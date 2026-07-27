@@ -101,6 +101,19 @@ v0.5.0 - defaults updated from the first real MFE/MAE dataset (159
          match (RR now tests 1.5/2.0/2.5, buffer now tests
          0.20/0.35/0.50) so "Оптимизировать" explores the same wider
          range instead of being capped below the new defaults.
+v0.6.0 - added background auto-tuning: previously per-symbol
+         optimization only ran when someone tapped "Оптимизировать" in
+         the chart modal — every other symbol traded on global
+         defaults forever. Each scan cycle now also (re-)tunes up to
+         VP_AUTO_TUNE_PER_CYCLE (default 1) symbols, prioritizing ones
+         with no override yet, then whichever override is oldest once
+         VP_AUTO_TUNE_REFRESH_SEC (default 48h) has passed — so the
+         whole universe gets tuned, and re-tuned, over time without any
+         manual action. Kept deliberately slow (one symbol's 81-combo
+         backtest costs real CPU) so it doesn't blow out the scan
+         cadence on a phone; toggle via VP_AUTO_TUNE=0 to disable. The
+         manual button still works for forcing an immediate re-tune.
+         Header now shows tuning progress (N/universe already tuned).
 """
 
 import os
@@ -114,7 +127,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.5.0"
+APP_VERSION = "0.6.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -465,6 +478,9 @@ BT_SEGS = int(os.environ.get("VP_BT_SEGS", 40))
 BT_HISTORY = int(os.environ.get("VP_BT_HISTORY", 500))
 BT_STRIDE = int(os.environ.get("VP_BT_STRIDE", 2))
 MIN_BACKTEST_TRADES = int(os.environ.get("VP_BT_MIN_TRADES", 6))
+AUTO_TUNE_ENABLED = os.environ.get("VP_AUTO_TUNE", "1") == "1"
+AUTO_TUNE_PER_CYCLE = int(os.environ.get("VP_AUTO_TUNE_PER_CYCLE", 1))  # how many symbols get (re-)tuned per scan cycle — kept low, each tune costs several seconds of CPU on top of the regular scan
+AUTO_TUNE_REFRESH_SEC = int(os.environ.get("VP_AUTO_TUNE_REFRESH_SEC", 48 * 3600))  # re-tune a symbol once its override is this old — price behavior drifts
 PARAM_GRID_LOOKBACK = [60, 100, 150]
 PARAM_GRID_HVN = [3, 6, 9]
 PARAM_GRID_RR = [1.5, 2.0, 2.5]              # data showed WIN median MFE ~2.8R, so the old 1.0 floor rarely won and was dropped in favor of testing further out
@@ -555,6 +571,43 @@ def optimize_symbol(symbol):
         with state_lock:
             SYMBOL_OVERRIDES[symbol] = best
     return best
+
+
+_auto_tune_cursor = 0  # rotating pointer into the universe list, persists across cycles
+
+
+def auto_tune_cycle(universe):
+    """Background version of the "Оптимизировать" button: each scan cycle,
+    (re-)tune a small number of symbols — new ones first, then whichever
+    override is oldest — so that over time every symbol in the universe
+    gets tuned, and stays tuned, without anyone having to tap a button.
+    Deliberately slow (AUTO_TUNE_PER_CYCLE per cycle): a full 81-combo
+    backtest costs real CPU, and doing it for 150 symbols at once would
+    make a phone miss its scan cadence."""
+    global _auto_tune_cursor
+    if not AUTO_TUNE_ENABLED or not universe or AUTO_TUNE_PER_CYCLE <= 0:
+        return
+    now = time.time()
+
+    def needs_tuning(sym):
+        ov = SYMBOL_OVERRIDES.get(sym)
+        return ov is None or (now - ov.get("optimized_at", 0)) > AUTO_TUNE_REFRESH_SEC
+
+    n = len(universe)
+    candidates = []
+    for i in range(n):
+        sym = universe[(_auto_tune_cursor + i) % n]
+        if needs_tuning(sym):
+            candidates.append(sym)
+        if len(candidates) >= AUTO_TUNE_PER_CYCLE:
+            break
+    _auto_tune_cursor = (_auto_tune_cursor + max(1, len(candidates))) % n
+
+    for sym in candidates:
+        try:
+            optimize_symbol(sym)
+        except Exception as e:
+            log_error(f"auto_tune {sym}: {e}")
 
 
 # ----------------------------------------------------------------------------
@@ -819,6 +872,7 @@ def scan_loop():
                 for _ in as_completed(futs):
                     pass
             update_signal_outcomes()
+            auto_tune_cycle(universe)
             t1 = time.time()
             with state_lock:
                 STATE["last_scan_finished"] = t1
@@ -835,6 +889,7 @@ def scan_loop():
 def api_status():
     stats = compute_signal_stats()
     with state_lock:
+        tuned_count = len(SYMBOL_OVERRIDES)
         return jsonify({
             "version": APP_VERSION,
             "universe_size": STATE["universe_size"],
@@ -844,6 +899,12 @@ def api_status():
             "last_scan_duration": STATE["last_scan_duration"],
             "errors": list(STATE["errors"])[-10:],
             "stats": stats,
+            "auto_tune": {
+                "enabled": AUTO_TUNE_ENABLED,
+                "per_cycle": AUTO_TUNE_PER_CYCLE,
+                "tuned_symbols": tuned_count,
+                "refresh_hours": round(AUTO_TUNE_REFRESH_SEC / 3600, 1),
+            },
             "config": {
                 "segs": SEGS, "lookback": LOOKBACK, "interval": INTERVAL,
                 "hvn_top_n": HVN_TOP_N, "min_vol_usd": MIN_VOL_USD,
@@ -1027,8 +1088,12 @@ async function refreshStatus() {
     el.textContent = `v${s.version} · ${scanTxt}`;
     const st = s.stats || {};
     const wr = st.winrate !== null && st.winrate !== undefined ? `${st.winrate}%` : '-';
+    const at = s.auto_tune || {};
+    const atTxt = at.enabled
+      ? `автотюнинг: ${at.tuned_symbols}/${s.universe_size} монет уже подобрано (обновление каждые ${at.refresh_hours}ч, +${at.per_cycle}/скан)`
+      : 'автотюнинг выключен';
     document.getElementById('stats').textContent =
-      `Винрейт: ${wr} (${st.wins||0}W / ${st.losses||0}L, timeout ${st.timeouts||0}) · открытых: ${st.open||0} · RR ${s.config ? s.config.rr : ''}`;
+      `Винрейт: ${wr} (${st.wins||0}W / ${st.losses||0}L, timeout ${st.timeouts||0}) · открытых: ${st.open||0} · RR ${s.config ? s.config.rr : ''} · ${atTxt}`;
   } catch(e) {}
 }
 
