@@ -134,6 +134,11 @@ v0.6.2 - the direction-flip/wick-ratio checks from v0.6.1 didn't catch
          Loosened those two thresholds slightly (0.68->0.60,
          0.72->0.65) since the efficiency-ratio check now carries more
          of the load.
+v0.6.3 - added a bounce-vs-breakout win-rate breakdown (compute_signal_stats
+         now returns by_reason, shown in the header) — needed to tell
+         whether an aggregate winrate drop is coming from one signal
+         type dragging the other down, rather than guessing from the
+         combined number alone.
 """
 
 import os
@@ -147,7 +152,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.6.2"
+APP_VERSION = "0.6.3"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -881,9 +886,19 @@ def compute_signal_stats():
     timeouts = sum(1 for s in signals if s.get("result") == "TIMEOUT")
     open_count = sum(1 for s in signals if s.get("status") == "OPEN")
     winrate = round(wins / total * 100, 1) if total else None
+
+    by_reason = {}
+    for reason in ("bounce", "breakout"):
+        rc = [s for s in closed if s.get("reason") == reason]
+        rw = sum(1 for s in rc if s["result"] == "WIN")
+        rl = sum(1 for s in rc if s["result"] == "LOSS")
+        rt = rw + rl
+        by_reason[reason] = {"wins": rw, "losses": rl, "total": rt, "winrate": round(rw / rt * 100, 1) if rt else None}
+
     return {
         "open": open_count, "wins": wins, "losses": losses,
         "timeouts": timeouts, "winrate": winrate, "closed_total": total,
+        "by_reason": by_reason,
     }
 
 
@@ -1177,8 +1192,11 @@ async function refreshStatus() {
     const atTxt = at.enabled
       ? `автотюнинг: ${at.tuned_symbols}/${s.universe_size} монет уже подобрано (обновление каждые ${at.refresh_hours}ч, +${at.per_cycle}/скан)`
       : 'автотюнинг выключен';
+    const br = st.by_reason || {};
+    const bounceTxt = br.bounce && br.bounce.total ? `bounce ${br.bounce.winrate}% (${br.bounce.total})` : 'bounce -';
+    const breakoutTxt = br.breakout && br.breakout.total ? `breakout ${br.breakout.winrate}% (${br.breakout.total})` : 'breakout -';
     document.getElementById('stats').textContent =
-      `Винрейт: ${wr} (${st.wins||0}W / ${st.losses||0}L, timeout ${st.timeouts||0}) · открытых: ${st.open||0} · RR ${s.config ? s.config.rr : ''} · ${atTxt}`;
+      `Винрейт: ${wr} (${st.wins||0}W / ${st.losses||0}L, timeout ${st.timeouts||0}) · ${bounceTxt} · ${breakoutTxt} · открытых: ${st.open||0} · RR ${s.config ? s.config.rr : ''} · ${atTxt}`;
   } catch(e) {}
 }
 
