@@ -114,6 +114,14 @@ v0.6.0 - added background auto-tuning: previously per-symbol
          cadence on a phone; toggle via VP_AUTO_TUNE=0 to disable. The
          manual button still works for forcing an immediate re-tune.
          Header now shows tuning progress (N/universe already tuned).
+v0.6.1 - extended data_quality_check with three "sawtooth chop" checks:
+         direction-flip ratio (bar-to-bar close direction reversing
+         almost every bar), average wick ratio (candles that are mostly
+         wick, little real body — indecision noise), and gap ratio
+         (open jumping away from the prior close too often). A symbol
+         can have plenty of volume and pass every earlier check yet
+         still whip back and forth with no continuity — such symbols
+         are now excluded the same way illiquid ones are.
 """
 
 import os
@@ -127,7 +135,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.6.0"
+APP_VERSION = "0.6.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -165,6 +173,15 @@ MIN_PEAK_RATIO = float(os.environ.get("VP_MIN_PEAK_RATIO", 2.5))  # the busiest 
 MAX_ZERO_VOL_RATIO = float(os.environ.get("VP_MAX_ZERO_VOL_RATIO", 0.15))
 MAX_FLAT_RATIO = float(os.environ.get("VP_MAX_FLAT_RATIO", 0.15))
 MIN_AVG_RANGE_PCT = float(os.environ.get("VP_MIN_AVG_RANGE_PCT", 0.0004))
+# "sawtooth" chop: candles whipping direction back and forth almost every
+# bar, mostly-wick candles (little real body vs total range), or frequent
+# open/close gaps between bars — technically has volume, but the profile
+# and any zone off it is unreliable because price isn't behaving
+# continuously, it's just jumping around.
+MAX_DIRECTION_FLIP_RATIO = float(os.environ.get("VP_MAX_DIRECTION_FLIP_RATIO", 0.68))
+MAX_AVG_WICK_RATIO = float(os.environ.get("VP_MAX_AVG_WICK_RATIO", 0.72))
+GAP_THRESHOLD_PCT = float(os.environ.get("VP_GAP_THRESHOLD_PCT", 0.004))
+MAX_GAP_RATIO = float(os.environ.get("VP_MAX_GAP_RATIO", 0.12))
 
 TELEGRAM_BOT_TOKEN = os.environ.get("VP_TG_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("VP_TG_CHAT", "")
@@ -191,10 +208,14 @@ _cooldowns = {}  # (symbol, zone_key) -> last_alert_ts
 
 
 def data_quality_check(candles):
-    """Reject symbols whose candle feed itself looks illiquid/stale: too
-    many zero-volume bars, too many flat (high==low) bars, or an average
-    range too small relative to price — the "sideways dashes" look on
-    thin/rarely-traded contracts. Returns (ok, reason)."""
+    """Reject symbols whose candle feed itself looks illiquid/stale or
+    unreliable: too many zero-volume bars, too many flat (high==low) bars,
+    an average range too small relative to price (the "sideways dashes"
+    look on thin/rarely-traded contracts), or a "sawtooth" pattern — price
+    whipping direction almost every bar, mostly-wick candles, or frequent
+    open/close gaps between bars, all of which make any zone built off the
+    profile unreliable even though the raw volume numbers look fine.
+    Returns (ok, reason)."""
     n = len(candles)
     if n < 20:
         return False, "too few candles"
@@ -209,6 +230,39 @@ def data_quality_check(candles):
         return False, f"flat bars {flat}/{n}"
     if avg_range_pct < MIN_AVG_RANGE_PCT:
         return False, f"avg range {avg_range_pct:.5f} < {MIN_AVG_RANGE_PCT}"
+
+    # direction flip ratio: how often bar-to-bar candle direction reverses
+    directions = [1 if c["close"] > c["open"] else (-1 if c["close"] < c["open"] else 0) for c in candles]
+    compared = flips = 0
+    for i in range(1, n):
+        if directions[i] != 0 and directions[i - 1] != 0:
+            compared += 1
+            if directions[i] != directions[i - 1]:
+                flips += 1
+    flip_ratio = flips / compared if compared else 0.0
+    if flip_ratio > MAX_DIRECTION_FLIP_RATIO:
+        return False, f"sawtooth direction flips {flip_ratio:.2f}"
+
+    # wick ratio: how much of each bar's range is wick rather than body
+    wick_ratios = []
+    for c in candles:
+        rng = c["high"] - c["low"]
+        if rng > 0:
+            wick_ratios.append((rng - abs(c["close"] - c["open"])) / rng)
+    avg_wick_ratio = sum(wick_ratios) / len(wick_ratios) if wick_ratios else 0.0
+    if avg_wick_ratio > MAX_AVG_WICK_RATIO:
+        return False, f"mostly-wick candles {avg_wick_ratio:.2f}"
+
+    # gap ratio: bars whose open jumps away from the prior close
+    gaps = 0
+    for i in range(1, n):
+        prev_close = candles[i - 1]["close"]
+        if prev_close > 0 and abs(candles[i]["open"] - prev_close) / prev_close > GAP_THRESHOLD_PCT:
+            gaps += 1
+    gap_ratio = gaps / (n - 1) if n > 1 else 0.0
+    if gap_ratio > MAX_GAP_RATIO:
+        return False, f"gappy bars {gap_ratio:.2f}"
+
     return True, None
 
 
@@ -912,6 +966,9 @@ def api_status():
                 "cooldown": COOLDOWN_SEC, "rr": RR,
                 "max_zero_vol_ratio": MAX_ZERO_VOL_RATIO, "max_flat_ratio": MAX_FLAT_RATIO,
                 "min_avg_range_pct": MIN_AVG_RANGE_PCT,
+                "max_direction_flip_ratio": MAX_DIRECTION_FLIP_RATIO,
+                "max_avg_wick_ratio": MAX_AVG_WICK_RATIO,
+                "gap_threshold_pct": GAP_THRESHOLD_PCT, "max_gap_ratio": MAX_GAP_RATIO,
             },
         })
 
