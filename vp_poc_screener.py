@@ -62,6 +62,23 @@ v0.3.1 - fix: update_signal_outcomes was checking the trigger candle
          count toward TP/SL/MFE/MAE. This was corrupting the win-rate
          stats; in-memory stats reset on restart so this takes effect
          cleanly.
+v0.4.0 - zone quality overhaul: extract_hvn_zones now drops merged
+         zones taller than VP_MAX_ZONE_HEIGHT_FRAC of the whole profile
+         range (no more wide/diffuse "zones"); added eligible_zones(),
+         which restricts signal generation to zones whose volume is at
+         least VP_ZONE_STRENGTH_MIN_RATIO of the POC's volume — weak
+         zones still render on the chart (dim/dotted) but won't fire
+         signals on their own. Added a second signal type, detect_breakout
+         (price bases inside/around a zone for a few bars then clears an
+         edge decisively) alongside the existing bounce/rejection
+         detector — both run every scan, tagged via a new "reason" field
+         (bounce/breakout) shown in the signals table and Telegram
+         alerts. The per-symbol optimizer (backtest_params) now uses the
+         exact same eligible-zone + bounce-or-breakout logic as live
+         scanning, so tuned parameters stay consistent with what
+         actually trades. Chart now visually distinguishes POC (bold
+         green) / eligible zones (dashed amber) / weak context-only
+         zones (faint dotted grey).
 """
 
 import os
@@ -75,7 +92,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.3.1"
+APP_VERSION = "0.4.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -96,6 +113,15 @@ RR = float(os.environ.get("VP_RR", 1.5))                  # take-profit distance
 ZONE_BUFFER_PCT = float(os.environ.get("VP_ZONE_BUFFER_PCT", 0.15))  # stop sits this far beyond the zone edge (fraction of zone height)
 SIGNAL_TIMEOUT_SEC = int(os.environ.get("VP_SIGNAL_TIMEOUT", 6 * 3600))  # close as TIMEOUT if neither TP/SL hit
 MFE_TRACK_SEC = int(os.environ.get("VP_MFE_TRACK_SEC", 24 * 3600))  # keep measuring max favorable/adverse excursion this long after detection, past TP/SL/timeout
+
+# --- zone quality filters: only narrow, genuinely dominant nodes should
+# fire signals. A merge of many adjacent top-N bins can produce a tall,
+# diffuse "zone" that isn't really a precise level — and a zone that's
+# technically in the top-N but far weaker than the POC isn't the kind of
+# node price actually respects.
+MAX_ZONE_HEIGHT_FRAC = float(os.environ.get("VP_MAX_ZONE_HEIGHT_FRAC", 0.10))   # zone height must be < this fraction of the whole profile range (hh-ll)
+ZONE_STRENGTH_MIN_RATIO = float(os.environ.get("VP_ZONE_STRENGTH_MIN_RATIO", 0.55))  # zone volume must be >= this fraction of the POC's volume to be eligible for signals
+BREAKOUT_MIN_BARS_INSIDE = int(os.environ.get("VP_BREAKOUT_MIN_BARS", 3))  # bars that must have been basing inside/around the zone right before a breakout signal
 
 # --- data quality filter: skip symbols that look illiquid/stale on the
 # candle feed itself (near-zero volume bars, flat high==low bars, or an
@@ -257,12 +283,15 @@ def compute_profile(candles, segs=SEGS, lookback=LOOKBACK):
     return {"borders": borders, "bin_vols": bin_vols, "hh": hh, "ll": ll, "inc": inc}
 
 
-def extract_hvn_zones(profile, top_n=HVN_TOP_N):
+def extract_hvn_zones(profile, top_n=HVN_TOP_N, max_height_frac=MAX_ZONE_HEIGHT_FRAC):
     """Take the top_n highest-volume bins and merge adjacent ones into
-    contiguous high-volume-node zones."""
+    contiguous high-volume-node zones. Zones that end up too tall relative
+    to the whole profile range are dropped — a merge that wide isn't a
+    precise level, it's a diffuse band."""
     borders = profile["borders"]
     bin_vols = profile["bin_vols"]
     segs = len(bin_vols)
+    total_range = max(profile["hh"] - profile["ll"], 1e-12)
     ranked = sorted(range(segs), key=lambda i: -bin_vols[i])[:top_n]
     ranked_set = set(ranked)
 
@@ -280,6 +309,9 @@ def extract_hvn_zones(profile, top_n=HVN_TOP_N):
             used.add(k)
         top = borders[lo]
         bottom = borders[hi + 1]
+        height = top - bottom
+        if max_height_frac and height / total_range > max_height_frac:
+            continue  # too tall/diffuse — not a precise node
         vol = sum(bin_vols[lo:hi + 1])
         zones.append({"top": top, "bottom": bottom, "mid": (top + bottom) / 2, "volume": vol})
 
@@ -287,14 +319,28 @@ def extract_hvn_zones(profile, top_n=HVN_TOP_N):
     return zones
 
 
+def eligible_zones(zones, min_ratio=ZONE_STRENGTH_MIN_RATIO):
+    """Restrict to zones strong enough, relative to the POC, to actually
+    trade off of. Weaker zones still show on the chart but won't fire
+    signals on their own."""
+    if not zones:
+        return []
+    top_vol = zones[0]["volume"]
+    if top_vol <= 0:
+        return zones
+    return [z for z in zones if z["volume"] >= top_vol * min_ratio]
+
+
 def poc_zone(zones):
     return zones[0] if zones else None
 
 
 # ----------------------------------------------------------------------------
-# Signal detection: bounce / rejection off an HVN zone
+# Signal detection
 # ----------------------------------------------------------------------------
 def detect_signal(candles, zones):
+    """Bounce/rejection: a wick pokes into the zone and the bar closes back
+    outside it, in the same direction the prior close was already on."""
     if len(candles) < 3 or not zones:
         return None
     prev, last = candles[-2], candles[-1]
@@ -304,10 +350,40 @@ def detect_signal(candles, zones):
         if not touched:
             continue
         if prev["close"] > top and last["close"] > top:
-            return {"direction": "LONG", "zone": zone, "price": last["close"], "time": last["time"]}
+            return {"direction": "LONG", "zone": zone, "price": last["close"], "time": last["time"], "reason": "bounce"}
         if prev["close"] < bottom and last["close"] < bottom:
-            return {"direction": "SHORT", "zone": zone, "price": last["close"], "time": last["time"]}
+            return {"direction": "SHORT", "zone": zone, "price": last["close"], "time": last["time"], "reason": "bounce"}
     return None
+
+
+def detect_breakout(candles, zones, min_bars_inside=BREAKOUT_MIN_BARS_INSIDE):
+    """Breakout: price was basing in/around the zone for several bars, then
+    this bar clears an edge decisively — the "launch off the node" pattern,
+    as opposed to a single-wick rejection."""
+    if len(candles) < min_bars_inside + 2 or not zones:
+        return None
+    last = candles[-1]
+    window = candles[-(min_bars_inside + 1):-1]
+    for zone in zones:
+        top, bottom = zone["top"], zone["bottom"]
+        height = max(top - bottom, 1e-12)
+        inside_count = sum(1 for c in window if c["low"] <= top and c["high"] >= bottom)
+        if inside_count < max(2, min_bars_inside - 1):
+            continue
+        buf = height * 0.1
+        if last["close"] > top + buf and last["low"] <= top + buf:
+            return {"direction": "LONG", "zone": zone, "price": last["close"], "time": last["time"], "reason": "breakout"}
+        if last["close"] < bottom - buf and last["high"] >= bottom - buf:
+            return {"direction": "SHORT", "zone": zone, "price": last["close"], "time": last["time"], "reason": "breakout"}
+    return None
+
+
+def detect_any_signal(candles, zones):
+    """Try a bounce first, then a breakout — either qualifies as a signal."""
+    sig = detect_signal(candles, zones)
+    if sig:
+        return sig
+    return detect_breakout(candles, zones)
 
 
 def nearest_zone_distance(price, zones):
@@ -399,23 +475,13 @@ def backtest_params(candles, lookback, hvn_top_n, rr, segs=BT_SEGS, stride=BT_ST
         profile = compute_profile(window, segs=segs, lookback=lookback)
         if profile:
             zones = extract_hvn_zones(profile, top_n=hvn_top_n)
-            if zones:
-                prev = candles[i - 1]
-                for z in zones:
-                    top, bottom = z["top"], z["bottom"]
-                    touched = c["low"] <= top and c["high"] >= bottom
-                    if not touched:
-                        continue
-                    direction = None
-                    if prev["close"] > top and c["close"] > top:
-                        direction = "LONG"
-                    elif prev["close"] < bottom and c["close"] < bottom:
-                        direction = "SHORT"
-                    if direction:
-                        entry = c["close"]
-                        sl, tp, _ = compute_tp_sl(direction, entry, z, rr=rr)
-                        open_trade = {"direction": direction, "sl": sl, "tp": tp}
-                        break
+            strong_zones = eligible_zones(zones)
+            sig = detect_any_signal(window + [c], strong_zones)
+            if sig:
+                direction = sig["direction"]
+                entry = sig["price"]
+                sl, tp, _ = compute_tp_sl(direction, entry, sig["zone"], rr=rr)
+                open_trade = {"direction": direction, "sl": sl, "tp": tp}
         i += stride if not open_trade else 1
 
     total = wins + losses
@@ -487,7 +553,7 @@ def scan_symbol(symbol):
         if len(candles) < 20:
             return
 
-        ok, reason = data_quality_check(candles[-lookback:])
+        ok, dq_reason = data_quality_check(candles[-lookback:])
         if not ok:
             with state_lock:
                 STATE["watchlist"].pop(symbol, None)
@@ -516,10 +582,13 @@ def scan_symbol(symbol):
                 "updated": time.time(),
             }
 
-        sig = detect_signal(candles, zones)
+        # Only narrow, POC-strength zones fire signals (weak/wide zones
+        # still show on the chart, they just don't trade).
+        strong_zones = eligible_zones(zones)
+        sig = detect_any_signal(candles, strong_zones)
         if sig:
             zone_key = round(sig["zone"]["mid"], 6)
-            key = (symbol, zone_key)
+            key = (symbol, zone_key, sig["reason"])
             now = time.time()
             last_ts = _cooldowns.get(key, 0)
             if now - last_ts >= COOLDOWN_SEC:
@@ -528,6 +597,7 @@ def scan_symbol(symbol):
                 record = {
                     "symbol": symbol,
                     "direction": sig["direction"],
+                    "reason": sig["reason"],
                     "price": sig["price"],
                     "entry": sig["price"],
                     "sl": sl,
@@ -556,11 +626,10 @@ def scan_symbol(symbol):
                     STATE["signals"].appendleft(record)
                 arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
                 send_telegram(
-                    f"{arrow} {symbol}\n"
+                    f"{arrow} {symbol} ({sig['reason']})\n"
                     f"entry: {sig['price']:.6g}\n"
                     f"SL: {sl:.6g}  TP: {tp:.6g}  (RR {rr:g})\n"
-                    f"HVN zone: {sig['zone']['bottom']:.6g} - {sig['zone']['top']:.6g}\n"
-                    f"reason: bounce off high-volume node"
+                    f"HVN zone: {sig['zone']['bottom']:.6g} - {sig['zone']['top']:.6g}"
                 )
     except Exception as e:
         log_error(f"{symbol}: {e}")
@@ -782,6 +851,9 @@ def api_profile(symbol):
         if not profile:
             return jsonify({"error": "not enough data"}), 400
         zones = extract_hvn_zones(profile, top_n=hvn_top_n)
+        strong_mids = {z["mid"] for z in eligible_zones(zones)}
+        for z in zones:
+            z["eligible"] = z["mid"] in strong_mids
         return jsonify({
             "symbol": symbol,
             "candles": candles[-lookback:],
@@ -870,7 +942,7 @@ INDEX_HTML = """<!doctype html>
 </div>
 <div class="panel">
   <table id="signalsTable" style="display:table">
-    <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
+    <thead><tr><th>Symbol</th><th>Dir</th><th>Reason</th><th>Entry</th><th>SL</th><th>TP</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
     <tbody></tbody>
   </table>
   <table id="watchTable" style="display:none">
@@ -944,6 +1016,7 @@ async function refreshSignals() {
     }
     tr.innerHTML = `<td>${r.symbol}</td>
       <td class="${r.direction==='LONG'?'long':'short'}">${r.direction}</td>
+      <td class="dim">${r.reason || '-'}</td>
       <td>${fmt(r.entry)}</td>
       <td class="dim">${fmt(r.sl)}</td>
       <td class="dim">${fmt(r.tp)}</td>
@@ -1111,7 +1184,13 @@ function drawChart(data, signalRow) {
   // HVN zones (background bands)
   for (const z of zones) {
     const isPoc = pocZone && z.mid === pocZone.mid;
-    ctx.fillStyle = isPoc ? 'rgba(80,220,160,0.14)' : 'rgba(80,160,255,0.08)';
+    if (isPoc) {
+      ctx.fillStyle = 'rgba(80,220,160,0.14)';
+    } else if (z.eligible) {
+      ctx.fillStyle = 'rgba(80,160,255,0.10)';
+    } else {
+      ctx.fillStyle = 'rgba(120,120,130,0.05)';
+    }
     ctx.fillRect(0, y(z.top), chartW, Math.max(1, y(z.bottom) - y(z.top)));
   }
 
@@ -1158,12 +1237,23 @@ function drawChart(data, signalRow) {
   }
 
   // zone edges — POC gets a bold highlighted line all the way across,
-  // other HVN zones get thin dashed lines (like the reference indicator)
+  // eligible (tradeable) zones get a visible dashed line, weak/non-eligible
+  // zones get a faint dotted line so it's clear they're context-only
   for (const z of zones) {
     const isPoc = pocZone && z.mid === pocZone.mid;
-    ctx.setLineDash(isPoc ? [] : [4, 3]);
-    ctx.lineWidth = isPoc ? 2 : 1;
-    ctx.strokeStyle = isPoc ? 'rgba(90,230,160,0.9)' : 'rgba(255,200,80,0.5)';
+    if (isPoc) {
+      ctx.setLineDash([]);
+      ctx.lineWidth = 2;
+      ctx.strokeStyle = 'rgba(90,230,160,0.9)';
+    } else if (z.eligible) {
+      ctx.setLineDash([4, 3]);
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(255,200,80,0.6)';
+    } else {
+      ctx.setLineDash([1, 4]);
+      ctx.lineWidth = 1;
+      ctx.strokeStyle = 'rgba(150,150,160,0.3)';
+    }
     ctx.beginPath(); ctx.moveTo(0, y(z.mid)); ctx.lineTo(px + profileW, y(z.mid)); ctx.stroke();
     if (isPoc) {
       ctx.fillStyle = 'rgba(90,230,160,0.9)';
