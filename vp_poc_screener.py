@@ -91,6 +91,16 @@ v0.4.1 - two fixes from live examples: (1) added a whole-profile
          out even with "optimized" params. buffer_pct is now a 4th grid
          dimension (15% / 35%) in the per-symbol optimizer, so a wider
          stop can be selected per-symbol when it improves win rate.
+v0.5.0 - defaults updated from the first real MFE/MAE dataset (159
+         signals, 46% winrate): WIN median MFE was ~2.8R against a
+         1.5R TP (leaving profit on the table), and LOSS median MFE
+         was ~1.7R (a chunk of stopped-out trades kept moving the
+         "right" way afterward — SL was clipped too close by noise).
+         Raised default RR 1.5 -> 2.0 and default ZONE_BUFFER_PCT
+         0.15 -> 0.30. Also widened the per-symbol optimizer grid to
+         match (RR now tests 1.5/2.0/2.5, buffer now tests
+         0.20/0.35/0.50) so "Оптимизировать" explores the same wider
+         range instead of being capped below the new defaults.
 """
 
 import os
@@ -104,7 +114,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.4.1"
+APP_VERSION = "0.5.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -121,8 +131,8 @@ SCAN_INTERVAL_SEC = int(os.environ.get("VP_SCAN_INTERVAL", 45))
 COOLDOWN_SEC = int(os.environ.get("VP_COOLDOWN", 900))    # per symbol+zone re-alert cooldown
 WORKERS = int(os.environ.get("VP_WORKERS", 8))
 SIGNAL_HISTORY = 200
-RR = float(os.environ.get("VP_RR", 1.5))                  # take-profit distance as a multiple of risk
-ZONE_BUFFER_PCT = float(os.environ.get("VP_ZONE_BUFFER_PCT", 0.15))  # stop sits this far beyond the zone edge (fraction of zone height)
+RR = float(os.environ.get("VP_RR", 2.0))                  # take-profit distance as a multiple of risk — raised from 1.5: collected MFE stats showed WIN median MFE ~2.8R, i.e. TP was cutting winners short
+ZONE_BUFFER_PCT = float(os.environ.get("VP_ZONE_BUFFER_PCT", 0.30))  # stop sits this far beyond the zone edge (fraction of zone height) — raised from 0.15: LOSS median MFE was ~1.7R, meaning a chunk of stopped-out trades kept moving in the original direction afterward — noise was clipping the stop too close
 SIGNAL_TIMEOUT_SEC = int(os.environ.get("VP_SIGNAL_TIMEOUT", 6 * 3600))  # close as TIMEOUT if neither TP/SL hit
 MFE_TRACK_SEC = int(os.environ.get("VP_MFE_TRACK_SEC", 24 * 3600))  # keep measuring max favorable/adverse excursion this long after detection, past TP/SL/timeout
 
@@ -457,8 +467,8 @@ BT_STRIDE = int(os.environ.get("VP_BT_STRIDE", 2))
 MIN_BACKTEST_TRADES = int(os.environ.get("VP_BT_MIN_TRADES", 6))
 PARAM_GRID_LOOKBACK = [60, 100, 150]
 PARAM_GRID_HVN = [3, 6, 9]
-PARAM_GRID_RR = [1.0, 1.5, 2.0]
-PARAM_GRID_BUFFER = [0.15, 0.35]  # stop buffer as a fraction of zone height — wider for symbols whose price routinely pokes a bit past the node before reversing
+PARAM_GRID_RR = [1.5, 2.0, 2.5]              # data showed WIN median MFE ~2.8R, so the old 1.0 floor rarely won and was dropped in favor of testing further out
+PARAM_GRID_BUFFER = [0.20, 0.35, 0.50]       # data showed LOSS median MFE ~1.7R (stopped out, then kept going the "right" way) — dropped the too-tight 0.15 floor, testing wider
 
 SYMBOL_OVERRIDES = {}  # symbol -> {lookback, hvn_top_n, rr, buffer_pct, winrate, trades, optimized_at}
 
