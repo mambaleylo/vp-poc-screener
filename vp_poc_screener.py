@@ -45,6 +45,13 @@ v0.2.1 - added a data-quality gate: symbols whose candle feed itself
          the "dashes that don't move" look on thin contracts) are
          excluded from the watchlist/signals even if they cleared the
          24h-volume filter. Excluded count shown in the header.
+v0.3.0 - added MFE/MAE tracking (max favorable/adverse excursion, in R
+         multiples of risk) per signal, kept updating for VP_MFE_TRACK_SEC
+         after detection regardless of whether/when TP or SL fired —
+         the raw data needed to later judge whether TP/SL should sit
+         further out or tighter in. New "Тюнинг" tab aggregates
+         avg/median/p25/p75 of MFE and MAE across WIN/LOSS/OPEN signals;
+         new /api/tuning endpoint exposes the same numbers.
 """
 
 import os
@@ -58,7 +65,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.3.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -78,6 +85,7 @@ SIGNAL_HISTORY = 200
 RR = float(os.environ.get("VP_RR", 1.5))                  # take-profit distance as a multiple of risk
 ZONE_BUFFER_PCT = float(os.environ.get("VP_ZONE_BUFFER_PCT", 0.15))  # stop sits this far beyond the zone edge (fraction of zone height)
 SIGNAL_TIMEOUT_SEC = int(os.environ.get("VP_SIGNAL_TIMEOUT", 6 * 3600))  # close as TIMEOUT if neither TP/SL hit
+MFE_TRACK_SEC = int(os.environ.get("VP_MFE_TRACK_SEC", 24 * 3600))  # keep measuring max favorable/adverse excursion this long after detection, past TP/SL/timeout
 
 # --- data quality filter: skip symbols that look illiquid/stale on the
 # candle feed itself (near-zero volume bars, flat high==low bars, or an
@@ -523,6 +531,16 @@ def scan_symbol(symbol):
                     "result": None,
                     "closed_at": None,
                     "exit_price": None,
+                    # max favorable/adverse excursion, in R (risk) multiples —
+                    # keeps updating for VP_MFE_TRACK_SEC after detection
+                    # regardless of when/whether TP or SL is hit, so we can
+                    # later see how much room there actually was to move
+                    # TP/SL by.
+                    "mfe_r": 0.0,
+                    "mae_r": 0.0,
+                    "mfe_price": None,
+                    "mae_price": None,
+                    "mfe_tracking_until": now + MFE_TRACK_SEC,
                 }
                 with state_lock:
                     STATE["signals"].appendleft(record)
@@ -550,34 +568,51 @@ def close_signal(sig, result, exit_price):
 
 
 def update_signal_outcomes():
+    now = time.time()
     with state_lock:
-        open_signals = [s for s in STATE["signals"] if s.get("status") == "OPEN"]
-    for sig in open_signals:
+        active = [
+            s for s in STATE["signals"]
+            if s.get("status") == "OPEN" or now < s.get("mfe_tracking_until", 0)
+        ]
+    for sig in active:
         try:
-            candles = get_candles(sig["symbol"], interval=INTERVAL, limit=200)
+            candles = get_candles(sig["symbol"], interval=INTERVAL, limit=300)
             relevant = [c for c in candles if c["time"] >= sig["time"]]
-            hit = False
+            direction = sig["direction"]
+            entry = sig["entry"]
+            risk = sig.get("risk") or abs(entry - sig["sl"]) or 1e-9
+
             for c in relevant:
-                if sig["direction"] == "LONG":
-                    if c["low"] <= sig["sl"]:
-                        close_signal(sig, "LOSS", sig["sl"])
-                        hit = True
-                        break
-                    if c["high"] >= sig["tp"]:
-                        close_signal(sig, "WIN", sig["tp"])
-                        hit = True
-                        break
+                # --- MFE/MAE tracking (runs regardless of open/closed) ---
+                if direction == "LONG":
+                    fav, adv = c["high"] - entry, entry - c["low"]
                 else:
-                    if c["high"] >= sig["sl"]:
-                        close_signal(sig, "LOSS", sig["sl"])
-                        hit = True
-                        break
-                    if c["low"] <= sig["tp"]:
-                        close_signal(sig, "WIN", sig["tp"])
-                        hit = True
-                        break
-            if not hit and time.time() - sig["detected_at"] > SIGNAL_TIMEOUT_SEC:
-                last_price = candles[-1]["close"] if candles else sig["entry"]
+                    fav, adv = entry - c["low"], c["high"] - entry
+                fav_r, adv_r = fav / risk, adv / risk
+                if fav_r > sig["mfe_r"] or adv_r > sig["mae_r"]:
+                    with state_lock:
+                        if fav_r > sig["mfe_r"]:
+                            sig["mfe_r"] = round(fav_r, 3)
+                            sig["mfe_price"] = c["high"] if direction == "LONG" else c["low"]
+                        if adv_r > sig["mae_r"]:
+                            sig["mae_r"] = round(adv_r, 3)
+                            sig["mae_price"] = c["low"] if direction == "LONG" else c["high"]
+
+                # --- TP/SL resolution (only while still open) ---
+                if sig["status"] == "OPEN":
+                    if direction == "LONG":
+                        if c["low"] <= sig["sl"]:
+                            close_signal(sig, "LOSS", sig["sl"])
+                        elif c["high"] >= sig["tp"]:
+                            close_signal(sig, "WIN", sig["tp"])
+                    else:
+                        if c["high"] >= sig["sl"]:
+                            close_signal(sig, "LOSS", sig["sl"])
+                        elif c["low"] <= sig["tp"]:
+                            close_signal(sig, "WIN", sig["tp"])
+
+            if sig["status"] == "OPEN" and now - sig["detected_at"] > SIGNAL_TIMEOUT_SEC:
+                last_price = candles[-1]["close"] if candles else entry
                 close_signal(sig, "TIMEOUT", last_price)
         except Exception as e:
             log_error(f"update_signal_outcomes {sig.get('symbol')}: {e}")
@@ -596,6 +631,57 @@ def compute_signal_stats():
     return {
         "open": open_count, "wins": wins, "losses": losses,
         "timeouts": timeouts, "winrate": winrate, "closed_total": total,
+    }
+
+
+def _pct(vals, p):
+    if not vals:
+        return None
+    vals = sorted(vals)
+    idx = min(int(len(vals) * p), len(vals) - 1)
+    return round(vals[idx], 3)
+
+
+def compute_tuning_stats():
+    """Aggregate MFE/MAE (in R multiples) across signals that have been
+    tracked at least one cycle — the raw material for deciding whether
+    TP/SL could sit further out or tighter in. mfe_r ~ how far price moved
+    in favor before the tracking window closed; mae_r ~ how far it moved
+    against. If avg mfe_r on wins is well above the RR used, TP may be
+    leaving profit on the table; if avg mae_r on losses is well below the
+    stop distance, SL may be wider than it needs to be."""
+    with state_lock:
+        signals = list(STATE["signals"])
+    dataset = [s for s in signals if s.get("mfe_price") is not None]
+    if not dataset:
+        return {"count": 0}
+
+    def agg(key, subset):
+        vals = [s[key] for s in subset]
+        if not vals:
+            return None
+        return {
+            "avg": round(sum(vals) / len(vals), 3),
+            "median": _pct(vals, 0.5),
+            "p25": _pct(vals, 0.25),
+            "p75": _pct(vals, 0.75),
+        }
+
+    wins = [s for s in dataset if s.get("result") == "WIN"]
+    losses = [s for s in dataset if s.get("result") == "LOSS"]
+    still_open = [s for s in dataset if s.get("status") == "OPEN"]
+
+    return {
+        "count": len(dataset),
+        "mfe_r_all": agg("mfe_r", dataset),
+        "mae_r_all": agg("mae_r", dataset),
+        "mfe_r_wins": agg("mfe_r", wins),
+        "mae_r_wins": agg("mae_r", wins),
+        "mfe_r_losses": agg("mfe_r", losses),
+        "mae_r_losses": agg("mae_r", losses),
+        "mfe_r_open": agg("mfe_r", still_open),
+        "mae_r_open": agg("mae_r", still_open),
+        "wins_n": len(wins), "losses_n": len(losses), "open_n": len(still_open),
     }
 
 
@@ -662,6 +748,11 @@ def api_watchlist():
 def api_signals():
     with state_lock:
         return jsonify(list(STATE["signals"]))
+
+
+@app.route("/api/tuning")
+def api_tuning():
+    return jsonify(compute_tuning_stats())
 
 
 @app.route("/api/profile/<symbol>")
@@ -760,16 +851,18 @@ INDEX_HTML = """<!doctype html>
 <div class="tabs">
   <div class="tab active" data-tab="signals">Сигналы</div>
   <div class="tab" data-tab="watch">Watchlist</div>
+  <div class="tab" data-tab="tuning">Тюнинг</div>
 </div>
 <div class="panel">
   <table id="signalsTable" style="display:table">
-    <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>Status</th><th>Time</th></tr></thead>
+    <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
     <tbody></tbody>
   </table>
   <table id="watchTable" style="display:none">
     <thead><tr><th>Symbol</th><th>Price</th><th>Nearest zone</th><th>Dist %</th></tr></thead>
     <tbody></tbody>
   </table>
+  <div id="tuningPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
 </div>
 
@@ -799,6 +892,8 @@ document.querySelectorAll('.tab').forEach(el => {
     activeTab = el.dataset.tab;
     document.getElementById('signalsTable').style.display = activeTab === 'signals' ? 'table' : 'none';
     document.getElementById('watchTable').style.display = activeTab === 'watch' ? 'table' : 'none';
+    document.getElementById('tuningPanel').style.display = activeTab === 'tuning' ? 'block' : 'none';
+    if (activeTab === 'tuning') refreshTuning();
   };
 });
 
@@ -837,6 +932,8 @@ async function refreshSignals() {
       <td>${fmt(r.entry)}</td>
       <td class="dim">${fmt(r.sl)}</td>
       <td class="dim">${fmt(r.tp)}</td>
+      <td class="dim">${r.mfe_r !== undefined ? r.mfe_r.toFixed(2) : '-'}</td>
+      <td class="dim">${r.mae_r !== undefined ? r.mae_r.toFixed(2) : '-'}</td>
       <td>${statusHtml}</td>
       <td class="dim">${fmtTime(r.time)}</td>`;
     tr.onclick = () => openChart(r);
@@ -860,10 +957,48 @@ async function refreshWatch() {
   }
 }
 
+function fmtStat(s) {
+  if (!s) return '-';
+  return `avg ${s.avg} · median ${s.median} · p25 ${s.p25} · p75 ${s.p75}`;
+}
+
+async function refreshTuning() {
+  const t = await (await fetch('/api/tuning')).json();
+  const el = document.getElementById('tuningPanel');
+  if (!t.count) {
+    el.innerHTML = '<div class="dim">Пока недостаточно данных — подожди пару циклов скана.</div>';
+    return;
+  }
+  el.innerHTML = `
+    <div class="dim" style="margin-bottom:10px;">
+      Всего сигналов с накопленными данными: ${t.count} ·
+      WIN: ${t.wins_n} · LOSS: ${t.losses_n} · OPEN: ${t.open_n}
+    </div>
+    <div style="margin-bottom:8px;"><b>MFE (R) — насколько цена уходила в плюс:</b><br>
+      <span class="dim">все: ${fmtStat(t.mfe_r_all)}</span><br>
+      <span class="win">WIN: ${fmtStat(t.mfe_r_wins)}</span><br>
+      <span class="loss">LOSS: ${fmtStat(t.mfe_r_losses)}</span><br>
+      <span class="status-open">OPEN: ${fmtStat(t.mfe_r_open)}</span>
+    </div>
+    <div><b>MAE (R) — насколько цена уходила в минус:</b><br>
+      <span class="dim">все: ${fmtStat(t.mae_r_all)}</span><br>
+      <span class="win">WIN: ${fmtStat(t.mae_r_wins)}</span><br>
+      <span class="loss">LOSS: ${fmtStat(t.mae_r_losses)}</span><br>
+      <span class="status-open">OPEN: ${fmtStat(t.mae_r_open)}</span>
+    </div>
+    <div class="dim" style="margin-top:10px;font-size:12px;">
+      Если MFE у WIN заметно больше текущего RR — тейк можно ставить дальше.
+      Если MAE у WIN близко к 1.0 (почти дошло до стопа перед разворотом) —
+      стоп можно чуть шире. Если MAE у LOSS сильно меньше 1.0 — часть лоссов
+      могла быть шумом, стоп можно ставить теснее.
+    </div>`;
+}
+
 async function refreshAll() {
   await refreshStatus();
   await refreshSignals();
   await refreshWatch();
+  if (activeTab === 'tuning') await refreshTuning();
 }
 refreshAll();
 setInterval(refreshAll, 15000);
