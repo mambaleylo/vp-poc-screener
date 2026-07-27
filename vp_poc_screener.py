@@ -25,6 +25,12 @@ v0.1.1 - fix: universe builder was reading volume fields off
          all (always 0 -> everything filtered out -> "0 пар"). Switched
          to /futures/usdt/tickers, which actually has volume_24h_quote/
          _settle/_base.
+v0.1.2 - added explicit TP/SL per signal (stop beyond the far edge of
+         the HVN zone, target at RR multiples of that risk, RR
+         configurable via VP_RR) and outcome tracking: each scan cycle
+         checks open signals' candles for TP/SL hits (or a timeout),
+         closes them WIN/LOSS/TIMEOUT, and exposes rolling win-rate
+         stats in /api/status and the UI header.
 """
 
 import os
@@ -38,7 +44,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.1.1"
+APP_VERSION = "0.1.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -55,6 +61,9 @@ SCAN_INTERVAL_SEC = int(os.environ.get("VP_SCAN_INTERVAL", 45))
 COOLDOWN_SEC = int(os.environ.get("VP_COOLDOWN", 900))    # per symbol+zone re-alert cooldown
 WORKERS = int(os.environ.get("VP_WORKERS", 8))
 SIGNAL_HISTORY = 200
+RR = float(os.environ.get("VP_RR", 1.5))                  # take-profit distance as a multiple of risk
+ZONE_BUFFER_PCT = float(os.environ.get("VP_ZONE_BUFFER_PCT", 0.15))  # stop sits this far beyond the zone edge (fraction of zone height)
+SIGNAL_TIMEOUT_SEC = int(os.environ.get("VP_SIGNAL_TIMEOUT", 6 * 3600))  # close as TIMEOUT if neither TP/SL hit
 
 TELEGRAM_BOT_TOKEN = os.environ.get("VP_TG_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("VP_TG_CHAT", "")
@@ -255,6 +264,23 @@ def nearest_zone_distance(price, zones):
     return best, best_dist
 
 
+def compute_tp_sl(direction, entry, zone):
+    """Stop sits just beyond the far edge of the HVN zone (the level that,
+    if broken, invalidates the bounce). Take-profit is RR multiples of that
+    risk distance."""
+    zone_height = max(zone["top"] - zone["bottom"], entry * 0.0005)
+    buffer = max(zone_height * ZONE_BUFFER_PCT, entry * 0.0005)
+    if direction == "LONG":
+        sl = zone["bottom"] - buffer
+        risk = entry - sl
+        tp = entry + risk * RR
+    else:
+        sl = zone["top"] + buffer
+        risk = sl - entry
+        tp = entry - risk * RR
+    return sl, tp, risk
+
+
 # ----------------------------------------------------------------------------
 # Telegram
 # ----------------------------------------------------------------------------
@@ -309,26 +335,97 @@ def scan_symbol(symbol):
             last_ts = _cooldowns.get(key, 0)
             if now - last_ts >= COOLDOWN_SEC:
                 _cooldowns[key] = now
+                sl, tp, risk = compute_tp_sl(sig["direction"], sig["price"], sig["zone"])
                 record = {
                     "symbol": symbol,
                     "direction": sig["direction"],
                     "price": sig["price"],
+                    "entry": sig["price"],
+                    "sl": sl,
+                    "tp": tp,
+                    "risk": risk,
                     "zone_top": sig["zone"]["top"],
                     "zone_bottom": sig["zone"]["bottom"],
                     "time": sig["time"],
                     "detected_at": now,
+                    "status": "OPEN",
+                    "result": None,
+                    "closed_at": None,
+                    "exit_price": None,
                 }
                 with state_lock:
                     STATE["signals"].appendleft(record)
                 arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
                 send_telegram(
                     f"{arrow} {symbol}\n"
-                    f"price: {sig['price']:.6g}\n"
+                    f"entry: {sig['price']:.6g}\n"
+                    f"SL: {sl:.6g}  TP: {tp:.6g}  (RR {RR:g})\n"
                     f"HVN zone: {sig['zone']['bottom']:.6g} - {sig['zone']['top']:.6g}\n"
                     f"reason: bounce off high-volume node"
                 )
     except Exception as e:
         log_error(f"{symbol}: {e}")
+
+
+def close_signal(sig, result, exit_price):
+    with state_lock:
+        sig["status"] = "CLOSED"
+        sig["result"] = result
+        sig["exit_price"] = exit_price
+        sig["closed_at"] = time.time()
+    if result in ("WIN", "LOSS"):
+        arrow = "\u2705" if result == "WIN" else "\u274c"
+        send_telegram(f"{arrow} {sig['symbol']} {sig['direction']} closed: {result} @ {exit_price:.6g}")
+
+
+def update_signal_outcomes():
+    with state_lock:
+        open_signals = [s for s in STATE["signals"] if s.get("status") == "OPEN"]
+    for sig in open_signals:
+        try:
+            candles = get_candles(sig["symbol"], interval=INTERVAL, limit=200)
+            relevant = [c for c in candles if c["time"] >= sig["time"]]
+            hit = False
+            for c in relevant:
+                if sig["direction"] == "LONG":
+                    if c["low"] <= sig["sl"]:
+                        close_signal(sig, "LOSS", sig["sl"])
+                        hit = True
+                        break
+                    if c["high"] >= sig["tp"]:
+                        close_signal(sig, "WIN", sig["tp"])
+                        hit = True
+                        break
+                else:
+                    if c["high"] >= sig["sl"]:
+                        close_signal(sig, "LOSS", sig["sl"])
+                        hit = True
+                        break
+                    if c["low"] <= sig["tp"]:
+                        close_signal(sig, "WIN", sig["tp"])
+                        hit = True
+                        break
+            if not hit and time.time() - sig["detected_at"] > SIGNAL_TIMEOUT_SEC:
+                last_price = candles[-1]["close"] if candles else sig["entry"]
+                close_signal(sig, "TIMEOUT", last_price)
+        except Exception as e:
+            log_error(f"update_signal_outcomes {sig.get('symbol')}: {e}")
+
+
+def compute_signal_stats():
+    with state_lock:
+        signals = list(STATE["signals"])
+    closed = [s for s in signals if s.get("status") == "CLOSED" and s.get("result") in ("WIN", "LOSS")]
+    wins = sum(1 for s in closed if s["result"] == "WIN")
+    losses = sum(1 for s in closed if s["result"] == "LOSS")
+    total = wins + losses
+    timeouts = sum(1 for s in signals if s.get("result") == "TIMEOUT")
+    open_count = sum(1 for s in signals if s.get("status") == "OPEN")
+    winrate = round(wins / total * 100, 1) if total else None
+    return {
+        "open": open_count, "wins": wins, "losses": losses,
+        "timeouts": timeouts, "winrate": winrate, "closed_total": total,
+    }
 
 
 def scan_loop():
@@ -344,6 +441,7 @@ def scan_loop():
                 futs = [ex.submit(scan_symbol, s) for s in universe]
                 for _ in as_completed(futs):
                     pass
+            update_signal_outcomes()
             t1 = time.time()
             with state_lock:
                 STATE["last_scan_finished"] = t1
@@ -358,6 +456,7 @@ def scan_loop():
 # ----------------------------------------------------------------------------
 @app.route("/api/status")
 def api_status():
+    stats = compute_signal_stats()
     with state_lock:
         return jsonify({
             "version": APP_VERSION,
@@ -366,11 +465,12 @@ def api_status():
             "last_scan_finished": STATE["last_scan_finished"],
             "last_scan_duration": STATE["last_scan_duration"],
             "errors": list(STATE["errors"])[-10:],
+            "stats": stats,
             "config": {
                 "segs": SEGS, "lookback": LOOKBACK, "interval": INTERVAL,
                 "hvn_top_n": HVN_TOP_N, "min_vol_usd": MIN_VOL_USD,
                 "max_symbols": MAX_SYMBOLS, "scan_interval": SCAN_INTERVAL_SEC,
-                "cooldown": COOLDOWN_SEC,
+                "cooldown": COOLDOWN_SEC, "rr": RR,
             },
         })
 
@@ -436,6 +536,10 @@ INDEX_HTML = """<!doctype html>
   tr:active { background:#182036; }
   .long { color:#3ddc97; font-weight:600; }
   .short { color:#ff6b6b; font-weight:600; }
+  .win { color:#3ddc97; font-weight:600; }
+  .loss { color:#ff6b6b; font-weight:600; }
+  .status-open { color:#e8b93d; font-weight:600; }
+  .status-timeout { color:#8b98ab; }
   .panel { padding:0 4px 20px; }
   #modal { position:fixed; inset:0; background:rgba(5,7,12,.92); display:none; z-index:20; }
   #modal.open { display:flex; flex-direction:column; }
@@ -452,6 +556,7 @@ INDEX_HTML = """<!doctype html>
 <header>
   <h1>VP-POC Screener</h1>
   <div id="status">загрузка...</div>
+  <div id="stats" class="dim" style="margin-top:2px;font-size:11px;"></div>
 </header>
 <div class="tabs">
   <div class="tab active" data-tab="signals">Сигналы</div>
@@ -459,7 +564,7 @@ INDEX_HTML = """<!doctype html>
 </div>
 <div class="panel">
   <table id="signalsTable" style="display:table">
-    <thead><tr><th>Symbol</th><th>Dir</th><th>Price</th><th>Zone</th><th>Time</th></tr></thead>
+    <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>Status</th><th>Time</th></tr></thead>
     <tbody></tbody>
   </table>
   <table id="watchTable" style="display:none">
@@ -498,6 +603,10 @@ async function refreshStatus() {
     const el = document.getElementById('status');
     const scanTxt = s.last_scan_finished ? `скан ${s.last_scan_duration}s, ${s.universe_size} пар` : 'сканирование...';
     el.textContent = `v${s.version} · ${scanTxt}`;
+    const st = s.stats || {};
+    const wr = st.winrate !== null && st.winrate !== undefined ? `${st.winrate}%` : '-';
+    document.getElementById('stats').textContent =
+      `Винрейт: ${wr} (${st.wins||0}W / ${st.losses||0}L, timeout ${st.timeouts||0}) · открытых: ${st.open||0} · RR ${s.config ? s.config.rr : ''}`;
   } catch(e) {}
 }
 
@@ -508,10 +617,22 @@ async function refreshSignals() {
   document.getElementById('emptyMsg').style.display = (activeTab==='signals' && rows.length===0) ? 'block' : 'none';
   for (const r of rows) {
     const tr = document.createElement('tr');
+    let statusHtml;
+    if (r.status === 'OPEN') {
+      statusHtml = `<span class="status-open">OPEN</span>`;
+    } else if (r.result === 'WIN') {
+      statusHtml = `<span class="win">WIN @ ${fmt(r.exit_price)}</span>`;
+    } else if (r.result === 'LOSS') {
+      statusHtml = `<span class="loss">LOSS @ ${fmt(r.exit_price)}</span>`;
+    } else {
+      statusHtml = `<span class="status-timeout">TIMEOUT</span>`;
+    }
     tr.innerHTML = `<td>${r.symbol}</td>
       <td class="${r.direction==='LONG'?'long':'short'}">${r.direction}</td>
-      <td>${fmt(r.price)}</td>
-      <td class="dim">${fmt(r.zone_bottom,5)}-${fmt(r.zone_top,5)}</td>
+      <td>${fmt(r.entry)}</td>
+      <td class="dim">${fmt(r.sl)}</td>
+      <td class="dim">${fmt(r.tp)}</td>
+      <td>${statusHtml}</td>
       <td class="dim">${fmtTime(r.time)}</td>`;
     tr.onclick = () => openChart(r.symbol);
     tbody.appendChild(tr);
