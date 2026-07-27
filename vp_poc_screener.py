@@ -31,6 +31,14 @@ v0.1.2 - added explicit TP/SL per signal (stop beyond the far edge of
          checks open signals' candles for TP/SL hits (or a timeout),
          closes them WIN/LOSS/TIMEOUT, and exposes rolling win-rate
          stats in /api/status and the UI header.
+v0.2.0 - chart modal now draws entry/SL/TP lines for a clicked signal
+         and highlights the POC zone (bold line + label, like the
+         reference ChartPrime indicator); added a per-symbol parameter
+         optimizer (walk-forward backtest over a small grid of
+         lookback/HVN-count/RR) triggered on demand via an
+         "Оптимизировать" button — picks the historically best-winrate
+         combo for that symbol and uses it for that symbol's live
+         signals going forward (/api/optimize/<symbol>).
 """
 
 import os
@@ -44,7 +52,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.1.2"
+APP_VERSION = "0.2.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -264,21 +272,135 @@ def nearest_zone_distance(price, zones):
     return best, best_dist
 
 
-def compute_tp_sl(direction, entry, zone):
+def compute_tp_sl(direction, entry, zone, rr=None, buffer_pct=None):
     """Stop sits just beyond the far edge of the HVN zone (the level that,
     if broken, invalidates the bounce). Take-profit is RR multiples of that
     risk distance."""
+    rr = RR if rr is None else rr
+    buffer_pct = ZONE_BUFFER_PCT if buffer_pct is None else buffer_pct
     zone_height = max(zone["top"] - zone["bottom"], entry * 0.0005)
-    buffer = max(zone_height * ZONE_BUFFER_PCT, entry * 0.0005)
+    buffer = max(zone_height * buffer_pct, entry * 0.0005)
     if direction == "LONG":
         sl = zone["bottom"] - buffer
         risk = entry - sl
-        tp = entry + risk * RR
+        tp = entry + risk * rr
     else:
         sl = zone["top"] + buffer
         risk = sl - entry
-        tp = entry - risk * RR
+        tp = entry - risk * rr
     return sl, tp, risk
+
+
+# ----------------------------------------------------------------------------
+# Per-symbol parameter optimizer: walk-forward backtest over a small grid
+# (lookback / HVN top-n / RR) to find the combo with the best historical
+# win rate for THIS symbol, then use that combo for its live signals.
+# Triggered on demand (UI "Оптимизировать" button) rather than for the
+# whole universe every cycle — a phone CPU can't grid-search 150 symbols
+# on a schedule, but one symbol on tap is fine.
+# ----------------------------------------------------------------------------
+BT_SEGS = int(os.environ.get("VP_BT_SEGS", 40))
+BT_HISTORY = int(os.environ.get("VP_BT_HISTORY", 500))
+BT_STRIDE = int(os.environ.get("VP_BT_STRIDE", 2))
+MIN_BACKTEST_TRADES = int(os.environ.get("VP_BT_MIN_TRADES", 6))
+PARAM_GRID_LOOKBACK = [60, 100, 150]
+PARAM_GRID_HVN = [3, 6, 9]
+PARAM_GRID_RR = [1.0, 1.5, 2.0]
+
+SYMBOL_OVERRIDES = {}  # symbol -> {lookback, hvn_top_n, rr, winrate, trades, optimized_at}
+
+
+def backtest_params(candles, lookback, hvn_top_n, rr, segs=BT_SEGS, stride=BT_STRIDE):
+    """Walk forward through history one trade at a time (no overlapping
+    positions), using only data strictly before each candidate bar to build
+    the profile — no lookahead."""
+    n = len(candles)
+    start = lookback + 2
+    if n <= start + 10:
+        return {"trades": 0, "wins": 0, "losses": 0, "winrate": None}
+    open_trade = None
+    wins = losses = 0
+    i = start
+    while i < n:
+        c = candles[i]
+        if open_trade:
+            if open_trade["direction"] == "LONG":
+                if c["low"] <= open_trade["sl"]:
+                    losses += 1
+                    open_trade = None
+                elif c["high"] >= open_trade["tp"]:
+                    wins += 1
+                    open_trade = None
+            else:
+                if c["high"] >= open_trade["sl"]:
+                    losses += 1
+                    open_trade = None
+                elif c["low"] <= open_trade["tp"]:
+                    wins += 1
+                    open_trade = None
+            i += 1
+            continue
+
+        window = candles[i - lookback:i]
+        profile = compute_profile(window, segs=segs, lookback=lookback)
+        if profile:
+            zones = extract_hvn_zones(profile, top_n=hvn_top_n)
+            if zones:
+                prev = candles[i - 1]
+                for z in zones:
+                    top, bottom = z["top"], z["bottom"]
+                    touched = c["low"] <= top and c["high"] >= bottom
+                    if not touched:
+                        continue
+                    direction = None
+                    if prev["close"] > top and c["close"] > top:
+                        direction = "LONG"
+                    elif prev["close"] < bottom and c["close"] < bottom:
+                        direction = "SHORT"
+                    if direction:
+                        entry = c["close"]
+                        sl, tp, _ = compute_tp_sl(direction, entry, z, rr=rr)
+                        open_trade = {"direction": direction, "sl": sl, "tp": tp}
+                        break
+        i += stride if not open_trade else 1
+
+    total = wins + losses
+    winrate = round(wins / total * 100, 1) if total else None
+    return {"trades": total, "wins": wins, "losses": losses, "winrate": winrate}
+
+
+def optimize_symbol(symbol):
+    candles = get_candles(symbol, interval=INTERVAL, limit=BT_HISTORY)
+    if len(candles) < 150:
+        return {"error": "not enough history"}
+
+    best = None
+    tried = []
+    for lb in PARAM_GRID_LOOKBACK:
+        for hvn in PARAM_GRID_HVN:
+            for rr in PARAM_GRID_RR:
+                res = backtest_params(candles, lb, hvn, rr)
+                tried.append({**res, "lookback": lb, "hvn_top_n": hvn, "rr": rr})
+                if res["trades"] < MIN_BACKTEST_TRADES or res["winrate"] is None:
+                    continue
+                if best is None or res["winrate"] > best["winrate"] or \
+                        (res["winrate"] == best["winrate"] and res["trades"] > best["trades"]):
+                    best = {**res, "lookback": lb, "hvn_top_n": hvn, "rr": rr}
+
+    if best is None:
+        # nothing cleared the min-trades bar; fall back to whichever combo
+        # had the most trades so the button still returns something useful
+        tried.sort(key=lambda t: -t["trades"])
+        best = tried[0] if tried else None
+        if best:
+            best["note"] = f"insufficient trades for a confident pick (<{MIN_BACKTEST_TRADES}); showing best-effort combo"
+
+    if best:
+        best["optimized_at"] = time.time()
+        best["candles_used"] = len(candles)
+        with state_lock:
+            SYMBOL_OVERRIDES[symbol] = best
+    return best
 
 
 # ----------------------------------------------------------------------------
@@ -302,13 +424,18 @@ def send_telegram(text):
 # ----------------------------------------------------------------------------
 def scan_symbol(symbol):
     try:
-        candles = get_candles(symbol)
+        ov = SYMBOL_OVERRIDES.get(symbol, {})
+        lookback = ov.get("lookback", LOOKBACK)
+        hvn_top_n = ov.get("hvn_top_n", HVN_TOP_N)
+        rr = ov.get("rr", RR)
+
+        candles = get_candles(symbol, limit=lookback + 5)
         if len(candles) < 20:
             return
-        profile = compute_profile(candles)
+        profile = compute_profile(candles, segs=SEGS, lookback=lookback)
         if not profile:
             return
-        zones = extract_hvn_zones(profile)
+        zones = extract_hvn_zones(profile, top_n=hvn_top_n)
         if not zones:
             return
         price = candles[-1]["close"]
@@ -335,7 +462,7 @@ def scan_symbol(symbol):
             last_ts = _cooldowns.get(key, 0)
             if now - last_ts >= COOLDOWN_SEC:
                 _cooldowns[key] = now
-                sl, tp, risk = compute_tp_sl(sig["direction"], sig["price"], sig["zone"])
+                sl, tp, risk = compute_tp_sl(sig["direction"], sig["price"], sig["zone"], rr=rr)
                 record = {
                     "symbol": symbol,
                     "direction": sig["direction"],
@@ -359,7 +486,7 @@ def scan_symbol(symbol):
                 send_telegram(
                     f"{arrow} {symbol}\n"
                     f"entry: {sig['price']:.6g}\n"
-                    f"SL: {sl:.6g}  TP: {tp:.6g}  (RR {RR:g})\n"
+                    f"SL: {sl:.6g}  TP: {tp:.6g}  (RR {rr:g})\n"
                     f"HVN zone: {sig['zone']['bottom']:.6g} - {sig['zone']['top']:.6g}\n"
                     f"reason: bounce off high-volume node"
                 )
@@ -491,23 +618,45 @@ def api_signals():
 
 @app.route("/api/profile/<symbol>")
 def api_profile(symbol):
+    ov = SYMBOL_OVERRIDES.get(symbol, {})
     interval = request.args.get("interval", INTERVAL)
+    lookback = int(request.args.get("lookback", ov.get("lookback", LOOKBACK)))
+    hvn_top_n = int(request.args.get("hvn_top_n", ov.get("hvn_top_n", HVN_TOP_N)))
     try:
-        candles = get_candles(symbol, interval=interval, limit=LOOKBACK + 5)
-        profile = compute_profile(candles, segs=SEGS, lookback=LOOKBACK)
+        candles = get_candles(symbol, interval=interval, limit=lookback + 5)
+        profile = compute_profile(candles, segs=SEGS, lookback=lookback)
         if not profile:
             return jsonify({"error": "not enough data"}), 400
-        zones = extract_hvn_zones(profile)
+        zones = extract_hvn_zones(profile, top_n=hvn_top_n)
         return jsonify({
             "symbol": symbol,
-            "candles": candles[-LOOKBACK:],
+            "candles": candles[-lookback:],
             "borders": profile["borders"],
             "bin_vols": profile["bin_vols"],
             "zones": zones,
+            "params": {"lookback": lookback, "hvn_top_n": hvn_top_n, "rr": ov.get("rr", RR)},
+            "override": ov if ov else None,
         })
     except Exception as e:
         log_error(f"api_profile {symbol}: {e}")
         return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/optimize/<symbol>", methods=["POST"])
+def api_optimize(symbol):
+    try:
+        result = optimize_symbol(symbol)
+        if result is None:
+            return jsonify({"error": "optimization failed"}), 500
+        return jsonify(result)
+    except Exception as e:
+        log_error(f"api_optimize {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/overrides")
+def api_overrides():
+    return jsonify(SYMBOL_OVERRIDES)
 
 
 # ----------------------------------------------------------------------------
@@ -543,9 +692,11 @@ INDEX_HTML = """<!doctype html>
   .panel { padding:0 4px 20px; }
   #modal { position:fixed; inset:0; background:rgba(5,7,12,.92); display:none; z-index:20; }
   #modal.open { display:flex; flex-direction:column; }
-  #modalHeader { padding:12px; display:flex; justify-content:space-between; align-items:center; }
+  #modalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
   #modalHeader h2 { font-size:15px; margin:0; }
-  #closeBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
+  #closeBtn, #optimizeBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
+  #optimizeBtn { background:#2a4030; color:#7fe0ab; }
+  #optimizeBtn:disabled { opacity:.5; }
   #chartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
   canvas { width:100%; height:100%; display:block; background:#0d1017; border-radius:8px; }
   .dim { color:#8b98ab; }
@@ -576,8 +727,14 @@ INDEX_HTML = """<!doctype html>
 
 <div id="modal">
   <div id="modalHeader">
-    <h2 id="modalTitle">-</h2>
-    <button id="closeBtn">Закрыть</button>
+    <div>
+      <h2 id="modalTitle">-</h2>
+      <div id="modalParams" class="dim" style="font-size:11px;margin-top:2px;"></div>
+    </div>
+    <div style="display:flex;gap:8px;">
+      <button id="optimizeBtn">Оптимизировать</button>
+      <button id="closeBtn">Закрыть</button>
+    </div>
   </div>
   <div id="chartWrap"><canvas id="chartCanvas"></canvas></div>
 </div>
@@ -634,7 +791,7 @@ async function refreshSignals() {
       <td class="dim">${fmt(r.tp)}</td>
       <td>${statusHtml}</td>
       <td class="dim">${fmtTime(r.time)}</td>`;
-    tr.onclick = () => openChart(r.symbol);
+    tr.onclick = () => openChart(r);
     tbody.appendChild(tr);
   }
 }
@@ -650,7 +807,7 @@ async function refreshWatch() {
       <td>${fmt(r.price)}</td>
       <td class="dim">${fmt(r.nearest_bottom,5)}-${fmt(r.nearest_top,5)}</td>
       <td>${r.dist_pct !== null ? r.dist_pct.toFixed(2)+'%' : '-'}</td>`;
-    tr.onclick = () => openChart(r.symbol);
+    tr.onclick = () => openChart(r);
     tbody.appendChild(tr);
   }
 }
@@ -666,19 +823,57 @@ setInterval(refreshAll, 15000);
 // ---------------- Chart modal ----------------
 const modal = document.getElementById('modal');
 document.getElementById('closeBtn').onclick = () => modal.classList.remove('open');
+let currentRow = null;
+let currentData = null;
 
-async function openChart(symbol) {
-  document.getElementById('modalTitle').textContent = symbol;
+async function openChart(row) {
+  currentRow = row;
+  document.getElementById('modalTitle').textContent = row.symbol;
+  document.getElementById('modalParams').textContent = 'загрузка...';
   modal.classList.add('open');
   try {
-    const data = await (await fetch(`/api/profile/${symbol}`)).json();
-    drawChart(data);
+    const data = await (await fetch(`/api/profile/${row.symbol}`)).json();
+    currentData = data;
+    renderParams(data);
+    drawChart(data, row);
   } catch (e) {
     console.error(e);
   }
 }
 
-function drawChart(data) {
+function renderParams(data) {
+  const p = data.params || {};
+  const ov = data.override;
+  const base = `lookback ${p.lookback} · HVN ${p.hvn_top_n} · RR ${p.rr}`;
+  const tag = ov ? ` · оптимизировано (${ov.winrate}%, ${ov.trades} сделок)` : ' · параметры по умолчанию';
+  document.getElementById('modalParams').textContent = base + tag;
+}
+
+document.getElementById('optimizeBtn').onclick = async () => {
+  if (!currentRow) return;
+  const btn = document.getElementById('optimizeBtn');
+  btn.disabled = true;
+  btn.textContent = 'Считаю...';
+  try {
+    const res = await (await fetch(`/api/optimize/${currentRow.symbol}`, {method:'POST'})).json();
+    if (res.error) {
+      document.getElementById('modalParams').textContent = 'Ошибка: ' + res.error;
+    } else {
+      const note = res.note ? ` (${res.note})` : '';
+      document.getElementById('modalParams').textContent =
+        `Подобрано: lookback ${res.lookback} · HVN ${res.hvn_top_n} · RR ${res.rr} · винрейт ${res.winrate}% (${res.trades} сделок)${note}`;
+      const data = await (await fetch(`/api/profile/${currentRow.symbol}`)).json();
+      currentData = data;
+      drawChart(data, currentRow);
+    }
+  } catch (e) {
+    document.getElementById('modalParams').textContent = 'Ошибка оптимизации';
+  }
+  btn.disabled = false;
+  btn.textContent = 'Оптимизировать';
+};
+
+function drawChart(data, signalRow) {
   const canvas = document.getElementById('chartCanvas');
   const wrap = document.getElementById('chartWrap');
   const dpr = window.devicePixelRatio || 1;
@@ -696,8 +891,15 @@ function drawChart(data) {
   const padTop = 10, padBottom = 24;
   const chartH = H - padTop - padBottom;
 
+  const hasTrade = signalRow && signalRow.entry !== undefined && signalRow.sl !== undefined;
   let hi = Math.max(...candles.map(c => c.high));
   let lo = Math.min(...candles.map(c => c.low));
+  if (hasTrade) {
+    hi = Math.max(hi, signalRow.tp, signalRow.sl, signalRow.entry);
+    lo = Math.min(lo, signalRow.tp, signalRow.sl, signalRow.entry);
+  }
+  const pad = (hi - lo) * 0.04 || hi * 0.01;
+  hi += pad; lo -= pad;
   const range = hi - lo || 1;
   const y = (price) => padTop + (hi - price) / range * chartH;
 
@@ -705,9 +907,13 @@ function drawChart(data) {
   const slot = chartW / n;
   const bodyW = Math.max(1, slot * 0.6);
 
+  const zones = data.zones || [];
+  const pocZone = zones.length ? zones[0] : null;
+
   // HVN zones (background bands)
-  for (const z of (data.zones || [])) {
-    ctx.fillStyle = 'rgba(80,160,255,0.10)';
+  for (const z of zones) {
+    const isPoc = pocZone && z.mid === pocZone.mid;
+    ctx.fillStyle = isPoc ? 'rgba(80,220,160,0.14)' : 'rgba(80,160,255,0.08)';
     ctx.fillRect(0, y(z.top), chartW, Math.max(1, y(z.bottom) - y(z.top)));
   }
 
@@ -753,13 +959,39 @@ function drawChart(data) {
     ctx.fillRect(px, yTop, w, Math.max(1, yBot - yTop));
   }
 
-  // zone edges
-  ctx.setLineDash([4, 3]);
-  for (const z of (data.zones || [])) {
-    ctx.strokeStyle = 'rgba(255,200,80,0.6)';
+  // zone edges — POC gets a bold highlighted line all the way across,
+  // other HVN zones get thin dashed lines (like the reference indicator)
+  for (const z of zones) {
+    const isPoc = pocZone && z.mid === pocZone.mid;
+    ctx.setLineDash(isPoc ? [] : [4, 3]);
+    ctx.lineWidth = isPoc ? 2 : 1;
+    ctx.strokeStyle = isPoc ? 'rgba(90,230,160,0.9)' : 'rgba(255,200,80,0.5)';
     ctx.beginPath(); ctx.moveTo(0, y(z.mid)); ctx.lineTo(px + profileW, y(z.mid)); ctx.stroke();
+    if (isPoc) {
+      ctx.fillStyle = 'rgba(90,230,160,0.9)';
+      ctx.font = '10px sans-serif';
+      ctx.fillText('POC', 4, y(z.mid) - 4);
+    }
   }
   ctx.setLineDash([]);
+
+  // entry / SL / TP lines for an actual signal
+  if (hasTrade) {
+    drawLevelLine(ctx, y(signalRow.entry), chartW, '#5aa8ff', 'ENTRY ' + fmtNum(signalRow.entry));
+    drawLevelLine(ctx, y(signalRow.sl), chartW, '#ff6b6b', 'SL ' + fmtNum(signalRow.sl));
+    drawLevelLine(ctx, y(signalRow.tp), chartW, '#3ddc97', 'TP ' + fmtNum(signalRow.tp));
+  }
+}
+
+function drawLevelLine(ctx, yy, chartW, color, label) {
+  ctx.setLineDash([2, 4]);
+  ctx.lineWidth = 1.5;
+  ctx.strokeStyle = color;
+  ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(chartW, yy); ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = color;
+  ctx.font = 'bold 10px sans-serif';
+  ctx.fillText(label, 4, yy - 4);
 }
 
 function fmtNum(n) {
@@ -767,9 +999,8 @@ function fmtNum(n) {
 }
 
 window.addEventListener('resize', () => {
-  if (modal.classList.contains('open')) {
-    const title = document.getElementById('modalTitle').textContent;
-    openChart(title);
+  if (modal.classList.contains('open') && currentData) {
+    drawChart(currentData, currentRow);
   }
 });
 </script>
