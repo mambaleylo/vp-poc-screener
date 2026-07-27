@@ -39,6 +39,12 @@ v0.2.0 - chart modal now draws entry/SL/TP lines for a clicked signal
          "Оптимизировать" button — picks the historically best-winrate
          combo for that symbol and uses it for that symbol's live
          signals going forward (/api/optimize/<symbol>).
+v0.2.1 - added a data-quality gate: symbols whose candle feed itself
+         looks illiquid/stale (too many zero-volume bars, too many
+         flat high==low bars, or near-zero average range vs price —
+         the "dashes that don't move" look on thin contracts) are
+         excluded from the watchlist/signals even if they cleared the
+         24h-volume filter. Excluded count shown in the header.
 """
 
 import os
@@ -52,7 +58,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.2.0"
+APP_VERSION = "0.2.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -73,6 +79,13 @@ RR = float(os.environ.get("VP_RR", 1.5))                  # take-profit distance
 ZONE_BUFFER_PCT = float(os.environ.get("VP_ZONE_BUFFER_PCT", 0.15))  # stop sits this far beyond the zone edge (fraction of zone height)
 SIGNAL_TIMEOUT_SEC = int(os.environ.get("VP_SIGNAL_TIMEOUT", 6 * 3600))  # close as TIMEOUT if neither TP/SL hit
 
+# --- data quality filter: skip symbols that look illiquid/stale on the
+# candle feed itself (near-zero volume bars, flat high==low bars, or an
+# almost flat price range) even if they cleared the 24h volume filter.
+MAX_ZERO_VOL_RATIO = float(os.environ.get("VP_MAX_ZERO_VOL_RATIO", 0.15))
+MAX_FLAT_RATIO = float(os.environ.get("VP_MAX_FLAT_RATIO", 0.15))
+MIN_AVG_RANGE_PCT = float(os.environ.get("VP_MIN_AVG_RANGE_PCT", 0.0004))
+
 TELEGRAM_BOT_TOKEN = os.environ.get("VP_TG_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("VP_TG_CHAT", "")
 
@@ -88,12 +101,35 @@ STATE = {
     "watchlist": {},          # symbol -> {price, top, bottom, dist_pct, zones, updated}
     "signals": deque(maxlen=SIGNAL_HISTORY),
     "universe_size": 0,
+    "excluded_low_quality": 0,
     "last_scan_started": None,
     "last_scan_finished": None,
     "last_scan_duration": None,
     "errors": deque(maxlen=30),
 }
 _cooldowns = {}  # (symbol, zone_key) -> last_alert_ts
+
+
+def data_quality_check(candles):
+    """Reject symbols whose candle feed itself looks illiquid/stale: too
+    many zero-volume bars, too many flat (high==low) bars, or an average
+    range too small relative to price — the "sideways dashes" look on
+    thin/rarely-traded contracts. Returns (ok, reason)."""
+    n = len(candles)
+    if n < 20:
+        return False, "too few candles"
+    zero_vol = sum(1 for c in candles if c["volume"] <= 0)
+    flat = sum(1 for c in candles if c["high"] <= c["low"])
+    ranges = [(c["high"] - c["low"]) / c["close"] for c in candles if c["close"] > 0]
+    avg_range_pct = sum(ranges) / len(ranges) if ranges else 0.0
+
+    if zero_vol / n > MAX_ZERO_VOL_RATIO:
+        return False, f"zero-volume bars {zero_vol}/{n}"
+    if flat / n > MAX_FLAT_RATIO:
+        return False, f"flat bars {flat}/{n}"
+    if avg_range_pct < MIN_AVG_RANGE_PCT:
+        return False, f"avg range {avg_range_pct:.5f} < {MIN_AVG_RANGE_PCT}"
+    return True, None
 
 
 def log_error(msg):
@@ -432,6 +468,14 @@ def scan_symbol(symbol):
         candles = get_candles(symbol, limit=lookback + 5)
         if len(candles) < 20:
             return
+
+        ok, reason = data_quality_check(candles[-lookback:])
+        if not ok:
+            with state_lock:
+                STATE["watchlist"].pop(symbol, None)
+                STATE["excluded_low_quality"] += 1
+            return
+
         profile = compute_profile(candles, segs=SEGS, lookback=lookback)
         if not profile:
             return
@@ -564,6 +608,7 @@ def scan_loop():
             universe = build_universe()
             with state_lock:
                 STATE["universe_size"] = len(universe)
+                STATE["excluded_low_quality"] = 0
             with ThreadPoolExecutor(max_workers=WORKERS) as ex:
                 futs = [ex.submit(scan_symbol, s) for s in universe]
                 for _ in as_completed(futs):
@@ -588,6 +633,7 @@ def api_status():
         return jsonify({
             "version": APP_VERSION,
             "universe_size": STATE["universe_size"],
+            "excluded_low_quality": STATE["excluded_low_quality"],
             "last_scan_started": STATE["last_scan_started"],
             "last_scan_finished": STATE["last_scan_finished"],
             "last_scan_duration": STATE["last_scan_duration"],
@@ -598,6 +644,8 @@ def api_status():
                 "hvn_top_n": HVN_TOP_N, "min_vol_usd": MIN_VOL_USD,
                 "max_symbols": MAX_SYMBOLS, "scan_interval": SCAN_INTERVAL_SEC,
                 "cooldown": COOLDOWN_SEC, "rr": RR,
+                "max_zero_vol_ratio": MAX_ZERO_VOL_RATIO, "max_flat_ratio": MAX_FLAT_RATIO,
+                "min_avg_range_pct": MIN_AVG_RANGE_PCT,
             },
         })
 
@@ -758,7 +806,7 @@ async function refreshStatus() {
   try {
     const s = await (await fetch('/api/status')).json();
     const el = document.getElementById('status');
-    const scanTxt = s.last_scan_finished ? `скан ${s.last_scan_duration}s, ${s.universe_size} пар` : 'сканирование...';
+    const scanTxt = s.last_scan_finished ? `скан ${s.last_scan_duration}s, ${s.universe_size} пар (искл. ${s.excluded_low_quality||0} неликвид)` : 'сканирование...';
     el.textContent = `v${s.version} · ${scanTxt}`;
     const st = s.stats || {};
     const wr = st.winrate !== null && st.winrate !== undefined ? `${st.winrate}%` : '-';
