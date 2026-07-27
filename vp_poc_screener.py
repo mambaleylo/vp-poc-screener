@@ -122,6 +122,18 @@ v0.6.1 - extended data_quality_check with three "sawtooth chop" checks:
          can have plenty of volume and pass every earlier check yet
          still whip back and forth with no continuity — such symbols
          are now excluded the same way illiquid ones are.
+v0.6.2 - the direction-flip/wick-ratio checks from v0.6.1 didn't catch
+         the actual reported example (XIAOMI_USDT) — real chop often
+         runs a few bars the same way before reversing, not a strict
+         every-other-bar flip, so the flip ratio stayed under threshold.
+         Added a Kaufman-style efficiency ratio check: net price
+         displacement over the window divided by the total path length
+         traveled. A symbol that swings hard but ends up near where it
+         started (lots of movement, ~0 net progress) now gets excluded
+         directly, regardless of the flip-ratio/wick-ratio numbers.
+         Loosened those two thresholds slightly (0.68->0.60,
+         0.72->0.65) since the efficiency-ratio check now carries more
+         of the load.
 """
 
 import os
@@ -135,7 +147,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.6.1"
+APP_VERSION = "0.6.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -178,10 +190,16 @@ MIN_AVG_RANGE_PCT = float(os.environ.get("VP_MIN_AVG_RANGE_PCT", 0.0004))
 # open/close gaps between bars — technically has volume, but the profile
 # and any zone off it is unreliable because price isn't behaving
 # continuously, it's just jumping around.
-MAX_DIRECTION_FLIP_RATIO = float(os.environ.get("VP_MAX_DIRECTION_FLIP_RATIO", 0.68))
-MAX_AVG_WICK_RATIO = float(os.environ.get("VP_MAX_AVG_WICK_RATIO", 0.72))
+MAX_DIRECTION_FLIP_RATIO = float(os.environ.get("VP_MAX_DIRECTION_FLIP_RATIO", 0.60))
+MAX_AVG_WICK_RATIO = float(os.environ.get("VP_MAX_AVG_WICK_RATIO", 0.65))
 GAP_THRESHOLD_PCT = float(os.environ.get("VP_GAP_THRESHOLD_PCT", 0.004))
 MAX_GAP_RATIO = float(os.environ.get("VP_MAX_GAP_RATIO", 0.12))
+# Kaufman-style efficiency ratio: net displacement over the window divided
+# by the total path length traveled to get there. A real sawtooth can have
+# a flip ratio near the ~50% random baseline (a few bars in a row each
+# way, not a strict alternation) and still be pure chop — this catches
+# that case directly: lots of total movement, almost no net progress.
+MIN_EFFICIENCY_RATIO = float(os.environ.get("VP_MIN_EFFICIENCY_RATIO", 0.15))
 
 TELEGRAM_BOT_TOKEN = os.environ.get("VP_TG_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("VP_TG_CHAT", "")
@@ -262,6 +280,15 @@ def data_quality_check(candles):
     gap_ratio = gaps / (n - 1) if n > 1 else 0.0
     if gap_ratio > MAX_GAP_RATIO:
         return False, f"gappy bars {gap_ratio:.2f}"
+
+    # efficiency ratio: net displacement vs total path length. Low value =
+    # price traveled a lot but ended up nowhere — classic sawtooth, even
+    # when no single metric above crosses its own threshold.
+    net_move = abs(candles[-1]["close"] - candles[0]["close"])
+    path_length = sum(abs(candles[i]["close"] - candles[i - 1]["close"]) for i in range(1, n))
+    efficiency = net_move / path_length if path_length > 0 else 1.0
+    if efficiency < MIN_EFFICIENCY_RATIO:
+        return False, f"low efficiency ratio {efficiency:.3f} (chop, little net progress)"
 
     return True, None
 
@@ -969,6 +996,7 @@ def api_status():
                 "max_direction_flip_ratio": MAX_DIRECTION_FLIP_RATIO,
                 "max_avg_wick_ratio": MAX_AVG_WICK_RATIO,
                 "gap_threshold_pct": GAP_THRESHOLD_PCT, "max_gap_ratio": MAX_GAP_RATIO,
+                "min_efficiency_ratio": MIN_EFFICIENCY_RATIO,
             },
         })
 
