@@ -79,6 +79,18 @@ v0.4.0 - zone quality overhaul: extract_hvn_zones now drops merged
          actually trades. Chart now visually distinguishes POC (bold
          green) / eligible zones (dashed amber) / weak context-only
          zones (faint dotted grey).
+v0.4.1 - two fixes from live examples: (1) added a whole-profile
+         "peakedness" gate in extract_hvn_zones — if the busiest bin
+         isn't at least VP_MIN_PEAK_RATIO times the average bin, volume
+         is just spread flat across the range and there's no real POC;
+         such symbols now return zero zones instead of pretending the
+         busiest bin means something. (2) the SL buffer (fraction of
+         zone height beyond the edge) was a fixed global constant the
+         optimizer never touched, so a symbol whose price routinely
+         pokes slightly past a node before reversing would get stopped
+         out even with "optimized" params. buffer_pct is now a 4th grid
+         dimension (15% / 35%) in the per-symbol optimizer, so a wider
+         stop can be selected per-symbol when it improves win rate.
 """
 
 import os
@@ -92,7 +104,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.4.0"
+APP_VERSION = "0.4.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -122,6 +134,7 @@ MFE_TRACK_SEC = int(os.environ.get("VP_MFE_TRACK_SEC", 24 * 3600))  # keep measu
 MAX_ZONE_HEIGHT_FRAC = float(os.environ.get("VP_MAX_ZONE_HEIGHT_FRAC", 0.10))   # zone height must be < this fraction of the whole profile range (hh-ll)
 ZONE_STRENGTH_MIN_RATIO = float(os.environ.get("VP_ZONE_STRENGTH_MIN_RATIO", 0.55))  # zone volume must be >= this fraction of the POC's volume to be eligible for signals
 BREAKOUT_MIN_BARS_INSIDE = int(os.environ.get("VP_BREAKOUT_MIN_BARS", 3))  # bars that must have been basing inside/around the zone right before a breakout signal
+MIN_PEAK_RATIO = float(os.environ.get("VP_MIN_PEAK_RATIO", 2.5))  # the busiest bin must be at least this many times the average bin — otherwise volume is just spread flat across the whole range and there's no real POC to trade
 
 # --- data quality filter: skip symbols that look illiquid/stale on the
 # candle feed itself (near-zero volume bars, flat high==low bars, or an
@@ -283,15 +296,24 @@ def compute_profile(candles, segs=SEGS, lookback=LOOKBACK):
     return {"borders": borders, "bin_vols": bin_vols, "hh": hh, "ll": ll, "inc": inc}
 
 
-def extract_hvn_zones(profile, top_n=HVN_TOP_N, max_height_frac=MAX_ZONE_HEIGHT_FRAC):
+def extract_hvn_zones(profile, top_n=HVN_TOP_N, max_height_frac=MAX_ZONE_HEIGHT_FRAC, min_peak_ratio=MIN_PEAK_RATIO):
     """Take the top_n highest-volume bins and merge adjacent ones into
     contiguous high-volume-node zones. Zones that end up too tall relative
     to the whole profile range are dropped — a merge that wide isn't a
-    precise level, it's a diffuse band."""
+    precise level, it's a diffuse band. If the whole profile is flat (no
+    bin meaningfully busier than average — volume just spread evenly
+    across the range), there's no real POC to trade at all: return no
+    zones rather than pretending the busiest bin means something."""
     borders = profile["borders"]
     bin_vols = profile["bin_vols"]
     segs = len(bin_vols)
     total_range = max(profile["hh"] - profile["ll"], 1e-12)
+
+    avg_vol = sum(bin_vols) / segs if segs else 0
+    max_vol = max(bin_vols) if bin_vols else 0
+    if min_peak_ratio and avg_vol > 0 and max_vol < avg_vol * min_peak_ratio:
+        return []
+
     ranked = sorted(range(segs), key=lambda i: -bin_vols[i])[:top_n]
     ranked_set = set(ranked)
 
@@ -436,11 +458,12 @@ MIN_BACKTEST_TRADES = int(os.environ.get("VP_BT_MIN_TRADES", 6))
 PARAM_GRID_LOOKBACK = [60, 100, 150]
 PARAM_GRID_HVN = [3, 6, 9]
 PARAM_GRID_RR = [1.0, 1.5, 2.0]
+PARAM_GRID_BUFFER = [0.15, 0.35]  # stop buffer as a fraction of zone height — wider for symbols whose price routinely pokes a bit past the node before reversing
 
-SYMBOL_OVERRIDES = {}  # symbol -> {lookback, hvn_top_n, rr, winrate, trades, optimized_at}
+SYMBOL_OVERRIDES = {}  # symbol -> {lookback, hvn_top_n, rr, buffer_pct, winrate, trades, optimized_at}
 
 
-def backtest_params(candles, lookback, hvn_top_n, rr, segs=BT_SEGS, stride=BT_STRIDE):
+def backtest_params(candles, lookback, hvn_top_n, rr, buffer_pct=ZONE_BUFFER_PCT, segs=BT_SEGS, stride=BT_STRIDE):
     """Walk forward through history one trade at a time (no overlapping
     positions), using only data strictly before each candidate bar to build
     the profile — no lookahead."""
@@ -480,7 +503,7 @@ def backtest_params(candles, lookback, hvn_top_n, rr, segs=BT_SEGS, stride=BT_ST
             if sig:
                 direction = sig["direction"]
                 entry = sig["price"]
-                sl, tp, _ = compute_tp_sl(direction, entry, sig["zone"], rr=rr)
+                sl, tp, _ = compute_tp_sl(direction, entry, sig["zone"], rr=rr, buffer_pct=buffer_pct)
                 open_trade = {"direction": direction, "sl": sl, "tp": tp}
         i += stride if not open_trade else 1
 
@@ -499,13 +522,14 @@ def optimize_symbol(symbol):
     for lb in PARAM_GRID_LOOKBACK:
         for hvn in PARAM_GRID_HVN:
             for rr in PARAM_GRID_RR:
-                res = backtest_params(candles, lb, hvn, rr)
-                tried.append({**res, "lookback": lb, "hvn_top_n": hvn, "rr": rr})
-                if res["trades"] < MIN_BACKTEST_TRADES or res["winrate"] is None:
-                    continue
-                if best is None or res["winrate"] > best["winrate"] or \
-                        (res["winrate"] == best["winrate"] and res["trades"] > best["trades"]):
-                    best = {**res, "lookback": lb, "hvn_top_n": hvn, "rr": rr}
+                for buf in PARAM_GRID_BUFFER:
+                    res = backtest_params(candles, lb, hvn, rr, buffer_pct=buf)
+                    tried.append({**res, "lookback": lb, "hvn_top_n": hvn, "rr": rr, "buffer_pct": buf})
+                    if res["trades"] < MIN_BACKTEST_TRADES or res["winrate"] is None:
+                        continue
+                    if best is None or res["winrate"] > best["winrate"] or \
+                            (res["winrate"] == best["winrate"] and res["trades"] > best["trades"]):
+                        best = {**res, "lookback": lb, "hvn_top_n": hvn, "rr": rr, "buffer_pct": buf}
 
     if best is None:
         # nothing cleared the min-trades bar; fall back to whichever combo
@@ -548,6 +572,7 @@ def scan_symbol(symbol):
         lookback = ov.get("lookback", LOOKBACK)
         hvn_top_n = ov.get("hvn_top_n", HVN_TOP_N)
         rr = ov.get("rr", RR)
+        buffer_pct = ov.get("buffer_pct", ZONE_BUFFER_PCT)
 
         candles = get_candles(symbol, limit=lookback + 5)
         if len(candles) < 20:
@@ -593,7 +618,7 @@ def scan_symbol(symbol):
             last_ts = _cooldowns.get(key, 0)
             if now - last_ts >= COOLDOWN_SEC:
                 _cooldowns[key] = now
-                sl, tp, risk = compute_tp_sl(sig["direction"], sig["price"], sig["zone"], rr=rr)
+                sl, tp, risk = compute_tp_sl(sig["direction"], sig["price"], sig["zone"], rr=rr, buffer_pct=buffer_pct)
                 record = {
                     "symbol": symbol,
                     "direction": sig["direction"],
@@ -860,7 +885,7 @@ def api_profile(symbol):
             "borders": profile["borders"],
             "bin_vols": profile["bin_vols"],
             "zones": zones,
-            "params": {"lookback": lookback, "hvn_top_n": hvn_top_n, "rr": ov.get("rr", RR)},
+            "params": {"lookback": lookback, "hvn_top_n": hvn_top_n, "rr": ov.get("rr", RR), "buffer_pct": ov.get("buffer_pct", ZONE_BUFFER_PCT)},
             "override": ov if ov else None,
         })
     except Exception as e:
@@ -1115,7 +1140,7 @@ async function openChart(row) {
 function renderParams(data) {
   const p = data.params || {};
   const ov = data.override;
-  const base = `lookback ${p.lookback} · HVN ${p.hvn_top_n} · RR ${p.rr}`;
+  const base = `lookback ${p.lookback} · HVN ${p.hvn_top_n} · RR ${p.rr} · буфер SL ${(p.buffer_pct*100).toFixed(0)}%`;
   const tag = ov ? ` · оптимизировано (${ov.winrate}%, ${ov.trades} сделок)` : ' · параметры по умолчанию';
   document.getElementById('modalParams').textContent = base + tag;
 }
@@ -1132,7 +1157,7 @@ document.getElementById('optimizeBtn').onclick = async () => {
     } else {
       const note = res.note ? ` (${res.note})` : '';
       document.getElementById('modalParams').textContent =
-        `Подобрано: lookback ${res.lookback} · HVN ${res.hvn_top_n} · RR ${res.rr} · винрейт ${res.winrate}% (${res.trades} сделок)${note}`;
+        `Подобрано: lookback ${res.lookback} · HVN ${res.hvn_top_n} · RR ${res.rr} · буфер SL ${(res.buffer_pct*100).toFixed(0)}% · винрейт ${res.winrate}% (${res.trades} сделок)${note}`;
       const data = await (await fetch(`/api/profile/${currentRow.symbol}`)).json();
       currentData = data;
       drawChart(data, currentRow);
