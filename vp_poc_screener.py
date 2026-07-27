@@ -52,6 +52,16 @@ v0.3.0 - added MFE/MAE tracking (max favorable/adverse excursion, in R
          further out or tighter in. New "Тюнинг" tab aggregates
          avg/median/p25/p75 of MFE and MAE across WIN/LOSS/OPEN signals;
          new /api/tuning endpoint exposes the same numbers.
+v0.3.1 - fix: update_signal_outcomes was checking the trigger candle
+         itself (time >= sig["time"]) against SL/TP. That candle's own
+         wick is what produced the signal (it's what touched the HVN
+         zone) — checking it against SL/TP could close a trade
+         instantly, on the very bar it was detected, before the trade
+         had any chance to actually play out. Now only candles that
+         close strictly AFTER the trigger bar (time > sig["time"])
+         count toward TP/SL/MFE/MAE. This was corrupting the win-rate
+         stats; in-memory stats reset on restart so this takes effect
+         cleanly.
 """
 
 import os
@@ -65,7 +75,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -577,7 +587,12 @@ def update_signal_outcomes():
     for sig in active:
         try:
             candles = get_candles(sig["symbol"], interval=INTERVAL, limit=300)
-            relevant = [c for c in candles if c["time"] >= sig["time"]]
+            # Strictly AFTER the trigger candle: that candle's own wick is
+            # what produced the signal (its high/low drove the zone touch),
+            # so checking it against SL/TP would count the very move that
+            # created the signal as if it happened post-entry — closing
+            # trades instantly and corrupting the win-rate stats.
+            relevant = [c for c in candles if c["time"] > sig["time"]]
             direction = sig["direction"]
             entry = sig["entry"]
             risk = sig.get("risk") or abs(entry - sig["sl"]) or 1e-9
