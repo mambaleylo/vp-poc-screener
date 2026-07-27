@@ -139,6 +139,11 @@ v0.6.3 - added a bounce-vs-breakout win-rate breakdown (compute_signal_stats
          whether an aggregate winrate drop is coming from one signal
          type dragging the other down, rather than guessing from the
          combined number alone.
+v0.6.4 - loosened MIN_EFFICIENCY_RATIO 0.15 -> 0.08: the stricter value
+         was excluding 98/150 universe symbols in practice — normal
+         crypto ranging/consolidation has low net displacement too, and
+         isn't the same thing as sawtooth chop. 0.08 should only catch
+         the more extreme cases while leaving the sample size usable.
 """
 
 import os
@@ -152,7 +157,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.6.3"
+APP_VERSION = "0.6.4"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -204,7 +209,7 @@ MAX_GAP_RATIO = float(os.environ.get("VP_MAX_GAP_RATIO", 0.12))
 # a flip ratio near the ~50% random baseline (a few bars in a row each
 # way, not a strict alternation) and still be pure chop — this catches
 # that case directly: lots of total movement, almost no net progress.
-MIN_EFFICIENCY_RATIO = float(os.environ.get("VP_MIN_EFFICIENCY_RATIO", 0.15))
+MIN_EFFICIENCY_RATIO = float(os.environ.get("VP_MIN_EFFICIENCY_RATIO", 0.08))  # 0.15 excluded 98/150 symbols in practice — normal crypto ranging/consolidation isn't the same thing as sawtooth chop, loosened to only catch the extreme cases
 
 TELEGRAM_BOT_TOKEN = os.environ.get("VP_TG_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("VP_TG_CHAT", "")
