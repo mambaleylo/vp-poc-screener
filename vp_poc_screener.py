@@ -20,6 +20,11 @@ v0.1.0 - initial release: contract universe fetch, fixed-range volume
          the Pine Script "quadratic" bin-attribution logic), HVN/POC
          zone extraction, bounce-signal detection, watchlist +
          signals API, canvas-based chart UI, optional Telegram alerts.
+v0.1.1 - fix: universe builder was reading volume fields off
+         /futures/usdt/contracts, which doesn't carry volume data at
+         all (always 0 -> everything filtered out -> "0 пар"). Switched
+         to /futures/usdt/tickers, which actually has volume_24h_quote/
+         _settle/_base.
 """
 
 import os
@@ -33,7 +38,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -112,14 +117,22 @@ def get_candles(symbol, interval=INTERVAL, limit=LOOKBACK + 5):
     return out
 
 
+def get_tickers():
+    r = requests.get(f"{GATE_BASE}/futures/usdt/tickers", timeout=HTTP_TIMEOUT)
+    r.raise_for_status()
+    return r.json()
+
+
 def build_universe():
-    contracts = get_contracts()
+    # Volume fields (volume_24h_quote/_settle/_base) live on the /tickers
+    # endpoint, not /contracts — /contracts has no volume data at all.
+    tickers = get_tickers()
     scored = []
-    for c in contracts:
-        name = c.get("name", "")
+    for t in tickers:
+        name = t.get("contract", "")
         if not name.endswith("_USDT"):
             continue
-        vol = c.get("volume_24h_settle") or c.get("volume_24h_quote") or c.get("volume_24h") or 0
+        vol = t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0
         try:
             vol = float(vol)
         except (TypeError, ValueError):
