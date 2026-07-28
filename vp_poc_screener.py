@@ -177,6 +177,19 @@ v0.8.1 - observability for the v0.8.0 filters and for version-over-version
          cycle) so it's visible how often each filter is actually
          rejecting a candidate signal, not just that it exists. Both
          shown in a new header line.
+v0.8.2 - fix: two signals for the same symbol at the same instant, with
+         near-identical but slightly different SL/TP (seen live on
+         DOGE_USDT). Root cause: build_universe() didn't dedupe symbol
+         names — if the tickers endpoint returned an entry twice, the
+         ThreadPoolExecutor scanned that symbol twice concurrently, and
+         each call independently fetched candles, built its own zone
+         object, and raced the cooldown check-before-set (both threads
+         read the old timestamp before either wrote the new one).
+         Deduped build_universe() (keeps the higher-volume reading per
+         name) and made the cooldown check-and-set atomic under a lock
+         as defense in depth, in case two threads ever land on the exact
+         same key concurrently again. Verified both with synthetic
+         duplicate-ticker input and a 20-thread concurrent-claim test.
 """
 
 import os
@@ -190,7 +203,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.8.1"
+APP_VERSION = "0.8.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -282,6 +295,7 @@ STATE = {
     "errors": deque(maxlen=30),
 }
 _cooldowns = {}  # (symbol, zone_key) -> last_alert_ts
+_cooldowns_lock = threading.Lock()
 
 
 def data_quality_check(candles):
@@ -400,7 +414,7 @@ def build_universe():
     # Volume fields (volume_24h_quote/_settle/_base) live on the /tickers
     # endpoint, not /contracts — /contracts has no volume data at all.
     tickers = get_tickers()
-    scored = []
+    best_vol = {}
     for t in tickers:
         name = t.get("contract", "")
         if not name.endswith("_USDT"):
@@ -412,8 +426,13 @@ def build_universe():
             vol = 0.0
         if vol < MIN_VOL_USD:
             continue
-        scored.append((name, vol))
-    scored.sort(key=lambda x: -x[1])
+        # dedupe: if a name shows up more than once (seen in practice —
+        # caused two concurrent scan_symbol() calls for the same symbol,
+        # which raced on the cooldown check and produced duplicate
+        # signals), keep the higher-volume reading.
+        if name not in best_vol or vol > best_vol[name]:
+            best_vol[name] = vol
+    scored = sorted(best_vol.items(), key=lambda x: -x[1])
     return [s[0] for s in scored[:MAX_SYMBOLS]]
 
 
@@ -925,9 +944,12 @@ def scan_symbol(symbol):
             zone_key = round(sig["zone"]["mid"], 6)
             key = (symbol, zone_key, sig["reason"])
             now = time.time()
-            last_ts = _cooldowns.get(key, 0)
-            if now - last_ts >= COOLDOWN_SEC:
-                _cooldowns[key] = now
+            with _cooldowns_lock:
+                last_ts = _cooldowns.get(key, 0)
+                allowed = now - last_ts >= COOLDOWN_SEC
+                if allowed:
+                    _cooldowns[key] = now
+            if allowed:
                 sl, tp, risk = compute_tp_sl(sig["direction"], sig["price"], sig["zone"], rr=rr, buffer_pct=buffer_pct)
                 record = {
                     "symbol": symbol,
