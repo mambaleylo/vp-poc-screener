@@ -153,6 +153,20 @@ v0.7.0 - persist state to disk (vp_poc_state.json next to the script):
          once at startup, before the scan thread begins. Best-effort —
          any read/write failure just logs and the app keeps running on
          in-memory state alone.
+v0.8.0 - added two signal filters, both applied identically in live
+         scanning and the backtest optimizer for consistency:
+         (1) trend filter — compute_trend() reads net price change over
+         VP_TREND_LOOKBACK bars (default 50); in a clear UP/DOWN move
+         (beyond VP_TREND_THRESHOLD_PCT, default 2%) only signals going
+         with that direction are taken (a LONG bounce off support in a
+         hard downtrend is fighting the move). Neutral regime: no
+         filtering. (2) volume confirmation — the trigger bar's volume
+         must be >= VP_VOL_CONFIRM_RATIO (default 1.15x) the average of
+         the preceding VP_VOL_CONFIRM_LOOKBACK bars (default 20); a
+         touch/breakout on below-average volume is more likely noise.
+         Both toggleable independently (VP_TREND_FILTER=0 /
+         VP_VOLUME_CONFIRM=0). Verified against synthetic up/down/flat
+         trends and low/high-volume trigger bars before shipping.
 """
 
 import os
@@ -166,7 +180,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.7.0"
+APP_VERSION = "0.8.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -197,6 +211,20 @@ MAX_ZONE_HEIGHT_FRAC = float(os.environ.get("VP_MAX_ZONE_HEIGHT_FRAC", 0.10))   
 ZONE_STRENGTH_MIN_RATIO = float(os.environ.get("VP_ZONE_STRENGTH_MIN_RATIO", 0.55))  # zone volume must be >= this fraction of the POC's volume to be eligible for signals
 BREAKOUT_MIN_BARS_INSIDE = int(os.environ.get("VP_BREAKOUT_MIN_BARS", 3))  # bars that must have been basing inside/around the zone right before a breakout signal
 MIN_PEAK_RATIO = float(os.environ.get("VP_MIN_PEAK_RATIO", 2.5))  # the busiest bin must be at least this many times the average bin — otherwise volume is just spread flat across the whole range and there's no real POC to trade
+
+# --- trend filter: in a clear up/down move, only take signals in that
+# direction (a LONG bounce off support in a hard downtrend is fighting the
+# move — the level is more likely to just break).
+TREND_FILTER_ENABLED = os.environ.get("VP_TREND_FILTER", "1") == "1"
+TREND_LOOKBACK = int(os.environ.get("VP_TREND_LOOKBACK", 50))
+TREND_THRESHOLD_PCT = float(os.environ.get("VP_TREND_THRESHOLD_PCT", 0.02))  # net move over TREND_LOOKBACK bars beyond which it counts as trending, not neutral
+
+# --- volume confirmation: the trigger bar should have above-average
+# volume — a level touch/breakout on thin, below-average volume is more
+# likely noise than a real move.
+VOLUME_CONFIRM_ENABLED = os.environ.get("VP_VOLUME_CONFIRM", "1") == "1"
+VOL_CONFIRM_LOOKBACK = int(os.environ.get("VP_VOL_CONFIRM_LOOKBACK", 20))
+VOL_CONFIRM_RATIO = float(os.environ.get("VP_VOL_CONFIRM_RATIO", 1.15))  # trigger bar volume must be >= this multiple of the average of the preceding VOL_CONFIRM_LOOKBACK bars
 
 # --- data quality filter: skip symbols that look illiquid/stale on the
 # candle feed itself (near-zero volume bars, flat high==low bars, or an
@@ -531,6 +559,62 @@ def detect_any_signal(candles, zones):
     return detect_breakout(candles, zones)
 
 
+# ----------------------------------------------------------------------------
+# Signal filters: trend direction + volume confirmation
+# ----------------------------------------------------------------------------
+def compute_trend(candles, lookback=TREND_LOOKBACK, threshold_pct=TREND_THRESHOLD_PCT):
+    """Net price change over the last `lookback` bars. Returns 'UP', 'DOWN',
+    or 'NEUTRAL' — a coarse regime read, not a precise trend indicator."""
+    if len(candles) < lookback + 1:
+        return "NEUTRAL"
+    window = candles[-lookback:]
+    start, end = window[0]["close"], window[-1]["close"]
+    if start <= 0:
+        return "NEUTRAL"
+    change = (end - start) / start
+    if change > threshold_pct:
+        return "UP"
+    if change < -threshold_pct:
+        return "DOWN"
+    return "NEUTRAL"
+
+
+def trend_allows(direction, trend):
+    """In a clear trend, only take signals that go with it."""
+    if not TREND_FILTER_ENABLED or trend == "NEUTRAL":
+        return True
+    return (trend == "UP" and direction == "LONG") or (trend == "DOWN" and direction == "SHORT")
+
+
+def volume_confirms(candles, min_ratio=VOL_CONFIRM_RATIO, lookback=VOL_CONFIRM_LOOKBACK):
+    """The trigger bar (the last candle) should have above-average volume
+    versus the bars right before it — a touch/breakout on thin volume is
+    more likely noise than a real move."""
+    if not VOLUME_CONFIRM_ENABLED:
+        return True
+    if len(candles) < lookback + 1:
+        return True  # not enough history to judge, don't block on it
+    trigger = candles[-1]
+    prior = candles[-(lookback + 1):-1]
+    avg_vol = sum(c["volume"] for c in prior) / len(prior) if prior else 0
+    if avg_vol <= 0:
+        return True
+    return trigger["volume"] >= avg_vol * min_ratio
+
+
+def signal_passes_filters(candles, sig):
+    """Apply trend + volume filters to a candidate signal. candles is the
+    full series ending at the trigger bar (candles[-1] == trigger)."""
+    if sig is None:
+        return False
+    trend = compute_trend(candles)
+    if not trend_allows(sig["direction"], trend):
+        return False
+    if not volume_confirms(candles):
+        return False
+    return True
+
+
 def nearest_zone_distance(price, zones):
     best = None
     best_dist = None
@@ -665,8 +749,9 @@ def backtest_params(candles, lookback, hvn_top_n, rr, buffer_pct=ZONE_BUFFER_PCT
         if profile:
             zones = extract_hvn_zones(profile, top_n=hvn_top_n)
             strong_zones = eligible_zones(zones)
-            sig = detect_any_signal(window + [c], strong_zones)
-            if sig:
+            trigger_series = window + [c]
+            sig = detect_any_signal(trigger_series, strong_zones)
+            if sig and signal_passes_filters(trigger_series, sig):
                 direction = sig["direction"]
                 entry = sig["price"]
                 sl, tp, _ = compute_tp_sl(direction, entry, sig["zone"], rr=rr, buffer_pct=buffer_pct)
@@ -814,6 +899,8 @@ def scan_symbol(symbol):
         # still show on the chart, they just don't trade).
         strong_zones = eligible_zones(zones)
         sig = detect_any_signal(candles, strong_zones)
+        if sig and not signal_passes_filters(candles, sig):
+            sig = None
         if sig:
             zone_key = round(sig["zone"]["mid"], 6)
             key = (symbol, zone_key, sig["reason"])
@@ -1067,6 +1154,9 @@ def api_status():
                 "max_avg_wick_ratio": MAX_AVG_WICK_RATIO,
                 "gap_threshold_pct": GAP_THRESHOLD_PCT, "max_gap_ratio": MAX_GAP_RATIO,
                 "min_efficiency_ratio": MIN_EFFICIENCY_RATIO,
+                "trend_filter_enabled": TREND_FILTER_ENABLED, "trend_lookback": TREND_LOOKBACK,
+                "trend_threshold_pct": TREND_THRESHOLD_PCT,
+                "volume_confirm_enabled": VOLUME_CONFIRM_ENABLED, "vol_confirm_ratio": VOL_CONFIRM_RATIO,
             },
         })
 
