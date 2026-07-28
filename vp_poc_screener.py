@@ -144,6 +144,15 @@ v0.6.4 - loosened MIN_EFFICIENCY_RATIO 0.15 -> 0.08: the stricter value
          crypto ranging/consolidation has low net displacement too, and
          isn't the same thing as sawtooth chop. 0.08 should only catch
          the more extreme cases while leaving the sample size usable.
+v0.7.0 - persist state to disk (vp_poc_state.json next to the script):
+         SYMBOL_OVERRIDES (auto-tuned + manually-optimized per-symbol
+         params) and the signal history (win-rate, MFE/MAE stats) now
+         survive a restart instead of resetting every time the script
+         is relaunched to pick up an update. Saved at the end of every
+         scan cycle and right after a manual "Оптимизировать". Loaded
+         once at startup, before the scan thread begins. Best-effort —
+         any read/write failure just logs and the app keeps running on
+         in-memory state alone.
 """
 
 import os
@@ -157,7 +166,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.6.4"
+APP_VERSION = "0.7.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -579,6 +588,46 @@ PARAM_GRID_BUFFER = [0.20, 0.35, 0.50]       # data showed LOSS median MFE ~1.7R
 
 SYMBOL_OVERRIDES = {}  # symbol -> {lookback, hvn_top_n, rr, buffer_pct, winrate, trades, optimized_at}
 
+# Persist tuning + signal history to disk so a restart (e.g. to pick up a
+# new version) doesn't throw away days of accumulated auto-tuning and
+# win-rate stats. Best-effort: any failure here just logs and continues,
+# the app runs fine on in-memory state alone if the file can't be written.
+STATE_FILE = os.environ.get(
+    "VP_STATE_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_state.json"),
+)
+
+
+def save_state():
+    try:
+        with state_lock:
+            data = {
+                "overrides": SYMBOL_OVERRIDES,
+                "signals": list(STATE["signals"]),
+                "saved_at": time.time(),
+            }
+        tmp_path = STATE_FILE + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(data, f)
+        os.replace(tmp_path, STATE_FILE)
+    except Exception as e:
+        log_error(f"save_state: {e}")
+
+
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        return
+    try:
+        with open(STATE_FILE) as f:
+            data = json.load(f)
+        SYMBOL_OVERRIDES.update(data.get("overrides", {}))
+        signals = data.get("signals", [])
+        with state_lock:
+            STATE["signals"] = deque(signals, maxlen=SIGNAL_HISTORY)
+        print(f"Loaded persisted state: {len(SYMBOL_OVERRIDES)} overrides, {len(signals)} signals")
+    except Exception as e:
+        log_error(f"load_state: {e}")
+
 
 def backtest_params(candles, lookback, hvn_top_n, rr, buffer_pct=ZONE_BUFFER_PCT, segs=BT_SEGS, stride=BT_STRIDE):
     """Walk forward through history one trade at a time (no overlapping
@@ -974,6 +1023,7 @@ def scan_loop():
                     pass
             update_signal_outcomes()
             auto_tune_cycle(universe)
+            save_state()
             t1 = time.time()
             with state_lock:
                 STATE["last_scan_finished"] = t1
@@ -1075,6 +1125,7 @@ def api_optimize(symbol):
         result = optimize_symbol(symbol)
         if result is None:
             return jsonify({"error": "optimization failed"}), 500
+        save_state()
         return jsonify(result)
     except Exception as e:
         log_error(f"api_optimize {symbol}: {e}")
@@ -1513,6 +1564,7 @@ def index():
 # Entrypoint
 # ----------------------------------------------------------------------------
 if __name__ == "__main__":
+    load_state()
     t = threading.Thread(target=scan_loop, daemon=True)
     t.start()
     port = int(os.environ.get("VP_PORT", 8080))
