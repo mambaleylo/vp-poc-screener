@@ -327,6 +327,25 @@ v0.12.0 - added an open-interest filter, applied to breakout signals
          walk-forward iteration would be expensive for a button click).
          Verified against synthetic rising/falling/flat OI series and a
          forced fetch-error case.
+v0.13.0 - replaced HVN zone construction entirely: extract_hvn_zones()
+         used to rank bins and merge a fixed top-N by rank, which could
+         cut a wide plateau short mid-shoulder or merge unrelated bins.
+         Now each zone grows outward from a local volume peak while
+         neighboring bins stay >= VP_SHOULDER_THRESHOLD_PCT (default
+         50%) of that peak's own volume — stopping exactly where the
+         bars visibly get shorter, matching what a person looking at
+         the profile would trace by eye. Removed the separate
+         VP_MAX_ZONE_HEIGHT_FRAC cap entirely: it existed to reject
+         "too tall" merged zones under the old method, but directly
+         fought the new one — a genuinely wide volume plateau should
+         produce a genuinely wide zone; the shoulder threshold is what
+         keeps it honest now, not an arbitrary height ceiling. Verified
+         against a Gaussian-hump-on-baseline synthetic profile (realistic
+         shape): the POC zone came out correctly wide, spanning the true
+         shoulder-to-shoulder width; a sharp narrow spike still stays
+         narrow; pure random-walk data (no genuine concentration)
+         correctly still returns zero zones (the flat-profile gate is
+         unaffected); 81-combo grid search performance unchanged (~5s).
 """
 
 import os
@@ -341,7 +360,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.12.0"
+APP_VERSION = "0.13.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -429,12 +448,12 @@ MFE_TRACK_SEC = int(os.environ.get("VP_MFE_TRACK_SEC", 24 * 3600))  # keep measu
 # diffuse "zone" that isn't really a precise level — and a zone that's
 # technically in the top-N but far weaker than the POC isn't the kind of
 # node price actually respects.
-MAX_ZONE_HEIGHT_FRAC = float(os.environ.get("VP_MAX_ZONE_HEIGHT_FRAC", 0.10))   # zone height must be < this fraction of the whole profile range (hh-ll)
+MIN_PEAK_RATIO = float(os.environ.get("VP_MIN_PEAK_RATIO", 2.5))  # the busiest bin must be at least this many times the average bin — otherwise volume is just spread flat across the whole range and there's no real POC to trade
+SHOULDER_THRESHOLD_PCT = float(os.environ.get("VP_SHOULDER_THRESHOLD_PCT", 0.5))  # a zone grows outward from its local peak bin while neighboring bins stay >= this fraction of that peak's volume — stops right where the bars visibly get shorter
 ZONE_STRENGTH_MIN_RATIO = float(os.environ.get("VP_ZONE_STRENGTH_MIN_RATIO", 0.55))  # zone volume must be >= this fraction of the POC's volume to be eligible for signals
 BREAKOUT_MIN_BARS_INSIDE = int(os.environ.get("VP_BREAKOUT_MIN_BARS", 3))  # bars that must have been basing inside/around the zone right before a breakout signal
 BOUNCE_ENABLED = os.environ.get("VP_BOUNCE_ENABLED", "1") == "1"
 BREAKOUT_ENABLED = os.environ.get("VP_BREAKOUT_ENABLED", "1") == "1"
-MIN_PEAK_RATIO = float(os.environ.get("VP_MIN_PEAK_RATIO", 2.5))  # the busiest bin must be at least this many times the average bin — otherwise volume is just spread flat across the whole range and there's no real POC to trade
 
 # --- trend filter: in a clear up/down move, only take signals in that
 # direction (a LONG bounce off support in a hard downtrend is fighting the
@@ -797,44 +816,45 @@ def build_profile_for_symbol(symbol, candles, lookback, segs=SEGS, interval=INTE
     return compute_profile(candles, segs=segs, lookback=lookback)
 
 
-def extract_hvn_zones(profile, top_n=HVN_TOP_N, max_height_frac=MAX_ZONE_HEIGHT_FRAC, min_peak_ratio=MIN_PEAK_RATIO):
-    """Take the top_n highest-volume bins and merge adjacent ones into
-    contiguous high-volume-node zones. Zones that end up too tall relative
-    to the whole profile range are dropped — a merge that wide isn't a
-    precise level, it's a diffuse band. If the whole profile is flat (no
-    bin meaningfully busier than average — volume just spread evenly
-    across the range), there's no real POC to trade at all: return no
-    zones rather than pretending the busiest bin means something."""
+def extract_hvn_zones(profile, top_n=HVN_TOP_N, min_peak_ratio=MIN_PEAK_RATIO, shoulder_pct=SHOULDER_THRESHOLD_PCT):
+    """Grow each zone outward from a local volume peak while neighboring
+    bins stay >= shoulder_pct of that peak's volume, stopping right where
+    the bars visibly get shorter — rather than merging together a fixed
+    top-N bins by rank, which could cut a zone short mid-shoulder or
+    merge two genuinely separate peaks into one. A zone can legitimately
+    come out wide if the underlying volume plateau is wide — the shoulder
+    threshold is what keeps it honest, not a separate height cap. If the
+    whole profile is flat (no bin meaningfully busier than average),
+    there's no real POC to trade at all: return no zones rather than
+    pretending the busiest bin means something."""
     borders = profile["borders"]
     bin_vols = profile["bin_vols"]
     segs = len(bin_vols)
-    total_range = max(profile["hh"] - profile["ll"], 1e-12)
 
     avg_vol = sum(bin_vols) / segs if segs else 0
     max_vol = max(bin_vols) if bin_vols else 0
     if min_peak_ratio and avg_vol > 0 and max_vol < avg_vol * min_peak_ratio:
         return []
 
-    ranked = sorted(range(segs), key=lambda i: -bin_vols[i])[:top_n]
-    ranked_set = set(ranked)
-
-    zones = []
+    ranked = sorted(range(segs), key=lambda i: -bin_vols[i])
     used = set()
-    for idx in sorted(ranked_set):
-        if idx in used:
+    zones = []
+    for idx in ranked:
+        if len(zones) >= top_n:
+            break
+        if idx in used or bin_vols[idx] <= 0:
             continue
+        peak_vol = bin_vols[idx]
+        threshold = peak_vol * shoulder_pct
         lo = hi = idx
-        while (lo - 1) in ranked_set and (lo - 1) not in used:
+        while lo - 1 >= 0 and (lo - 1) not in used and bin_vols[lo - 1] >= threshold:
             lo -= 1
-        while (hi + 1) in ranked_set and (hi + 1) not in used:
+        while hi + 1 < segs and (hi + 1) not in used and bin_vols[hi + 1] >= threshold:
             hi += 1
         for k in range(lo, hi + 1):
             used.add(k)
         top = borders[lo]
         bottom = borders[hi + 1]
-        height = top - bottom
-        if max_height_frac and height / total_range > max_height_frac:
-            continue  # too tall/diffuse — not a precise node
         vol = sum(bin_vols[lo:hi + 1])
         zones.append({"top": top, "bottom": bottom, "mid": (top + bottom) / 2, "volume": vol})
 
@@ -1665,6 +1685,7 @@ def api_status():
                 "max_avg_wick_ratio": MAX_AVG_WICK_RATIO,
                 "gap_threshold_pct": GAP_THRESHOLD_PCT, "max_gap_ratio": MAX_GAP_RATIO,
                 "min_efficiency_ratio": MIN_EFFICIENCY_RATIO,
+                "shoulder_threshold_pct": SHOULDER_THRESHOLD_PCT, "min_peak_ratio": MIN_PEAK_RATIO,
                 "trend_filter_enabled": TREND_FILTER_ENABLED, "trend_lookback": TREND_LOOKBACK,
                 "trend_threshold_pct": TREND_THRESHOLD_PCT,
                 "volume_confirm_enabled": VOLUME_CONFIRM_ENABLED, "vol_confirm_ratio": VOL_CONFIRM_RATIO,
