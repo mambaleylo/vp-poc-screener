@@ -190,6 +190,13 @@ v0.8.2 - fix: two signals for the same symbol at the same instant, with
          as defense in depth, in case two threads ever land on the exact
          same key concurrently again. Verified both with synthetic
          duplicate-ticker input and a 20-thread concurrent-claim test.
+v0.9.0 - added a "Очистить данные" button in the header: wipes
+         SYMBOL_OVERRIDES, signal history, watchlist, cooldowns, error
+         log, and the auto-tune rotation cursor, both in memory and in
+         the persisted state file (/api/reset, POST). Requires a native
+         confirm() dialog before it fires — no accidental taps. Useful
+         after a change to signal-generation logic, when old and new
+         signals mixed together would muddy the win-rate read.
 """
 
 import os
@@ -203,7 +210,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.8.2"
+APP_VERSION = "0.9.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1291,6 +1298,32 @@ def api_overrides():
     return jsonify(SYMBOL_OVERRIDES)
 
 
+@app.route("/api/reset", methods=["POST"])
+def api_reset():
+    """Wipe all accumulated state: per-symbol tuning overrides, signal
+    history (win-rate/MFE/MAE stats), cooldowns, and the watchlist —
+    both in memory and in the persisted state file. Used by the header's
+    "Очистить данные" button, which confirms before calling this."""
+    try:
+        with state_lock:
+            SYMBOL_OVERRIDES.clear()
+            STATE["signals"].clear()
+            STATE["watchlist"].clear()
+            STATE["excluded_low_quality"] = 0
+            STATE["filtered_by_trend"] = 0
+            STATE["filtered_by_volume"] = 0
+            STATE["errors"].clear()
+        with _cooldowns_lock:
+            _cooldowns.clear()
+        global _auto_tune_cursor
+        _auto_tune_cursor = 0
+        save_state()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 # ----------------------------------------------------------------------------
 # Frontend (single page, canvas rendering, no external CDN dependency)
 # ----------------------------------------------------------------------------
@@ -1305,6 +1338,8 @@ INDEX_HTML = """<!doctype html>
   * { box-sizing: border-box; }
   body { margin:0; background:#0b0e14; color:#d7dee8; font-family: -apple-system, Roboto, Segoe UI, sans-serif; }
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
+  #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
+  #resetBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   header h1 { font-size:16px; margin:0 0 4px; }
   #status { font-size:11px; color:#8b98ab; }
   .tabs { display:flex; gap:6px; padding:8px 10px 0; }
@@ -1337,7 +1372,10 @@ INDEX_HTML = """<!doctype html>
 </head>
 <body>
 <header>
-  <h1>VP-POC Screener</h1>
+  <div id="headerTop">
+    <h1>VP-POC Screener</h1>
+    <button id="resetBtn">Очистить данные</button>
+  </div>
   <div id="status">загрузка...</div>
   <div id="stats" class="dim" style="margin-top:2px;font-size:11px;"></div>
   <div id="filterStats" class="dim" style="margin-top:2px;font-size:11px;"></div>
@@ -1508,6 +1546,26 @@ async function refreshAll() {
 }
 refreshAll();
 setInterval(refreshAll, 15000);
+
+document.getElementById('resetBtn').onclick = async () => {
+  const sure = confirm('Удалить всю накопленную статистику и подобранные параметры по монетам? Это необратимо.');
+  if (!sure) return;
+  const btn = document.getElementById('resetBtn');
+  btn.disabled = true;
+  btn.textContent = 'Удаляю...';
+  try {
+    const res = await (await fetch('/api/reset', {method: 'POST'})).json();
+    if (res.ok) {
+      await refreshAll();
+    } else {
+      alert('Не удалось очистить: ' + (res.error || 'неизвестная ошибка'));
+    }
+  } catch (e) {
+    alert('Не удалось очистить: ' + e);
+  }
+  btn.disabled = false;
+  btn.textContent = 'Очистить данные';
+};
 
 // ---------------- Chart modal ----------------
 const modal = document.getElementById('modal');
