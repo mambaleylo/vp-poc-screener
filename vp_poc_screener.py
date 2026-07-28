@@ -307,45 +307,6 @@ v0.11.0 - bounce and breakout now get fully independent settings, not
          Verified: allowed_reasons correctly restricts backtest_params
          to one signal type, optimize_symbol produces and stores
          separate bounce/breakout results end-to-end (mocked candles).
-v0.12.0 - added an open-interest filter, applied to breakout signals
-         only (bounce is a rejection off a level; breakout is a move
-         away from it, which is what OI direction actually speaks to).
-         get_contract_stats() pulls OI history via GET
-         /futures/usdt/contract_stats; compute_oi_trend() reads net
-         change over VP_OI_LOOKBACK bars (default 24 x VP_OI_INTERVAL,
-         default 1h — so a 24h window) and calls it UP/DOWN beyond
-         VP_OI_THRESHOLD_PCT (default 5%). Rising OI only allows LONG
-         breakouts, falling OI only allows SHORT — new positions opening
-         should back a breakout in that direction; unwinding shouldn't.
-         Only fetched when a breakout candidate already exists (not
-         blanket per-symbol-per-scan), and degrades to NEUTRAL
-         (unfiltered) on any fetch error rather than blocking signals on
-         a network hiccup. Toggle via VP_OI_FILTER=0. New
-         filtered_by_oi counter alongside the trend/volume ones in the
-         header. Not applied inside the backtest optimizer (same
-         reasoning as bar magnification — historical OI alignment per
-         walk-forward iteration would be expensive for a button click).
-         Verified against synthetic rising/falling/flat OI series and a
-         forced fetch-error case.
-v0.13.0 - replaced HVN zone construction entirely: extract_hvn_zones()
-         used to rank bins and merge a fixed top-N by rank, which could
-         cut a wide plateau short mid-shoulder or merge unrelated bins.
-         Now each zone grows outward from a local volume peak while
-         neighboring bins stay >= VP_SHOULDER_THRESHOLD_PCT (default
-         50%) of that peak's own volume — stopping exactly where the
-         bars visibly get shorter, matching what a person looking at
-         the profile would trace by eye. Removed the separate
-         VP_MAX_ZONE_HEIGHT_FRAC cap entirely: it existed to reject
-         "too tall" merged zones under the old method, but directly
-         fought the new one — a genuinely wide volume plateau should
-         produce a genuinely wide zone; the shoulder threshold is what
-         keeps it honest now, not an arbitrary height ceiling. Verified
-         against a Gaussian-hump-on-baseline synthetic profile (realistic
-         shape): the POC zone came out correctly wide, spanning the true
-         shoulder-to-shoulder width; a sharp narrow spike still stays
-         narrow; pure random-walk data (no genuine concentration)
-         correctly still returns zero zones (the flat-profile gate is
-         unaffected); 81-combo grid search performance unchanged (~5s).
 """
 
 import os
@@ -360,7 +321,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.13.0"
+APP_VERSION = "0.11.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -448,12 +409,12 @@ MFE_TRACK_SEC = int(os.environ.get("VP_MFE_TRACK_SEC", 24 * 3600))  # keep measu
 # diffuse "zone" that isn't really a precise level — and a zone that's
 # technically in the top-N but far weaker than the POC isn't the kind of
 # node price actually respects.
-MIN_PEAK_RATIO = float(os.environ.get("VP_MIN_PEAK_RATIO", 2.5))  # the busiest bin must be at least this many times the average bin — otherwise volume is just spread flat across the whole range and there's no real POC to trade
-SHOULDER_THRESHOLD_PCT = float(os.environ.get("VP_SHOULDER_THRESHOLD_PCT", 0.5))  # a zone grows outward from its local peak bin while neighboring bins stay >= this fraction of that peak's volume — stops right where the bars visibly get shorter
+MAX_ZONE_HEIGHT_FRAC = float(os.environ.get("VP_MAX_ZONE_HEIGHT_FRAC", 0.10))   # zone height must be < this fraction of the whole profile range (hh-ll)
 ZONE_STRENGTH_MIN_RATIO = float(os.environ.get("VP_ZONE_STRENGTH_MIN_RATIO", 0.55))  # zone volume must be >= this fraction of the POC's volume to be eligible for signals
 BREAKOUT_MIN_BARS_INSIDE = int(os.environ.get("VP_BREAKOUT_MIN_BARS", 3))  # bars that must have been basing inside/around the zone right before a breakout signal
 BOUNCE_ENABLED = os.environ.get("VP_BOUNCE_ENABLED", "1") == "1"
 BREAKOUT_ENABLED = os.environ.get("VP_BREAKOUT_ENABLED", "1") == "1"
+MIN_PEAK_RATIO = float(os.environ.get("VP_MIN_PEAK_RATIO", 2.5))  # the busiest bin must be at least this many times the average bin — otherwise volume is just spread flat across the whole range and there's no real POC to trade
 
 # --- trend filter: in a clear up/down move, only take signals in that
 # direction (a LONG bounce off support in a hard downtrend is fighting the
@@ -468,19 +429,6 @@ TREND_THRESHOLD_PCT = float(os.environ.get("VP_TREND_THRESHOLD_PCT", 0.02))  # n
 VOLUME_CONFIRM_ENABLED = os.environ.get("VP_VOLUME_CONFIRM", "1") == "1"
 VOL_CONFIRM_LOOKBACK = int(os.environ.get("VP_VOL_CONFIRM_LOOKBACK", 20))
 VOL_CONFIRM_RATIO = float(os.environ.get("VP_VOL_CONFIRM_RATIO", 1.15))  # trigger bar volume must be >= this multiple of the average of the preceding VOL_CONFIRM_LOOKBACK bars
-
-# --- open interest filter: applied to breakout signals only (bounce is a
-# rejection off a level, breakout is a move away from it — OI direction
-# is a "is real money backing this move" check that fits breakout, not
-# bounce). Rising OI = new positions opening, more likely to back a
-# breakout in that direction; falling OI = positions unwinding, weaker
-# conviction the move continues. Only fetched when a breakout candidate
-# actually exists (not blanket per-symbol-per-scan) to limit the extra
-# network cost.
-OI_FILTER_ENABLED = os.environ.get("VP_OI_FILTER", "1") == "1"
-OI_INTERVAL = os.environ.get("VP_OI_INTERVAL", "1h")
-OI_LOOKBACK = int(os.environ.get("VP_OI_LOOKBACK", 24))
-OI_THRESHOLD_PCT = float(os.environ.get("VP_OI_THRESHOLD_PCT", 0.05))
 
 # --- data quality filter: skip symbols that look illiquid/stale on the
 # candle feed itself (near-zero volume bars, flat high==low bars, or an
@@ -522,7 +470,6 @@ STATE = {
     "excluded_low_quality": 0,
     "filtered_by_trend": 0,
     "filtered_by_volume": 0,
-    "filtered_by_oi": 0,
     "last_scan_started": None,
     "last_scan_finished": None,
     "last_scan_duration": None,
@@ -648,24 +595,6 @@ def get_candles(symbol, interval=INTERVAL, limit=LOOKBACK + 5):
     r.raise_for_status()
     # Gate.io returns oldest->newest already; fields: t,v,c,h,l,o,sum (varies by version)
     return _parse_candles(r.json())
-
-
-def get_contract_stats(symbol, interval=OI_INTERVAL, limit=OI_LOOKBACK + 2):
-    """Open interest history via GET /futures/usdt/contract_stats."""
-    r = requests.get(
-        f"{GATE_BASE}/futures/usdt/contract_stats",
-        params={"contract": symbol, "interval": interval, "limit": limit},
-        timeout=HTTP_TIMEOUT,
-    )
-    r.raise_for_status()
-    out = []
-    for c in r.json():
-        try:
-            out.append({"time": int(c.get("time", 0)), "open_interest": float(c.get("open_interest", 0))})
-        except (TypeError, ValueError):
-            continue
-    out.sort(key=lambda x: x["time"])
-    return out
 
 
 def get_candles_range(symbol, interval, start_ts, end_ts):
@@ -816,45 +745,44 @@ def build_profile_for_symbol(symbol, candles, lookback, segs=SEGS, interval=INTE
     return compute_profile(candles, segs=segs, lookback=lookback)
 
 
-def extract_hvn_zones(profile, top_n=HVN_TOP_N, min_peak_ratio=MIN_PEAK_RATIO, shoulder_pct=SHOULDER_THRESHOLD_PCT):
-    """Grow each zone outward from a local volume peak while neighboring
-    bins stay >= shoulder_pct of that peak's volume, stopping right where
-    the bars visibly get shorter — rather than merging together a fixed
-    top-N bins by rank, which could cut a zone short mid-shoulder or
-    merge two genuinely separate peaks into one. A zone can legitimately
-    come out wide if the underlying volume plateau is wide — the shoulder
-    threshold is what keeps it honest, not a separate height cap. If the
-    whole profile is flat (no bin meaningfully busier than average),
-    there's no real POC to trade at all: return no zones rather than
-    pretending the busiest bin means something."""
+def extract_hvn_zones(profile, top_n=HVN_TOP_N, max_height_frac=MAX_ZONE_HEIGHT_FRAC, min_peak_ratio=MIN_PEAK_RATIO):
+    """Take the top_n highest-volume bins and merge adjacent ones into
+    contiguous high-volume-node zones. Zones that end up too tall relative
+    to the whole profile range are dropped — a merge that wide isn't a
+    precise level, it's a diffuse band. If the whole profile is flat (no
+    bin meaningfully busier than average — volume just spread evenly
+    across the range), there's no real POC to trade at all: return no
+    zones rather than pretending the busiest bin means something."""
     borders = profile["borders"]
     bin_vols = profile["bin_vols"]
     segs = len(bin_vols)
+    total_range = max(profile["hh"] - profile["ll"], 1e-12)
 
     avg_vol = sum(bin_vols) / segs if segs else 0
     max_vol = max(bin_vols) if bin_vols else 0
     if min_peak_ratio and avg_vol > 0 and max_vol < avg_vol * min_peak_ratio:
         return []
 
-    ranked = sorted(range(segs), key=lambda i: -bin_vols[i])
-    used = set()
+    ranked = sorted(range(segs), key=lambda i: -bin_vols[i])[:top_n]
+    ranked_set = set(ranked)
+
     zones = []
-    for idx in ranked:
-        if len(zones) >= top_n:
-            break
-        if idx in used or bin_vols[idx] <= 0:
+    used = set()
+    for idx in sorted(ranked_set):
+        if idx in used:
             continue
-        peak_vol = bin_vols[idx]
-        threshold = peak_vol * shoulder_pct
         lo = hi = idx
-        while lo - 1 >= 0 and (lo - 1) not in used and bin_vols[lo - 1] >= threshold:
+        while (lo - 1) in ranked_set and (lo - 1) not in used:
             lo -= 1
-        while hi + 1 < segs and (hi + 1) not in used and bin_vols[hi + 1] >= threshold:
+        while (hi + 1) in ranked_set and (hi + 1) not in used:
             hi += 1
         for k in range(lo, hi + 1):
             used.add(k)
         top = borders[lo]
         bottom = borders[hi + 1]
+        height = top - bottom
+        if max_height_frac and height / total_range > max_height_frac:
+            continue  # too tall/diffuse — not a precise node
         vol = sum(bin_vols[lo:hi + 1])
         zones.append({"top": top, "bottom": bottom, "mid": (top + bottom) / 2, "volume": vol})
 
@@ -967,39 +895,6 @@ def trend_allows(direction, trend):
     if not TREND_FILTER_ENABLED or trend == "NEUTRAL":
         return True
     return (trend == "UP" and direction == "LONG") or (trend == "DOWN" and direction == "SHORT")
-
-
-def compute_oi_trend(symbol, lookback=OI_LOOKBACK, threshold_pct=OI_THRESHOLD_PCT, interval=OI_INTERVAL):
-    """Net open-interest change over the lookback window. Returns 'UP'
-    (OI growing — new positions opening), 'DOWN' (OI shrinking —
-    positions unwinding), or 'NEUTRAL'. Any fetch/data problem degrades
-    to NEUTRAL (never blocks a signal outright on a network hiccup)."""
-    try:
-        stats = get_contract_stats(symbol, interval=interval, limit=lookback + 2)
-    except Exception as e:
-        log_error(f"oi fetch {symbol}: {e}")
-        return "NEUTRAL"
-    if len(stats) < lookback:
-        return "NEUTRAL"
-    window = stats[-lookback:]
-    start_oi, end_oi = window[0]["open_interest"], window[-1]["open_interest"]
-    if start_oi <= 0:
-        return "NEUTRAL"
-    change = (end_oi - start_oi) / start_oi
-    if change > threshold_pct:
-        return "UP"
-    if change < -threshold_pct:
-        return "DOWN"
-    return "NEUTRAL"
-
-
-def oi_allows(direction, oi_trend):
-    """Rising OI backs a breakout in the same direction as the move
-    (new money); falling OI (unwinding) doesn't back a fresh breakout in
-    either direction as strongly — only the matching direction passes."""
-    if not OI_FILTER_ENABLED or oi_trend == "NEUTRAL":
-        return True
-    return (oi_trend == "UP" and direction == "LONG") or (oi_trend == "DOWN" and direction == "SHORT")
 
 
 def volume_confirms(candles, min_ratio=VOL_CONFIRM_RATIO, lookback=VOL_CONFIRM_LOOKBACK):
@@ -1384,14 +1279,7 @@ def scan_symbol(symbol):
         if BOUNCE_ENABLED and zones_bounce:
             sig = _try_signal(symbol, candles, detect_signal(candles, eligible_zones(zones_bounce)))
         if sig is None and BREAKOUT_ENABLED and zones_breakout:
-            candidate = _try_signal(symbol, candles, detect_breakout(candles, eligible_zones(zones_breakout)))
-            if candidate:
-                oi_trend = compute_oi_trend(symbol)
-                if oi_allows(candidate["direction"], oi_trend):
-                    sig = candidate
-                else:
-                    with state_lock:
-                        STATE["filtered_by_oi"] += 1
+            sig = _try_signal(symbol, candles, detect_breakout(candles, eligible_zones(zones_breakout)))
 
         if sig and has_open_signal(symbol):
             sig = None  # already have an unresolved signal on this symbol — don't stack another
@@ -1631,7 +1519,6 @@ def scan_loop():
                 STATE["excluded_low_quality"] = 0
                 STATE["filtered_by_trend"] = 0
                 STATE["filtered_by_volume"] = 0
-                STATE["filtered_by_oi"] = 0
             with ThreadPoolExecutor(max_workers=WORKERS) as ex:
                 futs = [ex.submit(scan_symbol, s) for s in universe]
                 for _ in as_completed(futs):
@@ -1662,7 +1549,6 @@ def api_status():
             "excluded_low_quality": STATE["excluded_low_quality"],
             "filtered_by_trend": STATE["filtered_by_trend"],
             "filtered_by_volume": STATE["filtered_by_volume"],
-            "filtered_by_oi": STATE["filtered_by_oi"],
             "last_scan_started": STATE["last_scan_started"],
             "last_scan_finished": STATE["last_scan_finished"],
             "last_scan_duration": STATE["last_scan_duration"],
@@ -1685,13 +1571,10 @@ def api_status():
                 "max_avg_wick_ratio": MAX_AVG_WICK_RATIO,
                 "gap_threshold_pct": GAP_THRESHOLD_PCT, "max_gap_ratio": MAX_GAP_RATIO,
                 "min_efficiency_ratio": MIN_EFFICIENCY_RATIO,
-                "shoulder_threshold_pct": SHOULDER_THRESHOLD_PCT, "min_peak_ratio": MIN_PEAK_RATIO,
                 "trend_filter_enabled": TREND_FILTER_ENABLED, "trend_lookback": TREND_LOOKBACK,
                 "trend_threshold_pct": TREND_THRESHOLD_PCT,
                 "volume_confirm_enabled": VOLUME_CONFIRM_ENABLED, "vol_confirm_ratio": VOL_CONFIRM_RATIO,
                 "bounce_enabled": BOUNCE_ENABLED, "breakout_enabled": BREAKOUT_ENABLED,
-                "oi_filter_enabled": OI_FILTER_ENABLED, "oi_interval": OI_INTERVAL,
-                "oi_lookback": OI_LOOKBACK, "oi_threshold_pct": OI_THRESHOLD_PCT,
                 "magnify_enabled": MAGNIFY_ENABLED, "magnify_interval": MAGNIFY_INTERVAL,
                 "magnify_target_ratio": MAGNIFY_TARGET_RATIO,
             },
@@ -1787,7 +1670,6 @@ def api_reset():
             STATE["excluded_low_quality"] = 0
             STATE["filtered_by_trend"] = 0
             STATE["filtered_by_volume"] = 0
-            STATE["filtered_by_oi"] = 0
             STATE["errors"].clear()
         with _cooldowns_lock:
             _cooldowns.clear()
@@ -1925,7 +1807,7 @@ async function refreshStatus() {
     const cv = st.current_version || {};
     const cvTxt = cv.total ? `с v${s.version}: ${cv.winrate}% (${cv.wins}W/${cv.losses}L)` : `с v${s.version}: пока нет закрытых`;
     document.getElementById('filterStats').textContent =
-      `За этот скан отклонено — тренд: ${s.filtered_by_trend||0}, объём: ${s.filtered_by_volume||0}, OI: ${s.filtered_by_oi||0} · ${cvTxt}`;
+      `За этот скан отклонено — тренд: ${s.filtered_by_trend||0}, объём: ${s.filtered_by_volume||0} · ${cvTxt}`;
   } catch(e) {}
 }
 
