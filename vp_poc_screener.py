@@ -197,6 +197,11 @@ v0.9.0 - added a "Очистить данные" button in the header: wipes
          confirm() dialog before it fires — no accidental taps. Useful
          after a change to signal-generation logic, when old and new
          signals mixed together would muddy the win-rate read.
+v0.9.1 - added VP_BOUNCE_ENABLED / VP_BREAKOUT_ENABLED toggles: the
+         bounce-vs-breakout winrate split (v0.6.3/v0.8.1) surfaced a big
+         gap in real data (bounce 20% vs breakout 38%), so being able to
+         disable either type independently and compare the aggregate is
+         now possible without a code change.
 """
 
 import os
@@ -210,7 +215,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.9.0"
+APP_VERSION = "0.9.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -240,6 +245,8 @@ MFE_TRACK_SEC = int(os.environ.get("VP_MFE_TRACK_SEC", 24 * 3600))  # keep measu
 MAX_ZONE_HEIGHT_FRAC = float(os.environ.get("VP_MAX_ZONE_HEIGHT_FRAC", 0.10))   # zone height must be < this fraction of the whole profile range (hh-ll)
 ZONE_STRENGTH_MIN_RATIO = float(os.environ.get("VP_ZONE_STRENGTH_MIN_RATIO", 0.55))  # zone volume must be >= this fraction of the POC's volume to be eligible for signals
 BREAKOUT_MIN_BARS_INSIDE = int(os.environ.get("VP_BREAKOUT_MIN_BARS", 3))  # bars that must have been basing inside/around the zone right before a breakout signal
+BOUNCE_ENABLED = os.environ.get("VP_BOUNCE_ENABLED", "1") == "1"
+BREAKOUT_ENABLED = os.environ.get("VP_BREAKOUT_ENABLED", "1") == "1"
 MIN_PEAK_RATIO = float(os.environ.get("VP_MIN_PEAK_RATIO", 2.5))  # the busiest bin must be at least this many times the average bin — otherwise volume is just spread flat across the whole range and there's no real POC to trade
 
 # --- trend filter: in a clear up/down move, only take signals in that
@@ -590,11 +597,17 @@ def detect_breakout(candles, zones, min_bars_inside=BREAKOUT_MIN_BARS_INSIDE):
 
 
 def detect_any_signal(candles, zones):
-    """Try a bounce first, then a breakout — either qualifies as a signal."""
-    sig = detect_signal(candles, zones)
-    if sig:
-        return sig
-    return detect_breakout(candles, zones)
+    """Try a bounce first, then a breakout — either qualifies as a signal.
+    Either type can be disabled independently (VP_BOUNCE_ENABLED /
+    VP_BREAKOUT_ENABLED) for A/B-style comparisons if one type turns out
+    to be underperforming the other."""
+    if BOUNCE_ENABLED:
+        sig = detect_signal(candles, zones)
+        if sig:
+            return sig
+    if BREAKOUT_ENABLED:
+        return detect_breakout(candles, zones)
+    return None
 
 
 # ----------------------------------------------------------------------------
@@ -1228,6 +1241,7 @@ def api_status():
                 "trend_filter_enabled": TREND_FILTER_ENABLED, "trend_lookback": TREND_LOOKBACK,
                 "trend_threshold_pct": TREND_THRESHOLD_PCT,
                 "volume_confirm_enabled": VOLUME_CONFIRM_ENABLED, "vol_confirm_ratio": VOL_CONFIRM_RATIO,
+                "bounce_enabled": BOUNCE_ENABLED, "breakout_enabled": BREAKOUT_ENABLED,
             },
         })
 
