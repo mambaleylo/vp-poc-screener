@@ -262,6 +262,13 @@ v0.10.3 - added exit-candle diagnostics: a closed signal now records
          — this makes it possible to verify a specific result against
          the exchange's own chart at the exact timestamp instead of
          eyeballing a compressed price range.
+v0.10.4 - reverted default VP_INTERVAL back to 5m per request. Added an
+         explicit MAGNIFY_OVERRIDES table so 5m always magnifies to 1m
+         (5x) rather than what the general closest-ratio algorithm picks
+         (10s, 30x) — the author's own formula floors to a coarser step
+         when tf<16 rather than going to a very fine sub-interval, and
+         1m is the practical equivalent here given our interval ladder
+         doesn't have anything between 10s and 1m.
 """
 
 import os
@@ -276,7 +283,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.10.3"
+APP_VERSION = "0.10.4"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -285,7 +292,7 @@ GATE_BASE = "https://api.gateio.ws/api/v4"
 
 SEGS = int(os.environ.get("VP_SEGS", 100))                # grid levels in profile
 LOOKBACK = int(os.environ.get("VP_LOOKBACK", 100))        # candles used to build profile
-INTERVAL = os.environ.get("VP_INTERVAL", "15m")           # candle timeframe — matches the author's own demo screenshots (confirmed 15m)
+INTERVAL = os.environ.get("VP_INTERVAL", "5m")            # candle timeframe
 
 # --- volume profile "bar magnification": instead of approximating a bar's
 # volume as spread evenly across its own high-low range, pull actual
@@ -302,6 +309,17 @@ MAGNIFY_ENABLED = os.environ.get("VP_MAGNIFY", "1") == "1"
 MAGNIFY_TARGET_RATIO = float(os.environ.get("VP_MAGNIFY_RATIO", 16))  # aim for at least this many sub-bars per parent bar, like the original's "~16x lower timeframe"
 
 
+# Explicit overrides for main intervals where the general algorithm's
+# pick doesn't match what's actually wanted: the original script's own
+# formula (round(tf/16), floored to a minimum step when tf<16) doesn't
+# land cleanly on our available interval ladder either. For a 5m main
+# interval specifically, 1m sub-bars (5x) is the intended magnify
+# interval — 10s (30x) is unnecessarily heavy for the accuracy gained.
+MAGNIFY_OVERRIDES = {
+    "5m": "1m",
+}
+
+
 def pick_magnify_interval(main_interval, target_ratio=MAGNIFY_TARGET_RATIO):
     """Pick whichever available finer interval gives a sub-bar ratio
     closest to target_ratio — comparing in log space so being 2x off at
@@ -310,6 +328,8 @@ def pick_magnify_interval(main_interval, target_ratio=MAGNIFY_TARGET_RATIO):
     ratio (right on target) while 10s would overshoot to 90x — the
     floor-based version used to pick 10s here since it was "at least"
     the target, burning 6x more requests for no real accuracy gain."""
+    if main_interval in MAGNIFY_OVERRIDES:
+        return MAGNIFY_OVERRIDES[main_interval]
     main_sec = INTERVAL_SECONDS.get(main_interval)
     if not main_sec:
         return main_interval
