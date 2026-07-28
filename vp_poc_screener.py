@@ -240,6 +240,11 @@ v0.10.0 - "bar magnification": the original ChartPrime indicator builds
          sanity check) — plus a mocked-network test confirming
          get_candles_range correctly paginates a 3000-candle window into
          2 chunks under the per-request cap.
+v0.10.1 - changed default VP_INTERVAL from 5m to 15m — confirmed by the
+         user that the author's own demo screenshots used 15m candles.
+         Lookback stays 100 bars, so the profile window is now ~25h
+         instead of ~8.3h. MAGNIFY_INTERVAL auto-recalculates from the
+         new default (still 10s, now a 90x sub-bar ratio instead of 30x).
 """
 
 import os
@@ -253,7 +258,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.10.0"
+APP_VERSION = "0.10.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -262,7 +267,7 @@ GATE_BASE = "https://api.gateio.ws/api/v4"
 
 SEGS = int(os.environ.get("VP_SEGS", 100))                # grid levels in profile
 LOOKBACK = int(os.environ.get("VP_LOOKBACK", 100))        # candles used to build profile
-INTERVAL = os.environ.get("VP_INTERVAL", "5m")            # candle timeframe
+INTERVAL = os.environ.get("VP_INTERVAL", "15m")           # candle timeframe — matches the author's own demo screenshots (confirmed 15m)
 
 # --- volume profile "bar magnification": instead of approximating a bar's
 # volume as spread evenly across its own high-low range, pull actual
