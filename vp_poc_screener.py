@@ -215,6 +215,31 @@ v0.9.2 - fix: the same symbol could fire near-duplicate signals a few
          unresolved (OPEN) one, regardless of which zone produced it.
          Cooldown is now just per-symbol, applied after that symbol's
          open signal closes.
+v0.10.0 - "bar magnification": the original ChartPrime indicator builds
+         its profile from lower-timeframe sub-bars (request.security_lower_tf,
+         ~16x finer), distributing each sub-bar's own volume instead of
+         approximating a whole parent-timeframe bar's volume as spread
+         evenly across its own high-low range. We'd been doing the
+         latter (an approximation) for performance reasons. Implemented
+         the former: get_candles_range() pages through Gate.io's
+         candlesticks endpoint (from/to, chunked under its ~2000-point
+         cap) to pull real sub-bar data at a finer interval
+         (pick_magnify_interval() picks the coarsest interval that's
+         still >= VP_MAGNIFY_RATIO, default 16x, finer than the main
+         one — 10s for a 5m main interval), and compute_profile_magnified()
+         distributes THEIR volume into the bins instead. Wired into live
+         scanning and /api/profile (chart view); the backtest optimizer
+         still uses the same-timeframe approximation deliberately — an
+         extra paginated fetch per walk-forward iteration across 81 grid
+         combos would be prohibitively slow. Falls back to the old
+         approximation automatically if the magnified fetch fails.
+         Toggle via VP_MAGNIFY=0. Verified: pick_magnify_interval picks
+         sensible finer intervals across several main intervals, and
+         compute_profile_magnified(window, window) exactly reproduces
+         compute_profile(window) when fed the same data (refactor
+         sanity check) — plus a mocked-network test confirming
+         get_candles_range correctly paginates a 3000-candle window into
+         2 chunks under the per-request cap.
 """
 
 import os
@@ -228,7 +253,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.9.2"
+APP_VERSION = "0.10.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -238,6 +263,40 @@ GATE_BASE = "https://api.gateio.ws/api/v4"
 SEGS = int(os.environ.get("VP_SEGS", 100))                # grid levels in profile
 LOOKBACK = int(os.environ.get("VP_LOOKBACK", 100))        # candles used to build profile
 INTERVAL = os.environ.get("VP_INTERVAL", "5m")            # candle timeframe
+
+# --- volume profile "bar magnification": instead of approximating a bar's
+# volume as spread evenly across its own high-low range, pull actual
+# sub-bar data at a finer interval and distribute THEIR volume — same idea
+# as the original ChartPrime script's request.security_lower_tf, just
+# implemented via REST pagination. Prioritizes accuracy over request
+# count: this adds a second (often multi-request, paginated) fetch per
+# symbol per scan.
+INTERVAL_SECONDS = {
+    "10s": 10, "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
+    "1h": 3600, "4h": 14400, "8h": 28800, "1d": 86400,
+}
+MAGNIFY_ENABLED = os.environ.get("VP_MAGNIFY", "1") == "1"
+MAGNIFY_TARGET_RATIO = float(os.environ.get("VP_MAGNIFY_RATIO", 16))  # aim for at least this many sub-bars per parent bar, like the original's "~16x lower timeframe"
+
+
+def pick_magnify_interval(main_interval, target_ratio=MAGNIFY_TARGET_RATIO):
+    """Pick the coarsest available interval that still gives at least
+    target_ratio sub-bars per parent bar (fewer sub-bars = fewer/cheaper
+    paginated requests, for the same resolution target)."""
+    main_sec = INTERVAL_SECONDS.get(main_interval)
+    if not main_sec:
+        return main_interval
+    finer = sorted(
+        ((name, sec) for name, sec in INTERVAL_SECONDS.items() if sec < main_sec),
+        key=lambda x: -x[1],  # coarsest first
+    )
+    for name, sec in finer:
+        if main_sec / sec >= target_ratio:
+            return name
+    return finer[-1][0] if finer else main_interval  # fall back to the finest available
+
+
+MAGNIFY_INTERVAL = pick_magnify_interval(INTERVAL)
 HVN_TOP_N = int(os.environ.get("VP_HVN_TOP_N", 6))        # top bins considered "high volume"
 MIN_VOL_USD = float(os.environ.get("VP_MIN_VOL_USD", 500000))  # min 24h quote volume filter
 MAX_SYMBOLS = int(os.environ.get("VP_MAX_SYMBOLS", 150))  # universe cap
@@ -417,15 +476,7 @@ def get_contracts():
     return r.json()
 
 
-def get_candles(symbol, interval=INTERVAL, limit=LOOKBACK + 5):
-    r = requests.get(
-        f"{GATE_BASE}/futures/usdt/candlesticks",
-        params={"contract": symbol, "interval": interval, "limit": limit},
-        timeout=HTTP_TIMEOUT,
-    )
-    r.raise_for_status()
-    raw = r.json()
-    # Gate.io returns oldest->newest already; fields: t,v,c,h,l,o,sum (varies by version)
+def _parse_candles(raw):
     out = []
     for c in raw:
         out.append({
@@ -438,6 +489,44 @@ def get_candles(symbol, interval=INTERVAL, limit=LOOKBACK + 5):
         })
     out.sort(key=lambda x: x["time"])
     return out
+
+
+def get_candles(symbol, interval=INTERVAL, limit=LOOKBACK + 5):
+    r = requests.get(
+        f"{GATE_BASE}/futures/usdt/candlesticks",
+        params={"contract": symbol, "interval": interval, "limit": limit},
+        timeout=HTTP_TIMEOUT,
+    )
+    r.raise_for_status()
+    # Gate.io returns oldest->newest already; fields: t,v,c,h,l,o,sum (varies by version)
+    return _parse_candles(r.json())
+
+
+def get_candles_range(symbol, interval, start_ts, end_ts):
+    """Fetch every candle in [start_ts, end_ts] at a finer interval than the
+    main scan uses, paginating since the API caps each response (~2000
+    points) and rejects combining `limit` with `from`/`to`. Used to build
+    the volume profile from actual sub-bar data instead of approximating
+    each parent bar's volume as spread evenly across its own high-low
+    range — the same "bar magnification" idea as the original indicator,
+    just implemented via REST polling instead of Pine's request.security_lower_tf."""
+    interval_sec = INTERVAL_SECONDS.get(interval, 60)
+    chunk_span = interval_sec * 1900  # a little under the ~2000-point cap, for safety
+    seen = {}
+    cur = int(start_ts)
+    end_ts = int(end_ts)
+    while cur < end_ts:
+        chunk_end = min(cur + chunk_span, end_ts)
+        r = requests.get(
+            f"{GATE_BASE}/futures/usdt/candlesticks",
+            params={"contract": symbol, "interval": interval, "from": cur, "to": chunk_end},
+            timeout=HTTP_TIMEOUT,
+        )
+        r.raise_for_status()
+        for c in _parse_candles(r.json()):
+            seen[c["time"]] = c
+        cur = chunk_end
+    return sorted(seen.values(), key=lambda x: x["time"])
 
 
 def get_tickers():
@@ -479,20 +568,9 @@ def build_universe():
 # across the bins it overlaps, weighted by the fraction of the candle's
 # high-low range inside each bin.
 # ----------------------------------------------------------------------------
-def compute_profile(candles, segs=SEGS, lookback=LOOKBACK):
-    window = candles[-lookback:]
-    if len(window) < 10:
-        return None
-    hh = max(c["high"] for c in window)
-    ll = min(c["low"] for c in window)
-    if hh <= ll:
-        return None
-    inc = (hh - ll) / segs
-    # borders[0] = hh (top), borders[segs] = ll (bottom), descending
-    borders = [hh - inc * i for i in range(segs + 1)]
+def _distribute_volume(source_candles, borders, hh, inc, segs):
     bin_vols = [0.0] * segs
-
-    for c in window:
+    for c in source_candles:
         ch, cl, cv = c["high"], c["low"], c["volume"]
         if cv <= 0:
             continue
@@ -510,8 +588,66 @@ def compute_profile(candles, segs=SEGS, lookback=LOOKBACK):
                 overlap = top_reg - bot_reg
                 if overlap > 0:
                     bin_vols[b] += cv * (overlap / diff)
+    return bin_vols
 
+
+def compute_profile(candles, segs=SEGS, lookback=LOOKBACK):
+    window = candles[-lookback:]
+    if len(window) < 10:
+        return None
+    hh = max(c["high"] for c in window)
+    ll = min(c["low"] for c in window)
+    if hh <= ll:
+        return None
+    inc = (hh - ll) / segs
+    # borders[0] = hh (top), borders[segs] = ll (bottom), descending
+    borders = [hh - inc * i for i in range(segs + 1)]
+    bin_vols = _distribute_volume(window, borders, hh, inc, segs)
     return {"borders": borders, "bin_vols": bin_vols, "hh": hh, "ll": ll, "inc": inc}
+
+
+def compute_profile_magnified(main_window, sub_candles, segs=SEGS):
+    """Same fixed-range profile as compute_profile, but the volume
+    distribution comes from real finer-interval sub-bars instead of
+    approximating each parent bar's volume as spread evenly across its own
+    high-low range — mirrors the original indicator's lower-timeframe
+    bar-magnification approach. The price range (hh/ll/borders) still
+    comes from the parent-timeframe window, only the volume attribution
+    granularity changes."""
+    if len(main_window) < 10 or not sub_candles:
+        return None
+    hh = max(c["high"] for c in main_window)
+    ll = min(c["low"] for c in main_window)
+    if hh <= ll:
+        return None
+    inc = (hh - ll) / segs
+    borders = [hh - inc * i for i in range(segs + 1)]
+    bin_vols = _distribute_volume(sub_candles, borders, hh, inc, segs)
+    return {"borders": borders, "bin_vols": bin_vols, "hh": hh, "ll": ll, "inc": inc}
+
+
+def build_profile_for_symbol(symbol, candles, lookback, segs=SEGS, interval=INTERVAL):
+    """Preferred entry point for building a symbol's profile: uses real
+    sub-bar data when magnification is enabled, falling back to the
+    same-timeframe approximation if the magnified fetch fails for any
+    reason (thin sub-interval history, a transient API error, etc.) so a
+    network hiccup on the extra request doesn't take the symbol out of
+    the scan entirely."""
+    window = candles[-lookback:]
+    if len(window) < 10:
+        return None
+    if MAGNIFY_ENABLED:
+        try:
+            magnify_interval = MAGNIFY_INTERVAL if interval == INTERVAL else pick_magnify_interval(interval)
+            start_ts = window[0]["time"]
+            end_ts = window[-1]["time"] + INTERVAL_SECONDS.get(interval, 300)
+            sub_candles = get_candles_range(symbol, magnify_interval, start_ts, end_ts)
+            profile = compute_profile_magnified(window, sub_candles, segs=segs)
+            if profile:
+                return profile
+        except Exception as e:
+            log_error(f"magnified profile {symbol}: {e}")
+    return compute_profile(candles, segs=segs, lookback=lookback)
 
 
 def extract_hvn_zones(profile, top_n=HVN_TOP_N, max_height_frac=MAX_ZONE_HEIGHT_FRAC, min_peak_ratio=MIN_PEAK_RATIO):
@@ -946,7 +1082,7 @@ def scan_symbol(symbol):
                 STATE["excluded_low_quality"] += 1
             return
 
-        profile = compute_profile(candles, segs=SEGS, lookback=lookback)
+        profile = build_profile_for_symbol(symbol, candles, lookback, segs=SEGS)
         if not profile:
             return
         zones = extract_hvn_zones(profile, top_n=hvn_top_n)
@@ -1265,6 +1401,8 @@ def api_status():
                 "trend_threshold_pct": TREND_THRESHOLD_PCT,
                 "volume_confirm_enabled": VOLUME_CONFIRM_ENABLED, "vol_confirm_ratio": VOL_CONFIRM_RATIO,
                 "bounce_enabled": BOUNCE_ENABLED, "breakout_enabled": BREAKOUT_ENABLED,
+                "magnify_enabled": MAGNIFY_ENABLED, "magnify_interval": MAGNIFY_INTERVAL,
+                "magnify_target_ratio": MAGNIFY_TARGET_RATIO,
             },
         })
 
@@ -1296,7 +1434,7 @@ def api_profile(symbol):
     hvn_top_n = int(request.args.get("hvn_top_n", ov.get("hvn_top_n", HVN_TOP_N)))
     try:
         candles = get_candles(symbol, interval=interval, limit=lookback + 5)
-        profile = compute_profile(candles, segs=SEGS, lookback=lookback)
+        profile = build_profile_for_symbol(symbol, candles, lookback, segs=SEGS, interval=interval)
         if not profile:
             return jsonify({"error": "not enough data"}), 400
         zones = extract_hvn_zones(profile, top_n=hvn_top_n)
