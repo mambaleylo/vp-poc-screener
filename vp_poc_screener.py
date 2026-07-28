@@ -307,6 +307,26 @@ v0.11.0 - bounce and breakout now get fully independent settings, not
          Verified: allowed_reasons correctly restricts backtest_params
          to one signal type, optimize_symbol produces and stores
          separate bounce/breakout results end-to-end (mocked candles).
+v0.12.0 - added an open-interest filter, applied to breakout signals
+         only (bounce is a rejection off a level; breakout is a move
+         away from it, which is what OI direction actually speaks to).
+         get_contract_stats() pulls OI history via GET
+         /futures/usdt/contract_stats; compute_oi_trend() reads net
+         change over VP_OI_LOOKBACK bars (default 24 x VP_OI_INTERVAL,
+         default 1h — so a 24h window) and calls it UP/DOWN beyond
+         VP_OI_THRESHOLD_PCT (default 5%). Rising OI only allows LONG
+         breakouts, falling OI only allows SHORT — new positions opening
+         should back a breakout in that direction; unwinding shouldn't.
+         Only fetched when a breakout candidate already exists (not
+         blanket per-symbol-per-scan), and degrades to NEUTRAL
+         (unfiltered) on any fetch error rather than blocking signals on
+         a network hiccup. Toggle via VP_OI_FILTER=0. New
+         filtered_by_oi counter alongside the trend/volume ones in the
+         header. Not applied inside the backtest optimizer (same
+         reasoning as bar magnification — historical OI alignment per
+         walk-forward iteration would be expensive for a button click).
+         Verified against synthetic rising/falling/flat OI series and a
+         forced fetch-error case.
 """
 
 import os
@@ -321,7 +341,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.11.0"
+APP_VERSION = "0.12.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -430,6 +450,19 @@ VOLUME_CONFIRM_ENABLED = os.environ.get("VP_VOLUME_CONFIRM", "1") == "1"
 VOL_CONFIRM_LOOKBACK = int(os.environ.get("VP_VOL_CONFIRM_LOOKBACK", 20))
 VOL_CONFIRM_RATIO = float(os.environ.get("VP_VOL_CONFIRM_RATIO", 1.15))  # trigger bar volume must be >= this multiple of the average of the preceding VOL_CONFIRM_LOOKBACK bars
 
+# --- open interest filter: applied to breakout signals only (bounce is a
+# rejection off a level, breakout is a move away from it — OI direction
+# is a "is real money backing this move" check that fits breakout, not
+# bounce). Rising OI = new positions opening, more likely to back a
+# breakout in that direction; falling OI = positions unwinding, weaker
+# conviction the move continues. Only fetched when a breakout candidate
+# actually exists (not blanket per-symbol-per-scan) to limit the extra
+# network cost.
+OI_FILTER_ENABLED = os.environ.get("VP_OI_FILTER", "1") == "1"
+OI_INTERVAL = os.environ.get("VP_OI_INTERVAL", "1h")
+OI_LOOKBACK = int(os.environ.get("VP_OI_LOOKBACK", 24))
+OI_THRESHOLD_PCT = float(os.environ.get("VP_OI_THRESHOLD_PCT", 0.05))
+
 # --- data quality filter: skip symbols that look illiquid/stale on the
 # candle feed itself (near-zero volume bars, flat high==low bars, or an
 # almost flat price range) even if they cleared the 24h volume filter.
@@ -470,6 +503,7 @@ STATE = {
     "excluded_low_quality": 0,
     "filtered_by_trend": 0,
     "filtered_by_volume": 0,
+    "filtered_by_oi": 0,
     "last_scan_started": None,
     "last_scan_finished": None,
     "last_scan_duration": None,
@@ -595,6 +629,24 @@ def get_candles(symbol, interval=INTERVAL, limit=LOOKBACK + 5):
     r.raise_for_status()
     # Gate.io returns oldest->newest already; fields: t,v,c,h,l,o,sum (varies by version)
     return _parse_candles(r.json())
+
+
+def get_contract_stats(symbol, interval=OI_INTERVAL, limit=OI_LOOKBACK + 2):
+    """Open interest history via GET /futures/usdt/contract_stats."""
+    r = requests.get(
+        f"{GATE_BASE}/futures/usdt/contract_stats",
+        params={"contract": symbol, "interval": interval, "limit": limit},
+        timeout=HTTP_TIMEOUT,
+    )
+    r.raise_for_status()
+    out = []
+    for c in r.json():
+        try:
+            out.append({"time": int(c.get("time", 0)), "open_interest": float(c.get("open_interest", 0))})
+        except (TypeError, ValueError):
+            continue
+    out.sort(key=lambda x: x["time"])
+    return out
 
 
 def get_candles_range(symbol, interval, start_ts, end_ts):
@@ -895,6 +947,39 @@ def trend_allows(direction, trend):
     if not TREND_FILTER_ENABLED or trend == "NEUTRAL":
         return True
     return (trend == "UP" and direction == "LONG") or (trend == "DOWN" and direction == "SHORT")
+
+
+def compute_oi_trend(symbol, lookback=OI_LOOKBACK, threshold_pct=OI_THRESHOLD_PCT, interval=OI_INTERVAL):
+    """Net open-interest change over the lookback window. Returns 'UP'
+    (OI growing — new positions opening), 'DOWN' (OI shrinking —
+    positions unwinding), or 'NEUTRAL'. Any fetch/data problem degrades
+    to NEUTRAL (never blocks a signal outright on a network hiccup)."""
+    try:
+        stats = get_contract_stats(symbol, interval=interval, limit=lookback + 2)
+    except Exception as e:
+        log_error(f"oi fetch {symbol}: {e}")
+        return "NEUTRAL"
+    if len(stats) < lookback:
+        return "NEUTRAL"
+    window = stats[-lookback:]
+    start_oi, end_oi = window[0]["open_interest"], window[-1]["open_interest"]
+    if start_oi <= 0:
+        return "NEUTRAL"
+    change = (end_oi - start_oi) / start_oi
+    if change > threshold_pct:
+        return "UP"
+    if change < -threshold_pct:
+        return "DOWN"
+    return "NEUTRAL"
+
+
+def oi_allows(direction, oi_trend):
+    """Rising OI backs a breakout in the same direction as the move
+    (new money); falling OI (unwinding) doesn't back a fresh breakout in
+    either direction as strongly — only the matching direction passes."""
+    if not OI_FILTER_ENABLED or oi_trend == "NEUTRAL":
+        return True
+    return (oi_trend == "UP" and direction == "LONG") or (oi_trend == "DOWN" and direction == "SHORT")
 
 
 def volume_confirms(candles, min_ratio=VOL_CONFIRM_RATIO, lookback=VOL_CONFIRM_LOOKBACK):
@@ -1279,7 +1364,14 @@ def scan_symbol(symbol):
         if BOUNCE_ENABLED and zones_bounce:
             sig = _try_signal(symbol, candles, detect_signal(candles, eligible_zones(zones_bounce)))
         if sig is None and BREAKOUT_ENABLED and zones_breakout:
-            sig = _try_signal(symbol, candles, detect_breakout(candles, eligible_zones(zones_breakout)))
+            candidate = _try_signal(symbol, candles, detect_breakout(candles, eligible_zones(zones_breakout)))
+            if candidate:
+                oi_trend = compute_oi_trend(symbol)
+                if oi_allows(candidate["direction"], oi_trend):
+                    sig = candidate
+                else:
+                    with state_lock:
+                        STATE["filtered_by_oi"] += 1
 
         if sig and has_open_signal(symbol):
             sig = None  # already have an unresolved signal on this symbol — don't stack another
@@ -1519,6 +1611,7 @@ def scan_loop():
                 STATE["excluded_low_quality"] = 0
                 STATE["filtered_by_trend"] = 0
                 STATE["filtered_by_volume"] = 0
+                STATE["filtered_by_oi"] = 0
             with ThreadPoolExecutor(max_workers=WORKERS) as ex:
                 futs = [ex.submit(scan_symbol, s) for s in universe]
                 for _ in as_completed(futs):
@@ -1549,6 +1642,7 @@ def api_status():
             "excluded_low_quality": STATE["excluded_low_quality"],
             "filtered_by_trend": STATE["filtered_by_trend"],
             "filtered_by_volume": STATE["filtered_by_volume"],
+            "filtered_by_oi": STATE["filtered_by_oi"],
             "last_scan_started": STATE["last_scan_started"],
             "last_scan_finished": STATE["last_scan_finished"],
             "last_scan_duration": STATE["last_scan_duration"],
@@ -1575,6 +1669,8 @@ def api_status():
                 "trend_threshold_pct": TREND_THRESHOLD_PCT,
                 "volume_confirm_enabled": VOLUME_CONFIRM_ENABLED, "vol_confirm_ratio": VOL_CONFIRM_RATIO,
                 "bounce_enabled": BOUNCE_ENABLED, "breakout_enabled": BREAKOUT_ENABLED,
+                "oi_filter_enabled": OI_FILTER_ENABLED, "oi_interval": OI_INTERVAL,
+                "oi_lookback": OI_LOOKBACK, "oi_threshold_pct": OI_THRESHOLD_PCT,
                 "magnify_enabled": MAGNIFY_ENABLED, "magnify_interval": MAGNIFY_INTERVAL,
                 "magnify_target_ratio": MAGNIFY_TARGET_RATIO,
             },
@@ -1670,6 +1766,7 @@ def api_reset():
             STATE["excluded_low_quality"] = 0
             STATE["filtered_by_trend"] = 0
             STATE["filtered_by_volume"] = 0
+            STATE["filtered_by_oi"] = 0
             STATE["errors"].clear()
         with _cooldowns_lock:
             _cooldowns.clear()
@@ -1807,7 +1904,7 @@ async function refreshStatus() {
     const cv = st.current_version || {};
     const cvTxt = cv.total ? `с v${s.version}: ${cv.winrate}% (${cv.wins}W/${cv.losses}L)` : `с v${s.version}: пока нет закрытых`;
     document.getElementById('filterStats').textContent =
-      `За этот скан отклонено — тренд: ${s.filtered_by_trend||0}, объём: ${s.filtered_by_volume||0} · ${cvTxt}`;
+      `За этот скан отклонено — тренд: ${s.filtered_by_trend||0}, объём: ${s.filtered_by_volume||0}, OI: ${s.filtered_by_oi||0} · ${cvTxt}`;
   } catch(e) {}
 }
 
