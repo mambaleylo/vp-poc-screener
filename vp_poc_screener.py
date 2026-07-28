@@ -245,11 +245,21 @@ v0.10.1 - changed default VP_INTERVAL from 5m to 15m — confirmed by the
          Lookback stays 100 bars, so the profile window is now ~25h
          instead of ~8.3h. MAGNIFY_INTERVAL auto-recalculates from the
          new default (still 10s, now a 90x sub-bar ratio instead of 30x).
+v0.10.2 - fix pick_magnify_interval(): it picked the coarsest interval
+         that was AT LEAST the target ratio, so 15m (now the default)
+         picked 10s sub-bars — a 90x ratio, 6x more requests than
+         needed for no real accuracy gain over the intended ~16x.
+         Switched to closest-in-log-ratio selection: 15m now correctly
+         picks 1m sub-bars (15x, right on target). 5m/1h/etc. picks are
+         unaffected or improved (see the ladder verified across every
+         interval: 1m->10s 6x, 5m->10s 30x, 15m->1m 15x, 30m->1m 30x,
+         1h->5m 12x, 4h->15m 16x, 8h->30m 16x, 1d->1h 24x).
 """
 
 import os
 import json
 import time
+import math
 import threading
 import traceback
 from collections import deque
@@ -258,7 +268,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.10.1"
+APP_VERSION = "0.10.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -285,20 +295,26 @@ MAGNIFY_TARGET_RATIO = float(os.environ.get("VP_MAGNIFY_RATIO", 16))  # aim for 
 
 
 def pick_magnify_interval(main_interval, target_ratio=MAGNIFY_TARGET_RATIO):
-    """Pick the coarsest available interval that still gives at least
-    target_ratio sub-bars per parent bar (fewer sub-bars = fewer/cheaper
-    paginated requests, for the same resolution target)."""
+    """Pick whichever available finer interval gives a sub-bar ratio
+    closest to target_ratio — comparing in log space so being 2x off at
+    a ratio of 15 counts the same as being 2x off at a ratio of 150.
+    Matters in practice: for a 15m main interval, 1m sub-bars give a 15x
+    ratio (right on target) while 10s would overshoot to 90x — the
+    floor-based version used to pick 10s here since it was "at least"
+    the target, burning 6x more requests for no real accuracy gain."""
     main_sec = INTERVAL_SECONDS.get(main_interval)
     if not main_sec:
         return main_interval
-    finer = sorted(
-        ((name, sec) for name, sec in INTERVAL_SECONDS.items() if sec < main_sec),
-        key=lambda x: -x[1],  # coarsest first
-    )
-    for name, sec in finer:
-        if main_sec / sec >= target_ratio:
-            return name
-    return finer[-1][0] if finer else main_interval  # fall back to the finest available
+    finer = [(name, sec) for name, sec in INTERVAL_SECONDS.items() if sec < main_sec]
+    if not finer:
+        return main_interval
+
+    def log_distance(item):
+        _, sec = item
+        return abs(math.log(main_sec / sec) - math.log(target_ratio))
+
+    finer.sort(key=log_distance)
+    return finer[0][0]
 
 
 MAGNIFY_INTERVAL = pick_magnify_interval(INTERVAL)
