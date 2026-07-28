@@ -254,6 +254,14 @@ v0.10.2 - fix pick_magnify_interval(): it picked the coarsest interval
          unaffected or improved (see the ladder verified across every
          interval: 1m->10s 6x, 5m->10s 30x, 15m->1m 15x, 30m->1m 30x,
          1h->5m 12x, 4h->15m 16x, 8h->30m 16x, 1d->1h 24x).
+v0.10.3 - added exit-candle diagnostics: a closed signal now records
+         exit_time and the exact OHLC of the candle that triggered
+         WIN/LOSS, shown as a tooltip (and inline time) next to the
+         status in the signals table. Direct response to a user report
+         that a LOSS looked wrong on our chart canvas at that zoom level
+         — this makes it possible to verify a specific result against
+         the exchange's own chart at the exact timestamp instead of
+         eyeballing a compressed price range.
 """
 
 import os
@@ -268,7 +276,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.10.2"
+APP_VERSION = "0.10.3"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1197,12 +1205,21 @@ def scan_symbol(symbol):
         log_error(f"{symbol}: {e}")
 
 
-def close_signal(sig, result, exit_price):
+def close_signal(sig, result, exit_price, exit_candle=None):
     with state_lock:
         sig["status"] = "CLOSED"
         sig["result"] = result
         sig["exit_price"] = exit_price
         sig["closed_at"] = time.time()
+        if exit_candle:
+            # exact candle that triggered the close, for direct
+            # cross-checking against the exchange's own chart if a result
+            # ever looks wrong on our canvas rendering
+            sig["exit_time"] = exit_candle["time"]
+            sig["exit_candle"] = {
+                "open": exit_candle["open"], "high": exit_candle["high"],
+                "low": exit_candle["low"], "close": exit_candle["close"],
+            }
     if result in ("WIN", "LOSS"):
         arrow = "\u2705" if result == "WIN" else "\u274c"
         send_telegram(f"{arrow} {sig['symbol']} {sig['direction']} closed: {result} @ {exit_price:.6g}")
@@ -1248,14 +1265,14 @@ def update_signal_outcomes():
                 if sig["status"] == "OPEN":
                     if direction == "LONG":
                         if c["low"] <= sig["sl"]:
-                            close_signal(sig, "LOSS", sig["sl"])
+                            close_signal(sig, "LOSS", sig["sl"], exit_candle=c)
                         elif c["high"] >= sig["tp"]:
-                            close_signal(sig, "WIN", sig["tp"])
+                            close_signal(sig, "WIN", sig["tp"], exit_candle=c)
                     else:
                         if c["high"] >= sig["sl"]:
-                            close_signal(sig, "LOSS", sig["sl"])
+                            close_signal(sig, "LOSS", sig["sl"], exit_candle=c)
                         elif c["low"] <= sig["tp"]:
-                            close_signal(sig, "WIN", sig["tp"])
+                            close_signal(sig, "WIN", sig["tp"], exit_candle=c)
 
             if sig["status"] == "OPEN" and now - sig["detected_at"] > SIGNAL_TIMEOUT_SEC:
                 last_price = candles[-1]["close"] if candles else entry
@@ -1657,12 +1674,15 @@ async function refreshSignals() {
   for (const r of rows) {
     const tr = document.createElement('tr');
     let statusHtml;
+    const exitTitle = r.exit_time
+      ? `title="свеча закрытия: ${fmtTime(r.exit_time)} · O ${fmt(r.exit_candle?.open)} H ${fmt(r.exit_candle?.high)} L ${fmt(r.exit_candle?.low)} C ${fmt(r.exit_candle?.close)}"`
+      : '';
     if (r.status === 'OPEN') {
       statusHtml = `<span class="status-open">OPEN</span>`;
     } else if (r.result === 'WIN') {
-      statusHtml = `<span class="win">WIN @ ${fmt(r.exit_price)}</span>`;
+      statusHtml = `<span class="win" ${exitTitle}>WIN @ ${fmt(r.exit_price)}${r.exit_time ? ' ('+fmtTime(r.exit_time)+')' : ''}</span>`;
     } else if (r.result === 'LOSS') {
-      statusHtml = `<span class="loss">LOSS @ ${fmt(r.exit_price)}</span>`;
+      statusHtml = `<span class="loss" ${exitTitle}>LOSS @ ${fmt(r.exit_price)}${r.exit_time ? ' ('+fmtTime(r.exit_time)+')' : ''}</span>`;
     } else {
       statusHtml = `<span class="status-timeout">TIMEOUT</span>`;
     }
