@@ -274,6 +274,39 @@ v0.10.5 - reverted default VP_INTERVAL back to 15m per follow-up
          should stay as default, confirmed matching the author's demo
          screenshots). MAGNIFY_OVERRIDES for 5m stays in place, harmless
          since it only applies if VP_INTERVAL is explicitly set to 5m.
+v0.11.0 - bounce and breakout now get fully independent settings, not
+         just independent stats. Real data showed bounce and breakout
+         can have meaningfully different win rates for the same symbol
+         (item #3 from the earlier improvement list); sharing one RR/
+         buffer/lookback/HVN across both meant tuning one could only
+         ever be a compromise. Changes:
+         - New global defaults VP_RR_BOUNCE / VP_RR_BREAKOUT and
+           VP_BUFFER_PCT_BOUNCE / VP_BUFFER_PCT_BREAKOUT (each falls
+           back to the shared VP_RR / VP_ZONE_BUFFER_PCT if unset, so
+           nothing changes unless configured).
+         - SYMBOL_OVERRIDES is now {"bounce": {...}, "breakout": {...}}
+           per symbol instead of one flat dict — optimize_symbol() runs
+           two separate 81-combo grid searches (via a new
+           allowed_reasons param threaded through detect_any_signal and
+           backtest_params, not a global toggle, so it's safe against
+           concurrent live scanning) and can land on entirely different
+           lookback/HVN/RR/buffer for bounce vs breakout on the same
+           symbol.
+         - scan_symbol() builds a profile per reason (reusing it when
+           both happen to share the same lookback, to avoid doubling
+           the magnified sub-candle fetch when nothing's actually been
+           tuned apart) and detects/prices each signal type against its
+           own zones and its own RR/buffer.
+         - /api/profile/<symbol> takes a ?reason=bounce|breakout param;
+           the chart modal now requests the profile scoped to whichever
+           reason the clicked signal actually was. The "Оптимизировать"
+           button shows both results side by side.
+         - auto_tune_cycle's staleness check updated for the new nested
+           structure (oldest optimized_at across whichever reasons have
+           a result).
+         Verified: allowed_reasons correctly restricts backtest_params
+         to one signal type, optimize_symbol produces and stores
+         separate bounce/breakout results end-to-end (mocked candles).
 """
 
 import os
@@ -288,7 +321,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.10.5"
+APP_VERSION = "0.11.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -360,6 +393,14 @@ WORKERS = int(os.environ.get("VP_WORKERS", 8))
 SIGNAL_HISTORY = 200
 RR = float(os.environ.get("VP_RR", 2.0))                  # take-profit distance as a multiple of risk — raised from 1.5: collected MFE stats showed WIN median MFE ~2.8R, i.e. TP was cutting winners short
 ZONE_BUFFER_PCT = float(os.environ.get("VP_ZONE_BUFFER_PCT", 0.30))  # stop sits this far beyond the zone edge (fraction of zone height) — raised from 0.15: LOSS median MFE was ~1.7R, meaning a chunk of stopped-out trades kept moving in the original direction afterward — noise was clipping the stop too close
+# bounce and breakout are different setups (rejection vs. continuation) —
+# give each its own RR/buffer defaults rather than forcing them to share
+# one setting. Falls back to the shared RR/ZONE_BUFFER_PCT above if not
+# explicitly set, so nothing changes unless these are configured.
+RR_BOUNCE = float(os.environ.get("VP_RR_BOUNCE", RR))
+RR_BREAKOUT = float(os.environ.get("VP_RR_BREAKOUT", RR))
+BUFFER_PCT_BOUNCE = float(os.environ.get("VP_BUFFER_PCT_BOUNCE", ZONE_BUFFER_PCT))
+BUFFER_PCT_BREAKOUT = float(os.environ.get("VP_BUFFER_PCT_BREAKOUT", ZONE_BUFFER_PCT))
 SIGNAL_TIMEOUT_SEC = int(os.environ.get("VP_SIGNAL_TIMEOUT", 6 * 3600))  # close as TIMEOUT if neither TP/SL hit
 MFE_TRACK_SEC = int(os.environ.get("VP_MFE_TRACK_SEC", 24 * 3600))  # keep measuring max favorable/adverse excursion this long after detection, past TP/SL/timeout
 
@@ -808,16 +849,23 @@ def detect_breakout(candles, zones, min_bars_inside=BREAKOUT_MIN_BARS_INSIDE):
     return None
 
 
-def detect_any_signal(candles, zones):
+def detect_any_signal(candles, zones, allowed_reasons=None):
     """Try a bounce first, then a breakout — either qualifies as a signal.
     Either type can be disabled independently (VP_BOUNCE_ENABLED /
     VP_BREAKOUT_ENABLED) for A/B-style comparisons if one type turns out
-    to be underperforming the other."""
-    if BOUNCE_ENABLED:
+    to be underperforming the other. allowed_reasons, if given, overrides
+    those globals for this call only — used to backtest bounce and
+    breakout separately without any shared mutable state (thread-safe
+    against concurrent live scanning)."""
+    if allowed_reasons is None:
+        allow_bounce, allow_breakout = BOUNCE_ENABLED, BREAKOUT_ENABLED
+    else:
+        allow_bounce, allow_breakout = "bounce" in allowed_reasons, "breakout" in allowed_reasons
+    if allow_bounce:
         sig = detect_signal(candles, zones)
         if sig:
             return sig
-    if BREAKOUT_ENABLED:
+    if allow_breakout:
         return detect_breakout(candles, zones)
     return None
 
@@ -976,10 +1024,11 @@ def load_state():
         log_error(f"load_state: {e}")
 
 
-def backtest_params(candles, lookback, hvn_top_n, rr, buffer_pct=ZONE_BUFFER_PCT, segs=BT_SEGS, stride=BT_STRIDE):
+def backtest_params(candles, lookback, hvn_top_n, rr, buffer_pct=ZONE_BUFFER_PCT, segs=BT_SEGS, stride=BT_STRIDE, allowed_reasons=None):
     """Walk forward through history one trade at a time (no overlapping
     positions), using only data strictly before each candidate bar to build
-    the profile — no lookahead."""
+    the profile — no lookahead. allowed_reasons restricts which signal
+    type(s) count, for tuning bounce and breakout independently."""
     n = len(candles)
     start = lookback + 2
     if n <= start + 10:
@@ -1013,7 +1062,7 @@ def backtest_params(candles, lookback, hvn_top_n, rr, buffer_pct=ZONE_BUFFER_PCT
             zones = extract_hvn_zones(profile, top_n=hvn_top_n)
             strong_zones = eligible_zones(zones)
             trigger_series = window + [c]
-            sig = detect_any_signal(trigger_series, strong_zones)
+            sig = detect_any_signal(trigger_series, strong_zones, allowed_reasons=allowed_reasons)
             if sig and signal_passes_filters(trigger_series, sig):
                 direction = sig["direction"]
                 entry = sig["price"]
@@ -1026,18 +1075,18 @@ def backtest_params(candles, lookback, hvn_top_n, rr, buffer_pct=ZONE_BUFFER_PCT
     return {"trades": total, "wins": wins, "losses": losses, "winrate": winrate}
 
 
-def optimize_symbol(symbol):
-    candles = get_candles(symbol, interval=INTERVAL, limit=BT_HISTORY)
-    if len(candles) < 150:
-        return {"error": "not enough history"}
-
+def _optimize_for_reason(candles, reason):
+    """Grid search restricted to a single signal type. Returns the best
+    combo (or a best-effort one, with a note, if nothing clears the
+    min-trades bar) — same selection logic as before, just scoped to one
+    reason at a time."""
     best = None
     tried = []
     for lb in PARAM_GRID_LOOKBACK:
         for hvn in PARAM_GRID_HVN:
             for rr in PARAM_GRID_RR:
                 for buf in PARAM_GRID_BUFFER:
-                    res = backtest_params(candles, lb, hvn, rr, buffer_pct=buf)
+                    res = backtest_params(candles, lb, hvn, rr, buffer_pct=buf, allowed_reasons={reason})
                     tried.append({**res, "lookback": lb, "hvn_top_n": hvn, "rr": rr, "buffer_pct": buf})
                     if res["trades"] < MIN_BACKTEST_TRADES or res["winrate"] is None:
                         continue
@@ -1046,19 +1095,35 @@ def optimize_symbol(symbol):
                         best = {**res, "lookback": lb, "hvn_top_n": hvn, "rr": rr, "buffer_pct": buf}
 
     if best is None:
-        # nothing cleared the min-trades bar; fall back to whichever combo
-        # had the most trades so the button still returns something useful
         tried.sort(key=lambda t: -t["trades"])
         best = tried[0] if tried else None
         if best:
-            best["note"] = f"insufficient trades for a confident pick (<{MIN_BACKTEST_TRADES}); showing best-effort combo"
-
-    if best:
-        best["optimized_at"] = time.time()
-        best["candles_used"] = len(candles)
-        with state_lock:
-            SYMBOL_OVERRIDES[symbol] = best
+            best["note"] = f"insufficient {reason} trades for a confident pick (<{MIN_BACKTEST_TRADES}); showing best-effort combo"
     return best
+
+
+def optimize_symbol(symbol):
+    """Tunes bounce and breakout completely independently — separate grid
+    searches, separate best lookback/HVN/RR/buffer per type — since
+    real data showed one can meaningfully underperform the other for the
+    same symbol. Stores {"bounce": {...}, "breakout": {...}} instead of
+    one shared set of params."""
+    candles = get_candles(symbol, interval=INTERVAL, limit=BT_HISTORY)
+    if len(candles) < 150:
+        return {"error": "not enough history"}
+
+    now = time.time()
+    result = {}
+    for reason in ("bounce", "breakout"):
+        best = _optimize_for_reason(candles, reason)
+        if best:
+            best["optimized_at"] = now
+            best["candles_used"] = len(candles)
+        result[reason] = best
+
+    with state_lock:
+        SYMBOL_OVERRIDES[symbol] = result
+    return result
 
 
 _auto_tune_cursor = 0  # rotating pointer into the universe list, persists across cycles
@@ -1079,7 +1144,13 @@ def auto_tune_cycle(universe):
 
     def needs_tuning(sym):
         ov = SYMBOL_OVERRIDES.get(sym)
-        return ov is None or (now - ov.get("optimized_at", 0)) > AUTO_TUNE_REFRESH_SEC
+        if not ov:
+            return True
+        # oldest optimized_at across whichever reasons have a result at all
+        timestamps = [r.get("optimized_at", 0) for r in ov.values() if r]
+        if not timestamps:
+            return True
+        return (now - min(timestamps)) > AUTO_TUNE_REFRESH_SEC
 
     n = len(universe)
     candidates = []
@@ -1117,34 +1188,76 @@ def send_telegram(text):
 # ----------------------------------------------------------------------------
 # Per-symbol scan
 # ----------------------------------------------------------------------------
+def _try_signal(symbol, candles, candidate):
+    """Apply trend/volume filters to a candidate signal, tracking which
+    filter rejected it (if any) for the header's per-cycle counters."""
+    if candidate is None:
+        return None
+    trend = compute_trend(candles)
+    if not trend_allows(candidate["direction"], trend):
+        with state_lock:
+            STATE["filtered_by_trend"] += 1
+        return None
+    if not volume_confirms(candles):
+        with state_lock:
+            STATE["filtered_by_volume"] += 1
+        return None
+    return candidate
+
+
 def scan_symbol(symbol):
     try:
-        ov = SYMBOL_OVERRIDES.get(symbol, {})
-        lookback = ov.get("lookback", LOOKBACK)
-        hvn_top_n = ov.get("hvn_top_n", HVN_TOP_N)
-        rr = ov.get("rr", RR)
-        buffer_pct = ov.get("buffer_pct", ZONE_BUFFER_PCT)
+        ov = SYMBOL_OVERRIDES.get(symbol, {}) or {}
+        bounce_ov = ov.get("bounce") or {}
+        breakout_ov = ov.get("breakout") or {}
 
-        candles = get_candles(symbol, limit=lookback + 5)
+        bounce_lookback = bounce_ov.get("lookback", LOOKBACK)
+        bounce_hvn = bounce_ov.get("hvn_top_n", HVN_TOP_N)
+        bounce_rr = bounce_ov.get("rr", RR_BOUNCE)
+        bounce_buffer = bounce_ov.get("buffer_pct", BUFFER_PCT_BOUNCE)
+
+        breakout_lookback = breakout_ov.get("lookback", LOOKBACK)
+        breakout_hvn = breakout_ov.get("hvn_top_n", HVN_TOP_N)
+        breakout_rr = breakout_ov.get("rr", RR_BREAKOUT)
+        breakout_buffer = breakout_ov.get("buffer_pct", BUFFER_PCT_BREAKOUT)
+
+        max_lookback = max(bounce_lookback, breakout_lookback)
+        candles = get_candles(symbol, limit=max_lookback + 5)
         if len(candles) < 20:
             return
 
-        ok, dq_reason = data_quality_check(candles[-lookback:])
+        ok, dq_reason = data_quality_check(candles[-max_lookback:])
         if not ok:
             with state_lock:
                 STATE["watchlist"].pop(symbol, None)
                 STATE["excluded_low_quality"] += 1
             return
 
-        profile = build_profile_for_symbol(symbol, candles, lookback, segs=SEGS)
-        if not profile:
+        # Bounce and breakout can have independently-tuned lookback/HVN —
+        # only rebuild the (network-costly, magnified) profile twice if
+        # they actually differ; otherwise reuse the same one.
+        profile_bounce = build_profile_for_symbol(symbol, candles, bounce_lookback, segs=SEGS) if BOUNCE_ENABLED else None
+        if BREAKOUT_ENABLED and breakout_lookback == bounce_lookback and profile_bounce is not None:
+            profile_breakout = profile_bounce
+        elif BREAKOUT_ENABLED:
+            profile_breakout = build_profile_for_symbol(symbol, candles, breakout_lookback, segs=SEGS)
+        else:
+            profile_breakout = None
+
+        if not profile_bounce and not profile_breakout:
             return
-        zones = extract_hvn_zones(profile, top_n=hvn_top_n)
-        if not zones:
+
+        zones_bounce = extract_hvn_zones(profile_bounce, top_n=bounce_hvn) if profile_bounce else []
+        zones_breakout = extract_hvn_zones(profile_breakout, top_n=breakout_hvn) if profile_breakout else []
+
+        # Whichever set is available drives the watchlist/POC display —
+        # informational only, doesn't affect signal generation.
+        display_zones = zones_bounce or zones_breakout
+        if not display_zones:
             return
         price = candles[-1]["close"]
-        nz, dist = nearest_zone_distance(price, zones)
-        poc = poc_zone(zones)
+        nz, dist = nearest_zone_distance(price, display_zones)
+        poc = poc_zone(display_zones)
 
         with state_lock:
             STATE["watchlist"][symbol] = {
@@ -1159,19 +1272,15 @@ def scan_symbol(symbol):
             }
 
         # Only narrow, POC-strength zones fire signals (weak/wide zones
-        # still show on the chart, they just don't trade).
-        strong_zones = eligible_zones(zones)
-        sig = detect_any_signal(candles, strong_zones)
-        if sig:
-            trend = compute_trend(candles)
-            if not trend_allows(sig["direction"], trend):
-                with state_lock:
-                    STATE["filtered_by_trend"] += 1
-                sig = None
-            elif not volume_confirms(candles):
-                with state_lock:
-                    STATE["filtered_by_volume"] += 1
-                sig = None
+        # still show on the chart, they just don't trade). Bounce is
+        # tried first (matches the previous priority order), each against
+        # its own zone set and its own tuned params.
+        sig = None
+        if BOUNCE_ENABLED and zones_bounce:
+            sig = _try_signal(symbol, candles, detect_signal(candles, eligible_zones(zones_bounce)))
+        if sig is None and BREAKOUT_ENABLED and zones_breakout:
+            sig = _try_signal(symbol, candles, detect_breakout(candles, eligible_zones(zones_breakout)))
+
         if sig and has_open_signal(symbol):
             sig = None  # already have an unresolved signal on this symbol — don't stack another
         if sig:
@@ -1183,6 +1292,8 @@ def scan_symbol(symbol):
                 if allowed:
                     _cooldowns[key] = now
             if allowed:
+                rr = bounce_rr if sig["reason"] == "bounce" else breakout_rr
+                buffer_pct = bounce_buffer if sig["reason"] == "bounce" else breakout_buffer
                 sl, tp, risk = compute_tp_sl(sig["direction"], sig["price"], sig["zone"], rr=rr, buffer_pct=buffer_pct)
                 record = {
                     "symbol": symbol,
@@ -1491,7 +1602,14 @@ def api_tuning():
 
 @app.route("/api/profile/<symbol>")
 def api_profile(symbol):
-    ov = SYMBOL_OVERRIDES.get(symbol, {})
+    all_ov = SYMBOL_OVERRIDES.get(symbol, {}) or {}
+    reason = request.args.get("reason", "bounce")
+    if reason not in ("bounce", "breakout"):
+        reason = "bounce"
+    ov = all_ov.get(reason) or {}
+    default_rr = RR_BOUNCE if reason == "bounce" else RR_BREAKOUT
+    default_buffer = BUFFER_PCT_BOUNCE if reason == "bounce" else BUFFER_PCT_BREAKOUT
+
     interval = request.args.get("interval", INTERVAL)
     lookback = int(request.args.get("lookback", ov.get("lookback", LOOKBACK)))
     hvn_top_n = int(request.args.get("hvn_top_n", ov.get("hvn_top_n", HVN_TOP_N)))
@@ -1506,12 +1624,14 @@ def api_profile(symbol):
             z["eligible"] = z["mid"] in strong_mids
         return jsonify({
             "symbol": symbol,
+            "reason": reason,
             "candles": candles[-lookback:],
             "borders": profile["borders"],
             "bin_vols": profile["bin_vols"],
             "zones": zones,
-            "params": {"lookback": lookback, "hvn_top_n": hvn_top_n, "rr": ov.get("rr", RR), "buffer_pct": ov.get("buffer_pct", ZONE_BUFFER_PCT)},
+            "params": {"lookback": lookback, "hvn_top_n": hvn_top_n, "rr": ov.get("rr", default_rr), "buffer_pct": ov.get("buffer_pct", default_buffer)},
             "override": ov if ov else None,
+            "all_overrides": all_ov if all_ov else None,
         })
     except Exception as e:
         log_error(f"api_profile {symbol}: {e}")
@@ -1820,7 +1940,8 @@ async function openChart(row) {
   document.getElementById('modalParams').textContent = 'загрузка...';
   modal.classList.add('open');
   try {
-    const data = await (await fetch(`/api/profile/${row.symbol}`)).json();
+    const reason = row.reason || 'bounce';
+    const data = await (await fetch(`/api/profile/${row.symbol}?reason=${reason}`)).json();
     currentData = data;
     renderParams(data);
     drawChart(data, row);
@@ -1832,9 +1953,15 @@ async function openChart(row) {
 function renderParams(data) {
   const p = data.params || {};
   const ov = data.override;
-  const base = `lookback ${p.lookback} · HVN ${p.hvn_top_n} · RR ${p.rr} · буфер SL ${(p.buffer_pct*100).toFixed(0)}%`;
+  const base = `[${data.reason}] lookback ${p.lookback} · HVN ${p.hvn_top_n} · RR ${p.rr} · буфер SL ${(p.buffer_pct*100).toFixed(0)}%`;
   const tag = ov ? ` · оптимизировано (${ov.winrate}%, ${ov.trades} сделок)` : ' · параметры по умолчанию';
   document.getElementById('modalParams').textContent = base + tag;
+}
+
+function fmtOptimizeResult(r, label) {
+  if (!r) return `${label}: нет данных`;
+  const note = r.note ? ` (${r.note})` : '';
+  return `${label}: lookback ${r.lookback} · HVN ${r.hvn_top_n} · RR ${r.rr} · буфер ${(r.buffer_pct*100).toFixed(0)}% · винрейт ${r.winrate}% (${r.trades})${note}`;
 }
 
 document.getElementById('optimizeBtn').onclick = async () => {
@@ -1847,10 +1974,10 @@ document.getElementById('optimizeBtn').onclick = async () => {
     if (res.error) {
       document.getElementById('modalParams').textContent = 'Ошибка: ' + res.error;
     } else {
-      const note = res.note ? ` (${res.note})` : '';
       document.getElementById('modalParams').textContent =
-        `Подобрано: lookback ${res.lookback} · HVN ${res.hvn_top_n} · RR ${res.rr} · буфер SL ${(res.buffer_pct*100).toFixed(0)}% · винрейт ${res.winrate}% (${res.trades} сделок)${note}`;
-      const data = await (await fetch(`/api/profile/${currentRow.symbol}`)).json();
+        fmtOptimizeResult(res.bounce, 'bounce') + '  |  ' + fmtOptimizeResult(res.breakout, 'breakout');
+      const reason = currentRow.reason || 'bounce';
+      const data = await (await fetch(`/api/profile/${currentRow.symbol}?reason=${reason}`)).json();
       currentData = data;
       drawChart(data, currentRow);
     }
