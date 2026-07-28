@@ -167,6 +167,16 @@ v0.8.0 - added two signal filters, both applied identically in live
          Both toggleable independently (VP_TREND_FILTER=0 /
          VP_VOLUME_CONFIRM=0). Verified against synthetic up/down/flat
          trends and low/high-volume trigger bars before shipping.
+v0.8.1 - observability for the v0.8.0 filters and for version-over-version
+         comparisons in general: (1) each signal is now tagged with the
+         APP_VERSION active when it was detected, and compute_signal_stats
+         returns a current_version winrate split alongside the aggregate —
+         old signals still in the rolling history no longer dilute the
+         read on "did this version's change actually help". (2) added
+         filtered_by_trend / filtered_by_volume counters (reset each scan
+         cycle) so it's visible how often each filter is actually
+         rejecting a candidate signal, not just that it exists. Both
+         shown in a new header line.
 """
 
 import os
@@ -180,7 +190,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.8.0"
+APP_VERSION = "0.8.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -264,6 +274,8 @@ STATE = {
     "signals": deque(maxlen=SIGNAL_HISTORY),
     "universe_size": 0,
     "excluded_low_quality": 0,
+    "filtered_by_trend": 0,
+    "filtered_by_volume": 0,
     "last_scan_started": None,
     "last_scan_finished": None,
     "last_scan_duration": None,
@@ -899,8 +911,16 @@ def scan_symbol(symbol):
         # still show on the chart, they just don't trade).
         strong_zones = eligible_zones(zones)
         sig = detect_any_signal(candles, strong_zones)
-        if sig and not signal_passes_filters(candles, sig):
-            sig = None
+        if sig:
+            trend = compute_trend(candles)
+            if not trend_allows(sig["direction"], trend):
+                with state_lock:
+                    STATE["filtered_by_trend"] += 1
+                sig = None
+            elif not volume_confirms(candles):
+                with state_lock:
+                    STATE["filtered_by_volume"] += 1
+                sig = None
         if sig:
             zone_key = round(sig["zone"]["mid"], 6)
             key = (symbol, zone_key, sig["reason"])
@@ -926,6 +946,11 @@ def scan_symbol(symbol):
                     "result": None,
                     "closed_at": None,
                     "exit_price": None,
+                    # app version at detection time — lets us later split
+                    # stats "before/after this change" instead of lumping
+                    # signals generated under different signal-generation
+                    # logic into one aggregate.
+                    "app_version": APP_VERSION,
                     # max favorable/adverse excursion, in R (risk) multiples —
                     # keeps updating for VP_MFE_TRACK_SEC after detection
                     # regardless of when/whether TP or SL is hit, so we can
@@ -1036,10 +1061,23 @@ def compute_signal_stats():
         rt = rw + rl
         by_reason[reason] = {"wins": rw, "losses": rl, "total": rt, "winrate": round(rw / rt * 100, 1) if rt else None}
 
+    # signals detected under the currently-running version's signal logic —
+    # lets a version bump that changes detection/filters be evaluated on
+    # its own, instead of being diluted by older signals still in the
+    # rolling history.
+    cur = [s for s in closed if s.get("app_version") == APP_VERSION]
+    cur_w = sum(1 for s in cur if s["result"] == "WIN")
+    cur_l = sum(1 for s in cur if s["result"] == "LOSS")
+    cur_t = cur_w + cur_l
+    current_version = {
+        "wins": cur_w, "losses": cur_l, "total": cur_t,
+        "winrate": round(cur_w / cur_t * 100, 1) if cur_t else None,
+    }
+
     return {
         "open": open_count, "wins": wins, "losses": losses,
         "timeouts": timeouts, "winrate": winrate, "closed_total": total,
-        "by_reason": by_reason,
+        "by_reason": by_reason, "current_version": current_version,
     }
 
 
@@ -1104,6 +1142,8 @@ def scan_loop():
             with state_lock:
                 STATE["universe_size"] = len(universe)
                 STATE["excluded_low_quality"] = 0
+                STATE["filtered_by_trend"] = 0
+                STATE["filtered_by_volume"] = 0
             with ThreadPoolExecutor(max_workers=WORKERS) as ex:
                 futs = [ex.submit(scan_symbol, s) for s in universe]
                 for _ in as_completed(futs):
@@ -1132,6 +1172,8 @@ def api_status():
             "version": APP_VERSION,
             "universe_size": STATE["universe_size"],
             "excluded_low_quality": STATE["excluded_low_quality"],
+            "filtered_by_trend": STATE["filtered_by_trend"],
+            "filtered_by_volume": STATE["filtered_by_volume"],
             "last_scan_started": STATE["last_scan_started"],
             "last_scan_finished": STATE["last_scan_finished"],
             "last_scan_duration": STATE["last_scan_duration"],
@@ -1276,6 +1318,7 @@ INDEX_HTML = """<!doctype html>
   <h1>VP-POC Screener</h1>
   <div id="status">загрузка...</div>
   <div id="stats" class="dim" style="margin-top:2px;font-size:11px;"></div>
+  <div id="filterStats" class="dim" style="margin-top:2px;font-size:11px;"></div>
 </header>
 <div class="tabs">
   <div class="tab active" data-tab="signals">Сигналы</div>
@@ -1343,6 +1386,10 @@ async function refreshStatus() {
     const breakoutTxt = br.breakout && br.breakout.total ? `breakout ${br.breakout.winrate}% (${br.breakout.total})` : 'breakout -';
     document.getElementById('stats').textContent =
       `Винрейт: ${wr} (${st.wins||0}W / ${st.losses||0}L, timeout ${st.timeouts||0}) · ${bounceTxt} · ${breakoutTxt} · открытых: ${st.open||0} · RR ${s.config ? s.config.rr : ''} · ${atTxt}`;
+    const cv = st.current_version || {};
+    const cvTxt = cv.total ? `с v${s.version}: ${cv.winrate}% (${cv.wins}W/${cv.losses}L)` : `с v${s.version}: пока нет закрытых`;
+    document.getElementById('filterStats').textContent =
+      `За этот скан отклонено — тренд: ${s.filtered_by_trend||0}, объём: ${s.filtered_by_volume||0} · ${cvTxt}`;
   } catch(e) {}
 }
 
