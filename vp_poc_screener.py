@@ -269,6 +269,11 @@ v0.10.4 - reverted default VP_INTERVAL back to 5m per request. Added an
          when tf<16 rather than going to a very fine sub-interval, and
          1m is the practical equivalent here given our interval ladder
          doesn't have anything between 10s and 1m.
+v0.10.5 - reverted default VP_INTERVAL back to 15m per follow-up
+         request (the 5m revert in v0.10.4 was a misread — 15m is what
+         should stay as default, confirmed matching the author's demo
+         screenshots). MAGNIFY_OVERRIDES for 5m stays in place, harmless
+         since it only applies if VP_INTERVAL is explicitly set to 5m.
 """
 
 import os
@@ -283,7 +288,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.10.4"
+APP_VERSION = "0.10.5"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -292,7 +297,7 @@ GATE_BASE = "https://api.gateio.ws/api/v4"
 
 SEGS = int(os.environ.get("VP_SEGS", 100))                # grid levels in profile
 LOOKBACK = int(os.environ.get("VP_LOOKBACK", 100))        # candles used to build profile
-INTERVAL = os.environ.get("VP_INTERVAL", "5m")            # candle timeframe
+INTERVAL = os.environ.get("VP_INTERVAL", "15m")           # candle timeframe — matches the author's confirmed 15m demo screenshots
 
 # --- volume profile "bar magnification": instead of approximating a bar's
 # volume as spread evenly across its own high-low range, pull actual
