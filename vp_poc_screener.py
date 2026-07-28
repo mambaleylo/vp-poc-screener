@@ -202,6 +202,19 @@ v0.9.1 - added VP_BOUNCE_ENABLED / VP_BREAKOUT_ENABLED toggles: the
          gap in real data (bounce 20% vs breakout 38%), so being able to
          disable either type independently and compare the aggregate is
          now possible without a code change.
+v0.9.2 - fix: the same symbol could fire near-duplicate signals a few
+         minutes apart (seen live on CBRS_USDT — three SHORT bounce
+         signals in ~10 minutes, all at essentially the same level).
+         Root cause: cooldown was keyed on the HVN zone's exact mid
+         price, but the zone is rebuilt from scratch every scan from a
+         rolling lookback window — its edges wobble slightly scan to
+         scan even with no real change in the level, so the "same" zone
+         kept producing a technically-different key and skipping the
+         cooldown check entirely. Replaced with a much simpler rule:
+         don't fire a new signal for a symbol that already has an
+         unresolved (OPEN) one, regardless of which zone produced it.
+         Cooldown is now just per-symbol, applied after that symbol's
+         open signal closes.
 """
 
 import os
@@ -215,7 +228,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.9.1"
+APP_VERSION = "0.9.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -229,7 +242,7 @@ HVN_TOP_N = int(os.environ.get("VP_HVN_TOP_N", 6))        # top bins considered 
 MIN_VOL_USD = float(os.environ.get("VP_MIN_VOL_USD", 500000))  # min 24h quote volume filter
 MAX_SYMBOLS = int(os.environ.get("VP_MAX_SYMBOLS", 150))  # universe cap
 SCAN_INTERVAL_SEC = int(os.environ.get("VP_SCAN_INTERVAL", 45))
-COOLDOWN_SEC = int(os.environ.get("VP_COOLDOWN", 900))    # per symbol+zone re-alert cooldown
+COOLDOWN_SEC = int(os.environ.get("VP_COOLDOWN", 900))    # per-symbol re-alert cooldown, applied after a signal on that symbol closes
 WORKERS = int(os.environ.get("VP_WORKERS", 8))
 SIGNAL_HISTORY = 200
 RR = float(os.environ.get("VP_RR", 2.0))                  # take-profit distance as a multiple of risk — raised from 1.5: collected MFE stats showed WIN median MFE ~2.8R, i.e. TP was cutting winners short
@@ -310,6 +323,15 @@ STATE = {
 }
 _cooldowns = {}  # (symbol, zone_key) -> last_alert_ts
 _cooldowns_lock = threading.Lock()
+
+
+def has_open_signal(symbol):
+    """True if this symbol already has an unresolved (OPEN) signal —
+    simplest fix for the "repeat signal on the same level every scan"
+    problem: don't stack a second signal on a symbol that already has one
+    running, regardless of which exact zone/direction produced it."""
+    with state_lock:
+        return any(s["symbol"] == symbol and s.get("status") == "OPEN" for s in STATE["signals"])
 
 
 def data_quality_check(candles):
@@ -960,9 +982,10 @@ def scan_symbol(symbol):
                 with state_lock:
                     STATE["filtered_by_volume"] += 1
                 sig = None
+        if sig and has_open_signal(symbol):
+            sig = None  # already have an unresolved signal on this symbol — don't stack another
         if sig:
-            zone_key = round(sig["zone"]["mid"], 6)
-            key = (symbol, zone_key, sig["reason"])
+            key = symbol
             now = time.time()
             with _cooldowns_lock:
                 last_ts = _cooldowns.get(key, 0)
