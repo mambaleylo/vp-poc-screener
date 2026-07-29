@@ -431,6 +431,32 @@ v0.16.1 - divergence chart is now self-labeling: each pivot point on
          detection (HH price + LH RSI) if the points are highs, which
          they most likely were — the labels make this self-evident
          going forward instead of requiring a manual trace.
+v0.17.0 - fix: a real bug this time, confirmed by a user screenshot
+         showing the RSI trendline cutting straight through visibly
+         taller peaks between its two connected points. Root cause:
+         detect_divergence compared RSI's value at the EXACT same bar
+         as the price pivot, but RSI and price don't necessarily peak
+         on the same bar — reading RSI only at price's pivot bar can
+         land on a mediocre point while RSI's real local extreme sits a
+         few bars away. Added _rsi_extreme_near(): for each price pivot,
+         search VP_DIV_RSI_SEARCH_WINDOW bars (default 10) each side for
+         RSI's own local max/min, and use THAT — both value and bar —
+         instead of the same-bar reading. New rsi_time_p1/rsi_time_p2
+         fields on the signal record so the chart's RSI trendline
+         connects to RSI's own extreme bars, which can now differ from
+         the price pivot bars (price panel and RSI panel trendlines no
+         longer share the same x-positions when the two series peak on
+         different bars — this is correct, not a bug). Also fixed the
+         chart modals' background: was semi-transparent (rgba alpha
+         .92) at z-index 20, letting the page header/button bleed
+         through visibly behind the modal on at least one mobile
+         browser (reported via screenshot) — now solid opaque #05070c
+         at z-index 999. Verified _rsi_extreme_near against three cases
+         (peak before the pivot bar, trough after it, and a peak outside
+         the search window correctly ignored) and a full
+         detect->store->chart-endpoint pipeline confirming rsi_time_p1/
+         p2 differ from time_p1/p2 when they should and are findable in
+         the chart's own candle timestamps.
 """
 
 import os
@@ -446,7 +472,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.16.1"
+APP_VERSION = "0.17.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -546,6 +572,7 @@ DIV_RSI_PERIOD = int(os.environ.get("VP_DIV_RSI_PERIOD", 14))
 DIV_PIVOT_LEFT = int(os.environ.get("VP_DIV_PIVOT_LEFT", 5))
 DIV_PIVOT_RIGHT = int(os.environ.get("VP_DIV_PIVOT_RIGHT", 5))
 DIV_FRESHNESS_BARS = int(os.environ.get("VP_DIV_FRESHNESS_BARS", 8))  # the second pivot must be within this many bars of "now" to still count as a live signal
+DIV_RSI_SEARCH_WINDOW = int(os.environ.get("VP_DIV_RSI_SEARCH_WINDOW", 10))  # bars each side of a price pivot to search for RSI's OWN local extreme in that neighborhood — price and RSI don't always peak on the exact same bar
 DIV_RR = float(os.environ.get("VP_DIV_RR", 2.0))
 DIV_BUFFER_PCT = float(os.environ.get("VP_DIV_BUFFER_PCT", 0.005))  # SL sits this far beyond the pivot extreme (fraction of price)
 DIV_COOLDOWN_SEC = int(os.environ.get("VP_DIV_COOLDOWN", 3600))
@@ -719,13 +746,37 @@ def find_pivots(values, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT, kind="high")
     return pivots
 
 
-def detect_divergence(candles, rsi, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT, freshness=DIV_FRESHNESS_BARS):
-    """Compares RSI's value at the two most recent PRICE pivots (not
-    independently-found RSI pivots — the standard, simpler approach: same
-    bar indices, compare what RSI did at those same two price extremes).
-    Bearish: price higher high + RSI lower high -> SHORT. Bullish: price
-    lower low + RSI higher low -> LONG. Only returns a match if the more
-    recent pivot is within `freshness` bars of the latest candle."""
+def _rsi_extreme_near(rsi, idx, window, mode):
+    """Search `window` bars each side of idx for RSI's own local
+    max/min — RSI and price don't necessarily peak on the exact same
+    bar, so reading RSI's value only at the price pivot's own bar can
+    connect a divergence line through points that aren't RSI's real
+    peaks/troughs at all. Returns (bar_index, value)."""
+    n = len(rsi)
+    lo = max(0, idx - window)
+    hi = min(n - 1, idx + window)
+    best_idx, best_val = None, None
+    for i in range(lo, hi + 1):
+        v = rsi[i]
+        if v is None:
+            continue
+        if best_val is None or (mode == "max" and v > best_val) or (mode == "min" and v < best_val):
+            best_val, best_idx = v, i
+    return best_idx, best_val
+
+
+def detect_divergence(candles, rsi, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT,
+                       freshness=DIV_FRESHNESS_BARS, rsi_window=DIV_RSI_SEARCH_WINDOW):
+    """Price pivots come from find_pivots() as before. For the RSI side,
+    instead of reading RSI's value at the exact same bar as the price
+    pivot, search RSI's own local extreme within `rsi_window` bars of
+    that price pivot — this is what actually gets drawn/compared, so the
+    connecting line tracks RSI's real peaks/troughs instead of cutting
+    through them. Bearish: price higher high + RSI's local high (near
+    that pivot) is lower than the earlier one -> SHORT. Bullish: price
+    lower low + RSI's local low (near that pivot) is higher -> LONG.
+    Only returns a match if the more recent pivot is within `freshness`
+    bars of the latest candle."""
     highs = [c["high"] for c in candles]
     lows = [c["low"] for c in candles]
     n = len(candles)
@@ -733,27 +784,33 @@ def detect_divergence(candles, rsi, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT, 
     pivot_highs = find_pivots(highs, left, right, "high")
     if len(pivot_highs) >= 2:
         p1, p2 = pivot_highs[-2], pivot_highs[-1]
-        if highs[p2] > highs[p1] and rsi[p1] is not None and rsi[p2] is not None and rsi[p2] < rsi[p1]:
+        r1_idx, r1_val = _rsi_extreme_near(rsi, p1, rsi_window, "max")
+        r2_idx, r2_val = _rsi_extreme_near(rsi, p2, rsi_window, "max")
+        if highs[p2] > highs[p1] and r1_val is not None and r2_val is not None and r2_val < r1_val:
             if n - 1 - p2 <= freshness:
                 return {
                     "direction": "SHORT", "kind": "bearish",
                     "p1": p1, "p2": p2,
                     "price_p1": highs[p1], "price_p2": highs[p2],
-                    "rsi_p1": rsi[p1], "rsi_p2": rsi[p2],
+                    "rsi_p1": r1_val, "rsi_p2": r2_val,
                     "time_p1": candles[p1]["time"], "time_p2": candles[p2]["time"],
+                    "rsi_time_p1": candles[r1_idx]["time"], "rsi_time_p2": candles[r2_idx]["time"],
                 }
 
     pivot_lows = find_pivots(lows, left, right, "low")
     if len(pivot_lows) >= 2:
         p1, p2 = pivot_lows[-2], pivot_lows[-1]
-        if lows[p2] < lows[p1] and rsi[p1] is not None and rsi[p2] is not None and rsi[p2] > rsi[p1]:
+        r1_idx, r1_val = _rsi_extreme_near(rsi, p1, rsi_window, "min")
+        r2_idx, r2_val = _rsi_extreme_near(rsi, p2, rsi_window, "min")
+        if lows[p2] < lows[p1] and r1_val is not None and r2_val is not None and r2_val > r1_val:
             if n - 1 - p2 <= freshness:
                 return {
                     "direction": "LONG", "kind": "bullish",
                     "p1": p1, "p2": p2,
                     "price_p1": lows[p1], "price_p2": lows[p2],
-                    "rsi_p1": rsi[p1], "rsi_p2": rsi[p2],
+                    "rsi_p1": r1_val, "rsi_p2": r2_val,
                     "time_p1": candles[p1]["time"], "time_p2": candles[p2]["time"],
+                    "rsi_time_p1": candles[r1_idx]["time"], "rsi_time_p2": candles[r2_idx]["time"],
                 }
     return None
 
@@ -820,6 +877,7 @@ def scan_symbol_divergence(symbol):
             "price_p1": sig["price_p1"], "price_p2": sig["price_p2"],
             "rsi_p1": sig["rsi_p1"], "rsi_p2": sig["rsi_p2"],
             "time_p1": sig["time_p1"], "time_p2": sig["time_p2"],
+            "rsi_time_p1": sig["rsi_time_p1"], "rsi_time_p2": sig["rsi_time_p2"],
             "time": candles[-1]["time"],
             "detected_at": now,
             "status": "OPEN",
@@ -2333,7 +2391,7 @@ INDEX_HTML = """<!doctype html>
   .status-open { color:#e8b93d; font-weight:600; }
   .status-timeout { color:#8b98ab; }
   .panel { padding:0 4px 20px; }
-  #modal { position:fixed; inset:0; background:rgba(5,7,12,.92); display:none; z-index:20; }
+  #modal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #modal.open { display:flex; flex-direction:column; }
   #modalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
   #modalHeader h2 { font-size:15px; margin:0; }
@@ -2342,7 +2400,7 @@ INDEX_HTML = """<!doctype html>
   #optimizeBtn:disabled { opacity:.5; }
   #chartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
   canvas { width:100%; height:100%; display:block; background:#0d1017; border-radius:8px; }
-  #divModal { position:fixed; inset:0; background:rgba(5,7,12,.92); display:none; z-index:20; }
+  #divModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #divModal.open { display:flex; flex-direction:column; }
   #divModalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
   #divModalHeader h2 { font-size:15px; margin:0; }
@@ -2989,17 +3047,24 @@ function drawDivergenceChart(data, row) {
   });
   ctx.stroke();
 
-  // RSI pivot trendline — same two bars as above, RSI's value there instead of price
-  if (row && pi1 >= 0 && pi2 >= 0 && row.rsi_p1 !== undefined && row.rsi_p2 !== undefined) {
-    const x1 = xAt(pi1), x2 = xAt(pi2), y1 = yR(row.rsi_p1), y2 = yR(row.rsi_p2);
-    ctx.strokeStyle = '#ffcc55';
-    ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
-    ctx.fillStyle = '#ffcc55';
-    [[x1, y1], [x2, y2]].forEach(([x, y]) => { ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill(); });
-    ctx.font = 'bold 9px sans-serif';
-    ctx.fillText(`RSI ${row.rsi_p1.toFixed(1)}`, x1 + 5, y1 - 6);
-    ctx.fillText(`RSI ${row.rsi_p2.toFixed(1)}`, x2 + 5, y2 - 6);
+  // RSI pivot trendline — RSI's OWN local extreme near each price pivot,
+  // not necessarily the same bar as the price pivot (rsi_time_p1/p2),
+  // falling back to the price pivot's own bar for older stored signals
+  // that predate this field.
+  if (row && row.rsi_p1 !== undefined && row.rsi_p2 !== undefined) {
+    const ri1 = row.rsi_time_p1 !== undefined ? findIdx(row.rsi_time_p1) : pi1;
+    const ri2 = row.rsi_time_p2 !== undefined ? findIdx(row.rsi_time_p2) : pi2;
+    if (ri1 >= 0 && ri2 >= 0) {
+      const x1 = xAt(ri1), x2 = xAt(ri2), y1 = yR(row.rsi_p1), y2 = yR(row.rsi_p2);
+      ctx.strokeStyle = '#ffcc55';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      ctx.fillStyle = '#ffcc55';
+      [[x1, y1], [x2, y2]].forEach(([x, y]) => { ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill(); });
+      ctx.font = 'bold 9px sans-serif';
+      ctx.fillText(`RSI ${row.rsi_p1.toFixed(1)}`, x1 + 5, y1 - 6);
+      ctx.fillText(`RSI ${row.rsi_p2.toFixed(1)}`, x2 + 5, y2 - 6);
+    }
   }
 }
 
