@@ -477,6 +477,29 @@ v0.18.0 - user feedback: v0.12-13 together cut live signal volume too
          be disabled entirely with VP_OI_FILTER=0. zone_method now
          shown in /api/status config for visibility into which mode is
          active.
+v0.19.0 - fixed a real measurement problem affecting every TP/SL
+         conclusion drawn from the tuning stats so far: MFE/MAE keep
+         updating for VP_MFE_TRACK_SEC (24h) after a signal closes, by
+         design, to see how much headroom existed — but that also means
+         a closed trade's mfe_r/mae_r pick up whatever the market did
+         AFTER it already resolved, which isn't the trade's own run and
+         shouldn't be read as "how far did it get before winning/
+         losing". close_signal()/close_div_signal() now snapshot
+         mfe_r_at_close/mae_r_at_close the instant a trade resolves,
+         before the post-close window keeps growing the originals. The
+         Тюнинг panel now leads with the at-close numbers (labeled
+         "на момент закрытия сделки") and tucks the original full-window
+         ones into a collapsed <details> for the separate "how much
+         general headroom exists" question. Also caught and fixed a
+         second self-inflicted bug while writing this: a template
+         literal referencing MFE_TRACK_HOURS, a JS variable that was
+         never declared (node --check doesn't catch undefined-variable
+         references, only syntax errors — it validates parseability, not
+         runtime correctness). Fixed by exposing mfe_track_hours from
+         /api/tuning instead. Added a static analysis pass — grep every
+         ${ALL_CAPS} template variable in the extracted script block
+         against declared const/let/function names — to catch this
+         category of bug going forward; found none remaining.
 """
 
 import os
@@ -492,7 +515,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.18.0"
+APP_VERSION = "0.19.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -938,6 +961,8 @@ def close_div_signal(sig, result, exit_price, exit_candle=None):
         sig["result"] = result
         sig["exit_price"] = exit_price
         sig["closed_at"] = time.time()
+        sig["mfe_r_at_close"] = sig["mfe_r"]
+        sig["mae_r_at_close"] = sig["mae_r"]
         if exit_candle:
             sig["exit_time"] = exit_candle["time"]
             sig["exit_candle"] = {
@@ -1012,7 +1037,7 @@ def compute_divergence_stats():
     dataset = [s for s in signals if s.get("mfe_price") is not None]
 
     def agg(key, subset):
-        vals = [s[key] for s in subset]
+        vals = [s[key] for s in subset if s.get(key) is not None]
         if not vals:
             return None
         vals_sorted = sorted(vals)
@@ -1022,6 +1047,7 @@ def compute_divergence_stats():
             "median": round(vals_sorted[n // 2], 3),
             "p25": round(vals_sorted[int(n * 0.25)], 3),
             "p75": round(vals_sorted[min(int(n * 0.75), n - 1)], 3),
+            "n": n,
         }
 
     win_set = [s for s in dataset if s.get("result") == "WIN"]
@@ -1035,6 +1061,8 @@ def compute_divergence_stats():
         "mfe_r_wins": agg("mfe_r", win_set), "mae_r_wins": agg("mae_r", win_set),
         "mfe_r_losses": agg("mfe_r", loss_set), "mae_r_losses": agg("mae_r", loss_set),
         "mfe_r_open": agg("mfe_r", open_set), "mae_r_open": agg("mae_r", open_set),
+        "mfe_r_wins_at_close": agg("mfe_r_at_close", win_set), "mae_r_wins_at_close": agg("mae_r_at_close", win_set),
+        "mfe_r_losses_at_close": agg("mfe_r_at_close", loss_set), "mae_r_losses_at_close": agg("mae_r_at_close", loss_set),
         "dataset_count": len(dataset),
     }
 
@@ -2045,6 +2073,13 @@ def close_signal(sig, result, exit_price, exit_candle=None):
         sig["result"] = result
         sig["exit_price"] = exit_price
         sig["closed_at"] = time.time()
+        # mfe_r/mae_r keep growing for VP_MFE_TRACK_SEC after this (by
+        # design, to see how much room there was to move TP/SL by) — but
+        # that means they stop answering "how far did this trade actually
+        # get before it resolved" the moment more candles arrive. Freeze
+        # a snapshot right now, before that continues.
+        sig["mfe_r_at_close"] = sig["mfe_r"]
+        sig["mae_r_at_close"] = sig["mae_r"]
         if exit_candle:
             # exact candle that triggered the close, for direct
             # cross-checking against the exchange's own chart if a result
@@ -2165,11 +2200,18 @@ def _pct(vals, p):
 def compute_tuning_stats():
     """Aggregate MFE/MAE (in R multiples) across signals that have been
     tracked at least one cycle — the raw material for deciding whether
-    TP/SL could sit further out or tighter in. mfe_r ~ how far price moved
-    in favor before the tracking window closed; mae_r ~ how far it moved
-    against. If avg mfe_r on wins is well above the RR used, TP may be
-    leaving profit on the table; if avg mae_r on losses is well below the
-    stop distance, SL may be wider than it needs to be."""
+    TP/SL could sit further out or tighter in.
+
+    Two versions of each number: the "_at_close" ones freeze the moment
+    a trade actually resolved (WIN/LOSS/TIMEOUT) — "how far did this
+    trade get before it was decided". The plain ones (mfe_r_all etc.)
+    keep growing for VP_MFE_TRACK_SEC after that, by design, to see how
+    much further room there was — but that means they also pick up
+    whatever the market did AFTER the trade was already closed, which
+    isn't really about that trade's own run. Use "_at_close" to judge
+    "was this specific trade's TP/SL well-placed"; use the plain ones to
+    judge "how much headroom exists in general". Older signals recorded
+    before this distinction existed won't have "_at_close" values."""
     with state_lock:
         signals = list(STATE["signals"])
     dataset = [s for s in signals if s.get("mfe_price") is not None]
@@ -2177,7 +2219,7 @@ def compute_tuning_stats():
         return {"count": 0}
 
     def agg(key, subset):
-        vals = [s[key] for s in subset]
+        vals = [s[key] for s in subset if s.get(key) is not None]
         if not vals:
             return None
         return {
@@ -2185,6 +2227,7 @@ def compute_tuning_stats():
             "median": _pct(vals, 0.5),
             "p25": _pct(vals, 0.25),
             "p75": _pct(vals, 0.75),
+            "n": len(vals),
         }
 
     wins = [s for s in dataset if s.get("result") == "WIN"]
@@ -2201,6 +2244,10 @@ def compute_tuning_stats():
         "mae_r_losses": agg("mae_r", losses),
         "mfe_r_open": agg("mfe_r", still_open),
         "mae_r_open": agg("mae_r", still_open),
+        "mfe_r_wins_at_close": agg("mfe_r_at_close", wins),
+        "mae_r_wins_at_close": agg("mae_r_at_close", wins),
+        "mfe_r_losses_at_close": agg("mfe_r_at_close", losses),
+        "mae_r_losses_at_close": agg("mae_r_at_close", losses),
         "wins_n": len(wins), "losses_n": len(losses), "open_n": len(still_open),
     }
 
@@ -2311,7 +2358,9 @@ def api_signals():
 
 @app.route("/api/tuning")
 def api_tuning():
-    return jsonify(compute_tuning_stats())
+    result = compute_tuning_stats()
+    result["mfe_track_hours"] = round(MFE_TRACK_SEC / 3600, 1)
+    return jsonify(result)
 
 
 @app.route("/api/profile/<symbol>")
@@ -2655,7 +2704,7 @@ async function refreshWatch() {
 
 function fmtStat(s) {
   if (!s) return '-';
-  return `avg ${s.avg} · median ${s.median} · p25 ${s.p25} · p75 ${s.p75}`;
+  return `avg ${s.avg} · median ${s.median} · p25 ${s.p25} · p75 ${s.p75}${s.n!==undefined ? ' (n='+s.n+')' : ''}`;
 }
 
 async function refreshTuning() {
@@ -2670,24 +2719,35 @@ async function refreshTuning() {
       Всего сигналов с накопленными данными: ${t.count} ·
       WIN: ${t.wins_n} · LOSS: ${t.losses_n} · OPEN: ${t.open_n}
     </div>
-    <div style="margin-bottom:8px;"><b>MFE (R) — насколько цена уходила в плюс:</b><br>
-      <span class="dim">все: ${fmtStat(t.mfe_r_all)}</span><br>
-      <span class="win">WIN: ${fmtStat(t.mfe_r_wins)}</span><br>
-      <span class="loss">LOSS: ${fmtStat(t.mfe_r_losses)}</span><br>
-      <span class="status-open">OPEN: ${fmtStat(t.mfe_r_open)}</span>
+    <div style="margin-bottom:10px;"><b>MFE/MAE (R) на момент закрытия сделки</b> — сколько реально было хода в плюс/минус, пока сделка была ещё жива (это и есть ответ на "можно ли было раздвинуть TP/SL"):<br>
+      <span class="win">WIN MFE: ${fmtStat(t.mfe_r_wins_at_close)}</span><br>
+      <span class="win">WIN MAE: ${fmtStat(t.mae_r_wins_at_close)}</span><br>
+      <span class="loss">LOSS MFE: ${fmtStat(t.mfe_r_losses_at_close)}</span><br>
+      <span class="loss">LOSS MAE: ${fmtStat(t.mae_r_losses_at_close)}</span>
     </div>
-    <div><b>MAE (R) — насколько цена уходила в минус:</b><br>
-      <span class="dim">все: ${fmtStat(t.mae_r_all)}</span><br>
-      <span class="win">WIN: ${fmtStat(t.mae_r_wins)}</span><br>
-      <span class="loss">LOSS: ${fmtStat(t.mae_r_losses)}</span><br>
-      <span class="status-open">OPEN: ${fmtStat(t.mae_r_open)}</span>
+    <div class="dim" style="margin-bottom:10px;font-size:12px;">
+      Если WIN MFE (на закрытии) заметно больше текущего RR — тейк резал прибыль рано,
+      можно двигать дальше. Если LOSS MFE (на закрытии) заметно больше 0 — часть лоссов
+      была в плюсе перед тем как развернуться и выбить стоп, тейк можно ставить ближе.
+      Если WIN MAE близко к 1.0 — почти дошло до стопа перед тем как выиграть, стоп
+      можно чуть шире. Если LOSS MAE сильно меньше 1.0 — стоп стоит теснее, чем
+      реально нужно было.
     </div>
-    <div class="dim" style="margin-top:10px;font-size:12px;">
-      Если MFE у WIN заметно больше текущего RR — тейк можно ставить дальше.
-      Если MAE у WIN близко к 1.0 (почти дошло до стопа перед разворотом) —
-      стоп можно чуть шире. Если MAE у LOSS сильно меньше 1.0 — часть лоссов
-      могла быть шумом, стоп можно ставить теснее.
-    </div>`;
+    <details style="margin-top:6px;">
+      <summary class="dim" style="cursor:pointer;font-size:12px;">Полное окно (${t.mfe_track_hours}ч после сигнала, включая то, что было уже после закрытия — для оценки общего запаса, не для оценки конкретной сделки)</summary>
+      <div style="margin-top:8px;"><b>MFE (R):</b><br>
+        <span class="dim">все: ${fmtStat(t.mfe_r_all)}</span><br>
+        <span class="win">WIN: ${fmtStat(t.mfe_r_wins)}</span><br>
+        <span class="loss">LOSS: ${fmtStat(t.mfe_r_losses)}</span><br>
+        <span class="status-open">OPEN: ${fmtStat(t.mfe_r_open)}</span>
+      </div>
+      <div style="margin-top:6px;"><b>MAE (R):</b><br>
+        <span class="dim">все: ${fmtStat(t.mae_r_all)}</span><br>
+        <span class="win">WIN: ${fmtStat(t.mae_r_wins)}</span><br>
+        <span class="loss">LOSS: ${fmtStat(t.mae_r_losses)}</span><br>
+        <span class="status-open">OPEN: ${fmtStat(t.mae_r_open)}</span>
+      </div>
+    </details>`;
 }
 
 async function refreshDivergence() {
