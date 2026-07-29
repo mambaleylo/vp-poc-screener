@@ -673,9 +673,10 @@ DIV_INTERVAL = os.environ.get("VP_DIV_INTERVAL", "1h")
 DIV_FETCH_LIMIT = int(os.environ.get("VP_DIV_FETCH_LIMIT", 200))  # candles pulled per symbol per scan
 DIV_RSI_PERIOD = int(os.environ.get("VP_DIV_RSI_PERIOD", 14))
 DIV_PIVOT_LEFT = int(os.environ.get("VP_DIV_PIVOT_LEFT", 5))
-DIV_PIVOT_RIGHT = int(os.environ.get("VP_DIV_PIVOT_RIGHT", 5))
+DIV_PIVOT_RIGHT = int(os.environ.get("VP_DIV_PIVOT_RIGHT", 3))  # was 5 — the tool's own shadow-stability stats (right=3: 88.3% agreement, entry ~0.15% better) show right=5 was confirming later than it needed to, often after the move had already played out
 DIV_FRESHNESS_BARS = int(os.environ.get("VP_DIV_FRESHNESS_BARS", 8))  # the second pivot must be within this many bars of "now" to still count as a live signal
-DIV_RSI_SEARCH_WINDOW = int(os.environ.get("VP_DIV_RSI_SEARCH_WINDOW", 10))  # bars each side of a price pivot to search for RSI's OWN local extreme in that neighborhood — price and RSI don't always peak on the exact same bar
+DIV_RSI_SEARCH_WINDOW = int(os.environ.get("VP_DIV_RSI_SEARCH_WINDOW", 4))  # was 10 — a window that wide let RSI's own local extreme drift far from the price pivots' actual spacing (e.g. price pivots 14 bars apart, RSI pivots picked only 4-5 apart), distorting how "divergent" the two lines really are. Kept > 0 so price/RSI can still peak one bar apart.
+DIV_MAX_RISK_PCT = float(os.environ.get("VP_DIV_MAX_RISK_PCT", 0.03))  # skip a divergence signal if the pivot-based invalidation point sits more than this fraction of entry price away — a distant pivot means an oversized SL and (at DIV_RR) an even more oversized TP, not a genuinely tradeable setup
 # Diagnostic only, doesn't affect live detection: for each fired signal,
 # check whether a SMALLER right-confirmation window would have picked the
 # exact same pivot bar using only the data that would actually have been
@@ -1033,6 +1034,8 @@ def scan_symbol_divergence(symbol):
 
         entry = candles[-1]["close"]
         sl, tp, risk = compute_div_tp_sl(sig["direction"], entry, sig)
+        if entry and risk / entry > DIV_MAX_RISK_PCT:
+            return  # pivot too far from current price — SL/TP would be oversized, not a real setup
         record = {
             "symbol": symbol,
             "direction": sig["direction"],
