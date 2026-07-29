@@ -307,6 +307,87 @@ v0.11.0 - bounce and breakout now get fully independent settings, not
          Verified: allowed_reasons correctly restricts backtest_params
          to one signal type, optimize_symbol produces and stores
          separate bounce/breakout results end-to-end (mocked candles).
+v0.12.0 - added an open-interest filter, applied to breakout signals
+         only (bounce is a rejection off a level; breakout is a move
+         away from it, which is what OI direction actually speaks to).
+         get_contract_stats() pulls OI history via GET
+         /futures/usdt/contract_stats; compute_oi_trend() reads net
+         change over VP_OI_LOOKBACK bars (default 24 x VP_OI_INTERVAL,
+         default 1h — so a 24h window) and calls it UP/DOWN beyond
+         VP_OI_THRESHOLD_PCT (default 5%). Rising OI only allows LONG
+         breakouts, falling OI only allows SHORT — new positions opening
+         should back a breakout in that direction; unwinding shouldn't.
+         Only fetched when a breakout candidate already exists (not
+         blanket per-symbol-per-scan), and degrades to NEUTRAL
+         (unfiltered) on any fetch error rather than blocking signals on
+         a network hiccup. Toggle via VP_OI_FILTER=0. New
+         filtered_by_oi counter alongside the trend/volume ones in the
+         header. Not applied inside the backtest optimizer (same
+         reasoning as bar magnification — historical OI alignment per
+         walk-forward iteration would be expensive for a button click).
+         Verified against synthetic rising/falling/flat OI series and a
+         forced fetch-error case.
+v0.13.0 - replaced HVN zone construction entirely: extract_hvn_zones()
+         used to rank bins and merge a fixed top-N by rank, which could
+         cut a wide plateau short mid-shoulder or merge unrelated bins.
+         Now each zone grows outward from a local volume peak while
+         neighboring bins stay >= VP_SHOULDER_THRESHOLD_PCT (default
+         50%) of that peak's own volume — stopping exactly where the
+         bars visibly get shorter, matching what a person looking at
+         the profile would trace by eye. Removed the separate
+         VP_MAX_ZONE_HEIGHT_FRAC cap entirely: it existed to reject
+         "too tall" merged zones under the old method, but directly
+         fought the new one — a genuinely wide volume plateau should
+         produce a genuinely wide zone; the shoulder threshold is what
+         keeps it honest now, not an arbitrary height ceiling. Verified
+         against a Gaussian-hump-on-baseline synthetic profile (realistic
+         shape): the POC zone came out correctly wide, spanning the true
+         shoulder-to-shoulder width; a sharp narrow spike still stays
+         narrow; pure random-walk data (no genuine concentration)
+         correctly still returns zero zones (the flat-profile gate is
+         unaffected); 81-combo grid search performance unchanged (~5s).
+v0.14.0 - new feature, fully separate from the volume-profile screener
+         above: RSI divergence detection on its own timeframe (1h by
+         default, VP_DIV_INTERVAL), own scan pass, own signal history,
+         own stats, own chart, own "Дивергенции" tab. compute_rsi() is a
+         standard Wilder RSI; find_pivots() confirms a swing high/low
+         `right` bars after it happens; detect_divergence() compares
+         RSI's value at the two most recent PRICE pivots (not
+         independently-found RSI pivots — the standard approach): price
+         higher-high + RSI lower-high = bearish -> SHORT; price
+         lower-low + RSI higher-low = bullish -> LONG. Only fires if the
+         second pivot is within VP_DIV_FRESHNESS_BARS (default 8) of the
+         latest candle. SL sits beyond the more extreme of the two
+         pivot prices (VP_DIV_BUFFER_PCT buffer), TP at VP_DIV_RR (own
+         RR, default 2.0) multiples of that risk. Same MFE/MAE tracking,
+         WIN/LOSS/TIMEOUT resolution, and disk persistence as the main
+         screener, but in a completely separate deque/cooldown/state so
+         the two never mix. New endpoints: /api/divergence/status,
+         /api/divergence/signals, /api/divergence/chart/<symbol>. The
+         chart modal renders two stacked panels — candles with a
+         trendline connecting the two price pivots (plus entry/SL/TP
+         lines), and RSI below with a trendline connecting RSI's value
+         at those same two bars — matching what a person tracing
+         divergences by eye on a chart would draw.
+         Caught and fixed two self-inflicted bugs while building this:
+         an edit that silently deleted the `data_quality_check` function
+         signature (body got orphaned as dead code inside the previous
+         function — compiled fine, failed at runtime), and a second edit
+         that deleted the `refreshAll` JS function signature the same
+         way. Added a standing check for both risks going forward:
+         `python3 -m py_compile` + a full module import (catches
+         function-signature deletions py_compile alone misses, since
+         orphaned code is still syntactically valid) for the Python
+         side, and extracting the embedded frontend script block and
+         running `node --check` on it for the JS side, after every edit
+         that touches either. Verified end-to-end with synthetic engineered
+         bearish/bullish divergences (correct direction, entry/SL/TP,
+         and — importantly — that the chart endpoint's candle timestamps
+         actually contain the signal's stored pivot timestamps, since
+         the frontend trendline draw depends on finding them), a Flask
+         test-client pass across all new and existing endpoints, and a
+         duplicate-top-level-function-definition scan across the whole
+         file.
 """
 
 import os
@@ -321,7 +402,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.11.0"
+APP_VERSION = "0.14.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -404,17 +485,36 @@ BUFFER_PCT_BREAKOUT = float(os.environ.get("VP_BUFFER_PCT_BREAKOUT", ZONE_BUFFER
 SIGNAL_TIMEOUT_SEC = int(os.environ.get("VP_SIGNAL_TIMEOUT", 6 * 3600))  # close as TIMEOUT if neither TP/SL hit
 MFE_TRACK_SEC = int(os.environ.get("VP_MFE_TRACK_SEC", 24 * 3600))  # keep measuring max favorable/adverse excursion this long after detection, past TP/SL/timeout
 
+# ----------------------------------------------------------------------------
+# RSI divergence: a completely separate signal source from the volume
+# profile screener above — own timeframe, own scan, own history/stats,
+# own chart. Bearish (regular) divergence: price makes a higher high while
+# RSI makes a lower high at the same two pivots -> SHORT. Bullish: price
+# lower low, RSI higher low -> LONG.
+# ----------------------------------------------------------------------------
+DIVERGENCE_ENABLED = os.environ.get("VP_DIVERGENCE_ENABLED", "1") == "1"
+DIV_INTERVAL = os.environ.get("VP_DIV_INTERVAL", "1h")
+DIV_FETCH_LIMIT = int(os.environ.get("VP_DIV_FETCH_LIMIT", 200))  # candles pulled per symbol per scan
+DIV_RSI_PERIOD = int(os.environ.get("VP_DIV_RSI_PERIOD", 14))
+DIV_PIVOT_LEFT = int(os.environ.get("VP_DIV_PIVOT_LEFT", 5))
+DIV_PIVOT_RIGHT = int(os.environ.get("VP_DIV_PIVOT_RIGHT", 5))
+DIV_FRESHNESS_BARS = int(os.environ.get("VP_DIV_FRESHNESS_BARS", 8))  # the second pivot must be within this many bars of "now" to still count as a live signal
+DIV_RR = float(os.environ.get("VP_DIV_RR", 2.0))
+DIV_BUFFER_PCT = float(os.environ.get("VP_DIV_BUFFER_PCT", 0.005))  # SL sits this far beyond the pivot extreme (fraction of price)
+DIV_COOLDOWN_SEC = int(os.environ.get("VP_DIV_COOLDOWN", 3600))
+DIV_SIGNAL_HISTORY = 200
+
 # --- zone quality filters: only narrow, genuinely dominant nodes should
 # fire signals. A merge of many adjacent top-N bins can produce a tall,
 # diffuse "zone" that isn't really a precise level — and a zone that's
 # technically in the top-N but far weaker than the POC isn't the kind of
 # node price actually respects.
-MAX_ZONE_HEIGHT_FRAC = float(os.environ.get("VP_MAX_ZONE_HEIGHT_FRAC", 0.10))   # zone height must be < this fraction of the whole profile range (hh-ll)
+MIN_PEAK_RATIO = float(os.environ.get("VP_MIN_PEAK_RATIO", 2.5))  # the busiest bin must be at least this many times the average bin — otherwise volume is just spread flat across the whole range and there's no real POC to trade
+SHOULDER_THRESHOLD_PCT = float(os.environ.get("VP_SHOULDER_THRESHOLD_PCT", 0.5))  # a zone grows outward from its local peak bin while neighboring bins stay >= this fraction of that peak's volume — stops right where the bars visibly get shorter
 ZONE_STRENGTH_MIN_RATIO = float(os.environ.get("VP_ZONE_STRENGTH_MIN_RATIO", 0.55))  # zone volume must be >= this fraction of the POC's volume to be eligible for signals
 BREAKOUT_MIN_BARS_INSIDE = int(os.environ.get("VP_BREAKOUT_MIN_BARS", 3))  # bars that must have been basing inside/around the zone right before a breakout signal
 BOUNCE_ENABLED = os.environ.get("VP_BOUNCE_ENABLED", "1") == "1"
 BREAKOUT_ENABLED = os.environ.get("VP_BREAKOUT_ENABLED", "1") == "1"
-MIN_PEAK_RATIO = float(os.environ.get("VP_MIN_PEAK_RATIO", 2.5))  # the busiest bin must be at least this many times the average bin — otherwise volume is just spread flat across the whole range and there's no real POC to trade
 
 # --- trend filter: in a clear up/down move, only take signals in that
 # direction (a LONG bounce off support in a hard downtrend is fighting the
@@ -429,6 +529,19 @@ TREND_THRESHOLD_PCT = float(os.environ.get("VP_TREND_THRESHOLD_PCT", 0.02))  # n
 VOLUME_CONFIRM_ENABLED = os.environ.get("VP_VOLUME_CONFIRM", "1") == "1"
 VOL_CONFIRM_LOOKBACK = int(os.environ.get("VP_VOL_CONFIRM_LOOKBACK", 20))
 VOL_CONFIRM_RATIO = float(os.environ.get("VP_VOL_CONFIRM_RATIO", 1.15))  # trigger bar volume must be >= this multiple of the average of the preceding VOL_CONFIRM_LOOKBACK bars
+
+# --- open interest filter: applied to breakout signals only (bounce is a
+# rejection off a level, breakout is a move away from it — OI direction
+# is a "is real money backing this move" check that fits breakout, not
+# bounce). Rising OI = new positions opening, more likely to back a
+# breakout in that direction; falling OI = positions unwinding, weaker
+# conviction the move continues. Only fetched when a breakout candidate
+# actually exists (not blanket per-symbol-per-scan) to limit the extra
+# network cost.
+OI_FILTER_ENABLED = os.environ.get("VP_OI_FILTER", "1") == "1"
+OI_INTERVAL = os.environ.get("VP_OI_INTERVAL", "1h")
+OI_LOOKBACK = int(os.environ.get("VP_OI_LOOKBACK", 24))
+OI_THRESHOLD_PCT = float(os.environ.get("VP_OI_THRESHOLD_PCT", 0.05))
 
 # --- data quality filter: skip symbols that look illiquid/stale on the
 # candle feed itself (near-zero volume bars, flat high==low bars, or an
@@ -470,13 +583,21 @@ STATE = {
     "excluded_low_quality": 0,
     "filtered_by_trend": 0,
     "filtered_by_volume": 0,
+    "filtered_by_oi": 0,
     "last_scan_started": None,
     "last_scan_finished": None,
     "last_scan_duration": None,
     "errors": deque(maxlen=30),
+    # RSI divergence — kept fully separate from the volume-profile
+    # screener above (own history, own stats, own "page").
+    "div_signals": deque(maxlen=DIV_SIGNAL_HISTORY),
+    "div_last_scan_finished": None,
+    "div_last_scan_duration": None,
 }
 _cooldowns = {}  # (symbol, zone_key) -> last_alert_ts
 _cooldowns_lock = threading.Lock()
+_div_cooldowns = {}  # symbol -> last_alert_ts
+_div_cooldowns_lock = threading.Lock()
 
 
 def has_open_signal(symbol):
@@ -486,6 +607,287 @@ def has_open_signal(symbol):
     running, regardless of which exact zone/direction produced it."""
     with state_lock:
         return any(s["symbol"] == symbol and s.get("status") == "OPEN" for s in STATE["signals"])
+
+
+# ----------------------------------------------------------------------------
+# RSI divergence: RSI calc, swing-pivot detection, divergence match
+# ----------------------------------------------------------------------------
+def compute_rsi(closes, period=DIV_RSI_PERIOD):
+    n = len(closes)
+    rsi = [None] * n
+    if n < period + 1:
+        return rsi
+    gains = [0.0] * n
+    losses = [0.0] * n
+    for i in range(1, n):
+        change = closes[i] - closes[i - 1]
+        gains[i] = max(change, 0.0)
+        losses[i] = max(-change, 0.0)
+    avg_gain = sum(gains[1:period + 1]) / period
+    avg_loss = sum(losses[1:period + 1]) / period
+    rsi[period] = 100.0 if avg_loss == 0 else 100 - 100 / (1 + avg_gain / avg_loss)
+    for i in range(period + 1, n):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        if avg_loss == 0:
+            rsi[i] = 100.0
+        else:
+            rsi[i] = 100 - 100 / (1 + avg_gain / avg_loss)
+    return rsi
+
+
+def find_pivots(values, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT, kind="high"):
+    """A bar is a pivot high/low if it's the max/min of the window
+    `left` bars before it through `right` bars after it — a pivot only
+    gets confirmed `right` bars after it actually happened."""
+    n = len(values)
+    pivots = []
+    for i in range(left, n - right):
+        if values[i] is None:
+            continue
+        window = values[i - left:i + right + 1]
+        if any(v is None for v in window):
+            continue
+        if kind == "high" and values[i] == max(window):
+            pivots.append(i)
+        elif kind == "low" and values[i] == min(window):
+            pivots.append(i)
+    return pivots
+
+
+def detect_divergence(candles, rsi, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT, freshness=DIV_FRESHNESS_BARS):
+    """Compares RSI's value at the two most recent PRICE pivots (not
+    independently-found RSI pivots — the standard, simpler approach: same
+    bar indices, compare what RSI did at those same two price extremes).
+    Bearish: price higher high + RSI lower high -> SHORT. Bullish: price
+    lower low + RSI higher low -> LONG. Only returns a match if the more
+    recent pivot is within `freshness` bars of the latest candle."""
+    highs = [c["high"] for c in candles]
+    lows = [c["low"] for c in candles]
+    n = len(candles)
+
+    pivot_highs = find_pivots(highs, left, right, "high")
+    if len(pivot_highs) >= 2:
+        p1, p2 = pivot_highs[-2], pivot_highs[-1]
+        if highs[p2] > highs[p1] and rsi[p1] is not None and rsi[p2] is not None and rsi[p2] < rsi[p1]:
+            if n - 1 - p2 <= freshness:
+                return {
+                    "direction": "SHORT", "kind": "bearish",
+                    "p1": p1, "p2": p2,
+                    "price_p1": highs[p1], "price_p2": highs[p2],
+                    "rsi_p1": rsi[p1], "rsi_p2": rsi[p2],
+                    "time_p1": candles[p1]["time"], "time_p2": candles[p2]["time"],
+                }
+
+    pivot_lows = find_pivots(lows, left, right, "low")
+    if len(pivot_lows) >= 2:
+        p1, p2 = pivot_lows[-2], pivot_lows[-1]
+        if lows[p2] < lows[p1] and rsi[p1] is not None and rsi[p2] is not None and rsi[p2] > rsi[p1]:
+            if n - 1 - p2 <= freshness:
+                return {
+                    "direction": "LONG", "kind": "bullish",
+                    "p1": p1, "p2": p2,
+                    "price_p1": lows[p1], "price_p2": lows[p2],
+                    "rsi_p1": rsi[p1], "rsi_p2": rsi[p2],
+                    "time_p1": candles[p1]["time"], "time_p2": candles[p2]["time"],
+                }
+    return None
+
+
+def compute_div_tp_sl(direction, entry, sig, rr=DIV_RR, buffer_pct=DIV_BUFFER_PCT):
+    """SL sits beyond whichever pivot price is more extreme (the level
+    that, if broken, invalidates the divergence read)."""
+    if direction == "SHORT":
+        extreme = max(sig["price_p1"], sig["price_p2"])
+        sl = extreme * (1 + buffer_pct)
+        risk = sl - entry
+        tp = entry - risk * rr
+    else:
+        extreme = min(sig["price_p1"], sig["price_p2"])
+        sl = extreme * (1 - buffer_pct)
+        risk = entry - sl
+        tp = entry + risk * rr
+    return sl, tp, risk
+
+
+def has_open_divergence_signal(symbol):
+    with state_lock:
+        return any(s["symbol"] == symbol and s.get("status") == "OPEN" for s in STATE["div_signals"])
+
+
+def scan_symbol_divergence(symbol):
+    if not DIVERGENCE_ENABLED:
+        return
+    try:
+        candles = get_candles(symbol, interval=DIV_INTERVAL, limit=DIV_FETCH_LIMIT)
+        min_needed = DIV_RSI_PERIOD + DIV_PIVOT_LEFT + DIV_PIVOT_RIGHT + 20
+        if len(candles) < min_needed:
+            return
+        ok, _reason = data_quality_check(candles[-min(len(candles), 100):])
+        if not ok:
+            return
+        closes = [c["close"] for c in candles]
+        rsi = compute_rsi(closes, period=DIV_RSI_PERIOD)
+        sig = detect_divergence(candles, rsi, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT, freshness=DIV_FRESHNESS_BARS)
+        if not sig:
+            return
+        if has_open_divergence_signal(symbol):
+            return
+
+        now = time.time()
+        with _div_cooldowns_lock:
+            last_ts = _div_cooldowns.get(symbol, 0)
+            allowed = now - last_ts >= DIV_COOLDOWN_SEC
+            if allowed:
+                _div_cooldowns[symbol] = now
+        if not allowed:
+            return
+
+        entry = candles[-1]["close"]
+        sl, tp, risk = compute_div_tp_sl(sig["direction"], entry, sig)
+        record = {
+            "symbol": symbol,
+            "direction": sig["direction"],
+            "kind": sig["kind"],  # bearish / bullish
+            "entry": entry,
+            "sl": sl,
+            "tp": tp,
+            "risk": risk,
+            "price_p1": sig["price_p1"], "price_p2": sig["price_p2"],
+            "rsi_p1": sig["rsi_p1"], "rsi_p2": sig["rsi_p2"],
+            "time_p1": sig["time_p1"], "time_p2": sig["time_p2"],
+            "time": candles[-1]["time"],
+            "detected_at": now,
+            "status": "OPEN",
+            "result": None,
+            "closed_at": None,
+            "exit_price": None,
+            "exit_time": None,
+            "exit_candle": None,
+            "app_version": APP_VERSION,
+            "mfe_r": 0.0,
+            "mae_r": 0.0,
+            "mfe_price": None,
+            "mae_price": None,
+            "mfe_tracking_until": now + MFE_TRACK_SEC,
+        }
+        with state_lock:
+            STATE["div_signals"].appendleft(record)
+        arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
+        send_telegram(
+            f"{arrow} {symbol} (RSI {sig['kind']} divergence)\n"
+            f"entry: {entry:.6g}\n"
+            f"SL: {sl:.6g}  TP: {tp:.6g}  (RR {DIV_RR:g})"
+        )
+    except Exception as e:
+        log_error(f"div {symbol}: {e}")
+
+
+def close_div_signal(sig, result, exit_price, exit_candle=None):
+    with state_lock:
+        sig["status"] = "CLOSED"
+        sig["result"] = result
+        sig["exit_price"] = exit_price
+        sig["closed_at"] = time.time()
+        if exit_candle:
+            sig["exit_time"] = exit_candle["time"]
+            sig["exit_candle"] = {
+                "open": exit_candle["open"], "high": exit_candle["high"],
+                "low": exit_candle["low"], "close": exit_candle["close"],
+            }
+    if result in ("WIN", "LOSS"):
+        arrow = "\u2705" if result == "WIN" else "\u274c"
+        send_telegram(f"{arrow} {sig['symbol']} divergence {sig['direction']} closed: {result} @ {exit_price:.6g}")
+
+
+def update_divergence_outcomes():
+    now = time.time()
+    with state_lock:
+        active = [
+            s for s in STATE["div_signals"]
+            if s.get("status") == "OPEN" or now < s.get("mfe_tracking_until", 0)
+        ]
+    for sig in active:
+        try:
+            candles = get_candles(sig["symbol"], interval=DIV_INTERVAL, limit=300)
+            relevant = [c for c in candles if c["time"] > sig["time"]]
+            direction = sig["direction"]
+            entry = sig["entry"]
+            risk = sig.get("risk") or abs(entry - sig["sl"]) or 1e-9
+
+            for c in relevant:
+                if direction == "LONG":
+                    fav, adv = c["high"] - entry, entry - c["low"]
+                else:
+                    fav, adv = entry - c["low"], c["high"] - entry
+                fav_r, adv_r = fav / risk, adv / risk
+                if fav_r > sig["mfe_r"] or adv_r > sig["mae_r"]:
+                    with state_lock:
+                        if fav_r > sig["mfe_r"]:
+                            sig["mfe_r"] = round(fav_r, 3)
+                            sig["mfe_price"] = c["high"] if direction == "LONG" else c["low"]
+                        if adv_r > sig["mae_r"]:
+                            sig["mae_r"] = round(adv_r, 3)
+                            sig["mae_price"] = c["low"] if direction == "LONG" else c["high"]
+
+                if sig["status"] == "OPEN":
+                    if direction == "LONG":
+                        if c["low"] <= sig["sl"]:
+                            close_div_signal(sig, "LOSS", sig["sl"], exit_candle=c)
+                        elif c["high"] >= sig["tp"]:
+                            close_div_signal(sig, "WIN", sig["tp"], exit_candle=c)
+                    else:
+                        if c["high"] >= sig["sl"]:
+                            close_div_signal(sig, "LOSS", sig["sl"], exit_candle=c)
+                        elif c["low"] <= sig["tp"]:
+                            close_div_signal(sig, "WIN", sig["tp"], exit_candle=c)
+
+            if sig["status"] == "OPEN" and now - sig["detected_at"] > SIGNAL_TIMEOUT_SEC:
+                last_price = candles[-1]["close"] if candles else entry
+                close_div_signal(sig, "TIMEOUT", last_price)
+        except Exception as e:
+            log_error(f"update_divergence_outcomes {sig.get('symbol')}: {e}")
+
+
+def compute_divergence_stats():
+    with state_lock:
+        signals = list(STATE["div_signals"])
+    closed = [s for s in signals if s.get("status") == "CLOSED" and s.get("result") in ("WIN", "LOSS")]
+    wins = sum(1 for s in closed if s["result"] == "WIN")
+    losses = sum(1 for s in closed if s["result"] == "LOSS")
+    total = wins + losses
+    timeouts = sum(1 for s in signals if s.get("result") == "TIMEOUT")
+    open_count = sum(1 for s in signals if s.get("status") == "OPEN")
+    winrate = round(wins / total * 100, 1) if total else None
+
+    dataset = [s for s in signals if s.get("mfe_price") is not None]
+
+    def agg(key, subset):
+        vals = [s[key] for s in subset]
+        if not vals:
+            return None
+        vals_sorted = sorted(vals)
+        n = len(vals_sorted)
+        return {
+            "avg": round(sum(vals) / n, 3),
+            "median": round(vals_sorted[n // 2], 3),
+            "p25": round(vals_sorted[int(n * 0.25)], 3),
+            "p75": round(vals_sorted[min(int(n * 0.75), n - 1)], 3),
+        }
+
+    win_set = [s for s in dataset if s.get("result") == "WIN"]
+    loss_set = [s for s in dataset if s.get("result") == "LOSS"]
+    open_set = [s for s in dataset if s.get("status") == "OPEN"]
+
+    return {
+        "open": open_count, "wins": wins, "losses": losses,
+        "timeouts": timeouts, "winrate": winrate, "closed_total": total,
+        "mfe_r_all": agg("mfe_r", dataset), "mae_r_all": agg("mae_r", dataset),
+        "mfe_r_wins": agg("mfe_r", win_set), "mae_r_wins": agg("mae_r", win_set),
+        "mfe_r_losses": agg("mfe_r", loss_set), "mae_r_losses": agg("mae_r", loss_set),
+        "mfe_r_open": agg("mfe_r", open_set), "mae_r_open": agg("mae_r", open_set),
+        "dataset_count": len(dataset),
+    }
 
 
 def data_quality_check(candles):
@@ -595,6 +997,24 @@ def get_candles(symbol, interval=INTERVAL, limit=LOOKBACK + 5):
     r.raise_for_status()
     # Gate.io returns oldest->newest already; fields: t,v,c,h,l,o,sum (varies by version)
     return _parse_candles(r.json())
+
+
+def get_contract_stats(symbol, interval=OI_INTERVAL, limit=OI_LOOKBACK + 2):
+    """Open interest history via GET /futures/usdt/contract_stats."""
+    r = requests.get(
+        f"{GATE_BASE}/futures/usdt/contract_stats",
+        params={"contract": symbol, "interval": interval, "limit": limit},
+        timeout=HTTP_TIMEOUT,
+    )
+    r.raise_for_status()
+    out = []
+    for c in r.json():
+        try:
+            out.append({"time": int(c.get("time", 0)), "open_interest": float(c.get("open_interest", 0))})
+        except (TypeError, ValueError):
+            continue
+    out.sort(key=lambda x: x["time"])
+    return out
 
 
 def get_candles_range(symbol, interval, start_ts, end_ts):
@@ -745,44 +1165,45 @@ def build_profile_for_symbol(symbol, candles, lookback, segs=SEGS, interval=INTE
     return compute_profile(candles, segs=segs, lookback=lookback)
 
 
-def extract_hvn_zones(profile, top_n=HVN_TOP_N, max_height_frac=MAX_ZONE_HEIGHT_FRAC, min_peak_ratio=MIN_PEAK_RATIO):
-    """Take the top_n highest-volume bins and merge adjacent ones into
-    contiguous high-volume-node zones. Zones that end up too tall relative
-    to the whole profile range are dropped — a merge that wide isn't a
-    precise level, it's a diffuse band. If the whole profile is flat (no
-    bin meaningfully busier than average — volume just spread evenly
-    across the range), there's no real POC to trade at all: return no
-    zones rather than pretending the busiest bin means something."""
+def extract_hvn_zones(profile, top_n=HVN_TOP_N, min_peak_ratio=MIN_PEAK_RATIO, shoulder_pct=SHOULDER_THRESHOLD_PCT):
+    """Grow each zone outward from a local volume peak while neighboring
+    bins stay >= shoulder_pct of that peak's volume, stopping right where
+    the bars visibly get shorter — rather than merging together a fixed
+    top-N bins by rank, which could cut a zone short mid-shoulder or
+    merge two genuinely separate peaks into one. A zone can legitimately
+    come out wide if the underlying volume plateau is wide — the shoulder
+    threshold is what keeps it honest, not a separate height cap. If the
+    whole profile is flat (no bin meaningfully busier than average),
+    there's no real POC to trade at all: return no zones rather than
+    pretending the busiest bin means something."""
     borders = profile["borders"]
     bin_vols = profile["bin_vols"]
     segs = len(bin_vols)
-    total_range = max(profile["hh"] - profile["ll"], 1e-12)
 
     avg_vol = sum(bin_vols) / segs if segs else 0
     max_vol = max(bin_vols) if bin_vols else 0
     if min_peak_ratio and avg_vol > 0 and max_vol < avg_vol * min_peak_ratio:
         return []
 
-    ranked = sorted(range(segs), key=lambda i: -bin_vols[i])[:top_n]
-    ranked_set = set(ranked)
-
-    zones = []
+    ranked = sorted(range(segs), key=lambda i: -bin_vols[i])
     used = set()
-    for idx in sorted(ranked_set):
-        if idx in used:
+    zones = []
+    for idx in ranked:
+        if len(zones) >= top_n:
+            break
+        if idx in used or bin_vols[idx] <= 0:
             continue
+        peak_vol = bin_vols[idx]
+        threshold = peak_vol * shoulder_pct
         lo = hi = idx
-        while (lo - 1) in ranked_set and (lo - 1) not in used:
+        while lo - 1 >= 0 and (lo - 1) not in used and bin_vols[lo - 1] >= threshold:
             lo -= 1
-        while (hi + 1) in ranked_set and (hi + 1) not in used:
+        while hi + 1 < segs and (hi + 1) not in used and bin_vols[hi + 1] >= threshold:
             hi += 1
         for k in range(lo, hi + 1):
             used.add(k)
         top = borders[lo]
         bottom = borders[hi + 1]
-        height = top - bottom
-        if max_height_frac and height / total_range > max_height_frac:
-            continue  # too tall/diffuse — not a precise node
         vol = sum(bin_vols[lo:hi + 1])
         zones.append({"top": top, "bottom": bottom, "mid": (top + bottom) / 2, "volume": vol})
 
@@ -897,6 +1318,39 @@ def trend_allows(direction, trend):
     return (trend == "UP" and direction == "LONG") or (trend == "DOWN" and direction == "SHORT")
 
 
+def compute_oi_trend(symbol, lookback=OI_LOOKBACK, threshold_pct=OI_THRESHOLD_PCT, interval=OI_INTERVAL):
+    """Net open-interest change over the lookback window. Returns 'UP'
+    (OI growing — new positions opening), 'DOWN' (OI shrinking —
+    positions unwinding), or 'NEUTRAL'. Any fetch/data problem degrades
+    to NEUTRAL (never blocks a signal outright on a network hiccup)."""
+    try:
+        stats = get_contract_stats(symbol, interval=interval, limit=lookback + 2)
+    except Exception as e:
+        log_error(f"oi fetch {symbol}: {e}")
+        return "NEUTRAL"
+    if len(stats) < lookback:
+        return "NEUTRAL"
+    window = stats[-lookback:]
+    start_oi, end_oi = window[0]["open_interest"], window[-1]["open_interest"]
+    if start_oi <= 0:
+        return "NEUTRAL"
+    change = (end_oi - start_oi) / start_oi
+    if change > threshold_pct:
+        return "UP"
+    if change < -threshold_pct:
+        return "DOWN"
+    return "NEUTRAL"
+
+
+def oi_allows(direction, oi_trend):
+    """Rising OI backs a breakout in the same direction as the move
+    (new money); falling OI (unwinding) doesn't back a fresh breakout in
+    either direction as strongly — only the matching direction passes."""
+    if not OI_FILTER_ENABLED or oi_trend == "NEUTRAL":
+        return True
+    return (oi_trend == "UP" and direction == "LONG") or (oi_trend == "DOWN" and direction == "SHORT")
+
+
 def volume_confirms(candles, min_ratio=VOL_CONFIRM_RATIO, lookback=VOL_CONFIRM_LOOKBACK):
     """The trigger bar (the last candle) should have above-average volume
     versus the bars right before it — a touch/breakout on thin volume is
@@ -999,6 +1453,7 @@ def save_state():
             data = {
                 "overrides": SYMBOL_OVERRIDES,
                 "signals": list(STATE["signals"]),
+                "div_signals": list(STATE["div_signals"]),
                 "saved_at": time.time(),
             }
         tmp_path = STATE_FILE + ".tmp"
@@ -1017,9 +1472,11 @@ def load_state():
             data = json.load(f)
         SYMBOL_OVERRIDES.update(data.get("overrides", {}))
         signals = data.get("signals", [])
+        div_signals = data.get("div_signals", [])
         with state_lock:
             STATE["signals"] = deque(signals, maxlen=SIGNAL_HISTORY)
-        print(f"Loaded persisted state: {len(SYMBOL_OVERRIDES)} overrides, {len(signals)} signals")
+            STATE["div_signals"] = deque(div_signals, maxlen=DIV_SIGNAL_HISTORY)
+        print(f"Loaded persisted state: {len(SYMBOL_OVERRIDES)} overrides, {len(signals)} signals, {len(div_signals)} divergence signals")
     except Exception as e:
         log_error(f"load_state: {e}")
 
@@ -1279,7 +1736,14 @@ def scan_symbol(symbol):
         if BOUNCE_ENABLED and zones_bounce:
             sig = _try_signal(symbol, candles, detect_signal(candles, eligible_zones(zones_bounce)))
         if sig is None and BREAKOUT_ENABLED and zones_breakout:
-            sig = _try_signal(symbol, candles, detect_breakout(candles, eligible_zones(zones_breakout)))
+            candidate = _try_signal(symbol, candles, detect_breakout(candles, eligible_zones(zones_breakout)))
+            if candidate:
+                oi_trend = compute_oi_trend(symbol)
+                if oi_allows(candidate["direction"], oi_trend):
+                    sig = candidate
+                else:
+                    with state_lock:
+                        STATE["filtered_by_oi"] += 1
 
         if sig and has_open_signal(symbol):
             sig = None  # already have an unresolved signal on this symbol — don't stack another
@@ -1519,17 +1983,24 @@ def scan_loop():
                 STATE["excluded_low_quality"] = 0
                 STATE["filtered_by_trend"] = 0
                 STATE["filtered_by_volume"] = 0
+                STATE["filtered_by_oi"] = 0
             with ThreadPoolExecutor(max_workers=WORKERS) as ex:
                 futs = [ex.submit(scan_symbol, s) for s in universe]
+                if DIVERGENCE_ENABLED:
+                    futs += [ex.submit(scan_symbol_divergence, s) for s in universe]
                 for _ in as_completed(futs):
                     pass
             update_signal_outcomes()
+            if DIVERGENCE_ENABLED:
+                update_divergence_outcomes()
             auto_tune_cycle(universe)
             save_state()
             t1 = time.time()
             with state_lock:
                 STATE["last_scan_finished"] = t1
                 STATE["last_scan_duration"] = round(t1 - t0, 1)
+                STATE["div_last_scan_finished"] = t1
+                STATE["div_last_scan_duration"] = round(t1 - t0, 1)
         except Exception as e:
             log_error(f"scan_loop: {e}\n{traceback.format_exc()}")
         time.sleep(max(5, SCAN_INTERVAL_SEC))
@@ -1549,6 +2020,7 @@ def api_status():
             "excluded_low_quality": STATE["excluded_low_quality"],
             "filtered_by_trend": STATE["filtered_by_trend"],
             "filtered_by_volume": STATE["filtered_by_volume"],
+            "filtered_by_oi": STATE["filtered_by_oi"],
             "last_scan_started": STATE["last_scan_started"],
             "last_scan_finished": STATE["last_scan_finished"],
             "last_scan_duration": STATE["last_scan_duration"],
@@ -1571,10 +2043,13 @@ def api_status():
                 "max_avg_wick_ratio": MAX_AVG_WICK_RATIO,
                 "gap_threshold_pct": GAP_THRESHOLD_PCT, "max_gap_ratio": MAX_GAP_RATIO,
                 "min_efficiency_ratio": MIN_EFFICIENCY_RATIO,
+                "shoulder_threshold_pct": SHOULDER_THRESHOLD_PCT, "min_peak_ratio": MIN_PEAK_RATIO,
                 "trend_filter_enabled": TREND_FILTER_ENABLED, "trend_lookback": TREND_LOOKBACK,
                 "trend_threshold_pct": TREND_THRESHOLD_PCT,
                 "volume_confirm_enabled": VOLUME_CONFIRM_ENABLED, "vol_confirm_ratio": VOL_CONFIRM_RATIO,
                 "bounce_enabled": BOUNCE_ENABLED, "breakout_enabled": BREAKOUT_ENABLED,
+                "oi_filter_enabled": OI_FILTER_ENABLED, "oi_interval": OI_INTERVAL,
+                "oi_lookback": OI_LOOKBACK, "oi_threshold_pct": OI_THRESHOLD_PCT,
                 "magnify_enabled": MAGNIFY_ENABLED, "magnify_interval": MAGNIFY_INTERVAL,
                 "magnify_target_ratio": MAGNIFY_TARGET_RATIO,
             },
@@ -1656,6 +2131,43 @@ def api_overrides():
     return jsonify(SYMBOL_OVERRIDES)
 
 
+@app.route("/api/divergence/status")
+def api_divergence_status():
+    stats = compute_divergence_stats()
+    with state_lock:
+        return jsonify({
+            "version": APP_VERSION,
+            "enabled": DIVERGENCE_ENABLED,
+            "interval": DIV_INTERVAL,
+            "last_scan_finished": STATE["div_last_scan_finished"],
+            "last_scan_duration": STATE["div_last_scan_duration"],
+            "stats": stats,
+            "config": {
+                "rr": DIV_RR, "buffer_pct": DIV_BUFFER_PCT, "rsi_period": DIV_RSI_PERIOD,
+                "pivot_left": DIV_PIVOT_LEFT, "pivot_right": DIV_PIVOT_RIGHT,
+                "freshness_bars": DIV_FRESHNESS_BARS, "cooldown": DIV_COOLDOWN_SEC,
+            },
+        })
+
+
+@app.route("/api/divergence/signals")
+def api_divergence_signals():
+    with state_lock:
+        return jsonify(list(STATE["div_signals"]))
+
+
+@app.route("/api/divergence/chart/<symbol>")
+def api_divergence_chart(symbol):
+    try:
+        candles = get_candles(symbol, interval=DIV_INTERVAL, limit=DIV_FETCH_LIMIT)
+        closes = [c["close"] for c in candles]
+        rsi = compute_rsi(closes, period=DIV_RSI_PERIOD)
+        return jsonify({"symbol": symbol, "interval": DIV_INTERVAL, "candles": candles, "rsi": rsi})
+    except Exception as e:
+        log_error(f"api_divergence_chart {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
     """Wipe all accumulated state: per-symbol tuning overrides, signal
@@ -1666,13 +2178,17 @@ def api_reset():
         with state_lock:
             SYMBOL_OVERRIDES.clear()
             STATE["signals"].clear()
+            STATE["div_signals"].clear()
             STATE["watchlist"].clear()
             STATE["excluded_low_quality"] = 0
             STATE["filtered_by_trend"] = 0
             STATE["filtered_by_volume"] = 0
+            STATE["filtered_by_oi"] = 0
             STATE["errors"].clear()
         with _cooldowns_lock:
             _cooldowns.clear()
+        with _div_cooldowns_lock:
+            _div_cooldowns.clear()
         global _auto_tune_cursor
         _auto_tune_cursor = 0
         save_state()
@@ -1724,6 +2240,12 @@ INDEX_HTML = """<!doctype html>
   #optimizeBtn:disabled { opacity:.5; }
   #chartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
   canvas { width:100%; height:100%; display:block; background:#0d1017; border-radius:8px; }
+  #divModal { position:fixed; inset:0; background:rgba(5,7,12,.92); display:none; z-index:20; }
+  #divModal.open { display:flex; flex-direction:column; }
+  #divModalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
+  #divModalHeader h2 { font-size:15px; margin:0; }
+  #divCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
+  #divChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
   .dim { color:#8b98ab; }
   .empty { padding:30px 14px; text-align:center; color:#6b7688; font-size:13px; }
 </style>
@@ -1742,6 +2264,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab active" data-tab="signals">Сигналы</div>
   <div class="tab" data-tab="watch">Watchlist</div>
   <div class="tab" data-tab="tuning">Тюнинг</div>
+  <div class="tab" data-tab="divergence">Дивергенции</div>
 </div>
 <div class="panel">
   <table id="signalsTable" style="display:table">
@@ -1753,6 +2276,11 @@ INDEX_HTML = """<!doctype html>
     <tbody></tbody>
   </table>
   <div id="tuningPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
+  <table id="divTable" style="display:none">
+    <thead><tr><th>Symbol</th><th>Dir</th><th>Kind</th><th>Entry</th><th>SL</th><th>TP</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div id="divStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
 </div>
 
@@ -1770,6 +2298,17 @@ INDEX_HTML = """<!doctype html>
   <div id="chartWrap"><canvas id="chartCanvas"></canvas></div>
 </div>
 
+<div id="divModal">
+  <div id="divModalHeader">
+    <div>
+      <h2 id="divModalTitle">-</h2>
+      <div id="divModalParams" class="dim" style="font-size:11px;margin-top:2px;"></div>
+    </div>
+    <button id="divCloseBtn">Закрыть</button>
+  </div>
+  <div id="divChartWrap"><canvas id="divChartCanvas"></canvas></div>
+</div>
+
 <script>
 const fmt = (n, d=6) => n === null || n === undefined ? '-' : Number(n).toPrecision(d).replace(/\\.?0+$/,'').replace(/\\.$/, '');
 const fmtTime = (t) => t ? new Date(t*1000).toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit'}) : '-';
@@ -1783,7 +2322,10 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('signalsTable').style.display = activeTab === 'signals' ? 'table' : 'none';
     document.getElementById('watchTable').style.display = activeTab === 'watch' ? 'table' : 'none';
     document.getElementById('tuningPanel').style.display = activeTab === 'tuning' ? 'block' : 'none';
+    document.getElementById('divTable').style.display = activeTab === 'divergence' ? 'table' : 'none';
+    document.getElementById('divStatsPanel').style.display = activeTab === 'divergence' ? 'block' : 'none';
     if (activeTab === 'tuning') refreshTuning();
+    if (activeTab === 'divergence') refreshDivergence();
   };
 });
 
@@ -1807,7 +2349,7 @@ async function refreshStatus() {
     const cv = st.current_version || {};
     const cvTxt = cv.total ? `с v${s.version}: ${cv.winrate}% (${cv.wins}W/${cv.losses}L)` : `с v${s.version}: пока нет закрытых`;
     document.getElementById('filterStats').textContent =
-      `За этот скан отклонено — тренд: ${s.filtered_by_trend||0}, объём: ${s.filtered_by_volume||0} · ${cvTxt}`;
+      `За этот скан отклонено — тренд: ${s.filtered_by_trend||0}, объём: ${s.filtered_by_volume||0}, OI: ${s.filtered_by_oi||0} · ${cvTxt}`;
   } catch(e) {}
 }
 
@@ -1899,11 +2441,73 @@ async function refreshTuning() {
     </div>`;
 }
 
+async function refreshDivergence() {
+  const status = await (await fetch('/api/divergence/status')).json();
+  const rows = await (await fetch('/api/divergence/signals')).json();
+
+  const tbody = document.querySelector('#divTable tbody');
+  tbody.innerHTML = '';
+  document.getElementById('emptyMsg').style.display = (activeTab==='divergence' && rows.length===0) ? 'block' : 'none';
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    let statusHtml;
+    const exitTitle = r.exit_time
+      ? `title="свеча закрытия: ${fmtTime(r.exit_time)} · O ${fmt(r.exit_candle?.open)} H ${fmt(r.exit_candle?.high)} L ${fmt(r.exit_candle?.low)} C ${fmt(r.exit_candle?.close)}"`
+      : '';
+    if (r.status === 'OPEN') {
+      statusHtml = `<span class="status-open">OPEN</span>`;
+    } else if (r.result === 'WIN') {
+      statusHtml = `<span class="win" ${exitTitle}>WIN @ ${fmt(r.exit_price)}${r.exit_time ? ' ('+fmtTime(r.exit_time)+')' : ''}</span>`;
+    } else if (r.result === 'LOSS') {
+      statusHtml = `<span class="loss" ${exitTitle}>LOSS @ ${fmt(r.exit_price)}${r.exit_time ? ' ('+fmtTime(r.exit_time)+')' : ''}</span>`;
+    } else {
+      statusHtml = `<span class="status-timeout">TIMEOUT</span>`;
+    }
+    tr.innerHTML = `<td>${r.symbol}</td>
+      <td class="${r.direction==='LONG'?'long':'short'}">${r.direction}</td>
+      <td class="dim">${r.kind || '-'}</td>
+      <td>${fmt(r.entry)}</td>
+      <td class="dim">${fmt(r.sl)}</td>
+      <td class="dim">${fmt(r.tp)}</td>
+      <td class="dim">${r.mfe_r !== undefined ? r.mfe_r.toFixed(2) : '-'}</td>
+      <td class="dim">${r.mae_r !== undefined ? r.mae_r.toFixed(2) : '-'}</td>
+      <td>${statusHtml}</td>
+      <td class="dim">${fmtTime(r.time)}</td>`;
+    tr.onclick = () => openDivergenceChart(r);
+    tbody.appendChild(tr);
+  }
+
+  const s = status.stats || {};
+  const wr = s.winrate !== null && s.winrate !== undefined ? `${s.winrate}%` : '-';
+  const panel = document.getElementById('divStatsPanel');
+  const cfg = status.config || {};
+  const mfeBlock = s.dataset_count ? `
+    <div style="margin-bottom:8px;"><b>MFE (R) — насколько цена уходила в плюс:</b><br>
+      <span class="dim">все: ${fmtStat(s.mfe_r_all)}</span><br>
+      <span class="win">WIN: ${fmtStat(s.mfe_r_wins)}</span><br>
+      <span class="loss">LOSS: ${fmtStat(s.mfe_r_losses)}</span><br>
+      <span class="status-open">OPEN: ${fmtStat(s.mfe_r_open)}</span>
+    </div>
+    <div><b>MAE (R) — насколько цена уходила в минус:</b><br>
+      <span class="dim">все: ${fmtStat(s.mae_r_all)}</span><br>
+      <span class="win">WIN: ${fmtStat(s.mae_r_wins)}</span><br>
+      <span class="loss">LOSS: ${fmtStat(s.mae_r_losses)}</span><br>
+      <span class="status-open">OPEN: ${fmtStat(s.mae_r_open)}</span>
+    </div>` : '<div class="dim">Пока недостаточно закрытых сигналов для MFE/MAE.</div>';
+  panel.innerHTML = `
+    <div class="dim" style="margin-bottom:10px;">
+      RSI-дивергенции · ТФ ${status.interval} · скан ${status.last_scan_duration!==null && status.last_scan_duration!==undefined ? status.last_scan_duration+'s' : '...'} ·
+      Винрейт: ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ${cfg.rr}
+    </div>
+    ${mfeBlock}`;
+}
+
 async function refreshAll() {
   await refreshStatus();
   await refreshSignals();
   await refreshWatch();
   if (activeTab === 'tuning') await refreshTuning();
+  if (activeTab === 'divergence') await refreshDivergence();
 }
 refreshAll();
 setInterval(refreshAll, 15000);
@@ -2130,9 +2734,151 @@ function fmtNum(n) {
   return Number(n).toPrecision(6).replace(/\\.?0+$/,'').replace(/\\.$/, '');
 }
 
+// ---------------- Divergence chart modal ----------------
+const divModal = document.getElementById('divModal');
+document.getElementById('divCloseBtn').onclick = () => divModal.classList.remove('open');
+let currentDivRow = null;
+let currentDivData = null;
+
+async function openDivergenceChart(row) {
+  currentDivRow = row;
+  document.getElementById('divModalTitle').textContent = row.symbol;
+  document.getElementById('divModalParams').textContent = 'загрузка...';
+  divModal.classList.add('open');
+  try {
+    const data = await (await fetch(`/api/divergence/chart/${row.symbol}`)).json();
+    currentDivData = data;
+    document.getElementById('divModalParams').textContent =
+      `RSI дивергенция (${row.kind}) · ${row.direction} · entry ${fmt(row.entry)} · SL ${fmt(row.sl)} · TP ${fmt(row.tp)}`;
+    drawDivergenceChart(data, row);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function drawDivergenceChart(data, row) {
+  const canvas = document.getElementById('divChartCanvas');
+  const wrap = document.getElementById('divChartWrap');
+  const dpr = window.devicePixelRatio || 1;
+  const W = wrap.clientWidth, H = wrap.clientHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+
+  const candles = data.candles || [];
+  const rsi = data.rsi || [];
+  if (!candles.length) return;
+
+  const priceH = H * 0.62;
+  const rsiTop = priceH + 14;
+  const rsiH = H - rsiTop - 4;
+  const padRight = 54;
+  const chartW = W - padRight;
+
+  const n = candles.length;
+  const slot = chartW / n;
+  const bodyW = Math.max(1, slot * 0.6);
+  const xAt = (i) => i * slot + slot / 2;
+  const findIdx = (t) => candles.findIndex(c => c.time === t);
+
+  // ---- price panel ----
+  let hi = Math.max(...candles.map(c => c.high));
+  let lo = Math.min(...candles.map(c => c.low));
+  if (row) { hi = Math.max(hi, row.tp, row.sl, row.entry); lo = Math.min(lo, row.tp, row.sl, row.entry); }
+  const pad = (hi - lo) * 0.05 || hi * 0.01;
+  hi += pad; lo -= pad;
+  const range = hi - lo || 1;
+  const yP = (price) => (hi - price) / range * priceH;
+
+  candles.forEach((c, i) => {
+    const cx = xAt(i);
+    const up = c.close >= c.open;
+    ctx.strokeStyle = ctx.fillStyle = up ? '#3ddc97' : '#ff6b6b';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx, yP(c.high));
+    ctx.lineTo(cx, yP(c.low));
+    ctx.stroke();
+    const top = yP(Math.max(c.open, c.close));
+    const h = Math.max(1, Math.abs(yP(c.open) - yP(c.close)));
+    ctx.fillRect(cx - bodyW / 2, top, bodyW, h);
+  });
+
+  ctx.fillStyle = '#6b7688';
+  ctx.font = '10px sans-serif';
+  for (let i = 0; i <= 3; i++) {
+    const p = hi - (range * i / 3);
+    const yy = yP(p);
+    ctx.fillText(fmtNum(p), chartW + 4, yy + 3);
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(chartW, yy); ctx.stroke();
+  }
+
+  // price pivot trendline — connects the two swing points the divergence was read from
+  let pi1 = -1, pi2 = -1;
+  if (row && row.time_p1 !== undefined && row.time_p2 !== undefined) {
+    pi1 = findIdx(row.time_p1);
+    pi2 = findIdx(row.time_p2);
+    if (pi1 >= 0 && pi2 >= 0) {
+      const x1 = xAt(pi1), x2 = xAt(pi2), y1 = yP(row.price_p1), y2 = yP(row.price_p2);
+      ctx.strokeStyle = '#ffcc55';
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+      ctx.fillStyle = '#ffcc55';
+      [[x1, y1], [x2, y2]].forEach(([x, y]) => { ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill(); });
+    }
+  }
+
+  if (row) {
+    drawLevelLine(ctx, yP(row.entry), chartW, '#5aa8ff', 'ENTRY ' + fmtNum(row.entry));
+    drawLevelLine(ctx, yP(row.sl), chartW, '#ff6b6b', 'SL ' + fmtNum(row.sl));
+    drawLevelLine(ctx, yP(row.tp), chartW, '#3ddc97', 'TP ' + fmtNum(row.tp));
+  }
+
+  // ---- RSI panel ----
+  ctx.fillStyle = '#8b98ab';
+  ctx.font = '10px sans-serif';
+  ctx.fillText('RSI', 4, rsiTop + 10);
+
+  const yR = (v) => rsiTop + (100 - v) / 100 * rsiH;
+  ctx.setLineDash([3, 3]);
+  [30, 50, 70].forEach(v => {
+    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
+    ctx.beginPath(); ctx.moveTo(0, yR(v)); ctx.lineTo(chartW, yR(v)); ctx.stroke();
+    ctx.fillStyle = '#555f70'; ctx.font = '9px sans-serif';
+    ctx.fillText(String(v), chartW + 4, yR(v) + 3);
+  });
+  ctx.setLineDash([]);
+
+  ctx.strokeStyle = '#c58cff';
+  ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  let started = false;
+  rsi.forEach((v, i) => {
+    if (v === null || v === undefined) return;
+    const cx = xAt(i), cy = yR(v);
+    if (!started) { ctx.moveTo(cx, cy); started = true; } else { ctx.lineTo(cx, cy); }
+  });
+  ctx.stroke();
+
+  // RSI pivot trendline — same two bars as above, RSI's value there instead of price
+  if (row && pi1 >= 0 && pi2 >= 0 && row.rsi_p1 !== undefined && row.rsi_p2 !== undefined) {
+    const x1 = xAt(pi1), x2 = xAt(pi2), y1 = yR(row.rsi_p1), y2 = yR(row.rsi_p2);
+    ctx.strokeStyle = '#ffcc55';
+    ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
+    ctx.fillStyle = '#ffcc55';
+    [[x1, y1], [x2, y2]].forEach(([x, y]) => { ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill(); });
+  }
+}
+
 window.addEventListener('resize', () => {
   if (modal.classList.contains('open') && currentData) {
     drawChart(currentData, currentRow);
+  }
+  if (divModal.classList.contains('open') && currentDivData) {
+    drawDivergenceChart(currentDivData, currentDivRow);
   }
 });
 </script>
