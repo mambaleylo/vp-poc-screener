@@ -544,6 +544,22 @@ v0.20.1 - MFE/MAE at-close values (v0.19) were only visible in the
          recorded before this field existed. Applied to both the main
          signals table and the divergence signals table. Verified
          against open/closed/legacy/missing-field cases directly.
+v0.21.0 - extended the pivot-stability diagnostic with the other half
+         of the question: not just "would a smaller right window agree
+         with the rigorous one", but "how much price move gets given up
+         waiting for the extra confirmation bars, on the cases where
+         they do agree". simulate_pivot_stability() now also takes
+         closes and, for every agreeing case, compares the close price
+         at shadow-confirmation time vs at full-confirmation time —
+         signed so positive always means "the earlier entry would have
+         been better" (higher price for a bearish/high pivot, lower for
+         a bullish/low one). Accumulated as a running avg (gain_sum/
+         gain_count, not a growing list, to keep memory bounded) per
+         VP_DIV_SHADOW_RIGHTS value, shown in the Дивергенции tab
+         alongside the agreement rate. Verified on synthetic data: gain
+         shrinks monotonically as shadow_right approaches the real one
+         (less waiting -> less to give up), consistent with the
+         agreement-rate trend from v0.20.
 """
 
 import os
@@ -559,7 +575,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.20.1"
+APP_VERSION = "0.21.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -789,7 +805,7 @@ STATE = {
     "div_last_scan_duration": None,
     # rotating diagnostic: how often would a smaller DIV_PIVOT_RIGHT have
     # agreed with the rigorous one, accumulated one symbol per cycle
-    "div_pivot_stability": {str(r): {"agree": 0, "disagree": 0} for r in DIV_SHADOW_RIGHTS},
+    "div_pivot_stability": {str(r): {"agree": 0, "disagree": 0, "gain_sum": 0.0, "gain_count": 0} for r in DIV_SHADOW_RIGHTS},
 }
 _cooldowns = {}  # (symbol, zone_key) -> last_alert_ts
 _cooldowns_lock = threading.Lock()
@@ -852,7 +868,7 @@ def find_pivots(values, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT, kind="high")
     return pivots
 
 
-def simulate_pivot_stability(values, left, real_right, shadow_right, kind, stride=1):
+def simulate_pivot_stability(values, closes, left, real_right, shadow_right, kind, stride=1):
     """Walk bar-by-bar as if running live: at each point T, compute what
     the SHADOW (smaller right) method would currently call its most
     recent pivot, using only data up to T. Check whether that specific
@@ -862,10 +878,20 @@ def simulate_pivot_stability(values, left, real_right, shadow_right, kind, strid
     guaranteed to always agree, a mistake caught before shipping this).
     Only counts cases where the rigorous method has had a full chance to
     judge that bar (excludes the unconfirmable tail), so a "disagree"
-    here means a real false start, not just "not confirmed yet"."""
+    here means a real false start, not just "not confirmed yet".
+
+    On every AGREEING case (same real pivot either way — an apples-to-
+    apples comparison), also records the % price move given up while
+    waiting the extra (real_right - shadow_right) bars for full
+    confirmation: close price at shadow-confirmation time vs close price
+    at full-confirmation time, signed so positive always means "the
+    earlier entry would have been better" (for a high/bearish pivot a
+    higher price is better; for a low/bullish pivot a lower price is
+    better, so that side is flipped)."""
     n = len(values)
     real_pivots = set(find_pivots(values, left, real_right, kind))
     agree = disagree = 0
+    pct_gains = []
     for T in range(left + shadow_right, n, stride):
         shadow_pivots = find_pivots(values[:T + 1], left, shadow_right, kind)
         if not shadow_pivots:
@@ -875,9 +901,16 @@ def simulate_pivot_stability(values, left, real_right, shadow_right, kind, strid
             continue  # rigorous method hasn't had a full chance to judge this bar yet
         if latest in real_pivots:
             agree += 1
+            shadow_t, real_t = latest + shadow_right, latest + real_right
+            p_shadow, p_real = closes[shadow_t], closes[real_t]
+            if p_real:
+                pct = (p_shadow - p_real) / p_real * 100
+                if kind == "low":
+                    pct = -pct
+                pct_gains.append(pct)
         else:
             disagree += 1
-    return agree, disagree
+    return agree, disagree, pct_gains
 
 
 def _rsi_extreme_near(rsi, idx, window, mode):
@@ -1961,15 +1994,20 @@ def div_stability_cycle(universe):
                 continue
             highs = [c["high"] for c in candles]
             lows = [c["low"] for c in candles]
+            closes = [c["close"] for c in candles]
             for shadow_r in DIV_SHADOW_RIGHTS:
                 if shadow_r >= DIV_PIVOT_RIGHT:
                     continue
-                a1, d1 = simulate_pivot_stability(highs, DIV_PIVOT_LEFT, DIV_PIVOT_RIGHT, shadow_r, "high")
-                a2, d2 = simulate_pivot_stability(lows, DIV_PIVOT_LEFT, DIV_PIVOT_RIGHT, shadow_r, "low")
+                a1, d1, g1 = simulate_pivot_stability(highs, closes, DIV_PIVOT_LEFT, DIV_PIVOT_RIGHT, shadow_r, "high")
+                a2, d2, g2 = simulate_pivot_stability(lows, closes, DIV_PIVOT_LEFT, DIV_PIVOT_RIGHT, shadow_r, "low")
+                gains = g1 + g2
                 with state_lock:
-                    bucket = STATE["div_pivot_stability"].setdefault(str(shadow_r), {"agree": 0, "disagree": 0})
+                    bucket = STATE["div_pivot_stability"].setdefault(
+                        str(shadow_r), {"agree": 0, "disagree": 0, "gain_sum": 0.0, "gain_count": 0})
                     bucket["agree"] += a1 + a2
                     bucket["disagree"] += d1 + d2
+                    bucket["gain_sum"] += sum(gains)
+                    bucket["gain_count"] += len(gains)
         except Exception as e:
             log_error(f"div_stability {symbol}: {e}")
 
@@ -2556,6 +2594,7 @@ def api_divergence_status():
                 k: {
                     "agree": v["agree"], "disagree": v["disagree"],
                     "rate": round(v["agree"] / (v["agree"] + v["disagree"]) * 100, 1) if (v["agree"] + v["disagree"]) else None,
+                    "avg_pct_gain": round(v.get("gain_sum", 0) / v["gain_count"], 3) if v.get("gain_count") else None,
                 }
                 for k, v in stability_raw.items()
             },
@@ -2602,7 +2641,7 @@ def api_reset():
             STATE["filtered_by_volume"] = 0
             STATE["filtered_by_oi"] = 0
             STATE["errors"].clear()
-            STATE["div_pivot_stability"] = {str(r): {"agree": 0, "disagree": 0} for r in DIV_SHADOW_RIGHTS}
+            STATE["div_pivot_stability"] = {str(r): {"agree": 0, "disagree": 0, "gain_sum": 0.0, "gain_count": 0} for r in DIV_SHADOW_RIGHTS}
         with _cooldowns_lock:
             _cooldowns.clear()
         with _div_cooldowns_lock:
@@ -2949,8 +2988,9 @@ async function refreshDivergence() {
   const psRows = Object.keys(ps).sort((a,b)=>Number(a)-Number(b)).map(r => {
     const v = ps[r];
     const total = v.agree + v.disagree;
+    const gainTxt = v.avg_pct_gain !== null && v.avg_pct_gain !== undefined ? ` · вход раньше в среднем на ${v.avg_pct_gain > 0 ? '+' : ''}${v.avg_pct_gain}% лучше` : '';
     return total
-      ? `right=${r}: <b>${v.rate}%</b> согласия (${v.agree}/${total})`
+      ? `right=${r}: <b>${v.rate}%</b> согласия (${v.agree}/${total})${gainTxt}`
       : `right=${r}: пока нет данных`;
   }).join('<br>');
   const psBlock = psRows ? `
