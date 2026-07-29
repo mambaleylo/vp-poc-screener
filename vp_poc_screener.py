@@ -457,6 +457,26 @@ v0.17.0 - fix: a real bug this time, confirmed by a user screenshot
          detect->store->chart-endpoint pipeline confirming rsi_time_p1/
          p2 differ from time_p1/p2 when they should and are findable in
          the chart's own candle timestamps.
+v0.18.0 - user feedback: v0.12-13 together cut live signal volume too
+         much, enough that they'd rolled back to v0.11 and lost the
+         dedup/Telegram/divergence fixes shipped since. Rather than
+         re-deleting the v0.13 zone method, made it selectable:
+         VP_ZONE_METHOD=shoulder (default, v0.13's behavior) or
+         VP_ZONE_METHOD=topn (restores v0.11's exact zone construction
+         — top-N bins merged by rank, with the original
+         VP_MAX_ZONE_HEIGHT_FRAC cap). Tested both against the same
+         Gaussian-hump profile: shoulder produced a 2.5-wide zone,
+         topn a 0.6-wide one (25% vs 6% of the price range) — a
+         materially narrower zone is easier to wick into and close back
+         out of, which is exactly the touch-and-reject condition both
+         bounce and breakout need to fire, so the width difference
+         plausibly explains the drop in signal frequency directly. Also
+         raised the default OI filter threshold 5% -> 8%
+         (VP_OI_THRESHOLD_PCT) since 5% over a 24h window was likely
+         triggering (and filtering breakouts) too readily — can still
+         be disabled entirely with VP_OI_FILTER=0. zone_method now
+         shown in /api/status config for visibility into which mode is
+         active.
 """
 
 import os
@@ -472,7 +492,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.17.0"
+APP_VERSION = "0.18.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -585,6 +605,13 @@ DIV_SIGNAL_HISTORY = 200
 # node price actually respects.
 MIN_PEAK_RATIO = float(os.environ.get("VP_MIN_PEAK_RATIO", 2.5))  # the busiest bin must be at least this many times the average bin — otherwise volume is just spread flat across the whole range and there's no real POC to trade
 SHOULDER_THRESHOLD_PCT = float(os.environ.get("VP_SHOULDER_THRESHOLD_PCT", 0.5))  # a zone grows outward from its local peak bin while neighboring bins stay >= this fraction of that peak's volume — stops right where the bars visibly get shorter
+# v0.13's shoulder-growth method replaced v0.11's top-N-bin-merge method.
+# User feedback: v0.12-13 together cut signal volume too much. Kept both
+# methods selectable rather than re-deleting the newer one — "topn"
+# restores the pre-v0.13 zone construction (with its original height cap)
+# exactly, in case the shoulder method is the one over-filtering.
+ZONE_METHOD = os.environ.get("VP_ZONE_METHOD", "shoulder")  # "shoulder" or "topn"
+LEGACY_MAX_ZONE_HEIGHT_FRAC = float(os.environ.get("VP_MAX_ZONE_HEIGHT_FRAC", 0.10))  # only used when VP_ZONE_METHOD=topn
 ZONE_STRENGTH_MIN_RATIO = float(os.environ.get("VP_ZONE_STRENGTH_MIN_RATIO", 0.55))  # zone volume must be >= this fraction of the POC's volume to be eligible for signals
 BREAKOUT_MIN_BARS_INSIDE = int(os.environ.get("VP_BREAKOUT_MIN_BARS", 3))  # bars that must have been basing inside/around the zone right before a breakout signal
 BOUNCE_ENABLED = os.environ.get("VP_BOUNCE_ENABLED", "1") == "1"
@@ -615,7 +642,7 @@ VOL_CONFIRM_RATIO = float(os.environ.get("VP_VOL_CONFIRM_RATIO", 1.15))  # trigg
 OI_FILTER_ENABLED = os.environ.get("VP_OI_FILTER", "1") == "1"
 OI_INTERVAL = os.environ.get("VP_OI_INTERVAL", "1h")
 OI_LOOKBACK = int(os.environ.get("VP_OI_LOOKBACK", 24))
-OI_THRESHOLD_PCT = float(os.environ.get("VP_OI_THRESHOLD_PCT", 0.05))
+OI_THRESHOLD_PCT = float(os.environ.get("VP_OI_THRESHOLD_PCT", 0.08))  # raised from 0.05 — was triggering (and filtering) too readily per user feedback that v0.12-13 cut signal volume too much
 
 # --- data quality filter: skip symbols that look illiquid/stale on the
 # candle feed itself (near-zero volume bars, flat high==low bars, or an
@@ -1287,17 +1314,14 @@ def build_profile_for_symbol(symbol, candles, lookback, segs=SEGS, interval=INTE
     return compute_profile(candles, segs=segs, lookback=lookback)
 
 
-def extract_hvn_zones(profile, top_n=HVN_TOP_N, min_peak_ratio=MIN_PEAK_RATIO, shoulder_pct=SHOULDER_THRESHOLD_PCT):
+def _extract_hvn_zones_shoulder(profile, top_n, min_peak_ratio, shoulder_pct):
     """Grow each zone outward from a local volume peak while neighboring
     bins stay >= shoulder_pct of that peak's volume, stopping right where
     the bars visibly get shorter — rather than merging together a fixed
     top-N bins by rank, which could cut a zone short mid-shoulder or
     merge two genuinely separate peaks into one. A zone can legitimately
     come out wide if the underlying volume plateau is wide — the shoulder
-    threshold is what keeps it honest, not a separate height cap. If the
-    whole profile is flat (no bin meaningfully busier than average),
-    there's no real POC to trade at all: return no zones rather than
-    pretending the busiest bin means something."""
+    threshold is what keeps it honest, not a separate height cap."""
     borders = profile["borders"]
     bin_vols = profile["bin_vols"]
     segs = len(bin_vols)
@@ -1331,6 +1355,60 @@ def extract_hvn_zones(profile, top_n=HVN_TOP_N, min_peak_ratio=MIN_PEAK_RATIO, s
 
     zones.sort(key=lambda z: -z["volume"])
     return zones
+
+
+def _extract_hvn_zones_topn(profile, top_n, min_peak_ratio, max_height_frac):
+    """Pre-v0.13 method: take the top_n highest-volume bins and merge
+    adjacent ones into contiguous zones, dropping any merged zone taller
+    than max_height_frac of the whole profile range. Restored as an
+    option after user feedback that v0.12-13 together cut signal volume
+    too much — lets that be isolated/reverted independently of the
+    other fixes shipped since."""
+    borders = profile["borders"]
+    bin_vols = profile["bin_vols"]
+    segs = len(bin_vols)
+    total_range = max(profile["hh"] - profile["ll"], 1e-12)
+
+    avg_vol = sum(bin_vols) / segs if segs else 0
+    max_vol = max(bin_vols) if bin_vols else 0
+    if min_peak_ratio and avg_vol > 0 and max_vol < avg_vol * min_peak_ratio:
+        return []
+
+    ranked = sorted(range(segs), key=lambda i: -bin_vols[i])[:top_n]
+    ranked_set = set(ranked)
+    zones = []
+    used = set()
+    for idx in sorted(ranked_set):
+        if idx in used:
+            continue
+        lo = hi = idx
+        while (lo - 1) in ranked_set and (lo - 1) not in used:
+            lo -= 1
+        while (hi + 1) in ranked_set and (hi + 1) not in used:
+            hi += 1
+        for k in range(lo, hi + 1):
+            used.add(k)
+        top = borders[lo]
+        bottom = borders[hi + 1]
+        height = top - bottom
+        if max_height_frac and height / total_range > max_height_frac:
+            continue
+        vol = sum(bin_vols[lo:hi + 1])
+        zones.append({"top": top, "bottom": bottom, "mid": (top + bottom) / 2, "volume": vol})
+
+    zones.sort(key=lambda z: -z["volume"])
+    return zones
+
+
+def extract_hvn_zones(profile, top_n=HVN_TOP_N, min_peak_ratio=MIN_PEAK_RATIO,
+                       shoulder_pct=SHOULDER_THRESHOLD_PCT, method=None):
+    """If the whole profile is flat (no bin meaningfully busier than
+    average), there's no real POC to trade at all — both methods return
+    no zones rather than pretending the busiest bin means something."""
+    method = method or ZONE_METHOD
+    if method == "topn":
+        return _extract_hvn_zones_topn(profile, top_n, min_peak_ratio, LEGACY_MAX_ZONE_HEIGHT_FRAC)
+    return _extract_hvn_zones_shoulder(profile, top_n, min_peak_ratio, shoulder_pct)
 
 
 def eligible_zones(zones, min_ratio=ZONE_STRENGTH_MIN_RATIO):
@@ -2204,6 +2282,7 @@ def api_status():
                 "gap_threshold_pct": GAP_THRESHOLD_PCT, "max_gap_ratio": MAX_GAP_RATIO,
                 "min_efficiency_ratio": MIN_EFFICIENCY_RATIO,
                 "shoulder_threshold_pct": SHOULDER_THRESHOLD_PCT, "min_peak_ratio": MIN_PEAK_RATIO,
+                "zone_method": ZONE_METHOD,
                 "trend_filter_enabled": TREND_FILTER_ENABLED, "trend_lookback": TREND_LOOKBACK,
                 "trend_threshold_pct": TREND_THRESHOLD_PCT,
                 "volume_confirm_enabled": VOLUME_CONFIRM_ENABLED, "vol_confirm_ratio": VOL_CONFIRM_RATIO,
