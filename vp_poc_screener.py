@@ -417,6 +417,20 @@ v0.16.0 - Telegram: reads mambaleylo/EMA-screener's already-populated
          queued messages arrive in order, and a flaky
          connection recovers on retry — all via a mocked requests.post,
          plus a full endpoint regression sweep.
+v0.16.1 - divergence chart is now self-labeling: each pivot point on
+         both panels shows its type (HIGH for bearish, LOW for bullish
+         — derived from the signal's own kind) and numeric value, plus
+         a prominent kind/direction banner drawn directly on the
+         canvas. Prompted by a user screenshot where it wasn't possible
+         to tell, from pixels alone, whether the two connected points
+         were pivot highs or lows — which made it impossible to verify
+         the trendline against our own bearish/bullish logic without
+         also seeing the (separately scrollable) header text. Traced
+         the coordinate math by hand to confirm the price-up/RSI-down
+         pattern in that screenshot is consistent with our bearish
+         detection (HH price + LH RSI) if the points are highs, which
+         they most likely were — the labels make this self-evident
+         going forward instead of requiring a manual trace.
 """
 
 import os
@@ -432,7 +446,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.16.0"
+APP_VERSION = "0.16.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2915,6 +2929,7 @@ function drawDivergenceChart(data, row) {
 
   // price pivot trendline — connects the two swing points the divergence was read from
   let pi1 = -1, pi2 = -1;
+  const pivotType = row && row.kind === 'bearish' ? 'HIGH' : 'LOW';
   if (row && row.time_p1 !== undefined && row.time_p2 !== undefined) {
     pi1 = findIdx(row.time_p1);
     pi2 = findIdx(row.time_p2);
@@ -2925,7 +2940,21 @@ function drawDivergenceChart(data, row) {
       ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
       ctx.fillStyle = '#ffcc55';
       [[x1, y1], [x2, y2]].forEach(([x, y]) => { ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill(); });
+      ctx.font = 'bold 9px sans-serif';
+      ctx.fillText(`P1 ${pivotType} ${fmtNum(row.price_p1)}`, x1 + 5, y1 - 6);
+      ctx.fillText(`P2 ${pivotType} ${fmtNum(row.price_p2)}`, x2 + 5, y2 - 6);
     }
+  }
+
+  // prominent banner — what our own code decided, directly on the image so
+  // it never depends on the (scrollable/croppable) header text above the canvas
+  if (row) {
+    const bannerColor = row.direction === 'SHORT' ? '#ff6b6b' : '#3ddc97';
+    ctx.fillStyle = 'rgba(5,7,12,0.75)';
+    ctx.fillRect(4, 4, 210, 18);
+    ctx.fillStyle = bannerColor;
+    ctx.font = 'bold 11px sans-serif';
+    ctx.fillText(`${(row.kind||'').toUpperCase()} DIVERGENCE -> ${row.direction}`, 8, 17);
   }
 
   if (row) {
@@ -2968,6 +2997,9 @@ function drawDivergenceChart(data, row) {
     ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
     ctx.fillStyle = '#ffcc55';
     [[x1, y1], [x2, y2]].forEach(([x, y]) => { ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill(); });
+    ctx.font = 'bold 9px sans-serif';
+    ctx.fillText(`RSI ${row.rsi_p1.toFixed(1)}`, x1 + 5, y1 - 6);
+    ctx.fillText(`RSI ${row.rsi_p2.toFixed(1)}`, x2 + 5, y2 - 6);
   }
 }
 
