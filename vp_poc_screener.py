@@ -388,6 +388,19 @@ v0.14.0 - new feature, fully separate from the volume-profile screener
          test-client pass across all new and existing endpoints, and a
          duplicate-top-level-function-definition scan across the whole
          file.
+v0.15.0 - added VP_VOLUME_PROFILE_ENABLED (default 1): set to 0 to run
+         divergence-only, skipping the whole volume-profile scan
+         (zones, bounce/breakout signals, watchlist, auto-tuning)
+         while the RSI divergence scan keeps running normally. The
+         universe is still built once and shared by whichever mode(s)
+         are on. UI hides the Sигналы/Watchlist/Тюнинг tabs and jumps
+         to Дивергенции automatically when volume-profile mode is off
+         (checked once via a new volume_profile_enabled field in
+         /api/status, not on every poll, so it doesn't fight a
+         manually-selected tab). Telegram alerts with a hardcoded
+         token from another project: not done yet, waiting on the
+         actual bot token/chat_id (or the sending code) from the user —
+         nothing to reuse without it.
 """
 
 import os
@@ -402,7 +415,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.14.0"
+APP_VERSION = "0.15.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -468,6 +481,9 @@ MAGNIFY_INTERVAL = pick_magnify_interval(INTERVAL)
 HVN_TOP_N = int(os.environ.get("VP_HVN_TOP_N", 6))        # top bins considered "high volume"
 MIN_VOL_USD = float(os.environ.get("VP_MIN_VOL_USD", 500000))  # min 24h quote volume filter
 MAX_SYMBOLS = int(os.environ.get("VP_MAX_SYMBOLS", 150))  # universe cap
+# master switch for the whole volume-profile screener (zones, bounce/breakout
+# signals, watchlist, auto-tuning) — turn off to run divergence-only
+VOLUME_PROFILE_ENABLED = os.environ.get("VP_VOLUME_PROFILE_ENABLED", "1") == "1"
 SCAN_INTERVAL_SEC = int(os.environ.get("VP_SCAN_INTERVAL", 45))
 COOLDOWN_SEC = int(os.environ.get("VP_COOLDOWN", 900))    # per-symbol re-alert cooldown, applied after a signal on that symbol closes
 WORKERS = int(os.environ.get("VP_WORKERS", 8))
@@ -1985,15 +2001,18 @@ def scan_loop():
                 STATE["filtered_by_volume"] = 0
                 STATE["filtered_by_oi"] = 0
             with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-                futs = [ex.submit(scan_symbol, s) for s in universe]
+                futs = []
+                if VOLUME_PROFILE_ENABLED:
+                    futs += [ex.submit(scan_symbol, s) for s in universe]
                 if DIVERGENCE_ENABLED:
                     futs += [ex.submit(scan_symbol_divergence, s) for s in universe]
                 for _ in as_completed(futs):
                     pass
-            update_signal_outcomes()
+            if VOLUME_PROFILE_ENABLED:
+                update_signal_outcomes()
+                auto_tune_cycle(universe)
             if DIVERGENCE_ENABLED:
                 update_divergence_outcomes()
-            auto_tune_cycle(universe)
             save_state()
             t1 = time.time()
             with state_lock:
@@ -2016,6 +2035,7 @@ def api_status():
         tuned_count = len(SYMBOL_OVERRIDES)
         return jsonify({
             "version": APP_VERSION,
+            "volume_profile_enabled": VOLUME_PROFILE_ENABLED,
             "universe_size": STATE["universe_size"],
             "excluded_low_quality": STATE["excluded_low_quality"],
             "filtered_by_trend": STATE["filtered_by_trend"],
@@ -2314,6 +2334,7 @@ const fmt = (n, d=6) => n === null || n === undefined ? '-' : Number(n).toPrecis
 const fmtTime = (t) => t ? new Date(t*1000).toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit'}) : '-';
 
 let activeTab = 'signals';
+let vpModeChecked = false;
 document.querySelectorAll('.tab').forEach(el => {
   el.onclick = () => {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -2332,6 +2353,15 @@ document.querySelectorAll('.tab').forEach(el => {
 async function refreshStatus() {
   try {
     const s = await (await fetch('/api/status')).json();
+    if (!vpModeChecked) {
+      vpModeChecked = true;
+      if (s.volume_profile_enabled === false) {
+        document.querySelector('.tab[data-tab="signals"]').style.display = 'none';
+        document.querySelector('.tab[data-tab="watch"]').style.display = 'none';
+        document.querySelector('.tab[data-tab="tuning"]').style.display = 'none';
+        document.querySelector('.tab[data-tab="divergence"]').click();
+      }
+    }
     const el = document.getElementById('status');
     const scanTxt = s.last_scan_finished ? `скан ${s.last_scan_duration}s, ${s.universe_size} пар (искл. ${s.excluded_low_quality||0} неликвид)` : 'сканирование...';
     el.textContent = `v${s.version} · ${scanTxt}`;
