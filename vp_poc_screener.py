@@ -619,6 +619,18 @@ v0.24.0 - split Telegram notifications by category in the settings
          gating directly: a "vp"-tagged alert is suppressed when
          telegram_alerts_vp is off while a "div"-tagged one still goes
          through, and vice versa.
+v0.25.0 - raised the universe cap and background-work throughput per
+         user request (hardware has headroom): VP_MAX_SYMBOLS 150->250,
+         VP_WORKERS 8->12 (parallel fetch/scan threads, so a bigger
+         universe doesn't just make every cycle proportionally longer),
+         VP_AUTO_TUNE_PER_CYCLE 1->3 (a 250-symbol universe's first full
+         tuning pass now takes ~84 cycles instead of 250), and
+         VP_DIV_STABILITY_PER_CYCLE 1->2 to match. Scan cadence itself
+         (VP_SCAN_INTERVAL, 45s) is a pause added AFTER each cycle's work
+         finishes, not a fixed period — so cycle time already scales
+         naturally with universe size regardless; no change needed
+         there. All four remain overridable via env var if the actual
+         hardware/network turns out to need dialing back.
 """
 
 import os
@@ -634,7 +646,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.24.0"
+APP_VERSION = "0.25.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -699,13 +711,13 @@ def pick_magnify_interval(main_interval, target_ratio=MAGNIFY_TARGET_RATIO):
 MAGNIFY_INTERVAL = pick_magnify_interval(INTERVAL)
 HVN_TOP_N = int(os.environ.get("VP_HVN_TOP_N", 6))        # top bins considered "high volume"
 MIN_VOL_USD = float(os.environ.get("VP_MIN_VOL_USD", 500000))  # min 24h quote volume filter
-MAX_SYMBOLS = int(os.environ.get("VP_MAX_SYMBOLS", 150))  # universe cap
+MAX_SYMBOLS = int(os.environ.get("VP_MAX_SYMBOLS", 250))  # universe cap — was 150, raised per user request (hardware headroom available)
 # master switch for the whole volume-profile screener (zones, bounce/breakout
 # signals, watchlist, auto-tuning) — turn off to run divergence-only
 VOLUME_PROFILE_ENABLED = os.environ.get("VP_VOLUME_PROFILE_ENABLED", "1") == "1"
 SCAN_INTERVAL_SEC = int(os.environ.get("VP_SCAN_INTERVAL", 45))
 COOLDOWN_SEC = int(os.environ.get("VP_COOLDOWN", 900))    # per-symbol re-alert cooldown, applied after a signal on that symbol closes
-WORKERS = int(os.environ.get("VP_WORKERS", 8))
+WORKERS = int(os.environ.get("VP_WORKERS", 12))  # was 8, raised alongside MAX_SYMBOLS
 SIGNAL_HISTORY = 200
 RR = float(os.environ.get("VP_RR", 2.0))                  # take-profit distance as a multiple of risk — raised from 1.5: collected MFE stats showed WIN median MFE ~2.8R, i.e. TP was cutting winners short
 ZONE_BUFFER_PCT = float(os.environ.get("VP_ZONE_BUFFER_PCT", 0.30))  # stop sits this far beyond the zone edge (fraction of zone height) — raised from 0.15: LOSS median MFE was ~1.7R, meaning a chunk of stopped-out trades kept moving in the original direction afterward — noise was clipping the stop too close
@@ -1926,7 +1938,7 @@ BT_HISTORY = int(os.environ.get("VP_BT_HISTORY", 500))
 BT_STRIDE = int(os.environ.get("VP_BT_STRIDE", 2))
 MIN_BACKTEST_TRADES = int(os.environ.get("VP_BT_MIN_TRADES", 6))
 AUTO_TUNE_ENABLED = os.environ.get("VP_AUTO_TUNE", "1") == "1"
-AUTO_TUNE_PER_CYCLE = int(os.environ.get("VP_AUTO_TUNE_PER_CYCLE", 1))  # how many symbols get (re-)tuned per scan cycle — kept low, each tune costs several seconds of CPU on top of the regular scan
+AUTO_TUNE_PER_CYCLE = int(os.environ.get("VP_AUTO_TUNE_PER_CYCLE", 3))  # was 1, raised so a bigger universe still finishes its first full tuning pass in reasonable time — each tune costs several seconds of CPU on top of the regular scan
 AUTO_TUNE_REFRESH_SEC = int(os.environ.get("VP_AUTO_TUNE_REFRESH_SEC", 48 * 3600))  # re-tune a symbol once its override is this old — price behavior drifts
 PARAM_GRID_LOOKBACK = [60, 100, 150]
 PARAM_GRID_HVN = [3, 6, 9]
@@ -2125,7 +2137,7 @@ def auto_tune_cycle(universe):
 
 
 _div_stability_cursor = 0
-DIV_STABILITY_PER_CYCLE = int(os.environ.get("VP_DIV_STABILITY_PER_CYCLE", 1))
+DIV_STABILITY_PER_CYCLE = int(os.environ.get("VP_DIV_STABILITY_PER_CYCLE", 2))  # was 1, raised alongside MAX_SYMBOLS
 
 
 def div_stability_cycle(universe):
