@@ -560,7 +560,30 @@ v0.21.0 - extended the pivot-stability diagnostic with the other half
          shrinks monotonically as shadow_right approaches the real one
          (less waiting -> less to give up), consistent with the
          agreement-rate trend from v0.20.
-v0.22.0 - added a settings button (⚙️) in the header: a modal with
+v0.22.0 - Диверы приведены в соответствие со стандартной практикой
+         торговли дивергенциями (проверено по опорным материалам, в
+         т.ч. по логике самого известного открытого скрипта дивергенций
+         на TradingView, LonesomeTheBlue "Divergence for Many
+         Indicators"): (1) VP_DIV_FRESHNESS_BARS теперь по умолчанию
+         равен VP_DIV_PIVOT_RIGHT — сигнал живёт ровно в момент
+         подтверждения пивота, а не ещё несколько баров после (было
+         freshness=8 при right=3, из-за чего сигнал мог появиться на
+         5 баров позже самого пивота на графике). (2) detect_divergence
+         больше не ищет "свой" локальный экстремум RSI в окне вокруг
+         ценового пивота (_rsi_extreme_near/VP_DIV_RSI_SEARCH_WINDOW из
+         v0.17.0) — теперь RSI читается строго на тех же барах, что и
+         ценовые пивоты, как это делают референсные индикаторы
+         дивергенций. Из-за поиска в окне верхняя (цена) и нижняя (RSI)
+         трендлинии на графике могли идти по разным x-координатам —
+         теперь они всегда синхронны. (3) добавлена стандартная
+         проверка "cut-through": если между двумя пивотами RSI хотя бы
+         раз пробивает линию, соединяющую rsi[p1] и rsi[p2] (пик выше
+         неё при медвежьей дивергенции / впадина ниже при бычьей),
+         сигнал отбраковывается как недостоверный — это правильный
+         способ обработать случай "линия режет более высокий пик",
+         вместо того чтобы переносить точку в сторону от реального бара
+         пивота.
+v0.23.0 - added a settings button (⚙️) in the header: a modal with
          on/off switches for the big scan-mode toggles — Volume Profile
          scanner, Bounce, Breakout, RSI divergence, Telegram
          notifications — deliberately NOT the detailed indicator knobs
@@ -598,7 +621,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.22.0"
+APP_VERSION = "0.23.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -696,9 +719,16 @@ DIV_INTERVAL = os.environ.get("VP_DIV_INTERVAL", "1h")
 DIV_FETCH_LIMIT = int(os.environ.get("VP_DIV_FETCH_LIMIT", 200))  # candles pulled per symbol per scan
 DIV_RSI_PERIOD = int(os.environ.get("VP_DIV_RSI_PERIOD", 14))
 DIV_PIVOT_LEFT = int(os.environ.get("VP_DIV_PIVOT_LEFT", 5))
-DIV_PIVOT_RIGHT = int(os.environ.get("VP_DIV_PIVOT_RIGHT", 5))
-DIV_FRESHNESS_BARS = int(os.environ.get("VP_DIV_FRESHNESS_BARS", 8))  # the second pivot must be within this many bars of "now" to still count as a live signal
-DIV_RSI_SEARCH_WINDOW = int(os.environ.get("VP_DIV_RSI_SEARCH_WINDOW", 10))  # bars each side of a price pivot to search for RSI's OWN local extreme in that neighborhood — price and RSI don't always peak on the exact same bar
+DIV_PIVOT_RIGHT = int(os.environ.get("VP_DIV_PIVOT_RIGHT", 3))  # was 5 — the tool's own shadow-stability stats (right=3: 88.3% agreement, entry ~0.15% better) show right=5 was confirming later than it needed to, often after the move had already played out
+# Стандартная практика торговли дивергенциями: сигнал считается живым
+# ровно в момент подтверждения пивота (right баров после самого пивота),
+# а не ещё сколько-то баров сверху. По умолчанию равен DIV_PIVOT_RIGHT —
+# это минимально возможное значение (раньше пивот физически не может
+# быть подтверждён), поэтому сигнал срабатывает один раз, точно на баре
+# подтверждения, и не "протухает" через дополнительные 5 баров, как было
+# при freshness=8 vs right=3.
+DIV_FRESHNESS_BARS = int(os.environ.get("VP_DIV_FRESHNESS_BARS", DIV_PIVOT_RIGHT))
+DIV_MAX_RISK_PCT = float(os.environ.get("VP_DIV_MAX_RISK_PCT", 0.03))  # skip a divergence signal if the pivot-based invalidation point sits more than this fraction of entry price away — a distant pivot means an oversized SL and (at DIV_RR) an even more oversized TP, not a genuinely tradeable setup
 # Diagnostic only, doesn't affect live detection: for each fired signal,
 # check whether a SMALLER right-confirmation window would have picked the
 # exact same pivot bar using only the data that would actually have been
@@ -775,10 +805,10 @@ MAX_AVG_WICK_RATIO = float(os.environ.get("VP_MAX_AVG_WICK_RATIO", 0.65))
 GAP_THRESHOLD_PCT = float(os.environ.get("VP_GAP_THRESHOLD_PCT", 0.004))
 MAX_GAP_RATIO = float(os.environ.get("VP_MAX_GAP_RATIO", 0.12))
 # Kaufman-style efficiency ratio: net displacement over the window divided
-# by the total path length traveled to get there. A real sawtooth can have
-# a flip ratio near the ~50% random baseline (a few bars in a row each
-# way, not a strict alternation) and still be pure chop — this catches
-# that case directly: lots of total movement, almost no net progress.
+# by the total path length traveled. A real sawtooth can have a flip ratio
+# near the ~50% random baseline (a few bars in a row each way, not a
+# strict alternation) and still be pure chop — this catches that case
+# directly: lots of total movement, almost no net progress.
 MIN_EFFICIENCY_RATIO = float(os.environ.get("VP_MIN_EFFICIENCY_RATIO", 0.08))  # 0.15 excluded 98/150 symbols in practice — normal crypto ranging/consolidation isn't the same thing as sawtooth chop, loosened to only catch the extreme cases
 
 TELEGRAM_BOT_TOKEN = os.environ.get("VP_TG_TOKEN", "")
@@ -998,37 +1028,46 @@ def simulate_pivot_stability(values, closes, left, real_right, shadow_right, kin
     return agree, disagree, pct_gains
 
 
-def _rsi_extreme_near(rsi, idx, window, mode):
-    """Search `window` bars each side of idx for RSI's own local
-    max/min — RSI and price don't necessarily peak on the exact same
-    bar, so reading RSI's value only at the price pivot's own bar can
-    connect a divergence line through points that aren't RSI's real
-    peaks/troughs at all. Returns (bar_index, value)."""
-    n = len(rsi)
-    lo = max(0, idx - window)
-    hi = min(n - 1, idx + window)
-    best_idx, best_val = None, None
-    for i in range(lo, hi + 1):
+def _rsi_cut_through(rsi, p1, p2, r1, r2, mode):
+    """Стандартная проверка валидности дивергенции (аналог опции
+    "Check Cut-Through" в референсном индикаторе дивергенций
+    LonesomeTheBlue): между двумя пивотами RSI не должен пробивать
+    прямую линию, соединяющую r1->r2 — иначе на самом деле RSI не
+    делал чистый lower-high/higher-low относительно ценовых пивотов,
+    а полученная "дивергенция" ненадёжна. Отбраковка такого сигнала —
+    правильный способ обработать случай "линия режет более высокий
+    пик между точками", а не перенос точки в сторону от реального
+    бара ценового пивота (как было в v0.17.0 через _rsi_extreme_near)."""
+    if p2 <= p1:
+        return False
+    span = p2 - p1
+    for i in range(p1 + 1, p2):
         v = rsi[i]
         if v is None:
             continue
-        if best_val is None or (mode == "max" and v > best_val) or (mode == "min" and v < best_val):
-            best_val, best_idx = v, i
-    return best_idx, best_val
+        interp = r1 + (r2 - r1) * (i - p1) / span
+        if mode == "high" and v > interp:
+            return True
+        if mode == "low" and v < interp:
+            return True
+    return False
 
 
 def detect_divergence(candles, rsi, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT,
-                       freshness=DIV_FRESHNESS_BARS, rsi_window=DIV_RSI_SEARCH_WINDOW):
-    """Price pivots come from find_pivots() as before. For the RSI side,
-    instead of reading RSI's value at the exact same bar as the price
-    pivot, search RSI's own local extreme within `rsi_window` bars of
-    that price pivot — this is what actually gets drawn/compared, so the
-    connecting line tracks RSI's real peaks/troughs instead of cutting
-    through them. Bearish: price higher high + RSI's local high (near
-    that pivot) is lower than the earlier one -> SHORT. Bullish: price
-    lower low + RSI's local low (near that pivot) is higher -> LONG.
-    Only returns a match if the more recent pivot is within `freshness`
-    bars of the latest candle."""
+                       freshness=DIV_FRESHNESS_BARS):
+    """Ценовые пивоты берутся из find_pivots(). RSI читается СТРОГО на
+    тех же барах, что и ценовые пивоты — это стандартный подход
+    (так пары цена/осциллятор сравнивают референсные индикаторы
+    дивергенций), а не отдельно найденный локальный экстремум RSI в
+    окне (как было в v0.17.0) — это как раз и рассинхронизировало
+    x-координаты верхней и нижней трендлиний на графике. Кандидат
+    отбраковывается, если RSI между пивотами пробивает линию,
+    соединяющую его значения на этих пивотах (_rsi_cut_through) —
+    правильная обработка "более высокого пика между точками" вместо
+    переноса точки. Сигнал засчитывается, только если второй пивот
+    отстоит от последнего бара не больше чем на `freshness` баров
+    (по умолчанию freshness == right, т.е. сигнал живой ровно в
+    момент подтверждения пивота, а не ещё долго после)."""
     highs = [c["high"] for c in candles]
     lows = [c["low"] for c in candles]
     n = len(candles)
@@ -1036,34 +1075,34 @@ def detect_divergence(candles, rsi, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT,
     pivot_highs = find_pivots(highs, left, right, "high")
     if len(pivot_highs) >= 2:
         p1, p2 = pivot_highs[-2], pivot_highs[-1]
-        r1_idx, r1_val = _rsi_extreme_near(rsi, p1, rsi_window, "max")
-        r2_idx, r2_val = _rsi_extreme_near(rsi, p2, rsi_window, "max")
-        if highs[p2] > highs[p1] and r1_val is not None and r2_val is not None and r2_val < r1_val:
-            if n - 1 - p2 <= freshness:
-                return {
-                    "direction": "SHORT", "kind": "bearish",
-                    "p1": p1, "p2": p2,
-                    "price_p1": highs[p1], "price_p2": highs[p2],
-                    "rsi_p1": r1_val, "rsi_p2": r2_val,
-                    "time_p1": candles[p1]["time"], "time_p2": candles[p2]["time"],
-                    "rsi_time_p1": candles[r1_idx]["time"], "rsi_time_p2": candles[r2_idx]["time"],
-                }
+        r1, r2 = rsi[p1], rsi[p2]
+        if (r1 is not None and r2 is not None and highs[p2] > highs[p1] and r2 < r1
+                and n - 1 - p2 <= freshness
+                and not _rsi_cut_through(rsi, p1, p2, r1, r2, "high")):
+            return {
+                "direction": "SHORT", "kind": "bearish",
+                "p1": p1, "p2": p2,
+                "price_p1": highs[p1], "price_p2": highs[p2],
+                "rsi_p1": r1, "rsi_p2": r2,
+                "time_p1": candles[p1]["time"], "time_p2": candles[p2]["time"],
+                "rsi_time_p1": candles[p1]["time"], "rsi_time_p2": candles[p2]["time"],
+            }
 
     pivot_lows = find_pivots(lows, left, right, "low")
     if len(pivot_lows) >= 2:
         p1, p2 = pivot_lows[-2], pivot_lows[-1]
-        r1_idx, r1_val = _rsi_extreme_near(rsi, p1, rsi_window, "min")
-        r2_idx, r2_val = _rsi_extreme_near(rsi, p2, rsi_window, "min")
-        if lows[p2] < lows[p1] and r1_val is not None and r2_val is not None and r2_val > r1_val:
-            if n - 1 - p2 <= freshness:
-                return {
-                    "direction": "LONG", "kind": "bullish",
-                    "p1": p1, "p2": p2,
-                    "price_p1": lows[p1], "price_p2": lows[p2],
-                    "rsi_p1": r1_val, "rsi_p2": r2_val,
-                    "time_p1": candles[p1]["time"], "time_p2": candles[p2]["time"],
-                    "rsi_time_p1": candles[r1_idx]["time"], "rsi_time_p2": candles[r2_idx]["time"],
-                }
+        r1, r2 = rsi[p1], rsi[p2]
+        if (r1 is not None and r2 is not None and lows[p2] < lows[p1] and r2 > r1
+                and n - 1 - p2 <= freshness
+                and not _rsi_cut_through(rsi, p1, p2, r1, r2, "low")):
+            return {
+                "direction": "LONG", "kind": "bullish",
+                "p1": p1, "p2": p2,
+                "price_p1": lows[p1], "price_p2": lows[p2],
+                "rsi_p1": r1, "rsi_p2": r2,
+                "time_p1": candles[p1]["time"], "time_p2": candles[p2]["time"],
+                "rsi_time_p1": candles[p1]["time"], "rsi_time_p2": candles[p2]["time"],
+            }
     return None
 
 
@@ -1118,6 +1157,8 @@ def scan_symbol_divergence(symbol):
 
         entry = candles[-1]["close"]
         sl, tp, risk = compute_div_tp_sl(sig["direction"], entry, sig)
+        if entry and risk / entry > DIV_MAX_RISK_PCT:
+            return  # pivot too far from current price — SL/TP would be oversized, not a real setup
         record = {
             "symbol": symbol,
             "direction": sig["direction"],
