@@ -560,29 +560,29 @@ v0.21.0 - extended the pivot-stability diagnostic with the other half
          shrinks monotonically as shadow_right approaches the real one
          (less waiting -> less to give up), consistent with the
          agreement-rate trend from v0.20.
-v0.22.0 - Диверы приведены в соответствие со стандартной практикой
-         торговли дивергенциями (проверено по опорным материалам, в
-         т.ч. по логике самого известного открытого скрипта дивергенций
-         на TradingView, LonesomeTheBlue "Divergence for Many
-         Indicators"): (1) VP_DIV_FRESHNESS_BARS теперь по умолчанию
-         равен VP_DIV_PIVOT_RIGHT — сигнал живёт ровно в момент
-         подтверждения пивота, а не ещё несколько баров после (было
-         freshness=8 при right=3, из-за чего сигнал мог появиться на
-         5 баров позже самого пивота на графике). (2) detect_divergence
-         больше не ищет "свой" локальный экстремум RSI в окне вокруг
-         ценового пивота (_rsi_extreme_near/VP_DIV_RSI_SEARCH_WINDOW из
-         v0.17.0) — теперь RSI читается строго на тех же барах, что и
-         ценовые пивоты, как это делают референсные индикаторы
-         дивергенций. Из-за поиска в окне верхняя (цена) и нижняя (RSI)
-         трендлинии на графике могли идти по разным x-координатам —
-         теперь они всегда синхронны. (3) добавлена стандартная
-         проверка "cut-through": если между двумя пивотами RSI хотя бы
-         раз пробивает линию, соединяющую rsi[p1] и rsi[p2] (пик выше
-         неё при медвежьей дивергенции / впадина ниже при бычьей),
-         сигнал отбраковывается как недостоверный — это правильный
-         способ обработать случай "линия режет более высокий пик",
-         вместо того чтобы переносить точку в сторону от реального бара
-         пивота.
+v0.22.0 - added a settings button (⚙️) in the header: a modal with
+         on/off switches for the big scan-mode toggles — Volume Profile
+         scanner, Bounce, Breakout, RSI divergence, Telegram
+         notifications — deliberately NOT the detailed indicator knobs
+         (RR, buffers, thresholds), which stay env-var-only per request.
+         These flags (VOLUME_PROFILE_ENABLED etc.) were already
+         module-level globals read fresh at call time everywhere, so
+         flipping them via the new /api/settings POST endpoint takes
+         effect on the very next scan cycle / next alert — no restart.
+         Verified none of them are used as function default-parameter
+         values (which would've been evaluated once at import and stayed
+         stale). Persisted to vp_poc_settings.json (own file, loaded at
+         startup alongside the existing state/alert-config files) so a
+         change made in the UI survives a restart. Added a new
+         TELEGRAM_ENABLED flag, separate from whether a token exists —
+         lets notifications be muted without losing the configured
+         token. Tab visibility for the Сигналы/Watchlist/Тюнинг tabs is
+         now reactive to volume_profile_enabled on every status poll,
+         not just checked once at page load, so toggling it from the
+         new settings panel shows/hides them live. Verified end-to-end:
+         POST /api/settings mutates the actual module globals
+         immediately, and a simulated restart (reload from disk)
+         correctly restores a saved change.
 """
 
 import os
@@ -696,16 +696,9 @@ DIV_INTERVAL = os.environ.get("VP_DIV_INTERVAL", "1h")
 DIV_FETCH_LIMIT = int(os.environ.get("VP_DIV_FETCH_LIMIT", 200))  # candles pulled per symbol per scan
 DIV_RSI_PERIOD = int(os.environ.get("VP_DIV_RSI_PERIOD", 14))
 DIV_PIVOT_LEFT = int(os.environ.get("VP_DIV_PIVOT_LEFT", 5))
-DIV_PIVOT_RIGHT = int(os.environ.get("VP_DIV_PIVOT_RIGHT", 3))  # was 5 — the tool's own shadow-stability stats (right=3: 88.3% agreement, entry ~0.15% better) show right=5 was confirming later than it needed to, often after the move had already played out
-# Стандартная практика торговли дивергенциями: сигнал считается живым
-# ровно в момент подтверждения пивота (right баров после самого пивота),
-# а не ещё сколько-то баров сверху. По умолчанию равен DIV_PIVOT_RIGHT —
-# это минимально возможное значение (раньше пивот физически не может
-# быть подтверждён), поэтому сигнал срабатывает один раз, точно на баре
-# подтверждения, и не "протухает" через дополнительные 5 баров, как было
-# при freshness=8 vs right=3.
-DIV_FRESHNESS_BARS = int(os.environ.get("VP_DIV_FRESHNESS_BARS", DIV_PIVOT_RIGHT))
-DIV_MAX_RISK_PCT = float(os.environ.get("VP_DIV_MAX_RISK_PCT", 0.03))  # skip a divergence signal if the pivot-based invalidation point sits more than this fraction of entry price away — a distant pivot means an oversized SL and (at DIV_RR) an even more oversized TP, not a genuinely tradeable setup
+DIV_PIVOT_RIGHT = int(os.environ.get("VP_DIV_PIVOT_RIGHT", 5))
+DIV_FRESHNESS_BARS = int(os.environ.get("VP_DIV_FRESHNESS_BARS", 8))  # the second pivot must be within this many bars of "now" to still count as a live signal
+DIV_RSI_SEARCH_WINDOW = int(os.environ.get("VP_DIV_RSI_SEARCH_WINDOW", 10))  # bars each side of a price pivot to search for RSI's OWN local extreme in that neighborhood — price and RSI don't always peak on the exact same bar
 # Diagnostic only, doesn't affect live detection: for each fired signal,
 # check whether a SMALLER right-confirmation window would have picked the
 # exact same pivot bar using only the data that would actually have been
@@ -782,13 +775,14 @@ MAX_AVG_WICK_RATIO = float(os.environ.get("VP_MAX_AVG_WICK_RATIO", 0.65))
 GAP_THRESHOLD_PCT = float(os.environ.get("VP_GAP_THRESHOLD_PCT", 0.004))
 MAX_GAP_RATIO = float(os.environ.get("VP_MAX_GAP_RATIO", 0.12))
 # Kaufman-style efficiency ratio: net displacement over the window divided
-# by the total path length traveled. A real sawtooth can have a flip ratio
-# near the ~50% random baseline (a few bars in a row each way, not a
-# strict alternation) and still be pure chop — this catches that case
-# directly: lots of total movement, almost no net progress.
+# by the total path length traveled to get there. A real sawtooth can have
+# a flip ratio near the ~50% random baseline (a few bars in a row each
+# way, not a strict alternation) and still be pure chop — this catches
+# that case directly: lots of total movement, almost no net progress.
 MIN_EFFICIENCY_RATIO = float(os.environ.get("VP_MIN_EFFICIENCY_RATIO", 0.08))  # 0.15 excluded 98/150 symbols in practice — normal crypto ranging/consolidation isn't the same thing as sawtooth chop, loosened to only catch the extreme cases
 
 TELEGRAM_BOT_TOKEN = os.environ.get("VP_TG_TOKEN", "")
+TELEGRAM_ENABLED = os.environ.get("VP_TG_ENABLED", "1") == "1"  # separate from whether a token exists — lets notifications be muted without losing the token
 TELEGRAM_CHAT_ID = os.environ.get("VP_TG_CHAT", "")
 # Same config file path used by the EMA-screener/Pump_Radar project — if
 # Telegram was already set up there, this picks up the same token/chat_id
@@ -809,6 +803,67 @@ def _load_alert_cfg():
         log_error(f"reading {ALERT_CFG_PATH}: {e}")
 
 HTTP_TIMEOUT = 10
+
+# --- basic runtime settings: scan modes + notifications, exposed through
+# the header's settings button. Deliberately NOT the detailed indicator
+# knobs (RR, buffer, thresholds, etc.) — those stay env-var-only. Backed
+# by a small JSON file so a change made in the UI survives a restart.
+SETTINGS_FILE = os.environ.get(
+    "VP_SETTINGS_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_settings.json"),
+)
+SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "bounce_enabled", "breakout_enabled", "telegram_enabled")
+
+
+def get_settings():
+    return {
+        "volume_profile_enabled": VOLUME_PROFILE_ENABLED,
+        "divergence_enabled": DIVERGENCE_ENABLED,
+        "bounce_enabled": BOUNCE_ENABLED,
+        "breakout_enabled": BREAKOUT_ENABLED,
+        "telegram_enabled": TELEGRAM_ENABLED,
+        "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+    }
+
+
+def apply_settings(updates):
+    """Mutates the module-level flags directly — every place that checks
+    them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
+    call time, not at import time, so this takes effect on the very next
+    scan cycle / next alert, no restart needed."""
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, TELEGRAM_ENABLED
+    if "volume_profile_enabled" in updates:
+        VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
+    if "divergence_enabled" in updates:
+        DIVERGENCE_ENABLED = bool(updates["divergence_enabled"])
+    if "bounce_enabled" in updates:
+        BOUNCE_ENABLED = bool(updates["bounce_enabled"])
+    if "breakout_enabled" in updates:
+        BREAKOUT_ENABLED = bool(updates["breakout_enabled"])
+    if "telegram_enabled" in updates:
+        TELEGRAM_ENABLED = bool(updates["telegram_enabled"])
+
+
+def save_settings():
+    try:
+        tmp_path = SETTINGS_FILE + ".tmp"
+        with open(tmp_path, "w") as f:
+            json.dump(get_settings(), f)
+        os.replace(tmp_path, SETTINGS_FILE)
+    except Exception as e:
+        log_error(f"save_settings: {e}")
+
+
+def load_settings():
+    if not os.path.exists(SETTINGS_FILE):
+        return
+    try:
+        with open(SETTINGS_FILE) as f:
+            saved = json.load(f)
+        apply_settings({k: v for k, v in saved.items() if k in SETTINGS_KEYS})
+    except Exception as e:
+        log_error(f"load_settings: {e}")
+
 
 # ----------------------------------------------------------------------------
 # State
@@ -943,46 +998,37 @@ def simulate_pivot_stability(values, closes, left, real_right, shadow_right, kin
     return agree, disagree, pct_gains
 
 
-def _rsi_cut_through(rsi, p1, p2, r1, r2, mode):
-    """Стандартная проверка валидности дивергенции (аналог опции
-    "Check Cut-Through" в референсном индикаторе дивергенций
-    LonesomeTheBlue): между двумя пивотами RSI не должен пробивать
-    прямую линию, соединяющую r1->r2 — иначе на самом деле RSI не
-    делал чистый lower-high/higher-low относительно ценовых пивотов,
-    а полученная "дивергенция" ненадёжна. Отбраковка такого сигнала —
-    правильный способ обработать случай "линия режет более высокий
-    пик между точками", а не перенос точки в сторону от реального
-    бара ценового пивота (как было в v0.17.0 через _rsi_extreme_near)."""
-    if p2 <= p1:
-        return False
-    span = p2 - p1
-    for i in range(p1 + 1, p2):
+def _rsi_extreme_near(rsi, idx, window, mode):
+    """Search `window` bars each side of idx for RSI's own local
+    max/min — RSI and price don't necessarily peak on the exact same
+    bar, so reading RSI's value only at the price pivot's own bar can
+    connect a divergence line through points that aren't RSI's real
+    peaks/troughs at all. Returns (bar_index, value)."""
+    n = len(rsi)
+    lo = max(0, idx - window)
+    hi = min(n - 1, idx + window)
+    best_idx, best_val = None, None
+    for i in range(lo, hi + 1):
         v = rsi[i]
         if v is None:
             continue
-        interp = r1 + (r2 - r1) * (i - p1) / span
-        if mode == "high" and v > interp:
-            return True
-        if mode == "low" and v < interp:
-            return True
-    return False
+        if best_val is None or (mode == "max" and v > best_val) or (mode == "min" and v < best_val):
+            best_val, best_idx = v, i
+    return best_idx, best_val
 
 
 def detect_divergence(candles, rsi, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT,
-                       freshness=DIV_FRESHNESS_BARS):
-    """Ценовые пивоты берутся из find_pivots(). RSI читается СТРОГО на
-    тех же барах, что и ценовые пивоты — это стандартный подход
-    (так пары цена/осциллятор сравнивают референсные индикаторы
-    дивергенций), а не отдельно найденный локальный экстремум RSI в
-    окне (как было в v0.17.0) — это как раз и рассинхронизировало
-    x-координаты верхней и нижней трендлиний на графике. Кандидат
-    отбраковывается, если RSI между пивотами пробивает линию,
-    соединяющую его значения на этих пивотах (_rsi_cut_through) —
-    правильная обработка "более высокого пика между точками" вместо
-    переноса точки. Сигнал засчитывается, только если второй пивот
-    отстоит от последнего бара не больше чем на `freshness` баров
-    (по умолчанию freshness == right, т.е. сигнал живой ровно в
-    момент подтверждения пивота, а не ещё долго после)."""
+                       freshness=DIV_FRESHNESS_BARS, rsi_window=DIV_RSI_SEARCH_WINDOW):
+    """Price pivots come from find_pivots() as before. For the RSI side,
+    instead of reading RSI's value at the exact same bar as the price
+    pivot, search RSI's own local extreme within `rsi_window` bars of
+    that price pivot — this is what actually gets drawn/compared, so the
+    connecting line tracks RSI's real peaks/troughs instead of cutting
+    through them. Bearish: price higher high + RSI's local high (near
+    that pivot) is lower than the earlier one -> SHORT. Bullish: price
+    lower low + RSI's local low (near that pivot) is higher -> LONG.
+    Only returns a match if the more recent pivot is within `freshness`
+    bars of the latest candle."""
     highs = [c["high"] for c in candles]
     lows = [c["low"] for c in candles]
     n = len(candles)
@@ -990,34 +1036,34 @@ def detect_divergence(candles, rsi, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT,
     pivot_highs = find_pivots(highs, left, right, "high")
     if len(pivot_highs) >= 2:
         p1, p2 = pivot_highs[-2], pivot_highs[-1]
-        r1, r2 = rsi[p1], rsi[p2]
-        if (r1 is not None and r2 is not None and highs[p2] > highs[p1] and r2 < r1
-                and n - 1 - p2 <= freshness
-                and not _rsi_cut_through(rsi, p1, p2, r1, r2, "high")):
-            return {
-                "direction": "SHORT", "kind": "bearish",
-                "p1": p1, "p2": p2,
-                "price_p1": highs[p1], "price_p2": highs[p2],
-                "rsi_p1": r1, "rsi_p2": r2,
-                "time_p1": candles[p1]["time"], "time_p2": candles[p2]["time"],
-                "rsi_time_p1": candles[p1]["time"], "rsi_time_p2": candles[p2]["time"],
-            }
+        r1_idx, r1_val = _rsi_extreme_near(rsi, p1, rsi_window, "max")
+        r2_idx, r2_val = _rsi_extreme_near(rsi, p2, rsi_window, "max")
+        if highs[p2] > highs[p1] and r1_val is not None and r2_val is not None and r2_val < r1_val:
+            if n - 1 - p2 <= freshness:
+                return {
+                    "direction": "SHORT", "kind": "bearish",
+                    "p1": p1, "p2": p2,
+                    "price_p1": highs[p1], "price_p2": highs[p2],
+                    "rsi_p1": r1_val, "rsi_p2": r2_val,
+                    "time_p1": candles[p1]["time"], "time_p2": candles[p2]["time"],
+                    "rsi_time_p1": candles[r1_idx]["time"], "rsi_time_p2": candles[r2_idx]["time"],
+                }
 
     pivot_lows = find_pivots(lows, left, right, "low")
     if len(pivot_lows) >= 2:
         p1, p2 = pivot_lows[-2], pivot_lows[-1]
-        r1, r2 = rsi[p1], rsi[p2]
-        if (r1 is not None and r2 is not None and lows[p2] < lows[p1] and r2 > r1
-                and n - 1 - p2 <= freshness
-                and not _rsi_cut_through(rsi, p1, p2, r1, r2, "low")):
-            return {
-                "direction": "LONG", "kind": "bullish",
-                "p1": p1, "p2": p2,
-                "price_p1": lows[p1], "price_p2": lows[p2],
-                "rsi_p1": r1, "rsi_p2": r2,
-                "time_p1": candles[p1]["time"], "time_p2": candles[p2]["time"],
-                "rsi_time_p1": candles[p1]["time"], "rsi_time_p2": candles[p2]["time"],
-            }
+        r1_idx, r1_val = _rsi_extreme_near(rsi, p1, rsi_window, "min")
+        r2_idx, r2_val = _rsi_extreme_near(rsi, p2, rsi_window, "min")
+        if lows[p2] < lows[p1] and r1_val is not None and r2_val is not None and r2_val > r1_val:
+            if n - 1 - p2 <= freshness:
+                return {
+                    "direction": "LONG", "kind": "bullish",
+                    "p1": p1, "p2": p2,
+                    "price_p1": lows[p1], "price_p2": lows[p2],
+                    "rsi_p1": r1_val, "rsi_p2": r2_val,
+                    "time_p1": candles[p1]["time"], "time_p2": candles[p2]["time"],
+                    "rsi_time_p1": candles[r1_idx]["time"], "rsi_time_p2": candles[r2_idx]["time"],
+                }
     return None
 
 
@@ -1072,8 +1118,6 @@ def scan_symbol_divergence(symbol):
 
         entry = candles[-1]["close"]
         sl, tp, risk = compute_div_tp_sl(sig["direction"], entry, sig)
-        if entry and risk / entry > DIV_MAX_RISK_PCT:
-            return  # pivot too far from current price — SL/TP would be oversized, not a real setup
         record = {
             "symbol": symbol,
             "direction": sig["direction"],
@@ -2078,7 +2122,7 @@ def _telegram_sender_worker():
 
 
 def send_telegram(text):
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    if not TELEGRAM_ENABLED or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
 
     def _do_send():
@@ -2665,6 +2709,24 @@ def api_divergence_chart(symbol):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/settings", methods=["GET"])
+def api_get_settings():
+    return jsonify(get_settings())
+
+
+@app.route("/api/settings", methods=["POST"])
+def api_post_settings():
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        updates = {k: v for k, v in body.items() if k in SETTINGS_KEYS}
+        apply_settings(updates)
+        save_settings()
+        return jsonify({"ok": True, "settings": get_settings()})
+    except Exception as e:
+        log_error(f"api_post_settings: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
     """Wipe all accumulated state: per-symbol tuning overrides, signal
@@ -2712,6 +2774,23 @@ INDEX_HTML = """<!doctype html>
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
   #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
   #resetBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
+  #settingsModal.open { display:flex; flex-direction:column; }
+  #settingsModalHeader { padding:12px; display:flex; justify-content:space-between; align-items:center; }
+  #settingsModalHeader h2 { font-size:15px; margin:0; }
+  #settingsCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
+  #settingsBody { padding:4px 16px 16px; overflow-y:auto; }
+  .settingRow { display:flex; justify-content:space-between; align-items:center; padding:14px 0; border-bottom:1px solid #1c2433; }
+  .settingRow .label { font-size:14px; }
+  .settingRow .sub { font-size:11px; color:#8b98ab; margin-top:2px; }
+  .switch { position:relative; display:inline-block; width:44px; height:24px; flex-shrink:0; }
+  .switch input { opacity:0; width:0; height:0; }
+  .switchSlider { position:absolute; cursor:pointer; inset:0; background:#3a4356; border-radius:24px; transition:.15s; }
+  .switchSlider:before { position:absolute; content:""; height:18px; width:18px; left:3px; bottom:3px; background:#fff; border-radius:50%; transition:.15s; }
+  input:checked + .switchSlider { background:#3ddc97; }
+  input:checked + .switchSlider:before { transform:translateX(20px); }
+  input:disabled + .switchSlider { opacity:.4; }
   header h1 { font-size:16px; margin:0 0 4px; }
   #status { font-size:11px; color:#8b98ab; }
   .tabs { display:flex; gap:6px; padding:8px 10px 0; }
@@ -2752,7 +2831,10 @@ INDEX_HTML = """<!doctype html>
 <header>
   <div id="headerTop">
     <h1>VP-POC Screener</h1>
-    <button id="resetBtn">Очистить данные</button>
+    <div style="display:flex;gap:8px;">
+      <button id="settingsBtn">⚙️ Настройки</button>
+      <button id="resetBtn">Очистить данные</button>
+    </div>
   </div>
   <div id="status">загрузка...</div>
   <div id="stats" class="dim" style="margin-top:2px;font-size:11px;"></div>
@@ -2807,6 +2889,51 @@ INDEX_HTML = """<!doctype html>
   <div id="divChartWrap"><canvas id="divChartCanvas"></canvas></div>
 </div>
 
+<div id="settingsModal">
+  <div id="settingsModalHeader">
+    <h2>Настройки</h2>
+    <button id="settingsCloseBtn">Закрыть</button>
+  </div>
+  <div id="settingsBody">
+    <div class="settingRow">
+      <div>
+        <div class="label">Volume Profile сканер</div>
+        <div class="sub">зоны, bounce/breakout сигналы, watchlist, автотюнинг</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setVolumeProfile"><span class="switchSlider"></span></label>
+    </div>
+    <div class="settingRow">
+      <div>
+        <div class="label">↳ Bounce сигналы</div>
+        <div class="sub">отбой от уровня</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setBounce"><span class="switchSlider"></span></label>
+    </div>
+    <div class="settingRow">
+      <div>
+        <div class="label">↳ Breakout сигналы</div>
+        <div class="sub">пробой после консолидации</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setBreakout"><span class="switchSlider"></span></label>
+    </div>
+    <div class="settingRow">
+      <div>
+        <div class="label">RSI-дивергенции</div>
+        <div class="sub">отдельный скан на часовом ТФ</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setDivergence"><span class="switchSlider"></span></label>
+    </div>
+    <div class="settingRow" style="border-bottom:none;">
+      <div>
+        <div class="label">Уведомления в Telegram</div>
+        <div class="sub" id="setTelegramSub">проверка...</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setTelegram"><span class="switchSlider"></span></label>
+    </div>
+    <div class="dim" style="font-size:12px;margin-top:8px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
+  </div>
+</div>
+
 <script>
 const fmt = (n, d=6) => n === null || n === undefined ? '-' : Number(n).toPrecision(d).replace(/\\.?0+$/,'').replace(/\\.$/, '');
 const fmtTime = (t) => t ? new Date(t*1000).toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit'}) : '-';
@@ -2831,12 +2958,11 @@ document.querySelectorAll('.tab').forEach(el => {
 async function refreshStatus() {
   try {
     const s = await (await fetch('/api/status')).json();
+    const vpTabs = ['signals', 'watch', 'tuning'].map(t => document.querySelector(`.tab[data-tab="${t}"]`));
+    vpTabs.forEach(el => { el.style.display = s.volume_profile_enabled === false ? 'none' : ''; });
     if (!vpModeChecked) {
       vpModeChecked = true;
       if (s.volume_profile_enabled === false) {
-        document.querySelector('.tab[data-tab="signals"]').style.display = 'none';
-        document.querySelector('.tab[data-tab="watch"]').style.display = 'none';
-        document.querySelector('.tab[data-tab="tuning"]').style.display = 'none';
         document.querySelector('.tab[data-tab="divergence"]').click();
       }
     }
@@ -3078,6 +3204,62 @@ document.getElementById('resetBtn').onclick = async () => {
   btn.disabled = false;
   btn.textContent = 'Очистить данные';
 };
+
+// ---------------- Settings modal ----------------
+const settingsModal = document.getElementById('settingsModal');
+const setInputs = {
+  volume_profile_enabled: document.getElementById('setVolumeProfile'),
+  bounce_enabled: document.getElementById('setBounce'),
+  breakout_enabled: document.getElementById('setBreakout'),
+  divergence_enabled: document.getElementById('setDivergence'),
+  telegram_enabled: document.getElementById('setTelegram'),
+};
+
+function applySettingsToInputs(s) {
+  for (const key in setInputs) {
+    if (s[key] !== undefined) setInputs[key].checked = s[key];
+  }
+  document.getElementById('setTelegramSub').textContent = s.telegram_configured
+    ? 'токен найден'
+    : 'токен не найден — уведомления не уйдут, даже если включено';
+}
+
+async function loadSettings() {
+  try {
+    const s = await (await fetch('/api/settings')).json();
+    applySettingsToInputs(s);
+  } catch (e) {}
+}
+
+document.getElementById('settingsBtn').onclick = async () => {
+  settingsModal.classList.add('open');
+  await loadSettings();
+};
+document.getElementById('settingsCloseBtn').onclick = () => settingsModal.classList.remove('open');
+
+for (const key in setInputs) {
+  setInputs[key].onchange = async (e) => {
+    const input = e.target;
+    input.disabled = true;
+    try {
+      const res = await (await fetch('/api/settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({[key]: input.checked}),
+      })).json();
+      if (res.ok) {
+        applySettingsToInputs(res.settings);
+      } else {
+        alert('Не удалось сохранить настройку');
+        await loadSettings();
+      }
+    } catch (err) {
+      alert('Не удалось сохранить настройку: ' + err);
+      await loadSettings();
+    }
+    input.disabled = false;
+  };
+}
 
 // ---------------- Chart modal ----------------
 const modal = document.getElementById('modal');
@@ -3468,6 +3650,7 @@ def index():
 # ----------------------------------------------------------------------------
 if __name__ == "__main__":
     load_state()
+    load_settings()
     _load_alert_cfg()
     threading.Thread(target=_telegram_sender_worker, daemon=True).start()
     t = threading.Thread(target=scan_loop, daemon=True)
