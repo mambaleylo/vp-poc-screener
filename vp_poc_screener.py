@@ -401,6 +401,22 @@ v0.15.0 - added VP_VOLUME_PROFILE_ENABLED (default 1): set to 0 to run
          token from another project: not done yet, waiting on the
          actual bot token/chat_id (or the sending code) from the user —
          nothing to reuse without it.
+v0.16.0 - Telegram: reads mambaleylo/EMA-screener's already-populated
+         ~/.smc_alert_cfg.json (same file, same tg_token/tg_chat keys)
+         as a fallback when VP_TG_TOKEN/VP_TG_CHAT aren't set — the
+         token already configured there just gets picked up, nothing
+         to paste in again. Also replaced the fire-and-own-thread
+         sender with the queued, rate-limited one already proven in
+         that project's Pump_Radar.py: Telegram Bot API caps at ~1
+         msg/sec/chat, so bursts (several signals the same scan cycle)
+         used to silently drop some sends (429s). One background
+         worker now drains a queue sequentially with a ~1.1s pause
+         between sends, with 3 retries (5s apart) on network errors,
+         no retry on non-network errors. Verified: config-file
+         precedence (env wins over file, missing file doesn't crash),
+         queued messages arrive in order, and a flaky
+         connection recovers on retry — all via a mocked requests.post,
+         plus a full endpoint regression sweep.
 """
 
 import os
@@ -409,13 +425,14 @@ import time
 import math
 import threading
 import traceback
+import queue
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.15.0"
+APP_VERSION = "0.16.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -583,6 +600,23 @@ MIN_EFFICIENCY_RATIO = float(os.environ.get("VP_MIN_EFFICIENCY_RATIO", 0.08))  #
 
 TELEGRAM_BOT_TOKEN = os.environ.get("VP_TG_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("VP_TG_CHAT", "")
+# Same config file path used by the EMA-screener/Pump_Radar project — if
+# Telegram was already set up there, this picks up the same token/chat_id
+# automatically, no re-entry needed. Env vars above still win if set.
+ALERT_CFG_PATH = os.path.expanduser("~/.smc_alert_cfg.json")
+
+
+def _load_alert_cfg():
+    global TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+    try:
+        with open(ALERT_CFG_PATH, "r") as f:
+            cfg = json.load(f)
+        TELEGRAM_BOT_TOKEN = TELEGRAM_BOT_TOKEN or cfg.get("tg_token", "") or ""
+        TELEGRAM_CHAT_ID = TELEGRAM_CHAT_ID or cfg.get("tg_chat", "") or ""
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        log_error(f"reading {ALERT_CFG_PATH}: {e}")
 
 HTTP_TIMEOUT = 10
 
@@ -1645,17 +1679,51 @@ def auto_tune_cycle(universe):
 # ----------------------------------------------------------------------------
 # Telegram
 # ----------------------------------------------------------------------------
+# ----------------------------------------------------------------------------
+# Telegram — queued sender, mirrors the fix already proven in the
+# EMA-screener/Pump_Radar project: Telegram Bot API has a real limit of
+# ~1 message/sec per chat. Firing each alert in its own thread caused
+# silent drops (429s) during bursts (e.g. several signals the same scan
+# cycle). One background worker drains a queue sequentially with a pause
+# between sends instead.
+# ----------------------------------------------------------------------------
+_telegram_send_queue = queue.Queue()
+
+
+def _telegram_sender_worker():
+    while True:
+        task = _telegram_send_queue.get()
+        try:
+            task()
+        except Exception as e:
+            log_error(f"telegram queue: {e}")
+        time.sleep(1.1)  # a little above Telegram's ~1 msg/sec/chat limit
+
+
 def send_telegram(text):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
-    try:
-        requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-            json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
-            timeout=HTTP_TIMEOUT,
-        )
-    except Exception as e:
-        log_error(f"telegram send failed: {e}")
+
+    def _do_send():
+        for attempt in range(1, 4):
+            try:
+                r = requests.post(
+                    f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                    json={"chat_id": TELEGRAM_CHAT_ID, "text": text, "parse_mode": "HTML"},
+                    timeout=8,
+                )
+                if r.ok:
+                    return
+                log_error(f"telegram HTTP {r.status_code} (attempt {attempt}/3)")
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+                log_error(f"telegram network (attempt {attempt}/3): {e}")
+            except Exception as e:
+                log_error(f"telegram send: {e} — not retrying (non-network error)")
+                return
+            if attempt < 3:
+                time.sleep(5)
+
+    _telegram_send_queue.put(_do_send)
 
 
 # ----------------------------------------------------------------------------
@@ -2926,8 +2994,11 @@ def index():
 # ----------------------------------------------------------------------------
 if __name__ == "__main__":
     load_state()
+    _load_alert_cfg()
+    threading.Thread(target=_telegram_sender_worker, daemon=True).start()
     t = threading.Thread(target=scan_loop, daemon=True)
     t.start()
     port = int(os.environ.get("VP_PORT", 8080))
-    print(f"VP-POC Screener v{APP_VERSION} — http://127.0.0.1:{port}")
+    tg_status = "настроен" if (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) else "не настроен"
+    print(f"VP-POC Screener v{APP_VERSION} — http://127.0.0.1:{port} — Telegram: {tg_status}")
     app.run(host="0.0.0.0", port=port, threaded=True)
