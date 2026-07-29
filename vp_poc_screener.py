@@ -533,6 +533,17 @@ v0.20.0 - added pivot-confirmation-delay diagnostics for RSI divergence
          improved further by v0.19's at-close fix) — nothing new needed
          there, confirmed working for divergence signals via the same
          end-to-end test.
+v0.20.1 - MFE/MAE at-close values (v0.19) were only visible in the
+         aggregate Тюнинг stats, not per-signal — the signals tables
+         still showed the still-growing 24h-window value for every row,
+         which doesn't directly answer "how far did THIS trade get
+         before it resolved". Added fmtMfeMae(): for a closed trade,
+         shows the at-close value with the current (possibly since
+         grown) value alongside it — e.g. "2.10 (→3.46)" — falling back
+         to just the current value for open trades or older signals
+         recorded before this field existed. Applied to both the main
+         signals table and the divergence signals table. Verified
+         against open/closed/legacy/missing-field cases directly.
 """
 
 import os
@@ -548,7 +559,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.20.0"
+APP_VERSION = "0.20.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2796,8 +2807,8 @@ async function refreshSignals() {
       <td>${fmt(r.entry)}</td>
       <td class="dim">${fmt(r.sl)}</td>
       <td class="dim">${fmt(r.tp)}</td>
-      <td class="dim">${r.mfe_r !== undefined ? r.mfe_r.toFixed(2) : '-'}</td>
-      <td class="dim">${r.mae_r !== undefined ? r.mae_r.toFixed(2) : '-'}</td>
+      <td class="dim" title="на закрытии → полное окно 24ч">${fmtMfeMae(r, 'mfe_r')}</td>
+      <td class="dim" title="на закрытии → полное окно 24ч">${fmtMfeMae(r, 'mae_r')}</td>
       <td>${statusHtml}</td>
       <td class="dim">${fmtTime(r.time)}</td>`;
     tr.onclick = () => openChart(r);
@@ -2819,6 +2830,18 @@ async function refreshWatch() {
     tr.onclick = () => openChart(r);
     tbody.appendChild(tr);
   }
+}
+
+function fmtMfeMae(r, key) {
+  const closeKey = key + '_at_close';
+  const cur = r[key];
+  if (cur === undefined) return '-';
+  if (r.status === 'CLOSED' && r[closeKey] !== undefined && r[closeKey] !== null) {
+    const atClose = r[closeKey].toFixed(2);
+    const full = cur.toFixed(2);
+    return atClose === full ? atClose : `${atClose} (→${full})`;
+  }
+  return cur.toFixed(2);
 }
 
 function fmtStat(s) {
@@ -2897,8 +2920,8 @@ async function refreshDivergence() {
       <td>${fmt(r.entry)}</td>
       <td class="dim">${fmt(r.sl)}</td>
       <td class="dim">${fmt(r.tp)}</td>
-      <td class="dim">${r.mfe_r !== undefined ? r.mfe_r.toFixed(2) : '-'}</td>
-      <td class="dim">${r.mae_r !== undefined ? r.mae_r.toFixed(2) : '-'}</td>
+      <td class="dim" title="на закрытии → полное окно 24ч">${fmtMfeMae(r, 'mfe_r')}</td>
+      <td class="dim" title="на закрытии → полное окно 24ч">${fmtMfeMae(r, 'mae_r')}</td>
       <td>${statusHtml}</td>
       <td class="dim">${fmtTime(r.time)}</td>`;
     tr.onclick = () => openDivergenceChart(r);
