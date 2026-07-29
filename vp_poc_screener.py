@@ -606,6 +606,19 @@ v0.23.0 - added a settings button (⚙️) in the header: a modal with
          POST /api/settings mutates the actual module globals
          immediately, and a simulated restart (reload from disk)
          correctly restores a saved change.
+v0.24.0 - split Telegram notifications by category in the settings
+         panel, alongside the existing master on/off: separate switches
+         for Volume Profile alerts (bounce/breakout signals + their
+         WIN/LOSS closes) and RSI-divergence alerts, so either can be
+         muted independently. send_telegram() now takes an optional
+         category ("vp"/"div") checked against the new
+         VP_TG_ALERTS_VP/VP_TG_ALERTS_DIV flags (both default on) in
+         addition to the master TELEGRAM_ENABLED — all 4 call sites
+         (both signal-open and both close alerts) tagged accordingly.
+         Persisted alongside the other settings. Verified the category
+         gating directly: a "vp"-tagged alert is suppressed when
+         telegram_alerts_vp is off while a "div"-tagged one still goes
+         through, and vice versa.
 """
 
 import os
@@ -621,7 +634,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.23.0"
+APP_VERSION = "0.24.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -813,6 +826,11 @@ MIN_EFFICIENCY_RATIO = float(os.environ.get("VP_MIN_EFFICIENCY_RATIO", 0.08))  #
 
 TELEGRAM_BOT_TOKEN = os.environ.get("VP_TG_TOKEN", "")
 TELEGRAM_ENABLED = os.environ.get("VP_TG_ENABLED", "1") == "1"  # separate from whether a token exists — lets notifications be muted without losing the token
+# per-category toggles, checked in addition to the master TELEGRAM_ENABLED
+# above — lets someone mute just one signal source without losing alerts
+# from the other.
+TELEGRAM_ALERTS_VP = os.environ.get("VP_TG_ALERTS_VP", "1") == "1"
+TELEGRAM_ALERTS_DIV = os.environ.get("VP_TG_ALERTS_DIV", "1") == "1"
 TELEGRAM_CHAT_ID = os.environ.get("VP_TG_CHAT", "")
 # Same config file path used by the EMA-screener/Pump_Radar project — if
 # Telegram was already set up there, this picks up the same token/chat_id
@@ -842,7 +860,8 @@ SETTINGS_FILE = os.environ.get(
     "VP_SETTINGS_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_settings.json"),
 )
-SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "bounce_enabled", "breakout_enabled", "telegram_enabled")
+SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "bounce_enabled", "breakout_enabled",
+                  "telegram_enabled", "telegram_alerts_vp", "telegram_alerts_div")
 
 
 def get_settings():
@@ -852,6 +871,8 @@ def get_settings():
         "bounce_enabled": BOUNCE_ENABLED,
         "breakout_enabled": BREAKOUT_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
+        "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
+        "telegram_alerts_div": TELEGRAM_ALERTS_DIV,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
     }
 
@@ -861,7 +882,8 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, TELEGRAM_ENABLED
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED
+    global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
     if "divergence_enabled" in updates:
@@ -872,6 +894,10 @@ def apply_settings(updates):
         BREAKOUT_ENABLED = bool(updates["breakout_enabled"])
     if "telegram_enabled" in updates:
         TELEGRAM_ENABLED = bool(updates["telegram_enabled"])
+    if "telegram_alerts_vp" in updates:
+        TELEGRAM_ALERTS_VP = bool(updates["telegram_alerts_vp"])
+    if "telegram_alerts_div" in updates:
+        TELEGRAM_ALERTS_DIV = bool(updates["telegram_alerts_div"])
 
 
 def save_settings():
@@ -1192,7 +1218,8 @@ def scan_symbol_divergence(symbol):
         send_telegram(
             f"{arrow} {symbol} (RSI {sig['kind']} divergence)\n"
             f"entry: {entry:.6g}\n"
-            f"SL: {sl:.6g}  TP: {tp:.6g}  (RR {DIV_RR:g})"
+            f"SL: {sl:.6g}  TP: {tp:.6g}  (RR {DIV_RR:g})",
+            category="div",
         )
     except Exception as e:
         log_error(f"div {symbol}: {e}")
@@ -1214,7 +1241,7 @@ def close_div_signal(sig, result, exit_price, exit_candle=None):
             }
     if result in ("WIN", "LOSS"):
         arrow = "\u2705" if result == "WIN" else "\u274c"
-        send_telegram(f"{arrow} {sig['symbol']} divergence {sig['direction']} closed: {result} @ {exit_price:.6g}")
+        send_telegram(f"{arrow} {sig['symbol']} divergence {sig['direction']} closed: {result} @ {exit_price:.6g}", category="div")
 
 
 def update_divergence_outcomes():
@@ -2162,8 +2189,12 @@ def _telegram_sender_worker():
         time.sleep(1.1)  # a little above Telegram's ~1 msg/sec/chat limit
 
 
-def send_telegram(text):
+def send_telegram(text, category=None):
     if not TELEGRAM_ENABLED or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    if category == "vp" and not TELEGRAM_ALERTS_VP:
+        return
+    if category == "div" and not TELEGRAM_ALERTS_DIV:
         return
 
     def _do_send():
@@ -2345,7 +2376,8 @@ def scan_symbol(symbol):
                     f"{arrow} {symbol} ({sig['reason']})\n"
                     f"entry: {sig['price']:.6g}\n"
                     f"SL: {sl:.6g}  TP: {tp:.6g}  (RR {rr:g})\n"
-                    f"HVN zone: {sig['zone']['bottom']:.6g} - {sig['zone']['top']:.6g}"
+                    f"HVN zone: {sig['zone']['bottom']:.6g} - {sig['zone']['top']:.6g}",
+                    category="vp",
                 )
     except Exception as e:
         log_error(f"{symbol}: {e}")
@@ -2375,7 +2407,7 @@ def close_signal(sig, result, exit_price, exit_candle=None):
             }
     if result in ("WIN", "LOSS"):
         arrow = "\u2705" if result == "WIN" else "\u274c"
-        send_telegram(f"{arrow} {sig['symbol']} {sig['direction']} closed: {result} @ {exit_price:.6g}")
+        send_telegram(f"{arrow} {sig['symbol']} {sig['direction']} closed: {result} @ {exit_price:.6g}", category="vp")
 
 
 def update_signal_outcomes():
@@ -2964,12 +2996,26 @@ INDEX_HTML = """<!doctype html>
       </div>
       <label class="switch"><input type="checkbox" id="setDivergence"><span class="switchSlider"></span></label>
     </div>
-    <div class="settingRow" style="border-bottom:none;">
+    <div class="settingRow">
       <div>
         <div class="label">Уведомления в Telegram</div>
         <div class="sub" id="setTelegramSub">проверка...</div>
       </div>
       <label class="switch"><input type="checkbox" id="setTelegram"><span class="switchSlider"></span></label>
+    </div>
+    <div class="settingRow">
+      <div>
+        <div class="label">↳ Алерты Volume Profile</div>
+        <div class="sub">bounce/breakout сигналы и их закрытие</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setTelegramVp"><span class="switchSlider"></span></label>
+    </div>
+    <div class="settingRow" style="border-bottom:none;">
+      <div>
+        <div class="label">↳ Алерты дивергенций</div>
+        <div class="sub">сигналы RSI-дивергенций и их закрытие</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setTelegramDiv"><span class="switchSlider"></span></label>
     </div>
     <div class="dim" style="font-size:12px;margin-top:8px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
   </div>
@@ -3254,6 +3300,8 @@ const setInputs = {
   breakout_enabled: document.getElementById('setBreakout'),
   divergence_enabled: document.getElementById('setDivergence'),
   telegram_enabled: document.getElementById('setTelegram'),
+  telegram_alerts_vp: document.getElementById('setTelegramVp'),
+  telegram_alerts_div: document.getElementById('setTelegramDiv'),
 };
 
 function applySettingsToInputs(s) {
