@@ -735,6 +735,15 @@ v0.30.0 - two user-requested changes.
          Verified end-to-end: same symbol firing independently on both
          intervals, correct per-interval stats breakdown, and chart
          fetch honoring interval=1w.
+v0.30.1 - user feedback (with screenshot): the weekly EMA chart was
+         still too zoomed out — 60 bars of a weekly candle spans well
+         over a year, far more than needed to see the setup, squeezing
+         the actual entry/SL/TP zone into a sliver at the edge. Added
+         windowParamsForInterval(): picks the before/total bar counts
+         based on the signal's own interval (1w: 6/20, 3d: 8/25, 1d:
+         10/35, else: 15/60 as before) instead of one fixed size for
+         every timeframe. Verified all four branches plus the
+         undefined-interval fallback directly.
 """
 
 import os
@@ -750,7 +759,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.30.0"
+APP_VERSION = "0.30.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4453,6 +4462,15 @@ function windowAroundTime(candles, targetTime, beforeBars, totalBars) {
   return { start, end };
 }
 
+function windowParamsForInterval(interval) {
+  // a weekly bar covers ~52x more time than an hourly one — the same bar
+  // COUNT would span over a year, way more than needed to see the setup
+  if (interval === '1w') return { before: 6, total: 20 };
+  if (interval === '3d') return { before: 8, total: 25 };
+  if (interval === '1d') return { before: 10, total: 35 };
+  return { before: 15, total: 60 };
+}
+
 function drawEmaChart(data, row) {
   const canvas = document.getElementById('emaChartCanvas');
   const wrap = document.getElementById('emaChartWrap');
@@ -4465,7 +4483,8 @@ function drawEmaChart(data, row) {
 
   const allCandles = data.candles || [];
   if (!allCandles.length) return;
-  const { start: winStart, end: winEnd } = windowAroundTime(allCandles, row && row.time, 15, 60);
+  const { before: emaBefore, total: emaTotal } = windowParamsForInterval(row && row.interval);
+  const { start: winStart, end: winEnd } = windowAroundTime(allCandles, row && row.time, emaBefore, emaTotal);
   const candles = allCandles.slice(winStart, winEnd);
   const ema7Full = data.ema7 || [], ema14Full = data.ema14 || [], ema28Full = data.ema28 || [];
   const ema7 = ema7Full.slice(winStart, winEnd);
