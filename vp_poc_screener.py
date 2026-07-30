@@ -664,6 +664,15 @@ v0.27.0 - user reported divergence signals feel "already played out" by
          actual TP distance is pre-consumed). Verified the signed
          formula against hand-computed cases for both directions
          (already-moved, no-move, and adverse-move scenarios).
+v0.28.0 - split the "Очистить данные" button into two scoped ones:
+         "Очистить объём" (/api/reset/volume — overrides, signals,
+         watchlist, cooldowns) and "Очистить дивер" (/api/reset/divergence
+         — div_signals, pivot-stability diagnostic, div cooldowns).
+         Each leaves the other side untouched. The old combined
+         /api/reset stays for backward compatibility but the header no
+         longer calls it. Verified selectivity directly: resetting one
+         side clears only its own data while the other side's populated
+         test data survives untouched, in both directions.
 """
 
 import os
@@ -679,7 +688,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.27.0"
+APP_VERSION = "0.28.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2863,12 +2872,54 @@ def api_post_settings():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/reset/volume", methods=["POST"])
+def api_reset_volume():
+    """Wipe only the volume-profile side: per-symbol tuning overrides,
+    signal history (win-rate/MFE/MAE stats), cooldowns, and the
+    watchlist. Leaves divergence data untouched."""
+    try:
+        with state_lock:
+            SYMBOL_OVERRIDES.clear()
+            STATE["signals"].clear()
+            STATE["watchlist"].clear()
+            STATE["excluded_low_quality"] = 0
+            STATE["filtered_by_trend"] = 0
+            STATE["filtered_by_volume"] = 0
+            STATE["filtered_by_oi"] = 0
+            STATE["errors"].clear()
+        with _cooldowns_lock:
+            _cooldowns.clear()
+        global _auto_tune_cursor
+        _auto_tune_cursor = 0
+        save_state()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset_volume: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/reset/divergence", methods=["POST"])
+def api_reset_divergence():
+    """Wipe only the divergence side: signal history, cooldowns, and the
+    pivot-stability diagnostic. Leaves volume-profile data untouched."""
+    try:
+        with state_lock:
+            STATE["div_signals"].clear()
+            STATE["div_pivot_stability"] = {str(r): {"agree": 0, "disagree": 0, "gain_sum": 0.0, "gain_count": 0} for r in DIV_SHADOW_RIGHTS}
+        with _div_cooldowns_lock:
+            _div_cooldowns.clear()
+        save_state()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset_divergence: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
-    """Wipe all accumulated state: per-symbol tuning overrides, signal
-    history (win-rate/MFE/MAE stats), cooldowns, and the watchlist —
-    both in memory and in the persisted state file. Used by the header's
-    "Очистить данные" button, which confirms before calling this."""
+    """Wipe everything — both volume-profile and divergence state. Kept
+    for backward compatibility; the header now has two separate buttons
+    that call the scoped endpoints above instead."""
     try:
         with state_lock:
             SYMBOL_OVERRIDES.clear()
@@ -2909,7 +2960,7 @@ INDEX_HTML = """<!doctype html>
   body { margin:0; background:#0b0e14; color:#d7dee8; font-family: -apple-system, Roboto, Segoe UI, sans-serif; }
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
   #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  #resetBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #resetVolumeBtn, #resetDivBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #settingsModal.open { display:flex; flex-direction:column; }
@@ -2967,9 +3018,10 @@ INDEX_HTML = """<!doctype html>
 <header>
   <div id="headerTop">
     <h1>VP-POC Screener</h1>
-    <div style="display:flex;gap:8px;">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;">
       <button id="settingsBtn">⚙️ Настройки</button>
-      <button id="resetBtn">Очистить данные</button>
+      <button id="resetVolumeBtn">Очистить объём</button>
+      <button id="resetDivBtn">Очистить дивер</button>
     </div>
   </div>
   <div id="status">загрузка...</div>
@@ -3345,25 +3397,33 @@ async function refreshAll() {
 refreshAll();
 setInterval(refreshAll, 15000);
 
-document.getElementById('resetBtn').onclick = async () => {
-  const sure = confirm('Удалить всю накопленную статистику и подобранные параметры по монетам? Это необратимо.');
-  if (!sure) return;
-  const btn = document.getElementById('resetBtn');
-  btn.disabled = true;
-  btn.textContent = 'Удаляю...';
-  try {
-    const res = await (await fetch('/api/reset', {method: 'POST'})).json();
-    if (res.ok) {
-      await refreshAll();
-    } else {
-      alert('Не удалось очистить: ' + (res.error || 'неизвестная ошибка'));
+function wireResetButton(btnId, endpoint, confirmMsg, idleLabel) {
+  const btn = document.getElementById(btnId);
+  btn.onclick = async () => {
+    const sure = confirm(confirmMsg);
+    if (!sure) return;
+    btn.disabled = true;
+    btn.textContent = 'Удаляю...';
+    try {
+      const res = await (await fetch(endpoint, {method: 'POST'})).json();
+      if (res.ok) {
+        await refreshAll();
+      } else {
+        alert('Не удалось очистить: ' + (res.error || 'неизвестная ошибка'));
+      }
+    } catch (e) {
+      alert('Не удалось очистить: ' + e);
     }
-  } catch (e) {
-    alert('Не удалось очистить: ' + e);
-  }
-  btn.disabled = false;
-  btn.textContent = 'Очистить данные';
-};
+    btn.disabled = false;
+    btn.textContent = idleLabel;
+  };
+}
+wireResetButton('resetVolumeBtn', '/api/reset/volume',
+  'Удалить статистику и подобранные параметры Volume Profile (Сигналы/Watchlist/Тюнинг)? Дивергенции не тронет. Это необратимо.',
+  'Очистить объём');
+wireResetButton('resetDivBtn', '/api/reset/divergence',
+  'Удалить статистику RSI-дивергенций? Volume Profile не тронет. Это необратимо.',
+  'Очистить дивер');
 
 // ---------------- Settings modal ----------------
 const settingsModal = document.getElementById('settingsModal');
