@@ -705,6 +705,36 @@ v0.29.0 - added a third, fully independent signal source: the EMA
          resolved correctly), the trend filter correctly blocking a
          counter-trend crossover, and a full endpoint regression across
          all three signal sources together.
+v0.30.0 - two user-requested changes.
+         (1) All three chart modals (Volume Profile, Divergence, EMA)
+         zoomed in on the signal instead of showing the full ~200-bar
+         fetch — added windowAroundTime(): finds the signal's own bar
+         by timestamp and windows to a fixed size around it (20
+         before/70 total for VP, 30/80 for divergence since pivots can
+         sit further back, 15/60 for EMA), clamped at either array edge
+         so it always returns a full-size window. Verified against
+         signal-near-end, signal-in-middle, signal-near-start, and
+         no-timestamp-match cases. Divergence and EMA windowing slice
+         the parallel arrays (rsi/ema7/ema14/ema28) by the same indices
+         so nothing desyncs.
+         (2) EMA indicator now scans multiple timeframes at once —
+         VP_EMA_INTERVALS (default "1h,1w") instead of a single
+         VP_EMA_INTERVAL — since the script's own developer runs it on
+         the weekly chart. Each signal is tagged with which interval it
+         came from; cooldown and the open-signal check are now keyed by
+         (symbol, interval) so the same symbol can have independent 1h
+         and 1w signals simultaneously; update_ema_outcomes reads the
+         interval back off each signal rather than a global default, so
+         outcome tracking fetches the right timeframe's candles.
+         compute_ema_stats() takes an optional interval filter;
+         /api/ema/status now returns a stats_by_interval breakdown so
+         1h vs weekly performance can be compared once enough data
+         accumulates, per the "let's track both and see" ask rather
+         than picking one upfront. Chart endpoint takes an interval
+         query param, defaulting to the clicked signal's own interval.
+         Verified end-to-end: same symbol firing independently on both
+         intervals, correct per-interval stats breakdown, and chart
+         fetch honoring interval=1w.
 """
 
 import os
@@ -720,7 +750,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.29.0"
+APP_VERSION = "0.30.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -850,7 +880,11 @@ DIV_SIGNAL_HISTORY = 200
 # mirroring the Pine Script's own input options.
 # ----------------------------------------------------------------------------
 EMA_ENABLED = os.environ.get("VP_EMA_ENABLED", "1") == "1"
-EMA_INTERVAL = os.environ.get("VP_EMA_INTERVAL", "1h")
+EMA_INTERVAL = os.environ.get("VP_EMA_INTERVAL", "1h")  # kept for backward-compat single-interval env overrides
+# the script's own developer runs it on the weekly chart — scanning both
+# alongside the existing 1h lets stats be compared later rather than
+# guessing which is better upfront
+EMA_INTERVALS = [x.strip() for x in os.environ.get("VP_EMA_INTERVALS", f"{EMA_INTERVAL},1w").split(",") if x.strip()]
 EMA_FETCH_LIMIT = int(os.environ.get("VP_EMA_FETCH_LIMIT", 200))
 EMA_LEN_7 = int(os.environ.get("VP_EMA_LEN_7", 7))
 EMA_LEN_14 = int(os.environ.get("VP_EMA_LEN_14", 14))
@@ -1513,16 +1547,16 @@ def update_divergence_outcomes():
             log_error(f"update_divergence_outcomes {sig.get('symbol')}: {e}")
 
 
-def has_open_ema_signal(symbol):
+def has_open_ema_signal(symbol, interval):
     with state_lock:
-        return any(s["symbol"] == symbol and s.get("status") == "OPEN" for s in STATE["ema_signals"])
+        return any(s["symbol"] == symbol and s.get("interval") == interval and s.get("status") == "OPEN" for s in STATE["ema_signals"])
 
 
-def scan_symbol_ema(symbol):
+def scan_symbol_ema(symbol, interval=EMA_INTERVAL):
     if not EMA_ENABLED:
         return
     try:
-        candles = get_candles(symbol, interval=EMA_INTERVAL, limit=EMA_FETCH_LIMIT)
+        candles = get_candles(symbol, interval=interval, limit=EMA_FETCH_LIMIT)
         min_needed = max(EMA_LEN_7, EMA_LEN_14, EMA_LEN_28) + 20
         if len(candles) < min_needed:
             return
@@ -1533,15 +1567,16 @@ def scan_symbol_ema(symbol):
         sig = detect_ema_signal(closes, EMA_LEN_7, EMA_LEN_14, EMA_LEN_28, EMA_SIGNAL_TYPE, EMA_TREND_FILTER)
         if not sig:
             return
-        if has_open_ema_signal(symbol):
+        if has_open_ema_signal(symbol, interval):
             return
 
         now = time.time()
+        cooldown_key = (symbol, interval)
         with _ema_cooldowns_lock:
-            last_ts = _ema_cooldowns.get(symbol, 0)
+            last_ts = _ema_cooldowns.get(cooldown_key, 0)
             allowed = now - last_ts >= EMA_COOLDOWN_SEC
             if allowed:
-                _ema_cooldowns[symbol] = now
+                _ema_cooldowns[cooldown_key] = now
         if not allowed:
             return
 
@@ -1549,6 +1584,7 @@ def scan_symbol_ema(symbol):
         sl, tp, risk = compute_ema_tp_sl(sig["direction"], entry)
         record = {
             "symbol": symbol,
+            "interval": interval,
             "direction": sig["direction"],
             "entry": entry,
             "sl": sl,
@@ -1574,7 +1610,7 @@ def scan_symbol_ema(symbol):
             STATE["ema_signals"].appendleft(record)
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         send_telegram(
-            f"{arrow} {symbol} (EMA {EMA_SIGNAL_TYPE})\n"
+            f"{arrow} {symbol} (EMA {EMA_SIGNAL_TYPE}, {interval})\n"
             f"entry: {entry:.6g}\n"
             f"SL: {sl:.6g}  TP: {tp:.6g}  (RR {EMA_RR:g})",
             category="ema",
@@ -1611,7 +1647,7 @@ def update_ema_outcomes():
         ]
     for sig in active:
         try:
-            candles = get_candles(sig["symbol"], interval=EMA_INTERVAL, limit=300)
+            candles = get_candles(sig["symbol"], interval=sig.get("interval", EMA_INTERVAL), limit=300)
             relevant = [c for c in candles if c["time"] > sig["time"]]
             direction = sig["direction"]
             entry = sig["entry"]
@@ -1651,9 +1687,11 @@ def update_ema_outcomes():
             log_error(f"update_ema_outcomes {sig.get('symbol')}: {e}")
 
 
-def compute_ema_stats():
+def compute_ema_stats(interval=None):
     with state_lock:
         signals = list(STATE["ema_signals"])
+    if interval is not None:
+        signals = [s for s in signals if s.get("interval") == interval]
     closed = [s for s in signals if s.get("status") == "CLOSED" and s.get("result") in ("WIN", "LOSS")]
     wins = sum(1 for s in closed if s["result"] == "WIN")
     losses = sum(1 for s in closed if s["result"] == "LOSS")
@@ -3000,7 +3038,7 @@ def scan_loop():
                 if DIVERGENCE_ENABLED:
                     futs += [ex.submit(scan_symbol_divergence, s) for s in universe]
                 if EMA_ENABLED:
-                    futs += [ex.submit(scan_symbol_ema, s) for s in universe]
+                    futs += [ex.submit(scan_symbol_ema, s, interval) for s in universe for interval in EMA_INTERVALS]
                 for _ in as_completed(futs):
                     pass
             if VOLUME_PROFILE_ENABLED:
@@ -3203,14 +3241,17 @@ def api_divergence_chart(symbol):
 @app.route("/api/ema/status")
 def api_ema_status():
     stats = compute_ema_stats()
+    by_interval = {interval: compute_ema_stats(interval) for interval in EMA_INTERVALS}
     with state_lock:
         return jsonify({
             "version": APP_VERSION,
             "enabled": EMA_ENABLED,
             "interval": EMA_INTERVAL,
+            "intervals": EMA_INTERVALS,
             "last_scan_finished": STATE["ema_last_scan_finished"],
             "last_scan_duration": STATE["ema_last_scan_duration"],
             "stats": stats,
+            "stats_by_interval": by_interval,
             "config": {
                 "rr": EMA_RR, "tp_pct": EMA_TP_PCT,
                 "len7": EMA_LEN_7, "len14": EMA_LEN_14, "len28": EMA_LEN_28,
@@ -3229,12 +3270,13 @@ def api_ema_signals():
 @app.route("/api/ema/chart/<symbol>")
 def api_ema_chart(symbol):
     try:
-        candles = get_candles(symbol, interval=EMA_INTERVAL, limit=EMA_FETCH_LIMIT)
+        interval = request.args.get("interval", EMA_INTERVAL)
+        candles = get_candles(symbol, interval=interval, limit=EMA_FETCH_LIMIT)
         closes = [c["close"] for c in candles]
         ema7 = compute_ema(closes, EMA_LEN_7)
         ema14 = compute_ema(closes, EMA_LEN_14)
         ema28 = compute_ema(closes, EMA_LEN_28)
-        return jsonify({"symbol": symbol, "interval": EMA_INTERVAL, "candles": candles,
+        return jsonify({"symbol": symbol, "interval": interval, "candles": candles,
                          "ema7": ema7, "ema14": ema14, "ema28": ema28})
     except Exception as e:
         log_error(f"api_ema_chart {symbol}: {e}")
@@ -3459,7 +3501,7 @@ INDEX_HTML = """<!doctype html>
   </table>
   <div id="divStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
   <table id="emaTable" style="display:none">
-    <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
+    <thead><tr><th>Symbol</th><th>Dir</th><th>TF</th><th>Entry</th><th>SL</th><th>TP</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
     <tbody></tbody>
   </table>
   <div id="emaStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
@@ -3853,6 +3895,7 @@ async function refreshEma() {
     }
     tr.innerHTML = `<td>${r.symbol}</td>
       <td class="${r.direction==='LONG'?'long':'short'}">${r.direction}</td>
+      <td class="dim">${r.interval || '-'}</td>
       <td>${fmt(r.entry)}</td>
       <td class="dim">${fmt(r.sl)}</td>
       <td class="dim">${fmt(r.tp)}</td>
@@ -3881,11 +3924,21 @@ async function refreshEma() {
       <span class="loss">LOSS: ${fmtStat(s.mae_r_losses)}</span><br>
       <span class="status-open">OPEN: ${fmtStat(s.mae_r_open)}</span>
     </div>` : '<div class="dim">Пока недостаточно закрытых сигналов для MFE/MAE.</div>';
+  const byInterval = status.stats_by_interval || {};
+  const intervalRows = (status.intervals || []).map(iv => {
+    const st = byInterval[iv] || {};
+    const ivWr = st.winrate !== null && st.winrate !== undefined ? `${st.winrate}%` : '-';
+    return `${iv}: <b>${ivWr}</b> (${st.wins||0}W/${st.losses||0}L, timeout ${st.timeouts||0}) · открытых: ${st.open||0}`;
+  }).join('<br>');
   panel.innerHTML = `
     <div class="dim" style="margin-bottom:10px;">
-      EMA ${cfg.len7}/${cfg.len14}/${cfg.len28} (${cfg.signal_type}${cfg.trend_filter ? ', с фильтром тренда' : ''}) · ТФ ${status.interval} ·
+      EMA ${cfg.len7}/${cfg.len14}/${cfg.len28} (${cfg.signal_type}${cfg.trend_filter ? ', с фильтром тренда' : ''}) · сканируются ТФ: ${(status.intervals||[]).join(', ')} ·
       скан ${status.last_scan_duration!==null && status.last_scan_duration!==undefined ? status.last_scan_duration+'s' : '...'} ·
-      Винрейт: ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ${cfg.rr}
+      Винрейт (всё вместе): ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ${cfg.rr}
+    </div>
+    <div style="margin-bottom:10px;padding-top:6px;border-top:1px solid #1c2433;">
+      <b>По таймфреймам (для сравнения):</b><br>
+      <span style="font-size:13px;">${intervalRows}</span>
     </div>
     ${mfeBlock}`;
 }
@@ -4062,8 +4115,10 @@ function drawChart(data, signalRow) {
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, W, H);
 
-  const candles = data.candles || [];
-  if (!candles.length) return;
+  const allCandles = data.candles || [];
+  if (!allCandles.length) return;
+  const { start: winStart, end: winEnd } = windowAroundTime(allCandles, signalRow && signalRow.time, 20, 70);
+  const candles = allCandles.slice(winStart, winEnd);
 
   const profileW = W * 0.22;
   const chartW = W - profileW - 50;
@@ -4226,8 +4281,14 @@ function drawDivergenceChart(data, row) {
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, W, H);
 
-  const candles = data.candles || [];
-  const rsi = data.rsi || [];
+  const allCandles = data.candles || [];
+  const allRsi = data.rsi || [];
+  if (!allCandles.length) return;
+  // wider before-margin than other charts: pivots can sit up to left+right+rsi_window
+  // bars before the signal's own bar, not just a handful
+  const { start: winStart, end: winEnd } = windowAroundTime(allCandles, row && row.time, 30, 80);
+  const candles = allCandles.slice(winStart, winEnd);
+  const rsi = allRsi.slice(winStart, winEnd);
   if (!candles.length) return;
 
   const priceH = H * 0.62;
@@ -4370,14 +4431,26 @@ async function openEmaChart(row) {
   document.getElementById('emaModalParams').textContent = 'загрузка...';
   emaModal.classList.add('open');
   try {
-    const data = await (await fetch(`/api/ema/chart/${row.symbol}`)).json();
+    const data = await (await fetch(`/api/ema/chart/${row.symbol}?interval=${encodeURIComponent(row.interval || '')}`)).json();
     currentEmaData = data;
     document.getElementById('emaModalParams').textContent =
-      `EMA 7/14/28 · ${row.direction} · entry ${fmt(row.entry)} · SL ${fmt(row.sl)} · TP ${fmt(row.tp)}`;
+      `EMA 7/14/28 · ${row.interval || ''} · ${row.direction} · entry ${fmt(row.entry)} · SL ${fmt(row.sl)} · TP ${fmt(row.tp)}`;
     drawEmaChart(data, row);
   } catch (e) {
     console.error(e);
   }
+}
+
+function windowAroundTime(candles, targetTime, beforeBars, totalBars) {
+  let idx = candles.length - 1;
+  if (targetTime !== undefined) {
+    const found = candles.findIndex(c => c.time === targetTime);
+    if (found >= 0) idx = found;
+  }
+  let start = Math.max(0, idx - beforeBars);
+  let end = Math.min(candles.length, start + totalBars);
+  if (end - start < totalBars) start = Math.max(0, end - totalBars);
+  return { start, end };
 }
 
 function drawEmaChart(data, row) {
@@ -4390,8 +4463,14 @@ function drawEmaChart(data, row) {
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, W, H);
 
-  const candles = data.candles || [];
-  if (!candles.length) return;
+  const allCandles = data.candles || [];
+  if (!allCandles.length) return;
+  const { start: winStart, end: winEnd } = windowAroundTime(allCandles, row && row.time, 15, 60);
+  const candles = allCandles.slice(winStart, winEnd);
+  const ema7Full = data.ema7 || [], ema14Full = data.ema14 || [], ema28Full = data.ema28 || [];
+  const ema7 = ema7Full.slice(winStart, winEnd);
+  const ema14 = ema14Full.slice(winStart, winEnd);
+  const ema28 = ema28Full.slice(winStart, winEnd);
   const padRight = 54;
   const chartW = W - padRight;
   const n = candles.length;
@@ -4443,9 +4522,9 @@ function drawEmaChart(data, row) {
     });
     ctx.stroke();
   };
-  drawEmaLine(data.ema7 || [], '#2962FF');
-  drawEmaLine(data.ema14 || [], '#FF6D00');
-  drawEmaLine(data.ema28 || [], '#E53935');
+  drawEmaLine(ema7, '#2962FF');
+  drawEmaLine(ema14, '#FF6D00');
+  drawEmaLine(ema28, '#E53935');
 
   ctx.fillStyle = 'rgba(5,7,12,0.75)';
   ctx.fillRect(4, 4, 150, 40);
