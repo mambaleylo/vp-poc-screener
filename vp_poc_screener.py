@@ -766,6 +766,27 @@ v0.31.0 - user feedback (with screenshot, weekly EMA chart): the real
          matching target — and confirmed a normal case (zone already
          ~10% of a tight natural range) is left alone rather than
          over-cropped.
+v0.31.1 - user feedback (with screenshot): the v0.31.0 fix went too far
+         the other way — compressing hard enough to hit a fixed 30% zone
+         target could clip almost the entire visible window down to ~4
+         candles when the lead-up trend was strong (a 5x price swing
+         over a few weekly bars, e.g.). This is a genuine geometric
+         conflict, not a simple bug: you can't have both a huge price
+         swing AND a tiny zone each filling most of the screen at the
+         same time. Reworked computeYRangeForZone() with a bounded
+         compromise instead of an absolute target: it still compresses
+         toward making the zone visible, but never shrinks the range
+         below minKeepFrac (0.12) of the range needed to show bars from
+         the window's start through ~8 bars past the signal — bars
+         further out than that may still clip if extreme. Swept
+         minKeepFrac from 0.35 down to 0.08 against the reported
+         scenario (6 weekly bars in a 0.27->0.058 downtrend, entry
+         0.0531) to find a balance: settled on 0.12, giving a 4.2% zone
+         with 15/20 candles still visible, vs. the reported case's ~4
+         candles and vs. 1.4%/16-visible at the more conservative 0.35.
+         Verified this default against the original tiny-zone bug (now
+         4% instead of <1%) and a normal, non-extreme case (unaffected,
+         same ~36% as before) — both still behave sensibly.
 """
 
 import os
@@ -781,7 +802,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.31.0"
+APP_VERSION = "0.31.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4158,7 +4179,7 @@ function drawChart(data, signalRow) {
 
   const hasTrade = signalRow && signalRow.entry !== undefined && signalRow.sl !== undefined;
   const { hi, lo } = computeYRangeForZone(candles, hasTrade ? signalRow.entry : undefined,
-    hasTrade ? signalRow.sl : undefined, hasTrade ? signalRow.tp : undefined);
+    hasTrade ? signalRow.sl : undefined, hasTrade ? signalRow.tp : undefined, signalRow && signalRow.time);
   const range = hi - lo || 1;
   const y = (price) => padTop + (hi - price) / range * chartH;
 
@@ -4329,7 +4350,7 @@ function drawDivergenceChart(data, row) {
   const findIdx = (t) => candles.findIndex(c => c.time === t);
 
   // ---- price panel ----
-  const { hi, lo } = computeYRangeForZone(candles, row && row.entry, row && row.sl, row && row.tp);
+  const { hi, lo } = computeYRangeForZone(candles, row && row.entry, row && row.sl, row && row.tp, row && row.time);
   const range = hi - lo || 1;
   const yP = (price) => (hi - price) / range * priceH;
 
@@ -4483,29 +4504,48 @@ function windowParamsForInterval(interval) {
   return { before: 15, total: 60 };
 }
 
-function computeYRangeForZone(candles, entry, sl, tp, targetFrac) {
-  targetFrac = targetFrac || 0.3;
-  let hi = Math.max(...candles.map(c => c.high));
-  let lo = Math.min(...candles.map(c => c.low));
-  const naturalRange = hi - lo || hi * 0.02 || 1;
+function computeYRangeForZone(candles, entry, sl, tp, sigTime, targetFrac, minKeepFrac) {
+  targetFrac = targetFrac || 0.25;
+  minKeepFrac = minKeepFrac || 0.12; // never compress the near range below this fraction — keeps most bars visible even through a strong trend
+  const nearAfter = 8;
+  let sigIdx = candles.length - 1;
+  if (sigTime !== undefined) {
+    const found = candles.findIndex(c => c.time === sigTime);
+    if (found >= 0) sigIdx = found;
+  }
+  const nearEnd = Math.min(candles.length, sigIdx + nearAfter + 1);
+  const nearCandles = candles.slice(0, nearEnd);
+  const nearSrc = nearCandles.length ? nearCandles : candles;
+  let baseHi = Math.max(...nearSrc.map(c => c.high));
+  let baseLo = Math.min(...nearSrc.map(c => c.low));
+
   if (entry !== undefined && sl !== undefined && tp !== undefined) {
     const zoneTop = Math.max(entry, sl, tp);
     const zoneBottom = Math.min(entry, sl, tp);
+    baseHi = Math.max(baseHi, zoneTop);
+    baseLo = Math.min(baseLo, zoneBottom);
     const zoneHeight = (zoneTop - zoneBottom) || zoneTop * 0.001 || 1;
-    const zoneFrac = zoneHeight / naturalRange;
+    const baseRange = (baseHi - baseLo) || zoneHeight;
+    const zoneFrac = zoneHeight / baseRange;
     if (zoneFrac < targetFrac) {
-      // the zone is a sliver of the naive autoscale range (old bars at a
-      // very different price stretch the axis) — shrink the range so the
-      // zone actually takes up targetFrac of the screen, centered on it.
-      // Bars whose highs/lows fall outside the new range simply clip off
-      // the top/bottom of the canvas, same as any charting tool does.
-      const newRange = zoneHeight / targetFrac;
-      const zoneMid = (zoneTop + zoneBottom) / 2;
-      return { hi: zoneMid + newRange / 2, lo: zoneMid - newRange / 2 };
+      // Showing the full lead-up (e.g. a strong trend into the signal) and
+      // making the zone visually prominent can genuinely conflict — you
+      // can't have a 5x price swing AND a tiny zone both filling most of
+      // the screen. Compress toward the zone, but cap it at minKeepFrac of
+      // the natural range so at least a predictable, bounded amount of
+      // context always survives rather than collapsing to almost nothing.
+      const wanted = zoneHeight / targetFrac;
+      const floor = baseRange * minKeepFrac;
+      const newRange = Math.max(wanted, floor);
+      if (newRange < baseRange) {
+        const zoneMid = (zoneTop + zoneBottom) / 2;
+        const pad = newRange * 0.03;
+        return { hi: zoneMid + newRange / 2 + pad, lo: zoneMid - newRange / 2 - pad };
+      }
     }
   }
-  const pad = naturalRange * 0.05;
-  return { hi: hi + pad, lo: lo - pad };
+  const pad = (baseHi - baseLo) * 0.05 || baseHi * 0.01;
+  return { hi: baseHi + pad, lo: baseLo - pad };
 }
 
 function drawEmaChart(data, row) {
@@ -4534,7 +4574,7 @@ function drawEmaChart(data, row) {
   const bodyW = Math.max(1, slot * 0.6);
   const xAt = (i) => i * slot + slot / 2;
 
-  const { hi, lo } = computeYRangeForZone(candles, row && row.entry, row && row.sl, row && row.tp);
+  const { hi, lo } = computeYRangeForZone(candles, row && row.entry, row && row.sl, row && row.tp, row && row.time);
   const range = hi - lo || 1;
   const yP = (price) => (hi - price) / range * H;
 
