@@ -631,6 +631,24 @@ v0.25.0 - raised the universe cap and background-work throughput per
          naturally with universe size regardless; no change needed
          there. All four remain overridable via env var if the actual
          hardware/network turns out to need dialing back.
+v0.26.0 - two user-requested changes to divergence TP/SL and timing:
+         (1) TP is now a fixed % move from entry (VP_DIV_TP_PCT, default
+         1.1%) instead of being derived from a pivot-based SL — SL is
+         now sized backward from that fixed TP distance divided by
+         DIV_RR, so the RR ratio (2.0) is preserved but SL is a
+         mechanical fraction of TP, no longer the divergence's actual
+         structural invalidation point beyond the pivot. Removed
+         DIV_MAX_RISK_PCT entirely — it existed to catch a pivot-based
+         SL sitting too far from entry, which can't happen anymore since
+         risk is now always exactly tp_pct/rr of entry, a constant.
+         Also removed the now-fully-unused DIV_BUFFER_PCT. (2) lowered
+         VP_DIV_PIVOT_RIGHT 3->2 per overnight signal volume plus the
+         tool's own shadow-stability read at right=2. VP_DIV_SHADOW_RIGHTS
+         default updated to "1" (previously "2,3,4", all of which sat at
+         or above the new right=2 and would have produced zero stability
+         data going forward). Verified the new TP/SL calc directly (both
+         directions land at exactly 1.1% TP and preserve RR=2.0) and a
+         full endpoint regression.
 """
 
 import os
@@ -646,7 +664,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.25.0"
+APP_VERSION = "0.26.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -744,7 +762,7 @@ DIV_INTERVAL = os.environ.get("VP_DIV_INTERVAL", "1h")
 DIV_FETCH_LIMIT = int(os.environ.get("VP_DIV_FETCH_LIMIT", 200))  # candles pulled per symbol per scan
 DIV_RSI_PERIOD = int(os.environ.get("VP_DIV_RSI_PERIOD", 14))
 DIV_PIVOT_LEFT = int(os.environ.get("VP_DIV_PIVOT_LEFT", 5))
-DIV_PIVOT_RIGHT = int(os.environ.get("VP_DIV_PIVOT_RIGHT", 3))  # was 5 — the tool's own shadow-stability stats (right=3: 88.3% agreement, entry ~0.15% better) show right=5 was confirming later than it needed to, often after the move had already played out
+DIV_PIVOT_RIGHT = int(os.environ.get("VP_DIV_PIVOT_RIGHT", 2))  # was 3, lowered further per overnight signal volume + the tool's own shadow-stability stats (right=2 still showed a reasonable agreement rate)
 # Стандартная практика торговли дивергенциями: сигнал считается живым
 # ровно в момент подтверждения пивота (right баров после самого пивота),
 # а не ещё сколько-то баров сверху. По умолчанию равен DIV_PIVOT_RIGHT —
@@ -753,7 +771,6 @@ DIV_PIVOT_RIGHT = int(os.environ.get("VP_DIV_PIVOT_RIGHT", 3))  # was 5 — the 
 # подтверждения, и не "протухает" через дополнительные 5 баров, как было
 # при freshness=8 vs right=3.
 DIV_FRESHNESS_BARS = int(os.environ.get("VP_DIV_FRESHNESS_BARS", DIV_PIVOT_RIGHT))
-DIV_MAX_RISK_PCT = float(os.environ.get("VP_DIV_MAX_RISK_PCT", 0.03))  # skip a divergence signal if the pivot-based invalidation point sits more than this fraction of entry price away — a distant pivot means an oversized SL and (at DIV_RR) an even more oversized TP, not a genuinely tradeable setup
 # Diagnostic only, doesn't affect live detection: for each fired signal,
 # check whether a SMALLER right-confirmation window would have picked the
 # exact same pivot bar using only the data that would actually have been
@@ -762,9 +779,9 @@ DIV_MAX_RISK_PCT = float(os.environ.get("VP_DIV_MAX_RISK_PCT", 0.03))  # skip a 
 # window trivially also satisfies any smaller one in hindsight). This is
 # what actually tells us the risk of reducing VP_DIV_PIVOT_RIGHT: how
 # often would going faster have picked a different, wrong point instead.
-DIV_SHADOW_RIGHTS = [int(x) for x in os.environ.get("VP_DIV_SHADOW_RIGHTS", "2,3,4").split(",") if x.strip()]
+DIV_SHADOW_RIGHTS = [int(x) for x in os.environ.get("VP_DIV_SHADOW_RIGHTS", "1").split(",") if x.strip()]  # only values below DIV_PIVOT_RIGHT are meaningful for the stability diagnostic
 DIV_RR = float(os.environ.get("VP_DIV_RR", 2.0))
-DIV_BUFFER_PCT = float(os.environ.get("VP_DIV_BUFFER_PCT", 0.005))  # SL sits this far beyond the pivot extreme (fraction of price)
+DIV_TP_PCT = float(os.environ.get("VP_DIV_TP_PCT", 0.011))  # TP is a fixed % move from entry (1.1% default) — SL is then sized backward from this via DIV_RR, rather than TP being derived from a pivot-based SL
 DIV_COOLDOWN_SEC = int(os.environ.get("VP_DIV_COOLDOWN", 3600))
 DIV_SIGNAL_HISTORY = 200
 
@@ -1144,19 +1161,24 @@ def detect_divergence(candles, rsi, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT,
     return None
 
 
-def compute_div_tp_sl(direction, entry, sig, rr=DIV_RR, buffer_pct=DIV_BUFFER_PCT):
-    """SL sits beyond whichever pivot price is more extreme (the level
-    that, if broken, invalidates the divergence read)."""
+def compute_div_tp_sl(direction, entry, rr=DIV_RR, tp_pct=DIV_TP_PCT):
+    """TP is a fixed % move from entry (tp_pct) rather than derived from
+    the pivot-based invalidation point. SL is then sized backward from
+    that TP distance divided by rr, so the RR ratio is preserved — but
+    note this means SL no longer corresponds to where the divergence
+    pattern itself is actually invalidated (beyond the pivot extreme);
+    it's now a purely mechanical fraction of the TP distance. Deliberate
+    tradeoff, requested in place of the structural (pivot-based) stop."""
     if direction == "SHORT":
-        extreme = max(sig["price_p1"], sig["price_p2"])
-        sl = extreme * (1 + buffer_pct)
-        risk = sl - entry
-        tp = entry - risk * rr
+        tp = entry * (1 - tp_pct)
+        tp_dist = entry - tp
+        risk = tp_dist / rr
+        sl = entry + risk
     else:
-        extreme = min(sig["price_p1"], sig["price_p2"])
-        sl = extreme * (1 - buffer_pct)
-        risk = entry - sl
-        tp = entry + risk * rr
+        tp = entry * (1 + tp_pct)
+        tp_dist = tp - entry
+        risk = tp_dist / rr
+        sl = entry - risk
     return sl, tp, risk
 
 
@@ -1194,9 +1216,7 @@ def scan_symbol_divergence(symbol):
             return
 
         entry = candles[-1]["close"]
-        sl, tp, risk = compute_div_tp_sl(sig["direction"], entry, sig)
-        if entry and risk / entry > DIV_MAX_RISK_PCT:
-            return  # pivot too far from current price — SL/TP would be oversized, not a real setup
+        sl, tp, risk = compute_div_tp_sl(sig["direction"], entry)
         record = {
             "symbol": symbol,
             "direction": sig["direction"],
@@ -2769,7 +2789,7 @@ def api_divergence_status():
                 for k, v in stability_raw.items()
             },
             "config": {
-                "rr": DIV_RR, "buffer_pct": DIV_BUFFER_PCT, "rsi_period": DIV_RSI_PERIOD,
+                "rr": DIV_RR, "tp_pct": DIV_TP_PCT, "rsi_period": DIV_RSI_PERIOD,
                 "pivot_left": DIV_PIVOT_LEFT, "pivot_right": DIV_PIVOT_RIGHT,
                 "freshness_bars": DIV_FRESHNESS_BARS, "cooldown": DIV_COOLDOWN_SEC,
             },
