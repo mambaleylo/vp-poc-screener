@@ -787,6 +787,21 @@ v0.31.1 - user feedback (with screenshot): the v0.31.0 fix went too far
          Verified this default against the original tiny-zone bug (now
          4% instead of <1%) and a normal, non-extreme case (unaffected,
          same ~36% as before) — both still behave sensibly.
+v0.31.2 - fixed a real gap noticed while reading a user's stats
+         screenshot: the Дивергенции and Индикатор (EMA) tabs were both
+         still showing full-window (24h, contaminated by post-close
+         drift) MFE/MAE as the primary numbers — the at-close snapshot
+         fix from v0.19 only ever got wired into the Тюнинг (Volume
+         Profile) panel's JS, even though compute_divergence_stats()
+         and compute_ema_stats() had already been computing the
+         *_at_close fields backend-side all along. Caught because a
+         LOSS MAE of 2.683 shown for EMA is physically impossible for
+         an at-close reading (a fixed-size stop means adverse excursion
+         is exactly 1.0R the instant SL is touched) — that value could
+         only come from continued post-close tracking. Both panels now
+         lead with the at-close numbers and tuck the full-window ones
+         into the same collapsed <details> the Тюнинг panel already
+         uses, for consistency across all three signal sources.
 """
 
 import os
@@ -802,7 +817,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.31.1"
+APP_VERSION = "0.31.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3877,18 +3892,27 @@ async function refreshDivergence() {
   const panel = document.getElementById('divStatsPanel');
   const cfg = status.config || {};
   const mfeBlock = s.dataset_count ? `
-    <div style="margin-bottom:8px;"><b>MFE (R) — насколько цена уходила в плюс:</b><br>
-      <span class="dim">все: ${fmtStat(s.mfe_r_all)}</span><br>
-      <span class="win">WIN: ${fmtStat(s.mfe_r_wins)}</span><br>
-      <span class="loss">LOSS: ${fmtStat(s.mfe_r_losses)}</span><br>
-      <span class="status-open">OPEN: ${fmtStat(s.mfe_r_open)}</span>
+    <div style="margin-bottom:8px;"><b>MFE/MAE (R) на момент закрытия сделки</b> — сколько реально было хода в плюс/минус, пока сделка была ещё жива:<br>
+      <span class="win">WIN MFE: ${fmtStat(s.mfe_r_wins_at_close)}</span><br>
+      <span class="win">WIN MAE: ${fmtStat(s.mae_r_wins_at_close)}</span><br>
+      <span class="loss">LOSS MFE: ${fmtStat(s.mfe_r_losses_at_close)}</span><br>
+      <span class="loss">LOSS MAE: ${fmtStat(s.mae_r_losses_at_close)}</span>
     </div>
-    <div><b>MAE (R) — насколько цена уходила в минус:</b><br>
-      <span class="dim">все: ${fmtStat(s.mae_r_all)}</span><br>
-      <span class="win">WIN: ${fmtStat(s.mae_r_wins)}</span><br>
-      <span class="loss">LOSS: ${fmtStat(s.mae_r_losses)}</span><br>
-      <span class="status-open">OPEN: ${fmtStat(s.mae_r_open)}</span>
-    </div>` : '<div class="dim">Пока недостаточно закрытых сигналов для MFE/MAE.</div>';
+    <details style="margin-top:6px;">
+      <summary class="dim" style="cursor:pointer;font-size:12px;">Полное окно (24ч после сигнала, включая то, что было уже после закрытия — для оценки общего запаса, не для оценки конкретной сделки)</summary>
+      <div style="margin-top:8px;"><b>MFE (R):</b><br>
+        <span class="dim">все: ${fmtStat(s.mfe_r_all)}</span><br>
+        <span class="win">WIN: ${fmtStat(s.mfe_r_wins)}</span><br>
+        <span class="loss">LOSS: ${fmtStat(s.mfe_r_losses)}</span><br>
+        <span class="status-open">OPEN: ${fmtStat(s.mfe_r_open)}</span>
+      </div>
+      <div style="margin-top:6px;"><b>MAE (R):</b><br>
+        <span class="dim">все: ${fmtStat(s.mae_r_all)}</span><br>
+        <span class="win">WIN: ${fmtStat(s.mae_r_wins)}</span><br>
+        <span class="loss">LOSS: ${fmtStat(s.mae_r_losses)}</span><br>
+        <span class="status-open">OPEN: ${fmtStat(s.mae_r_open)}</span>
+      </div>
+    </details>` : '<div class="dim">Пока недостаточно закрытых сигналов для MFE/MAE.</div>';
   const pm = s.pre_move_pct_all;
   const preMoveBlock = pm ? `
     <div style="margin-top:10px;padding-top:10px;border-top:1px solid #1c2433;">
@@ -3964,18 +3988,27 @@ async function refreshEma() {
   const panel = document.getElementById('emaStatsPanel');
   const cfg = status.config || {};
   const mfeBlock = s.dataset_count ? `
-    <div style="margin-bottom:8px;"><b>MFE (R) — насколько цена уходила в плюс:</b><br>
-      <span class="dim">все: ${fmtStat(s.mfe_r_all)}</span><br>
-      <span class="win">WIN: ${fmtStat(s.mfe_r_wins)}</span><br>
-      <span class="loss">LOSS: ${fmtStat(s.mfe_r_losses)}</span><br>
-      <span class="status-open">OPEN: ${fmtStat(s.mfe_r_open)}</span>
+    <div style="margin-bottom:8px;"><b>MFE/MAE (R) на момент закрытия сделки</b> — сколько реально было хода в плюс/минус, пока сделка была ещё жива:<br>
+      <span class="win">WIN MFE: ${fmtStat(s.mfe_r_wins_at_close)}</span><br>
+      <span class="win">WIN MAE: ${fmtStat(s.mae_r_wins_at_close)}</span><br>
+      <span class="loss">LOSS MFE: ${fmtStat(s.mfe_r_losses_at_close)}</span><br>
+      <span class="loss">LOSS MAE: ${fmtStat(s.mae_r_losses_at_close)}</span>
     </div>
-    <div><b>MAE (R) — насколько цена уходила в минус:</b><br>
-      <span class="dim">все: ${fmtStat(s.mae_r_all)}</span><br>
-      <span class="win">WIN: ${fmtStat(s.mae_r_wins)}</span><br>
-      <span class="loss">LOSS: ${fmtStat(s.mae_r_losses)}</span><br>
-      <span class="status-open">OPEN: ${fmtStat(s.mae_r_open)}</span>
-    </div>` : '<div class="dim">Пока недостаточно закрытых сигналов для MFE/MAE.</div>';
+    <details style="margin-top:6px;">
+      <summary class="dim" style="cursor:pointer;font-size:12px;">Полное окно (24ч после сигнала, включая то, что было уже после закрытия — для оценки общего запаса, не для оценки конкретной сделки)</summary>
+      <div style="margin-top:8px;"><b>MFE (R):</b><br>
+        <span class="dim">все: ${fmtStat(s.mfe_r_all)}</span><br>
+        <span class="win">WIN: ${fmtStat(s.mfe_r_wins)}</span><br>
+        <span class="loss">LOSS: ${fmtStat(s.mfe_r_losses)}</span><br>
+        <span class="status-open">OPEN: ${fmtStat(s.mfe_r_open)}</span>
+      </div>
+      <div style="margin-top:6px;"><b>MAE (R):</b><br>
+        <span class="dim">все: ${fmtStat(s.mae_r_all)}</span><br>
+        <span class="win">WIN: ${fmtStat(s.mae_r_wins)}</span><br>
+        <span class="loss">LOSS: ${fmtStat(s.mae_r_losses)}</span><br>
+        <span class="status-open">OPEN: ${fmtStat(s.mae_r_open)}</span>
+      </div>
+    </details>` : '<div class="dim">Пока недостаточно закрытых сигналов для MFE/MAE.</div>';
   const byInterval = status.stats_by_interval || {};
   const intervalRows = (status.intervals || []).map(iv => {
     const st = byInterval[iv] || {};
