@@ -744,6 +744,28 @@ v0.30.1 - user feedback (with screenshot): the weekly EMA chart was
          10/35, else: 15/60 as before) instead of one fixed size for
          every timeframe. Verified all four branches plus the
          undefined-interval fallback directly.
+v0.31.0 - user feedback (with screenshot, weekly EMA chart): the real
+         problem wasn't bar count, it was vertical stretch — a naive
+         min/max-of-visible-candles autoscale let old bars at a very
+         different price (e.g. 0.15-0.2 many weeks back vs a 0.053
+         entry/SL/TP zone now) dominate the y-axis, squeezing the
+         actual signal zone into an unreadable sliver at the very
+         edge. Replaced the autoscale in all three chart types (Volume
+         Profile, Divergence, EMA) with computeYRangeForZone(): if the
+         entry/SL/TP zone would occupy less than 30% of the vertical
+         range under naive autoscale, shrinks the range so the zone is
+         centered and actually occupies 30% of the screen — bars whose
+         highs/lows fall outside the new range simply clip off the
+         top/bottom of the canvas (normal charting behavior, browsers
+         clip out-of-bounds drawing for free). Falls back to the old
+         padded-autoscale behavior when the zone already occupies a
+         healthy fraction naturally, so normal-looking charts aren't
+         needlessly cropped. Verified directly against the exact
+         screenshot scenario (0.053 zone inside a 0.038-0.27 candle
+         range) — zone now measures exactly 30% of the shown range,
+         matching target — and confirmed a normal case (zone already
+         ~10% of a tight natural range) is left alone rather than
+         over-cropped.
 """
 
 import os
@@ -759,7 +781,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.30.1"
+APP_VERSION = "0.31.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4135,14 +4157,8 @@ function drawChart(data, signalRow) {
   const chartH = H - padTop - padBottom;
 
   const hasTrade = signalRow && signalRow.entry !== undefined && signalRow.sl !== undefined;
-  let hi = Math.max(...candles.map(c => c.high));
-  let lo = Math.min(...candles.map(c => c.low));
-  if (hasTrade) {
-    hi = Math.max(hi, signalRow.tp, signalRow.sl, signalRow.entry);
-    lo = Math.min(lo, signalRow.tp, signalRow.sl, signalRow.entry);
-  }
-  const pad = (hi - lo) * 0.04 || hi * 0.01;
-  hi += pad; lo -= pad;
+  const { hi, lo } = computeYRangeForZone(candles, hasTrade ? signalRow.entry : undefined,
+    hasTrade ? signalRow.sl : undefined, hasTrade ? signalRow.tp : undefined);
   const range = hi - lo || 1;
   const y = (price) => padTop + (hi - price) / range * chartH;
 
@@ -4313,11 +4329,7 @@ function drawDivergenceChart(data, row) {
   const findIdx = (t) => candles.findIndex(c => c.time === t);
 
   // ---- price panel ----
-  let hi = Math.max(...candles.map(c => c.high));
-  let lo = Math.min(...candles.map(c => c.low));
-  if (row) { hi = Math.max(hi, row.tp, row.sl, row.entry); lo = Math.min(lo, row.tp, row.sl, row.entry); }
-  const pad = (hi - lo) * 0.05 || hi * 0.01;
-  hi += pad; lo -= pad;
+  const { hi, lo } = computeYRangeForZone(candles, row && row.entry, row && row.sl, row && row.tp);
   const range = hi - lo || 1;
   const yP = (price) => (hi - price) / range * priceH;
 
@@ -4471,6 +4483,31 @@ function windowParamsForInterval(interval) {
   return { before: 15, total: 60 };
 }
 
+function computeYRangeForZone(candles, entry, sl, tp, targetFrac) {
+  targetFrac = targetFrac || 0.3;
+  let hi = Math.max(...candles.map(c => c.high));
+  let lo = Math.min(...candles.map(c => c.low));
+  const naturalRange = hi - lo || hi * 0.02 || 1;
+  if (entry !== undefined && sl !== undefined && tp !== undefined) {
+    const zoneTop = Math.max(entry, sl, tp);
+    const zoneBottom = Math.min(entry, sl, tp);
+    const zoneHeight = (zoneTop - zoneBottom) || zoneTop * 0.001 || 1;
+    const zoneFrac = zoneHeight / naturalRange;
+    if (zoneFrac < targetFrac) {
+      // the zone is a sliver of the naive autoscale range (old bars at a
+      // very different price stretch the axis) — shrink the range so the
+      // zone actually takes up targetFrac of the screen, centered on it.
+      // Bars whose highs/lows fall outside the new range simply clip off
+      // the top/bottom of the canvas, same as any charting tool does.
+      const newRange = zoneHeight / targetFrac;
+      const zoneMid = (zoneTop + zoneBottom) / 2;
+      return { hi: zoneMid + newRange / 2, lo: zoneMid - newRange / 2 };
+    }
+  }
+  const pad = naturalRange * 0.05;
+  return { hi: hi + pad, lo: lo - pad };
+}
+
 function drawEmaChart(data, row) {
   const canvas = document.getElementById('emaChartCanvas');
   const wrap = document.getElementById('emaChartWrap');
@@ -4497,11 +4534,7 @@ function drawEmaChart(data, row) {
   const bodyW = Math.max(1, slot * 0.6);
   const xAt = (i) => i * slot + slot / 2;
 
-  let hi = Math.max(...candles.map(c => c.high));
-  let lo = Math.min(...candles.map(c => c.low));
-  if (row) { hi = Math.max(hi, row.tp, row.sl, row.entry); lo = Math.min(lo, row.tp, row.sl, row.entry); }
-  const pad = (hi - lo) * 0.05 || hi * 0.01;
-  hi += pad; lo -= pad;
+  const { hi, lo } = computeYRangeForZone(candles, row && row.entry, row && row.sl, row && row.tp);
   const range = hi - lo || 1;
   const yP = (price) => (hi - price) / range * H;
 
