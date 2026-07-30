@@ -673,6 +673,38 @@ v0.28.0 - split the "Очистить данные" button into two scoped ones:
          longer calls it. Verified selectivity directly: resetting one
          side clears only its own data while the other side's populated
          test data survives untouched, in both directions.
+v0.29.0 - added a third, fully independent signal source: the EMA
+         7/14/28 crossover indicator, ported directly from a
+         user-supplied Pine Script ("EMA 7,14,28 + Сигналы"). Own scan
+         (VP_EMA_INTERVAL, default 1h), own history/stats/chart/tab
+         ("Индикатор"), own Telegram category ("ema"), own settings
+         toggle (labeled "Обещанный индикатор" per request) and reset
+         button ("Очистить индикатор" / /api/reset/ema) — same
+         "completely separate from everything else" treatment as
+         divergence got in v0.14.
+         compute_ema() matches Pine's ta.ema exactly: seeds with the
+         first value (no SMA warm-up), then the standard
+         alpha=2/(period+1) recursion — verified against a hand-computed
+         first step. Three signal-type definitions mirror the script's
+         own dropdown: price/EMA7 cross, EMA7/EMA14 cross, or
+         "combined" (price crosses EMA7 while EMA7 already sits on the
+         trade's side of EMA14) — plus the optional EMA28 trend filter,
+         all only evaluated on the latest bar (no confirmation delay
+         needed, since a crossover is knowable the instant a bar
+         closes, unlike a swing pivot). The script only plots BUY/SELL
+         labels with no TP/SL of its own, so added a fixed-%-TP-then-
+         derive-SL calc (VP_EMA_TP_PCT, default 1.5%, RR 2.0) mirroring
+         the divergence signals, purely so this fits the same win-rate/
+         MFE/MAE tracking as everything else. Chart is overlay-only (no
+         separate sub-panel, matching how the indicator actually draws
+         on a real chart) — candles plus the three EMA lines in their
+         original script colors, with entry/SL/TP level lines.
+         Verified end-to-end: EMA seeding against a hand-computed
+         value, a manufactured price/EMA7 crossover firing correctly
+         through the full scan->record->outcome-tracking pipeline (WIN
+         resolved correctly), the trend filter correctly blocking a
+         counter-trend crossover, and a full endpoint regression across
+         all three signal sources together.
 """
 
 import os
@@ -688,7 +720,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.28.0"
+APP_VERSION = "0.29.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -809,6 +841,33 @@ DIV_TP_PCT = float(os.environ.get("VP_DIV_TP_PCT", 0.011))  # TP is a fixed % mo
 DIV_COOLDOWN_SEC = int(os.environ.get("VP_DIV_COOLDOWN", 3600))
 DIV_SIGNAL_HISTORY = 200
 
+# ----------------------------------------------------------------------------
+# EMA 7/14/28 signal indicator — ported from a user-supplied Pine Script
+# ("EMA 7,14,28 + Сигналы"). A third, fully separate signal source: own
+# scan, own history/stats, own chart, own Telegram category. Three
+# possible crossover definitions (price/EMA7, EMA7/EMA14, or both
+# combined), optionally filtered by trend (price vs EMA28) — exactly
+# mirroring the Pine Script's own input options.
+# ----------------------------------------------------------------------------
+EMA_ENABLED = os.environ.get("VP_EMA_ENABLED", "1") == "1"
+EMA_INTERVAL = os.environ.get("VP_EMA_INTERVAL", "1h")
+EMA_FETCH_LIMIT = int(os.environ.get("VP_EMA_FETCH_LIMIT", 200))
+EMA_LEN_7 = int(os.environ.get("VP_EMA_LEN_7", 7))
+EMA_LEN_14 = int(os.environ.get("VP_EMA_LEN_14", 14))
+EMA_LEN_28 = int(os.environ.get("VP_EMA_LEN_28", 28))
+# "price_ema7" = Pine's "Пересечение цены и EMA7"; "ema7_ema14" = "Пересечение
+# EMA7 и EMA14"; "combined" = "Комбинированный" (price crosses EMA7 AND EMA7
+# is already on the trade's side of EMA14)
+EMA_SIGNAL_TYPE = os.environ.get("VP_EMA_SIGNAL_TYPE", "combined")
+EMA_TREND_FILTER = os.environ.get("VP_EMA_TREND_FILTER", "1") == "1"  # only BUY above EMA28 / SELL below it, same as the script's "Фильтровать по тренду"
+EMA_COOLDOWN_SEC = int(os.environ.get("VP_EMA_COOLDOWN", 3600))
+EMA_SIGNAL_HISTORY = 200
+# the Pine Script only plots BUY/SELL labels, no TP/SL of its own — added
+# a fixed-% TP (mirroring the divergence signals) purely so this fits the
+# same win-rate/MFE/MAE tracking as everything else in the app.
+EMA_TP_PCT = float(os.environ.get("VP_EMA_TP_PCT", 0.015))
+EMA_RR = float(os.environ.get("VP_EMA_RR", 2.0))
+
 # --- zone quality filters: only narrow, genuinely dominant nodes should
 # fire signals. A merge of many adjacent top-N bins can produce a tall,
 # diffuse "zone" that isn't really a precise level — and a zone that's
@@ -884,6 +943,7 @@ TELEGRAM_ENABLED = os.environ.get("VP_TG_ENABLED", "1") == "1"  # separate from 
 # from the other.
 TELEGRAM_ALERTS_VP = os.environ.get("VP_TG_ALERTS_VP", "1") == "1"
 TELEGRAM_ALERTS_DIV = os.environ.get("VP_TG_ALERTS_DIV", "1") == "1"
+TELEGRAM_ALERTS_EMA = os.environ.get("VP_TG_ALERTS_EMA", "1") == "1"
 TELEGRAM_CHAT_ID = os.environ.get("VP_TG_CHAT", "")
 # Same config file path used by the EMA-screener/Pump_Radar project — if
 # Telegram was already set up there, this picks up the same token/chat_id
@@ -914,7 +974,7 @@ SETTINGS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_settings.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "bounce_enabled", "breakout_enabled",
-                  "telegram_enabled", "telegram_alerts_vp", "telegram_alerts_div")
+                  "ema_enabled", "telegram_enabled", "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema")
 
 
 def get_settings():
@@ -923,11 +983,14 @@ def get_settings():
         "divergence_enabled": DIVERGENCE_ENABLED,
         "bounce_enabled": BOUNCE_ENABLED,
         "breakout_enabled": BREAKOUT_ENABLED,
+        "ema_enabled": EMA_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
         "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
         "telegram_alerts_div": TELEGRAM_ALERTS_DIV,
+        "telegram_alerts_ema": TELEGRAM_ALERTS_EMA,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
     }
+
 
 
 def apply_settings(updates):
@@ -935,8 +998,8 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED
-    global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED
+    global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
     if "divergence_enabled" in updates:
@@ -945,12 +1008,16 @@ def apply_settings(updates):
         BOUNCE_ENABLED = bool(updates["bounce_enabled"])
     if "breakout_enabled" in updates:
         BREAKOUT_ENABLED = bool(updates["breakout_enabled"])
+    if "ema_enabled" in updates:
+        EMA_ENABLED = bool(updates["ema_enabled"])
     if "telegram_enabled" in updates:
         TELEGRAM_ENABLED = bool(updates["telegram_enabled"])
     if "telegram_alerts_vp" in updates:
         TELEGRAM_ALERTS_VP = bool(updates["telegram_alerts_vp"])
     if "telegram_alerts_div" in updates:
         TELEGRAM_ALERTS_DIV = bool(updates["telegram_alerts_div"])
+    if "telegram_alerts_ema" in updates:
+        TELEGRAM_ALERTS_EMA = bool(updates["telegram_alerts_ema"])
 
 
 def save_settings():
@@ -1000,11 +1067,17 @@ STATE = {
     # rotating diagnostic: how often would a smaller DIV_PIVOT_RIGHT have
     # agreed with the rigorous one, accumulated one symbol per cycle
     "div_pivot_stability": {str(r): {"agree": 0, "disagree": 0, "gain_sum": 0.0, "gain_count": 0} for r in DIV_SHADOW_RIGHTS},
+    # EMA 7/14/28 signal indicator — same "own page" treatment as divergence
+    "ema_signals": deque(maxlen=EMA_SIGNAL_HISTORY),
+    "ema_last_scan_finished": None,
+    "ema_last_scan_duration": None,
 }
 _cooldowns = {}  # (symbol, zone_key) -> last_alert_ts
 _cooldowns_lock = threading.Lock()
 _div_cooldowns = {}  # symbol -> last_alert_ts
 _div_cooldowns_lock = threading.Lock()
+_ema_cooldowns = {}  # symbol -> last_alert_ts
+_ema_cooldowns_lock = threading.Lock()
 
 
 def has_open_signal(symbol):
@@ -1185,7 +1258,87 @@ def detect_divergence(candles, rsi, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT,
     return None
 
 
-def compute_div_tp_sl(direction, entry, rr=DIV_RR, tp_pct=DIV_TP_PCT):
+# ----------------------------------------------------------------------------
+# EMA 7/14/28 signal indicator — ported from a user-supplied Pine Script.
+# ----------------------------------------------------------------------------
+def compute_ema(values, period):
+    """Matches Pine Script's ta.ema exactly: seeds with the first value
+    (no SMA warm-up), then applies alpha=2/(period+1) recursively."""
+    n = len(values)
+    ema = [None] * n
+    if n == 0:
+        return ema
+    alpha = 2 / (period + 1)
+    ema[0] = values[0]
+    for i in range(1, n):
+        ema[i] = alpha * values[i] + (1 - alpha) * ema[i - 1]
+    return ema
+
+
+def _crossover(a, b, i):
+    """a crosses above b at bar i (Pine's ta.crossover)."""
+    return a[i - 1] <= b[i - 1] and a[i] > b[i]
+
+
+def _crossunder(a, b, i):
+    """a crosses below b at bar i (Pine's ta.crossunder)."""
+    return a[i - 1] >= b[i - 1] and a[i] < b[i]
+
+
+def detect_ema_signal(closes, len7=EMA_LEN_7, len14=EMA_LEN_14, len28=EMA_LEN_28,
+                       signal_type=EMA_SIGNAL_TYPE, trend_filter=EMA_TREND_FILTER):
+    """Same three signal definitions as the Pine Script's "Тип сигнала"
+    input: price/EMA7 cross, EMA7/EMA14 cross, or "combined" (price
+    crosses EMA7 while EMA7 is already positioned on the trade's side of
+    EMA14) — plus the optional EMA28 trend filter. Only looks at the
+    latest bar, mirroring how the indicator plots live on a chart."""
+    n = len(closes)
+    if signal_type == "disabled" or n < max(len7, len14, len28) + 2:
+        return None
+    ema7 = compute_ema(closes, len7)
+    ema14 = compute_ema(closes, len14)
+    ema28 = compute_ema(closes, len28)
+    i = n - 1
+
+    cross_buy = _crossover(closes, ema7, i)
+    cross_sell = _crossunder(closes, ema7, i)
+
+    if signal_type == "price_ema7":
+        buy, sell = cross_buy, cross_sell
+    elif signal_type == "ema7_ema14":
+        buy, sell = _crossover(ema7, ema14, i), _crossunder(ema7, ema14, i)
+    elif signal_type == "combined":
+        buy = cross_buy and ema7[i] > ema14[i]
+        sell = cross_sell and ema7[i] < ema14[i]
+    else:
+        buy, sell = False, False
+
+    if trend_filter:
+        buy = buy and closes[i] > ema28[i]
+        sell = sell and closes[i] < ema28[i]
+
+    if buy:
+        return {"direction": "LONG", "ema7": ema7[i], "ema14": ema14[i], "ema28": ema28[i]}
+    if sell:
+        return {"direction": "SHORT", "ema7": ema7[i], "ema14": ema14[i], "ema28": ema28[i]}
+    return None
+
+
+def compute_ema_tp_sl(direction, entry, rr=EMA_RR, tp_pct=EMA_TP_PCT):
+    """Same fixed-%-TP-then-derive-SL approach as the divergence signals
+    — the source Pine Script only plots BUY/SELL labels, no TP/SL."""
+    if direction == "SHORT":
+        tp = entry * (1 - tp_pct)
+        risk = (entry - tp) / rr
+        sl = entry + risk
+    else:
+        tp = entry * (1 + tp_pct)
+        risk = (tp - entry) / rr
+        sl = entry - risk
+    return sl, tp, risk
+
+
+
     """TP is a fixed % move from entry (tp_pct) rather than derived from
     the pivot-based invalidation point. SL is then sized backward from
     that TP distance divided by rr, so the RR ratio is preserved — but
@@ -1358,6 +1511,188 @@ def update_divergence_outcomes():
                 close_div_signal(sig, "TIMEOUT", last_price)
         except Exception as e:
             log_error(f"update_divergence_outcomes {sig.get('symbol')}: {e}")
+
+
+def has_open_ema_signal(symbol):
+    with state_lock:
+        return any(s["symbol"] == symbol and s.get("status") == "OPEN" for s in STATE["ema_signals"])
+
+
+def scan_symbol_ema(symbol):
+    if not EMA_ENABLED:
+        return
+    try:
+        candles = get_candles(symbol, interval=EMA_INTERVAL, limit=EMA_FETCH_LIMIT)
+        min_needed = max(EMA_LEN_7, EMA_LEN_14, EMA_LEN_28) + 20
+        if len(candles) < min_needed:
+            return
+        ok, _reason = data_quality_check(candles[-min(len(candles), 100):])
+        if not ok:
+            return
+        closes = [c["close"] for c in candles]
+        sig = detect_ema_signal(closes, EMA_LEN_7, EMA_LEN_14, EMA_LEN_28, EMA_SIGNAL_TYPE, EMA_TREND_FILTER)
+        if not sig:
+            return
+        if has_open_ema_signal(symbol):
+            return
+
+        now = time.time()
+        with _ema_cooldowns_lock:
+            last_ts = _ema_cooldowns.get(symbol, 0)
+            allowed = now - last_ts >= EMA_COOLDOWN_SEC
+            if allowed:
+                _ema_cooldowns[symbol] = now
+        if not allowed:
+            return
+
+        entry = candles[-1]["close"]
+        sl, tp, risk = compute_ema_tp_sl(sig["direction"], entry)
+        record = {
+            "symbol": symbol,
+            "direction": sig["direction"],
+            "entry": entry,
+            "sl": sl,
+            "tp": tp,
+            "risk": risk,
+            "ema7": sig["ema7"], "ema14": sig["ema14"], "ema28": sig["ema28"],
+            "time": candles[-1]["time"],
+            "detected_at": now,
+            "status": "OPEN",
+            "result": None,
+            "closed_at": None,
+            "exit_price": None,
+            "exit_time": None,
+            "exit_candle": None,
+            "app_version": APP_VERSION,
+            "mfe_r": 0.0,
+            "mae_r": 0.0,
+            "mfe_price": None,
+            "mae_price": None,
+            "mfe_tracking_until": now + MFE_TRACK_SEC,
+        }
+        with state_lock:
+            STATE["ema_signals"].appendleft(record)
+        arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
+        send_telegram(
+            f"{arrow} {symbol} (EMA {EMA_SIGNAL_TYPE})\n"
+            f"entry: {entry:.6g}\n"
+            f"SL: {sl:.6g}  TP: {tp:.6g}  (RR {EMA_RR:g})",
+            category="ema",
+        )
+    except Exception as e:
+        log_error(f"ema {symbol}: {e}")
+
+
+def close_ema_signal(sig, result, exit_price, exit_candle=None):
+    with state_lock:
+        sig["status"] = "CLOSED"
+        sig["result"] = result
+        sig["exit_price"] = exit_price
+        sig["closed_at"] = time.time()
+        sig["mfe_r_at_close"] = sig["mfe_r"]
+        sig["mae_r_at_close"] = sig["mae_r"]
+        if exit_candle:
+            sig["exit_time"] = exit_candle["time"]
+            sig["exit_candle"] = {
+                "open": exit_candle["open"], "high": exit_candle["high"],
+                "low": exit_candle["low"], "close": exit_candle["close"],
+            }
+    if result in ("WIN", "LOSS"):
+        arrow = "\u2705" if result == "WIN" else "\u274c"
+        send_telegram(f"{arrow} {sig['symbol']} EMA {sig['direction']} closed: {result} @ {exit_price:.6g}", category="ema")
+
+
+def update_ema_outcomes():
+    now = time.time()
+    with state_lock:
+        active = [
+            s for s in STATE["ema_signals"]
+            if s.get("status") == "OPEN" or now < s.get("mfe_tracking_until", 0)
+        ]
+    for sig in active:
+        try:
+            candles = get_candles(sig["symbol"], interval=EMA_INTERVAL, limit=300)
+            relevant = [c for c in candles if c["time"] > sig["time"]]
+            direction = sig["direction"]
+            entry = sig["entry"]
+            risk = sig.get("risk") or abs(entry - sig["sl"]) or 1e-9
+
+            for c in relevant:
+                if direction == "LONG":
+                    fav, adv = c["high"] - entry, entry - c["low"]
+                else:
+                    fav, adv = entry - c["low"], c["high"] - entry
+                fav_r, adv_r = fav / risk, adv / risk
+                if fav_r > sig["mfe_r"] or adv_r > sig["mae_r"]:
+                    with state_lock:
+                        if fav_r > sig["mfe_r"]:
+                            sig["mfe_r"] = round(fav_r, 3)
+                            sig["mfe_price"] = c["high"] if direction == "LONG" else c["low"]
+                        if adv_r > sig["mae_r"]:
+                            sig["mae_r"] = round(adv_r, 3)
+                            sig["mae_price"] = c["low"] if direction == "LONG" else c["high"]
+
+                if sig["status"] == "OPEN":
+                    if direction == "LONG":
+                        if c["low"] <= sig["sl"]:
+                            close_ema_signal(sig, "LOSS", sig["sl"], exit_candle=c)
+                        elif c["high"] >= sig["tp"]:
+                            close_ema_signal(sig, "WIN", sig["tp"], exit_candle=c)
+                    else:
+                        if c["high"] >= sig["sl"]:
+                            close_ema_signal(sig, "LOSS", sig["sl"], exit_candle=c)
+                        elif c["low"] <= sig["tp"]:
+                            close_ema_signal(sig, "WIN", sig["tp"], exit_candle=c)
+
+            if sig["status"] == "OPEN" and now - sig["detected_at"] > SIGNAL_TIMEOUT_SEC:
+                last_price = candles[-1]["close"] if candles else entry
+                close_ema_signal(sig, "TIMEOUT", last_price)
+        except Exception as e:
+            log_error(f"update_ema_outcomes {sig.get('symbol')}: {e}")
+
+
+def compute_ema_stats():
+    with state_lock:
+        signals = list(STATE["ema_signals"])
+    closed = [s for s in signals if s.get("status") == "CLOSED" and s.get("result") in ("WIN", "LOSS")]
+    wins = sum(1 for s in closed if s["result"] == "WIN")
+    losses = sum(1 for s in closed if s["result"] == "LOSS")
+    total = wins + losses
+    timeouts = sum(1 for s in signals if s.get("result") == "TIMEOUT")
+    open_count = sum(1 for s in signals if s.get("status") == "OPEN")
+    winrate = round(wins / total * 100, 1) if total else None
+
+    dataset = [s for s in signals if s.get("mfe_price") is not None]
+
+    def agg(key, subset):
+        vals = [s[key] for s in subset if s.get(key) is not None]
+        if not vals:
+            return None
+        vals_sorted = sorted(vals)
+        n = len(vals_sorted)
+        return {
+            "avg": round(sum(vals) / n, 3),
+            "median": round(vals_sorted[n // 2], 3),
+            "p25": round(vals_sorted[int(n * 0.25)], 3),
+            "p75": round(vals_sorted[min(int(n * 0.75), n - 1)], 3),
+            "n": n,
+        }
+
+    win_set = [s for s in dataset if s.get("result") == "WIN"]
+    loss_set = [s for s in dataset if s.get("result") == "LOSS"]
+    open_set = [s for s in dataset if s.get("status") == "OPEN"]
+
+    return {
+        "open": open_count, "wins": wins, "losses": losses,
+        "timeouts": timeouts, "winrate": winrate, "closed_total": total,
+        "mfe_r_all": agg("mfe_r", dataset), "mae_r_all": agg("mae_r", dataset),
+        "mfe_r_wins": agg("mfe_r", win_set), "mae_r_wins": agg("mae_r", win_set),
+        "mfe_r_losses": agg("mfe_r", loss_set), "mae_r_losses": agg("mae_r", loss_set),
+        "mfe_r_open": agg("mfe_r", open_set), "mae_r_open": agg("mae_r", open_set),
+        "mfe_r_wins_at_close": agg("mfe_r_at_close", win_set), "mae_r_wins_at_close": agg("mae_r_at_close", win_set),
+        "mfe_r_losses_at_close": agg("mfe_r_at_close", loss_set), "mae_r_losses_at_close": agg("mae_r_at_close", loss_set),
+        "dataset_count": len(dataset),
+    }
 
 
 def compute_divergence_stats():
@@ -2024,6 +2359,7 @@ def save_state():
                 "overrides": SYMBOL_OVERRIDES,
                 "signals": list(STATE["signals"]),
                 "div_signals": list(STATE["div_signals"]),
+                "ema_signals": list(STATE["ema_signals"]),
                 "saved_at": time.time(),
             }
         tmp_path = STATE_FILE + ".tmp"
@@ -2043,10 +2379,12 @@ def load_state():
         SYMBOL_OVERRIDES.update(data.get("overrides", {}))
         signals = data.get("signals", [])
         div_signals = data.get("div_signals", [])
+        ema_signals = data.get("ema_signals", [])
         with state_lock:
             STATE["signals"] = deque(signals, maxlen=SIGNAL_HISTORY)
             STATE["div_signals"] = deque(div_signals, maxlen=DIV_SIGNAL_HISTORY)
-        print(f"Loaded persisted state: {len(SYMBOL_OVERRIDES)} overrides, {len(signals)} signals, {len(div_signals)} divergence signals")
+            STATE["ema_signals"] = deque(ema_signals, maxlen=EMA_SIGNAL_HISTORY)
+        print(f"Loaded persisted state: {len(SYMBOL_OVERRIDES)} overrides, {len(signals)} signals, {len(div_signals)} divergence signals, {len(ema_signals)} EMA signals")
     except Exception as e:
         log_error(f"load_state: {e}")
 
@@ -2267,6 +2605,8 @@ def send_telegram(text, category=None):
     if category == "vp" and not TELEGRAM_ALERTS_VP:
         return
     if category == "div" and not TELEGRAM_ALERTS_DIV:
+        return
+    if category == "ema" and not TELEGRAM_ALERTS_EMA:
         return
 
     def _do_send():
@@ -2659,6 +2999,8 @@ def scan_loop():
                     futs += [ex.submit(scan_symbol, s) for s in universe]
                 if DIVERGENCE_ENABLED:
                     futs += [ex.submit(scan_symbol_divergence, s) for s in universe]
+                if EMA_ENABLED:
+                    futs += [ex.submit(scan_symbol_ema, s) for s in universe]
                 for _ in as_completed(futs):
                     pass
             if VOLUME_PROFILE_ENABLED:
@@ -2667,6 +3009,8 @@ def scan_loop():
             if DIVERGENCE_ENABLED:
                 update_divergence_outcomes()
                 div_stability_cycle(universe)
+            if EMA_ENABLED:
+                update_ema_outcomes()
             save_state()
             t1 = time.time()
             with state_lock:
@@ -2674,6 +3018,8 @@ def scan_loop():
                 STATE["last_scan_duration"] = round(t1 - t0, 1)
                 STATE["div_last_scan_finished"] = t1
                 STATE["div_last_scan_duration"] = round(t1 - t0, 1)
+                STATE["ema_last_scan_finished"] = t1
+                STATE["ema_last_scan_duration"] = round(t1 - t0, 1)
         except Exception as e:
             log_error(f"scan_loop: {e}\n{traceback.format_exc()}")
         time.sleep(max(5, SCAN_INTERVAL_SEC))
@@ -2854,6 +3200,61 @@ def api_divergence_chart(symbol):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/ema/status")
+def api_ema_status():
+    stats = compute_ema_stats()
+    with state_lock:
+        return jsonify({
+            "version": APP_VERSION,
+            "enabled": EMA_ENABLED,
+            "interval": EMA_INTERVAL,
+            "last_scan_finished": STATE["ema_last_scan_finished"],
+            "last_scan_duration": STATE["ema_last_scan_duration"],
+            "stats": stats,
+            "config": {
+                "rr": EMA_RR, "tp_pct": EMA_TP_PCT,
+                "len7": EMA_LEN_7, "len14": EMA_LEN_14, "len28": EMA_LEN_28,
+                "signal_type": EMA_SIGNAL_TYPE, "trend_filter": EMA_TREND_FILTER,
+                "cooldown": EMA_COOLDOWN_SEC,
+            },
+        })
+
+
+@app.route("/api/ema/signals")
+def api_ema_signals():
+    with state_lock:
+        return jsonify(list(STATE["ema_signals"]))
+
+
+@app.route("/api/ema/chart/<symbol>")
+def api_ema_chart(symbol):
+    try:
+        candles = get_candles(symbol, interval=EMA_INTERVAL, limit=EMA_FETCH_LIMIT)
+        closes = [c["close"] for c in candles]
+        ema7 = compute_ema(closes, EMA_LEN_7)
+        ema14 = compute_ema(closes, EMA_LEN_14)
+        ema28 = compute_ema(closes, EMA_LEN_28)
+        return jsonify({"symbol": symbol, "interval": EMA_INTERVAL, "candles": candles,
+                         "ema7": ema7, "ema14": ema14, "ema28": ema28})
+    except Exception as e:
+        log_error(f"api_ema_chart {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/reset/ema", methods=["POST"])
+def api_reset_ema():
+    try:
+        with state_lock:
+            STATE["ema_signals"].clear()
+        with _ema_cooldowns_lock:
+            _ema_cooldowns.clear()
+        save_state()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset_ema: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/settings", methods=["GET"])
 def api_get_settings():
     return jsonify(get_settings())
@@ -2960,7 +3361,7 @@ INDEX_HTML = """<!doctype html>
   body { margin:0; background:#0b0e14; color:#d7dee8; font-family: -apple-system, Roboto, Segoe UI, sans-serif; }
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
   #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  #resetVolumeBtn, #resetDivBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #settingsModal.open { display:flex; flex-direction:column; }
@@ -3010,6 +3411,12 @@ INDEX_HTML = """<!doctype html>
   #divModalHeader h2 { font-size:15px; margin:0; }
   #divCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
   #divChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
+  #emaModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
+  #emaModal.open { display:flex; flex-direction:column; }
+  #emaModalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
+  #emaModalHeader h2 { font-size:15px; margin:0; }
+  #emaCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
+  #emaChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
   .dim { color:#8b98ab; }
   .empty { padding:30px 14px; text-align:center; color:#6b7688; font-size:13px; }
 </style>
@@ -3022,6 +3429,7 @@ INDEX_HTML = """<!doctype html>
       <button id="settingsBtn">⚙️ Настройки</button>
       <button id="resetVolumeBtn">Очистить объём</button>
       <button id="resetDivBtn">Очистить дивер</button>
+      <button id="resetEmaBtn">Очистить индикатор</button>
     </div>
   </div>
   <div id="status">загрузка...</div>
@@ -3033,6 +3441,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="watch">Watchlist</div>
   <div class="tab" data-tab="tuning">Тюнинг</div>
   <div class="tab" data-tab="divergence">Дивергенции</div>
+  <div class="tab" data-tab="ema">Индикатор</div>
 </div>
 <div class="panel">
   <table id="signalsTable" style="display:table">
@@ -3049,6 +3458,11 @@ INDEX_HTML = """<!doctype html>
     <tbody></tbody>
   </table>
   <div id="divStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
+  <table id="emaTable" style="display:none">
+    <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div id="emaStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
 </div>
 
@@ -3075,6 +3489,17 @@ INDEX_HTML = """<!doctype html>
     <button id="divCloseBtn">Закрыть</button>
   </div>
   <div id="divChartWrap"><canvas id="divChartCanvas"></canvas></div>
+</div>
+
+<div id="emaModal">
+  <div id="emaModalHeader">
+    <div>
+      <h2 id="emaModalTitle">-</h2>
+      <div id="emaModalParams" class="dim" style="font-size:11px;margin-top:2px;"></div>
+    </div>
+    <button id="emaCloseBtn">Закрыть</button>
+  </div>
+  <div id="emaChartWrap"><canvas id="emaChartCanvas"></canvas></div>
 </div>
 
 <div id="settingsModal">
@@ -3113,6 +3538,13 @@ INDEX_HTML = """<!doctype html>
     </div>
     <div class="settingRow">
       <div>
+        <div class="label">Обещанный индикатор</div>
+        <div class="sub">EMA 7/14/28 пересечения (свой скан и вкладка)</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setEma"><span class="switchSlider"></span></label>
+    </div>
+    <div class="settingRow">
+      <div>
         <div class="label">Уведомления в Telegram</div>
         <div class="sub" id="setTelegramSub">проверка...</div>
       </div>
@@ -3125,12 +3557,19 @@ INDEX_HTML = """<!doctype html>
       </div>
       <label class="switch"><input type="checkbox" id="setTelegramVp"><span class="switchSlider"></span></label>
     </div>
-    <div class="settingRow" style="border-bottom:none;">
+    <div class="settingRow">
       <div>
         <div class="label">↳ Алерты дивергенций</div>
         <div class="sub">сигналы RSI-дивергенций и их закрытие</div>
       </div>
       <label class="switch"><input type="checkbox" id="setTelegramDiv"><span class="switchSlider"></span></label>
+    </div>
+    <div class="settingRow" style="border-bottom:none;">
+      <div>
+        <div class="label">↳ Алерты индикатора</div>
+        <div class="sub">EMA-сигналы и их закрытие</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setTelegramEma"><span class="switchSlider"></span></label>
     </div>
     <div class="dim" style="font-size:12px;margin-top:8px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
   </div>
@@ -3152,8 +3591,11 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('tuningPanel').style.display = activeTab === 'tuning' ? 'block' : 'none';
     document.getElementById('divTable').style.display = activeTab === 'divergence' ? 'table' : 'none';
     document.getElementById('divStatsPanel').style.display = activeTab === 'divergence' ? 'block' : 'none';
+    document.getElementById('emaTable').style.display = activeTab === 'ema' ? 'table' : 'none';
+    document.getElementById('emaStatsPanel').style.display = activeTab === 'ema' ? 'block' : 'none';
     if (activeTab === 'tuning') refreshTuning();
     if (activeTab === 'divergence') refreshDivergence();
+    if (activeTab === 'ema') refreshEma();
   };
 });
 
@@ -3387,12 +3829,74 @@ async function refreshDivergence() {
     ${psBlock}`;
 }
 
+async function refreshEma() {
+  const status = await (await fetch('/api/ema/status')).json();
+  const rows = await (await fetch('/api/ema/signals')).json();
+
+  const tbody = document.querySelector('#emaTable tbody');
+  tbody.innerHTML = '';
+  document.getElementById('emptyMsg').style.display = (activeTab==='ema' && rows.length===0) ? 'block' : 'none';
+  for (const r of rows) {
+    const tr = document.createElement('tr');
+    let statusHtml;
+    const exitTitle = r.exit_time
+      ? `title="свеча закрытия: ${fmtTime(r.exit_time)} · O ${fmt(r.exit_candle?.open)} H ${fmt(r.exit_candle?.high)} L ${fmt(r.exit_candle?.low)} C ${fmt(r.exit_candle?.close)}"`
+      : '';
+    if (r.status === 'OPEN') {
+      statusHtml = `<span class="status-open">OPEN</span>`;
+    } else if (r.result === 'WIN') {
+      statusHtml = `<span class="win" ${exitTitle}>WIN @ ${fmt(r.exit_price)}${r.exit_time ? ' ('+fmtTime(r.exit_time)+')' : ''}</span>`;
+    } else if (r.result === 'LOSS') {
+      statusHtml = `<span class="loss" ${exitTitle}>LOSS @ ${fmt(r.exit_price)}${r.exit_time ? ' ('+fmtTime(r.exit_time)+')' : ''}</span>`;
+    } else {
+      statusHtml = `<span class="status-timeout">TIMEOUT</span>`;
+    }
+    tr.innerHTML = `<td>${r.symbol}</td>
+      <td class="${r.direction==='LONG'?'long':'short'}">${r.direction}</td>
+      <td>${fmt(r.entry)}</td>
+      <td class="dim">${fmt(r.sl)}</td>
+      <td class="dim">${fmt(r.tp)}</td>
+      <td class="dim" title="на закрытии → полное окно 24ч">${fmtMfeMae(r, 'mfe_r')}</td>
+      <td class="dim" title="на закрытии → полное окно 24ч">${fmtMfeMae(r, 'mae_r')}</td>
+      <td>${statusHtml}</td>
+      <td class="dim">${fmtTime(r.time)}</td>`;
+    tr.onclick = () => openEmaChart(r);
+    tbody.appendChild(tr);
+  }
+
+  const s = status.stats || {};
+  const wr = s.winrate !== null && s.winrate !== undefined ? `${s.winrate}%` : '-';
+  const panel = document.getElementById('emaStatsPanel');
+  const cfg = status.config || {};
+  const mfeBlock = s.dataset_count ? `
+    <div style="margin-bottom:8px;"><b>MFE (R) — насколько цена уходила в плюс:</b><br>
+      <span class="dim">все: ${fmtStat(s.mfe_r_all)}</span><br>
+      <span class="win">WIN: ${fmtStat(s.mfe_r_wins)}</span><br>
+      <span class="loss">LOSS: ${fmtStat(s.mfe_r_losses)}</span><br>
+      <span class="status-open">OPEN: ${fmtStat(s.mfe_r_open)}</span>
+    </div>
+    <div><b>MAE (R) — насколько цена уходила в минус:</b><br>
+      <span class="dim">все: ${fmtStat(s.mae_r_all)}</span><br>
+      <span class="win">WIN: ${fmtStat(s.mae_r_wins)}</span><br>
+      <span class="loss">LOSS: ${fmtStat(s.mae_r_losses)}</span><br>
+      <span class="status-open">OPEN: ${fmtStat(s.mae_r_open)}</span>
+    </div>` : '<div class="dim">Пока недостаточно закрытых сигналов для MFE/MAE.</div>';
+  panel.innerHTML = `
+    <div class="dim" style="margin-bottom:10px;">
+      EMA ${cfg.len7}/${cfg.len14}/${cfg.len28} (${cfg.signal_type}${cfg.trend_filter ? ', с фильтром тренда' : ''}) · ТФ ${status.interval} ·
+      скан ${status.last_scan_duration!==null && status.last_scan_duration!==undefined ? status.last_scan_duration+'s' : '...'} ·
+      Винрейт: ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ${cfg.rr}
+    </div>
+    ${mfeBlock}`;
+}
+
 async function refreshAll() {
   await refreshStatus();
   await refreshSignals();
   await refreshWatch();
   if (activeTab === 'tuning') await refreshTuning();
   if (activeTab === 'divergence') await refreshDivergence();
+  if (activeTab === 'ema') await refreshEma();
 }
 refreshAll();
 setInterval(refreshAll, 15000);
@@ -3424,6 +3928,9 @@ wireResetButton('resetVolumeBtn', '/api/reset/volume',
 wireResetButton('resetDivBtn', '/api/reset/divergence',
   'Удалить статистику RSI-дивергенций? Volume Profile не тронет. Это необратимо.',
   'Очистить дивер');
+wireResetButton('resetEmaBtn', '/api/reset/ema',
+  'Удалить статистику EMA-индикатора? Остальное не тронет. Это необратимо.',
+  'Очистить индикатор');
 
 // ---------------- Settings modal ----------------
 const settingsModal = document.getElementById('settingsModal');
@@ -3432,9 +3939,11 @@ const setInputs = {
   bounce_enabled: document.getElementById('setBounce'),
   breakout_enabled: document.getElementById('setBreakout'),
   divergence_enabled: document.getElementById('setDivergence'),
+  ema_enabled: document.getElementById('setEma'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
   telegram_alerts_div: document.getElementById('setTelegramDiv'),
+  telegram_alerts_ema: document.getElementById('setTelegramEma'),
 };
 
 function applySettingsToInputs(s) {
@@ -3849,12 +4358,118 @@ function drawDivergenceChart(data, row) {
   }
 }
 
+// ---------------- EMA chart modal ----------------
+const emaModal = document.getElementById('emaModal');
+document.getElementById('emaCloseBtn').onclick = () => emaModal.classList.remove('open');
+let currentEmaRow = null;
+let currentEmaData = null;
+
+async function openEmaChart(row) {
+  currentEmaRow = row;
+  document.getElementById('emaModalTitle').textContent = row.symbol;
+  document.getElementById('emaModalParams').textContent = 'загрузка...';
+  emaModal.classList.add('open');
+  try {
+    const data = await (await fetch(`/api/ema/chart/${row.symbol}`)).json();
+    currentEmaData = data;
+    document.getElementById('emaModalParams').textContent =
+      `EMA 7/14/28 · ${row.direction} · entry ${fmt(row.entry)} · SL ${fmt(row.sl)} · TP ${fmt(row.tp)}`;
+    drawEmaChart(data, row);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function drawEmaChart(data, row) {
+  const canvas = document.getElementById('emaChartCanvas');
+  const wrap = document.getElementById('emaChartWrap');
+  const dpr = window.devicePixelRatio || 1;
+  const W = wrap.clientWidth, H = wrap.clientHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+
+  const candles = data.candles || [];
+  if (!candles.length) return;
+  const padRight = 54;
+  const chartW = W - padRight;
+  const n = candles.length;
+  const slot = chartW / n;
+  const bodyW = Math.max(1, slot * 0.6);
+  const xAt = (i) => i * slot + slot / 2;
+
+  let hi = Math.max(...candles.map(c => c.high));
+  let lo = Math.min(...candles.map(c => c.low));
+  if (row) { hi = Math.max(hi, row.tp, row.sl, row.entry); lo = Math.min(lo, row.tp, row.sl, row.entry); }
+  const pad = (hi - lo) * 0.05 || hi * 0.01;
+  hi += pad; lo -= pad;
+  const range = hi - lo || 1;
+  const yP = (price) => (hi - price) / range * H;
+
+  candles.forEach((c, i) => {
+    const cx = xAt(i);
+    const up = c.close >= c.open;
+    ctx.strokeStyle = ctx.fillStyle = up ? '#3ddc97' : '#ff6b6b';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx, yP(c.high));
+    ctx.lineTo(cx, yP(c.low));
+    ctx.stroke();
+    const top = yP(Math.max(c.open, c.close));
+    const h = Math.max(1, Math.abs(yP(c.open) - yP(c.close)));
+    ctx.fillRect(cx - bodyW / 2, top, bodyW, h);
+  });
+
+  ctx.fillStyle = '#6b7688';
+  ctx.font = '10px sans-serif';
+  for (let i = 0; i <= 3; i++) {
+    const p = hi - (range * i / 3);
+    const yy = yP(p);
+    ctx.fillText(fmtNum(p), chartW + 4, yy + 3);
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(chartW, yy); ctx.stroke();
+  }
+
+  const drawEmaLine = (values, color) => {
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    let started = false;
+    values.forEach((v, i) => {
+      if (v === null || v === undefined) return;
+      const cx = xAt(i), cy = yP(v);
+      if (!started) { ctx.moveTo(cx, cy); started = true; } else { ctx.lineTo(cx, cy); }
+    });
+    ctx.stroke();
+  };
+  drawEmaLine(data.ema7 || [], '#2962FF');
+  drawEmaLine(data.ema14 || [], '#FF6D00');
+  drawEmaLine(data.ema28 || [], '#E53935');
+
+  ctx.fillStyle = 'rgba(5,7,12,0.75)';
+  ctx.fillRect(4, 4, 150, 40);
+  ctx.font = 'bold 10px sans-serif';
+  ctx.fillStyle = '#2962FF'; ctx.fillText('EMA 7', 8, 16);
+  ctx.fillStyle = '#FF6D00'; ctx.fillText('EMA 14', 8, 28);
+  ctx.fillStyle = '#E53935'; ctx.fillText('EMA 28', 8, 40);
+
+  if (row) {
+    drawLevelLine(ctx, yP(row.entry), chartW, '#5aa8ff', 'ENTRY ' + fmtNum(row.entry));
+    drawLevelLine(ctx, yP(row.sl), chartW, '#ff6b6b', 'SL ' + fmtNum(row.sl));
+    drawLevelLine(ctx, yP(row.tp), chartW, '#3ddc97', 'TP ' + fmtNum(row.tp));
+  }
+}
+
 window.addEventListener('resize', () => {
   if (modal.classList.contains('open') && currentData) {
     drawChart(currentData, currentRow);
   }
   if (divModal.classList.contains('open') && currentDivData) {
     drawDivergenceChart(currentDivData, currentDivRow);
+  }
+  if (emaModal.classList.contains('open') && currentEmaData) {
+    drawEmaChart(currentEmaData, currentEmaRow);
   }
 });
 </script>
