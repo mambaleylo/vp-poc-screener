@@ -856,6 +856,37 @@ v0.33.0 - wired the "Скальпинг" module all the way to a working
          cycle body (universe build -> MMR fetch -> per-symbol scan ->
          recommendation -> API read) against mocked data, confirming a
          sensible top-ranked result end to end.
+v0.33.1 - SAFETY FIX, found by hand-checking the user's first real
+         dashboard screenshot rather than trusting it: VELVET_USDT
+         showed leverage 46.67x with a liquidation buffer of 5.467% —
+         mathematically impossible at that leverage (the theoretical
+         ceiling with zero MMR and zero fees is 100/46.67 = 2.14%; no
+         non-negative MMR could ever produce a buffer above that,
+         confirmed by sweeping MMR values and finding only an
+         implausible ~-3.2% "MMR" reproduces 5.467%). Root cause: Gate's
+         actual risk_limit_tiers response field names couldn't be
+         verified against a live request during development (sandboxed,
+         no network access to confirm) — for some contracts, a wrong
+         field apparently parsed successfully into a plausible-looking
+         but wrong number, which the earlier defensive code only guarded
+         against exceptions/missing fields, not against successfully
+         parsing garbage. Two independent fixes: (1)
+         get_futures_risk_limit_tiers() now rejects any parsed value
+         outside a sane MMR range (0.01%-5%, VP_SCALP_MMR_SANITY_MIN/MAX)
+         before accepting it, falling back to the conservative default
+         instead; (2) compute_scalp_liquidation_move_pct() now clamps
+         its result to the hard mathematical ceiling of 100/leverage
+         regardless of what mmr_pct it's given — a non-negative MMR can
+         only ever shrink this buffer, never enlarge it, so this is a
+         real invariant, not a heuristic, and protects against this
+         entire bug class even from a source I haven't thought to
+         distrust yet. Verified both fixes directly: the exact bad MMR
+         value now correctly gets clamped/rejected, a normal MMR is
+         unaffected, and even if a bad value somehow reached
+         recommend_scalp_config() directly (bypassing the first fix
+         entirely), the second fix alone still produces a safe result.
+         Every "буфер" value shown before this fix should be treated as
+         unverified until a fresh scan runs on the corrected code.
 """
 
 import os
@@ -871,7 +902,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.33.0"
+APP_VERSION = "0.33.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1042,6 +1073,8 @@ SCALP_MAX_WAIT_SEC = int(os.environ.get("VP_SCALP_MAX_WAIT_SEC", 24 * 3600))  # 
 SCALP_FETCH_LIMIT = int(os.environ.get("VP_SCALP_FETCH_LIMIT", 500))
 SCALP_TAKER_FEE_PCT = float(os.environ.get("VP_SCALP_TAKER_FEE_PCT", 0.0005))  # 0.05% per side, Gate.io VIP0 default
 SCALP_DEFAULT_MMR_PCT = float(os.environ.get("VP_SCALP_DEFAULT_MMR_PCT", 0.006))  # conservative fallback when a contract's own maintenance rate isn't available
+SCALP_MMR_SANITY_MIN = float(os.environ.get("VP_SCALP_MMR_SANITY_MIN", 0.0001))  # 0.01% — a fetched "MMR" outside [MIN,MAX] is almost certainly the wrong field, not a real maintenance rate
+SCALP_MMR_SANITY_MAX = float(os.environ.get("VP_SCALP_MMR_SANITY_MAX", 0.05))  # 5%
 SCALP_REFRESH_SEC = int(os.environ.get("VP_SCALP_REFRESH_SEC", 6 * 3600))  # how often the whole universe gets rebuilt/rescanned — this is a slow, batch stats job, not a live scanner
 SCALP_ACCOUNT_USD = float(os.environ.get("VP_SCALP_ACCOUNT_USD", 30.0))
 SCALP_TARGET_PROFIT_USD = float(os.environ.get("VP_SCALP_TARGET_PROFIT_USD", 7.0))
@@ -1621,14 +1654,23 @@ def compute_scalp_liquidation_move_pct(direction, leverage, mmr_pct, taker_fee_p
     Gate.io's own formula (Est. Liq. Price = (Entry ± Margin/Amount) /
     [1 ± (MMR + TakerFee)], with Margin/Amount = Entry/leverage for a
     fully-margined isolated position). Returns a positive percentage —
-    how far price can move against the position before liquidation."""
+    how far price can move against the position before liquidation.
+    A non-negative MMR+fee can only ever SHRINK this buffer relative to
+    the naive 1/leverage figure, never enlarge it — that's a hard
+    mathematical ceiling, clamped here regardless of what mmr_pct turns
+    out to be. This caught a real bug once: a bad MMR value from an
+    unverified field parse produced a buffer far above that ceiling,
+    which silently passed the safety check upstream. Clamping here
+    means any future bad MMR source degrades to "overly conservative",
+    never to "unsafely optimistic"."""
     if leverage <= 0:
         return None
     if direction == "LONG":
         liq_price = (1 - 1 / leverage) / (1 - (mmr_pct + taker_fee_pct))
     else:
         liq_price = (1 + 1 / leverage) / (1 + (mmr_pct + taker_fee_pct))
-    return abs(1 - liq_price) * 100
+    buffer_pct = abs(1 - liq_price) * 100
+    return min(buffer_pct, 100 / leverage)
 
 
 def compute_scalp_leverage_for_target(target_pct, account_usd=SCALP_ACCOUNT_USD, target_profit_usd=SCALP_TARGET_PROFIT_USD):
@@ -2242,8 +2284,13 @@ def get_futures_risk_limit_tiers():
     every coin (altcoins often carry a higher rate than BTC/ETH's
     lowest tier). Field names are parsed defensively: if the exchange's
     exact schema doesn't match what's expected here, this returns an
-    empty map and every symbol just falls back to SCALP_DEFAULT_MMR_PCT
-    — never crashes, never silently uses a wrong/unvalidated number."""
+    empty map and every symbol just falls back to SCALP_DEFAULT_MMR_PCT.
+    Parsing successfully to a float isn't proof it's actually the
+    maintenance rate, though — a wrong field name could still produce a
+    plausible-looking number (this exact bug shipped once: a value that
+    only made sense as roughly -3.2% MMR passed through unnoticed, which
+    is impossible for a real maintenance rate). Anything outside a
+    realistic MMR range gets discarded, same as if it were missing."""
     try:
         r = requests.get(f"{GATE_BASE}/futures/usdt/risk_limit_tiers", timeout=HTTP_TIMEOUT)
         r.raise_for_status()
@@ -2260,7 +2307,8 @@ def get_futures_risk_limit_tiers():
                 mmr = row.get("maintain_rate")
             if name and mmr is not None:
                 mmr = float(mmr)
-                # keep the LOWEST tier per contract (first one seen / smallest rate)
+                if not (SCALP_MMR_SANITY_MIN <= mmr <= SCALP_MMR_SANITY_MAX):
+                    continue  # not a plausible maintenance rate — likely the wrong field; fall back to default instead
                 if name not in out or mmr < out[name]:
                     out[name] = mmr
         except (TypeError, ValueError, AttributeError):
