@@ -649,6 +649,21 @@ v0.26.0 - two user-requested changes to divergence TP/SL and timing:
          data going forward). Verified the new TP/SL calc directly (both
          directions land at exactly 1.1% TP and preserve RR=2.0) and a
          full endpoint regression.
+v0.27.0 - user reported divergence signals feel "already played out" by
+         the time they arrive. Rather than guess, added a direct
+         measurement: pre_move_pct on every signal — the % of the
+         anticipated move that already happened between the confirmed
+         pivot (price_p2) and actual entry, signed so positive means
+         price already moved favorably before the trade could open.
+         Shown in the Дивергенции stats panel split by all/WIN/LOSS, so
+         it's now possible to see concretely how much of the fixed
+         1.1% TP is typically already gone by entry, rather than
+         inferring it indirectly from the pivot-confirmation-delay
+         diagnostics (which measure a related but different thing: how
+         often a faster confirmation would agree, not how much of the
+         actual TP distance is pre-consumed). Verified the signed
+         formula against hand-computed cases for both directions
+         (already-moved, no-move, and adverse-move scenarios).
 """
 
 import os
@@ -664,7 +679,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.26.0"
+APP_VERSION = "0.27.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1217,6 +1232,16 @@ def scan_symbol_divergence(symbol):
 
         entry = candles[-1]["close"]
         sl, tp, risk = compute_div_tp_sl(sig["direction"], entry)
+        # how much of the anticipated move already happened between the
+        # pivot forming and the signal actually firing (confirmation +
+        # freshness delay) — positive means price already moved in the
+        # favorable direction before we could enter, i.e. "already played
+        # out" by the time the alert arrives.
+        p2 = sig["price_p2"]
+        if sig["direction"] == "SHORT":
+            pre_move_pct = (p2 - entry) / p2 * 100 if p2 else 0.0
+        else:
+            pre_move_pct = (entry - p2) / p2 * 100 if p2 else 0.0
         record = {
             "symbol": symbol,
             "direction": sig["direction"],
@@ -1229,6 +1254,7 @@ def scan_symbol_divergence(symbol):
             "rsi_p1": sig["rsi_p1"], "rsi_p2": sig["rsi_p2"],
             "time_p1": sig["time_p1"], "time_p2": sig["time_p2"],
             "rsi_time_p1": sig["rsi_time_p1"], "rsi_time_p2": sig["rsi_time_p2"],
+            "pre_move_pct": round(pre_move_pct, 4),
             "time": candles[-1]["time"],
             "detected_at": now,
             "status": "OPEN",
@@ -1355,6 +1381,8 @@ def compute_divergence_stats():
     win_set = [s for s in dataset if s.get("result") == "WIN"]
     loss_set = [s for s in dataset if s.get("result") == "LOSS"]
     open_set = [s for s in dataset if s.get("status") == "OPEN"]
+    win_set_all = [s for s in signals if s.get("result") == "WIN"]
+    loss_set_all = [s for s in signals if s.get("result") == "LOSS"]
 
     return {
         "open": open_count, "wins": wins, "losses": losses,
@@ -1365,6 +1393,9 @@ def compute_divergence_stats():
         "mfe_r_open": agg("mfe_r", open_set), "mae_r_open": agg("mae_r", open_set),
         "mfe_r_wins_at_close": agg("mfe_r_at_close", win_set), "mae_r_wins_at_close": agg("mae_r_at_close", win_set),
         "mfe_r_losses_at_close": agg("mfe_r_at_close", loss_set), "mae_r_losses_at_close": agg("mae_r_at_close", loss_set),
+        "pre_move_pct_all": agg("pre_move_pct", signals),
+        "pre_move_pct_wins": agg("pre_move_pct", win_set_all),
+        "pre_move_pct_losses": agg("pre_move_pct", loss_set_all),
         "dataset_count": len(dataset),
     }
 
@@ -3270,6 +3301,15 @@ async function refreshDivergence() {
       <span class="loss">LOSS: ${fmtStat(s.mae_r_losses)}</span><br>
       <span class="status-open">OPEN: ${fmtStat(s.mae_r_open)}</span>
     </div>` : '<div class="dim">Пока недостаточно закрытых сигналов для MFE/MAE.</div>';
+  const pm = s.pre_move_pct_all;
+  const preMoveBlock = pm ? `
+    <div style="margin-top:10px;padding-top:10px;border-top:1px solid #1c2433;">
+      <b>Сколько % хода уже съедено к моменту входа</b> (от пивота до входа, с учётом задержки подтверждения):<br>
+      <span class="dim">все: ${fmtStat(s.pre_move_pct_all)}</span><br>
+      <span class="win">WIN: ${fmtStat(s.pre_move_pct_wins)}</span><br>
+      <span class="loss">LOSS: ${fmtStat(s.pre_move_pct_losses)}</span><br>
+      <span class="dim" style="font-size:12px;">Положительное — цена уже пошла в нужную сторону до входа (TP ${cfg.tp_pct ? (cfg.tp_pct*100).toFixed(2) : '?'}% — сравни, сколько из него уже "съедено"). Отрицательное — цена ещё не начала двигаться или уже развернулась против.</span>
+    </div>` : '';
   const ps = status.pivot_stability || {};
   const psRows = Object.keys(ps).sort((a,b)=>Number(a)-Number(b)).map(r => {
     const v = ps[r];
@@ -3291,6 +3331,7 @@ async function refreshDivergence() {
       Винрейт: ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ${cfg.rr}
     </div>
     ${mfeBlock}
+    ${preMoveBlock}
     ${psBlock}`;
 }
 
