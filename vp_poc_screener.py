@@ -802,6 +802,32 @@ v0.31.2 - fixed a real gap noticed while reading a user's stats
          lead with the at-close numbers and tuck the full-window ones
          into the same collapsed <details> the Тюнинг panel already
          uses, for consistency across all three signal sources.
+v0.32.0 - URGENT FIX: compute_div_tp_sl() had no function signature —
+         only its body existed, orphaned as dead/unreachable code after
+         a str_replace edit ate the `def` line (the same category of
+         bug caught and fixed twice before this session, for
+         data_quality_check and compute_divergence_stats). This one
+         slipped through because every regression check since v0.26.0
+         only ever hit GET API endpoints (which read already-existing
+         STATE data) — none of them actually CALLED
+         scan_symbol_divergence(), so the NameError it threw every
+         single scan cycle was silently caught by that function's own
+         try/except and logged, never surfacing as a visible failure.
+         Confirmed via the live GitHub copy at v0.31.2 (fetched before
+         this fix) that the break has been live since v0.26.0 — meaning
+         no new divergence signals have been created for however long
+         devices have been running v0.26.0 or later. Fixed by restoring
+         the missing signature; verified this time by directly calling
+         scan_symbol, scan_symbol_divergence, and scan_symbol_ema (not
+         just their API layers) end-to-end with no exceptions, and
+         added this direct-call check as a standing practice going
+         forward alongside the existing compile/import/JS checks.
+         Also includes the early groundwork (untested-in-production,
+         not yet wired into anything) for a new "Скальпинг" module per
+         a separate ongoing request — config, an excursion-statistics
+         engine, Gate.io's isolated-margin liquidation formula, a
+         volatility-based universe ranker, and a maintenance-margin-rate
+         fetch — all inert until wired up in a follow-up push.
 """
 
 import os
@@ -817,7 +843,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.31.2"
+APP_VERSION = "0.32.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -968,6 +994,31 @@ EMA_SIGNAL_HISTORY = 200
 # same win-rate/MFE/MAE tracking as everything else in the app.
 EMA_TP_PCT = float(os.environ.get("VP_EMA_TP_PCT", 0.015))
 EMA_RR = float(os.environ.get("VP_EMA_RR", 2.0))
+
+# ----------------------------------------------------------------------------
+# Scalp volatility statistics ("Скальпинг" tab) — a pure exploratory/stats
+# tool, no signals, no auto-trading yet. For a universe of the most
+# volatile "sawtooth" coins, walks every historical candle as a
+# hypothetical entry and measures how long it takes (and how much
+# adverse move happens first) to reach various % targets, separately for
+# LONG and SHORT, across a few timeframes. This is deliberately NOT a
+# signal generator — see /areas note for the full design rationale.
+# ----------------------------------------------------------------------------
+SCALP_ENABLED = os.environ.get("VP_SCALP_ENABLED", "1") == "1"
+SCALP_UNIVERSE_SIZE = int(os.environ.get("VP_SCALP_UNIVERSE_SIZE", 200))
+SCALP_RANK_INTERVAL = os.environ.get("VP_SCALP_RANK_INTERVAL", "15m")  # timeframe used to rank symbols by volatility
+SCALP_RANK_LOOKBACK = int(os.environ.get("VP_SCALP_RANK_LOOKBACK", 200))  # candles used for the ranking metric
+SCALP_INTERVALS = [x.strip() for x in os.environ.get("VP_SCALP_INTERVALS", "5m,15m,1h").split(",") if x.strip()]
+SCALP_TARGET_PCTS = [float(x) for x in os.environ.get("VP_SCALP_TARGET_PCTS", "0.3,0.5,1.0,1.5,2.0,3.0").split(",") if x.strip()]
+SCALP_MAX_WAIT_SEC = int(os.environ.get("VP_SCALP_MAX_WAIT_SEC", 24 * 3600))  # give up tracking a hypothetical entry after this long
+SCALP_FETCH_LIMIT = int(os.environ.get("VP_SCALP_FETCH_LIMIT", 500))
+SCALP_TAKER_FEE_PCT = float(os.environ.get("VP_SCALP_TAKER_FEE_PCT", 0.0005))  # 0.05% per side, Gate.io VIP0 default
+SCALP_DEFAULT_MMR_PCT = float(os.environ.get("VP_SCALP_DEFAULT_MMR_PCT", 0.006))  # conservative fallback when a contract's own maintenance rate isn't available
+SCALP_REFRESH_SEC = int(os.environ.get("VP_SCALP_REFRESH_SEC", 6 * 3600))  # how often the whole universe gets rebuilt/rescanned — this is a slow, batch stats job, not a live scanner
+SCALP_ACCOUNT_USD = float(os.environ.get("VP_SCALP_ACCOUNT_USD", 30.0))
+SCALP_TARGET_PROFIT_USD = float(os.environ.get("VP_SCALP_TARGET_PROFIT_USD", 7.0))
+SCALP_SAFETY_MARGIN = float(os.environ.get("VP_SCALP_SAFETY_MARGIN", 1.5))  # liquidation buffer must exceed the coin's own historical p90 adverse move by this factor before a target/leverage combo is flagged "safe"
+SCALP_MIN_HIT_RATE = float(os.environ.get("VP_SCALP_MIN_HIT_RATE", 60.0))  # a target below this hit-rate isn't worth recommending even if technically "safe"
 
 # --- zone quality filters: only narrow, genuinely dominant nodes should
 # fire signals. A merge of many adjacent top-N bins can produce a tall,
@@ -1439,7 +1490,114 @@ def compute_ema_tp_sl(direction, entry, rr=EMA_RR, tp_pct=EMA_TP_PCT):
     return sl, tp, risk
 
 
+# ----------------------------------------------------------------------------
+# Scalp volatility statistics — see SCALP_ENABLED comment above for the
+# design summary. This is a stats/exploration tool, not a signal source:
+# no records get created, no Telegram alerts, nothing "fires". It answers
+# "if I'd entered at any point in this coin's history, how often and how
+# fast would volatility alone have carried price X% in my favor, and how
+# rough would the ride there typically have been" — separately per
+# direction and timeframe, which is exactly the raw material needed to
+# size a safe leverage and judge whether $7-off-$30 five times a day is
+# realistic for a given coin.
+# ----------------------------------------------------------------------------
+def analyze_excursions(candles, direction, target_pcts, max_bars_ahead, stride=3):
+    """Samples every `stride`-th candle as a hypothetical entry (its own
+    open as entry price), walks forward up to max_bars_ahead bars, and
+    for each target % records how many bars until that favorable move
+    was first reached, plus — importantly — the worst adverse move seen
+    before that point (not just "did it hit", but "how rough was the
+    ride there", which is what a leverage/liquidation safety check
+    needs)."""
+    n = len(candles)
+    results = {pct: {"hit_bars": [], "not_hit": 0} for pct in target_pcts}
+    adverse_before_hit = {pct: [] for pct in target_pcts}
 
+    for i in range(0, max(0, n - 1), stride):
+        entry = candles[i]["open"]
+        if not entry or entry <= 0:
+            continue
+        end = min(n, i + 1 + max_bars_ahead)
+        max_fav = 0.0
+        max_adv = 0.0
+        hit_this_target = {pct: None for pct in target_pcts}
+        remaining = set(target_pcts)
+        for j in range(i + 1, end):
+            c = candles[j]
+            if direction == "LONG":
+                fav = (c["high"] - entry) / entry * 100
+                adv = (entry - c["low"]) / entry * 100
+            else:
+                fav = (entry - c["low"]) / entry * 100
+                adv = (c["high"] - entry) / entry * 100
+            if fav > max_fav:
+                max_fav = fav
+            if adv > max_adv:
+                max_adv = adv
+            newly_hit = [pct for pct in remaining if max_fav >= pct]
+            for pct in newly_hit:
+                hit_this_target[pct] = j - i
+                adverse_before_hit[pct].append(max_adv)
+                remaining.discard(pct)
+            if not remaining:
+                break
+        for pct in target_pcts:
+            if hit_this_target[pct] is not None:
+                results[pct]["hit_bars"].append(hit_this_target[pct])
+            else:
+                results[pct]["not_hit"] += 1
+    return results, adverse_before_hit
+
+
+def _percentile(sorted_vals, p):
+    if not sorted_vals:
+        return None
+    idx = min(int(len(sorted_vals) * p), len(sorted_vals) - 1)
+    return sorted_vals[idx]
+
+
+def summarize_excursions(results, adverse_before_hit, target_pcts):
+    out = {}
+    for pct in target_pcts:
+        hb = sorted(results[pct]["hit_bars"])
+        nh = results[pct]["not_hit"]
+        total = len(hb) + nh
+        hit_rate = round(len(hb) / total * 100, 1) if total else None
+        adv = sorted(adverse_before_hit[pct])
+        out[str(pct)] = {
+            "hit_rate": hit_rate, "n": total,
+            "median_bars_to_hit": _percentile(hb, 0.5),
+            "p75_adverse_pct": round(_percentile(adv, 0.75), 3) if adv else None,
+            "p90_adverse_pct": round(_percentile(adv, 0.90), 3) if adv else None,
+        }
+    return out
+
+
+def compute_scalp_liquidation_move_pct(direction, leverage, mmr_pct, taker_fee_pct=SCALP_TAKER_FEE_PCT):
+    """% adverse move from entry to isolated-margin liquidation, per
+    Gate.io's own formula (Est. Liq. Price = (Entry ± Margin/Amount) /
+    [1 ± (MMR + TakerFee)], with Margin/Amount = Entry/leverage for a
+    fully-margined isolated position). Returns a positive percentage —
+    how far price can move against the position before liquidation."""
+    if leverage <= 0:
+        return None
+    if direction == "LONG":
+        liq_price = (1 - 1 / leverage) / (1 - (mmr_pct + taker_fee_pct))
+    else:
+        liq_price = (1 + 1 / leverage) / (1 + (mmr_pct + taker_fee_pct))
+    return abs(1 - liq_price) * 100
+
+
+def compute_scalp_leverage_for_target(target_pct, account_usd=SCALP_ACCOUNT_USD, target_profit_usd=SCALP_TARGET_PROFIT_USD):
+    """Leverage needed so that a target_pct favorable move on the full
+    account balance yields target_profit_usd (before fees)."""
+    if target_pct <= 0:
+        return None
+    required_notional = target_profit_usd / (target_pct / 100)
+    return required_notional / account_usd
+
+
+def compute_div_tp_sl(direction, entry, rr=DIV_RR, tp_pct=DIV_TP_PCT):
     """TP is a fixed % move from entry (tp_pct) rather than derived from
     the pivot-based invalidation point. SL is then sized backward from
     that TP distance divided by rr, so the RR ratio is preserved — but
@@ -2033,6 +2191,84 @@ def build_universe():
             best_vol[name] = vol
     scored = sorted(best_vol.items(), key=lambda x: -x[1])
     return [s[0] for s in scored[:MAX_SYMBOLS]]
+
+
+def get_futures_risk_limit_tiers():
+    """Public, no-auth endpoint that exposes each contract's own tiered
+    maintenance margin rate — used instead of assuming one fixed MMR for
+    every coin (altcoins often carry a higher rate than BTC/ETH's
+    lowest tier). Field names are parsed defensively: if the exchange's
+    exact schema doesn't match what's expected here, this returns an
+    empty map and every symbol just falls back to SCALP_DEFAULT_MMR_PCT
+    — never crashes, never silently uses a wrong/unvalidated number."""
+    try:
+        r = requests.get(f"{GATE_BASE}/futures/usdt/risk_limit_tiers", timeout=HTTP_TIMEOUT)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        log_error(f"get_futures_risk_limit_tiers: {e}")
+        return {}
+    out = {}
+    for row in data:
+        try:
+            name = row.get("contract") or row.get("name")
+            mmr = row.get("maintenance_rate")
+            if mmr is None:
+                mmr = row.get("maintain_rate")
+            if name and mmr is not None:
+                mmr = float(mmr)
+                # keep the LOWEST tier per contract (first one seen / smallest rate)
+                if name not in out or mmr < out[name]:
+                    out[name] = mmr
+        except (TypeError, ValueError, AttributeError):
+            continue
+    return out
+
+
+def build_scalp_universe():
+    """Ranks candidate symbols by average full-range volatility per
+    candle — (high-low)/close — on SCALP_RANK_INTERVAL, over the last
+    SCALP_RANK_LOOKBACK bars. Starts from the same liquid-symbol pool as
+    the main screener (via tickers' 24h volume) so we're not ranking
+    illiquid/unlisted-in-practice contracts, then fetches candles for
+    each candidate in parallel to compute the actual metric."""
+    tickers = get_tickers()
+    candidates = []
+    seen_vol = {}
+    for t in tickers:
+        name = t.get("contract", "")
+        if not name.endswith("_USDT"):
+            continue
+        vol = t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0
+        try:
+            vol = float(vol)
+        except (TypeError, ValueError):
+            vol = 0.0
+        if vol < MIN_VOL_USD:
+            continue
+        if name not in seen_vol or vol > seen_vol[name]:
+            seen_vol[name] = vol
+    candidates = list(seen_vol.keys())
+
+    def rank_one(symbol):
+        try:
+            candles = get_candles(symbol, interval=SCALP_RANK_INTERVAL, limit=SCALP_RANK_LOOKBACK)
+            if len(candles) < 20:
+                return None
+            moves = [(c["high"] - c["low"]) / c["close"] * 100 for c in candles if c.get("close")]
+            if not moves:
+                return None
+            return symbol, sum(moves) / len(moves)
+        except Exception:
+            return None
+
+    scored = []
+    with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+        for res in ex.map(rank_one, candidates):
+            if res:
+                scored.append(res)
+    scored.sort(key=lambda x: -x[1])
+    return [s[0] for s in scored[:SCALP_UNIVERSE_SIZE]], {s[0]: round(s[1], 4) for s in scored[:SCALP_UNIVERSE_SIZE]}
 
 
 # ----------------------------------------------------------------------------
