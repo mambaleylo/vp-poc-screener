@@ -828,6 +828,34 @@ v0.32.0 - URGENT FIX: compute_div_tp_sl() had no function signature —
          engine, Gate.io's isolated-margin liquidation formula, a
          volatility-based universe ranker, and a maintenance-margin-rate
          fetch — all inert until wired up in a follow-up push.
+v0.33.0 - wired the "Скальпинг" module all the way to a working
+         dashboard. scan_symbol_scalp() runs the excursion engine
+         across VP_SCALP_INTERVALS x LONG/SHORT for one symbol;
+         recommend_scalp_config() picks, per interval/direction, the
+         LARGEST target% that both clears VP_SCALP_MIN_HIT_RATE and
+         has a liquidation buffer (at the leverage that target implies
+         for the $7/$30 goal) exceeding the coin's own historical p90
+         adverse move by VP_SCALP_SAFETY_MARGIN (1.5x) — then ranks
+         across all interval/direction combos by hit_rate x
+         trades_per_day. New scalp_loop() thread, own 6h cadence,
+         fully separate from the main 45s scanner — rebuilds the
+         volatility-ranked universe, fetches real per-contract MMR
+         from Gate.io's risk_limit_tiers endpoint (falls back to a
+         conservative default per-symbol, never crashes on an
+         unexpected schema), then fans out the scan across the thread
+         pool. New API routes (/api/scalp/status ranked list,
+         /api/scalp/symbol/<symbol> full detail, /api/reset/scalp),
+         settings toggle, and a fourth tab with a dense ranked table
+         (score, hit-rate, leverage, liquidation buffer, MMR-verified
+         flag) plus click-to-expand full per-symbol breakdown — this
+         is explicitly a data tool for future review, not a live
+         signal feed, so density won over polish.
+         Verified end-to-end this time by directly calling all four
+         scan_symbol_* functions (not just their API layers) with zero
+         exceptions, plus a full manual replication of scalp_loop's
+         cycle body (universe build -> MMR fetch -> per-symbol scan ->
+         recommendation -> API read) against mocked data, confirming a
+         sensible top-ranked result end to end.
 """
 
 import os
@@ -843,7 +871,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.32.0"
+APP_VERSION = "0.33.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1126,7 +1154,7 @@ SETTINGS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_settings.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "bounce_enabled", "breakout_enabled",
-                  "ema_enabled", "telegram_enabled", "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema")
+                  "ema_enabled", "scalp_enabled", "telegram_enabled", "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema")
 
 
 def get_settings():
@@ -1136,6 +1164,7 @@ def get_settings():
         "bounce_enabled": BOUNCE_ENABLED,
         "breakout_enabled": BREAKOUT_ENABLED,
         "ema_enabled": EMA_ENABLED,
+        "scalp_enabled": SCALP_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
         "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
         "telegram_alerts_div": TELEGRAM_ALERTS_DIV,
@@ -1150,7 +1179,7 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, SCALP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
@@ -1162,6 +1191,8 @@ def apply_settings(updates):
         BREAKOUT_ENABLED = bool(updates["breakout_enabled"])
     if "ema_enabled" in updates:
         EMA_ENABLED = bool(updates["ema_enabled"])
+    if "scalp_enabled" in updates:
+        SCALP_ENABLED = bool(updates["scalp_enabled"])
     if "telegram_enabled" in updates:
         TELEGRAM_ENABLED = bool(updates["telegram_enabled"])
     if "telegram_alerts_vp" in updates:
@@ -1223,6 +1254,18 @@ STATE = {
     "ema_signals": deque(maxlen=EMA_SIGNAL_HISTORY),
     "ema_last_scan_finished": None,
     "ema_last_scan_duration": None,
+    # Скальпинг — pure stats, not a signal source: universe + per-symbol
+    # excursion data + the computed recommendation for each, refreshed on
+    # its own slow SCALP_REFRESH_SEC cadence, separate from the main loop.
+    "scalp_universe": [],
+    "scalp_universe_scores": {},
+    "scalp_mmr_map": {},
+    "scalp_data": {},          # symbol -> {interval -> {direction -> target-summary}}
+    "scalp_recommendations": {},  # symbol -> best config (or None)
+    "scalp_last_build_started": None,
+    "scalp_last_build_finished": None,
+    "scalp_last_build_duration": None,
+    "scalp_symbols_done": 0,
 }
 _cooldowns = {}  # (symbol, zone_key) -> last_alert_ts
 _cooldowns_lock = threading.Lock()
@@ -2269,6 +2312,77 @@ def build_scalp_universe():
                 scored.append(res)
     scored.sort(key=lambda x: -x[1])
     return [s[0] for s in scored[:SCALP_UNIVERSE_SIZE]], {s[0]: round(s[1], 4) for s in scored[:SCALP_UNIVERSE_SIZE]}
+
+
+def scan_symbol_scalp(symbol):
+    """Runs the excursion-statistics engine for one symbol across every
+    configured timeframe and both directions. Pure data collection —
+    returns a dict, doesn't touch STATE or fire anything."""
+    out = {}
+    for interval in SCALP_INTERVALS:
+        try:
+            candles = get_candles(symbol, interval=interval, limit=SCALP_FETCH_LIMIT)
+            if len(candles) < 30:
+                continue
+            interval_sec = INTERVAL_SECONDS.get(interval, 300)
+            max_bars_ahead = max(5, min(SCALP_MAX_WAIT_SEC // interval_sec, 48))
+            interval_out = {}
+            for direction in ("LONG", "SHORT"):
+                res, adv = analyze_excursions(candles, direction, SCALP_TARGET_PCTS, max_bars_ahead)
+                interval_out[direction] = summarize_excursions(res, adv, SCALP_TARGET_PCTS)
+            out[interval] = interval_out
+        except Exception as e:
+            log_error(f"scalp {symbol} {interval}: {e}")
+    return out
+
+
+def recommend_scalp_config(symbol_data, mmr_pct):
+    """Given one symbol's full interval/direction/target data, picks the
+    single best (interval, direction, target%) combination: the LARGEST
+    target that still clears SCALP_MIN_HIT_RATE and where the
+    liquidation buffer at the leverage that target implies exceeds the
+    coin's own historical p90 adverse move by SCALP_SAFETY_MARGIN.
+    Returns None if nothing on this symbol clears both bars at any
+    interval/direction/target — that's a legitimate, informative result
+    (this coin isn't a safe candidate for the stated goal), not an
+    error."""
+    best = None
+    for interval, dirs in symbol_data.items():
+        interval_sec = INTERVAL_SECONDS.get(interval, 300)
+        for direction, summary in dirs.items():
+            for pct_str in sorted(summary.keys(), key=lambda x: -float(x)):
+                s = summary[pct_str]
+                if s["hit_rate"] is None or s["hit_rate"] < SCALP_MIN_HIT_RATE:
+                    continue
+                if s["p90_adverse_pct"] is None or s["median_bars_to_hit"] is None:
+                    continue
+                pct = float(pct_str)
+                leverage = compute_scalp_leverage_for_target(pct)
+                if not leverage or leverage <= 0:
+                    continue
+                liq_buffer = compute_scalp_liquidation_move_pct(direction, leverage, mmr_pct)
+                if liq_buffer is None or liq_buffer < s["p90_adverse_pct"] * SCALP_SAFETY_MARGIN:
+                    continue
+                time_to_hit_hours = s["median_bars_to_hit"] * interval_sec / 3600
+                if time_to_hit_hours <= 0:
+                    continue
+                trades_per_day_est = round(24 / time_to_hit_hours, 2)
+                score = round((s["hit_rate"] / 100) * trades_per_day_est, 4)
+                candidate = {
+                    "interval": interval, "direction": direction, "target_pct": pct,
+                    "hit_rate": s["hit_rate"], "n": s["n"],
+                    "median_bars_to_hit": s["median_bars_to_hit"],
+                    "time_to_hit_hours": round(time_to_hit_hours, 2),
+                    "trades_per_day_est": trades_per_day_est,
+                    "leverage": round(leverage, 2),
+                    "liq_buffer_pct": round(liq_buffer, 3),
+                    "p90_adverse_pct": s["p90_adverse_pct"],
+                    "score": score,
+                }
+                if best is None or candidate["score"] > best["score"]:
+                    best = candidate
+                break  # this interval/direction's largest qualifying target — no need to check smaller ones too
+    return best
 
 
 # ----------------------------------------------------------------------------
@@ -3366,6 +3480,57 @@ def scan_loop():
         time.sleep(max(5, SCAN_INTERVAL_SEC))
 
 
+def scalp_loop():
+    """Own slow cadence (SCALP_REFRESH_SEC, default 6h) — this is a batch
+    stats job, not a live scanner, so it runs on a separate thread from
+    the main 45s scan_loop entirely."""
+    while True:
+        try:
+            if not SCALP_ENABLED:
+                time.sleep(60)
+                continue
+            t0 = time.time()
+            with state_lock:
+                STATE["scalp_last_build_started"] = t0
+                STATE["scalp_symbols_done"] = 0
+
+            universe, scores = build_scalp_universe()
+            mmr_map = get_futures_risk_limit_tiers()
+            with state_lock:
+                STATE["scalp_universe"] = universe
+                STATE["scalp_universe_scores"] = scores
+                STATE["scalp_mmr_map"] = mmr_map
+                # purge symbols that dropped out of this cycle's universe,
+                # rather than letting stale entries linger indefinitely
+                STATE["scalp_data"] = {}
+                STATE["scalp_recommendations"] = {}
+
+            def process_one(symbol):
+                try:
+                    data = scan_symbol_scalp(symbol)
+                    mmr = mmr_map.get(symbol, SCALP_DEFAULT_MMR_PCT)
+                    rec = recommend_scalp_config(data, mmr)
+                    with state_lock:
+                        STATE["scalp_data"][symbol] = data
+                        STATE["scalp_recommendations"][symbol] = rec
+                        STATE["scalp_symbols_done"] += 1
+                except Exception as e:
+                    log_error(f"scalp process_one {symbol}: {e}")
+
+            with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+                futs = [ex.submit(process_one, s) for s in universe]
+                for _ in as_completed(futs):
+                    pass
+
+            t1 = time.time()
+            with state_lock:
+                STATE["scalp_last_build_finished"] = t1
+                STATE["scalp_last_build_duration"] = round(t1 - t0, 1)
+        except Exception as e:
+            log_error(f"scalp_loop: {e}")
+        time.sleep(max(60, SCALP_REFRESH_SEC))
+
+
 # ----------------------------------------------------------------------------
 # API
 # ----------------------------------------------------------------------------
@@ -3586,6 +3751,81 @@ def api_ema_chart(symbol):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/scalp/status")
+def api_scalp_status():
+    with state_lock:
+        universe = list(STATE["scalp_universe"])
+        scores = dict(STATE["scalp_universe_scores"])
+        mmr_map = dict(STATE["scalp_mmr_map"])
+        recs = dict(STATE["scalp_recommendations"])
+        last_build_finished = STATE["scalp_last_build_finished"]
+        last_build_duration = STATE["scalp_last_build_duration"]
+        symbols_done = STATE["scalp_symbols_done"]
+    ranked = []
+    for symbol, rec in recs.items():
+        if not rec:
+            continue
+        row = dict(rec)
+        row["symbol"] = symbol
+        row["volatility_score"] = scores.get(symbol)
+        row["mmr_pct"] = mmr_map.get(symbol, SCALP_DEFAULT_MMR_PCT)
+        row["mmr_verified"] = symbol in mmr_map
+        ranked.append(row)
+    ranked.sort(key=lambda r: -r["score"])
+    no_safe_config = sum(1 for r in recs.values() if r is None)
+    return jsonify({
+        "enabled": SCALP_ENABLED,
+        "universe_size": len(universe),
+        "symbols_done": symbols_done,
+        "last_build_finished": last_build_finished,
+        "last_build_duration": last_build_duration,
+        "no_safe_config_count": no_safe_config,
+        "config": {
+            "account_usd": SCALP_ACCOUNT_USD, "target_profit_usd": SCALP_TARGET_PROFIT_USD,
+            "intervals": SCALP_INTERVALS, "target_pcts": SCALP_TARGET_PCTS,
+            "safety_margin": SCALP_SAFETY_MARGIN, "min_hit_rate": SCALP_MIN_HIT_RATE,
+            "taker_fee_pct": SCALP_TAKER_FEE_PCT, "default_mmr_pct": SCALP_DEFAULT_MMR_PCT,
+        },
+        "top": ranked,
+    })
+
+
+@app.route("/api/scalp/symbol/<symbol>")
+def api_scalp_symbol(symbol):
+    with state_lock:
+        data = STATE["scalp_data"].get(symbol)
+        rec = STATE["scalp_recommendations"].get(symbol)
+        score = STATE["scalp_universe_scores"].get(symbol)
+        mmr_map = dict(STATE["scalp_mmr_map"])
+    if data is None:
+        return jsonify({"error": "no data for this symbol yet"}), 404
+    return jsonify({
+        "symbol": symbol, "volatility_score": score,
+        "mmr_pct": mmr_map.get(symbol, SCALP_DEFAULT_MMR_PCT),
+        "mmr_verified": symbol in mmr_map,
+        "recommendation": rec, "data": data,
+    })
+
+
+@app.route("/api/reset/scalp", methods=["POST"])
+def api_reset_scalp():
+    try:
+        with state_lock:
+            STATE["scalp_universe"] = []
+            STATE["scalp_universe_scores"] = {}
+            STATE["scalp_mmr_map"] = {}
+            STATE["scalp_data"] = {}
+            STATE["scalp_recommendations"] = {}
+            STATE["scalp_last_build_started"] = None
+            STATE["scalp_last_build_finished"] = None
+            STATE["scalp_last_build_duration"] = None
+            STATE["scalp_symbols_done"] = 0
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset_scalp: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/reset/ema", methods=["POST"])
 def api_reset_ema():
     try:
@@ -3706,7 +3946,7 @@ INDEX_HTML = """<!doctype html>
   body { margin:0; background:#0b0e14; color:#d7dee8; font-family: -apple-system, Roboto, Segoe UI, sans-serif; }
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
   #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #settingsModal.open { display:flex; flex-direction:column; }
@@ -3775,6 +4015,7 @@ INDEX_HTML = """<!doctype html>
       <button id="resetVolumeBtn">Очистить объём</button>
       <button id="resetDivBtn">Очистить дивер</button>
       <button id="resetEmaBtn">Очистить индикатор</button>
+      <button id="resetScalpBtn">Очистить скальпинг</button>
     </div>
   </div>
   <div id="status">загрузка...</div>
@@ -3787,6 +4028,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="tuning">Тюнинг</div>
   <div class="tab" data-tab="divergence">Дивергенции</div>
   <div class="tab" data-tab="ema">Индикатор</div>
+  <div class="tab" data-tab="scalp">Скальпинг</div>
 </div>
 <div class="panel">
   <table id="signalsTable" style="display:table">
@@ -3808,6 +4050,7 @@ INDEX_HTML = """<!doctype html>
     <tbody></tbody>
   </table>
   <div id="emaStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
+  <div id="scalpPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
 </div>
 
@@ -3890,6 +4133,13 @@ INDEX_HTML = """<!doctype html>
     </div>
     <div class="settingRow">
       <div>
+        <div class="label">Скальпинг (статистика волатильности)</div>
+        <div class="sub">фоновый сбор данных раз в несколько часов, без сигналов</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setScalp"><span class="switchSlider"></span></label>
+    </div>
+    <div class="settingRow">
+      <div>
         <div class="label">Уведомления в Telegram</div>
         <div class="sub" id="setTelegramSub">проверка...</div>
       </div>
@@ -3938,9 +4188,11 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('divStatsPanel').style.display = activeTab === 'divergence' ? 'block' : 'none';
     document.getElementById('emaTable').style.display = activeTab === 'ema' ? 'table' : 'none';
     document.getElementById('emaStatsPanel').style.display = activeTab === 'ema' ? 'block' : 'none';
+    document.getElementById('scalpPanel').style.display = activeTab === 'scalp' ? 'block' : 'none';
     if (activeTab === 'tuning') refreshTuning();
     if (activeTab === 'divergence') refreshDivergence();
     if (activeTab === 'ema') refreshEma();
+    if (activeTab === 'scalp') refreshScalp();
   };
 });
 
@@ -4264,6 +4516,96 @@ async function refreshEma() {
     ${mfeBlock}`;
 }
 
+let scalpExpanded = null;
+
+function fmtScalpRow(r, rank) {
+  const dirClass = r.direction === 'LONG' ? 'long' : 'short';
+  const mmrTag = r.mmr_verified ? '' : '<span title="MMR не подтверждён с Gate.io, используется консервативный дефолт" style="color:#e0a030;">~</span>';
+  return `<tr data-symbol="${r.symbol}" style="cursor:pointer;">
+    <td class="dim">${rank}</td>
+    <td>${r.symbol}</td>
+    <td class="dim">${r.volatility_score !== null && r.volatility_score !== undefined ? r.volatility_score.toFixed(2)+'%' : '-'}</td>
+    <td class="${dirClass}">${r.direction}</td>
+    <td class="dim">${r.interval}</td>
+    <td>${r.target_pct}%</td>
+    <td>${r.hit_rate}% <span class="dim">(n=${r.n})</span></td>
+    <td class="dim">${r.median_bars_to_hit}б / ${r.time_to_hit_hours}ч</td>
+    <td>${r.trades_per_day_est}</td>
+    <td>${r.leverage}x</td>
+    <td class="dim">${r.liq_buffer_pct}%${mmrTag}</td>
+    <td class="dim">${r.p90_adverse_pct}%</td>
+    <td><b>${r.score}</b></td>
+  </tr>`;
+}
+
+async function refreshScalp() {
+  const status = await (await fetch('/api/scalp/status')).json();
+  const panel = document.getElementById('scalpPanel');
+  const cfg = status.config || {};
+  const buildTxt = status.last_build_finished
+    ? `последнее построение: ${fmtTime(status.last_build_finished)} (${status.last_build_duration}s) · монет обработано: ${status.symbols_done}/${status.universe_size}`
+    : `первое построение ещё не завершилось (${status.symbols_done}/${status.universe_size || '?'})`;
+  const headerHtml = `
+    <div class="dim" style="margin-bottom:8px;">
+      Цель: $${cfg.target_profit_usd} со счёта $${cfg.account_usd} · ТФ: ${(cfg.intervals||[]).join(', ')} ·
+      мин. hit-rate ${cfg.min_hit_rate}% · запас безопасности x${cfg.safety_margin} · комиссия ${(cfg.taker_fee_pct*100).toFixed(3)}%/сторону<br>
+      ${buildTxt} · без безопасной конфигурации: ${status.no_safe_config_count}<br>
+      <span style="font-size:11px;">~ рядом с буфером = MMR не подтверждён с Gate.io, используется консервативный дефолт ${(cfg.default_mmr_pct*100).toFixed(2)}%</span>
+    </div>`;
+  if (!status.top || status.top.length === 0) {
+    panel.innerHTML = headerHtml + '<div class="dim">Пока нет рекомендаций — либо ещё считается, либо ни одна монета не прошла проверку безопасности при текущих настройках.</div>';
+    return;
+  }
+  const rows = status.top.map((r, i) => fmtScalpRow(r, i + 1)).join('');
+  panel.innerHTML = headerHtml + `
+    <div style="overflow-x:auto;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr>
+        <th>#</th><th>Symbol</th><th>Vola</th><th>Dir</th><th>TF</th><th>Target</th>
+        <th>Hit-rate</th><th>До цели</th><th>Trades/д</th><th>Плечо</th><th>Буфер</th><th>p90 adv</th><th>Score</th>
+      </tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    </div>
+    <div id="scalpDetail" style="margin-top:12px;"></div>`;
+  document.querySelectorAll('#scalpPanel tbody tr').forEach(tr => {
+    tr.onclick = () => openScalpDetail(tr.dataset.symbol);
+  });
+}
+
+async function openScalpDetail(symbol) {
+  const detail = document.getElementById('scalpDetail');
+  if (scalpExpanded === symbol) {
+    detail.innerHTML = '';
+    scalpExpanded = null;
+    return;
+  }
+  scalpExpanded = symbol;
+  detail.innerHTML = '<div class="dim">загрузка...</div>';
+  try {
+    const j = await (await fetch(`/api/scalp/symbol/${symbol}`)).json();
+    if (j.error) { detail.innerHTML = `<div class="dim">${j.error}</div>`; return; }
+    let html = `<div style="border-top:1px solid #1c2433;padding-top:8px;"><b>${symbol}</b> — полная разбивка по ТФ/направлению/цели` +
+      `${j.mmr_verified ? '' : ' <span style="color:#e0a030;">(MMR не подтверждён, дефолт)</span>'}:</div>`;
+    for (const interval in j.data) {
+      for (const direction in j.data[interval]) {
+        const dirClass = direction === 'LONG' ? 'long' : 'short';
+        html += `<div style="margin-top:6px;"><b>${interval} · <span class="${dirClass}">${direction}</span></b><br>`;
+        const targets = j.data[interval][direction];
+        const parts = [];
+        for (const pct in targets) {
+          const t = targets[pct];
+          parts.push(`${pct}%: ${t.hit_rate}% (n=${t.n}, ${t.median_bars_to_hit}б, p90adv ${t.p90_adverse_pct}%)`);
+        }
+        html += `<span style="font-size:11px;">${parts.join(' · ')}</span></div>`;
+      }
+    }
+    detail.innerHTML = html;
+  } catch (e) {
+    detail.innerHTML = `<div class="dim">ошибка загрузки: ${e}</div>`;
+  }
+}
+
 async function refreshAll() {
   await refreshStatus();
   await refreshSignals();
@@ -4271,6 +4613,7 @@ async function refreshAll() {
   if (activeTab === 'tuning') await refreshTuning();
   if (activeTab === 'divergence') await refreshDivergence();
   if (activeTab === 'ema') await refreshEma();
+  if (activeTab === 'scalp') await refreshScalp();
 }
 refreshAll();
 setInterval(refreshAll, 15000);
@@ -4305,6 +4648,9 @@ wireResetButton('resetDivBtn', '/api/reset/divergence',
 wireResetButton('resetEmaBtn', '/api/reset/ema',
   'Удалить статистику EMA-индикатора? Остальное не тронет. Это необратимо.',
   'Очистить индикатор');
+wireResetButton('resetScalpBtn', '/api/reset/scalp',
+  'Удалить накопленную статистику скальпинга (вселенная, данные по монетам, рекомендации)? Остальное не тронет. Это необратимо.',
+  'Очистить скальпинг');
 
 // ---------------- Settings modal ----------------
 const settingsModal = document.getElementById('settingsModal');
@@ -4314,6 +4660,7 @@ const setInputs = {
   breakout_enabled: document.getElementById('setBreakout'),
   divergence_enabled: document.getElementById('setDivergence'),
   ema_enabled: document.getElementById('setEma'),
+  scalp_enabled: document.getElementById('setScalp'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
   telegram_alerts_div: document.getElementById('setTelegramDiv'),
@@ -4932,6 +5279,7 @@ if __name__ == "__main__":
     threading.Thread(target=_telegram_sender_worker, daemon=True).start()
     t = threading.Thread(target=scan_loop, daemon=True)
     t.start()
+    threading.Thread(target=scalp_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
     tg_status = "настроен" if (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) else "не настроен"
     print(f"VP-POC Screener v{APP_VERSION} — http://127.0.0.1:{port} — Telegram: {tg_status}")
