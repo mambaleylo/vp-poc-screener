@@ -1010,6 +1010,23 @@ v0.35.1 - user pushed back on leaving TP/SL untouched ("use what's
          the new defaults compute to exactly TP=0.65%/SL=0.75% in both
          directions, and the full scan-function/endpoint regression
          stayed clean.
+v0.36.0 - UI restructure per user request: renamed "Сигналы" -> "Volume"
+         and "Индикатор" -> "EMA" tab labels. More substantially,
+         unified where each signal source's stats live — previously VP
+         stats sat in their own standalone "Тюнинг" tab while
+         Дивергенции and EMA each showed stats at the bottom of their
+         own signals table, an inconsistent layout the user flagged
+         directly. Removed the standalone tuning tab; tuningPanel now
+         shows at the bottom of the Volume tab (same DOM position it
+         already occupied, just re-tied to activeTab==='signals'
+         instead of a separate tab click), matching the divStatsPanel/
+         emaStatsPanel pattern exactly. Added a matching "Объём (Volume
+         Profile) — статистика" header line to both the populated and
+         empty states of that panel, since it's no longer implicitly
+         labeled by living in its own tab. Verified the full
+         scan-function/endpoint regression stayed clean and confirmed
+         no leftover references to the old "tuning" tab anywhere in the
+         JS.
 """
 
 import os
@@ -1025,7 +1042,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.35.1"
+APP_VERSION = "0.36.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4265,11 +4282,10 @@ INDEX_HTML = """<!doctype html>
   <div id="filterStats" class="dim" style="margin-top:2px;font-size:11px;"></div>
 </header>
 <div class="tabs">
-  <div class="tab active" data-tab="signals">Сигналы</div>
+  <div class="tab active" data-tab="signals">Volume</div>
   <div class="tab" data-tab="watch">Watchlist</div>
-  <div class="tab" data-tab="tuning">Тюнинг</div>
   <div class="tab" data-tab="divergence">Дивергенции</div>
-  <div class="tab" data-tab="ema">Индикатор</div>
+  <div class="tab" data-tab="ema">EMA</div>
   <div class="tab" data-tab="scalp">Скальпинг</div>
 </div>
 <div class="panel">
@@ -4376,7 +4392,7 @@ INDEX_HTML = """<!doctype html>
     <div class="settingRow">
       <div>
         <div class="label">Обещанный индикатор</div>
-        <div class="sub">EMA 7/14/28 пересечения (свой скан и вкладка)</div>
+        <div class="sub">EMA 7/14/28 пересечения (свой скан, вкладка "EMA")</div>
       </div>
       <label class="switch"><input type="checkbox" id="setEma"><span class="switchSlider"></span></label>
     </div>
@@ -4439,13 +4455,13 @@ document.querySelectorAll('.tab').forEach(el => {
     activeTab = el.dataset.tab;
     document.getElementById('signalsTable').style.display = activeTab === 'signals' ? 'table' : 'none';
     document.getElementById('watchTable').style.display = activeTab === 'watch' ? 'table' : 'none';
-    document.getElementById('tuningPanel').style.display = activeTab === 'tuning' ? 'block' : 'none';
+    document.getElementById('tuningPanel').style.display = activeTab === 'signals' ? 'block' : 'none';
     document.getElementById('divTable').style.display = activeTab === 'divergence' ? 'table' : 'none';
     document.getElementById('divStatsPanel').style.display = activeTab === 'divergence' ? 'block' : 'none';
     document.getElementById('emaTable').style.display = activeTab === 'ema' ? 'table' : 'none';
     document.getElementById('emaStatsPanel').style.display = activeTab === 'ema' ? 'block' : 'none';
     document.getElementById('scalpPanel').style.display = activeTab === 'scalp' ? 'block' : 'none';
-    if (activeTab === 'tuning') refreshTuning();
+    if (activeTab === 'signals') refreshTuning();
     if (activeTab === 'divergence') refreshDivergence();
     if (activeTab === 'ema') refreshEma();
     if (activeTab === 'scalp') refreshScalp();
@@ -4556,12 +4572,12 @@ async function refreshTuning() {
   const t = await (await fetch('/api/tuning')).json();
   const el = document.getElementById('tuningPanel');
   if (!t.count) {
-    el.innerHTML = '<div class="dim">Пока недостаточно данных — подожди пару циклов скана.</div>';
+    el.innerHTML = '<div class="dim" style="padding-top:10px;border-top:1px solid #1c2433;"><b>Объём (Volume Profile) — статистика</b><br>Пока недостаточно данных — подожди пару циклов скана.</div>';
     return;
   }
   el.innerHTML = `
-    <div class="dim" style="margin-bottom:10px;">
-      Всего сигналов с накопленными данными: ${t.count} ·
+    <div class="dim" style="margin-bottom:10px;padding-top:10px;border-top:1px solid #1c2433;">
+      <b>Объём (Volume Profile) — статистика</b> · Всего сигналов с накопленными данными: ${t.count} ·
       WIN: ${t.wins_n} · LOSS: ${t.losses_n} · OPEN: ${t.open_n}
     </div>
     <div style="margin-bottom:10px;"><b>MFE/MAE (R) на момент закрытия сделки</b> — сколько реально было хода в плюс/минус, пока сделка была ещё жива (это и есть ответ на "можно ли было раздвинуть TP/SL"):<br>
@@ -4868,7 +4884,7 @@ async function refreshAll() {
   await refreshStatus();
   await refreshSignals();
   await refreshWatch();
-  if (activeTab === 'tuning') await refreshTuning();
+  if (activeTab === 'signals') await refreshTuning();
   if (activeTab === 'divergence') await refreshDivergence();
   if (activeTab === 'ema') await refreshEma();
   if (activeTab === 'scalp') await refreshScalp();
