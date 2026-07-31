@@ -921,6 +921,36 @@ v0.34.0 - user caught another real gap: VELVET_USDT's recommendation
          target that fits under it, and a full direct-call sweep of all
          four scan_symbol_* functions plus the endpoint regression both
          stayed clean.
+v0.34.1 - the EMA indicator's current config has run at 22.4% win rate
+         (19W/66L) at RR=2 — well below the ~33% breakeven, and on a
+         large enough sample (85 closed) that it's not noise. User
+         asked to consider trading it in reverse instead of just
+         retuning the filter. Added VP_EMA_INVERT_SIGNALS: flips
+         buy/sell in detect_ema_signal() after the trend filter is
+         applied (inverts exactly what the current indicator+filter
+         says, not the raw pre-filter crossover — matches "do the
+         opposite of what it says" literally). Settings toggle
+         ("↳ Реверс сигналов EMA"), and the Индикатор tab's header now
+         shows a prominent "РЕВЕРС ВКЛЮЧЁН" marker when active, so
+         historical stats read while toggling don't get misread as the
+         wrong mode. Gave the user a reasoned starting estimate for
+         reversed TP/SL (~0.6-0.75% target / ~0.4-0.5% stop, vs the
+         original 1.5%/0.75%) based on reading LOSS MFE (median 0.29%
+         — how far reversed-adverse typically ran on paths that would
+         become reversed wins) against WIN MFE (median ~2.12% — how far
+         reversed-adverse ran on paths that would become reversed
+         losses) at-close, but was explicit that this is a directional
+         estimate from aggregate stats, not a rigorous recomputation —
+         the toggle exists so the same at-close MFE/MAE machinery can
+         measure the reversed version directly going forward instead of
+         trusting the estimate. Verified inversion flips LONG<->SHORT
+         correctly, leaves the no-signal case as no-signal, and the
+         full direct-call scan sweep plus endpoint regression stayed
+         clean.
+         (A night-vs-day excursion breakdown was added and then fully
+         reverted per direct user feedback that it wasn't wanted —
+         analyze_excursions/summarize_excursions and the per-symbol
+         detail display are back to exactly their pre-breakdown form.)
 """
 
 import os
@@ -936,7 +966,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.34.0"
+APP_VERSION = "0.34.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1080,6 +1110,7 @@ EMA_LEN_28 = int(os.environ.get("VP_EMA_LEN_28", 28))
 # is already on the trade's side of EMA14)
 EMA_SIGNAL_TYPE = os.environ.get("VP_EMA_SIGNAL_TYPE", "combined")
 EMA_TREND_FILTER = os.environ.get("VP_EMA_TREND_FILTER", "1") == "1"  # only BUY above EMA28 / SELL below it, same as the script's "Фильтровать по тренду"
+EMA_INVERT_SIGNALS = os.environ.get("VP_EMA_INVERT_SIGNALS", "0") == "1"  # user hypothesis: this indicator's config has been systematically wrong more often than right (22.4% win rate at RR=2) — worth testing whether trading the OPPOSITE of what it says works, with its own (smaller, asymmetric) TP/SL rather than reusing the original's
 EMA_COOLDOWN_SEC = int(os.environ.get("VP_EMA_COOLDOWN", 3600))
 EMA_SIGNAL_HISTORY = 200
 # the Pine Script only plots BUY/SELL labels, no TP/SL of its own — added
@@ -1224,7 +1255,7 @@ SETTINGS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_settings.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "bounce_enabled", "breakout_enabled",
-                  "ema_enabled", "scalp_enabled", "telegram_enabled", "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema")
+                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "telegram_enabled", "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema")
 
 
 def get_settings():
@@ -1234,6 +1265,7 @@ def get_settings():
         "bounce_enabled": BOUNCE_ENABLED,
         "breakout_enabled": BREAKOUT_ENABLED,
         "ema_enabled": EMA_ENABLED,
+        "ema_invert_signals": EMA_INVERT_SIGNALS,
         "scalp_enabled": SCALP_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
         "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
@@ -1249,7 +1281,7 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, SCALP_ENABLED
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
@@ -1261,6 +1293,8 @@ def apply_settings(updates):
         BREAKOUT_ENABLED = bool(updates["breakout_enabled"])
     if "ema_enabled" in updates:
         EMA_ENABLED = bool(updates["ema_enabled"])
+    if "ema_invert_signals" in updates:
+        EMA_INVERT_SIGNALS = bool(updates["ema_invert_signals"])
     if "scalp_enabled" in updates:
         SCALP_ENABLED = bool(updates["scalp_enabled"])
     if "telegram_enabled" in updates:
@@ -1582,6 +1616,9 @@ def detect_ema_signal(closes, len7=EMA_LEN_7, len14=EMA_LEN_14, len28=EMA_LEN_28
     if trend_filter:
         buy = buy and closes[i] > ema28[i]
         sell = sell and closes[i] < ema28[i]
+
+    if EMA_INVERT_SIGNALS:
+        buy, sell = sell, buy  # trade the opposite of whatever the indicator (including its trend filter) says
 
     if buy:
         return {"direction": "LONG", "ema7": ema7[i], "ema14": ema14[i], "ema28": ema28[i]}
@@ -3832,7 +3869,7 @@ def api_ema_status():
             "config": {
                 "rr": EMA_RR, "tp_pct": EMA_TP_PCT,
                 "len7": EMA_LEN_7, "len14": EMA_LEN_14, "len28": EMA_LEN_28,
-                "signal_type": EMA_SIGNAL_TYPE, "trend_filter": EMA_TREND_FILTER,
+                "signal_type": EMA_SIGNAL_TYPE, "trend_filter": EMA_TREND_FILTER, "invert_signals": EMA_INVERT_SIGNALS,
                 "cooldown": EMA_COOLDOWN_SEC,
             },
         })
@@ -4249,6 +4286,13 @@ INDEX_HTML = """<!doctype html>
     </div>
     <div class="settingRow">
       <div>
+        <div class="label">↳ Реверс сигналов EMA</div>
+        <div class="sub">торговать в обратную сторону от того, что говорит индикатор</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setEmaInvert"><span class="switchSlider"></span></label>
+    </div>
+    <div class="settingRow">
+      <div>
         <div class="label">Скальпинг (статистика волатильности)</div>
         <div class="sub">фоновый сбор данных раз в несколько часов, без сигналов</div>
       </div>
@@ -4621,7 +4665,7 @@ async function refreshEma() {
   }).join('<br>');
   panel.innerHTML = `
     <div class="dim" style="margin-bottom:10px;">
-      EMA ${cfg.len7}/${cfg.len14}/${cfg.len28} (${cfg.signal_type}${cfg.trend_filter ? ', с фильтром тренда' : ''}) · сканируются ТФ: ${(status.intervals||[]).join(', ')} ·
+      EMA ${cfg.len7}/${cfg.len14}/${cfg.len28} (${cfg.signal_type}${cfg.trend_filter ? ', с фильтром тренда' : ''})${cfg.invert_signals ? ' <span style="color:#ffcc55;font-weight:bold;">· РЕВЕРС ВКЛЮЧЁН</span>' : ''} · сканируются ТФ: ${(status.intervals||[]).join(', ')} ·
       скан ${status.last_scan_duration!==null && status.last_scan_duration!==undefined ? status.last_scan_duration+'s' : '...'} ·
       Винрейт (всё вместе): ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ${cfg.rr}
     </div>
@@ -4778,6 +4822,7 @@ const setInputs = {
   breakout_enabled: document.getElementById('setBreakout'),
   divergence_enabled: document.getElementById('setDivergence'),
   ema_enabled: document.getElementById('setEma'),
+  ema_invert_signals: document.getElementById('setEmaInvert'),
   scalp_enabled: document.getElementById('setScalp'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
