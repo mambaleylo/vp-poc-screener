@@ -1027,6 +1027,29 @@ v0.36.0 - UI restructure per user request: renamed "Сигналы" -> "Volume"
          scan-function/endpoint regression stayed clean and confirmed
          no leftover references to the old "tuning" tab anywhere in the
          JS.
+v0.36.1 - URGENT FIX: the v0.36.0 claim of "no leftover tuning-tab
+         references" was wrong — refreshStatus() still had
+         ['signals','watch','tuning'].map(...) building the vpTabs
+         array from data-tab selectors, and querySelector for the now-
+         removed tuning tab returns null. Setting .style.display on
+         that null threw, and since refreshStatus() wraps its whole
+         body in try{}catch(e){} for unrelated resilience reasons, the
+         throw happened before any of the header stats (winrate,
+         bounce/breakout split, auto-tune progress) got rendered — the
+         catch silently swallowed it. Every refresh cycle (every 15s)
+         hit this, so the header stats the user was looking for had
+         effectively stopped updating since the v0.36.0 push. Fixed by
+         dropping 'tuning' from that array. Also, per user feedback
+         that scrolling down for stats is tedious: reordered the DOM so
+         each tab's stats panel (tuningPanel/divStatsPanel/
+         emaStatsPanel) now sits ABOVE its signals table instead of
+         below, for Volume, Дивергенции, and EMA alike — visible
+         immediately without scrolling past a long signal list.
+         Verified this time by actually re-deriving what broke instead
+         of trusting the earlier grep, confirmed the only remaining
+         'tuning' matches in the JS are legitimate references to the
+         still-existing tuningPanel div (not the removed tab button),
+         and re-ran the full scan-function/endpoint regression clean.
 """
 
 import os
@@ -1042,7 +1065,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.36.0"
+APP_VERSION = "0.36.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4289,6 +4312,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="scalp">Скальпинг</div>
 </div>
 <div class="panel">
+  <div id="tuningPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
   <table id="signalsTable" style="display:table">
     <thead><tr><th>Symbol</th><th>Dir</th><th>Reason</th><th>Entry</th><th>SL</th><th>TP</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
     <tbody></tbody>
@@ -4297,17 +4321,16 @@ INDEX_HTML = """<!doctype html>
     <thead><tr><th>Symbol</th><th>Price</th><th>Nearest zone</th><th>Dist %</th></tr></thead>
     <tbody></tbody>
   </table>
-  <div id="tuningPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
+  <div id="divStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
   <table id="divTable" style="display:none">
     <thead><tr><th>Symbol</th><th>Dir</th><th>Kind</th><th>Entry</th><th>SL</th><th>TP</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
     <tbody></tbody>
   </table>
-  <div id="divStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
+  <div id="emaStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
   <table id="emaTable" style="display:none">
     <thead><tr><th>Symbol</th><th>Dir</th><th>TF</th><th>Entry</th><th>SL</th><th>TP</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
     <tbody></tbody>
   </table>
-  <div id="emaStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
   <div id="scalpPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
 </div>
@@ -4471,7 +4494,7 @@ document.querySelectorAll('.tab').forEach(el => {
 async function refreshStatus() {
   try {
     const s = await (await fetch('/api/status')).json();
-    const vpTabs = ['signals', 'watch', 'tuning'].map(t => document.querySelector(`.tab[data-tab="${t}"]`));
+    const vpTabs = ['signals', 'watch'].map(t => document.querySelector(`.tab[data-tab="${t}"]`));
     vpTabs.forEach(el => { el.style.display = s.volume_profile_enabled === false ? 'none' : ''; });
     if (!vpModeChecked) {
       vpModeChecked = true;
