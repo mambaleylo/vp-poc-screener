@@ -951,6 +951,20 @@ v0.34.1 - the EMA indicator's current config has run at 22.4% win rate
          reverted per direct user feedback that it wasn't wanted —
          analyze_excursions/summarize_excursions and the per-symbol
          detail display are back to exactly their pre-breakdown form.)
+v0.34.2 - retuned EMA_TP_PCT/EMA_RR for the reversed-signal hypothesis
+         (0.015/2.0 -> 0.0075/1.5, i.e. TP 1.5%->0.75%, SL 0.75%->0.5%).
+         Reasoning grounded in the original config's own at-close
+         numbers: LOSS trades' favorable excursion (= the reversed
+         side's adverse excursion) sat at median 0.29%/avg 0.375%
+         before the original 0.75% stop was hit, so the new SL (0.5%)
+         gives ~1.3-1.7x headroom above that without going so wide it
+         wrecks RR. The new TP (0.75%) sits exactly at the original
+         stop's level — a level every current LOSS trade crossed by
+         definition, so a level the reversed side should reach often on
+         those same historical paths. Verified the new defaults
+         compute to exactly TP=0.75%/SL=0.5%/risk=0.5% in both
+         directions, and the full scan-function/endpoint regression
+         stayed clean.
 """
 
 import os
@@ -966,7 +980,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.34.1"
+APP_VERSION = "0.34.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1116,8 +1130,20 @@ EMA_SIGNAL_HISTORY = 200
 # the Pine Script only plots BUY/SELL labels, no TP/SL of its own — added
 # a fixed-% TP (mirroring the divergence signals) purely so this fits the
 # same win-rate/MFE/MAE tracking as everything else in the app.
-EMA_TP_PCT = float(os.environ.get("VP_EMA_TP_PCT", 0.015))
-EMA_RR = float(os.environ.get("VP_EMA_RR", 2.0))
+# Retuned for the reverse-signal hypothesis (VP_EMA_INVERT_SIGNALS): the
+# original config's own at-close stats showed LOSS trades' favorable
+# excursion (= the reversed position's adverse excursion) at median
+# 0.29%/avg 0.375% before hitting the original 0.75% stop — so a
+# reversed SL needs headroom above that without going so wide it wrecks
+# RR. TP=0.75% sits exactly at the original stop's level, which every
+# current LOSS trade crossed by definition, so it's a level the reversed
+# side should reach often on those same paths. RR=1.5 -> SL=0.5%, ~1.3-
+# 1.7x the typical pre-stop excursion, not razor-thin but not loose
+# either. If reverting to the non-inverted signal, these two should
+# probably go back too — they were chosen for the reversed hypothesis
+# specifically, not re-validated for the original direction.
+EMA_TP_PCT = float(os.environ.get("VP_EMA_TP_PCT", 0.0075))
+EMA_RR = float(os.environ.get("VP_EMA_RR", 1.5))
 
 # ----------------------------------------------------------------------------
 # Scalp volatility statistics ("Скальпинг" tab) — a pure exploratory/stats
