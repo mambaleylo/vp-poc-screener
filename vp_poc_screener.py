@@ -1050,6 +1050,22 @@ v0.36.1 - URGENT FIX: the v0.36.0 claim of "no leftover tuning-tab
          'tuning' matches in the JS are legitimate references to the
          still-existing tuningPanel div (not the removed tab button),
          and re-ran the full scan-function/endpoint regression clean.
+v0.37.0 - two tuning changes from fresh Volume stats (breakout had
+         degraded to 34.5% win rate, barely above the 33.3% breakeven
+         at RR=2, down from 41.7% a few versions back):
+         (1) OI_THRESHOLD_PCT reverted 0.08 -> 0.05, undoing the earlier
+         raise — testing whether the looser OI filter correlates with
+         breakout's decline.
+         (2) PARAM_GRID_BUFFER: re-added 0.15 (now [0.15,0.20,0.35,0.50]),
+         which had been dropped earlier in this session when LOSS
+         median MFE was ~1.7R (tight buffers were getting stopped out
+         before eventually reversing "the right way"). Bounce's LOSS
+         MFE has since fallen to ~0.48R and WIN MAE sits at ~0.18R
+         (winners barely dip toward the stop at all) — the data that
+         justified excluding the tight buffer no longer holds, so
+         letting the auto-tuner test it again rather than assuming.
+         Verified backtest_params runs cleanly with buffer=0.15 directly,
+         and the full scan-function/endpoint regression stayed clean.
 """
 
 import os
@@ -1065,7 +1081,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.36.1"
+APP_VERSION = "0.37.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1319,7 +1335,7 @@ VOL_CONFIRM_RATIO = float(os.environ.get("VP_VOL_CONFIRM_RATIO", 1.15))  # trigg
 OI_FILTER_ENABLED = os.environ.get("VP_OI_FILTER", "1") == "1"
 OI_INTERVAL = os.environ.get("VP_OI_INTERVAL", "1h")
 OI_LOOKBACK = int(os.environ.get("VP_OI_LOOKBACK", 24))
-OI_THRESHOLD_PCT = float(os.environ.get("VP_OI_THRESHOLD_PCT", 0.08))  # raised from 0.05 — was triggering (and filtering) too readily per user feedback that v0.12-13 cut signal volume too much
+OI_THRESHOLD_PCT = float(os.environ.get("VP_OI_THRESHOLD_PCT", 0.05))  # reverted 0.08 -> 0.05 — breakout's win rate degraded to near-breakeven (41.7% -> 34.5%) since the 0.05->0.08 raise, testing whether the looser OI filter was the cause
 
 # --- data quality filter: skip symbols that look illiquid/stale on the
 # candle feed itself (near-zero volume bars, flat high==low bars, or an
@@ -3066,7 +3082,7 @@ AUTO_TUNE_REFRESH_SEC = int(os.environ.get("VP_AUTO_TUNE_REFRESH_SEC", 48 * 3600
 PARAM_GRID_LOOKBACK = [60, 100, 150]
 PARAM_GRID_HVN = [3, 6, 9]
 PARAM_GRID_RR = [1.5, 2.0, 2.5]              # data showed WIN median MFE ~2.8R, so the old 1.0 floor rarely won and was dropped in favor of testing further out
-PARAM_GRID_BUFFER = [0.20, 0.35, 0.50]       # data showed LOSS median MFE ~1.7R (stopped out, then kept going the "right" way) — dropped the too-tight 0.15 floor, testing wider
+PARAM_GRID_BUFFER = [0.15, 0.20, 0.35, 0.50]  # 0.15 dropped earlier when LOSS median MFE was ~1.7R (tight buffers got stopped out before reversing "the right way") — re-added now that LOSS MFE has fallen to ~0.48R and WIN MAE sits at ~0.18R (winners barely dip toward the stop at all), suggesting the wider-only grid's justification no longer holds; letting the auto-tuner test it again rather than assuming
 
 SYMBOL_OVERRIDES = {}  # symbol -> {lookback, hvn_top_n, rr, buffer_pct, winrate, trades, optimized_at}
 
