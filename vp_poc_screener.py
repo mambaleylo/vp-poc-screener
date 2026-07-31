@@ -1066,6 +1066,24 @@ v0.37.0 - two tuning changes from fresh Volume stats (breakout had
          letting the auto-tuner test it again rather than assuming.
          Verified backtest_params runs cleanly with buffer=0.15 directly,
          and the full scan-function/endpoint regression stayed clean.
+v0.37.1 - the EMA reverse-signal hypothesis (v0.34.1) is now CONFIRMED
+         live: n=86 closed, 54.7% win rate vs. RR=1.5's 40% breakeven,
+         +0.37R/trade — a real edge, not a guess anymore. Round 2
+         retune off that live data's own at-close numbers: WIN MFE sat
+         at median 2.065R/avg 3.842R (well above the old RR=1.5),
+         meaning the TP was cutting winners short, so EMA_TP_PCT moved
+         0.0075->0.01 (0.75%->1.0%, roughly the median, capturing most
+         of the current win population fully rather than clipping it).
+         WIN MAE sat at median 0/avg 0.214R/p75 0.356R — winners barely
+         dipped toward the stop — so EMA_RR moved 1.5->2.5, giving
+         SL=0.4% (comfortable buffer above p75, down from 0.5%). Also
+         flagged in the config comment that LOSS MAE ran noticeably
+         above the nominal 1R (median 1.697R/avg 2.89R) on the 1h
+         timeframe with this tight a stop — not a bug, just volatile
+         candles against a narrow stop, worth keeping in mind for real
+         position sizing. Verified the new defaults compute to exactly
+         TP=1.0%/SL=0.4% in both directions, and the full scan-function/
+         endpoint regression stayed clean.
 """
 
 import os
@@ -1081,7 +1099,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.37.0"
+APP_VERSION = "0.37.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1246,20 +1264,22 @@ EMA_SIGNAL_HISTORY = 200
 # the Pine Script only plots BUY/SELL labels, no TP/SL of its own — added
 # a fixed-% TP (mirroring the divergence signals) purely so this fits the
 # same win-rate/MFE/MAE tracking as everything else in the app.
-# Retuned for the reverse-signal hypothesis (VP_EMA_INVERT_SIGNALS): the
-# original config's own at-close stats showed LOSS trades' favorable
-# excursion (= the reversed position's adverse excursion) at median
-# 0.29%/avg 0.375% before hitting the original 0.75% stop — so a
-# reversed SL needs headroom above that without going so wide it wrecks
-# RR. TP=0.75% sits exactly at the original stop's level, which every
-# current LOSS trade crossed by definition, so it's a level the reversed
-# side should reach often on those same paths. RR=1.5 -> SL=0.5%, ~1.3-
-# 1.7x the typical pre-stop excursion, not razor-thin but not loose
-# either. If reverting to the non-inverted signal, these two should
-# probably go back too — they were chosen for the reversed hypothesis
-# specifically, not re-validated for the original direction.
-EMA_TP_PCT = float(os.environ.get("VP_EMA_TP_PCT", 0.0075))
-EMA_RR = float(os.environ.get("VP_EMA_RR", 1.5))
+# Round 1 retune (0.015/2.0 -> 0.0075/1.5) was for the reverse-signal
+# hypothesis before it had any of its own data. That hypothesis has since
+# been CONFIRMED live: n=86 closed at 54.7% win rate vs. RR=1.5's 40%
+# breakeven, +0.37R/trade — a real, validated edge, not a guess.
+# Round 2 retune, off THAT reversed data's own at-close stats: WIN MFE
+# sat at median 2.065R/avg 3.842R (R=0.5% then) — well above the old
+# RR=1.5, meaning the TP was cutting winners short — so TP moved up to
+# ~1.0% (roughly the median, capturing most of the current win
+# population fully). WIN MAE sat at median 0/avg 0.214R/p75 0.356R —
+# winners barely dipped toward the stop at all — so SL tightened to
+# ~0.4% (comfortable buffer above p75, well below the old 0.5%).
+# RR=2.5. If reverting to the non-inverted signal, these should
+# probably go back to something re-derived for that direction instead —
+# neither retune round was validated for it.
+EMA_TP_PCT = float(os.environ.get("VP_EMA_TP_PCT", 0.01))
+EMA_RR = float(os.environ.get("VP_EMA_RR", 2.5))
 
 # ----------------------------------------------------------------------------
 # Scalp volatility statistics ("Скальпинг" tab) — a pure exploratory/stats
