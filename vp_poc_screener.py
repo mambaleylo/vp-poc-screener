@@ -993,6 +993,23 @@ v0.35.0 - user shared a live PROM_USDT divergence screenshot showing
          direction flips) and the full scan-function/endpoint
          regression, settings toggle, and DIV_PIVOT_RIGHT=3 all stayed
          clean.
+v0.35.1 - user pushed back on leaving TP/SL untouched ("use what's
+         there instead of waiting") — retuned DIV_TP_PCT/DIV_RR for the
+         reversed hypothesis after all: 0.011/2.0 (SL 0.55%) ->
+         0.0065/0.867 (SL~0.75%). Off the ORIGINAL direction's own
+         at-close numbers (n=8: 3W/5L): LOSS trades' favorable
+         excursion before the original stop sat at median 0.62%R/avg
+         0.82%R — that's the reversed side's adverse excursion on
+         paths that would become reversed wins, so SL~0.75% sits
+         between median and avg. LOSS MAE at close (0.86%/1.05%,
+         reflecting same-bar overshoot past the exact stop price)
+         suggested price often continued past the stop's own level, so
+         TP~0.65% sits above the bare 0.55% floor. Comment is explicit
+         that this is a far weaker estimate than the EMA retune — n=8
+         vs n=85 — an informed guess, not a validated figure. Verified
+         the new defaults compute to exactly TP=0.65%/SL=0.75% in both
+         directions, and the full scan-function/endpoint regression
+         stayed clean.
 """
 
 import os
@@ -1008,7 +1025,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.35.0"
+APP_VERSION = "0.35.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1124,8 +1141,22 @@ DIV_FRESHNESS_BARS = int(os.environ.get("VP_DIV_FRESHNESS_BARS", DIV_PIVOT_RIGHT
 # what actually tells us the risk of reducing VP_DIV_PIVOT_RIGHT: how
 # often would going faster have picked a different, wrong point instead.
 DIV_SHADOW_RIGHTS = [int(x) for x in os.environ.get("VP_DIV_SHADOW_RIGHTS", "1,2").split(",") if x.strip()]  # only values below DIV_PIVOT_RIGHT are meaningful for the stability diagnostic
-DIV_RR = float(os.environ.get("VP_DIV_RR", 2.0))
-DIV_TP_PCT = float(os.environ.get("VP_DIV_TP_PCT", 0.011))  # TP is a fixed % move from entry (1.1% default) — SL is then sized backward from this via DIV_RR, rather than TP being derived from a pivot-based SL
+DIV_RR = float(os.environ.get("VP_DIV_RR", 0.867))  # retuned for the reverse-signal hypothesis (VP_DIV_INVERT_SIGNALS) — see DIV_TP_PCT comment. Was 2.0 for the original (non-inverted) direction.
+DIV_TP_PCT = float(os.environ.get("VP_DIV_TP_PCT", 0.0065))  # TP is a fixed % move from entry — SL is then sized backward from this via DIV_RR, rather than TP being derived from a pivot-based SL.
+# Retuned 0.011/RR2.0 (SL 0.55%) -> 0.0065/RR0.867 (SL~0.75%) for the
+# reversed hypothesis, off the ORIGINAL (non-inverted) direction's own
+# at-close stats: LOSS trades' favorable excursion before the original
+# 0.55% stop sat at median 0.62%/avg 0.82% (R=0.55%) — that's the
+# reversed side's adverse excursion on paths that would become reversed
+# wins, so SL~0.75% sits between median and avg with some buffer. LOSS
+# MAE at close (0.86% median/1.05% avg, reflecting same-bar overshoot
+# past the exact stop price) suggested price often continued further
+# past the stop than the stop's own level, so TP~0.65% sits above the
+# bare 0.55% floor rather than exactly at it.
+# CAVEAT, much stronger than the equivalent EMA retune: this is off an
+# n=8 sample (3W/5L) — an order of magnitude smaller than EMA's n=85.
+# Treat this as an informed starting guess, not a validated figure,
+# until real reversed-signal data accumulates.
 DIV_INVERT_SIGNALS = os.environ.get("VP_DIV_INVERT_SIGNALS", "0") == "1"  # a live example showed the divergence-implied bounce often already largely played out by the time the signal actually fires — worth testing whether trading the OPPOSITE direction (effectively fading the already-completed move) does better than trading the original signal late
 DIV_COOLDOWN_SEC = int(os.environ.get("VP_DIV_COOLDOWN", 3600))
 DIV_SIGNAL_HISTORY = 200
