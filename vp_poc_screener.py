@@ -1084,6 +1084,39 @@ v0.37.1 - the EMA reverse-signal hypothesis (v0.34.1) is now CONFIRMED
          position sizing. Verified the new defaults compute to exactly
          TP=1.0%/SL=0.4% in both directions, and the full scan-function/
          endpoint regression stayed clean.
+v0.38.0 - two scalp-module changes from user feedback (with a live
+         screenshot showing ~96/189 symbols with no safe config and
+         most rows missing confirmed leverage/MMR):
+         (1) FIX: get_futures_risk_limit_tiers() made a single
+         unpaginated request. Gate's own docs say the endpoint defaults
+         to the top 100 markets when no `contract` filter is passed —
+         confirmed as the root cause, matching the observed pattern
+         (roughly half the universe never had a chance to get real
+         data). Now paginates with limit/offset until a page comes back
+         empty, capped at 30 pages as a safety net. Verified against
+         250 mocked symbols across multiple pages (all covered
+         correctly), and that a network failure mid-pagination keeps
+         already-fetched pages rather than discarding everything.
+         (2) NEW: live signal generation on top of the stats-only
+         engine — scan_symbol_scalp_signal() enters at the most
+         recently closed candle's close (same candles[-1] convention
+         EMA/divergence already use) on whichever interval/direction/
+         target% recommend_scalp_config() currently recommends for that
+         symbol, no stop per the original spec: outcome is WIN (target
+         touched) or TIMEOUT, never LOSS. Per-(symbol,interval)
+         cooldown keyed to the candle's own timestamp prevents refiring
+         on the same still-open candle. Wired into the existing fast
+         45s scan_loop (using the already-computed, slow-refresh
+         recommendations — no expensive recompute on the fast path) and
+         update_scalp_signal_outcomes() alongside it. New
+         /api/scalp/signals route, compute_scalp_signal_stats() for a
+         win-rate summary now included in /api/scalp/status, reset
+         endpoint clears signals too, and a live-signals table now sits
+         above the recommendations table in the Скальпинг tab.
+         Verified directly: signal creation, same-candle dedup via
+         cooldown, WIN detection (forced target touch), TIMEOUT
+         detection (backdated timeout), and the full scan-function/
+         endpoint regression — all clean.
 """
 
 import os
@@ -1099,7 +1132,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.37.1"
+APP_VERSION = "0.38.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1308,6 +1341,17 @@ SCALP_DEFAULT_MAX_LEVERAGE = float(os.environ.get("VP_SCALP_DEFAULT_MAX_LEVERAGE
 SCALP_REFRESH_SEC = int(os.environ.get("VP_SCALP_REFRESH_SEC", 6 * 3600))  # how often the whole universe gets rebuilt/rescanned — this is a slow, batch stats job, not a live scanner
 SCALP_ACCOUNT_USD = float(os.environ.get("VP_SCALP_ACCOUNT_USD", 30.0))
 SCALP_TARGET_PROFIT_USD = float(os.environ.get("VP_SCALP_TARGET_PROFIT_USD", 7.0))
+# Live signal generation, on top of the stats-only engine above. Enters
+# at the most recently closed candle's close (same "candles[-1]" close
+# convention the EMA/divergence scanners already use) on whichever
+# interval/direction/target% recommend_scalp_config currently picks for
+# that symbol — no stop, per the original spec ("без стопа пока что"):
+# outcomes are WIN (target touched) or TIMEOUT (never touched within
+# the window), there is no LOSS state for this module.
+SCALP_SIGNALS_ENABLED = os.environ.get("VP_SCALP_SIGNALS_ENABLED", "1") == "1"
+SCALP_SIGNAL_HISTORY = 200
+SCALP_SIGNAL_COOLDOWN_SEC = int(os.environ.get("VP_SCALP_SIGNAL_COOLDOWN_SEC", 3600))  # per (symbol, interval) — avoid re-firing every 45s scan tick for the same still-fresh candle
+SCALP_SIGNAL_TIMEOUT_MULT = float(os.environ.get("VP_SCALP_SIGNAL_TIMEOUT_MULT", 4.0))  # timeout = this many times the recommendation's own median time-to-hit
 SCALP_SAFETY_MARGIN = float(os.environ.get("VP_SCALP_SAFETY_MARGIN", 1.5))  # liquidation buffer must exceed the coin's own historical p90 adverse move by this factor before a target/leverage combo is flagged "safe"
 SCALP_MIN_HIT_RATE = float(os.environ.get("VP_SCALP_MIN_HIT_RATE", 60.0))  # a target below this hit-rate isn't worth recommending even if technically "safe"
 
@@ -1536,6 +1580,7 @@ STATE = {
     "scalp_last_build_finished": None,
     "scalp_last_build_duration": None,
     "scalp_symbols_done": 0,
+    "scalp_signals": deque(maxlen=SCALP_SIGNAL_HISTORY),
 }
 _cooldowns = {}  # (symbol, zone_key) -> last_alert_ts
 _cooldowns_lock = threading.Lock()
@@ -1543,6 +1588,8 @@ _div_cooldowns = {}  # symbol -> last_alert_ts
 _div_cooldowns_lock = threading.Lock()
 _ema_cooldowns = {}  # symbol -> last_alert_ts
 _ema_cooldowns_lock = threading.Lock()
+_scalp_signal_cooldowns = {}  # (symbol, interval) -> last_signal_ts
+_scalp_signal_cooldowns_lock = threading.Lock()
 
 
 def has_open_signal(symbol):
@@ -2532,14 +2579,31 @@ def get_futures_risk_limit_tiers():
     could still produce a plausible-looking number (this exact bug
     shipped once for MMR: a value that only made sense as roughly -3.2%
     MMR passed through unnoticed). Anything outside a realistic range
-    gets discarded, same as if it were missing, for both fields."""
+    gets discarded, same as if it were missing, for both fields.
+    Paginated: without a `contract` filter, Gate's own docs say this
+    endpoint defaults to only the top 100 markets — a single
+    unpaginated call silently covered a small fraction of the universe
+    (confirmed live: ~96/189 symbols had no safe config, almost all
+    missing exactly the leverage/MMR data this fetches). Pages through
+    with limit/offset until a page comes back empty."""
+    all_rows = []
+    limit = 100
+    offset = 0
     try:
-        r = requests.get(f"{GATE_BASE}/futures/usdt/risk_limit_tiers", timeout=HTTP_TIMEOUT)
-        r.raise_for_status()
-        data = r.json()
+        for _ in range(30):  # safety cap — 30*100 = 3000 markets, far more than any real universe
+            r = requests.get(f"{GATE_BASE}/futures/usdt/risk_limit_tiers",
+                              params={"limit": limit, "offset": offset}, timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            page = r.json()
+            if not page:
+                break
+            all_rows.extend(page)
+            offset += limit
     except Exception as e:
         log_error(f"get_futures_risk_limit_tiers: {e}")
-        return {}, {}
+        if not all_rows:
+            return {}, {}
+    data = all_rows
     mmr_out = {}
     lev_out = {}
     for row in data:
@@ -2692,6 +2756,111 @@ def recommend_scalp_config(symbol_data, mmr_pct, max_leverage=SCALP_DEFAULT_MAX_
                     best = candidate
                 break  # this interval/direction's largest qualifying target — no need to check smaller ones too
     return best
+
+
+def scan_symbol_scalp_signal(symbol, rec):
+    """Fires a live scalp signal for one symbol, given its current
+    recommend_scalp_config() output. Entry is the most recently closed
+    candle's close on the recommended interval — the same "enter right
+    at the new candle" convention EMA/divergence already use for
+    candles[-1]. No stop, per the original spec: outcome is WIN (target
+    touched) or TIMEOUT, never LOSS."""
+    if not SCALP_SIGNALS_ENABLED or not rec:
+        return
+    interval = rec["interval"]
+    try:
+        candles = get_candles(symbol, interval=interval, limit=5)
+        if len(candles) < 2:
+            return
+        last = candles[-1]
+        entry_time = last["time"]
+
+        cooldown_key = (symbol, interval)
+        with _scalp_signal_cooldowns_lock:
+            last_ts = _scalp_signal_cooldowns.get(cooldown_key)
+            if last_ts == entry_time:
+                return  # already signaled off this exact candle
+            _scalp_signal_cooldowns[cooldown_key] = entry_time
+
+        with state_lock:
+            if any(s["symbol"] == symbol and s["interval"] == interval and s["status"] == "OPEN"
+                   for s in STATE["scalp_signals"]):
+                return  # one open scalp signal per (symbol, interval) at a time
+
+        entry = last["close"]
+        direction = rec["direction"]
+        target_pct = rec["target_pct"]
+        if direction == "LONG":
+            target_price = entry * (1 + target_pct / 100)
+        else:
+            target_price = entry * (1 - target_pct / 100)
+        interval_sec = INTERVAL_SECONDS.get(interval, 300)
+        timeout_sec = max(rec["time_to_hit_hours"] * 3600 * SCALP_SIGNAL_TIMEOUT_MULT, interval_sec * 4)
+
+        record = {
+            "symbol": symbol, "interval": interval, "direction": direction,
+            "entry": entry, "target_price": target_price, "target_pct": target_pct,
+            "leverage": rec["leverage"], "max_leverage": rec.get("max_leverage"),
+            "hit_rate_hist": rec["hit_rate"], "score": rec["score"],
+            "time": entry_time, "detected_at": time.time(),
+            "timeout_at": time.time() + timeout_sec,
+            "status": "OPEN", "result": None,
+            "exit_price": None, "exit_time": None,
+            "app_version": APP_VERSION,
+        }
+        with state_lock:
+            STATE["scalp_signals"].appendleft(record)
+    except Exception as e:
+        log_error(f"scalp_signal {symbol}: {e}")
+
+
+def compute_scalp_signal_stats():
+    with state_lock:
+        signals = list(STATE["scalp_signals"])
+    closed = [s for s in signals if s["status"] == "CLOSED"]
+    wins = sum(1 for s in closed if s["result"] == "WIN")
+    timeouts = sum(1 for s in closed if s["result"] == "TIMEOUT")
+    open_n = sum(1 for s in signals if s["status"] == "OPEN")
+    total_closed = len(closed)
+    win_rate = round(wins / total_closed * 100, 1) if total_closed else None
+    return {"total": len(signals), "wins": wins, "timeouts": timeouts, "open": open_n, "win_rate": win_rate}
+
+
+def update_scalp_signal_outcomes():
+    now = time.time()
+    with state_lock:
+        open_signals = [s for s in STATE["scalp_signals"] if s["status"] == "OPEN"]
+    for sig in open_signals:
+        try:
+            candles = get_candles(sig["symbol"], interval=sig["interval"], limit=200)
+            future = [c for c in candles if c["time"] >= sig["time"]]
+            hit = False
+            exit_price = None
+            exit_time = None
+            for c in future:
+                if sig["direction"] == "LONG" and c["high"] >= sig["target_price"]:
+                    hit = True
+                    exit_price = sig["target_price"]
+                    exit_time = c["time"]
+                    break
+                if sig["direction"] == "SHORT" and c["low"] <= sig["target_price"]:
+                    hit = True
+                    exit_price = sig["target_price"]
+                    exit_time = c["time"]
+                    break
+            with state_lock:
+                if hit:
+                    sig["status"] = "CLOSED"
+                    sig["result"] = "WIN"
+                    sig["exit_price"] = exit_price
+                    sig["exit_time"] = exit_time
+                elif now >= sig["timeout_at"]:
+                    sig["status"] = "CLOSED"
+                    sig["result"] = "TIMEOUT"
+                    sig["exit_price"] = candles[-1]["close"] if candles else None
+                    sig["exit_time"] = candles[-1]["time"] if candles else None
+        except Exception as e:
+            log_error(f"scalp_outcome {sig['symbol']}: {e}")
 
 
 # ----------------------------------------------------------------------------
@@ -3765,6 +3934,10 @@ def scan_loop():
                     futs += [ex.submit(scan_symbol_divergence, s) for s in universe]
                 if EMA_ENABLED:
                     futs += [ex.submit(scan_symbol_ema, s, interval) for s in universe for interval in EMA_INTERVALS]
+                if SCALP_SIGNALS_ENABLED:
+                    with state_lock:
+                        scalp_recs_snapshot = dict(STATE["scalp_recommendations"])
+                    futs += [ex.submit(scan_symbol_scalp_signal, sym, rec) for sym, rec in scalp_recs_snapshot.items() if rec]
                 for _ in as_completed(futs):
                     pass
             if VOLUME_PROFILE_ENABLED:
@@ -3775,6 +3948,8 @@ def scan_loop():
                 div_stability_cycle(universe)
             if EMA_ENABLED:
                 update_ema_outcomes()
+            if SCALP_SIGNALS_ENABLED:
+                update_scalp_signal_outcomes()
             save_state()
             t1 = time.time()
             with state_lock:
@@ -4101,7 +4276,14 @@ def api_scalp_status():
             "default_max_leverage": SCALP_DEFAULT_MAX_LEVERAGE,
         },
         "top": ranked,
+        "signals_stats": compute_scalp_signal_stats(),
     })
+
+
+@app.route("/api/scalp/signals")
+def api_scalp_signals():
+    with state_lock:
+        return jsonify(list(STATE["scalp_signals"]))
 
 
 @app.route("/api/scalp/symbol/<symbol>")
@@ -4138,6 +4320,7 @@ def api_reset_scalp():
             STATE["scalp_last_build_finished"] = None
             STATE["scalp_last_build_duration"] = None
             STATE["scalp_symbols_done"] = 0
+            STATE["scalp_signals"].clear()
         return jsonify({"ok": True})
     except Exception as e:
         log_error(f"api_reset_scalp: {e}")
@@ -4872,25 +5055,49 @@ function fmtScalpRow(r, rank) {
 
 async function refreshScalp() {
   const status = await (await fetch('/api/scalp/status')).json();
+  const signals = await (await fetch('/api/scalp/signals')).json();
   const panel = document.getElementById('scalpPanel');
   const cfg = status.config || {};
+  const ss = status.signals_stats || {};
   const buildTxt = status.last_build_finished
     ? `последнее построение: ${fmtTime(status.last_build_finished)} (${status.last_build_duration}s) · монет обработано: ${status.symbols_done}/${status.universe_size}`
     : `первое построение ещё не завершилось (${status.symbols_done}/${status.universe_size || '?'})`;
+  const ssWr = ss.win_rate !== null && ss.win_rate !== undefined ? `${ss.win_rate}%` : '-';
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
       Цель: $${cfg.target_profit_usd} со счёта $${cfg.account_usd} · ТФ: ${(cfg.intervals||[]).join(', ')} ·
       мин. hit-rate ${cfg.min_hit_rate}% · запас безопасности x${cfg.safety_margin} · комиссия ${(cfg.taker_fee_pct*100).toFixed(3)}%/сторону<br>
       ${buildTxt} · без безопасной конфигурации: ${status.no_safe_config_count}<br>
+      <b>Живые сигналы</b> (вход на закрытии свечи, без стопа): ${ssWr} (${ss.wins||0}W/${ss.timeouts||0}TIMEOUT) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
       <span style="font-size:11px;">~ рядом с буфером = MMR не подтверждён с Gate.io, используется консервативный дефолт ${(cfg.default_mmr_pct*100).toFixed(2)}%<br>
       ~ рядом с плечом = макс. плечо биржи для монеты не подтверждено, используется дефолт ${cfg.default_max_leverage}x — проверь реальный лимит на бирже перед входом</span>
     </div>`;
+  const signalsRows = signals.map(s => {
+    const dirClass = s.direction === 'LONG' ? 'long' : 'short';
+    let statusHtml;
+    if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
+    else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
+    else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
+    return `<tr>
+      <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td><td class="dim">${s.interval}</td>
+      <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.target_price)} (${s.target_pct}%)</td>
+      <td class="dim">${s.leverage}x</td><td>${statusHtml}</td><td class="dim">${fmtTime(s.time)}</td>
+    </tr>`;
+  }).join('');
+  const signalsTableHtml = signals.length ? `
+    <div style="overflow-x:auto;margin-bottom:14px;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>Symbol</th><th>Dir</th><th>TF</th><th>Entry</th><th>Target</th><th>Плечо</th><th>Status</th><th>Time</th></tr></thead>
+      <tbody>${signalsRows}</tbody>
+    </table>
+    </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
   if (!status.top || status.top.length === 0) {
-    panel.innerHTML = headerHtml + '<div class="dim">Пока нет рекомендаций — либо ещё считается, либо ни одна монета не прошла проверку безопасности при текущих настройках.</div>';
+    panel.innerHTML = headerHtml + signalsTableHtml + '<div class="dim">Пока нет рекомендаций — либо ещё считается, либо ни одна монета не прошла проверку безопасности при текущих настройках.</div>';
     return;
   }
   const rows = status.top.map((r, i) => fmtScalpRow(r, i + 1)).join('');
-  panel.innerHTML = headerHtml + `
+  panel.innerHTML = headerHtml + signalsTableHtml + `
+    <div class="dim" style="margin-bottom:6px;"><b>Рекомендации по монетам</b> (для справки, откуда берутся сигналы):</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
       <thead><tr>
@@ -4901,7 +5108,7 @@ async function refreshScalp() {
     </table>
     </div>
     <div id="scalpDetail" style="margin-top:12px;"></div>`;
-  document.querySelectorAll('#scalpPanel tbody tr').forEach(tr => {
+  document.querySelectorAll('#scalpPanel tbody tr[data-symbol]').forEach(tr => {
     tr.onclick = () => openScalpDetail(tr.dataset.symbol);
   });
 }
