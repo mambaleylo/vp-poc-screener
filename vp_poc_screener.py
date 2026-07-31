@@ -965,6 +965,34 @@ v0.34.2 - retuned EMA_TP_PCT/EMA_RR for the reversed-signal hypothesis
          compute to exactly TP=0.75%/SL=0.5%/risk=0.5% in both
          directions, and the full scan-function/endpoint regression
          stayed clean.
+v0.35.0 - user shared a live PROM_USDT divergence screenshot showing
+         the bounce had already largely played out (price tagged above
+         the eventual TP level in a candle well before entry, then
+         pulled back to where the signal actually fired) — the same
+         lateness problem this session already built pre_move_pct to
+         measure, now seen concretely. Two changes: (1) reverted
+         DIV_PIVOT_RIGHT 2->3 per direct request — flagged honestly
+         that slower confirmation should, by the delay logic alone,
+         make lateness worse rather than better, but reverted anyway;
+         worth watching pre_move_pct to see the actual effect.
+         DIV_SHADOW_RIGHTS default restored to "1,2" since shadow=2 is
+         meaningful again now that right=3. (2) added
+         VP_DIV_INVERT_SIGNALS mirroring the EMA one — detect_
+         divergence() now flips "direction" (LONG<->SHORT) while
+         leaving "kind" (bullish/bearish) untouched, since kind
+         describes the RSI pattern found and direction is the separate
+         trading decision now being inverted. Settings toggle
+         ("↳ Реверс сигналов дивергенций"), and the Дивергенции tab
+         header shows "РЕВЕРС ВКЛЮЧЁН" when active, same pattern as
+         EMA's marker.
+         Did NOT retune DIV_TP_PCT/DIV_RR for the reversed case the way
+         EMA's were — EMA had 85 closed trades to derive percentiles
+         from, divergence has 6. Explicitly left as a decision for the
+         user rather than fabricating numbers off an n=6 sample.
+         Verified the ternary-swap logic directly (kind stays constant,
+         direction flips) and the full scan-function/endpoint
+         regression, settings toggle, and DIV_PIVOT_RIGHT=3 all stayed
+         clean.
 """
 
 import os
@@ -980,7 +1008,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.34.2"
+APP_VERSION = "0.35.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1078,7 +1106,7 @@ DIV_INTERVAL = os.environ.get("VP_DIV_INTERVAL", "1h")
 DIV_FETCH_LIMIT = int(os.environ.get("VP_DIV_FETCH_LIMIT", 200))  # candles pulled per symbol per scan
 DIV_RSI_PERIOD = int(os.environ.get("VP_DIV_RSI_PERIOD", 14))
 DIV_PIVOT_LEFT = int(os.environ.get("VP_DIV_PIVOT_LEFT", 5))
-DIV_PIVOT_RIGHT = int(os.environ.get("VP_DIV_PIVOT_RIGHT", 2))  # was 3, lowered further per overnight signal volume + the tool's own shadow-stability stats (right=2 still showed a reasonable agreement rate)
+DIV_PIVOT_RIGHT = int(os.environ.get("VP_DIV_PIVOT_RIGHT", 3))  # reverted from 2 -> 3 after a live example showed the divergence firing well after the bounce had already largely played out (screenshot: entry sat below a candle that had already tagged above TP). Note: going slower should, if anything, make lateness worse, not better, by the pivot-confirmation-delay logic alone — reverted per direct request anyway, worth watching pre_move_pct data to see if it actually helps
 # Стандартная практика торговли дивергенциями: сигнал считается живым
 # ровно в момент подтверждения пивота (right баров после самого пивота),
 # а не ещё сколько-то баров сверху. По умолчанию равен DIV_PIVOT_RIGHT —
@@ -1095,9 +1123,10 @@ DIV_FRESHNESS_BARS = int(os.environ.get("VP_DIV_FRESHNESS_BARS", DIV_PIVOT_RIGHT
 # window trivially also satisfies any smaller one in hindsight). This is
 # what actually tells us the risk of reducing VP_DIV_PIVOT_RIGHT: how
 # often would going faster have picked a different, wrong point instead.
-DIV_SHADOW_RIGHTS = [int(x) for x in os.environ.get("VP_DIV_SHADOW_RIGHTS", "1").split(",") if x.strip()]  # only values below DIV_PIVOT_RIGHT are meaningful for the stability diagnostic
+DIV_SHADOW_RIGHTS = [int(x) for x in os.environ.get("VP_DIV_SHADOW_RIGHTS", "1,2").split(",") if x.strip()]  # only values below DIV_PIVOT_RIGHT are meaningful for the stability diagnostic
 DIV_RR = float(os.environ.get("VP_DIV_RR", 2.0))
 DIV_TP_PCT = float(os.environ.get("VP_DIV_TP_PCT", 0.011))  # TP is a fixed % move from entry (1.1% default) — SL is then sized backward from this via DIV_RR, rather than TP being derived from a pivot-based SL
+DIV_INVERT_SIGNALS = os.environ.get("VP_DIV_INVERT_SIGNALS", "0") == "1"  # a live example showed the divergence-implied bounce often already largely played out by the time the signal actually fires — worth testing whether trading the OPPOSITE direction (effectively fading the already-completed move) does better than trading the original signal late
 DIV_COOLDOWN_SEC = int(os.environ.get("VP_DIV_COOLDOWN", 3600))
 DIV_SIGNAL_HISTORY = 200
 
@@ -1280,7 +1309,7 @@ SETTINGS_FILE = os.environ.get(
     "VP_SETTINGS_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_settings.json"),
 )
-SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "bounce_enabled", "breakout_enabled",
+SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "bounce_enabled", "breakout_enabled",
                   "ema_enabled", "ema_invert_signals", "scalp_enabled", "telegram_enabled", "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema")
 
 
@@ -1288,6 +1317,7 @@ def get_settings():
     return {
         "volume_profile_enabled": VOLUME_PROFILE_ENABLED,
         "divergence_enabled": DIVERGENCE_ENABLED,
+        "div_invert_signals": DIV_INVERT_SIGNALS,
         "bounce_enabled": BOUNCE_ENABLED,
         "breakout_enabled": BREAKOUT_ENABLED,
         "ema_enabled": EMA_ENABLED,
@@ -1307,12 +1337,14 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
     if "divergence_enabled" in updates:
         DIVERGENCE_ENABLED = bool(updates["divergence_enabled"])
+    if "div_invert_signals" in updates:
+        DIV_INVERT_SIGNALS = bool(updates["div_invert_signals"])
     if "bounce_enabled" in updates:
         BOUNCE_ENABLED = bool(updates["bounce_enabled"])
     if "breakout_enabled" in updates:
@@ -1558,7 +1590,7 @@ def detect_divergence(candles, rsi, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT,
                 and n - 1 - p2 <= freshness
                 and not _rsi_cut_through(rsi, p1, p2, r1, r2, "high")):
             return {
-                "direction": "SHORT", "kind": "bearish",
+                "direction": "LONG" if DIV_INVERT_SIGNALS else "SHORT", "kind": "bearish",
                 "p1": p1, "p2": p2,
                 "price_p1": highs[p1], "price_p2": highs[p2],
                 "rsi_p1": r1, "rsi_p2": r2,
@@ -1574,7 +1606,7 @@ def detect_divergence(candles, rsi, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT,
                 and n - 1 - p2 <= freshness
                 and not _rsi_cut_through(rsi, p1, p2, r1, r2, "low")):
             return {
-                "direction": "LONG", "kind": "bullish",
+                "direction": "SHORT" if DIV_INVERT_SIGNALS else "LONG", "kind": "bullish",
                 "p1": p1, "p2": p2,
                 "price_p1": lows[p1], "price_p2": lows[p2],
                 "rsi_p1": r1, "rsi_p2": r2,
@@ -3854,7 +3886,7 @@ def api_divergence_status():
             },
             "config": {
                 "rr": DIV_RR, "tp_pct": DIV_TP_PCT, "rsi_period": DIV_RSI_PERIOD,
-                "pivot_left": DIV_PIVOT_LEFT, "pivot_right": DIV_PIVOT_RIGHT,
+                "pivot_left": DIV_PIVOT_LEFT, "pivot_right": DIV_PIVOT_RIGHT, "invert_signals": DIV_INVERT_SIGNALS,
                 "freshness_bars": DIV_FRESHNESS_BARS, "cooldown": DIV_COOLDOWN_SEC,
             },
         })
@@ -4305,6 +4337,13 @@ INDEX_HTML = """<!doctype html>
     </div>
     <div class="settingRow">
       <div>
+        <div class="label">↳ Реверс сигналов дивергенций</div>
+        <div class="sub">торговать в обратную сторону от того, что говорит дивергенция</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setDivInvert"><span class="switchSlider"></span></label>
+    </div>
+    <div class="settingRow">
+      <div>
         <div class="label">Обещанный индикатор</div>
         <div class="sub">EMA 7/14/28 пересечения (свой скан и вкладка)</div>
       </div>
@@ -4613,7 +4652,7 @@ async function refreshDivergence() {
     </div>` : '';
   panel.innerHTML = `
     <div class="dim" style="margin-bottom:10px;">
-      RSI-дивергенции · ТФ ${status.interval} · скан ${status.last_scan_duration!==null && status.last_scan_duration!==undefined ? status.last_scan_duration+'s' : '...'} ·
+      RSI-дивергенции${cfg.invert_signals ? ' <span style="color:#ffcc55;font-weight:bold;">· РЕВЕРС ВКЛЮЧЁН</span>' : ''} · ТФ ${status.interval} · скан ${status.last_scan_duration!==null && status.last_scan_duration!==undefined ? status.last_scan_duration+'s' : '...'} ·
       Винрейт: ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ${cfg.rr}
     </div>
     ${mfeBlock}
@@ -4847,6 +4886,7 @@ const setInputs = {
   bounce_enabled: document.getElementById('setBounce'),
   breakout_enabled: document.getElementById('setBreakout'),
   divergence_enabled: document.getElementById('setDivergence'),
+  div_invert_signals: document.getElementById('setDivInvert'),
   ema_enabled: document.getElementById('setEma'),
   ema_invert_signals: document.getElementById('setEmaInvert'),
   scalp_enabled: document.getElementById('setScalp'),
