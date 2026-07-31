@@ -887,6 +887,40 @@ v0.33.1 - SAFETY FIX, found by hand-checking the user's first real
          entirely), the second fix alone still produces a safe result.
          Every "буфер" value shown before this fix should be treated as
          unverified until a fresh scan runs on the corrected code.
+v0.34.0 - user caught another real gap: VELVET_USDT's recommendation
+         called for 46.67x leverage, but Gate.io only allows 10x on
+         that contract — the whole leverage-safety check validated
+         liquidation risk but never checked whether the exchange would
+         actually let the leverage be set at all. get_futures_risk_
+         limit_tiers() now also extracts each contract's own max
+         leverage (leverage_max, with a max_leverage fallback field
+         name) from the same tiered response, sanity-bounded to
+         [1,125] the same way MMR is. recommend_scalp_config() takes a
+         new max_leverage param and now rejects any target whose
+         required leverage exceeds it — a target the math likes but
+         the exchange won't execute isn't a real recommendation.
+         Defaults to a conservative 10x (VP_SCALP_DEFAULT_MAX_LEVERAGE)
+         when a contract's real cap isn't confirmed, matching the exact
+         value the user found for VELVET_USDT rather than assuming
+         majors' 125x. Table and per-symbol detail both show a "~"
+         marker on the leverage figure when unconfirmed, same pattern
+         as the MMR marker.
+         Also: caught and fixed a mistake made WHILE writing this fix —
+         a str_replace matched only the tail of the old function and
+         the new_str contained a full replacement function, which
+         produced two overlapping `def get_futures_risk_limit_tiers():`
+         blocks merged into one broken mess (not the usual "signature
+         silently vanishes" version of this bug, but the same root
+         cause: not re-viewing the exact match boundaries before
+         trusting a large multi-line replacement). Caught immediately
+         via the duplicate-def grep check before compiling, so it never
+         reached even a local test run, let alone a push.
+         Verified the fix directly: a synthetic VELVET-like scenario
+         with a 10x cap correctly returns no recommendation, the same
+         scenario with a 125x cap correctly recommends the smaller
+         target that fits under it, and a full direct-call sweep of all
+         four scan_symbol_* functions plus the endpoint regression both
+         stayed clean.
 """
 
 import os
@@ -902,7 +936,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.33.1"
+APP_VERSION = "0.34.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1075,6 +1109,9 @@ SCALP_TAKER_FEE_PCT = float(os.environ.get("VP_SCALP_TAKER_FEE_PCT", 0.0005))  #
 SCALP_DEFAULT_MMR_PCT = float(os.environ.get("VP_SCALP_DEFAULT_MMR_PCT", 0.006))  # conservative fallback when a contract's own maintenance rate isn't available
 SCALP_MMR_SANITY_MIN = float(os.environ.get("VP_SCALP_MMR_SANITY_MIN", 0.0001))  # 0.01% — a fetched "MMR" outside [MIN,MAX] is almost certainly the wrong field, not a real maintenance rate
 SCALP_MMR_SANITY_MAX = float(os.environ.get("VP_SCALP_MMR_SANITY_MAX", 0.05))  # 5%
+SCALP_LEVERAGE_SANITY_MIN = float(os.environ.get("VP_SCALP_LEVERAGE_SANITY_MIN", 1))
+SCALP_LEVERAGE_SANITY_MAX = float(os.environ.get("VP_SCALP_LEVERAGE_SANITY_MAX", 125))  # Gate.io's own advertised ceiling for its most liquid pairs
+SCALP_DEFAULT_MAX_LEVERAGE = float(os.environ.get("VP_SCALP_DEFAULT_MAX_LEVERAGE", 10))  # conservative fallback when a contract's own max leverage isn't confirmed — matches what the user found on a real altcoin (VELVET_USDT: 10x), not the 125x majors get
 SCALP_REFRESH_SEC = int(os.environ.get("VP_SCALP_REFRESH_SEC", 6 * 3600))  # how often the whole universe gets rebuilt/rescanned — this is a slow, batch stats job, not a live scanner
 SCALP_ACCOUNT_USD = float(os.environ.get("VP_SCALP_ACCOUNT_USD", 30.0))
 SCALP_TARGET_PROFIT_USD = float(os.environ.get("VP_SCALP_TARGET_PROFIT_USD", 7.0))
@@ -1293,6 +1330,7 @@ STATE = {
     "scalp_universe": [],
     "scalp_universe_scores": {},
     "scalp_mmr_map": {},
+    "scalp_max_leverage_map": {},
     "scalp_data": {},          # symbol -> {interval -> {direction -> target-summary}}
     "scalp_recommendations": {},  # symbol -> best config (or None)
     "scalp_last_build_started": None,
@@ -2280,40 +2318,54 @@ def build_universe():
 
 def get_futures_risk_limit_tiers():
     """Public, no-auth endpoint that exposes each contract's own tiered
-    maintenance margin rate — used instead of assuming one fixed MMR for
-    every coin (altcoins often carry a higher rate than BTC/ETH's
-    lowest tier). Field names are parsed defensively: if the exchange's
-    exact schema doesn't match what's expected here, this returns an
-    empty map and every symbol just falls back to SCALP_DEFAULT_MMR_PCT.
-    Parsing successfully to a float isn't proof it's actually the
-    maintenance rate, though — a wrong field name could still produce a
-    plausible-looking number (this exact bug shipped once: a value that
-    only made sense as roughly -3.2% MMR passed through unnoticed, which
-    is impossible for a real maintenance rate). Anything outside a
-    realistic MMR range gets discarded, same as if it were missing."""
+    maintenance margin rate AND max leverage — used instead of assuming
+    one fixed MMR/leverage cap for every coin (altcoins often carry a
+    higher MMR and a MUCH lower max leverage than BTC/ETH's lowest
+    tier — confirmed by the user: a coin the math said needed 23-47x
+    for, the exchange itself only allows 10x on). Field names are
+    parsed defensively: if the exchange's exact schema doesn't match
+    what's expected here, this returns empty maps and every symbol just
+    falls back to the conservative defaults. Parsing successfully to a
+    float isn't proof it's the right field, though — a wrong field name
+    could still produce a plausible-looking number (this exact bug
+    shipped once for MMR: a value that only made sense as roughly -3.2%
+    MMR passed through unnoticed). Anything outside a realistic range
+    gets discarded, same as if it were missing, for both fields."""
     try:
         r = requests.get(f"{GATE_BASE}/futures/usdt/risk_limit_tiers", timeout=HTTP_TIMEOUT)
         r.raise_for_status()
         data = r.json()
     except Exception as e:
         log_error(f"get_futures_risk_limit_tiers: {e}")
-        return {}
-    out = {}
+        return {}, {}
+    mmr_out = {}
+    lev_out = {}
     for row in data:
         try:
             name = row.get("contract") or row.get("name")
+            if not name:
+                continue
             mmr = row.get("maintenance_rate")
             if mmr is None:
                 mmr = row.get("maintain_rate")
-            if name and mmr is not None:
+            if mmr is not None:
                 mmr = float(mmr)
-                if not (SCALP_MMR_SANITY_MIN <= mmr <= SCALP_MMR_SANITY_MAX):
-                    continue  # not a plausible maintenance rate — likely the wrong field; fall back to default instead
-                if name not in out or mmr < out[name]:
-                    out[name] = mmr
+                if SCALP_MMR_SANITY_MIN <= mmr <= SCALP_MMR_SANITY_MAX:
+                    if name not in mmr_out or mmr < mmr_out[name]:
+                        mmr_out[name] = mmr
+            max_lev = row.get("leverage_max")
+            if max_lev is None:
+                max_lev = row.get("max_leverage")
+            if max_lev is not None:
+                max_lev = float(max_lev)
+                if SCALP_LEVERAGE_SANITY_MIN <= max_lev <= SCALP_LEVERAGE_SANITY_MAX:
+                    # keep the HIGHEST max-leverage seen (the lowest-risk /
+                    # smallest-size tier allows the most leverage)
+                    if name not in lev_out or max_lev > lev_out[name]:
+                        lev_out[name] = max_lev
         except (TypeError, ValueError, AttributeError):
             continue
-    return out
+    return mmr_out, lev_out
 
 
 def build_scalp_universe():
@@ -2384,16 +2436,20 @@ def scan_symbol_scalp(symbol):
     return out
 
 
-def recommend_scalp_config(symbol_data, mmr_pct):
+def recommend_scalp_config(symbol_data, mmr_pct, max_leverage=SCALP_DEFAULT_MAX_LEVERAGE):
     """Given one symbol's full interval/direction/target data, picks the
     single best (interval, direction, target%) combination: the LARGEST
-    target that still clears SCALP_MIN_HIT_RATE and where the
-    liquidation buffer at the leverage that target implies exceeds the
-    coin's own historical p90 adverse move by SCALP_SAFETY_MARGIN.
-    Returns None if nothing on this symbol clears both bars at any
+    target that still clears SCALP_MIN_HIT_RATE, needs no more leverage
+    than the exchange actually allows for this contract (max_leverage —
+    confirmed by the user that this varies a lot by coin, e.g. 10x on
+    VELVET_USDT vs 125x on majors; a target the math likes but the
+    exchange won't let you execute isn't a real recommendation), and
+    where the liquidation buffer at that leverage exceeds the coin's own
+    historical p90 adverse move by SCALP_SAFETY_MARGIN. Returns None if
+    nothing on this symbol clears all three bars at any
     interval/direction/target — that's a legitimate, informative result
-    (this coin isn't a safe candidate for the stated goal), not an
-    error."""
+    (this coin isn't a safe, executable candidate for the stated goal),
+    not an error."""
     best = None
     for interval, dirs in symbol_data.items():
         interval_sec = INTERVAL_SECONDS.get(interval, 300)
@@ -2408,6 +2464,8 @@ def recommend_scalp_config(symbol_data, mmr_pct):
                 leverage = compute_scalp_leverage_for_target(pct)
                 if not leverage or leverage <= 0:
                     continue
+                if leverage > max_leverage:
+                    continue  # exchange won't allow this leverage on this contract, however good the stats are
                 liq_buffer = compute_scalp_liquidation_move_pct(direction, leverage, mmr_pct)
                 if liq_buffer is None or liq_buffer < s["p90_adverse_pct"] * SCALP_SAFETY_MARGIN:
                     continue
@@ -2423,6 +2481,7 @@ def recommend_scalp_config(symbol_data, mmr_pct):
                     "time_to_hit_hours": round(time_to_hit_hours, 2),
                     "trades_per_day_est": trades_per_day_est,
                     "leverage": round(leverage, 2),
+                    "max_leverage": max_leverage,
                     "liq_buffer_pct": round(liq_buffer, 3),
                     "p90_adverse_pct": s["p90_adverse_pct"],
                     "score": score,
@@ -3543,11 +3602,12 @@ def scalp_loop():
                 STATE["scalp_symbols_done"] = 0
 
             universe, scores = build_scalp_universe()
-            mmr_map = get_futures_risk_limit_tiers()
+            mmr_map, max_leverage_map = get_futures_risk_limit_tiers()
             with state_lock:
                 STATE["scalp_universe"] = universe
                 STATE["scalp_universe_scores"] = scores
                 STATE["scalp_mmr_map"] = mmr_map
+                STATE["scalp_max_leverage_map"] = max_leverage_map
                 # purge symbols that dropped out of this cycle's universe,
                 # rather than letting stale entries linger indefinitely
                 STATE["scalp_data"] = {}
@@ -3557,7 +3617,8 @@ def scalp_loop():
                 try:
                     data = scan_symbol_scalp(symbol)
                     mmr = mmr_map.get(symbol, SCALP_DEFAULT_MMR_PCT)
-                    rec = recommend_scalp_config(data, mmr)
+                    max_lev = max_leverage_map.get(symbol, SCALP_DEFAULT_MAX_LEVERAGE)
+                    rec = recommend_scalp_config(data, mmr, max_lev)
                     with state_lock:
                         STATE["scalp_data"][symbol] = data
                         STATE["scalp_recommendations"][symbol] = rec
@@ -3805,6 +3866,7 @@ def api_scalp_status():
         universe = list(STATE["scalp_universe"])
         scores = dict(STATE["scalp_universe_scores"])
         mmr_map = dict(STATE["scalp_mmr_map"])
+        max_lev_map = dict(STATE["scalp_max_leverage_map"])
         recs = dict(STATE["scalp_recommendations"])
         last_build_finished = STATE["scalp_last_build_finished"]
         last_build_duration = STATE["scalp_last_build_duration"]
@@ -3818,6 +3880,7 @@ def api_scalp_status():
         row["volatility_score"] = scores.get(symbol)
         row["mmr_pct"] = mmr_map.get(symbol, SCALP_DEFAULT_MMR_PCT)
         row["mmr_verified"] = symbol in mmr_map
+        row["leverage_verified"] = symbol in max_lev_map
         ranked.append(row)
     ranked.sort(key=lambda r: -r["score"])
     no_safe_config = sum(1 for r in recs.values() if r is None)
@@ -3833,6 +3896,7 @@ def api_scalp_status():
             "intervals": SCALP_INTERVALS, "target_pcts": SCALP_TARGET_PCTS,
             "safety_margin": SCALP_SAFETY_MARGIN, "min_hit_rate": SCALP_MIN_HIT_RATE,
             "taker_fee_pct": SCALP_TAKER_FEE_PCT, "default_mmr_pct": SCALP_DEFAULT_MMR_PCT,
+            "default_max_leverage": SCALP_DEFAULT_MAX_LEVERAGE,
         },
         "top": ranked,
     })
@@ -3845,12 +3909,15 @@ def api_scalp_symbol(symbol):
         rec = STATE["scalp_recommendations"].get(symbol)
         score = STATE["scalp_universe_scores"].get(symbol)
         mmr_map = dict(STATE["scalp_mmr_map"])
+        max_lev_map = dict(STATE["scalp_max_leverage_map"])
     if data is None:
         return jsonify({"error": "no data for this symbol yet"}), 404
     return jsonify({
         "symbol": symbol, "volatility_score": score,
         "mmr_pct": mmr_map.get(symbol, SCALP_DEFAULT_MMR_PCT),
         "mmr_verified": symbol in mmr_map,
+        "max_leverage": max_lev_map.get(symbol, SCALP_DEFAULT_MAX_LEVERAGE),
+        "leverage_verified": symbol in max_lev_map,
         "recommendation": rec, "data": data,
     })
 
@@ -3862,6 +3929,7 @@ def api_reset_scalp():
             STATE["scalp_universe"] = []
             STATE["scalp_universe_scores"] = {}
             STATE["scalp_mmr_map"] = {}
+            STATE["scalp_max_leverage_map"] = {}
             STATE["scalp_data"] = {}
             STATE["scalp_recommendations"] = {}
             STATE["scalp_last_build_started"] = None
@@ -4569,6 +4637,7 @@ let scalpExpanded = null;
 function fmtScalpRow(r, rank) {
   const dirClass = r.direction === 'LONG' ? 'long' : 'short';
   const mmrTag = r.mmr_verified ? '' : '<span title="MMR не подтверждён с Gate.io, используется консервативный дефолт" style="color:#e0a030;">~</span>';
+  const levTag = r.leverage_verified ? '' : '<span title="Макс. плечо биржи для этой монеты не подтверждено с Gate.io — используется консервативный дефолт (10x). Реальный лимит биржи может отличаться, проверь вручную перед входом." style="color:#e0a030;">~</span>';
   return `<tr data-symbol="${r.symbol}" style="cursor:pointer;">
     <td class="dim">${rank}</td>
     <td>${r.symbol}</td>
@@ -4579,7 +4648,7 @@ function fmtScalpRow(r, rank) {
     <td>${r.hit_rate}% <span class="dim">(n=${r.n})</span></td>
     <td class="dim">${r.median_bars_to_hit}б / ${r.time_to_hit_hours}ч</td>
     <td>${r.trades_per_day_est}</td>
-    <td>${r.leverage}x</td>
+    <td>${r.leverage}x${levTag}</td>
     <td class="dim">${r.liq_buffer_pct}%${mmrTag}</td>
     <td class="dim">${r.p90_adverse_pct}%</td>
     <td><b>${r.score}</b></td>
@@ -4598,7 +4667,8 @@ async function refreshScalp() {
       Цель: $${cfg.target_profit_usd} со счёта $${cfg.account_usd} · ТФ: ${(cfg.intervals||[]).join(', ')} ·
       мин. hit-rate ${cfg.min_hit_rate}% · запас безопасности x${cfg.safety_margin} · комиссия ${(cfg.taker_fee_pct*100).toFixed(3)}%/сторону<br>
       ${buildTxt} · без безопасной конфигурации: ${status.no_safe_config_count}<br>
-      <span style="font-size:11px;">~ рядом с буфером = MMR не подтверждён с Gate.io, используется консервативный дефолт ${(cfg.default_mmr_pct*100).toFixed(2)}%</span>
+      <span style="font-size:11px;">~ рядом с буфером = MMR не подтверждён с Gate.io, используется консервативный дефолт ${(cfg.default_mmr_pct*100).toFixed(2)}%<br>
+      ~ рядом с плечом = макс. плечо биржи для монеты не подтверждено, используется дефолт ${cfg.default_max_leverage}x — проверь реальный лимит на бирже перед входом</span>
     </div>`;
   if (!status.top || status.top.length === 0) {
     panel.innerHTML = headerHtml + '<div class="dim">Пока нет рекомендаций — либо ещё считается, либо ни одна монета не прошла проверку безопасности при текущих настройках.</div>';
