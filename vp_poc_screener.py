@@ -1117,6 +1117,27 @@ v0.38.0 - two scalp-module changes from user feedback (with a live
          cooldown, WIN detection (forced target touch), TIMEOUT
          detection (backdated timeout), and the full scan-function/
          endpoint regression — all clean.
+v0.39.0 - hourly Telegram digest across all four modes. New
+         hourly_stats_loop() thread, own independent 1h cadence
+         (VP_HOURLY_STATS_INTERVAL_SEC), separate from every other loop.
+         build_hourly_stats_report() pulls compute_signal_stats() /
+         compute_divergence_stats() / compute_ema_stats() /
+         compute_scalp_signal_stats() and formats a compact HTML summary
+         — winrate, W/L, open count per mode, Volume's bounce/breakout
+         split, and a [РЕВЕРС] tag on Дивергенции/EMA when their invert
+         toggles are active, so the digest doesn't read misleadingly
+         after a reverse-mode switch. New "hourly" Telegram category
+         (gated the same way vp/div/ema already are), its own toggle in
+         settings ("↳ Часовая статистика"), plus VP_HOURLY_STATS_ENABLED
+         as an env-only master switch alongside the Telegram gate.
+         Verified the report builds correctly on both empty state and
+         populated state (including the [РЕВЕРС] tags rendering
+         correctly), confirmed the "hourly" category gate actually
+         blocks/allows queuing via the real _telegram_send_queue (an
+         earlier version of this same test checked the wrong queue
+         variable name and would have passed either way — caught before
+         trusting it), and the full scan-function/endpoint regression
+         stayed clean.
 """
 
 import os
@@ -1132,7 +1153,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.38.0"
+APP_VERSION = "0.39.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1431,6 +1452,9 @@ TELEGRAM_ENABLED = os.environ.get("VP_TG_ENABLED", "1") == "1"  # separate from 
 TELEGRAM_ALERTS_VP = os.environ.get("VP_TG_ALERTS_VP", "1") == "1"
 TELEGRAM_ALERTS_DIV = os.environ.get("VP_TG_ALERTS_DIV", "1") == "1"
 TELEGRAM_ALERTS_EMA = os.environ.get("VP_TG_ALERTS_EMA", "1") == "1"
+TELEGRAM_ALERTS_HOURLY = os.environ.get("VP_TG_ALERTS_HOURLY", "1") == "1"
+HOURLY_STATS_ENABLED = os.environ.get("VP_HOURLY_STATS_ENABLED", "1") == "1"
+HOURLY_STATS_INTERVAL_SEC = int(os.environ.get("VP_HOURLY_STATS_INTERVAL_SEC", 3600))
 TELEGRAM_CHAT_ID = os.environ.get("VP_TG_CHAT", "")
 # Same config file path used by the EMA-screener/Pump_Radar project — if
 # Telegram was already set up there, this picks up the same token/chat_id
@@ -1461,7 +1485,8 @@ SETTINGS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_settings.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "bounce_enabled", "breakout_enabled",
-                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "telegram_enabled", "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema")
+                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly")
 
 
 def get_settings():
@@ -1474,10 +1499,12 @@ def get_settings():
         "ema_enabled": EMA_ENABLED,
         "ema_invert_signals": EMA_INVERT_SIGNALS,
         "scalp_enabled": SCALP_ENABLED,
+        "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
         "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
         "telegram_alerts_div": TELEGRAM_ALERTS_DIV,
         "telegram_alerts_ema": TELEGRAM_ALERTS_EMA,
+        "telegram_alerts_hourly": TELEGRAM_ALERTS_HOURLY,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
     }
 
@@ -1488,8 +1515,8 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED
-    global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, HOURLY_STATS_ENABLED
+    global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
     if "divergence_enabled" in updates:
@@ -1506,6 +1533,8 @@ def apply_settings(updates):
         EMA_INVERT_SIGNALS = bool(updates["ema_invert_signals"])
     if "scalp_enabled" in updates:
         SCALP_ENABLED = bool(updates["scalp_enabled"])
+    if "hourly_stats_enabled" in updates:
+        HOURLY_STATS_ENABLED = bool(updates["hourly_stats_enabled"])
     if "telegram_enabled" in updates:
         TELEGRAM_ENABLED = bool(updates["telegram_enabled"])
     if "telegram_alerts_vp" in updates:
@@ -1514,6 +1543,8 @@ def apply_settings(updates):
         TELEGRAM_ALERTS_DIV = bool(updates["telegram_alerts_div"])
     if "telegram_alerts_ema" in updates:
         TELEGRAM_ALERTS_EMA = bool(updates["telegram_alerts_ema"])
+    if "telegram_alerts_hourly" in updates:
+        TELEGRAM_ALERTS_HOURLY = bool(updates["telegram_alerts_hourly"])
 
 
 def save_settings():
@@ -3541,6 +3572,8 @@ def send_telegram(text, category=None):
         return
     if category == "ema" and not TELEGRAM_ALERTS_EMA:
         return
+    if category == "hourly" and not TELEGRAM_ALERTS_HOURLY:
+        return
 
     def _do_send():
         for attempt in range(1, 4):
@@ -3962,6 +3995,48 @@ def scan_loop():
         except Exception as e:
             log_error(f"scan_loop: {e}\n{traceback.format_exc()}")
         time.sleep(max(5, SCAN_INTERVAL_SEC))
+
+
+def build_hourly_stats_report():
+    vp_s = compute_signal_stats()
+    div_s = compute_divergence_stats()
+    ema_s = compute_ema_stats()
+    scalp_s = compute_scalp_signal_stats()
+
+    def wr(x):
+        return f"{x}%" if x is not None else "-"
+
+    br = vp_s.get("by_reason", {}) or {}
+    bounce = br.get("bounce", {}) or {}
+    breakout = br.get("breakout", {}) or {}
+    vp_line = (f"<b>Volume</b>: {wr(vp_s['winrate'])} ({vp_s['wins']}W/{vp_s['losses']}L) · "
+               f"открытых {vp_s['open']} · bounce {wr(bounce.get('winrate'))}/breakout {wr(breakout.get('winrate'))}")
+
+    div_tag = " [РЕВЕРС]" if DIV_INVERT_SIGNALS else ""
+    div_line = f"<b>Дивергенции</b>{div_tag}: {wr(div_s['winrate'])} ({div_s['wins']}W/{div_s['losses']}L) · открытых {div_s['open']}"
+
+    ema_tag = " [РЕВЕРС]" if EMA_INVERT_SIGNALS else ""
+    ema_line = f"<b>EMA</b>{ema_tag}: {wr(ema_s['winrate'])} ({ema_s['wins']}W/{ema_s['losses']}L) · открытых {ema_s['open']}"
+
+    scalp_line = (f"<b>Скальпинг</b>: {wr(scalp_s['win_rate'])} ({scalp_s['wins']}W/{scalp_s['timeouts']}TIMEOUT) · "
+                  f"открытых {scalp_s['open']}") if SCALP_SIGNALS_ENABLED else None
+
+    lines = [f"📊 Часовая статистика (v{APP_VERSION})", vp_line, div_line, ema_line]
+    if scalp_line:
+        lines.append(scalp_line)
+    return "\n".join(lines)
+
+
+def hourly_stats_loop():
+    """Own hourly cadence, independent of every other loop in the app —
+    sends a compact win-rate summary across all modes to Telegram."""
+    while True:
+        try:
+            if HOURLY_STATS_ENABLED:
+                send_telegram(build_hourly_stats_report(), category="hourly")
+        except Exception as e:
+            log_error(f"hourly_stats_loop: {e}")
+        time.sleep(max(60, HOURLY_STATS_INTERVAL_SEC))
 
 
 def scalp_loop():
@@ -4673,12 +4748,19 @@ INDEX_HTML = """<!doctype html>
       </div>
       <label class="switch"><input type="checkbox" id="setTelegramDiv"><span class="switchSlider"></span></label>
     </div>
-    <div class="settingRow" style="border-bottom:none;">
+    <div class="settingRow">
       <div>
         <div class="label">↳ Алерты индикатора</div>
         <div class="sub">EMA-сигналы и их закрытие</div>
       </div>
       <label class="switch"><input type="checkbox" id="setTelegramEma"><span class="switchSlider"></span></label>
+    </div>
+    <div class="settingRow" style="border-bottom:none;">
+      <div>
+        <div class="label">↳ Часовая статистика</div>
+        <div class="sub">сводка винрейта по всем режимам, раз в час</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setTelegramHourly"><span class="switchSlider"></span></label>
     </div>
     <div class="dim" style="font-size:12px;margin-top:8px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
   </div>
@@ -5207,6 +5289,7 @@ const setInputs = {
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
   telegram_alerts_div: document.getElementById('setTelegramDiv'),
   telegram_alerts_ema: document.getElementById('setTelegramEma'),
+  telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
 };
 
 function applySettingsToInputs(s) {
@@ -5822,6 +5905,7 @@ if __name__ == "__main__":
     t = threading.Thread(target=scan_loop, daemon=True)
     t.start()
     threading.Thread(target=scalp_loop, daemon=True).start()
+    threading.Thread(target=hourly_stats_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
     tg_status = "настроен" if (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) else "не настроен"
     print(f"VP-POC Screener v{APP_VERSION} — http://127.0.0.1:{port} — Telegram: {tg_status}")
