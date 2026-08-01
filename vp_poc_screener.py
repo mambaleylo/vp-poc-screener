@@ -1486,6 +1486,36 @@ v0.45.2 - settings modal redesigned per direct request — was one
          settings round-trip (posting all 16 SETTINGS_KEYS as true and
          reading them back) confirmed every key still applies
          correctly through the reorganized markup.
+v0.46.0 - two scalp module changes from direct feedback: (1) live
+         signals now only fire for the top SCALP_SIGNAL_TOP_N (default
+         1) symbols by score each cycle, not every qualifying one —
+         selection happens in the fast scan_loop, sorting the
+         recommendation snapshot by score before submitting to
+         scan_symbol_scalp_signal. (2) Added a real SL — user asked
+         directly whether "no stop" was an actual requirement or just
+         something Claude assumed; it was the latter, carried over
+         from the original stats-only module's methodology (which only
+         measured target-hit probability, no stop-survival concept at
+         all). Rather than invent an arbitrary stop, used data the
+         module was already computing: SL sits at p90_adverse_pct
+         (the 90th-percentile adverse excursion the stats engine
+         already measures) plus a 20% buffer (SCALP_SL_BUFFER_MULT) —
+         a hard floor at the exact p90 would still stop out ~10% of
+         otherwise-fine trades on normal noise. update_scalp_signal_
+         outcomes() now checks SL before TP within the same candle
+         (same conservative convention as the session module), with a
+         LOSS result added alongside WIN/TIMEOUT; compute_scalp_signal_
+         stats() and every place it feeds (header overview, hourly
+         Telegram digest, the Скальпинг tab's own panel) updated to
+         show losses and use the same wins/(wins+losses) winrate
+         convention every other module already uses (timeouts excluded
+         from the denominator). Backward compatible: old signals
+         without sl_price just skip the SL check, same as before.
+         Verified: SL computes to the expected p90*1.2 value, forcing
+         a price move to the SL level correctly produces a LOSS result
+         and updates the stats correctly, the top-N selection picks
+         the right highest-scored symbol, JS syntax is clean, and the
+         full scan-function/endpoint regression stayed clean.
 """
 
 import os
@@ -1502,7 +1532,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.45.2"
+APP_VERSION = "0.46.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1720,6 +1750,8 @@ SCALP_SIGNALS_ENABLED = os.environ.get("VP_SCALP_SIGNALS_ENABLED", "1") == "1"
 SCALP_SIGNAL_HISTORY = 200
 SCALP_SIGNAL_COOLDOWN_SEC = int(os.environ.get("VP_SCALP_SIGNAL_COOLDOWN_SEC", 3600))  # per (symbol, interval) — avoid re-firing every 45s scan tick for the same still-fresh candle
 SCALP_SIGNAL_TIMEOUT_MULT = float(os.environ.get("VP_SCALP_SIGNAL_TIMEOUT_MULT", 4.0))  # timeout = this many times the recommendation's own median time-to-hit
+SCALP_SL_BUFFER_MULT = float(os.environ.get("VP_SCALP_SL_BUFFER_MULT", 0.2))  # SL = p90_adverse_pct * (1 + this) — some margin beyond the p90 itself, since a hard floor at the exact p90 would still stop out ~10% of otherwise-fine trades on normal noise
+SCALP_SIGNAL_TOP_N = int(os.environ.get("VP_SCALP_SIGNAL_TOP_N", 1))  # only fire a live signal for the top-N ranked symbols by score each cycle, not every qualifying one
 SCALP_SAFETY_MARGIN = float(os.environ.get("VP_SCALP_SAFETY_MARGIN", 1.5))  # liquidation buffer must exceed the coin's own historical p90 adverse move by this factor before a target/leverage combo is flagged "safe"
 SCALP_MIN_HIT_RATE = float(os.environ.get("VP_SCALP_MIN_HIT_RATE", 60.0))  # a target below this hit-rate isn't worth recommending even if technically "safe"
 
@@ -3493,8 +3525,13 @@ def scan_symbol_scalp_signal(symbol, rec):
     recommend_scalp_config() output. Entry is the most recently closed
     candle's close on the recommended interval — the same "enter right
     at the new candle" convention EMA/divergence already use for
-    candles[-1]. No stop, per the original spec: outcome is WIN (target
-    touched) or TIMEOUT, never LOSS."""
+    candles[-1]. SL sits just beyond the p90 adverse excursion already
+    measured by the underlying stats engine (analyze_excursions) — a
+    data-driven stop rather than an arbitrary guess, added after
+    confirming with the user that "no stop" was never an actual
+    requirement, just something carried over from the original
+    stats-only module (which only measured target-hit probability, with
+    no stop-survival concept at all)."""
     if not SCALP_SIGNALS_ENABLED or not rec:
         return
     interval = rec["interval"]
@@ -3520,16 +3557,21 @@ def scan_symbol_scalp_signal(symbol, rec):
         entry = last["close"]
         direction = rec["direction"]
         target_pct = rec["target_pct"]
+        adverse_pct = rec.get("p90_adverse_pct") or (target_pct * SCALP_SAFETY_MARGIN)  # fallback if somehow missing
+        sl_pct = adverse_pct * (1 + SCALP_SL_BUFFER_MULT)
         if direction == "LONG":
             target_price = entry * (1 + target_pct / 100)
+            sl_price = entry * (1 - sl_pct / 100)
         else:
             target_price = entry * (1 - target_pct / 100)
+            sl_price = entry * (1 + sl_pct / 100)
         interval_sec = INTERVAL_SECONDS.get(interval, 300)
         timeout_sec = max(rec["time_to_hit_hours"] * 3600 * SCALP_SIGNAL_TIMEOUT_MULT, interval_sec * 4)
 
         record = {
             "symbol": symbol, "interval": interval, "direction": direction,
             "entry": entry, "target_price": target_price, "target_pct": target_pct,
+            "sl_price": sl_price, "sl_pct": round(sl_pct, 3),
             "leverage": rec["leverage"], "max_leverage": rec.get("max_leverage"),
             "hit_rate_hist": rec["hit_rate"], "score": rec["score"],
             "time": entry_time, "detected_at": time.time(),
@@ -3547,13 +3589,14 @@ def scan_symbol_scalp_signal(symbol, rec):
 def compute_scalp_signal_stats():
     with state_lock:
         signals = list(STATE["scalp_signals"])
-    closed = [s for s in signals if s["status"] == "CLOSED"]
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
     wins = sum(1 for s in closed if s["result"] == "WIN")
-    timeouts = sum(1 for s in closed if s["result"] == "TIMEOUT")
+    losses = sum(1 for s in closed if s["result"] == "LOSS")
+    timeouts = sum(1 for s in signals if s.get("status") == "CLOSED" and s.get("result") == "TIMEOUT")
     open_n = sum(1 for s in signals if s["status"] == "OPEN")
     total_closed = len(closed)
     win_rate = round(wins / total_closed * 100, 1) if total_closed else None
-    return {"total": len(signals), "wins": wins, "timeouts": timeouts, "open": open_n, "win_rate": win_rate}
+    return {"total": len(signals), "wins": wins, "losses": losses, "timeouts": timeouts, "open": open_n, "win_rate": win_rate}
 
 
 def update_scalp_signal_outcomes():
@@ -3564,24 +3607,36 @@ def update_scalp_signal_outcomes():
         try:
             candles = get_candles(sig["symbol"], interval=sig["interval"], limit=200)
             future = [c for c in candles if c["time"] >= sig["time"]]
-            hit = False
+            result = None
             exit_price = None
             exit_time = None
+            sl_price = sig.get("sl_price")  # older signals created before SL existed won't have this — falls back to WIN/TIMEOUT only, same as before
             for c in future:
+                if sl_price is not None:
+                    if sig["direction"] == "LONG" and c["low"] <= sl_price:
+                        result = "LOSS"
+                        exit_price = sl_price
+                        exit_time = c["time"]
+                        break
+                    if sig["direction"] == "SHORT" and c["high"] >= sl_price:
+                        result = "LOSS"
+                        exit_price = sl_price
+                        exit_time = c["time"]
+                        break
                 if sig["direction"] == "LONG" and c["high"] >= sig["target_price"]:
-                    hit = True
+                    result = "WIN"
                     exit_price = sig["target_price"]
                     exit_time = c["time"]
                     break
                 if sig["direction"] == "SHORT" and c["low"] <= sig["target_price"]:
-                    hit = True
+                    result = "WIN"
                     exit_price = sig["target_price"]
                     exit_time = c["time"]
                     break
             with state_lock:
-                if hit:
+                if result:
                     sig["status"] = "CLOSED"
-                    sig["result"] = "WIN"
+                    sig["result"] = result
                     sig["exit_price"] = exit_price
                     sig["exit_time"] = exit_time
                 elif now >= sig["timeout_at"]:
@@ -4671,7 +4726,11 @@ def scan_loop():
                 if SCALP_SIGNALS_ENABLED:
                     with state_lock:
                         scalp_recs_snapshot = dict(STATE["scalp_recommendations"])
-                    futs += [ex.submit(scan_symbol_scalp_signal, sym, rec) for sym, rec in scalp_recs_snapshot.items() if rec]
+                    top_recs = sorted(
+                        [(sym, rec) for sym, rec in scalp_recs_snapshot.items() if rec],
+                        key=lambda x: -x[1]["score"]
+                    )[:SCALP_SIGNAL_TOP_N]
+                    futs += [ex.submit(scan_symbol_scalp_signal, sym, rec) for sym, rec in top_recs]
                 if SESSION_ENABLED:
                     now_ts = time.time()
                     todays_open = session_open_utc_ts(now_ts)
@@ -4726,7 +4785,7 @@ def build_hourly_stats_report():
     ema_tag = " [РЕВЕРС]" if EMA_INVERT_SIGNALS else ""
     ema_line = f"<b>EMA</b>{ema_tag}: {wr(ema_s['winrate'])} ({ema_s['wins']}W/{ema_s['losses']}L) · открытых {ema_s['open']}"
 
-    scalp_line = (f"<b>Скальпинг</b>: {wr(scalp_s['win_rate'])} ({scalp_s['wins']}W/{scalp_s['timeouts']}TIMEOUT) · "
+    scalp_line = (f"<b>Скальпинг</b>: {wr(scalp_s['win_rate'])} ({scalp_s['wins']}W/{scalp_s['losses']}L/{scalp_s['timeouts']}TIMEOUT) · "
                   f"открытых {scalp_s['open']}") if SCALP_SIGNALS_ENABLED else None
 
     lines = [f"📊 Часовая статистика (v{APP_VERSION})", vp_line, div_line, ema_line]
@@ -4913,7 +4972,7 @@ def api_overview():
                         "enabled": DIVERGENCE_ENABLED, "invert": DIV_INVERT_SIGNALS},
         "ema": {"winrate": ema["winrate"], "wins": ema["wins"], "losses": ema["losses"], "open": ema["open"],
                  "enabled": EMA_ENABLED, "invert": EMA_INVERT_SIGNALS},
-        "scalp": {"winrate": scalp["win_rate"], "wins": scalp["wins"], "timeouts": scalp["timeouts"], "open": scalp["open"],
+        "scalp": {"winrate": scalp["win_rate"], "wins": scalp["wins"], "losses": scalp["losses"], "timeouts": scalp["timeouts"], "open": scalp["open"],
                    "enabled": SCALP_SIGNALS_ENABLED},
         "session": {"winrate": session["winrate"], "wins": session["wins"], "losses": session["losses"], "open": session["open"],
                      "enabled": SESSION_ENABLED},
@@ -5174,6 +5233,7 @@ def api_scalp_status():
             "safety_margin": SCALP_SAFETY_MARGIN, "min_hit_rate": SCALP_MIN_HIT_RATE,
             "taker_fee_pct": SCALP_TAKER_FEE_PCT, "default_mmr_pct": SCALP_DEFAULT_MMR_PCT,
             "default_max_leverage": SCALP_DEFAULT_MAX_LEVERAGE,
+            "signal_top_n": SCALP_SIGNAL_TOP_N,
         },
         "top": ranked,
         "signals_stats": compute_scalp_signal_stats(),
@@ -5810,7 +5870,7 @@ async function refreshOverview() {
     if (o.scalp.enabled) {
       const scalpWrClass = (o.scalp.winrate === null || o.scalp.winrate === undefined) ? 'dim' : (o.scalp.winrate >= 50 ? 'win' : 'loss');
       const scalpWr = `<span class="${scalpWrClass}">${o.scalp.winrate !== null && o.scalp.winrate !== undefined ? o.scalp.winrate+'%' : '-'}</span>`;
-      parts.push(`<b>Скальп</b> ${scalpWr} (<span class="win">${o.scalp.wins}W</span>/<span class="status-timeout">${o.scalp.timeouts}T</span>) ${openTxt(o.scalp.open)}`);
+      parts.push(`<b>Скальп</b> ${scalpWr} (<span class="win">${o.scalp.wins}W</span>/<span class="loss">${o.scalp.losses}L</span>/<span class="status-timeout">${o.scalp.timeouts}T</span>) ${openTxt(o.scalp.open)}`);
     }
     if (o.session.enabled) parts.push(`<b>Сессия</b> ${wr(o.session)} (${wl(o.session.wins, o.session.losses)}) ${openTxt(o.session.open)}`);
     document.getElementById('overview').innerHTML = parts.join(' &nbsp;·&nbsp; ');
@@ -6147,7 +6207,7 @@ async function refreshScalp() {
       Цель: $${cfg.target_profit_usd} со счёта $${cfg.account_usd} · ТФ: ${(cfg.intervals||[]).join(', ')} ·
       мин. hit-rate ${cfg.min_hit_rate}% · запас безопасности x${cfg.safety_margin} · комиссия ${(cfg.taker_fee_pct*100).toFixed(3)}%/сторону<br>
       ${buildTxt} · без безопасной конфигурации: ${status.no_safe_config_count}<br>
-      <b>Живые сигналы</b> (вход на закрытии свечи, без стопа): ${ssWr} (${ss.wins||0}W/${ss.timeouts||0}TIMEOUT) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
+      <b>Живые сигналы</b> (вход на закрытии свечи, топ-${cfg.signal_top_n || 1} по score): ${ssWr} (${ss.wins||0}W/${ss.losses||0}L/${ss.timeouts||0}TIMEOUT) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
       <span style="font-size:11px;">~ рядом с буфером = MMR не подтверждён с Gate.io, используется консервативный дефолт ${(cfg.default_mmr_pct*100).toFixed(2)}%<br>
       ~ рядом с плечом = макс. плечо биржи для монеты не подтверждено, используется дефолт ${cfg.default_max_leverage}x — проверь реальный лимит на бирже перед входом</span>
     </div>`;
@@ -6156,17 +6216,19 @@ async function refreshScalp() {
     let statusHtml;
     if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
     else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
+    else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
     else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
     return `<tr>
       <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td><td class="dim">${s.interval}</td>
       <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.target_price)} (${s.target_pct}%)</td>
+      <td class="dim">${s.sl_price !== undefined ? fmt(s.sl_price)+' ('+s.sl_pct+'%)' : '-'}</td>
       <td class="dim">${s.leverage}x</td><td>${statusHtml}</td><td class="dim">${fmtTime(s.time)}</td>
     </tr>`;
   }).join('');
   const signalsTableHtml = signals.length ? `
     <div style="overflow-x:auto;margin-bottom:14px;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Dir</th><th>TF</th><th>Entry</th><th>Target</th><th>Плечо</th><th>Status</th><th>Time</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Dir</th><th>TF</th><th>Entry</th><th>Target</th><th>SL</th><th>Плечо</th><th>Status</th><th>Time</th></tr></thead>
       <tbody>${signalsRows}</tbody>
     </table>
     </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
