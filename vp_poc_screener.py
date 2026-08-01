@@ -1276,6 +1276,31 @@ v0.41.2 - tzdata fix worked (no more timezone errors), but every
          225 points after two halvings, and a full 8-chunk range needed
          only 2 failed calls total, not 16. Full scan-function/endpoint
          regression stayed clean.
+v0.42.0 - tzdata still wouldn't install on the user's Termux — pip
+         itself was broken (python3.14t executable linked against a
+         missing libpython3.14t.so), an environment problem unrelated
+         to this app and not fixable from here. User offered Moscow
+         10:00 as an acceptable substitute for Kyiv. Took that further:
+         Moscow has used a fixed UTC+3 with no DST since 2014, so
+         "10:00 Moscow" is always exactly 07:00 UTC — no timezone
+         database needed at all. Replaced the whole zoneinfo/ZoneInfo-
+         based session_open_utc_ts() with plain datetime arithmetic
+         (SESSION_UTC_OFFSET_HOURS, default 3), removed the now-dead
+         get_session_tz() cache/diagnostic and the zoneinfo import
+         entirely — this class of problem can't recur since there's no
+         external tz database dependency left in the module at all.
+         Traded away true Kyiv-local DST-awareness (drifts 1h from Kyiv
+         during the EU winter half of the year) for something that
+         works unconditionally, per direct user request rather than
+         continuing to fight a broken pip/python install neither of us
+         can see. SESSION_TZ_NAME config and the API's tz_name field
+         renamed to SESSION_UTC_OFFSET_HOURS/utc_offset_hours
+         throughout (config, API, UI). Verified session_open_utc_ts()
+         resolves to exactly 07:00 UTC across all four tested dates
+         (summer, winter, and both 2026 DST transition dates — now
+         correctly IDENTICAL across all of them, which is the whole
+         point), and the full scan-function/endpoint regression
+         stayed clean.
 """
 
 import os
@@ -1286,14 +1311,13 @@ import threading
 import traceback
 import queue
 import datetime
-from zoneinfo import ZoneInfo
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.41.2"
+APP_VERSION = "0.42.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1605,8 +1629,8 @@ HOURLY_STATS_INTERVAL_SEC = int(os.environ.get("VP_HOURLY_STATS_INTERVAL_SEC", 3
 # detection function is used for live scanning and historical backtesting.
 # ----------------------------------------------------------------------------
 SESSION_ENABLED = os.environ.get("VP_SESSION_ENABLED", "1") == "1"
-SESSION_TZ_NAME = os.environ.get("VP_SESSION_TZ_NAME", "Europe/Kyiv")
-SESSION_OPEN_HOUR_LOCAL = int(os.environ.get("VP_SESSION_OPEN_HOUR_LOCAL", 10))  # 10:00 in SESSION_TZ_NAME, DST-aware
+SESSION_UTC_OFFSET_HOURS = float(os.environ.get("VP_SESSION_UTC_OFFSET_HOURS", 3))  # Moscow, fixed since 2014 (no DST) — deliberately not Europe/Kyiv+zoneinfo, see session_open_utc_ts() docstring for why
+SESSION_OPEN_HOUR_LOCAL = int(os.environ.get("VP_SESSION_OPEN_HOUR_LOCAL", 10))  # 10:00 at SESSION_UTC_OFFSET_HOURS ahead of UTC
 SESSION_RANGE_TF = os.environ.get("VP_SESSION_RANGE_TF", "5m")
 SESSION_RANGE_START_UTC_HOUR = int(os.environ.get("VP_SESSION_RANGE_START_UTC_HOUR", 0))  # consolidation range spans [this UTC hour, session open) — i.e. the prior (Asian) session, not a fixed lookback window
 SESSION_MANIPULATION_WINDOW_MIN = int(os.environ.get("VP_SESSION_MANIPULATION_WINDOW_MIN", 30))  # how long after open to watch for the sweep+reversal
@@ -2054,46 +2078,26 @@ def detect_ema_signal(closes, len7=EMA_LEN_7, len14=EMA_LEN_14, len28=EMA_LEN_28
     return None
 
 
-_session_tz_cache = None
-_session_tz_error_logged = False
-
-
-def get_session_tz():
-    """Lazily loads and caches the session timezone. Termux/Android
-    Python builds often ship without the system IANA tzdata database
-    that zoneinfo relies on by default (unlike a typical Linux distro),
-    which makes every single call fail identically — logging that once,
-    clearly, with the actual fix, beats 100 near-identical per-symbol
-    error lines that bury the real cause."""
-    global _session_tz_cache, _session_tz_error_logged
-    if _session_tz_cache is not None:
-        return _session_tz_cache
-    try:
-        _session_tz_cache = ZoneInfo(SESSION_TZ_NAME)
-        return _session_tz_cache
-    except Exception as e:
-        if not _session_tz_error_logged:
-            _session_tz_error_logged = True
-            log_error(
-                f"session module: can't load timezone '{SESSION_TZ_NAME}' ({e}). "
-                f"This usually means the system has no IANA tzdata database (common on "
-                f"Termux/Android) — run: pip install tzdata --break-system-packages, "
-                f"then restart. All Сессия backtests/signals will fail until this is fixed."
-            )
-        raise
-
-
 def session_open_utc_ts(ref_ts):
     """Given any UTC epoch timestamp, returns the UTC epoch timestamp of
-    that SAME calendar day's session open (SESSION_OPEN_HOUR_LOCAL in
-    SESSION_TZ_NAME) — DST-aware, so this stays correct across the
-    winter/summer transition rather than using one fixed UTC hour
-    year-round."""
-    tz = get_session_tz()
+    that SAME calendar day's session open (SESSION_OPEN_HOUR_LOCAL,
+    SESSION_UTC_OFFSET_HOURS ahead of UTC). Pure arithmetic, no zoneinfo/
+    tzdata dependency at all — this was originally DST-aware via
+    Europe/Kyiv + zoneinfo, but Termux/Android environments proved
+    unreliable for getting a working tzdata install (pip itself was
+    broken on the user's device, unrelated to this app). Switched the
+    reference to Moscow, which has used a fixed UTC+3 with no DST since
+    2014 — "10:00 Moscow" is always exactly 07:00 UTC, so this can be
+    plain arithmetic and never depend on a timezone database again. The
+    tradeoff: this drifts by 1h from true Kyiv-local time during the EU
+    winter half of the year (Kyiv is UTC+2 then) — accepted per direct
+    user request rather than fighting the broken tzdata install
+    further."""
     dt_utc = datetime.datetime.fromtimestamp(ref_ts, tz=datetime.timezone.utc)
-    dt_local = dt_utc.astimezone(tz)
-    open_local = dt_local.replace(hour=SESSION_OPEN_HOUR_LOCAL, minute=0, second=0, microsecond=0)
-    return open_local.astimezone(datetime.timezone.utc).timestamp()
+    local_shifted = dt_utc + datetime.timedelta(hours=SESSION_UTC_OFFSET_HOURS)
+    open_shifted = local_shifted.replace(hour=SESSION_OPEN_HOUR_LOCAL, minute=0, second=0, microsecond=0)
+    open_utc = open_shifted - datetime.timedelta(hours=SESSION_UTC_OFFSET_HOURS)
+    return open_utc.timestamp()
 
 
 def detect_session_manipulation(candles, session_open_ts):
@@ -5059,7 +5063,7 @@ def api_session_status():
         "next_open_ts": next_open_ts,
         "signals_stats": compute_session_signal_stats(),
         "config": {
-            "tz_name": SESSION_TZ_NAME, "open_hour_local": SESSION_OPEN_HOUR_LOCAL,
+            "utc_offset_hours": SESSION_UTC_OFFSET_HOURS, "open_hour_local": SESSION_OPEN_HOUR_LOCAL,
             "range_tf": SESSION_RANGE_TF, "range_start_utc_hour": SESSION_RANGE_START_UTC_HOUR,
             "manipulation_window_min": SESSION_MANIPULATION_WINDOW_MIN,
             "min_sample": SESSION_MIN_SAMPLE, "backtest_days": SESSION_BACKTEST_DAYS,
@@ -5979,7 +5983,7 @@ async function refreshSession() {
   const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
-      Открытие сессии: ${cfg.open_hour_local}:00 (${cfg.tz_name}) · диапазон проторговки: с ${cfg.range_start_utc_hour}:00 UTC до открытия, ТФ ${cfg.range_tf} ·
+      Открытие сессии: ${cfg.open_hour_local}:00 (UTC+${cfg.utc_offset_hours}, фикс.) · диапазон проторговки: с ${cfg.range_start_utc_hour}:00 UTC до открытия, ТФ ${cfg.range_tf} ·
       окно манипуляции: первые ${cfg.manipulation_window_min} мин после открытия · мин. выборка для ранжирования: ${cfg.min_sample}<br>
       ${buildTxt} · ${nextOpenTxt}<br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
