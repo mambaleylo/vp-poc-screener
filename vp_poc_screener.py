@@ -1423,6 +1423,35 @@ v0.44.2 - divergence reverse mode is working (55.6% win rate) but user
          new defaults compute to exactly TP=1.0%/SL=0.5% in both
          directions, and the full scan-function/endpoint regression
          stayed clean.
+v0.45.0 - Сессия's manipulation detection redesigned per user feedback
+         (screenshot showing a live signal whose entry sat near the
+         session open, not the obvious sweep candle they circled). The
+         original design allowed the sweep and the close-back-inside
+         confirmation to be arbitrarily far apart within the whole
+         30-min window; a first attempt tightened this to requiring
+         both on the SAME candle, but the user went back to the
+         original reference screenshot and clarified the real pattern
+         is a short 2-3 candle thrust (sweep, brief drift, then
+         reversal), not strictly one bar. New VP_SESSION_MAX_THRUST_BARS
+         (default 3): for each candle whose own close lands back inside
+         the range, looks back at just that trailing cluster (up to 3
+         bars including itself) for a sweep, rather than the entire
+         window. Confirmed via direct testing that a "sweep now, clean
+         drift for several bars, confirm much later" scenario is
+         actually architecturally impossible to construct — a candle
+         whose close stays outside the range necessarily has its own
+         high/low outside too (high>=close, low<=close), so it's always
+         itself a fresh nearby sweep; the cluster naturally uses
+         whichever sweep is most recent rather than a stale one,
+         which is the sensible behavior. Verified: single-candle
+         sweep+reject still works (the 1-bar case is a special case of
+         the cluster logic), a 3-bar thrust with the sweep 2 bars
+         before confirmation correctly picks up the right sweep_extreme,
+         no-sweep/both-sides-ambiguous/LONG-mirror/flat-range all still
+         behave correctly, and the full scan-function/endpoint
+         regression stayed clean. Old backtest/signal history under the
+         previous detection logic is no longer comparable — worth a
+         "Очистить сессию" before trusting fresh numbers.
 """
 
 import os
@@ -1439,7 +1468,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.44.2"
+APP_VERSION = "0.45.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1756,6 +1785,7 @@ SESSION_RANGE_START_UTC_HOUR = int(os.environ.get("VP_SESSION_RANGE_START_UTC_HO
 SESSION_MANIPULATION_WINDOW_MIN = int(os.environ.get("VP_SESSION_MANIPULATION_WINDOW_MIN", 30))  # how long after open to watch for the sweep+reversal
 SESSION_SL_BUFFER_PCT = float(os.environ.get("VP_SESSION_SL_BUFFER_PCT", 0.001))  # 0.1% beyond the sweep extreme
 SESSION_MIN_RANGE_PCT = float(os.environ.get("VP_SESSION_MIN_RANGE_PCT", 0.003))  # 0.3% — skip symbols whose 4h range is too tiny to be a meaningful consolidation
+SESSION_MAX_THRUST_BARS = int(os.environ.get("VP_SESSION_MAX_THRUST_BARS", 3))  # the sweep and the close-back-inside confirmation can be up to this many bars apart — a short thrust, not strictly the same candle, per the reference chart (2-3 candle burst, not a single bar)
 SESSION_BACKTEST_DAYS = int(os.environ.get("VP_SESSION_BACKTEST_DAYS", 30))  # was 60 — Gate enforces a hard "from" floor of ~10000 candles back from now (added without notice ~Feb 2026); for 5m candles that's ~34.7 days, so 30 leaves margin
 SESSION_UNIVERSE_SIZE = int(os.environ.get("VP_SESSION_UNIVERSE_SIZE", 100))  # backtesting 60 days of 5m per symbol is expensive (paginated fetch) — cap the pool by liquidity
 SESSION_MIN_SAMPLE = int(os.environ.get("VP_SESSION_MIN_SAMPLE", 8))  # don't rank a symbol's backtest as meaningful with fewer closed sessions than this
@@ -2253,35 +2283,31 @@ def detect_session_manipulation(candles, session_open_ts):
     window_end = session_open_ts + SESSION_MANIPULATION_WINDOW_MIN * 60
     window_candles = [c for c in candles if session_open_ts <= c["time"] < window_end]
 
-    swept_high = swept_low = False
-    sweep_high_extreme = sweep_low_extreme = None
-    for c in window_candles:
-        if c["high"] > range_high:
-            swept_high = True
-            sweep_high_extreme = max(sweep_high_extreme or c["high"], c["high"])
-        if c["low"] < range_low:
-            swept_low = True
-            sweep_low_extreme = min(sweep_low_extreme or c["low"], c["low"])
-
-        confirmed = range_low <= c["close"] <= range_high
-        if not confirmed:
-            continue
-        if swept_high and swept_low:
-            return None  # both sides swept before a clean confirmation — ambiguous, not a clean manipulation
-        if swept_high:
+    for i, c in enumerate(window_candles):
+        closed_back_inside = range_low <= c["close"] <= range_high
+        if not closed_back_inside:
+            continue  # this candle didn't reject back into the range on its own close — not a confirmation point, keep looking
+        cluster = window_candles[max(0, i - (SESSION_MAX_THRUST_BARS - 1)):i + 1]
+        cluster_highs_above = [cc["high"] for cc in cluster if cc["high"] > range_high]
+        cluster_lows_below = [cc["low"] for cc in cluster if cc["low"] < range_low]
+        if cluster_highs_above and cluster_lows_below:
+            continue  # both sides swept within this short cluster — too chaotic to call cleanly, keep looking
+        if cluster_highs_above:
             entry = c["close"]
-            sl = sweep_high_extreme * (1 + SESSION_SL_BUFFER_PCT)
+            sweep_extreme = max(cluster_highs_above)
+            sl = sweep_extreme * (1 + SESSION_SL_BUFFER_PCT)
             tp = range_low
             return {"direction": "SHORT", "entry": entry, "sl": sl, "tp": tp,
                     "range_high": range_high, "range_low": range_low,
-                    "sweep_extreme": sweep_high_extreme, "confirm_time": c["time"]}
-        if swept_low:
+                    "sweep_extreme": sweep_extreme, "confirm_time": c["time"]}
+        if cluster_lows_below:
             entry = c["close"]
-            sl = sweep_low_extreme * (1 - SESSION_SL_BUFFER_PCT)
+            sweep_extreme = min(cluster_lows_below)
+            sl = sweep_extreme * (1 - SESSION_SL_BUFFER_PCT)
             tp = range_high
             return {"direction": "LONG", "entry": entry, "sl": sl, "tp": tp,
                     "range_high": range_high, "range_low": range_low,
-                    "sweep_extreme": sweep_low_extreme, "confirm_time": c["time"]}
+                    "sweep_extreme": sweep_extreme, "confirm_time": c["time"]}
     return None
 
 
