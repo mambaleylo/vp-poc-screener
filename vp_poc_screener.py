@@ -1409,6 +1409,20 @@ v0.44.1 - two fixes from user feedback (screenshots): (1) Сессия's
          and forces an immediate re-tune against the reverted grid.
          Verified: full scan-function/endpoint regression stayed clean,
          and confirmed the reverted config values load correctly.
+v0.44.2 - divergence reverse mode is working (55.6% win rate) but user
+         wanted a better RR. Round 2 retune off the reversed direction's
+         own live at-close data (n=8, 5W/3L — still a tiny sample,
+         weaker basis than EMA's analogous round-2 retune which had
+         n=86, flagged explicitly): WIN MFE sat at median 1.348R/avg
+         1.935R (R=0.75% at the old config), well above the old
+         0.65% TP, meaning it was cutting winners short — DIV_TP_PCT
+         moved 0.0065->0.01 (0.65%->1.0%). WIN MAE sat at median 0/avg
+         0.264R — winners barely dipped toward the stop — so DIV_RR
+         moved 0.867->2.0, giving SL=0.5% (down from 0.75%), with
+         headroom above the p75 WIN MAE reference point. Verified the
+         new defaults compute to exactly TP=1.0%/SL=0.5% in both
+         directions, and the full scan-function/endpoint regression
+         stayed clean.
 """
 
 import os
@@ -1425,7 +1439,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.44.1"
+APP_VERSION = "0.44.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1541,22 +1555,20 @@ DIV_FRESHNESS_BARS = int(os.environ.get("VP_DIV_FRESHNESS_BARS", DIV_PIVOT_RIGHT
 # what actually tells us the risk of reducing VP_DIV_PIVOT_RIGHT: how
 # often would going faster have picked a different, wrong point instead.
 DIV_SHADOW_RIGHTS = [int(x) for x in os.environ.get("VP_DIV_SHADOW_RIGHTS", "1,2").split(",") if x.strip()]  # only values below DIV_PIVOT_RIGHT are meaningful for the stability diagnostic
-DIV_RR = float(os.environ.get("VP_DIV_RR", 0.867))  # retuned for the reverse-signal hypothesis (VP_DIV_INVERT_SIGNALS) — see DIV_TP_PCT comment. Was 2.0 for the original (non-inverted) direction.
-DIV_TP_PCT = float(os.environ.get("VP_DIV_TP_PCT", 0.0065))  # TP is a fixed % move from entry — SL is then sized backward from this via DIV_RR, rather than TP being derived from a pivot-based SL.
-# Retuned 0.011/RR2.0 (SL 0.55%) -> 0.0065/RR0.867 (SL~0.75%) for the
-# reversed hypothesis, off the ORIGINAL (non-inverted) direction's own
-# at-close stats: LOSS trades' favorable excursion before the original
-# 0.55% stop sat at median 0.62%/avg 0.82% (R=0.55%) — that's the
-# reversed side's adverse excursion on paths that would become reversed
-# wins, so SL~0.75% sits between median and avg with some buffer. LOSS
-# MAE at close (0.86% median/1.05% avg, reflecting same-bar overshoot
-# past the exact stop price) suggested price often continued further
-# past the stop than the stop's own level, so TP~0.65% sits above the
-# bare 0.55% floor rather than exactly at it.
-# CAVEAT, much stronger than the equivalent EMA retune: this is off an
-# n=8 sample (3W/5L) — an order of magnitude smaller than EMA's n=85.
-# Treat this as an informed starting guess, not a validated figure,
-# until real reversed-signal data accumulates.
+DIV_RR = float(os.environ.get("VP_DIV_RR", 2.0))  # round 2 retune — see DIV_TP_PCT comment. Was 0.867 for round 1 (pre-data guess).
+DIV_TP_PCT = float(os.environ.get("VP_DIV_TP_PCT", 0.01))  # TP is a fixed % move from entry — SL is then sized backward from this via DIV_RR, rather than TP being derived from a pivot-based SL.
+# Round 1 (0.011/RR2.0 -> 0.0065/RR0.867) was a pre-data guess for the
+# reversed hypothesis, off the ORIGINAL direction's own stats.
+# Round 2, off the REVERSED direction's own live at-close data (n=8,
+# 5W/3L — still a tiny sample, weaker basis than EMA's round-2 retune
+# which had n=86): WIN MFE sat at median 1.348R/avg 1.935R (R=0.75%
+# then) — well above the old target, meaning TP was cutting winners
+# short — so TP moved up to ~1.0%. WIN MAE sat at median 0/avg 0.264R
+# — winners barely dipped toward the stop at all — so SL tightened to
+# ~0.5% (RR=2.0), giving headroom above the p75 WIN MAE (0.337R at the
+# old R, ~0.253%) without going razor-thin on an 8-trade sample.
+# CAVEAT: even more than round 1, this is a low-confidence tune —
+# treat as a starting guess to test forward, not a validated figure.
 DIV_INVERT_SIGNALS = os.environ.get("VP_DIV_INVERT_SIGNALS", "0") == "1"  # a live example showed the divergence-implied bounce often already largely played out by the time the signal actually fires — worth testing whether trading the OPPOSITE direction (effectively fading the already-completed move) does better than trading the original signal late
 DIV_COOLDOWN_SEC = int(os.environ.get("VP_DIV_COOLDOWN", 3600))
 DIV_SIGNAL_HISTORY = 200
