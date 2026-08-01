@@ -1256,6 +1256,26 @@ v0.41.1 - user's first live backtest finished in 21.1s for "0/100"
          completely unaffected (empty error log, all functions still
          return normally), and the full scan-function/endpoint
          regression stayed clean.
+v0.41.2 - tzdata fix worked (no more timezone errors), but every
+         session backtest then 400'd on the FIRST candlestick fetch —
+         get_candles_range() had never been exercised at 60-day scale
+         before (its original use was short bar-magnification ranges),
+         and Gate's own SDK docs disagree with each other on the real
+         per-request point cap (1000 in some, 2000 in others); the
+         actual server rejected a chunk sized for ~1900 points. Rather
+         than guess a single new hardcoded number that might also be
+         wrong, made get_candles_range() self-adjusting: starts at a
+         conservative 900 points, and if the server 400s a chunk,
+         halves the size and retries — remembering the smaller size for
+         every later chunk in the same call instead of re-discovering
+         it from scratch each time (checked this specifically: without
+         memoization, a 60-day pull would re-fail at 900 on every
+         single chunk; with it, only the first 1-2 chunks pay the
+         discovery cost). Verified against a simulated server with an
+         arbitrary 400-point limit: correctly discovers and settles on
+         225 points after two halvings, and a full 8-chunk range needed
+         only 2 failed calls total, not 16. Full scan-function/endpoint
+         regression stayed clean.
 """
 
 import os
@@ -1273,7 +1293,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.41.1"
+APP_VERSION = "0.41.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3004,25 +3024,44 @@ def get_contract_stats(symbol, interval=OI_INTERVAL, limit=OI_LOOKBACK + 2):
 
 def get_candles_range(symbol, interval, start_ts, end_ts):
     """Fetch every candle in [start_ts, end_ts] at a finer interval than the
-    main scan uses, paginating since the API caps each response (~2000
-    points) and rejects combining `limit` with `from`/`to`. Used to build
-    the volume profile from actual sub-bar data instead of approximating
-    each parent bar's volume as spread evenly across its own high-low
-    range — the same "bar magnification" idea as the original indicator,
-    just implemented via REST polling instead of Pine's request.security_lower_tf."""
+    main scan uses, paginating since the API caps each response and
+    rejects combining `limit` with `from`/`to`. Used to build the volume
+    profile from actual sub-bar data instead of approximating each
+    parent bar's volume as spread evenly across its own high-low range
+    — the same "bar magnification" idea as the original indicator, just
+    implemented via REST polling instead of Pine's
+    request.security_lower_tf. Also used by the session-manipulation
+    module's 60-day backtests, which is a much larger range than this
+    was originally exercised at.
+    The actual per-request point cap isn't reliably documented — Gate's
+    own SDK docs disagree with each other (1000 in some, 2000 in
+    others), and a chunk sized for 1900 points 400'd in practice at the
+    60-day backtest scale. Rather than trust a single hardcoded number,
+    this starts conservative and, if a chunk still 400s, halves it and
+    retries — self-adjusting to whatever the real limit turns out to be
+    instead of needing to know it in advance."""
     interval_sec = INTERVAL_SECONDS.get(interval, 60)
-    chunk_span = interval_sec * 1900  # a little under the ~2000-point cap, for safety
+    chunk_points = 900  # conservative starting point — under both documented figures; shrinks (and stays shrunk) the first time the server rejects it
     seen = {}
     cur = int(start_ts)
     end_ts = int(end_ts)
     while cur < end_ts:
-        chunk_end = min(cur + chunk_span, end_ts)
-        r = requests.get(
-            f"{GATE_BASE}/futures/usdt/candlesticks",
-            params={"contract": symbol, "interval": interval, "from": cur, "to": chunk_end},
-            timeout=HTTP_TIMEOUT,
-        )
-        r.raise_for_status()
+        while True:
+            chunk_span = interval_sec * chunk_points
+            chunk_end = min(cur + chunk_span, end_ts)
+            try:
+                r = requests.get(
+                    f"{GATE_BASE}/futures/usdt/candlesticks",
+                    params={"contract": symbol, "interval": interval, "from": cur, "to": chunk_end},
+                    timeout=HTTP_TIMEOUT,
+                )
+                r.raise_for_status()
+                break
+            except requests.exceptions.HTTPError as e:
+                if e.response is not None and e.response.status_code == 400 and chunk_points > 50:
+                    chunk_points = chunk_points // 2  # server rejected this size — shrink, and keep it shrunk for later chunks too
+                    continue
+                raise
         for c in _parse_candles(r.json()):
             seen[c["time"]] = c
         cur = chunk_end
