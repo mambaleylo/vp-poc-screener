@@ -1236,6 +1236,26 @@ v0.41.0 - new "Сессия" module: London-session-open liquidity-sweep
          mirror, all edge cases (no sweep, both-sides-swept ambiguity,
          too-flat range), the wait-loop fix against the exact bug
          scenario, and the full scan-function/endpoint regression.
+v0.41.1 - user's first live backtest finished in 21.1s for "0/100"
+         symbols — far too fast for real paginated 60-day-history
+         fetches, meaning every symbol was failing near-instantly
+         before any network call. Prime suspect: Termux/Android Python
+         builds often ship without the system IANA tzdata database
+         zoneinfo relies on by default (unlike a normal Linux distro),
+         so every ZoneInfo(SESSION_TZ_NAME) call would raise
+         identically — impossible to confirm directly in this sandbox
+         (which does have system tzdata), but reproduced the exact
+         failure mode with a mocked ZoneInfoNotFoundError and confirmed
+         it explains both symptoms (instant "failure", 0 successes).
+         Added get_session_tz(): caches the ZoneInfo object, and on
+         first failure logs ONE clear diagnostic naming the likely
+         cause and the fix (pip install tzdata --break-system-packages)
+         instead of the same opaque error 100 times, once per symbol,
+         burying the actual cause. Verified: 5 repeated failing calls
+         now log exactly 1 error (not 5), the working-timezone case is
+         completely unaffected (empty error log, all functions still
+         return normally), and the full scan-function/endpoint
+         regression stayed clean.
 """
 
 import os
@@ -1253,7 +1273,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.41.0"
+APP_VERSION = "0.41.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2014,13 +2034,42 @@ def detect_ema_signal(closes, len7=EMA_LEN_7, len14=EMA_LEN_14, len28=EMA_LEN_28
     return None
 
 
+_session_tz_cache = None
+_session_tz_error_logged = False
+
+
+def get_session_tz():
+    """Lazily loads and caches the session timezone. Termux/Android
+    Python builds often ship without the system IANA tzdata database
+    that zoneinfo relies on by default (unlike a typical Linux distro),
+    which makes every single call fail identically — logging that once,
+    clearly, with the actual fix, beats 100 near-identical per-symbol
+    error lines that bury the real cause."""
+    global _session_tz_cache, _session_tz_error_logged
+    if _session_tz_cache is not None:
+        return _session_tz_cache
+    try:
+        _session_tz_cache = ZoneInfo(SESSION_TZ_NAME)
+        return _session_tz_cache
+    except Exception as e:
+        if not _session_tz_error_logged:
+            _session_tz_error_logged = True
+            log_error(
+                f"session module: can't load timezone '{SESSION_TZ_NAME}' ({e}). "
+                f"This usually means the system has no IANA tzdata database (common on "
+                f"Termux/Android) — run: pip install tzdata --break-system-packages, "
+                f"then restart. All Сессия backtests/signals will fail until this is fixed."
+            )
+        raise
+
+
 def session_open_utc_ts(ref_ts):
     """Given any UTC epoch timestamp, returns the UTC epoch timestamp of
     that SAME calendar day's session open (SESSION_OPEN_HOUR_LOCAL in
     SESSION_TZ_NAME) — DST-aware, so this stays correct across the
     winter/summer transition rather than using one fixed UTC hour
     year-round."""
-    tz = ZoneInfo(SESSION_TZ_NAME)
+    tz = get_session_tz()
     dt_utc = datetime.datetime.fromtimestamp(ref_ts, tz=datetime.timezone.utc)
     dt_local = dt_utc.astimezone(tz)
     open_local = dt_local.replace(hour=SESSION_OPEN_HOUR_LOCAL, minute=0, second=0, microsecond=0)
