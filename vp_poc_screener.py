@@ -1138,6 +1138,18 @@ v0.39.0 - hourly Telegram digest across all four modes. New
          variable name and would have passed either way — caught before
          trusting it), and the full scan-function/endpoint regression
          stayed clean.
+v0.39.1 - removed the weekly (1w) timeframe from EMA scanning per user
+         request — EMA_INTERVALS now defaults to just EMA_INTERVAL
+         ("1h") instead of "1h,1w". Weekly signals were always going to
+         be rare by nature (one bar a week) and never accumulated
+         meaningful data to compare against 1h. Existing 1w signals
+         already in history are untouched and still track their
+         outcome correctly (update_ema_outcomes reads each signal's own
+         stored interval, independent of the scan list), so nothing
+         needs resetting — only new 1w signal creation stops. Verified
+         EMA_INTERVALS resolves to ['1h'], the full scan-function sweep
+         stayed clean, and /api/ema/status reports the single interval
+         correctly.
 """
 
 import os
@@ -1153,7 +1165,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.39.0"
+APP_VERSION = "0.39.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1302,7 +1314,7 @@ EMA_INTERVAL = os.environ.get("VP_EMA_INTERVAL", "1h")  # kept for backward-comp
 # the script's own developer runs it on the weekly chart — scanning both
 # alongside the existing 1h lets stats be compared later rather than
 # guessing which is better upfront
-EMA_INTERVALS = [x.strip() for x in os.environ.get("VP_EMA_INTERVALS", f"{EMA_INTERVAL},1w").split(",") if x.strip()]
+EMA_INTERVALS = [x.strip() for x in os.environ.get("VP_EMA_INTERVALS", EMA_INTERVAL).split(",") if x.strip()]  # was f"{EMA_INTERVAL},1w" — weekly removed per user request (accumulated almost no signals, wasn't worth the ongoing comparison)
 EMA_FETCH_LIMIT = int(os.environ.get("VP_EMA_FETCH_LIMIT", 200))
 EMA_LEN_7 = int(os.environ.get("VP_EMA_LEN_7", 7))
 EMA_LEN_14 = int(os.environ.get("VP_EMA_LEN_14", 14))
