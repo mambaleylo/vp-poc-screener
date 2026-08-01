@@ -1325,6 +1325,17 @@ v0.42.1 - the chunk-halving fix from v0.41.2 didn't actually solve the
          this specific failure. Verified directly: a simulated 60-day
          request against a mocked API confirms the first chunk's `from`
          now lands at ~34 days back, not 60.
+v0.42.2 - user confirmed they're actually in Moscow, so v0.42.0's
+         fixed-UTC+3-no-DST design is exactly right for them, not just
+         an acceptable substitute — no code change needed there.
+         Cleaned up a docstring that was left stale by that same
+         change: detect_session_manipulation() still said the
+         consolidation range "varies 7-8h depending on DST", which was
+         true under the old Kyiv+zoneinfo version but hasn't been since
+         v0.42.0 removed DST entirely. Verified directly: the range is
+         now exactly 7.0h on all four previously-varying test dates
+         (summer, winter, both 2026 DST transition dates), confirming
+         the fix's own behavior matches the corrected docstring.
 """
 
 import os
@@ -1341,7 +1352,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.42.1"
+APP_VERSION = "0.42.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2133,9 +2144,11 @@ def detect_session_manipulation(candles, session_open_ts):
     manipulation happened around this particular session open.
     The consolidation range is the PRIOR (Asian) session, not a fixed
     lookback window — spans from SESSION_RANGE_START_UTC_HOUR (UTC,
-    default midnight) up to the session open itself, so its length
-    varies with the DST-driven UTC hour of the open (~7-8h) rather
-    than being a fixed duration."""
+    default midnight) up to the session open itself. Since v0.42.0's
+    fixed-Moscow-offset session_open_utc_ts(), the open is always
+    exactly 07:00 UTC, so this range is now always exactly 7h — it
+    used to vary 7-8h under the earlier DST-aware Kyiv version, no
+    longer applicable."""
     open_dt = datetime.datetime.fromtimestamp(session_open_ts, tz=datetime.timezone.utc)
     range_start_dt = open_dt.replace(hour=SESSION_RANGE_START_UTC_HOUR, minute=0, second=0, microsecond=0)
     range_start = range_start_dt.timestamp()
