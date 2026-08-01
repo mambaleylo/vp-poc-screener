@@ -1176,6 +1176,14 @@ v0.40.0 - UI restructure per user feedback (with screenshot): the
          live in the code (only the historical changelog mention
          remains), /api/overview returns correctly shaped data, and the
          full scan-function/endpoint regression stayed clean.
+v0.40.1 - color-coded the new overview header line, reusing the app's
+         existing classes rather than inventing new ones: winrate green
+         (.win) at >=50%, red (.loss) below, grey (.dim) with no data
+         yet; W count always green, L count always red; open count in
+         the same amber (.status-open) used for OPEN rows elsewhere;
+         Скальп's TIMEOUT count uses .status-timeout to match. Verified
+         JS syntax/undefined-var sweep and the full scan-function/
+         endpoint regression stayed clean.
 """
 
 import os
@@ -1191,7 +1199,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.40.0"
+APP_VERSION = "0.40.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4864,12 +4872,19 @@ async function refreshStatus() {
 async function refreshOverview() {
   try {
     const o = await (await fetch('/api/overview')).json();
-    const wr = (m) => m.winrate !== null && m.winrate !== undefined ? `${m.winrate}%` : '-';
+    const wrClass = (m) => (m.winrate === null || m.winrate === undefined) ? 'dim' : (m.winrate >= 50 ? 'win' : 'loss');
+    const wr = (m) => `<span class="${wrClass(m)}">${m.winrate !== null && m.winrate !== undefined ? m.winrate+'%' : '-'}</span>`;
+    const wl = (w, l) => `<span class="win">${w}W</span>/<span class="loss">${l}L</span>`;
+    const openTxt = (n) => `<span class="status-open">откр.${n}</span>`;
     const parts = [];
-    if (o.volume.enabled) parts.push(`<b>Volume</b> ${wr(o.volume)} (${o.volume.wins}W/${o.volume.losses}L) откр.${o.volume.open}`);
-    if (o.divergence.enabled) parts.push(`<b>Див</b>${o.divergence.invert?'[Р]':''} ${wr(o.divergence)} (${o.divergence.wins}W/${o.divergence.losses}L) откр.${o.divergence.open}`);
-    if (o.ema.enabled) parts.push(`<b>EMA</b>${o.ema.invert?'[Р]':''} ${wr(o.ema)} (${o.ema.wins}W/${o.ema.losses}L) откр.${o.ema.open}`);
-    if (o.scalp.enabled) parts.push(`<b>Скальп</b> ${o.scalp.winrate !== null && o.scalp.winrate !== undefined ? o.scalp.winrate+'%' : '-'} (${o.scalp.wins}W/${o.scalp.timeouts}T) откр.${o.scalp.open}`);
+    if (o.volume.enabled) parts.push(`<b>Volume</b> ${wr(o.volume)} (${wl(o.volume.wins, o.volume.losses)}) ${openTxt(o.volume.open)}`);
+    if (o.divergence.enabled) parts.push(`<b>Див</b>${o.divergence.invert?'[Р]':''} ${wr(o.divergence)} (${wl(o.divergence.wins, o.divergence.losses)}) ${openTxt(o.divergence.open)}`);
+    if (o.ema.enabled) parts.push(`<b>EMA</b>${o.ema.invert?'[Р]':''} ${wr(o.ema)} (${wl(o.ema.wins, o.ema.losses)}) ${openTxt(o.ema.open)}`);
+    if (o.scalp.enabled) {
+      const scalpWrClass = (o.scalp.winrate === null || o.scalp.winrate === undefined) ? 'dim' : (o.scalp.winrate >= 50 ? 'win' : 'loss');
+      const scalpWr = `<span class="${scalpWrClass}">${o.scalp.winrate !== null && o.scalp.winrate !== undefined ? o.scalp.winrate+'%' : '-'}</span>`;
+      parts.push(`<b>Скальп</b> ${scalpWr} (<span class="win">${o.scalp.wins}W</span>/<span class="status-timeout">${o.scalp.timeouts}T</span>) ${openTxt(o.scalp.open)}`);
+    }
     document.getElementById('overview').innerHTML = parts.join(' &nbsp;·&nbsp; ');
   } catch(e) {}
 }
