@@ -1472,6 +1472,20 @@ v0.45.1 - two fixes from a live example (BANK_USDT LONG, screenshot):
          universe size=50 confirmed against a mocked 150-symbol
          ticker list), and the full scan-function/endpoint regression
          stayed clean.
+v0.45.2 - settings modal redesigned per direct request — was one
+         continuous flat list of 15 toggle rows with no visual
+         separation, hard to scan. New .settingsGroup card style: each
+         module (Volume Profile, Дивергенции, EMA, Скальпинг, Сессия,
+         Telegram) is its own bordered, rounded card with an uppercase
+         section title, matching toggles grouped inside it instead of
+         one undifferentiated column. All 15 checkbox IDs kept
+         identical (setVolumeProfile, setBounce, ... setTelegramHourly)
+         so no JS wiring changed, just the surrounding markup/CSS.
+         Verified: all 15 IDs still present exactly once (no
+         duplicates from the restructure), JS syntax clean, and a full
+         settings round-trip (posting all 16 SETTINGS_KEYS as true and
+         reading them back) confirmed every key still applies
+         correctly through the reorganized markup.
 """
 
 import os
@@ -1488,7 +1502,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.45.1"
+APP_VERSION = "0.45.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5445,6 +5459,11 @@ INDEX_HTML = """<!doctype html>
   #settingsModalHeader h2 { font-size:15px; margin:0; }
   #settingsCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
   #settingsBody { padding:4px 16px 16px; overflow-y:auto; }
+  .settingsGroup { margin-top:18px; border:1px solid #1c2433; border-radius:12px; overflow:hidden; }
+  .settingsGroup:first-child { margin-top:4px; }
+  .settingsGroupTitle { padding:10px 14px; font-size:11px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:#6b7688; background:#0d1220; border-bottom:1px solid #1c2433; }
+  .settingsGroup .settingRow { padding:14px; }
+  .settingsGroup .settingRow:last-child { border-bottom:none; }
   .settingRow { display:flex; justify-content:space-between; align-items:center; padding:14px 0; border-bottom:1px solid #1c2433; }
   .settingRow .label { font-size:14px; }
   .settingRow .sub { font-size:11px; color:#8b98ab; margin-top:2px; }
@@ -5600,112 +5619,136 @@ INDEX_HTML = """<!doctype html>
     <button id="settingsCloseBtn">Закрыть</button>
   </div>
   <div id="settingsBody">
-    <div class="settingRow">
-      <div>
-        <div class="label">Volume Profile сканер</div>
-        <div class="sub">зоны, bounce/breakout сигналы, watchlist, автотюнинг</div>
+    <div class="settingsGroup">
+      <div class="settingsGroupTitle">Volume Profile</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Volume Profile сканер</div>
+          <div class="sub">зоны, bounce/breakout сигналы, watchlist, автотюнинг</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setVolumeProfile"><span class="switchSlider"></span></label>
       </div>
-      <label class="switch"><input type="checkbox" id="setVolumeProfile"><span class="switchSlider"></span></label>
-    </div>
-    <div class="settingRow">
-      <div>
-        <div class="label">↳ Bounce сигналы</div>
-        <div class="sub">отбой от уровня</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Bounce сигналы</div>
+          <div class="sub">отбой от уровня</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setBounce"><span class="switchSlider"></span></label>
       </div>
-      <label class="switch"><input type="checkbox" id="setBounce"><span class="switchSlider"></span></label>
-    </div>
-    <div class="settingRow">
-      <div>
-        <div class="label">↳ Breakout сигналы</div>
-        <div class="sub">пробой после консолидации</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Breakout сигналы</div>
+          <div class="sub">пробой после консолидации</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setBreakout"><span class="switchSlider"></span></label>
       </div>
-      <label class="switch"><input type="checkbox" id="setBreakout"><span class="switchSlider"></span></label>
     </div>
-    <div class="settingRow">
-      <div>
-        <div class="label">RSI-дивергенции</div>
-        <div class="sub">отдельный скан на часовом ТФ</div>
+
+    <div class="settingsGroup">
+      <div class="settingsGroupTitle">Дивергенции</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">RSI-дивергенции</div>
+          <div class="sub">отдельный скан на часовом ТФ</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setDivergence"><span class="switchSlider"></span></label>
       </div>
-      <label class="switch"><input type="checkbox" id="setDivergence"><span class="switchSlider"></span></label>
-    </div>
-    <div class="settingRow">
-      <div>
-        <div class="label">↳ Реверс сигналов дивергенций</div>
-        <div class="sub">торговать в обратную сторону от того, что говорит дивергенция</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Реверс сигналов</div>
+          <div class="sub">торговать в обратную сторону от того, что говорит дивергенция</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setDivInvert"><span class="switchSlider"></span></label>
       </div>
-      <label class="switch"><input type="checkbox" id="setDivInvert"><span class="switchSlider"></span></label>
     </div>
-    <div class="settingRow">
-      <div>
-        <div class="label">Обещанный индикатор</div>
-        <div class="sub">EMA 7/14/28 пересечения (свой скан, вкладка "EMA")</div>
+
+    <div class="settingsGroup">
+      <div class="settingsGroupTitle">EMA</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">EMA 7/14/28</div>
+          <div class="sub">пересечения, свой скан, вкладка "EMA"</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setEma"><span class="switchSlider"></span></label>
       </div>
-      <label class="switch"><input type="checkbox" id="setEma"><span class="switchSlider"></span></label>
-    </div>
-    <div class="settingRow">
-      <div>
-        <div class="label">↳ Реверс сигналов EMA</div>
-        <div class="sub">торговать в обратную сторону от того, что говорит индикатор</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Реверс сигналов</div>
+          <div class="sub">торговать в обратную сторону от того, что говорит индикатор</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setEmaInvert"><span class="switchSlider"></span></label>
       </div>
-      <label class="switch"><input type="checkbox" id="setEmaInvert"><span class="switchSlider"></span></label>
     </div>
-    <div class="settingRow">
-      <div>
-        <div class="label">Скальпинг (статистика волатильности)</div>
-        <div class="sub">фоновый сбор данных раз в несколько часов, без сигналов</div>
+
+    <div class="settingsGroup">
+      <div class="settingsGroupTitle">Скальпинг</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Скальпинг (статистика волатильности)</div>
+          <div class="sub">фоновый сбор данных раз в несколько часов, без сигналов</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setScalp"><span class="switchSlider"></span></label>
       </div>
-      <label class="switch"><input type="checkbox" id="setScalp"><span class="switchSlider"></span></label>
     </div>
-    <div class="settingRow">
-      <div>
-        <div class="label">Сессия (манипуляция на открытии)</div>
-        <div class="sub">бэктест раз в сутки + живой скан в окне открытия Лондона</div>
+
+    <div class="settingsGroup">
+      <div class="settingsGroupTitle">Сессия</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Манипуляция на открытии</div>
+          <div class="sub">бэктест раз в сутки + живой скан в окне открытия Лондона</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setSession"><span class="switchSlider"></span></label>
       </div>
-      <label class="switch"><input type="checkbox" id="setSession"><span class="switchSlider"></span></label>
     </div>
-    <div class="settingRow">
-      <div>
-        <div class="label">Уведомления в Telegram</div>
-        <div class="sub" id="setTelegramSub">проверка...</div>
+
+    <div class="settingsGroup">
+      <div class="settingsGroupTitle">Telegram</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Уведомления в Telegram</div>
+          <div class="sub" id="setTelegramSub">проверка...</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegram"><span class="switchSlider"></span></label>
       </div>
-      <label class="switch"><input type="checkbox" id="setTelegram"><span class="switchSlider"></span></label>
-    </div>
-    <div class="settingRow">
-      <div>
-        <div class="label">↳ Алерты Volume Profile</div>
-        <div class="sub">bounce/breakout сигналы и их закрытие</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Алерты Volume Profile</div>
+          <div class="sub">bounce/breakout сигналы и их закрытие</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramVp"><span class="switchSlider"></span></label>
       </div>
-      <label class="switch"><input type="checkbox" id="setTelegramVp"><span class="switchSlider"></span></label>
-    </div>
-    <div class="settingRow">
-      <div>
-        <div class="label">↳ Алерты дивергенций</div>
-        <div class="sub">сигналы RSI-дивергенций и их закрытие</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Алерты дивергенций</div>
+          <div class="sub">сигналы RSI-дивергенций и их закрытие</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramDiv"><span class="switchSlider"></span></label>
       </div>
-      <label class="switch"><input type="checkbox" id="setTelegramDiv"><span class="switchSlider"></span></label>
-    </div>
-    <div class="settingRow">
-      <div>
-        <div class="label">↳ Алерты индикатора</div>
-        <div class="sub">EMA-сигналы и их закрытие</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Алерты EMA</div>
+          <div class="sub">EMA-сигналы и их закрытие</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramEma"><span class="switchSlider"></span></label>
       </div>
-      <label class="switch"><input type="checkbox" id="setTelegramEma"><span class="switchSlider"></span></label>
-    </div>
-    <div class="settingRow">
-      <div>
-        <div class="label">↳ Часовая статистика</div>
-        <div class="sub">сводка винрейта по всем режимам, раз в час</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Алерты сессии</div>
+          <div class="sub">живые сигналы манипуляции на открытии</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramSession"><span class="switchSlider"></span></label>
       </div>
-      <label class="switch"><input type="checkbox" id="setTelegramHourly"><span class="switchSlider"></span></label>
-    </div>
-    <div class="settingRow" style="border-bottom:none;">
-      <div>
-        <div class="label">↳ Алерты сессии</div>
-        <div class="sub">живые сигналы манипуляции на открытии</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Часовая статистика</div>
+          <div class="sub">сводка винрейта по всем режимам, раз в час</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramHourly"><span class="switchSlider"></span></label>
       </div>
-      <label class="switch"><input type="checkbox" id="setTelegramSession"><span class="switchSlider"></span></label>
     </div>
-    <div class="dim" style="font-size:12px;margin-top:8px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
+
+    <div class="dim" style="font-size:12px;margin-top:16px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
   </div>
 </div>
 
