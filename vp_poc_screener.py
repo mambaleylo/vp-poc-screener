@@ -1531,6 +1531,27 @@ v0.46.1 - SCALP_SIGNALS_ENABLED had no settings UI at all — it was
          (not just echoes back the posted value), a full round-trip of
          all 17 settings keys still applies correctly, and the full
          scan-function/endpoint regression stayed clean.
+v0.46.2 - user didn't see BTC/ETH in the Сессия ranked list despite
+         asking for the most liquid coins. Prime suspect: they ARE in
+         the liquidity-selected universe (BTC/ETH are almost certainly
+         top-2 by volume) but likely just never showed a qualifying
+         manipulation — majors tend to have lower % volatility than
+         alts, and SESSION_MIN_RANGE_PCT (0.3%) would filter out an
+         overnight range that never gets that wide, giving them n=0
+         across the whole backtest, which api_session_status silently
+         dropped from the ranked list with no distinction from "not
+         selected as liquid enough" at all. Rather than guess further,
+         made this directly checkable: /api/session/status now returns
+         zero_manipulation_count, not_yet_processed_count, and a
+         watch_symbols block explicitly reporting BTC_USDT/ETH_USDT's
+         exact status (ranked / zero_manipulations_found /
+         not_yet_processed / not_in_universe) with their n. Surfaced
+         directly in the Сессия tab header instead of requiring a
+         manual API call. Verified with mocked state covering all four
+         statuses at once (BTC/ETH zero-manipulation, one ranked
+         symbol, one not-yet-processed) — counts and per-symbol status
+         all came back correct — plus the full scan-function/endpoint
+         regression stayed clean.
 """
 
 import os
@@ -1547,7 +1568,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.46.1"
+APP_VERSION = "0.46.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5315,18 +5336,39 @@ def api_session_status():
         symbols_done = STATE["session_symbols_done"]
         next_open_ts = STATE["session_next_open_ts"]
     ranked = []
-    for symbol, s in summaries.items():
-        if not s or not s.get("n"):
+    zero_manipulation_count = 0
+    not_yet_processed_count = 0
+    for symbol in universe:
+        s = summaries.get(symbol)
+        if s is None:
+            not_yet_processed_count += 1
+            continue
+        if not s.get("n"):
+            zero_manipulation_count += 1  # in the universe (passed the liquidity filter), backtested, just never showed a qualifying manipulation — NOT excluded for being illiquid
             continue
         row = dict(s)
         row["symbol"] = symbol
         row["meets_min_sample"] = s["n"] >= SESSION_MIN_SAMPLE
         ranked.append(row)
     ranked.sort(key=lambda r: (-1 if r["meets_min_sample"] else 0, r["win_rate"] or 0, r["n"]), reverse=True)
+    watch_symbols = {}
+    for sym in ("BTC_USDT", "ETH_USDT"):
+        in_universe = sym in universe
+        s = summaries.get(sym)
+        watch_symbols[sym] = {
+            "in_universe": in_universe,
+            "n": s.get("n") if s else None,
+            "status": ("not_in_universe" if not in_universe else
+                       "not_yet_processed" if s is None else
+                       "zero_manipulations_found" if not s.get("n") else "ranked"),
+        }
     return jsonify({
         "enabled": SESSION_ENABLED,
         "universe_size": len(universe),
         "symbols_done": symbols_done,
+        "zero_manipulation_count": zero_manipulation_count,
+        "not_yet_processed_count": not_yet_processed_count,
+        "watch_symbols": watch_symbols,
         "last_backtest_finished": last_backtest_finished,
         "last_backtest_duration": last_backtest_duration,
         "next_open_ts": next_open_ts,
@@ -6339,13 +6381,20 @@ async function refreshSession() {
     : `первый бэктест ещё не завершился (${status.symbols_done}/${status.universe_size || '?'})`;
   const nextOpenTxt = status.next_open_ts ? `следующее открытие сессии: ${fmtTime(status.next_open_ts)}` : '';
   const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
+  const watchTxt = Object.entries(status.watch_symbols || {}).map(([sym, w]) => {
+    const label = {ranked: 'в рейтинге', zero_manipulations_found: 'манипуляций не найдено', not_yet_processed: 'ещё считается', not_in_universe: 'не в вселенной'}[w.status] || w.status;
+    return `${sym}: ${label}${w.n !== null && w.n !== undefined ? ' (n='+w.n+')' : ''}`;
+  }).join(' · ');
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
       Открытие сессии: ${cfg.open_hour_local}:00 (UTC+${cfg.utc_offset_hours}, фикс.) · диапазон проторговки: с ${cfg.range_start_utc_hour}:00 UTC до открытия, ТФ ${cfg.range_tf} ·
       окно манипуляции: первые ${cfg.manipulation_window_min} мин после открытия · мин. выборка для ранжирования: ${cfg.min_sample}<br>
       ${buildTxt} · ${nextOpenTxt}<br>
+      Монет в рейтинге: ${(status.top||[]).length} · манипуляций не найдено: ${status.zero_manipulation_count||0} · ещё не обработано: ${status.not_yet_processed_count||0}<br>
+      ${watchTxt}<br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
-      <span style="font-size:11px;">~ рядом с винрейтом = меньше минимальной выборки (${cfg.min_sample}) — цифра пока ненадёжна</span>
+      <span style="font-size:11px;">~ рядом с винрейтом = меньше минимальной выборки (${cfg.min_sample}) — цифра пока ненадёжна<br>
+      "манипуляций не найдено" = монета прошла отбор по ликвидности и была проверена, просто ни разу не дала подходящий паттерн — не исключена как неликвидная</span>
     </div>`;
   const signalsRows = signals.map(s => {
     const dirClass = s.direction === 'LONG' ? 'long' : 'short';
