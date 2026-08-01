@@ -1184,6 +1184,58 @@ v0.40.1 - color-coded the new overview header line, reusing the app's
          Скальп's TIMEOUT count uses .status-timeout to match. Verified
          JS syntax/undefined-var sweep and the full scan-function/
          endpoint regression stayed clean.
+v0.41.0 - new "Сессия" module: London-session-open liquidity-sweep
+         manipulation (user's screenshot: price consolidates, the
+         session open sweeps one side of that range grabbing stops,
+         then closes back inside — trade the reversal to the opposite
+         side). Core detect_session_manipulation() is shared by live
+         scanning and historical backtesting. Session open is 10:00
+         Europe/Kyiv, DST-aware via zoneinfo (07:00 UTC in summer,
+         08:00 in winter) rather than a hardcoded UTC hour. The
+         consolidation range is the PRIOR (Asian) session — from
+         00:00 UTC to the session open, ~7-8h depending on DST, not a
+         fixed lookback window (corrected mid-session per user
+         feedback). SL sits just beyond the sweep's own extreme
+         (+0.1% buffer), TP is the opposite side of the range — a
+         measured-move target, so RR floats per-day rather than being
+         fixed like the other three modules, which matches the
+         pattern's actual logic.
+         Two real bugs caught and fixed while reconciling work written
+         across separate sessions: (1) a full STATE-key and config
+         duplication (session_backtest vs session_backtest_results/
+         summary, session_last_build_* vs session_last_backtest_*,
+         SESSION_REFRESH_SEC vs SESSION_BACKTEST_REFRESH_SEC) — merged
+         to one consistent schema; (2) the daily wait-loop recomputed
+         next_open_ts mid-sleep, which after crossing the target would
+         see "today's open is in the past" and jump straight to
+         tomorrow — skipping the entire day's window. Fixed by sleeping
+         in bounded chunks toward one fixed target instead of
+         recomputing it, and confirmed with a fake-clock test that the
+         old logic really did skip a day while the new one lands
+         exactly on target.
+         Two loops: session_loop (batch-backtests the whole liquidity-
+         ranked universe once a day) and session_live_loop (sleeps
+         until precisely the next session open, then scans the
+         backtest-ranked universe for 30 min looking for a live
+         signal). Outcome tracking wired into the existing fast
+         scan_loop. Four new API routes, settings toggles (module +
+         its own Telegram alert category), reset button, and a
+         "Сессия" tab with backtest-ranking table + live-signals table,
+         matching every other module's layout.
+         Also caught via direct testing (not just reading the code):
+         session_enabled and telegram_alerts_session were wired into
+         SETTINGS_KEYS and get_settings() but never into
+         apply_settings() — the toggles existed in the UI but silently
+         did nothing. Found by actually posting a settings change and
+         checking the echoed value came back wrong, not by inspection.
+         Fixed, then re-verified every single one of the 16 settings
+         keys round-trips correctly, not just the two that broke.
+         Verified end-to-end: DST-transition test on the real 2026
+         EU changeover date, detection against a direct reproduction
+         of the screenshot's pattern (SHORT case) plus its LONG
+         mirror, all edge cases (no sweep, both-sides-swept ambiguity,
+         too-flat range), the wait-loop fix against the exact bug
+         scenario, and the full scan-function/endpoint regression.
 """
 
 import os
@@ -1193,13 +1245,15 @@ import math
 import threading
 import traceback
 import queue
+import datetime
+from zoneinfo import ZoneInfo
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.40.1"
+APP_VERSION = "0.41.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1499,8 +1553,31 @@ TELEGRAM_ALERTS_VP = os.environ.get("VP_TG_ALERTS_VP", "1") == "1"
 TELEGRAM_ALERTS_DIV = os.environ.get("VP_TG_ALERTS_DIV", "1") == "1"
 TELEGRAM_ALERTS_EMA = os.environ.get("VP_TG_ALERTS_EMA", "1") == "1"
 TELEGRAM_ALERTS_HOURLY = os.environ.get("VP_TG_ALERTS_HOURLY", "1") == "1"
+TELEGRAM_ALERTS_SESSION = os.environ.get("VP_TG_ALERTS_SESSION", "1") == "1"
 HOURLY_STATS_ENABLED = os.environ.get("VP_HOURLY_STATS_ENABLED", "1") == "1"
 HOURLY_STATS_INTERVAL_SEC = int(os.environ.get("VP_HOURLY_STATS_INTERVAL_SEC", 3600))
+
+# ----------------------------------------------------------------------------
+# Session-open manipulation ("Сессия" tab) — London-session liquidity sweep:
+# price consolidates into a range, the session open sweeps one side of that
+# range (grabbing stops / trapping breakout traders), then closes back
+# inside the range — trade the reversal, targeting the opposite side. Same
+# detection function is used for live scanning and historical backtesting.
+# ----------------------------------------------------------------------------
+SESSION_ENABLED = os.environ.get("VP_SESSION_ENABLED", "1") == "1"
+SESSION_TZ_NAME = os.environ.get("VP_SESSION_TZ_NAME", "Europe/Kyiv")
+SESSION_OPEN_HOUR_LOCAL = int(os.environ.get("VP_SESSION_OPEN_HOUR_LOCAL", 10))  # 10:00 in SESSION_TZ_NAME, DST-aware
+SESSION_RANGE_TF = os.environ.get("VP_SESSION_RANGE_TF", "5m")
+SESSION_RANGE_START_UTC_HOUR = int(os.environ.get("VP_SESSION_RANGE_START_UTC_HOUR", 0))  # consolidation range spans [this UTC hour, session open) — i.e. the prior (Asian) session, not a fixed lookback window
+SESSION_MANIPULATION_WINDOW_MIN = int(os.environ.get("VP_SESSION_MANIPULATION_WINDOW_MIN", 30))  # how long after open to watch for the sweep+reversal
+SESSION_SL_BUFFER_PCT = float(os.environ.get("VP_SESSION_SL_BUFFER_PCT", 0.001))  # 0.1% beyond the sweep extreme
+SESSION_MIN_RANGE_PCT = float(os.environ.get("VP_SESSION_MIN_RANGE_PCT", 0.003))  # 0.3% — skip symbols whose 4h range is too tiny to be a meaningful consolidation
+SESSION_BACKTEST_DAYS = int(os.environ.get("VP_SESSION_BACKTEST_DAYS", 60))
+SESSION_UNIVERSE_SIZE = int(os.environ.get("VP_SESSION_UNIVERSE_SIZE", 100))  # backtesting 60 days of 5m per symbol is expensive (paginated fetch) — cap the pool by liquidity
+SESSION_MIN_SAMPLE = int(os.environ.get("VP_SESSION_MIN_SAMPLE", 8))  # don't rank a symbol's backtest as meaningful with fewer closed sessions than this
+SESSION_SIGNAL_HISTORY = 200
+SESSION_REFRESH_SEC = int(os.environ.get("VP_SESSION_REFRESH_SEC", 24 * 3600))  # batch backtest job — once a day is plenty, one new day of data per cycle anyway
+
 TELEGRAM_CHAT_ID = os.environ.get("VP_TG_CHAT", "")
 # Same config file path used by the EMA-screener/Pump_Radar project — if
 # Telegram was already set up there, this picks up the same token/chat_id
@@ -1531,8 +1608,8 @@ SETTINGS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_settings.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "bounce_enabled", "breakout_enabled",
-                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly")
+                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "session_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session")
 
 
 def get_settings():
@@ -1545,12 +1622,14 @@ def get_settings():
         "ema_enabled": EMA_ENABLED,
         "ema_invert_signals": EMA_INVERT_SIGNALS,
         "scalp_enabled": SCALP_ENABLED,
+        "session_enabled": SESSION_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
         "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
         "telegram_alerts_div": TELEGRAM_ALERTS_DIV,
         "telegram_alerts_ema": TELEGRAM_ALERTS_EMA,
         "telegram_alerts_hourly": TELEGRAM_ALERTS_HOURLY,
+        "telegram_alerts_session": TELEGRAM_ALERTS_SESSION,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
     }
 
@@ -1561,8 +1640,8 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, HOURLY_STATS_ENABLED
-    global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SESSION_ENABLED, HOURLY_STATS_ENABLED
+    global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
     if "divergence_enabled" in updates:
@@ -1579,6 +1658,8 @@ def apply_settings(updates):
         EMA_INVERT_SIGNALS = bool(updates["ema_invert_signals"])
     if "scalp_enabled" in updates:
         SCALP_ENABLED = bool(updates["scalp_enabled"])
+    if "session_enabled" in updates:
+        SESSION_ENABLED = bool(updates["session_enabled"])
     if "hourly_stats_enabled" in updates:
         HOURLY_STATS_ENABLED = bool(updates["hourly_stats_enabled"])
     if "telegram_enabled" in updates:
@@ -1589,6 +1670,8 @@ def apply_settings(updates):
         TELEGRAM_ALERTS_DIV = bool(updates["telegram_alerts_div"])
     if "telegram_alerts_ema" in updates:
         TELEGRAM_ALERTS_EMA = bool(updates["telegram_alerts_ema"])
+    if "telegram_alerts_session" in updates:
+        TELEGRAM_ALERTS_SESSION = bool(updates["telegram_alerts_session"])
     if "telegram_alerts_hourly" in updates:
         TELEGRAM_ALERTS_HOURLY = bool(updates["telegram_alerts_hourly"])
 
@@ -1658,6 +1741,17 @@ STATE = {
     "scalp_last_build_duration": None,
     "scalp_symbols_done": 0,
     "scalp_signals": deque(maxlen=SCALP_SIGNAL_HISTORY),
+    # Session-open manipulation — backtest results/summary per symbol,
+    # plus live signals fired during each day's manipulation window.
+    "session_universe": [],
+    "session_backtest_results": {},
+    "session_backtest_summary": {},
+    "session_last_backtest_started": None,
+    "session_last_backtest_finished": None,
+    "session_last_backtest_duration": None,
+    "session_symbols_done": 0,
+    "session_signals": deque(maxlen=SESSION_SIGNAL_HISTORY),
+    "session_next_open_ts": None,
 }
 _cooldowns = {}  # (symbol, zone_key) -> last_alert_ts
 _cooldowns_lock = threading.Lock()
@@ -1667,6 +1761,10 @@ _ema_cooldowns = {}  # symbol -> last_alert_ts
 _ema_cooldowns_lock = threading.Lock()
 _scalp_signal_cooldowns = {}  # (symbol, interval) -> last_signal_ts
 _scalp_signal_cooldowns_lock = threading.Lock()
+_session_signal_cooldowns = {}  # (symbol, session_open_ts) -> True, once fired
+_session_signal_cooldowns_lock = threading.Lock()
+_session_signal_cooldowns = {}  # symbol -> last session_open_ts signaled
+_session_signal_cooldowns_lock = threading.Lock()
 
 
 def has_open_signal(symbol):
@@ -1914,6 +2012,278 @@ def detect_ema_signal(closes, len7=EMA_LEN_7, len14=EMA_LEN_14, len28=EMA_LEN_28
     if sell:
         return {"direction": "SHORT", "ema7": ema7[i], "ema14": ema14[i], "ema28": ema28[i]}
     return None
+
+
+def session_open_utc_ts(ref_ts):
+    """Given any UTC epoch timestamp, returns the UTC epoch timestamp of
+    that SAME calendar day's session open (SESSION_OPEN_HOUR_LOCAL in
+    SESSION_TZ_NAME) — DST-aware, so this stays correct across the
+    winter/summer transition rather than using one fixed UTC hour
+    year-round."""
+    tz = ZoneInfo(SESSION_TZ_NAME)
+    dt_utc = datetime.datetime.fromtimestamp(ref_ts, tz=datetime.timezone.utc)
+    dt_local = dt_utc.astimezone(tz)
+    open_local = dt_local.replace(hour=SESSION_OPEN_HOUR_LOCAL, minute=0, second=0, microsecond=0)
+    return open_local.astimezone(datetime.timezone.utc).timestamp()
+
+
+def detect_session_manipulation(candles, session_open_ts):
+    """Core pattern detector, shared by live scanning and historical
+    backtesting. candles must be 5m (or whatever SESSION_RANGE_TF is)
+    and cover at least [that UTC day's SESSION_RANGE_START_UTC_HOUR,
+    session_open_ts + SESSION_MANIPULATION_WINDOW_MIN]. Returns a dict
+    with direction/entry/range/sl/tp, or None if no confirmed
+    manipulation happened around this particular session open.
+    The consolidation range is the PRIOR (Asian) session, not a fixed
+    lookback window — spans from SESSION_RANGE_START_UTC_HOUR (UTC,
+    default midnight) up to the session open itself, so its length
+    varies with the DST-driven UTC hour of the open (~7-8h) rather
+    than being a fixed duration."""
+    open_dt = datetime.datetime.fromtimestamp(session_open_ts, tz=datetime.timezone.utc)
+    range_start_dt = open_dt.replace(hour=SESSION_RANGE_START_UTC_HOUR, minute=0, second=0, microsecond=0)
+    range_start = range_start_dt.timestamp()
+    range_duration_sec = session_open_ts - range_start
+    range_candles = [c for c in candles if range_start <= c["time"] < session_open_ts]
+    expected_bars = range_duration_sec / INTERVAL_SECONDS.get(SESSION_RANGE_TF, 300)
+    if expected_bars <= 0 or len(range_candles) < expected_bars * 0.6:  # tolerate some gaps, but not a mostly-missing range
+        return None
+    range_high = max(c["high"] for c in range_candles)
+    range_low = min(c["low"] for c in range_candles)
+    if range_low <= 0:
+        return None
+    range_pct = (range_high - range_low) / range_low
+    if range_pct < SESSION_MIN_RANGE_PCT:
+        return None  # too flat to be a meaningful consolidation
+
+    window_end = session_open_ts + SESSION_MANIPULATION_WINDOW_MIN * 60
+    window_candles = [c for c in candles if session_open_ts <= c["time"] < window_end]
+
+    swept_high = swept_low = False
+    sweep_high_extreme = sweep_low_extreme = None
+    for c in window_candles:
+        if c["high"] > range_high:
+            swept_high = True
+            sweep_high_extreme = max(sweep_high_extreme or c["high"], c["high"])
+        if c["low"] < range_low:
+            swept_low = True
+            sweep_low_extreme = min(sweep_low_extreme or c["low"], c["low"])
+
+        confirmed = range_low <= c["close"] <= range_high
+        if not confirmed:
+            continue
+        if swept_high and swept_low:
+            return None  # both sides swept before a clean confirmation — ambiguous, not a clean manipulation
+        if swept_high:
+            entry = c["close"]
+            sl = sweep_high_extreme * (1 + SESSION_SL_BUFFER_PCT)
+            tp = range_low
+            return {"direction": "SHORT", "entry": entry, "sl": sl, "tp": tp,
+                    "range_high": range_high, "range_low": range_low,
+                    "sweep_extreme": sweep_high_extreme, "confirm_time": c["time"]}
+        if swept_low:
+            entry = c["close"]
+            sl = sweep_low_extreme * (1 - SESSION_SL_BUFFER_PCT)
+            tp = range_high
+            return {"direction": "LONG", "entry": entry, "sl": sl, "tp": tp,
+                    "range_high": range_high, "range_low": range_low,
+                    "sweep_extreme": sweep_low_extreme, "confirm_time": c["time"]}
+    return None
+
+
+def track_session_outcome(candles, sig, max_wait_sec=24 * 3600):
+    """Walks forward from the signal's confirm_time looking for TP or SL
+    touch. If a single candle's range covers both (can't tell from OHLC
+    alone which came first), SL is checked first — the conservative
+    assumption, consistent with how a real position would behave if
+    price is volatile enough to touch both in one bar."""
+    future = [c for c in candles if c["time"] >= sig["confirm_time"]]
+    for c in future:
+        if c["time"] - sig["confirm_time"] > max_wait_sec:
+            return "TIMEOUT", None
+        if sig["direction"] == "SHORT":
+            if c["high"] >= sig["sl"]:
+                return "LOSS", c["time"]
+            if c["low"] <= sig["tp"]:
+                return "WIN", c["time"]
+        else:
+            if c["low"] <= sig["sl"]:
+                return "LOSS", c["time"]
+            if c["high"] >= sig["tp"]:
+                return "WIN", c["time"]
+    return "TIMEOUT", None
+
+
+def backtest_session_symbol(symbol, days=SESSION_BACKTEST_DAYS):
+    """Walks the last `days` calendar days for one symbol, running
+    detect_session_manipulation() at each day's own DST-correct session
+    open, and tracking the outcome of any signal found. Returns a list
+    of per-day results — the aggregate stats (win rate etc.) are
+    computed separately so this stays a single-purpose data collector,
+    same split as the scalp module's analyze_excursions/summarize."""
+    now = time.time()
+    fetch_start = now - days * 86400 - 25 * 3600  # generous buffer: covers a full day before the first session's range starts
+    candles = get_candles_range(symbol, SESSION_RANGE_TF, fetch_start, now)
+    if len(candles) < 50:
+        return []
+
+    results = []
+    cur = session_open_utc_ts(fetch_start) + 86400  # first full day inside the fetched window
+    cutoff = now - SESSION_MANIPULATION_WINDOW_MIN * 60  # need the full manipulation window to have elapsed
+    seen_days = 0
+    while cur < cutoff and seen_days < days:
+        sig = detect_session_manipulation(candles, cur)
+        if sig:
+            result, exit_time = track_session_outcome(candles, sig)
+            results.append({
+                "session_open": cur, "direction": sig["direction"],
+                "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
+                "range_high": sig["range_high"], "range_low": sig["range_low"],
+                "result": result, "exit_time": exit_time,
+            })
+        # re-derive from the calendar date rather than a flat +86400 stride —
+        # a fixed-seconds increment would drift by 1h for every day past a
+        # DST transition, since the local 10:00 offset from UTC changes but
+        # a raw +86400 doesn't know that
+        cur = session_open_utc_ts(cur + 86400)
+        seen_days += 1
+    return results
+
+
+def summarize_session_backtest(results):
+    total = len(results)
+    if not total:
+        return {"n": 0, "win_rate": None, "wins": 0, "losses": 0, "timeouts": 0}
+    wins = sum(1 for r in results if r["result"] == "WIN")
+    losses = sum(1 for r in results if r["result"] == "LOSS")
+    timeouts = sum(1 for r in results if r["result"] == "TIMEOUT")
+    closed = wins + losses
+    win_rate = round(wins / closed * 100, 1) if closed else None
+    return {"n": total, "win_rate": win_rate, "wins": wins, "losses": losses, "timeouts": timeouts}
+
+
+def build_session_universe():
+    """Liquid-symbol pool, same source as build_scalp_universe (tickers'
+    24h volume), capped to SESSION_UNIVERSE_SIZE since backtesting
+    SESSION_BACKTEST_DAYS of 5m history per symbol (paginated fetch) is
+    the expensive part here — no separate volatility ranking pass, the
+    backtest results themselves are the ranking."""
+    tickers = get_tickers()
+    seen_vol = {}
+    for t in tickers:
+        name = t.get("contract", "")
+        if not name.endswith("_USDT"):
+            continue
+        vol = t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0
+        try:
+            vol = float(vol)
+        except (TypeError, ValueError):
+            vol = 0.0
+        if vol < MIN_VOL_USD:
+            continue
+        if name not in seen_vol or vol > seen_vol[name]:
+            seen_vol[name] = vol
+    ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
+    return [s[0] for s in ranked[:SESSION_UNIVERSE_SIZE]]
+
+
+def scan_symbol_session_live(symbol, session_open_ts):
+    """Live counterpart to backtest_session_symbol — only called for
+    TODAY's session_open_ts, and only while we're inside the
+    manipulation window (checked by the caller). Fires at most once per
+    (symbol, session_open_ts): a confirmed manipulation doesn't change
+    once found, so re-scanning the same session after a signal exists
+    would just rediscover it."""
+    if not SESSION_ENABLED:
+        return
+    with _session_signal_cooldowns_lock:
+        if _session_signal_cooldowns.get(symbol) == session_open_ts:
+            return
+    try:
+        range_start_dt = datetime.datetime.fromtimestamp(session_open_ts, tz=datetime.timezone.utc).replace(
+            hour=SESSION_RANGE_START_UTC_HOUR, minute=0, second=0, microsecond=0)
+        candles = get_candles_range(symbol, SESSION_RANGE_TF, range_start_dt.timestamp(), time.time())
+        sig = detect_session_manipulation(candles, session_open_ts)
+        if not sig:
+            return
+        with _session_signal_cooldowns_lock:
+            if _session_signal_cooldowns.get(symbol) == session_open_ts:
+                return  # another thread found it first this same cycle
+            _session_signal_cooldowns[symbol] = session_open_ts
+        record = {
+            "symbol": symbol, "direction": sig["direction"],
+            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
+            "range_high": sig["range_high"], "range_low": sig["range_low"],
+            "session_open": session_open_ts, "confirm_time": sig["confirm_time"],
+            "detected_at": time.time(), "status": "OPEN", "result": None,
+            "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
+        }
+        with state_lock:
+            STATE["session_signals"].appendleft(record)
+        arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
+        send_telegram(
+            f"{arrow} {symbol} (открытие сессии — манипуляция)\n"
+            f"entry: {sig['entry']:.6g}\n"
+            f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}",
+            category="session",
+        )
+    except Exception as e:
+        log_error(f"session_live {symbol}: {e}")
+
+
+def update_session_signal_outcomes():
+    now = time.time()
+    with state_lock:
+        open_signals = [s for s in STATE["session_signals"] if s["status"] == "OPEN"]
+    for sig in open_signals:
+        try:
+            candles = get_candles(sig["symbol"], interval=SESSION_RANGE_TF, limit=300)
+            future = [c for c in candles if c["time"] >= sig["confirm_time"]]
+            result = None
+            exit_price = None
+            exit_time = None
+            for c in future:
+                if sig["direction"] == "SHORT":
+                    if c["high"] >= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["low"] <= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+                else:
+                    if c["low"] <= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["high"] >= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+            timed_out = (now - sig["detected_at"]) > 24 * 3600
+            with state_lock:
+                if result:
+                    sig["status"] = "CLOSED"
+                    sig["result"] = result
+                    sig["exit_price"] = exit_price
+                    sig["exit_time"] = exit_time
+                elif timed_out:
+                    sig["status"] = "CLOSED"
+                    sig["result"] = "TIMEOUT"
+                    sig["exit_price"] = candles[-1]["close"] if candles else None
+                    sig["exit_time"] = candles[-1]["time"] if candles else None
+        except Exception as e:
+            log_error(f"session_outcome {sig['symbol']}: {e}")
+
+
+def compute_session_signal_stats():
+    with state_lock:
+        signals = list(STATE["session_signals"])
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+    wins = sum(1 for s in closed if s["result"] == "WIN")
+    losses = sum(1 for s in closed if s["result"] == "LOSS")
+    timeouts = sum(1 for s in signals if s.get("result") == "TIMEOUT")
+    open_n = sum(1 for s in signals if s["status"] == "OPEN")
+    total_closed = len(closed)
+    winrate = round(wins / total_closed * 100, 1) if total_closed else None
+    return {"total": len(signals), "wins": wins, "losses": losses, "timeouts": timeouts,
+            "open": open_n, "winrate": winrate}
 
 
 def compute_ema_tp_sl(direction, entry, rr=EMA_RR, tp_pct=EMA_TP_PCT):
@@ -3620,6 +3990,8 @@ def send_telegram(text, category=None):
         return
     if category == "hourly" and not TELEGRAM_ALERTS_HOURLY:
         return
+    if category == "session" and not TELEGRAM_ALERTS_SESSION:
+        return
 
     def _do_send():
         for attempt in range(1, 4):
@@ -4017,6 +4389,11 @@ def scan_loop():
                     with state_lock:
                         scalp_recs_snapshot = dict(STATE["scalp_recommendations"])
                     futs += [ex.submit(scan_symbol_scalp_signal, sym, rec) for sym, rec in scalp_recs_snapshot.items() if rec]
+                if SESSION_ENABLED:
+                    now_ts = time.time()
+                    todays_open = session_open_utc_ts(now_ts)
+                    if todays_open <= now_ts < todays_open + SESSION_MANIPULATION_WINDOW_MIN * 60:
+                        futs += [ex.submit(scan_symbol_session_live, s, todays_open) for s in universe]
                 for _ in as_completed(futs):
                     pass
             if VOLUME_PROFILE_ENABLED:
@@ -4029,6 +4406,8 @@ def scan_loop():
                 update_ema_outcomes()
             if SCALP_SIGNALS_ENABLED:
                 update_scalp_signal_outcomes()
+            if SESSION_ENABLED:
+                update_session_signal_outcomes()
             save_state()
             t1 = time.time()
             with state_lock:
@@ -4138,6 +4517,99 @@ def scalp_loop():
         time.sleep(max(60, SCALP_REFRESH_SEC))
 
 
+def session_loop():
+    """Own daily-ish cadence — batch-backtests the whole universe for the
+    session-open manipulation pattern, one day of history at a time in
+    steady state. Separate thread from both the fast scan_loop and the
+    slower scalp_loop."""
+    while True:
+        try:
+            if not SESSION_ENABLED:
+                time.sleep(60)
+                continue
+            t0 = time.time()
+            with state_lock:
+                STATE["session_last_backtest_started"] = t0
+                STATE["session_symbols_done"] = 0
+
+            universe = build_session_universe()
+            with state_lock:
+                STATE["session_universe"] = universe
+                # purge symbols that dropped out of this cycle's universe
+                STATE["session_backtest_results"] = {}
+                STATE["session_backtest_summary"] = {}
+
+            def process_one(symbol):
+                try:
+                    results = backtest_session_symbol(symbol)
+                    summary = summarize_session_backtest(results)
+                    with state_lock:
+                        STATE["session_backtest_results"][symbol] = results
+                        STATE["session_backtest_summary"][symbol] = summary
+                        STATE["session_symbols_done"] += 1
+                except Exception as e:
+                    log_error(f"session process_one {symbol}: {e}")
+
+            with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+                futs = [ex.submit(process_one, s) for s in universe]
+                for _ in as_completed(futs):
+                    pass
+
+            t1 = time.time()
+            with state_lock:
+                STATE["session_last_backtest_finished"] = t1
+                STATE["session_last_backtest_duration"] = round(t1 - t0, 1)
+        except Exception as e:
+            log_error(f"session_loop: {e}")
+        time.sleep(max(60, SESSION_REFRESH_SEC))
+
+
+def session_live_loop():
+    """Handles the daily live-signal window: sleeps until shortly before
+    the next session open, then polls the backtested universe (ranked by
+    win rate) during the SESSION_MANIPULATION_WINDOW_MIN window looking
+    for a live manipulation. Separate from session_loop's slow backtest
+    refresh entirely — this one wakes up precisely once a day."""
+    while True:
+        try:
+            if not SESSION_ENABLED:
+                time.sleep(60)
+                continue
+            now = time.time()
+            next_open = session_open_utc_ts(now)
+            if next_open <= now:
+                next_open = session_open_utc_ts(now + 86400)
+            with state_lock:
+                STATE["session_next_open_ts"] = next_open
+
+            # sleep in bounded chunks toward this SAME fixed target — do
+            # NOT recompute next_open mid-wait, or sleeping past it would
+            # make the recompute see "today's open is in the past" and
+            # jump straight to tomorrow, skipping today's window entirely
+            while True:
+                remaining = next_open - time.time()
+                if remaining <= 0:
+                    break
+                time.sleep(min(remaining, 1800))
+
+            with state_lock:
+                summaries = dict(STATE["session_backtest_summary"])
+                universe = list(STATE["session_universe"]) or list(summaries.keys())
+            candidates = [s for s in universe
+                          if summaries.get(s, {}).get("n", 0) >= SESSION_MIN_SAMPLE
+                          and (summaries.get(s, {}).get("win_rate") or 0) >= 50]
+            window_end = next_open + SESSION_MANIPULATION_WINDOW_MIN * 60
+            while time.time() < window_end:
+                with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+                    futs = [ex.submit(scan_symbol_session_live, s, next_open) for s in candidates]
+                    for _ in as_completed(futs):
+                        pass
+                time.sleep(60)
+        except Exception as e:
+            log_error(f"session_live_loop: {e}")
+            time.sleep(60)
+
+
 # ----------------------------------------------------------------------------
 # API
 # ----------------------------------------------------------------------------
@@ -4150,6 +4622,7 @@ def api_overview():
     div = compute_divergence_stats()
     ema = compute_ema_stats()
     scalp = compute_scalp_signal_stats()
+    session = compute_session_signal_stats()
     return jsonify({
         "volume": {"winrate": vp["winrate"], "wins": vp["wins"], "losses": vp["losses"], "open": vp["open"],
                     "enabled": VOLUME_PROFILE_ENABLED},
@@ -4159,6 +4632,8 @@ def api_overview():
                  "enabled": EMA_ENABLED, "invert": EMA_INVERT_SIGNALS},
         "scalp": {"winrate": scalp["win_rate"], "wins": scalp["wins"], "timeouts": scalp["timeouts"], "open": scalp["open"],
                    "enabled": SCALP_SIGNALS_ENABLED},
+        "session": {"winrate": session["winrate"], "wins": session["wins"], "losses": session["losses"], "open": session["open"],
+                     "enabled": SESSION_ENABLED},
     })
 
 
@@ -4469,6 +4944,76 @@ def api_reset_scalp():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/session/status")
+def api_session_status():
+    with state_lock:
+        universe = list(STATE["session_universe"])
+        summaries = dict(STATE["session_backtest_summary"])
+        last_backtest_finished = STATE["session_last_backtest_finished"]
+        last_backtest_duration = STATE["session_last_backtest_duration"]
+        symbols_done = STATE["session_symbols_done"]
+        next_open_ts = STATE["session_next_open_ts"]
+    ranked = []
+    for symbol, s in summaries.items():
+        if not s or not s.get("n"):
+            continue
+        row = dict(s)
+        row["symbol"] = symbol
+        row["meets_min_sample"] = s["n"] >= SESSION_MIN_SAMPLE
+        ranked.append(row)
+    ranked.sort(key=lambda r: (-1 if r["meets_min_sample"] else 0, r["win_rate"] or 0, r["n"]), reverse=True)
+    return jsonify({
+        "enabled": SESSION_ENABLED,
+        "universe_size": len(universe),
+        "symbols_done": symbols_done,
+        "last_backtest_finished": last_backtest_finished,
+        "last_backtest_duration": last_backtest_duration,
+        "next_open_ts": next_open_ts,
+        "signals_stats": compute_session_signal_stats(),
+        "config": {
+            "tz_name": SESSION_TZ_NAME, "open_hour_local": SESSION_OPEN_HOUR_LOCAL,
+            "range_tf": SESSION_RANGE_TF, "range_start_utc_hour": SESSION_RANGE_START_UTC_HOUR,
+            "manipulation_window_min": SESSION_MANIPULATION_WINDOW_MIN,
+            "min_sample": SESSION_MIN_SAMPLE, "backtest_days": SESSION_BACKTEST_DAYS,
+        },
+        "top": ranked,
+    })
+
+
+@app.route("/api/session/signals")
+def api_session_signals():
+    with state_lock:
+        return jsonify(list(STATE["session_signals"]))
+
+
+@app.route("/api/session/symbol/<symbol>")
+def api_session_symbol(symbol):
+    with state_lock:
+        results = STATE["session_backtest_results"].get(symbol)
+        summary = STATE["session_backtest_summary"].get(symbol)
+    if results is None:
+        return jsonify({"error": "no data for this symbol yet"}), 404
+    return jsonify({"symbol": symbol, "summary": summary, "results": results})
+
+
+@app.route("/api/reset/session", methods=["POST"])
+def api_reset_session():
+    try:
+        with state_lock:
+            STATE["session_universe"] = []
+            STATE["session_backtest_results"] = {}
+            STATE["session_backtest_summary"] = {}
+            STATE["session_last_backtest_started"] = None
+            STATE["session_last_backtest_finished"] = None
+            STATE["session_last_backtest_duration"] = None
+            STATE["session_symbols_done"] = 0
+            STATE["session_signals"].clear()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset_session: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/reset/ema", methods=["POST"])
 def api_reset_ema():
     try:
@@ -4589,7 +5134,7 @@ INDEX_HTML = """<!doctype html>
   body { margin:0; background:#0b0e14; color:#d7dee8; font-family: -apple-system, Roboto, Segoe UI, sans-serif; }
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
   #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #settingsModal.open { display:flex; flex-direction:column; }
@@ -4659,6 +5204,7 @@ INDEX_HTML = """<!doctype html>
       <button id="resetDivBtn">Очистить дивер</button>
       <button id="resetEmaBtn">Очистить индикатор</button>
       <button id="resetScalpBtn">Очистить скальпинг</button>
+      <button id="resetSessionBtn">Очистить сессию</button>
     </div>
   </div>
   <div id="status">загрузка...</div>
@@ -4669,6 +5215,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="divergence">Дивергенции</div>
   <div class="tab" data-tab="ema">EMA</div>
   <div class="tab" data-tab="scalp">Скальпинг</div>
+  <div class="tab" data-tab="session">Сессия</div>
 </div>
 <div class="panel">
   <div id="tuningPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
@@ -4687,6 +5234,7 @@ INDEX_HTML = """<!doctype html>
     <tbody></tbody>
   </table>
   <div id="scalpPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
+  <div id="sessionPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
 </div>
 
@@ -4790,6 +5338,13 @@ INDEX_HTML = """<!doctype html>
     </div>
     <div class="settingRow">
       <div>
+        <div class="label">Сессия (манипуляция на открытии)</div>
+        <div class="sub">бэктест раз в сутки + живой скан в окне открытия Лондона</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setSession"><span class="switchSlider"></span></label>
+    </div>
+    <div class="settingRow">
+      <div>
         <div class="label">Уведомления в Telegram</div>
         <div class="sub" id="setTelegramSub">проверка...</div>
       </div>
@@ -4816,12 +5371,19 @@ INDEX_HTML = """<!doctype html>
       </div>
       <label class="switch"><input type="checkbox" id="setTelegramEma"><span class="switchSlider"></span></label>
     </div>
-    <div class="settingRow" style="border-bottom:none;">
+    <div class="settingRow">
       <div>
         <div class="label">↳ Часовая статистика</div>
         <div class="sub">сводка винрейта по всем режимам, раз в час</div>
       </div>
       <label class="switch"><input type="checkbox" id="setTelegramHourly"><span class="switchSlider"></span></label>
+    </div>
+    <div class="settingRow" style="border-bottom:none;">
+      <div>
+        <div class="label">↳ Алерты сессии</div>
+        <div class="sub">живые сигналы манипуляции на открытии</div>
+      </div>
+      <label class="switch"><input type="checkbox" id="setTelegramSession"><span class="switchSlider"></span></label>
     </div>
     <div class="dim" style="font-size:12px;margin-top:8px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
   </div>
@@ -4845,10 +5407,12 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('emaTable').style.display = activeTab === 'ema' ? 'table' : 'none';
     document.getElementById('emaStatsPanel').style.display = activeTab === 'ema' ? 'block' : 'none';
     document.getElementById('scalpPanel').style.display = activeTab === 'scalp' ? 'block' : 'none';
+    document.getElementById('sessionPanel').style.display = activeTab === 'session' ? 'block' : 'none';
     if (activeTab === 'signals') refreshTuning();
     if (activeTab === 'divergence') refreshDivergence();
     if (activeTab === 'ema') refreshEma();
     if (activeTab === 'scalp') refreshScalp();
+    if (activeTab === 'session') refreshSession();
   };
 });
 
@@ -4885,6 +5449,7 @@ async function refreshOverview() {
       const scalpWr = `<span class="${scalpWrClass}">${o.scalp.winrate !== null && o.scalp.winrate !== undefined ? o.scalp.winrate+'%' : '-'}</span>`;
       parts.push(`<b>Скальп</b> ${scalpWr} (<span class="win">${o.scalp.wins}W</span>/<span class="status-timeout">${o.scalp.timeouts}T</span>) ${openTxt(o.scalp.open)}`);
     }
+    if (o.session.enabled) parts.push(`<b>Сессия</b> ${wr(o.session)} (${wl(o.session.wins, o.session.losses)}) ${openTxt(o.session.open)}`);
     document.getElementById('overview').innerHTML = parts.join(' &nbsp;·&nbsp; ');
   } catch(e) {}
 }
@@ -5297,6 +5862,104 @@ async function openScalpDetail(symbol) {
   }
 }
 
+let sessionExpanded = null;
+
+function fmtSessionRow(r, rank) {
+  const wrClass = (r.win_rate === null || r.win_rate === undefined) ? 'dim' : (r.win_rate >= 50 ? 'win' : 'loss');
+  const sampleTag = r.meets_min_sample ? '' : '<span title="Меньше минимальной выборки — ненадёжно" style="color:#e0a030;">~</span>';
+  return `<tr data-symbol="${r.symbol}" style="cursor:pointer;">
+    <td class="dim">${rank}</td>
+    <td>${r.symbol}</td>
+    <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}${sampleTag}</td>
+    <td class="dim">n=${r.n}</td>
+    <td class="win">${r.wins}W</td>
+    <td class="loss">${r.losses}L</td>
+    <td class="status-timeout">${r.timeouts}T</td>
+  </tr>`;
+}
+
+async function refreshSession() {
+  const status = await (await fetch('/api/session/status')).json();
+  const signals = await (await fetch('/api/session/signals')).json();
+  const panel = document.getElementById('sessionPanel');
+  const cfg = status.config || {};
+  const ss = status.signals_stats || {};
+  const buildTxt = status.last_backtest_finished
+    ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · монет обработано: ${status.symbols_done}/${status.universe_size}`
+    : `первый бэктест ещё не завершился (${status.symbols_done}/${status.universe_size || '?'})`;
+  const nextOpenTxt = status.next_open_ts ? `следующее открытие сессии: ${fmtTime(status.next_open_ts)}` : '';
+  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
+  const headerHtml = `
+    <div class="dim" style="margin-bottom:8px;">
+      Открытие сессии: ${cfg.open_hour_local}:00 (${cfg.tz_name}) · диапазон проторговки: с ${cfg.range_start_utc_hour}:00 UTC до открытия, ТФ ${cfg.range_tf} ·
+      окно манипуляции: первые ${cfg.manipulation_window_min} мин после открытия · мин. выборка для ранжирования: ${cfg.min_sample}<br>
+      ${buildTxt} · ${nextOpenTxt}<br>
+      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
+      <span style="font-size:11px;">~ рядом с винрейтом = меньше минимальной выборки (${cfg.min_sample}) — цифра пока ненадёжна</span>
+    </div>`;
+  const signalsRows = signals.map(s => {
+    const dirClass = s.direction === 'LONG' ? 'long' : 'short';
+    let statusHtml;
+    if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
+    else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
+    else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
+    else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
+    return `<tr>
+      <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td>
+      <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.sl)}</td><td class="dim">${fmt(s.tp)}</td>
+      <td>${statusHtml}</td><td class="dim">${fmtTime(s.session_open)}</td>
+    </tr>`;
+  }).join('');
+  const signalsTableHtml = signals.length ? `
+    <div style="overflow-x:auto;margin-bottom:14px;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>Status</th><th>Открытие</th></tr></thead>
+      <tbody>${signalsRows}</tbody>
+    </table>
+    </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
+  if (!status.top || status.top.length === 0) {
+    panel.innerHTML = headerHtml + signalsTableHtml + '<div class="dim">Пока нет результатов бэктеста — либо ещё считается, либо ни у одной монеты не нашлось манипуляций.</div>';
+    return;
+  }
+  const rows = status.top.map((r, i) => fmtSessionRow(r, i + 1)).join('');
+  panel.innerHTML = headerHtml + signalsTableHtml + `
+    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (сортировка: сначала прошедшие мин. выборку, потом по винрейту):</div>
+    <div style="overflow-x:auto;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>#</th><th>Symbol</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th><th>T</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    </div>
+    <div id="sessionDetail" style="margin-top:12px;"></div>`;
+  document.querySelectorAll('#sessionPanel tbody tr[data-symbol]').forEach(tr => {
+    tr.onclick = () => openSessionDetail(tr.dataset.symbol);
+  });
+}
+
+async function openSessionDetail(symbol) {
+  const detail = document.getElementById('sessionDetail');
+  if (sessionExpanded === symbol) {
+    detail.innerHTML = '';
+    sessionExpanded = null;
+    return;
+  }
+  sessionExpanded = symbol;
+  detail.innerHTML = '<div class="dim">загрузка...</div>';
+  try {
+    const j = await (await fetch(`/api/session/symbol/${symbol}`)).json();
+    if (j.error) { detail.innerHTML = `<div class="dim">${j.error}</div>`; return; }
+    const rows = (j.results || []).map(r => {
+      const dirClass = r.direction === 'LONG' ? 'long' : 'short';
+      const resClass = r.result === 'WIN' ? 'win' : (r.result === 'LOSS' ? 'loss' : 'status-timeout');
+      return `${fmtTime(r.session_open)}: <span class="${dirClass}">${r.direction}</span> <span class="${resClass}">${r.result}</span>`;
+    }).join(' · ');
+    detail.innerHTML = `<div style="border-top:1px solid #1c2433;padding-top:8px;"><b>${symbol}</b> — история по дням:<br>
+      <span style="font-size:11px;">${rows || 'нет данных'}</span></div>`;
+  } catch (e) {
+    detail.innerHTML = `<div class="dim">ошибка загрузки: ${e}</div>`;
+  }
+}
+
 async function refreshAll() {
   await refreshStatus();
   await refreshOverview();
@@ -5305,6 +5968,7 @@ async function refreshAll() {
   if (activeTab === 'divergence') await refreshDivergence();
   if (activeTab === 'ema') await refreshEma();
   if (activeTab === 'scalp') await refreshScalp();
+  if (activeTab === 'session') await refreshSession();
 }
 refreshAll();
 setInterval(refreshAll, 15000);
@@ -5342,6 +6006,9 @@ wireResetButton('resetEmaBtn', '/api/reset/ema',
 wireResetButton('resetScalpBtn', '/api/reset/scalp',
   'Удалить накопленную статистику скальпинга (вселенная, данные по монетам, рекомендации)? Остальное не тронет. Это необратимо.',
   'Очистить скальпинг');
+wireResetButton('resetSessionBtn', '/api/reset/session',
+  'Удалить накопленный бэктест и сигналы по манипуляции на открытии сессии? Остальное не тронет. Это необратимо.',
+  'Очистить сессию');
 
 // ---------------- Settings modal ----------------
 const settingsModal = document.getElementById('settingsModal');
@@ -5354,11 +6021,13 @@ const setInputs = {
   ema_enabled: document.getElementById('setEma'),
   ema_invert_signals: document.getElementById('setEmaInvert'),
   scalp_enabled: document.getElementById('setScalp'),
+  session_enabled: document.getElementById('setSession'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
   telegram_alerts_div: document.getElementById('setTelegramDiv'),
   telegram_alerts_ema: document.getElementById('setTelegramEma'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
+  telegram_alerts_session: document.getElementById('setTelegramSession'),
 };
 
 function applySettingsToInputs(s) {
@@ -5975,6 +6644,8 @@ if __name__ == "__main__":
     t.start()
     threading.Thread(target=scalp_loop, daemon=True).start()
     threading.Thread(target=hourly_stats_loop, daemon=True).start()
+    threading.Thread(target=session_loop, daemon=True).start()
+    threading.Thread(target=session_live_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
     tg_status = "настроен" if (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) else "не настроен"
     print(f"VP-POC Screener v{APP_VERSION} — http://127.0.0.1:{port} — Telegram: {tg_status}")
