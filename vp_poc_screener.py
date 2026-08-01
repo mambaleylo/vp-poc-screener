@@ -1364,6 +1364,31 @@ v0.43.0 - chart visualization for Сессия, matching the click-to-view
          end-to-end, JS syntax/undefined-var/duplicate-id sweeps all
          clean, and the full scan-function/endpoint regression
          (including the new chart route) stayed clean.
+v0.44.0 - user hit computeYRangeForZone's scaling being uninformative
+         again (screenshot: a divergence chart with a huge dead-empty
+         upper section, entry/TP/SL squeezed low, hard to read) and
+         asked to drop the "smart" scaling entirely — for Сессия
+         charts specifically at first (plain candles, no tricks), then
+         extended to all the older chart types too after this latest
+         example. Given the zone-bias logic had already been tuned
+         through several rounds this session (30% target -> capped
+         compression -> etc.) and was still producing bad results
+         sometimes, simplifying beats iterating further: added
+         computeYRangeSimple() — natural min/max of the visible candles
+         plus the trade levels, with plain 5% padding, no compression,
+         no "near-bars" logic. Replaced all four computeYRangeForZone()
+         call sites (VP, divergence, EMA, session) with it, then
+         deleted computeYRangeForZone() entirely since nothing called
+         it anymore. Session's chart also dropped its windowAroundTime
+         crop and now shows every candle in the API response directly
+         (the fetch range itself is already reasonably bounded) rather
+         than a narrowed window, matching the "just show many candles"
+         request literally.
+         Verified: JS syntax/undefined-var sweep clean, confirmed via
+         grep that computeYRangeForZone has zero remaining references
+         anywhere (not even the definition), and the full scan-function/
+         endpoint regression (all four chart-backing scan functions +
+         the session chart route) stayed clean.
 """
 
 import os
@@ -1380,7 +1405,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.43.0"
+APP_VERSION = "0.44.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6385,8 +6410,8 @@ function drawChart(data, signalRow) {
   const chartH = H - padTop - padBottom;
 
   const hasTrade = signalRow && signalRow.entry !== undefined && signalRow.sl !== undefined;
-  const { hi, lo } = computeYRangeForZone(candles, hasTrade ? signalRow.entry : undefined,
-    hasTrade ? signalRow.sl : undefined, hasTrade ? signalRow.tp : undefined, signalRow && signalRow.time);
+  const { hi, lo } = computeYRangeSimple(candles, hasTrade ? signalRow.entry : undefined,
+    hasTrade ? signalRow.sl : undefined, hasTrade ? signalRow.tp : undefined);
   const range = hi - lo || 1;
   const y = (price) => padTop + (hi - price) / range * chartH;
 
@@ -6557,7 +6582,7 @@ function drawDivergenceChart(data, row) {
   const findIdx = (t) => candles.findIndex(c => c.time === t);
 
   // ---- price panel ----
-  const { hi, lo } = computeYRangeForZone(candles, row && row.entry, row && row.sl, row && row.tp, row && row.time);
+  const { hi, lo } = computeYRangeSimple(candles, row && row.entry, row && row.sl, row && row.tp);
   const range = hi - lo || 1;
   const yP = (price) => (hi - price) / range * priceH;
 
@@ -6711,48 +6736,20 @@ function windowParamsForInterval(interval) {
   return { before: 15, total: 60 };
 }
 
-function computeYRangeForZone(candles, entry, sl, tp, sigTime, targetFrac, minKeepFrac) {
-  targetFrac = targetFrac || 0.25;
-  minKeepFrac = minKeepFrac || 0.12; // never compress the near range below this fraction — keeps most bars visible even through a strong trend
-  const nearAfter = 8;
-  let sigIdx = candles.length - 1;
-  if (sigTime !== undefined) {
-    const found = candles.findIndex(c => c.time === sigTime);
-    if (found >= 0) sigIdx = found;
-  }
-  const nearEnd = Math.min(candles.length, sigIdx + nearAfter + 1);
-  const nearCandles = candles.slice(0, nearEnd);
-  const nearSrc = nearCandles.length ? nearCandles : candles;
-  let baseHi = Math.max(...nearSrc.map(c => c.high));
-  let baseLo = Math.min(...nearSrc.map(c => c.low));
-
+function computeYRangeSimple(candles, entry, sl, tp) {
+  // deliberately no zone-compression logic — after repeated back-and-forth
+  // tuning that was still sometimes uninformative (entry point invisible
+  // or most candles clipped depending on the case), simple natural
+  // min/max of what's actually shown is more reliably readable.
+  let hi = Math.max(...candles.map(c => c.high));
+  let lo = Math.min(...candles.map(c => c.low));
   if (entry !== undefined && sl !== undefined && tp !== undefined) {
-    const zoneTop = Math.max(entry, sl, tp);
-    const zoneBottom = Math.min(entry, sl, tp);
-    baseHi = Math.max(baseHi, zoneTop);
-    baseLo = Math.min(baseLo, zoneBottom);
-    const zoneHeight = (zoneTop - zoneBottom) || zoneTop * 0.001 || 1;
-    const baseRange = (baseHi - baseLo) || zoneHeight;
-    const zoneFrac = zoneHeight / baseRange;
-    if (zoneFrac < targetFrac) {
-      // Showing the full lead-up (e.g. a strong trend into the signal) and
-      // making the zone visually prominent can genuinely conflict — you
-      // can't have a 5x price swing AND a tiny zone both filling most of
-      // the screen. Compress toward the zone, but cap it at minKeepFrac of
-      // the natural range so at least a predictable, bounded amount of
-      // context always survives rather than collapsing to almost nothing.
-      const wanted = zoneHeight / targetFrac;
-      const floor = baseRange * minKeepFrac;
-      const newRange = Math.max(wanted, floor);
-      if (newRange < baseRange) {
-        const zoneMid = (zoneTop + zoneBottom) / 2;
-        const pad = newRange * 0.03;
-        return { hi: zoneMid + newRange / 2 + pad, lo: zoneMid - newRange / 2 - pad };
-      }
-    }
+    hi = Math.max(hi, entry, sl, tp);
+    lo = Math.min(lo, entry, sl, tp);
   }
-  const pad = (baseHi - baseLo) * 0.05 || baseHi * 0.01;
-  return { hi: baseHi + pad, lo: baseLo - pad };
+  const range = (hi - lo) || (hi * 0.02) || 1;
+  const pad = range * 0.05;
+  return { hi: hi + pad, lo: lo - pad };
 }
 
 function drawEmaChart(data, row) {
@@ -6781,7 +6778,7 @@ function drawEmaChart(data, row) {
   const bodyW = Math.max(1, slot * 0.6);
   const xAt = (i) => i * slot + slot / 2;
 
-  const { hi, lo } = computeYRangeForZone(candles, row && row.entry, row && row.sl, row && row.tp, row && row.time);
+  const { hi, lo } = computeYRangeSimple(candles, row && row.entry, row && row.sl, row && row.tp);
   const range = hi - lo || 1;
   const yP = (price) => (hi - price) / range * H;
 
@@ -6876,12 +6873,9 @@ function drawSessionChart(data) {
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, W, H);
 
-  const allCandles = data.candles || [];
-  if (!allCandles.length) return;
-  const sig = data.signal;
-  const { start: winStart, end: winEnd } = windowAroundTime(allCandles, data.session_open, 30, 90);
-  const candles = allCandles.slice(winStart, winEnd);
+  const candles = data.candles || [];
   if (!candles.length) return;
+  const sig = data.signal;
 
   const padRight = 54;
   const chartW = W - padRight;
@@ -6893,7 +6887,7 @@ function drawSessionChart(data) {
   const entry = sig ? sig.entry : undefined;
   const sl = sig ? sig.sl : undefined;
   const tp = sig ? sig.tp : undefined;
-  const { hi, lo } = computeYRangeForZone(candles, entry, sl, tp, data.session_open);
+  const { hi, lo } = computeYRangeSimple(candles, entry, sl, tp);
   const range = hi - lo || 1;
   const yP = (price) => (hi - price) / range * H;
 
