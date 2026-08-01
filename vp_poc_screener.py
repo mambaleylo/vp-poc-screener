@@ -1150,6 +1150,32 @@ v0.39.1 - removed the weekly (1w) timeframe from EMA scanning per user
          EMA_INTERVALS resolves to ['1h'], the full scan-function sweep
          stayed clean, and /api/ema/status reports the single interval
          correctly.
+v0.40.0 - UI restructure per user feedback (with screenshot): the
+         persistent header showed detailed Volume-specific stats
+         (winrate breakdown, bounce/breakout split, auto-tune progress,
+         rejected-this-scan counts) even while a completely different
+         tab like EMA was open — confusing, and inconsistent with every
+         other mode which keeps its stats inside its own tab. New
+         /api/overview endpoint returns a compact winrate/W-L/open
+         summary for all four modes in one call (avoids hitting four
+         separate endpoints on every 15s poll regardless of which tab
+         is active). Header now shows just the general v/scan-time line
+         plus one compact multi-mode line — "Volume 41.4% (63W/89L)
+         откр.20 · Див[Р] 33.3%... · EMA[Р] 54.7%... · Скальп 60%..." —
+         with a [Р] marker when a mode's reverse toggle is on. All the
+         detailed Volume-specific content that used to live in the
+         header moved into the Volume tab itself (refreshTuning now
+         also fetches /api/status and prepends that detail above the
+         existing MFE/MAE stats), matching the layout every other tab
+         already uses. Also removed the Watchlist tab entirely per
+         direct request — tab button, table markup, refreshWatch(), and
+         all references cleaned up (the underlying /api/watchlist route
+         is left as-is, just unused by the UI now).
+         Verified: JS syntax and undefined-variable sweep clean, no
+         leftover watch/watchTable/refreshWatch references anywhere
+         live in the code (only the historical changelog mention
+         remains), /api/overview returns correctly shaped data, and the
+         full scan-function/endpoint regression stayed clean.
 """
 
 import os
@@ -1165,7 +1191,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.39.1"
+APP_VERSION = "0.40.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4107,6 +4133,27 @@ def scalp_loop():
 # ----------------------------------------------------------------------------
 # API
 # ----------------------------------------------------------------------------
+@app.route("/api/overview")
+def api_overview():
+    """Compact win-rate summary across all four modes, for the persistent
+    header — one call instead of hitting four separate endpoints on
+    every poll regardless of which tab is open."""
+    vp = compute_signal_stats()
+    div = compute_divergence_stats()
+    ema = compute_ema_stats()
+    scalp = compute_scalp_signal_stats()
+    return jsonify({
+        "volume": {"winrate": vp["winrate"], "wins": vp["wins"], "losses": vp["losses"], "open": vp["open"],
+                    "enabled": VOLUME_PROFILE_ENABLED},
+        "divergence": {"winrate": div["winrate"], "wins": div["wins"], "losses": div["losses"], "open": div["open"],
+                        "enabled": DIVERGENCE_ENABLED, "invert": DIV_INVERT_SIGNALS},
+        "ema": {"winrate": ema["winrate"], "wins": ema["wins"], "losses": ema["losses"], "open": ema["open"],
+                 "enabled": EMA_ENABLED, "invert": EMA_INVERT_SIGNALS},
+        "scalp": {"winrate": scalp["win_rate"], "wins": scalp["wins"], "timeouts": scalp["timeouts"], "open": scalp["open"],
+                   "enabled": SCALP_SIGNALS_ENABLED},
+    })
+
+
 @app.route("/api/status")
 def api_status():
     stats = compute_signal_stats()
@@ -4607,12 +4654,10 @@ INDEX_HTML = """<!doctype html>
     </div>
   </div>
   <div id="status">загрузка...</div>
-  <div id="stats" class="dim" style="margin-top:2px;font-size:11px;"></div>
-  <div id="filterStats" class="dim" style="margin-top:2px;font-size:11px;"></div>
+  <div id="overview" class="dim" style="margin-top:2px;font-size:12px;"></div>
 </header>
 <div class="tabs">
   <div class="tab active" data-tab="signals">Volume</div>
-  <div class="tab" data-tab="watch">Watchlist</div>
   <div class="tab" data-tab="divergence">Дивергенции</div>
   <div class="tab" data-tab="ema">EMA</div>
   <div class="tab" data-tab="scalp">Скальпинг</div>
@@ -4621,10 +4666,6 @@ INDEX_HTML = """<!doctype html>
   <div id="tuningPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
   <table id="signalsTable" style="display:table">
     <thead><tr><th>Symbol</th><th>Dir</th><th>Reason</th><th>Entry</th><th>SL</th><th>TP</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
-    <tbody></tbody>
-  </table>
-  <table id="watchTable" style="display:none">
-    <thead><tr><th>Symbol</th><th>Price</th><th>Nearest zone</th><th>Dist %</th></tr></thead>
     <tbody></tbody>
   </table>
   <div id="divStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
@@ -4790,7 +4831,6 @@ document.querySelectorAll('.tab').forEach(el => {
     el.classList.add('active');
     activeTab = el.dataset.tab;
     document.getElementById('signalsTable').style.display = activeTab === 'signals' ? 'table' : 'none';
-    document.getElementById('watchTable').style.display = activeTab === 'watch' ? 'table' : 'none';
     document.getElementById('tuningPanel').style.display = activeTab === 'signals' ? 'block' : 'none';
     document.getElementById('divTable').style.display = activeTab === 'divergence' ? 'table' : 'none';
     document.getElementById('divStatsPanel').style.display = activeTab === 'divergence' ? 'block' : 'none';
@@ -4807,7 +4847,7 @@ document.querySelectorAll('.tab').forEach(el => {
 async function refreshStatus() {
   try {
     const s = await (await fetch('/api/status')).json();
-    const vpTabs = ['signals', 'watch'].map(t => document.querySelector(`.tab[data-tab="${t}"]`));
+    const vpTabs = ['signals'].map(t => document.querySelector(`.tab[data-tab="${t}"]`));
     vpTabs.forEach(el => { el.style.display = s.volume_profile_enabled === false ? 'none' : ''; });
     if (!vpModeChecked) {
       vpModeChecked = true;
@@ -4818,21 +4858,19 @@ async function refreshStatus() {
     const el = document.getElementById('status');
     const scanTxt = s.last_scan_finished ? `скан ${s.last_scan_duration}s, ${s.universe_size} пар (искл. ${s.excluded_low_quality||0} неликвид)` : 'сканирование...';
     el.textContent = `v${s.version} · ${scanTxt}`;
-    const st = s.stats || {};
-    const wr = st.winrate !== null && st.winrate !== undefined ? `${st.winrate}%` : '-';
-    const at = s.auto_tune || {};
-    const atTxt = at.enabled
-      ? `автотюнинг: ${at.tuned_symbols}/${s.universe_size} монет уже подобрано (обновление каждые ${at.refresh_hours}ч, +${at.per_cycle}/скан)`
-      : 'автотюнинг выключен';
-    const br = st.by_reason || {};
-    const bounceTxt = br.bounce && br.bounce.total ? `bounce ${br.bounce.winrate}% (${br.bounce.total})` : 'bounce -';
-    const breakoutTxt = br.breakout && br.breakout.total ? `breakout ${br.breakout.winrate}% (${br.breakout.total})` : 'breakout -';
-    document.getElementById('stats').textContent =
-      `Винрейт: ${wr} (${st.wins||0}W / ${st.losses||0}L, timeout ${st.timeouts||0}) · ${bounceTxt} · ${breakoutTxt} · открытых: ${st.open||0} · RR ${s.config ? s.config.rr : ''} · ${atTxt}`;
-    const cv = st.current_version || {};
-    const cvTxt = cv.total ? `с v${s.version}: ${cv.winrate}% (${cv.wins}W/${cv.losses}L)` : `с v${s.version}: пока нет закрытых`;
-    document.getElementById('filterStats').textContent =
-      `За этот скан отклонено — тренд: ${s.filtered_by_trend||0}, объём: ${s.filtered_by_volume||0}, OI: ${s.filtered_by_oi||0} · ${cvTxt}`;
+  } catch(e) {}
+}
+
+async function refreshOverview() {
+  try {
+    const o = await (await fetch('/api/overview')).json();
+    const wr = (m) => m.winrate !== null && m.winrate !== undefined ? `${m.winrate}%` : '-';
+    const parts = [];
+    if (o.volume.enabled) parts.push(`<b>Volume</b> ${wr(o.volume)} (${o.volume.wins}W/${o.volume.losses}L) откр.${o.volume.open}`);
+    if (o.divergence.enabled) parts.push(`<b>Див</b>${o.divergence.invert?'[Р]':''} ${wr(o.divergence)} (${o.divergence.wins}W/${o.divergence.losses}L) откр.${o.divergence.open}`);
+    if (o.ema.enabled) parts.push(`<b>EMA</b>${o.ema.invert?'[Р]':''} ${wr(o.ema)} (${o.ema.wins}W/${o.ema.losses}L) откр.${o.ema.open}`);
+    if (o.scalp.enabled) parts.push(`<b>Скальп</b> ${o.scalp.winrate !== null && o.scalp.winrate !== undefined ? o.scalp.winrate+'%' : '-'} (${o.scalp.wins}W/${o.scalp.timeouts}T) откр.${o.scalp.open}`);
+    document.getElementById('overview').innerHTML = parts.join(' &nbsp;·&nbsp; ');
   } catch(e) {}
 }
 
@@ -4871,22 +4909,6 @@ async function refreshSignals() {
   }
 }
 
-async function refreshWatch() {
-  const rows = await (await fetch('/api/watchlist')).json();
-  const tbody = document.querySelector('#watchTable tbody');
-  tbody.innerHTML = '';
-  document.getElementById('emptyMsg').style.display = (activeTab==='watch' && rows.length===0) ? 'block' : 'none';
-  for (const r of rows) {
-    const tr = document.createElement('tr');
-    tr.innerHTML = `<td>${r.symbol}</td>
-      <td>${fmt(r.price)}</td>
-      <td class="dim">${fmt(r.nearest_bottom,5)}-${fmt(r.nearest_top,5)}</td>
-      <td>${r.dist_pct !== null ? r.dist_pct.toFixed(2)+'%' : '-'}</td>`;
-    tr.onclick = () => openChart(r);
-    tbody.appendChild(tr);
-  }
-}
-
 function fmtMfeMae(r, key) {
   const closeKey = key + '_at_close';
   const cur = r[key];
@@ -4905,13 +4927,33 @@ function fmtStat(s) {
 }
 
 async function refreshTuning() {
-  const t = await (await fetch('/api/tuning')).json();
+  const [t, s] = await Promise.all([
+    (await fetch('/api/tuning')).json(),
+    (await fetch('/api/status')).json(),
+  ]);
   const el = document.getElementById('tuningPanel');
+  const st = s.stats || {};
+  const wr = st.winrate !== null && st.winrate !== undefined ? `${st.winrate}%` : '-';
+  const at = s.auto_tune || {};
+  const atTxt = at.enabled
+    ? `автотюнинг: ${at.tuned_symbols}/${s.universe_size} монет уже подобрано (обновление каждые ${at.refresh_hours}ч, +${at.per_cycle}/скан)`
+    : 'автотюнинг выключен';
+  const br = st.by_reason || {};
+  const bounceTxt = br.bounce && br.bounce.total ? `bounce ${br.bounce.winrate}% (${br.bounce.total})` : 'bounce -';
+  const breakoutTxt = br.breakout && br.breakout.total ? `breakout ${br.breakout.winrate}% (${br.breakout.total})` : 'breakout -';
+  const cv = st.current_version || {};
+  const cvTxt = cv.total ? `с v${s.version}: ${cv.winrate}% (${cv.wins}W/${cv.losses}L)` : `с v${s.version}: пока нет закрытых`;
+  const detailHtml = `
+    <div class="dim" style="margin-bottom:10px;">
+      <b>Volume</b> · Винрейт: ${wr} (${st.wins||0}W / ${st.losses||0}L, timeout ${st.timeouts||0}) · ${bounceTxt} · ${breakoutTxt} · открытых: ${st.open||0} · RR ${s.config ? s.config.rr : ''}<br>
+      ${atTxt}<br>
+      За этот скан отклонено — тренд: ${s.filtered_by_trend||0}, объём: ${s.filtered_by_volume||0}, OI: ${s.filtered_by_oi||0} · ${cvTxt}
+    </div>`;
   if (!t.count) {
-    el.innerHTML = '<div class="dim" style="padding-top:10px;border-top:1px solid #1c2433;"><b>Объём (Volume Profile) — статистика</b><br>Пока недостаточно данных — подожди пару циклов скана.</div>';
+    el.innerHTML = detailHtml + '<div class="dim" style="padding-top:10px;border-top:1px solid #1c2433;"><b>Объём (Volume Profile) — статистика</b><br>Пока недостаточно данных — подожди пару циклов скана.</div>';
     return;
   }
-  el.innerHTML = `
+  el.innerHTML = detailHtml + `
     <div class="dim" style="margin-bottom:10px;padding-top:10px;border-top:1px solid #1c2433;">
       <b>Объём (Volume Profile) — статистика</b> · Всего сигналов с накопленными данными: ${t.count} ·
       WIN: ${t.wins_n} · LOSS: ${t.losses_n} · OPEN: ${t.open_n}
@@ -5242,8 +5284,8 @@ async function openScalpDetail(symbol) {
 
 async function refreshAll() {
   await refreshStatus();
+  await refreshOverview();
   await refreshSignals();
-  await refreshWatch();
   if (activeTab === 'signals') await refreshTuning();
   if (activeTab === 'divergence') await refreshDivergence();
   if (activeTab === 'ema') await refreshEma();
