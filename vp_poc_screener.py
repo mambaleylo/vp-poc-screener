@@ -1389,6 +1389,26 @@ v0.44.0 - user hit computeYRangeForZone's scaling being uninformative
          anywhere (not even the definition), and the full scan-function/
          endpoint regression (all four chart-backing scan functions +
          the session chart route) stayed clean.
+v0.44.1 - two fixes from user feedback (screenshots): (1) Сессия's
+         per-symbol day-by-day detail (sessionDetail) rendered BELOW
+         the full backtest-ranking table, so clicking any row required
+         scrolling past potentially 100+ rows to see what was clicked —
+         moved it above the ranking table instead, same "don't make me
+         scroll for what I just clicked" fix applied to other tabs'
+         stats earlier this session. (2) Volume's winrate got WORSE
+         after the v0.37.0 experiments, not better (45.3% -> 33.3%) —
+         reverted both OI_THRESHOLD_PCT (0.05 -> back to 0.08) and
+         PARAM_GRID_BUFFER (dropped the re-added 0.15, back to
+         [0.20,0.35,0.50]) per direct request rather than continuing to
+         chase it. Existing per-symbol tuned overrides that had already
+         settled on buffer=0.15 during the ~week those changes were
+         live would otherwise keep using it until their next scheduled
+         48h re-tune — pointed the user at the existing "Очистить
+         объём" button (already clears SYMBOL_OVERRIDES) instead of
+         writing new reset logic, since that mechanism already exists
+         and forces an immediate re-tune against the reverted grid.
+         Verified: full scan-function/endpoint regression stayed clean,
+         and confirmed the reverted config values load correctly.
 """
 
 import os
@@ -1405,7 +1425,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.44.0"
+APP_VERSION = "0.44.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1672,7 +1692,7 @@ VOL_CONFIRM_RATIO = float(os.environ.get("VP_VOL_CONFIRM_RATIO", 1.15))  # trigg
 OI_FILTER_ENABLED = os.environ.get("VP_OI_FILTER", "1") == "1"
 OI_INTERVAL = os.environ.get("VP_OI_INTERVAL", "1h")
 OI_LOOKBACK = int(os.environ.get("VP_OI_LOOKBACK", 24))
-OI_THRESHOLD_PCT = float(os.environ.get("VP_OI_THRESHOLD_PCT", 0.05))  # reverted 0.08 -> 0.05 — breakout's win rate degraded to near-breakeven (41.7% -> 34.5%) since the 0.05->0.08 raise, testing whether the looser OI filter was the cause
+OI_THRESHOLD_PCT = float(os.environ.get("VP_OI_THRESHOLD_PCT", 0.08))  # reverted back from 0.05 — the 0.05 experiment (v0.37.0) was meant to test whether it explained breakout's earlier decline, but overall Volume winrate got WORSE after the change (45.3% -> 33.3%), not better, so reverting per direct user request rather than continuing to chase it
 
 # --- data quality filter: skip symbols that look illiquid/stale on the
 # candle feed itself (near-zero volume bars, flat high==low bars, or an
@@ -3909,7 +3929,7 @@ AUTO_TUNE_REFRESH_SEC = int(os.environ.get("VP_AUTO_TUNE_REFRESH_SEC", 48 * 3600
 PARAM_GRID_LOOKBACK = [60, 100, 150]
 PARAM_GRID_HVN = [3, 6, 9]
 PARAM_GRID_RR = [1.5, 2.0, 2.5]              # data showed WIN median MFE ~2.8R, so the old 1.0 floor rarely won and was dropped in favor of testing further out
-PARAM_GRID_BUFFER = [0.15, 0.20, 0.35, 0.50]  # 0.15 dropped earlier when LOSS median MFE was ~1.7R (tight buffers got stopped out before reversing "the right way") — re-added now that LOSS MFE has fallen to ~0.48R and WIN MAE sits at ~0.18R (winners barely dip toward the stop at all), suggesting the wider-only grid's justification no longer holds; letting the auto-tuner test it again rather than assuming
+PARAM_GRID_BUFFER = [0.20, 0.35, 0.50]  # reverted — 0.15 was re-added in v0.37.0 to test whether tight buffers now perform better, but overall Volume winrate got WORSE after that change (45.3% -> 33.3%), not better, so reverting per direct user request
 
 SYMBOL_OVERRIDES = {}  # symbol -> {lookback, hvn_top_n, rr, buffer_pct, winrate, trades, optimized_at}
 
@@ -6166,14 +6186,14 @@ async function refreshSession() {
   }
   const rows = status.top.map((r, i) => fmtSessionRow(r, i + 1)).join('');
   panel.innerHTML = headerHtml + signalsTableHtml + `
+    <div id="sessionDetail" style="margin-bottom:12px;"></div>
     <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (сортировка: сначала прошедшие мин. выборку, потом по винрейту):</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
       <thead><tr><th>#</th><th>Symbol</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th><th>T</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    </div>
-    <div id="sessionDetail" style="margin-top:12px;"></div>`;
+    </div>`;
   wireSessionRowClicks();
 }
 
