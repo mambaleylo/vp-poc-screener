@@ -1301,6 +1301,30 @@ v0.42.0 - tzdata still wouldn't install on the user's Termux — pip
          correctly IDENTICAL across all of them, which is the whole
          point), and the full scan-function/endpoint regression
          stayed clean.
+v0.42.1 - the chunk-halving fix from v0.41.2 didn't actually solve the
+         backtest 400s — user's log showed it still failing even after
+         self-halving all the way down to a 28-point request. That
+         ruled out "chunk too big" as the cause. Root cause, confirmed
+         via a public ccxt issue: Gate silently started enforcing
+         "Candlestick too long ago. Maximum 10000 points recently are
+         allowed" around Feb 2026 — a hard floor on how far `from` can
+         be from NOW, totally independent of how small the requested
+         span is, so no amount of chunk-size reduction could ever have
+         fixed it. For 5m candles that's ~34.7 days; SESSION_BACKTEST_
+         DAYS defaulted to 60, comfortably over the wall. Two fixes:
+         (1) SESSION_BACKTEST_DAYS 60->30, safely inside the limit; (2)
+         get_candles_range() now proactively clamps its start_ts up
+         front to the earliest allowed point (9800 candles back, a
+         margin under the confirmed 10000) instead of ever attempting
+         the doomed request — no wasted 400s at all now, vs. before
+         where every single symbol burned 5-6 failing requests each
+         cycle before giving up. Kept the v0.41.2 chunk-halving as a
+         secondary safety net (a genuine over-sized-chunk rejection may
+         still be real; Gate's own docs disagree with each other on
+         that separate number too), but it's no longer load-bearing for
+         this specific failure. Verified directly: a simulated 60-day
+         request against a mocked API confirms the first chunk's `from`
+         now lands at ~34 days back, not 60.
 """
 
 import os
@@ -1317,7 +1341,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.42.0"
+APP_VERSION = "0.42.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1636,7 +1660,7 @@ SESSION_RANGE_START_UTC_HOUR = int(os.environ.get("VP_SESSION_RANGE_START_UTC_HO
 SESSION_MANIPULATION_WINDOW_MIN = int(os.environ.get("VP_SESSION_MANIPULATION_WINDOW_MIN", 30))  # how long after open to watch for the sweep+reversal
 SESSION_SL_BUFFER_PCT = float(os.environ.get("VP_SESSION_SL_BUFFER_PCT", 0.001))  # 0.1% beyond the sweep extreme
 SESSION_MIN_RANGE_PCT = float(os.environ.get("VP_SESSION_MIN_RANGE_PCT", 0.003))  # 0.3% — skip symbols whose 4h range is too tiny to be a meaningful consolidation
-SESSION_BACKTEST_DAYS = int(os.environ.get("VP_SESSION_BACKTEST_DAYS", 60))
+SESSION_BACKTEST_DAYS = int(os.environ.get("VP_SESSION_BACKTEST_DAYS", 30))  # was 60 — Gate enforces a hard "from" floor of ~10000 candles back from now (added without notice ~Feb 2026); for 5m candles that's ~34.7 days, so 30 leaves margin
 SESSION_UNIVERSE_SIZE = int(os.environ.get("VP_SESSION_UNIVERSE_SIZE", 100))  # backtesting 60 days of 5m per symbol is expensive (paginated fetch) — cap the pool by liquidity
 SESSION_MIN_SAMPLE = int(os.environ.get("VP_SESSION_MIN_SAMPLE", 8))  # don't rank a symbol's backtest as meaningful with fewer closed sessions than this
 SESSION_SIGNAL_HISTORY = 200
@@ -3035,19 +3059,28 @@ def get_candles_range(symbol, interval, start_ts, end_ts):
     — the same "bar magnification" idea as the original indicator, just
     implemented via REST polling instead of Pine's
     request.security_lower_tf. Also used by the session-manipulation
-    module's 60-day backtests, which is a much larger range than this
-    was originally exercised at.
-    The actual per-request point cap isn't reliably documented — Gate's
-    own SDK docs disagree with each other (1000 in some, 2000 in
-    others), and a chunk sized for 1900 points 400'd in practice at the
-    60-day backtest scale. Rather than trust a single hardcoded number,
-    this starts conservative and, if a chunk still 400s, halves it and
-    retries — self-adjusting to whatever the real limit turns out to be
-    instead of needing to know it in advance."""
+    module's multi-week backtests, a much larger range than this was
+    originally exercised at.
+    CONFIRMED (not just suspected): Gate enforces a hard floor on how
+    far back `from` can be — "Candlestick too long ago. Maximum 10000
+    points recently are allowed" — added server-side without notice
+    around Feb 2026. This is a floor on the START of the request
+    relative to NOW, completely independent of how small the requested
+    span is — a real-world test confirmed even a 28-point chunk still
+    400s if its `from` is past that floor. (An earlier version of this
+    docstring guessed the problem was purely a too-large per-request
+    point cap and added the retry-with-smaller-chunk logic below for
+    that; that logic doesn't help THIS failure mode at all, but is kept
+    as a secondary safety net for genuine over-sized-chunk rejections,
+    which may also be real — Gate's own SDK docs disagree with each
+    other on that number, 1000 in some places and 2000 in others.)
+    Clamps `start_ts` forward to the earliest allowed point up front so
+    this doesn't even attempt the doomed request."""
     interval_sec = INTERVAL_SECONDS.get(interval, 60)
+    earliest_allowed = time.time() - 9800 * interval_sec  # margin under the confirmed ~10000-candle floor
     chunk_points = 900  # conservative starting point — under both documented figures; shrinks (and stays shrunk) the first time the server rejects it
     seen = {}
-    cur = int(start_ts)
+    cur = max(int(start_ts), int(earliest_allowed))
     end_ts = int(end_ts)
     while cur < end_ts:
         while True:
