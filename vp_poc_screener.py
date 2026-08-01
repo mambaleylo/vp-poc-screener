@@ -1336,6 +1336,34 @@ v0.42.2 - user confirmed they're actually in Moscow, so v0.42.0's
          now exactly 7.0h on all four previously-varying test dates
          (summer, winter, both 2026 DST transition dates), confirming
          the fix's own behavior matches the corrected docstring.
+v0.43.0 - chart visualization for Сессия, matching the click-to-view
+         pattern every other mode already has. New /api/session/chart/
+         <symbol>?session_open=<ts> route: re-runs detect_session_
+         manipulation() on freshly fetched candles for that specific
+         day rather than looking anything up from stored records —
+         works identically for a past backtest day or a live signal,
+         since both are just (symbol, session_open) and detection is
+         fully deterministic from candle data alone. New sessionModal
+         (mirrors the div/ema modal pattern exactly: own canvas, own
+         header, own close button) with drawSessionChart() — candles,
+         a shaded band for the consolidation range (range_high/low), a
+         dashed vertical line marking the session open, and entry/SL/TP
+         level lines, reusing the existing windowAroundTime/
+         computeYRangeForZone/drawLevelLine helpers rather than
+         reinventing them. Both places a user would want to click now
+         open the chart: live-signal rows directly, and each day in a
+         symbol's backtest-history detail view (previously plain text,
+         now clickable spans). Had to fix the click-wiring for the
+         Сессия tab's two different row types (live signals vs.
+         backtest-ranking rows) which both carry data-symbol — split
+         into wireSessionRowClicks() disambiguating on the presence of
+         data-session-open, and fixed a real gap where the early-return
+         path (no backtest results yet) never wired the live-signals
+         rows' clicks at all.
+         Verified: the chart endpoint returns correctly shaped data
+         end-to-end, JS syntax/undefined-var/duplicate-id sweeps all
+         clean, and the full scan-function/endpoint regression
+         (including the new chart route) stayed clean.
 """
 
 import os
@@ -1352,7 +1380,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.42.2"
+APP_VERSION = "0.43.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5134,6 +5162,40 @@ def api_session_symbol(symbol):
     return jsonify({"symbol": symbol, "summary": summary, "results": results})
 
 
+@app.route("/api/session/chart/<symbol>")
+def api_session_chart(symbol):
+    """Re-derives the manipulation for one specific session open by
+    re-running detect_session_manipulation() on freshly fetched candles
+    — works identically for a past backtest day or a live signal, since
+    both are just (symbol, session_open) and the detection is fully
+    deterministic from the candle data alone, no need to look anything
+    up from stored records."""
+    try:
+        session_open = float(request.args.get("session_open"))
+        range_start_dt = datetime.datetime.fromtimestamp(session_open, tz=datetime.timezone.utc).replace(
+            hour=SESSION_RANGE_START_UTC_HOUR, minute=0, second=0, microsecond=0)
+        fetch_start = range_start_dt.timestamp() - 2 * 3600
+        fetch_end = session_open + SESSION_MANIPULATION_WINDOW_MIN * 60 + 8 * 3600
+        candles = get_candles_range(symbol, SESSION_RANGE_TF, fetch_start, fetch_end)
+        sig = detect_session_manipulation(candles, session_open)
+        result = None
+        exit_time = None
+        exit_price = None
+        if sig:
+            result, exit_time = track_session_outcome(candles, sig)
+            if result == "WIN":
+                exit_price = sig["tp"]
+            elif result == "LOSS":
+                exit_price = sig["sl"]
+        return jsonify({
+            "symbol": symbol, "candles": candles, "session_open": session_open,
+            "signal": sig, "result": result, "exit_time": exit_time, "exit_price": exit_price,
+        })
+    except Exception as e:
+        log_error(f"api_session_chart {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/reset/session", methods=["POST"])
 def api_reset_session():
     try:
@@ -5328,6 +5390,12 @@ INDEX_HTML = """<!doctype html>
   #emaModalHeader h2 { font-size:15px; margin:0; }
   #emaCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
   #emaChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
+  #sessionModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
+  #sessionModal.open { display:flex; flex-direction:column; }
+  #sessionModalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
+  #sessionModalHeader h2 { font-size:15px; margin:0; }
+  #sessionCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
+  #sessionChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
   .dim { color:#8b98ab; }
   .empty { padding:30px 14px; text-align:center; color:#6b7688; font-size:13px; }
 </style>
@@ -5410,6 +5478,17 @@ INDEX_HTML = """<!doctype html>
     <button id="emaCloseBtn">Закрыть</button>
   </div>
   <div id="emaChartWrap"><canvas id="emaChartCanvas"></canvas></div>
+</div>
+
+<div id="sessionModal">
+  <div id="sessionModalHeader">
+    <div>
+      <h2 id="sessionModalTitle">-</h2>
+      <div id="sessionModalParams" class="dim" style="font-size:11px;margin-top:2px;"></div>
+    </div>
+    <button id="sessionCloseBtn">Закрыть</button>
+  </div>
+  <div id="sessionChartWrap"><canvas id="sessionChartCanvas"></canvas></div>
 </div>
 
 <div id="settingsModal">
@@ -6042,7 +6121,7 @@ async function refreshSession() {
     else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
     else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
     else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
-    return `<tr>
+    return `<tr data-symbol="${s.symbol}" data-session-open="${s.session_open}" style="cursor:pointer;">
       <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td>
       <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.sl)}</td><td class="dim">${fmt(s.tp)}</td>
       <td>${statusHtml}</td><td class="dim">${fmtTime(s.session_open)}</td>
@@ -6057,6 +6136,7 @@ async function refreshSession() {
     </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
   if (!status.top || status.top.length === 0) {
     panel.innerHTML = headerHtml + signalsTableHtml + '<div class="dim">Пока нет результатов бэктеста — либо ещё считается, либо ни у одной монеты не нашлось манипуляций.</div>';
+    wireSessionRowClicks();
     return;
   }
   const rows = status.top.map((r, i) => fmtSessionRow(r, i + 1)).join('');
@@ -6069,7 +6149,14 @@ async function refreshSession() {
     </table>
     </div>
     <div id="sessionDetail" style="margin-top:12px;"></div>`;
-  document.querySelectorAll('#sessionPanel tbody tr[data-symbol]').forEach(tr => {
+  wireSessionRowClicks();
+}
+
+function wireSessionRowClicks() {
+  document.querySelectorAll('#sessionPanel tbody tr[data-session-open]').forEach(tr => {
+    tr.onclick = () => openSessionChart(tr.dataset.symbol, tr.dataset.sessionOpen);
+  });
+  document.querySelectorAll('#sessionPanel tbody tr[data-symbol]:not([data-session-open])').forEach(tr => {
     tr.onclick = () => openSessionDetail(tr.dataset.symbol);
   });
 }
@@ -6089,10 +6176,13 @@ async function openSessionDetail(symbol) {
     const rows = (j.results || []).map(r => {
       const dirClass = r.direction === 'LONG' ? 'long' : 'short';
       const resClass = r.result === 'WIN' ? 'win' : (r.result === 'LOSS' ? 'loss' : 'status-timeout');
-      return `${fmtTime(r.session_open)}: <span class="${dirClass}">${r.direction}</span> <span class="${resClass}">${r.result}</span>`;
+      return `<span class="sessionDayLink" data-symbol="${symbol}" data-session-open="${r.session_open}" style="cursor:pointer;text-decoration:underline dotted;">${fmtTime(r.session_open)}: <span class="${dirClass}">${r.direction}</span> <span class="${resClass}">${r.result}</span></span>`;
     }).join(' · ');
-    detail.innerHTML = `<div style="border-top:1px solid #1c2433;padding-top:8px;"><b>${symbol}</b> — история по дням:<br>
+    detail.innerHTML = `<div style="border-top:1px solid #1c2433;padding-top:8px;"><b>${symbol}</b> — история по дням (клик открывает график):<br>
       <span style="font-size:11px;">${rows || 'нет данных'}</span></div>`;
+    detail.querySelectorAll('.sessionDayLink').forEach(el => {
+      el.onclick = () => openSessionChart(el.dataset.symbol, el.dataset.sessionOpen);
+    });
   } catch (e) {
     detail.innerHTML = `<div class="dim">ошибка загрузки: ${e}</div>`;
   }
@@ -6749,6 +6839,115 @@ function drawEmaChart(data, row) {
   }
 }
 
+// ---------------- Session chart modal ----------------
+const sessionModal = document.getElementById('sessionModal');
+document.getElementById('sessionCloseBtn').onclick = () => sessionModal.classList.remove('open');
+let currentSessionData = null;
+
+async function openSessionChart(symbol, sessionOpen) {
+  document.getElementById('sessionModalTitle').textContent = symbol;
+  document.getElementById('sessionModalParams').textContent = 'загрузка...';
+  sessionModal.classList.add('open');
+  try {
+    const data = await (await fetch(`/api/session/chart/${symbol}?session_open=${sessionOpen}`)).json();
+    if (data.error) { document.getElementById('sessionModalParams').textContent = data.error; return; }
+    currentSessionData = data;
+    const sig = data.signal;
+    if (!sig) {
+      document.getElementById('sessionModalParams').textContent = `${fmtTime(sessionOpen)} · манипуляции в этот день не было`;
+    } else {
+      const resTxt = data.result ? ` · ${data.result}${data.exit_price ? ' @ '+fmtNum(data.exit_price) : ''}` : '';
+      document.getElementById('sessionModalParams').textContent =
+        `${fmtTime(sessionOpen)} · ${sig.direction} · entry ${fmtNum(sig.entry)} · SL ${fmtNum(sig.sl)} · TP ${fmtNum(sig.tp)}${resTxt}`;
+    }
+    drawSessionChart(data);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function drawSessionChart(data) {
+  const canvas = document.getElementById('sessionChartCanvas');
+  const wrap = document.getElementById('sessionChartWrap');
+  const dpr = window.devicePixelRatio || 1;
+  const W = wrap.clientWidth, H = wrap.clientHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+
+  const allCandles = data.candles || [];
+  if (!allCandles.length) return;
+  const sig = data.signal;
+  const { start: winStart, end: winEnd } = windowAroundTime(allCandles, data.session_open, 30, 90);
+  const candles = allCandles.slice(winStart, winEnd);
+  if (!candles.length) return;
+
+  const padRight = 54;
+  const chartW = W - padRight;
+  const n = candles.length;
+  const slot = chartW / n;
+  const bodyW = Math.max(1, slot * 0.6);
+  const xAt = (i) => i * slot + slot / 2;
+
+  const entry = sig ? sig.entry : undefined;
+  const sl = sig ? sig.sl : undefined;
+  const tp = sig ? sig.tp : undefined;
+  const { hi, lo } = computeYRangeForZone(candles, entry, sl, tp, data.session_open);
+  const range = hi - lo || 1;
+  const yP = (price) => (hi - price) / range * H;
+
+  if (sig) {
+    ctx.fillStyle = 'rgba(80,160,255,0.08)';
+    const topY = yP(sig.range_high), botY = yP(sig.range_low);
+    ctx.fillRect(0, Math.min(topY, botY), chartW, Math.abs(botY - topY));
+  }
+
+  candles.forEach((c, i) => {
+    const cx = xAt(i);
+    const up = c.close >= c.open;
+    ctx.strokeStyle = ctx.fillStyle = up ? '#3ddc97' : '#ff6b6b';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx, yP(c.high));
+    ctx.lineTo(cx, yP(c.low));
+    ctx.stroke();
+    const top = yP(Math.max(c.open, c.close));
+    const h = Math.max(1, Math.abs(yP(c.open) - yP(c.close)));
+    ctx.fillRect(cx - bodyW / 2, top, bodyW, h);
+  });
+
+  ctx.fillStyle = '#6b7688';
+  ctx.font = '10px sans-serif';
+  for (let i = 0; i <= 3; i++) {
+    const p = hi - (range * i / 3);
+    const yy = yP(p);
+    ctx.fillText(fmtNum(p), chartW + 4, yy + 3);
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(chartW, yy); ctx.stroke();
+  }
+
+  const openIdx = candles.findIndex(c => c.time === data.session_open);
+  if (openIdx >= 0) {
+    const ox = xAt(openIdx);
+    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath(); ctx.moveTo(ox, 0); ctx.lineTo(ox, H); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = 'bold 10px sans-serif';
+    ctx.fillText('OPEN', ox + 3, 12);
+  }
+
+  if (sig) {
+    drawLevelLine(ctx, yP(sig.range_high), chartW, '#5aa8ff', 'RANGE HIGH ' + fmtNum(sig.range_high));
+    drawLevelLine(ctx, yP(sig.range_low), chartW, '#5aa8ff', 'RANGE LOW ' + fmtNum(sig.range_low));
+    drawLevelLine(ctx, yP(sig.entry), chartW, '#e8b93d', 'ENTRY ' + fmtNum(sig.entry));
+    drawLevelLine(ctx, yP(sig.sl), chartW, '#ff6b6b', 'SL ' + fmtNum(sig.sl));
+    drawLevelLine(ctx, yP(sig.tp), chartW, '#3ddc97', 'TP ' + fmtNum(sig.tp));
+  }
+}
+
 window.addEventListener('resize', () => {
   if (modal.classList.contains('open') && currentData) {
     drawChart(currentData, currentRow);
@@ -6758,6 +6957,9 @@ window.addEventListener('resize', () => {
   }
   if (emaModal.classList.contains('open') && currentEmaData) {
     drawEmaChart(currentEmaData, currentEmaRow);
+  }
+  if (sessionModal.classList.contains('open') && currentSessionData) {
+    drawSessionChart(currentSessionData);
   }
 });
 </script>
