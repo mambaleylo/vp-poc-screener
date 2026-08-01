@@ -1516,6 +1516,21 @@ v0.46.0 - two scalp module changes from direct feedback: (1) live
          and updates the stats correctly, the top-N selection picks
          the right highest-scored symbol, JS syntax is clean, and the
          full scan-function/endpoint regression stayed clean.
+v0.46.1 - SCALP_SIGNALS_ENABLED had no settings UI at all — it was
+         wired into scan_loop and the outputs it feeds, but never added
+         to SETTINGS_KEYS/get_settings/apply_settings or given a
+         checkbox, so there was no way to toggle live scalp signals
+         off separately from the underlying stats module. Added
+         scalp_signals_enabled throughout (settings dict, mutation
+         logic — remembered this time, unlike the session_enabled miss
+         a few versions back — checkbox registration) and a new "↳
+         Живые сигналы" row under Скальпинг in the settings UI. Also
+         fixed the Скальпинг group's now-stale "без сигналов"
+         description, left over from before signal generation existed.
+         Verified: the new toggle actually changes SCALP_SIGNALS_ENABLED
+         (not just echoes back the posted value), a full round-trip of
+         all 17 settings keys still applies correctly, and the full
+         scan-function/endpoint regression stayed clean.
 """
 
 import os
@@ -1532,7 +1547,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.46.0"
+APP_VERSION = "0.46.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1888,7 +1903,7 @@ SETTINGS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_settings.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "bounce_enabled", "breakout_enabled",
-                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "session_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session")
 
 
@@ -1902,6 +1917,7 @@ def get_settings():
         "ema_enabled": EMA_ENABLED,
         "ema_invert_signals": EMA_INVERT_SIGNALS,
         "scalp_enabled": SCALP_ENABLED,
+        "scalp_signals_enabled": SCALP_SIGNALS_ENABLED,
         "session_enabled": SESSION_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
@@ -1920,7 +1936,7 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SESSION_ENABLED, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, HOURLY_STATS_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
@@ -1938,6 +1954,8 @@ def apply_settings(updates):
         EMA_INVERT_SIGNALS = bool(updates["ema_invert_signals"])
     if "scalp_enabled" in updates:
         SCALP_ENABLED = bool(updates["scalp_enabled"])
+    if "scalp_signals_enabled" in updates:
+        SCALP_SIGNALS_ENABLED = bool(updates["scalp_signals_enabled"])
     if "session_enabled" in updates:
         SESSION_ENABLED = bool(updates["session_enabled"])
     if "hourly_stats_enabled" in updates:
@@ -5744,10 +5762,17 @@ INDEX_HTML = """<!doctype html>
       <div class="settingsGroupTitle">Скальпинг</div>
       <div class="settingRow">
         <div>
-          <div class="label">Скальпинг (статистика волатильности)</div>
-          <div class="sub">фоновый сбор данных раз в несколько часов, без сигналов</div>
+          <div class="label">Скальпинг</div>
+          <div class="sub">фоновый сбор статистики волатильности, раз в несколько часов</div>
         </div>
         <label class="switch"><input type="checkbox" id="setScalp"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Живые сигналы</div>
+          <div class="sub">топ монет по score, вход на закрытии свечи, TP/SL из статистики</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setScalpSignals"><span class="switchSlider"></span></label>
       </div>
     </div>
 
@@ -6457,6 +6482,7 @@ const setInputs = {
   ema_enabled: document.getElementById('setEma'),
   ema_invert_signals: document.getElementById('setEmaInvert'),
   scalp_enabled: document.getElementById('setScalp'),
+  scalp_signals_enabled: document.getElementById('setScalpSignals'),
   session_enabled: document.getElementById('setSession'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
