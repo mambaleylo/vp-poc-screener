@@ -1452,6 +1452,26 @@ v0.45.0 - Сессия's manipulation detection redesigned per user feedback
          regression stayed clean. Old backtest/signal history under the
          previous detection logic is no longer comparable — worth a
          "Очистить сессию" before trusting fresh numbers.
+v0.45.1 - two fixes from a live example (BANK_USDT LONG, screenshot):
+         (1) SESSION_SL_BUFFER_PCT 0.1%->0.5% — the chart showed a
+         shallow bounce confirming the pattern (closing back inside the
+         range) before the REAL low was actually reached a bit later —
+         a double-dip, where the first reversal attempt fails and stops
+         get run again before the genuine move. The old 0.1% buffer sat
+         right at the shallow bounce's own extreme, so the deeper
+         second dip stopped the trade out just before it turned into a
+         winner (visibly ran most of the way to TP afterward). Didn't
+         redesign the confirmation window itself — that would need more
+         live data to get right — just gave the stop more room to
+         survive exactly this kind of continuation.
+         (2) SESSION_UNIVERSE_SIZE 100->50, per direct request to focus
+         on the most liquid coins specifically — already sorted by 24h
+         volume descending, this just cuts deeper into that ranking
+         rather than reaching into the less-liquid tail.
+         Verified: new config values load correctly (buffer=0.005,
+         universe size=50 confirmed against a mocked 150-symbol
+         ticker list), and the full scan-function/endpoint regression
+         stayed clean.
 """
 
 import os
@@ -1468,7 +1488,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.45.0"
+APP_VERSION = "0.45.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1783,11 +1803,11 @@ SESSION_OPEN_HOUR_LOCAL = int(os.environ.get("VP_SESSION_OPEN_HOUR_LOCAL", 10)) 
 SESSION_RANGE_TF = os.environ.get("VP_SESSION_RANGE_TF", "5m")
 SESSION_RANGE_START_UTC_HOUR = int(os.environ.get("VP_SESSION_RANGE_START_UTC_HOUR", 0))  # consolidation range spans [this UTC hour, session open) — i.e. the prior (Asian) session, not a fixed lookback window
 SESSION_MANIPULATION_WINDOW_MIN = int(os.environ.get("VP_SESSION_MANIPULATION_WINDOW_MIN", 30))  # how long after open to watch for the sweep+reversal
-SESSION_SL_BUFFER_PCT = float(os.environ.get("VP_SESSION_SL_BUFFER_PCT", 0.001))  # 0.1% beyond the sweep extreme
+SESSION_SL_BUFFER_PCT = float(os.environ.get("VP_SESSION_SL_BUFFER_PCT", 0.005))  # was 0.1% — a live example showed price continuing well past that tight a buffer (a shallow bounce confirmed the pattern before the real, deeper low was actually reached) before reversing hard toward TP; 0.5% gives room for that kind of double-dip without redesigning the confirmation window itself
 SESSION_MIN_RANGE_PCT = float(os.environ.get("VP_SESSION_MIN_RANGE_PCT", 0.003))  # 0.3% — skip symbols whose 4h range is too tiny to be a meaningful consolidation
 SESSION_MAX_THRUST_BARS = int(os.environ.get("VP_SESSION_MAX_THRUST_BARS", 3))  # the sweep and the close-back-inside confirmation can be up to this many bars apart — a short thrust, not strictly the same candle, per the reference chart (2-3 candle burst, not a single bar)
 SESSION_BACKTEST_DAYS = int(os.environ.get("VP_SESSION_BACKTEST_DAYS", 30))  # was 60 — Gate enforces a hard "from" floor of ~10000 candles back from now (added without notice ~Feb 2026); for 5m candles that's ~34.7 days, so 30 leaves margin
-SESSION_UNIVERSE_SIZE = int(os.environ.get("VP_SESSION_UNIVERSE_SIZE", 100))  # backtesting 60 days of 5m per symbol is expensive (paginated fetch) — cap the pool by liquidity
+SESSION_UNIVERSE_SIZE = int(os.environ.get("VP_SESSION_UNIVERSE_SIZE", 50))  # reduced from 100 — user wants the most liquid coins specifically, not a broad tail; already sorted by 24h volume descending, this just cuts deeper into that ranking
 SESSION_MIN_SAMPLE = int(os.environ.get("VP_SESSION_MIN_SAMPLE", 8))  # don't rank a symbol's backtest as meaningful with fewer closed sessions than this
 SESSION_SIGNAL_HISTORY = 200
 SESSION_REFRESH_SEC = int(os.environ.get("VP_SESSION_REFRESH_SEC", 24 * 3600))  # batch backtest job — once a day is plenty, one new day of data per cycle anyway
