@@ -1761,6 +1761,20 @@ v0.50.0 - added MFE/MAE-at-close tracking for scalp signals, the piece
          yet — this is the prerequisite data, not the retune itself;
          next actual RR change should be grounded in this once enough
          closed scalp trades accumulate.
+v0.50.1 - EMA's round-3 retune (TP=1.5%/SL=0.3%/RR=5.0) dropped the win
+         rate to 35.5% (11W/20L) — still profitable on paper (breakeven
+         ~16.7% at that RR) but the user wanted the round-2 stop back.
+         First attempt reverted TP too (back to round 2's 1.0%); user
+         corrected that they only wanted the stop touched, not the
+         take. Fixed: TP stayed at round 3's 1.5%, and EMA_RR moved to
+         3.75 (not round 2's 2.5) specifically so the DERIVED SL lands
+         back at round 2's 0.4% while TP stays put — SL is computed as
+         TP/RR here, so getting SL=0.4% with TP=1.5% needs RR=3.75, not
+         RR=2.5 (which would have given a barely-different TP=1.5% but
+         SL=0.6%, not what was actually asked for). Verified directly:
+         TP computes to exactly 1.5% and SL to exactly 0.4% in both
+         directions, and the full scan-function/endpoint regression
+         stayed clean.
 """
 
 import os
@@ -1779,7 +1793,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.50.0"
+APP_VERSION = "0.50.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1957,8 +1971,8 @@ EMA_SIGNAL_HISTORY = 200
 # RR=2.5. If reverting to the non-inverted signal, these should
 # probably go back to something re-derived for that direction instead —
 # neither retune round was validated for it.
-EMA_TP_PCT = float(os.environ.get("VP_EMA_TP_PCT", 0.015))  # round 3 — see comment above/below
-EMA_RR = float(os.environ.get("VP_EMA_RR", 5.0))  # round 3
+EMA_TP_PCT = float(os.environ.get("VP_EMA_TP_PCT", 0.015))  # kept at round 3's value — user only wanted the stop reverted, not the take
+EMA_RR = float(os.environ.get("VP_EMA_RR", 3.75))  # SL reverted to round 2's 0.4% while keeping TP at round 3's 1.5% (RR = 1.5/0.4 = 3.75) — round 3's SL=0.3%/RR=5.0 dropped the win rate to 35.5% (11W/20L); even though that was still profitable on paper (breakeven ~16.7% at RR=5), the user wants the wider round-2 stop back, just not a smaller take
 # Round 3 retune, off n=70 closed live reversed-signal data (screenshot):
 # at-close WIN MAE sat at median 0/p75 0.269R (R=0.4% under round 2) —
 # winners essentially never dipped toward the stop — while the FULL 24h
