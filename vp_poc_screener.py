@@ -1936,6 +1936,21 @@ v0.52.1 - user's live log showed two more real failures: LEVERAGE_
          of headroom (50x max, 15x requested) is completely unaffected,
          and dry-run still makes zero network calls. Full scan-function/
          endpoint regression stayed clean.
+v0.52.2 - first scalp SL retune, off the MFE/MAE tracking added in
+         v0.50.0 (n=8: 7W/1L — a genuinely small sample, flagged as
+         such before touching anything). WIN MAE stayed well clear of
+         the stop (p75 -0.127R, nowhere near -1.0) while the single
+         LOSS's MAE landed at -1.103R, roughly where the stop already
+         sits. Given the small n and — critically — only one loss ever
+         (not enough to know the true distribution of adverse moves,
+         unlike the win side which had 7 data points), tightened
+         SCALP_SL_BUFFER_MULT modestly: 0.2 -> 0.05, not all the way to
+         0 or as far as the win-side data alone might suggest. For a
+         real example from the live data (RATS_USDT), this moves the
+         SL from ~7.516% to ~6.577% — a real but measured step.
+         Verified the resulting SL% computes correctly for that exact
+         case, and the full scan-function/endpoint regression stayed
+         clean.
 """
 
 import os
@@ -1954,7 +1969,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.52.1"
+APP_VERSION = "0.52.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2187,7 +2202,7 @@ SCALP_SIGNALS_ENABLED = os.environ.get("VP_SCALP_SIGNALS_ENABLED", "1") == "1"
 SCALP_SIGNAL_HISTORY = 200
 SCALP_SIGNAL_COOLDOWN_SEC = int(os.environ.get("VP_SCALP_SIGNAL_COOLDOWN_SEC", 3600))  # per (symbol, interval) — avoid re-firing every 45s scan tick for the same still-fresh candle
 SCALP_SIGNAL_TIMEOUT_MULT = float(os.environ.get("VP_SCALP_SIGNAL_TIMEOUT_MULT", 4.0))  # timeout = this many times the recommendation's own median time-to-hit
-SCALP_SL_BUFFER_MULT = float(os.environ.get("VP_SCALP_SL_BUFFER_MULT", 0.2))  # SL = p90_adverse_pct * (1 + this) — some margin beyond the p90 itself, since a hard floor at the exact p90 would still stop out ~10% of otherwise-fine trades on normal noise
+SCALP_SL_BUFFER_MULT = float(os.environ.get("VP_SCALP_SL_BUFFER_MULT", 0.05))  # SL = p90_adverse_pct * (1 + this) — tightened from 0.2 on a first round of live MFE/MAE data (n=8: 7W/1L): WIN MAE stayed well clear of the stop (p75 -0.127R, nowhere near -1.0), but with only ONE loss ever, the true distribution of adverse moves isn't known yet — kept the step modest (0.2->0.05, not all the way to 0) rather than tightening as far as the win-side data alone might suggest, specifically because a single loss can't establish how far real adverse moves go
 SCALP_SIGNAL_TOP_N = int(os.environ.get("VP_SCALP_SIGNAL_TOP_N", 1))  # only fire a live signal for the top-N ranked symbols by score each cycle, not every qualifying one
 SCALP_SAFETY_MARGIN = float(os.environ.get("VP_SCALP_SAFETY_MARGIN", 1.5))  # liquidation buffer must exceed the coin's own historical p90 adverse move by this factor before a target/leverage combo is flagged "safe"
 SCALP_MIN_HIT_RATE = float(os.environ.get("VP_SCALP_MIN_HIT_RATE", 60.0))  # a target below this hit-rate isn't worth recommending even if technically "safe"
