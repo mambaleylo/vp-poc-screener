@@ -1552,6 +1552,37 @@ v0.46.2 - user didn't see BTC/ETH in the Сессия ranked list despite
          symbol, one not-yet-processed) — counts and per-symbol status
          all came back correct — plus the full scan-function/endpoint
          regression stayed clean.
+v0.47.0 - user shared a batch of live screenshots across every module
+         and asked for analysis + recommendations. Two follow-throughs
+         from that review, both confirmed with the user first:
+         (1) EMA reverse round 3 retune off n=70 closed live data:
+         at-close WIN MAE sat at median 0/p75 0.269R — winners barely
+         dipped toward the stop — while the full-window WIN MFE sat at
+         median 7.725R/p25 4.471R, several times past the round-2 TP
+         (2.5R) actually captured. Anchored the new TP to the full
+         window's p25 (not the median/avg, to avoid overfitting to
+         outliers) then rounded down to a more measured step:
+         EMA_TP_PCT 1.0%->1.5%, EMA_RR 2.5->5.0 (SL 0.4%->0.3%).
+         Breakeven win rate needed drops to ~16.7%, wide margin below
+         the 50% observed even allowing for a real decline post-retune.
+         (2) Volume's bounce reason (30.8%, below the 33.3% breakeven
+         at RR=2) vs breakout (50%) — bounce/breakout already get
+         independently auto-tuned RR/buffer per symbol from the same
+         grid, so the likely issue isn't a global default to tweak, and
+         guessing new numbers without reason-specific MFE/MAE data would
+         just be another blind guess, not a real retune. Instead added
+         the missing visibility: compute_tuning_stats() takes an
+         optional reason filter, /api/tuning now returns a by_reason
+         breakdown (bounce/breakout) alongside the combined numbers, and
+         the Volume tab's stats panel shows both side by side. No
+         parameter change yet — needs this data to actually accumulate
+         before a bounce-specific retune would be anything but a guess.
+         Verified: new EMA TP/SL compute to the exact expected 1.5%/0.3%
+         in both directions, the reason-filtered tuning stats correctly
+         separate bounce/breakout in a direct test, fmtStat handles the
+         undefined case gracefully for symbols with no reason-specific
+         data yet, and the full scan-function/endpoint regression
+         stayed clean.
 """
 
 import os
@@ -1568,7 +1599,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.46.2"
+APP_VERSION = "0.47.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1745,8 +1776,22 @@ EMA_SIGNAL_HISTORY = 200
 # RR=2.5. If reverting to the non-inverted signal, these should
 # probably go back to something re-derived for that direction instead —
 # neither retune round was validated for it.
-EMA_TP_PCT = float(os.environ.get("VP_EMA_TP_PCT", 0.01))
-EMA_RR = float(os.environ.get("VP_EMA_RR", 2.5))
+EMA_TP_PCT = float(os.environ.get("VP_EMA_TP_PCT", 0.015))  # round 3 — see comment above/below
+EMA_RR = float(os.environ.get("VP_EMA_RR", 5.0))  # round 3
+# Round 3 retune, off n=70 closed live reversed-signal data (screenshot):
+# at-close WIN MAE sat at median 0/p75 0.269R (R=0.4% under round 2) —
+# winners essentially never dipped toward the stop — while the FULL 24h
+# window's WIN MFE sat at median 7.725R/p25 4.471R, several times past
+# the round-2 TP (2.5R) that was actually captured. Anchored the new TP
+# to the full window's p25 (4.471R * 0.4% ≈ 1.8%) rather than the
+# median/avg (7.725R/10.843R) to avoid overfitting to outlier moves,
+# then rounded down slightly to 1.5% as a more measured step given
+# widening TP typically also lowers the realized win rate somewhat —
+# unknown by how much until live data comes in at the new levels. SL
+# tightened 0.4%->0.3%, still well above the at-close p75 MAE reference
+# point. New RR=5.0 vs round 2's 2.5 — breakeven win rate needed drops
+# to ~16.7%, a wide margin below the round-2 50% actually observed, even
+# allowing for a real winrate decline post-retune.
 
 # ----------------------------------------------------------------------------
 # Scalp volatility statistics ("Скальпинг" tab) — a pure exploratory/stats
@@ -4686,7 +4731,7 @@ def _pct(vals, p):
     return round(vals[idx], 3)
 
 
-def compute_tuning_stats():
+def compute_tuning_stats(reason=None):
     """Aggregate MFE/MAE (in R multiples) across signals that have been
     tracked at least one cycle — the raw material for deciding whether
     TP/SL could sit further out or tighter in.
@@ -4700,10 +4745,19 @@ def compute_tuning_stats():
     isn't really about that trade's own run. Use "_at_close" to judge
     "was this specific trade's TP/SL well-placed"; use the plain ones to
     judge "how much headroom exists in general". Older signals recorded
-    before this distinction existed won't have "_at_close" values."""
+    before this distinction existed won't have "_at_close" values.
+
+    reason=None aggregates bounce+breakout together (previous behavior);
+    reason="bounce"/"breakout" filters to just that reason — bounce and
+    breakout get independently auto-tuned RR/buffer per symbol already,
+    but that tuning had no visibility into MFE/MAE split by reason, only
+    combined-Volume numbers, which isn't enough to tell whether a
+    reason's own TP/SL sizing is the actual issue."""
     with state_lock:
         signals = list(STATE["signals"])
     dataset = [s for s in signals if s.get("mfe_price") is not None]
+    if reason is not None:
+        dataset = [s for s in dataset if s.get("reason") == reason]
     if not dataset:
         return {"count": 0}
 
@@ -5085,6 +5139,10 @@ def api_signals():
 def api_tuning():
     result = compute_tuning_stats()
     result["mfe_track_hours"] = round(MFE_TRACK_SEC / 3600, 1)
+    result["by_reason"] = {
+        "bounce": compute_tuning_stats(reason="bounce"),
+        "breakout": compute_tuning_stats(reason="breakout"),
+    }
     return jsonify(result)
 
 
@@ -6033,6 +6091,16 @@ async function refreshTuning() {
       <span class="win">WIN MAE: ${fmtStat(t.mae_r_wins_at_close)}</span><br>
       <span class="loss">LOSS MFE: ${fmtStat(t.mfe_r_losses_at_close)}</span><br>
       <span class="loss">LOSS MAE: ${fmtStat(t.mae_r_losses_at_close)}</span>
+    </div>
+    <div style="margin-bottom:10px;"><b>То же самое, отдельно по bounce и breakout</b> (на закрытии):<br>
+      <span class="dim">bounce — </span><span class="win">WIN MFE: ${fmtStat(t.by_reason?.bounce?.mfe_r_wins_at_close)}</span> ·
+      <span class="win">MAE: ${fmtStat(t.by_reason?.bounce?.mae_r_wins_at_close)}</span> ·
+      <span class="loss">LOSS MFE: ${fmtStat(t.by_reason?.bounce?.mfe_r_losses_at_close)}</span> ·
+      <span class="loss">MAE: ${fmtStat(t.by_reason?.bounce?.mae_r_losses_at_close)}</span><br>
+      <span class="dim">breakout — </span><span class="win">WIN MFE: ${fmtStat(t.by_reason?.breakout?.mfe_r_wins_at_close)}</span> ·
+      <span class="win">MAE: ${fmtStat(t.by_reason?.breakout?.mae_r_wins_at_close)}</span> ·
+      <span class="loss">LOSS MFE: ${fmtStat(t.by_reason?.breakout?.mfe_r_losses_at_close)}</span> ·
+      <span class="loss">MAE: ${fmtStat(t.by_reason?.breakout?.mae_r_losses_at_close)}</span>
     </div>
     <div class="dim" style="margin-bottom:10px;font-size:12px;">
       Если WIN MFE (на закрытии) заметно больше текущего RR — тейк резал прибыль рано,
