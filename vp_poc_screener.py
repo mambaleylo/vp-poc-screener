@@ -1841,6 +1841,26 @@ v0.51.2 - user reported open EMA signals, autotrade log, and simulator
          shipped): PENDING sim trades, since their live reference to a
          signal record can't survive a restart anyway — only SETTLED
          ones carry over.
+v0.51.3 - CRITICAL: user's Gate.io API credentials weren't surviving a
+         restart at all — four EMA autotrade attempts all failed with
+         "Gate.io API credentials not configured" right after a
+         restart, despite having entered and saved them before. Root
+         cause: load_credentials() existed (reads CREDENTIALS_FILE,
+         sets GATE_API_KEY/GATE_API_SECRET) and save_credentials()
+         correctly wrote the file (chmod 600, verified working back
+         when the credentials feature shipped) — but load_credentials()
+         was never actually CALLED in __main__ at startup. save_state()/
+         load_settings() were both wired in; this one call was simply
+         missing, meaning every restart silently reset both credential
+         globals to empty strings regardless of what was saved to disk.
+         Added the missing load_credentials() call alongside the
+         existing load_state()/load_settings() calls. Verified directly
+         with a save -> simulated restart (fresh module load, matching
+         what a real process restart does) -> load_credentials() cycle:
+         both GATE_API_KEY and GATE_API_SECRET come back exactly as
+         saved, and GET /api/credentials correctly reports configured=
+         true afterward. Full scan-function/endpoint regression stayed
+         clean.
 """
 
 import os
@@ -1859,7 +1879,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.51.2"
+APP_VERSION = "0.51.3"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -8668,6 +8688,7 @@ def index():
 if __name__ == "__main__":
     load_state()
     load_settings()
+    load_credentials()
     _load_alert_cfg()
     threading.Thread(target=_telegram_sender_worker, daemon=True).start()
     t = threading.Thread(target=scan_loop, daemon=True)
