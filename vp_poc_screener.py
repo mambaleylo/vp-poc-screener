@@ -1736,6 +1736,31 @@ v0.49.1 - corrected the simulator's design per direct feedback: it
          Verified directly: with a mode's autotrade toggle off, neither
          the autotrade log nor the simulator gets an entry; with it on,
          both fire together for the same signal.
+v0.50.0 - added MFE/MAE-at-close tracking for scalp signals, the piece
+         that made the earlier EMA/divergence RR retunes possible but
+         scalp never had — user asked directly whether there was enough
+         data to retune scalp's RR and the honest answer was no, so
+         built the missing visibility first rather than guess.
+         update_scalp_signal_outcomes() now tracks the best-favorable
+         and worst-adverse price reached while a signal is open
+         (mfe_price/mae_price), freezing them as R-multiples
+         (mfe_r_at_close/mae_r_at_close, R = that signal's own sl_pct —
+         scalp's SL varies per symbol/cycle unlike EMA/divergence's
+         fixed global RR, so the R unit has to be per-signal too) at
+         the exact moment the trade resolves — same "at close" semantics
+         as Volume/EMA/divergence's existing panels. New
+         compute_scalp_tuning_stats() aggregates this WIN/LOSS split
+         (avg/median/p25/p75), exposed via /api/scalp/status's new
+         tuning_stats field and a new MFE/MAE panel in the Скальпинг
+         tab, styled the same as the Volume tuning panel it's modeled
+         on. Verified with direct WIN and LOSS scenarios: MFE/MAE
+         signs and magnitudes came out exactly as expected (a LOSS
+         case's MAE landed at essentially -1.0R, precisely the SL
+         definition; a WIN case's MFE exceeded the target's own R,
+         confirming it captured the overshoot correctly). No retune
+         yet — this is the prerequisite data, not the retune itself;
+         next actual RR change should be grounded in this once enough
+         closed scalp trades accumulate.
 """
 
 import os
@@ -1754,7 +1779,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.49.1"
+APP_VERSION = "0.50.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4311,6 +4336,8 @@ def scan_symbol_scalp_signal(symbol, rec):
             "status": "OPEN", "result": None,
             "exit_price": None, "exit_time": None,
             "app_version": APP_VERSION,
+            "mfe_price": entry, "mae_price": entry,  # best-favorable / worst-adverse price reached while OPEN
+            "mfe_r_at_close": None, "mae_r_at_close": None,  # R-multiples (R = sl_pct), frozen once the trade resolves
         }
         with state_lock:
             STATE["scalp_signals"].appendleft(record)
@@ -4348,41 +4375,97 @@ def update_scalp_signal_outcomes():
             exit_price = None
             exit_time = None
             sl_price = sig.get("sl_price")  # older signals created before SL existed won't have this — falls back to WIN/TIMEOUT only, same as before
+            entry = sig["entry"]
+            direction = sig["direction"]
+            mfe_price = sig.get("mfe_price", entry)
+            mae_price = sig.get("mae_price", entry)
             for c in future:
+                if direction == "LONG":
+                    mfe_price = max(mfe_price, c["high"])
+                    mae_price = min(mae_price, c["low"])
+                else:
+                    mfe_price = min(mfe_price, c["low"])
+                    mae_price = max(mae_price, c["high"])
+
                 if sl_price is not None:
-                    if sig["direction"] == "LONG" and c["low"] <= sl_price:
+                    if direction == "LONG" and c["low"] <= sl_price:
                         result = "LOSS"
                         exit_price = sl_price
                         exit_time = c["time"]
                         break
-                    if sig["direction"] == "SHORT" and c["high"] >= sl_price:
+                    if direction == "SHORT" and c["high"] >= sl_price:
                         result = "LOSS"
                         exit_price = sl_price
                         exit_time = c["time"]
                         break
-                if sig["direction"] == "LONG" and c["high"] >= sig["target_price"]:
+                if direction == "LONG" and c["high"] >= sig["target_price"]:
                     result = "WIN"
                     exit_price = sig["target_price"]
                     exit_time = c["time"]
                     break
-                if sig["direction"] == "SHORT" and c["low"] <= sig["target_price"]:
+                if direction == "SHORT" and c["low"] <= sig["target_price"]:
                     result = "WIN"
                     exit_price = sig["target_price"]
                     exit_time = c["time"]
                     break
+
+            risk_pct = sig.get("sl_pct")  # the R unit — % distance from entry to SL
+            def r_multiple(price):
+                if not risk_pct or entry <= 0:
+                    return None
+                move_pct = (price - entry) / entry * 100 if direction == "LONG" else (entry - price) / entry * 100
+                return round(move_pct / risk_pct, 4)
+
             with state_lock:
+                sig["mfe_price"] = mfe_price
+                sig["mae_price"] = mae_price
                 if result:
                     sig["status"] = "CLOSED"
                     sig["result"] = result
                     sig["exit_price"] = exit_price
                     sig["exit_time"] = exit_time
+                    sig["mfe_r_at_close"] = r_multiple(mfe_price)
+                    sig["mae_r_at_close"] = r_multiple(mae_price)
                 elif now >= sig["timeout_at"]:
                     sig["status"] = "CLOSED"
                     sig["result"] = "TIMEOUT"
                     sig["exit_price"] = candles[-1]["close"] if candles else None
                     sig["exit_time"] = candles[-1]["time"] if candles else None
+                    sig["mfe_r_at_close"] = r_multiple(mfe_price)
+                    sig["mae_r_at_close"] = r_multiple(mae_price)
         except Exception as e:
             log_error(f"scalp_outcome {sig['symbol']}: {e}")
+
+
+def compute_scalp_tuning_stats():
+    """MFE/MAE (R-multiples, R = each signal's own sl_pct) split by
+    WIN/LOSS at close — the same style of breakdown compute_tuning_stats()
+    gives Volume and the EMA/divergence equivalents already have, added
+    here specifically so a future scalp SL-buffer retune can be grounded
+    in real excursion data instead of a guess."""
+    with state_lock:
+        signals = list(STATE["scalp_signals"])
+    dataset = [s for s in signals if s.get("mfe_r_at_close") is not None and s.get("status") == "CLOSED"]
+    wins = [s for s in dataset if s["result"] == "WIN"]
+    losses = [s for s in dataset if s["result"] == "LOSS"]
+
+    def agg(key, rows):
+        vals = [r[key] for r in rows if r.get(key) is not None]
+        if not vals:
+            return None
+        vals_sorted = sorted(vals)
+        n = len(vals_sorted)
+        return {
+            "avg": round(sum(vals) / n, 3), "median": round(vals_sorted[n // 2], 3),
+            "p25": round(vals_sorted[int(n * 0.25)], 3), "p75": round(vals_sorted[min(int(n * 0.75), n - 1)], 3),
+            "n": n,
+        }
+
+    return {
+        "count": len(dataset), "wins_n": len(wins), "losses_n": len(losses),
+        "mfe_r_wins_at_close": agg("mfe_r_at_close", wins), "mae_r_wins_at_close": agg("mae_r_at_close", wins),
+        "mfe_r_losses_at_close": agg("mfe_r_at_close", losses), "mae_r_losses_at_close": agg("mae_r_at_close", losses),
+    }
 
 
 # ----------------------------------------------------------------------------
@@ -6005,6 +6088,7 @@ def api_scalp_status():
         },
         "top": ranked,
         "signals_stats": compute_scalp_signal_stats(),
+        "tuning_stats": compute_scalp_tuning_stats(),
     })
 
 
@@ -7217,6 +7301,15 @@ async function refreshScalp() {
     ? `последнее построение: ${fmtTime(status.last_build_finished)} (${status.last_build_duration}s) · монет обработано: ${status.symbols_done}/${status.universe_size}`
     : `первое построение ещё не завершилось (${status.symbols_done}/${status.universe_size || '?'})`;
   const ssWr = ss.win_rate !== null && ss.win_rate !== undefined ? `${ss.win_rate}%` : '-';
+  const ts = status.tuning_stats || {};
+  const mfeMaeHtml = ts.count ? `
+    <div style="margin-bottom:8px;"><b>MFE/MAE (R, R = свой SL% каждой сделки) на закрытии</b> — сколько реально было хода в плюс/минус к моменту исхода (n=${ts.count}: ${ts.wins_n}W/${ts.losses_n}L):<br>
+      <span class="win">WIN MFE: ${fmtStat(ts.mfe_r_wins_at_close)}</span><br>
+      <span class="win">WIN MAE: ${fmtStat(ts.mae_r_wins_at_close)}</span><br>
+      <span class="loss">LOSS MFE: ${fmtStat(ts.mfe_r_losses_at_close)}</span><br>
+      <span class="loss">LOSS MAE: ${fmtStat(ts.mae_r_losses_at_close)}</span><br>
+      <span class="dim" style="font-size:11px;">Если WIN MFE заметно больше 1.0 (текущий тейк = target_pct/sl_pct в R) — тейк можно двигать дальше. Если WIN MAE близко к -1.0 — почти дошло до стопа перед тем как выиграть, стоп можно чуть шире. Если LOSS MAE заметно меньше -1.0 по модулю — стоп теснее, чем нужно.</span>
+    </div>` : '<div class="dim" style="margin-bottom:8px;">MFE/MAE статистика пока копится — нужны закрытые сделки.</div>';
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
       Цель: $${cfg.target_profit_usd} со счёта $${cfg.account_usd} · ТФ: ${(cfg.intervals||[]).join(', ')} ·
@@ -7225,7 +7318,8 @@ async function refreshScalp() {
       <b>Живые сигналы</b> (вход на закрытии свечи, топ-${cfg.signal_top_n || 1} по score): ${ssWr} (${ss.wins||0}W/${ss.losses||0}L/${ss.timeouts||0}TIMEOUT) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
       <span style="font-size:11px;">~ рядом с буфером = MMR не подтверждён с Gate.io, используется консервативный дефолт ${(cfg.default_mmr_pct*100).toFixed(2)}%<br>
       ~ рядом с плечом = макс. плечо биржи для монеты не подтверждено, используется дефолт ${cfg.default_max_leverage}x — проверь реальный лимит на бирже перед входом</span>
-    </div>`;
+    </div>
+    ${mfeMaeHtml}`;
   const signalsRows = signals.map(s => {
     const dirClass = s.direction === 'LONG' ? 'long' : 'short';
     let statusHtml;
