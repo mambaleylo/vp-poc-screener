@@ -1605,6 +1605,65 @@ v0.47.1 - real bug: a live session signal (BULLA_USDT, LOSS in the
          creates the correct signal — the fix only excludes genuinely
          incomplete data, not real detections. Full scan-function/
          endpoint regression stayed clean.
+v0.48.0 - Auto-trading on Gate.io futures, off the signals every module
+         already generates. Real money, so built and verified this in
+         layers rather than all at once, referencing hard-learned
+         lessons from the mambaleylo/EMA-screener project (per-symbol
+         leverage_max/quanto_multiplier instead of a flat assumption,
+         POSITION_NOT_FOUND not treated as an error, bounded-limit-style
+         stop orders to cap slippage).
+         Gate APIv4 HMAC-SHA512 request signing (gate_signed_request) —
+         verified the empty-payload SHA512 hash against Gate's own
+         documented value, and independently recomputed a full request
+         signature by hand to confirm gate_signed_request's output
+         matches. Credentials (API key/secret) live in their own file
+         (vp_poc_credentials.json, chmod 600), entered via the UI,
+         deliberately kept separate from the general settings file so a
+         secret never ends up in a GET /api/settings response — only a
+         "configured: true/false" boolean is ever returned.
+         compute_position_size() converts the configured sizing
+         (% of futures wallet balance, or a flat $ margin — mode
+         switchable, only one active at a time) into a contract count
+         using each symbol's own quanto_multiplier/order_size_min,
+         instead of the EMA-screener's flat "force minimum 1 contract"
+         approach: if hitting the minimum lot would need more than 1.5x
+         the intended notional, the trade is skipped rather than
+         silently oversized. Order flow: set_leverage -> market order
+         (tif=ioc, the only tif Gate allows at price=0) -> two
+         price-triggered close orders for TP/SL (rule=1/2 verified
+         correct and mirrored for LONG vs SHORT). execute_autotrade()
+         is the single entry point every signal source calls through,
+         always writes exactly one log entry (OPENED/SKIPPED/DRY_RUN/
+         ERROR) regardless of outcome, and makes ZERO network calls in
+         dry-run — verified directly, since that's the single most
+         important safety property here.
+         Per direct request: opt-in per mode with Volume split into
+         bounce/breakout specifically (6 independent toggles total),
+         leverage configurable per mode EXCEPT scalp, which uses its
+         own signal's already-computed leverage field instead of a
+         settings fallback. AUTOTRADE_DRY_RUN defaults to on (verified:
+         a fresh install has dry-run true and every mode-enabled flag
+         false) — no real order fires until both the person turns dry-
+         run off AND enables a specific mode.
+         Wired into all 6 signal-creation sites (bounce, breakout,
+         divergence, EMA, scalp, session) — verified end-to-end with a
+         mixed live-scan run: session/scalp/EMA signals all correctly
+         reached execute_autotrade and logged DRY_RUN entries with the
+         right values (scalp's leverage pulled from its own signal,
+         confirmed at 12.5x not the fallback).
+         Settings UI: new "Автоторговля" group — API key/secret input
+         (password-masked, save/clear buttons, status line that never
+         echoes the secret back), dry-run switch, size mode+value,
+         and the 6 per-mode toggles with their leverage inputs.
+         Verified: full settings round-trip across all new keys
+         (checkbox AND value-type together), out-of-range leverage/
+         invalid size-mode rejected rather than silently accepted, all
+         new element IDs unique, JS syntax clean, and the full
+         scan-function/endpoint regression stayed clean throughout.
+         NOT yet done: a dedicated autotrade log viewer in the UI (the
+         log itself is being written correctly, just not surfaced
+         anywhere to look at yet) and a prominent live-money warning
+         banner when dry-run is off — next up.
 """
 
 import os
@@ -1615,18 +1674,21 @@ import threading
 import traceback
 import queue
 import datetime
+import hmac
+import hashlib
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.47.1"
+APP_VERSION = "0.48.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
 # ----------------------------------------------------------------------------
 GATE_BASE = "https://api.gateio.ws/api/v4"
+GATE_BASE_HOST = "https://api.gateio.ws"  # host only, no /api/v4 — gate_signed_request builds the full path itself since the signature needs the /api/v4-prefixed path separately from the host
 
 SEGS = int(os.environ.get("VP_SEGS", 100))                # grid levels in profile
 LOOKBACK = int(os.environ.get("VP_LOOKBACK", 100))        # candles used to build profile
@@ -1961,6 +2023,35 @@ SESSION_MIN_SAMPLE = int(os.environ.get("VP_SESSION_MIN_SAMPLE", 8))  # don't ra
 SESSION_SIGNAL_HISTORY = 200
 SESSION_REFRESH_SEC = int(os.environ.get("VP_SESSION_REFRESH_SEC", 24 * 3600))  # batch backtest job — once a day is plenty, one new day of data per cycle anyway
 
+# ----------------------------------------------------------------------------
+# Auto-trading — places real orders on Gate.io futures off the signals the
+# modules above already generate. Opt-in per mode (Volume further split into
+# bounce/breakout specifically, per direct request), market-order entry,
+# DRY_RUN on by default so a fresh install never fires a real order until the
+# person explicitly turns it off having seen dry-run behavior first. Position
+# sizing is either a % of the current futures wallet balance or a flat $
+# amount regardless of leverage, switched by AUTOTRADE_SIZE_MODE rather than
+# both being live at once. Leverage: each mode uses ITS OWN signal's leverage
+# field when the signal carries one (scalp already computes this per trade);
+# modes whose signals don't carry a leverage recommendation (Volume/
+# Divergence/EMA/Session) fall back to a configurable per-mode leverage.
+# ----------------------------------------------------------------------------
+AUTOTRADE_DRY_RUN = os.environ.get("VP_AUTOTRADE_DRY_RUN", "1") == "1"  # default ON — log what WOULD happen, no real orders, until explicitly turned off
+AUTOTRADE_ENABLED_BOUNCE = os.environ.get("VP_AUTOTRADE_BOUNCE", "0") == "1"
+AUTOTRADE_ENABLED_BREAKOUT = os.environ.get("VP_AUTOTRADE_BREAKOUT", "0") == "1"
+AUTOTRADE_ENABLED_DIVERGENCE = os.environ.get("VP_AUTOTRADE_DIVERGENCE", "0") == "1"
+AUTOTRADE_ENABLED_EMA = os.environ.get("VP_AUTOTRADE_EMA", "0") == "1"
+AUTOTRADE_ENABLED_SCALP = os.environ.get("VP_AUTOTRADE_SCALP", "0") == "1"
+AUTOTRADE_ENABLED_SESSION = os.environ.get("VP_AUTOTRADE_SESSION", "0") == "1"
+AUTOTRADE_SIZE_MODE = os.environ.get("VP_AUTOTRADE_SIZE_MODE", "percent")  # "percent" or "fixed" — the single size value below is interpreted according to this
+AUTOTRADE_SIZE_VALUE = float(os.environ.get("VP_AUTOTRADE_SIZE_VALUE", 2.0))  # percent: % of futures wallet balance; fixed: raw USD margin, leverage-independent either way
+AUTOTRADE_LEVERAGE_BOUNCE = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_BOUNCE", 10))
+AUTOTRADE_LEVERAGE_BREAKOUT = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_BREAKOUT", 10))
+AUTOTRADE_LEVERAGE_DIVERGENCE = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_DIVERGENCE", 10))
+AUTOTRADE_LEVERAGE_EMA = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_EMA", 10))
+AUTOTRADE_LEVERAGE_SESSION = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SESSION", 10))
+AUTOTRADE_TRADE_HISTORY = 300
+
 TELEGRAM_CHAT_ID = os.environ.get("VP_TG_CHAT", "")
 # Same config file path used by the EMA-screener/Pump_Radar project — if
 # Telegram was already set up there, this picks up the same token/chat_id
@@ -1990,9 +2081,19 @@ SETTINGS_FILE = os.environ.get(
     "VP_SETTINGS_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_settings.json"),
 )
+# Kept in its own file, deliberately separate from SETTINGS_FILE — that file's
+# whole contents get echoed back via GET /api/settings, and a secret has no
+# business ever going out over that response, even to the same local UI.
+CREDENTIALS_FILE = os.environ.get(
+    "VP_CREDENTIALS_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
+)
 SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "bounce_enabled", "breakout_enabled",
                   "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session")
+                  "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session",
+                  "autotrade_size_mode", "autotrade_size_value",
+                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session")
 
 
 def get_settings():
@@ -2015,6 +2116,20 @@ def get_settings():
         "telegram_alerts_hourly": TELEGRAM_ALERTS_HOURLY,
         "telegram_alerts_session": TELEGRAM_ALERTS_SESSION,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
+        "autotrade_dry_run": AUTOTRADE_DRY_RUN,
+        "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
+        "autotrade_breakout": AUTOTRADE_ENABLED_BREAKOUT,
+        "autotrade_divergence": AUTOTRADE_ENABLED_DIVERGENCE,
+        "autotrade_ema": AUTOTRADE_ENABLED_EMA,
+        "autotrade_scalp": AUTOTRADE_ENABLED_SCALP,
+        "autotrade_session": AUTOTRADE_ENABLED_SESSION,
+        "autotrade_size_mode": AUTOTRADE_SIZE_MODE,
+        "autotrade_size_value": AUTOTRADE_SIZE_VALUE,
+        "autotrade_leverage_bounce": AUTOTRADE_LEVERAGE_BOUNCE,
+        "autotrade_leverage_breakout": AUTOTRADE_LEVERAGE_BREAKOUT,
+        "autotrade_leverage_divergence": AUTOTRADE_LEVERAGE_DIVERGENCE,
+        "autotrade_leverage_ema": AUTOTRADE_LEVERAGE_EMA,
+        "autotrade_leverage_session": AUTOTRADE_LEVERAGE_SESSION,
     }
 
 
@@ -2026,6 +2141,9 @@ def apply_settings(updates):
     scan cycle / next alert, no restart needed."""
     global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, HOURLY_STATS_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION
+    global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
+    global AUTOTRADE_LEVERAGE_BOUNCE, AUTOTRADE_LEVERAGE_BREAKOUT, AUTOTRADE_LEVERAGE_DIVERGENCE, AUTOTRADE_LEVERAGE_EMA, AUTOTRADE_LEVERAGE_SESSION
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
     if "divergence_enabled" in updates:
@@ -2058,6 +2176,43 @@ def apply_settings(updates):
         TELEGRAM_ALERTS_EMA = bool(updates["telegram_alerts_ema"])
     if "telegram_alerts_session" in updates:
         TELEGRAM_ALERTS_SESSION = bool(updates["telegram_alerts_session"])
+    if "autotrade_dry_run" in updates:
+        AUTOTRADE_DRY_RUN = bool(updates["autotrade_dry_run"])
+    if "autotrade_bounce" in updates:
+        AUTOTRADE_ENABLED_BOUNCE = bool(updates["autotrade_bounce"])
+    if "autotrade_breakout" in updates:
+        AUTOTRADE_ENABLED_BREAKOUT = bool(updates["autotrade_breakout"])
+    if "autotrade_divergence" in updates:
+        AUTOTRADE_ENABLED_DIVERGENCE = bool(updates["autotrade_divergence"])
+    if "autotrade_ema" in updates:
+        AUTOTRADE_ENABLED_EMA = bool(updates["autotrade_ema"])
+    if "autotrade_scalp" in updates:
+        AUTOTRADE_ENABLED_SCALP = bool(updates["autotrade_scalp"])
+    if "autotrade_session" in updates:
+        AUTOTRADE_ENABLED_SESSION = bool(updates["autotrade_session"])
+    if "autotrade_size_mode" in updates and updates["autotrade_size_mode"] in ("percent", "fixed"):
+        AUTOTRADE_SIZE_MODE = updates["autotrade_size_mode"]
+    if "autotrade_size_value" in updates:
+        try:
+            v = float(updates["autotrade_size_value"])
+            if v > 0:
+                AUTOTRADE_SIZE_VALUE = v
+        except (TypeError, ValueError):
+            pass
+    for key, glob_name in (
+        ("autotrade_leverage_bounce", "AUTOTRADE_LEVERAGE_BOUNCE"),
+        ("autotrade_leverage_breakout", "AUTOTRADE_LEVERAGE_BREAKOUT"),
+        ("autotrade_leverage_divergence", "AUTOTRADE_LEVERAGE_DIVERGENCE"),
+        ("autotrade_leverage_ema", "AUTOTRADE_LEVERAGE_EMA"),
+        ("autotrade_leverage_session", "AUTOTRADE_LEVERAGE_SESSION"),
+    ):
+        if key in updates:
+            try:
+                lev = int(updates[key])
+                if 1 <= lev <= 125:
+                    globals()[glob_name] = lev
+            except (TypeError, ValueError):
+                pass
     if "telegram_alerts_hourly" in updates:
         TELEGRAM_ALERTS_HOURLY = bool(updates["telegram_alerts_hourly"])
 
@@ -2081,6 +2236,77 @@ def load_settings():
         apply_settings({k: v for k, v in saved.items() if k in SETTINGS_KEYS})
     except Exception as e:
         log_error(f"load_settings: {e}")
+
+
+# ----------------------------------------------------------------------------
+# Gate.io private API — HMAC-SHA512 request signing (APIv4 scheme) and
+# credential storage. Kept fully separate from the public GATE_BASE calls
+# used everywhere else in this file: those never need a key/secret at all.
+# ----------------------------------------------------------------------------
+GATE_API_KEY = ""
+GATE_API_SECRET = ""
+_credentials_lock = threading.Lock()
+
+
+def save_credentials(api_key, api_secret):
+    """Writes to CREDENTIALS_FILE, chmod 600 (owner read/write only) — best
+    effort on platforms that support it; Termux/Android generally does."""
+    global GATE_API_KEY, GATE_API_SECRET
+    with _credentials_lock:
+        GATE_API_KEY = api_key
+        GATE_API_SECRET = api_secret
+        try:
+            tmp_path = CREDENTIALS_FILE + ".tmp"
+            with open(tmp_path, "w") as f:
+                json.dump({"api_key": api_key, "api_secret": api_secret}, f)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, CREDENTIALS_FILE)
+        except Exception as e:
+            log_error(f"save_credentials: {e}")
+
+
+def load_credentials():
+    global GATE_API_KEY, GATE_API_SECRET
+    if not os.path.exists(CREDENTIALS_FILE):
+        return
+    try:
+        with open(CREDENTIALS_FILE) as f:
+            saved = json.load(f)
+        with _credentials_lock:
+            GATE_API_KEY = saved.get("api_key", "")
+            GATE_API_SECRET = saved.get("api_secret", "")
+    except Exception as e:
+        log_error(f"load_credentials: {e}")
+
+
+def gate_signed_request(method, url_path, query_string="", body=None, timeout=HTTP_TIMEOUT):
+    """One request to Gate's authenticated futures API. url_path is the path
+    only (e.g. "/futures/usdt/orders"), no host/prefix. body, if given, is
+    the dict that will become the JSON payload — signed over its exact
+    serialized bytes, so build it once and reuse the same object for both
+    signing and sending rather than re-serializing (a different key order
+    would still hash the same content, but simpler to just sign what's
+    actually sent).
+    Signature scheme (Gate APIv4): SIGN = HexEncode(HMAC_SHA512(secret,
+    Method + "\\n" + URL + "\\n" + QueryString + "\\n" + HexEncode(SHA512(Payload)) + "\\n" + Timestamp))."""
+    if not GATE_API_KEY or not GATE_API_SECRET:
+        raise RuntimeError("Gate.io API credentials not configured")
+    payload_str = json.dumps(body) if body is not None else ""
+    hashed_payload = hashlib.sha512(payload_str.encode("utf-8")).hexdigest()
+    ts = str(time.time())
+    full_url_path = "/api/v4" + url_path
+    sign_string = f"{method}\n{full_url_path}\n{query_string}\n{hashed_payload}\n{ts}"
+    sign = hmac.new(GATE_API_SECRET.encode("utf-8"), sign_string.encode("utf-8"), hashlib.sha512).hexdigest()
+    headers = {
+        "KEY": GATE_API_KEY, "Timestamp": ts, "SIGN": sign,
+        "Accept": "application/json", "Content-Type": "application/json",
+    }
+    url = f"{GATE_BASE_HOST}{full_url_path}"
+    if query_string:
+        url += f"?{query_string}"
+    r = requests.request(method, url, headers=headers, data=payload_str if body is not None else None, timeout=timeout)
+    r.raise_for_status()
+    return r.json() if r.text else None
 
 
 # ----------------------------------------------------------------------------
@@ -2138,6 +2364,7 @@ STATE = {
     "session_symbols_done": 0,
     "session_signals": deque(maxlen=SESSION_SIGNAL_HISTORY),
     "session_next_open_ts": None,
+    "autotrade_log": deque(maxlen=AUTOTRADE_TRADE_HISTORY),  # every attempted auto-trade, dry-run or real, with its outcome
 }
 _cooldowns = {}  # (symbol, zone_key) -> last_alert_ts
 _cooldowns_lock = threading.Lock()
@@ -2621,6 +2848,9 @@ def scan_symbol_session_live(symbol, session_open_ts):
         }
         with state_lock:
             STATE["session_signals"].appendleft(record)
+        if AUTOTRADE_ENABLED_SESSION:
+            execute_autotrade("session", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                               AUTOTRADE_LEVERAGE_SESSION, extra={"session_open": session_open_ts})
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         send_telegram(
             f"{arrow} {symbol} (открытие сессии — манипуляция)\n"
@@ -2914,6 +3144,9 @@ def scan_symbol_divergence(symbol):
         }
         with state_lock:
             STATE["div_signals"].appendleft(record)
+        if AUTOTRADE_ENABLED_DIVERGENCE:
+            execute_autotrade("divergence", symbol, sig["direction"], entry, sl, tp,
+                               AUTOTRADE_LEVERAGE_DIVERGENCE, extra={"kind": sig["kind"]})
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         send_telegram(
             f"{arrow} {symbol} (RSI {sig['kind']} divergence)\n"
@@ -3054,6 +3287,9 @@ def scan_symbol_ema(symbol, interval=EMA_INTERVAL):
         }
         with state_lock:
             STATE["ema_signals"].appendleft(record)
+        if AUTOTRADE_ENABLED_EMA:
+            execute_autotrade("ema", symbol, sig["direction"], entry, sl, tp,
+                               AUTOTRADE_LEVERAGE_EMA, extra={"interval": interval})
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         send_telegram(
             f"{arrow} {symbol} (EMA {EMA_SIGNAL_TYPE}, {interval})\n"
@@ -3416,6 +3652,225 @@ def get_tickers():
     return r.json()
 
 
+_contract_spec_cache = {}
+_contract_spec_cache_lock = threading.Lock()
+CONTRACT_SPEC_CACHE_TTL_SEC = 3600  # contract specs (multiplier, min size, max leverage) change rarely — an hour-old value is fine
+
+
+def get_contract_spec(symbol):
+    """quanto_multiplier: how much of the underlying one contract represents
+    — position notional in USD = size_in_contracts * quanto_multiplier *
+    mark_price, so this is what turns a target $ notional into a contract
+    count. order_size_min: smallest order Gate accepts for this contract
+    (usually 1, but not guaranteed). leverage_max: highest leverage Gate
+    allows on this specific contract — the EMA-screener project hit real
+    bugs assuming a flat leverage cap across all coins; this fetches the
+    real per-contract value instead."""
+    with _contract_spec_cache_lock:
+        cached = _contract_spec_cache.get(symbol)
+        if cached and time.time() - cached["fetched_at"] < CONTRACT_SPEC_CACHE_TTL_SEC:
+            return cached["spec"]
+    r = requests.get(f"{GATE_BASE}/futures/usdt/contracts/{symbol}", timeout=HTTP_TIMEOUT)
+    r.raise_for_status()
+    data = r.json()
+    spec = {
+        "quanto_multiplier": float(data.get("quanto_multiplier", 0) or 0),
+        "order_size_min": float(data.get("order_size_min", 1) or 1),
+        "leverage_max": float(data.get("leverage_max", 20) or 20),
+    }
+    with _contract_spec_cache_lock:
+        _contract_spec_cache[symbol] = {"spec": spec, "fetched_at": time.time()}
+    return spec
+
+
+def set_leverage(symbol, leverage):
+    """POST /futures/usdt/positions/{contract}/leverage — must be set
+    before placing an order at that leverage; Gate doesn't take leverage as
+    an order-placement parameter itself, it's a standing per-contract
+    position setting. Takes `leverage` as a query-string value."""
+    return gate_signed_request(
+        "POST", f"/futures/usdt/positions/{symbol}/leverage",
+        query_string=f"leverage={leverage}",
+    )
+
+
+def compute_position_size(symbol, entry_price, size_mode, size_value, leverage, wallet_balance=None):
+    """Turns the configured sizing (percent-of-wallet or flat $ margin) into
+    a contract count. margin * leverage = notional; notional / (quanto_
+    multiplier * price) = raw contract count, then snapped to the
+    contract's own lot step (order_size_min).
+
+    A real lesson from the EMA-screener project: on an expensive contract
+    (large quanto_multiplier), the raw count can round to less than one
+    lot — Gate simply can't place a sub-minimum order. That project forced
+    a minimum-1-contract position in that case, which silently OVERSIZES
+    the trade beyond what the sizing config actually asked for. That's the
+    wrong default for real money: if hitting the minimum lot would need
+    more than 1.5x the intended notional, skip the trade instead of
+    silently taking on extra risk; only round up if the gap is small.
+
+    Returns (contracts, notional_usd, margin_usd, skip_reason). skip_reason
+    is None on success, otherwise a human-readable string and contracts=0."""
+    spec = get_contract_spec(symbol)
+    if size_mode == "percent":
+        if wallet_balance is None:
+            return 0, 0, 0, "wallet balance unavailable for percent-based sizing"
+        margin_usd = wallet_balance * (size_value / 100.0)
+    else:
+        margin_usd = size_value
+    if margin_usd <= 0:
+        return 0, 0, 0, f"computed margin is {margin_usd} — check sizing config/wallet balance"
+    notional_usd = margin_usd * leverage
+    multiplier = spec["quanto_multiplier"]
+    if multiplier <= 0 or entry_price <= 0:
+        return 0, 0, 0, f"invalid contract spec (multiplier={multiplier}) or price ({entry_price}) for {symbol}"
+    min_size = spec["order_size_min"] or 1
+    raw_contracts = notional_usd / (multiplier * entry_price)
+    if raw_contracts < min_size:
+        min_size_notional = min_size * multiplier * entry_price
+        if min_size_notional > notional_usd * 1.5:
+            return 0, 0, 0, (f"minimum order size for {symbol} ({min_size} contracts = "
+                              f"${min_size_notional:.2f} notional) is more than 1.5x the intended "
+                              f"${notional_usd:.2f} — skipping rather than oversizing")
+        contracts = min_size  # gap is small enough to accept rounding up to the minimum lot
+    else:
+        contracts = math.floor(raw_contracts / min_size) * min_size
+    actual_notional = contracts * multiplier * entry_price
+    return contracts, actual_notional, actual_notional / leverage, None
+
+
+def place_market_order(symbol, direction, contracts, reduce_only=False):
+    """Market order, tif=ioc (the only tif Gate accepts at price=0/market).
+    size sign encodes direction: positive=long, negative=short."""
+    size = contracts if direction == "LONG" else -contracts
+    body = {"contract": symbol, "size": size, "price": "0", "tif": "ioc"}
+    if reduce_only:
+        body["reduce_only"] = True
+    return gate_signed_request("POST", "/futures/usdt/orders", body=body)
+
+
+def place_tp_sl_orders(symbol, direction, tp_price, sl_price, price_type=0):
+    """Places both the TP and SL as separate price-triggered close orders.
+    Returns (tp_order, sl_order, errors) — errors is a list of (which, msg)
+    for whichever leg failed, so one failing doesn't silently hide the
+    other's success or failure."""
+    if direction == "LONG":
+        tp_rule, sl_rule = 1, 2
+    else:
+        tp_rule, sl_rule = 2, 1
+    errors = []
+    tp_order = sl_order = None
+    try:
+        tp_order = gate_signed_request("POST", "/futures/usdt/price_orders", body={
+            "initial": {"contract": symbol, "size": 0, "price": "0", "close": True, "tif": "ioc"},
+            "trigger": {"strategy_type": 0, "price_type": price_type, "price": str(tp_price), "rule": tp_rule, "expiration": 0},
+        })
+    except Exception as e:
+        errors.append(("tp", str(e)))
+    try:
+        sl_order = gate_signed_request("POST", "/futures/usdt/price_orders", body={
+            "initial": {"contract": symbol, "size": 0, "price": "0", "close": True, "tif": "ioc"},
+            "trigger": {"strategy_type": 0, "price_type": price_type, "price": str(sl_price), "rule": sl_rule, "expiration": 0},
+        })
+    except Exception as e:
+        errors.append(("sl", str(e)))
+    return tp_order, sl_order, errors
+
+
+def get_futures_wallet_balance():
+    """GET /futures/usdt/accounts — returns the USDT futures wallet's
+    available balance, used for percent-of-deposit position sizing."""
+    data = gate_signed_request("GET", "/futures/usdt/accounts")
+    return float(data.get("available", 0) or 0)
+
+
+def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=None):
+    """The single entry point every signal source calls to (maybe) fire a
+    real trade. `mode` is a short label (e.g. "bounce", "ema", "scalp") used
+    for the auto-trade-enabled toggle lookup and the log. `extra` is any
+    signal-specific context worth keeping in the log (reason, interval,
+    etc.) — purely informational, not used for trading logic.
+
+    Always writes exactly one entry to STATE["autotrade_log"], whether it
+    trades, skips, or dry-runs, so the log is a complete record of every
+    signal that was even considered, not just the ones that fired."""
+    record = {
+        "time": time.time(), "mode": mode, "symbol": symbol, "direction": direction,
+        "entry": entry, "sl": sl, "tp": tp, "leverage": leverage,
+        "dry_run": AUTOTRADE_DRY_RUN, "extra": extra or {},
+        "status": None, "detail": None, "contracts": None, "order_id": None,
+    }
+    try:
+        wallet_balance = None
+        if AUTOTRADE_SIZE_MODE == "percent" and not AUTOTRADE_DRY_RUN:
+            wallet_balance = get_futures_wallet_balance()
+        elif AUTOTRADE_SIZE_MODE == "percent":
+            # dry-run with percent sizing still needs a balance to show a
+            # realistic contract count in the log, but shouldn't require
+            # live credentials just to preview — fall back to a nominal
+            # $1000 for the estimate and say so.
+            if GATE_API_KEY and GATE_API_SECRET:
+                try:
+                    wallet_balance = get_futures_wallet_balance()
+                except Exception:
+                    wallet_balance = 1000.0
+                    record["extra"]["balance_note"] = "fetch failed, used nominal $1000 for dry-run estimate"
+            else:
+                wallet_balance = 1000.0
+                record["extra"]["balance_note"] = "no credentials configured, used nominal $1000 for dry-run estimate"
+
+        contracts, notional, margin, skip_reason = compute_position_size(
+            symbol, entry, AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE, leverage, wallet_balance)
+        record["contracts"] = contracts
+        record["notional_usd"] = round(notional, 2) if notional else notional
+        record["margin_usd"] = round(margin, 2) if margin else margin
+
+        if skip_reason:
+            record["status"] = "SKIPPED"
+            record["detail"] = skip_reason
+            with state_lock:
+                STATE["autotrade_log"].appendleft(record)
+            return record
+
+        if AUTOTRADE_DRY_RUN:
+            record["status"] = "DRY_RUN"
+            record["detail"] = f"would open {direction} {contracts} contracts on {symbol} @ {leverage}x, TP {tp} / SL {sl}"
+            with state_lock:
+                STATE["autotrade_log"].appendleft(record)
+            return record
+
+        set_leverage(symbol, leverage)
+        order = place_market_order(symbol, direction, contracts)
+        record["order_id"] = order.get("id") if isinstance(order, dict) else None
+        fill_price = None
+        if isinstance(order, dict):
+            fp = order.get("fill_price")
+            if fp:
+                try:
+                    fill_price = float(fp)
+                except (TypeError, ValueError):
+                    fill_price = None
+        record["fill_price"] = fill_price
+
+        tp_order, sl_order, tp_sl_errors = place_tp_sl_orders(symbol, direction, tp, sl)
+        if tp_sl_errors:
+            record["status"] = "OPENED_TP_SL_FAILED"
+            record["detail"] = f"position opened but TP/SL placement had errors: {tp_sl_errors} — check the position manually"
+        else:
+            record["status"] = "OPENED"
+            record["detail"] = f"opened {direction} {contracts} contracts on {symbol} @ {leverage}x"
+        with state_lock:
+            STATE["autotrade_log"].appendleft(record)
+        return record
+    except Exception as e:
+        record["status"] = "ERROR"
+        record["detail"] = str(e)
+        log_error(f"execute_autotrade {mode} {symbol}: {e}")
+        with state_lock:
+            STATE["autotrade_log"].appendleft(record)
+        return record
+
+
 def build_universe():
     # Volume fields (volume_24h_quote/_settle/_base) live on the /tickers
     # endpoint, not /contracts — /contracts has no volume data at all.
@@ -3697,6 +4152,9 @@ def scan_symbol_scalp_signal(symbol, rec):
         }
         with state_lock:
             STATE["scalp_signals"].appendleft(record)
+        if AUTOTRADE_ENABLED_SCALP:
+            execute_autotrade("scalp", symbol, direction, entry, sl_price, target_price,
+                               rec["leverage"], extra={"interval": interval, "score": rec["score"]})
     except Exception as e:
         log_error(f"scalp_signal {symbol}: {e}")
 
@@ -4620,6 +5078,11 @@ def scan_symbol(symbol):
                 }
                 with state_lock:
                     STATE["signals"].appendleft(record)
+                autotrade_enabled = AUTOTRADE_ENABLED_BOUNCE if sig["reason"] == "bounce" else AUTOTRADE_ENABLED_BREAKOUT
+                autotrade_leverage = AUTOTRADE_LEVERAGE_BOUNCE if sig["reason"] == "bounce" else AUTOTRADE_LEVERAGE_BREAKOUT
+                if autotrade_enabled:
+                    execute_autotrade(sig["reason"], symbol, sig["direction"], sig["price"], sl, tp,
+                                       autotrade_leverage, extra={"reason": sig["reason"]})
                 arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
                 send_telegram(
                     f"{arrow} {symbol} ({sig['reason']})\n"
@@ -5572,6 +6035,38 @@ def api_post_settings():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/credentials", methods=["GET"])
+def api_get_credentials():
+    return jsonify({"gate_api_configured": bool(GATE_API_KEY and GATE_API_SECRET)})
+
+
+@app.route("/api/credentials", methods=["POST"])
+def api_post_credentials():
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        api_key = (body.get("api_key") or "").strip()
+        api_secret = (body.get("api_secret") or "").strip()
+        if not api_key or not api_secret:
+            return jsonify({"ok": False, "error": "both api_key and api_secret are required"}), 400
+        save_credentials(api_key, api_secret)
+        return jsonify({"ok": True, "gate_api_configured": True})
+    except Exception as e:
+        log_error(f"api_post_credentials: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/credentials", methods=["DELETE"])
+def api_delete_credentials():
+    try:
+        save_credentials("", "")
+        if os.path.exists(CREDENTIALS_FILE):
+            os.remove(CREDENTIALS_FILE)
+        return jsonify({"ok": True, "gate_api_configured": False})
+    except Exception as e:
+        log_error(f"api_delete_credentials: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/reset/volume", methods=["POST"])
 def api_reset_volume():
     """Wipe only the volume-profile side: per-symbol tuning overrides,
@@ -5961,6 +6456,101 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">сводка винрейта по всем режимам, раз в час</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramHourly"><span class="switchSlider"></span></label>
+      </div>
+    </div>
+
+    <div class="settingsGroup">
+      <div class="settingsGroupTitle">Автоторговля</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">API-ключи Gate.io</div>
+          <div class="sub" id="setGateApiSub">проверка...</div>
+        </div>
+      </div>
+      <div class="settingRow" style="flex-direction:column;align-items:stretch;gap:8px;">
+        <input type="text" id="setGateApiKey" placeholder="API Key" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;">
+        <input type="password" id="setGateApiSecret" placeholder="API Secret" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;">
+        <div style="display:flex;gap:8px;">
+          <button id="saveGateApiBtn" style="flex:1;background:#1e2a3f;border:none;color:#fff;padding:8px;border-radius:8px;font-size:13px;">Сохранить ключи</button>
+          <button id="clearGateApiBtn" style="background:#3a1e22;border:none;color:#ff9b9b;padding:8px 12px;border-radius:8px;font-size:13px;">Удалить</button>
+        </div>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Бумажная торговля (dry-run)</div>
+          <div class="sub">без реальных ордеров, только лог того, что было бы сделано — выключи только когда уверен</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeDryRun"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Размер позиции</div>
+          <div class="sub">режим и значение — либо % от баланса фьючерсного кошелька, либо фикс. $ маржи (плечо не влияет на это число)</div>
+        </div>
+      </div>
+      <div class="settingRow" style="gap:8px;">
+        <select id="setAutotradeSizeMode" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;">
+          <option value="percent">% от депозита</option>
+          <option value="fixed">Фикс. $</option>
+        </select>
+        <input type="number" id="setAutotradeSizeValue" step="0.1" min="0.1" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;width:100px;">
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Bounce</div>
+          <div class="sub">плечо, если включено</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="number" id="setAutotradeLevBounce" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+          <label class="switch"><input type="checkbox" id="setAutotradeBounce"><span class="switchSlider"></span></label>
+        </div>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Breakout</div>
+          <div class="sub">плечо, если включено</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="number" id="setAutotradeLevBreakout" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+          <label class="switch"><input type="checkbox" id="setAutotradeBreakout"><span class="switchSlider"></span></label>
+        </div>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Дивергенции</div>
+          <div class="sub">плечо, если включено</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="number" id="setAutotradeLevDivergence" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+          <label class="switch"><input type="checkbox" id="setAutotradeDivergence"><span class="switchSlider"></span></label>
+        </div>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ EMA</div>
+          <div class="sub">плечо, если включено</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="number" id="setAutotradeLevEma" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+          <label class="switch"><input type="checkbox" id="setAutotradeEma"><span class="switchSlider"></span></label>
+        </div>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Скальпинг</div>
+          <div class="sub">плечо берётся из самого сигнала, не отсюда</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeScalp"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Сессия</div>
+          <div class="sub">плечо, если включено</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="number" id="setAutotradeLevSession" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+          <label class="switch"><input type="checkbox" id="setAutotradeSession"><span class="switchSlider"></span></label>
+        </div>
       </div>
     </div>
 
@@ -6638,15 +7228,44 @@ const setInputs = {
   telegram_alerts_ema: document.getElementById('setTelegramEma'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
   telegram_alerts_session: document.getElementById('setTelegramSession'),
+  autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
+  autotrade_bounce: document.getElementById('setAutotradeBounce'),
+  autotrade_breakout: document.getElementById('setAutotradeBreakout'),
+  autotrade_divergence: document.getElementById('setAutotradeDivergence'),
+  autotrade_ema: document.getElementById('setAutotradeEma'),
+  autotrade_scalp: document.getElementById('setAutotradeScalp'),
+  autotrade_session: document.getElementById('setAutotradeSession'),
+};
+
+const setValueInputs = {
+  autotrade_size_mode: document.getElementById('setAutotradeSizeMode'),
+  autotrade_size_value: document.getElementById('setAutotradeSizeValue'),
+  autotrade_leverage_bounce: document.getElementById('setAutotradeLevBounce'),
+  autotrade_leverage_breakout: document.getElementById('setAutotradeLevBreakout'),
+  autotrade_leverage_divergence: document.getElementById('setAutotradeLevDivergence'),
+  autotrade_leverage_ema: document.getElementById('setAutotradeLevEma'),
+  autotrade_leverage_session: document.getElementById('setAutotradeLevSession'),
 };
 
 function applySettingsToInputs(s) {
   for (const key in setInputs) {
     if (s[key] !== undefined) setInputs[key].checked = s[key];
   }
+  for (const key in setValueInputs) {
+    if (s[key] !== undefined) setValueInputs[key].value = s[key];
+  }
   document.getElementById('setTelegramSub').textContent = s.telegram_configured
     ? 'токен найден'
     : 'токен не найден — уведомления не уйдут, даже если включено';
+}
+
+async function refreshGateApiStatus() {
+  try {
+    const s = await (await fetch('/api/credentials')).json();
+    document.getElementById('setGateApiSub').textContent = s.gate_api_configured
+      ? 'ключи сохранены'
+      : 'ключи не заданы — реальные ордера невозможны, работает только dry-run';
+  } catch (e) {}
 }
 
 async function loadSettings() {
@@ -6659,6 +7278,7 @@ async function loadSettings() {
 document.getElementById('settingsBtn').onclick = async () => {
   settingsModal.classList.add('open');
   await loadSettings();
+  await refreshGateApiStatus();
 };
 document.getElementById('settingsCloseBtn').onclick = () => settingsModal.classList.remove('open');
 
@@ -6685,6 +7305,62 @@ for (const key in setInputs) {
     input.disabled = false;
   };
 }
+
+for (const key in setValueInputs) {
+  setValueInputs[key].onchange = async (e) => {
+    const input = e.target;
+    input.disabled = true;
+    try {
+      const res = await (await fetch('/api/settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({[key]: input.value}),
+      })).json();
+      if (res.ok) {
+        applySettingsToInputs(res.settings);
+      } else {
+        alert('Не удалось сохранить настройку');
+        await loadSettings();
+      }
+    } catch (err) {
+      alert('Не удалось сохранить настройку: ' + err);
+      await loadSettings();
+    }
+    input.disabled = false;
+  };
+}
+
+document.getElementById('saveGateApiBtn').onclick = async () => {
+  const key = document.getElementById('setGateApiKey').value.trim();
+  const secret = document.getElementById('setGateApiSecret').value.trim();
+  if (!key || !secret) { alert('Заполни оба поля'); return; }
+  try {
+    const res = await (await fetch('/api/credentials', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({api_key: key, api_secret: secret}),
+    })).json();
+    if (res.ok) {
+      document.getElementById('setGateApiKey').value = '';
+      document.getElementById('setGateApiSecret').value = '';
+      await refreshGateApiStatus();
+    } else {
+      alert('Не удалось сохранить ключи: ' + (res.error || ''));
+    }
+  } catch (err) {
+    alert('Не удалось сохранить ключи: ' + err);
+  }
+};
+
+document.getElementById('clearGateApiBtn').onclick = async () => {
+  if (!confirm('Удалить сохранённые API-ключи Gate.io?')) return;
+  try {
+    await fetch('/api/credentials', {method: 'DELETE'});
+    await refreshGateApiStatus();
+  } catch (err) {
+    alert('Не удалось удалить ключи: ' + err);
+  }
+};
 
 // ---------------- Chart modal ----------------
 const modal = document.getElementById('modal');
