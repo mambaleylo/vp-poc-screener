@@ -1882,6 +1882,38 @@ v0.51.4 - v0.51.1's error-body-capture fix immediately paid off: user's
          been rejected unrounded now place successfully after rounding
          (0.0468912345 -> 0.0469 at a 0.0001 tick). Full scan-function/
          endpoint regression stayed clean.
+v0.52.0 - added position/order reconciliation, per direct request:
+         catch unprotected positions and clean up orphaned trigger
+         orders, checked at the moment a new real trade opens rather
+         than on a separate timer (avoids adding another periodic
+         API-polling loop, and avoids spamming — piggybacks on however
+         often trades actually happen).
+         reconcile_positions_and_orders() fetches live positions
+         (GET /futures/usdt/positions) and live open trigger orders
+         (GET /futures/usdt/price_orders?status=open) ONCE and reuses
+         that single fetch for both checks:
+         (1) a position with no attached trigger order at all — exactly
+         the OPENED_TP_SL_FAILED scenario from two fixes ago — gets a
+         Telegram alert, deduped via a small in-memory set so the same
+         still-unprotected contract doesn't re-alert on every
+         subsequent trade; the set self-clears once that contract is
+         protected again, so a genuinely new recurrence still alerts.
+         (2) a trigger order whose position has ALREADY closed — Gate
+         has no native OCO, so when TP fires and closes a position, the
+         paired SL order (or vice versa) just sits there as a live
+         trigger with nothing left to close, and would fire against
+         whatever NEW position later opens on that same contract if
+         left alone — gets cancelled outright via DELETE
+         /futures/usdt/price_orders/{id}.
+         Wired into execute_autotrade() right before a REAL trade opens
+         (after the dry-run check, so this never touches dry-run or
+         costs it any network calls — reverified that property still
+         holds, zero calls in dry-run). Verified the full scenario
+         directly: an unprotected position alerts once and stays
+         silent on repeat calls while still unprotected, an orphaned
+         trigger gets cancelled, protecting the position clears it from
+         the alerted set, and a later genuine recurrence alerts again.
+         Full scan-function/endpoint regression stayed clean.
 """
 
 import os
@@ -1900,7 +1932,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.51.4"
+APP_VERSION = "0.52.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4087,6 +4119,82 @@ def get_dual_mode():
     return dual
 
 
+def get_open_positions():
+    """GET /futures/usdt/positions — all positions, filtered to non-zero
+    size (Gate returns every contract ever touched, most with size=0)."""
+    data = gate_signed_request("GET", "/futures/usdt/positions")
+    return [p for p in data if float(p.get("size", 0) or 0) != 0]
+
+
+def get_open_price_orders():
+    """GET /futures/usdt/price_orders?status=open — every still-pending
+    price-triggered (TP/SL) order."""
+    return gate_signed_request("GET", "/futures/usdt/price_orders", query_string="status=open")
+
+
+_unprotected_alerted = set()  # contracts already flagged — avoids re-alerting on every single new trade while the same position stays unprotected
+
+
+def cancel_price_order(order_id):
+    """DELETE /futures/usdt/price_orders/{order_id} — cancels one still-
+    pending trigger order."""
+    return gate_signed_request("DELETE", f"/futures/usdt/price_orders/{order_id}")
+
+
+def reconcile_positions_and_orders():
+    """One combined pass over live positions + live trigger orders,
+    fetched once and reused for both checks (rather than two separate
+    functions each re-fetching the same data):
+    (1) positions with NO attached trigger order at all — alerted via
+        Telegram, deduped so the same still-unprotected contract doesn't
+        re-alert on every subsequent trade.
+    (2) trigger orders whose position has ALREADY closed — Gate has no
+        native OCO, so when TP fires and closes a position, the paired
+        SL order (or vice versa) just sits there as a live trigger with
+        nothing left to close, and would fire against whatever NEW
+        position might later open on that same contract if left alone.
+        These get cancelled outright.
+    Called at the moment a new real trade is about to open rather than
+    on its own timer, piggybacking on however often trades actually
+    happen instead of adding another periodic API-polling loop.
+    Returns (unprotected_contracts, cancelled_contracts)."""
+    try:
+        positions = get_open_positions()
+        triggers = get_open_price_orders()
+    except Exception as e:
+        log_error(f"reconcile_positions_and_orders: {e}")
+        return [], []
+
+    open_contracts = {p["contract"] for p in positions if p.get("contract")}
+    triggered_contracts = {t.get("initial", {}).get("contract") for t in triggers if t.get("initial", {}).get("contract")}
+
+    unprotected = [c for c in open_contracts if c not in triggered_contracts]
+    with _scalp_signal_cooldowns_lock:  # reusing an existing lock for this tiny bit of shared state rather than adding a new one
+        new_ones = [c for c in unprotected if c not in _unprotected_alerted]
+        _unprotected_alerted.intersection_update(unprotected)
+        _unprotected_alerted.update(unprotected)
+    if new_ones:
+        send_telegram(
+            f"⚠️ Незащищённые позиции без TP/SL: {', '.join(new_ones)} — проверь вручную на бирже",
+            category=None,
+        )
+
+    cancelled = []
+    for t in triggers:
+        contract = t.get("initial", {}).get("contract")
+        order_id = t.get("id")
+        if contract and contract not in open_contracts and order_id is not None:
+            try:
+                cancel_price_order(order_id)
+                cancelled.append(contract)
+            except Exception as e:
+                log_error(f"reconcile_positions_and_orders: failed to cancel orphaned order {order_id} ({contract}): {e}")
+    if cancelled:
+        log_error(f"reconcile_positions_and_orders: cancelled {len(cancelled)} orphaned trigger order(s): {cancelled}")
+
+    return unprotected, cancelled
+
+
 def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=None):
     """The single entry point every signal source calls to (maybe) fire a
     real trade. `mode` is a short label (e.g. "bounce", "ema", "scalp") used
@@ -4141,6 +4249,11 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=No
             with state_lock:
                 STATE["autotrade_log"].appendleft(record)
             return record
+
+        try:
+            reconcile_positions_and_orders()
+        except Exception as e:
+            log_error(f"execute_autotrade {symbol}: reconcile before open failed: {e}")
 
         set_leverage(symbol, leverage)
         order = place_market_order(symbol, direction, contracts)
