@@ -1790,6 +1790,39 @@ v0.51.0 - entry marker dot on all four chart types (VP, divergence,
          existing ENTRY/SL/TP lines. Verified: JS syntax clean, both
          new functions declared exactly once, and the full
          scan-function/endpoint regression stayed clean.
+v0.51.1 - CRITICAL: user's live log showed two real EMA positions
+         (ZBT_USDT SHORT, TAG_USDT LONG) opened with real money but
+         with NO stop-loss/take-profit protection — both TP and SL
+         price_orders calls failed with 400. Two root causes, both
+         fixed:
+         (1) gate_signed_request() only surfaced requests'
+         generic "400 Client Error: Bad Request" text, discarding
+         Gate's actual JSON error body (label/message) — meaning the
+         real cause was invisible in the log, forcing a guess instead
+         of a diagnosis. Now captures and includes the real response
+         body in the raised error.
+         (2) The likely actual cause: Gate's close-position order
+         schema genuinely differs by account position mode. Single
+         mode closes via size=0/close=true (what place_tp_sl_orders
+         already sent); two-side (hedge/dual) mode instead requires
+         auto_size ("close_long"/"close_short") + reduce_only=true, and
+         doesn't use `close` at all — a request built for one mode gets
+         rejected under the other. Added get_dual_mode() (cached,
+         reads in_dual_mode from GET /futures/usdt/accounts) and
+         branched place_tp_sl_orders()'s initial-order payload
+         accordingly. If mode detection itself fails, falls back to
+         single-mode (the more common default) with a logged warning
+         rather than blocking the close order entirely.
+         Verified directly: single-mode payload unchanged (close:true,
+         no auto_size), dual-mode payload correctly uses auto_size
+         (close_long for LONG, close_short for SHORT) + reduce_only
+         with no close field, and the detection-failure path falls
+         back gracefully without raising. Full scan-function/endpoint
+         regression stayed clean.
+         Told the user directly to manually verify/protect the two
+         live unprotected positions on the exchange before relying on
+         this fix — a code fix doesn't retroactively add stops to
+         positions that already exist without them.
 """
 
 import os
@@ -1808,7 +1841,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.51.0"
+APP_VERSION = "0.51.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2446,7 +2479,15 @@ def gate_signed_request(method, url_path, query_string="", body=None, timeout=HT
     if query_string:
         url += f"?{query_string}"
     r = requests.request(method, url, headers=headers, data=payload_str if body is not None else None, timeout=timeout)
-    r.raise_for_status()
+    if not r.ok:
+        # Gate's error responses carry a JSON body ({"label":..., "message":...})
+        # that raise_for_status()'s generic "400 Client Error" text throws away —
+        # exactly the detail needed to diagnose a rejected order without guessing.
+        try:
+            detail = r.json()
+        except Exception:
+            detail = r.text
+        raise requests.exceptions.HTTPError(f"{r.status_code} error for {method} {url_path}: {detail}", response=r)
     return r.json() if r.text else None
 
 
@@ -3902,23 +3943,40 @@ def place_tp_sl_orders(symbol, direction, tp_price, sl_price, price_type=0):
     """Places both the TP and SL as separate price-triggered close orders.
     Returns (tp_order, sl_order, errors) — errors is a list of (which, msg)
     for whichever leg failed, so one failing doesn't silently hide the
-    other's success or failure."""
+    other's success or failure.
+    The "initial" close-order schema genuinely differs by account
+    position mode (confirmed the hard way — a request built for single
+    mode 400'd under dual/hedge mode): single mode closes via
+    size=0/close=true; dual mode instead needs auto_size ("close_long"/
+    "close_short", matching which side is being closed) plus
+    reduce_only=true, and doesn't use `close` at all."""
     if direction == "LONG":
         tp_rule, sl_rule = 1, 2
+        auto_size = "close_long"
     else:
         tp_rule, sl_rule = 2, 1
+        auto_size = "close_short"
+    try:
+        dual = get_dual_mode()
+    except Exception as e:
+        log_error(f"place_tp_sl_orders {symbol}: couldn't determine position mode ({e}), assuming single-mode")
+        dual = False
+    if dual:
+        initial = {"contract": symbol, "size": 0, "price": "0", "tif": "ioc", "auto_size": auto_size, "reduce_only": True}
+    else:
+        initial = {"contract": symbol, "size": 0, "price": "0", "close": True, "tif": "ioc"}
     errors = []
     tp_order = sl_order = None
     try:
         tp_order = gate_signed_request("POST", "/futures/usdt/price_orders", body={
-            "initial": {"contract": symbol, "size": 0, "price": "0", "close": True, "tif": "ioc"},
+            "initial": dict(initial),
             "trigger": {"strategy_type": 0, "price_type": price_type, "price": str(tp_price), "rule": tp_rule, "expiration": 0},
         })
     except Exception as e:
         errors.append(("tp", str(e)))
     try:
         sl_order = gate_signed_request("POST", "/futures/usdt/price_orders", body={
-            "initial": {"contract": symbol, "size": 0, "price": "0", "close": True, "tif": "ioc"},
+            "initial": dict(initial),
             "trigger": {"strategy_type": 0, "price_type": price_type, "price": str(sl_price), "rule": sl_rule, "expiration": 0},
         })
     except Exception as e:
@@ -3931,6 +3989,28 @@ def get_futures_wallet_balance():
     available balance, used for percent-of-deposit position sizing."""
     data = gate_signed_request("GET", "/futures/usdt/accounts")
     return float(data.get("available", 0) or 0)
+
+
+_dual_mode_cache = {"value": None, "fetched_at": 0}
+DUAL_MODE_CACHE_TTL_SEC = 3600  # this is an account-level setting that essentially never changes mid-session
+
+
+def get_dual_mode():
+    """Whether the account is in two-side (hedge) position mode — GET
+    /futures/usdt/accounts returns in_dual_mode. This matters because
+    Gate's close-position order schema is genuinely different between
+    modes: single mode closes with size=0/close=true; dual mode instead
+    needs auto_size ("close_long"/"close_short") + reduce_only=true, and
+    a request built for one mode gets rejected under the other — the
+    exact 400 that happened before this existed."""
+    now = time.time()
+    if _dual_mode_cache["value"] is not None and now - _dual_mode_cache["fetched_at"] < DUAL_MODE_CACHE_TTL_SEC:
+        return _dual_mode_cache["value"]
+    data = gate_signed_request("GET", "/futures/usdt/accounts")
+    dual = bool(data.get("in_dual_mode", False))
+    _dual_mode_cache["value"] = dual
+    _dual_mode_cache["fetched_at"] = now
+    return dual
 
 
 def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=None):
