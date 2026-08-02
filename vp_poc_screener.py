@@ -1687,6 +1687,42 @@ v0.48.1 - the two pieces left over from v0.48.0: new "Автоторговля" 
          endpoint regression stayed clean, and the two new endpoints
          verified directly with mock log entries covering all four
          status types.
+v0.49.0 - Balance simulator, separate from the real/dry-run auto-trader:
+         always runs for every firing signal across all six sources
+         regardless of each mode's own autotrade-enabled toggle, using
+         the same sizing/leverage config, to answer "what would my
+         balance look like if this had been running the whole time"
+         continuously rather than only once a mode is turned on.
+         sim_execute_trade() opens a paper position sized off the
+         running simulated balance (AUTOTRADE_SIM_START_BALANCE,
+         default $30) and keeps a direct reference to the originating
+         signal record; sweep_sim_trades() (wired into the main scan
+         loop) settles it once that record's own outcome-tracking sets
+         status=CLOSED, computing PnL from the REAL exit price the
+         signal actually closed at rather than an assumed R-multiple,
+         with entry+exit taker fees applied both ways. Verified the
+         PnL/fee math by hand against a known case (margin $10, 10x
+         leverage, +2% move -> net $1.95 after $0.05 fees each side)
+         and confirmed it matches exactly, plus a LOSS case and the
+         zero-balance guard (stops opening new paper trades once
+         busted).
+         Persistence: sim_balance and SETTLED trades survive a restart;
+         still-PENDING trades are deliberately excluded on save, since
+         their live signal reference can't survive a restart anyway
+         (scalp/session signals aren't persisted either) — verified via
+         a full save/reload cycle that only the settled trade survives
+         and the balance is exact.
+         New "Симулятор" tab (balance, PnL $ and %, win rate, full trade
+         history with per-trade PnL and running balance) plus three API
+         routes (/api/simulator/status, /trades, /reset — the trades
+         route strips the internal _signal_ref before returning,
+         verified it never leaks). Learned from the exact mistake in
+         v0.48.1 (an insertion that silently ate the refreshAll()
+         declaration line): inserted refreshSimulator() as a fully
+         isolated block this time and immediately ran node --check plus
+         a grep for exactly-one-declaration on both functions before
+         doing anything else — confirmed clean on the first try.
+         Full scan-function/endpoint regression stayed clean throughout.
 """
 
 import os
@@ -1705,7 +1741,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.48.1"
+APP_VERSION = "0.49.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2075,6 +2111,21 @@ AUTOTRADE_LEVERAGE_EMA = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_EMA", 10))
 AUTOTRADE_LEVERAGE_SESSION = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SESSION", 10))
 AUTOTRADE_TRADE_HISTORY = 300
 
+# ----------------------------------------------------------------------------
+# Balance simulator — separate from the real/dry-run auto-trader above.
+# Always runs for every firing signal across all six sources, regardless of
+# each mode's own autotrade-enabled toggle, using the SAME sizing/leverage
+# settings — answers "what would my balance actually look like if this had
+# been running the whole time", continuously, not gated behind turning
+# individual modes on. Settles against each signal's own REAL eventual
+# outcome (WIN/LOSS/TIMEOUT, whatever price it actually closed at) rather
+# than a theoretical R-multiple, by keeping a live reference to the
+# originating signal record and reading its outcome once resolved.
+# ----------------------------------------------------------------------------
+AUTOTRADE_SIM_START_BALANCE = float(os.environ.get("VP_AUTOTRADE_SIM_START_BALANCE", 30.0))
+AUTOTRADE_SIM_FEE_PCT = float(os.environ.get("VP_AUTOTRADE_SIM_FEE_PCT", 0.0005))  # taker fee per side, matches SCALP_TAKER_FEE_PCT's own default
+AUTOTRADE_SIM_TRADE_HISTORY = 500
+
 TELEGRAM_CHAT_ID = os.environ.get("VP_TG_CHAT", "")
 # Same config file path used by the EMA-screener/Pump_Radar project — if
 # Telegram was already set up there, this picks up the same token/chat_id
@@ -2388,6 +2439,8 @@ STATE = {
     "session_signals": deque(maxlen=SESSION_SIGNAL_HISTORY),
     "session_next_open_ts": None,
     "autotrade_log": deque(maxlen=AUTOTRADE_TRADE_HISTORY),  # every attempted auto-trade, dry-run or real, with its outcome
+    "sim_balance": AUTOTRADE_SIM_START_BALANCE,
+    "sim_trades": deque(maxlen=AUTOTRADE_SIM_TRADE_HISTORY),  # pending + settled paper trades
 }
 _cooldowns = {}  # (symbol, zone_key) -> last_alert_ts
 _cooldowns_lock = threading.Lock()
@@ -2874,6 +2927,8 @@ def scan_symbol_session_live(symbol, session_open_ts):
         if AUTOTRADE_ENABLED_SESSION:
             execute_autotrade("session", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                AUTOTRADE_LEVERAGE_SESSION, extra={"session_open": session_open_ts})
+        sim_execute_trade("session", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                           AUTOTRADE_LEVERAGE_SESSION, record)
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         send_telegram(
             f"{arrow} {symbol} (открытие сессии — манипуляция)\n"
@@ -3170,6 +3225,8 @@ def scan_symbol_divergence(symbol):
         if AUTOTRADE_ENABLED_DIVERGENCE:
             execute_autotrade("divergence", symbol, sig["direction"], entry, sl, tp,
                                AUTOTRADE_LEVERAGE_DIVERGENCE, extra={"kind": sig["kind"]})
+        sim_execute_trade("divergence", symbol, sig["direction"], entry, sl, tp,
+                           AUTOTRADE_LEVERAGE_DIVERGENCE, record)
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         send_telegram(
             f"{arrow} {symbol} (RSI {sig['kind']} divergence)\n"
@@ -3313,6 +3370,8 @@ def scan_symbol_ema(symbol, interval=EMA_INTERVAL):
         if AUTOTRADE_ENABLED_EMA:
             execute_autotrade("ema", symbol, sig["direction"], entry, sl, tp,
                                AUTOTRADE_LEVERAGE_EMA, extra={"interval": interval})
+        sim_execute_trade("ema", symbol, sig["direction"], entry, sl, tp,
+                           AUTOTRADE_LEVERAGE_EMA, record)
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         send_telegram(
             f"{arrow} {symbol} (EMA {EMA_SIGNAL_TYPE}, {interval})\n"
@@ -3894,6 +3953,73 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=No
         return record
 
 
+def sim_execute_trade(mode, symbol, direction, entry, sl, tp, leverage, signal_record):
+    """Opens a paper trade against the running simulated balance, sized
+    with the SAME AUTOTRADE_SIZE_MODE/AUTOTRADE_SIZE_VALUE config real
+    auto-trading uses (so the simulation reflects whatever sizing the
+    person actually has configured, not a separate hardcoded scheme).
+    Keeps a direct reference to signal_record so sweep_sim_trades() can
+    read its real eventual outcome later — that record gets mutated in
+    place by the module's own outcome-tracking function when it resolves,
+    so no separate lookup is needed, just checking the same dict again."""
+    with state_lock:
+        balance = STATE["sim_balance"]
+    if balance <= 0:
+        return None  # busted — stop opening new paper trades until manually reset
+    if AUTOTRADE_SIZE_MODE == "percent":
+        margin = balance * (AUTOTRADE_SIZE_VALUE / 100.0)
+    else:
+        margin = AUTOTRADE_SIZE_VALUE
+    margin = min(margin, balance)  # can't risk more than the paper account actually has
+    if margin <= 0:
+        return None
+    notional = margin * leverage
+    entry_fee = notional * AUTOTRADE_SIM_FEE_PCT
+    trade = {
+        "time": time.time(), "mode": mode, "symbol": symbol, "direction": direction,
+        "entry": entry, "sl": sl, "tp": tp, "leverage": leverage,
+        "margin": round(margin, 4), "notional": round(notional, 4), "entry_fee": round(entry_fee, 4),
+        "status": "PENDING", "result": None, "pnl": None, "balance_after": None,
+        "_signal_ref": signal_record,
+    }
+    with state_lock:
+        STATE["sim_balance"] = round(STATE["sim_balance"] - entry_fee, 6)
+        STATE["sim_trades"].append(trade)
+    return trade
+
+
+def sweep_sim_trades():
+    """Settles any pending paper trade whose originating signal has since
+    resolved. PnL is computed from the ACTUAL exit_price the signal closed
+    at (whichever of TP/SL/timeout-close it really was), not an assumed
+    R-multiple — the whole point is reflecting what genuinely happened."""
+    with state_lock:
+        pending = [t for t in STATE["sim_trades"] if t["status"] == "PENDING"]
+    for t in pending:
+        rec = t.get("_signal_ref")
+        if rec is None or rec.get("status") != "CLOSED":
+            continue
+        exit_price = rec.get("exit_price")
+        result = rec.get("result")
+        if exit_price is None:
+            log_error(f"sweep_sim_trades: {t['symbol']} closed with result={result} but no exit_price — leaving pending")
+            continue
+        entry = t["entry"]
+        if entry <= 0:
+            continue
+        move_pct = (exit_price - entry) / entry if t["direction"] == "LONG" else (entry - exit_price) / entry
+        gross_pnl = t["notional"] * move_pct
+        exit_fee = t["notional"] * AUTOTRADE_SIM_FEE_PCT
+        net_pnl = gross_pnl - exit_fee
+        with state_lock:
+            STATE["sim_balance"] = round(STATE["sim_balance"] + net_pnl, 6)
+            t["status"] = "SETTLED"
+            t["result"] = result
+            t["pnl"] = round(net_pnl, 4)
+            t["balance_after"] = STATE["sim_balance"]
+            t["_signal_ref"] = None  # drop the reference once settled, nothing more to read from it
+
+
 def build_universe():
     # Volume fields (volume_24h_quote/_settle/_base) live on the /tickers
     # endpoint, not /contracts — /contracts has no volume data at all.
@@ -4178,6 +4304,8 @@ def scan_symbol_scalp_signal(symbol, rec):
         if AUTOTRADE_ENABLED_SCALP:
             execute_autotrade("scalp", symbol, direction, entry, sl_price, target_price,
                                rec["leverage"], extra={"interval": interval, "score": rec["score"]})
+        sim_execute_trade("scalp", symbol, direction, entry, sl_price, target_price,
+                           rec["leverage"], record)
     except Exception as e:
         log_error(f"scalp_signal {symbol}: {e}")
 
@@ -4669,11 +4797,17 @@ STATE_FILE = os.environ.get(
 def save_state():
     try:
         with state_lock:
+            settled_sim_trades = [
+                {k: v for k, v in t.items() if k != "_signal_ref"}
+                for t in STATE["sim_trades"] if t["status"] == "SETTLED"
+            ]
             data = {
                 "overrides": SYMBOL_OVERRIDES,
                 "signals": list(STATE["signals"]),
                 "div_signals": list(STATE["div_signals"]),
                 "ema_signals": list(STATE["ema_signals"]),
+                "sim_balance": STATE["sim_balance"],
+                "sim_trades": settled_sim_trades,  # pending trades excluded — their live signal reference can't survive a restart, so they can never resolve; keeping them "pending" forever would be misleading
                 "saved_at": time.time(),
             }
         tmp_path = STATE_FILE + ".tmp"
@@ -4694,11 +4828,15 @@ def load_state():
         signals = data.get("signals", [])
         div_signals = data.get("div_signals", [])
         ema_signals = data.get("ema_signals", [])
+        sim_trades = data.get("sim_trades", [])
         with state_lock:
             STATE["signals"] = deque(signals, maxlen=SIGNAL_HISTORY)
             STATE["div_signals"] = deque(div_signals, maxlen=DIV_SIGNAL_HISTORY)
             STATE["ema_signals"] = deque(ema_signals, maxlen=EMA_SIGNAL_HISTORY)
-        print(f"Loaded persisted state: {len(SYMBOL_OVERRIDES)} overrides, {len(signals)} signals, {len(div_signals)} divergence signals, {len(ema_signals)} EMA signals")
+            if "sim_balance" in data:
+                STATE["sim_balance"] = data["sim_balance"]
+            STATE["sim_trades"] = deque(sim_trades, maxlen=AUTOTRADE_SIM_TRADE_HISTORY)
+        print(f"Loaded persisted state: {len(SYMBOL_OVERRIDES)} overrides, {len(signals)} signals, {len(div_signals)} divergence signals, {len(ema_signals)} EMA signals, {len(sim_trades)} settled sim trades")
     except Exception as e:
         log_error(f"load_state: {e}")
 
@@ -5106,6 +5244,8 @@ def scan_symbol(symbol):
                 if autotrade_enabled:
                     execute_autotrade(sig["reason"], symbol, sig["direction"], sig["price"], sl, tp,
                                        autotrade_leverage, extra={"reason": sig["reason"]})
+                sim_execute_trade(sig["reason"], symbol, sig["direction"], sig["price"], sl, tp,
+                                   autotrade_leverage, record)
                 arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
                 send_telegram(
                     f"{arrow} {symbol} ({sig['reason']})\n"
@@ -5360,6 +5500,7 @@ def scan_loop():
                 update_scalp_signal_outcomes()
             if SESSION_ENABLED:
                 update_session_signal_outcomes()
+            sweep_sim_trades()
             save_state()
             t1 = time.time()
             with state_lock:
@@ -6117,6 +6258,51 @@ def api_autotrade_status():
     })
 
 
+@app.route("/api/simulator/status")
+def api_simulator_status():
+    with state_lock:
+        trades = list(STATE["sim_trades"])
+        balance = STATE["sim_balance"]
+    settled = [t for t in trades if t["status"] == "SETTLED"]
+    pending = [t for t in trades if t["status"] == "PENDING"]
+    wins = sum(1 for t in settled if t["result"] == "WIN")
+    losses = sum(1 for t in settled if t["result"] == "LOSS")
+    timeouts = sum(1 for t in settled if t["result"] == "TIMEOUT")
+    total_pnl = sum(t["pnl"] for t in settled) if settled else 0
+    return jsonify({
+        "balance": round(balance, 4), "start_balance": AUTOTRADE_SIM_START_BALANCE,
+        "pnl_total": round(total_pnl, 4),
+        "pnl_pct": round((balance - AUTOTRADE_SIM_START_BALANCE) / AUTOTRADE_SIM_START_BALANCE * 100, 2) if AUTOTRADE_SIM_START_BALANCE else None,
+        "settled": len(settled), "pending": len(pending),
+        "wins": wins, "losses": losses, "timeouts": timeouts,
+        "win_rate": round(wins / (wins + losses) * 100, 1) if (wins + losses) else None,
+        "size_mode": AUTOTRADE_SIZE_MODE, "size_value": AUTOTRADE_SIZE_VALUE,
+        "fee_pct": AUTOTRADE_SIM_FEE_PCT,
+    })
+
+
+@app.route("/api/simulator/trades")
+def api_simulator_trades():
+    with state_lock:
+        trades = list(STATE["sim_trades"])
+    clean = [{k: v for k, v in t.items() if k != "_signal_ref"} for t in trades]
+    return jsonify(clean)
+
+
+@app.route("/api/simulator/reset", methods=["POST"])
+def api_simulator_reset():
+    try:
+        with state_lock:
+            STATE["sim_balance"] = AUTOTRADE_SIM_START_BALANCE
+            STATE["sim_trades"].clear()
+        return jsonify({"ok": True, "balance": AUTOTRADE_SIM_START_BALANCE})
+    except Exception as e:
+        log_error(f"api_simulator_reset: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+
+
 @app.route("/api/reset/volume", methods=["POST"])
 def api_reset_volume():
     """Wipe only the volume-profile side: per-symbol tuning overrides,
@@ -6205,7 +6391,7 @@ INDEX_HTML = """<!doctype html>
   body { margin:0; background:#0b0e14; color:#d7dee8; font-family: -apple-system, Roboto, Segoe UI, sans-serif; }
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
   #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #settingsModal.open { display:flex; flex-direction:column; }
@@ -6287,6 +6473,7 @@ INDEX_HTML = """<!doctype html>
       <button id="resetEmaBtn">Очистить индикатор</button>
       <button id="resetScalpBtn">Очистить скальпинг</button>
       <button id="resetSessionBtn">Очистить сессию</button>
+      <button id="resetSimulatorBtn">Сбросить симулятор</button>
     </div>
   </div>
   <div id="status">загрузка...</div>
@@ -6300,6 +6487,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="scalp">Скальпинг</div>
   <div class="tab" data-tab="session">Сессия</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
+  <div class="tab" data-tab="simulator">Симулятор</div>
 </div>
 <div class="panel">
   <div id="tuningPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
@@ -6320,6 +6508,7 @@ INDEX_HTML = """<!doctype html>
   <div id="scalpPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="sessionPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
+  <div id="simulatorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
 </div>
 
@@ -6631,12 +6820,14 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('scalpPanel').style.display = activeTab === 'scalp' ? 'block' : 'none';
     document.getElementById('sessionPanel').style.display = activeTab === 'session' ? 'block' : 'none';
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
+    document.getElementById('simulatorPanel').style.display = activeTab === 'simulator' ? 'block' : 'none';
     if (activeTab === 'signals') refreshTuning();
     if (activeTab === 'divergence') refreshDivergence();
     if (activeTab === 'ema') refreshEma();
     if (activeTab === 'scalp') refreshScalp();
     if (activeTab === 'session') refreshSession();
     if (activeTab === 'autotrade') refreshAutotrade();
+    if (activeTab === 'simulator') refreshSimulator();
   };
 });
 
@@ -7288,6 +7479,62 @@ async function refreshAutotrade() {
   panel.innerHTML = headerHtml + tableHtml;
 }
 
+async function refreshSimulator() {
+  const [status, trades] = await Promise.all([
+    (await fetch('/api/simulator/status')).json(),
+    (await fetch('/api/simulator/trades')).json(),
+  ]);
+  const panel = document.getElementById('simulatorPanel');
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия'};
+
+  const pnlClass = status.pnl_total >= 0 ? 'win' : 'loss';
+  const sizeTxt = status.size_mode === 'percent' ? `${status.size_value}% от баланса` : `фикс. $${status.size_value}`;
+
+  const headerHtml = `
+    <div class="dim" style="margin-bottom:10px;">
+      Симуляция всегда идёт по всем режимам, независимо от тумблеров реальной/dry-run автоторговли выше — показывает "что было бы", если бы это работало с самого начала. Размер: ${sizeTxt} · комиссия ${(status.fee_pct*100).toFixed(3)}%/сторону.
+    </div>
+    <div style="margin-bottom:10px;">
+      <div style="font-size:28px;font-weight:700;">$${status.balance.toFixed(2)}</div>
+      <div class="${pnlClass}" style="font-size:14px;">
+        ${status.pnl_total >= 0 ? '+' : ''}${status.pnl_total.toFixed(2)}$
+        (${status.pnl_pct !== null ? (status.pnl_pct >= 0 ? '+' : '') + status.pnl_pct + '%' : '-'})
+        от старта $${status.start_balance.toFixed(2)}
+      </div>
+    </div>
+    <div class="dim" style="margin-bottom:10px;">
+      Сделок: ${status.settled} закрыто, ${status.pending} в ожидании ·
+      <span class="win">${status.wins}W</span>/<span class="loss">${status.losses}L</span>/<span class="status-timeout">${status.timeouts}T</span> ·
+      винрейт: ${status.win_rate !== null ? status.win_rate+'%' : '-'}
+    </div>`;
+
+  const rows = trades.map(t => {
+    const dirClass = t.direction === 'LONG' ? 'long' : 'short';
+    const statusHtml = t.status === 'PENDING'
+      ? '<span class="status-open">PENDING</span>'
+      : (t.result === 'WIN' ? '<span class="win">WIN</span>' : (t.result === 'LOSS' ? '<span class="loss">LOSS</span>' : '<span class="status-timeout">TIMEOUT</span>'));
+    const pnlTxt = t.pnl !== null && t.pnl !== undefined
+      ? `<span class="${t.pnl >= 0 ? 'win' : 'loss'}">${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(3)}$</span>`
+      : '<span class="dim">-</span>';
+    return `<tr>
+      <td class="dim">${fmtTime(t.time)}</td><td>${modeLabels[t.mode] || t.mode}</td><td>${t.symbol}</td>
+      <td class="${dirClass}">${t.direction}</td><td class="dim">${fmt(t.margin,4)}$ x${t.leverage}</td>
+      <td>${statusHtml}</td><td>${pnlTxt}</td>
+      <td class="dim">${t.balance_after !== null && t.balance_after !== undefined ? '$'+t.balance_after.toFixed(2) : '-'}</td>
+    </tr>`;
+  }).join('');
+
+  const tableHtml = trades.length ? `
+    <div style="overflow-x:auto;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>Время</th><th>Режим</th><th>Symbol</th><th>Dir</th><th>Маржа/плечо</th><th>Статус</th><th>PnL</th><th>Баланс</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    </div>` : '<div class="dim">Пока нет сделок симулятора.</div>';
+
+  panel.innerHTML = headerHtml + tableHtml;
+}
+
 async function refreshAll() {
   await refreshStatus();
   await refreshOverview();
@@ -7299,6 +7546,7 @@ async function refreshAll() {
   if (activeTab === 'scalp') await refreshScalp();
   if (activeTab === 'session') await refreshSession();
   if (activeTab === 'autotrade') await refreshAutotrade();
+  if (activeTab === 'simulator') await refreshSimulator();
 }
 refreshAll();
 setInterval(refreshAll, 15000);
@@ -7339,6 +7587,9 @@ wireResetButton('resetScalpBtn', '/api/reset/scalp',
 wireResetButton('resetSessionBtn', '/api/reset/session',
   'Удалить накопленный бэктест и сигналы по манипуляции на открытии сессии? Остальное не тронет. Это необратимо.',
   'Очистить сессию');
+wireResetButton('resetSimulatorBtn', '/api/simulator/reset',
+  'Сбросить симулятор баланса к стартовому значению и удалить всю историю сделок? Это необратимо.',
+  'Сбросить симулятор');
 
 // ---------------- Settings modal ----------------
 const settingsModal = document.getElementById('settingsModal');
