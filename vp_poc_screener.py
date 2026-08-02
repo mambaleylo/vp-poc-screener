@@ -1723,6 +1723,19 @@ v0.49.0 - Balance simulator, separate from the real/dry-run auto-trader:
          a grep for exactly-one-declaration on both functions before
          doing anything else — confirmed clean on the first try.
          Full scan-function/endpoint regression stayed clean throughout.
+v0.49.1 - corrected the simulator's design per direct feedback: it
+         should mirror the real/dry-run auto-trader's actual trades,
+         not run independently for every signal regardless of which
+         modes are enabled. All six sim_execute_trade() calls moved
+         inside their existing `if AUTOTRADE_ENABLED_X:` block, right
+         alongside the execute_autotrade() call they used to sit next
+         to unconditionally — same gate, same leverage, same signal.
+         Updated the now-inaccurate "always runs regardless of toggles"
+         comment (config docstring and the UI's own description text)
+         to describe the corrected behavior instead of the old one.
+         Verified directly: with a mode's autotrade toggle off, neither
+         the autotrade log nor the simulator gets an entry; with it on,
+         both fire together for the same signal.
 """
 
 import os
@@ -1741,7 +1754,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.49.0"
+APP_VERSION = "0.49.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2112,12 +2125,12 @@ AUTOTRADE_LEVERAGE_SESSION = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SESSION",
 AUTOTRADE_TRADE_HISTORY = 300
 
 # ----------------------------------------------------------------------------
-# Balance simulator — separate from the real/dry-run auto-trader above.
-# Always runs for every firing signal across all six sources, regardless of
-# each mode's own autotrade-enabled toggle, using the SAME sizing/leverage
-# settings — answers "what would my balance actually look like if this had
-# been running the whole time", continuously, not gated behind turning
-# individual modes on. Settles against each signal's own REAL eventual
+# Balance simulator — mirrors the real/dry-run auto-trader exactly: fires
+# for the same signals, gated by the same per-mode autotrade-enabled
+# toggles and the same sizing/leverage settings, just tracking a paper
+# balance instead of (or alongside) a real/dry-run order — answers "what
+# would my balance actually look like if my current auto-trade config had
+# been running for real". Settles against each signal's own REAL eventual
 # outcome (WIN/LOSS/TIMEOUT, whatever price it actually closed at) rather
 # than a theoretical R-multiple, by keeping a live reference to the
 # originating signal record and reading its outcome once resolved.
@@ -2927,8 +2940,8 @@ def scan_symbol_session_live(symbol, session_open_ts):
         if AUTOTRADE_ENABLED_SESSION:
             execute_autotrade("session", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                AUTOTRADE_LEVERAGE_SESSION, extra={"session_open": session_open_ts})
-        sim_execute_trade("session", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
-                           AUTOTRADE_LEVERAGE_SESSION, record)
+            sim_execute_trade("session", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                               AUTOTRADE_LEVERAGE_SESSION, record)
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         send_telegram(
             f"{arrow} {symbol} (открытие сессии — манипуляция)\n"
@@ -3225,8 +3238,8 @@ def scan_symbol_divergence(symbol):
         if AUTOTRADE_ENABLED_DIVERGENCE:
             execute_autotrade("divergence", symbol, sig["direction"], entry, sl, tp,
                                AUTOTRADE_LEVERAGE_DIVERGENCE, extra={"kind": sig["kind"]})
-        sim_execute_trade("divergence", symbol, sig["direction"], entry, sl, tp,
-                           AUTOTRADE_LEVERAGE_DIVERGENCE, record)
+            sim_execute_trade("divergence", symbol, sig["direction"], entry, sl, tp,
+                               AUTOTRADE_LEVERAGE_DIVERGENCE, record)
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         send_telegram(
             f"{arrow} {symbol} (RSI {sig['kind']} divergence)\n"
@@ -3370,8 +3383,8 @@ def scan_symbol_ema(symbol, interval=EMA_INTERVAL):
         if AUTOTRADE_ENABLED_EMA:
             execute_autotrade("ema", symbol, sig["direction"], entry, sl, tp,
                                AUTOTRADE_LEVERAGE_EMA, extra={"interval": interval})
-        sim_execute_trade("ema", symbol, sig["direction"], entry, sl, tp,
-                           AUTOTRADE_LEVERAGE_EMA, record)
+            sim_execute_trade("ema", symbol, sig["direction"], entry, sl, tp,
+                               AUTOTRADE_LEVERAGE_EMA, record)
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         send_telegram(
             f"{arrow} {symbol} (EMA {EMA_SIGNAL_TYPE}, {interval})\n"
@@ -4304,8 +4317,8 @@ def scan_symbol_scalp_signal(symbol, rec):
         if AUTOTRADE_ENABLED_SCALP:
             execute_autotrade("scalp", symbol, direction, entry, sl_price, target_price,
                                rec["leverage"], extra={"interval": interval, "score": rec["score"]})
-        sim_execute_trade("scalp", symbol, direction, entry, sl_price, target_price,
-                           rec["leverage"], record)
+            sim_execute_trade("scalp", symbol, direction, entry, sl_price, target_price,
+                               rec["leverage"], record)
     except Exception as e:
         log_error(f"scalp_signal {symbol}: {e}")
 
@@ -5244,8 +5257,8 @@ def scan_symbol(symbol):
                 if autotrade_enabled:
                     execute_autotrade(sig["reason"], symbol, sig["direction"], sig["price"], sl, tp,
                                        autotrade_leverage, extra={"reason": sig["reason"]})
-                sim_execute_trade(sig["reason"], symbol, sig["direction"], sig["price"], sl, tp,
-                                   autotrade_leverage, record)
+                    sim_execute_trade(sig["reason"], symbol, sig["direction"], sig["price"], sl, tp,
+                                       autotrade_leverage, record)
                 arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
                 send_telegram(
                     f"{arrow} {symbol} ({sig['reason']})\n"
@@ -7492,7 +7505,7 @@ async function refreshSimulator() {
 
   const headerHtml = `
     <div class="dim" style="margin-bottom:10px;">
-      Симуляция всегда идёт по всем режимам, независимо от тумблеров реальной/dry-run автоторговли выше — показывает "что было бы", если бы это работало с самого начала. Размер: ${sizeTxt} · комиссия ${(status.fee_pct*100).toFixed(3)}%/сторону.
+      Симулятор повторяет ровно те же сделки, что и автоторговля выше (те же тумблеры режимов, тот же размер/плечо) — показывает, каким был бы баланс на реальных или dry-run сделках. Размер: ${sizeTxt} · комиссия ${(status.fee_pct*100).toFixed(3)}%/сторону.
     </div>
     <div style="margin-bottom:10px;">
       <div style="font-size:28px;font-weight:700;">$${status.balance.toFixed(2)}</div>
