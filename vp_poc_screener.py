@@ -1914,6 +1914,28 @@ v0.52.0 - added position/order reconciliation, per direct request:
          trigger gets cancelled, protecting the position clears it from
          the alerted set, and a later genuine recurrence alerts again.
          Full scan-function/endpoint regression stayed clean.
+v0.52.1 - user's live log showed two more real failures: LEVERAGE_
+         EXCEEDED ("limit [1, 10]") on ZEST_USDT and Q_USDT — both
+         capped at 10x on Gate, while the EMA mode was configured for
+         15x. get_contract_spec() already fetched leverage_max for
+         exactly this reason but nothing actually used it to constrain
+         the requested leverage before calling set_leverage() — it was
+         sent as configured, unconditionally, regardless of what the
+         specific contract allows.
+         Fixed by clamping leverage to the contract's leverage_max
+         BEFORE compute_position_size() runs (not after) — sizing has
+         to use the leverage that will actually be applied, or the
+         resulting margin/notional relationship would be wrong once
+         Gate enforces the real cap. When a clamp happens, the
+         originally-requested value is kept in the log under
+         extra.leverage_requested and record["leverage"] reflects what
+         was actually used, so it's visible after the fact without
+         being a scary top-level field. Verified directly: a contract
+         capped at 10x correctly opens at 10x (with 15 logged as the
+         requested value) instead of erroring, a contract with plenty
+         of headroom (50x max, 15x requested) is completely unaffected,
+         and dry-run still makes zero network calls. Full scan-function/
+         endpoint regression stayed clean.
 """
 
 import os
@@ -1932,7 +1954,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.52.0"
+APP_VERSION = "0.52.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4230,8 +4252,17 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=No
                 wallet_balance = 1000.0
                 record["extra"]["balance_note"] = "no credentials configured, used nominal $1000 for dry-run estimate"
 
+        try:
+            leverage_max = get_contract_spec(symbol).get("leverage_max")
+            if leverage_max and leverage > leverage_max:
+                record["extra"]["leverage_requested"] = leverage
+                leverage = leverage_max
+        except Exception as e:
+            log_error(f"execute_autotrade {symbol}: couldn't fetch leverage_max ({e}), using requested leverage as-is")
+
         contracts, notional, margin, skip_reason = compute_position_size(
             symbol, entry, AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE, leverage, wallet_balance)
+        record["leverage"] = leverage  # reflect the (possibly clamped) value actually used, not the originally requested one
         record["contracts"] = contracts
         record["notional_usd"] = round(notional, 2) if notional else notional
         record["margin_usd"] = round(margin, 2) if margin else margin
