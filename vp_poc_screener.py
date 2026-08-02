@@ -1775,6 +1775,21 @@ v0.50.1 - EMA's round-3 retune (TP=1.5%/SL=0.3%/RR=5.0) dropped the win
          TP computes to exactly 1.5% and SL to exactly 0.4% in both
          directions, and the full scan-function/endpoint regression
          stayed clean.
+v0.51.0 - entry marker dot on all four chart types (VP, divergence,
+         EMA, session) — the horizontal ENTRY line showed the price but
+         gave no way to tell WHICH candle was actually the entry.
+         findCandleIndex() locates the candle closest to the signal's
+         own entry timestamp (row.time for VP/divergence/EMA,
+         sig.confirm_time for session — the confirming candle IS the
+         entry candle there), drawEntryMarker() draws a small filled
+         circle with a dark outline at that candle's (x, entry-price)
+         position, reusing the same slot-width math each chart already
+         computes for candle x-positions rather than recomputing it.
+         Added both helpers once, next to drawLevelLine, and wired one
+         call into each of the four chart functions right after their
+         existing ENTRY/SL/TP lines. Verified: JS syntax clean, both
+         new functions declared exactly once, and the full
+         scan-function/endpoint regression stayed clean.
 """
 
 import os
@@ -1793,7 +1808,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.50.1"
+APP_VERSION = "0.51.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -8045,6 +8060,10 @@ function drawChart(data, signalRow) {
     drawLevelLine(ctx, y(signalRow.entry), chartW, '#5aa8ff', 'ENTRY ' + fmtNum(signalRow.entry));
     drawLevelLine(ctx, y(signalRow.sl), chartW, '#ff6b6b', 'SL ' + fmtNum(signalRow.sl));
     drawLevelLine(ctx, y(signalRow.tp), chartW, '#3ddc97', 'TP ' + fmtNum(signalRow.tp));
+    const entryIdx = findCandleIndex(candles, signalRow.time);
+    if (entryIdx >= 0) {
+      drawEntryMarker(ctx, entryIdx * slot + slot / 2, y(signalRow.entry), '#5aa8ff');
+    }
   }
 }
 
@@ -8057,6 +8076,28 @@ function drawLevelLine(ctx, yy, chartW, color, label) {
   ctx.fillStyle = color;
   ctx.font = 'bold 10px sans-serif';
   ctx.fillText(label, 4, yy - 4);
+}
+
+function findCandleIndex(candles, targetTime) {
+  if (targetTime === undefined || targetTime === null) return -1;
+  let best = -1, bestDiff = Infinity;
+  for (let i = 0; i < candles.length; i++) {
+    const diff = Math.abs(candles[i].time - targetTime);
+    if (diff < bestDiff) { bestDiff = diff; best = i; }
+  }
+  return best;
+}
+
+function drawEntryMarker(ctx, cx, cy, color) {
+  ctx.save();
+  ctx.fillStyle = color;
+  ctx.strokeStyle = '#05070c';
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.arc(cx, cy, 5, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.stroke();
+  ctx.restore();
 }
 
 function fmtNum(n) {
@@ -8180,6 +8221,10 @@ function drawDivergenceChart(data, row) {
     drawLevelLine(ctx, yP(row.entry), chartW, '#5aa8ff', 'ENTRY ' + fmtNum(row.entry));
     drawLevelLine(ctx, yP(row.sl), chartW, '#ff6b6b', 'SL ' + fmtNum(row.sl));
     drawLevelLine(ctx, yP(row.tp), chartW, '#3ddc97', 'TP ' + fmtNum(row.tp));
+    const entryIdx = findCandleIndex(candles, row.time);
+    if (entryIdx >= 0) {
+      drawEntryMarker(ctx, entryIdx * slot + slot / 2, yP(row.entry), '#5aa8ff');
+    }
   }
 
   // ---- RSI panel ----
@@ -8369,6 +8414,10 @@ function drawEmaChart(data, row) {
     drawLevelLine(ctx, yP(row.entry), chartW, '#5aa8ff', 'ENTRY ' + fmtNum(row.entry));
     drawLevelLine(ctx, yP(row.sl), chartW, '#ff6b6b', 'SL ' + fmtNum(row.sl));
     drawLevelLine(ctx, yP(row.tp), chartW, '#3ddc97', 'TP ' + fmtNum(row.tp));
+    const entryIdx = findCandleIndex(candles, row.time);
+    if (entryIdx >= 0) {
+      drawEntryMarker(ctx, entryIdx * slot + slot / 2, yP(row.entry), '#5aa8ff');
+    }
   }
 }
 
@@ -8475,6 +8524,10 @@ function drawSessionChart(data) {
     drawLevelLine(ctx, yP(sig.entry), chartW, '#e8b93d', 'ENTRY ' + fmtNum(sig.entry));
     drawLevelLine(ctx, yP(sig.sl), chartW, '#ff6b6b', 'SL ' + fmtNum(sig.sl));
     drawLevelLine(ctx, yP(sig.tp), chartW, '#3ddc97', 'TP ' + fmtNum(sig.tp));
+    const entryIdx = findCandleIndex(candles, sig.confirm_time);
+    if (entryIdx >= 0) {
+      drawEntryMarker(ctx, entryIdx * slot + slot / 2, yP(sig.entry), '#e8b93d');
+    }
   }
 }
 
