@@ -1823,6 +1823,24 @@ v0.51.1 - CRITICAL: user's live log showed two real EMA positions
          live unprotected positions on the exchange before relying on
          this fix — a code fix doesn't retroactively add stops to
          positions that already exist without them.
+v0.51.2 - user reported open EMA signals, autotrade log, and simulator
+         data disappearing on restart. EMA signal persistence itself
+         checked out fine in isolation (verified with a direct
+         save/reload round-trip of an OPEN signal) — but scalp_signals,
+         session_signals, and autotrade_log were never in save_state()/
+         load_state()'s whitelist at all, a real gap that predates this
+         session's work (only signals/div_signals/ema_signals/overrides
+         were ever covered, then sim_balance/settled sim_trades got
+         added later without extending the other two). Added all three
+         missing categories to both functions. Verified directly: an
+         OPEN record in each of the four previously-gapped categories
+         (ema/scalp/session signals, autotrade log) survives a full
+         save-then-reload cycle with its status and fields intact.
+         Full scan-function/endpoint regression stayed clean.
+         Still NOT persisted, by design (documented when the simulator
+         shipped): PENDING sim trades, since their live reference to a
+         signal record can't survive a restart anyway — only SETTLED
+         ones carry over.
 """
 
 import os
@@ -1841,7 +1859,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.51.1"
+APP_VERSION = "0.51.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5011,6 +5029,9 @@ def save_state():
                 "signals": list(STATE["signals"]),
                 "div_signals": list(STATE["div_signals"]),
                 "ema_signals": list(STATE["ema_signals"]),
+                "scalp_signals": list(STATE["scalp_signals"]),
+                "session_signals": list(STATE["session_signals"]),
+                "autotrade_log": list(STATE["autotrade_log"]),
                 "sim_balance": STATE["sim_balance"],
                 "sim_trades": settled_sim_trades,  # pending trades excluded — their live signal reference can't survive a restart, so they can never resolve; keeping them "pending" forever would be misleading
                 "saved_at": time.time(),
@@ -5033,15 +5054,21 @@ def load_state():
         signals = data.get("signals", [])
         div_signals = data.get("div_signals", [])
         ema_signals = data.get("ema_signals", [])
+        scalp_signals = data.get("scalp_signals", [])
+        session_signals = data.get("session_signals", [])
+        autotrade_log = data.get("autotrade_log", [])
         sim_trades = data.get("sim_trades", [])
         with state_lock:
             STATE["signals"] = deque(signals, maxlen=SIGNAL_HISTORY)
             STATE["div_signals"] = deque(div_signals, maxlen=DIV_SIGNAL_HISTORY)
             STATE["ema_signals"] = deque(ema_signals, maxlen=EMA_SIGNAL_HISTORY)
+            STATE["scalp_signals"] = deque(scalp_signals, maxlen=SCALP_SIGNAL_HISTORY)
+            STATE["session_signals"] = deque(session_signals, maxlen=SESSION_SIGNAL_HISTORY)
+            STATE["autotrade_log"] = deque(autotrade_log, maxlen=AUTOTRADE_TRADE_HISTORY)
             if "sim_balance" in data:
                 STATE["sim_balance"] = data["sim_balance"]
             STATE["sim_trades"] = deque(sim_trades, maxlen=AUTOTRADE_SIM_TRADE_HISTORY)
-        print(f"Loaded persisted state: {len(SYMBOL_OVERRIDES)} overrides, {len(signals)} signals, {len(div_signals)} divergence signals, {len(ema_signals)} EMA signals, {len(sim_trades)} settled sim trades")
+        print(f"Loaded persisted state: {len(SYMBOL_OVERRIDES)} overrides, {len(signals)} signals, {len(div_signals)} divergence signals, {len(ema_signals)} EMA signals, {len(scalp_signals)} scalp signals, {len(session_signals)} session signals, {len(autotrade_log)} autotrade log entries, {len(sim_trades)} settled sim trades")
     except Exception as e:
         log_error(f"load_state: {e}")
 
