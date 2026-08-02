@@ -1861,6 +1861,27 @@ v0.51.3 - CRITICAL: user's Gate.io API credentials weren't surviving a
          saved, and GET /api/credentials correctly reports configured=
          true afterward. Full scan-function/endpoint regression stayed
          clean.
+v0.51.4 - v0.51.1's error-body-capture fix immediately paid off: user's
+         next TP/SL failure showed the REAL cause instead of a generic
+         400 — Gate rejected both trigger prices with
+         AUTO_INVALID_PARAM_TRIGGER_PRICE: "price is not an integer
+         multiple of a price unit". Root cause: computed TP/SL prices
+         were sent with whatever floating-point precision the math
+         happened to produce, never rounded to the contract's actual
+         tick size — Gate requires every order/trigger price to be an
+         exact multiple of it. Added order_price_round to
+         get_contract_spec() (the tick size field, confirmed from
+         Gate's own docs) and round_to_tick() (snaps to the nearest
+         exact multiple, falls back to the raw price unchanged if the
+         tick size is missing rather than guessing). execute_autotrade()
+         now rounds both TP and SL to the contract's tick size right
+         before calling place_tp_sl_orders(), and logs the rounded
+         values on the record for visibility. Verified end-to-end with
+         a simulated Gate that rejects non-tick-aligned prices exactly
+         like the real error: the same TP/SL values that would have
+         been rejected unrounded now place successfully after rounding
+         (0.0468912345 -> 0.0469 at a 0.0001 tick). Full scan-function/
+         endpoint regression stayed clean.
 """
 
 import os
@@ -1879,7 +1900,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.51.3"
+APP_VERSION = "0.51.4"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3893,7 +3914,11 @@ def get_contract_spec(symbol):
     (usually 1, but not guaranteed). leverage_max: highest leverage Gate
     allows on this specific contract — the EMA-screener project hit real
     bugs assuming a flat leverage cap across all coins; this fetches the
-    real per-contract value instead."""
+    real per-contract value instead. order_price_round: the tick size —
+    every order/trigger price must be an exact multiple of this or Gate
+    rejects it with AUTO_INVALID_PARAM_TRIGGER_PRICE (hit this live: a
+    computed SL/TP price with more decimal places than the contract
+    allows got rejected outright)."""
     with _contract_spec_cache_lock:
         cached = _contract_spec_cache.get(symbol)
         if cached and time.time() - cached["fetched_at"] < CONTRACT_SPEC_CACHE_TTL_SEC:
@@ -3905,10 +3930,21 @@ def get_contract_spec(symbol):
         "quanto_multiplier": float(data.get("quanto_multiplier", 0) or 0),
         "order_size_min": float(data.get("order_size_min", 1) or 1),
         "leverage_max": float(data.get("leverage_max", 20) or 20),
+        "order_price_round": float(data.get("order_price_round", 0) or 0) or None,
     }
     with _contract_spec_cache_lock:
         _contract_spec_cache[symbol] = {"spec": spec, "fetched_at": time.time()}
     return spec
+
+
+def round_to_tick(price, tick_size):
+    """Snaps price to the nearest exact multiple of tick_size — Gate
+    rejects trigger/order prices that aren't. Falls back to the raw price
+    unchanged if tick_size is missing/zero (better to try the original
+    value than silently mangle it when we don't actually know the tick)."""
+    if not tick_size or tick_size <= 0:
+        return price
+    return round(round(price / tick_size) * tick_size, 12)
 
 
 def set_leverage(symbol, leverage):
@@ -4119,7 +4155,15 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=No
                     fill_price = None
         record["fill_price"] = fill_price
 
-        tp_order, sl_order, tp_sl_errors = place_tp_sl_orders(symbol, direction, tp, sl)
+        try:
+            tick = get_contract_spec(symbol).get("order_price_round")
+        except Exception:
+            tick = None
+        tp_rounded = round_to_tick(tp, tick)
+        sl_rounded = round_to_tick(sl, tick)
+        record["tp_rounded"] = tp_rounded
+        record["sl_rounded"] = sl_rounded
+        tp_order, sl_order, tp_sl_errors = place_tp_sl_orders(symbol, direction, tp_rounded, sl_rounded)
         if tp_sl_errors:
             record["status"] = "OPENED_TP_SL_FAILED"
             record["detail"] = f"position opened but TP/SL placement had errors: {tp_sl_errors} — check the position manually"
