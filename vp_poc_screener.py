@@ -1583,6 +1583,28 @@ v0.47.0 - user shared a batch of live screenshots across every module
          undefined case gracefully for symbols with no reason-specific
          data yet, and the full scan-function/endpoint regression
          stayed clean.
+v0.47.1 - real bug: a live session signal (BULLA_USDT, LOSS in the
+         table) but opening its chart said no manipulation happened
+         and showed nothing. scan_symbol_session_live() fetched candles
+         up to time.time() and evaluated ALL of them including the
+         most recent — which, mid-window, is very likely still
+         FORMING (its OHLC keeps changing until the candle actually
+         closes). A transient wick+close-back-inside during formation
+         could satisfy detect_session_manipulation() and fire a signal,
+         but by the time /api/session/chart re-derives from now-
+         finalized candle data, that same candle's real final values no
+         longer show the pattern — exactly the mismatch reported. Fixed
+         by excluding any candle whose close time hasn't been reached
+         yet (c["time"] + interval_sec > now) before running detection
+         — only fully-closed candles get evaluated live, matching what
+         backtesting already does implicitly (every candle in a past
+         day is guaranteed closed). Verified directly: a candle still
+         within its own formation window no longer creates a signal
+         (0 signals, was firing before the fix), while the identical
+         candle re-checked after its close time has passed still
+         creates the correct signal — the fix only excludes genuinely
+         incomplete data, not real detections. Full scan-function/
+         endpoint regression stayed clean.
 """
 
 import os
@@ -1599,7 +1621,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.47.0"
+APP_VERSION = "0.47.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2573,6 +2595,15 @@ def scan_symbol_session_live(symbol, session_open_ts):
         range_start_dt = datetime.datetime.fromtimestamp(session_open_ts, tz=datetime.timezone.utc).replace(
             hour=SESSION_RANGE_START_UTC_HOUR, minute=0, second=0, microsecond=0)
         candles = get_candles_range(symbol, SESSION_RANGE_TF, range_start_dt.timestamp(), time.time())
+        # Exclude the currently-forming candle — its OHLC is still changing
+        # until it actually closes, so evaluating it mid-formation risks
+        # firing on a transient wick+close-back-inside that won't hold up
+        # once the candle finalizes (confirmed as the cause of a live
+        # signal that later showed no manipulation on the chart, since the
+        # chart re-derives from the now-finalized candle).
+        interval_sec = INTERVAL_SECONDS.get(SESSION_RANGE_TF, 300)
+        now = time.time()
+        candles = [c for c in candles if c["time"] + interval_sec <= now]
         sig = detect_session_manipulation(candles, session_open_ts)
         if not sig:
             return
