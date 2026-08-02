@@ -1664,6 +1664,29 @@ v0.48.0 - Auto-trading on Gate.io futures, off the signals every module
          log itself is being written correctly, just not surfaced
          anywhere to look at yet) and a prominent live-money warning
          banner when dry-run is off — next up.
+v0.48.1 - the two pieces left over from v0.48.0: new "Автоторговля" tab
+         with a live/dry-run status line, per-mode enabled state, and
+         the full trade attempt log (OPENED/DRY_RUN/SKIPPED/ERROR, with
+         detail text) via two new routes (/api/autotrade/log,
+         /api/autotrade/status). A red "⚠️ РЕАЛЬНЫЕ ОРДЕРА ВКЛЮЧЕНЫ"
+         banner shows inside that tab whenever dry-run is off, plus a
+         compact always-visible version in the persistent header
+         (independent of which tab is open) so live-money mode can't
+         go unnoticed while looking at something else.
+         Caught and fixed a real bug in my own edit before pushing: an
+         earlier str_replace's old_str matched the exact text of the
+         "async function refreshAll() {" declaration line and the
+         replacement didn't preserve it, silently deleting that
+         function's own opening line — its body was still there but
+         no longer inside any function, which node --check correctly
+         flagged as "await is only valid in async functions". Restored
+         the declaration, reran the JS syntax check clean, and
+         confirmed via grep that both refreshAll and refreshAutotrade
+         now have exactly one declaration each (would have caught a
+         duplicate too, not just the deletion). Full scan-function/
+         endpoint regression stayed clean, and the two new endpoints
+         verified directly with mock log entries covering all four
+         status types.
 """
 
 import os
@@ -1682,7 +1705,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.48.0"
+APP_VERSION = "0.48.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6067,6 +6090,33 @@ def api_delete_credentials():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/autotrade/log")
+def api_autotrade_log():
+    with state_lock:
+        return jsonify(list(STATE["autotrade_log"]))
+
+
+@app.route("/api/autotrade/status")
+def api_autotrade_status():
+    with state_lock:
+        log = list(STATE["autotrade_log"])
+    opened = sum(1 for e in log if e["status"] in ("OPENED", "OPENED_TP_SL_FAILED"))
+    dry_run_n = sum(1 for e in log if e["status"] == "DRY_RUN")
+    skipped = sum(1 for e in log if e["status"] == "SKIPPED")
+    errors = sum(1 for e in log if e["status"] == "ERROR")
+    return jsonify({
+        "dry_run": AUTOTRADE_DRY_RUN,
+        "gate_api_configured": bool(GATE_API_KEY and GATE_API_SECRET),
+        "total": len(log), "opened": opened, "dry_run_count": dry_run_n,
+        "skipped": skipped, "errors": errors,
+        "enabled": {
+            "bounce": AUTOTRADE_ENABLED_BOUNCE, "breakout": AUTOTRADE_ENABLED_BREAKOUT,
+            "divergence": AUTOTRADE_ENABLED_DIVERGENCE, "ema": AUTOTRADE_ENABLED_EMA,
+            "scalp": AUTOTRADE_ENABLED_SCALP, "session": AUTOTRADE_ENABLED_SESSION,
+        },
+    })
+
+
 @app.route("/api/reset/volume", methods=["POST"])
 def api_reset_volume():
     """Wipe only the volume-profile side: per-symbol tuning overrides,
@@ -6241,6 +6291,7 @@ INDEX_HTML = """<!doctype html>
   </div>
   <div id="status">загрузка...</div>
   <div id="overview" class="dim" style="margin-top:2px;font-size:12px;"></div>
+  <div id="autotradeBanner" style="margin-top:2px;font-size:12px;"></div>
 </header>
 <div class="tabs">
   <div class="tab active" data-tab="signals">Volume</div>
@@ -6248,6 +6299,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="ema">EMA</div>
   <div class="tab" data-tab="scalp">Скальпинг</div>
   <div class="tab" data-tab="session">Сессия</div>
+  <div class="tab" data-tab="autotrade">Автоторговля</div>
 </div>
 <div class="panel">
   <div id="tuningPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
@@ -6267,6 +6319,7 @@ INDEX_HTML = """<!doctype html>
   </table>
   <div id="scalpPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="sessionPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
+  <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
 </div>
 
@@ -6577,11 +6630,13 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('emaStatsPanel').style.display = activeTab === 'ema' ? 'block' : 'none';
     document.getElementById('scalpPanel').style.display = activeTab === 'scalp' ? 'block' : 'none';
     document.getElementById('sessionPanel').style.display = activeTab === 'session' ? 'block' : 'none';
+    document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
     if (activeTab === 'signals') refreshTuning();
     if (activeTab === 'divergence') refreshDivergence();
     if (activeTab === 'ema') refreshEma();
     if (activeTab === 'scalp') refreshScalp();
     if (activeTab === 'session') refreshSession();
+    if (activeTab === 'autotrade') refreshAutotrade();
   };
 });
 
@@ -7159,15 +7214,91 @@ async function openSessionDetail(symbol) {
   }
 }
 
+async function refreshAutotradeBanner() {
+  try {
+    const s = await (await fetch('/api/autotrade/status')).json();
+    const anyEnabled = Object.values(s.enabled).some(v => v);
+    const el = document.getElementById('autotradeBanner');
+    if (!anyEnabled) {
+      el.innerHTML = '';
+    } else if (!s.dry_run) {
+      el.innerHTML = '<span style="color:#ff6b6b;font-weight:700;">⚠️ РЕАЛЬНЫЕ ОРДЕРА ВКЛЮЧЕНЫ</span>';
+    } else {
+      el.innerHTML = '<span style="color:#3ddc97;">✓ автоторговля: dry-run</span>';
+    }
+  } catch(e) {}
+}
+
+async function refreshAutotrade() {
+  const [status, log] = await Promise.all([
+    (await fetch('/api/autotrade/status')).json(),
+    (await fetch('/api/autotrade/log')).json(),
+  ]);
+  const panel = document.getElementById('autotradePanel');
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия'};
+  const enabledTxt = Object.entries(status.enabled)
+    .map(([k, v]) => `<span class="${v ? 'win' : 'dim'}">${modeLabels[k]}: ${v ? 'вкл' : 'выкл'}</span>`)
+    .join(' &nbsp;·&nbsp; ');
+
+  let bannerHtml = '';
+  if (!status.dry_run) {
+    bannerHtml = `<div style="background:#3a1e22;border:1px solid #ff6b6b;border-radius:10px;padding:12px 14px;margin-bottom:14px;">
+      <b style="color:#ff6b6b;">⚠️ РЕАЛЬНЫЕ ОРДЕРА ВКЛЮЧЕНЫ</b><br>
+      <span style="font-size:12px;color:#ffb3b3;">Dry-run выключен — включённые режимы будут открывать настоящие позиции на бирже за реальные деньги.</span>
+    </div>`;
+  } else {
+    bannerHtml = `<div style="background:#132018;border:1px solid #3ddc97;border-radius:10px;padding:10px 14px;margin-bottom:14px;">
+      <span style="color:#3ddc97;font-size:12px;">✓ Dry-run включён — реальные ордера не отправляются, только лог того, что было бы сделано.</span>
+    </div>`;
+  }
+
+  const apiTxt = status.gate_api_configured
+    ? '<span class="win">ключи Gate.io сохранены</span>'
+    : '<span class="loss">ключи Gate.io не заданы — реальные ордера невозможны</span>';
+
+  const headerHtml = `
+    ${bannerHtml}
+    <div class="dim" style="margin-bottom:8px;">
+      ${apiTxt}<br>
+      Режимы: ${enabledTxt}<br>
+      Всего попыток: ${status.total} · <span class="win">открыто: ${status.opened}</span> ·
+      <span class="status-open">dry-run: ${status.dry_run_count}</span> ·
+      <span class="dim">пропущено: ${status.skipped}</span> · <span class="loss">ошибок: ${status.errors}</span>
+    </div>`;
+
+  const rows = log.map(e => {
+    const dirClass = e.direction === 'LONG' ? 'long' : (e.direction === 'SHORT' ? 'short' : 'dim');
+    const statusClass = {OPENED: 'win', OPENED_TP_SL_FAILED: 'loss', DRY_RUN: 'status-open', SKIPPED: 'dim', ERROR: 'loss'}[e.status] || 'dim';
+    return `<tr>
+      <td class="dim">${fmtTime(e.time)}</td><td>${modeLabels[e.mode] || e.mode}</td><td>${e.symbol}</td>
+      <td class="${dirClass}">${e.direction || '-'}</td>
+      <td class="${statusClass}">${e.status}</td>
+      <td class="dim" style="max-width:280px;white-space:normal;">${e.detail || ''}</td>
+    </tr>`;
+  }).join('');
+
+  const tableHtml = log.length ? `
+    <div style="overflow-x:auto;">
+    <table style="font-size:11px;">
+      <thead><tr><th>Время</th><th>Режим</th><th>Symbol</th><th>Dir</th><th>Статус</th><th>Детали</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    </div>` : '<div class="dim">Пока нет попыток автоторговли.</div>';
+
+  panel.innerHTML = headerHtml + tableHtml;
+}
+
 async function refreshAll() {
   await refreshStatus();
   await refreshOverview();
+  await refreshAutotradeBanner();
   await refreshSignals();
   if (activeTab === 'signals') await refreshTuning();
   if (activeTab === 'divergence') await refreshDivergence();
   if (activeTab === 'ema') await refreshEma();
   if (activeTab === 'scalp') await refreshScalp();
   if (activeTab === 'session') await refreshSession();
+  if (activeTab === 'autotrade') await refreshAutotrade();
 }
 refreshAll();
 setInterval(refreshAll, 15000);
