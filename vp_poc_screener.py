@@ -2335,6 +2335,45 @@ v0.61.0 - fixed the scalp recommendation score to be EV-based, per direct
          (checked: only used for -score sorting and storage), so this
          doesn't break anything, and correctly demotes those symbols
          to the bottom of the ranking instead of hiding the problem.
+
+v0.62.0 - EMA diagnostics-only logging, per direct user request to
+         understand the module's low win rate (30%, 6W/14L) before
+         touching any filter or the fixed-%-based SL. Existing filters:
+         EMA_TREND_FILTER (only trade with EMA28) and signal_type=
+         "combined" (the strictest of the three signal definitions)
+         were already active — what was missing was any per-signal
+         context to tell WHY a given signal won or lost.
+         Four new fields attached at signal-detection time, none of
+         which affect whether a signal fires or its TP/SL — purely
+         informational:
+         - atr_pct: ATR(14) as % of price (new _true_range_series() +
+           _atr_series() — proper Wilder smoothing, not compute_ema()
+           reused with a different period). Tests the hypothesis that
+           losses cluster on high-volatility bars where the fixed 0.4%
+           SL is simply too tight for that coin's actual noise.
+         - ema_slope_pct: EMA28's slope over the last
+           EMA_DIAG_SLOPE_LOOKBACK (5) bars, SIGNED so positive always
+           means "moving with this trade's direction" regardless of
+           LONG/SHORT — lets win/loss aggregation compare both
+           directions on one scale. Tests whether losses happen more in
+           a flat/undecided EMA28 vs a clearly trending one.
+         - ema_gap_pct: (EMA7-EMA14)/price at signal time — how
+           decisive vs marginal the cross was.
+         - recent_crossover_count: EMA7/EMA14 crossovers in the last
+           EMA_DIAG_CHOP_LOOKBACK (20) bars — a whipsaw/chop proxy;
+           classic failure mode for crossover systems is a ranging
+           market chopping out one signal after another.
+         All four also added to compute_ema_stats()'s win/loss
+         breakdown (same agg() pattern as the existing mfe_r/mae_r
+         stats), so /api/ema/status now shows win vs loss avg/median/
+         p25/p75 for each — actual evidence to decide between an
+         ATR-based stop and/or an anti-chop filter next, instead of
+         guessing (matches how the two earlier SL/RR retunes for this
+         module were done blind, per EMA_RR's own comment history).
+         detect_ema_signal() gained an optional `candles` param (for
+         ATR); its only caller (scan_symbol_ema) already had candles in
+         hand, so no extra fetch needed. Backward compatible — omitting
+         candles just leaves atr_pct None.
 """
 
 import os
@@ -2354,7 +2393,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.61.0"
+APP_VERSION = "0.62.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3293,13 +3332,93 @@ def _crossunder(a, b, i):
     return a[i - 1] >= b[i - 1] and a[i] < b[i]
 
 
+def _true_range_series(candles):
+    """Per-bar true range: max(high-low, |high-prev_close|,
+    |low-prev_close|). First bar has no prior close, so its TR is just
+    high-low."""
+    tr = [None] * len(candles)
+    for i, c in enumerate(candles):
+        if i == 0:
+            tr[i] = c["high"] - c["low"]
+        else:
+            prev_close = candles[i - 1]["close"]
+            tr[i] = max(c["high"] - c["low"], abs(c["high"] - prev_close), abs(c["low"] - prev_close))
+    return tr
+
+
+def _atr_series(tr, period):
+    """Wilder's ATR: SMA seed over the first `period` true-range values,
+    then Wilder smoothing (an EMA with alpha=1/period, not the standard
+    2/(period+1) — this is the original ATR definition, not compute_ema
+    reused with a different period)."""
+    n = len(tr)
+    atr = [None] * n
+    if n < period:
+        return atr
+    seed = sum(tr[:period]) / period
+    atr[period - 1] = seed
+    for i in range(period, n):
+        atr[i] = (atr[i - 1] * (period - 1) + tr[i]) / period
+    return atr
+
+
+# EMA diagnostics — v0.62.0, per direct user request to understand the
+# EMA module's low win rate before touching its filters/SL. NONE of
+# these affect whether a signal fires or its TP/SL; they're attached to
+# each signal purely so compute_ema_stats()'s win/loss breakdown (and
+# /api/ema/status) can show whether losses cluster on high-ATR bars,
+# weak/flat EMA28 slope, marginal EMA7/14 separation, or choppy
+# recent-crossover conditions — actual evidence to decide a real filter
+# on, instead of guessing.
+EMA_DIAG_ATR_PERIOD = int(os.environ.get("VP_EMA_DIAG_ATR_PERIOD", 14))
+EMA_DIAG_SLOPE_LOOKBACK = int(os.environ.get("VP_EMA_DIAG_SLOPE_LOOKBACK", 5))  # bars back for the EMA28 slope measurement
+EMA_DIAG_CHOP_LOOKBACK = int(os.environ.get("VP_EMA_DIAG_CHOP_LOOKBACK", 20))  # bars back to count EMA7/EMA14 crossovers in
+
+
+def _ema_signal_diagnostics(closes, ema7, ema14, ema28, i, direction, candles):
+    """Computes the diagnostic-only fields described above for the
+    signal at bar i. candles (with high/low) is needed for ATR — if not
+    given, atr_pct is left None rather than guessed at from closes
+    alone."""
+    diag = {"atr_pct": None, "ema_slope_pct": None, "ema_gap_pct": None, "recent_crossover_count": None}
+    price = closes[i]
+    if price:
+        diag["ema_gap_pct"] = round((ema7[i] - ema14[i]) / price * 100, 4)
+
+    lb = EMA_DIAG_SLOPE_LOOKBACK
+    if i - lb >= 0 and ema28[i - lb]:
+        raw_slope_pct = (ema28[i] - ema28[i - lb]) / ema28[i - lb] * 100
+        # Signed so positive always means "EMA28 is moving WITH this
+        # trade's direction" regardless of LONG/SHORT — lets win/loss
+        # aggregation compare apples to apples across both directions.
+        diag["ema_slope_pct"] = round(raw_slope_pct if direction == "LONG" else -raw_slope_pct, 4)
+
+    chop_lb = EMA_DIAG_CHOP_LOOKBACK
+    start = max(1, i - chop_lb + 1)
+    count = 0
+    for j in range(start, i + 1):
+        if _crossover(ema7, ema14, j) or _crossunder(ema7, ema14, j):
+            count += 1
+    diag["recent_crossover_count"] = count
+
+    if candles is not None and len(candles) == len(closes):
+        tr = _true_range_series(candles)
+        atr = _atr_series(tr, EMA_DIAG_ATR_PERIOD)
+        if atr[i] and price:
+            diag["atr_pct"] = round(atr[i] / price * 100, 4)
+
+    return diag
+
+
 def detect_ema_signal(closes, len7=EMA_LEN_7, len14=EMA_LEN_14, len28=EMA_LEN_28,
-                       signal_type=EMA_SIGNAL_TYPE, trend_filter=EMA_TREND_FILTER):
+                       signal_type=EMA_SIGNAL_TYPE, trend_filter=EMA_TREND_FILTER, candles=None):
     """Same three signal definitions as the Pine Script's "Тип сигнала"
     input: price/EMA7 cross, EMA7/EMA14 cross, or "combined" (price
     crosses EMA7 while EMA7 is already positioned on the trade's side of
     EMA14) — plus the optional EMA28 trend filter. Only looks at the
-    latest bar, mirroring how the indicator plots live on a chart."""
+    latest bar, mirroring how the indicator plots live on a chart.
+    candles (optional, with high/low) enables the ATR diagnostic field;
+    omitting it just leaves atr_pct as None, no other behavior changes."""
     n = len(closes)
     if signal_type == "disabled" or n < max(len7, len14, len28) + 2:
         return None
@@ -3328,11 +3447,13 @@ def detect_ema_signal(closes, len7=EMA_LEN_7, len14=EMA_LEN_14, len28=EMA_LEN_28
     if EMA_INVERT_SIGNALS:
         buy, sell = sell, buy  # trade the opposite of whatever the indicator (including its trend filter) says
 
-    if buy:
-        return {"direction": "LONG", "ema7": ema7[i], "ema14": ema14[i], "ema28": ema28[i]}
-    if sell:
-        return {"direction": "SHORT", "ema7": ema7[i], "ema14": ema14[i], "ema28": ema28[i]}
+    if buy or sell:
+        direction = "LONG" if buy else "SHORT"
+        result = {"direction": direction, "ema7": ema7[i], "ema14": ema14[i], "ema28": ema28[i]}
+        result.update(_ema_signal_diagnostics(closes, ema7, ema14, ema28, i, direction, candles))
+        return result
     return None
+
 
 
 def session_open_utc_ts(ref_ts):
@@ -3971,7 +4092,7 @@ def scan_symbol_ema(symbol, interval=EMA_INTERVAL, candles=None):
         if not ok:
             return
         closes = [c["close"] for c in candles]
-        sig = detect_ema_signal(closes, EMA_LEN_7, EMA_LEN_14, EMA_LEN_28, EMA_SIGNAL_TYPE, EMA_TREND_FILTER)
+        sig = detect_ema_signal(closes, EMA_LEN_7, EMA_LEN_14, EMA_LEN_28, EMA_SIGNAL_TYPE, EMA_TREND_FILTER, candles=candles)
         if not sig:
             return
         if has_open_ema_signal(symbol, interval):
@@ -3998,6 +4119,13 @@ def scan_symbol_ema(symbol, interval=EMA_INTERVAL, candles=None):
             "tp": tp,
             "risk": risk,
             "ema7": sig["ema7"], "ema14": sig["ema14"], "ema28": sig["ema28"],
+            # Diagnostic-only (v0.62.0) — see _ema_signal_diagnostics().
+            # Not used by any live logic, purely for compute_ema_stats()'s
+            # win/loss breakdown to ground a future filter decision.
+            "atr_pct": sig.get("atr_pct"),
+            "ema_slope_pct": sig.get("ema_slope_pct"),
+            "ema_gap_pct": sig.get("ema_gap_pct"),
+            "recent_crossover_count": sig.get("recent_crossover_count"),
             "time": candles[-1]["time"],
             "detected_at": now,
             "status": "OPEN",
@@ -4144,6 +4272,17 @@ def compute_ema_stats(interval=None):
         "mfe_r_wins_at_close": agg("mfe_r_at_close", win_set), "mae_r_wins_at_close": agg("mae_r_at_close", win_set),
         "mfe_r_losses_at_close": agg("mfe_r_at_close", loss_set), "mae_r_losses_at_close": agg("mae_r_at_close", loss_set),
         "dataset_count": len(dataset),
+        # Diagnostic breakdown (v0.62.0) — win vs loss comparison for the
+        # fields _ema_signal_diagnostics() attaches at signal time. None
+        # of these were used to decide whether a signal fired; this is
+        # purely to see whether losses cluster on high ATR, weak/flat
+        # EMA28 slope, marginal EMA7/14 separation, or choppy recent-
+        # crossover conditions, before committing to any actual filter.
+        "atr_pct_wins": agg("atr_pct", win_set), "atr_pct_losses": agg("atr_pct", loss_set),
+        "ema_slope_pct_wins": agg("ema_slope_pct", win_set), "ema_slope_pct_losses": agg("ema_slope_pct", loss_set),
+        "ema_gap_pct_wins": agg("ema_gap_pct", win_set), "ema_gap_pct_losses": agg("ema_gap_pct", loss_set),
+        "recent_crossover_count_wins": agg("recent_crossover_count", win_set),
+        "recent_crossover_count_losses": agg("recent_crossover_count", loss_set),
     }
 
 
