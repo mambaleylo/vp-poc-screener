@@ -2133,6 +2133,28 @@ v0.55.0 - new "flat zone" filter for the Сессия consolidation range, per
          starting point, not yet backtested against history — flagged
          to retune once there's live/backtest data showing how it
          performs.
+
+v0.56.0 - fixed a real autotrade bug reported by user (screenshots of
+         autotrade_log): scalp signals on RATS_USDT were opening a
+         position (OPENED_TP_SL_FAILED) with BOTH the TP and SL
+         price_orders rejected by Gate as code 1009,
+         AUTO_INVALID_PARAM_TRIGGER_PRICE. Root cause: place_tp_sl_
+         orders() sent trigger.price as str(price) — Python's str()/
+         repr() switches small floats to scientific notation (e.g.
+         str(0.0000034) == '3.4e-06'), which Gate's API doesn't accept
+         for trigger.price. Only showed up on cheap/meme contracts
+         (RATS_USDT's price sits well below 1e-4); ordinary-priced
+         symbols never hit this. New format_price_str(price, tick_size)
+         always renders a plain fixed-point decimal string, with
+         decimals derived from the contract's own tick_size (via
+         Decimal, not float log10, to avoid a rounding-hair-off decimal
+         count) — falls back to 10 decimals if tick_size is missing.
+         place_tp_sl_orders() now takes a `tick` param and uses this
+         for both trigger prices instead of str(); execute_autotrade()
+         passes through the tick it already fetches for round_to_tick().
+         Also noticed while making this change: v0.55.0's flat-zone
+         session filter shipped without bumping APP_VERSION (stayed at
+         0.54.0) — corrected here, no functional relation to this fix.
 """
 
 import os
@@ -2145,13 +2167,14 @@ import queue
 import datetime
 import hmac
 import hashlib
+from decimal import Decimal
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.54.0"
+APP_VERSION = "0.56.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4209,6 +4232,32 @@ def round_to_tick(price, tick_size):
     return round(round(price / tick_size) * tick_size, 12)
 
 
+def format_price_str(price, tick_size=None):
+    """Converts a price float to a plain fixed-point decimal string, never
+    scientific notation. Python's str()/repr() silently switches to
+    scientific notation for small floats (str(0.0000034) -> '3.4e-06'),
+    and place_tp_sl_orders() was sending that straight through as Gate's
+    trigger.price JSON value. Gate rejected it as an invalid trigger
+    price (code 1009, AUTO_INVALID_PARAM_TRIGGER_PRICE) — silent on
+    cheap/meme contracts (e.g. RATS_USDT) whose price sits below ~1e-4,
+    never on ordinary-priced symbols, which is why this only showed up
+    on some scalp signals.
+    Decimal places are derived from tick_size's own string form (via
+    Decimal, not float math — float log10 on a tick_size like 0.00001
+    can itself be off by a rounding hair) so the output has exactly the
+    precision the contract actually uses. Falls back to a generous 10
+    decimals if tick_size is missing, still always fixed-point."""
+    if tick_size:
+        try:
+            exponent = Decimal(str(tick_size)).as_tuple().exponent
+            decimals = max(0, -exponent) if isinstance(exponent, int) else 10
+        except Exception:
+            decimals = 10
+    else:
+        decimals = 10
+    return f"{price:.{decimals}f}"
+
+
 def set_leverage(symbol, leverage):
     """POST /futures/usdt/positions/{contract}/leverage — must be set
     before placing an order at that leverage; Gate doesn't take leverage as
@@ -4284,7 +4333,7 @@ def place_market_order(symbol, direction, contracts, reduce_only=False):
     return gate_signed_request("POST", "/futures/usdt/orders", body=body)
 
 
-def place_tp_sl_orders(symbol, direction, tp_price, sl_price, price_type=0):
+def place_tp_sl_orders(symbol, direction, tp_price, sl_price, tick=None, price_type=0):
     """Places both the TP and SL as separate price-triggered close orders.
     Returns (tp_order, sl_order, errors) — errors is a list of (which, msg)
     for whichever leg failed, so one failing doesn't silently hide the
@@ -4294,7 +4343,11 @@ def place_tp_sl_orders(symbol, direction, tp_price, sl_price, price_type=0):
     mode 400'd under dual/hedge mode): single mode closes via
     size=0/close=true; dual mode instead needs auto_size ("close_long"/
     "close_short", matching which side is being closed) plus
-    reduce_only=true, and doesn't use `close` at all."""
+    reduce_only=true, and doesn't use `close` at all.
+    tick is passed through to format_price_str() so trigger.price is
+    always sent as plain fixed-point decimal, never Python's scientific
+    notation for small floats (the cause of a real AUTO_INVALID_PARAM_
+    TRIGGER_PRICE failure on cheap/meme contracts like RATS_USDT)."""
     if direction == "LONG":
         tp_rule, sl_rule = 1, 2
         auto_size = "close_long"
@@ -4315,14 +4368,14 @@ def place_tp_sl_orders(symbol, direction, tp_price, sl_price, price_type=0):
     try:
         tp_order = gate_signed_request("POST", "/futures/usdt/price_orders", body={
             "initial": dict(initial),
-            "trigger": {"strategy_type": 0, "price_type": price_type, "price": str(tp_price), "rule": tp_rule, "expiration": 0},
+            "trigger": {"strategy_type": 0, "price_type": price_type, "price": format_price_str(tp_price, tick), "rule": tp_rule, "expiration": 0},
         })
     except Exception as e:
         errors.append(("tp", str(e)))
     try:
         sl_order = gate_signed_request("POST", "/futures/usdt/price_orders", body={
             "initial": dict(initial),
-            "trigger": {"strategy_type": 0, "price_type": price_type, "price": str(sl_price), "rule": sl_rule, "expiration": 0},
+            "trigger": {"strategy_type": 0, "price_type": price_type, "price": format_price_str(sl_price, tick), "rule": sl_rule, "expiration": 0},
         })
     except Exception as e:
         errors.append(("sl", str(e)))
@@ -4527,7 +4580,7 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=No
         sl_rounded = round_to_tick(sl, tick)
         record["tp_rounded"] = tp_rounded
         record["sl_rounded"] = sl_rounded
-        tp_order, sl_order, tp_sl_errors = place_tp_sl_orders(symbol, direction, tp_rounded, sl_rounded)
+        tp_order, sl_order, tp_sl_errors = place_tp_sl_orders(symbol, direction, tp_rounded, sl_rounded, tick=tick)
         if tp_sl_errors:
             record["status"] = "OPENED_TP_SL_FAILED"
             record["detail"] = f"position opened but TP/SL placement had errors: {tp_sl_errors} — check the position manually"
