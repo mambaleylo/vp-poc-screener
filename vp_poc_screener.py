@@ -2530,6 +2530,42 @@ v0.66.0 - fixed a real sign bug in the divergence pivot-confirmation-
          mix in the same running average until enough new data diluted
          it out. Starting clean avoids that transition period being
          misleading.
+
+v0.67.0 - fixed a real bug reported by user ("simulator doesn't remember
+         trades after restart"): save_state() only ever persisted
+         SETTLED paper trades — any still-PENDING (open) sim trade was
+         silently dropped on every restart, because it held a live
+         Python object reference (_signal_ref) to its originating
+         signal, which obviously can't survive a process restart. That
+         wasn't just a display gap: the trade's margin/fee had already
+         been deducted from sim_balance at open, but its eventual real
+         PnL (win, loss, or timeout) could now never be credited back,
+         since the trade record itself was gone and could never
+         resolve. Effectively silent money loss from the paper balance
+         on every restart, worse the more frequently the app restarts
+         relative to how long trades take to resolve.
+         Fix: save_state() now persists ALL sim trades (PENDING and
+         SETTLED), still stripping _signal_ref (a raw object reference
+         can't serialize meaningfully). New _relink_sim_trade(trade) in
+         load_state(): for each restored PENDING trade, searches the
+         matching module's just-reloaded signal list (bounce/breakout →
+         STATE["signals"], divergence → div_signals, etc.) for an OPEN
+         signal with the same symbol+direction and detected_at within
+         10s of the trade's own creation time — sim trades are created
+         moments after their signal in the same code path, so anything
+         further apart is treated as no real match rather than risking
+         a wrong attachment. Critically, this re-attaches the trade to
+         the SAME live dict object now sitting in STATE[<list>], not a
+         detached copy — sweep_sim_trades() reads through _signal_ref
+         to see when that signal's status flips to CLOSED, so a copy
+         would just freeze the trade as PENDING forever, silently
+         re-introducing the exact bug this fix is for.
+         A PENDING trade whose own signal ALSO didn't survive (e.g. it
+         fell out of that module's own history maxlen) can't be
+         re-linked — dropped rather than left permanently stuck, and
+         counted in the startup log line ("N pending trades couldn't be
+         re-linked and were dropped") so this stays visible instead of
+         silently recurring in a different form.
 """
 
 import os
@@ -2549,7 +2585,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.66.0"
+APP_VERSION = "0.67.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6222,9 +6258,9 @@ STATE_FILE = os.environ.get(
 def save_state():
     try:
         with state_lock:
-            settled_sim_trades = [
+            sim_trades_out = [
                 {k: v for k, v in t.items() if k != "_signal_ref"}
-                for t in STATE["sim_trades"] if t["status"] == "SETTLED"
+                for t in STATE["sim_trades"]
             ]
             data = {
                 "overrides": SYMBOL_OVERRIDES,
@@ -6235,7 +6271,14 @@ def save_state():
                 "session_signals": list(STATE["session_signals"]),
                 "autotrade_log": list(STATE["autotrade_log"]),
                 "sim_balance": STATE["sim_balance"],
-                "sim_trades": settled_sim_trades,  # pending trades excluded — their live signal reference can't survive a restart, so they can never resolve; keeping them "pending" forever would be misleading
+                # Both PENDING and SETTLED now (previously PENDING was
+                # excluded outright — see load_state()'s _relink_sim_trade()
+                # for why that silently lost real money from the paper
+                # balance on every restart). _signal_ref is dropped either
+                # way since it's an in-memory object reference that can't
+                # serialize meaningfully; load_state() re-attaches it to the
+                # actual reloaded signal object, not a detached copy.
+                "sim_trades": sim_trades_out,
                 "saved_at": time.time(),
             }
         tmp_path = STATE_FILE + ".tmp"
@@ -6244,6 +6287,46 @@ def save_state():
         os.replace(tmp_path, STATE_FILE)
     except Exception as e:
         log_error(f"save_state: {e}")
+
+
+def _relink_sim_trade(trade):
+    """Best-effort re-link for a persisted PENDING sim trade: finds the
+    OPEN signal in the matching module's just-reloaded list with the
+    same symbol+direction and the closest detected_at to the trade's own
+    creation time. Must be called AFTER the STATE[<module>_signals]
+    deques are already populated in load_state() — it reads directly
+    from STATE, not from the raw JSON.
+    Needed because sweep_sim_trades() reads the trade's status through
+    _signal_ref, which has to be the SAME object as the one living in
+    STATE[<list>] for later mutations (WIN/LOSS/TIMEOUT) to be visible —
+    a deserialized standalone copy of the old signal dict would never
+    update again, silently freezing that trade as PENDING forever.
+    10s tolerance: a sim trade is created moments after its signal in
+    the same code path (never more than a couple seconds apart in
+    practice), so anything wider is treated as "no real match" rather
+    than risk attaching to the wrong signal.
+    Returns the signal dict, or None if nothing close enough was found
+    (e.g. that signal itself fell out of its own history maxlen)."""
+    module_lists = {
+        "bounce": STATE["signals"], "breakout": STATE["signals"],
+        "divergence": STATE["div_signals"], "ema": STATE["ema_signals"],
+        "scalp": STATE["scalp_signals"], "session": STATE["session_signals"],
+    }
+    candidates = module_lists.get(trade.get("mode"))
+    if not candidates:
+        return None
+    best, best_dt = None, None
+    for s in candidates:
+        if s.get("status") != "OPEN":
+            continue
+        if s.get("symbol") != trade.get("symbol") or s.get("direction") != trade.get("direction"):
+            continue
+        dt = abs((s.get("detected_at") or 0) - (trade.get("time") or 0))
+        if dt > 10:
+            continue
+        if best is None or dt < best_dt:
+            best, best_dt = s, dt
+    return best
 
 
 def load_state():
@@ -6269,8 +6352,18 @@ def load_state():
             STATE["autotrade_log"] = deque(autotrade_log, maxlen=AUTOTRADE_TRADE_HISTORY)
             if "sim_balance" in data:
                 STATE["sim_balance"] = data["sim_balance"]
-            STATE["sim_trades"] = deque(sim_trades, maxlen=AUTOTRADE_SIM_TRADE_HISTORY)
-        print(f"Loaded persisted state: {len(SYMBOL_OVERRIDES)} overrides, {len(signals)} signals, {len(div_signals)} divergence signals, {len(ema_signals)} EMA signals, {len(scalp_signals)} scalp signals, {len(session_signals)} session signals, {len(autotrade_log)} autotrade log entries, {len(sim_trades)} settled sim trades")
+            restored_trades = []
+            dropped_pending = 0
+            for t in sim_trades:
+                if t.get("status") == "PENDING":
+                    match = _relink_sim_trade(t)
+                    if match is None:
+                        dropped_pending += 1
+                        continue  # its own signal didn't survive either — can't ever resolve, drop rather than keep a permanently-stuck PENDING entry
+                    t["_signal_ref"] = match
+                restored_trades.append(t)
+            STATE["sim_trades"] = deque(restored_trades, maxlen=AUTOTRADE_SIM_TRADE_HISTORY)
+        print(f"Loaded persisted state: {len(SYMBOL_OVERRIDES)} overrides, {len(signals)} signals, {len(div_signals)} divergence signals, {len(ema_signals)} EMA signals, {len(scalp_signals)} scalp signals, {len(session_signals)} session signals, {len(autotrade_log)} autotrade log entries, {len(restored_trades)} sim trades ({dropped_pending} pending trades couldn't be re-linked and were dropped)")
     except Exception as e:
         log_error(f"load_state: {e}")
 
