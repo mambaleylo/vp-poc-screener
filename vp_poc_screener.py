@@ -1951,6 +1951,29 @@ v0.52.2 - first scalp SL retune, off the MFE/MAE tracking added in
          Verified the resulting SL% computes correctly for that exact
          case, and the full scan-function/endpoint regression stayed
          clean.
+v0.52.3 - user reported overnight scalp trades looked like they had no
+         SL/TP at all — lucky the price moved the right way. Checked
+         the actual gating logic first (sim_execute_trade calls are
+         still correctly nested inside each mode's `if AUTOTRADE_
+         ENABLED_X:` block, confirmed by direct inspection — the
+         v0.49.1 toggle-mirroring fix is intact, not a regression).
+         The real gap: the Симулятор tab never showed the per-mode
+         enabled toggles at all (so there was no way to see AT A
+         GLANCE whether scalp was even supposed to be trading), and
+         the trade table had no SL/TP columns — entry/sl/tp were
+         already stored on every sim trade record and returned by
+         /api/simulator/trades, just never rendered, so a trade with a
+         real stop and target LOOKED like it had neither.
+         Added both: a "Режимы: ..." status line (reusing /api/
+         autotrade/status's existing enabled field, same style as the
+         Автоторговля tab) and Entry/SL/TP columns to the trade table.
+         Learned from the exact mistake in v0.48.1 (an insertion that
+         silently ate a function declaration): checked refreshSimulator
+         and refreshAll both still have exactly one declaration each
+         via grep before moving on, and ran node --check immediately.
+         Verified directly that sl/tp fields are present and correctly
+         populated in a real /api/simulator/trades response. Full
+         scan-function/endpoint regression stayed clean.
 """
 
 import os
@@ -1969,7 +1992,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.52.2"
+APP_VERSION = "0.52.3"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7946,19 +7969,24 @@ async function refreshAutotrade() {
 }
 
 async function refreshSimulator() {
-  const [status, trades] = await Promise.all([
+  const [status, trades, autotradeStatus] = await Promise.all([
     (await fetch('/api/simulator/status')).json(),
     (await fetch('/api/simulator/trades')).json(),
+    (await fetch('/api/autotrade/status')).json(),
   ]);
   const panel = document.getElementById('simulatorPanel');
   const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия'};
 
   const pnlClass = status.pnl_total >= 0 ? 'win' : 'loss';
   const sizeTxt = status.size_mode === 'percent' ? `${status.size_value}% от баланса` : `фикс. $${status.size_value}`;
+  const enabledTxt = Object.entries(autotradeStatus.enabled || {})
+    .map(([k, v]) => `<span class="${v ? 'win' : 'dim'}">${modeLabels[k]}: ${v ? 'вкл' : 'выкл'}</span>`)
+    .join(' &nbsp;·&nbsp; ');
 
   const headerHtml = `
     <div class="dim" style="margin-bottom:10px;">
-      Симулятор повторяет ровно те же сделки, что и автоторговля выше (те же тумблеры режимов, тот же размер/плечо) — показывает, каким был бы баланс на реальных или dry-run сделках. Размер: ${sizeTxt} · комиссия ${(status.fee_pct*100).toFixed(3)}%/сторону.
+      Симулятор повторяет ровно те же сделки, что и автоторговля выше (те же тумблеры режимов, тот же размер/плечо) — показывает, каким был бы баланс на реальных или dry-run сделках. Размер: ${sizeTxt} · комиссия ${(status.fee_pct*100).toFixed(3)}%/сторону.<br>
+      Режимы: ${enabledTxt}
     </div>
     <div style="margin-bottom:10px;">
       <div style="font-size:28px;font-weight:700;">$${status.balance.toFixed(2)}</div>
@@ -7984,7 +8012,11 @@ async function refreshSimulator() {
       : '<span class="dim">-</span>';
     return `<tr>
       <td class="dim">${fmtTime(t.time)}</td><td>${modeLabels[t.mode] || t.mode}</td><td>${t.symbol}</td>
-      <td class="${dirClass}">${t.direction}</td><td class="dim">${fmt(t.margin,4)}$ x${t.leverage}</td>
+      <td class="${dirClass}">${t.direction}</td>
+      <td class="dim">${fmt(t.entry)}</td>
+      <td class="loss">${t.sl !== null && t.sl !== undefined ? fmt(t.sl) : '-'}</td>
+      <td class="win">${t.tp !== null && t.tp !== undefined ? fmt(t.tp) : '-'}</td>
+      <td class="dim">${fmt(t.margin,4)}$ x${t.leverage}</td>
       <td>${statusHtml}</td><td>${pnlTxt}</td>
       <td class="dim">${t.balance_after !== null && t.balance_after !== undefined ? '$'+t.balance_after.toFixed(2) : '-'}</td>
     </tr>`;
@@ -7993,7 +8025,7 @@ async function refreshSimulator() {
   const tableHtml = trades.length ? `
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Время</th><th>Режим</th><th>Symbol</th><th>Dir</th><th>Маржа/плечо</th><th>Статус</th><th>PnL</th><th>Баланс</th></tr></thead>
+      <thead><tr><th>Время</th><th>Режим</th><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>Маржа/плечо</th><th>Статус</th><th>PnL</th><th>Баланс</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
     </div>` : '<div class="dim">Пока нет сделок симулятора.</div>';
