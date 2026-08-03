@@ -2302,6 +2302,39 @@ v0.60.0 - deduped candle fetches across Divergence and EMA, per direct
          it's more invasive (needs a persistent per-symbol candle store,
          gap handling, in-progress-candle handling) and more likely to
          introduce subtle bugs than this dedup was.
+
+v0.61.0 - fixed the scalp recommendation score to be EV-based, per direct
+         user question about why KOMA_USDT outranked AKE_USDT despite
+         AKE's clearly better hit-rate (85% vs 75.4%). Root cause:
+         score was hit_rate * trades_per_day_est — literally just an
+         estimate of wins/day, completely blind to how big a loss
+         costs. KOMA fires more often (57.6 trades/day vs AKE's 48),
+         which was enough to out-score AKE on pure frequency despite
+         AKE's better hit-rate.
+         New: sl_pct_est = p90_adverse_pct * (1 + SCALP_SL_BUFFER_MULT)
+         — mirrors the REAL stop scan_symbol_scalp_signal() actually
+         places, not liq_buffer_pct (a separate, unrelated liquidation-
+         distance safety check that was never the right basis for this
+         and wasn't used in the old score either — worth naming since
+         an earlier draft of this same fix used liq_buffer_pct by
+         mistake before catching it against the real SL logic).
+         ev_per_trade_pct = hit_frac*target_pct - (1-hit_frac)*sl_pct_est
+         score = ev_per_trade_pct * trades_per_day_est — now an actual
+         (rough) expected-return-per-day estimate, not just a win-count
+         proxy. Both sl_pct_est and ev_per_trade_pct are now stored on
+         the candidate dict alongside the existing fields (liq_buffer_
+         pct/p90_adverse_pct untouched, still there for their original
+         leverage/liquidation-safety purpose).
+         Recalculated against the screenshot: KOMA's EV/trade ≈ 0.82%
+         (score ≈47.3) vs AKE's ≈1.86% (score ≈89.3) — AKE now clearly
+         outranks KOMA, matching what the raw hit-rate gap actually
+         implies.
+         Note: score can now legitimately come out negative for a
+         symbol whose only qualifying combo has bad EV (wide stop,
+         marginal hit-rate) — no code elsewhere assumed score >= 0
+         (checked: only used for -score sorting and storage), so this
+         doesn't break anything, and correctly demotes those symbols
+         to the bottom of the ranking instead of hiding the problem.
 """
 
 import os
@@ -2321,7 +2354,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.60.0"
+APP_VERSION = "0.61.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5110,7 +5143,24 @@ def recommend_scalp_config(symbol_data, mmr_pct, max_leverage=SCALP_DEFAULT_MAX_
                 if time_to_hit_hours <= 0:
                     continue
                 trades_per_day_est = round(24 / time_to_hit_hours, 2)
-                score = round((s["hit_rate"] / 100) * trades_per_day_est, 4)
+                # Previously: score = hit_rate * trades_per_day_est — ranked
+                # purely on how many WINS/day to expect, completely blind to
+                # how big a loss costs. A symbol with a wider stop (bigger
+                # p90_adverse_pct) can out-rank one with a much better
+                # hit-rate just by firing more often, even though its actual
+                # expected return per trade is worse — exactly what happened
+                # with KOMA_USDT outranking AKE_USDT despite AKE's clearly
+                # better hit-rate, per direct user question about the
+                # ranking. sl_pct_est mirrors the real SL that scan_symbol_
+                # scalp_signal() actually places (p90_adverse_pct scaled by
+                # the same SCALP_SL_BUFFER_MULT), so this uses the real risk
+                # side, not the liquidation buffer (a different, unrelated
+                # safety margin — liq_buffer_pct — that was never the right
+                # basis for this and wasn't previously used in score either).
+                sl_pct_est = s["p90_adverse_pct"] * (1 + SCALP_SL_BUFFER_MULT)
+                hit_frac = s["hit_rate"] / 100
+                ev_per_trade_pct = hit_frac * pct - (1 - hit_frac) * sl_pct_est
+                score = round(ev_per_trade_pct * trades_per_day_est, 4)
                 candidate = {
                     "interval": interval, "direction": direction, "target_pct": pct,
                     "hit_rate": s["hit_rate"], "n": s["n"],
@@ -5121,6 +5171,8 @@ def recommend_scalp_config(symbol_data, mmr_pct, max_leverage=SCALP_DEFAULT_MAX_
                     "max_leverage": max_leverage,
                     "liq_buffer_pct": round(liq_buffer, 3),
                     "p90_adverse_pct": s["p90_adverse_pct"],
+                    "sl_pct_est": round(sl_pct_est, 3),
+                    "ev_per_trade_pct": round(ev_per_trade_pct, 4),
                     "score": score,
                 }
                 if best is None or candidate["score"] > best["score"]:
