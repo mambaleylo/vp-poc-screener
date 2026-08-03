@@ -2225,6 +2225,24 @@ v0.58.0 - new signal-staleness filter for the Volume module (bounce/
          entries vs. how much bad-entry risk it actually removes;
          adjustable via VP_SIGNAL_MAX_STALENESS_SEC without a code
          change if it turns out too tight or too loose.
+
+v0.58.1 - SIGNAL_MAX_STALENESS_SEC tightened 300s -> 60s, per direct
+         user request (5 min still felt too loose). Worth flagging:
+         at 60s, a symbol only fires a signal if the scan happens to
+         reach it within a minute of its candle closing — with a full
+         182-symbol scan cycle taking ~429s observed, that's a fairly
+         narrow window relative to the whole cycle, meaning a real
+         chunk of otherwise-valid signals may now get rejected purely
+         on scan-queue timing (which symbol happens to be scanned
+         when) rather than on the signal itself being stale. Left as
+         requested since the user was explicit about wanting it
+         tighter, not asking for an analysis — but this is the
+         tradeoff worth watching via the new filtered_by_staleness
+         counter (v0.58.0) going forward: if it's rejecting most
+         breakout candidates rather than an occasional stale one, that
+         signals the scan cycle itself is too slow for a 60s window
+         and either the interval, worker count, or universe size may
+         need attention rather than this threshold alone.
 """
 
 import os
@@ -2244,7 +2262,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.58.0"
+APP_VERSION = "0.58.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2329,7 +2347,7 @@ RR_BREAKOUT = float(os.environ.get("VP_RR_BREAKOUT", RR))
 BUFFER_PCT_BOUNCE = float(os.environ.get("VP_BUFFER_PCT_BOUNCE", ZONE_BUFFER_PCT))
 BUFFER_PCT_BREAKOUT = float(os.environ.get("VP_BUFFER_PCT_BREAKOUT", ZONE_BUFFER_PCT))
 SIGNAL_TIMEOUT_SEC = int(os.environ.get("VP_SIGNAL_TIMEOUT", 6 * 3600))  # close as TIMEOUT if neither TP/SL hit
-SIGNAL_MAX_STALENESS_SEC = int(os.environ.get("VP_SIGNAL_MAX_STALENESS_SEC", 300))  # 5 min — a full universe scan cycle takes several minutes (429s observed for 182 symbols), so a symbol scanned late in the cycle can find a signal on a candle that closed well before the scan actually reached it. Entry/SL/TP are computed off that candle's close (sig["price"]), but the real market order fills at whatever price exists NOW — if too much time has passed, price has likely already moved well past where the signal detected it, so the trade enters late into an already-spent move rather than near its start. Reject (skip) the signal if now - candle_close_time exceeds this.
+SIGNAL_MAX_STALENESS_SEC = int(os.environ.get("VP_SIGNAL_MAX_STALENESS_SEC", 60))  # 1 min (tightened from an initial 5 min default per direct user request — 5 min was too loose) — a full universe scan cycle takes several minutes (429s observed for 182 symbols), so a symbol scanned late in the cycle can find a signal on a candle that closed well before the scan actually reached it. Entry/SL/TP are computed off that candle's close (sig["price"]), but the real market order fills at whatever price exists NOW — if too much time has passed, price has likely already moved well past where the signal detected it, so the trade enters late into an already-spent move rather than near its start. Reject (skip) the signal if now - candle_close_time exceeds this.
 MFE_TRACK_SEC = int(os.environ.get("VP_MFE_TRACK_SEC", 24 * 3600))  # keep measuring max favorable/adverse excursion this long after detection, past TP/SL/timeout
 # Breakeven stop-move for breakout signals only (bounce is disabled by
 # default — see BOUNCE_ENABLED below). Live stats showed ~25% of breakout
