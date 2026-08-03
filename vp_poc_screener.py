@@ -2272,6 +2272,36 @@ v0.59.0 - major scan-cycle speedup, per direct user question ("why so
          that `with ThreadPoolExecutor(...) as ex:` block has already
          exited (its results collected via as_completed) by the time
          these run, per scan_loop()'s existing sequencing.
+
+v0.60.0 - deduped candle fetches across Divergence and EMA, per direct
+         user request after v0.59.0 got the cycle down to 268s and they
+         asked to keep going. Both modules default to the same interval
+         (DIV_INTERVAL == EMA_INTERVAL == "1h"), so every symbol was
+         being fetched twice for identical candles. scan_loop() now
+         builds a shared_interval_limits dict (interval -> the largest
+         limit any enabled module needs at that interval) before the
+         main scan pool starts, fetches every (symbol, interval) pair
+         in that set ONCE via the existing fetch_candles_concurrent(),
+         and hands the result to scan_symbol_divergence()/scan_symbol_
+         ema() — both now take an optional `candles` param and only
+         fetch their own if it's missing (backward compatible; no other
+         caller passes it, so nothing else changes behavior).
+         Volume (scan_symbol()) deliberately stays out of this dedup:
+         its interval (15m default) differs from Divergence/EMA's, and
+         its per-symbol lookback can vary via SYMBOL_OVERRIDES (auto-
+         tune) — a shared fixed-limit cache wouldn't reliably cover a
+         tuned symbol. scan_symbol() takes an optional `candles` too,
+         but only accepts a passed-in list if it's already long enough
+         for that specific symbol's tuned lookback; otherwise it falls
+         back to its own fetch — a length check, not a behavior change,
+         so a tuned symbol never silently gets truncated history.
+         Full lazy/incremental candle loading (fetching only the newest
+         bar instead of the whole lookback window every cycle) was
+         discussed and deliberately NOT done here — user flagged it
+         as the next lever but wanted it separate, correctly expecting
+         it's more invasive (needs a persistent per-symbol candle store,
+         gap handling, in-progress-candle handling) and more likely to
+         introduce subtle bugs than this dedup was.
 """
 
 import os
@@ -2291,7 +2321,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.59.0"
+APP_VERSION = "0.60.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3733,11 +3763,12 @@ def has_open_divergence_signal(symbol):
         return any(s["symbol"] == symbol and s.get("status") == "OPEN" for s in STATE["div_signals"])
 
 
-def scan_symbol_divergence(symbol):
+def scan_symbol_divergence(symbol, candles=None):
     if not DIVERGENCE_ENABLED:
         return
     try:
-        candles = get_candles(symbol, interval=DIV_INTERVAL, limit=DIV_FETCH_LIMIT)
+        if candles is None:
+            candles = get_candles(symbol, interval=DIV_INTERVAL, limit=DIV_FETCH_LIMIT)
         min_needed = DIV_RSI_PERIOD + DIV_PIVOT_LEFT + DIV_PIVOT_RIGHT + 20
         if len(candles) < min_needed:
             return
@@ -3894,11 +3925,12 @@ def has_open_ema_signal(symbol, interval):
         return any(s["symbol"] == symbol and s.get("interval") == interval and s.get("status") == "OPEN" for s in STATE["ema_signals"])
 
 
-def scan_symbol_ema(symbol, interval=EMA_INTERVAL):
+def scan_symbol_ema(symbol, interval=EMA_INTERVAL, candles=None):
     if not EMA_ENABLED:
         return
     try:
-        candles = get_candles(symbol, interval=interval, limit=EMA_FETCH_LIMIT)
+        if candles is None:
+            candles = get_candles(symbol, interval=interval, limit=EMA_FETCH_LIMIT)
         min_needed = max(EMA_LEN_7, EMA_LEN_14, EMA_LEN_28) + 20
         if len(candles) < min_needed:
             return
@@ -6043,7 +6075,7 @@ def _try_signal(symbol, candles, candidate):
     return candidate
 
 
-def scan_symbol(symbol):
+def scan_symbol(symbol, candles=None):
     try:
         ov = SYMBOL_OVERRIDES.get(symbol, {}) or {}
         bounce_ov = ov.get("bounce") or {}
@@ -6060,7 +6092,14 @@ def scan_symbol(symbol):
         breakout_buffer = breakout_ov.get("buffer_pct", BUFFER_PCT_BREAKOUT)
 
         max_lookback = max(bounce_lookback, breakout_lookback)
-        candles = get_candles(symbol, limit=max_lookback + 5)
+        # A shared pre-fetched candle set (from scan_loop's dedup cache) is
+        # used as-is ONLY if it's long enough for THIS symbol's tuned
+        # lookback — per-symbol auto-tune overrides can ask for more
+        # history than the default the cache was built with. Falling back
+        # to a fresh fetch here only affects the (rare) tuned-override
+        # symbols, never silently truncates anyone's actual lookback.
+        if candles is None or len(candles) < max_lookback + 5:
+            candles = get_candles(symbol, limit=max_lookback + 5)
         if len(candles) < 20:
             return
 
@@ -6444,14 +6483,43 @@ def scan_loop():
                 STATE["filtered_by_volume"] = 0
                 STATE["filtered_by_oi"] = 0
                 STATE["filtered_by_staleness"] = 0
+
+            # Dedup candle fetches across Divergence and EMA: by default
+            # both run on DIV_INTERVAL/EMA_INTERVAL = "1h", so without this
+            # every symbol was fetched twice for the identical timeframe.
+            # Volume isn't included here — its interval (15m default)
+            # differs from Divergence/EMA's, AND its per-symbol lookback
+            # can vary via SYMBOL_OVERRIDES (auto-tune), so a shared fixed-
+            # limit cache wouldn't reliably cover it; scan_symbol() still
+            # fetches its own candles, same as before.
+            # Keyed by interval -> the largest limit any enabled module
+            # needs at that interval, so one fetch covers every consumer
+            # of that (symbol, interval) pair regardless of their
+            # individual limit — more candles than a given consumer needs
+            # is harmless, fewer would be (which is why scan_symbol()
+            # above still falls back to its own fetch on a length miss).
+            shared_interval_limits = {}
+            if DIVERGENCE_ENABLED:
+                shared_interval_limits[DIV_INTERVAL] = max(shared_interval_limits.get(DIV_INTERVAL, 0), DIV_FETCH_LIMIT)
+            if EMA_ENABLED:
+                for interval in EMA_INTERVALS:
+                    shared_interval_limits[interval] = max(shared_interval_limits.get(interval, 0), EMA_FETCH_LIMIT)
+
+            candle_cache = {}
+            if shared_interval_limits:
+                cache_specs = [(s, interval, limit) for s in universe for interval, limit in shared_interval_limits.items()]
+                fetched = fetch_candles_concurrent(cache_specs)
+                for (s, interval, _limit), candles in zip(cache_specs, fetched):
+                    candle_cache[(s, interval)] = candles
+
             with ThreadPoolExecutor(max_workers=WORKERS) as ex:
                 futs = []
                 if VOLUME_PROFILE_ENABLED:
                     futs += [ex.submit(scan_symbol, s) for s in universe]
                 if DIVERGENCE_ENABLED:
-                    futs += [ex.submit(scan_symbol_divergence, s) for s in universe]
+                    futs += [ex.submit(scan_symbol_divergence, s, candle_cache.get((s, DIV_INTERVAL))) for s in universe]
                 if EMA_ENABLED:
-                    futs += [ex.submit(scan_symbol_ema, s, interval) for s in universe for interval in EMA_INTERVALS]
+                    futs += [ex.submit(scan_symbol_ema, s, interval, candle_cache.get((s, interval))) for s in universe for interval in EMA_INTERVALS]
                 if SCALP_SIGNALS_ENABLED:
                     with state_lock:
                         scalp_recs_snapshot = dict(STATE["scalp_recommendations"])
