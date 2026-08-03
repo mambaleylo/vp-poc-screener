@@ -2086,6 +2086,30 @@ v0.53.2 - network-loss resilience audit, per direct request (this runs
          near-instantly (not blocked) and logs the drop; a normal send
          below capacity still queues exactly as before. Full scan-
          function/endpoint regression stayed clean.
+v0.54.0 - removed the scalp timeout entirely, per direct request:
+         KOMA_USDT kept expiring into TIMEOUT (4 of 5 recent signals)
+         at the old 4x-median-time cutoff (~79 min) without ever
+         reaching its target or stop — a low-volatility grinder that
+         just needs longer to resolve either way. User wanted a real
+         WIN/LOSS outcome no matter how long it takes rather than an
+         ambiguous TIMEOUT.
+         timeout_sec is now 10**12 seconds (~31,700 years) instead of
+         rec["time_to_hit_hours"] * SCALP_SIGNAL_TIMEOUT_MULT — a very
+         large FINITE number rather than float('inf'), specifically
+         because inf serializes as the non-standard JSON token
+         'Infinity'; scalp_signals get persisted to disk via
+         save_state() (since v0.51.2), and a plain huge number is safe
+         there without relying on Python's json module happening to
+         accept a non-standard token forever. The existing "now >=
+         timeout_at" check in update_scalp_signal_outcomes() needed no
+         change — it simply can never become true now, no second code
+         path added.
+         Verified directly: a signal survives ~41 hours of flat price
+         action (far past the old ~79min cutoff) still OPEN, then
+         correctly resolves to WIN once price actually reaches the
+         target; the huge timeout_at value round-trips through JSON
+         serialization correctly with no 'Infinity' token anywhere.
+         Full scan-function/endpoint regression stayed clean.
 """
 
 import os
@@ -2104,7 +2128,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.53.2"
+APP_VERSION = "0.54.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4820,7 +4844,13 @@ def scan_symbol_scalp_signal(symbol, rec):
             target_price = entry * (1 - target_pct / 100)
             sl_price = entry * (1 + sl_pct / 100)
         interval_sec = INTERVAL_SECONDS.get(interval, 300)
-        timeout_sec = max(rec["time_to_hit_hours"] * 3600 * SCALP_SIGNAL_TIMEOUT_MULT, interval_sec * 4)
+        # Timeout removed per direct request — a signal now waits as long as
+        # it takes to hit either the target or the stop, never expiring into
+        # an ambiguous TIMEOUT result. A very large finite number (not
+        # float('inf')) keeps timeout_at safe to persist to disk — inf
+        # serializes as the non-standard JSON token 'Infinity', which isn't
+        # something to rely on for a value that gets saved via save_state().
+        timeout_sec = 10 ** 12  # ~31,700 years — never actually reached, just avoids inf
 
         record = {
             "symbol": symbol, "interval": interval, "direction": direction,
