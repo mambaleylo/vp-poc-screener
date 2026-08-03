@@ -2408,6 +2408,52 @@ v0.63.0 - scalp gets its own position-size config, per direct user
          scalp autotrade toggle — same percent-of-balance/fixed-$
          dropdown+input as the shared control above it. Also surfaced
          in /api/scalp/status's config block for visibility.
+
+v0.64.0 - fixed a real gap reported by user (screenshots: 13 open orders
+         on one symbol in Gate's UI, plus the autotrade log directly
+         showing it — EMA opened MMT_USDT SHORT at 17:03, Breakout
+         opened MMT_USDT LONG at 17:46, completely independently).
+         Each module (Volume/Divergence/EMA/Scalp/Session) only ever
+         checked its OWN signal list before firing — has_open_signal(),
+         has_open_divergence_signal(), has_open_ema_signal(), and two
+         inline checks for scalp/session. Nothing stopped a SECOND
+         module from opening a position on a symbol another module
+         already held, each placing its own independent market order +
+         TP + SL. Across five modules scanning the same universe, a
+         popular/volatile symbol accumulates a pile of uncoordinated
+         orders — and it wasn't visible in any single module's own log,
+         because no module's log ever saw the whole picture.
+         New has_open_signal_any_module(symbol, exclude=None): checks
+         all five signal lists (STATE["signals"]/div_signals/ema_signals/
+         scalp_signals/session_signals) for an OPEN entry on this
+         symbol. Called in ADDITION to each module's own existing check,
+         everywhere a new signal gets created — it's a cross-module
+         veto layered on top, not a replacement for any module's
+         existing per-symbol/interval dedup.
+         exclude lets a module skip checking its OWN list here, since
+         it already checked that separately (and EMA's own check is
+         interval-aware — it deliberately allows several simultaneously-
+         open EMA signals on the same symbol across DIFFERENT intervals
+         for comparison, which excluding ema_signals here preserves;
+         without the exclude, EMA would have started vetoing its own
+         multi-interval feature).
+         Session never had its own per-symbol open check at all before
+         this (only a per-session_open_ts cooldown) — this fix is the
+         first thing that stops it opening on a symbol another module
+         already holds.
+         state_lock is a plain, non-reentrant threading.Lock() — the
+         scalp call site had its own dedup check inside a `with
+         state_lock:` block already, so has_open_signal_any_module()
+         (which takes the lock itself) had to be called AFTER that
+         block exits, not nested inside it, or it would deadlock.
+         Verified none of the other four call sites were nested inside
+         a state_lock block either before adding the call there.
+         Does NOT retroactively touch any already-open duplicate
+         positions/orders (like the ones on SNDK_USDT in the report) —
+         only prevents new ones going forward. Existing pileups need a
+         manual check on Gate; the bot has no reliable way to guess
+         which of several already-open positions on one symbol was the
+         "intended" one to keep.
 """
 
 import os
@@ -2427,7 +2473,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.63.0"
+APP_VERSION = "0.64.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3190,6 +3236,43 @@ def has_open_signal(symbol):
         return any(s["symbol"] == symbol and s.get("status") == "OPEN" for s in STATE["signals"])
 
 
+def has_open_signal_any_module(symbol, exclude=None):
+    """True if ANY module (Volume/Divergence/EMA/Scalp/Session) already
+    has an OPEN signal on this symbol. Each module previously only
+    checked its OWN signal list before firing — real gap found live:
+    EMA opened MMT_USDT SHORT, and 43 minutes later Breakout opened
+    MMT_USDT LONG, completely independently, each placing its own
+    market order + TP + SL. Multiplied across five modules all watching
+    the same universe, a single popular/volatile symbol accumulates a
+    pile of orders from different sources with no coordination between
+    them (the reported case: 13 open orders on one symbol on Gate,
+    nothing in any single module's own log looking obviously wrong,
+    because no module's log ever saw the whole picture).
+    Called in ADDITION to each module's existing own-list check, not
+    instead of it — this only adds a cross-module veto, it doesn't
+    change any module's internal per-symbol/interval dedup logic.
+    exclude: STATE key name to skip (e.g. "ema_signals") — EMA
+    deliberately allows multiple simultaneously-open signals on the same
+    symbol across DIFFERENT intervals (its own has_open_ema_signal is
+    interval-aware and already handles that within-module case), so its
+    call here excludes ema_signals to avoid vetoing itself; the other
+    four modules only ever want at most one open signal per symbol
+    regardless of interval, so they pass their own list name too, purely
+    for clarity (their own already-called check makes it a no-op)."""
+    lists = {
+        "signals": STATE["signals"], "div_signals": STATE["div_signals"],
+        "ema_signals": STATE["ema_signals"], "scalp_signals": STATE["scalp_signals"],
+        "session_signals": STATE["session_signals"],
+    }
+    with state_lock:
+        for name, lst in lists.items():
+            if name == exclude:
+                continue
+            if any(s["symbol"] == symbol and s.get("status") == "OPEN" for s in lst):
+                return True
+    return False
+
+
 # ----------------------------------------------------------------------------
 # RSI divergence: RSI calc, swing-pivot detection, divergence match
 # ----------------------------------------------------------------------------
@@ -3727,6 +3810,8 @@ def scan_symbol_session_live(symbol, session_open_ts):
         sig = detect_session_manipulation(candles, session_open_ts)
         if not sig:
             return
+        if has_open_signal_any_module(symbol, exclude="session_signals"):
+            return  # another module already has an open position on this symbol — see has_open_signal_any_module's docstring for why this check exists
         with _session_signal_cooldowns_lock:
             if _session_signal_cooldowns.get(symbol) == session_open_ts:
                 return  # another thread found it first this same cycle
@@ -3988,7 +4073,7 @@ def scan_symbol_divergence(symbol, candles=None):
         sig = detect_divergence(candles, rsi, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT, freshness=DIV_FRESHNESS_BARS)
         if not sig:
             return
-        if has_open_divergence_signal(symbol):
+        if has_open_divergence_signal(symbol) or has_open_signal_any_module(symbol, exclude="div_signals"):
             return
 
         now = time.time()
@@ -4149,7 +4234,7 @@ def scan_symbol_ema(symbol, interval=EMA_INTERVAL, candles=None):
         sig = detect_ema_signal(closes, EMA_LEN_7, EMA_LEN_14, EMA_LEN_28, EMA_SIGNAL_TYPE, EMA_TREND_FILTER, candles=candles)
         if not sig:
             return
-        if has_open_ema_signal(symbol, interval):
+        if has_open_ema_signal(symbol, interval) or has_open_signal_any_module(symbol, exclude="ema_signals"):
             return
 
         now = time.time()
@@ -5420,6 +5505,8 @@ def scan_symbol_scalp_signal(symbol, rec):
             if any(s["symbol"] == symbol and s["interval"] == interval and s["status"] == "OPEN"
                    for s in STATE["scalp_signals"]):
                 return  # one open scalp signal per (symbol, interval) at a time
+        if has_open_signal_any_module(symbol, exclude="scalp_signals"):
+            return  # another module already has an open position on this symbol — see has_open_signal_any_module's docstring for why this check exists
 
         entry = last["close"]
         direction = rec["direction"]
@@ -6432,7 +6519,7 @@ def scan_symbol(symbol, candles=None):
                     STATE["filtered_by_staleness"] += 1
                 sig = None  # candle closed too long ago — price has likely already moved past this signal's entry level, entering now would chase a stale/spent move rather than catch it near its start
 
-        if sig and has_open_signal(symbol):
+        if sig and (has_open_signal(symbol) or has_open_signal_any_module(symbol, exclude="signals")):
             sig = None  # already have an unresolved signal on this symbol — don't stack another
         if sig:
             key = symbol
