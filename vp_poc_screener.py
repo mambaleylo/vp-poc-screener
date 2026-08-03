@@ -1998,6 +1998,30 @@ v0.52.4 - user's live autotrade log showed a repeating pattern:
          and percent mode; dry-run with fixed mode and no credentials
          still makes zero network calls. Full scan-function/endpoint
          regression stayed clean.
+v0.53.0 - Volume winrate analysis (31.9%, below the RR=2 breakeven of
+         33.3%) turned up a clear pattern comparing at-close vs full-
+         window (24h) stats: LOSS full-window MFE averaged 2.737R —
+         past the TP itself — vs only 0.343-0.461R at the moment the
+         tight stop actually closed the trade. A large share of
+         "losses" appear to reverse in the intended direction anyway;
+         the stop just doesn't survive the noise long enough. WIN full-
+         window MFE similarly ran to 5.425R (median 3.94R) vs the
+         ~2R the current TP captures.
+         Unlike EMA/divergence's single global TP%/RR, Volume's TP/SL
+         come from a per-symbol auto-tuned grid (PARAM_GRID_BUFFER,
+         PARAM_GRID_RR), so there's no one fixed value to change —
+         widened the grids instead (buffer 0.20/0.35/0.50 -> +0.65,
+         RR 1.5/2.0/2.5 -> +3.0) so the per-symbol auto-tuner can
+         select the wider options where they backtest better, rather
+         than forcing everyone to the same new value. Recommended the
+         user clear Volume's accumulated per-symbol overrides so the
+         new grid gets explored promptly instead of waiting for the
+         normal 48h-per-symbol refresh cycle to reach everyone.
+         Verified: new grid values load correctly, and the full
+         scan-function/endpoint regression stayed clean (a test-harness
+         call to backtest_params with an incomplete arg list raised as
+         expected — a test mistake, not an application bug, confirmed
+         by every other check passing).
 """
 
 import os
@@ -2016,7 +2040,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.52.4"
+APP_VERSION = "0.53.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5281,8 +5305,8 @@ AUTO_TUNE_PER_CYCLE = int(os.environ.get("VP_AUTO_TUNE_PER_CYCLE", 3))  # was 1,
 AUTO_TUNE_REFRESH_SEC = int(os.environ.get("VP_AUTO_TUNE_REFRESH_SEC", 48 * 3600))  # re-tune a symbol once its override is this old — price behavior drifts
 PARAM_GRID_LOOKBACK = [60, 100, 150]
 PARAM_GRID_HVN = [3, 6, 9]
-PARAM_GRID_RR = [1.5, 2.0, 2.5]              # data showed WIN median MFE ~2.8R, so the old 1.0 floor rarely won and was dropped in favor of testing further out
-PARAM_GRID_BUFFER = [0.20, 0.35, 0.50]  # reverted — 0.15 was re-added in v0.37.0 to test whether tight buffers now perform better, but overall Volume winrate got WORSE after that change (45.3% -> 33.3%), not better, so reverting per direct user request
+PARAM_GRID_RR = [1.5, 2.0, 2.5, 3.0]              # added 3.0 — full-window (24h) WIN MFE ran median 3.94R (bounce) vs the 2.0-2.5R the current grid tops out at capturing, so let auto-tune test whether a further target does better per symbol
+PARAM_GRID_BUFFER = [0.20, 0.35, 0.50, 0.65]  # added 0.65 — full-window (24h) LOSS MFE averaged 2.737R (would have exceeded the TP itself before reversing) vs 0.343-0.461R at the moment the tight stop actually closed the trade, suggesting many "losses" reverse in the intended direction but the stop is too close to survive the noise; testing whether a wider buffer catches more of those per symbol
 
 SYMBOL_OVERRIDES = {}  # symbol -> {lookback, hvn_top_n, rr, buffer_pct, winrate, trades, optimized_at}
 
