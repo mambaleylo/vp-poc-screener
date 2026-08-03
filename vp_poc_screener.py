@@ -2194,6 +2194,37 @@ v0.57.0 - per direct user request, off the bounce/breakout stats screenshot
          Not yet backtested — this changes LIVE order management, not
          just signal-generation math, so it can only really be
          validated by watching real trade outcomes going forward.
+
+v0.58.0 - new signal-staleness filter for the Volume module (bounce/
+         breakout), per direct user observation (screenshot): a signal
+         showed 14:00 as its candle time while the scan that surfaced
+         it ran at 14:08 — an 8-minute-old candle by the time it was
+         even seen, on top of however long the actual order placement
+         then took. A full universe scan takes several minutes (429s
+         observed for 182 symbols), so a symbol near the end of the
+         scan queue can pick up a signal whose candle closed well
+         before the scan actually reached it. Entry/SL/TP are computed
+         off that candle's close, but the real market order fills at
+         whatever price exists NOW — too much elapsed time means price
+         has likely already moved past where the signal detected it,
+         so the trade would enter late into an already-spent move
+         instead of near its start.
+         New SIGNAL_MAX_STALENESS_SEC (default 300s / 5 min): right
+         after a candidate signal passes the existing trend/volume/OI
+         filters, if time.time() - sig["time"] exceeds this, the signal
+         is dropped (same pattern as the other filters — a new
+         filtered_by_staleness counter, reset alongside filtered_by_
+         trend/volume/oi in all three existing reset sites, exposed in
+         the same API response and the same "отклонено" line in the
+         UI). Applies to both bounce and breakout paths (bounce is
+         disabled by default anyway per v0.57.0, but the check sits
+         before that branch either way, so it's ready if bounce ever
+         gets re-enabled for comparison).
+         5 min is a starting default at ~1/3 of the 15m candle
+         interval — not yet tuned against how much it costs in missed
+         entries vs. how much bad-entry risk it actually removes;
+         adjustable via VP_SIGNAL_MAX_STALENESS_SEC without a code
+         change if it turns out too tight or too loose.
 """
 
 import os
@@ -2213,7 +2244,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.57.0"
+APP_VERSION = "0.58.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2298,6 +2329,7 @@ RR_BREAKOUT = float(os.environ.get("VP_RR_BREAKOUT", RR))
 BUFFER_PCT_BOUNCE = float(os.environ.get("VP_BUFFER_PCT_BOUNCE", ZONE_BUFFER_PCT))
 BUFFER_PCT_BREAKOUT = float(os.environ.get("VP_BUFFER_PCT_BREAKOUT", ZONE_BUFFER_PCT))
 SIGNAL_TIMEOUT_SEC = int(os.environ.get("VP_SIGNAL_TIMEOUT", 6 * 3600))  # close as TIMEOUT if neither TP/SL hit
+SIGNAL_MAX_STALENESS_SEC = int(os.environ.get("VP_SIGNAL_MAX_STALENESS_SEC", 300))  # 5 min — a full universe scan cycle takes several minutes (429s observed for 182 symbols), so a symbol scanned late in the cycle can find a signal on a candle that closed well before the scan actually reached it. Entry/SL/TP are computed off that candle's close (sig["price"]), but the real market order fills at whatever price exists NOW — if too much time has passed, price has likely already moved well past where the signal detected it, so the trade enters late into an already-spent move rather than near its start. Reject (skip) the signal if now - candle_close_time exceeds this.
 MFE_TRACK_SEC = int(os.environ.get("VP_MFE_TRACK_SEC", 24 * 3600))  # keep measuring max favorable/adverse excursion this long after detection, past TP/SL/timeout
 # Breakeven stop-move for breakout signals only (bounce is disabled by
 # default — see BOUNCE_ENABLED below). Live stats showed ~25% of breakout
@@ -2886,6 +2918,7 @@ STATE = {
     "filtered_by_trend": 0,
     "filtered_by_volume": 0,
     "filtered_by_oi": 0,
+    "filtered_by_staleness": 0,
     "last_scan_started": None,
     "last_scan_finished": None,
     "last_scan_duration": None,
@@ -6005,6 +6038,13 @@ def scan_symbol(symbol):
                     with state_lock:
                         STATE["filtered_by_oi"] += 1
 
+        if sig:
+            staleness_sec = time.time() - sig["time"]
+            if staleness_sec > SIGNAL_MAX_STALENESS_SEC:
+                with state_lock:
+                    STATE["filtered_by_staleness"] += 1
+                sig = None  # candle closed too long ago — price has likely already moved past this signal's entry level, entering now would chase a stale/spent move rather than catch it near its start
+
         if sig and has_open_signal(symbol):
             sig = None  # already have an unresolved signal on this symbol — don't stack another
         if sig:
@@ -6313,6 +6353,7 @@ def scan_loop():
                 STATE["filtered_by_trend"] = 0
                 STATE["filtered_by_volume"] = 0
                 STATE["filtered_by_oi"] = 0
+                STATE["filtered_by_staleness"] = 0
             with ThreadPoolExecutor(max_workers=WORKERS) as ex:
                 futs = []
                 if VOLUME_PROFILE_ENABLED:
@@ -6591,6 +6632,7 @@ def api_status():
             "filtered_by_trend": STATE["filtered_by_trend"],
             "filtered_by_volume": STATE["filtered_by_volume"],
             "filtered_by_oi": STATE["filtered_by_oi"],
+            "filtered_by_staleness": STATE["filtered_by_staleness"],
             "last_scan_started": STATE["last_scan_started"],
             "last_scan_finished": STATE["last_scan_finished"],
             "last_scan_duration": STATE["last_scan_duration"],
@@ -7166,6 +7208,7 @@ def api_reset_volume():
             STATE["filtered_by_trend"] = 0
             STATE["filtered_by_volume"] = 0
             STATE["filtered_by_oi"] = 0
+            STATE["filtered_by_staleness"] = 0
             STATE["errors"].clear()
         with _cooldowns_lock:
             _cooldowns.clear()
@@ -7210,6 +7253,7 @@ def api_reset():
             STATE["filtered_by_trend"] = 0
             STATE["filtered_by_volume"] = 0
             STATE["filtered_by_oi"] = 0
+            STATE["filtered_by_staleness"] = 0
             STATE["errors"].clear()
             STATE["div_pivot_stability"] = {str(r): {"agree": 0, "disagree": 0, "gain_sum": 0.0, "gain_count": 0} for r in DIV_SHADOW_RIGHTS}
         with _cooldowns_lock:
@@ -7791,7 +7835,7 @@ async function refreshTuning() {
     <div class="dim" style="margin-bottom:10px;">
       <b>Volume</b> · Винрейт: ${wr} (${st.wins||0}W / ${st.losses||0}L, timeout ${st.timeouts||0}) · ${bounceTxt} · ${breakoutTxt} · открытых: ${st.open||0} · RR ${s.config ? s.config.rr : ''}<br>
       ${atTxt}<br>
-      За этот скан отклонено — тренд: ${s.filtered_by_trend||0}, объём: ${s.filtered_by_volume||0}, OI: ${s.filtered_by_oi||0} · ${cvTxt}
+      За этот скан отклонено — тренд: ${s.filtered_by_trend||0}, объём: ${s.filtered_by_volume||0}, OI: ${s.filtered_by_oi||0}, устарел: ${s.filtered_by_staleness||0} · ${cvTxt}
     </div>`;
   if (!t.count) {
     el.innerHTML = detailHtml + '<div class="dim" style="padding-top:10px;border-top:1px solid #1c2433;"><b>Объём (Volume Profile) — статистика</b><br>Пока недостаточно данных — подожди пару циклов скана.</div>';
