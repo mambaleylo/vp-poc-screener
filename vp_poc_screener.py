@@ -2155,6 +2155,45 @@ v0.56.0 - fixed a real autotrade bug reported by user (screenshots of
          Also noticed while making this change: v0.55.0's flat-zone
          session filter shipped without bumping APP_VERSION (stayed at
          0.54.0) — corrected here, no functional relation to this fix.
+
+v0.57.0 - per direct user request, off the bounce/breakout stats screenshot
+         (bounce 1W/5L ~16.7% vs breakout 5W/4L ~56%):
+         (1) BOUNCE_ENABLED now defaults to "0" (was "1") — bounce
+         signals disabled by default. Module code kept intact (toggle
+         only, not ripped out) so it can be re-enabled for comparison
+         later.
+         (2) VOL_CONFIRM_RATIO default raised 1.15x -> 1.4x — the
+         existing volume-confirmation filter (already active on both
+         bounce and breakout via _try_signal/volume_confirms) was too
+         weak to reliably separate a real breakout's volume spike from
+         ordinary noise.
+         (3) New breakeven stop-move for breakout signals only, via
+         BREAKOUT_BREAKEVEN_TRIGGER_R (default 0.8R) and
+         BREAKOUT_BREAKEVEN_BUFFER_PCT (default 0.1%). Motivated by the
+         same screenshot: breakout LOSS MFE showed p75=1.224R, meaning
+         a quarter of losses had traveled over 1R in favor before
+         reversing to hit the original stop — pure wasted edge. Once an
+         OPEN breakout signal with a real (non-dry-run) SL order on
+         Gate reaches fav_r >= BREAKOUT_BREAKEVEN_TRIGGER_R,
+         move_stop_to_breakeven() cancels that SL order and places a
+         new one at entry (+/- the small buffer) — implemented via a
+         new shared place_close_trigger_order() helper (place_tp_sl_
+         orders() refactored to use it too, no behavior change there).
+         Only ever attempted once per signal (breakeven_moved flag),
+         success or failure, to avoid hammering the API every cycle on
+         a persistent error. A close against a successfully-moved
+         breakeven stop is labeled result="BREAKEVEN" rather than
+         "LOSS" (tracked via a separate breakeven_active flag, true
+         only on confirmed success) — mirrors how "TIMEOUT" already
+         sits outside the WIN/LOSS stats buckets, so this doesn't
+         require touching win/loss aggregation elsewhere. sim_execute_
+         trade's paper-trading PnL needed no change: it already prices
+         off the real exit_price, not an assumed result label, so a
+         breakeven exit naturally nets to ~0 PnL (minus fees) on its
+         own.
+         Not yet backtested — this changes LIVE order management, not
+         just signal-generation math, so it can only really be
+         validated by watching real trade outcomes going forward.
 """
 
 import os
@@ -2174,7 +2213,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.56.0"
+APP_VERSION = "0.57.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2260,6 +2299,14 @@ BUFFER_PCT_BOUNCE = float(os.environ.get("VP_BUFFER_PCT_BOUNCE", ZONE_BUFFER_PCT
 BUFFER_PCT_BREAKOUT = float(os.environ.get("VP_BUFFER_PCT_BREAKOUT", ZONE_BUFFER_PCT))
 SIGNAL_TIMEOUT_SEC = int(os.environ.get("VP_SIGNAL_TIMEOUT", 6 * 3600))  # close as TIMEOUT if neither TP/SL hit
 MFE_TRACK_SEC = int(os.environ.get("VP_MFE_TRACK_SEC", 24 * 3600))  # keep measuring max favorable/adverse excursion this long after detection, past TP/SL/timeout
+# Breakeven stop-move for breakout signals only (bounce is disabled by
+# default — see BOUNCE_ENABLED below). Live stats showed ~25% of breakout
+# losses had traveled over 1R in favor before reversing to hit the
+# original stop — moving the stop to breakeven once price proves the
+# trade right by BREAKOUT_BREAKEVEN_TRIGGER_R turns those into scratches
+# instead of full losses, without touching TP.
+BREAKOUT_BREAKEVEN_TRIGGER_R = float(os.environ.get("VP_BREAKOUT_BREAKEVEN_TRIGGER_R", 0.8))
+BREAKOUT_BREAKEVEN_BUFFER_PCT = float(os.environ.get("VP_BREAKOUT_BREAKEVEN_BUFFER_PCT", 0.001))  # 0.1% beyond pure entry, in the trade's favor — so a dead-even wick still covers fees/slippage instead of landing exactly on entry
 
 # ----------------------------------------------------------------------------
 # RSI divergence: a completely separate signal source from the volume
@@ -2428,7 +2475,7 @@ ZONE_METHOD = os.environ.get("VP_ZONE_METHOD", "shoulder")  # "shoulder" or "top
 LEGACY_MAX_ZONE_HEIGHT_FRAC = float(os.environ.get("VP_MAX_ZONE_HEIGHT_FRAC", 0.10))  # only used when VP_ZONE_METHOD=topn
 ZONE_STRENGTH_MIN_RATIO = float(os.environ.get("VP_ZONE_STRENGTH_MIN_RATIO", 0.55))  # zone volume must be >= this fraction of the POC's volume to be eligible for signals
 BREAKOUT_MIN_BARS_INSIDE = int(os.environ.get("VP_BREAKOUT_MIN_BARS", 3))  # bars that must have been basing inside/around the zone right before a breakout signal
-BOUNCE_ENABLED = os.environ.get("VP_BOUNCE_ENABLED", "1") == "1"
+BOUNCE_ENABLED = os.environ.get("VP_BOUNCE_ENABLED", "0") == "1"  # disabled by default per user request — live stats showed bounce winrate ~16.7% (1W/5L) vs breakout's ~56% (5W/4L); module code kept intact (toggle only) so it can be re-enabled for comparison later rather than ripped out
 BREAKOUT_ENABLED = os.environ.get("VP_BREAKOUT_ENABLED", "1") == "1"
 
 # --- trend filter: in a clear up/down move, only take signals in that
@@ -2443,7 +2490,7 @@ TREND_THRESHOLD_PCT = float(os.environ.get("VP_TREND_THRESHOLD_PCT", 0.02))  # n
 # likely noise than a real move.
 VOLUME_CONFIRM_ENABLED = os.environ.get("VP_VOLUME_CONFIRM", "1") == "1"
 VOL_CONFIRM_LOOKBACK = int(os.environ.get("VP_VOL_CONFIRM_LOOKBACK", 20))
-VOL_CONFIRM_RATIO = float(os.environ.get("VP_VOL_CONFIRM_RATIO", 1.15))  # trigger bar volume must be >= this multiple of the average of the preceding VOL_CONFIRM_LOOKBACK bars
+VOL_CONFIRM_RATIO = float(os.environ.get("VP_VOL_CONFIRM_RATIO", 1.4))  # trigger bar volume must be >= this multiple of the average of the preceding VOL_CONFIRM_LOOKBACK bars — raised from 1.15x per user request to strengthen breakout confirmation (1.15x was too weak to reliably distinguish a real breakout's volume spike from ordinary noise)
 
 # --- open interest filter: applied to breakout signals only (bounce is a
 # rejection off a level, breakout is a move away from it — OI direction
@@ -4333,53 +4380,96 @@ def place_market_order(symbol, direction, contracts, reduce_only=False):
     return gate_signed_request("POST", "/futures/usdt/orders", body=body)
 
 
-def place_tp_sl_orders(symbol, direction, tp_price, sl_price, tick=None, price_type=0):
-    """Places both the TP and SL as separate price-triggered close orders.
-    Returns (tp_order, sl_order, errors) — errors is a list of (which, msg)
-    for whichever leg failed, so one failing doesn't silently hide the
-    other's success or failure.
+def _close_order_initial(symbol, direction, dual):
+    """Builds the "initial" close-order payload for a price-triggered
+    order. Position-mode-dependent (see place_close_trigger_order
+    docstring) — split out so both the normal TP/SL placement and a
+    later breakeven-move replacement build it identically."""
+    auto_size = "close_long" if direction == "LONG" else "close_short"
+    if dual:
+        return {"contract": symbol, "size": 0, "price": "0", "tif": "ioc", "auto_size": auto_size, "reduce_only": True}
+    return {"contract": symbol, "size": 0, "price": "0", "close": True, "tif": "ioc"}
+
+
+def place_close_trigger_order(symbol, direction, price, rule, tick=None, price_type=0):
+    """Places a single price-triggered close order (used for TP, SL, and
+    later for replacing an SL at breakeven). rule follows Gate's
+    price_orders convention: 1 = trigger when mark/last price rises to
+    meet `price`, 2 = trigger when it falls to meet it — caller picks
+    whichever matches what this particular order should do.
     The "initial" close-order schema genuinely differs by account
     position mode (confirmed the hard way — a request built for single
     mode 400'd under dual/hedge mode): single mode closes via
     size=0/close=true; dual mode instead needs auto_size ("close_long"/
-    "close_short", matching which side is being closed) plus
-    reduce_only=true, and doesn't use `close` at all.
+    "close_short") plus reduce_only=true, and doesn't use `close` at all.
     tick is passed through to format_price_str() so trigger.price is
     always sent as plain fixed-point decimal, never Python's scientific
     notation for small floats (the cause of a real AUTO_INVALID_PARAM_
     TRIGGER_PRICE failure on cheap/meme contracts like RATS_USDT)."""
-    if direction == "LONG":
-        tp_rule, sl_rule = 1, 2
-        auto_size = "close_long"
-    else:
-        tp_rule, sl_rule = 2, 1
-        auto_size = "close_short"
     try:
         dual = get_dual_mode()
     except Exception as e:
-        log_error(f"place_tp_sl_orders {symbol}: couldn't determine position mode ({e}), assuming single-mode")
+        log_error(f"place_close_trigger_order {symbol}: couldn't determine position mode ({e}), assuming single-mode")
         dual = False
-    if dual:
-        initial = {"contract": symbol, "size": 0, "price": "0", "tif": "ioc", "auto_size": auto_size, "reduce_only": True}
+    initial = _close_order_initial(symbol, direction, dual)
+    return gate_signed_request("POST", "/futures/usdt/price_orders", body={
+        "initial": initial,
+        "trigger": {"strategy_type": 0, "price_type": price_type, "price": format_price_str(price, tick), "rule": rule, "expiration": 0},
+    })
+
+
+def place_tp_sl_orders(symbol, direction, tp_price, sl_price, tick=None, price_type=0):
+    """Places both the TP and SL as separate price-triggered close orders,
+    via place_close_trigger_order(). Returns (tp_order, sl_order, errors)
+    — errors is a list of (which, msg) for whichever leg failed, so one
+    failing doesn't silently hide the other's success or failure."""
+    if direction == "LONG":
+        tp_rule, sl_rule = 1, 2
     else:
-        initial = {"contract": symbol, "size": 0, "price": "0", "close": True, "tif": "ioc"}
+        tp_rule, sl_rule = 2, 1
     errors = []
     tp_order = sl_order = None
     try:
-        tp_order = gate_signed_request("POST", "/futures/usdt/price_orders", body={
-            "initial": dict(initial),
-            "trigger": {"strategy_type": 0, "price_type": price_type, "price": format_price_str(tp_price, tick), "rule": tp_rule, "expiration": 0},
-        })
+        tp_order = place_close_trigger_order(symbol, direction, tp_price, tp_rule, tick, price_type)
     except Exception as e:
         errors.append(("tp", str(e)))
     try:
-        sl_order = gate_signed_request("POST", "/futures/usdt/price_orders", body={
-            "initial": dict(initial),
-            "trigger": {"strategy_type": 0, "price_type": price_type, "price": format_price_str(sl_price, tick), "rule": sl_rule, "expiration": 0},
-        })
+        sl_order = place_close_trigger_order(symbol, direction, sl_price, sl_rule, tick, price_type)
     except Exception as e:
         errors.append(("sl", str(e)))
     return tp_order, sl_order, errors
+
+
+def move_stop_to_breakeven(symbol, direction, sl_order_id, entry, tick, buffer_pct=None):
+    """Cancels the existing SL trigger order and replaces it with one at
+    breakeven — entry plus a small buffer in the trade's favor
+    (BREAKOUT_BREAKEVEN_BUFFER_PCT), so a dead-even wick still covers
+    fees/slippage rather than landing exactly on entry.
+    Returns the new SL order's id, or None if either step failed (logged
+    via log_error, not raised — caller marks the signal as "already
+    tried" regardless, so a failure here doesn't retry every cycle and
+    spam the API/log).
+    Order matters: the old SL is cancelled FIRST, then the new one is
+    placed. If the new placement then fails, the position is briefly
+    unprotected (no SL at all) until the next reconcile/manual check —
+    the alternative (place-then-cancel) risks briefly having two live
+    SL orders that could both fire, which is worse (a double-close
+    attempt) than a short unprotected gap on what should be an already-
+    favorable trade."""
+    buffer_pct = BREAKOUT_BREAKEVEN_BUFFER_PCT if buffer_pct is None else buffer_pct
+    try:
+        cancel_price_order(sl_order_id)
+    except Exception as e:
+        log_error(f"move_stop_to_breakeven {symbol}: failed to cancel old SL {sl_order_id}: {e}")
+        return None
+    breakeven_price = entry * (1 + buffer_pct) if direction == "LONG" else entry * (1 - buffer_pct)
+    sl_rule = 2 if direction == "LONG" else 1
+    try:
+        new_sl = place_close_trigger_order(symbol, direction, breakeven_price, sl_rule, tick)
+    except Exception as e:
+        log_error(f"move_stop_to_breakeven {symbol}: old SL cancelled but new breakeven SL failed to place ({e}) — position may be UNPROTECTED, check manually")
+        return None
+    return new_sl.get("id") if isinstance(new_sl, dict) else None
 
 
 def get_futures_wallet_balance():
@@ -4581,6 +4671,9 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=No
         record["tp_rounded"] = tp_rounded
         record["sl_rounded"] = sl_rounded
         tp_order, sl_order, tp_sl_errors = place_tp_sl_orders(symbol, direction, tp_rounded, sl_rounded, tick=tick)
+        record["tick"] = tick
+        record["tp_order_id"] = tp_order.get("id") if isinstance(tp_order, dict) else None
+        record["sl_order_id"] = sl_order.get("id") if isinstance(sl_order, dict) else None
         if tp_sl_errors:
             record["status"] = "OPENED_TP_SL_FAILED"
             record["detail"] = f"position opened but TP/SL placement had errors: {tp_sl_errors} — check the position manually"
@@ -5958,14 +6051,28 @@ def scan_symbol(symbol):
                     "mfe_price": None,
                     "mae_price": None,
                     "mfe_tracking_until": now + MFE_TRACK_SEC,
+                    # breakeven-stop bookkeeping (breakout only — see
+                    # BREAKOUT_BREAKEVEN_TRIGGER_R): sl_order_id/tick are
+                    # only ever populated for a REAL (non-dry-run) trade,
+                    # since a dry-run/sim-only signal has no live order to
+                    # amend. breakeven_moved guards against retrying every
+                    # cycle once an attempt has been made, success or fail.
+                    "sl_order_id": None,
+                    "tick": None,
+                    "breakeven_moved": False,
+                    "breakeven_active": False,
                 }
                 with state_lock:
                     STATE["signals"].appendleft(record)
                 autotrade_enabled = AUTOTRADE_ENABLED_BOUNCE if sig["reason"] == "bounce" else AUTOTRADE_ENABLED_BREAKOUT
                 autotrade_leverage = AUTOTRADE_LEVERAGE_BOUNCE if sig["reason"] == "bounce" else AUTOTRADE_LEVERAGE_BREAKOUT
                 if autotrade_enabled:
-                    execute_autotrade(sig["reason"], symbol, sig["direction"], sig["price"], sl, tp,
+                    autotrade_result = execute_autotrade(sig["reason"], symbol, sig["direction"], sig["price"], sl, tp,
                                        autotrade_leverage, extra={"reason": sig["reason"]})
+                    if autotrade_result and autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED"):
+                        with state_lock:
+                            record["sl_order_id"] = autotrade_result.get("sl_order_id")
+                            record["tick"] = autotrade_result.get("tick")
                     sim_execute_trade(sig["reason"], symbol, sig["direction"], sig["price"], sl, tp,
                                        autotrade_leverage, record)
                 arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
@@ -6043,16 +6150,35 @@ def update_signal_outcomes():
                             sig["mae_r"] = round(adv_r, 3)
                             sig["mae_price"] = c["low"] if direction == "LONG" else c["high"]
 
+                # --- Breakeven stop-move (breakout only, real trades only) ---
+                # Runs after MFE is updated for this candle so it can act on
+                # fav_r reaching the trigger threshold on this SAME candle,
+                # and before TP/SL resolution below so a later check in this
+                # same candle already sees the moved stop.
+                if (sig["status"] == "OPEN" and sig.get("reason") == "breakout"
+                        and not sig.get("breakeven_moved") and sig.get("sl_order_id")
+                        and fav_r >= BREAKOUT_BREAKEVEN_TRIGGER_R):
+                    new_sl_id = move_stop_to_breakeven(sig["symbol"], direction, sig["sl_order_id"], entry, sig.get("tick"))
+                    with state_lock:
+                        sig["breakeven_moved"] = True  # only ever attempt once per signal, whether it succeeds or fails — a failure logs via move_stop_to_breakeven itself, retrying every cycle would just spam the API against the same likely-persistent error
+                        if new_sl_id:
+                            sig["sl_order_id"] = new_sl_id
+                            buf = BREAKOUT_BREAKEVEN_BUFFER_PCT
+                            sig["sl"] = entry * (1 + buf) if direction == "LONG" else entry * (1 - buf)
+                            sig["breakeven_active"] = True  # distinct from breakeven_moved: this one only True on actual success, used below to label the eventual close as BREAKEVEN rather than LOSS
+
                 # --- TP/SL resolution (only while still open) ---
                 if sig["status"] == "OPEN":
                     if direction == "LONG":
                         if c["low"] <= sig["sl"]:
-                            close_signal(sig, "LOSS", sig["sl"], exit_candle=c)
+                            result = "BREAKEVEN" if sig.get("breakeven_active") else "LOSS"
+                            close_signal(sig, result, sig["sl"], exit_candle=c)
                         elif c["high"] >= sig["tp"]:
                             close_signal(sig, "WIN", sig["tp"], exit_candle=c)
                     else:
                         if c["high"] >= sig["sl"]:
-                            close_signal(sig, "LOSS", sig["sl"], exit_candle=c)
+                            result = "BREAKEVEN" if sig.get("breakeven_active") else "LOSS"
+                            close_signal(sig, result, sig["sl"], exit_candle=c)
                         elif c["low"] <= sig["tp"]:
                             close_signal(sig, "WIN", sig["tp"], exit_candle=c)
 
