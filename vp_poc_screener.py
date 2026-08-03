@@ -2454,6 +2454,53 @@ v0.64.0 - fixed a real gap reported by user (screenshots: 13 open orders
          manual check on Gate; the bot has no reliable way to guess
          which of several already-open positions on one symbol was the
          "intended" one to keep.
+
+v0.65.0 - ATR-based SL for EMA, per direct user request, motivated by
+         hard evidence from the module's own MFE/MAE-at-close numbers:
+         WIN MFE at close averaged 7.17R against a nominal RR of 3.75,
+         and LOSS MAE at close averaged 2.187R against a nominal 1R —
+         both roughly double their nominal level, meaning a single 1h
+         candle routinely blew through the fixed 0.4% SL and 1.5% TP by
+         a wide margin. Not noise: the stop was simply sized far too
+         tight for what a 1h candle on these symbols actually moves,
+         and a fixed % can't adapt per-symbol where ATR can.
+         New EMA_SL_MODE ("atr" default, or "fixed_pct" to reproduce
+         the exact old behavior) and EMA_SL_ATR_MULT (default 1.5).
+         compute_ema_tp_sl() rewritten: TP stays a fixed % of entry
+         (EMA_TP_PCT, unchanged) but SL = ATR(EMA_DIAG_ATR_PERIOD, i.e.
+         the same ATR the v0.62.0 diagnostics already computed) *
+         EMA_SL_ATR_MULT, falling back to the old EMA_RR-derived SL
+         when ATR is unavailable for that signal (or EMA_SL_MODE is
+         "fixed_pct"). The ATR value used is the exact same atr_pct
+         already computed by _ema_signal_diagnostics() at signal-
+         detection time (converted back to price units) — no separate
+         calculation, no chance of the two disagreeing.
+         Consequence flagged by the user before implementing: RR is no
+         longer one constant (it depended on a fixed SL), it now varies
+         signal to signal — a volatile symbol gets a wider ATR-based
+         stop and therefore a lower per-trade RR than a calm one, for
+         the same fixed TP %. So:
+         - compute_ema_tp_sl() now returns (sl, tp, risk, rr) instead of
+           (sl, tp, risk) — rr computed FROM the actual resulting
+           distances, not assumed.
+         - Every EMA signal record now carries its own "rr" field.
+         - compute_ema_stats() gained rr_all/rr_wins/rr_losses
+           (avg/median/p25/p75, same agg() pattern as everything else).
+         - The EMA panel header (previously "RR ${cfg.rr}", one fixed
+           number) now shows "RR ср. X (медиана Y)" from rr_all, plus
+           "SL: ATR×1.5" (or "фикс. RR N" in fixed_pct mode) so it's
+           clear at a glance which mode is active.
+         - New RR column in the EMA signals table, showing each
+           individual trade's actual RR rather than implying one
+           constant applied to all of them.
+         - /api/ema/status's config block: "rr" replaced with
+           "sl_mode"/"sl_atr_mult"/"rr_fallback" (renamed from the old
+           "rr" key, now clearly labeled as the fallback, not the
+           active value).
+         Old signals created before this change have no "rr" key at
+         all — every read site uses .get()/None-checks, never bare
+         indexing, so they render as "-" in the table and are simply
+         excluded from the new rr_* aggregates rather than erroring.
 """
 
 import os
@@ -2473,7 +2520,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.64.0"
+APP_VERSION = "0.65.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2661,7 +2708,25 @@ EMA_SIGNAL_HISTORY = 200
 # probably go back to something re-derived for that direction instead —
 # neither retune round was validated for it.
 EMA_TP_PCT = float(os.environ.get("VP_EMA_TP_PCT", 0.015))  # kept at round 3's value — user only wanted the stop reverted, not the take
-EMA_RR = float(os.environ.get("VP_EMA_RR", 3.75))  # SL reverted to round 2's 0.4% while keeping TP at round 3's 1.5% (RR = 1.5/0.4 = 3.75) — round 3's SL=0.3%/RR=5.0 dropped the win rate to 35.5% (11W/20L); even though that was still profitable on paper (breakeven ~16.7% at RR=5), the user wants the wider round-2 stop back, just not a smaller take
+EMA_RR = float(os.environ.get("VP_EMA_RR", 3.75))  # SL reverted to round 2's 0.4% while keeping TP at round 3's 1.5% (RR = 1.5/0.4 = 3.75) — round 3's SL=0.3%/RR=5.0 dropped the win rate to 35.5% (11W/20L); even though that was still profitable on paper (breakeven ~16.7% at RR=5), the user wants the wider round-2 stop back, just not a smaller take. NOW ONLY a fallback (see EMA_SL_MODE below) for when ATR isn't available — not the primary SL basis anymore.
+# ATR-based SL, v0.65.0 — per direct user request, after the fixed-%
+# stop's own MFE/MAE-at-close numbers exposed the real problem: WIN MFE
+# at close averaged 7.17R against a nominal RR of 3.75, and LOSS MAE at
+# close averaged 2.187R against a nominal risk of 1R — both roughly 2x
+# their nominal levels, meaning a single 1h candle routinely blows
+# through both the fixed 0.4% SL and the 1.5% TP by a wide margin. That
+# isn't noise, it's the stop being sized far too tight for what a 1h
+# candle on these symbols actually moves — a fixed % can't adapt
+# per-symbol, ATR can.
+EMA_SL_MODE = os.environ.get("VP_EMA_SL_MODE", "atr")  # "atr" or "fixed_pct" — fixed_pct reproduces the old EMA_RR-derived behavior exactly, for comparison/rollback
+EMA_SL_ATR_MULT = float(os.environ.get("VP_EMA_SL_ATR_MULT", 1.5))  # SL = ATR(EMA_DIAG_ATR_PERIOD) * this, in price units
+# TP stays a fixed % of entry (EMA_TP_PCT) — only the STOP moves to ATR.
+# Consequence: RR is no longer one constant, it varies signal to signal
+# (tp_pct-distance / atr-based-risk) depending on each symbol's own
+# volatility at signal time. Every signal now carries its own "rr" field
+# instead of relying on a single global; compute_ema_stats() exposes
+# rr_avg/rr_median across closed signals for the header display that
+# used to just show the old constant.
 # Round 3 retune, off n=70 closed live reversed-signal data (screenshot):
 # at-close WIN MAE sat at median 0/p75 0.269R (R=0.4% under round 2) —
 # winners essentially never dipped toward the stop — while the FULL 24h
@@ -3900,18 +3965,38 @@ def compute_session_signal_stats():
             "open": open_n, "winrate": winrate}
 
 
-def compute_ema_tp_sl(direction, entry, rr=EMA_RR, tp_pct=EMA_TP_PCT):
-    """Same fixed-%-TP-then-derive-SL approach as the divergence signals
-    — the source Pine Script only plots BUY/SELL labels, no TP/SL."""
+def compute_ema_tp_sl(direction, entry, atr=None, tp_pct=EMA_TP_PCT, atr_mult=EMA_SL_ATR_MULT, fallback_rr=EMA_RR):
+    """TP is always a fixed % of entry (tp_pct) — the source Pine Script
+    only plots BUY/SELL labels, no TP/SL, so this was always synthetic.
+    SL depends on EMA_SL_MODE:
+      - "atr" (default): SL = atr * atr_mult in price units, on the
+        losing side of entry. Needs atr (price units, not %) — pass
+        None or 0 to force the fixed_rr fallback for this call even in
+        atr mode (e.g. ATR unavailable for this candle set).
+      - "fixed_pct" or ATR unavailable: reproduces the old behavior —
+        risk = tp_distance / fallback_rr (EMA_RR), same math as before
+        this function grew ATR support.
+    Returns (sl, tp, risk, rr) — rr is now always computed FROM the
+    actual sl/tp distances rather than assumed, since ATR mode makes it
+    vary signal to signal instead of being one fixed constant."""
     if direction == "SHORT":
         tp = entry * (1 - tp_pct)
-        risk = (entry - tp) / rr
+        tp_dist = entry - tp
+        if EMA_SL_MODE == "atr" and atr:
+            risk = atr * atr_mult
+        else:
+            risk = tp_dist / fallback_rr
         sl = entry + risk
     else:
         tp = entry * (1 + tp_pct)
-        risk = (tp - entry) / rr
+        tp_dist = tp - entry
+        if EMA_SL_MODE == "atr" and atr:
+            risk = atr * atr_mult
+        else:
+            risk = tp_dist / fallback_rr
         sl = entry - risk
-    return sl, tp, risk
+    rr = round(tp_dist / risk, 3) if risk else None
+    return sl, tp, risk, rr
 
 
 # ----------------------------------------------------------------------------
@@ -4248,7 +4333,9 @@ def scan_symbol_ema(symbol, interval=EMA_INTERVAL, candles=None):
             return
 
         entry = candles[-1]["close"]
-        sl, tp, risk = compute_ema_tp_sl(sig["direction"], entry)
+        atr_pct = sig.get("atr_pct")
+        atr_price = (atr_pct / 100 * entry) if atr_pct else None
+        sl, tp, risk, rr = compute_ema_tp_sl(sig["direction"], entry, atr=atr_price)
         record = {
             "symbol": symbol,
             "interval": interval,
@@ -4257,6 +4344,7 @@ def scan_symbol_ema(symbol, interval=EMA_INTERVAL, candles=None):
             "sl": sl,
             "tp": tp,
             "risk": risk,
+            "rr": rr,  # varies per signal in ATR mode — see EMA_SL_MODE / compute_ema_tp_sl
             "ema7": sig["ema7"], "ema14": sig["ema14"], "ema28": sig["ema28"],
             # Diagnostic-only (v0.62.0) — see _ema_signal_diagnostics().
             # Not used by any live logic, purely for compute_ema_stats()'s
@@ -4288,10 +4376,11 @@ def scan_symbol_ema(symbol, interval=EMA_INTERVAL, candles=None):
             sim_execute_trade("ema", symbol, sig["direction"], entry, sl, tp,
                                AUTOTRADE_LEVERAGE_EMA, record)
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
+        rr_txt = f"{rr:g}" if rr is not None else "?"
         send_telegram(
             f"{arrow} {symbol} (EMA {EMA_SIGNAL_TYPE}, {interval})\n"
             f"entry: {entry:.6g}\n"
-            f"SL: {sl:.6g}  TP: {tp:.6g}  (RR {EMA_RR:g})",
+            f"SL: {sl:.6g}  TP: {tp:.6g}  (RR {rr_txt})",
             category="ema",
         )
     except Exception as e:
@@ -4422,6 +4511,10 @@ def compute_ema_stats(interval=None):
         "ema_gap_pct_wins": agg("ema_gap_pct", win_set), "ema_gap_pct_losses": agg("ema_gap_pct", loss_set),
         "recent_crossover_count_wins": agg("recent_crossover_count", win_set),
         "recent_crossover_count_losses": agg("recent_crossover_count", loss_set),
+        # rr is per-signal now (v0.65.0, ATR-based SL) instead of one
+        # global constant — this is what the header display shows in
+        # place of the old fixed EMA_RR value.
+        "rr_all": agg("rr", dataset), "rr_wins": agg("rr", win_set), "rr_losses": agg("rr", loss_set),
     }
 
 
@@ -7316,7 +7409,7 @@ def api_ema_status():
             "stats": stats,
             "stats_by_interval": by_interval,
             "config": {
-                "rr": EMA_RR, "tp_pct": EMA_TP_PCT,
+                "sl_mode": EMA_SL_MODE, "sl_atr_mult": EMA_SL_ATR_MULT, "rr_fallback": EMA_RR, "tp_pct": EMA_TP_PCT,
                 "len7": EMA_LEN_7, "len14": EMA_LEN_14, "len28": EMA_LEN_28,
                 "signal_type": EMA_SIGNAL_TYPE, "trend_filter": EMA_TREND_FILTER, "invert_signals": EMA_INVERT_SIGNALS,
                 "cooldown": EMA_COOLDOWN_SEC,
@@ -7901,7 +7994,7 @@ INDEX_HTML = """<!doctype html>
   </table>
   <div id="emaStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
   <table id="emaTable" style="display:none">
-    <thead><tr><th>Symbol</th><th>Dir</th><th>TF</th><th>Entry</th><th>SL</th><th>TP</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
+    <thead><tr><th>Symbol</th><th>Dir</th><th>TF</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
     <tbody></tbody>
   </table>
   <div id="scalpPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
@@ -8528,6 +8621,7 @@ async function refreshEma() {
       <td>${fmt(r.entry)}</td>
       <td class="dim">${fmt(r.sl)}</td>
       <td class="dim">${fmt(r.tp)}</td>
+      <td class="dim">${r.rr !== null && r.rr !== undefined ? r.rr : '-'}</td>
       <td class="dim" title="на закрытии → полное окно 24ч">${fmtMfeMae(r, 'mfe_r')}</td>
       <td class="dim" title="на закрытии → полное окно 24ч">${fmtMfeMae(r, 'mae_r')}</td>
       <td>${statusHtml}</td>
@@ -8572,7 +8666,7 @@ async function refreshEma() {
     <div class="dim" style="margin-bottom:10px;">
       EMA ${cfg.len7}/${cfg.len14}/${cfg.len28} (${cfg.signal_type}${cfg.trend_filter ? ', с фильтром тренда' : ''})${cfg.invert_signals ? ' <span style="color:#ffcc55;font-weight:bold;">· РЕВЕРС ВКЛЮЧЁН</span>' : ''} · сканируются ТФ: ${(status.intervals||[]).join(', ')} ·
       скан ${status.last_scan_duration!==null && status.last_scan_duration!==undefined ? status.last_scan_duration+'s' : '...'} ·
-      Винрейт (всё вместе): ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ${cfg.rr}
+      Винрейт (всё вместе): ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ср. ${s.rr_all ? s.rr_all.avg : '?'} (медиана ${s.rr_all ? s.rr_all.median : '?'}) · SL: ${cfg.sl_mode === 'atr' ? `ATR×${cfg.sl_atr_mult}` : `фикс. RR ${cfg.rr_fallback}`}
     </div>
     <div style="margin-bottom:10px;padding-top:6px;border-top:1px solid #1c2433;">
       <b>По таймфреймам (для сравнения):</b><br>
