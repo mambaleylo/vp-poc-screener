@@ -2501,6 +2501,35 @@ v0.65.0 - ATR-based SL for EMA, per direct user request, motivated by
          all — every read site uses .get()/None-checks, never bare
          indexing, so they render as "-" in the table and are simply
          excluded from the new rr_* aggregates rather than erroring.
+
+v0.66.0 - fixed a real sign bug in the divergence pivot-confirmation-
+         delay stat, caught by direct user question: they run with
+         DIV_INVERT_SIGNALS on, and asked whether the "вход раньше в
+         среднем на +X% лучше" figure accounted for that. It didn't.
+         simulate_pivot_stability()'s gain sign convention assumes the
+         NATURAL trade direction per pivot kind (SHORT on a high/
+         bearish pivot, LONG on a low/bullish one — see its own
+         docstring). With DIV_INVERT_SIGNALS on, every live divergence
+         trade goes the OPPOSITE direction, so "earlier entry is
+         better" should flip to "earlier entry is worse" by the same
+         magnitude — the stat was silently reporting the gain for a
+         direction that was never actually being traded.
+         Fixed in the periodic stability cycle (not inside
+         simulate_pivot_stability() itself, which stays a neutral,
+         direction-agnostic measurement): gains are now negated when
+         DIV_INVERT_SIGNALS is on, before accumulating into gain_sum/
+         gain_count. UI text also fixed to say "лучше"/"хуже" based on
+         the actual sign instead of always appending "лучше" with a
+         raw +/- number (which read oddly negative, e.g. "-0.822%
+         лучше"), and the panel's caption now notes when the figure
+         already accounts for reverse mode.
+         STATE["div_pivot_stability"] reset on this deploy — the
+         running gain_sum accumulated under the OLD (wrong-for-
+         reversed-mode) sign convention for as long as reverse mode has
+         been on, so old and newly-correct-signed data would otherwise
+         mix in the same running average until enough new data diluted
+         it out. Starting clean avoids that transition period being
+         misleading.
 """
 
 import os
@@ -2520,7 +2549,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.65.0"
+APP_VERSION = "0.66.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6421,6 +6450,22 @@ def div_stability_cycle(universe):
                 a1, d1, g1 = simulate_pivot_stability(highs, closes, DIV_PIVOT_LEFT, DIV_PIVOT_RIGHT, shadow_r, "high")
                 a2, d2, g2 = simulate_pivot_stability(lows, closes, DIV_PIVOT_LEFT, DIV_PIVOT_RIGHT, shadow_r, "low")
                 gains = g1 + g2
+                if DIV_INVERT_SIGNALS:
+                    # simulate_pivot_stability's sign convention assumes the
+                    # NATURAL trade direction for each pivot kind (SHORT on
+                    # a high/bearish pivot, LONG on a low/bullish one) — see
+                    # its own docstring. With DIV_INVERT_SIGNALS on, every
+                    # live trade goes the OPPOSITE direction, so "earlier
+                    # entry is better" flips to "earlier entry is worse" by
+                    # the same magnitude — caught by direct user question
+                    # about why this stat didn't seem to account for reverse
+                    # mode being active. Flipping here (not in
+                    # simulate_pivot_stability itself, which stays a neutral
+                    # measurement) makes gain_sum/gain_count — and therefore
+                    # the "vход раньше в среднем на X% лучше/хуже" figure —
+                    # correct for whichever direction is ACTUALLY being
+                    # traded right now.
+                    gains = [-g for g in gains]
                 with state_lock:
                     bucket = STATE["div_pivot_stability"].setdefault(
                         str(shadow_r), {"agree": 0, "disagree": 0, "gain_sum": 0.0, "gain_count": 0})
@@ -8572,7 +8617,9 @@ async function refreshDivergence() {
   const psRows = Object.keys(ps).sort((a,b)=>Number(a)-Number(b)).map(r => {
     const v = ps[r];
     const total = v.agree + v.disagree;
-    const gainTxt = v.avg_pct_gain !== null && v.avg_pct_gain !== undefined ? ` · вход раньше в среднем на ${v.avg_pct_gain > 0 ? '+' : ''}${v.avg_pct_gain}% лучше` : '';
+    const gainTxt = v.avg_pct_gain !== null && v.avg_pct_gain !== undefined
+      ? ` · вход раньше в среднем на ${Math.abs(v.avg_pct_gain)}% ${v.avg_pct_gain >= 0 ? 'лучше' : 'хуже'}`
+      : '';
     return total
       ? `right=${r}: <b>${v.rate}%</b> согласия (${v.agree}/${total})${gainTxt}`
       : `right=${r}: пока нет данных`;
@@ -8580,7 +8627,7 @@ async function refreshDivergence() {
   const psBlock = psRows ? `
     <div style="margin-top:10px;padding-top:10px;border-top:1px solid #1c2433;">
       <b>Насколько можно уменьшить задержку подтверждения пивота (right=${cfg.pivot_right} сейчас):</b><br>
-      <span class="dim" style="font-size:12px;">процент случаев, когда укороченное окно указало бы на ту же точку, что и строгая (текущая) проверка — не ретроспективно на уже известном ответе, а по факту вживую</span><br>
+      <span class="dim" style="font-size:12px;">процент случаев, когда укороченное окно указало бы на ту же точку, что и строгая (текущая) проверка — не ретроспективно на уже известном ответе, а по факту вживую${cfg.invert_signals ? ' · знак "лучше/хуже" уже учитывает реверс — считается для того направления, которое реально торгуется' : ''}</span><br>
       <span style="font-size:13px;">${psRows}</span>
     </div>` : '';
   panel.innerHTML = `
