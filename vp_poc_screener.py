@@ -1974,6 +1974,30 @@ v0.52.3 - user reported overnight scalp trades looked like they had no
          Verified directly that sl/tp fields are present and correctly
          populated in a real /api/simulator/trades response. Full
          scan-function/endpoint regression stayed clean.
+v0.52.4 - user's live autotrade log showed a repeating pattern:
+         INSUFFICIENT_AVAILABLE errors for Breakout, "margin 10.03...
+         while available 1.09695" — same ~$10 fixed margin attempted
+         over and over as available balance kept shrinking (25 open
+         positions already consuming margin). Root cause: fixed-$
+         sizing mode had NO relationship to actual account balance at
+         all — unlike percent mode, which naturally scales with
+         wallet_balance, fixed mode just used the configured $ value
+         directly and let Gate reject it after the fact, every single
+         time, with no way to know in advance.
+         compute_position_size() now checks margin against actual
+         wallet_balance regardless of sizing mode, skipping cleanly
+         (SKIPPED, not a wasted API round-trip that fails) when the
+         computed margin exceeds what's actually free. This required
+         also fetching wallet_balance in the real (non-dry-run) path
+         for BOTH modes, not just percent — previously fixed mode never
+         fetched it at all since the sizing math didn't need it.
+         Verified directly: the exact reported scenario ($10 margin,
+         $1.10 available) now skips with zero order-placement API calls
+         instead of hitting the exchange and failing; a normal
+         sufficient-balance case still opens correctly in both fixed
+         and percent mode; dry-run with fixed mode and no credentials
+         still makes zero network calls. Full scan-function/endpoint
+         regression stayed clean.
 """
 
 import os
@@ -1992,7 +2016,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.52.3"
+APP_VERSION = "0.52.4"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4076,6 +4100,15 @@ def compute_position_size(symbol, entry_price, size_mode, size_value, leverage, 
         margin_usd = size_value
     if margin_usd <= 0:
         return 0, 0, 0, f"computed margin is {margin_usd} — check sizing config/wallet balance"
+    # Fixed mode has no built-in relationship to the account balance, so it
+    # never naturally scales down — with several positions already open
+    # consuming margin, a flat $X request can easily exceed what's actually
+    # free, and every attempt fails the same way (INSUFFICIENT_AVAILABLE)
+    # until something closes. Check against real availability regardless of
+    # mode rather than letting Gate reject it after the fact every time.
+    if wallet_balance is not None and margin_usd > wallet_balance:
+        return 0, 0, 0, (f"computed margin ${margin_usd:.2f} exceeds available balance "
+                          f"${wallet_balance:.2f} — skipping rather than sending a doomed order")
     notional_usd = margin_usd * leverage
     multiplier = spec["quanto_multiplier"]
     if multiplier <= 0 or entry_price <= 0:
@@ -4273,7 +4306,7 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=No
     }
     try:
         wallet_balance = None
-        if AUTOTRADE_SIZE_MODE == "percent" and not AUTOTRADE_DRY_RUN:
+        if not AUTOTRADE_DRY_RUN:
             wallet_balance = get_futures_wallet_balance()
         elif AUTOTRADE_SIZE_MODE == "percent":
             # dry-run with percent sizing still needs a balance to show a
