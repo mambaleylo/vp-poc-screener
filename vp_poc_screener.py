@@ -2054,6 +2054,38 @@ v0.53.1 - proactive bug audit of the auto-trade path (per direct
          not touched this round.
          Full scan-function/endpoint regression and the dry-run
          zero-network-call property both stayed clean throughout.
+v0.53.2 - network-loss resilience audit, per direct request (this runs
+         on mobile Termux, so flaky/dropped connectivity is a real
+         scenario, not an edge case). Checked systematically:
+         scan_loop's whole iteration is wrapped in try/except with a
+         minimum-5s sleep before retrying — a network failure logs and
+         backs off rather than hot-looping or crashing the thread.
+         Every requests.get/post/request call in the file (confirmed
+         by grep, including multi-line calls a naive search missed at
+         first) has an explicit timeout — no call can hang forever on
+         a half-dead connection. _telegram_sender_worker catches per-
+         task exceptions individually so one failed send never kills
+         the worker thread, and send_telegram's own retry loop (3
+         attempts with backoff) is already in place. STATE["errors"]
+         is bounded (maxlen=30) so a long outage can't grow it
+         unbounded. The browser-side fetch() calls talk to 127.0.0.1
+         only (the local Flask server, not an external host) — losing
+         the device's actual internet connection doesn't affect those
+         at all, and setInterval(refreshAll, 15000) doesn't depend on
+         the previous tick succeeding, so the UI polling loop is
+         inherently self-recovering regardless.
+         Found and fixed one real gap: the Telegram send queue was
+         unbounded, and used a blocking put() — during a long enough
+         outage with signals still firing, it could in theory grow
+         without limit, and if it ever did fill, put() would block
+         WHATEVER thread called send_telegram (e.g. a scan worker),
+         which is worse than dropping a message. Bounded it to 200 and
+         switched to put_nowait() with a caught queue.Full that logs
+         and drops rather than blocks. Verified directly: filling the
+         queue to capacity and calling send_telegram again returns
+         near-instantly (not blocked) and logs the drop; a normal send
+         below capacity still queues exactly as before. Full scan-
+         function/endpoint regression stayed clean.
 """
 
 import os
@@ -2072,7 +2104,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.53.1"
+APP_VERSION = "0.53.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5608,7 +5640,7 @@ def div_stability_cycle(universe):
 # cycle). One background worker drains a queue sequentially with a pause
 # between sends instead.
 # ----------------------------------------------------------------------------
-_telegram_send_queue = queue.Queue()
+_telegram_send_queue = queue.Queue(maxsize=200)  # bounded — during a long enough outage, a message every scan cycle could otherwise accumulate without limit
 
 
 def _telegram_sender_worker():
@@ -5654,7 +5686,10 @@ def send_telegram(text, category=None):
             if attempt < 3:
                 time.sleep(5)
 
-    _telegram_send_queue.put(_do_send)
+    try:
+        _telegram_send_queue.put_nowait(_do_send)
+    except queue.Full:
+        log_error("telegram queue: full (200 pending), dropping this message rather than blocking the caller")
 
 
 # ----------------------------------------------------------------------------
