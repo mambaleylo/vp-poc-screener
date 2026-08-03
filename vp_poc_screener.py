@@ -2380,6 +2380,34 @@ v0.62.1 - SIGNAL_MAX_STALENESS_SEC raised 60s -> 180s (3 min), per
          risk back in v0.58.1's own changelog note). 5min -> 60s ->
          180s across three rounds now; still adjustable via
          VP_SIGNAL_MAX_STALENESS_SEC without a code change.
+
+v0.63.0 - scalp gets its own position-size config, per direct user
+         request ("as everywhere else, by analogy"). Previously every
+         mode (bounce/breakout/divergence/ema/session/scalp) shared ONE
+         global AUTOTRADE_SIZE_MODE/AUTOTRADE_SIZE_VALUE — unlike
+         leverage, which already has a separate per-mode constant for
+         every mode except scalp (scalp computes its own leverage per
+         signal, so it never needed AUTOTRADE_LEVERAGE_SCALP). Size had
+         no equivalent split for scalp until now.
+         New SCALP_SIZE_MODE / SCALP_SIZE_VALUE (env VP_SCALP_SIZE_MODE
+         / VP_SCALP_SIZE_VALUE), defaulting to whatever AUTOTRADE_SIZE_
+         MODE/VALUE resolve to at import time — an existing setup's
+         scalp sizing doesn't silently change until the user actually
+         customizes it via settings.
+         execute_autotrade() and sim_execute_trade() both gained
+         optional size_mode/size_value params, defaulting to the shared
+         AUTOTRADE_SIZE_MODE/VALUE when omitted (every other mode's
+         call site is unchanged, still passes nothing here) — only
+         scalp's call site passes SCALP_SIZE_MODE/VALUE explicitly, for
+         both the real order and its paper-trading counterpart, so the
+         simulator's scalp stats stay honest against what real scalp
+         trades would actually size.
+         Wired through get_settings()/apply_settings()/SETTINGS_KEYS
+         (persisted to disk like every other setting) and a new
+         "↳ Сумма скальпинга" row in the settings UI, right under the
+         scalp autotrade toggle — same percent-of-balance/fixed-$
+         dropdown+input as the shared control above it. Also surfaced
+         in /api/scalp/status's config block for visibility.
 """
 
 import os
@@ -2399,7 +2427,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.62.1"
+APP_VERSION = "0.63.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2772,6 +2800,13 @@ AUTOTRADE_ENABLED_SCALP = os.environ.get("VP_AUTOTRADE_SCALP", "0") == "1"
 AUTOTRADE_ENABLED_SESSION = os.environ.get("VP_AUTOTRADE_SESSION", "0") == "1"
 AUTOTRADE_SIZE_MODE = os.environ.get("VP_AUTOTRADE_SIZE_MODE", "percent")  # "percent" or "fixed" — the single size value below is interpreted according to this
 AUTOTRADE_SIZE_VALUE = float(os.environ.get("VP_AUTOTRADE_SIZE_VALUE", 2.0))  # percent: % of futures wallet balance; fixed: raw USD margin, leverage-independent either way
+# Scalp gets its OWN size config, separate from the shared one above — per
+# direct user request, by analogy with how leverage is already per-mode for
+# bounce/breakout/divergence/ema/session. Defaults mirror AUTOTRADE_SIZE_MODE/
+# VALUE at import time so an existing setup's scalp sizing doesn't silently
+# change until the user actually customizes it via settings.
+SCALP_SIZE_MODE = os.environ.get("VP_SCALP_SIZE_MODE", AUTOTRADE_SIZE_MODE)
+SCALP_SIZE_VALUE = float(os.environ.get("VP_SCALP_SIZE_VALUE", AUTOTRADE_SIZE_VALUE))
 AUTOTRADE_LEVERAGE_BOUNCE = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_BOUNCE", 10))
 AUTOTRADE_LEVERAGE_BREAKOUT = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_BREAKOUT", 10))
 AUTOTRADE_LEVERAGE_DIVERGENCE = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_DIVERGENCE", 10))
@@ -2835,6 +2870,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_sig
                   "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session",
                   "autotrade_size_mode", "autotrade_size_value",
+                  "scalp_size_mode", "scalp_size_value",
                   "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session")
 
 
@@ -2867,6 +2903,8 @@ def get_settings():
         "autotrade_session": AUTOTRADE_ENABLED_SESSION,
         "autotrade_size_mode": AUTOTRADE_SIZE_MODE,
         "autotrade_size_value": AUTOTRADE_SIZE_VALUE,
+        "scalp_size_mode": SCALP_SIZE_MODE,
+        "scalp_size_value": SCALP_SIZE_VALUE,
         "autotrade_leverage_bounce": AUTOTRADE_LEVERAGE_BOUNCE,
         "autotrade_leverage_breakout": AUTOTRADE_LEVERAGE_BREAKOUT,
         "autotrade_leverage_divergence": AUTOTRADE_LEVERAGE_DIVERGENCE,
@@ -2885,6 +2923,7 @@ def apply_settings(updates):
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION
     global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
+    global SCALP_SIZE_MODE, SCALP_SIZE_VALUE
     global AUTOTRADE_LEVERAGE_BOUNCE, AUTOTRADE_LEVERAGE_BREAKOUT, AUTOTRADE_LEVERAGE_DIVERGENCE, AUTOTRADE_LEVERAGE_EMA, AUTOTRADE_LEVERAGE_SESSION
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
@@ -2939,6 +2978,15 @@ def apply_settings(updates):
             v = float(updates["autotrade_size_value"])
             if v > 0:
                 AUTOTRADE_SIZE_VALUE = v
+        except (TypeError, ValueError):
+            pass
+    if "scalp_size_mode" in updates and updates["scalp_size_mode"] in ("percent", "fixed"):
+        SCALP_SIZE_MODE = updates["scalp_size_mode"]
+    if "scalp_size_value" in updates:
+        try:
+            v = float(updates["scalp_size_value"])
+            if v > 0:
+                SCALP_SIZE_VALUE = v
         except (TypeError, ValueError):
             pass
     for key, glob_name in (
@@ -4909,16 +4957,23 @@ def reconcile_positions_and_orders():
     return unprotected, cancelled
 
 
-def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=None):
+def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=None, size_mode=None, size_value=None):
     """The single entry point every signal source calls to (maybe) fire a
     real trade. `mode` is a short label (e.g. "bounce", "ema", "scalp") used
     for the auto-trade-enabled toggle lookup and the log. `extra` is any
     signal-specific context worth keeping in the log (reason, interval,
     etc.) — purely informational, not used for trading logic.
+    size_mode/size_value override the shared AUTOTRADE_SIZE_MODE/VALUE for
+    this call only — used by scalp to trade its own configured amount
+    (SCALP_SIZE_MODE/VALUE) instead of the one shared by every other mode.
+    Left as None (the default), which is what every OTHER mode's call site
+    still does, this behaves exactly as before.
 
     Always writes exactly one entry to STATE["autotrade_log"], whether it
     trades, skips, or dry-runs, so the log is a complete record of every
     signal that was even considered, not just the ones that fired."""
+    size_mode = AUTOTRADE_SIZE_MODE if size_mode is None else size_mode
+    size_value = AUTOTRADE_SIZE_VALUE if size_value is None else size_value
     record = {
         "time": time.time(), "mode": mode, "symbol": symbol, "direction": direction,
         "entry": entry, "sl": sl, "tp": tp, "leverage": leverage,
@@ -4929,7 +4984,7 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=No
         wallet_balance = None
         if not AUTOTRADE_DRY_RUN:
             wallet_balance = get_futures_wallet_balance()
-        elif AUTOTRADE_SIZE_MODE == "percent":
+        elif size_mode == "percent":
             # dry-run with percent sizing still needs a balance to show a
             # realistic contract count in the log, but shouldn't require
             # live credentials just to preview — fall back to a nominal
@@ -4953,7 +5008,7 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=No
             log_error(f"execute_autotrade {symbol}: couldn't fetch leverage_max ({e}), using requested leverage as-is")
 
         contracts, notional, margin, skip_reason = compute_position_size(
-            symbol, entry, AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE, leverage, wallet_balance)
+            symbol, entry, size_mode, size_value, leverage, wallet_balance)
         record["leverage"] = leverage  # reflect the (possibly clamped) value actually used, not the originally requested one
         record["contracts"] = contracts
         record["notional_usd"] = round(notional, 2) if notional else notional
@@ -5021,23 +5076,29 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=No
         return record
 
 
-def sim_execute_trade(mode, symbol, direction, entry, sl, tp, leverage, signal_record):
+def sim_execute_trade(mode, symbol, direction, entry, sl, tp, leverage, signal_record, size_mode=None, size_value=None):
     """Opens a paper trade against the running simulated balance, sized
     with the SAME AUTOTRADE_SIZE_MODE/AUTOTRADE_SIZE_VALUE config real
-    auto-trading uses (so the simulation reflects whatever sizing the
-    person actually has configured, not a separate hardcoded scheme).
+    auto-trading uses by default (so the simulation reflects whatever
+    sizing the person actually has configured, not a separate hardcoded
+    scheme). size_mode/size_value override this for one call — scalp
+    passes its own SCALP_SIZE_MODE/VALUE here so the paper simulation
+    matches what its real trades actually use, same override pattern as
+    execute_autotrade().
     Keeps a direct reference to signal_record so sweep_sim_trades() can
     read its real eventual outcome later — that record gets mutated in
     place by the module's own outcome-tracking function when it resolves,
     so no separate lookup is needed, just checking the same dict again."""
+    size_mode = AUTOTRADE_SIZE_MODE if size_mode is None else size_mode
+    size_value = AUTOTRADE_SIZE_VALUE if size_value is None else size_value
     with state_lock:
         balance = STATE["sim_balance"]
     if balance <= 0:
         return None  # busted — stop opening new paper trades until manually reset
-    if AUTOTRADE_SIZE_MODE == "percent":
-        margin = balance * (AUTOTRADE_SIZE_VALUE / 100.0)
+    if size_mode == "percent":
+        margin = balance * (size_value / 100.0)
     else:
-        margin = AUTOTRADE_SIZE_VALUE
+        margin = size_value
     margin = min(margin, balance)  # can't risk more than the paper account actually has
     if margin <= 0:
         return None
@@ -5398,9 +5459,11 @@ def scan_symbol_scalp_signal(symbol, rec):
             STATE["scalp_signals"].appendleft(record)
         if AUTOTRADE_ENABLED_SCALP:
             execute_autotrade("scalp", symbol, direction, entry, sl_price, target_price,
-                               rec["leverage"], extra={"interval": interval, "score": rec["score"]})
+                               rec["leverage"], extra={"interval": interval, "score": rec["score"]},
+                               size_mode=SCALP_SIZE_MODE, size_value=SCALP_SIZE_VALUE)
             sim_execute_trade("scalp", symbol, direction, entry, sl_price, target_price,
-                               rec["leverage"], record)
+                               rec["leverage"], record,
+                               size_mode=SCALP_SIZE_MODE, size_value=SCALP_SIZE_VALUE)
     except Exception as e:
         log_error(f"scalp_signal {symbol}: {e}")
 
@@ -7234,6 +7297,7 @@ def api_scalp_status():
             "taker_fee_pct": SCALP_TAKER_FEE_PCT, "default_mmr_pct": SCALP_DEFAULT_MMR_PCT,
             "default_max_leverage": SCALP_DEFAULT_MAX_LEVERAGE,
             "signal_top_n": SCALP_SIGNAL_TOP_N,
+            "size_mode": SCALP_SIZE_MODE, "size_value": SCALP_SIZE_VALUE,
         },
         "top": ranked,
         "signals_stats": compute_scalp_signal_stats(),
@@ -8031,6 +8095,17 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">плечо берётся из самого сигнала, не отсюда</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeScalp"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow" style="gap:8px;">
+        <div>
+          <div class="label">↳ Сумма скальпинга</div>
+          <div class="sub">своя, отдельно от общего размера позиции выше</div>
+        </div>
+        <select id="setScalpSizeMode" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;">
+          <option value="percent">% от депозита</option>
+          <option value="fixed">Фикс. $</option>
+        </select>
+        <input type="number" id="setScalpSizeValue" step="0.1" min="0.1" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;width:100px;">
       </div>
       <div class="settingRow">
         <div>
@@ -8889,6 +8964,8 @@ const setInputs = {
 const setValueInputs = {
   autotrade_size_mode: document.getElementById('setAutotradeSizeMode'),
   autotrade_size_value: document.getElementById('setAutotradeSizeValue'),
+  scalp_size_mode: document.getElementById('setScalpSizeMode'),
+  scalp_size_value: document.getElementById('setScalpSizeValue'),
   autotrade_leverage_bounce: document.getElementById('setAutotradeLevBounce'),
   autotrade_leverage_breakout: document.getElementById('setAutotradeLevBreakout'),
   autotrade_leverage_divergence: document.getElementById('setAutotradeLevDivergence'),
