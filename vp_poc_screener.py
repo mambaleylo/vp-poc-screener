@@ -2243,6 +2243,35 @@ v0.58.1 - SIGNAL_MAX_STALENESS_SEC tightened 300s -> 60s, per direct
          signals the scan cycle itself is too slow for a 60s window
          and either the interval, worker count, or universe size may
          need attention rather than this threshold alone.
+
+v0.59.0 - major scan-cycle speedup, per direct user question ("why so
+         slow, isn't it just loading one new candle?"). It wasn't one
+         candle: every update_*_outcomes() function (signal/divergence/
+         ema/scalp/session) was calling get_candles() inside a plain
+         `for sig in active:` loop — one blocking network request per
+         active signal, fully sequential, fetching 200-300 candles
+         each time. With MFE tracking running 24h past close on top of
+         whatever's still OPEN across five modules, that list adds up
+         fast, and this ran with ZERO concurrency, unlike the main
+         per-symbol scan (which already uses a WORKERS-sized thread
+         pool). This was very likely the single biggest chunk of the
+         reported ~429s cycle time — bigger than the main scan itself.
+         New fetch_candles_concurrent(fetch_specs, workers=WORKERS):
+         takes a list of (symbol, interval, limit) specs, fetches all
+         of them in a thread pool, returns results in the same order
+         (a failed fetch yields None at that position, logged, rather
+         than raising and losing the whole batch). All five update_*_
+         outcomes() functions now build their fetch_specs list, call
+         this once up front, then zip(active, all_candles) into the
+         same per-signal processing loop they already had — no change
+         to the actual outcome/MFE/breakeven logic itself, purely
+         collapsing N sequential requests into ceil(N/WORKERS)
+         concurrent batches.
+         Each function creates and closes its own ThreadPoolExecutor
+         via this helper; no conflict with the main scan's pool since
+         that `with ThreadPoolExecutor(...) as ex:` block has already
+         exited (its results collected via as_completed) by the time
+         these run, per scan_loop()'s existing sequencing.
 """
 
 import os
@@ -2262,7 +2291,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.58.1"
+APP_VERSION = "0.59.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3494,9 +3523,11 @@ def update_session_signal_outcomes():
     now = time.time()
     with state_lock:
         open_signals = [s for s in STATE["session_signals"] if s["status"] == "OPEN"]
-    for sig in open_signals:
+    all_candles = fetch_candles_concurrent([(s["symbol"], SESSION_RANGE_TF, 300) for s in open_signals])
+    for sig, candles in zip(open_signals, all_candles):
         try:
-            candles = get_candles(sig["symbol"], interval=SESSION_RANGE_TF, limit=300)
+            if candles is None:
+                continue
             future = [c for c in candles if c["time"] >= sig["confirm_time"]]
             result = None
             exit_price = None
@@ -3814,9 +3845,11 @@ def update_divergence_outcomes():
             s for s in STATE["div_signals"]
             if s.get("status") == "OPEN" or now < s.get("mfe_tracking_until", 0)
         ]
-    for sig in active:
+    all_candles = fetch_candles_concurrent([(s["symbol"], DIV_INTERVAL, 300) for s in active])
+    for sig, candles in zip(active, all_candles):
         try:
-            candles = get_candles(sig["symbol"], interval=DIV_INTERVAL, limit=300)
+            if candles is None:
+                continue
             relevant = [c for c in candles if c["time"] > sig["time"]]
             direction = sig["direction"]
             entry = sig["entry"]
@@ -3959,9 +3992,11 @@ def update_ema_outcomes():
             s for s in STATE["ema_signals"]
             if s.get("status") == "OPEN" or now < s.get("mfe_tracking_until", 0)
         ]
-    for sig in active:
+    all_candles = fetch_candles_concurrent([(s["symbol"], s.get("interval", EMA_INTERVAL), 300) for s in active])
+    for sig, candles in zip(active, all_candles):
         try:
-            candles = get_candles(sig["symbol"], interval=sig.get("interval", EMA_INTERVAL), limit=300)
+            if candles is None:
+                continue
             relevant = [c for c in candles if c["time"] > sig["time"]]
             direction = sig["direction"]
             entry = sig["entry"]
@@ -4203,6 +4238,39 @@ def get_candles(symbol, interval=INTERVAL, limit=LOOKBACK + 5):
     r.raise_for_status()
     # Gate.io returns oldest->newest already; fields: t,v,c,h,l,o,sum (varies by version)
     return _parse_candles(r.json())
+
+
+def fetch_candles_concurrent(fetch_specs, workers=WORKERS):
+    """Fetches candles for many (symbol, interval, limit) specs at once,
+    in a thread pool, instead of one blocking get_candles() call at a
+    time. Every update_*_outcomes() function used to do exactly that —
+    `for sig in active: candles = get_candles(...)` — which serializes
+    what's actually independent network I/O across however many active
+    signals that module is tracking; with MFE tracking running for 24h
+    past close on top of whatever's still OPEN, that list adds up, and
+    doing it one request at a time was the single biggest cost in a
+    full scan cycle. Returns a list of candle-lists in the SAME ORDER
+    as fetch_specs; a spec whose fetch failed gets None at that
+    position (logged, not raised) rather than derailing the rest of
+    the batch."""
+    results = [None] * len(fetch_specs)
+    if not fetch_specs:
+        return results
+
+    def _one(i, spec):
+        symbol, interval, limit = spec
+        try:
+            return i, get_candles(symbol, interval=interval, limit=limit)
+        except Exception as e:
+            log_error(f"fetch_candles_concurrent {symbol}: {e}")
+            return i, None
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = [ex.submit(_one, i, spec) for i, spec in enumerate(fetch_specs)]
+        for fut in as_completed(futs):
+            i, candles = fut.result()
+            results[i] = candles
+    return results
 
 
 def get_contract_stats(symbol, interval=OI_INTERVAL, limit=OI_LOOKBACK + 2):
@@ -5125,9 +5193,11 @@ def update_scalp_signal_outcomes():
     now = time.time()
     with state_lock:
         open_signals = [s for s in STATE["scalp_signals"] if s["status"] == "OPEN"]
-    for sig in open_signals:
+    all_candles = fetch_candles_concurrent([(s["symbol"], s["interval"], 200) for s in open_signals])
+    for sig, candles in zip(open_signals, all_candles):
         try:
-            candles = get_candles(sig["symbol"], interval=sig["interval"], limit=200)
+            if candles is None:
+                continue
             future = [c for c in candles if c["time"] >= sig["time"]]
             result = None
             exit_price = None
@@ -6179,9 +6249,11 @@ def update_signal_outcomes():
             s for s in STATE["signals"]
             if s.get("status") == "OPEN" or now < s.get("mfe_tracking_until", 0)
         ]
-    for sig in active:
+    all_candles = fetch_candles_concurrent([(s["symbol"], INTERVAL, 300) for s in active])
+    for sig, candles in zip(active, all_candles):
         try:
-            candles = get_candles(sig["symbol"], interval=INTERVAL, limit=300)
+            if candles is None:
+                continue
             # Strictly AFTER the trigger candle: that candle's own wick is
             # what produced the signal (its high/low drove the zone touch),
             # so checking it against SL/TP would count the very move that
