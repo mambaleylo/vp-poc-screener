@@ -2110,6 +2110,29 @@ v0.54.0 - removed the scalp timeout entirely, per direct request:
          target; the huge timeout_at value round-trips through JSON
          serialization correctly with no 'Infinity' token anywhere.
          Full scan-function/endpoint regression stayed clean.
+
+v0.55.0 - new "flat zone" filter for the Сессия consolidation range, per
+         user's annotated chart screenshot: the range immediately
+         before the session open should be a genuine sideways
+         consolidation, not just the tail end of a directional move
+         that happens to satisfy SESSION_MIN_RANGE_PCT. The old check
+         only rejected ranges that were too SMALL — it said nothing
+         about whether the range was still trending in one direction.
+         Added SESSION_MAX_TREND_RATIO (default 0.5): computes the
+         range's net directional drift (abs(last close - first open))
+         as a fraction of the range's total height (range_high -
+         range_low). A clean sideways chop has a small net drift
+         relative to its swing (price goes back and forth without
+         going anywhere); a directional move has net drift close to
+         the full range height (most of the swing was in one
+         direction). Reject (return None) if trend_ratio exceeds the
+         threshold. Applied in detect_session_manipulation() right
+         after the existing range_pct/SESSION_MIN_RANGE_PCT check, so
+         a session is now skipped if the pre-open range is either too
+         small OR too directional. Threshold picked as a reasonable
+         starting point, not yet backtested against history — flagged
+         to retune once there's live/backtest data showing how it
+         performs.
 """
 
 import os
@@ -2462,6 +2485,7 @@ SESSION_RANGE_START_UTC_HOUR = int(os.environ.get("VP_SESSION_RANGE_START_UTC_HO
 SESSION_MANIPULATION_WINDOW_MIN = int(os.environ.get("VP_SESSION_MANIPULATION_WINDOW_MIN", 30))  # how long after open to watch for the sweep+reversal
 SESSION_SL_BUFFER_PCT = float(os.environ.get("VP_SESSION_SL_BUFFER_PCT", 0.005))  # was 0.1% — a live example showed price continuing well past that tight a buffer (a shallow bounce confirmed the pattern before the real, deeper low was actually reached) before reversing hard toward TP; 0.5% gives room for that kind of double-dip without redesigning the confirmation window itself
 SESSION_MIN_RANGE_PCT = float(os.environ.get("VP_SESSION_MIN_RANGE_PCT", 0.003))  # 0.3% — skip symbols whose 4h range is too tiny to be a meaningful consolidation
+SESSION_MAX_TREND_RATIO = float(os.environ.get("VP_SESSION_MAX_TREND_RATIO", 0.5))  # net directional drift across the range, as a fraction of range height — reject if the "consolidation" is really still trending in one direction rather than choppy/flat (per user's annotated screenshot: the zone before the session should be flat, no clear trend)
 SESSION_MAX_THRUST_BARS = int(os.environ.get("VP_SESSION_MAX_THRUST_BARS", 3))  # the sweep and the close-back-inside confirmation can be up to this many bars apart — a short thrust, not strictly the same candle, per the reference chart (2-3 candle burst, not a single bar)
 SESSION_BACKTEST_DAYS = int(os.environ.get("VP_SESSION_BACKTEST_DAYS", 30))  # was 60 — Gate enforces a hard "from" floor of ~10000 candles back from now (added without notice ~Feb 2026); for 5m candles that's ~34.7 days, so 30 leaves margin
 SESSION_UNIVERSE_SIZE = int(os.environ.get("VP_SESSION_UNIVERSE_SIZE", 50))  # reduced from 100 — user wants the most liquid coins specifically, not a broad tail; already sorted by 24h volume descending, this just cuts deeper into that ranking
@@ -3133,7 +3157,11 @@ def detect_session_manipulation(candles, session_open_ts):
     fixed-Moscow-offset session_open_utc_ts(), the open is always
     exactly 07:00 UTC, so this range is now always exactly 7h — it
     used to vary 7-8h under the earlier DST-aware Kyiv version, no
-    longer applicable."""
+    longer applicable.
+    Since v0.55.0, the range must also be flat/choppy rather than
+    still trending in one direction (SESSION_MAX_TREND_RATIO) — a
+    range can pass SESSION_MIN_RANGE_PCT just by being the tail end
+    of a directional move, which isn't a real consolidation."""
     open_dt = datetime.datetime.fromtimestamp(session_open_ts, tz=datetime.timezone.utc)
     range_start_dt = open_dt.replace(hour=SESSION_RANGE_START_UTC_HOUR, minute=0, second=0, microsecond=0)
     range_start = range_start_dt.timestamp()
@@ -3149,6 +3177,12 @@ def detect_session_manipulation(candles, session_open_ts):
     range_pct = (range_high - range_low) / range_low
     if range_pct < SESSION_MIN_RANGE_PCT:
         return None  # too flat to be a meaningful consolidation
+
+    range_height = range_high - range_low
+    net_move = abs(range_candles[-1]["close"] - range_candles[0]["open"])
+    trend_ratio = net_move / range_height
+    if trend_ratio > SESSION_MAX_TREND_RATIO:
+        return None  # range is still trending directionally, not a genuine flat consolidation
 
     window_end = session_open_ts + SESSION_MANIPULATION_WINDOW_MIN * 60
     window_candles = [c for c in candles if session_open_ts <= c["time"] < window_end]
