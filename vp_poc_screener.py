@@ -2666,6 +2666,26 @@ v0.70.0 - two fixes from direct user reports off the ATR-SL rollout:
          SETTINGS_KEYS and a new "↳ EMA мин. RR" field in the settings
          UI, right under the EMA leverage row — adjustable live, no
          restart needed, 0 always means off.
+
+v0.71.0 - EMA gets its own signal timeout, per direct user request
+         ("расширим тайм-аут для сделок EMA, если недавно этого не
+         делали" — checked: hadn't). SIGNAL_TIMEOUT_SEC (6h) was shared
+         by Volume, Divergence, AND EMA — widening it for EMA alone
+         needed its own constant, not a shared-value change that would
+         have also affected the other two modules.
+         New EMA_SIGNAL_TIMEOUT_SEC, default 12h (doubled from the
+         shared 6h) — a starting point given EMA's timeout rate looked
+         high (12/46 closed) at 6h. update_ema_outcomes() now checks
+         against this instead of SIGNAL_TIMEOUT_SEC; Volume and
+         Divergence's own outcome-tracking functions are untouched,
+         still on the original shared constant.
+         Wired through get_settings()/apply_settings()/SETTINGS_KEYS as
+         "ema_signal_timeout_hours" (stored/edited in hours for a
+         friendlier UI number than raw seconds, converted to/from
+         EMA_SIGNAL_TIMEOUT_SEC internally) and a new "↳ EMA тайм-аут
+         (ч)" row in settings, right under the min-RR field — adjustable
+         live, no restart needed. Also added to /api/ema/status's config
+         block as signal_timeout_hours.
 """
 
 import os
@@ -2685,7 +2705,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.70.0"
+APP_VERSION = "0.71.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2769,7 +2789,8 @@ RR_BOUNCE = float(os.environ.get("VP_RR_BOUNCE", RR))
 RR_BREAKOUT = float(os.environ.get("VP_RR_BREAKOUT", RR))
 BUFFER_PCT_BOUNCE = float(os.environ.get("VP_BUFFER_PCT_BOUNCE", ZONE_BUFFER_PCT))
 BUFFER_PCT_BREAKOUT = float(os.environ.get("VP_BUFFER_PCT_BREAKOUT", ZONE_BUFFER_PCT))
-SIGNAL_TIMEOUT_SEC = int(os.environ.get("VP_SIGNAL_TIMEOUT", 6 * 3600))  # close as TIMEOUT if neither TP/SL hit
+SIGNAL_TIMEOUT_SEC = int(os.environ.get("VP_SIGNAL_TIMEOUT", 6 * 3600))  # close as TIMEOUT if neither TP/SL hit — shared by Volume and Divergence
+EMA_SIGNAL_TIMEOUT_SEC = int(os.environ.get("VP_EMA_SIGNAL_TIMEOUT", 12 * 3600))  # separate from SIGNAL_TIMEOUT_SEC above, per direct user request — widened to 12h (doubled from the shared 6h default) since EMA's timeout rate looked high (12/46 closed) at the current 6h; adjustable live via settings, doesn't touch Volume/Divergence's shared timeout
 SIGNAL_MAX_STALENESS_SEC = int(os.environ.get("VP_SIGNAL_MAX_STALENESS_SEC", 180))  # 3 min (raised from 1 min per direct user request — 60s was too tight; was 5 min before that) — a full universe scan cycle takes several minutes (429s observed for 182 symbols before the v0.59.0/v0.60.0 speedups, since improved), so a symbol scanned late in the cycle can find a signal on a candle that closed well before the scan actually reached it. Entry/SL/TP are computed off that candle's close (sig["price"]), but the real market order fills at whatever price exists NOW — if too much time has passed, price has likely already moved well past where the signal detected it, so the trade enters late into an already-spent move rather than near its start. Reject (skip) the signal if now - candle_close_time exceeds this.
 MFE_TRACK_SEC = int(os.environ.get("VP_MFE_TRACK_SEC", 24 * 3600))  # keep measuring max favorable/adverse excursion this long after detection, past TP/SL/timeout
 # Breakeven stop-move for breakout signals only (bounce is disabled by
@@ -3148,7 +3169,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_sig
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session",
                   "autotrade_size_mode", "autotrade_size_value",
                   "scalp_size_mode", "scalp_size_value",
-                  "ema_min_rr",
+                  "ema_min_rr", "ema_signal_timeout_hours",
                   "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session")
 
 
@@ -3188,6 +3209,7 @@ def get_settings():
         "autotrade_leverage_divergence": AUTOTRADE_LEVERAGE_DIVERGENCE,
         "autotrade_leverage_ema": AUTOTRADE_LEVERAGE_EMA,
         "ema_min_rr": EMA_MIN_RR,
+        "ema_signal_timeout_hours": round(EMA_SIGNAL_TIMEOUT_SEC / 3600, 2),
         "autotrade_leverage_session": AUTOTRADE_LEVERAGE_SESSION,
     }
 
@@ -3205,6 +3227,7 @@ def apply_settings(updates):
     global SCALP_SIZE_MODE, SCALP_SIZE_VALUE
     global AUTOTRADE_LEVERAGE_BOUNCE, AUTOTRADE_LEVERAGE_BREAKOUT, AUTOTRADE_LEVERAGE_DIVERGENCE, AUTOTRADE_LEVERAGE_EMA, AUTOTRADE_LEVERAGE_SESSION
     global EMA_MIN_RR
+    global EMA_SIGNAL_TIMEOUT_SEC
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
     if "divergence_enabled" in updates:
@@ -3274,6 +3297,13 @@ def apply_settings(updates):
             v = float(updates["ema_min_rr"])
             if v >= 0:  # 0 is a valid value here (disables the filter), unlike the size fields above
                 EMA_MIN_RR = v
+        except (TypeError, ValueError):
+            pass
+    if "ema_signal_timeout_hours" in updates:
+        try:
+            v = float(updates["ema_signal_timeout_hours"])
+            if v > 0:
+                EMA_SIGNAL_TIMEOUT_SEC = int(v * 3600)
         except (TypeError, ValueError):
             pass
     for key, glob_name in (
@@ -4633,7 +4663,7 @@ def update_ema_outcomes():
                         elif c["low"] <= sig["tp"]:
                             close_ema_signal(sig, "WIN", sig["tp"], exit_candle=c)
 
-            if sig["status"] == "OPEN" and now - sig["detected_at"] > SIGNAL_TIMEOUT_SEC:
+            if sig["status"] == "OPEN" and now - sig["detected_at"] > EMA_SIGNAL_TIMEOUT_SEC:
                 last_price = candles[-1]["close"] if candles else entry
                 close_ema_signal(sig, "TIMEOUT", last_price)
         except Exception as e:
@@ -7741,6 +7771,7 @@ def api_ema_status():
             "config": {
                 "sl_mode": EMA_SL_MODE, "sl_atr_mult": EMA_SL_ATR_MULT, "rr_fallback": EMA_RR, "tp_pct": EMA_TP_PCT,
                 "min_rr": EMA_MIN_RR,
+                "signal_timeout_hours": round(EMA_SIGNAL_TIMEOUT_SEC / 3600, 2),
                 "len7": EMA_LEN_7, "len14": EMA_LEN_14, "len28": EMA_LEN_28,
                 "signal_type": EMA_SIGNAL_TYPE, "trend_filter": EMA_TREND_FILTER, "invert_signals": EMA_INVERT_SIGNALS,
                 "cooldown": EMA_COOLDOWN_SEC,
@@ -8609,6 +8640,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">0 = выключено. Сигнал пропускается, если ATR-стоп даёт RR ниже этого</div>
         </div>
         <input type="number" id="setEmaMinRr" step="0.1" min="0" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;width:100px;">
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ EMA тайм-аут (ч)</div>
+          <div class="sub">закрыть как TIMEOUT, если ни TP, ни SL не сработали за это время — отдельно от Volume/Дивергенций</div>
+        </div>
+        <input type="number" id="setEmaSignalTimeoutHours" step="1" min="1" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;width:100px;">
       </div>
       <div class="settingRow">
         <div>
@@ -9498,6 +9536,7 @@ const setValueInputs = {
   scalp_size_mode: document.getElementById('setScalpSizeMode'),
   scalp_size_value: document.getElementById('setScalpSizeValue'),
   ema_min_rr: document.getElementById('setEmaMinRr'),
+  ema_signal_timeout_hours: document.getElementById('setEmaSignalTimeoutHours'),
   autotrade_leverage_bounce: document.getElementById('setAutotradeLevBounce'),
   autotrade_leverage_breakout: document.getElementById('setAutotradeLevBreakout'),
   autotrade_leverage_divergence: document.getElementById('setAutotradeLevDivergence'),
