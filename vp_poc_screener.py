@@ -2819,6 +2819,20 @@ v0.75.0 - get_candles_range() gets the same network-error retry as
          [ERR]-prefixed catch (magnified profile / session process_one
          each already have their own), same safety net as before —
          this just reduces how often that fallback is needed.
+
+v0.76.0 - WORKERS lowered 12 -> 8, HTTP_TIMEOUT raised 10 -> 15s (now
+         env-configurable via VP_HTTP_TIMEOUT, was hardcoded), per
+         direct user request. Live error logs kept showing "network
+         error after 2 retries" on read timeouts even with v0.73.0's/
+         v0.75.0's retry logic in place — retries alone weren't enough,
+         pointing at 12 concurrent requests routinely saturating actual
+         available mobile bandwidth rather than any single request
+         being unlucky. Both levers address that directly: fewer
+         simultaneous requests competing for the same limited
+         bandwidth, and more room per request before giving up. Trade-
+         off is a slower full-universe scan cycle in exchange for fewer
+         failed fetches — accepted as the right call given how often
+         retries were still coming up short.
 """
 
 import os
@@ -2838,7 +2852,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.75.0"
+APP_VERSION = "0.76.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2910,7 +2924,7 @@ MAX_SYMBOLS = int(os.environ.get("VP_MAX_SYMBOLS", 250))  # universe cap — was
 VOLUME_PROFILE_ENABLED = os.environ.get("VP_VOLUME_PROFILE_ENABLED", "1") == "1"
 SCAN_INTERVAL_SEC = int(os.environ.get("VP_SCAN_INTERVAL", 45))
 COOLDOWN_SEC = int(os.environ.get("VP_COOLDOWN", 900))    # per-symbol re-alert cooldown, applied after a signal on that symbol closes
-WORKERS = int(os.environ.get("VP_WORKERS", 12))  # was 8, raised alongside MAX_SYMBOLS
+WORKERS = int(os.environ.get("VP_WORKERS", 8))  # was 12 (before that, 8) — lowered back per direct user request after live error logs showed repeated "network error after 2 retries" on read timeouts even WITH the v0.73.0/v0.75.0 retry logic in place, suggesting 12 concurrent requests was routinely saturating the actual available mobile bandwidth rather than any single request being unlucky
 SIGNAL_HISTORY = 200
 RR = float(os.environ.get("VP_RR", 2.0))                  # take-profit distance as a multiple of risk — raised from 1.5: collected MFE stats showed WIN median MFE ~2.8R, i.e. TP was cutting winners short
 ZONE_BUFFER_PCT = float(os.environ.get("VP_ZONE_BUFFER_PCT", 0.30))  # stop sits this far beyond the zone edge (fraction of zone height) — raised from 0.15: LOSS median MFE was ~1.7R, meaning a chunk of stopped-out trades kept moving in the original direction afterward — noise was clipping the stop too close
@@ -3299,7 +3313,7 @@ def _load_alert_cfg():
     except Exception as e:
         log_error(f"reading {ALERT_CFG_PATH}: {e}")
 
-HTTP_TIMEOUT = 10
+HTTP_TIMEOUT = int(os.environ.get("VP_HTTP_TIMEOUT", 15))  # was a hardcoded 10 — raised per direct user request after repeated "Read timed out (read timeout=10)" errors persisted even with retries, giving each request more room before giving up under real mobile-network conditions
 
 # --- basic runtime settings: scan modes + notifications, exposed through
 # the header's settings button. Deliberately NOT the detailed indicator
