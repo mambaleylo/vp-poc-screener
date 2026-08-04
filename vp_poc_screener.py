@@ -2686,6 +2686,44 @@ v0.71.0 - EMA gets its own signal timeout, per direct user request
          (ч)" row in settings, right under the min-RR field — adjustable
          live, no restart needed. Also added to /api/ema/status's config
          block as signal_timeout_hours.
+
+v0.72.0 - ADX regime filter for EMA, per direct user request to research
+         real improvements for the whipsaw problem rather than guessing.
+         Virtually every source on EMA crossover strategies converges on
+         the same finding: raw crossovers run ~35-40% win rate in
+         choppy/range-bound conditions, and the standard, decades-old
+         fix (Wilder, 1978) is requiring ADX above ~20-25 before trading
+         a crossover — ADX measures trend STRENGTH directly, unlike
+         recent_crossover_count (v0.62.0), which was always just a
+         home-grown proxy for the same idea.
+         New _dm_series() + compute_adx(): proper Wilder DM/DI/DX/ADX,
+         reusing _true_range_series()/_atr_series() for the smoothing
+         (same Wilder-smoothing math, applied twice — once for DM/TR,
+         once more for DX itself). adx is now a diagnostic field on
+         every EMA signal (same pattern as atr_pct/ema_slope_pct/
+         ema_gap_pct), plus a new win/loss breakdown in compute_ema_
+         stats().
+         Unlike EMA_MIN_RR/EMA_MIN_GAP_PCT (both default off, no
+         universal right answer without our own data first),
+         EMA_ADX_FILTER_ENABLED defaults ON with EMA_ADX_MIN=20 — this
+         one's a well-established literature threshold, not a guess,
+         checked before the cooldown-consuming block (same ordering
+         reasoning as the RR filter: a filtered signal must not block a
+         later, better one).
+         Also added, off by default per the same reasoning as EMA_MIN_
+         RR: EMA_MIN_GAP_PCT, a minimum EMA7/EMA14 separation at signal
+         time (the "buffer zone before confirming a cross" idea several
+         sources also recommend) — reuses the existing ema_gap_pct
+         diagnostic, no new calculation. Needs its own win/loss
+         breakdown data before a sensible default exists, unlike ADX.
+         New filtered_by_adx / filtered_by_min_gap counters, both shown
+         in the EMA panel header when their filter is active. New ADX
+         column in the EMA signals table. All three new settings
+         (ema_adx_filter_enabled, ema_adx_min, ema_min_gap_pct) wired
+         through get_settings()/apply_settings()/SETTINGS_KEYS and new
+         "↳ EMA фильтр ADX" (toggle + threshold) / "↳ EMA мин. зазор
+         EMA7/14 (%)" rows in settings — all adjustable live, no restart
+         needed.
 """
 
 import os
@@ -2705,7 +2743,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.71.0"
+APP_VERSION = "0.72.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2907,6 +2945,26 @@ EMA_RR = float(os.environ.get("VP_EMA_RR", 3.75))  # SL reverted to round 2's 0.
 EMA_SL_MODE = os.environ.get("VP_EMA_SL_MODE", "atr")  # "atr" or "fixed_pct" — fixed_pct reproduces the old EMA_RR-derived behavior exactly, for comparison/rollback
 EMA_SL_ATR_MULT = float(os.environ.get("VP_EMA_SL_ATR_MULT", 1.5))  # SL = ATR(EMA_DIAG_ATR_PERIOD) * this, in price units
 EMA_MIN_RR = float(os.environ.get("VP_EMA_MIN_RR", 0))  # 0 = disabled. Per direct user request after ATR-based SL (above) started producing RR well below 1 on volatile symbols (stop wider than the fixed take) — since TP is fixed and SL is ATR-based, RR is directly 1/ATR, so a minimum-RR filter is really just a maximum-ATR filter, expressed in the unit that actually matters (risk relative to reward) rather than a raw volatility threshold that would need re-tuning if TP% ever changes. Signals below this get skipped entirely (not created, not logged as a signal) — same treatment as the trend/volume/OI filters elsewhere.
+# ADX regime filter, v0.72.0 — per direct user request to research and
+# propose an actual filter for EMA's whipsaw problem (rather than the
+# home-grown recent_crossover_count proxy from v0.62.0). ADX (Wilder,
+# 1978) is the standard, decades-old answer to exactly this: it measures
+# trend STRENGTH directly, and the near-universal finding across
+# sources is that raw EMA crossovers run ~35-40% win rate in choppy/
+# range-bound conditions, while requiring ADX above ~20-25 before
+# trading a crossover is the standard fix. Enabled by default (unlike
+# EMA_MIN_RR/EMA_MIN_GAP_PCT below) because this is a well-established,
+# literature-backed threshold, not a guess needing our own data first.
+EMA_ADX_FILTER_ENABLED = os.environ.get("VP_EMA_ADX_FILTER_ENABLED", "1") == "1"
+EMA_ADX_MIN = float(os.environ.get("VP_EMA_ADX_MIN", 20))  # Wilder's own "trending" cutoff is 25; 20 is the more commonly cited "at least not dead flat" floor — starting here since it's the least aggressive cut, easy to raise toward 25 later if 20 doesn't do enough
+# Minimum EMA7/EMA14 separation at signal time — the "buffer zone
+# before confirming a cross" idea several sources also recommend,
+# using the ema_gap_pct diagnostic we already log (v0.62.0). Off by
+# default (unlike ADX above): there's no established universal
+# threshold for this the way there is for ADX, and it needs to be
+# calibrated against ema_gap_pct's own win/loss breakdown once enough
+# adx-filtered data has accumulated, not guessed at.
+EMA_MIN_GAP_PCT = float(os.environ.get("VP_EMA_MIN_GAP_PCT", 0))  # 0 = disabled, in the same % units as ema_gap_pct
 # TP stays a fixed % of entry (EMA_TP_PCT) — only the STOP moves to ATR.
 # Consequence: RR is no longer one constant, it varies signal to signal
 # (tp_pct-distance / atr-based-risk) depending on each symbol's own
@@ -3170,6 +3228,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_sig
                   "autotrade_size_mode", "autotrade_size_value",
                   "scalp_size_mode", "scalp_size_value",
                   "ema_min_rr", "ema_signal_timeout_hours",
+                  "ema_adx_filter_enabled", "ema_adx_min", "ema_min_gap_pct",
                   "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session")
 
 
@@ -3210,6 +3269,9 @@ def get_settings():
         "autotrade_leverage_ema": AUTOTRADE_LEVERAGE_EMA,
         "ema_min_rr": EMA_MIN_RR,
         "ema_signal_timeout_hours": round(EMA_SIGNAL_TIMEOUT_SEC / 3600, 2),
+        "ema_adx_filter_enabled": EMA_ADX_FILTER_ENABLED,
+        "ema_adx_min": EMA_ADX_MIN,
+        "ema_min_gap_pct": EMA_MIN_GAP_PCT,
         "autotrade_leverage_session": AUTOTRADE_LEVERAGE_SESSION,
     }
 
@@ -3228,6 +3290,7 @@ def apply_settings(updates):
     global AUTOTRADE_LEVERAGE_BOUNCE, AUTOTRADE_LEVERAGE_BREAKOUT, AUTOTRADE_LEVERAGE_DIVERGENCE, AUTOTRADE_LEVERAGE_EMA, AUTOTRADE_LEVERAGE_SESSION
     global EMA_MIN_RR
     global EMA_SIGNAL_TIMEOUT_SEC
+    global EMA_ADX_FILTER_ENABLED, EMA_ADX_MIN, EMA_MIN_GAP_PCT
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
     if "divergence_enabled" in updates:
@@ -3304,6 +3367,22 @@ def apply_settings(updates):
             v = float(updates["ema_signal_timeout_hours"])
             if v > 0:
                 EMA_SIGNAL_TIMEOUT_SEC = int(v * 3600)
+        except (TypeError, ValueError):
+            pass
+    if "ema_adx_filter_enabled" in updates:
+        EMA_ADX_FILTER_ENABLED = bool(updates["ema_adx_filter_enabled"])
+    if "ema_adx_min" in updates:
+        try:
+            v = float(updates["ema_adx_min"])
+            if v >= 0:
+                EMA_ADX_MIN = v
+        except (TypeError, ValueError):
+            pass
+    if "ema_min_gap_pct" in updates:
+        try:
+            v = float(updates["ema_min_gap_pct"])
+            if v >= 0:  # 0 disables the filter, same convention as ema_min_rr
+                EMA_MIN_GAP_PCT = v
         except (TypeError, ValueError):
             pass
     for key, glob_name in (
@@ -3441,6 +3520,8 @@ STATE = {
     "filtered_by_oi": 0,
     "filtered_by_staleness": 0,
     "filtered_by_min_rr": 0,
+    "filtered_by_adx": 0,
+    "filtered_by_min_gap": 0,
     "last_scan_started": None,
     "last_scan_finished": None,
     "last_scan_duration": None,
@@ -3772,6 +3853,66 @@ def _atr_series(tr, period):
     return atr
 
 
+def _dm_series(candles):
+    """Wilder's directional movement per bar: +DM is the up-move when it
+    exceeds the down-move (and is positive), -DM is the down-move when
+    IT exceeds the up-move (and is positive) — never both nonzero on the
+    same bar. First bar has no prior bar to compare against, so both
+    are 0 there."""
+    n = len(candles)
+    plus_dm = [0.0] * n
+    minus_dm = [0.0] * n
+    for i in range(1, n):
+        up_move = candles[i]["high"] - candles[i - 1]["high"]
+        down_move = candles[i - 1]["low"] - candles[i]["low"]
+        if up_move > down_move and up_move > 0:
+            plus_dm[i] = up_move
+        if down_move > up_move and down_move > 0:
+            minus_dm[i] = down_move
+    return plus_dm, minus_dm
+
+
+def compute_adx(candles, period=14):
+    """Wilder's ADX — measures trend STRENGTH (0-100), not direction;
+    +DI/-DI (also returned) show which direction currently dominates.
+    Standard, decades-old regime filter for exactly the whipsaw problem
+    recent_crossover_count (v0.62.0) was trying to approximate with a
+    home-grown proxy: ADX<20 means weak/no trend (chop — crossovers
+    here are mostly noise), 20-25 an emerging trend, >25 confirmed.
+    Reuses _true_range_series()/_atr_series() for the TR and DM
+    smoothing (Wilder smoothing, same math as ATR) — DX = 100*|+DI-
+    -DI|/(+DI+-DI) per bar, and ADX itself is that same Wilder
+    smoothing applied a second time, to DX. Needs roughly 2*period bars
+    of warm-up before the first real value; returns None for indices
+    before that. Returns (plus_di, minus_di, adx), all same length as
+    candles."""
+    n = len(candles)
+    plus_di = [None] * n
+    minus_di = [None] * n
+    adx = [None] * n
+    if n < period * 2:
+        return plus_di, minus_di, adx
+    tr = _true_range_series(candles)
+    plus_dm, minus_dm = _dm_series(candles)
+    smooth_tr = _atr_series(tr, period)
+    smooth_plus_dm = _atr_series(plus_dm, period)
+    smooth_minus_dm = _atr_series(minus_dm, period)
+    dx = [None] * n
+    for i in range(n):
+        if smooth_tr[i] is not None and smooth_plus_dm[i] is not None and smooth_minus_dm[i] is not None and smooth_tr[i] > 0:
+            plus_di[i] = 100 * smooth_plus_dm[i] / smooth_tr[i]
+            minus_di[i] = 100 * smooth_minus_dm[i] / smooth_tr[i]
+            di_sum = plus_di[i] + minus_di[i]
+            dx[i] = 100 * abs(plus_di[i] - minus_di[i]) / di_sum if di_sum else 0.0
+    dx_start = next((i for i, v in enumerate(dx) if v is not None), None)
+    if dx_start is not None:
+        dx_tail = [v if v is not None else 0.0 for v in dx[dx_start:]]
+        adx_tail = _atr_series(dx_tail, period)
+        for j, v in enumerate(adx_tail):
+            adx[dx_start + j] = v
+    return plus_di, minus_di, adx
+
+
 # EMA diagnostics — v0.62.0, per direct user request to understand the
 # EMA module's low win rate before touching its filters/SL. NONE of
 # these affect whether a signal fires or its TP/SL; they're attached to
@@ -3783,14 +3924,15 @@ def _atr_series(tr, period):
 EMA_DIAG_ATR_PERIOD = int(os.environ.get("VP_EMA_DIAG_ATR_PERIOD", 14))
 EMA_DIAG_SLOPE_LOOKBACK = int(os.environ.get("VP_EMA_DIAG_SLOPE_LOOKBACK", 5))  # bars back for the EMA28 slope measurement
 EMA_DIAG_CHOP_LOOKBACK = int(os.environ.get("VP_EMA_DIAG_CHOP_LOOKBACK", 20))  # bars back to count EMA7/EMA14 crossovers in
+EMA_ADX_PERIOD = int(os.environ.get("VP_EMA_ADX_PERIOD", 14))  # Wilder's standard period — see compute_adx()
 
 
 def _ema_signal_diagnostics(closes, ema7, ema14, ema28, i, direction, candles):
     """Computes the diagnostic-only fields described above for the
-    signal at bar i. candles (with high/low) is needed for ATR — if not
-    given, atr_pct is left None rather than guessed at from closes
+    signal at bar i. candles (with high/low) is needed for ATR/ADX — if
+    not given, those are left None rather than guessed at from closes
     alone."""
-    diag = {"atr_pct": None, "ema_slope_pct": None, "ema_gap_pct": None, "recent_crossover_count": None}
+    diag = {"atr_pct": None, "ema_slope_pct": None, "ema_gap_pct": None, "recent_crossover_count": None, "adx": None}
     price = closes[i]
     if price:
         diag["ema_gap_pct"] = round((ema7[i] - ema14[i]) / price * 100, 4)
@@ -3816,6 +3958,9 @@ def _ema_signal_diagnostics(closes, ema7, ema14, ema28, i, direction, candles):
         atr = _atr_series(tr, EMA_DIAG_ATR_PERIOD)
         if atr[i] and price:
             diag["atr_pct"] = round(atr[i] / price * 100, 4)
+        _plus_di, _minus_di, adx = compute_adx(candles, EMA_ADX_PERIOD)
+        if adx[i] is not None:
+            diag["adx"] = round(adx[i], 3)
 
     return diag
 
@@ -4530,6 +4675,19 @@ def scan_symbol_ema(symbol, interval=EMA_INTERVAL, candles=None):
         if has_open_ema_signal(symbol, interval) or has_open_signal_any_module(symbol, exclude="ema_signals"):
             return
 
+        if EMA_ADX_FILTER_ENABLED:
+            adx_val = sig.get("adx")
+            if adx_val is not None and adx_val < EMA_ADX_MIN:
+                with state_lock:
+                    STATE["filtered_by_adx"] += 1
+                return  # weak/no trend (Wilder's regime filter) — the crossover is more likely chop than a real signal here
+        if EMA_MIN_GAP_PCT > 0:
+            gap_val = sig.get("ema_gap_pct")
+            if gap_val is not None and abs(gap_val) < EMA_MIN_GAP_PCT:
+                with state_lock:
+                    STATE["filtered_by_min_gap"] += 1
+                return  # EMA7/EMA14 barely separated — marginal cross, not a decisive one
+
         entry = candles[-1]["close"]
         atr_pct = sig.get("atr_pct")
         atr_price = (atr_pct / 100 * entry) if atr_pct else None
@@ -4566,6 +4724,7 @@ def scan_symbol_ema(symbol, interval=EMA_INTERVAL, candles=None):
             "ema_slope_pct": sig.get("ema_slope_pct"),
             "ema_gap_pct": sig.get("ema_gap_pct"),
             "recent_crossover_count": sig.get("recent_crossover_count"),
+            "adx": sig.get("adx"),
             "time": candles[-1]["time"],
             "detected_at": now,
             "status": "OPEN",
@@ -4724,6 +4883,7 @@ def compute_ema_stats(interval=None):
         "ema_gap_pct_wins": agg("ema_gap_pct", win_set), "ema_gap_pct_losses": agg("ema_gap_pct", loss_set),
         "recent_crossover_count_wins": agg("recent_crossover_count", win_set),
         "recent_crossover_count_losses": agg("recent_crossover_count", loss_set),
+        "adx_wins": agg("adx", win_set), "adx_losses": agg("adx", loss_set),
         # rr is per-signal now (v0.65.0, ATR-based SL) instead of one
         # global constant — this is what the header display shows in
         # place of the old fixed EMA_RR value.
@@ -7772,11 +7932,15 @@ def api_ema_status():
                 "sl_mode": EMA_SL_MODE, "sl_atr_mult": EMA_SL_ATR_MULT, "rr_fallback": EMA_RR, "tp_pct": EMA_TP_PCT,
                 "min_rr": EMA_MIN_RR,
                 "signal_timeout_hours": round(EMA_SIGNAL_TIMEOUT_SEC / 3600, 2),
+                "adx_filter_enabled": EMA_ADX_FILTER_ENABLED, "adx_min": EMA_ADX_MIN, "adx_period": EMA_ADX_PERIOD,
+                "min_gap_pct": EMA_MIN_GAP_PCT,
                 "len7": EMA_LEN_7, "len14": EMA_LEN_14, "len28": EMA_LEN_28,
                 "signal_type": EMA_SIGNAL_TYPE, "trend_filter": EMA_TREND_FILTER, "invert_signals": EMA_INVERT_SIGNALS,
                 "cooldown": EMA_COOLDOWN_SEC,
             },
             "filtered_by_min_rr": STATE["filtered_by_min_rr"],
+            "filtered_by_adx": STATE["filtered_by_adx"],
+            "filtered_by_min_gap": STATE["filtered_by_min_gap"],
         })
 
 
@@ -8359,7 +8523,7 @@ INDEX_HTML = """<!doctype html>
   </table>
   <div id="emaStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
   <table id="emaTable" style="display:none">
-    <thead><tr><th>Symbol</th><th>Dir</th><th>TF</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
+    <thead><tr><th>Symbol</th><th>Dir</th><th>TF</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>ADX</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
     <tbody></tbody>
   </table>
   <div id="scalpPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
@@ -8647,6 +8811,23 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">закрыть как TIMEOUT, если ни TP, ни SL не сработали за это время — отдельно от Volume/Дивергенций</div>
         </div>
         <input type="number" id="setEmaSignalTimeoutHours" step="1" min="1" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;width:100px;">
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ EMA фильтр ADX</div>
+          <div class="sub">не торговать кроссовер, если тренд слишком слабый (Уайлдер, стандартный порог)</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="number" id="setEmaAdxMin" step="1" min="0" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+          <label class="switch"><input type="checkbox" id="setEmaAdxFilterEnabled"><span class="switchSlider"></span></label>
+        </div>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ EMA мин. зазор EMA7/14 (%)</div>
+          <div class="sub">0 = выключено. Отсекает пограничные, почти незаметные пересечения</div>
+        </div>
+        <input type="number" id="setEmaMinGapPct" step="0.01" min="0" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;width:100px;">
       </div>
       <div class="settingRow">
         <div>
@@ -9010,6 +9191,7 @@ async function refreshEma() {
       <td class="dim">${fmt(r.sl)}</td>
       <td class="dim">${fmt(r.tp)}</td>
       <td class="dim">${r.rr !== null && r.rr !== undefined ? r.rr : '-'}</td>
+      <td class="dim">${r.adx !== null && r.adx !== undefined ? r.adx : '-'}</td>
       <td class="dim" title="на закрытии → полное окно 24ч">${fmtMfeMae(r, 'mfe_r')}</td>
       <td class="dim" title="на закрытии → полное окно 24ч">${fmtMfeMae(r, 'mae_r')}</td>
       <td>${statusHtml}</td>
@@ -9054,7 +9236,7 @@ async function refreshEma() {
     <div class="dim" style="margin-bottom:10px;">
       EMA ${cfg.len7}/${cfg.len14}/${cfg.len28} (${cfg.signal_type}${cfg.trend_filter ? ', с фильтром тренда' : ''})${cfg.invert_signals ? ' <span style="color:#ffcc55;font-weight:bold;">· РЕВЕРС ВКЛЮЧЁН</span>' : ''} · сканируются ТФ: ${(status.intervals||[]).join(', ')} ·
       скан ${status.last_scan_duration!==null && status.last_scan_duration!==undefined ? status.last_scan_duration+'s' : '...'} ·
-      Винрейт (всё вместе): ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ср. ${s.rr_all ? s.rr_all.avg : '?'} (медиана ${s.rr_all ? s.rr_all.median : '?'}) · SL: ${cfg.sl_mode === 'atr' ? `ATR×${cfg.sl_atr_mult}` : `фикс. RR ${cfg.rr_fallback}`}${cfg.min_rr > 0 ? ` · мин. RR ${cfg.min_rr} (отсеяно: ${s.filtered_by_min_rr||0})` : ''}
+      Винрейт (всё вместе): ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ср. ${s.rr_all ? s.rr_all.avg : '?'} (медиана ${s.rr_all ? s.rr_all.median : '?'}) · SL: ${cfg.sl_mode === 'atr' ? `ATR×${cfg.sl_atr_mult}` : `фикс. RR ${cfg.rr_fallback}`}${cfg.min_rr > 0 ? ` · мин. RR ${cfg.min_rr} (отсеяно: ${s.filtered_by_min_rr||0})` : ''}${cfg.adx_filter_enabled ? ` · ADX ≥ ${cfg.adx_min} (отсеяно: ${s.filtered_by_adx||0})` : ''}${cfg.min_gap_pct > 0 ? ` · мин. зазор ${cfg.min_gap_pct}% (отсеяно: ${s.filtered_by_min_gap||0})` : ''}
     </div>
     <div style="margin-bottom:10px;padding-top:6px;border-top:1px solid #1c2433;">
       <b>По таймфреймам (для сравнения):</b><br>
@@ -9512,6 +9694,7 @@ const setInputs = {
   div_invert_signals: document.getElementById('setDivInvert'),
   ema_enabled: document.getElementById('setEma'),
   ema_invert_signals: document.getElementById('setEmaInvert'),
+  ema_adx_filter_enabled: document.getElementById('setEmaAdxFilterEnabled'),
   scalp_enabled: document.getElementById('setScalp'),
   scalp_signals_enabled: document.getElementById('setScalpSignals'),
   session_enabled: document.getElementById('setSession'),
@@ -9537,6 +9720,8 @@ const setValueInputs = {
   scalp_size_value: document.getElementById('setScalpSizeValue'),
   ema_min_rr: document.getElementById('setEmaMinRr'),
   ema_signal_timeout_hours: document.getElementById('setEmaSignalTimeoutHours'),
+  ema_adx_min: document.getElementById('setEmaAdxMin'),
+  ema_min_gap_pct: document.getElementById('setEmaMinGapPct'),
   autotrade_leverage_bounce: document.getElementById('setAutotradeLevBounce'),
   autotrade_leverage_breakout: document.getElementById('setAutotradeLevBreakout'),
   autotrade_leverage_divergence: document.getElementById('setAutotradeLevDivergence'),
