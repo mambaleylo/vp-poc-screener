@@ -2791,6 +2791,34 @@ v0.74.0 - get_tickers() gets the same retry protection get_candles() got
          exposure is "costs a cycle," not "kills a thread" — lower
          priority than the two highest-traffic endpoints (candles,
          tickers) fixed here and in v0.73.0.
+
+v0.75.0 - get_candles_range() gets the same network-error retry as
+         get_candles()/get_tickers(), per a live error-log screenshot
+         (v0.74.0 running, confirming that version's own network fixes
+         work — this is a genuinely separate function that was never
+         covered). Errors showed as SSLEOFError ("UNEXPECTED_EOF_
+         WHILE_READING") from "magnified profile" and "session
+         process_one" — both consumers of get_candles_range(), not
+         get_candles(). requests.exceptions.SSLError is itself a
+         subclass of requests.exceptions.ConnectionError (confirmed
+         against the requests source), so the existing except clause
+         pattern already covers it with no new exception class needed.
+         get_candles_range() paginates in a loop with its own inner
+         retry for HTTP 400 (shrinks chunk_points and retries same
+         chunk) — added a SEPARATE counter (net_attempt, capped at
+         GET_CANDLES_RETRIES) for (ConnectionError, Timeout) specifically,
+         so a network blip retries a few times before giving up, without
+         being confused with or interfering with the existing chunk-
+         size-shrink retry logic (different problem, different fix,
+         kept as two distinct except clauses on the same try). A range
+         fetch makes many more individual requests than a single
+         get_candles() call, so it's proportionally more likely to hit
+         a transient blip somewhere in the middle — previously any
+         single one aborted the ENTIRE range fetch with zero retry.
+         Whatever gets past this still surfaces via the caller's own
+         [ERR]-prefixed catch (magnified profile / session process_one
+         each already have their own), same safety net as before —
+         this just reduces how often that fallback is needed.
 """
 
 import os
@@ -2810,7 +2838,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.74.0"
+APP_VERSION = "0.75.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5364,6 +5392,7 @@ def get_candles_range(symbol, interval, start_ts, end_ts):
     cur = max(int(start_ts), int(earliest_allowed))
     end_ts = int(end_ts)
     while cur < end_ts:
+        net_attempt = 0
         while True:
             chunk_span = interval_sec * chunk_points
             chunk_end = min(cur + chunk_span, end_ts)
@@ -5380,6 +5409,18 @@ def get_candles_range(symbol, interval, start_ts, end_ts):
                     chunk_points = chunk_points // 2  # server rejected this size — shrink, and keep it shrunk for later chunks too
                     continue
                 raise
+            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                # Same retry policy as get_candles()/get_tickers() — a
+                # multi-chunk range fetch (used by "magnified profile"
+                # and session backtests) has many more individual
+                # requests than either of those, so it's proportionally
+                # more likely to hit a transient network blip somewhere
+                # in the middle; previously any single one would abort
+                # the whole range fetch with no retry at all.
+                net_attempt += 1
+                if net_attempt > GET_CANDLES_RETRIES:
+                    raise
+                time.sleep(GET_CANDLES_RETRY_DELAY)
         for c in _parse_candles(r.json()):
             seen[c["time"]] = c
         cur = chunk_end
