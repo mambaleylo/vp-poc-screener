@@ -2848,6 +2848,15 @@ v0.77.0 - get_futures_risk_limit_tiers() gets the same network-error
          RETRIES/GET_CANDLES_RETRY_DELAY policy as get_candles()/
          get_tickers()/get_candles_range() before it, applied per-page
          inside the existing pagination loop.
+
+v0.78.0 - VOL_CONFIRM_RATIO lowered 1.4 -> 1.25, per direct user request
+         after checking the actual per-cycle rejection breakdown they'd
+         asked to see ("За этот скан отклонено — ... объём: 12") —
+         volume was the leading rejection reason that cycle, well above
+         trend (0) and staleness (2). 1.15x (the original default) was
+         found too weak in v0.57.0; 1.4x now looks too strict once
+         actually observed against live rejection counts. 1.25x is a
+         middle ground between the two, not a return to either extreme.
 """
 
 import os
@@ -2867,7 +2876,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.77.0"
+APP_VERSION = "0.78.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3185,7 +3194,7 @@ TREND_THRESHOLD_PCT = float(os.environ.get("VP_TREND_THRESHOLD_PCT", 0.02))  # n
 # likely noise than a real move.
 VOLUME_CONFIRM_ENABLED = os.environ.get("VP_VOLUME_CONFIRM", "1") == "1"
 VOL_CONFIRM_LOOKBACK = int(os.environ.get("VP_VOL_CONFIRM_LOOKBACK", 20))
-VOL_CONFIRM_RATIO = float(os.environ.get("VP_VOL_CONFIRM_RATIO", 1.4))  # trigger bar volume must be >= this multiple of the average of the preceding VOL_CONFIRM_LOOKBACK bars — raised from 1.15x per user request to strengthen breakout confirmation (1.15x was too weak to reliably distinguish a real breakout's volume spike from ordinary noise)
+VOL_CONFIRM_RATIO = float(os.environ.get("VP_VOL_CONFIRM_RATIO", 1.25))  # trigger bar volume must be >= this multiple of the average of the preceding VOL_CONFIRM_LOOKBACK bars — was 1.15x (too weak), raised to 1.4x, now lowered to this middle ground per direct user request after live stats showed "объём: 12" leading the rejection counts for a scan cycle — 1.4x looked too strict once actually observed against live data
 
 # --- open interest filter: applied to breakout signals only (bounce is a
 # rejection off a level, breakout is a move away from it — OI direction
