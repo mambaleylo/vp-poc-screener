@@ -2914,6 +2914,37 @@ v0.80.0 - reverse mode for the Session module, per direct user request
          active, matching how Divergence's panel already flags its own
          reverse state — closes the same gap noted earlier: reverse
          status needs to be visible at a glance, not just inferred.
+
+v0.81.0 - realized-R tracking for TIMEOUT closes, per direct user
+         question about why EMA's account balance was quietly drifting
+         negative despite a strong-looking 70.5% winrate. Diagnosis:
+         EV from winrate*avg_RR was genuinely positive (+0.355R/trade),
+         but median RR (0.696) sat well below the average (0.922) —
+         a few high-RR outlier wins were propping up the average, so
+         the TYPICAL trade's edge was thinner than the headline number
+         suggested (+0.196R at median RR). On top of that, 24 TIMEOUTs
+         out of 156 closed trades (15.4%) were invisible to the win/
+         loss-only winrate entirely, yet TIMEOUT closes at whatever the
+         market price happens to be when the window expires (see
+         update_ema_outcomes' "last_price") — not at breakeven, not
+         excluded from PnL — so a batch of them closing slightly
+         negative on average would be real, quiet money leaving the
+         account with no trace in the 70.5% figure.
+         close_ema_signal() now computes exit_r (realized R at the
+         actual close price, signed by direction) for every close, not
+         just WIN/LOSS — previously only mfe_r_at_close/mae_r_at_close
+         were captured, nothing recorded the actual realized outcome
+         for a TIMEOUT. compute_ema_stats() gained exit_r_timeouts
+         (same avg/median/p25/p75/n shape as the other agg() stats),
+         and the EMA panel's MFE/MAE block shows it as a new "TIMEOUT
+         реализованный R" line — explicitly labeled as not part of the
+         winrate but real balance impact, so it doesn't get missed the
+         same way again.
+         Old signals closed before this change have no exit_r (agg()
+         quietly excludes them, no error) — the new stat starts thin
+         and fills in as new TIMEOUTs occur going forward, same
+         backward-compat pattern as every other diagnostic field added
+         this way (atr_pct, adx, rr, etc.).
 """
 
 import os
@@ -2933,7 +2964,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.80.0"
+APP_VERSION = "0.81.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4982,6 +5013,18 @@ def close_ema_signal(sig, result, exit_price, exit_candle=None):
         sig["closed_at"] = time.time()
         sig["mfe_r_at_close"] = sig["mfe_r"]
         sig["mae_r_at_close"] = sig["mae_r"]
+        # Realized R at whatever price actually closed the trade — for
+        # WIN/LOSS this is redundant with the R implied by hitting TP/SL,
+        # but for TIMEOUT it's the only place this ever gets computed.
+        # TIMEOUT closes at "last_price" (see update_ema_outcomes), not
+        # at breakeven or any fixed value — a batch of timeouts closing
+        # slightly negative on average is real money leaving the account
+        # that the plain WIN/LOSS winrate never shows, since TIMEOUT sits
+        # outside that count entirely.
+        risk = sig.get("risk")
+        if risk and exit_price is not None and sig.get("entry") is not None:
+            raw = exit_price - sig["entry"] if sig["direction"] == "LONG" else sig["entry"] - exit_price
+            sig["exit_r"] = round(raw / risk, 4)
         if exit_candle:
             sig["exit_time"] = exit_candle["time"]
             sig["exit_candle"] = {
@@ -5201,6 +5244,7 @@ def compute_ema_stats(interval=None):
     win_set = [s for s in dataset if s.get("result") == "WIN"]
     loss_set = [s for s in dataset if s.get("result") == "LOSS"]
     open_set = [s for s in dataset if s.get("status") == "OPEN"]
+    timeout_set = [s for s in dataset if s.get("result") == "TIMEOUT"]
 
     return {
         "open": open_count, "wins": wins, "losses": losses,
@@ -5211,6 +5255,13 @@ def compute_ema_stats(interval=None):
         "mfe_r_open": agg("mfe_r", open_set), "mae_r_open": agg("mae_r", open_set),
         "mfe_r_wins_at_close": agg("mfe_r_at_close", win_set), "mae_r_wins_at_close": agg("mae_r_at_close", win_set),
         "mfe_r_losses_at_close": agg("mfe_r_at_close", loss_set), "mae_r_losses_at_close": agg("mae_r_at_close", loss_set),
+        # Realized R for TIMEOUT closes specifically — see close_ema_
+        # signal()'s comment: this is the only place TIMEOUT's actual $
+        # impact is visible, since the plain winrate excludes it
+        # entirely. If this comes out net negative, timeouts are a real
+        # (if quiet) drag on the account that the headline winrate
+        # can't show.
+        "exit_r_timeouts": agg("exit_r", timeout_set),
         "dataset_count": len(dataset),
         # Diagnostic breakdown (v0.62.0) — win vs loss comparison for the
         # fields _ema_signal_diagnostics() attaches at signal time. None
@@ -9612,7 +9663,8 @@ async function refreshEma() {
       <span class="win">WIN MFE: ${fmtStat(s.mfe_r_wins_at_close)}</span><br>
       <span class="win">WIN MAE: ${fmtStat(s.mae_r_wins_at_close)}</span><br>
       <span class="loss">LOSS MFE: ${fmtStat(s.mfe_r_losses_at_close)}</span><br>
-      <span class="loss">LOSS MAE: ${fmtStat(s.mae_r_losses_at_close)}</span>
+      <span class="loss">LOSS MAE: ${fmtStat(s.mae_r_losses_at_close)}</span><br>
+      <span class="dim">TIMEOUT реализованный R (не входит в винрейт, но реально двигает баланс): ${fmtStat(s.exit_r_timeouts)}</span>
     </div>
     <details style="margin-top:6px;">
       <summary class="dim" style="cursor:pointer;font-size:12px;">Полное окно (24ч после сигнала, включая то, что было уже после закрытия — для оценки общего запаса, не для оценки конкретной сделки)</summary>
