@@ -2758,6 +2758,39 @@ v0.73.0 - get_candles() now also retries on requests.exceptions.Timeout
          the user's decision on whether/how to continue it — the
          functions exist but nothing calls them yet, so this is inert,
          not broken.
+
+v0.74.0 - get_tickers() gets the same retry protection get_candles() got
+         in v0.69.0/v0.73.0 (ConnectionError + Timeout, GET_CANDLES_
+         RETRIES/GET_CANDLES_RETRY_DELAY, reused not duplicated). User
+         showed a raw Termux crash traceback: a DNS blip during
+         build_universe() -> get_tickers() propagated all the way up
+         with no [ERR]-style catch, unlike the other background loops
+         (scalp_loop/session_loop/telegram) which DID catch the same
+         DNS failure gracefully in that same log excerpt. Checked
+         scan_loop() itself first: its try/except (added some time ago,
+         wraps the entire cycle body including build_universe()) DOES
+         already catch this in the current code — the crash traceback's
+         own line number (7436) is far below where build_universe() is
+         called in the current source (7611+), meaning the process that
+         crashed was running a meaningfully older version, most likely
+         from well before several of today's pushes. So the crash itself
+         isn't reproducible against current code; user needs to restart
+         the Termux process to actually pick up everything pushed today
+         (v0.69.0 through this one) rather than keep running whatever's
+         been up for hours.
+         Added the retry anyway as real defense in depth: even with
+         scan_loop()'s outer catch preventing a crash, a single DNS blip
+         on the tickers fetch with no retry would previously cost an
+         entire scan cycle (SCAN_INTERVAL_SEC, 45s+) instead of
+         recovering in a couple seconds.
+         Did not sweep every other raw requests.get/post call in the
+         file for the same treatment this round — scan_loop()'s outer
+         catch already prevents any of them from crashing that thread,
+         and the other background loops already have their own [ERR]-
+         style catches per the same log excerpt, so the remaining
+         exposure is "costs a cycle," not "kills a thread" — lower
+         priority than the two highest-traffic endpoints (candles,
+         tickers) fixed here and in v0.73.0.
 """
 
 import os
@@ -2777,7 +2810,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.73.0"
+APP_VERSION = "0.74.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5354,9 +5387,28 @@ def get_candles_range(symbol, interval, start_ts, end_ts):
 
 
 def get_tickers():
-    r = requests.get(f"{GATE_BASE}/futures/usdt/tickers", timeout=HTTP_TIMEOUT)
-    r.raise_for_status()
-    return r.json()
+    """Fetches the full USDT futures ticker list — build_universe() (and
+    therefore the entire scan cycle) depends on this succeeding. Retries
+    on the same (ConnectionError, Timeout) classes and policy as
+    get_candles() (GET_CANDLES_RETRIES/GET_CANDLES_RETRY_DELAY, reused
+    rather than duplicated) — a DNS blip or slow response here shouldn't
+    cost a whole scan cycle (SCAN_INTERVAL_SEC, currently 45s+) when a
+    couple of quick retries could recover it in a few seconds instead.
+    scan_loop()'s own try/except still catches whatever gets past this
+    (any exception, not just network ones) so one bad cycle was never
+    able to kill the scan thread outright — but that fallback means
+    losing the whole cycle, this retry means usually not needing to."""
+    last_err = None
+    for attempt in range(GET_CANDLES_RETRIES + 1):
+        try:
+            r = requests.get(f"{GATE_BASE}/futures/usdt/tickers", timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            return r.json()
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            last_err = e
+            if attempt < GET_CANDLES_RETRIES:
+                time.sleep(GET_CANDLES_RETRY_DELAY)
+    raise last_err
 
 
 _contract_spec_cache = {}
