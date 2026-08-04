@@ -2566,6 +2566,24 @@ v0.67.0 - fixed a real bug reported by user ("simulator doesn't remember
          counted in the startup log line ("N pending trades couldn't be
          re-linked and were dropped") so this stays visible instead of
          silently recurring in a different form.
+
+v0.68.0 - surfaced the scanner error log (STATE["errors"]) in the UI —
+         it was already returned by /api/status as "errors" (last 10
+         entries), but nothing ever rendered it; the only visible error
+         signal was an unrelated numeric "ошибок: N" count on the
+         Автоторговля tab (counting autotrade ORDER failures, not scan-
+         level exceptions like a failed candle fetch). Found this gap
+         when the user asked where to see scan errors after the Volume
+         module went quiet (v0.66.0's "искл. неликвид" swung 96 -> 23
+         between two consecutive scans on a near-identical universe
+         size — too fast to be real liquidity change, more likely
+         symbols intermittently failing data_quality_check's "too few
+         candles" path from a flaky/incomplete fetch).
+         New block in the Volume panel: "Последние ошибки сканера (N)"
+         — timestamp + message for each of the last 10, newest first.
+         Purely a display fix — no change to what gets logged or when,
+         just makes the existing data visible instead of only reachable
+         by hitting /api/status directly as raw JSON.
 """
 
 import os
@@ -2585,7 +2603,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.67.0"
+APP_VERSION = "0.68.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -8579,12 +8597,18 @@ async function refreshTuning() {
   const breakoutTxt = br.breakout && br.breakout.total ? `breakout ${br.breakout.winrate}% (${br.breakout.total})` : 'breakout -';
   const cv = st.current_version || {};
   const cvTxt = cv.total ? `с v${s.version}: ${cv.winrate}% (${cv.wins}W/${cv.losses}L)` : `с v${s.version}: пока нет закрытых`;
+  const errList = s.errors || [];
+  const errHtml = errList.length ? `
+    <div class="dim" style="margin-top:10px;padding-top:10px;border-top:1px solid #1c2433;">
+      <b class="loss">Последние ошибки сканера (${errList.length}):</b><br>
+      <span style="font-size:12px;">${errList.slice().reverse().map(e => `${fmtTime(e.t)} — ${e.msg}`).join('<br>')}</span>
+    </div>` : '';
   const detailHtml = `
     <div class="dim" style="margin-bottom:10px;">
       <b>Volume</b> · Винрейт: ${wr} (${st.wins||0}W / ${st.losses||0}L, timeout ${st.timeouts||0}) · ${bounceTxt} · ${breakoutTxt} · открытых: ${st.open||0} · RR ${s.config ? s.config.rr : ''}<br>
       ${atTxt}<br>
       За этот скан отклонено — тренд: ${s.filtered_by_trend||0}, объём: ${s.filtered_by_volume||0}, OI: ${s.filtered_by_oi||0}, устарел: ${s.filtered_by_staleness||0} · ${cvTxt}
-    </div>`;
+    </div>${errHtml}`;
   if (!t.count) {
     el.innerHTML = detailHtml + '<div class="dim" style="padding-top:10px;border-top:1px solid #1c2433;"><b>Объём (Volume Profile) — статистика</b><br>Пока недостаточно данных — подожди пару циклов скана.</div>';
     return;
