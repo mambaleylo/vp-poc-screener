@@ -2857,6 +2857,33 @@ v0.78.0 - VOL_CONFIRM_RATIO lowered 1.4 -> 1.25, per direct user request
          found too weak in v0.57.0; 1.4x now looks too strict once
          actually observed against live rejection counts. 1.25x is a
          middle ground between the two, not a return to either extreme.
+
+v0.79.0 - SIGNAL_MAX_STALENESS_SEC raised 180s -> 300s, per direct user
+         follow-up after "still zero signals" — this time with actual
+         evidence pointing at a specific, previously-invisible cause.
+         The v0.78.0 rejection breakdown showed "устарел: 17" leading
+         Volume's own count (ahead of объём: 11), for a cycle where
+         candidates were genuinely being found (not the earlier all-
+         zero problem from before v0.78.0's volume-ratio fix). Root
+         cause: v0.76.0 deliberately lowered WORKERS 12->8 to fix
+         network reliability, which as an unavoidable side effect
+         slowed the full scan cycle back down — now observed at ~296s
+         live. The 180s staleness threshold (last set in v0.62.1, back
+         when cycles were faster) was never revisited after that
+         slowdown, so symbols scanned in the back half of a now-~5-
+         minute cycle were routinely aging past 180s before the scan
+         even reached them — real signals were being thrown away
+         purely because of how far into the cycle their symbol
+         happened to sit, not because anything was wrong with them.
+         Raised to 300s to roughly match the observed full-cycle
+         duration instead of leaving the two mismatched. Confirmed via
+         code search this only affects Volume (line ~7446, the only
+         reference to this constant) — Divergence has no equivalent
+         check and runs on 1h candles anyway, where this kind of gap
+         is proportionally trivial, so its own continued quiet period
+         has a different (unconfirmed, likely just genuinely quiet
+         market conditions plus occasional network-related fetch
+         misses) cause, not this one.
 """
 
 import os
@@ -2876,7 +2903,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.78.0"
+APP_VERSION = "0.79.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2962,7 +2989,7 @@ BUFFER_PCT_BOUNCE = float(os.environ.get("VP_BUFFER_PCT_BOUNCE", ZONE_BUFFER_PCT
 BUFFER_PCT_BREAKOUT = float(os.environ.get("VP_BUFFER_PCT_BREAKOUT", ZONE_BUFFER_PCT))
 SIGNAL_TIMEOUT_SEC = int(os.environ.get("VP_SIGNAL_TIMEOUT", 6 * 3600))  # close as TIMEOUT if neither TP/SL hit — shared by Volume and Divergence
 EMA_SIGNAL_TIMEOUT_SEC = int(os.environ.get("VP_EMA_SIGNAL_TIMEOUT", 12 * 3600))  # separate from SIGNAL_TIMEOUT_SEC above, per direct user request — widened to 12h (doubled from the shared 6h default) since EMA's timeout rate looked high (12/46 closed) at the current 6h; adjustable live via settings, doesn't touch Volume/Divergence's shared timeout
-SIGNAL_MAX_STALENESS_SEC = int(os.environ.get("VP_SIGNAL_MAX_STALENESS_SEC", 180))  # 3 min (raised from 1 min per direct user request — 60s was too tight; was 5 min before that) — a full universe scan cycle takes several minutes (429s observed for 182 symbols before the v0.59.0/v0.60.0 speedups, since improved), so a symbol scanned late in the cycle can find a signal on a candle that closed well before the scan actually reached it. Entry/SL/TP are computed off that candle's close (sig["price"]), but the real market order fills at whatever price exists NOW — if too much time has passed, price has likely already moved well past where the signal detected it, so the trade enters late into an already-spent move rather than near its start. Reject (skip) the signal if now - candle_close_time exceeds this.
+SIGNAL_MAX_STALENESS_SEC = int(os.environ.get("VP_SIGNAL_MAX_STALENESS_SEC", 300))  # 5 min (raised from 3 min — 60s before that, 5 min before that) — a full universe scan cycle now regularly takes ~296s (observed live), since v0.76.0 deliberately lowered WORKERS 12->8 to fix network reliability, which slowed the cycle back down. 180s was too tight for that slower cadence: live data showed "устарел: 17" leading Volume's own rejection counts for a cycle where candidates were actually being found (not the earlier zero-candidate problem) — most of them just aged past 180s before the scan reached them. Raised to roughly match the observed full-cycle duration rather than picked arbitrarily. Entry/SL/TP are computed off that candle's close (sig["price"]), but the real market order fills at whatever price exists NOW — if too much time has passed, price has likely already moved well past where the signal detected it, so the trade enters late into an already-spent move rather than near its start. Reject (skip) the signal if now - candle_close_time exceeds this.
 MFE_TRACK_SEC = int(os.environ.get("VP_MFE_TRACK_SEC", 24 * 3600))  # keep measuring max favorable/adverse excursion this long after detection, past TP/SL/timeout
 # Breakeven stop-move for breakout signals only (bounce is disabled by
 # default — see BOUNCE_ENABLED below). Live stats showed ~25% of breakout
