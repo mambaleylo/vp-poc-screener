@@ -2724,6 +2724,40 @@ v0.72.0 - ADX regime filter for EMA, per direct user request to research
          "↳ EMA фильтр ADX" (toggle + threshold) / "↳ EMA мин. зазор
          EMA7/14 (%)" rows in settings — all adjustable live, no restart
          needed.
+
+v0.73.0 - get_candles() now also retries on requests.exceptions.Timeout
+         (read timeouts, not just connect-level ConnectionError from
+         v0.69.0), per a live error-log screenshot showing "Read timed
+         out (read timeout=10)" recurring across many different symbols
+         over several minutes. v0.69.0 deliberately excluded read
+         timeouts from retries, reasoning that a real outage or rate
+         limit shouldn't turn into a retry pile-up — reversed against
+         this actual evidence: the pattern (many different symbols,
+         spread over minutes, not one symbol repeatedly) looks like
+         WORKERS (12 concurrent requests) routinely exceeding
+         HTTP_TIMEOUT under real mobile-network conditions, not a hard
+         outage, so retrying is the right call here. Still bounded by
+         GET_CANDLES_RETRIES either way, so even if this read is wrong
+         for some future genuine outage, it only adds a few seconds of
+         latency per symbol, not an unbounded pile-up.
+         scan_symbol()'s specific error handler broadened to match
+         (ConnectionError, Timeout) and count both into the same
+         excluded_fetch_error counter / "N сетевых сбоев" header
+         display from v0.69.0 — both represent the same underlying
+         thing (couldn't get fresh data for this symbol due to network
+         conditions), so splitting them into separate counters wouldn't
+         add useful information.
+         Also in progress, not yet wired up or pushed as a working
+         feature: generic signal-snapshot save/replay infrastructure
+         (save_signal_snapshot()/list_signal_snapshots()/replay_signal_
+         snapshot(), STATE["signal_snapshots"]) — per user request, to
+         freeze a module's closed signals and instantly test a
+         candidate filter threshold against them offline instead of
+         waiting for new live data. Paused mid-implementation (no Flask
+         endpoints or UI yet, not in save_state()/load_state()) pending
+         the user's decision on whether/how to continue it — the
+         functions exist but nothing calls them yet, so this is inert,
+         not broken.
 """
 
 import os
@@ -2743,7 +2777,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.72.0"
+APP_VERSION = "0.73.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3544,6 +3578,15 @@ STATE = {
     "scalp_universe": [],
     "scalp_universe_scores": {},
     "scalp_mmr_map": {},
+    # Signal snapshots (v0.73.0) — a frozen copy of a module's CLOSED
+    # signal list, with all its diagnostic fields, saved on demand so a
+    # candidate filter threshold can be tested against it instantly
+    # (recomputing win/loss/winrate offline) instead of waiting for new
+    # live signals to accumulate under the new threshold. Keyed by an
+    # opaque snapshot id; see save_signal_snapshot()/replay_signal_
+    # snapshot(). Persisted via save_state()/load_state() like
+    # everything else in STATE.
+    "signal_snapshots": {},
     "scalp_max_leverage_map": {},
     "scalp_data": {},          # symbol -> {interval -> {direction -> target-summary}}
     "scalp_recommendations": {},  # symbol -> best config (or None)
@@ -4829,6 +4872,131 @@ def update_ema_outcomes():
             log_error(f"update_ema_outcomes {sig.get('symbol')}: {e}")
 
 
+SNAPSHOT_MODULE_KEYS = {
+    "volume": "signals",
+    "divergence": "div_signals",
+    "ema": "ema_signals",
+    "scalp": "scalp_signals",
+    "session": "session_signals",
+}
+
+
+def save_signal_snapshot(module, limit=100, name=None):
+    """Freezes up to `limit` of the module's most recent CLOSED signals
+    (every field they carry, diagnostics included — adx/rr/ema_gap_pct/
+    atr_pct/etc. for EMA, whatever the module tracks) under a new
+    snapshot id. Only CLOSED signals are kept — a replay recomputes
+    win/loss stats, which needs a resolved result; an OPEN one would
+    just be dead weight. STATE[<list>] is stored newest-first
+    (appendleft on creation), so signals[:limit] is already "most
+    recent N", no sorting needed. Returns the snapshot's metadata, or
+    None if the module name isn't recognized or there's nothing closed
+    yet to save."""
+    state_key = SNAPSHOT_MODULE_KEYS.get(module)
+    if state_key is None:
+        return None
+    with state_lock:
+        signals = list(STATE.get(state_key, []))
+    closed = [s for s in signals if s.get("status") == "CLOSED" and s.get("result") in ("WIN", "LOSS", "TIMEOUT", "BREAKEVEN")]
+    closed = closed[:limit]
+    if not closed:
+        return None
+    snap_id = f"{module}-{int(time.time())}"
+    snapshot = {
+        "id": snap_id, "module": module, "name": name or snap_id,
+        "saved_at": time.time(), "signals": closed, "count": len(closed),
+    }
+    with state_lock:
+        STATE["signal_snapshots"][snap_id] = snapshot
+    save_state()
+    return {"id": snap_id, "module": module, "name": snapshot["name"], "saved_at": snapshot["saved_at"], "count": snapshot["count"]}
+
+
+def list_signal_snapshots(module=None):
+    with state_lock:
+        snaps = list(STATE["signal_snapshots"].values())
+    if module:
+        snaps = [s for s in snaps if s["module"] == module]
+    snaps.sort(key=lambda s: -s["saved_at"])
+    return [{"id": s["id"], "module": s["module"], "name": s["name"], "saved_at": s["saved_at"], "count": s["count"]} for s in snaps]
+
+
+_SNAPSHOT_REPLAY_OPS = {
+    "gte": lambda v, threshold: v >= threshold,
+    "lte": lambda v, threshold: v <= threshold,
+    "abs_gte": lambda v, threshold: abs(v) >= threshold,
+    "abs_lte": lambda v, threshold: abs(v) <= threshold,
+}
+
+
+def _signal_passes_replay_filters(sig, filters):
+    """filters: list of {"field": str, "op": one of _SNAPSHOT_REPLAY_OPS,
+    "value": number}. A signal passes only if EVERY condition holds; a
+    condition on a field the signal doesn't have (None — e.g. an old
+    signal saved before that diagnostic existed) fails CLOSED, treated
+    as not passing rather than silently skipped, matching how a live
+    filter would treat missing data (see EMA_MIN_RR's own `rr is not
+    None and rr < threshold` guard — same "missing means can't confirm
+    it clears the bar" logic, not "missing means let it through")."""
+    for f in filters:
+        val = sig.get(f["field"])
+        if val is None:
+            return False
+        op = _SNAPSHOT_REPLAY_OPS.get(f["op"])
+        if op is None or not op(val, f["value"]):
+            return False
+    return True
+
+
+def replay_signal_snapshot(snap_id, filters):
+    """Recomputes win/loss/winrate and an MFE/MAE-at-close breakdown
+    (same agg() shape compute_ema_stats() etc. already use) against a
+    saved snapshot, keeping only signals that pass `filters`. Entirely
+    offline against already-stored data — no live scanning, no network
+    calls, no waiting for new signals. This can only ever narrow what a
+    snapshot already contains: a signal that a filter active AT SAVE
+    TIME already rejected was never created in the first place, so it
+    isn't in the snapshot to test a looser threshold against — replay
+    can simulate a STRICTER version of an existing filter, not recover
+    what an even-stricter one back then would have thrown away, and
+    obviously can't simulate an entirely new detection rule that never
+    ran. Returns None if the snapshot id doesn't exist."""
+    with state_lock:
+        snapshot = STATE["signal_snapshots"].get(snap_id)
+    if snapshot is None:
+        return None
+    survivors = [s for s in snapshot["signals"] if _signal_passes_replay_filters(s, filters)]
+    wins = sum(1 for s in survivors if s.get("result") == "WIN")
+    losses = sum(1 for s in survivors if s.get("result") == "LOSS")
+    timeouts = sum(1 for s in survivors if s.get("result") == "TIMEOUT")
+    breakevens = sum(1 for s in survivors if s.get("result") == "BREAKEVEN")
+    total = wins + losses
+    winrate = round(wins / total * 100, 1) if total else None
+
+    def agg(key, subset):
+        vals = [s[key] for s in subset if s.get(key) is not None]
+        if not vals:
+            return None
+        vals_sorted = sorted(vals)
+        n = len(vals_sorted)
+        return {
+            "avg": round(sum(vals) / n, 3), "median": round(vals_sorted[n // 2], 3),
+            "p25": round(vals_sorted[int(n * 0.25)], 3),
+            "p75": round(vals_sorted[min(int(n * 0.75), n - 1)], 3), "n": n,
+        }
+
+    win_set = [s for s in survivors if s.get("result") == "WIN"]
+    loss_set = [s for s in survivors if s.get("result") == "LOSS"]
+    return {
+        "snapshot_id": snap_id, "original_count": snapshot["count"], "surviving_count": len(survivors),
+        "wins": wins, "losses": losses, "timeouts": timeouts, "breakevens": breakevens,
+        "total": total, "winrate": winrate,
+        "rr_all": agg("rr", survivors), "rr_wins": agg("rr", win_set), "rr_losses": agg("rr", loss_set),
+        "mfe_r_wins_at_close": agg("mfe_r_at_close", win_set), "mae_r_wins_at_close": agg("mae_r_at_close", win_set),
+        "mfe_r_losses_at_close": agg("mfe_r_at_close", loss_set), "mae_r_losses_at_close": agg("mae_r_at_close", loss_set),
+    }
+
+
 def compute_ema_stats(interval=None):
     with state_lock:
         signals = list(STATE["ema_signals"])
@@ -5044,16 +5212,23 @@ GET_CANDLES_RETRY_DELAY = float(os.environ.get("VP_GET_CANDLES_RETRY_DELAY", 1.5
 
 def get_candles(symbol, interval=INTERVAL, limit=LOOKBACK + 5):
     """Fetches candles for one symbol. Retries GET_CANDLES_RETRIES times
-    on requests.exceptions.ConnectionError specifically (covers DNS
-    resolution failures like the real one seen live — "Failed to resolve
-    'api.gateio.ws'" during what was probably a brief mobile-network
-    blip — as well as refused/reset connections) with a short delay
-    between attempts, since these are transient by nature and a symbol
-    shouldn't be judged on one unlucky moment. Does NOT retry on HTTP
-    error responses (4xx/5xx) or read timeouts — those aren't the "can't
-    even reach the host" class of failure this exists for, and retrying
-    them blindly risks piling up retries during a real outage or rate-
-    limit situation instead of just failing fast."""
+    on requests.exceptions.ConnectionError (DNS resolution failures,
+    refused/reset connections) AND requests.exceptions.Timeout (covers
+    both connect and READ timeouts), with a short delay between
+    attempts. Read timeouts were deliberately excluded from retries in
+    an earlier version, reasoning that a real outage or rate limit
+    shouldn't turn into a retry pile-up — reversed here against actual
+    evidence: a live error-log screenshot showed "Read timed out (read
+    timeout=10)" recurring across many different symbols over several
+    minutes, consistent with WORKERS (12 concurrent requests) routinely
+    exceeding HTTP_TIMEOUT under real mobile-network conditions, not a
+    hard outage — retrying is the right call for that pattern. The
+    retry count stays capped at GET_CANDLES_RETRIES either way, so even
+    if this guess is wrong for some future real outage, it adds bounded
+    extra latency (a few seconds per symbol), not an unbounded pile-up.
+    Does NOT retry on HTTP error responses (4xx/5xx) — the request DID
+    complete there, and a 4xx/5xx is a real answer, not a connectivity
+    blip, so retrying wouldn't change the outcome."""
     last_err = None
     for attempt in range(GET_CANDLES_RETRIES + 1):
         try:
@@ -5065,7 +5240,7 @@ def get_candles(symbol, interval=INTERVAL, limit=LOOKBACK + 5):
             r.raise_for_status()
             # Gate.io returns oldest->newest already; fields: t,v,c,h,l,o,sum (varies by version)
             return _parse_candles(r.json())
-        except requests.exceptions.ConnectionError as e:
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
             last_err = e
             if attempt < GET_CANDLES_RETRIES:
                 time.sleep(GET_CANDLES_RETRY_DELAY)
@@ -7204,10 +7379,10 @@ def scan_symbol(symbol, candles=None):
                     f"HVN zone: {sig['zone']['bottom']:.6g} - {sig['zone']['top']:.6g}",
                     category="vp",
                 )
-    except requests.exceptions.ConnectionError as e:
+    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
         with state_lock:
             STATE["excluded_fetch_error"] += 1
-        log_error(f"{symbol}: connection error after {GET_CANDLES_RETRIES} retries — {e}")
+        log_error(f"{symbol}: network error after {GET_CANDLES_RETRIES} retries — {e}")
     except Exception as e:
         log_error(f"{symbol}: {e}")
 
