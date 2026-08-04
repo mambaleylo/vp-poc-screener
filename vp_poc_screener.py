@@ -2584,6 +2584,44 @@ v0.68.0 - surfaced the scanner error log (STATE["errors"]) in the UI —
          Purely a display fix — no change to what gets logged or when,
          just makes the existing data visible instead of only reachable
          by hitting /api/status directly as raw JSON.
+
+v0.69.0 - root cause found for the "искл. неликвид" swing (96 -> 23 in
+         2 minutes) the user asked about, once v0.68.0's new error panel
+         made it visible: DNS resolution failures for api.gateio.ws
+         ("Failed to resolve... No address associated with hostname"),
+         clustered in a ~35s window — a transient mobile-network blip,
+         not a persistent issue (no repeats afterward in the same log).
+         Two fixes:
+         (1) get_candles() now retries GET_CANDLES_RETRIES (default 2)
+         times specifically on requests.exceptions.ConnectionError
+         (covers DNS failures and refused/reset connections), with
+         GET_CANDLES_RETRY_DELAY (default 1.5s) between attempts, before
+         giving up — a brief blip shouldn't cost a symbol its whole
+         cycle. Deliberately does NOT retry HTTP error responses or read
+         timeouts — only "couldn't even reach the host" failures, so a
+         real outage or rate limit doesn't turn into a retry pile-up.
+         Every caller (scan_symbol's own fetch, and fetch_candles_
+         concurrent()'s per-symbol calls used by the Divergence/EMA
+         shared cache) gets this for free, no per-caller changes needed.
+         (2) New excluded_fetch_error counter, separate from
+         excluded_low_quality — scan_symbol() now catches
+         ConnectionError specifically (after retries are exhausted) and
+         counts it here instead of falling into the generic error log
+         un-counted. Reset alongside the other per-cycle counters in all
+         three existing reset sites, exposed in /api/status, and shown
+         in the header scan-status line as ", N сетевых сбоев" (only
+         appears when nonzero) — so a network blip is now visibly
+         distinguishable from genuine low-liquidity exclusions at a
+         glance, instead of the two being indistinguishable in the
+         header and the real cause only visible by reading raw error
+         text.
+         Also confirmed from the same log: the recurring "reconcile_
+         positions_and_orders: cancelled N orphaned trigger order(s)"
+         entries are the existing cleanup mechanism working as intended
+         (an orphaned TP or SL left behind after its position closed),
+         not a new problem — mentioned here only because they showed up
+         in the same error-panel screenshot and were worth ruling out
+         explicitly rather than leaving ambiguous.
 """
 
 import os
@@ -2603,7 +2641,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.68.0"
+APP_VERSION = "0.69.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3312,6 +3350,7 @@ STATE = {
     "signals": deque(maxlen=SIGNAL_HISTORY),
     "universe_size": 0,
     "excluded_low_quality": 0,
+    "excluded_fetch_error": 0,
     "filtered_by_trend": 0,
     "filtered_by_volume": 0,
     "filtered_by_oi": 0,
@@ -4748,15 +4787,38 @@ def _parse_candles(raw):
     return out
 
 
+GET_CANDLES_RETRIES = int(os.environ.get("VP_GET_CANDLES_RETRIES", 2))  # extra attempts on connection-level failures (DNS, connect timeout) before giving up — a brief network blip shouldn't get a symbol miscounted as illiquid, see excluded_fetch_error below
+GET_CANDLES_RETRY_DELAY = float(os.environ.get("VP_GET_CANDLES_RETRY_DELAY", 1.5))  # seconds between retries
+
+
 def get_candles(symbol, interval=INTERVAL, limit=LOOKBACK + 5):
-    r = requests.get(
-        f"{GATE_BASE}/futures/usdt/candlesticks",
-        params={"contract": symbol, "interval": interval, "limit": limit},
-        timeout=HTTP_TIMEOUT,
-    )
-    r.raise_for_status()
-    # Gate.io returns oldest->newest already; fields: t,v,c,h,l,o,sum (varies by version)
-    return _parse_candles(r.json())
+    """Fetches candles for one symbol. Retries GET_CANDLES_RETRIES times
+    on requests.exceptions.ConnectionError specifically (covers DNS
+    resolution failures like the real one seen live — "Failed to resolve
+    'api.gateio.ws'" during what was probably a brief mobile-network
+    blip — as well as refused/reset connections) with a short delay
+    between attempts, since these are transient by nature and a symbol
+    shouldn't be judged on one unlucky moment. Does NOT retry on HTTP
+    error responses (4xx/5xx) or read timeouts — those aren't the "can't
+    even reach the host" class of failure this exists for, and retrying
+    them blindly risks piling up retries during a real outage or rate-
+    limit situation instead of just failing fast."""
+    last_err = None
+    for attempt in range(GET_CANDLES_RETRIES + 1):
+        try:
+            r = requests.get(
+                f"{GATE_BASE}/futures/usdt/candlesticks",
+                params={"contract": symbol, "interval": interval, "limit": limit},
+                timeout=HTTP_TIMEOUT,
+            )
+            r.raise_for_status()
+            # Gate.io returns oldest->newest already; fields: t,v,c,h,l,o,sum (varies by version)
+            return _parse_candles(r.json())
+        except requests.exceptions.ConnectionError as e:
+            last_err = e
+            if attempt < GET_CANDLES_RETRIES:
+                time.sleep(GET_CANDLES_RETRY_DELAY)
+    raise last_err
 
 
 def fetch_candles_concurrent(fetch_specs, workers=WORKERS):
@@ -6846,6 +6908,10 @@ def scan_symbol(symbol, candles=None):
                     f"HVN zone: {sig['zone']['bottom']:.6g} - {sig['zone']['top']:.6g}",
                     category="vp",
                 )
+    except requests.exceptions.ConnectionError as e:
+        with state_lock:
+            STATE["excluded_fetch_error"] += 1
+        log_error(f"{symbol}: connection error after {GET_CANDLES_RETRIES} retries — {e}")
     except Exception as e:
         log_error(f"{symbol}: {e}")
 
@@ -7075,6 +7141,7 @@ def scan_loop():
             with state_lock:
                 STATE["universe_size"] = len(universe)
                 STATE["excluded_low_quality"] = 0
+                STATE["excluded_fetch_error"] = 0
                 STATE["filtered_by_trend"] = 0
                 STATE["filtered_by_volume"] = 0
                 STATE["filtered_by_oi"] = 0
@@ -7383,6 +7450,7 @@ def api_status():
             "volume_profile_enabled": VOLUME_PROFILE_ENABLED,
             "universe_size": STATE["universe_size"],
             "excluded_low_quality": STATE["excluded_low_quality"],
+            "excluded_fetch_error": STATE["excluded_fetch_error"],
             "filtered_by_trend": STATE["filtered_by_trend"],
             "filtered_by_volume": STATE["filtered_by_volume"],
             "filtered_by_oi": STATE["filtered_by_oi"],
@@ -7960,6 +8028,7 @@ def api_reset_volume():
             STATE["signals"].clear()
             STATE["watchlist"].clear()
             STATE["excluded_low_quality"] = 0
+            STATE["excluded_fetch_error"] = 0
             STATE["filtered_by_trend"] = 0
             STATE["filtered_by_volume"] = 0
             STATE["filtered_by_oi"] = 0
@@ -8005,6 +8074,7 @@ def api_reset():
             STATE["div_signals"].clear()
             STATE["watchlist"].clear()
             STATE["excluded_low_quality"] = 0
+            STATE["excluded_fetch_error"] = 0
             STATE["filtered_by_trend"] = 0
             STATE["filtered_by_volume"] = 0
             STATE["filtered_by_oi"] = 0
@@ -8502,7 +8572,8 @@ async function refreshStatus() {
       }
     }
     const el = document.getElementById('status');
-    const scanTxt = s.last_scan_finished ? `скан ${s.last_scan_duration}s, ${s.universe_size} пар (искл. ${s.excluded_low_quality||0} неликвид)` : 'сканирование...';
+    const fetchErrTxt = s.excluded_fetch_error ? `, ${s.excluded_fetch_error} сетевых сбоев` : '';
+    const scanTxt = s.last_scan_finished ? `скан ${s.last_scan_duration}s, ${s.universe_size} пар (искл. ${s.excluded_low_quality||0} неликвид${fetchErrTxt})` : 'сканирование...';
     el.textContent = `v${s.version} · ${scanTxt}`;
   } catch(e) {}
 }
