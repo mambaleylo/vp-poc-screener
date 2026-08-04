@@ -2622,6 +2622,50 @@ v0.69.0 - root cause found for the "искл. неликвид" swing (96 -> 23 
          not a new problem — mentioned here only because they showed up
          in the same error-panel screenshot and were worth ruling out
          explicitly rather than leaving ambiguous.
+
+v0.70.0 - two fixes from direct user reports off the ATR-SL rollout:
+         (1) REAL SAFETY BUG: user reported live cases where the
+         computed SL sat further from entry than the exchange's own
+         liquidation price at the resolved leverage — meaning Gate
+         would forcibly liquidate the position before that SL order
+         could ever trigger, turning a bounded intended loss into an
+         uncontrolled one. Root cause: only the scalp module ever
+         checked SL distance against the liquidation buffer; every
+         other mode (bounce/breakout/divergence/ema/session) placed its
+         SL with no such check at all. Harmless while EMA's SL was a
+         tight fixed 0.4%, far short of any real liquidation distance —
+         stopped being harmless the moment EMA's SL went ATR-based
+         (v0.65.0) and started coming out wider on volatile symbols.
+         New check in execute_autotrade() (shared by every mode, not
+         just EMA): after leverage is resolved, computes the
+         liquidation buffer via compute_scalp_liquidation_move_pct()
+         (its math isn't actually scalp-specific, just first written
+         there) using mmr_pct from STATE["scalp_mmr_map"] — MMR is a
+         Gate contract property, not a per-module one, so reusing that
+         already-refreshed cache is correct rather than a shortcut —
+         falling back to SCALP_DEFAULT_MMR_PCT for a symbol the scalp
+         universe hasn't covered. If the liquidation buffer doesn't
+         clear the SL distance by at least SCALP_SAFETY_MARGIN (1.5x,
+         the same constant scalp already uses for this exact purpose),
+         the trade is SKIPPED with a clear log reason instead of placing
+         an SL that could never actually fire.
+         (2) RR got worse after ATR-based SL, per direct user question
+         asking for a filter to cut trade count. Since TP is fixed and
+         SL is ATR-based, RR is directly 1/ATR — a minimum-RR filter is
+         really a maximum-ATR filter expressed in the unit that
+         actually matters (risk relative to reward), so it was the
+         obvious direct choice over some indirect volatility proxy. New
+         EMA_MIN_RR (default 0 = disabled): scan_symbol_ema() now
+         checks the computed rr against it BEFORE consuming the
+         cooldown slot (a filtered-out signal must not block a later,
+         better one on the same symbol+interval — moved the whole
+         entry/atr/rr computation earlier in the function to make this
+         ordering possible). Filtered count tracked in filtered_by_
+         min_rr, shown in the EMA panel header next to the threshold
+         when active. Wired through get_settings()/apply_settings()/
+         SETTINGS_KEYS and a new "↳ EMA мин. RR" field in the settings
+         UI, right under the EMA leverage row — adjustable live, no
+         restart needed, 0 always means off.
 """
 
 import os
@@ -2641,7 +2685,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.69.0"
+APP_VERSION = "0.70.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2841,6 +2885,7 @@ EMA_RR = float(os.environ.get("VP_EMA_RR", 3.75))  # SL reverted to round 2's 0.
 # per-symbol, ATR can.
 EMA_SL_MODE = os.environ.get("VP_EMA_SL_MODE", "atr")  # "atr" or "fixed_pct" — fixed_pct reproduces the old EMA_RR-derived behavior exactly, for comparison/rollback
 EMA_SL_ATR_MULT = float(os.environ.get("VP_EMA_SL_ATR_MULT", 1.5))  # SL = ATR(EMA_DIAG_ATR_PERIOD) * this, in price units
+EMA_MIN_RR = float(os.environ.get("VP_EMA_MIN_RR", 0))  # 0 = disabled. Per direct user request after ATR-based SL (above) started producing RR well below 1 on volatile symbols (stop wider than the fixed take) — since TP is fixed and SL is ATR-based, RR is directly 1/ATR, so a minimum-RR filter is really just a maximum-ATR filter, expressed in the unit that actually matters (risk relative to reward) rather than a raw volatility threshold that would need re-tuning if TP% ever changes. Signals below this get skipped entirely (not created, not logged as a signal) — same treatment as the trend/volume/OI filters elsewhere.
 # TP stays a fixed % of entry (EMA_TP_PCT) — only the STOP moves to ATR.
 # Consequence: RR is no longer one constant, it varies signal to signal
 # (tp_pct-distance / atr-based-risk) depending on each symbol's own
@@ -3103,6 +3148,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_sig
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session",
                   "autotrade_size_mode", "autotrade_size_value",
                   "scalp_size_mode", "scalp_size_value",
+                  "ema_min_rr",
                   "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session")
 
 
@@ -3141,6 +3187,7 @@ def get_settings():
         "autotrade_leverage_breakout": AUTOTRADE_LEVERAGE_BREAKOUT,
         "autotrade_leverage_divergence": AUTOTRADE_LEVERAGE_DIVERGENCE,
         "autotrade_leverage_ema": AUTOTRADE_LEVERAGE_EMA,
+        "ema_min_rr": EMA_MIN_RR,
         "autotrade_leverage_session": AUTOTRADE_LEVERAGE_SESSION,
     }
 
@@ -3157,6 +3204,7 @@ def apply_settings(updates):
     global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
     global SCALP_SIZE_MODE, SCALP_SIZE_VALUE
     global AUTOTRADE_LEVERAGE_BOUNCE, AUTOTRADE_LEVERAGE_BREAKOUT, AUTOTRADE_LEVERAGE_DIVERGENCE, AUTOTRADE_LEVERAGE_EMA, AUTOTRADE_LEVERAGE_SESSION
+    global EMA_MIN_RR
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
     if "divergence_enabled" in updates:
@@ -3219,6 +3267,13 @@ def apply_settings(updates):
             v = float(updates["scalp_size_value"])
             if v > 0:
                 SCALP_SIZE_VALUE = v
+        except (TypeError, ValueError):
+            pass
+    if "ema_min_rr" in updates:
+        try:
+            v = float(updates["ema_min_rr"])
+            if v >= 0:  # 0 is a valid value here (disables the filter), unlike the size fields above
+                EMA_MIN_RR = v
         except (TypeError, ValueError):
             pass
     for key, glob_name in (
@@ -3355,6 +3410,7 @@ STATE = {
     "filtered_by_volume": 0,
     "filtered_by_oi": 0,
     "filtered_by_staleness": 0,
+    "filtered_by_min_rr": 0,
     "last_scan_started": None,
     "last_scan_finished": None,
     "last_scan_duration": None,
@@ -4444,6 +4500,15 @@ def scan_symbol_ema(symbol, interval=EMA_INTERVAL, candles=None):
         if has_open_ema_signal(symbol, interval) or has_open_signal_any_module(symbol, exclude="ema_signals"):
             return
 
+        entry = candles[-1]["close"]
+        atr_pct = sig.get("atr_pct")
+        atr_price = (atr_pct / 100 * entry) if atr_pct else None
+        sl, tp, risk, rr = compute_ema_tp_sl(sig["direction"], entry, atr=atr_price)
+        if EMA_MIN_RR > 0 and rr is not None and rr < EMA_MIN_RR:
+            with state_lock:
+                STATE["filtered_by_min_rr"] += 1
+            return  # ATR-based stop came out too wide relative to the fixed TP — checked BEFORE the cooldown below so a filtered signal doesn't block a later, better one on the same (symbol, interval)
+
         now = time.time()
         cooldown_key = (symbol, interval)
         with _ema_cooldowns_lock:
@@ -4454,10 +4519,6 @@ def scan_symbol_ema(symbol, interval=EMA_INTERVAL, candles=None):
         if not allowed:
             return
 
-        entry = candles[-1]["close"]
-        atr_pct = sig.get("atr_pct")
-        atr_price = (atr_pct / 100 * entry) if atr_pct else None
-        sl, tp, risk, rr = compute_ema_tp_sl(sig["direction"], entry, atr=atr_price)
         record = {
             "symbol": symbol,
             "interval": interval,
@@ -5329,6 +5390,51 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=No
                 leverage = leverage_max
         except Exception as e:
             log_error(f"execute_autotrade {symbol}: couldn't fetch leverage_max ({e}), using requested leverage as-is")
+
+        # Liquidation-safety check, v0.70.0 — previously only the scalp
+        # module ever compared its SL distance against the liquidation
+        # buffer at the chosen leverage; every other mode (bounce/
+        # breakout/divergence/ema/session) placed its SL with no such
+        # check at all. That was always a latent risk, but harmless in
+        # practice while EMA's SL was a tight fixed 0.4% — nowhere near
+        # a typical liquidation distance. It stopped being harmless the
+        # moment EMA's SL became ATR-based (v0.65.0) and started coming
+        # out WIDER than before on volatile symbols: user directly
+        # reported live cases where the computed SL sat further from
+        # entry than the exchange's own liquidation price — meaning
+        # Gate would forcibly liquidate the position before that SL
+        # order could ever trigger, turning a bounded, intended loss
+        # into an uncontrolled one at whatever the liquidation engine's
+        # own (worse) price ends up being.
+        # Reuses compute_scalp_liquidation_move_pct() — despite the
+        # name, its math (Gate's isolated-margin liquidation formula)
+        # isn't scalp-specific, just first written for that module.
+        # mmr_pct comes from the same STATE["scalp_mmr_map"] the scalp
+        # module already refreshes every SCALP_REFRESH_SEC — MMR is a
+        # property of the Gate contract itself, not of which module is
+        # trading it, so reusing that cache instead of a fresh fetch is
+        # correct, not a shortcut. Falls back to SCALP_DEFAULT_MMR_PCT
+        # (a deliberately conservative default) for a symbol the scalp
+        # universe hasn't covered yet.
+        try:
+            with state_lock:
+                mmr_map = STATE.get("scalp_mmr_map", {})
+            mmr_pct = mmr_map.get(symbol, SCALP_DEFAULT_MMR_PCT)
+            liq_buffer_pct = compute_scalp_liquidation_move_pct(direction, leverage, mmr_pct)
+            sl_distance_pct = abs(entry - sl) / entry * 100 if entry else None
+            if liq_buffer_pct is not None and sl_distance_pct is not None:
+                if liq_buffer_pct < sl_distance_pct * SCALP_SAFETY_MARGIN:
+                    record["status"] = "SKIPPED"
+                    record["detail"] = (
+                        f"SL distance {sl_distance_pct:.3f}% at {leverage}x leverage doesn't clear the "
+                        f"liquidation buffer ({liq_buffer_pct:.3f}%, needs >= {SCALP_SAFETY_MARGIN}x margin) — "
+                        f"skipping rather than placing an SL that could never actually trigger"
+                    )
+                    with state_lock:
+                        STATE["autotrade_log"].appendleft(record)
+                    return record
+        except Exception as e:
+            log_error(f"execute_autotrade {symbol}: liquidation-safety check failed ({e}), proceeding without it — this is exactly the gap this check exists to close, so treat any recurrence of this log line as worth investigating")
 
         contracts, notional, margin, skip_reason = compute_position_size(
             symbol, entry, size_mode, size_value, leverage, wallet_balance)
@@ -7634,10 +7740,12 @@ def api_ema_status():
             "stats_by_interval": by_interval,
             "config": {
                 "sl_mode": EMA_SL_MODE, "sl_atr_mult": EMA_SL_ATR_MULT, "rr_fallback": EMA_RR, "tp_pct": EMA_TP_PCT,
+                "min_rr": EMA_MIN_RR,
                 "len7": EMA_LEN_7, "len14": EMA_LEN_14, "len28": EMA_LEN_28,
                 "signal_type": EMA_SIGNAL_TYPE, "trend_filter": EMA_TREND_FILTER, "invert_signals": EMA_INVERT_SIGNALS,
                 "cooldown": EMA_COOLDOWN_SEC,
             },
+            "filtered_by_min_rr": STATE["filtered_by_min_rr"],
         })
 
 
@@ -8497,6 +8605,13 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="label">↳ EMA мин. RR</div>
+          <div class="sub">0 = выключено. Сигнал пропускается, если ATR-стоп даёт RR ниже этого</div>
+        </div>
+        <input type="number" id="setEmaMinRr" step="0.1" min="0" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;width:100px;">
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Скальпинг</div>
           <div class="sub">плечо берётся из самого сигнала, не отсюда</div>
         </div>
@@ -8901,7 +9016,7 @@ async function refreshEma() {
     <div class="dim" style="margin-bottom:10px;">
       EMA ${cfg.len7}/${cfg.len14}/${cfg.len28} (${cfg.signal_type}${cfg.trend_filter ? ', с фильтром тренда' : ''})${cfg.invert_signals ? ' <span style="color:#ffcc55;font-weight:bold;">· РЕВЕРС ВКЛЮЧЁН</span>' : ''} · сканируются ТФ: ${(status.intervals||[]).join(', ')} ·
       скан ${status.last_scan_duration!==null && status.last_scan_duration!==undefined ? status.last_scan_duration+'s' : '...'} ·
-      Винрейт (всё вместе): ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ср. ${s.rr_all ? s.rr_all.avg : '?'} (медиана ${s.rr_all ? s.rr_all.median : '?'}) · SL: ${cfg.sl_mode === 'atr' ? `ATR×${cfg.sl_atr_mult}` : `фикс. RR ${cfg.rr_fallback}`}
+      Винрейт (всё вместе): ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ср. ${s.rr_all ? s.rr_all.avg : '?'} (медиана ${s.rr_all ? s.rr_all.median : '?'}) · SL: ${cfg.sl_mode === 'atr' ? `ATR×${cfg.sl_atr_mult}` : `фикс. RR ${cfg.rr_fallback}`}${cfg.min_rr > 0 ? ` · мин. RR ${cfg.min_rr} (отсеяно: ${s.filtered_by_min_rr||0})` : ''}
     </div>
     <div style="margin-bottom:10px;padding-top:6px;border-top:1px solid #1c2433;">
       <b>По таймфреймам (для сравнения):</b><br>
@@ -9382,6 +9497,7 @@ const setValueInputs = {
   autotrade_size_value: document.getElementById('setAutotradeSizeValue'),
   scalp_size_mode: document.getElementById('setScalpSizeMode'),
   scalp_size_value: document.getElementById('setScalpSizeValue'),
+  ema_min_rr: document.getElementById('setEmaMinRr'),
   autotrade_leverage_bounce: document.getElementById('setAutotradeLevBounce'),
   autotrade_leverage_breakout: document.getElementById('setAutotradeLevBreakout'),
   autotrade_leverage_divergence: document.getElementById('setAutotradeLevDivergence'),
