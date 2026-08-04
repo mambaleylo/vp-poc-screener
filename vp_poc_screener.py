@@ -2884,6 +2884,36 @@ v0.79.0 - SIGNAL_MAX_STALENESS_SEC raised 180s -> 300s, per direct user
          has a different (unconfirmed, likely just genuinely quiet
          market conditions plus occasional network-related fetch
          misses) cause, not this one.
+
+v0.80.0 - reverse mode for the Session module, per direct user request
+         after its live winrate looked bad (~11%). Mirrors DIV_INVERT_
+         SIGNALS/EMA_INVERT_SIGNALS in spirit, but with its own sizing
+         spec the user was explicit about: the inverted trade's SL uses
+         the SAME risk distance the non-inverted trade's stop would
+         have had (sweep_extreme + SESSION_SL_BUFFER_PCT), just applied
+         on the opposite side of entry since direction flips — TP is
+         fixed at 2x that risk (RR=2), NOT the original TP (opposite
+         side of the consolidation range, a distance tied to range
+         width rather than to risk, so it wouldn't make sense to reuse
+         for a differently-sized inverted stop).
+         New SESSION_INVERT_SIGNALS (default off). Implemented directly
+         inside detect_session_manipulation() itself — the single
+         function already shared by both live scanning and the
+         historical backtest ranking — rather than as a separate post-
+         processing step, so live signals and the backtest-driven
+         symbol ranking automatically agree on which direction is
+         actually being traded. This sidesteps the exact class of bug
+         found and fixed for divergence's pivot-stability stat (v0.66.0),
+         where a metric computed outside the core detection function
+         didn't know about the invert flag and reported the wrong sign
+         for months.
+         Wired through get_settings()/apply_settings()/SETTINGS_KEYS and
+         a new "↳ Реверс сигналов (RR 2)" toggle right under the Session
+         enable switch — adjustable live, no restart needed. Session's
+         own panel header now also shows "РЕВЕРС ВКЛЮЧЁН (RR 2)" when
+         active, matching how Divergence's panel already flags its own
+         reverse state — closes the same gap noted earlier: reverse
+         status needs to be visible at a glance, not just inferred.
 """
 
 import os
@@ -2903,7 +2933,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.79.0"
+APP_VERSION = "0.80.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3072,6 +3102,7 @@ EMA_LEN_28 = int(os.environ.get("VP_EMA_LEN_28", 28))
 EMA_SIGNAL_TYPE = os.environ.get("VP_EMA_SIGNAL_TYPE", "combined")
 EMA_TREND_FILTER = os.environ.get("VP_EMA_TREND_FILTER", "1") == "1"  # only BUY above EMA28 / SELL below it, same as the script's "Фильтровать по тренду"
 EMA_INVERT_SIGNALS = os.environ.get("VP_EMA_INVERT_SIGNALS", "0") == "1"  # user hypothesis: this indicator's config has been systematically wrong more often than right (22.4% win rate at RR=2) — worth testing whether trading the OPPOSITE of what it says works, with its own (smaller, asymmetric) TP/SL rather than reusing the original's
+SESSION_INVERT_SIGNALS = os.environ.get("VP_SESSION_INVERT_SIGNALS", "0") == "1"  # per direct user request after live session winrate looked bad (~11%) — mirrors DIV_INVERT_SIGNALS/EMA_INVERT_SIGNALS, but with its OWN sizing rather than just flipping direction and reusing the original sl/tp: the ORIGINAL sl distance (sweep_extreme + SESSION_SL_BUFFER_PCT, i.e. the same risk a non-inverted trade would have taken) becomes the inverted trade's own SL distance too, applied on the opposite side of entry — TP is fixed at 2x that same risk (RR=2), not the original TP (opposite side of the consolidation range, an arbitrary distance tied to range width rather than to risk). Implemented inside detect_session_manipulation() itself (not as a separate post-processing step) so both live scanning AND the historical backtest ranking see the same inverted direction/sizing consistently — avoids the kind of sign mismatch found and fixed for divergence's pivot-stability stat, where the live/backtest paths could disagree about which direction was "the one actually traded."
 EMA_COOLDOWN_SEC = int(os.environ.get("VP_EMA_COOLDOWN", 3600))
 EMA_SIGNAL_HISTORY = 200
 # the Pine Script only plots BUY/SELL labels, no TP/SL of its own — added
@@ -3382,7 +3413,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "bounce_enabled", "breakout_enabled",
-                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session",
                   "autotrade_size_mode", "autotrade_size_value",
@@ -3404,6 +3435,7 @@ def get_settings():
         "scalp_enabled": SCALP_ENABLED,
         "scalp_signals_enabled": SCALP_SIGNALS_ENABLED,
         "session_enabled": SESSION_ENABLED,
+        "session_invert_signals": SESSION_INVERT_SIGNALS,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
         "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
@@ -3442,7 +3474,7 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, HOURLY_STATS_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION
     global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
@@ -3471,6 +3503,8 @@ def apply_settings(updates):
         SCALP_SIGNALS_ENABLED = bool(updates["scalp_signals_enabled"])
     if "session_enabled" in updates:
         SESSION_ENABLED = bool(updates["session_enabled"])
+    if "session_invert_signals" in updates:
+        SESSION_INVERT_SIGNALS = bool(updates["session_invert_signals"])
     if "hourly_stats_enabled" in updates:
         HOURLY_STATS_ENABLED = bool(updates["hourly_stats_enabled"])
     if "telegram_enabled" in updates:
@@ -4219,7 +4253,11 @@ def detect_session_manipulation(candles, session_open_ts):
     Since v0.55.0, the range must also be flat/choppy rather than
     still trending in one direction (SESSION_MAX_TREND_RATIO) — a
     range can pass SESSION_MIN_RANGE_PCT just by being the tail end
-    of a directional move, which isn't a real consolidation."""
+    of a directional move, which isn't a real consolidation.
+    Since v0.80.0, SESSION_INVERT_SIGNALS flips direction AND uses its
+    own RR=2 sizing (same risk distance as the non-inverted stop, TP at
+    2x that) instead of reusing the original tp (opposite side of the
+    range) — see that constant's own comment for the reasoning."""
     open_dt = datetime.datetime.fromtimestamp(session_open_ts, tz=datetime.timezone.utc)
     range_start_dt = open_dt.replace(hour=SESSION_RANGE_START_UTC_HOUR, minute=0, second=0, microsecond=0)
     range_start = range_start_dt.timestamp()
@@ -4257,17 +4295,25 @@ def detect_session_manipulation(candles, session_open_ts):
         if cluster_highs_above:
             entry = c["close"]
             sweep_extreme = max(cluster_highs_above)
-            sl = sweep_extreme * (1 + SESSION_SL_BUFFER_PCT)
-            tp = range_low
-            return {"direction": "SHORT", "entry": entry, "sl": sl, "tp": tp,
+            orig_sl = sweep_extreme * (1 + SESSION_SL_BUFFER_PCT)
+            risk = abs(entry - orig_sl)
+            if SESSION_INVERT_SIGNALS:
+                direction, sl, tp = "LONG", entry - risk, entry + risk * 2
+            else:
+                direction, sl, tp = "SHORT", orig_sl, range_low
+            return {"direction": direction, "entry": entry, "sl": sl, "tp": tp,
                     "range_high": range_high, "range_low": range_low,
                     "sweep_extreme": sweep_extreme, "confirm_time": c["time"]}
         if cluster_lows_below:
             entry = c["close"]
             sweep_extreme = min(cluster_lows_below)
-            sl = sweep_extreme * (1 - SESSION_SL_BUFFER_PCT)
-            tp = range_high
-            return {"direction": "LONG", "entry": entry, "sl": sl, "tp": tp,
+            orig_sl = sweep_extreme * (1 - SESSION_SL_BUFFER_PCT)
+            risk = abs(entry - orig_sl)
+            if SESSION_INVERT_SIGNALS:
+                direction, sl, tp = "SHORT", entry + risk, entry - risk * 2
+            else:
+                direction, sl, tp = "LONG", orig_sl, range_high
+            return {"direction": direction, "entry": entry, "sl": sl, "tp": tp,
                     "range_high": range_high, "range_low": range_low,
                     "sweep_extreme": sweep_extreme, "confirm_time": c["time"]}
     return None
@@ -8460,6 +8506,7 @@ def api_session_status():
             "range_tf": SESSION_RANGE_TF, "range_start_utc_hour": SESSION_RANGE_START_UTC_HOUR,
             "manipulation_window_min": SESSION_MANIPULATION_WINDOW_MIN,
             "min_sample": SESSION_MIN_SAMPLE, "backtest_days": SESSION_BACKTEST_DAYS,
+            "invert_signals": SESSION_INVERT_SIGNALS,
         },
         "top": ranked,
     })
@@ -9022,6 +9069,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">бэктест раз в сутки + живой скан в окне открытия Лондона</div>
         </div>
         <label class="switch"><input type="checkbox" id="setSession"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Реверс сигналов (RR 2)</div>
+          <div class="sub">торговать в обратную сторону; риск как у обычного стопа, тейк = 2×риска</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setSessionInvert"><span class="switchSlider"></span></label>
       </div>
     </div>
 
@@ -9756,7 +9810,7 @@ async function refreshSession() {
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
       Открытие сессии: ${cfg.open_hour_local}:00 (UTC+${cfg.utc_offset_hours}, фикс.) · диапазон проторговки: с ${cfg.range_start_utc_hour}:00 UTC до открытия, ТФ ${cfg.range_tf} ·
-      окно манипуляции: первые ${cfg.manipulation_window_min} мин после открытия · мин. выборка для ранжирования: ${cfg.min_sample}<br>
+      окно манипуляции: первые ${cfg.manipulation_window_min} мин после открытия · мин. выборка для ранжирования: ${cfg.min_sample}${cfg.invert_signals ? ' · <span style="color:#ffcc55;font-weight:bold;">РЕВЕРС ВКЛЮЧЁН (RR 2)</span>' : ''}<br>
       ${buildTxt} · ${nextOpenTxt}<br>
       Монет в рейтинге: ${(status.top||[]).length} · манипуляций не найдено: ${status.zero_manipulation_count||0} · ещё не обработано: ${status.not_yet_processed_count||0}<br>
       ${watchTxt}<br>
@@ -10041,6 +10095,7 @@ const setInputs = {
   breakout_enabled: document.getElementById('setBreakout'),
   divergence_enabled: document.getElementById('setDivergence'),
   div_invert_signals: document.getElementById('setDivInvert'),
+  session_invert_signals: document.getElementById('setSessionInvert'),
   ema_enabled: document.getElementById('setEma'),
   ema_invert_signals: document.getElementById('setEmaInvert'),
   ema_adx_filter_enabled: document.getElementById('setEmaAdxFilterEnabled'),
