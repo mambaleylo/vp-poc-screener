@@ -2833,6 +2833,21 @@ v0.76.0 - WORKERS lowered 12 -> 8, HTTP_TIMEOUT raised 10 -> 15s (now
          off is a slower full-universe scan cycle in exchange for fewer
          failed fetches — accepted as the right call given how often
          retries were still coming up short.
+
+v0.77.0 - get_futures_risk_limit_tiers() gets the same network-error
+         retry as the other fetch functions — last remaining gap, found
+         after v0.76.0's WORKERS/HTTP_TIMEOUT change cut the error log
+         from 10 entries down to 1 (confirms that fix worked well). This
+         function pages through Gate's risk_limit_tiers endpoint
+         (SCALP_REFRESH_SEC apart, hours between runs) and previously
+         had zero retry on any single page's fetch — a network blip
+         mid-pagination meant losing every page not yet fetched for
+         that entire cycle, even though the outer try/except already
+         degrades gracefully (keeps whatever pages DID succeed rather
+         than crashing). Same (ConnectionError, Timeout) + GET_CANDLES_
+         RETRIES/GET_CANDLES_RETRY_DELAY policy as get_candles()/
+         get_tickers()/get_candles_range() before it, applied per-page
+         inside the existing pagination loop.
 """
 
 import os
@@ -2852,7 +2867,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.76.0"
+APP_VERSION = "0.77.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6102,9 +6117,25 @@ def get_futures_risk_limit_tiers():
     offset = 0
     try:
         for _ in range(30):  # safety cap — 30*100 = 3000 markets, far more than any real universe
-            r = requests.get(f"{GATE_BASE}/futures/usdt/risk_limit_tiers",
-                              params={"limit": limit, "offset": offset}, timeout=HTTP_TIMEOUT)
-            r.raise_for_status()
+            net_attempt = 0
+            while True:
+                try:
+                    r = requests.get(f"{GATE_BASE}/futures/usdt/risk_limit_tiers",
+                                      params={"limit": limit, "offset": offset}, timeout=HTTP_TIMEOUT)
+                    r.raise_for_status()
+                    break
+                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                    # Same retry policy as get_candles()/get_tickers()/
+                    # get_candles_range() — this runs infrequently
+                    # (SCALP_REFRESH_SEC, hours apart), but a network
+                    # blip mid-pagination previously meant losing
+                    # whatever pages hadn't been fetched yet for that
+                    # entire cycle rather than just retrying the one
+                    # page that failed.
+                    net_attempt += 1
+                    if net_attempt > GET_CANDLES_RETRIES:
+                        raise
+                    time.sleep(GET_CANDLES_RETRY_DELAY)
             page = r.json()
             if not page:
                 break
