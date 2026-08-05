@@ -2945,6 +2945,26 @@ v0.81.0 - realized-R tracking for TIMEOUT closes, per direct user
          and fills in as new TIMEOUTs occur going forward, same
          backward-compat pattern as every other diagnostic field added
          this way (atr_pct, adx, rr, etc.).
+
+v0.82.0 - orphaned trigger orders now get cleaned up on a fixed 2-minute
+         timer, per direct user report with a screenshot: Gate showing
+         16 open orders against only 2 open positions. Root cause was
+         in reconcile_positions_and_orders()'s own design, stated
+         plainly in its old docstring: it was called only "at the
+         moment a new real trade is about to open," piggybacking on
+         however often trades happened rather than running on its own
+         schedule — during a quiet stretch with no new trades, orphaned
+         orders (leftover TP or SL after the other leg already closed
+         the position) just sat there accumulating indefinitely.
+         New reconcile_loop() + RECONCILE_INTERVAL_SEC (default 120s,
+         the 2-minute cadence directly requested) — runs
+         reconcile_positions_and_orders() on its own timer, registered
+         as a new daemon thread in __main__. This is additive, not a
+         replacement: execute_autotrade() still also calls it
+         opportunistically right before opening a new position, same
+         as before — the timer just closes the gap for whenever no new
+         trade happens to trigger that call. Skipped in dry-run mode
+         (nothing to reconcile against if nothing real is being placed).
 """
 
 import os
@@ -2964,7 +2984,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.81.0"
+APP_VERSION = "0.82.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5920,9 +5940,13 @@ def reconcile_positions_and_orders():
         nothing left to close, and would fire against whatever NEW
         position might later open on that same contract if left alone.
         These get cancelled outright.
-    Called at the moment a new real trade is about to open rather than
-    on its own timer, piggybacking on however often trades actually
-    happen instead of adding another periodic API-polling loop.
+    Called both opportunistically (right before a new real trade opens)
+    AND on its own timer (reconcile_loop(), RECONCILE_INTERVAL_SEC) —
+    the opportunistic call alone left orphaned orders sitting for as
+    long as the market stayed quiet with no new trades to piggyback the
+    cleanup on, which is exactly what a live example showed (16 open
+    orders against only 2 open positions after a lull with nothing new
+    triggering a reconcile pass).
     Returns (unprotected_contracts, cancelled_contracts)."""
     try:
         positions = get_open_positions()
@@ -8153,6 +8177,24 @@ def session_live_loop():
         except Exception as e:
             log_error(f"session_live_loop: {e}")
             time.sleep(60)
+
+
+RECONCILE_INTERVAL_SEC = int(os.environ.get("VP_RECONCILE_INTERVAL_SEC", 120))  # 2 min, per direct user request — reconcile_positions_and_orders() was previously only called opportunistically (right before a new trade opens), so orphaned orders sat uncleaned for as long as the market stayed quiet with nothing new to piggyback the cleanup on; a live example showed 16 open orders against only 2 open positions after such a lull
+
+
+def reconcile_loop():
+    """Runs reconcile_positions_and_orders() on its own fixed timer,
+    independent of whether any new trade happens to be opening —
+    complements (doesn't replace) the opportunistic call still made
+    inside execute_autotrade() right before a new position opens, so
+    cleanup isn't left waiting on new trades during a quiet market."""
+    while True:
+        try:
+            if not AUTOTRADE_DRY_RUN:
+                reconcile_positions_and_orders()
+        except Exception as e:
+            log_error(f"reconcile_loop: {e}")
+        time.sleep(max(30, RECONCILE_INTERVAL_SEC))
 
 
 # ----------------------------------------------------------------------------
@@ -10990,6 +11032,7 @@ if __name__ == "__main__":
     threading.Thread(target=hourly_stats_loop, daemon=True).start()
     threading.Thread(target=session_loop, daemon=True).start()
     threading.Thread(target=session_live_loop, daemon=True).start()
+    threading.Thread(target=reconcile_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
     tg_status = "настроен" if (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) else "не настроен"
     print(f"VP-POC Screener v{APP_VERSION} — http://127.0.0.1:{port} — Telegram: {tg_status}")
