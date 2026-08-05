@@ -2993,6 +2993,24 @@ v0.83.0 - EMA_MIN_RR default enabled (0 -> 0.3), per direct user request
          flagged so this doesn't become a second "why didn't my fix
          apply" investigation like the earlier raw.githubusercontent.com
          caching one.
+
+v0.84.0 - SESSION_SL_MULT (default 1.5), per direct user request after
+         a live example (CYS_USDT, inverted-mode LONG) hit its SL:
+         entry 0.5815, SL 0.563719, risk 3.06% of price. Multiplies the
+         base risk distance (sweep_extreme + SESSION_SL_BUFFER_PCT vs
+         entry) by 1.5 before it's used for BOTH the inverted trade's
+         SL and its RR=2 TP, so risk and reward scale together and RR
+         stays exactly 2 at the new, wider stop — not a case of loosening
+         the stop while leaving the take behind. Applied in both
+         direction branches of detect_session_manipulation(), only
+         inside the SESSION_INVERT_SIGNALS path — the non-inverted
+         trade keeps its original sizing (sweep-based stop, opposite-
+         range-edge take) untouched, since that path was never part of
+         this request and isn't RR-based the same way. No settings-
+         persistence caveat here unlike EMA_MIN_RR's v0.83.0 note — this
+         constant was never added to SETTINGS_KEYS/the settings UI, so
+         there's no saved-settings value that could override this new
+         code default; the 1.5x takes effect immediately on restart.
 """
 
 import os
@@ -3012,7 +3030,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.83.0"
+APP_VERSION = "0.84.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3182,6 +3200,7 @@ EMA_SIGNAL_TYPE = os.environ.get("VP_EMA_SIGNAL_TYPE", "combined")
 EMA_TREND_FILTER = os.environ.get("VP_EMA_TREND_FILTER", "1") == "1"  # only BUY above EMA28 / SELL below it, same as the script's "Фильтровать по тренду"
 EMA_INVERT_SIGNALS = os.environ.get("VP_EMA_INVERT_SIGNALS", "0") == "1"  # user hypothesis: this indicator's config has been systematically wrong more often than right (22.4% win rate at RR=2) — worth testing whether trading the OPPOSITE of what it says works, with its own (smaller, asymmetric) TP/SL rather than reusing the original's
 SESSION_INVERT_SIGNALS = os.environ.get("VP_SESSION_INVERT_SIGNALS", "0") == "1"  # per direct user request after live session winrate looked bad (~11%) — mirrors DIV_INVERT_SIGNALS/EMA_INVERT_SIGNALS, but with its OWN sizing rather than just flipping direction and reusing the original sl/tp: the ORIGINAL sl distance (sweep_extreme + SESSION_SL_BUFFER_PCT, i.e. the same risk a non-inverted trade would have taken) becomes the inverted trade's own SL distance too, applied on the opposite side of entry — TP is fixed at 2x that same risk (RR=2), not the original TP (opposite side of the consolidation range, an arbitrary distance tied to range width rather than to risk). Implemented inside detect_session_manipulation() itself (not as a separate post-processing step) so both live scanning AND the historical backtest ranking see the same inverted direction/sizing consistently — avoids the kind of sign mismatch found and fixed for divergence's pivot-stability stat, where the live/backtest paths could disagree about which direction was "the one actually traded."
+SESSION_SL_MULT = float(os.environ.get("VP_SESSION_SL_MULT", 1.5))  # per direct user request after a live example (CYS_USDT) hit its SL — multiplies the base risk distance (sweep_extreme + SESSION_SL_BUFFER_PCT vs entry) before it's used for the inverted trade's SL AND its RR=2 TP, so both scale together and RR stays exactly 2 at the new, wider stop. Only affects SESSION_INVERT_SIGNALS's own sizing (see its comment above) — the non-inverted trade still uses its original sl/tp (sweep-based stop, opposite-range-edge take), untouched by this.
 EMA_COOLDOWN_SEC = int(os.environ.get("VP_EMA_COOLDOWN", 3600))
 EMA_SIGNAL_HISTORY = 200
 # the Pine Script only plots BUY/SELL labels, no TP/SL of its own — added
@@ -4377,6 +4396,7 @@ def detect_session_manipulation(candles, session_open_ts):
             orig_sl = sweep_extreme * (1 + SESSION_SL_BUFFER_PCT)
             risk = abs(entry - orig_sl)
             if SESSION_INVERT_SIGNALS:
+                risk *= SESSION_SL_MULT
                 direction, sl, tp = "LONG", entry - risk, entry + risk * 2
             else:
                 direction, sl, tp = "SHORT", orig_sl, range_low
@@ -4389,6 +4409,7 @@ def detect_session_manipulation(candles, session_open_ts):
             orig_sl = sweep_extreme * (1 - SESSION_SL_BUFFER_PCT)
             risk = abs(entry - orig_sl)
             if SESSION_INVERT_SIGNALS:
+                risk *= SESSION_SL_MULT
                 direction, sl, tp = "SHORT", entry + risk, entry - risk * 2
             else:
                 direction, sl, tp = "LONG", orig_sl, range_high
