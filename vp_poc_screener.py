@@ -2965,6 +2965,34 @@ v0.82.0 - orphaned trigger orders now get cleaned up on a fixed 2-minute
          as before — the timer just closes the gap for whenever no new
          trade happens to trigger that call. Skipped in dry-run mode
          (nothing to reconcile against if nothing real is being placed).
+
+v0.83.0 - EMA_MIN_RR default enabled (0 -> 0.3), per direct user request
+         after a concrete live example: a UB_USDT SHORT (entry 0.12947,
+         SL 0.150056, TP 0.127528) worked out to RR≈0.094 — risk 15.9%
+         of price against a 1.5% reward, since TP stays fixed but SL is
+         ATR-based and this symbol's 1h ATR was huge. A ~7x-worse
+         outlier even against the already-low median RR (0.627 at the
+         time). User asked to enable the filter but left the exact
+         threshold to judgment; 0.3 was picked to clear that specific
+         bad case with room to spare while staying below the median, so
+         it should mainly cut tail outliers rather than the typical
+         trade — not validated against a win/loss-by-RR-bucket
+         breakdown, a reasonable starting point pending that data
+         (filtered_by_min_rr will show how many signals it's actually
+         catching).
+         Important persistence note, called out directly to the user:
+         save_settings() writes the FULL current settings dict (via
+         get_settings()) on every save, so anyone who has saved settings
+         since EMA_MIN_RR existed (v0.72.0) almost certainly already has
+         "ema_min_rr": 0 pinned in their settings.json — load_settings()
+         will apply that saved 0 at startup, silently overriding this
+         new code-level default of 0.3. The code default only takes
+         effect on a fresh install with no settings.json yet. Existing
+         users need to set the "↳ EMA мин. RR" field to 0.3 once via the
+         settings UI (added in v0.72.0) for it to actually take effect —
+         flagged so this doesn't become a second "why didn't my fix
+         apply" investigation like the earlier raw.githubusercontent.com
+         caching one.
 """
 
 import os
@@ -2984,7 +3012,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.82.0"
+APP_VERSION = "0.83.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3186,7 +3214,7 @@ EMA_RR = float(os.environ.get("VP_EMA_RR", 3.75))  # SL reverted to round 2's 0.
 # per-symbol, ATR can.
 EMA_SL_MODE = os.environ.get("VP_EMA_SL_MODE", "atr")  # "atr" or "fixed_pct" — fixed_pct reproduces the old EMA_RR-derived behavior exactly, for comparison/rollback
 EMA_SL_ATR_MULT = float(os.environ.get("VP_EMA_SL_ATR_MULT", 1.5))  # SL = ATR(EMA_DIAG_ATR_PERIOD) * this, in price units
-EMA_MIN_RR = float(os.environ.get("VP_EMA_MIN_RR", 0))  # 0 = disabled. Per direct user request after ATR-based SL (above) started producing RR well below 1 on volatile symbols (stop wider than the fixed take) — since TP is fixed and SL is ATR-based, RR is directly 1/ATR, so a minimum-RR filter is really just a maximum-ATR filter, expressed in the unit that actually matters (risk relative to reward) rather than a raw volatility threshold that would need re-tuning if TP% ever changes. Signals below this get skipped entirely (not created, not logged as a signal) — same treatment as the trend/volume/OI filters elsewhere.
+EMA_MIN_RR = float(os.environ.get("VP_EMA_MIN_RR", 0.3))  # was 0 (disabled) — enabled per direct user request after a concrete live example: UB_USDT SHORT with entry 0.12947/SL 0.150056/TP 0.127528 worked out to RR≈0.094 (risk 15.9% of price vs reward 1.5%, since TP is fixed but SL is ATR-based and this symbol's ATR was huge on 1h). That's a ~7x-worse outlier even against the already-low median RR (0.627 at the time). 0.3 is set as a starting point specifically to cut that kind of tail outlier without touching the typical trade — median RR sits well above it, so most signals should be unaffected; this wasn't tuned against a win/loss breakdown by RR bucket, just picked to clear the reported bad case with room to spare, and can be raised/lowered from here once there's data on how many signals it's actually filtering (see filtered_by_min_rr).
 # ADX regime filter, v0.72.0 — per direct user request to research and
 # propose an actual filter for EMA's whipsaw problem (rather than the
 # home-grown recent_crossover_count proxy from v0.62.0). ADX (Wilder,
