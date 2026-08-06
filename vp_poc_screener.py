@@ -3068,6 +3068,43 @@ v0.87.0 - SCALP_SL_BUFFER_MULT raised back 0.05 -> 0.25, per direct
          0.2->0.05 change used — needs verifying against the next batch
          of losses under the new buffer. Not in SETTINGS_KEYS, so no
          settings-persistence override risk here (unlike EMA_MIN_RR).
+
+v0.88.0 - ATR-based SL for Divergence, per direct user request after
+         reviewing live MFE/MAE data with reverse mode confirmed off
+         (so the numbers were trustworthy, unlike the earlier pivot-
+         stability sign bug period). Root cause: DIV_RR-derived SL was
+         a fixed 0.5% (DIV_TP_PCT/DIV_RR) regardless of the symbol's
+         actual volatility — LOSS MAE at close averaged 3.23R / median
+         1.851R, meaning losses overshot the nominal -1.0R stop by
+         3x+ on average, an even bigger gap than EMA had before its
+         own ATR fix (v0.65.0, ~2x overshoot). Exact same mirror of
+         that fix: new DIV_SL_MODE ("atr" default, or "fixed_pct" to
+         reproduce the old exact behavior) and DIV_SL_ATR_MULT (default
+         1.5, same multiplier EMA uses). compute_div_tp_sl() rewritten
+         to match compute_ema_tp_sl()'s shape: TP stays a fixed % of
+         entry (DIV_TP_PCT, unchanged), SL = ATR(EMA_DIAG_ATR_PERIOD,
+         the same period constant EMA's own ATR already uses — not a
+         separate one) * DIV_SL_ATR_MULT, falling back to the old
+         DIV_RR-derived SL when ATR is unavailable or DIV_SL_MODE is
+         "fixed_pct". scan_symbol_divergence() computes ATR directly
+         from the candles it already has in hand (reuses _true_range_
+         series()/_atr_series(), no new fetch) rather than needing a
+         separate diagnostics pass the way EMA originally grew one.
+         Same downstream consequences as EMA's v0.65.0: compute_div_
+         tp_sl() now returns (sl, tp, risk, rr) instead of (sl, tp,
+         risk); every divergence signal carries its own "rr" and
+         "atr_pct" fields; compute_divergence_stats() gained rr_all/
+         rr_wins/rr_losses and atr_pct_wins/atr_pct_losses (same agg()
+         shape as everything else); the panel header (previously "RR
+         ${cfg.rr}", one fixed number) now shows "RR ср. X (медиана Y)"
+         plus "SL: ATR×1.5" (or "фикс. RR N" in fixed_pct mode); new RR
+         column in the divergence signals table; /api/status's div
+         config block replaced "rr" with "sl_mode"/"sl_atr_mult"/
+         "rr_fallback". Old signals from before this change have no
+         "rr"/"atr_pct" keys — every read site uses .get()/None-checks,
+         so they render as "-" and are simply excluded from the new
+         aggregates rather than erroring, same backward-compat pattern
+         used for every other diagnostic field added this way.
 """
 
 import os
@@ -3087,7 +3124,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.87.0"
+APP_VERSION = "0.88.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3216,6 +3253,20 @@ DIV_FRESHNESS_BARS = int(os.environ.get("VP_DIV_FRESHNESS_BARS", DIV_PIVOT_RIGHT
 DIV_SHADOW_RIGHTS = [int(x) for x in os.environ.get("VP_DIV_SHADOW_RIGHTS", "1,2").split(",") if x.strip()]  # only values below DIV_PIVOT_RIGHT are meaningful for the stability diagnostic
 DIV_RR = float(os.environ.get("VP_DIV_RR", 2.0))  # round 2 retune — see DIV_TP_PCT comment. Was 0.867 for round 1 (pre-data guess).
 DIV_TP_PCT = float(os.environ.get("VP_DIV_TP_PCT", 0.01))  # TP is a fixed % move from entry — SL is then sized backward from this via DIV_RR, rather than TP being derived from a pivot-based SL.
+# ATR-based SL for divergence, v0.88.0 — mirrors EMA's v0.65.0 fix, per
+# direct user request after live MFE/MAE data showed the same root
+# cause: DIV_RR-derived SL is a fixed 0.5% (DIV_TP_PCT/DIV_RR) regardless
+# of the symbol's actual volatility, and LOSS MAE at close averaged
+# 3.23R / median 1.851R — losses were overshooting the nominal -1.0R
+# stop by 3x+ on average, an even bigger gap than EMA's original ~2x
+# before its own ATR fix. A fixed % can't adapt per-symbol; ATR can.
+DIV_SL_MODE = os.environ.get("VP_DIV_SL_MODE", "atr")  # "atr" or "fixed_pct" — fixed_pct reproduces the exact old DIV_RR-derived behavior, for comparison/rollback
+DIV_SL_ATR_MULT = float(os.environ.get("VP_DIV_SL_ATR_MULT", 1.5))  # SL = ATR(EMA_DIAG_ATR_PERIOD) * this, in price units — same period constant EMA's own ATR diagnostic/SL already uses, not a separate one
+# TP stays a fixed % of entry (DIV_TP_PCT) — only the STOP moves to ATR,
+# same split EMA uses. RR is no longer one constant; every signal now
+# carries its own "rr" field (tp_dist / atr-based-risk), and
+# compute_divergence_stats() exposes rr_all/rr_wins/rr_losses for the
+# header display that used to just show the old fixed DIV_RR.
 # Round 1 (0.011/RR2.0 -> 0.0065/RR0.867) was a pre-data guess for the
 # reversed hypothesis, off the ORIGINAL direction's own stats.
 # Round 2, off the REVERSED direction's own live at-close data (n=8,
@@ -4840,25 +4891,36 @@ def compute_scalp_leverage_for_target(target_pct, account_usd=SCALP_ACCOUNT_USD,
     return required_notional / account_usd
 
 
-def compute_div_tp_sl(direction, entry, rr=DIV_RR, tp_pct=DIV_TP_PCT):
-    """TP is a fixed % move from entry (tp_pct) rather than derived from
-    the pivot-based invalidation point. SL is then sized backward from
-    that TP distance divided by rr, so the RR ratio is preserved — but
-    note this means SL no longer corresponds to where the divergence
-    pattern itself is actually invalidated (beyond the pivot extreme);
-    it's now a purely mechanical fraction of the TP distance. Deliberate
-    tradeoff, requested in place of the structural (pivot-based) stop."""
+def compute_div_tp_sl(direction, entry, atr=None, tp_pct=DIV_TP_PCT, atr_mult=DIV_SL_ATR_MULT, fallback_rr=DIV_RR):
+    """TP is always a fixed % of entry (tp_pct) — the divergence pattern
+    itself doesn't imply a TP, this was always synthetic. SL depends on
+    DIV_SL_MODE:
+      - "atr" (default): SL = atr * atr_mult in price units. Pass None
+        or 0 for atr to force the fixed_rr fallback for this call even
+        in atr mode (e.g. ATR unavailable for this candle set).
+      - "fixed_pct" or ATR unavailable: reproduces the old behavior —
+        risk = tp_distance / fallback_rr (DIV_RR).
+    Returns (sl, tp, risk, rr) — rr computed FROM the actual resulting
+    distances rather than assumed, since ATR mode makes it vary signal
+    to signal instead of being one fixed constant."""
     if direction == "SHORT":
         tp = entry * (1 - tp_pct)
         tp_dist = entry - tp
-        risk = tp_dist / rr
+        if DIV_SL_MODE == "atr" and atr:
+            risk = atr * atr_mult
+        else:
+            risk = tp_dist / fallback_rr
         sl = entry + risk
     else:
         tp = entry * (1 + tp_pct)
         tp_dist = tp - entry
-        risk = tp_dist / rr
+        if DIV_SL_MODE == "atr" and atr:
+            risk = atr * atr_mult
+        else:
+            risk = tp_dist / fallback_rr
         sl = entry - risk
-    return sl, tp, risk
+    rr = round(tp_dist / risk, 3) if risk else None
+    return sl, tp, risk, rr
 
 
 def has_open_divergence_signal(symbol):
@@ -4896,7 +4958,16 @@ def scan_symbol_divergence(symbol, candles=None):
             return
 
         entry = candles[-1]["close"]
-        sl, tp, risk = compute_div_tp_sl(sig["direction"], entry)
+        atr_pct = None
+        atr_price = None
+        if len(candles) >= EMA_DIAG_ATR_PERIOD * 2:
+            tr = _true_range_series(candles)
+            atr_series = _atr_series(tr, EMA_DIAG_ATR_PERIOD)
+            last_atr = atr_series[-1]
+            if last_atr and entry:
+                atr_price = last_atr
+                atr_pct = round(last_atr / entry * 100, 4)
+        sl, tp, risk, rr = compute_div_tp_sl(sig["direction"], entry, atr=atr_price)
         # how much of the anticipated move already happened between the
         # pivot forming and the signal actually firing (confirmation +
         # freshness delay) — positive means price already moved in the
@@ -4915,6 +4986,8 @@ def scan_symbol_divergence(symbol, candles=None):
             "sl": sl,
             "tp": tp,
             "risk": risk,
+            "rr": rr,  # varies per signal in ATR mode — see DIV_SL_MODE / compute_div_tp_sl
+            "atr_pct": atr_pct,
             "price_p1": sig["price_p1"], "price_p2": sig["price_p2"],
             "rsi_p1": sig["rsi_p1"], "rsi_p2": sig["rsi_p2"],
             "time_p1": sig["time_p1"], "time_p2": sig["time_p2"],
@@ -4943,10 +5016,11 @@ def scan_symbol_divergence(symbol, candles=None):
             sim_execute_trade("divergence", symbol, sig["direction"], entry, sl, tp,
                                AUTOTRADE_LEVERAGE_DIVERGENCE, record)
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
+        rr_txt = f"{rr:g}" if rr is not None else "?"
         send_telegram(
             f"{arrow} {symbol} (RSI {sig['kind']} divergence)\n"
             f"entry: {entry:.6g}\n"
-            f"SL: {sl:.6g}  TP: {tp:.6g}  (RR {DIV_RR:g})",
+            f"SL: {sl:.6g}  TP: {tp:.6g}  (RR {rr_txt})",
             category="div",
         )
     except Exception as e:
@@ -5453,6 +5527,11 @@ def compute_divergence_stats():
         "pre_move_pct_all": agg("pre_move_pct", signals),
         "pre_move_pct_wins": agg("pre_move_pct", win_set_all),
         "pre_move_pct_losses": agg("pre_move_pct", loss_set_all),
+        # rr is per-signal now (v0.88.0, ATR-based SL) instead of one
+        # global constant — this is what the header display shows in
+        # place of the old fixed DIV_RR value.
+        "rr_all": agg("rr", dataset), "rr_wins": agg("rr", win_set), "rr_losses": agg("rr", loss_set),
+        "atr_pct_wins": agg("atr_pct", win_set), "atr_pct_losses": agg("atr_pct", loss_set),
         "dataset_count": len(dataset),
     }
 
@@ -8483,7 +8562,7 @@ def api_divergence_status():
                 for k, v in stability_raw.items()
             },
             "config": {
-                "rr": DIV_RR, "tp_pct": DIV_TP_PCT, "rsi_period": DIV_RSI_PERIOD,
+                "sl_mode": DIV_SL_MODE, "sl_atr_mult": DIV_SL_ATR_MULT, "rr_fallback": DIV_RR, "tp_pct": DIV_TP_PCT, "rsi_period": DIV_RSI_PERIOD,
                 "pivot_left": DIV_PIVOT_LEFT, "pivot_right": DIV_PIVOT_RIGHT, "invert_signals": DIV_INVERT_SIGNALS,
                 "freshness_bars": DIV_FRESHNESS_BARS, "cooldown": DIV_COOLDOWN_SEC,
             },
@@ -9113,7 +9192,7 @@ INDEX_HTML = """<!doctype html>
   </table>
   <div id="divStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
   <table id="divTable" style="display:none">
-    <thead><tr><th>Symbol</th><th>Dir</th><th>Kind</th><th>Entry</th><th>SL</th><th>TP</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
+    <thead><tr><th>Symbol</th><th>Dir</th><th>Kind</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
     <tbody></tbody>
   </table>
   <div id="emaStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
@@ -9695,6 +9774,7 @@ async function refreshDivergence() {
       <td>${fmt(r.entry)}</td>
       <td class="dim">${fmt(r.sl)}</td>
       <td class="dim">${fmt(r.tp)}</td>
+      <td class="dim">${r.rr !== null && r.rr !== undefined ? r.rr : '-'}</td>
       <td class="dim" title="на закрытии → полное окно 24ч">${fmtMfeMae(r, 'mfe_r')}</td>
       <td class="dim" title="на закрытии → полное окно 24ч">${fmtMfeMae(r, 'mae_r')}</td>
       <td>${statusHtml}</td>
@@ -9758,7 +9838,7 @@ async function refreshDivergence() {
   panel.innerHTML = `
     <div class="dim" style="margin-bottom:10px;">
       RSI-дивергенции${cfg.invert_signals ? ' <span style="color:#ffcc55;font-weight:bold;">· РЕВЕРС ВКЛЮЧЁН</span>' : ''} · ТФ ${status.interval} · скан ${status.last_scan_duration!==null && status.last_scan_duration!==undefined ? status.last_scan_duration+'s' : '...'} ·
-      Винрейт: ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ${cfg.rr}
+      Винрейт: ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ср. ${s.rr_all ? s.rr_all.avg : '?'} (медиана ${s.rr_all ? s.rr_all.median : '?'}) · SL: ${cfg.sl_mode === 'atr' ? `ATR×${cfg.sl_atr_mult}` : `фикс. RR ${cfg.rr_fallback}`}
     </div>
     ${mfeBlock}
     ${preMoveBlock}
