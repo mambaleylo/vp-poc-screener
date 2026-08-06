@@ -3011,6 +3011,24 @@ v0.84.0 - SESSION_SL_MULT (default 1.5), per direct user request after
          constant was never added to SETTINGS_KEYS/the settings UI, so
          there's no saved-settings value that could override this new
          code default; the 1.5x takes effect immediately on restart.
+
+v0.85.0 - EMA_MIN_RR raised 0.3 -> 0.7, per direct user request after
+         live stats showed the average/median RR gap actually mattered:
+         avg RR 0.923 gave EV≈+0.075R at the live 55.9% winrate, but
+         median RR 0.717 gave EV≈-0.040R at that same winrate — the
+         TYPICAL trade was already losing money on average even though
+         the headline average RR looked fine. 0.3 (v0.83.0) was picked
+         only to clear one extreme outlier (UB_USDT, RR≈0.094) and was
+         nowhere near this. Breakeven RR at 55.9% winrate works out to
+         ≈0.789; 0.7 sits just under that deliberately, cutting sub-
+         breakeven trades without also catching ones right at the
+         margin (winrate itself is an estimate with its own noise, so
+         filtering exactly at the calculated breakeven would over-cut).
+         Confirmed same persistence caveat as v0.83.0 applies: if
+         settings.json already has ema_min_rr saved (0.3 or otherwise),
+         it overrides this new code default of 0.7 at startup — needs
+         the "↳ EMA мин. RR" settings field updated to 0.7 manually,
+         same as before.
 """
 
 import os
@@ -3030,7 +3048,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.84.0"
+APP_VERSION = "0.85.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3233,7 +3251,7 @@ EMA_RR = float(os.environ.get("VP_EMA_RR", 3.75))  # SL reverted to round 2's 0.
 # per-symbol, ATR can.
 EMA_SL_MODE = os.environ.get("VP_EMA_SL_MODE", "atr")  # "atr" or "fixed_pct" — fixed_pct reproduces the old EMA_RR-derived behavior exactly, for comparison/rollback
 EMA_SL_ATR_MULT = float(os.environ.get("VP_EMA_SL_ATR_MULT", 1.5))  # SL = ATR(EMA_DIAG_ATR_PERIOD) * this, in price units
-EMA_MIN_RR = float(os.environ.get("VP_EMA_MIN_RR", 0.3))  # was 0 (disabled) — enabled per direct user request after a concrete live example: UB_USDT SHORT with entry 0.12947/SL 0.150056/TP 0.127528 worked out to RR≈0.094 (risk 15.9% of price vs reward 1.5%, since TP is fixed but SL is ATR-based and this symbol's ATR was huge on 1h). That's a ~7x-worse outlier even against the already-low median RR (0.627 at the time). 0.3 is set as a starting point specifically to cut that kind of tail outlier without touching the typical trade — median RR sits well above it, so most signals should be unaffected; this wasn't tuned against a win/loss breakdown by RR bucket, just picked to clear the reported bad case with room to spare, and can be raised/lowered from here once there's data on how many signals it's actually filtering (see filtered_by_min_rr).
+EMA_MIN_RR = float(os.environ.get("VP_EMA_MIN_RR", 0.7))  # was 0.3 — raised per direct user request after live stats showed a real gap between the average RR (0.923, EV≈+0.075R at 55.9% winrate) and the median RR (0.717, EV≈-0.040R at the same winrate) — the "typical" trade was already sub-breakeven even though the average looked fine, and 0.3 (picked only to clear one extreme outlier, UB_USDT at RR≈0.094) was nowhere near catching that. Breakeven RR at the live 55.9% winrate works out to ≈0.789 (from winrate*RR = 1-winrate); 0.7 sits just under that on purpose — cuts sub-breakeven trades without also cutting ones sitting right at the margin, which could still be fine as winrate estimate itself has noise. TIMEOUT closes told the same story from another angle: avg realized R was +0.142 but median was -0.142 — opposite signs, meaning a few large positive outliers were carrying the average while the typical timeout was already a small loss.
 # ADX regime filter, v0.72.0 — per direct user request to research and
 # propose an actual filter for EMA's whipsaw problem (rather than the
 # home-grown recent_crossover_count proxy from v0.62.0). ADX (Wilder,
