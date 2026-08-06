@@ -3029,6 +3029,21 @@ v0.85.0 - EMA_MIN_RR raised 0.3 -> 0.7, per direct user request after
          it overrides this new code default of 0.7 at startup — needs
          the "↳ EMA мин. RR" settings field updated to 0.7 manually,
          same as before.
+
+v0.86.0 - Session's "Открытие" column now shows date+time, not just
+         time, per direct user observation: session open is the same
+         fixed 10:00 every single day by design (SESSION_OPEN_HOUR_
+         LOCAL), so the existing fmtTime() (hour:minute only) gave zero
+         way to tell which day's session a row belonged to — every row
+         just read "10:00" regardless of when it actually happened.
+         New fmtDateTime() (day, month, hour, minute) used specifically
+         for session_open in both places it's rendered: the main
+         session signals table and the per-symbol sessionDayLink history
+         list. fmtTime() itself is untouched and still used everywhere
+         else (Volume/Divergence/EMA/Scalp tables, error log timestamps,
+         exit-time tooltips) — those show each row's own varying
+         creation time throughout the day, where time-only is
+         sufficient context, unlike Session's fixed daily open.
 """
 
 import os
@@ -3048,7 +3063,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.85.0"
+APP_VERSION = "0.86.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9429,6 +9444,7 @@ INDEX_HTML = """<!doctype html>
 <script>
 const fmt = (n, d=6) => n === null || n === undefined ? '-' : Number(n).toPrecision(d).replace(/\\.?0+$/,'').replace(/\\.$/, '');
 const fmtTime = (t) => t ? new Date(t*1000).toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit'}) : '-';
+const fmtDateTime = (t) => t ? new Date(t*1000).toLocaleString('ru-RU', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'}) : '-';  // date+time, not just time — Session's own open time is the SAME 10:00 every day by design, so time-only gives no way to tell which day's session a row belongs to
 
 let activeTab = 'signals';
 let vpModeChecked = false;
@@ -9989,7 +10005,7 @@ async function refreshSession() {
     return `<tr data-symbol="${s.symbol}" data-session-open="${s.session_open}" style="cursor:pointer;">
       <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td>
       <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.sl)}</td><td class="dim">${fmt(s.tp)}</td>
-      <td>${statusHtml}</td><td class="dim">${fmtTime(s.session_open)}</td>
+      <td>${statusHtml}</td><td class="dim">${fmtDateTime(s.session_open)}</td>
     </tr>`;
   }).join('');
   const signalsTableHtml = signals.length ? `
@@ -10041,7 +10057,7 @@ async function openSessionDetail(symbol) {
     const rows = (j.results || []).map(r => {
       const dirClass = r.direction === 'LONG' ? 'long' : 'short';
       const resClass = r.result === 'WIN' ? 'win' : (r.result === 'LOSS' ? 'loss' : 'status-timeout');
-      return `<span class="sessionDayLink" data-symbol="${symbol}" data-session-open="${r.session_open}" style="cursor:pointer;text-decoration:underline dotted;">${fmtTime(r.session_open)}: <span class="${dirClass}">${r.direction}</span> <span class="${resClass}">${r.result}</span></span>`;
+      return `<span class="sessionDayLink" data-symbol="${symbol}" data-session-open="${r.session_open}" style="cursor:pointer;text-decoration:underline dotted;">${fmtDateTime(r.session_open)}: <span class="${dirClass}">${r.direction}</span> <span class="${resClass}">${r.result}</span></span>`;
     }).join(' · ');
     detail.innerHTML = `<div style="border-top:1px solid #1c2433;padding-top:8px;"><b>${symbol}</b> — история по дням (клик открывает график):<br>
       <span style="font-size:11px;">${rows || 'нет данных'}</span></div>`;
