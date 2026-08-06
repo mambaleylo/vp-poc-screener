@@ -3044,6 +3044,30 @@ v0.86.0 - Session's "Открытие" column now shows date+time, not just
          exit-time tooltips) — those show each row's own varying
          creation time throughout the day, where time-only is
          sufficient context, unlike Session's fixed daily open.
+
+v0.87.0 - SCALP_SL_BUFFER_MULT raised back 0.05 -> 0.25, per direct
+         user request to improve scalp's real profitability (not just
+         RR cosmetics). The 0.05 cut (an earlier version) was explicitly
+         made cautious because it was based on n=1 loss — now n=26 real
+         losses show avg LOSS MAE -1.167R / median -1.065R, meaning
+         actual adverse excursion overshoots the nominal -1.0R stop by
+         ~17% on average (slippage/wicks the historical p90_adverse_pct
+         measurement doesn't fully capture). Recomputed EV using a live
+         example (SKYAI_USDT, RR≈0.479, 70.8% live winrate): by nominal
+         stop, EV≈+0.047R (thin positive); by the REAL overshot stop
+         (-1.167R instead of -1.0R), EV≈-0.002R — essentially zero. The
+         decent winrate was very likely being fully absorbed by this
+         overshoot rather than showing up as real account profit, which
+         is what the user's "хороший винрейт, но толку мало" complaint
+         actually looks like once the math is done — a more concrete,
+         fixable target than "RR isn't great" (which alone is expected
+         and already accounted for by the EV-based scoring from v0.61.0).
+         0.25 aims to bring the stop back in line with where real losses
+         land rather than an arbitrary round number, following the same
+         "watch live data, don't just theorize" approach the original
+         0.2->0.05 change used — needs verifying against the next batch
+         of losses under the new buffer. Not in SETTINGS_KEYS, so no
+         settings-persistence override risk here (unlike EMA_MIN_RR).
 """
 
 import os
@@ -3063,7 +3087,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.86.0"
+APP_VERSION = "0.87.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3347,7 +3371,7 @@ SCALP_SIGNALS_ENABLED = os.environ.get("VP_SCALP_SIGNALS_ENABLED", "1") == "1"
 SCALP_SIGNAL_HISTORY = 200
 SCALP_SIGNAL_COOLDOWN_SEC = int(os.environ.get("VP_SCALP_SIGNAL_COOLDOWN_SEC", 3600))  # per (symbol, interval) — avoid re-firing every 45s scan tick for the same still-fresh candle
 SCALP_SIGNAL_TIMEOUT_MULT = float(os.environ.get("VP_SCALP_SIGNAL_TIMEOUT_MULT", 4.0))  # timeout = this many times the recommendation's own median time-to-hit
-SCALP_SL_BUFFER_MULT = float(os.environ.get("VP_SCALP_SL_BUFFER_MULT", 0.05))  # SL = p90_adverse_pct * (1 + this) — tightened from 0.2 on a first round of live MFE/MAE data (n=8: 7W/1L): WIN MAE stayed well clear of the stop (p75 -0.127R, nowhere near -1.0), but with only ONE loss ever, the true distribution of adverse moves isn't known yet — kept the step modest (0.2->0.05, not all the way to 0) rather than tightening as far as the win-side data alone might suggest, specifically because a single loss can't establish how far real adverse moves go
+SCALP_SL_BUFFER_MULT = float(os.environ.get("VP_SCALP_SL_BUFFER_MULT", 0.25))  # SL = p90_adverse_pct * (1 + this) — raised back up from 0.05, per direct user request after live LOSS MAE data (now n=26, a real sample — the earlier 0.05 cut was explicitly made cautious because it was based on n=1 loss) showed avg -1.167R / median -1.065R: losses were overshooting the nominal -1.0R stop by ~17% on average, meaning the 0.05 buffer wasn't actually covering real adverse excursion including slippage/wicks. Back-of-envelope from that overshoot: current_sl_pct = p90_adverse*1.05, and avg realized loss = -1.167*current_sl_pct ≈ p90_adverse*1.225 — so the true P90 estimate itself was being undershot by roughly that much once real execution is factored in. 0.25 targets bringing the stop back in line with what real losses actually reach, rather than picking an arbitrary round number; still needs verifying against the NEXT batch of live losses once they accumulate under the new buffer, same as the original 0.2->0.05 decision was based on watching real data rather than theory alone.
 SCALP_SIGNAL_TOP_N = int(os.environ.get("VP_SCALP_SIGNAL_TOP_N", 1))  # only fire a live signal for the top-N ranked symbols by score each cycle, not every qualifying one
 SCALP_SAFETY_MARGIN = float(os.environ.get("VP_SCALP_SAFETY_MARGIN", 1.5))  # liquidation buffer must exceed the coin's own historical p90 adverse move by this factor before a target/leverage combo is flagged "safe"
 SCALP_MIN_HIT_RATE = float(os.environ.get("VP_SCALP_MIN_HIT_RATE", 60.0))  # a target below this hit-rate isn't worth recommending even if technically "safe"
