@@ -3276,6 +3276,76 @@ v0.93.0 - Risk auto-tune: a new system that periodically nudges risk-
          the five newly-settings-backed constants this round (readable/
          writable via the API, and being tuned automatically per the
          user's request) — noted as a scope decision, not an oversight.
+
+v0.94.0 - Session NY: a full, independent duplicate of the Session module
+         (London/Frankfurt open, 10:00 Moscow) for the New York open
+         (16:30 Moscow / 13:30 UTC), per direct user request after the
+         original showed a promising live streak (6W/0L, though on a
+         tiny sample — the actual larger per-symbol backtest table
+         showed a more modest 50-67%, flagged directly to the user
+         before building this). Explicitly NOT a generalization of the
+         original into a multi-session system — user was specific that
+         Session must stay completely untouched, zero refactor risk to
+         something already working, even at the cost of duplicating a
+         genuinely large amount of code. Every constant (SESSION_NY_*),
+         function, STATE key, background thread, and API endpoint below
+         has its own independent name; the original session_* code path
+         was not modified anywhere except the one shared, generic
+         cross-module check (has_open_signal_any_module gained a
+         "session_ny_signals" entry in its own lists dict — skipping
+         that would let this module stack a position on a symbol
+         another module already has open).
+         New York's 16:30 open isn't a whole hour like the original's
+         10:00, so session_ny_open_utc_ts() needed its own minute-aware
+         implementation (SESSION_NY_OPEN_MINUTE_LOCAL) — the original
+         session_open_utc_ts() hardcodes minute=0. Consolidation range
+         for the NY variant starts at SESSION_NY_RANGE_START_UTC_HOUR=7
+         (07:00 UTC = the ORIGINAL session's own open) — i.e. the
+         London/Frankfurt session becomes the "prior session" range for
+         New York's manipulation check, the same relationship the
+         original has to the Asian session before it.
+         Fully duplicated: detect_session_ny_manipulation() (same
+         sweep-and-reject pattern logic, own SESSION_NY_* constants,
+         including its own SESSION_NY_INVERT_SIGNALS/SESSION_NY_SL_MULT
+         reverse-mode sizing mirroring v0.80.0/v0.84.0), track_session_
+         ny_outcome(), backtest_session_ny_symbol(), build_session_ny_
+         universe(), scan_symbol_session_ny_live() (own autotrade mode
+         string "session_ny", own AUTOTRADE_ENABLED_SESSION_NY/
+         AUTOTRADE_LEVERAGE_SESSION_NY, own Telegram category with its
+         own TELEGRAM_ALERTS_SESSION_NY toggle), update_session_ny_
+         signal_outcomes(), compute_session_ny_signal_stats(), session_
+         ny_loop() (daily batch backtest) and session_ny_live_loop()
+         (daily live-window scan) as new daemon threads, five new API
+         endpoints (/api/session_ny/status, /signals, /symbol/<symbol>,
+         /chart/<symbol>, /api/reset/session_ny) mirroring the
+         originals exactly. summarize_session_backtest() turned out to
+         already be generic (doesn't reference any SESSION_* constant)
+         — reused directly rather than duplicated.
+         New settings: session_ny_enabled, session_ny_invert_signals,
+         autotrade_session_ny, autotrade_leverage_session_ny — full
+         SETTINGS_KEYS/get_settings/apply_settings wiring, plus a new
+         "Сессия NY" settings group (own toggle + reverse toggle) and
+         autotrade leverage row, independent of the original Session's
+         settings UI.
+         New "Сессия NY" tab + panel, JS render (refreshSessionNy,
+         fmtSessionNyRow, wireSessionNyRowClicks, openSessionNyDetail)
+         duplicated with independent names/DOM ids, and its own reset
+         button (resetSessionNyBtn -> /api/reset/session_ny). ONE
+         deliberate exception to "full duplicate": the chart modal
+         (canvas drawing of a session's candles/range/entry/SL/TP) is
+         reused rather than copied — openSessionChart() gained an
+         optional 3rd endpoint parameter (default '/api/session/chart',
+         so existing 2-arg calls are unaffected) and openSessionNyChart()
+         is a thin wrapper passing '/api/session_ny/chart'. Justified
+         because this is pure display code with zero effect on trading
+         behavior, unlike everything else in this entry which IS fully
+         duplicated — ~150 lines of canvas machinery duplicated for a
+         read-only chart viewer wasn't worth the risk/reward the same
+         way the detection and execution logic was.
+         session_ny_signals persisted through save_state()/load_state()
+         (same as every other signal list), and added to
+         SNAPSHOT_MODULE_KEYS and the sim-trade relink module_lists
+         mapping for full feature parity with every other module.
 """
 
 import os
@@ -3295,7 +3365,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.93.0"
+APP_VERSION = "0.94.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3678,6 +3748,7 @@ TELEGRAM_ALERTS_DIV = os.environ.get("VP_TG_ALERTS_DIV", "1") == "1"
 TELEGRAM_ALERTS_EMA = os.environ.get("VP_TG_ALERTS_EMA", "1") == "1"
 TELEGRAM_ALERTS_HOURLY = os.environ.get("VP_TG_ALERTS_HOURLY", "1") == "1"
 TELEGRAM_ALERTS_SESSION = os.environ.get("VP_TG_ALERTS_SESSION", "1") == "1"
+TELEGRAM_ALERTS_SESSION_NY = os.environ.get("VP_TG_ALERTS_SESSION_NY", "1") == "1"
 HOURLY_STATS_ENABLED = os.environ.get("VP_HOURLY_STATS_ENABLED", "1") == "1"
 HOURLY_STATS_INTERVAL_SEC = int(os.environ.get("VP_HOURLY_STATS_INTERVAL_SEC", 3600))
 
@@ -3705,6 +3776,46 @@ SESSION_SIGNAL_HISTORY = 200
 SESSION_REFRESH_SEC = int(os.environ.get("VP_SESSION_REFRESH_SEC", 24 * 3600))  # batch backtest job — once a day is plenty, one new day of data per cycle anyway
 
 # ----------------------------------------------------------------------------
+# Session-open manipulation, New York variant (v0.94.0) — per direct user
+# request after the original (London/Frankfurt, 10:00 Moscow) session module
+# showed a promising live streak. Explicitly a FULL, INDEPENDENT duplicate,
+# not a generalization of the original into a multi-session system — the
+# user was specific that the original must stay completely untouched (zero
+# refactor risk to something already working), even at the cost of code
+# duplication across this whole section. Every constant, function, STATE
+# key, thread, and API endpoint below has its own SESSION_NY_ name; nothing
+# here is imported or reused from the original except pure, already-generic
+# helpers that don't know or care which session they're serving (get_candles_
+# range, get_tickers, INTERVAL_SECONDS, fetch_candles_concurrent, has_open_
+# signal_any_module — which DOES get a new "session_ny_signals" entry added
+# to its own lists dict, the one deliberate touch to shared code, since
+# skipping that would let this module stack a position on a symbol another
+# module already has open, defeating the whole point of that check).
+# New York open: 16:30 Moscow time (13:30 UTC) — the half-hour offset is why
+# session_ny_open_utc_ts() needs its own minute-aware implementation; the
+# original session_open_utc_ts() hardcodes minute=0.
+# ----------------------------------------------------------------------------
+SESSION_NY_ENABLED = os.environ.get("VP_SESSION_NY_ENABLED", "1") == "1"
+SESSION_NY_UTC_OFFSET_HOURS = float(os.environ.get("VP_SESSION_NY_UTC_OFFSET_HOURS", 3))  # same Moscow reference as the original — no DST, fixed UTC+3
+SESSION_NY_OPEN_HOUR_LOCAL = int(os.environ.get("VP_SESSION_NY_OPEN_HOUR_LOCAL", 16))  # 16:30 Moscow = New York open
+SESSION_NY_OPEN_MINUTE_LOCAL = int(os.environ.get("VP_SESSION_NY_OPEN_MINUTE_LOCAL", 30))
+SESSION_NY_RANGE_TF = os.environ.get("VP_SESSION_NY_RANGE_TF", "5m")
+SESSION_NY_RANGE_START_UTC_HOUR = int(os.environ.get("VP_SESSION_NY_RANGE_START_UTC_HOUR", 7))  # consolidation range spans [this UTC hour, NY open) — starts at the ORIGINAL session's own open (07:00 UTC = 10:00 Moscow), i.e. the London/Frankfurt session itself, mirroring how the original range starts at the PRIOR (Asian) session's boundary
+SESSION_NY_MANIPULATION_WINDOW_MIN = int(os.environ.get("VP_SESSION_NY_MANIPULATION_WINDOW_MIN", 30))
+SESSION_NY_SL_BUFFER_PCT = float(os.environ.get("VP_SESSION_NY_SL_BUFFER_PCT", 0.005))
+SESSION_NY_MIN_RANGE_PCT = float(os.environ.get("VP_SESSION_NY_MIN_RANGE_PCT", 0.003))
+SESSION_NY_MAX_TREND_RATIO = float(os.environ.get("VP_SESSION_NY_MAX_TREND_RATIO", 0.5))
+SESSION_NY_MAX_THRUST_BARS = int(os.environ.get("VP_SESSION_NY_MAX_THRUST_BARS", 3))
+SESSION_NY_BACKTEST_DAYS = int(os.environ.get("VP_SESSION_NY_BACKTEST_DAYS", 30))
+SESSION_NY_UNIVERSE_SIZE = int(os.environ.get("VP_SESSION_NY_UNIVERSE_SIZE", 50))
+SESSION_NY_MIN_SAMPLE = int(os.environ.get("VP_SESSION_NY_MIN_SAMPLE", 8))
+SESSION_NY_SIGNAL_HISTORY = 200
+SESSION_NY_REFRESH_SEC = int(os.environ.get("VP_SESSION_NY_REFRESH_SEC", 24 * 3600))
+SESSION_NY_INVERT_SIGNALS = os.environ.get("VP_SESSION_NY_INVERT_SIGNALS", "0") == "1"
+SESSION_NY_SL_MULT = float(os.environ.get("VP_SESSION_NY_SL_MULT", 1.5))
+
+
+# ----------------------------------------------------------------------------
 # Auto-trading — places real orders on Gate.io futures off the signals the
 # modules above already generate. Opt-in per mode (Volume further split into
 # bounce/breakout specifically, per direct request), market-order entry,
@@ -3724,6 +3835,7 @@ AUTOTRADE_ENABLED_DIVERGENCE = os.environ.get("VP_AUTOTRADE_DIVERGENCE", "0") ==
 AUTOTRADE_ENABLED_EMA = os.environ.get("VP_AUTOTRADE_EMA", "0") == "1"
 AUTOTRADE_ENABLED_SCALP = os.environ.get("VP_AUTOTRADE_SCALP", "0") == "1"
 AUTOTRADE_ENABLED_SESSION = os.environ.get("VP_AUTOTRADE_SESSION", "0") == "1"
+AUTOTRADE_ENABLED_SESSION_NY = os.environ.get("VP_AUTOTRADE_SESSION_NY", "0") == "1"
 AUTOTRADE_SIZE_MODE = os.environ.get("VP_AUTOTRADE_SIZE_MODE", "percent")  # "percent" or "fixed" — the single size value below is interpreted according to this
 AUTOTRADE_SIZE_VALUE = float(os.environ.get("VP_AUTOTRADE_SIZE_VALUE", 2.0))  # percent: % of futures wallet balance; fixed: raw USD margin, leverage-independent either way
 # Scalp gets its OWN size config, separate from the shared one above — per
@@ -3738,6 +3850,7 @@ AUTOTRADE_LEVERAGE_BREAKOUT = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_BREAKOUT
 AUTOTRADE_LEVERAGE_DIVERGENCE = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_DIVERGENCE", 10))
 AUTOTRADE_LEVERAGE_EMA = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_EMA", 10))
 AUTOTRADE_LEVERAGE_SESSION = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SESSION", 10))
+AUTOTRADE_LEVERAGE_SESSION_NY = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SESSION_NY", 10))
 AUTOTRADE_TRADE_HISTORY = 300
 
 # ----------------------------------------------------------------------------
@@ -3792,14 +3905,14 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "div_min_rr", "bounce_enabled", "breakout_enabled",
-                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "hourly_stats_enabled", "telegram_enabled",
+                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny",
                   "autotrade_size_mode", "autotrade_size_value",
                   "scalp_size_mode", "scalp_size_value",
                   "ema_min_rr", "ema_signal_timeout_hours",
                   "ema_adx_filter_enabled", "ema_adx_min", "ema_min_gap_pct",
-                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session",
+                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session", "autotrade_leverage_session_ny",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
                   # same save_settings() path everything else already uses,
@@ -3826,6 +3939,8 @@ def get_settings():
         "scalp_signals_enabled": SCALP_SIGNALS_ENABLED,
         "session_enabled": SESSION_ENABLED,
         "session_invert_signals": SESSION_INVERT_SIGNALS,
+        "session_ny_enabled": SESSION_NY_ENABLED,
+        "session_ny_invert_signals": SESSION_NY_INVERT_SIGNALS,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
         "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
@@ -3841,6 +3956,7 @@ def get_settings():
         "autotrade_ema": AUTOTRADE_ENABLED_EMA,
         "autotrade_scalp": AUTOTRADE_ENABLED_SCALP,
         "autotrade_session": AUTOTRADE_ENABLED_SESSION,
+        "autotrade_session_ny": AUTOTRADE_ENABLED_SESSION_NY,
         "autotrade_size_mode": AUTOTRADE_SIZE_MODE,
         "autotrade_size_value": AUTOTRADE_SIZE_VALUE,
         "scalp_size_mode": SCALP_SIZE_MODE,
@@ -3855,6 +3971,7 @@ def get_settings():
         "ema_adx_min": EMA_ADX_MIN,
         "ema_min_gap_pct": EMA_MIN_GAP_PCT,
         "autotrade_leverage_session": AUTOTRADE_LEVERAGE_SESSION,
+        "autotrade_leverage_session_ny": AUTOTRADE_LEVERAGE_SESSION_NY,
         "scalp_min_rr": SCALP_MIN_RR,
         "scalp_sl_buffer_mult": SCALP_SL_BUFFER_MULT,
         "session_sl_mult": SESSION_SL_MULT,
@@ -3869,9 +3986,9 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, HOURLY_STATS_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY
     global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
     global SCALP_SIZE_MODE, SCALP_SIZE_VALUE
     global AUTOTRADE_LEVERAGE_BOUNCE, AUTOTRADE_LEVERAGE_BREAKOUT, AUTOTRADE_LEVERAGE_DIVERGENCE, AUTOTRADE_LEVERAGE_EMA, AUTOTRADE_LEVERAGE_SESSION
@@ -3909,6 +4026,10 @@ def apply_settings(updates):
         SESSION_ENABLED = bool(updates["session_enabled"])
     if "session_invert_signals" in updates:
         SESSION_INVERT_SIGNALS = bool(updates["session_invert_signals"])
+    if "session_ny_enabled" in updates:
+        SESSION_NY_ENABLED = bool(updates["session_ny_enabled"])
+    if "session_ny_invert_signals" in updates:
+        SESSION_NY_INVERT_SIGNALS = bool(updates["session_ny_invert_signals"])
     if "hourly_stats_enabled" in updates:
         HOURLY_STATS_ENABLED = bool(updates["hourly_stats_enabled"])
     if "telegram_enabled" in updates:
@@ -3935,6 +4056,8 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_SCALP = bool(updates["autotrade_scalp"])
     if "autotrade_session" in updates:
         AUTOTRADE_ENABLED_SESSION = bool(updates["autotrade_session"])
+    if "autotrade_session_ny" in updates:
+        AUTOTRADE_ENABLED_SESSION_NY = bool(updates["autotrade_session_ny"])
     if "autotrade_size_mode" in updates and updates["autotrade_size_mode"] in ("percent", "fixed"):
         AUTOTRADE_SIZE_MODE = updates["autotrade_size_mode"]
     if "autotrade_size_value" in updates:
@@ -3989,6 +4112,7 @@ def apply_settings(updates):
         ("autotrade_leverage_divergence", "AUTOTRADE_LEVERAGE_DIVERGENCE"),
         ("autotrade_leverage_ema", "AUTOTRADE_LEVERAGE_EMA"),
         ("autotrade_leverage_session", "AUTOTRADE_LEVERAGE_SESSION"),
+        ("autotrade_leverage_session_ny", "AUTOTRADE_LEVERAGE_SESSION_NY"),
     ):
         if key in updates:
             try:
@@ -4216,6 +4340,17 @@ STATE = {
     "session_symbols_done": 0,
     "session_signals": deque(maxlen=SESSION_SIGNAL_HISTORY),
     "session_next_open_ts": None,
+    # New York session variant (v0.94.0) — fully independent STATE, mirrors
+    # every key above with its own "session_ny_" prefix.
+    "session_ny_universe": [],
+    "session_ny_backtest_results": {},
+    "session_ny_backtest_summary": {},
+    "session_ny_last_backtest_started": None,
+    "session_ny_last_backtest_finished": None,
+    "session_ny_last_backtest_duration": None,
+    "session_ny_symbols_done": 0,
+    "session_ny_signals": deque(maxlen=SESSION_NY_SIGNAL_HISTORY),
+    "session_ny_next_open_ts": None,
     "autotrade_log": deque(maxlen=AUTOTRADE_TRADE_HISTORY),  # every attempted auto-trade, dry-run or real, with its outcome
     "sim_balance": AUTOTRADE_SIM_START_BALANCE,
     "sim_trades": deque(maxlen=AUTOTRADE_SIM_TRADE_HISTORY),  # pending + settled paper trades
@@ -4232,6 +4367,8 @@ _session_signal_cooldowns = {}  # (symbol, session_open_ts) -> True, once fired
 _session_signal_cooldowns_lock = threading.Lock()
 _session_signal_cooldowns = {}  # symbol -> last session_open_ts signaled
 _session_signal_cooldowns_lock = threading.Lock()
+_session_ny_signal_cooldowns = {}  # same purpose, fully separate — New York variant
+_session_ny_signal_cooldowns_lock = threading.Lock()
 
 
 def has_open_signal(symbol):
@@ -4269,7 +4406,7 @@ def has_open_signal_any_module(symbol, exclude=None):
     lists = {
         "signals": STATE["signals"], "div_signals": STATE["div_signals"],
         "ema_signals": STATE["ema_signals"], "scalp_signals": STATE["scalp_signals"],
-        "session_signals": STATE["session_signals"],
+        "session_signals": STATE["session_signals"], "session_ny_signals": STATE["session_ny_signals"],
     }
     with state_lock:
         for name, lst in lists.items():
@@ -4686,6 +4823,19 @@ def session_open_utc_ts(ref_ts):
     return open_utc.timestamp()
 
 
+def session_ny_open_utc_ts(ref_ts):
+    """New York counterpart of session_open_utc_ts() — same Moscow-fixed-
+    offset arithmetic, but with minute precision (SESSION_NY_OPEN_MINUTE_
+    LOCAL) since 16:30 Moscow isn't a whole hour, unlike the original's
+    10:00. Fully independent function, not a generalization of the
+    original — see this section's own header comment for why."""
+    dt_utc = datetime.datetime.fromtimestamp(ref_ts, tz=datetime.timezone.utc)
+    local_shifted = dt_utc + datetime.timedelta(hours=SESSION_NY_UTC_OFFSET_HOURS)
+    open_shifted = local_shifted.replace(hour=SESSION_NY_OPEN_HOUR_LOCAL, minute=SESSION_NY_OPEN_MINUTE_LOCAL, second=0, microsecond=0)
+    open_utc = open_shifted - datetime.timedelta(hours=SESSION_NY_UTC_OFFSET_HOURS)
+    return open_utc.timestamp()
+
+
 def detect_session_manipulation(candles, session_open_ts):
     """Core pattern detector, shared by live scanning and historical
     backtesting. candles must be 5m (or whatever SESSION_RANGE_TF is)
@@ -4771,12 +4921,104 @@ def detect_session_manipulation(candles, session_open_ts):
     return None
 
 
+def detect_session_ny_manipulation(candles, session_open_ts):
+    """New York counterpart of detect_session_manipulation() — identical
+    pattern logic (consolidation range -> sweep beyond it within the
+    manipulation window -> close back inside = confirmed manipulation),
+    just reading the SESSION_NY_* constants instead of SESSION_*. See
+    that function's own docstring for the pattern rationale; not
+    repeated here beyond what differs. Kept as a fully separate function
+    rather than parameterizing the original, per the user's explicit
+    request that the original stay untouched."""
+    open_dt = datetime.datetime.fromtimestamp(session_open_ts, tz=datetime.timezone.utc)
+    range_start_dt = open_dt.replace(hour=SESSION_NY_RANGE_START_UTC_HOUR, minute=0, second=0, microsecond=0)
+    range_start = range_start_dt.timestamp()
+    range_duration_sec = session_open_ts - range_start
+    range_candles = [c for c in candles if range_start <= c["time"] < session_open_ts]
+    expected_bars = range_duration_sec / INTERVAL_SECONDS.get(SESSION_NY_RANGE_TF, 300)
+    if expected_bars <= 0 or len(range_candles) < expected_bars * 0.6:
+        return None
+    range_high = max(c["high"] for c in range_candles)
+    range_low = min(c["low"] for c in range_candles)
+    if range_low <= 0:
+        return None
+    range_pct = (range_high - range_low) / range_low
+    if range_pct < SESSION_NY_MIN_RANGE_PCT:
+        return None
+
+    range_height = range_high - range_low
+    net_move = abs(range_candles[-1]["close"] - range_candles[0]["open"])
+    trend_ratio = net_move / range_height
+    if trend_ratio > SESSION_NY_MAX_TREND_RATIO:
+        return None
+
+    window_end = session_open_ts + SESSION_NY_MANIPULATION_WINDOW_MIN * 60
+    window_candles = [c for c in candles if session_open_ts <= c["time"] < window_end]
+
+    for i, c in enumerate(window_candles):
+        closed_back_inside = range_low <= c["close"] <= range_high
+        if not closed_back_inside:
+            continue
+        cluster = window_candles[max(0, i - (SESSION_NY_MAX_THRUST_BARS - 1)):i + 1]
+        cluster_highs_above = [cc["high"] for cc in cluster if cc["high"] > range_high]
+        cluster_lows_below = [cc["low"] for cc in cluster if cc["low"] < range_low]
+        if cluster_highs_above and cluster_lows_below:
+            continue
+        if cluster_highs_above:
+            entry = c["close"]
+            sweep_extreme = max(cluster_highs_above)
+            orig_sl = sweep_extreme * (1 + SESSION_NY_SL_BUFFER_PCT)
+            risk = abs(entry - orig_sl)
+            if SESSION_NY_INVERT_SIGNALS:
+                risk *= SESSION_NY_SL_MULT
+                direction, sl, tp = "LONG", entry - risk, entry + risk * 2
+            else:
+                direction, sl, tp = "SHORT", orig_sl, range_low
+            return {"direction": direction, "entry": entry, "sl": sl, "tp": tp,
+                    "range_high": range_high, "range_low": range_low,
+                    "sweep_extreme": sweep_extreme, "confirm_time": c["time"]}
+        if cluster_lows_below:
+            entry = c["close"]
+            sweep_extreme = min(cluster_lows_below)
+            orig_sl = sweep_extreme * (1 - SESSION_NY_SL_BUFFER_PCT)
+            risk = abs(entry - orig_sl)
+            if SESSION_NY_INVERT_SIGNALS:
+                risk *= SESSION_NY_SL_MULT
+                direction, sl, tp = "SHORT", entry + risk, entry - risk * 2
+            else:
+                direction, sl, tp = "LONG", orig_sl, range_high
+            return {"direction": direction, "entry": entry, "sl": sl, "tp": tp,
+                    "range_high": range_high, "range_low": range_low,
+                    "sweep_extreme": sweep_extreme, "confirm_time": c["time"]}
+    return None
+
+
 def track_session_outcome(candles, sig, max_wait_sec=24 * 3600):
     """Walks forward from the signal's confirm_time looking for TP or SL
     touch. If a single candle's range covers both (can't tell from OHLC
     alone which came first), SL is checked first — the conservative
     assumption, consistent with how a real position would behave if
     price is volatile enough to touch both in one bar."""
+    future = [c for c in candles if c["time"] >= sig["confirm_time"]]
+    for c in future:
+        if c["time"] - sig["confirm_time"] > max_wait_sec:
+            return "TIMEOUT", None
+        if sig["direction"] == "SHORT":
+            if c["high"] >= sig["sl"]:
+                return "LOSS", c["time"]
+            if c["low"] <= sig["tp"]:
+                return "WIN", c["time"]
+        else:
+            if c["low"] <= sig["sl"]:
+                return "LOSS", c["time"]
+            if c["high"] >= sig["tp"]:
+                return "WIN", c["time"]
+    return "TIMEOUT", None
+
+
+def track_session_ny_outcome(candles, sig, max_wait_sec=24 * 3600):
+    """New York counterpart of track_session_outcome() — identical
+    walk-forward logic."""
     future = [c for c in candles if c["time"] >= sig["confirm_time"]]
     for c in future:
         if c["time"] - sig["confirm_time"] > max_wait_sec:
@@ -4830,6 +5072,36 @@ def backtest_session_symbol(symbol, days=SESSION_BACKTEST_DAYS):
     return results
 
 
+def backtest_session_ny_symbol(symbol, days=SESSION_NY_BACKTEST_DAYS):
+    """New York counterpart of backtest_session_symbol() — identical
+    walk-forward-by-calendar-day logic, reading SESSION_NY_* constants
+    and calling detect_session_ny_manipulation()/track_session_ny_
+    outcome()/session_ny_open_utc_ts() throughout."""
+    now = time.time()
+    fetch_start = now - days * 86400 - 25 * 3600
+    candles = get_candles_range(symbol, SESSION_NY_RANGE_TF, fetch_start, now)
+    if len(candles) < 50:
+        return []
+
+    results = []
+    cur = session_ny_open_utc_ts(fetch_start) + 86400
+    cutoff = now - SESSION_NY_MANIPULATION_WINDOW_MIN * 60
+    seen_days = 0
+    while cur < cutoff and seen_days < days:
+        sig = detect_session_ny_manipulation(candles, cur)
+        if sig:
+            result, exit_time = track_session_ny_outcome(candles, sig)
+            results.append({
+                "session_open": cur, "direction": sig["direction"],
+                "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
+                "range_high": sig["range_high"], "range_low": sig["range_low"],
+                "result": result, "exit_time": exit_time,
+            })
+        cur = session_ny_open_utc_ts(cur + 86400)
+        seen_days += 1
+    return results
+
+
 def summarize_session_backtest(results):
     total = len(results)
     if not total:
@@ -4865,6 +5137,28 @@ def build_session_universe():
             seen_vol[name] = vol
     ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
     return [s[0] for s in ranked[:SESSION_UNIVERSE_SIZE]]
+
+
+def build_session_ny_universe():
+    """New York counterpart of build_session_universe() — identical
+    ticker-volume ranking, capped to SESSION_NY_UNIVERSE_SIZE."""
+    tickers = get_tickers()
+    seen_vol = {}
+    for t in tickers:
+        name = t.get("contract", "")
+        if not name.endswith("_USDT"):
+            continue
+        vol = t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0
+        try:
+            vol = float(vol)
+        except (TypeError, ValueError):
+            vol = 0.0
+        if vol < MIN_VOL_USD:
+            continue
+        if name not in seen_vol or vol > seen_vol[name]:
+            seen_vol[name] = vol
+    ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
+    return [s[0] for s in ranked[:SESSION_NY_UNIVERSE_SIZE]]
 
 
 def scan_symbol_session_live(symbol, session_open_ts):
@@ -4927,6 +5221,58 @@ def scan_symbol_session_live(symbol, session_open_ts):
         log_error(f"session_live {symbol}: {e}")
 
 
+def scan_symbol_session_ny_live(symbol, session_open_ts):
+    """New York counterpart of scan_symbol_session_live() — identical
+    logic, own STATE list/cooldowns/constants, and its own autotrade
+    "session_ny" mode string so autotrade_log/simulator entries are
+    distinguishable from the original session's."""
+    if not SESSION_NY_ENABLED:
+        return
+    with _session_ny_signal_cooldowns_lock:
+        if _session_ny_signal_cooldowns.get(symbol) == session_open_ts:
+            return
+    try:
+        range_start_dt = datetime.datetime.fromtimestamp(session_open_ts, tz=datetime.timezone.utc).replace(
+            hour=SESSION_NY_RANGE_START_UTC_HOUR, minute=0, second=0, microsecond=0)
+        candles = get_candles_range(symbol, SESSION_NY_RANGE_TF, range_start_dt.timestamp(), time.time())
+        interval_sec = INTERVAL_SECONDS.get(SESSION_NY_RANGE_TF, 300)
+        now = time.time()
+        candles = [c for c in candles if c["time"] + interval_sec <= now]
+        sig = detect_session_ny_manipulation(candles, session_open_ts)
+        if not sig:
+            return
+        if has_open_signal_any_module(symbol, exclude="session_ny_signals"):
+            return
+        with _session_ny_signal_cooldowns_lock:
+            if _session_ny_signal_cooldowns.get(symbol) == session_open_ts:
+                return
+            _session_ny_signal_cooldowns[symbol] = session_open_ts
+        record = {
+            "symbol": symbol, "direction": sig["direction"],
+            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
+            "range_high": sig["range_high"], "range_low": sig["range_low"],
+            "session_open": session_open_ts, "confirm_time": sig["confirm_time"],
+            "detected_at": time.time(), "status": "OPEN", "result": None,
+            "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
+        }
+        with state_lock:
+            STATE["session_ny_signals"].appendleft(record)
+        if AUTOTRADE_ENABLED_SESSION_NY:
+            execute_autotrade("session_ny", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                               AUTOTRADE_LEVERAGE_SESSION_NY, extra={"session_open": session_open_ts})
+            sim_execute_trade("session_ny", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                               AUTOTRADE_LEVERAGE_SESSION_NY, record)
+        arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
+        send_telegram(
+            f"{arrow} {symbol} (открытие Нью-Йорка — манипуляция)\n"
+            f"entry: {sig['entry']:.6g}\n"
+            f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}",
+            category="session_ny",
+        )
+    except Exception as e:
+        log_error(f"session_ny_live {symbol}: {e}")
+
+
 def update_session_signal_outcomes():
     now = time.time()
     with state_lock:
@@ -4974,6 +5320,66 @@ def update_session_signal_outcomes():
 def compute_session_signal_stats():
     with state_lock:
         signals = list(STATE["session_signals"])
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+    wins = sum(1 for s in closed if s["result"] == "WIN")
+    losses = sum(1 for s in closed if s["result"] == "LOSS")
+    timeouts = sum(1 for s in signals if s.get("result") == "TIMEOUT")
+    open_n = sum(1 for s in signals if s["status"] == "OPEN")
+    total_closed = len(closed)
+    winrate = round(wins / total_closed * 100, 1) if total_closed else None
+    return {"total": len(signals), "wins": wins, "losses": losses, "timeouts": timeouts,
+            "open": open_n, "winrate": winrate}
+
+
+def update_session_ny_signal_outcomes():
+    """New York counterpart of update_session_signal_outcomes() — same
+    walk-forward SL/TP check and 24h timeout, own STATE list/constants."""
+    now = time.time()
+    with state_lock:
+        open_signals = [s for s in STATE["session_ny_signals"] if s["status"] == "OPEN"]
+    all_candles = fetch_candles_concurrent([(s["symbol"], SESSION_NY_RANGE_TF, 300) for s in open_signals])
+    for sig, candles in zip(open_signals, all_candles):
+        try:
+            if candles is None:
+                continue
+            future = [c for c in candles if c["time"] >= sig["confirm_time"]]
+            result = None
+            exit_price = None
+            exit_time = None
+            for c in future:
+                if sig["direction"] == "SHORT":
+                    if c["high"] >= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["low"] <= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+                else:
+                    if c["low"] <= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["high"] >= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+            timed_out = (now - sig["detected_at"]) > 24 * 3600
+            with state_lock:
+                if result:
+                    sig["status"] = "CLOSED"
+                    sig["result"] = result
+                    sig["exit_price"] = exit_price
+                    sig["exit_time"] = exit_time
+                elif timed_out:
+                    sig["status"] = "CLOSED"
+                    sig["result"] = "TIMEOUT"
+                    sig["exit_price"] = candles[-1]["close"] if candles else None
+                    sig["exit_time"] = candles[-1]["time"] if candles else None
+        except Exception as e:
+            log_error(f"session_ny_outcome {sig['symbol']}: {e}")
+
+
+def compute_session_ny_signal_stats():
+    with state_lock:
+        signals = list(STATE["session_ny_signals"])
     closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
     wins = sum(1 for s in closed if s["result"] == "WIN")
     losses = sum(1 for s in closed if s["result"] == "LOSS")
@@ -5541,6 +5947,7 @@ SNAPSHOT_MODULE_KEYS = {
     "ema": "ema_signals",
     "scalp": "scalp_signals",
     "session": "session_signals",
+    "session_ny": "session_ny_signals",
 }
 
 
@@ -7579,6 +7986,7 @@ def save_state():
                 "ema_signals": list(STATE["ema_signals"]),
                 "scalp_signals": list(STATE["scalp_signals"]),
                 "session_signals": list(STATE["session_signals"]),
+                "session_ny_signals": list(STATE["session_ny_signals"]),
                 "autotrade_log": list(STATE["autotrade_log"]),
                 "sim_balance": STATE["sim_balance"],
                 # Both PENDING and SETTLED now (previously PENDING was
@@ -7623,6 +8031,7 @@ def _relink_sim_trade(trade):
         "bounce": STATE["signals"], "breakout": STATE["signals"],
         "divergence": STATE["div_signals"], "ema": STATE["ema_signals"],
         "scalp": STATE["scalp_signals"], "session": STATE["session_signals"],
+        "session_ny": STATE["session_ny_signals"],
     }
     candidates = module_lists.get(trade.get("mode"))
     if not candidates:
@@ -7653,6 +8062,7 @@ def load_state():
         ema_signals = data.get("ema_signals", [])
         scalp_signals = data.get("scalp_signals", [])
         session_signals = data.get("session_signals", [])
+        session_ny_signals = data.get("session_ny_signals", [])
         autotrade_log = data.get("autotrade_log", [])
         sim_trades = data.get("sim_trades", [])
         risk_autotune_log = data.get("risk_autotune_log", [])
@@ -7663,6 +8073,7 @@ def load_state():
             STATE["ema_signals"] = deque(ema_signals, maxlen=EMA_SIGNAL_HISTORY)
             STATE["scalp_signals"] = deque(scalp_signals, maxlen=SCALP_SIGNAL_HISTORY)
             STATE["session_signals"] = deque(session_signals, maxlen=SESSION_SIGNAL_HISTORY)
+            STATE["session_ny_signals"] = deque(session_ny_signals, maxlen=SESSION_NY_SIGNAL_HISTORY)
             STATE["autotrade_log"] = deque(autotrade_log, maxlen=AUTOTRADE_TRADE_HISTORY)
             STATE["risk_autotune_log"] = deque(risk_autotune_log, maxlen=200)
             STATE["risk_autotune_last_change"] = risk_autotune_last_change
@@ -7922,6 +8333,8 @@ def send_telegram(text, category=None):
     if category == "hourly" and not TELEGRAM_ALERTS_HOURLY:
         return
     if category == "session" and not TELEGRAM_ALERTS_SESSION:
+        return
+    if category == "session_ny" and not TELEGRAM_ALERTS_SESSION_NY:
         return
 
     def _do_send():
@@ -8646,6 +9059,89 @@ def session_live_loop():
                 time.sleep(60)
         except Exception as e:
             log_error(f"session_live_loop: {e}")
+            time.sleep(60)
+
+
+def session_ny_loop():
+    """New York counterpart of session_loop() — same daily batch-backtest
+    cadence, own STATE/constants throughout."""
+    while True:
+        try:
+            if not SESSION_NY_ENABLED:
+                time.sleep(60)
+                continue
+            t0 = time.time()
+            with state_lock:
+                STATE["session_ny_last_backtest_started"] = t0
+                STATE["session_ny_symbols_done"] = 0
+
+            universe = build_session_ny_universe()
+            with state_lock:
+                STATE["session_ny_universe"] = universe
+                STATE["session_ny_backtest_results"] = {}
+                STATE["session_ny_backtest_summary"] = {}
+
+            def process_one(symbol):
+                try:
+                    results = backtest_session_ny_symbol(symbol)
+                    summary = summarize_session_backtest(results)
+                    with state_lock:
+                        STATE["session_ny_backtest_results"][symbol] = results
+                        STATE["session_ny_backtest_summary"][symbol] = summary
+                        STATE["session_ny_symbols_done"] += 1
+                except Exception as e:
+                    log_error(f"session_ny process_one {symbol}: {e}")
+
+            with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+                futs = [ex.submit(process_one, s) for s in universe]
+                for _ in as_completed(futs):
+                    pass
+
+            t1 = time.time()
+            with state_lock:
+                STATE["session_ny_last_backtest_finished"] = t1
+                STATE["session_ny_last_backtest_duration"] = round(t1 - t0, 1)
+        except Exception as e:
+            log_error(f"session_ny_loop: {e}")
+        time.sleep(max(60, SESSION_NY_REFRESH_SEC))
+
+
+def session_ny_live_loop():
+    """New York counterpart of session_live_loop() — same sleep-until-
+    next-open, scan-during-window pattern, own STATE/constants."""
+    while True:
+        try:
+            if not SESSION_NY_ENABLED:
+                time.sleep(60)
+                continue
+            now = time.time()
+            next_open = session_ny_open_utc_ts(now)
+            if next_open <= now:
+                next_open = session_ny_open_utc_ts(now + 86400)
+            with state_lock:
+                STATE["session_ny_next_open_ts"] = next_open
+
+            while True:
+                remaining = next_open - time.time()
+                if remaining <= 0:
+                    break
+                time.sleep(min(remaining, 1800))
+
+            with state_lock:
+                summaries = dict(STATE["session_ny_backtest_summary"])
+                universe = list(STATE["session_ny_universe"]) or list(summaries.keys())
+            candidates = [s for s in universe
+                          if summaries.get(s, {}).get("n", 0) >= SESSION_NY_MIN_SAMPLE
+                          and (summaries.get(s, {}).get("win_rate") or 0) >= 50]
+            window_end = next_open + SESSION_NY_MANIPULATION_WINDOW_MIN * 60
+            while time.time() < window_end:
+                with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+                    futs = [ex.submit(scan_symbol_session_ny_live, s, next_open) for s in candidates]
+                    for _ in as_completed(futs):
+                        pass
+                time.sleep(60)
+        except Exception as e:
+            log_error(f"session_ny_live_loop: {e}")
             time.sleep(60)
 
 
@@ -9469,6 +9965,131 @@ def api_reset_session():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/session_ny/status")
+def api_session_ny_status():
+    """New York counterpart of api_session_status() — identical shape,
+    own STATE/constants throughout."""
+    with state_lock:
+        universe = list(STATE["session_ny_universe"])
+        summaries = dict(STATE["session_ny_backtest_summary"])
+        last_backtest_finished = STATE["session_ny_last_backtest_finished"]
+        last_backtest_duration = STATE["session_ny_last_backtest_duration"]
+        symbols_done = STATE["session_ny_symbols_done"]
+        next_open_ts = STATE["session_ny_next_open_ts"]
+    ranked = []
+    zero_manipulation_count = 0
+    not_yet_processed_count = 0
+    for symbol in universe:
+        s = summaries.get(symbol)
+        if s is None:
+            not_yet_processed_count += 1
+            continue
+        if not s.get("n"):
+            zero_manipulation_count += 1
+            continue
+        row = dict(s)
+        row["symbol"] = symbol
+        row["meets_min_sample"] = s["n"] >= SESSION_NY_MIN_SAMPLE
+        ranked.append(row)
+    ranked.sort(key=lambda r: (-1 if r["meets_min_sample"] else 0, r["win_rate"] or 0, r["n"]), reverse=True)
+    watch_symbols = {}
+    for sym in ("BTC_USDT", "ETH_USDT"):
+        in_universe = sym in universe
+        s = summaries.get(sym)
+        watch_symbols[sym] = {
+            "in_universe": in_universe,
+            "n": s.get("n") if s else None,
+            "status": ("not_in_universe" if not in_universe else
+                       "not_yet_processed" if s is None else
+                       "zero_manipulations_found" if not s.get("n") else "ranked"),
+        }
+    return jsonify({
+        "enabled": SESSION_NY_ENABLED,
+        "universe_size": len(universe),
+        "symbols_done": symbols_done,
+        "zero_manipulation_count": zero_manipulation_count,
+        "not_yet_processed_count": not_yet_processed_count,
+        "watch_symbols": watch_symbols,
+        "last_backtest_finished": last_backtest_finished,
+        "last_backtest_duration": last_backtest_duration,
+        "next_open_ts": next_open_ts,
+        "signals_stats": compute_session_ny_signal_stats(),
+        "config": {
+            "utc_offset_hours": SESSION_NY_UTC_OFFSET_HOURS, "open_hour_local": SESSION_NY_OPEN_HOUR_LOCAL,
+            "open_minute_local": SESSION_NY_OPEN_MINUTE_LOCAL,
+            "range_tf": SESSION_NY_RANGE_TF, "range_start_utc_hour": SESSION_NY_RANGE_START_UTC_HOUR,
+            "manipulation_window_min": SESSION_NY_MANIPULATION_WINDOW_MIN,
+            "min_sample": SESSION_NY_MIN_SAMPLE, "backtest_days": SESSION_NY_BACKTEST_DAYS,
+            "invert_signals": SESSION_NY_INVERT_SIGNALS,
+        },
+        "top": ranked,
+    })
+
+
+@app.route("/api/session_ny/signals")
+def api_session_ny_signals():
+    with state_lock:
+        return jsonify(list(STATE["session_ny_signals"]))
+
+
+@app.route("/api/session_ny/symbol/<symbol>")
+def api_session_ny_symbol(symbol):
+    with state_lock:
+        results = STATE["session_ny_backtest_results"].get(symbol)
+        summary = STATE["session_ny_backtest_summary"].get(symbol)
+    if results is None:
+        return jsonify({"error": "no data for this symbol yet"}), 404
+    return jsonify({"symbol": symbol, "summary": summary, "results": results})
+
+
+@app.route("/api/session_ny/chart/<symbol>")
+def api_session_ny_chart(symbol):
+    """New York counterpart of api_session_chart() — same re-derive-from-
+    fresh-candles approach, own detection/outcome functions."""
+    try:
+        session_open = float(request.args.get("session_open"))
+        range_start_dt = datetime.datetime.fromtimestamp(session_open, tz=datetime.timezone.utc).replace(
+            hour=SESSION_NY_RANGE_START_UTC_HOUR, minute=0, second=0, microsecond=0)
+        fetch_start = range_start_dt.timestamp() - 2 * 3600
+        fetch_end = session_open + SESSION_NY_MANIPULATION_WINDOW_MIN * 60 + 8 * 3600
+        candles = get_candles_range(symbol, SESSION_NY_RANGE_TF, fetch_start, fetch_end)
+        sig = detect_session_ny_manipulation(candles, session_open)
+        result = None
+        exit_time = None
+        exit_price = None
+        if sig:
+            result, exit_time = track_session_ny_outcome(candles, sig)
+            if result == "WIN":
+                exit_price = sig["tp"]
+            elif result == "LOSS":
+                exit_price = sig["sl"]
+        return jsonify({
+            "symbol": symbol, "candles": candles, "session_open": session_open,
+            "signal": sig, "result": result, "exit_time": exit_time, "exit_price": exit_price,
+        })
+    except Exception as e:
+        log_error(f"api_session_ny_chart {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/reset/session_ny", methods=["POST"])
+def api_reset_session_ny():
+    try:
+        with state_lock:
+            STATE["session_ny_universe"] = []
+            STATE["session_ny_backtest_results"] = {}
+            STATE["session_ny_backtest_summary"] = {}
+            STATE["session_ny_last_backtest_started"] = None
+            STATE["session_ny_last_backtest_finished"] = None
+            STATE["session_ny_last_backtest_duration"] = None
+            STATE["session_ny_symbols_done"] = 0
+            STATE["session_ny_signals"].clear()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset_session_ny: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/reset/ema", methods=["POST"])
 def api_reset_ema():
     try:
@@ -9556,6 +10177,7 @@ def api_autotrade_status():
             "bounce": AUTOTRADE_ENABLED_BOUNCE, "breakout": AUTOTRADE_ENABLED_BREAKOUT,
             "divergence": AUTOTRADE_ENABLED_DIVERGENCE, "ema": AUTOTRADE_ENABLED_EMA,
             "scalp": AUTOTRADE_ENABLED_SCALP, "session": AUTOTRADE_ENABLED_SESSION,
+            "session_ny": AUTOTRADE_ENABLED_SESSION_NY,
         },
     })
 
@@ -9697,7 +10319,7 @@ INDEX_HTML = """<!doctype html>
   body { margin:0; background:#0b0e14; color:#d7dee8; font-family: -apple-system, Roboto, Segoe UI, sans-serif; }
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
   #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #settingsModal.open { display:flex; flex-direction:column; }
@@ -9806,6 +10428,7 @@ INDEX_HTML = """<!doctype html>
       <button id="resetEmaBtn">Очистить индикатор</button>
       <button id="resetScalpBtn">Очистить скальпинг</button>
       <button id="resetSessionBtn">Очистить сессию</button>
+      <button id="resetSessionNyBtn">Очистить сессию NY</button>
       <button id="resetSimulatorBtn">Сбросить симулятор</button>
     </div>
   </div>
@@ -9823,6 +10446,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="ema">EMA</div>
   <div class="tab" data-tab="scalp">Скальпинг</div>
   <div class="tab" data-tab="session">Сессия</div>
+  <div class="tab" data-tab="session_ny">Сессия NY</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
 </div>
@@ -9844,6 +10468,7 @@ INDEX_HTML = """<!doctype html>
   </table>
   <div id="scalpPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="sessionPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
+  <div id="sessionNyPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="simulatorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
@@ -9996,6 +10621,24 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">торговать в обратную сторону; риск как у обычного стопа, тейк = 2×риска</div>
         </div>
         <label class="switch"><input type="checkbox" id="setSessionInvert"><span class="switchSlider"></span></label>
+      </div>
+    </div>
+
+    <div class="settingsGroup">
+      <div class="settingsGroupTitle">Сессия NY</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Манипуляция на открытии (Нью-Йорк)</div>
+          <div class="sub">та же логика, что и обычная Сессия, но на открытии Нью-Йорка (16:30 Москва) — полностью независимый модуль, не влияет на Сессию выше</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setSessionNy"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Реверс сигналов (RR 2)</div>
+          <div class="sub">торговать в обратную сторону; риск как у обычного стопа, тейк = 2×риска</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setSessionNyInvert"><span class="switchSlider"></span></label>
       </div>
     </div>
 
@@ -10180,6 +10823,16 @@ INDEX_HTML = """<!doctype html>
           <label class="switch"><input type="checkbox" id="setAutotradeSession"><span class="switchSlider"></span></label>
         </div>
       </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Сессия NY</div>
+          <div class="sub">плечо, если включено</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="number" id="setAutotradeLevSessionNy" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+          <label class="switch"><input type="checkbox" id="setAutotradeSessionNy"><span class="switchSlider"></span></label>
+        </div>
+      </div>
     </div>
 
     <div class="dim" style="font-size:12px;margin-top:16px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
@@ -10206,6 +10859,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('emaStatsPanel').style.display = activeTab === 'ema' ? 'block' : 'none';
     document.getElementById('scalpPanel').style.display = activeTab === 'scalp' ? 'block' : 'none';
     document.getElementById('sessionPanel').style.display = activeTab === 'session' ? 'block' : 'none';
+    document.getElementById('sessionNyPanel').style.display = activeTab === 'session_ny' ? 'block' : 'none';
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
     document.getElementById('simulatorPanel').style.display = activeTab === 'simulator' ? 'block' : 'none';
     if (activeTab === 'signals') refreshTuning();
@@ -10213,6 +10867,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'ema') refreshEma();
     if (activeTab === 'scalp') refreshScalp();
     if (activeTab === 'session') refreshSession();
+    if (activeTab === 'session_ny') refreshSessionNy();
     if (activeTab === 'autotrade') refreshAutotrade();
     if (activeTab === 'simulator') refreshSimulator();
   };
@@ -10833,6 +11488,128 @@ async function openSessionDetail(symbol) {
   }
 }
 
+// ---------------- Session NY (New York open, v0.94.0) ----------------
+// Full duplicate of the block above, own STATE var/functions/endpoints
+// throughout — reuses only the already-generic formatters (fmt, fmtTime,
+// fmtDateTime) shared by the whole page, same as the Python side reuses
+// only pure helpers like get_candles_range/get_tickers.
+let sessionNyExpanded = null;
+
+function fmtSessionNyRow(r, rank) {
+  const wrClass = (r.win_rate === null || r.win_rate === undefined) ? 'dim' : (r.win_rate >= 50 ? 'win' : 'loss');
+  const sampleTag = r.meets_min_sample ? '' : '<span title="Меньше минимальной выборки — ненадёжно" style="color:#e0a030;">~</span>';
+  return `<tr data-symbol="${r.symbol}" style="cursor:pointer;">
+    <td class="dim">${rank}</td>
+    <td>${r.symbol}</td>
+    <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}${sampleTag}</td>
+    <td class="dim">n=${r.n}</td>
+    <td class="win">${r.wins}W</td>
+    <td class="loss">${r.losses}L</td>
+    <td class="status-timeout">${r.timeouts}T</td>
+  </tr>`;
+}
+
+async function refreshSessionNy() {
+  const status = await (await fetch('/api/session_ny/status')).json();
+  const signals = await (await fetch('/api/session_ny/signals')).json();
+  const panel = document.getElementById('sessionNyPanel');
+  const cfg = status.config || {};
+  const ss = status.signals_stats || {};
+  const buildTxt = status.last_backtest_finished
+    ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · монет обработано: ${status.symbols_done}/${status.universe_size}`
+    : `первый бэктест ещё не завершился (${status.symbols_done}/${status.universe_size || '?'})`;
+  const nextOpenTxt = status.next_open_ts ? `следующее открытие Нью-Йорка: ${fmtTime(status.next_open_ts)}` : '';
+  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
+  const watchTxt = Object.entries(status.watch_symbols || {}).map(([sym, w]) => {
+    const label = {ranked: 'в рейтинге', zero_manipulations_found: 'манипуляций не найдено', not_yet_processed: 'ещё считается', not_in_universe: 'не в вселенной'}[w.status] || w.status;
+    return `${sym}: ${label}${w.n !== null && w.n !== undefined ? ' (n='+w.n+')' : ''}`;
+  }).join(' · ');
+  const openMinTxt = String(cfg.open_minute_local || 0).padStart(2, '0');
+  const headerHtml = `
+    <div class="dim" style="margin-bottom:8px;">
+      Открытие Нью-Йорка: ${cfg.open_hour_local}:${openMinTxt} (UTC+${cfg.utc_offset_hours}, фикс.) · диапазон проторговки: с ${cfg.range_start_utc_hour}:00 UTC до открытия, ТФ ${cfg.range_tf} ·
+      окно манипуляции: первые ${cfg.manipulation_window_min} мин после открытия · мин. выборка для ранжирования: ${cfg.min_sample}${cfg.invert_signals ? ' · <span style="color:#ffcc55;font-weight:bold;">РЕВЕРС ВКЛЮЧЁН (RR 2)</span>' : ''}<br>
+      ${buildTxt} · ${nextOpenTxt}<br>
+      Монет в рейтинге: ${(status.top||[]).length} · манипуляций не найдено: ${status.zero_manipulation_count||0} · ещё не обработано: ${status.not_yet_processed_count||0}<br>
+      ${watchTxt}<br>
+      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
+      <span style="font-size:11px;">~ рядом с винрейтом = меньше минимальной выборки (${cfg.min_sample}) — цифра пока ненадёжна<br>
+      "манипуляций не найдено" = монета прошла отбор по ликвидности и была проверена, просто ни разу не дала подходящий паттерн — не исключена как неликвидная</span>
+    </div>`;
+  const signalsRows = signals.map(s => {
+    const dirClass = s.direction === 'LONG' ? 'long' : 'short';
+    let statusHtml;
+    if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
+    else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
+    else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
+    else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
+    return `<tr data-symbol="${s.symbol}" data-session-open="${s.session_open}" style="cursor:pointer;">
+      <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td>
+      <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.sl)}</td><td class="dim">${fmt(s.tp)}</td>
+      <td>${statusHtml}</td><td class="dim">${fmtDateTime(s.session_open)}</td>
+    </tr>`;
+  }).join('');
+  const signalsTableHtml = signals.length ? `
+    <div style="overflow-x:auto;margin-bottom:14px;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>Status</th><th>Открытие</th></tr></thead>
+      <tbody>${signalsRows}</tbody>
+    </table>
+    </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
+  if (!status.top || status.top.length === 0) {
+    panel.innerHTML = headerHtml + signalsTableHtml + '<div class="dim">Пока нет результатов бэктеста — либо ещё считается, либо ни у одной монеты не нашлось манипуляций.</div>';
+    wireSessionNyRowClicks();
+    return;
+  }
+  const rows = status.top.map((r, i) => fmtSessionNyRow(r, i + 1)).join('');
+  panel.innerHTML = headerHtml + signalsTableHtml + `
+    <div id="sessionNyDetail" style="margin-bottom:12px;"></div>
+    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (сортировка: сначала прошедшие мин. выборку, потом по винрейту):</div>
+    <div style="overflow-x:auto;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>#</th><th>Symbol</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th><th>T</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>
+    </div>`;
+  wireSessionNyRowClicks();
+}
+
+function wireSessionNyRowClicks() {
+  document.querySelectorAll('#sessionNyPanel tbody tr[data-session-open]').forEach(tr => {
+    tr.onclick = () => openSessionNyChart(tr.dataset.symbol, tr.dataset.sessionOpen);
+  });
+  document.querySelectorAll('#sessionNyPanel tbody tr[data-symbol]:not([data-session-open])').forEach(tr => {
+    tr.onclick = () => openSessionNyDetail(tr.dataset.symbol);
+  });
+}
+
+async function openSessionNyDetail(symbol) {
+  const detail = document.getElementById('sessionNyDetail');
+  if (sessionNyExpanded === symbol) {
+    detail.innerHTML = '';
+    sessionNyExpanded = null;
+    return;
+  }
+  sessionNyExpanded = symbol;
+  detail.innerHTML = '<div class="dim">загрузка...</div>';
+  try {
+    const j = await (await fetch(`/api/session_ny/symbol/${symbol}`)).json();
+    if (j.error) { detail.innerHTML = `<div class="dim">${j.error}</div>`; return; }
+    const rows = (j.results || []).map(r => {
+      const dirClass = r.direction === 'LONG' ? 'long' : 'short';
+      const resClass = r.result === 'WIN' ? 'win' : (r.result === 'LOSS' ? 'loss' : 'status-timeout');
+      return `<span class="sessionNyDayLink" data-symbol="${symbol}" data-session-open="${r.session_open}" style="cursor:pointer;text-decoration:underline dotted;">${fmtDateTime(r.session_open)}: <span class="${dirClass}">${r.direction}</span> <span class="${resClass}">${r.result}</span></span>`;
+    }).join(' · ');
+    detail.innerHTML = `<div style="border-top:1px solid #1c2433;padding-top:8px;"><b>${symbol}</b> — история по дням (клик открывает график):<br>
+      <span style="font-size:11px;">${rows || 'нет данных'}</span></div>`;
+    detail.querySelectorAll('.sessionNyDayLink').forEach(el => {
+      el.onclick = () => openSessionNyChart(el.dataset.symbol, el.dataset.sessionOpen);
+    });
+  } catch (e) {
+    detail.innerHTML = `<div class="dim">ошибка загрузки: ${e}</div>`;
+  }
+}
+
 async function refreshAutotradeBanner() {
   try {
     const s = await (await fetch('/api/autotrade/status')).json();
@@ -10854,7 +11631,7 @@ async function refreshAutotrade() {
     (await fetch('/api/autotrade/log')).json(),
   ]);
   const panel = document.getElementById('autotradePanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY'};
   const enabledTxt = Object.entries(status.enabled)
     .map(([k, v]) => `<span class="${v ? 'win' : 'dim'}">${modeLabels[k]}: ${v ? 'вкл' : 'выкл'}</span>`)
     .join(' &nbsp;·&nbsp; ');
@@ -10914,7 +11691,7 @@ async function refreshSimulator() {
     (await fetch('/api/autotrade/status')).json(),
   ]);
   const panel = document.getElementById('simulatorPanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY'};
 
   const pnlClass = status.pnl_total >= 0 ? 'win' : 'loss';
   const sizeTxt = status.size_mode === 'percent' ? `${status.size_value}% от баланса` : `фикс. $${status.size_value}`;
@@ -10982,6 +11759,7 @@ async function refreshAll() {
   if (activeTab === 'ema') await refreshEma();
   if (activeTab === 'scalp') await refreshScalp();
   if (activeTab === 'session') await refreshSession();
+  if (activeTab === 'session_ny') await refreshSessionNy();
   if (activeTab === 'autotrade') await refreshAutotrade();
   if (activeTab === 'simulator') await refreshSimulator();
 }
@@ -11024,6 +11802,9 @@ wireResetButton('resetScalpBtn', '/api/reset/scalp',
 wireResetButton('resetSessionBtn', '/api/reset/session',
   'Удалить накопленный бэктест и сигналы по манипуляции на открытии сессии? Остальное не тронет. Это необратимо.',
   'Очистить сессию');
+wireResetButton('resetSessionNyBtn', '/api/reset/session_ny',
+  'Удалить накопленный бэктест и сигналы по манипуляции на открытии Нью-Йорка? Остальное (включая обычную Сессию) не тронет. Это необратимо.',
+  'Очистить сессию NY');
 wireResetButton('resetSimulatorBtn', '/api/simulator/reset',
   'Сбросить симулятор баланса к стартовому значению и удалить всю историю сделок? Это необратимо.',
   'Сбросить симулятор');
@@ -11043,6 +11824,8 @@ const setInputs = {
   scalp_enabled: document.getElementById('setScalp'),
   scalp_signals_enabled: document.getElementById('setScalpSignals'),
   session_enabled: document.getElementById('setSession'),
+  session_ny_enabled: document.getElementById('setSessionNy'),
+  session_ny_invert_signals: document.getElementById('setSessionNyInvert'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
   telegram_alerts_div: document.getElementById('setTelegramDiv'),
@@ -11056,6 +11839,7 @@ const setInputs = {
   autotrade_ema: document.getElementById('setAutotradeEma'),
   autotrade_scalp: document.getElementById('setAutotradeScalp'),
   autotrade_session: document.getElementById('setAutotradeSession'),
+  autotrade_session_ny: document.getElementById('setAutotradeSessionNy'),
 };
 
 const setValueInputs = {
@@ -11072,6 +11856,7 @@ const setValueInputs = {
   autotrade_leverage_divergence: document.getElementById('setAutotradeLevDivergence'),
   autotrade_leverage_ema: document.getElementById('setAutotradeLevEma'),
   autotrade_leverage_session: document.getElementById('setAutotradeLevSession'),
+  autotrade_leverage_session_ny: document.getElementById('setAutotradeLevSessionNy'),
 };
 
 function applySettingsToInputs(s) {
@@ -11735,12 +12520,22 @@ const sessionModal = document.getElementById('sessionModal');
 document.getElementById('sessionCloseBtn').onclick = () => sessionModal.classList.remove('open');
 let currentSessionData = null;
 
-async function openSessionChart(symbol, sessionOpen) {
+function openSessionNyChart(symbol, sessionOpen) {
+  // Thin wrapper, not a duplicate — reuses the exact same modal/canvas
+  // (openSessionChart/drawSessionChart) since this is pure chart-display
+  // code with zero effect on trading behavior, unlike the detection/
+  // execution logic above which IS fully duplicated per the user's
+  // explicit request. The optional 3rd param only changes which API
+  // endpoint gets fetched.
+  return openSessionChart(symbol, sessionOpen, '/api/session_ny/chart');
+}
+
+async function openSessionChart(symbol, sessionOpen, endpoint = '/api/session/chart') {
   document.getElementById('sessionModalTitle').textContent = symbol;
   document.getElementById('sessionModalParams').textContent = 'загрузка...';
   sessionModal.classList.add('open');
   try {
-    const data = await (await fetch(`/api/session/chart/${symbol}?session_open=${sessionOpen}`)).json();
+    const data = await (await fetch(`${endpoint}/${symbol}?session_open=${sessionOpen}`)).json();
     if (data.error) { document.getElementById('sessionModalParams').textContent = data.error; return; }
     currentSessionData = data;
     const sig = data.signal;
@@ -11879,6 +12674,8 @@ if __name__ == "__main__":
     threading.Thread(target=hourly_stats_loop, daemon=True).start()
     threading.Thread(target=session_loop, daemon=True).start()
     threading.Thread(target=session_live_loop, daemon=True).start()
+    threading.Thread(target=session_ny_loop, daemon=True).start()
+    threading.Thread(target=session_ny_live_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     threading.Thread(target=risk_autotune_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
