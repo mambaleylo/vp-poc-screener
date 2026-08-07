@@ -3144,6 +3144,37 @@ v0.90.0 - disabled the header's `position:sticky` specifically inside
          desktop (outside that breakpoint) keeps sticky as before,
          since the bug was specific to the mobile+zoom combination, not
          sticky positioning in general.
+
+v0.91.0 - fixed a real bug in recommend_scalp_config()'s target
+         selection, found while answering a direct user question about
+         why scalp was "barely profitable despite a good winrate" —
+         stops kept coming out wider than the fixed target. Root cause:
+         the target loop was sorted largest-first and `break`d after
+         the FIRST (i.e. largest) target clearing SCALP_MIN_HIT_RATE,
+         never even computing smaller targets' actual EV — a leftover
+         assumption from the OLD score (hit_rate*trades_per_day, where
+         a bigger target only ever meant fewer trades/day, so stopping
+         early was a safe shortcut). Under the CURRENT EV-based score
+         (ev_per_trade_pct = hit_frac*pct - (1-hit_frac)*sl_pct_est,
+         since v0.61.0), that assumption is simply wrong: a smaller
+         target usually clears a much higher hit-rate, and that can
+         easily beat a bigger target's raw size in the real EV math.
+         The break meant every qualifying symbol mechanically locked
+         onto its largest clearing target from SCALP_TARGET_PCTS
+         without ever checking whether a smaller one scored better —
+         exactly what the live data showed: every SKYAI_USDT scalp
+         signal used target=3% (the largest configured option), and
+         with SL frequently exceeding that fixed target, the account
+         was staying positive on a thin margin only because the 70%+
+         hit-rate was carrying stops that were routinely bigger than
+         the reward.
+         Fix: removed the `break` and the largest-first sort — now
+         every (interval, direction)'s qualifying targets get scored,
+         and whichever genuinely has the best EV wins, which may well
+         be a smaller target with a much better hit-rate on symbols
+         where that's true. Docstring updated to match. No new
+         constant/filter needed — this was a real logic bug in the
+         existing EV-based selection, not a missing threshold.
 """
 
 import os
@@ -3163,7 +3194,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.90.0"
+APP_VERSION = "0.91.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6627,23 +6658,47 @@ def scan_symbol_scalp(symbol):
 
 def recommend_scalp_config(symbol_data, mmr_pct, max_leverage=SCALP_DEFAULT_MAX_LEVERAGE):
     """Given one symbol's full interval/direction/target data, picks the
-    single best (interval, direction, target%) combination: the LARGEST
-    target that still clears SCALP_MIN_HIT_RATE, needs no more leverage
-    than the exchange actually allows for this contract (max_leverage —
-    confirmed by the user that this varies a lot by coin, e.g. 10x on
-    VELVET_USDT vs 125x on majors; a target the math likes but the
-    exchange won't let you execute isn't a real recommendation), and
-    where the liquidation buffer at that leverage exceeds the coin's own
-    historical p90 adverse move by SCALP_SAFETY_MARGIN. Returns None if
-    nothing on this symbol clears all three bars at any
-    interval/direction/target — that's a legitimate, informative result
-    (this coin isn't a safe, executable candidate for the stated goal),
-    not an error."""
+    single best (interval, direction, target%) combination by actual EV
+    (see ev_per_trade_pct below) among every target that clears
+    SCALP_MIN_HIT_RATE, needs no more leverage than the exchange
+    actually allows for this contract (max_leverage — confirmed by the
+    user that this varies a lot by coin, e.g. 10x on VELVET_USDT vs
+    125x on majors; a target the math likes but the exchange won't let
+    you execute isn't a real recommendation), and where the liquidation
+    buffer at that leverage exceeds the coin's own historical p90
+    adverse move by SCALP_SAFETY_MARGIN. Returns None if nothing on
+    this symbol clears all three bars at any interval/direction/target
+    — that's a legitimate, informative result (this coin isn't a safe,
+    executable candidate for the stated goal), not an error.
+    v0.91.0: previously stopped at the FIRST (largest) target clearing
+    the hit-rate bar per (interval, direction), assuming a bigger
+    target was always at least as good — true under the old hit_rate*
+    frequency score, false under the current EV-based one, where a
+    smaller target's usually-higher hit-rate can win on real EV. Now
+    checks every qualifying target and keeps whichever scores best."""
     best = None
     for interval, dirs in symbol_data.items():
         interval_sec = INTERVAL_SECONDS.get(interval, 300)
         for direction, summary in dirs.items():
-            for pct_str in sorted(summary.keys(), key=lambda x: -float(x)):
+            # v0.91.0: used to be sorted largest-target-first with a
+            # `break` after the first one clearing SCALP_MIN_HIT_RATE —
+            # correct under the OLD score (hit_rate*frequency, where a
+            # bigger target only ever meant fewer trades/day, so
+            # stopping early was a safe shortcut), but NOT under the
+            # current EV-based score (ev_per_trade_pct = hit_frac*pct -
+            # (1-hit_frac)*sl_pct_est): a smaller target usually clears
+            # a much HIGHER hit-rate, and that can easily beat a bigger
+            # target's raw size in the actual EV math. The old break
+            # meant every qualifying symbol mechanically locked onto
+            # its LARGEST clearing target without ever computing what
+            # a smaller one's real EV would have been — exactly what a
+            # live user complaint showed: every SKYAI_USDT signal used
+            # target=3% (the largest in SCALP_TARGET_PCTS), and the
+            # account was only barely profitable specifically because
+            # stops kept coming out wider than that target. Now checks
+            # every target this (interval, direction) offers and keeps
+            # whichever genuinely scores best.
+            for pct_str in summary.keys():
                 s = summary[pct_str]
                 if s["hit_rate"] is None or s["hit_rate"] < SCALP_MIN_HIT_RATE:
                     continue
@@ -6696,7 +6751,6 @@ def recommend_scalp_config(symbol_data, mmr_pct, max_leverage=SCALP_DEFAULT_MAX_
                 }
                 if best is None or candidate["score"] > best["score"]:
                     best = candidate
-                break  # this interval/direction's largest qualifying target — no need to check smaller ones too
     return best
 
 
