@@ -3175,6 +3175,30 @@ v0.91.0 - fixed a real bug in recommend_scalp_config()'s target
          where that's true. Docstring updated to match. No new
          constant/filter needed — this was a real logic bug in the
          existing EV-based selection, not a missing threshold.
+
+v0.92.0 - new SCALP_MIN_RR (default 0.5) in recommend_scalp_config(),
+         per direct user follow-up right after v0.91.0's target-
+         selection fix: "стоп может быть другим, а то сейчас в среднем
+         в 3 раза больше тейка" (SL averaging ~3x the target). v0.91.0
+         fixed the mechanism CHOOSING among targets but didn't cap how
+         lopsided a still-EV-positive winner's SL:target ratio could
+         be. Deliberately does NOT touch the SL calculation itself
+         (sl_pct_est, p90_adverse_pct-based, deliberately widened in
+         v0.87.0 to match real adverse excursion) — artificially
+         tightening a stop below what real losses actually reach would
+         just convert would-be wins into losses and undo that fix, not
+         improve anything. Instead this REJECTS any (interval,
+         direction, target) candidate where target_pct/sl_pct_est
+         falls under 0.5 (SL more than 2x the target), same "filter,
+         don't distort the underlying measurement" approach EMA_MIN_RR
+         already uses. Placed right after sl_pct_est is computed, before
+         EV/score — a symbol can still end up with no qualifying
+         candidate at all if none of its targets clear both this and
+         SCALP_MIN_HIT_RATE, same legitimate "not a safe candidate"
+         outcome the function already returns None for. Candidate dicts
+         also gained an "rr" field (target_pct/sl_pct_est) for
+         visibility, though no UI column was added for it this round —
+         the fix itself was the priority requested.
 """
 
 import os
@@ -3194,7 +3218,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.91.0"
+APP_VERSION = "0.92.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3496,6 +3520,7 @@ SCALP_SL_BUFFER_MULT = float(os.environ.get("VP_SCALP_SL_BUFFER_MULT", 0.25))  #
 SCALP_SIGNAL_TOP_N = int(os.environ.get("VP_SCALP_SIGNAL_TOP_N", 1))  # only fire a live signal for the top-N ranked symbols by score each cycle, not every qualifying one
 SCALP_SAFETY_MARGIN = float(os.environ.get("VP_SCALP_SAFETY_MARGIN", 1.5))  # liquidation buffer must exceed the coin's own historical p90 adverse move by this factor before a target/leverage combo is flagged "safe"
 SCALP_MIN_HIT_RATE = float(os.environ.get("VP_SCALP_MIN_HIT_RATE", 60.0))  # a target below this hit-rate isn't worth recommending even if technically "safe"
+SCALP_MIN_RR = float(os.environ.get("VP_SCALP_MIN_RR", 0.5))  # per direct user request after live data showed the SL averaging ~3x the target (RR~0.33) even on EV-positive configs — real SL is p90_adverse_pct-based (v0.87.0's SCALP_SL_BUFFER_MULT), left untouched here on purpose: rather than artificially tightening a stop below what real adverse moves actually reach (which would just convert would-be wins into losses, undermining the whole point of the P90-based sizing), this REJECTS candidates whose target/sl_pct_est ratio doesn't clear this bar — same "filter, don't distort the underlying measurement" approach as EMA_MIN_RR. 0.5 means SL can be at most 2x the target, down from the ~3x average that prompted this.
 
 # --- zone quality filters: only narrow, genuinely dominant nodes should
 # fire signals. A merge of many adjacent top-N bins can produce a tall,
@@ -6675,7 +6700,12 @@ def recommend_scalp_config(symbol_data, mmr_pct, max_leverage=SCALP_DEFAULT_MAX_
     target was always at least as good — true under the old hit_rate*
     frequency score, false under the current EV-based one, where a
     smaller target's usually-higher hit-rate can win on real EV. Now
-    checks every qualifying target and keeps whichever scores best."""
+    checks every qualifying target and keeps whichever scores best.
+    v0.92.0: also requires target/sl_pct_est >= SCALP_MIN_RR — a
+    positive-EV candidate can still have a SL disproportionately wider
+    than its target (real losses do cost more than real wins), and this
+    caps how lopsided that's allowed to get, on top of (not instead of)
+    the EV ranking above."""
     best = None
     for interval, dirs in symbol_data.items():
         interval_sec = INTERVAL_SECONDS.get(interval, 300)
@@ -6732,6 +6762,8 @@ def recommend_scalp_config(symbol_data, mmr_pct, max_leverage=SCALP_DEFAULT_MAX_
                 # safety margin — liq_buffer_pct — that was never the right
                 # basis for this and wasn't previously used in score either).
                 sl_pct_est = s["p90_adverse_pct"] * (1 + SCALP_SL_BUFFER_MULT)
+                if sl_pct_est <= 0 or pct / sl_pct_est < SCALP_MIN_RR:
+                    continue  # SL too wide relative to this target — see SCALP_MIN_RR's own comment
                 hit_frac = s["hit_rate"] / 100
                 ev_per_trade_pct = hit_frac * pct - (1 - hit_frac) * sl_pct_est
                 score = round(ev_per_trade_pct * trades_per_day_est, 4)
@@ -6741,6 +6773,7 @@ def recommend_scalp_config(symbol_data, mmr_pct, max_leverage=SCALP_DEFAULT_MAX_
                     "median_bars_to_hit": s["median_bars_to_hit"],
                     "time_to_hit_hours": round(time_to_hit_hours, 2),
                     "trades_per_day_est": trades_per_day_est,
+                    "rr": round(pct / sl_pct_est, 3),
                     "leverage": round(leverage, 2),
                     "max_leverage": max_leverage,
                     "liq_buffer_pct": round(liq_buffer, 3),
