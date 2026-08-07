@@ -3128,6 +3128,22 @@ v0.89.0 - mobile layout fixes, per direct user request with a live
          itself, not a specific id, so nothing rendered later needs its
          own wrapper. Minor font/padding reductions for header text and
          table cells at this width too.
+
+v0.90.0 - disabled the header's `position:sticky` specifically inside
+         the v0.89.0 mobile media query, per a direct live screenshot
+         showing a real rendering glitch: after pinch-zooming out on
+         the phone, the header's own stats text ("откр.27" etc.) was
+         visibly duplicated/overlapping onto table rows further down
+         the page — a known WebKit/Chromium-mobile artifact where
+         `position:sticky` combined with a zoom transform can smear a
+         stale paint of the sticky element onto scrolled content below
+         it. Added `header { position:static; }` inside the existing
+         @media (max-width:640px) block from v0.89.0 — narrow/mobile
+         viewports lose the "header stays pinned while scrolling"
+         convenience in exchange for not having this overlap bug;
+         desktop (outside that breakpoint) keeps sticky as before,
+         since the bug was specific to the mobile+zoom combination, not
+         sticky positioning in general.
 """
 
 import os
@@ -3147,7 +3163,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.89.0"
+APP_VERSION = "0.90.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9191,7 +9207,7 @@ INDEX_HTML = """<!doctype html>
      auto }` rule applies to any table on the page, present now or
      injected later, without needing to touch each render function. */
   @media (max-width: 640px) {
-    header { padding:8px 10px; }
+    header { padding:8px 10px; position:static; }
     header h1 { font-size:15px; margin-bottom:6px; }
     #headerTop { flex-direction:column; align-items:stretch; gap:2px; }
     #headerTop > div:last-child {
