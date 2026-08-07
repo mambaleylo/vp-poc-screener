@@ -3105,6 +3105,29 @@ v0.88.0 - ATR-based SL for Divergence, per direct user request after
          so they render as "-" and are simply excluded from the new
          aggregates rather than erroring, same backward-compat pattern
          used for every other diagnostic field added this way.
+
+v0.89.0 - mobile layout fixes, per direct user request with a live
+         screenshot showing the header's 7 reset/settings buttons
+         wrapping across ~4 lines on a phone (eating most of the
+         visible screen before any actual data), and the 12-column
+         tables (EMA's is the worst case: Symbol/Dir/TF/Entry/SL/TP/RR/
+         ADX/MFE/MAE/Status/Time) rendering all columns crushed into
+         barely-legible widths at that viewport.
+         CSS-only fix, no JS or markup changes: a new @media (max-width:
+         640px) block. Header buttons switch from wrapping to a single
+         horizontally-scrollable row (#headerTop flex-direction:column
+         so the title sits above it, button container gets overflow-x:
+         auto). Tabs get the same horizontal-scroll treatment instead of
+         wrapping. Tables get `display:block; overflow-x:auto; white-
+         space:nowrap` — the standard scrollable-table CSS trick, which
+         applies to any <table> element on the page rather than needing
+         per-table markup changes. This is why it works for the three
+         static tables (signals/div/ema) AND the dynamically-generated
+         ones (scalp/session panels build their own <table> via
+         innerHTML) with a single rule — the CSS targets the element
+         itself, not a specific id, so nothing rendered later needs its
+         own wrapper. Minor font/padding reductions for header text and
+         table cells at this width too.
 """
 
 import os
@@ -3124,7 +3147,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.88.0"
+APP_VERSION = "0.89.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9155,6 +9178,33 @@ INDEX_HTML = """<!doctype html>
   #sessionChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
   .dim { color:#8b98ab; }
   .empty { padding:30px 14px; text-align:center; color:#6b7688; font-size:13px; }
+
+  /* Mobile layout, v0.89.0 — per direct user request after a live
+     screenshot showed the header button row wrapping across ~4 lines
+     (eating most of the visible screen before any actual data) and the
+     12-column tables (EMA's, worst case) rendering all columns crushed
+     into unreadable widths on a narrow phone viewport. Deliberately
+     CSS-only: no JS/markup changes needed, since it works for BOTH the
+     three static <table> elements (signals/div/ema) AND the
+     dynamically-generated ones (scalp/session panels build their own
+     <table> via innerHTML) — the `table { display:block; overflow-x:
+     auto }` rule applies to any table on the page, present now or
+     injected later, without needing to touch each render function. */
+  @media (max-width: 640px) {
+    header { padding:8px 10px; }
+    header h1 { font-size:15px; margin-bottom:6px; }
+    #headerTop { flex-direction:column; align-items:stretch; gap:2px; }
+    #headerTop > div:last-child {
+      display:flex; flex-wrap:nowrap; overflow-x:auto; gap:6px;
+      -webkit-overflow-scrolling:touch; padding-bottom:4px;
+    }
+    #headerTop > div:last-child button { flex-shrink:0; font-size:11px; padding:6px 10px; }
+    #status, #overview, #autotradeBanner { font-size:10.5px; }
+    .tabs { flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; padding-bottom:2px; }
+    .tab { flex-shrink:0; font-size:12px; padding:6px 10px; }
+    table { display:block; overflow-x:auto; white-space:nowrap; -webkit-overflow-scrolling:touch; max-width:100%; }
+    th, td { padding:6px 8px; font-size:12px; }
+  }
 </style>
 </head>
 <body>
