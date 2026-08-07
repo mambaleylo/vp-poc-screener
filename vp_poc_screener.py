@@ -3199,6 +3199,83 @@ v0.92.0 - new SCALP_MIN_RR (default 0.5) in recommend_scalp_config(),
          also gained an "rr" field (target_pct/sl_pct_est) for
          visibility, though no UI column was added for it this round —
          the fix itself was the priority requested.
+
+v0.93.0 - Risk auto-tune: a new system that periodically nudges risk-
+         related constants based on live win/loss data, per direct user
+         request to automate the recurring pattern of this whole session
+         — screenshot stats, Claude computes breakeven RR / overshoot /
+         reverse-EV, Claude picks a new number. User explicitly chose
+         full automation including reverse over an advisory-only or
+         partial-automation option.
+         NOT the same system as auto_tune_cycle()/AUTO_TUNE_ENABLED
+         (pre-existing — searches Volume Profile detection parameters
+         per symbol, unrelated). This one is named RISK_AUTOTUNE_* to
+         avoid the collision.
+         Three generic rule types, applied per module:
+         - _risk_autotune_min_rr: nudges a *_MIN_RR filter toward 95% of
+           the RR that would break even at the module's live winrate —
+           the same reasoning manually used for EMA_MIN_RR (0.3->0.7)
+           and SCALP_MIN_RR (0.5).
+         - _risk_autotune_sl_mult: nudges an SL-width multiplier based on
+           whether realized LOSS MAE (in R) overshoots -1.0 — same logic
+           manually used for SCALP_SL_BUFFER_MULT (0.05->0.25).
+         - _risk_autotune_reverse: flips an *_INVERT_SIGNALS flag if the
+           CURRENTLY active direction's own EV has been solidly negative
+           over a large sample. Explicitly weaker evidence than the
+           other two (live data never shows the mirror direction's
+           outcome, only whichever was actually traded) — gets a higher
+           sample bar (RISK_AUTOTUNE_MIN_SAMPLE_REVERSE=30 vs 20) and a
+           much longer cooldown (24h vs 6h) specifically to prevent
+           flip-flopping on noise, since a wrong flip reverses every
+           future signal until the next one, not just one trade.
+         Applied to: EMA_MIN_RR/EMA_SL_ATR_MULT/EMA_INVERT_SIGNALS,
+         DIV_MIN_RR (NEW, see below)/DIV_SL_ATR_MULT/DIV_INVERT_SIGNALS,
+         SCALP_MIN_RR/SCALP_SL_BUFFER_MULT (scalp has no reverse flag —
+         direction comes from recommend_scalp_config's own EV ranking,
+         not an invertible indicator), and SESSION_INVERT_SIGNALS only
+         (SESSION_SL_MULT can't be auto-tuned the overshoot way — Session
+         signals never got MFE/MAE tracking added, a real pre-existing
+         gap being surfaced here rather than silently worked around;
+         session's reverse check computes realized R directly from
+         entry/sl/exit_price instead, using RR=2 fixed by construction
+         from SESSION_INVERT_SIGNALS's own v0.80.0 sizing).
+         New DIV_MIN_RR filter added for symmetry with EMA_MIN_RR (0 =
+         disabled by default) — found already partially wired (constant
+         + gating check in scan_symbol_divergence, referencing a v0.93.0
+         comment) but with an uninitialized STATE["filtered_by_div_min_rr"]
+         that would have KeyError'd at runtime; completed to full parity
+         with EMA_MIN_RR (settings persistence, /api/divergence/status,
+         panel header display).
+         Fixed a real pre-existing display bug while touching this code:
+         EMA's panel header read filtered_by_min_rr/filtered_by_adx/
+         filtered_by_min_gap from `s` (=status.stats), but the API
+         actually returns all three as siblings of "stats", not inside
+         it — meaning the "(отсеяно: N)" counts next to these filters
+         had always silently shown 0 regardless of the real count. Fixed
+         for EMA and applied correctly for the new DIV_MIN_RR display.
+         SCALP_MIN_RR, SCALP_SL_BUFFER_MULT, SESSION_SL_MULT, EMA_SL_ATR_
+         MULT, DIV_SL_ATR_MULT — none of these five were in the settings
+         system before this (plain module constants, no persistence at
+         all — not even the settings.json-overrides-code-default kind of
+         persistence). Moved all five in, since an auto-tuned value that
+         reverts on every restart defeats the point; this also fixes a
+         latent gap for anyone who'd been setting them via env var only.
+         New STATE["risk_autotune_log"] (capped 200, newest-first) and
+         STATE["risk_autotune_last_change"] (cooldown timestamps per
+         param) — both now persisted through save_state()/load_state()
+         (log for the history, cooldowns so a restart can't bypass the
+         anti-thrash protection by resetting them to "never tuned").
+         risk_autotune_pass() runs hourly via new risk_autotune_loop()
+         daemon thread; each module wrapped in its own try/except so one
+         module's bad data doesn't block the others.
+         Surfaced in /api/status under "risk_autotune" (distinct key from
+         the pre-existing "auto_tune") and in a new collapsed-by-default
+         "Авто-тюнинг риска" details element in the header, showing the
+         most recent changes with old→new values and the reasoning
+         string logged for each. No settings-UI toggles were added for
+         the five newly-settings-backed constants this round (readable/
+         writable via the API, and being tuned automatically per the
+         user's request) — noted as a scope decision, not an oversight.
 """
 
 import os
@@ -3218,7 +3295,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.92.0"
+APP_VERSION = "0.93.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3356,6 +3433,7 @@ DIV_TP_PCT = float(os.environ.get("VP_DIV_TP_PCT", 0.01))  # TP is a fixed % mov
 # before its own ATR fix. A fixed % can't adapt per-symbol; ATR can.
 DIV_SL_MODE = os.environ.get("VP_DIV_SL_MODE", "atr")  # "atr" or "fixed_pct" — fixed_pct reproduces the exact old DIV_RR-derived behavior, for comparison/rollback
 DIV_SL_ATR_MULT = float(os.environ.get("VP_DIV_SL_ATR_MULT", 1.5))  # SL = ATR(EMA_DIAG_ATR_PERIOD) * this, in price units — same period constant EMA's own ATR diagnostic/SL already uses, not a separate one
+DIV_MIN_RR = float(os.environ.get("VP_DIV_MIN_RR", 0))  # 0 = disabled by default — mirrors EMA_MIN_RR, added for symmetry so the auto-tuner (v0.93.0) has the same lever on divergence that it already has on EMA
 # TP stays a fixed % of entry (DIV_TP_PCT) — only the STOP moves to ATR,
 # same split EMA uses. RR is no longer one constant; every signal now
 # carries its own "rr" field (tp_dist / atr-based-risk), and
@@ -3713,7 +3791,7 @@ CREDENTIALS_FILE = os.environ.get(
     "VP_CREDENTIALS_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
-SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "bounce_enabled", "breakout_enabled",
+SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "div_min_rr", "bounce_enabled", "breakout_enabled",
                   "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session",
@@ -3721,7 +3799,17 @@ SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_sig
                   "scalp_size_mode", "scalp_size_value",
                   "ema_min_rr", "ema_signal_timeout_hours",
                   "ema_adx_filter_enabled", "ema_adx_min", "ema_min_gap_pct",
-                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session")
+                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session",
+                  # v0.93.0 — moved into the settings system specifically so
+                  # auto_tune_pass() can persist adjustments to these via the
+                  # same save_settings() path everything else already uses,
+                  # rather than inventing a second, separate persistence
+                  # mechanism just for auto-tuned values. Also fixes a real
+                  # (if minor) pre-existing gap: before this, these three were
+                  # plain module constants with NO persistence at all, so any
+                  # manual env-var override would silently revert on restart
+                  # too — now they follow the same rules as ema_min_rr etc.
+                  "scalp_min_rr", "scalp_sl_buffer_mult", "session_sl_mult", "ema_sl_atr_mult", "div_sl_atr_mult")
 
 
 def get_settings():
@@ -3729,6 +3817,7 @@ def get_settings():
         "volume_profile_enabled": VOLUME_PROFILE_ENABLED,
         "divergence_enabled": DIVERGENCE_ENABLED,
         "div_invert_signals": DIV_INVERT_SIGNALS,
+        "div_min_rr": DIV_MIN_RR,
         "bounce_enabled": BOUNCE_ENABLED,
         "breakout_enabled": BREAKOUT_ENABLED,
         "ema_enabled": EMA_ENABLED,
@@ -3766,6 +3855,11 @@ def get_settings():
         "ema_adx_min": EMA_ADX_MIN,
         "ema_min_gap_pct": EMA_MIN_GAP_PCT,
         "autotrade_leverage_session": AUTOTRADE_LEVERAGE_SESSION,
+        "scalp_min_rr": SCALP_MIN_RR,
+        "scalp_sl_buffer_mult": SCALP_SL_BUFFER_MULT,
+        "session_sl_mult": SESSION_SL_MULT,
+        "ema_sl_atr_mult": EMA_SL_ATR_MULT,
+        "div_sl_atr_mult": DIV_SL_ATR_MULT,
     }
 
 
@@ -3775,7 +3869,7 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, HOURLY_STATS_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION
     global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
@@ -3784,12 +3878,21 @@ def apply_settings(updates):
     global EMA_MIN_RR
     global EMA_SIGNAL_TIMEOUT_SEC
     global EMA_ADX_FILTER_ENABLED, EMA_ADX_MIN, EMA_MIN_GAP_PCT
+    global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT, SESSION_SL_MULT
+    global EMA_SL_ATR_MULT, DIV_SL_ATR_MULT
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
     if "divergence_enabled" in updates:
         DIVERGENCE_ENABLED = bool(updates["divergence_enabled"])
     if "div_invert_signals" in updates:
         DIV_INVERT_SIGNALS = bool(updates["div_invert_signals"])
+    if "div_min_rr" in updates:
+        try:
+            v = float(updates["div_min_rr"])
+            if v >= 0:
+                DIV_MIN_RR = v
+        except (TypeError, ValueError):
+            pass
     if "bounce_enabled" in updates:
         BOUNCE_ENABLED = bool(updates["bounce_enabled"])
     if "breakout_enabled" in updates:
@@ -3896,6 +3999,41 @@ def apply_settings(updates):
                 pass
     if "telegram_alerts_hourly" in updates:
         TELEGRAM_ALERTS_HOURLY = bool(updates["telegram_alerts_hourly"])
+    if "scalp_min_rr" in updates:
+        try:
+            v = float(updates["scalp_min_rr"])
+            if v >= 0:
+                SCALP_MIN_RR = v
+        except (TypeError, ValueError):
+            pass
+    if "scalp_sl_buffer_mult" in updates:
+        try:
+            v = float(updates["scalp_sl_buffer_mult"])
+            if v >= 0:
+                SCALP_SL_BUFFER_MULT = v
+        except (TypeError, ValueError):
+            pass
+    if "session_sl_mult" in updates:
+        try:
+            v = float(updates["session_sl_mult"])
+            if v > 0:
+                SESSION_SL_MULT = v
+        except (TypeError, ValueError):
+            pass
+    if "ema_sl_atr_mult" in updates:
+        try:
+            v = float(updates["ema_sl_atr_mult"])
+            if v > 0:
+                EMA_SL_ATR_MULT = v
+        except (TypeError, ValueError):
+            pass
+    if "div_sl_atr_mult" in updates:
+        try:
+            v = float(updates["div_sl_atr_mult"])
+            if v > 0:
+                DIV_SL_ATR_MULT = v
+        except (TypeError, ValueError):
+            pass
 
 
 def save_settings():
@@ -4015,6 +4153,7 @@ STATE = {
     "filtered_by_oi": 0,
     "filtered_by_staleness": 0,
     "filtered_by_min_rr": 0,
+    "filtered_by_div_min_rr": 0,
     "filtered_by_adx": 0,
     "filtered_by_min_gap": 0,
     "last_scan_started": None,
@@ -4048,6 +4187,16 @@ STATE = {
     # snapshot(). Persisted via save_state()/load_state() like
     # everything else in STATE.
     "signal_snapshots": {},
+    # Risk auto-tune (v0.93.0) — NOT the same system as auto_tune_cycle()/
+    # AUTO_TUNE_ENABLED above (that one searches Volume Profile detection
+    # parameters per symbol). This is a separate system that periodically
+    # nudges risk-related constants (EMA_MIN_RR, SCALP_MIN_RR, SCALP_SL_
+    # BUFFER_MULT, SESSION_SL_MULT, and the three *_INVERT_SIGNALS flags)
+    # based on live win/loss stats, replacing what had been the user
+    # manually screenshotting stats each time and asking for the same kind
+    # of adjustment — see risk_autotune_pass()'s own docstring.
+    "risk_autotune_log": deque(maxlen=200),
+    "risk_autotune_last_change": {},  # param_key -> unix ts, for cooldown enforcement
     "scalp_max_leverage_map": {},
     "scalp_data": {},          # symbol -> {interval -> {direction -> target-summary}}
     "scalp_recommendations": {},  # symbol -> best config (or None)
@@ -5063,6 +5212,10 @@ def scan_symbol_divergence(symbol, candles=None):
                 atr_price = last_atr
                 atr_pct = round(last_atr / entry * 100, 4)
         sl, tp, risk, rr = compute_div_tp_sl(sig["direction"], entry, atr=atr_price)
+        if DIV_MIN_RR > 0 and rr is not None and rr < DIV_MIN_RR:
+            with state_lock:
+                STATE["filtered_by_div_min_rr"] += 1
+            return  # ATR-based stop came out too wide relative to the fixed TP — mirrors EMA_MIN_RR. Applied AFTER the cooldown consumption above (unlike EMA, where it's checked before) since divergence's cooldown is keyed by symbol only, not symbol+interval — restructuring the order wasn't worth the risk for this addition; a filtered signal here does still consume the symbol's cooldown slot, a minor inconsistency versus EMA's ordering, not a correctness issue
         # how much of the anticipated move already happened between the
         # pivot forming and the signal actually firing (confirmation +
         # freshness delay) — positive means price already moved in the
@@ -7436,6 +7589,8 @@ def save_state():
                 # serialize meaningfully; load_state() re-attaches it to the
                 # actual reloaded signal object, not a detached copy.
                 "sim_trades": sim_trades_out,
+                "risk_autotune_log": list(STATE["risk_autotune_log"]),
+                "risk_autotune_last_change": STATE["risk_autotune_last_change"],
                 "saved_at": time.time(),
             }
         tmp_path = STATE_FILE + ".tmp"
@@ -7500,6 +7655,8 @@ def load_state():
         session_signals = data.get("session_signals", [])
         autotrade_log = data.get("autotrade_log", [])
         sim_trades = data.get("sim_trades", [])
+        risk_autotune_log = data.get("risk_autotune_log", [])
+        risk_autotune_last_change = data.get("risk_autotune_last_change", {})
         with state_lock:
             STATE["signals"] = deque(signals, maxlen=SIGNAL_HISTORY)
             STATE["div_signals"] = deque(div_signals, maxlen=DIV_SIGNAL_HISTORY)
@@ -7507,6 +7664,8 @@ def load_state():
             STATE["scalp_signals"] = deque(scalp_signals, maxlen=SCALP_SIGNAL_HISTORY)
             STATE["session_signals"] = deque(session_signals, maxlen=SESSION_SIGNAL_HISTORY)
             STATE["autotrade_log"] = deque(autotrade_log, maxlen=AUTOTRADE_TRADE_HISTORY)
+            STATE["risk_autotune_log"] = deque(risk_autotune_log, maxlen=200)
+            STATE["risk_autotune_last_change"] = risk_autotune_last_change
             if "sim_balance" in data:
                 STATE["sim_balance"] = data["sim_balance"]
             restored_trades = []
@@ -8509,6 +8668,322 @@ def reconcile_loop():
 
 
 # ----------------------------------------------------------------------------
+# Risk auto-tune (v0.93.0) — periodically nudges risk-related constants based
+# on live win/loss data, automating what had been the user manually
+# screenshotting stats each session and asking for the same handful of
+# recurring adjustments (RR-vs-breakeven, SL-overshoot, reverse-direction
+# EV). NOT the same system as auto_tune_cycle()/AUTO_TUNE_ENABLED above,
+# which searches Volume Profile detection parameters per symbol — this one
+# tunes EMA_MIN_RR, DIV_MIN_RR, SCALP_MIN_RR (a floor on target/stop ratio),
+# EMA_SL_ATR_MULT, DIV_SL_ATR_MULT, SCALP_SL_BUFFER_MULT (stop width), and
+# DIV_INVERT_SIGNALS/EMA_INVERT_SIGNALS/SESSION_INVERT_SIGNALS (direction).
+# Per direct user request for FULL automation including reverse — the
+# safeguards below (min sample sizes, bounded step sizes, cooldowns) aren't
+# a hedge against that choice, just how "automatic" avoids being self-
+# destructive on noisy data: a fixed formula chasing every small sample
+# would thrash a parameter back and forth on noise alone.
+# Known gap: Session has no MFE/MAE tracking on its signals at all (never
+# added), so SESSION_SL_MULT can't be auto-tuned the same overshoot-based
+# way as the other three SL-width knobs — only its reverse flag is tunable
+# here, computed directly from entry/sl/exit_price instead.
+# ----------------------------------------------------------------------------
+RISK_AUTOTUNE_ENABLED = os.environ.get("VP_RISK_AUTOTUNE_ENABLED", "1") == "1"
+RISK_AUTOTUNE_INTERVAL_SEC = int(os.environ.get("VP_RISK_AUTOTUNE_INTERVAL_SEC", 3600))  # hourly
+RISK_AUTOTUNE_MIN_SAMPLE = int(os.environ.get("VP_RISK_AUTOTUNE_MIN_SAMPLE", 20))  # closed trades needed before nudging an RR/SL-width knob
+RISK_AUTOTUNE_MIN_SAMPLE_REVERSE = int(os.environ.get("VP_RISK_AUTOTUNE_MIN_SAMPLE_REVERSE", 30))  # higher bar for flipping direction — wrong evidence there reverses every future trade, not just widens/narrows one number
+RISK_AUTOTUNE_COOLDOWN_SEC = int(os.environ.get("VP_RISK_AUTOTUNE_COOLDOWN_SEC", 6 * 3600))  # 6h between changes to the SAME knob
+RISK_AUTOTUNE_REVERSE_COOLDOWN_SEC = int(os.environ.get("VP_RISK_AUTOTUNE_REVERSE_COOLDOWN_SEC", 24 * 3600))  # 24h between flips of the SAME direction flag — the main defense against flip-flopping back and forth on noise
+RISK_AUTOTUNE_RR_STEP = float(os.environ.get("VP_RISK_AUTOTUNE_RR_STEP", 0.1))  # max change per pass for any *_MIN_RR filter
+RISK_AUTOTUNE_MULT_STEP = float(os.environ.get("VP_RISK_AUTOTUNE_MULT_STEP", 0.05))  # max change per pass for any *_SL_ATR_MULT / SCALP_SL_BUFFER_MULT
+RISK_AUTOTUNE_RR_BOUNDS = (0.0, 2.0)  # 2.0 would already be extremely strict for any of these filters
+RISK_AUTOTUNE_MULT_BOUNDS = (0.5, 3.0)  # below 0.5 is an unrealistically tight stop, above 3.0 an unrealistically wide one
+RISK_AUTOTUNE_RR_TOLERANCE = 0.02  # don't nudge an RR filter already within this of its target — avoids chasing noise
+RISK_AUTOTUNE_MULT_TOLERANCE_R = 0.08  # don't nudge an SL-width multiplier if realized LOSS MAE is already within this many R of -1.0
+RISK_AUTOTUNE_REVERSE_EV_THRESHOLD = -0.03  # only flip a direction flag if the CURRENT mode's EV is negative by at least this much — a small negative EV could just be noise
+
+
+def _risk_autotune_log(module, param, old_value, new_value, reason, sample_n):
+    entry = {"ts": time.time(), "module": module, "param": param,
+             "old": old_value, "new": new_value, "reason": reason, "n": sample_n}
+    with state_lock:
+        STATE["risk_autotune_log"].appendleft(entry)
+    # Piggybacks on the existing error/info log channel for UI visibility
+    # ("Последние ошибки" panel) rather than building a dedicated display
+    # from scratch — not really an error, but the same intended audience.
+    log_error(f"RISK-AUTOTUNE: {module}.{param} {old_value} -> {new_value} ({reason}, n={sample_n})")
+
+
+def _risk_autotune_cooldown_ok(param_key, cooldown_sec):
+    with state_lock:
+        last = STATE["risk_autotune_last_change"].get(param_key)
+    return last is None or (time.time() - last) >= cooldown_sec
+
+
+def _risk_autotune_mark(param_key):
+    with state_lock:
+        STATE["risk_autotune_last_change"][param_key] = time.time()
+
+
+def _risk_autotune_min_rr(module, param_key, current_value, median_rr, winrate_pct, sample_n, setter):
+    """Nudges a *_MIN_RR filter toward (a small margin under) the RR that
+    would just break even at the module's own live winrate — same
+    reasoning applied manually for EMA_MIN_RR (0.3->0.7) and SCALP_MIN_RR
+    (0.5). breakeven_rr = (1-winrate)/winrate; target sits 5% under that,
+    matching the margin picked for EMA_MIN_RR=0.7 at the time (breakeven
+    was ~0.789 then)."""
+    if not RISK_AUTOTUNE_ENABLED or sample_n < RISK_AUTOTUNE_MIN_SAMPLE:
+        return
+    if median_rr is None or winrate_pct is None:
+        return
+    if not _risk_autotune_cooldown_ok(param_key, RISK_AUTOTUNE_COOLDOWN_SEC):
+        return
+    winrate = winrate_pct / 100
+    if winrate <= 0 or winrate >= 1:
+        return
+    breakeven_rr = (1 - winrate) / winrate
+    target = breakeven_rr * 0.95
+    diff = target - current_value
+    if abs(diff) < RISK_AUTOTUNE_RR_TOLERANCE:
+        return
+    step = max(-RISK_AUTOTUNE_RR_STEP, min(RISK_AUTOTUNE_RR_STEP, diff))
+    lo, hi = RISK_AUTOTUNE_RR_BOUNDS
+    new_value = round(min(hi, max(lo, current_value + step)), 3)
+    if new_value == current_value:
+        return
+    setter(new_value)
+    _risk_autotune_mark(param_key)
+    _risk_autotune_log(module, param_key, current_value, new_value,
+                        f"median_rr={median_rr:.3f} winrate={winrate_pct:.1f}% breakeven={breakeven_rr:.3f}", sample_n)
+
+
+def _risk_autotune_sl_mult(module, param_key, current_value, loss_mae_avg_r, sample_n, setter):
+    """Nudges an SL-width multiplier toward matching real adverse
+    excursion: if realized LOSS MAE (in R, where R is that trade's own
+    SL distance) averages beyond -1.0, the stop is too tight relative to
+    where losses actually go — widen it. If comfortably inside -1.0, the
+    stop has slack it doesn't need — tighten it, since a needlessly wide
+    stop only worsens RR for no real safety benefit. Same logic applied
+    manually for SCALP_SL_BUFFER_MULT (0.05->0.25)."""
+    if not RISK_AUTOTUNE_ENABLED or sample_n < RISK_AUTOTUNE_MIN_SAMPLE:
+        return
+    if loss_mae_avg_r is None:
+        return
+    if not _risk_autotune_cooldown_ok(param_key, RISK_AUTOTUNE_COOLDOWN_SEC):
+        return
+    overshoot = abs(loss_mae_avg_r) - 1.0
+    if abs(overshoot) < RISK_AUTOTUNE_MULT_TOLERANCE_R:
+        return
+    step = RISK_AUTOTUNE_MULT_STEP if overshoot > 0 else -RISK_AUTOTUNE_MULT_STEP
+    lo, hi = RISK_AUTOTUNE_MULT_BOUNDS
+    new_value = round(min(hi, max(lo, current_value + step)), 3)
+    if new_value == current_value:
+        return
+    setter(new_value)
+    _risk_autotune_mark(param_key)
+    _risk_autotune_log(module, param_key, current_value, new_value,
+                        f"loss_mae_avg_r={loss_mae_avg_r:+.3f} overshoot={overshoot:+.3f}", sample_n)
+
+
+def _risk_autotune_reverse(module, param_key, current_flag, winrate_pct, rr, sample_n, setter):
+    """Flips an *_INVERT_SIGNALS flag if the CURRENTLY active direction's
+    own EV (winrate*rr - (1-winrate)) has been solidly negative over a
+    large-enough sample. Weaker evidence than the two nudges above — live
+    data only ever shows the outcome of whichever direction was actually
+    traded, never a parallel "what if the opposite" — so this gets a
+    higher sample bar (RISK_AUTOTUNE_MIN_SAMPLE_REVERSE) and a much
+    longer cooldown (RISK_AUTOTUNE_REVERSE_COOLDOWN_SEC): a wrong flip
+    doesn't just cost one trade, it reverses the direction of every
+    signal until the next flip."""
+    if not RISK_AUTOTUNE_ENABLED or sample_n < RISK_AUTOTUNE_MIN_SAMPLE_REVERSE:
+        return
+    if winrate_pct is None or rr is None or rr <= 0:
+        return
+    if not _risk_autotune_cooldown_ok(param_key, RISK_AUTOTUNE_REVERSE_COOLDOWN_SEC):
+        return
+    winrate = winrate_pct / 100
+    ev = winrate * rr - (1 - winrate)
+    if ev >= RISK_AUTOTUNE_REVERSE_EV_THRESHOLD:
+        return
+    new_flag = not current_flag
+    setter(new_flag)
+    _risk_autotune_mark(param_key)
+    _risk_autotune_log(module, param_key, current_flag, new_flag,
+                        f"ev={ev:+.3f} winrate={winrate_pct:.1f}% rr={rr:.3f}", sample_n)
+
+
+# --- setters: each applies the change AND persists it via save_settings(),
+# same pattern the settings API endpoint itself already uses ---
+
+def _set_ema_min_rr(v):
+    global EMA_MIN_RR
+    EMA_MIN_RR = v
+    save_settings()
+
+
+def _set_ema_sl_atr_mult(v):
+    global EMA_SL_ATR_MULT
+    EMA_SL_ATR_MULT = v
+    save_settings()
+
+
+def _set_ema_invert(v):
+    global EMA_INVERT_SIGNALS
+    EMA_INVERT_SIGNALS = v
+    save_settings()
+
+
+def _set_div_min_rr(v):
+    global DIV_MIN_RR
+    DIV_MIN_RR = v
+    save_settings()
+
+
+def _set_div_sl_atr_mult(v):
+    global DIV_SL_ATR_MULT
+    DIV_SL_ATR_MULT = v
+    save_settings()
+
+
+def _set_div_invert(v):
+    global DIV_INVERT_SIGNALS
+    DIV_INVERT_SIGNALS = v
+    save_settings()
+
+
+def _set_scalp_min_rr(v):
+    global SCALP_MIN_RR
+    SCALP_MIN_RR = v
+    save_settings()
+
+
+def _set_scalp_sl_buffer_mult(v):
+    global SCALP_SL_BUFFER_MULT
+    SCALP_SL_BUFFER_MULT = v
+    save_settings()
+
+
+def _set_session_invert(v):
+    global SESSION_INVERT_SIGNALS
+    SESSION_INVERT_SIGNALS = v
+    save_settings()
+
+
+def _scalp_closed_rr_stats():
+    """Median target_pct/sl_pct ratio across closed scalp trades — scalp
+    doesn't carry a stats-function-level rr_all the way EMA/Divergence
+    do, so this reads it directly off STATE instead."""
+    with state_lock:
+        signals = list(STATE["scalp_signals"])
+    closed = [s for s in signals if s.get("status") == "CLOSED" and s.get("result") in ("WIN", "LOSS") and s.get("sl_pct")]
+    rrs = sorted(s["target_pct"] / s["sl_pct"] for s in closed if s.get("target_pct") and s.get("sl_pct"))
+    if not rrs:
+        return None, 0
+    n = len(rrs)
+    return rrs[n // 2], n
+
+
+def _scalp_loss_mae_avg_r():
+    with state_lock:
+        signals = list(STATE["scalp_signals"])
+    vals = [s["mae_r_at_close"] for s in signals
+            if s.get("status") == "CLOSED" and s.get("result") == "LOSS" and s.get("mae_r_at_close") is not None]
+    if not vals:
+        return None, 0
+    return sum(vals) / len(vals), len(vals)
+
+
+def _session_reverse_stats():
+    """Session has no MFE/MAE tracking on its signals (never added — a
+    real gap, not silently worked around), so this computes realized R
+    directly from entry/sl/exit_price on CLOSED trades instead. Only
+    meaningful while SESSION_INVERT_SIGNALS is on: only the inverted
+    sizing is risk/RR-based (see detect_session_manipulation()) — the
+    non-inverted TP sits at the opposite range edge, an arbitrary
+    distance unrelated to risk, so there's no consistent "R" to compute
+    for that side. Returns (winrate_pct, rr, n); rr is fixed at
+    SESSION_SL_MULT-derived RR=2 by construction when inverted."""
+    with state_lock:
+        signals = list(STATE["session_signals"])
+    closed = [s for s in signals if s.get("status") == "CLOSED" and s.get("result") in ("WIN", "LOSS")]
+    n = len(closed)
+    if not n:
+        return None, None, 0
+    wins = sum(1 for s in closed if s["result"] == "WIN")
+    winrate_pct = round(wins / n * 100, 1)
+    return winrate_pct, 2.0, n  # RR=2 fixed by SESSION_INVERT_SIGNALS's own construction (v0.80.0)
+
+
+def risk_autotune_pass():
+    """One tuning pass across all four modules. Each module's checks are
+    wrapped separately so one module's bad data doesn't block the rest."""
+    try:
+        s = compute_ema_stats()
+        rr_all = s.get("rr_all")
+        winrate = s.get("winrate")
+        closed_n = s.get("closed_total", 0) or 0
+        if rr_all:
+            _risk_autotune_min_rr("ema", "ema_min_rr", EMA_MIN_RR, rr_all["median"], winrate, closed_n, _set_ema_min_rr)
+        loss_mae = s.get("mae_r_losses_at_close")
+        if loss_mae:
+            _risk_autotune_sl_mult("ema", "ema_sl_atr_mult", EMA_SL_ATR_MULT, loss_mae["avg"], s.get("losses", 0) or 0, _set_ema_sl_atr_mult)
+        if rr_all:
+            _risk_autotune_reverse("ema", "ema_invert_signals", EMA_INVERT_SIGNALS, winrate, rr_all["avg"], closed_n, _set_ema_invert)
+    except Exception as e:
+        log_error(f"risk_autotune ema: {e}")
+
+    try:
+        s = compute_divergence_stats()
+        rr_all = s.get("rr_all")
+        winrate = s.get("winrate")
+        closed_n = (s.get("wins", 0) or 0) + (s.get("losses", 0) or 0)
+        if rr_all:
+            _risk_autotune_min_rr("divergence", "div_min_rr", DIV_MIN_RR, rr_all["median"], winrate, closed_n, _set_div_min_rr)
+        loss_mae = s.get("mae_r_losses_at_close")
+        if loss_mae:
+            _risk_autotune_sl_mult("divergence", "div_sl_atr_mult", DIV_SL_ATR_MULT, loss_mae["avg"], s.get("losses", 0) or 0, _set_div_sl_atr_mult)
+        if rr_all:
+            _risk_autotune_reverse("divergence", "div_invert_signals", DIV_INVERT_SIGNALS, winrate, rr_all["avg"], closed_n, _set_div_invert)
+    except Exception as e:
+        log_error(f"risk_autotune divergence: {e}")
+
+    try:
+        median_rr, rr_n = _scalp_closed_rr_stats()
+        scalp_stats = compute_scalp_signal_stats()
+        winrate = scalp_stats.get("win_rate")
+        closed_n = (scalp_stats.get("wins", 0) or 0) + (scalp_stats.get("losses", 0) or 0)
+        if median_rr is not None:
+            _risk_autotune_min_rr("scalp", "scalp_min_rr", SCALP_MIN_RR, median_rr, winrate, rr_n, _set_scalp_min_rr)
+        loss_mae_avg, loss_n = _scalp_loss_mae_avg_r()
+        if loss_mae_avg is not None:
+            _risk_autotune_sl_mult("scalp", "scalp_sl_buffer_mult", SCALP_SL_BUFFER_MULT, loss_mae_avg, loss_n, _set_scalp_sl_buffer_mult)
+        # No reverse flag exists for scalp (it picks direction from
+        # recommend_scalp_config's own EV ranking, not a fixed indicator
+        # to invert) — nothing to tune here.
+    except Exception as e:
+        log_error(f"risk_autotune scalp: {e}")
+
+    try:
+        if SESSION_INVERT_SIGNALS:  # see _session_reverse_stats' docstring — only meaningful in inverted mode
+            winrate, rr, n = _session_reverse_stats()
+            if winrate is not None:
+                _risk_autotune_reverse("session", "session_invert_signals", SESSION_INVERT_SIGNALS, winrate, rr, n, _set_session_invert)
+        # session_sl_mult intentionally not auto-tuned — no MFE/MAE data
+        # exists to base an overshoot check on (see module docstring above).
+    except Exception as e:
+        log_error(f"risk_autotune session: {e}")
+
+
+def risk_autotune_loop():
+    while True:
+        try:
+            if RISK_AUTOTUNE_ENABLED:
+                risk_autotune_pass()
+        except Exception as e:
+            log_error(f"risk_autotune_loop: {e}")
+        time.sleep(max(300, RISK_AUTOTUNE_INTERVAL_SEC))
+
+
+# ----------------------------------------------------------------------------
 # API
 # ----------------------------------------------------------------------------
 @app.route("/api/overview")
@@ -8560,6 +9035,15 @@ def api_status():
                 "per_cycle": AUTO_TUNE_PER_CYCLE,
                 "tuned_symbols": tuned_count,
                 "refresh_hours": round(AUTO_TUNE_REFRESH_SEC / 3600, 1),
+            },
+            # Distinct from "auto_tune" above (that one is Volume Profile
+            # detection-parameter search per symbol) — this is the risk-
+            # parameter tuner from v0.93.0 (EMA_MIN_RR, SL-width multipliers,
+            # reverse flags). Log entries are newest-first, capped at 200.
+            "risk_autotune": {
+                "enabled": RISK_AUTOTUNE_ENABLED,
+                "interval_hours": round(RISK_AUTOTUNE_INTERVAL_SEC / 3600, 2),
+                "log": list(STATE["risk_autotune_log"])[:30],
             },
             "config": {
                 "segs": SEGS, "lookback": LOOKBACK, "interval": INTERVAL,
@@ -8678,6 +9162,7 @@ def api_divergence_status():
             "interval": DIV_INTERVAL,
             "last_scan_finished": STATE["div_last_scan_finished"],
             "last_scan_duration": STATE["div_last_scan_duration"],
+            "filtered_by_min_rr": STATE["filtered_by_div_min_rr"],
             "stats": stats,
             "pivot_stability": {
                 k: {
@@ -8688,7 +9173,7 @@ def api_divergence_status():
                 for k, v in stability_raw.items()
             },
             "config": {
-                "sl_mode": DIV_SL_MODE, "sl_atr_mult": DIV_SL_ATR_MULT, "rr_fallback": DIV_RR, "tp_pct": DIV_TP_PCT, "rsi_period": DIV_RSI_PERIOD,
+                "sl_mode": DIV_SL_MODE, "sl_atr_mult": DIV_SL_ATR_MULT, "rr_fallback": DIV_RR, "min_rr": DIV_MIN_RR, "tp_pct": DIV_TP_PCT, "rsi_period": DIV_RSI_PERIOD,
                 "pivot_left": DIV_PIVOT_LEFT, "pivot_right": DIV_PIVOT_RIGHT, "invert_signals": DIV_INVERT_SIGNALS,
                 "freshness_bars": DIV_FRESHNESS_BARS, "cooldown": DIV_COOLDOWN_SEC,
             },
@@ -9327,6 +9812,10 @@ INDEX_HTML = """<!doctype html>
   <div id="status">загрузка...</div>
   <div id="overview" class="dim" style="margin-top:2px;font-size:12px;"></div>
   <div id="autotradeBanner" style="margin-top:2px;font-size:12px;"></div>
+  <details id="riskAutotuneBox" style="margin-top:4px;font-size:11.5px;display:none;">
+    <summary class="dim" style="cursor:pointer;">Авто-тюнинг риска</summary>
+    <div id="riskAutotuneLog" class="dim" style="margin-top:4px;"></div>
+  </details>
 </header>
 <div class="tabs">
   <div class="tab active" data-tab="signals">Volume</div>
@@ -9744,6 +10233,24 @@ async function refreshStatus() {
     const fetchErrTxt = s.excluded_fetch_error ? `, ${s.excluded_fetch_error} сетевых сбоев` : '';
     const scanTxt = s.last_scan_finished ? `скан ${s.last_scan_duration}s, ${s.universe_size} пар (искл. ${s.excluded_low_quality||0} неликвид${fetchErrTxt})` : 'сканирование...';
     el.textContent = `v${s.version} · ${scanTxt}`;
+    const ra = s.risk_autotune;
+    const raBox = document.getElementById('riskAutotuneBox');
+    if (ra && ra.log && ra.log.length) {
+      raBox.style.display = 'block';
+      const paramLabels = {ema_min_rr: 'EMA мин.RR', ema_sl_atr_mult: 'EMA ATR-мульт.', ema_invert_signals: 'EMA реверс',
+        div_min_rr: 'Див мин.RR', div_sl_atr_mult: 'Див ATR-мульт.', div_invert_signals: 'Див реверс',
+        scalp_min_rr: 'Скальп мин.RR', scalp_sl_buffer_mult: 'Скальп SL-буфер',
+        session_invert_signals: 'Сессия реверс'};
+      raBox.querySelector('summary').textContent = `Авто-тюнинг риска (${ra.enabled ? 'вкл' : 'выкл'}, последних: ${ra.log.length})`;
+      document.getElementById('riskAutotuneLog').innerHTML = ra.log.map(e => {
+        const label = paramLabels[e.param] || e.param;
+        const oldTxt = typeof e.old === 'boolean' ? (e.old ? 'вкл' : 'выкл') : e.old;
+        const newTxt = typeof e.new === 'boolean' ? (e.new ? 'вкл' : 'выкл') : e.new;
+        return `${fmtDateTime(e.ts)} — <b>${e.module}</b>.${label}: ${oldTxt} → ${newTxt} <span class="dim">(${e.reason}, n=${e.n})</span>`;
+      }).join('<br>');
+    } else {
+      raBox.style.display = 'none';
+    }
   } catch(e) {}
 }
 
@@ -9991,7 +10498,7 @@ async function refreshDivergence() {
   panel.innerHTML = `
     <div class="dim" style="margin-bottom:10px;">
       RSI-дивергенции${cfg.invert_signals ? ' <span style="color:#ffcc55;font-weight:bold;">· РЕВЕРС ВКЛЮЧЁН</span>' : ''} · ТФ ${status.interval} · скан ${status.last_scan_duration!==null && status.last_scan_duration!==undefined ? status.last_scan_duration+'s' : '...'} ·
-      Винрейт: ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ср. ${s.rr_all ? s.rr_all.avg : '?'} (медиана ${s.rr_all ? s.rr_all.median : '?'}) · SL: ${cfg.sl_mode === 'atr' ? `ATR×${cfg.sl_atr_mult}` : `фикс. RR ${cfg.rr_fallback}`}
+      Винрейт: ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ср. ${s.rr_all ? s.rr_all.avg : '?'} (медиана ${s.rr_all ? s.rr_all.median : '?'}) · SL: ${cfg.sl_mode === 'atr' ? `ATR×${cfg.sl_atr_mult}` : `фикс. RR ${cfg.rr_fallback}`}${cfg.min_rr > 0 ? ` · мин. RR ${cfg.min_rr} (отсеяно: ${status.filtered_by_min_rr||0})` : ''}
     </div>
     ${mfeBlock}
     ${preMoveBlock}
@@ -10073,7 +10580,7 @@ async function refreshEma() {
     <div class="dim" style="margin-bottom:10px;">
       EMA ${cfg.len7}/${cfg.len14}/${cfg.len28} (${cfg.signal_type}${cfg.trend_filter ? ', с фильтром тренда' : ''})${cfg.invert_signals ? ' <span style="color:#ffcc55;font-weight:bold;">· РЕВЕРС ВКЛЮЧЁН</span>' : ''} · сканируются ТФ: ${(status.intervals||[]).join(', ')} ·
       скан ${status.last_scan_duration!==null && status.last_scan_duration!==undefined ? status.last_scan_duration+'s' : '...'} ·
-      Винрейт (всё вместе): ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ср. ${s.rr_all ? s.rr_all.avg : '?'} (медиана ${s.rr_all ? s.rr_all.median : '?'}) · SL: ${cfg.sl_mode === 'atr' ? `ATR×${cfg.sl_atr_mult}` : `фикс. RR ${cfg.rr_fallback}`}${cfg.min_rr > 0 ? ` · мин. RR ${cfg.min_rr} (отсеяно: ${s.filtered_by_min_rr||0})` : ''}${cfg.adx_filter_enabled ? ` · ADX ≥ ${cfg.adx_min} (отсеяно: ${s.filtered_by_adx||0})` : ''}${cfg.min_gap_pct > 0 ? ` · мин. зазор ${cfg.min_gap_pct}% (отсеяно: ${s.filtered_by_min_gap||0})` : ''}
+      Винрейт (всё вместе): ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ср. ${s.rr_all ? s.rr_all.avg : '?'} (медиана ${s.rr_all ? s.rr_all.median : '?'}) · SL: ${cfg.sl_mode === 'atr' ? `ATR×${cfg.sl_atr_mult}` : `фикс. RR ${cfg.rr_fallback}`}${cfg.min_rr > 0 ? ` · мин. RR ${cfg.min_rr} (отсеяно: ${status.filtered_by_min_rr||0})` : ''}${cfg.adx_filter_enabled ? ` · ADX ≥ ${cfg.adx_min} (отсеяно: ${status.filtered_by_adx||0})` : ''}${cfg.min_gap_pct > 0 ? ` · мин. зазор ${cfg.min_gap_pct}% (отсеяно: ${status.filtered_by_min_gap||0})` : ''}
     </div>
     <div style="margin-bottom:10px;padding-top:6px;border-top:1px solid #1c2433;">
       <b>По таймфреймам (для сравнения):</b><br>
@@ -11373,6 +11880,7 @@ if __name__ == "__main__":
     threading.Thread(target=session_loop, daemon=True).start()
     threading.Thread(target=session_live_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
+    threading.Thread(target=risk_autotune_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
     tg_status = "настроен" if (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) else "не настроен"
     print(f"VP-POC Screener v{APP_VERSION} — http://127.0.0.1:{port} — Telegram: {tg_status}")
