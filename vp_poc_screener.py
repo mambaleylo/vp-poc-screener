@@ -3346,6 +3346,74 @@ v0.94.0 - Session NY: a full, independent duplicate of the Session module
          (same as every other signal list), and added to
          SNAPSHOT_MODULE_KEYS and the sim-trade relink module_lists
          mapping for full feature parity with every other module.
+
+v0.95.0 - EXPERIMENTAL: XAU Liquidity Grab, per direct user request after
+         sharing an Instagram post (trendwisdom/pranamghagare) claiming a
+         76% win rate / <2% drawdown XAU/USD strategy. Treated with real
+         skepticism, not taken at face value — flagged this to the user
+         before building: the claim is an unverifiable ~1-month backtest
+         screenshot with a "comment for the full report in DMs" / "comment
+         for a free prop-firm guide" structure, i.e. a lead-generation
+         funnel, not a checkable published result. Built anyway because
+         the underlying PATTERN (sweep a level, close back inside, trade
+         the reversal with a trend filter) is genuinely testable and
+         structurally close to what Session/Session NY already do — worth
+         backtesting on this app's own data rather than trusting the
+         screenshot's numbers.
+         User explicitly asked for this to be easy to delete later if it
+         doesn't hold up — every name in the module is prefixed XAU_LG_/
+         xau_lg_ specifically so the whole thing can be found and removed
+         with one search. Marked EXPERIMENTAL throughout: a distinct
+         header-comment block, a ⚠️ in the tab label and settings group
+         title, and an explicit warning box at the top of the panel
+         itself restating the source skepticism in the UI, not just code
+         comments.
+         Strategy as described: EMA(30) trend filter (close > EMA = longs
+         only, < EMA = shorts only), support/resistance from swing pivots
+         at LEFT=1/RIGHT=1 bars (deliberately tight/noisy, matching the
+         source's own LuxAlgo settings — not the app's other pivot
+         configs elsewhere), a confirmed "liquidity grab" when a candle
+         wicks past a level but closes back inside it, entry at that
+         candle's high/low, stop at its low/high, fixed 1:1 risk:reward.
+         xau_lg_detect_signals() implements this as a single no-lookahead
+         walk-forward pass — pivots only become active pivot_right bars
+         after they form (the same confirmation delay a real pivot
+         indicator has), and each signal only uses its own trigger bar's
+         close/EMA — used identically for both backtesting (feed the
+         whole history) and live scanning (feed recent history, check if
+         the LAST bar produced a new signal), same principle as detect_
+         session_manipulation() serving both callers.
+         Universe restricted to XAU_USDT/XAUT_USDT/PAXG_USDT (actual
+         gold-tracking symbols) rather than the app's usual 150-200
+         symbol universe, per the user's own framing ("индикатор ПО
+         ЗОЛОТУ") — diluting across everything would test a different,
+         unstated hypothesis. AUTOTRADE_ENABLED_XAU_LG defaults OFF
+         (unlike every other module's live-trading toggle, which follows
+         whatever the user last set) — this one starts disabled
+         specifically because the strategy is unverified; the user has
+         to deliberately opt in after seeing real backtest numbers, not
+         just because the module exists.
+         Full module: xau_lg_detect_signals()/xau_lg_track_outcome()/
+         xau_lg_backtest_symbol()/xau_lg_summarize_backtest() (backtest),
+         xau_lg_scan_symbol_live()/update_xau_lg_signal_outcomes()/
+         compute_xau_lg_signal_stats() (live), xau_lg_backtest_loop()/
+         xau_lg_live_loop() (daemon threads), three API endpoints (/api/
+         xau_lg/status, /signals, /api/reset/xau_lg — no per-symbol
+         history or chart-modal endpoints, deliberately leaner than
+         Session NY's given this is provisional), xau_lg_signals STATE
+         persisted through save_state()/load_state(), added to has_open_
+         signal_any_module's lists and the sim-trade relink module_lists
+         mapping for consistency with every other module, new "XAU LG ⚠️"
+         tab + panel (refreshXauLg — simpler than refreshSession/
+         refreshSessionNy, no per-symbol day-history modal), new
+         "XAU Liquidity Grab ⚠️ Экспериментально" settings group with a
+         single enable toggle (autotrade toggle/leverage reachable via
+         the settings API, no dedicated UI row this round — same "scope
+         decision, not oversight" pattern used for risk_autotune's five
+         constants in v0.93.0). Deliberately excluded from risk_autotune_
+         pass() — this whole module is provisional, auto-tuning an
+         unverified strategy's parameters isn't a sensible next step
+         before the strategy itself has been validated.
 """
 
 import os
@@ -3365,7 +3433,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.94.0"
+APP_VERSION = "0.95.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3749,6 +3817,7 @@ TELEGRAM_ALERTS_EMA = os.environ.get("VP_TG_ALERTS_EMA", "1") == "1"
 TELEGRAM_ALERTS_HOURLY = os.environ.get("VP_TG_ALERTS_HOURLY", "1") == "1"
 TELEGRAM_ALERTS_SESSION = os.environ.get("VP_TG_ALERTS_SESSION", "1") == "1"
 TELEGRAM_ALERTS_SESSION_NY = os.environ.get("VP_TG_ALERTS_SESSION_NY", "1") == "1"
+TELEGRAM_ALERTS_XAU_LG = os.environ.get("VP_TG_ALERTS_XAU_LG", "1") == "1"
 HOURLY_STATS_ENABLED = os.environ.get("VP_HOURLY_STATS_ENABLED", "1") == "1"
 HOURLY_STATS_INTERVAL_SEC = int(os.environ.get("VP_HOURLY_STATS_INTERVAL_SEC", 3600))
 
@@ -3851,6 +3920,8 @@ AUTOTRADE_LEVERAGE_DIVERGENCE = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_DIVERG
 AUTOTRADE_LEVERAGE_EMA = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_EMA", 10))
 AUTOTRADE_LEVERAGE_SESSION = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SESSION", 10))
 AUTOTRADE_LEVERAGE_SESSION_NY = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SESSION_NY", 10))
+AUTOTRADE_ENABLED_XAU_LG = os.environ.get("VP_AUTOTRADE_XAU_LG", "0") == "1"  # off by default — see the XAU_LG module's own header comment on why this strategy is treated as unverified
+AUTOTRADE_LEVERAGE_XAU_LG = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_XAU_LG", 10))
 AUTOTRADE_TRADE_HISTORY = 300
 
 # ----------------------------------------------------------------------------
@@ -3905,14 +3976,14 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "div_min_rr", "bounce_enabled", "breakout_enabled",
-                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "hourly_stats_enabled", "telegram_enabled",
+                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg",
                   "autotrade_size_mode", "autotrade_size_value",
                   "scalp_size_mode", "scalp_size_value",
                   "ema_min_rr", "ema_signal_timeout_hours",
                   "ema_adx_filter_enabled", "ema_adx_min", "ema_min_gap_pct",
-                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session", "autotrade_leverage_session_ny",
+                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session", "autotrade_leverage_session_ny", "autotrade_leverage_xau_lg",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
                   # same save_settings() path everything else already uses,
@@ -3941,6 +4012,7 @@ def get_settings():
         "session_invert_signals": SESSION_INVERT_SIGNALS,
         "session_ny_enabled": SESSION_NY_ENABLED,
         "session_ny_invert_signals": SESSION_NY_INVERT_SIGNALS,
+        "xau_lg_enabled": XAU_LG_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
         "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
@@ -3957,6 +4029,7 @@ def get_settings():
         "autotrade_scalp": AUTOTRADE_ENABLED_SCALP,
         "autotrade_session": AUTOTRADE_ENABLED_SESSION,
         "autotrade_session_ny": AUTOTRADE_ENABLED_SESSION_NY,
+        "autotrade_xau_lg": AUTOTRADE_ENABLED_XAU_LG,
         "autotrade_size_mode": AUTOTRADE_SIZE_MODE,
         "autotrade_size_value": AUTOTRADE_SIZE_VALUE,
         "scalp_size_mode": SCALP_SIZE_MODE,
@@ -3972,6 +4045,7 @@ def get_settings():
         "ema_min_gap_pct": EMA_MIN_GAP_PCT,
         "autotrade_leverage_session": AUTOTRADE_LEVERAGE_SESSION,
         "autotrade_leverage_session_ny": AUTOTRADE_LEVERAGE_SESSION_NY,
+        "autotrade_leverage_xau_lg": AUTOTRADE_LEVERAGE_XAU_LG,
         "scalp_min_rr": SCALP_MIN_RR,
         "scalp_sl_buffer_mult": SCALP_SL_BUFFER_MULT,
         "session_sl_mult": SESSION_SL_MULT,
@@ -3986,9 +4060,9 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, HOURLY_STATS_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG
     global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
     global SCALP_SIZE_MODE, SCALP_SIZE_VALUE
     global AUTOTRADE_LEVERAGE_BOUNCE, AUTOTRADE_LEVERAGE_BREAKOUT, AUTOTRADE_LEVERAGE_DIVERGENCE, AUTOTRADE_LEVERAGE_EMA, AUTOTRADE_LEVERAGE_SESSION
@@ -4030,6 +4104,8 @@ def apply_settings(updates):
         SESSION_NY_ENABLED = bool(updates["session_ny_enabled"])
     if "session_ny_invert_signals" in updates:
         SESSION_NY_INVERT_SIGNALS = bool(updates["session_ny_invert_signals"])
+    if "xau_lg_enabled" in updates:
+        XAU_LG_ENABLED = bool(updates["xau_lg_enabled"])
     if "hourly_stats_enabled" in updates:
         HOURLY_STATS_ENABLED = bool(updates["hourly_stats_enabled"])
     if "telegram_enabled" in updates:
@@ -4058,6 +4134,8 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_SESSION = bool(updates["autotrade_session"])
     if "autotrade_session_ny" in updates:
         AUTOTRADE_ENABLED_SESSION_NY = bool(updates["autotrade_session_ny"])
+    if "autotrade_xau_lg" in updates:
+        AUTOTRADE_ENABLED_XAU_LG = bool(updates["autotrade_xau_lg"])
     if "autotrade_size_mode" in updates and updates["autotrade_size_mode"] in ("percent", "fixed"):
         AUTOTRADE_SIZE_MODE = updates["autotrade_size_mode"]
     if "autotrade_size_value" in updates:
@@ -4113,6 +4191,7 @@ def apply_settings(updates):
         ("autotrade_leverage_ema", "AUTOTRADE_LEVERAGE_EMA"),
         ("autotrade_leverage_session", "AUTOTRADE_LEVERAGE_SESSION"),
         ("autotrade_leverage_session_ny", "AUTOTRADE_LEVERAGE_SESSION_NY"),
+        ("autotrade_leverage_xau_lg", "AUTOTRADE_LEVERAGE_XAU_LG"),
     ):
         if key in updates:
             try:
@@ -4351,6 +4430,13 @@ STATE = {
     "session_ny_symbols_done": 0,
     "session_ny_signals": deque(maxlen=SESSION_NY_SIGNAL_HISTORY),
     "session_ny_next_open_ts": None,
+    # EXPERIMENTAL XAU Liquidity Grab (v0.95.0) — see that module's own
+    # header comment. All keys prefixed xau_lg_ for easy removal.
+    "xau_lg_signals": deque(maxlen=XAU_LG_SIGNAL_HISTORY),
+    "xau_lg_backtest_results": {},
+    "xau_lg_backtest_summary": {},
+    "xau_lg_last_backtest_finished": None,
+    "xau_lg_last_backtest_duration": None,
     "autotrade_log": deque(maxlen=AUTOTRADE_TRADE_HISTORY),  # every attempted auto-trade, dry-run or real, with its outcome
     "sim_balance": AUTOTRADE_SIM_START_BALANCE,
     "sim_trades": deque(maxlen=AUTOTRADE_SIM_TRADE_HISTORY),  # pending + settled paper trades
@@ -4407,6 +4493,7 @@ def has_open_signal_any_module(symbol, exclude=None):
         "signals": STATE["signals"], "div_signals": STATE["div_signals"],
         "ema_signals": STATE["ema_signals"], "scalp_signals": STATE["scalp_signals"],
         "session_signals": STATE["session_signals"], "session_ny_signals": STATE["session_ny_signals"],
+        "xau_lg_signals": STATE["xau_lg_signals"],
     }
     with state_lock:
         for name, lst in lists.items():
@@ -7987,6 +8074,7 @@ def save_state():
                 "scalp_signals": list(STATE["scalp_signals"]),
                 "session_signals": list(STATE["session_signals"]),
                 "session_ny_signals": list(STATE["session_ny_signals"]),
+                "xau_lg_signals": list(STATE["xau_lg_signals"]),
                 "autotrade_log": list(STATE["autotrade_log"]),
                 "sim_balance": STATE["sim_balance"],
                 # Both PENDING and SETTLED now (previously PENDING was
@@ -8032,6 +8120,7 @@ def _relink_sim_trade(trade):
         "divergence": STATE["div_signals"], "ema": STATE["ema_signals"],
         "scalp": STATE["scalp_signals"], "session": STATE["session_signals"],
         "session_ny": STATE["session_ny_signals"],
+        "xau_lg": STATE["xau_lg_signals"],
     }
     candidates = module_lists.get(trade.get("mode"))
     if not candidates:
@@ -8063,6 +8152,7 @@ def load_state():
         scalp_signals = data.get("scalp_signals", [])
         session_signals = data.get("session_signals", [])
         session_ny_signals = data.get("session_ny_signals", [])
+        xau_lg_signals = data.get("xau_lg_signals", [])
         autotrade_log = data.get("autotrade_log", [])
         sim_trades = data.get("sim_trades", [])
         risk_autotune_log = data.get("risk_autotune_log", [])
@@ -8074,6 +8164,7 @@ def load_state():
             STATE["scalp_signals"] = deque(scalp_signals, maxlen=SCALP_SIGNAL_HISTORY)
             STATE["session_signals"] = deque(session_signals, maxlen=SESSION_SIGNAL_HISTORY)
             STATE["session_ny_signals"] = deque(session_ny_signals, maxlen=SESSION_NY_SIGNAL_HISTORY)
+            STATE["xau_lg_signals"] = deque(xau_lg_signals, maxlen=XAU_LG_SIGNAL_HISTORY)
             STATE["autotrade_log"] = deque(autotrade_log, maxlen=AUTOTRADE_TRADE_HISTORY)
             STATE["risk_autotune_log"] = deque(risk_autotune_log, maxlen=200)
             STATE["risk_autotune_last_change"] = risk_autotune_last_change
@@ -8335,6 +8426,8 @@ def send_telegram(text, category=None):
     if category == "session" and not TELEGRAM_ALERTS_SESSION:
         return
     if category == "session_ny" and not TELEGRAM_ALERTS_SESSION_NY:
+        return
+    if category == "xau_lg" and not TELEGRAM_ALERTS_XAU_LG:
         return
 
     def _do_send():
@@ -9479,6 +9572,331 @@ def risk_autotune_loop():
         time.sleep(max(300, RISK_AUTOTUNE_INTERVAL_SEC))
 
 
+# ============================================================================
+# EXPERIMENTAL: XAU Liquidity Grab (v0.95.0)
+# ----------------------------------------------------------------------------
+# Every name in this module is prefixed XAU_LG_ / xau_lg_ specifically so the
+# WHOLE module can be found and deleted later with one search, per direct
+# user request ("делай так, чтобы потом удалить можно было") — this reflects
+# genuine uncertainty about whether the underlying idea holds up, not just
+# code hygiene. Source: an Instagram post (trendwisdom/pranamghagare)
+# claiming 76% win rate / <2% drawdown on a XAU/USD strategy — treated with
+# real skepticism, not taken at face value: the claim is an unverifiable
+# screenshot over a ~1-month window, with a "comment for the full report in
+# DMs" / "comment for a free prop-firm guide" structure, i.e. a lead-
+# generation funnel, not a published, checkable result. Implemented anyway
+# because the underlying PATTERN (sweep a level, close back inside, trade
+# the reversal with a trend filter) is a real, testable idea structurally
+# similar to what Session/Session NY already do — worth actually
+# backtesting on this app's own data rather than trusting the screenshot.
+# Strategy as described across the 8 slides:
+#   1. EMA(30) trend filter: close > EMA -> longs only, close < EMA -> shorts
+#   2. Support/resistance from swing pivots, LEFT=1/RIGHT=1 bars (LuxAlgo's
+#      "Support and Resistance Levels with Breaks" indicator at its default-
+#      minus-14 sensitivity — deliberately tight/noisy, not a generalized
+#      pivot config elsewhere in this app)
+#   3. On a 15m candle: wick below support but CLOSE back above it (or wick
+#      above resistance but close back below) = confirmed "liquidity grab"
+#   4. Entry at the top of that candle (its high) for a long, stop at the
+#      candle's low, fixed 1:1 risk:reward — mirrored for shorts
+# Universe restricted to actual gold-tracking symbols only, per the user's
+# own framing ("индикатор ПО ЗОЛОТУ") rather than the app's usual full
+# 150-200 symbol universe — this was never claimed to generalize beyond
+# gold, and diluting it across everything would just be testing a different,
+# unstated hypothesis.
+# ============================================================================
+XAU_LG_ENABLED = os.environ.get("VP_XAU_LG_ENABLED", "1") == "1"
+XAU_LG_SYMBOLS = [s.strip() for s in os.environ.get("VP_XAU_LG_SYMBOLS", "XAU_USDT,XAUT_USDT,PAXG_USDT").split(",") if s.strip()]
+XAU_LG_TF = os.environ.get("VP_XAU_LG_TF", "15m")
+XAU_LG_EMA_PERIOD = int(os.environ.get("VP_XAU_LG_EMA_PERIOD", 30))
+XAU_LG_PIVOT_LEFT = int(os.environ.get("VP_XAU_LG_PIVOT_LEFT", 1))
+XAU_LG_PIVOT_RIGHT = int(os.environ.get("VP_XAU_LG_PIVOT_RIGHT", 1))
+XAU_LG_RR = float(os.environ.get("VP_XAU_LG_RR", 1.0))  # fixed 1:1, per the source's own stated rule — not auto-tuned by risk_autotune_pass(), deliberately excluded since this whole module is provisional
+XAU_LG_BACKTEST_DAYS = int(os.environ.get("VP_XAU_LG_BACKTEST_DAYS", 30))
+XAU_LG_SIGNAL_HISTORY = 200
+XAU_LG_REFRESH_SEC = int(os.environ.get("VP_XAU_LG_REFRESH_SEC", 3600))  # hourly backtest refresh — small fixed symbol list, cheap compared to Session's 50-symbol universe scan
+XAU_LG_SCAN_INTERVAL_SEC = int(os.environ.get("VP_XAU_LG_SCAN_INTERVAL_SEC", 300))  # live scan cadence — 15m candles, checking every 5 min is plenty
+
+
+def xau_lg_detect_signals(candles, ema_period=XAU_LG_EMA_PERIOD, pivot_left=XAU_LG_PIVOT_LEFT, pivot_right=XAU_LG_PIVOT_RIGHT):
+    """Single walk-forward pass over `candles` (must be XAU_LG_TF, oldest
+    first) — maintains the nearest active (unbroken) pivot support/
+    resistance level as it goes, exactly like a live indicator would, and
+    returns every confirmed liquidity-grab signal found. No lookahead: a
+    pivot at bar j only becomes "active" once bar j+pivot_right has been
+    seen (the same confirmation delay real pivot indicators have — you
+    can't know bar j was a local extreme until pivot_right bars later
+    confirm nothing higher/lower followed), and each signal only uses the
+    close/EMA of its own trigger bar.
+    A level is "consumed" (retired) either by triggering a grab signal off
+    it, or by price closing cleanly through it without wicking back — in
+    both cases the next-confirmed pivot becomes the new active level.
+    Used identically for backtesting (feed the whole history) and live
+    scanning (feed recent history, check whether the LAST bar produced a
+    new signal) — same principle as detect_session_manipulation() serving
+    both callers."""
+    n = len(candles)
+    if n < ema_period + pivot_left + pivot_right + 2:
+        return []
+    closes = [c["close"] for c in candles]
+    ema = compute_ema(closes, ema_period)
+    signals = []
+    active_support = None
+    active_resistance = None
+    for i in range(n):
+        confirm_idx = i - pivot_right
+        if confirm_idx - pivot_left >= 0:
+            cc = candles[confirm_idx]
+            is_high = (all(cc["high"] >= candles[confirm_idx - j]["high"] for j in range(1, pivot_left + 1)) and
+                       all(cc["high"] >= candles[confirm_idx + j]["high"] for j in range(1, pivot_right + 1)))
+            if is_high:
+                active_resistance = cc["high"]
+            is_low = (all(cc["low"] <= candles[confirm_idx - j]["low"] for j in range(1, pivot_left + 1)) and
+                      all(cc["low"] <= candles[confirm_idx + j]["low"] for j in range(1, pivot_right + 1)))
+            if is_low:
+                active_support = cc["low"]
+        c = candles[i]
+        if active_support is not None:
+            if c["low"] < active_support <= c["close"]:
+                if c["close"] > ema[i]:
+                    entry, sl = c["high"], c["low"]
+                    risk = entry - sl
+                    if risk > 0:
+                        tp = entry + risk * XAU_LG_RR
+                        signals.append({"index": i, "time": c["time"], "direction": "LONG",
+                                         "entry": entry, "sl": sl, "tp": tp, "level": active_support})
+                active_support = None
+            elif c["close"] < active_support:
+                active_support = None
+        if active_resistance is not None:
+            if c["high"] > active_resistance >= c["close"]:
+                if c["close"] < ema[i]:
+                    entry, sl = c["low"], c["high"]
+                    risk = sl - entry
+                    if risk > 0:
+                        tp = entry - risk * XAU_LG_RR
+                        signals.append({"index": i, "time": c["time"], "direction": "SHORT",
+                                         "entry": entry, "sl": sl, "tp": tp, "level": active_resistance})
+                active_resistance = None
+            elif c["close"] > active_resistance:
+                active_resistance = None
+    return signals
+
+
+def xau_lg_track_outcome(candles, sig, max_wait_bars=200):
+    """Walks forward from sig['index']+1 looking for TP/SL touch — SL
+    checked first on any bar covering both, same conservative convention
+    as track_session_outcome()."""
+    n = len(candles)
+    for k in range(sig["index"] + 1, min(n, sig["index"] + 1 + max_wait_bars)):
+        c = candles[k]
+        if sig["direction"] == "LONG":
+            if c["low"] <= sig["sl"]:
+                return "LOSS", c["time"]
+            if c["high"] >= sig["tp"]:
+                return "WIN", c["time"]
+        else:
+            if c["high"] >= sig["sl"]:
+                return "LOSS", c["time"]
+            if c["low"] <= sig["tp"]:
+                return "WIN", c["time"]
+    return "TIMEOUT", None
+
+
+def xau_lg_backtest_symbol(symbol, days=XAU_LG_BACKTEST_DAYS):
+    """Fetches XAU_LG_BACKTEST_DAYS of XAU_LG_TF history and runs the
+    detector + outcome tracker over the WHOLE window in one pass — much
+    cheaper than Session's per-day walk since this pattern isn't anchored
+    to a specific time of day, just scanned continuously."""
+    now = time.time()
+    fetch_start = now - days * 86400
+    candles = get_candles_range(symbol, XAU_LG_TF, fetch_start, now)
+    if len(candles) < XAU_LG_EMA_PERIOD + 10:
+        return []
+    sigs = xau_lg_detect_signals(candles)
+    results = []
+    for sig in sigs:
+        result, exit_time = xau_lg_track_outcome(candles, sig)
+        results.append({
+            "time": sig["time"], "direction": sig["direction"],
+            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
+            "result": result, "exit_time": exit_time,
+        })
+    return results
+
+
+def xau_lg_summarize_backtest(results):
+    total = len(results)
+    if not total:
+        return {"n": 0, "win_rate": None, "wins": 0, "losses": 0, "timeouts": 0}
+    wins = sum(1 for r in results if r["result"] == "WIN")
+    losses = sum(1 for r in results if r["result"] == "LOSS")
+    timeouts = sum(1 for r in results if r["result"] == "TIMEOUT")
+    closed = wins + losses
+    win_rate = round(wins / closed * 100, 1) if closed else None
+    return {"n": total, "win_rate": win_rate, "wins": wins, "losses": losses, "timeouts": timeouts}
+
+
+_xau_lg_signal_cooldowns = {}  # symbol -> last signaled bar time
+_xau_lg_signal_cooldowns_lock = threading.Lock()
+
+
+def xau_lg_scan_symbol_live(symbol):
+    """Live counterpart to xau_lg_backtest_symbol() — fetches recent
+    history, runs the SAME detector, and fires only if the LAST candle
+    produced a brand-new signal not already seen for this symbol."""
+    if not XAU_LG_ENABLED:
+        return
+    try:
+        lookback_sec = (XAU_LG_EMA_PERIOD + 60) * INTERVAL_SECONDS.get(XAU_LG_TF, 900)
+        candles = get_candles(symbol, interval=XAU_LG_TF, limit=XAU_LG_EMA_PERIOD + 80)
+        interval_sec = INTERVAL_SECONDS.get(XAU_LG_TF, 900)
+        now = time.time()
+        candles = [c for c in candles if c["time"] + interval_sec <= now]  # drop still-forming candle, same reasoning as scan_symbol_session_live
+        if len(candles) < XAU_LG_EMA_PERIOD + 10:
+            return
+        sigs = xau_lg_detect_signals(candles)
+        if not sigs:
+            return
+        sig = sigs[-1]
+        if sig["index"] != len(candles) - 1:
+            return  # most recent signal isn't off the latest closed candle — already stale/handled
+        with _xau_lg_signal_cooldowns_lock:
+            if _xau_lg_signal_cooldowns.get(symbol) == sig["time"]:
+                return
+            _xau_lg_signal_cooldowns[symbol] = sig["time"]
+        if has_open_signal_any_module(symbol, exclude="xau_lg_signals"):
+            return
+        record = {
+            "symbol": symbol, "direction": sig["direction"],
+            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
+            "level": sig["level"], "time": sig["time"],
+            "detected_at": time.time(), "status": "OPEN", "result": None,
+            "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
+        }
+        with state_lock:
+            STATE["xau_lg_signals"].appendleft(record)
+        if AUTOTRADE_ENABLED_XAU_LG:
+            execute_autotrade("xau_lg", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                               AUTOTRADE_LEVERAGE_XAU_LG)
+            sim_execute_trade("xau_lg", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                               AUTOTRADE_LEVERAGE_XAU_LG, record)
+        arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
+        send_telegram(
+            f"{arrow} {symbol} (XAU liquidity grab — ЭКСПЕРИМЕНТАЛЬНО)\n"
+            f"entry: {sig['entry']:.6g}\n"
+            f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}",
+            category="xau_lg",
+        )
+    except Exception as e:
+        log_error(f"xau_lg_live {symbol}: {e}")
+
+
+def update_xau_lg_signal_outcomes():
+    now = time.time()
+    with state_lock:
+        open_signals = [s for s in STATE["xau_lg_signals"] if s["status"] == "OPEN"]
+    all_candles = fetch_candles_concurrent([(s["symbol"], XAU_LG_TF, 300) for s in open_signals])
+    for sig, candles in zip(open_signals, all_candles):
+        try:
+            if candles is None:
+                continue
+            future = [c for c in candles if c["time"] >= sig["time"]]
+            result = None
+            exit_price = None
+            exit_time = None
+            for c in future:
+                if sig["direction"] == "LONG":
+                    if c["low"] <= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["high"] >= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+                else:
+                    if c["high"] >= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["low"] <= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+            timed_out = (now - sig["detected_at"]) > 24 * 3600
+            with state_lock:
+                if result:
+                    sig["status"] = "CLOSED"
+                    sig["result"] = result
+                    sig["exit_price"] = exit_price
+                    sig["exit_time"] = exit_time
+                elif timed_out:
+                    sig["status"] = "CLOSED"
+                    sig["result"] = "TIMEOUT"
+                    sig["exit_price"] = candles[-1]["close"] if candles else None
+                    sig["exit_time"] = candles[-1]["time"] if candles else None
+        except Exception as e:
+            log_error(f"xau_lg_outcome {sig['symbol']}: {e}")
+
+
+def compute_xau_lg_signal_stats():
+    with state_lock:
+        signals = list(STATE["xau_lg_signals"])
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+    wins = sum(1 for s in closed if s["result"] == "WIN")
+    losses = sum(1 for s in closed if s["result"] == "LOSS")
+    timeouts = sum(1 for s in signals if s.get("result") == "TIMEOUT")
+    open_n = sum(1 for s in signals if s["status"] == "OPEN")
+    total_closed = len(closed)
+    winrate = round(wins / total_closed * 100, 1) if total_closed else None
+    return {"total": len(signals), "wins": wins, "losses": losses, "timeouts": timeouts,
+            "open": open_n, "winrate": winrate}
+
+
+def xau_lg_backtest_loop():
+    while True:
+        try:
+            if not XAU_LG_ENABLED:
+                time.sleep(60)
+                continue
+            t0 = time.time()
+            results_by_symbol = {}
+            summary_by_symbol = {}
+            for symbol in XAU_LG_SYMBOLS:
+                try:
+                    results = xau_lg_backtest_symbol(symbol)
+                    results_by_symbol[symbol] = results
+                    summary_by_symbol[symbol] = xau_lg_summarize_backtest(results)
+                except Exception as e:
+                    log_error(f"xau_lg_backtest {symbol}: {e}")
+            with state_lock:
+                STATE["xau_lg_backtest_results"] = results_by_symbol
+                STATE["xau_lg_backtest_summary"] = summary_by_symbol
+                STATE["xau_lg_last_backtest_finished"] = time.time()
+                STATE["xau_lg_last_backtest_duration"] = round(time.time() - t0, 1)
+        except Exception as e:
+            log_error(f"xau_lg_backtest_loop: {e}")
+        time.sleep(max(300, XAU_LG_REFRESH_SEC))
+
+
+def xau_lg_live_loop():
+    while True:
+        try:
+            if not XAU_LG_ENABLED:
+                time.sleep(60)
+                continue
+            with ThreadPoolExecutor(max_workers=min(WORKERS, len(XAU_LG_SYMBOLS) or 1)) as ex:
+                futs = [ex.submit(xau_lg_scan_symbol_live, s) for s in XAU_LG_SYMBOLS]
+                for _ in as_completed(futs):
+                    pass
+            update_xau_lg_signal_outcomes()
+        except Exception as e:
+            log_error(f"xau_lg_live_loop: {e}")
+        time.sleep(max(60, XAU_LG_SCAN_INTERVAL_SEC))
+
+
+# ============================================================================
+# END EXPERIMENTAL: XAU Liquidity Grab
+# ============================================================================
+
+
 # ----------------------------------------------------------------------------
 # API
 # ----------------------------------------------------------------------------
@@ -10090,6 +10508,51 @@ def api_reset_session_ny():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/xau_lg/status")
+def api_xau_lg_status():
+    """EXPERIMENTAL — see the XAU_LG module's own header comment."""
+    with state_lock:
+        summary = dict(STATE["xau_lg_backtest_summary"])
+        last_backtest_finished = STATE["xau_lg_last_backtest_finished"]
+        last_backtest_duration = STATE["xau_lg_last_backtest_duration"]
+    ranked = [dict(s, symbol=sym) for sym, s in summary.items()]
+    ranked.sort(key=lambda r: (r["win_rate"] or 0, r["n"]), reverse=True)
+    return jsonify({
+        "enabled": XAU_LG_ENABLED,
+        "symbols": XAU_LG_SYMBOLS,
+        "last_backtest_finished": last_backtest_finished,
+        "last_backtest_duration": last_backtest_duration,
+        "signals_stats": compute_xau_lg_signal_stats(),
+        "config": {
+            "tf": XAU_LG_TF, "ema_period": XAU_LG_EMA_PERIOD,
+            "pivot_left": XAU_LG_PIVOT_LEFT, "pivot_right": XAU_LG_PIVOT_RIGHT,
+            "rr": XAU_LG_RR, "backtest_days": XAU_LG_BACKTEST_DAYS,
+        },
+        "top": ranked,
+    })
+
+
+@app.route("/api/xau_lg/signals")
+def api_xau_lg_signals():
+    with state_lock:
+        return jsonify(list(STATE["xau_lg_signals"]))
+
+
+@app.route("/api/reset/xau_lg", methods=["POST"])
+def api_reset_xau_lg():
+    try:
+        with state_lock:
+            STATE["xau_lg_backtest_results"] = {}
+            STATE["xau_lg_backtest_summary"] = {}
+            STATE["xau_lg_last_backtest_finished"] = None
+            STATE["xau_lg_last_backtest_duration"] = None
+            STATE["xau_lg_signals"].clear()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset_xau_lg: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/reset/ema", methods=["POST"])
 def api_reset_ema():
     try:
@@ -10177,7 +10640,7 @@ def api_autotrade_status():
             "bounce": AUTOTRADE_ENABLED_BOUNCE, "breakout": AUTOTRADE_ENABLED_BREAKOUT,
             "divergence": AUTOTRADE_ENABLED_DIVERGENCE, "ema": AUTOTRADE_ENABLED_EMA,
             "scalp": AUTOTRADE_ENABLED_SCALP, "session": AUTOTRADE_ENABLED_SESSION,
-            "session_ny": AUTOTRADE_ENABLED_SESSION_NY,
+            "session_ny": AUTOTRADE_ENABLED_SESSION_NY, "xau_lg": AUTOTRADE_ENABLED_XAU_LG,
         },
     })
 
@@ -10319,7 +10782,7 @@ INDEX_HTML = """<!doctype html>
   body { margin:0; background:#0b0e14; color:#d7dee8; font-family: -apple-system, Roboto, Segoe UI, sans-serif; }
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
   #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetXauLgBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #settingsModal.open { display:flex; flex-direction:column; }
@@ -10429,6 +10892,7 @@ INDEX_HTML = """<!doctype html>
       <button id="resetScalpBtn">Очистить скальпинг</button>
       <button id="resetSessionBtn">Очистить сессию</button>
       <button id="resetSessionNyBtn">Очистить сессию NY</button>
+      <button id="resetXauLgBtn">Очистить XAU LG</button>
       <button id="resetSimulatorBtn">Сбросить симулятор</button>
     </div>
   </div>
@@ -10447,6 +10911,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="scalp">Скальпинг</div>
   <div class="tab" data-tab="session">Сессия</div>
   <div class="tab" data-tab="session_ny">Сессия NY</div>
+  <div class="tab" data-tab="xau_lg" style="color:#e0a030;">XAU LG ⚠️</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
 </div>
@@ -10469,6 +10934,7 @@ INDEX_HTML = """<!doctype html>
   <div id="scalpPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="sessionPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="sessionNyPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
+  <div id="xauLgPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="simulatorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
@@ -10639,6 +11105,17 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">торговать в обратную сторону; риск как у обычного стопа, тейк = 2×риска</div>
         </div>
         <label class="switch"><input type="checkbox" id="setSessionNyInvert"><span class="switchSlider"></span></label>
+      </div>
+    </div>
+
+    <div class="settingsGroup">
+      <div class="settingsGroupTitle" style="color:#e0a030;">XAU Liquidity Grab ⚠️ Экспериментально</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Сканирование (только золото)</div>
+          <div class="sub">идея из непроверенного источника — см. предупреждение на вкладке. Автоторговля ниже выключена по умолчанию.</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setXauLg"><span class="switchSlider"></span></label>
       </div>
     </div>
 
@@ -10860,6 +11337,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('scalpPanel').style.display = activeTab === 'scalp' ? 'block' : 'none';
     document.getElementById('sessionPanel').style.display = activeTab === 'session' ? 'block' : 'none';
     document.getElementById('sessionNyPanel').style.display = activeTab === 'session_ny' ? 'block' : 'none';
+    document.getElementById('xauLgPanel').style.display = activeTab === 'xau_lg' ? 'block' : 'none';
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
     document.getElementById('simulatorPanel').style.display = activeTab === 'simulator' ? 'block' : 'none';
     if (activeTab === 'signals') refreshTuning();
@@ -10868,6 +11346,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'scalp') refreshScalp();
     if (activeTab === 'session') refreshSession();
     if (activeTab === 'session_ny') refreshSessionNy();
+    if (activeTab === 'xau_lg') refreshXauLg();
     if (activeTab === 'autotrade') refreshAutotrade();
     if (activeTab === 'simulator') refreshSimulator();
   };
@@ -11610,6 +12089,76 @@ async function openSessionNyDetail(symbol) {
   }
 }
 
+// ---------------- XAU Liquidity Grab (EXPERIMENTAL, v0.95.0) ----------------
+// Deliberately simpler than Session/Session NY — no per-symbol day-history
+// modal, no chart viewer. This is a provisional module built to test an
+// unverified Instagram-sourced strategy idea, not a polished feature; kept
+// minimal on purpose so it stays easy to find and delete if it doesn't
+// hold up (see the Python module's own header comment for the full
+// reasoning and source skepticism).
+async function refreshXauLg() {
+  const status = await (await fetch('/api/xau_lg/status')).json();
+  const signals = await (await fetch('/api/xau_lg/signals')).json();
+  const panel = document.getElementById('xauLgPanel');
+  const cfg = status.config || {};
+  const ss = status.signals_stats || {};
+  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
+  const buildTxt = status.last_backtest_finished
+    ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s)`
+    : 'бэктест ещё не завершился';
+  const warnHtml = `
+    <div style="background:#2a1f0e;border:1px solid #e0a030;border-radius:10px;padding:10px 14px;margin-bottom:12px;">
+      <b style="color:#e0a030;">⚠️ Экспериментально</b><br>
+      <span style="font-size:12px;color:#d9c08a;">Идея взята из поста в Instagram (заявлено 76% winrate / &lt;2% просадка) — источник непроверяемый, доверять цифрам со скриншота нельзя. Здесь — честный бэктест по нашим собственным данным без заглядывания вперёд. Автоторговля выключена по умолчанию.</span>
+    </div>`;
+  const headerHtml = `
+    <div class="dim" style="margin-bottom:8px;">
+      Символы: ${(status.symbols||[]).join(', ')} · ТФ ${cfg.tf} · EMA(${cfg.ema_period}) фильтр тренда · пивоты L${cfg.pivot_left}/R${cfg.pivot_right} · RR фикс. ${cfg.rr}<br>
+      ${buildTxt}<br>
+      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0}
+    </div>`;
+  const signalsRows = signals.map(s => {
+    const dirClass = s.direction === 'LONG' ? 'long' : 'short';
+    let statusHtml;
+    if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
+    else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
+    else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
+    else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
+    return `<tr>
+      <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td>
+      <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.sl)}</td><td class="dim">${fmt(s.tp)}</td>
+      <td>${statusHtml}</td><td class="dim">${fmtDateTime(s.time)}</td>
+    </tr>`;
+  }).join('');
+  const signalsTableHtml = signals.length ? `
+    <div style="overflow-x:auto;margin-bottom:14px;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>Status</th><th>Время</th></tr></thead>
+      <tbody>${signalsRows}</tbody>
+    </table>
+    </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
+  const btRows = (status.top || []).map(r => {
+    const wrClass = (r.win_rate === null || r.win_rate === undefined) ? 'dim' : (r.win_rate >= 50 ? 'win' : 'loss');
+    return `<tr>
+      <td>${r.symbol}</td>
+      <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
+      <td class="dim">n=${r.n}</td>
+      <td class="win">${r.wins}W</td>
+      <td class="loss">${r.losses}L</td>
+      <td class="status-timeout">${r.timeouts}T</td>
+    </tr>`;
+  }).join('');
+  const btTableHtml = (status.top || []).length ? `
+    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории, без заглядывания вперёд):</div>
+    <div style="overflow-x:auto;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>Symbol</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th><th>T</th></tr></thead>
+      <tbody>${btRows}</tbody>
+    </table>
+    </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
+  panel.innerHTML = warnHtml + headerHtml + signalsTableHtml + btTableHtml;
+}
+
 async function refreshAutotradeBanner() {
   try {
     const s = await (await fetch('/api/autotrade/status')).json();
@@ -11631,7 +12180,7 @@ async function refreshAutotrade() {
     (await fetch('/api/autotrade/log')).json(),
   ]);
   const panel = document.getElementById('autotradePanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG'};
   const enabledTxt = Object.entries(status.enabled)
     .map(([k, v]) => `<span class="${v ? 'win' : 'dim'}">${modeLabels[k]}: ${v ? 'вкл' : 'выкл'}</span>`)
     .join(' &nbsp;·&nbsp; ');
@@ -11691,7 +12240,7 @@ async function refreshSimulator() {
     (await fetch('/api/autotrade/status')).json(),
   ]);
   const panel = document.getElementById('simulatorPanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG'};
 
   const pnlClass = status.pnl_total >= 0 ? 'win' : 'loss';
   const sizeTxt = status.size_mode === 'percent' ? `${status.size_value}% от баланса` : `фикс. $${status.size_value}`;
@@ -11760,6 +12309,7 @@ async function refreshAll() {
   if (activeTab === 'scalp') await refreshScalp();
   if (activeTab === 'session') await refreshSession();
   if (activeTab === 'session_ny') await refreshSessionNy();
+  if (activeTab === 'xau_lg') await refreshXauLg();
   if (activeTab === 'autotrade') await refreshAutotrade();
   if (activeTab === 'simulator') await refreshSimulator();
 }
@@ -11805,6 +12355,9 @@ wireResetButton('resetSessionBtn', '/api/reset/session',
 wireResetButton('resetSessionNyBtn', '/api/reset/session_ny',
   'Удалить накопленный бэктест и сигналы по манипуляции на открытии Нью-Йорка? Остальное (включая обычную Сессию) не тронет. Это необратимо.',
   'Очистить сессию NY');
+wireResetButton('resetXauLgBtn', '/api/reset/xau_lg',
+  'Удалить накопленный бэктест и сигналы экспериментального XAU Liquidity Grab? Остальное не тронет. Это необратимо.',
+  'Очистить XAU LG');
 wireResetButton('resetSimulatorBtn', '/api/simulator/reset',
   'Сбросить симулятор баланса к стартовому значению и удалить всю историю сделок? Это необратимо.',
   'Сбросить симулятор');
@@ -11826,6 +12379,7 @@ const setInputs = {
   session_enabled: document.getElementById('setSession'),
   session_ny_enabled: document.getElementById('setSessionNy'),
   session_ny_invert_signals: document.getElementById('setSessionNyInvert'),
+  xau_lg_enabled: document.getElementById('setXauLg'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
   telegram_alerts_div: document.getElementById('setTelegramDiv'),
@@ -12676,6 +13230,8 @@ if __name__ == "__main__":
     threading.Thread(target=session_live_loop, daemon=True).start()
     threading.Thread(target=session_ny_loop, daemon=True).start()
     threading.Thread(target=session_ny_live_loop, daemon=True).start()
+    threading.Thread(target=xau_lg_backtest_loop, daemon=True).start()
+    threading.Thread(target=xau_lg_live_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     threading.Thread(target=risk_autotune_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
