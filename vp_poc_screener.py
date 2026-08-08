@@ -3498,6 +3498,31 @@ v0.95.3 - fixed a real formula bug in _risk_autotune_min_rr(), per direct
          min_rr call, so it's unaffected. Verified with both py_compile
          and an actual runtime start (per the v0.95.1 lesson) before
          pushing.
+
+v0.95.4 - same overshoot fix as v0.95.3, applied to _risk_autotune_
+         reverse() — found by the user asking about a Divergence
+         screenshot right after the min_rr fix, which prompted checking
+         whether the sibling function had the identical bug. It did:
+         the div_invert_signals flip logged earlier ("ev=-0.195") used
+         the same assume-losses-cost-exactly-1R math. Real Divergence
+         LOSS MAE averaged -4.382R (median -1.84R) — honest EV was
+         between -0.6R (by median, less outlier-sensitive) and -1.8R
+         (by average), both far more solidly negative than -0.195
+         suggested. The nominal number wasn't WRONG about direction
+         (still negative, flip was still the right call) but understated
+         by how much, which matters for judging how much margin the
+         RISK_AUTOTUNE_REVERSE_EV_THRESHOLD cutoff (-0.03) actually has.
+         _risk_autotune_reverse() gained the same avg_loss_mae_r
+         parameter and overshoot multiplier as _risk_autotune_min_rr();
+         EMA's and Divergence's reverse call sites now pass their
+         already-computed loss_mae stat through, matching the min_rr
+         call sites right next to them. Session's reverse call is
+         unchanged — no MFE/MAE tracking exists for Session's signals to
+         compute an overshoot from (same known gap noted in v0.94.0), so
+         it keeps using the nominal assumption, honestly the best
+         available given that data limitation rather than a remaining
+         bug. Verified with both py_compile and an actual runtime start
+         before pushing.
 """
 
 import os
@@ -3517,7 +3542,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.95.3"
+APP_VERSION = "0.95.4"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9526,16 +9551,26 @@ def _risk_autotune_sl_mult(module, param_key, current_value, loss_mae_avg_r, sam
                         f"loss_mae_avg_r={loss_mae_avg_r:+.3f} overshoot={overshoot:+.3f}", sample_n)
 
 
-def _risk_autotune_reverse(module, param_key, current_flag, winrate_pct, rr, sample_n, setter):
+def _risk_autotune_reverse(module, param_key, current_flag, winrate_pct, rr, sample_n, setter, avg_loss_mae_r=None):
     """Flips an *_INVERT_SIGNALS flag if the CURRENTLY active direction's
-    own EV (winrate*rr - (1-winrate)) has been solidly negative over a
-    large-enough sample. Weaker evidence than the two nudges above — live
-    data only ever shows the outcome of whichever direction was actually
-    traded, never a parallel "what if the opposite" — so this gets a
-    higher sample bar (RISK_AUTOTUNE_MIN_SAMPLE_REVERSE) and a much
-    longer cooldown (RISK_AUTOTUNE_REVERSE_COOLDOWN_SEC): a wrong flip
-    doesn't just cost one trade, it reverses the direction of every
-    signal until the next flip."""
+    own EV (winrate*rr - (1-winrate)*overshoot) has been solidly negative
+    over a large-enough sample. Weaker evidence than the two nudges
+    above — live data only ever shows the outcome of whichever direction
+    was actually traded, never a parallel "what if the opposite" — so
+    this gets a higher sample bar (RISK_AUTOTUNE_MIN_SAMPLE_REVERSE) and
+    a much longer cooldown (RISK_AUTOTUNE_REVERSE_COOLDOWN_SEC): a wrong
+    flip doesn't just cost one trade, it reverses the direction of every
+    signal until the next flip.
+    v0.95.4: gained the same avg_loss_mae_r overshoot correction as
+    _risk_autotune_min_rr() — a live example (Divergence) showed EV
+    computed assuming -1R losses coming out -0.195, while real LOSS MAE
+    averaged -4.382R (median -1.84R): the honest EV was -1.8R by the
+    average or -0.6R by the (less outlier-sensitive) median — either
+    way much more solidly negative than the nominal number suggested,
+    for the exact same reason the min_rr formula was wrong: losses
+    don't actually cost exactly -1R, and pretending otherwise
+    understates how bad (or overstates how good) a direction's real EV
+    is."""
     if not RISK_AUTOTUNE_ENABLED or sample_n < RISK_AUTOTUNE_MIN_SAMPLE_REVERSE:
         return
     if winrate_pct is None or rr is None or rr <= 0:
@@ -9543,14 +9578,15 @@ def _risk_autotune_reverse(module, param_key, current_flag, winrate_pct, rr, sam
     if not _risk_autotune_cooldown_ok(param_key, RISK_AUTOTUNE_REVERSE_COOLDOWN_SEC):
         return
     winrate = winrate_pct / 100
-    ev = winrate * rr - (1 - winrate)
+    overshoot = abs(avg_loss_mae_r) if avg_loss_mae_r else 1.0
+    ev = winrate * rr - (1 - winrate) * overshoot
     if ev >= RISK_AUTOTUNE_REVERSE_EV_THRESHOLD:
         return
     new_flag = not current_flag
     setter(new_flag)
     _risk_autotune_mark(param_key)
     _risk_autotune_log(module, param_key, current_flag, new_flag,
-                        f"ev={ev:+.3f} winrate={winrate_pct:.1f}% rr={rr:.3f}", sample_n)
+                        f"ev={ev:+.3f} winrate={winrate_pct:.1f}% rr={rr:.3f} overshoot={overshoot:.3f}", sample_n)
 
 
 # --- setters: each applies the change AND persists it via save_settings(),
@@ -9670,7 +9706,8 @@ def risk_autotune_pass():
         if loss_mae:
             _risk_autotune_sl_mult("ema", "ema_sl_atr_mult", EMA_SL_ATR_MULT, loss_mae["avg"], s.get("losses", 0) or 0, _set_ema_sl_atr_mult)
         if rr_all:
-            _risk_autotune_reverse("ema", "ema_invert_signals", EMA_INVERT_SIGNALS, winrate, rr_all["avg"], closed_n, _set_ema_invert)
+            _risk_autotune_reverse("ema", "ema_invert_signals", EMA_INVERT_SIGNALS, winrate, rr_all["avg"], closed_n, _set_ema_invert,
+                                    avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
     except Exception as e:
         log_error(f"risk_autotune ema: {e}")
 
@@ -9686,7 +9723,8 @@ def risk_autotune_pass():
         if loss_mae:
             _risk_autotune_sl_mult("divergence", "div_sl_atr_mult", DIV_SL_ATR_MULT, loss_mae["avg"], s.get("losses", 0) or 0, _set_div_sl_atr_mult)
         if rr_all:
-            _risk_autotune_reverse("divergence", "div_invert_signals", DIV_INVERT_SIGNALS, winrate, rr_all["avg"], closed_n, _set_div_invert)
+            _risk_autotune_reverse("divergence", "div_invert_signals", DIV_INVERT_SIGNALS, winrate, rr_all["avg"], closed_n, _set_div_invert,
+                                    avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
     except Exception as e:
         log_error(f"risk_autotune divergence: {e}")
 
