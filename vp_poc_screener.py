@@ -3414,6 +3414,39 @@ v0.95.0 - EXPERIMENTAL: XAU Liquidity Grab, per direct user request after
          pass() — this whole module is provisional, auto-tuning an
          unverified strategy's parameters isn't a sensible next step
          before the strategy itself has been validated.
+
+v0.95.1 - fixed a real startup crash, per a direct Termux traceback
+         screenshot: NameError: name "XAU_LG_SIGNAL_HISTORY" is not
+         defined, at the STATE dict's "xau_lg_signals": deque(maxlen=
+         XAU_LG_SIGNAL_HISTORY) line. Root cause: v0.95.0 defined the
+         whole XAU_LG_* constants block right next to the module's
+         functions (near the API section, far down the file), but STATE
+         is constructed much earlier — Python executes top-to-bottom, so
+         referencing a constant before its own definition line is a
+         NameError, not something a docstring comment can paper over.
+         Testing-methodology note, stated plainly rather than glossed
+         over: every "compiles cleanly" claim across this session (and
+         specifically for v0.95.0) was from py_compile, which only
+         checks syntax — it does NOT execute module-level code, so it
+         cannot catch a NameError caused by execution-order issues like
+         this one. This bug should have been caught before shipping;
+         it wasn't, because compiling isn't the same as running. Added
+         an actual runtime smoke test to the verification process this
+         time (timeout 8 python3 vp_poc_screener.py, checked stderr for
+         a traceback) — confirmed the fixed version starts cleanly and
+         all daemon threads (including xau_lg_backtest_loop/xau_lg_
+         live_loop) run without error; the only errors seen were 403s
+         from api.gateio.ws, which is this sandbox's own network
+         restriction (no route to Gate.io here), not a code issue.
+         Fix: moved the entire XAU_LG_* constants block (with its full
+         explanatory header comment) to right after SESSION_NY_SIGNAL_
+         HISTORY, before STATE is built — same position pattern already
+         used for every other module's constants (Session/Session NY's
+         own constants sit early for the same reason). Left a short
+         pointer comment at the old location, next to the functions,
+         explaining where the constants moved and why, so the code
+         doesn't look like something's missing when read top-to-bottom
+         from that point.
 """
 
 import os
@@ -3433,7 +3466,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.95.0"
+APP_VERSION = "0.95.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3879,6 +3912,58 @@ SESSION_NY_BACKTEST_DAYS = int(os.environ.get("VP_SESSION_NY_BACKTEST_DAYS", 30)
 SESSION_NY_UNIVERSE_SIZE = int(os.environ.get("VP_SESSION_NY_UNIVERSE_SIZE", 50))
 SESSION_NY_MIN_SAMPLE = int(os.environ.get("VP_SESSION_NY_MIN_SAMPLE", 8))
 SESSION_NY_SIGNAL_HISTORY = 200
+
+# ============================================================================
+# EXPERIMENTAL: XAU Liquidity Grab (v0.95.0) — constants
+# ----------------------------------------------------------------------------
+# Every name in this module is prefixed XAU_LG_ / xau_lg_ specifically so the
+# WHOLE module can be found and deleted later with one search, per direct
+# user request ("делай так, чтобы потом удалить можно было") — this reflects
+# genuine uncertainty about whether the underlying idea holds up, not just
+# code hygiene. Source: an Instagram post (trendwisdom/pranamghagare)
+# claiming 76% win rate / <2% drawdown on a XAU/USD strategy — treated with
+# real skepticism, not taken at face value: the claim is an unverifiable
+# screenshot over a ~1-month window, with a "comment for the full report in
+# DMs" / "comment for a free prop-firm guide" structure, i.e. a lead-
+# generation funnel, not a published, checkable result. Implemented anyway
+# because the underlying PATTERN (sweep a level, close back inside, trade
+# the reversal with a trend filter) is a real, testable idea structurally
+# similar to what Session/Session NY already do — worth actually
+# backtesting on this app's own data rather than trusting the screenshot.
+# Strategy as described across the 8 slides:
+#   1. EMA(30) trend filter: close > EMA -> longs only, close < EMA -> shorts
+#   2. Support/resistance from swing pivots, LEFT=1/RIGHT=1 bars (LuxAlgo's
+#      "Support and Resistance Levels with Breaks" indicator at its default-
+#      minus-14 sensitivity — deliberately tight/noisy, not a generalized
+#      pivot config elsewhere in this app)
+#   3. On a 15m candle: wick below support but CLOSE back above it (or wick
+#      above resistance but close back below) = confirmed "liquidity grab"
+#   4. Entry at the top of that candle (its high) for a long, stop at the
+#      candle's low, fixed 1:1 risk:reward — mirrored for shorts
+# Universe restricted to actual gold-tracking symbols only, per the user's
+# own framing ("индикатор ПО ЗОЛОТУ") rather than the app's usual full
+# 150-200 symbol universe — this was never claimed to generalize beyond
+# gold, and diluting it across everything would just be testing a different,
+# unstated hypothesis.
+# Constants are placed HERE (not next to the module's functions further
+# down) specifically because STATE (constructed shortly after this point)
+# references XAU_LG_SIGNAL_HISTORY at construction time — Python executes
+# top-to-bottom, so the constant must exist before STATE does. Functions
+# stay where they were, right before the API section; see that location's
+# own short pointer comment.
+# ============================================================================
+XAU_LG_ENABLED = os.environ.get("VP_XAU_LG_ENABLED", "1") == "1"
+XAU_LG_SYMBOLS = [s.strip() for s in os.environ.get("VP_XAU_LG_SYMBOLS", "XAU_USDT,XAUT_USDT,PAXG_USDT").split(",") if s.strip()]
+XAU_LG_TF = os.environ.get("VP_XAU_LG_TF", "15m")
+XAU_LG_EMA_PERIOD = int(os.environ.get("VP_XAU_LG_EMA_PERIOD", 30))
+XAU_LG_PIVOT_LEFT = int(os.environ.get("VP_XAU_LG_PIVOT_LEFT", 1))
+XAU_LG_PIVOT_RIGHT = int(os.environ.get("VP_XAU_LG_PIVOT_RIGHT", 1))
+XAU_LG_RR = float(os.environ.get("VP_XAU_LG_RR", 1.0))  # fixed 1:1, per the source's own stated rule — not auto-tuned by risk_autotune_pass(), deliberately excluded since this whole module is provisional
+XAU_LG_BACKTEST_DAYS = int(os.environ.get("VP_XAU_LG_BACKTEST_DAYS", 30))
+XAU_LG_SIGNAL_HISTORY = 200
+XAU_LG_REFRESH_SEC = int(os.environ.get("VP_XAU_LG_REFRESH_SEC", 3600))  # hourly backtest refresh — small fixed symbol list, cheap compared to Session's 50-symbol universe scan
+XAU_LG_SCAN_INTERVAL_SEC = int(os.environ.get("VP_XAU_LG_SCAN_INTERVAL_SEC", 300))  # live scan cadence — 15m candles, checking every 5 min is plenty
+
 SESSION_NY_REFRESH_SEC = int(os.environ.get("VP_SESSION_NY_REFRESH_SEC", 24 * 3600))
 SESSION_NY_INVERT_SIGNALS = os.environ.get("VP_SESSION_NY_INVERT_SIGNALS", "0") == "1"
 SESSION_NY_SL_MULT = float(os.environ.get("VP_SESSION_NY_SL_MULT", 1.5))
@@ -9573,49 +9658,18 @@ def risk_autotune_loop():
 
 
 # ============================================================================
-# EXPERIMENTAL: XAU Liquidity Grab (v0.95.0)
+# EXPERIMENTAL: XAU Liquidity Grab (v0.95.0) — functions
 # ----------------------------------------------------------------------------
-# Every name in this module is prefixed XAU_LG_ / xau_lg_ specifically so the
-# WHOLE module can be found and deleted later with one search, per direct
-# user request ("делай так, чтобы потом удалить можно было") — this reflects
-# genuine uncertainty about whether the underlying idea holds up, not just
-# code hygiene. Source: an Instagram post (trendwisdom/pranamghagare)
-# claiming 76% win rate / <2% drawdown on a XAU/USD strategy — treated with
-# real skepticism, not taken at face value: the claim is an unverifiable
-# screenshot over a ~1-month window, with a "comment for the full report in
-# DMs" / "comment for a free prop-firm guide" structure, i.e. a lead-
-# generation funnel, not a published, checkable result. Implemented anyway
-# because the underlying PATTERN (sweep a level, close back inside, trade
-# the reversal with a trend filter) is a real, testable idea structurally
-# similar to what Session/Session NY already do — worth actually
-# backtesting on this app's own data rather than trusting the screenshot.
-# Strategy as described across the 8 slides:
-#   1. EMA(30) trend filter: close > EMA -> longs only, close < EMA -> shorts
-#   2. Support/resistance from swing pivots, LEFT=1/RIGHT=1 bars (LuxAlgo's
-#      "Support and Resistance Levels with Breaks" indicator at its default-
-#      minus-14 sensitivity — deliberately tight/noisy, not a generalized
-#      pivot config elsewhere in this app)
-#   3. On a 15m candle: wick below support but CLOSE back above it (or wick
-#      above resistance but close back below) = confirmed "liquidity grab"
-#   4. Entry at the top of that candle (its high) for a long, stop at the
-#      candle's low, fixed 1:1 risk:reward — mirrored for shorts
-# Universe restricted to actual gold-tracking symbols only, per the user's
-# own framing ("индикатор ПО ЗОЛОТУ") rather than the app's usual full
-# 150-200 symbol universe — this was never claimed to generalize beyond
-# gold, and diluting it across everything would just be testing a different,
-# unstated hypothesis.
+# Constants (XAU_LG_ENABLED, XAU_LG_SYMBOLS, etc.) are defined much earlier
+# in the file, right after the SESSION_NY_* constants — moved there in
+# v0.95.1 after a live NameError: the STATE dict (which references
+# XAU_LG_SIGNAL_HISTORY at construction time) is built long before this
+# point in the file's top-to-bottom execution order, so the constant has to
+# exist before STATE does, not just before these functions do. py_compile
+# only checks syntax, not execution order, so this class of bug doesn't
+# show up until the script actually runs — caught here from a live Termux
+# traceback, not from compiling locally beforehand.
 # ============================================================================
-XAU_LG_ENABLED = os.environ.get("VP_XAU_LG_ENABLED", "1") == "1"
-XAU_LG_SYMBOLS = [s.strip() for s in os.environ.get("VP_XAU_LG_SYMBOLS", "XAU_USDT,XAUT_USDT,PAXG_USDT").split(",") if s.strip()]
-XAU_LG_TF = os.environ.get("VP_XAU_LG_TF", "15m")
-XAU_LG_EMA_PERIOD = int(os.environ.get("VP_XAU_LG_EMA_PERIOD", 30))
-XAU_LG_PIVOT_LEFT = int(os.environ.get("VP_XAU_LG_PIVOT_LEFT", 1))
-XAU_LG_PIVOT_RIGHT = int(os.environ.get("VP_XAU_LG_PIVOT_RIGHT", 1))
-XAU_LG_RR = float(os.environ.get("VP_XAU_LG_RR", 1.0))  # fixed 1:1, per the source's own stated rule — not auto-tuned by risk_autotune_pass(), deliberately excluded since this whole module is provisional
-XAU_LG_BACKTEST_DAYS = int(os.environ.get("VP_XAU_LG_BACKTEST_DAYS", 30))
-XAU_LG_SIGNAL_HISTORY = 200
-XAU_LG_REFRESH_SEC = int(os.environ.get("VP_XAU_LG_REFRESH_SEC", 3600))  # hourly backtest refresh — small fixed symbol list, cheap compared to Session's 50-symbol universe scan
-XAU_LG_SCAN_INTERVAL_SEC = int(os.environ.get("VP_XAU_LG_SCAN_INTERVAL_SEC", 300))  # live scan cadence — 15m candles, checking every 5 min is plenty
 
 
 def xau_lg_detect_signals(candles, ema_period=XAU_LG_EMA_PERIOD, pivot_left=XAU_LG_PIVOT_LEFT, pivot_right=XAU_LG_PIVOT_RIGHT):
