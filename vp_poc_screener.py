@@ -3523,6 +3523,48 @@ v0.95.4 - same overshoot fix as v0.95.3, applied to _risk_autotune_
          available given that data limitation rather than a remaining
          bug. Verified with both py_compile and an actual runtime start
          before pushing.
+
+v0.95.5 - new TP-extend rule for risk-autotune, per direct user request
+         to have the system also catch the "winning trades run well past
+         the current target" pattern it had been missing entirely — every
+         existing rule only ever tightened risk (MIN_RR filters, SL
+         width, reverse flags), nothing ever extended a target even when
+         evidence pointed that way. Found manually for Volume/breakout
+         earlier in this session (median WIN MFE 3.641R against a fixed
+         RR=2 target — wins running nearly double the target before
+         reversing), the same underlying pattern the app's own UI hint
+         text already names ("если WIN MFE заметно больше текущего RR —
+         тейк можно двигать дальше").
+         New _risk_autotune_tp_extend(): scales a fixed TP_PCT by (win_
+         mfe_r / current_rr), bounded to +/-10% per pass (RISK_AUTOTUNE_
+         TP_STEP_RATIO) within a 0.3%-5% range (RISK_AUTOTUNE_TP_PCT_
+         BOUNDS), ignoring anything within 15% of current (RISK_
+         AUTOTUNE_TP_TOLERANCE_RATIO) — same bounded-step, cooldown-
+         gated, sample-size-gated shape as every other nudge in this
+         system, mirroring _risk_autotune_sl_mult()'s two-directional
+         design but for the reward side instead of risk. Deliberately
+         uses mfe_r_wins_AT_CLOSE, not the full-24h-window MFE stat — the
+         UI already labels that window "не для оценки конкретной
+         сделки" since it includes post-close movement that isn't
+         tradeable under the current exit logic, and feeding it into an
+         automatic adjustment would be inconsistent with that existing
+         caution.
+         Applies ONLY to EMA_TP_PCT and DIV_TP_PCT (both newly added to
+         the settings system this round, same persistence reasoning as
+         every other constant risk-autotune touches). Explicitly does
+         NOT apply to Volume or Scalp: both already run their own
+         per-symbol grid search over multiple target sizes (PARAM_GRID_RR
+         for Volume, SCALP_TARGET_PCTS for Scalp) — a second, separate
+         global TP nudge would just fight that existing per-symbol
+         search rather than complement it. Also doesn't apply to
+         Session/Session NY: non-inverted TP is the opposite edge of
+         that day's range, a different value every signal, not a single
+         fixed constant there's anything to nudge.
+         risk_autotune_pass() extended for EMA and Divergence to also
+         call this after their existing min_rr/sl_mult/reverse checks,
+         using the mfe_r_wins_at_close and rr_all stats those blocks
+         already compute rather than re-fetching anything. Verified with
+         both py_compile and an actual runtime start before pushing.
 """
 
 import os
@@ -3542,7 +3584,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.95.4"
+APP_VERSION = "0.95.5"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4154,7 +4196,8 @@ SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_sig
                   # plain module constants with NO persistence at all, so any
                   # manual env-var override would silently revert on restart
                   # too — now they follow the same rules as ema_min_rr etc.
-                  "scalp_min_rr", "scalp_sl_buffer_mult", "session_sl_mult", "ema_sl_atr_mult", "div_sl_atr_mult")
+                  "scalp_min_rr", "scalp_sl_buffer_mult", "session_sl_mult", "ema_sl_atr_mult", "div_sl_atr_mult",
+                  "ema_tp_pct", "div_tp_pct")
 
 
 def get_settings():
@@ -4212,6 +4255,8 @@ def get_settings():
         "session_sl_mult": SESSION_SL_MULT,
         "ema_sl_atr_mult": EMA_SL_ATR_MULT,
         "div_sl_atr_mult": DIV_SL_ATR_MULT,
+        "ema_tp_pct": EMA_TP_PCT,
+        "div_tp_pct": DIV_TP_PCT,
     }
 
 
@@ -4232,6 +4277,7 @@ def apply_settings(updates):
     global EMA_ADX_FILTER_ENABLED, EMA_ADX_MIN, EMA_MIN_GAP_PCT
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT, SESSION_SL_MULT
     global EMA_SL_ATR_MULT, DIV_SL_ATR_MULT
+    global EMA_TP_PCT, DIV_TP_PCT
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
     if "divergence_enabled" in updates:
@@ -4396,6 +4442,20 @@ def apply_settings(updates):
             v = float(updates["div_sl_atr_mult"])
             if v > 0:
                 DIV_SL_ATR_MULT = v
+        except (TypeError, ValueError):
+            pass
+    if "ema_tp_pct" in updates:
+        try:
+            v = float(updates["ema_tp_pct"])
+            if v > 0:
+                EMA_TP_PCT = v
+        except (TypeError, ValueError):
+            pass
+    if "div_tp_pct" in updates:
+        try:
+            v = float(updates["div_tp_pct"])
+            if v > 0:
+                DIV_TP_PCT = v
         except (TypeError, ValueError):
             pass
 
@@ -9450,6 +9510,18 @@ RISK_AUTOTUNE_MULT_BOUNDS = (0.5, 3.0)  # below 0.5 is an unrealistically tight 
 RISK_AUTOTUNE_RR_TOLERANCE = 0.02  # don't nudge an RR filter already within this of its target — avoids chasing noise
 RISK_AUTOTUNE_MULT_TOLERANCE_R = 0.08  # don't nudge an SL-width multiplier if realized LOSS MAE is already within this many R of -1.0
 RISK_AUTOTUNE_REVERSE_EV_THRESHOLD = -0.03  # only flip a direction flag if the CURRENT mode's EV is negative by at least this much — a small negative EV could just be noise
+# v0.95.5 — TP-extend rule, per direct user request to have auto-tune also
+# catch the "WIN MFE far exceeds current RR" pattern (found manually for
+# Volume/breakout earlier: median WIN MFE 3.641R against a fixed RR=2
+# target) rather than only ever tightening risk. Only applies to EMA_TP_PCT/
+# DIV_TP_PCT — Volume and Scalp already run their own per-symbol grid
+# search over multiple target sizes (PARAM_GRID_RR / SCALP_TARGET_PCTS),
+# so a second, separate global nudge would just fight that existing
+# search; Session's non-inverted TP is the opposite range edge each time,
+# not a single tunable constant, so there's nothing fixed to nudge there.
+RISK_AUTOTUNE_TP_TOLERANCE_RATIO = 0.15  # ignore if WIN MFE is within 15% of the current RR — avoid chasing noise
+RISK_AUTOTUNE_TP_STEP_RATIO = 0.1  # max 10% change to TP_PCT per pass — same bounded-step philosophy as the RR/SL-mult nudges
+RISK_AUTOTUNE_TP_PCT_BOUNDS = (0.003, 0.05)  # 0.3%-5% — sane range; below is barely worth the fees, above is an unrealistic single fixed target
 
 
 def _risk_autotune_log(module, param, old_value, new_value, reason, sample_n):
@@ -9589,6 +9661,42 @@ def _risk_autotune_reverse(module, param_key, current_flag, winrate_pct, rr, sam
                         f"ev={ev:+.3f} winrate={winrate_pct:.1f}% rr={rr:.3f} overshoot={overshoot:.3f}", sample_n)
 
 
+def _risk_autotune_tp_extend(module, param_key, current_tp_pct, win_mfe_r, current_rr, sample_n, setter):
+    """Nudges a fixed TP_PCT (EMA_TP_PCT / DIV_TP_PCT) toward matching the
+    R-multiple winning trades actually reach before closing (win_mfe_r —
+    pass mfe_r_wins_at_close specifically, NOT the full-24h-window MFE,
+    since that includes post-close movement that isn't tradeable under
+    the current exit logic and the app's own UI already labels it "не
+    для оценки конкретной сделки"). If wins consistently run well past
+    the R-multiple the current TP sits at (current_rr — pass rr_all's
+    median or avg), the target is cutting profit short: extend it. If
+    wins rarely get anywhere near it, the target may be unrealistic:
+    trim it. Mirrors _risk_autotune_sl_mult()'s two-directional nudge,
+    just for the reward side instead of the risk side.
+    Since SL is ATR-based (varies per trade) while TP_PCT is one fixed %
+    for everyone, R and TP_PCT move proportionally — scaling TP_PCT by
+    (win_mfe_r / current_rr) is the direct translation, bounded to a
+    max step per pass same as every other nudge here."""
+    if not RISK_AUTOTUNE_ENABLED or sample_n < RISK_AUTOTUNE_MIN_SAMPLE:
+        return
+    if win_mfe_r is None or current_rr is None or current_rr <= 0:
+        return
+    if not _risk_autotune_cooldown_ok(param_key, RISK_AUTOTUNE_COOLDOWN_SEC):
+        return
+    ratio = win_mfe_r / current_rr
+    if abs(ratio - 1.0) < RISK_AUTOTUNE_TP_TOLERANCE_RATIO:
+        return
+    ratio = max(1 - RISK_AUTOTUNE_TP_STEP_RATIO, min(1 + RISK_AUTOTUNE_TP_STEP_RATIO, ratio))
+    lo, hi = RISK_AUTOTUNE_TP_PCT_BOUNDS
+    new_value = round(min(hi, max(lo, current_tp_pct * ratio)), 5)
+    if new_value == current_tp_pct:
+        return
+    setter(new_value)
+    _risk_autotune_mark(param_key)
+    _risk_autotune_log(module, param_key, current_tp_pct, new_value,
+                        f"win_mfe_r={win_mfe_r:.3f} current_rr={current_rr:.3f} ratio={ratio:.3f}", sample_n)
+
+
 # --- setters: each applies the change AND persists it via save_settings(),
 # same pattern the settings API endpoint itself already uses ---
 
@@ -9601,6 +9709,12 @@ def _set_ema_min_rr(v):
 def _set_ema_sl_atr_mult(v):
     global EMA_SL_ATR_MULT
     EMA_SL_ATR_MULT = v
+    save_settings()
+
+
+def _set_ema_tp_pct(v):
+    global EMA_TP_PCT
+    EMA_TP_PCT = v
     save_settings()
 
 
@@ -9619,6 +9733,12 @@ def _set_div_min_rr(v):
 def _set_div_sl_atr_mult(v):
     global DIV_SL_ATR_MULT
     DIV_SL_ATR_MULT = v
+    save_settings()
+
+
+def _set_div_tp_pct(v):
+    global DIV_TP_PCT
+    DIV_TP_PCT = v
     save_settings()
 
 
@@ -9708,6 +9828,9 @@ def risk_autotune_pass():
         if rr_all:
             _risk_autotune_reverse("ema", "ema_invert_signals", EMA_INVERT_SIGNALS, winrate, rr_all["avg"], closed_n, _set_ema_invert,
                                     avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
+        win_mfe = s.get("mfe_r_wins_at_close")
+        if win_mfe and rr_all:
+            _risk_autotune_tp_extend("ema", "ema_tp_pct", EMA_TP_PCT, win_mfe["median"], rr_all["median"], closed_n, _set_ema_tp_pct)
     except Exception as e:
         log_error(f"risk_autotune ema: {e}")
 
@@ -9725,6 +9848,9 @@ def risk_autotune_pass():
         if rr_all:
             _risk_autotune_reverse("divergence", "div_invert_signals", DIV_INVERT_SIGNALS, winrate, rr_all["avg"], closed_n, _set_div_invert,
                                     avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
+        win_mfe = s.get("mfe_r_wins_at_close")
+        if win_mfe and rr_all:
+            _risk_autotune_tp_extend("divergence", "div_tp_pct", DIV_TP_PCT, win_mfe["median"], rr_all["median"], closed_n, _set_div_tp_pct)
     except Exception as e:
         log_error(f"risk_autotune divergence: {e}")
 
