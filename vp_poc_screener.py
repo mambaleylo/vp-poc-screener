@@ -3565,6 +3565,39 @@ v0.95.5 - new TP-extend rule for risk-autotune, per direct user request
          using the mfe_r_wins_at_close and rr_all stats those blocks
          already compute rather than re-fetching anything. Verified with
          both py_compile and an actual runtime start before pushing.
+
+v0.95.6 - fixed a real bug in Volume's per-symbol grid search (_optimize_
+         for_reason(), feeding SYMBOL_OVERRIDES), found by directly
+         checking whether it was actually exploring PARAM_GRID_RR's wider
+         options in practice or just defaulting to the easiest one, per
+         a direct user follow-up question. It was: the selection
+         criterion picked whichever (lookback, hvn, rr, buffer) combo had
+         the HIGHEST RAW WINRATE, tie-broken only by trade count — never
+         weighing the target size itself. This mechanically biases
+         toward the SMALLEST rr in PARAM_GRID_RR (1.5) almost regardless
+         of true edge, since a nearer target is inherently easier to
+         touch before price reverses — the exact same class of oversight
+         already found and fixed for Scalp's own target selection in
+         v0.91.0 (that one had a premature `break` after the largest
+         qualifying target; this one never even weighed target size at
+         all). Confirmed this genuinely reaches live trading, not just
+         display: scan_symbol() reads SYMBOL_OVERRIDES[symbol]["breakout"]
+         ["rr"] directly for real entries/SL/TP, falling back to RR_
+         BREAKOUT only when no override exists yet.
+         Fix: selection now maximizes EV (winrate*rr - (1-winrate)*1)
+         instead of raw winrate. No overshoot correction applied here
+         (unlike risk-autotune's v0.95.3/v0.95.4 fixes) — backtest_
+         params() simulates SL/TP hits directly against historical
+         candle highs/lows with no slippage modeled, so within this
+         specific backtest a loss genuinely costs exactly -1R by
+         construction; nominal EV is the internally-consistent metric
+         for it, not an approximation that needs correcting.
+         /api/overrides (pre-existing endpoint, just newly relevant) now
+         reflects the corrected per-symbol rr choices as the optimizer
+         re-runs on its normal 48h refresh cycle — useful for directly
+         checking the resulting RR distribution across symbols instead
+         of assuming the mechanism works. Verified with both py_compile
+         and an actual runtime start before pushing.
 """
 
 import os
@@ -3584,7 +3617,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.95.5"
+APP_VERSION = "0.95.6"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -8464,6 +8497,7 @@ def _optimize_for_reason(candles, reason):
     min-trades bar) — same selection logic as before, just scoped to one
     reason at a time."""
     best = None
+    best_ev = None
     tried = []
     for lb in PARAM_GRID_LOOKBACK:
         for hvn in PARAM_GRID_HVN:
@@ -8473,9 +8507,26 @@ def _optimize_for_reason(candles, reason):
                     tried.append({**res, "lookback": lb, "hvn_top_n": hvn, "rr": rr, "buffer_pct": buf})
                     if res["trades"] < MIN_BACKTEST_TRADES or res["winrate"] is None:
                         continue
-                    if best is None or res["winrate"] > best["winrate"] or \
-                            (res["winrate"] == best["winrate"] and res["trades"] > best["trades"]):
+                    # v0.95.6: selection criterion changed from raw winrate to
+                    # EV, per direct user question about whether the grid
+                    # search was actually exploring wider targets or just
+                    # picking the easiest one to hit. It was picking the
+                    # easiest one: winrate alone is mechanically biased
+                    # toward the SMALLEST rr in PARAM_GRID_RR almost
+                    # regardless of true edge, since a nearer target is
+                    # inherently easier to touch before price reverses —
+                    # the exact same class of oversight already found and
+                    # fixed for Scalp's target selection in v0.91.0. This
+                    # backtest simulates SL/TP hits directly on historical
+                    # candles with no slippage modeled, so within it a loss
+                    # genuinely costs exactly -1R by construction — no
+                    # overshoot correction needed here the way risk-
+                    # autotune's live-execution stats needed one.
+                    wr = res["winrate"] / 100
+                    ev = wr * rr - (1 - wr) * 1.0
+                    if best is None or ev > best_ev or (ev == best_ev and res["trades"] > best["trades"]):
                         best = {**res, "lookback": lb, "hvn_top_n": hvn, "rr": rr, "buffer_pct": buf}
+                        best_ev = ev
 
     if best is None:
         tried.sort(key=lambda t: -t["trades"])
