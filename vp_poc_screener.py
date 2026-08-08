@@ -3447,6 +3447,29 @@ v0.95.1 - fixed a real startup crash, per a direct Termux traceback
          explaining where the constants moved and why, so the code
          doesn't look like something's missing when read top-to-bottom
          from that point.
+
+v0.95.2 - stopped _risk_autotune_log() from also calling log_error(),
+         per a direct user screenshot showing 4 of 5 entries in the
+         "Последние ошибки сканера" panel were routine RISK-AUTOTUNE
+         adjustments, not errors — the user sent the screenshot
+         specifically asking what had gone wrong, when nothing had.
+         Root cause: v0.93.0 deliberately dual-logged risk-autotune
+         entries through log_error() "for visibility," but STATE
+         ["risk_autotune_log"] already has its own dedicated collapsible
+         "Авто-тюнинг риска" panel in the header (built in that same
+         version) — the log_error() call was pure redundancy that had
+         the side effect of painting normal automated behavior red under
+         an "ошибки" (errors) heading. Removed the log_error() call;
+         the STATE list append (which feeds the dedicated panel) is
+         untouched. reconcile_positions_and_orders()'s own "cancelled N
+         orphaned trigger order(s)" line has the same informational-not-
+         error framing and predates this session's work, but has no
+         separate display location the way risk-autotune's entries do —
+         left as-is rather than removing its only visibility, flagged
+         here for awareness rather than silently left unmentioned.
+         Verification for this release included an actual runtime smoke
+         test (not just py_compile), per the lesson from v0.95.1's
+         startup crash — confirmed clean.
 """
 
 import os
@@ -3466,7 +3489,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.95.1"
+APP_VERSION = "0.95.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9381,10 +9404,15 @@ def _risk_autotune_log(module, param, old_value, new_value, reason, sample_n):
              "old": old_value, "new": new_value, "reason": reason, "n": sample_n}
     with state_lock:
         STATE["risk_autotune_log"].appendleft(entry)
-    # Piggybacks on the existing error/info log channel for UI visibility
-    # ("Последние ошибки" panel) rather than building a dedicated display
-    # from scratch — not really an error, but the same intended audience.
-    log_error(f"RISK-AUTOTUNE: {module}.{param} {old_value} -> {new_value} ({reason}, n={sample_n})")
+    # v0.95.2: used to ALSO call log_error() here for visibility in the
+    # "Последние ошибки" panel — removed after a live screenshot showed
+    # this made routine automated adjustments (not errors at all) sit
+    # under a red "ошибки" header, confusing enough that the user sent
+    # the screenshot specifically asking what had gone wrong. Redundant
+    # anyway: STATE["risk_autotune_log"] already has its own dedicated
+    # collapsible "Авто-тюнинг риска" display in the header (built at
+    # the same time this dual-logging was added) — the entry above is
+    # the only write this function needs.
 
 
 def _risk_autotune_cooldown_ok(param_key, cooldown_sec):
