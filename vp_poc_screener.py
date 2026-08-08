@@ -3470,6 +3470,34 @@ v0.95.2 - stopped _risk_autotune_log() from also calling log_error(),
          Verification for this release included an actual runtime smoke
          test (not just py_compile), per the lesson from v0.95.1's
          startup crash — confirmed clean.
+
+v0.95.3 - fixed a real formula bug in _risk_autotune_min_rr(), per direct
+         user evidence: a live scalp trade (CYS_USDT, RR=0.415) passed
+         SCALP_MIN_RR despite that filter having been auto-tuned to
+         0.368 using math that assumed every loss costs exactly -1R.
+         Real scalp LOSS MAE averaged -1.171R at the time — the SAME
+         overshoot _risk_autotune_sl_mult() was separately, correctly
+         reacting to (scalp_sl_buffer_mult 0.65->0.7) in the very same
+         autotune pass. The two rules were using inconsistent pictures
+         of reality: sl_mult tuning knew losses cost 1.171R, but min_rr
+         tuning's breakeven formula silently assumed 1.0R, computing a
+         breakeven of ~0.36 instead of the honest ~0.42 once the same
+         overshoot data both rules already had is actually used. At
+         0.415, the CYS_USDT trade sat between those two numbers — it
+         should have been rejected, and wasn't, specifically because of
+         this gap.
+         Fix: _risk_autotune_min_rr() gained an avg_loss_mae_r parameter
+         (optional, defaults to no adjustment for backward compat);
+         breakeven_rr is now (1-winrate)/winrate * abs(avg_loss_mae_r)
+         instead of assuming the multiplier is 1. risk_autotune_pass()
+         reordered in all three call sites (EMA/Divergence/Scalp) so the
+         loss-MAE stat each module already computes for its own sl_mult
+         tuning call gets computed first and passed into the min_rr call
+         too, rather than each rule pulling its own inconsistent picture
+         of the same underlying data. Session has no reverse-eligible
+         min_rr call, so it's unaffected. Verified with both py_compile
+         and an actual runtime start (per the v0.95.1 lesson) before
+         pushing.
 """
 
 import os
@@ -3489,7 +3517,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.95.2"
+APP_VERSION = "0.95.3"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9426,13 +9454,24 @@ def _risk_autotune_mark(param_key):
         STATE["risk_autotune_last_change"][param_key] = time.time()
 
 
-def _risk_autotune_min_rr(module, param_key, current_value, median_rr, winrate_pct, sample_n, setter):
+def _risk_autotune_min_rr(module, param_key, current_value, median_rr, winrate_pct, sample_n, setter, avg_loss_mae_r=None):
     """Nudges a *_MIN_RR filter toward (a small margin under) the RR that
     would just break even at the module's own live winrate — same
     reasoning applied manually for EMA_MIN_RR (0.3->0.7) and SCALP_MIN_RR
-    (0.5). breakeven_rr = (1-winrate)/winrate; target sits 5% under that,
-    matching the margin picked for EMA_MIN_RR=0.7 at the time (breakeven
-    was ~0.789 then)."""
+    (0.5). breakeven_rr = (1-winrate)/winrate * overshoot, where overshoot
+    is how many R a LOSS actually costs on average (abs(avg_loss_mae_r)),
+    not an assumed exactly-1R. target sits 5% under that, matching the
+    margin picked for EMA_MIN_RR=0.7 at the time.
+    v0.95.3: the overshoot factor was missing entirely until a live
+    example caught it — scalp_min_rr had been loosened to 0.368 using
+    the nominal (assume-1R-losses) formula, but real LOSS MAE averaged
+    -1.171R (the exact same overshoot _risk_autotune_sl_mult() was
+    separately, correctly reacting to for scalp_sl_buffer_mult at the
+    same time) — so a trade at RR 0.415 passed a filter that, accounting
+    for the SAME overshoot data already available, should have sat
+    around ~0.42 and rejected it. avg_loss_mae_r is optional and
+    defaults to no adjustment (overshoot=1.0) so callers that don't have
+    this stat handy still work, just without the correction."""
     if not RISK_AUTOTUNE_ENABLED or sample_n < RISK_AUTOTUNE_MIN_SAMPLE:
         return
     if median_rr is None or winrate_pct is None:
@@ -9442,7 +9481,8 @@ def _risk_autotune_min_rr(module, param_key, current_value, median_rr, winrate_p
     winrate = winrate_pct / 100
     if winrate <= 0 or winrate >= 1:
         return
-    breakeven_rr = (1 - winrate) / winrate
+    overshoot = abs(avg_loss_mae_r) if avg_loss_mae_r else 1.0
+    breakeven_rr = (1 - winrate) / winrate * overshoot
     target = breakeven_rr * 0.95
     diff = target - current_value
     if abs(diff) < RISK_AUTOTUNE_RR_TOLERANCE:
@@ -9623,9 +9663,10 @@ def risk_autotune_pass():
         rr_all = s.get("rr_all")
         winrate = s.get("winrate")
         closed_n = s.get("closed_total", 0) or 0
-        if rr_all:
-            _risk_autotune_min_rr("ema", "ema_min_rr", EMA_MIN_RR, rr_all["median"], winrate, closed_n, _set_ema_min_rr)
         loss_mae = s.get("mae_r_losses_at_close")
+        if rr_all:
+            _risk_autotune_min_rr("ema", "ema_min_rr", EMA_MIN_RR, rr_all["median"], winrate, closed_n, _set_ema_min_rr,
+                                   avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
         if loss_mae:
             _risk_autotune_sl_mult("ema", "ema_sl_atr_mult", EMA_SL_ATR_MULT, loss_mae["avg"], s.get("losses", 0) or 0, _set_ema_sl_atr_mult)
         if rr_all:
@@ -9638,9 +9679,10 @@ def risk_autotune_pass():
         rr_all = s.get("rr_all")
         winrate = s.get("winrate")
         closed_n = (s.get("wins", 0) or 0) + (s.get("losses", 0) or 0)
-        if rr_all:
-            _risk_autotune_min_rr("divergence", "div_min_rr", DIV_MIN_RR, rr_all["median"], winrate, closed_n, _set_div_min_rr)
         loss_mae = s.get("mae_r_losses_at_close")
+        if rr_all:
+            _risk_autotune_min_rr("divergence", "div_min_rr", DIV_MIN_RR, rr_all["median"], winrate, closed_n, _set_div_min_rr,
+                                   avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
         if loss_mae:
             _risk_autotune_sl_mult("divergence", "div_sl_atr_mult", DIV_SL_ATR_MULT, loss_mae["avg"], s.get("losses", 0) or 0, _set_div_sl_atr_mult)
         if rr_all:
@@ -9653,9 +9695,10 @@ def risk_autotune_pass():
         scalp_stats = compute_scalp_signal_stats()
         winrate = scalp_stats.get("win_rate")
         closed_n = (scalp_stats.get("wins", 0) or 0) + (scalp_stats.get("losses", 0) or 0)
-        if median_rr is not None:
-            _risk_autotune_min_rr("scalp", "scalp_min_rr", SCALP_MIN_RR, median_rr, winrate, rr_n, _set_scalp_min_rr)
         loss_mae_avg, loss_n = _scalp_loss_mae_avg_r()
+        if median_rr is not None:
+            _risk_autotune_min_rr("scalp", "scalp_min_rr", SCALP_MIN_RR, median_rr, winrate, rr_n, _set_scalp_min_rr,
+                                   avg_loss_mae_r=loss_mae_avg)
         if loss_mae_avg is not None:
             _risk_autotune_sl_mult("scalp", "scalp_sl_buffer_mult", SCALP_SL_BUFFER_MULT, loss_mae_avg, loss_n, _set_scalp_sl_buffer_mult)
         # No reverse flag exists for scalp (it picks direction from
