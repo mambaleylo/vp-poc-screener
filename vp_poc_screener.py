@@ -3598,6 +3598,70 @@ v0.95.6 - fixed a real bug in Volume's per-symbol grid search (_optimize_
          checking the resulting RR distribution across symbols instead
          of assuming the mechanism works. Verified with both py_compile
          and an actual runtime start before pushing.
+
+v0.95.7 - full audit pass, per direct user request ("найди все проблемы
+         и баги еще вдруг есть") rather than a specific symptom report.
+         Ran pyflakes (found and cleaned up 2 genuinely dead variables —
+         interval_sec in the scalp signal path, left over from before
+         timeouts were removed; lookback_sec in xau_lg_scan_symbol_live,
+         left over from an earlier draft — and 5 redundant `global`
+         declarations in apply_settings() for leverage constants that
+         are actually mutated via globals()[name]=v in a loop, not
+         direct assignment; all cosmetic, zero behavior change).
+         Cross-checked SETTINGS_KEYS against get_settings()'s return
+         dict both directions — fully consistent (telegram_configured
+         is the only get_settings()-only field, and that's intentional:
+         a read-only derived flag, not a user-set value). Checked every
+         apply_settings() handler and every risk-autotune _set_*
+         function for assignments missing their `global` declaration
+         (which would silently create a local variable instead of
+         mutating the module global, and the change would appear to
+         "work" per the caller's return value but never actually
+         persist) — none found.
+         Found ONE real, high-impact bug via systematic cross-reference
+         (every function signature using an ALL-CAPS default parameter,
+         checked against every constant that's ever reassigned via
+         `global` anywhere in the file): compute_ema_tp_sl() and
+         compute_div_tp_sl() declared tp_pct=EMA_TP_PCT/DIV_TP_PCT and
+         atr_mult=EMA_SL_ATR_MULT/DIV_SL_ATR_MULT as literal default
+         parameter values. Python evaluates a default parameter value
+         ONCE, at function-definition time (module load) — not on every
+         call — so whatever EMA_TP_PCT/DIV_TP_PCT/EMA_SL_ATR_MULT/
+         DIV_SL_ATR_MULT happened to be at process startup got frozen
+         into these two functions' own __defaults__ forever. Confirmed
+         both real call sites (scan_symbol_divergence, the EMA
+         equivalent) call with only direction/entry/atr, relying
+         entirely on the (broken) default — meaning every risk_autotune_
+         pass() adjustment to these four values since process start was
+         successfully computed, logged to STATE["risk_autotune_log"],
+         AND persisted to settings.json (save_settings() genuinely wrote
+         the new number), but had ZERO effect on actual live SL/TP
+         calculation: real signals kept using the ORIGINAL startup
+         value the whole time. This was silent — no error, no crash,
+         the log entries looked exactly like every other successful
+         adjustment. Not found from a live symptom; found by directly
+         auditing for this exact class of bug after fixing an unrelated
+         one (v0.93.0's own persistence work) raised the general
+         question of whether a "successful" auto-tune write actually
+         reaches live behavior.
+         Fix: both functions' tp_pct/atr_mult/fallback_rr parameters now
+         default to None and get resolved to the CURRENT global inside
+         the function body on every call, instead of being bound as
+         literals in the signature. Verified BEHAVIORALLY, not just by
+         reading the code: imported the module, called compute_ema_tp_sl
+         once, mutated EMA_TP_PCT directly (same as risk-autotune's own
+         setter does), called it again, confirmed the returned TP
+         actually changed between the two calls.
+         Systematically checked every other function in the file using
+         an ALL-CAPS constant as a default parameter value (49 found)
+         against every constant that's mutated anywhere via `global` —
+         confirmed these were the only two instances of this bug
+         pattern; everything else either defaults to a genuinely fixed
+         constant (safe, since "evaluated once" and "never changes" are
+         equivalent) or is a settings-controlled toggle that's already
+         read fresh from the global inside the function body (like
+         EMA_MIN_RR's own `if EMA_MIN_RR > 0` filter check) rather than
+         captured as a default parameter.
 """
 
 import os
@@ -3617,7 +3681,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.95.6"
+APP_VERSION = "0.95.7"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4304,7 +4368,6 @@ def apply_settings(updates):
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG
     global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
     global SCALP_SIZE_MODE, SCALP_SIZE_VALUE
-    global AUTOTRADE_LEVERAGE_BOUNCE, AUTOTRADE_LEVERAGE_BREAKOUT, AUTOTRADE_LEVERAGE_DIVERGENCE, AUTOTRADE_LEVERAGE_EMA, AUTOTRADE_LEVERAGE_SESSION
     global EMA_MIN_RR
     global EMA_SIGNAL_TIMEOUT_SEC
     global EMA_ADX_FILTER_ENABLED, EMA_ADX_MIN, EMA_MIN_GAP_PCT
@@ -5732,7 +5795,7 @@ def compute_session_ny_signal_stats():
             "open": open_n, "winrate": winrate}
 
 
-def compute_ema_tp_sl(direction, entry, atr=None, tp_pct=EMA_TP_PCT, atr_mult=EMA_SL_ATR_MULT, fallback_rr=EMA_RR):
+def compute_ema_tp_sl(direction, entry, atr=None, tp_pct=None, atr_mult=None, fallback_rr=None):
     """TP is always a fixed % of entry (tp_pct) — the source Pine Script
     only plots BUY/SELL labels, no TP/SL, so this was always synthetic.
     SL depends on EMA_SL_MODE:
@@ -5745,7 +5808,28 @@ def compute_ema_tp_sl(direction, entry, atr=None, tp_pct=EMA_TP_PCT, atr_mult=EM
         this function grew ATR support.
     Returns (sl, tp, risk, rr) — rr is now always computed FROM the
     actual sl/tp distances rather than assumed, since ATR mode makes it
-    vary signal to signal instead of being one fixed constant."""
+    vary signal to signal instead of being one fixed constant.
+    v0.95.7: tp_pct/atr_mult/fallback_rr now default to None and get
+    resolved to the CURRENT EMA_TP_PCT/EMA_SL_ATR_MULT/EMA_RR globals
+    inside the function body — NOT bound as literal default parameter
+    values in the signature. Python evaluates a default parameter value
+    ONCE, at function-definition time (module load), not on each call —
+    so `tp_pct=EMA_TP_PCT` froze whatever EMA_TP_PCT happened to be at
+    startup into this function's own __defaults__ forever. Every actual
+    call site (scan_symbol_ema) calls this with only direction/entry/atr,
+    relying entirely on that default — meaning every risk_autotune_pass()
+    adjustment to EMA_TP_PCT or EMA_SL_ATR_MULT since process start was
+    successfully logged and persisted to settings.json, but had ZERO
+    effect on real signals: they kept computing SL/TP off the ORIGINAL
+    startup value. Found via direct audit ("найди все проблемы"), not a
+    live symptom someone noticed — this could have been silently
+    inert for the rest of this session otherwise."""
+    if tp_pct is None:
+        tp_pct = EMA_TP_PCT
+    if atr_mult is None:
+        atr_mult = EMA_SL_ATR_MULT
+    if fallback_rr is None:
+        fallback_rr = EMA_RR
     if direction == "SHORT":
         tp = entry * (1 - tp_pct)
         tp_dist = entry - tp
@@ -5882,7 +5966,7 @@ def compute_scalp_leverage_for_target(target_pct, account_usd=SCALP_ACCOUNT_USD,
     return required_notional / account_usd
 
 
-def compute_div_tp_sl(direction, entry, atr=None, tp_pct=DIV_TP_PCT, atr_mult=DIV_SL_ATR_MULT, fallback_rr=DIV_RR):
+def compute_div_tp_sl(direction, entry, atr=None, tp_pct=None, atr_mult=None, fallback_rr=None):
     """TP is always a fixed % of entry (tp_pct) — the divergence pattern
     itself doesn't imply a TP, this was always synthetic. SL depends on
     DIV_SL_MODE:
@@ -5893,7 +5977,19 @@ def compute_div_tp_sl(direction, entry, atr=None, tp_pct=DIV_TP_PCT, atr_mult=DI
         risk = tp_distance / fallback_rr (DIV_RR).
     Returns (sl, tp, risk, rr) — rr computed FROM the actual resulting
     distances rather than assumed, since ATR mode makes it vary signal
-    to signal instead of being one fixed constant."""
+    to signal instead of being one fixed constant.
+    v0.95.7: same fix as compute_ema_tp_sl() — tp_pct/atr_mult/
+    fallback_rr now resolve to the CURRENT DIV_TP_PCT/DIV_SL_ATR_MULT/
+    DIV_RR globals inside the function body instead of being frozen as
+    literal default parameter values at module-load time. See that
+    function's docstring for the full explanation; same bug, same fix,
+    found in the same audit pass."""
+    if tp_pct is None:
+        tp_pct = DIV_TP_PCT
+    if atr_mult is None:
+        atr_mult = DIV_SL_ATR_MULT
+    if fallback_rr is None:
+        fallback_rr = DIV_RR
     if direction == "SHORT":
         tp = entry * (1 - tp_pct)
         tp_dist = entry - tp
@@ -7735,7 +7831,6 @@ def scan_symbol_scalp_signal(symbol, rec):
         else:
             target_price = entry * (1 - target_pct / 100)
             sl_price = entry * (1 + sl_pct / 100)
-        interval_sec = INTERVAL_SECONDS.get(interval, 300)
         # Timeout removed per direct request — a signal now waits as long as
         # it takes to hit either the target or the stop, never expiring into
         # an ambiguous TIMEOUT result. A very large finite number (not
@@ -10088,7 +10183,6 @@ def xau_lg_scan_symbol_live(symbol):
     if not XAU_LG_ENABLED:
         return
     try:
-        lookback_sec = (XAU_LG_EMA_PERIOD + 60) * INTERVAL_SECONDS.get(XAU_LG_TF, 900)
         candles = get_candles(symbol, interval=XAU_LG_TF, limit=XAU_LG_EMA_PERIOD + 80)
         interval_sec = INTERVAL_SECONDS.get(XAU_LG_TF, 900)
         now = time.time()
