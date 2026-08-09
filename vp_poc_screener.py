@@ -3845,6 +3845,33 @@ v0.96.2 - added a Telegram close alert for FT5 signals, per direct user
          the realized RR from v0.96.1 — verified the exact message
          formatting behaviorally (both a WIN and a LOSS case) rather
          than just reading the f-string and assuming it's right.
+
+v0.96.3 - fixed a real gap, per a direct user question ("галочка
+         уведомлений точно есть в настройках?"): TELEGRAM_ALERTS_
+         SESSION_NY, TELEGRAM_ALERTS_XAU_LG, and TELEGRAM_ALERTS_FT5
+         all existed as constants and were correctly checked inside
+         send_telegram()'s category filter, but none of the three were
+         ever wired into SETTINGS_KEYS/get_settings/apply_settings, and
+         none had an actual checkbox in the settings UI — meaning they
+         were stuck at their env-var default (on) with no way to turn
+         them off short of editing code and restarting. This wasn't
+         just an FT5 gap: checked Session NY and XAU_LG too rather than
+         fixing only what was asked about, and both had the identical
+         hole. Notably, this contradicts what their own changelog
+         entries claimed at the time — v0.94.0 said Session NY got "its
+         own TELEGRAM_ALERTS_SESSION_NY toggle" and v0.95.0 said the
+         same for XAU_LG's category — both entries described the
+         constant-plus-filter-check as a complete toggle when the
+         settings/UI wiring was actually missing; worth naming plainly
+         rather than letting it pass as a minor detail.
+         Fixed for all three at once, matching Session's own already-
+         complete pattern exactly: added telegram_alerts_session_ny/
+         xau_lg/ft5 to SETTINGS_KEYS, get_settings(), apply_settings()
+         (global declarations + handlers), and three new checkbox rows
+         in the Telegram settings group (setTelegramSessionNy/XauLg/
+         Ft5, the latter two carrying their modules' own ⚠️ marker),
+         wired into the shared setInputs object that already handles
+         loading/saving every other toggle generically.
 """
 
 import os
@@ -3864,7 +3891,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.96.2"
+APP_VERSION = "0.96.3"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4534,7 +4561,7 @@ CREDENTIALS_FILE = os.environ.get(
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "div_min_rr", "bounce_enabled", "breakout_enabled",
                   "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session",
+                  "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session", "telegram_alerts_session_ny", "telegram_alerts_xau_lg", "telegram_alerts_ft5",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5",
                   "autotrade_size_mode", "autotrade_size_value",
                   "scalp_size_mode", "scalp_size_value",
@@ -4579,6 +4606,9 @@ def get_settings():
         "telegram_alerts_ema": TELEGRAM_ALERTS_EMA,
         "telegram_alerts_hourly": TELEGRAM_ALERTS_HOURLY,
         "telegram_alerts_session": TELEGRAM_ALERTS_SESSION,
+        "telegram_alerts_session_ny": TELEGRAM_ALERTS_SESSION_NY,
+        "telegram_alerts_xau_lg": TELEGRAM_ALERTS_XAU_LG,
+        "telegram_alerts_ft5": TELEGRAM_ALERTS_FT5,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
         "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
@@ -4625,6 +4655,7 @@ def apply_settings(updates):
     scan cycle / next alert, no restart needed."""
     global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, FT5_ENABLED, HOURLY_STATS_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
+    global TELEGRAM_ALERTS_SESSION_NY, TELEGRAM_ALERTS_XAU_LG, TELEGRAM_ALERTS_FT5
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5
     global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
     global SCALP_SIZE_MODE, SCALP_SIZE_VALUE
@@ -4683,6 +4714,12 @@ def apply_settings(updates):
         TELEGRAM_ALERTS_EMA = bool(updates["telegram_alerts_ema"])
     if "telegram_alerts_session" in updates:
         TELEGRAM_ALERTS_SESSION = bool(updates["telegram_alerts_session"])
+    if "telegram_alerts_session_ny" in updates:
+        TELEGRAM_ALERTS_SESSION_NY = bool(updates["telegram_alerts_session_ny"])
+    if "telegram_alerts_xau_lg" in updates:
+        TELEGRAM_ALERTS_XAU_LG = bool(updates["telegram_alerts_xau_lg"])
+    if "telegram_alerts_ft5" in updates:
+        TELEGRAM_ALERTS_FT5 = bool(updates["telegram_alerts_ft5"])
     if "autotrade_dry_run" in updates:
         AUTOTRADE_DRY_RUN = bool(updates["autotrade_dry_run"])
     if "autotrade_bounce" in updates:
@@ -12492,6 +12529,27 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="label">↳ Алерты сессии NY</div>
+          <div class="sub">живые сигналы манипуляции на открытии Нью-Йорка</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramSessionNy"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Алерты XAU LG ⚠️</div>
+          <div class="sub">экспериментально — живые сигналы liquidity grab по золоту</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramXauLg"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Алерты FT5 ⚠️</div>
+          <div class="sub">экспериментально — открытие и закрытие сигналов</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramFt5"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Часовая статистика</div>
           <div class="sub">сводка винрейта по всем режимам, раз в час</div>
         </div>
@@ -13797,6 +13855,9 @@ const setInputs = {
   telegram_alerts_ema: document.getElementById('setTelegramEma'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
   telegram_alerts_session: document.getElementById('setTelegramSession'),
+  telegram_alerts_session_ny: document.getElementById('setTelegramSessionNy'),
+  telegram_alerts_xau_lg: document.getElementById('setTelegramXauLg'),
+  telegram_alerts_ft5: document.getElementById('setTelegramFt5'),
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
   autotrade_bounce: document.getElementById('setAutotradeBounce'),
   autotrade_breakout: document.getElementById('setAutotradeBreakout'),
