@@ -3767,6 +3767,60 @@ v0.96.0 - EXPERIMENTAL: FT5, a port of freqtrade-strategies' Strategy005
          the same way py_compile + an actual runtime start already
          became standard practice after v0.95.1's NameError. Confirmed
          both clean for this release.
+
+v0.96.1 - FT5: RR display and a chart modal, per direct user request
+         ("можно тоже сделать графическое отображение сигналов? надо
+         еще rr показывать как в других индикаторах").
+         RR: FT5 has no single fixed reward target the way a fixed-TP
+         module does (exits via stoploss OR a time-decaying ROI ladder
+         OR either of two sell-signal conditions), so instead of
+         inventing a fictional target RR, "rr" is the REALIZED R-
+         multiple — pnl_pct divided by the fixed stoploss risk (FT5_
+         STOPLOSS_PCT) — computed once a signal closes, in update_ft5_
+         signal_outcomes(), and aggregated (avg + median) in compute_
+         ft5_signal_stats(). Shown per-signal in the live signals table
+         and as "RR ср. X (медиана Y)" in the panel header, same wording
+         pattern EMA/Divergence/Session already use. The backtest/
+         optimizer leaderboard shows an equivalent RR derived client-
+         side from avg_pnl_pct/stoploss_pct (no backend change needed
+         for that table, since it's a pure function of numbers already
+         returned).
+         Chart: new /api/ft5/chart/<symbol>?entry_time=... endpoint —
+         re-runs ft5_run_backtest() on an appropriate window using that
+         specific signal's own recorded params (same reuse-the-
+         deterministic-detector principle update_ft5_signal_outcomes()
+         already uses), returning candles + entry + the fixed stoploss
+         price + exit info. New dedicated ft5Modal/openFt5Chart/
+         drawFt5Chart — deliberately NOT reusing Session's chart modal
+         the way Session NY did in v0.94.0: FT5's shape genuinely
+         differs (no session range box, no single TP price to draw —
+         entry/stoploss lines plus the actual realized exit point
+         marker instead), so force-reusing drawSessionChart would need
+         extra branching inside a function that's currently working
+         cleanly for two other modules; a new ~90-line self-contained
+         function was the safer choice, matching this app's existing
+         reuse-when-truly-identical, duplicate-when-meaningfully-
+         different judgment call (same reasoning already applied when
+         XAU_LG/Session NY were built). Signal rows in the FT5 table are
+         now clickable, opening the chart with entry/SL lines and a
+         colored exit marker (green/red/amber for WIN/LOSS/TIMEOUT).
+         Process note: while extracting the embedded <script> block for
+         this release's mandatory JS syntax check (standard practice
+         since v0.96.0's own process-note), the extraction helper itself
+         produced a false SyntaxError — its naive regex search matched
+         the FIRST literal "<script>" substring in the whole file, which
+         turned out to be inside a changelog comment (this file's own
+         v0.96.0 entry mentions "<script>" in backticks) rather than the
+         real HTML template's script tag, and since there is only ONE
+         real "</script>" closing tag in the entire file, the regex
+         spanned from that comment all the way down to it, capturing
+         ~450KB of unrelated Python source as "JS" and failing to parse
+         it. Fixed by taking the LAST literal "<script>" occurrence
+         instead (the real HTML template's script tag reliably comes
+         last in the file) before searching forward for its closing tag
+         — a lesson that the verification tooling itself needs the same
+         scrutiny as the code it's checking, not blind trust that a
+         failing check means the checked code is wrong.
 """
 
 import os
@@ -3786,7 +3840,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.96.0"
+APP_VERSION = "0.96.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5689,6 +5743,15 @@ def update_ft5_signal_outcomes():
                     sig["exit_time"] = matched["exit_time"]
                     sig["exit_reason"] = matched["exit_reason"]
                     sig["pnl_pct"] = matched["pnl_pct"]
+                    # Realized R-multiple: pnl_pct relative to the fixed
+                    # stoploss risk (FT5_STOPLOSS_PCT), matching the
+                    # "RR" meaning every other module here uses (return
+                    # relative to what was actually risked) even though
+                    # FT5 has no single fixed reward target the way a
+                    # fixed-TP module does — see this module's own header
+                    # comment on why a static TP isn't a faithful concept
+                    # for this strategy's ROI-ladder/signal exit shape.
+                    sig["rr"] = round(matched["pnl_pct"] / (FT5_STOPLOSS_PCT * 100), 3)
                 elif timed_out:
                     sig["status"] = "CLOSED"
                     sig["result"] = "TIMEOUT"
@@ -5697,6 +5760,7 @@ def update_ft5_signal_outcomes():
                     sig["exit_reason"] = "max_hold_timeout"
                     if sig["exit_price"]:
                         sig["pnl_pct"] = round((sig["exit_price"] - sig["entry"]) / sig["entry"] * 100, 3)
+                        sig["rr"] = round(sig["pnl_pct"] / (FT5_STOPLOSS_PCT * 100), 3)
         except Exception as e:
             log_error(f"ft5_outcome {sig['symbol']}: {e}")
 
@@ -5713,8 +5777,12 @@ def compute_ft5_signal_stats():
     winrate = round(wins / total_closed * 100, 1) if total_closed else None
     pnls = [s["pnl_pct"] for s in closed if s.get("pnl_pct") is not None]
     avg_pnl = round(sum(pnls) / len(pnls), 3) if pnls else None
+    rrs = sorted(s["rr"] for s in closed if s.get("rr") is not None)
+    rr_avg = round(sum(rrs) / len(rrs), 3) if rrs else None
+    rr_median = round(rrs[len(rrs) // 2], 3) if rrs else None
     return {"total": len(signals), "wins": wins, "losses": losses, "timeouts": timeouts,
-            "open": open_n, "winrate": winrate, "avg_pnl_pct": avg_pnl}
+            "open": open_n, "winrate": winrate, "avg_pnl_pct": avg_pnl,
+            "rr_avg": rr_avg, "rr_median": rr_median}
 
 
 # EMA diagnostics — v0.62.0, per direct user request to understand the
@@ -11695,6 +11763,43 @@ def api_ft5_signals():
         return jsonify(list(STATE["ft5_signals"]))
 
 
+@app.route("/api/ft5/chart/<symbol>")
+def api_ft5_chart(symbol):
+    """Re-derives a specific FT5 trade by re-running ft5_run_backtest()
+    on an appropriate window with that trade's OWN recorded params —
+    deterministic, so it reproduces the identical entry, same principle
+    update_ft5_signal_outcomes() already uses. entry_time identifies
+    which trade (a symbol can have many over time, same reasoning
+    api_session_chart uses session_open to disambiguate)."""
+    try:
+        entry_time = float(request.args.get("entry_time"))
+        with state_lock:
+            sig = next((s for s in STATE["ft5_signals"]
+                        if s["symbol"] == symbol and s["entry_time"] == entry_time), None)
+        if sig is None:
+            return jsonify({"error": "signal not found"}), 404
+        interval_sec = INTERVAL_SECONDS.get(FT5_TF, 300)
+        warmup_bars = max(FT5_SMA_PERIOD, FT5_VOLUME_AVG_PERIOD) + 100
+        fetch_start = entry_time - warmup_bars * interval_sec
+        fetch_end = sig["exit_time"] + 6 * 3600 if sig.get("exit_time") else time.time()
+        candles = get_candles_range(symbol, FT5_TF, fetch_start, fetch_end)
+        trades, open_position = ft5_run_backtest(
+            candles, buy_rsi=sig["buy_rsi"], buy_fisher=sig["buy_fisher"], sell_rsi=sig["sell_rsi"])
+        matched = next((t for t in trades if t["entry_time"] == entry_time), None)
+        sl_price = sig["entry"] * (1 - FT5_STOPLOSS_PCT)
+        return jsonify({
+            "symbol": symbol, "candles": candles, "entry_time": entry_time,
+            "entry": sig["entry"], "sl": sl_price,
+            "result": sig.get("result"), "exit_time": sig.get("exit_time"),
+            "exit_price": sig.get("exit_price"), "exit_reason": sig.get("exit_reason"),
+            "pnl_pct": sig.get("pnl_pct"), "rr": sig.get("rr"),
+            "matched_trade": matched,
+        })
+    except Exception as e:
+        log_error(f"api_ft5_chart {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/reset/ft5", methods=["POST"])
 def api_reset_ft5():
     try:
@@ -12008,6 +12113,12 @@ INDEX_HTML = """<!doctype html>
   #sessionModalHeader h2 { font-size:15px; margin:0; }
   #sessionCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
   #sessionChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
+  #ft5Modal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
+  #ft5Modal.open { display:flex; flex-direction:column; }
+  #ft5ModalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
+  #ft5ModalHeader h2 { font-size:15px; margin:0; }
+  #ft5CloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
+  #ft5ChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
   .dim { color:#8b98ab; }
   .empty { padding:30px 14px; text-align:center; color:#6b7688; font-size:13px; }
 
@@ -12147,6 +12258,17 @@ INDEX_HTML = """<!doctype html>
     <button id="sessionCloseBtn">Закрыть</button>
   </div>
   <div id="sessionChartWrap"><canvas id="sessionChartCanvas"></canvas></div>
+</div>
+
+<div id="ft5Modal">
+  <div id="ft5ModalHeader">
+    <div>
+      <h2 id="ft5ModalTitle">-</h2>
+      <div id="ft5ModalParams" class="dim" style="font-size:11px;margin-top:2px;"></div>
+    </div>
+    <button id="ft5CloseBtn">Закрыть</button>
+  </div>
+  <div id="ft5ChartWrap"><canvas id="ft5ChartCanvas"></canvas></div>
 </div>
 
 <div id="settingsModal">
@@ -13332,19 +13454,23 @@ async function refreshFt5() {
   const ss = status.signals_stats || {};
   const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
   const avgPnlTxt = ss.avg_pnl_pct !== null && ss.avg_pnl_pct !== undefined ? `${ss.avg_pnl_pct > 0 ? '+' : ''}${ss.avg_pnl_pct}%` : '-';
+  const rrTxt = ss.rr_avg !== null && ss.rr_avg !== undefined
+    ? `RR ср. ${ss.rr_avg>0?'+':''}${ss.rr_avg} (медиана ${ss.rr_median>0?'+':''}${ss.rr_median})`
+    : 'RR ещё нет данных';
   const buildTxt = status.last_backtest_finished
     ? `последний перебор параметров: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · монет: ${status.symbols_done}/${status.universe_size}`
     : `перебор параметров ещё не завершился (${status.symbols_done}/${status.universe_size || '?'})`;
   const warnHtml = `
     <div style="background:#2a1f0e;border:1px solid #e0a030;border-radius:10px;padding:10px 14px;margin-bottom:12px;">
       <b style="color:#e0a030;">⚠️ Экспериментально</b><br>
-      <span style="font-size:12px;color:#d9c08a;">Портирована структура Strategy005 (github.com/freqtrade/freqtrade-strategies, автор Gerald Lonlas) — 6 индикаторов (MACD, Minus DI, RSI+Fisher, Stochastic, SAR, SMA) + лесенка тейка по времени + фикс. стоп -10%. Оригинальные hyperopt-параметры взяты из бэктеста на 20 днях 2018 года — почти наверняка переподогнаны под тот период, поэтому НЕ скопированы напрямую: здесь свой перебор параметров на реальных данных этой биржи. Автоторговля и общий симулятор сознательно НЕ подключены — у стратегии нет единого фиксированного тейка (выход по времени/сигналу/стопу), а вся текущая инфраструктура рассчитана на пару SL/TP. Сигналы ниже — информационные, только LONG.</span>
+      <span style="font-size:12px;color:#d9c08a;">Портирована структура Strategy005 (github.com/freqtrade/freqtrade-strategies, автор Gerald Lonlas) — 6 индикаторов (MACD, Minus DI, RSI+Fisher, Stochastic, SAR, SMA) + лесенка тейка по времени + фикс. стоп -10%. Оригинальные hyperopt-параметры взяты из бэктеста на 20 днях 2018 года — почти наверняка переподогнаны под тот период, поэтому НЕ скопированы напрямую: здесь свой перебор параметров на реальных данных этой биржи. Автоторговля и общий симулятор сознательно НЕ подключены — у стратегии нет единого фиксированного тейка (выход по времени/сигналу/стопу), а вся текущая инфраструктура рассчитана на пару SL/TP. Сигналы ниже — информационные, только LONG. RR ниже — реализованный (P&L относительно риска на стопе), не заранее заданный, раз фиксированного тейка нет.</span>
     </div>`;
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
       ТФ ${cfg.tf} · стоп ${(cfg.stoploss_pct*100).toFixed(0)}% · перебор: buy_rsi${JSON.stringify(cfg.grid_buy_rsi)} × buy_fisher${JSON.stringify(cfg.grid_buy_fisher)} × sell_rsi${JSON.stringify(cfg.grid_sell_rsi)}<br>
       ${buildTxt}<br>
-      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · средний P&L/сделку: ${avgPnlTxt} · открытых: ${ss.open||0} · всего: ${ss.total||0}
+      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · средний P&L/сделку: ${avgPnlTxt} · ${rrTxt} · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
+      <span style="font-size:11px;">Клик по строке сигнала открывает график входа/выхода.</span>
     </div>`;
   const signalsRows = signals.map(s => {
     let statusHtml;
@@ -13352,25 +13478,28 @@ async function refreshFt5() {
     else if (s.result === 'WIN') statusHtml = `<span class="win">WIN (${s.exit_reason}) ${s.pnl_pct>0?'+':''}${s.pnl_pct}%</span>`;
     else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS (${s.exit_reason}) ${s.pnl_pct}%</span>`;
     else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
-    return `<tr>
+    const rrTd = s.rr !== null && s.rr !== undefined ? `<td class="${s.rr>=0?'win':'loss'}">${s.rr>0?'+':''}${s.rr}</td>` : '<td class="dim">-</td>';
+    return `<tr data-symbol="${s.symbol}" data-entry-time="${s.entry_time}" style="cursor:pointer;">
       <td>${s.symbol}</td><td>${fmt(s.entry)}</td>
       <td class="dim">rsi${s.buy_rsi}/fish${s.buy_fisher}/sell${s.sell_rsi}</td>
-      <td>${statusHtml}</td><td class="dim">${fmtDateTime(s.entry_time)}</td>
+      <td>${statusHtml}</td>${rrTd}<td class="dim">${fmtDateTime(s.entry_time)}</td>
     </tr>`;
   }).join('');
   const signalsTableHtml = signals.length ? `
     <div style="overflow-x:auto;margin-bottom:14px;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Entry</th><th>Параметры</th><th>Status</th><th>Время входа</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Entry</th><th>Параметры</th><th>Status</th><th>RR</th><th>Время входа</th></tr></thead>
       <tbody>${signalsRows}</tbody>
     </table>
     </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
   const btRows = (status.top || []).map(r => {
     const pnlClass = (r.avg_pnl_pct || 0) >= 0 ? 'win' : 'loss';
+    const rr = r.avg_pnl_pct !== null && r.avg_pnl_pct !== undefined && cfg.stoploss_pct ? Math.round((r.avg_pnl_pct / (cfg.stoploss_pct*100)) * 100) / 100 : null;
     return `<tr>
       <td>${r.symbol}</td>
       <td class="dim">rsi${r.buy_rsi}/fish${r.buy_fisher}/sell${r.sell_rsi}</td>
       <td class="${pnlClass}">${r.avg_pnl_pct>0?'+':''}${r.avg_pnl_pct}%</td>
+      <td class="${pnlClass}">${rr !== null ? (rr>0?'+':'')+rr : '-'}</td>
       <td class="dim">n=${r.trades}</td>
       <td class="win">${r.wins}W</td>
       <td class="loss">${r.losses}L</td>
@@ -13380,11 +13509,14 @@ async function refreshFt5() {
     <div class="dim" style="margin-bottom:6px;"><b>Перебор параметров по монетам</b> (${cfg.backtest_days} дней истории, отбор по среднему P&L на сделку):</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Параметры</th><th>Avg P&L</th><th>n</th><th>W</th><th>L</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Параметры</th><th>Avg P&L</th><th>RR</th><th>n</th><th>W</th><th>L</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Перебор параметров ещё не готов.</div>';
   panel.innerHTML = warnHtml + headerHtml + signalsTableHtml + btTableHtml;
+  panel.querySelectorAll('tbody tr[data-entry-time]').forEach(tr => {
+    tr.onclick = () => openFt5Chart(tr.dataset.symbol, tr.dataset.entryTime);
+  });
 }
 
 async function refreshAutotradeBanner() {
@@ -14302,6 +14434,116 @@ function drawEmaChart(data, row) {
 const sessionModal = document.getElementById('sessionModal');
 document.getElementById('sessionCloseBtn').onclick = () => sessionModal.classList.remove('open');
 let currentSessionData = null;
+
+// ---------------- FT5 chart modal ----------------
+// Own modal/canvas rather than reusing Session's — FT5's shape is
+// meaningfully different (no session range box, no single fixed TP;
+// instead entry/stoploss lines plus the actual realized exit point),
+// so force-reusing drawSessionChart would either draw a meaningless
+// empty range box or need extra branching inside a function this app
+// already has working for Session/Session NY. A new, small, self-
+// contained function is safer than complicating a working one.
+const ft5Modal = document.getElementById('ft5Modal');
+document.getElementById('ft5CloseBtn').onclick = () => ft5Modal.classList.remove('open');
+
+async function openFt5Chart(symbol, entryTime) {
+  document.getElementById('ft5ModalTitle').textContent = symbol;
+  document.getElementById('ft5ModalParams').textContent = 'загрузка...';
+  ft5Modal.classList.add('open');
+  try {
+    const data = await (await fetch(`/api/ft5/chart/${symbol}?entry_time=${entryTime}`)).json();
+    if (data.error) { document.getElementById('ft5ModalParams').textContent = data.error; return; }
+    const resTxt = data.result ? ` · ${data.result}${data.exit_reason ? ' ('+data.exit_reason+')' : ''}${data.pnl_pct !== null && data.pnl_pct !== undefined ? ' ' + (data.pnl_pct>0?'+':'') + data.pnl_pct + '%' : ''}${data.rr !== null && data.rr !== undefined ? ' · RR ' + (data.rr>0?'+':'') + data.rr : ''}` : ' · OPEN';
+    document.getElementById('ft5ModalParams').textContent =
+      `${fmtDateTime(entryTime)} · LONG · entry ${fmtNum(data.entry)} · SL ${fmtNum(data.sl)}${resTxt}`;
+    drawFt5Chart(data);
+  } catch (e) {
+    document.getElementById('ft5ModalParams').textContent = `ошибка загрузки: ${e}`;
+  }
+}
+
+function drawFt5Chart(data) {
+  const canvas = document.getElementById('ft5ChartCanvas');
+  const wrap = document.getElementById('ft5ChartWrap');
+  const dpr = window.devicePixelRatio || 1;
+  const W = wrap.clientWidth, H = wrap.clientHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+
+  const candles = data.candles || [];
+  if (!candles.length) return;
+  const entry = data.entry, sl = data.sl;
+  const exitPrice = data.exit_price;
+
+  const padRight = 54;
+  const chartW = W - padRight;
+  const n = candles.length;
+  const slot = chartW / n;
+  const bodyW = Math.max(1, slot * 0.6);
+  const xAt = (i) => i * slot + slot / 2;
+
+  // computeYRangeSimple wants (entry, sl, tp) as its 3 reference prices —
+  // FT5 has no single tp, so the exit price (if closed) fills that slot;
+  // while still open, pass entry twice so the range still includes SL.
+  const { hi, lo } = computeYRangeSimple(candles, entry, sl, exitPrice !== null && exitPrice !== undefined ? exitPrice : entry);
+  const range = hi - lo || 1;
+  const yP = (price) => (hi - price) / range * H;
+
+  candles.forEach((c, i) => {
+    const cx = xAt(i);
+    const up = c.close >= c.open;
+    ctx.strokeStyle = ctx.fillStyle = up ? '#3ddc97' : '#ff6b6b';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx, yP(c.high));
+    ctx.lineTo(cx, yP(c.low));
+    ctx.stroke();
+    const top = yP(Math.max(c.open, c.close));
+    const h = Math.max(1, Math.abs(yP(c.open) - yP(c.close)));
+    ctx.fillRect(cx - bodyW / 2, top, bodyW, h);
+  });
+
+  ctx.fillStyle = '#6b7688';
+  ctx.font = '10px sans-serif';
+  for (let i = 0; i <= 3; i++) {
+    const p = hi - (range * i / 3);
+    const yy = yP(p);
+    ctx.fillText(fmtNum(p), chartW + 4, yy + 3);
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(chartW, yy); ctx.stroke();
+  }
+
+  const drawLevelLine = (price, color, label) => {
+    const yy = yP(price);
+    ctx.strokeStyle = color;
+    ctx.setLineDash([5, 4]);
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(chartW, yy); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = color;
+    ctx.font = 'bold 10px sans-serif';
+    ctx.fillText(label, 4, yy - 3);
+  };
+  drawLevelLine(entry, '#5a9fff', 'ENTRY');
+  drawLevelLine(sl, '#ff6b6b', 'SL');
+
+  const entryIdx = candles.findIndex(c => c.time === data.entry_time);
+  if (entryIdx >= 0) {
+    const ex = xAt(entryIdx);
+    ctx.fillStyle = '#5a9fff';
+    ctx.beginPath(); ctx.arc(ex, yP(entry), 4, 0, Math.PI * 2); ctx.fill();
+  }
+  if (data.exit_time && exitPrice !== null && exitPrice !== undefined) {
+    const exitIdx = candles.findIndex(c => c.time === data.exit_time);
+    if (exitIdx >= 0) {
+      const exx = xAt(exitIdx);
+      ctx.fillStyle = data.result === 'WIN' ? '#3ddc97' : (data.result === 'LOSS' ? '#ff6b6b' : '#e0a030');
+      ctx.beginPath(); ctx.arc(exx, yP(exitPrice), 4, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+}
 
 function openSessionNyChart(symbol, sessionOpen) {
   // Thin wrapper, not a duplicate — reuses the exact same modal/canvas
