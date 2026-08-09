@@ -3662,6 +3662,111 @@ v0.95.7 - full audit pass, per direct user request ("найди все проб�
          read fresh from the global inside the function body (like
          EMA_MIN_RR's own `if EMA_MIN_RR > 0` filter check) rather than
          captured as a default parameter.
+
+v0.96.0 - EXPERIMENTAL: FT5, a port of freqtrade-strategies' Strategy005
+         (github.com/freqtrade/freqtrade-strategies, author Gerald
+         Lonlas), per direct user request after researching freqtrade
+         and asking for "the full version... a separate tab with live
+         signals and parameter re-optimization." That repo's own
+         published backtest table showed Strategy005 as the most-traded
+         strategy (180 trades) — but the backtest window was 2018-01-10
+         to 2018-01-30, a 20-day stretch during the post-2017-top crash,
+         and the repo's own README says outright that results depend
+         heavily on pairs/timeframe/timerange and to run your own
+         backtests. The specific hyperopt-tuned parameter values in the
+         source (buy_rsi=26, buy_fishRsiNorma=5, etc.) are a near-
+         textbook overfitting case — flagged to the user before
+         building, same treatment as XAU_LG's Instagram source.
+         Kept the STRUCTURE (which 6 indicators, which entry/exit
+         conditions, the time-decaying ROI ladder, the fixed stoploss)
+         but does NOT copy the specific parameter values — instead
+         re-derives them via ft5_optimize_symbol()'s own grid search
+         against this app's live Gate.io data, same "test on real data,
+         don't trust the source's numbers" principle already applied to
+         XAU_LG and (after v0.95.6's fix) Volume's own optimizer.
+         Found and did NOT replicate a likely bug in the literal
+         freqtrade source: one sell condition compares dataframe['fisher
+         _rsi'] (range -1 to 1) against self.sell_fishRsiNorma (an
+         IntParameter with range 1-100) — that comparison can only ever
+         be true in a razor-thin edge case given fisher_rsi tops out at
+         1 and the threshold's own minimum is 1, which looks like
+         comparing against the wrong variable (fisher_rsi_norma, scaled
+         0-100, matches the parameter's own range) rather than a
+         deliberate design choice. FT5 uses fisher_rsi_norma there
+         instead, documented as a deliberate deviation, not a silent
+         difference.
+         New pure-Python indicator helpers (no pandas/talib, matching
+         this app's existing style): compute_sma, compute_macd,
+         compute_stoch_fast (TA-Lib STOCHF-equivalent), compute_fisher_
+         rsi (inverse Fisher transform of RSI), compute_sar (Wilder's
+         Parabolic SAR) — kept as generic, reusable helpers alongside
+         compute_rsi/compute_ema/compute_adx rather than FT5-prefixed,
+         since none of them are specific to this one module. Every one
+         individually verified behaviorally against synthetic candle
+         data (sensible ranges: stoch/fisher_norma in 0-100, fisher in
+         -1..1, SAR tracking price direction correctly) before being
+         used in the strategy logic itself.
+         ft5_run_backtest(): single no-lookahead walk-forward simulator
+         — computes every indicator once, then walks forward checking
+         entry (volume spike x4 avg, price below SMA40, stochastic
+         cross, RSI, Fisher-RSI-norma) and, once "in a trade," exits in
+         priority order (stoploss -10% first, then the ROI ladder
+         [(1440min,1%),(80min,2%),(40min,3%),(20min,4%),(0min,5%)], then
+         either sell-signal condition) — returns (closed_trades,
+         open_position_at_window_end), the latter used by the live
+         scanner to detect a fresh entry on the very last candle. Long-
+         only, matching Strategy005's own design. Verified end-to-end on
+         synthetic random-walk candles with occasional volume spikes —
+         produced internally consistent trades (result matches pnl_pct
+         sign in every case).
+         ft5_optimize_symbol(): 36-combo grid search (buy_rsi x
+         buy_fisher x sell_rsi — the params freqtrade's own hyperopt run
+         varied most) selecting by mean pnl_pct per trade directly
+         (FT5's trades are already %-based, not a fixed-RR system, so
+         there's no separate winrate-vs-RR translation needed the way
+         Volume's v0.95.6 fix required). Verified end-to-end via a
+         monkeypatched get_candles_range call, confirmed it picks the
+         same combo a manual grid search of the same data finds.
+         Deliberately does NOT wire real autotrade or the shared paper
+         simulator (AUTOTRADE_ENABLED_FT5 exists in settings, defaults
+         off, currently a no-op) — unlike every other module here, FT5's
+         real exit logic isn't a fixed (SL, TP) price pair, and execute_
+         autotrade()/sim_execute_trade() are both built around exactly
+         that shape. Approximating it with a single static TP (e.g. the
+         largest ROI rung) would silently misrepresent FT5's actual exit
+         behavior to real money or the simulator; faithfully trading it
+         would need active position management (a loop sending a real
+         close-order the moment ROI-ladder/signal/stoploss conditions
+         are met), which hasn't been built. ft5_signals are
+         informational only, with their own pnl_pct tracked via update_
+         ft5_signal_outcomes() (re-runs the same deterministic walk-
+         forward on an extended window using the signal's own recorded
+         params — reproduces the same entry, then naturally continues
+         to find the exit, rather than a separate resume-from-open-
+         position code path).
+         Full plumbing: ft5_build_universe() (same top-by-24h-volume
+         shape as build_session_universe), ft5_backtest_loop()/ft5_live_
+         loop() daemon threads, three API endpoints (/api/ft5/status,
+         /signals, /api/reset/ft5), ft5_signals + ft5_symbol_overrides
+         persisted through save_state()/load_state(), added to has_
+         open_signal_any_module's lists, new "FT5 ⚠️" tab + panel
+         (refreshFt5, with the same in-UI source-skepticism warning box
+         XAU_LG has) + reset button, ft5_enabled/autotrade_ft5/autotrade
+         _leverage_ft5 wired through the full settings system.
+         Process note: while editing the JS template for this UI panel,
+         a str_replace accidentally deleted the `async function
+         refreshAutotradeBanner() {` declaration line — Python's own
+         py_compile does NOT catch this class of error, since the
+         entire HTML/JS template is just a string literal to the Python
+         parser, syntax-invalid JS inside it doesn't fail Python
+         compilation. Caught it by manually reviewing the diff, not by
+         any automated check — which is itself the finding: added a new
+         verification step to the release process from here on,
+         extracting the embedded <script> block and running `node
+         --check` against it (node is available in this environment),
+         the same way py_compile + an actual runtime start already
+         became standard practice after v0.95.1's NameError. Confirmed
+         both clean for this release.
 """
 
 import os
@@ -3681,7 +3786,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.95.7"
+APP_VERSION = "0.96.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4066,6 +4171,7 @@ TELEGRAM_ALERTS_HOURLY = os.environ.get("VP_TG_ALERTS_HOURLY", "1") == "1"
 TELEGRAM_ALERTS_SESSION = os.environ.get("VP_TG_ALERTS_SESSION", "1") == "1"
 TELEGRAM_ALERTS_SESSION_NY = os.environ.get("VP_TG_ALERTS_SESSION_NY", "1") == "1"
 TELEGRAM_ALERTS_XAU_LG = os.environ.get("VP_TG_ALERTS_XAU_LG", "1") == "1"
+TELEGRAM_ALERTS_FT5 = os.environ.get("VP_TG_ALERTS_FT5", "1") == "1"
 HOURLY_STATS_ENABLED = os.environ.get("VP_HOURLY_STATS_ENABLED", "1") == "1"
 HOURLY_STATS_INTERVAL_SEC = int(os.environ.get("VP_HOURLY_STATS_INTERVAL_SEC", 3600))
 
@@ -4179,6 +4285,77 @@ XAU_LG_SIGNAL_HISTORY = 200
 XAU_LG_REFRESH_SEC = int(os.environ.get("VP_XAU_LG_REFRESH_SEC", 3600))  # hourly backtest refresh — small fixed symbol list, cheap compared to Session's 50-symbol universe scan
 XAU_LG_SCAN_INTERVAL_SEC = int(os.environ.get("VP_XAU_LG_SCAN_INTERVAL_SEC", 300))  # live scan cadence — 15m candles, checking every 5 min is plenty
 
+# ============================================================================
+# EXPERIMENTAL: FT5 — port of freqtrade-strategies' Strategy005 (v0.96.0)
+# ----------------------------------------------------------------------------
+# Per direct user request ("сделай полную версию... фул версию") after
+# researching freqtrade (github.com/freqtrade/freqtrade-strategies).
+# Strategy005 (author: Gerald Lonlas) was the most-traded strategy in that
+# repo's own published backtest table (180 trades) — but that backtest was
+# run 2018-01-10 to 2018-01-30, a 20-day window during the post-2017-top
+# crash, on whatever pairs/exchange were configured at the time. The repo's
+# own README says outright: "results will heavily depend on the pairs,
+# timeframe and timerange used... run your own backtests". The specific
+# hyperopt-tuned parameter values (buy_rsi=26, buy_fishRsiNorma=5, etc.) are
+# near-certainly overfit to that narrow, stale window — flagged to the user
+# before building this, same treatment as the XAU Liquidity Grab source.
+# This port keeps the STRUCTURE (which indicators, which conditions, the
+# time-decaying ROI ladder) but re-derives its own parameters via a grid
+# search against THIS app's own live Gate.io data (ft5_backtest_symbol()),
+# the same "test on real data, don't trust the source's numbers" principle
+# applied to XAU_LG. Prefixed FT5_/ft5_ throughout, same reasoning as
+# XAU_LG_/xau_lg_ — easy to find and delete if it doesn't hold up.
+# Deviations from the literal freqtrade source, made deliberately and
+# documented rather than silently:
+#   - Long-only, matching the original (short entries were never defined in
+#     Strategy005 — it predates futures-style short support in freqtrade).
+#   - The "close > 0.00000200" condition dropped — a stale-price sanity
+#     floor from 2018-era sub-satoshi altcoins, meaningless on this app's
+#     current gate.io futures universe.
+#   - Sell trigger "sar-fisherRsi" compares fisher_rsi_norma (0-100 range)
+#     against sell_fishRsiNorma, not the raw fisher_rsi (-1 to 1 range) the
+#     original source code literally uses — that comparison in the
+#     original can only ever be true in a razor-thin edge case (fisher_rsi
+#     tops out at 1, sell_fishRsiNorma's own parameter range starts at 1),
+#     which looks like a genuine bug in the upstream strategy (comparing
+#     against the wrong variable), not a deliberate design choice. Not
+#     replicated here.
+# ============================================================================
+FT5_ENABLED = os.environ.get("VP_FT5_ENABLED", "1") == "1"
+FT5_TF = os.environ.get("VP_FT5_TF", "5m")  # matches Strategy005's own timeframe
+FT5_UNIVERSE_SIZE = int(os.environ.get("VP_FT5_UNIVERSE_SIZE", 40))
+FT5_BACKTEST_DAYS = int(os.environ.get("VP_FT5_BACKTEST_DAYS", 30))
+FT5_SIGNAL_HISTORY = 200
+FT5_REFRESH_SEC = int(os.environ.get("VP_FT5_REFRESH_SEC", 24 * 3600))  # daily backtest/param-search refresh, same cadence as Volume's optimizer
+FT5_SCAN_INTERVAL_SEC = int(os.environ.get("VP_FT5_SCAN_INTERVAL_SEC", 300))
+FT5_MIN_BACKTEST_TRADES = int(os.environ.get("VP_FT5_MIN_BACKTEST_TRADES", 5))  # a combo with fewer trades than this in the backtest window isn't a confident pick — same bar Volume's optimizer uses (MIN_BACKTEST_TRADES)
+
+# Fixed structural parameters (not grid-searched — kept at the original's
+# own defaults, since re-deriving every one of Strategy005's 8 hyperopt
+# dimensions would be its own combinatorial explosion; the grid search
+# below focuses on the 3 parameters most likely to matter for entry
+# selectivity, same "modest grid over the highest-impact dimensions"
+# philosophy PARAM_GRID_RR/PARAM_GRID_LOOKBACK already use for Volume).
+FT5_VOLUME_AVG_PERIOD = int(os.environ.get("VP_FT5_VOLUME_AVG_PERIOD", 70))
+FT5_VOLUME_SPIKE_MULT = float(os.environ.get("VP_FT5_VOLUME_SPIKE_MULT", 4.0))
+FT5_SMA_PERIOD = int(os.environ.get("VP_FT5_SMA_PERIOD", 40))
+FT5_STOCH_K = int(os.environ.get("VP_FT5_STOCH_K", 5))
+FT5_STOCH_D = int(os.environ.get("VP_FT5_STOCH_D", 3))
+FT5_SELL_MINUS_DI = float(os.environ.get("VP_FT5_SELL_MINUS_DI", 4.0))
+FT5_SELL_FISHER = float(os.environ.get("VP_FT5_SELL_FISHER", 30.0))  # compared against fisher_rsi_norma (0-100), see header comment on the corrected variable
+FT5_STOPLOSS_PCT = float(os.environ.get("VP_FT5_STOPLOSS_PCT", 0.10))  # matches Strategy005's fixed -10% stoploss
+FT5_ROI_LADDER = [(1440, 0.01), (80, 0.02), (40, 0.03), (20, 0.04), (0, 0.05)]  # (minutes_in_trade_at_least, min_profit_pct_required) — first entry (by descending minutes) whose time threshold is cleared applies; matches Strategy005's minimal_roi table exactly
+
+# Grid-searched per symbol (FT5_PARAM_GRID_* + FT5_SYMBOL_OVERRIDES), same
+# EV-based selection this file already uses for Volume (v0.95.6) — buy_rsi/
+# buy_fisher/sell_rsi were the 3 parameters freqtrade's own hyperopt run
+# actually varied the most across that stale 2018 backtest, so they're the
+# most plausible candidates for "matters enough to re-search," not an
+# arbitrary subset.
+FT5_PARAM_GRID_BUY_RSI = [20, 26, 32, 40]
+FT5_PARAM_GRID_BUY_FISHER = [5, 15, 30]
+FT5_PARAM_GRID_SELL_RSI = [65, 74, 82]
+
 SESSION_NY_REFRESH_SEC = int(os.environ.get("VP_SESSION_NY_REFRESH_SEC", 24 * 3600))
 SESSION_NY_INVERT_SIGNALS = os.environ.get("VP_SESSION_NY_INVERT_SIGNALS", "0") == "1"
 SESSION_NY_SL_MULT = float(os.environ.get("VP_SESSION_NY_SL_MULT", 1.5))
@@ -4222,6 +4399,8 @@ AUTOTRADE_LEVERAGE_SESSION = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SESSION",
 AUTOTRADE_LEVERAGE_SESSION_NY = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SESSION_NY", 10))
 AUTOTRADE_ENABLED_XAU_LG = os.environ.get("VP_AUTOTRADE_XAU_LG", "0") == "1"  # off by default — see the XAU_LG module's own header comment on why this strategy is treated as unverified
 AUTOTRADE_LEVERAGE_XAU_LG = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_XAU_LG", 10))
+AUTOTRADE_ENABLED_FT5 = os.environ.get("VP_AUTOTRADE_FT5", "0") == "1"  # off by default — same reasoning as XAU_LG: unverified source, and the freqtrade backtest table this was ported from is a near-certain overfitting example (20-day 2018 window)
+AUTOTRADE_LEVERAGE_FT5 = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_FT5", 10))
 AUTOTRADE_TRADE_HISTORY = 300
 
 # ----------------------------------------------------------------------------
@@ -4276,14 +4455,14 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "div_min_rr", "bounce_enabled", "breakout_enabled",
-                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5",
                   "autotrade_size_mode", "autotrade_size_value",
                   "scalp_size_mode", "scalp_size_value",
                   "ema_min_rr", "ema_signal_timeout_hours",
                   "ema_adx_filter_enabled", "ema_adx_min", "ema_min_gap_pct",
-                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session", "autotrade_leverage_session_ny", "autotrade_leverage_xau_lg",
+                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session", "autotrade_leverage_session_ny", "autotrade_leverage_xau_lg", "autotrade_leverage_ft5",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
                   # same save_settings() path everything else already uses,
@@ -4314,6 +4493,7 @@ def get_settings():
         "session_ny_enabled": SESSION_NY_ENABLED,
         "session_ny_invert_signals": SESSION_NY_INVERT_SIGNALS,
         "xau_lg_enabled": XAU_LG_ENABLED,
+        "ft5_enabled": FT5_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
         "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
@@ -4331,6 +4511,7 @@ def get_settings():
         "autotrade_session": AUTOTRADE_ENABLED_SESSION,
         "autotrade_session_ny": AUTOTRADE_ENABLED_SESSION_NY,
         "autotrade_xau_lg": AUTOTRADE_ENABLED_XAU_LG,
+        "autotrade_ft5": AUTOTRADE_ENABLED_FT5,
         "autotrade_size_mode": AUTOTRADE_SIZE_MODE,
         "autotrade_size_value": AUTOTRADE_SIZE_VALUE,
         "scalp_size_mode": SCALP_SIZE_MODE,
@@ -4347,6 +4528,7 @@ def get_settings():
         "autotrade_leverage_session": AUTOTRADE_LEVERAGE_SESSION,
         "autotrade_leverage_session_ny": AUTOTRADE_LEVERAGE_SESSION_NY,
         "autotrade_leverage_xau_lg": AUTOTRADE_LEVERAGE_XAU_LG,
+        "autotrade_leverage_ft5": AUTOTRADE_LEVERAGE_FT5,
         "scalp_min_rr": SCALP_MIN_RR,
         "scalp_sl_buffer_mult": SCALP_SL_BUFFER_MULT,
         "session_sl_mult": SESSION_SL_MULT,
@@ -4363,9 +4545,9 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, FT5_ENABLED, HOURLY_STATS_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5
     global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
     global SCALP_SIZE_MODE, SCALP_SIZE_VALUE
     global EMA_MIN_RR
@@ -4409,6 +4591,8 @@ def apply_settings(updates):
         SESSION_NY_INVERT_SIGNALS = bool(updates["session_ny_invert_signals"])
     if "xau_lg_enabled" in updates:
         XAU_LG_ENABLED = bool(updates["xau_lg_enabled"])
+    if "ft5_enabled" in updates:
+        FT5_ENABLED = bool(updates["ft5_enabled"])
     if "hourly_stats_enabled" in updates:
         HOURLY_STATS_ENABLED = bool(updates["hourly_stats_enabled"])
     if "telegram_enabled" in updates:
@@ -4439,6 +4623,8 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_SESSION_NY = bool(updates["autotrade_session_ny"])
     if "autotrade_xau_lg" in updates:
         AUTOTRADE_ENABLED_XAU_LG = bool(updates["autotrade_xau_lg"])
+    if "autotrade_ft5" in updates:
+        AUTOTRADE_ENABLED_FT5 = bool(updates["autotrade_ft5"])
     if "autotrade_size_mode" in updates and updates["autotrade_size_mode"] in ("percent", "fixed"):
         AUTOTRADE_SIZE_MODE = updates["autotrade_size_mode"]
     if "autotrade_size_value" in updates:
@@ -4495,6 +4681,7 @@ def apply_settings(updates):
         ("autotrade_leverage_session", "AUTOTRADE_LEVERAGE_SESSION"),
         ("autotrade_leverage_session_ny", "AUTOTRADE_LEVERAGE_SESSION_NY"),
         ("autotrade_leverage_xau_lg", "AUTOTRADE_LEVERAGE_XAU_LG"),
+        ("autotrade_leverage_ft5", "AUTOTRADE_LEVERAGE_FT5"),
     ):
         if key in updates:
             try:
@@ -4754,6 +4941,14 @@ STATE = {
     "xau_lg_backtest_summary": {},
     "xau_lg_last_backtest_finished": None,
     "xau_lg_last_backtest_duration": None,
+    # EXPERIMENTAL FT5 (port of freqtrade's Strategy005, v0.96.0) — see
+    # that module's own header comment. All keys prefixed ft5_.
+    "ft5_universe": [],
+    "ft5_symbol_overrides": {},  # symbol -> {buy_rsi, buy_fisher, sell_rsi, trades, winrate, avg_pnl_pct, optimized_at}
+    "ft5_symbols_done": 0,
+    "ft5_last_backtest_finished": None,
+    "ft5_last_backtest_duration": None,
+    "ft5_signals": deque(maxlen=FT5_SIGNAL_HISTORY),
     "autotrade_log": deque(maxlen=AUTOTRADE_TRADE_HISTORY),  # every attempted auto-trade, dry-run or real, with its outcome
     "sim_balance": AUTOTRADE_SIM_START_BALANCE,
     "sim_trades": deque(maxlen=AUTOTRADE_SIM_TRADE_HISTORY),  # pending + settled paper trades
@@ -4810,7 +5005,7 @@ def has_open_signal_any_module(symbol, exclude=None):
         "signals": STATE["signals"], "div_signals": STATE["div_signals"],
         "ema_signals": STATE["ema_signals"], "scalp_signals": STATE["scalp_signals"],
         "session_signals": STATE["session_signals"], "session_ny_signals": STATE["session_ny_signals"],
-        "xau_lg_signals": STATE["xau_lg_signals"],
+        "xau_lg_signals": STATE["xau_lg_signals"], "ft5_signals": STATE["ft5_signals"],
     }
     with state_lock:
         for name, lst in lists.items():
@@ -5105,6 +5300,421 @@ def compute_adx(candles, period=14):
         for j, v in enumerate(adx_tail):
             adx[dx_start + j] = v
     return plus_di, minus_di, adx
+
+
+# ----------------------------------------------------------------------------
+# Extra indicator helpers for FT5 (v0.96.0) — SMA, MACD, Stochastic Fast,
+# Fisher-transformed RSI, Parabolic SAR. Pure Python over this app's own
+# candle-dict lists, matching every other indicator here — no pandas/talib
+# dependency (this whole app deliberately avoids that stack), unlike the
+# freqtrade source these are ported from, which uses talib.abstract
+# throughout. Kept as generic, reusable helpers (not FT5-prefixed) since
+# none of them are specific to that one module — same principle already
+# applied to compute_rsi/compute_ema/compute_adx being shared infrastructure.
+# ----------------------------------------------------------------------------
+def compute_sma(values, period):
+    n = len(values)
+    sma = [None] * n
+    for i in range(period - 1, n):
+        window = values[i - period + 1:i + 1]
+        if any(v is None for v in window):
+            continue
+        sma[i] = sum(window) / period
+    return sma
+
+
+def compute_macd(closes, fast=12, slow=26, signal=9):
+    """Standard MACD: macd_line = EMA(fast) - EMA(slow), signal_line =
+    EMA(macd_line, signal). compute_ema() seeds from index 0 with no
+    None warm-up (Pine-style, same as the EMA 7/14/28 module already
+    uses), so macd_line has no None gaps either — only genuinely
+    meaningless very-early values, same caveat as EMA7/14/28 have."""
+    ema_fast = compute_ema(closes, fast)
+    ema_slow = compute_ema(closes, slow)
+    macd_line = [f - s for f, s in zip(ema_fast, ema_slow)]
+    signal_line = compute_ema(macd_line, signal)
+    return macd_line, signal_line
+
+
+def compute_stoch_fast(candles, k_period=5, d_period=3):
+    """%K = 100*(close-lowest_low)/(highest_high-lowest_low) over
+    k_period bars; %D = SMA(%K, d_period) — matches TA-Lib's STOCHF
+    defaults (fastk_period=5, fastd_period=3, fastd_matype=SMA)."""
+    n = len(candles)
+    fastk = [None] * n
+    for i in range(k_period - 1, n):
+        window = candles[i - k_period + 1:i + 1]
+        hh = max(c["high"] for c in window)
+        ll = min(c["low"] for c in window)
+        rng = hh - ll
+        fastk[i] = 100 * (candles[i]["close"] - ll) / rng if rng > 0 else 0.0
+    fastd = compute_sma(fastk, d_period)
+    return fastk, fastd
+
+
+def compute_fisher_rsi(rsi_series):
+    """Inverse Fisher transform of RSI — sharpens RSI's extremes into a
+    [-1, 1] range (fisher) and a normalized [0, 100] range (fisher_
+    norma), same transform Strategy005 uses: rsi_scaled = 0.1*(rsi-50),
+    fisher = (e^(2x)-1)/(e^(2x)+1), fisher_norma = 50*(fisher+1)."""
+    n = len(rsi_series)
+    fisher = [None] * n
+    fisher_norma = [None] * n
+    for i, r in enumerate(rsi_series):
+        if r is None:
+            continue
+        x = 0.1 * (r - 50)
+        f = (math.exp(2 * x) - 1) / (math.exp(2 * x) + 1)
+        fisher[i] = f
+        fisher_norma[i] = 50 * (f + 1)
+    return fisher, fisher_norma
+
+
+def compute_sar(candles, af_start=0.02, af_increment=0.02, af_max=0.2):
+    """Wilder's Parabolic SAR — standard iterative algorithm, no
+    external TA library (same reasoning as this whole section's header
+    comment). Trend flips when price crosses the current SAR; AF
+    (acceleration factor) grows each time a new extreme point forms in
+    the current trend's direction, capped at af_max, and resets to
+    af_start on every flip."""
+    n = len(candles)
+    sar = [None] * n
+    if n < 2:
+        return sar
+    uptrend = candles[1]["close"] >= candles[0]["close"]
+    if uptrend:
+        cur_sar = candles[0]["low"]
+        ep = candles[1]["high"]
+    else:
+        cur_sar = candles[0]["high"]
+        ep = candles[1]["low"]
+    af = af_start
+    sar[1] = cur_sar
+    for i in range(2, n):
+        prev_sar = cur_sar
+        cur_sar = prev_sar + af * (ep - prev_sar)
+        if uptrend:
+            cur_sar = min(cur_sar, candles[i - 1]["low"], candles[i - 2]["low"])
+            if candles[i]["low"] < cur_sar:
+                uptrend = False
+                cur_sar = ep
+                ep = candles[i]["low"]
+                af = af_start
+            elif candles[i]["high"] > ep:
+                ep = candles[i]["high"]
+                af = min(af + af_increment, af_max)
+        else:
+            cur_sar = max(cur_sar, candles[i - 1]["high"], candles[i - 2]["high"])
+            if candles[i]["high"] > cur_sar:
+                uptrend = True
+                cur_sar = ep
+                ep = candles[i]["high"]
+                af = af_start
+            elif candles[i]["low"] < ep:
+                ep = candles[i]["low"]
+                af = min(af + af_increment, af_max)
+        sar[i] = cur_sar
+    return sar
+
+
+def ft5_run_backtest(candles, buy_rsi=26, buy_fisher=5, sell_rsi=74,
+                      buy_fastd_min=1, buy_volume_avg=FT5_VOLUME_AVG_PERIOD,
+                      buy_volume_mult=FT5_VOLUME_SPIKE_MULT, sma_period=FT5_SMA_PERIOD,
+                      sell_minus_di=FT5_SELL_MINUS_DI, sell_fisher=FT5_SELL_FISHER,
+                      stoploss_pct=FT5_STOPLOSS_PCT, roi_ladder=None):
+    """Core FT5 walk-forward simulator — computes every indicator ONCE
+    over the whole candle list, then walks forward bar by bar with no
+    lookahead: an entry at bar i only ever uses indicator values through
+    bar i, and once in a (simulated) position, checks exits in the same
+    priority order Strategy005 itself effectively has (stoploss first,
+    then the ROI ladder, then the sell-signal conditions) using only
+    that bar's own high/low/close. Used identically for grid-search
+    backtesting (feed the whole history, try many param combos) and for
+    turning a symbol's LATEST bar into a live signal (feed recent
+    history, check whether a position would have just opened/closed on
+    the last bar) — same "one function serves both" principle as every
+    other detector in this app.
+    Long-only, matching Strategy005's own design (see this module's
+    header comment for the full list of deliberate deviations from the
+    literal freqtrade source).
+    Returns (trades, open_position): trades is a list of CLOSED trades
+    ({entry_time, exit_time, entry, exit, pnl_pct, result, exit_reason});
+    open_position is None, or {entry, entry_time} if a position was
+    still open when the candle list ran out — the live scanner uses
+    this to detect a position that just opened on the very last bar."""
+    roi_ladder = roi_ladder or FT5_ROI_LADDER
+    n = len(candles)
+    warmup = max(sma_period, buy_volume_avg) + 30
+    if n < warmup + 20:
+        return [], None
+    closes = [c["close"] for c in candles]
+    volumes = [c["volume"] for c in candles]
+    rsi = compute_rsi(closes)
+    fisher, fisher_norma = compute_fisher_rsi(rsi)
+    macd_line, macd_signal = compute_macd(closes)
+    _, minus_di, _ = compute_adx(candles)
+    fastk, fastd = compute_stoch_fast(candles, FT5_STOCH_K, FT5_STOCH_D)
+    sma = compute_sma(closes, sma_period)
+    vol_avg = compute_sma(volumes, buy_volume_avg)
+    sar = compute_sar(candles)
+
+    trades = []
+    position = None
+    for i in range(warmup, n):
+        c = candles[i]
+        if position is None:
+            if (vol_avg[i] is not None and volumes[i] > vol_avg[i] * buy_volume_mult and
+                    sma[i] is not None and c["close"] < sma[i] and
+                    fastd[i] is not None and fastk[i] is not None and fastd[i] > fastk[i] and
+                    rsi[i] is not None and rsi[i] > buy_rsi and
+                    fastd[i] > buy_fastd_min and
+                    fisher_norma[i] is not None and fisher_norma[i] < buy_fisher):
+                position = {"entry": c["close"], "entry_time": c["time"]}
+            continue
+
+        entry = position["entry"]
+        minutes_in_trade = (c["time"] - position["entry_time"]) / 60
+        sl_price = entry * (1 - stoploss_pct)
+        if c["low"] <= sl_price:
+            trades.append({"entry_time": position["entry_time"], "exit_time": c["time"],
+                            "entry": entry, "exit": sl_price, "pnl_pct": round(-stoploss_pct * 100, 3),
+                            "result": "LOSS", "exit_reason": "stoploss"})
+            position = None
+            continue
+
+        roi_threshold = None
+        for min_minutes, min_pct in roi_ladder:
+            if minutes_in_trade >= min_minutes:
+                roi_threshold = min_pct
+                break
+        if roi_threshold is not None:
+            roi_price = entry * (1 + roi_threshold)
+            if c["high"] >= roi_price:
+                trades.append({"entry_time": position["entry_time"], "exit_time": c["time"],
+                                "entry": entry, "exit": roi_price, "pnl_pct": round(roi_threshold * 100, 3),
+                                "result": "WIN", "exit_reason": "roi"})
+                position = None
+                continue
+
+        sell_signal = False
+        if (rsi[i - 1] is not None and rsi[i] is not None and rsi[i - 1] <= sell_rsi < rsi[i] and
+                macd_line[i] < 0 and minus_di[i] is not None and minus_di[i] > sell_minus_di):
+            sell_signal = True
+        # NOTE: compares fisher_rsi_norma (0-100 scale), not the raw
+        # fisher_rsi (-1..1 scale) the literal freqtrade source uses for
+        # this specific condition — see this module's header comment on
+        # why that's treated as a source bug, not replicated here.
+        if not sell_signal and (sar[i] is not None and sar[i] > c["close"] and
+                                 fisher_norma[i] is not None and fisher_norma[i] > sell_fisher):
+            sell_signal = True
+        if sell_signal:
+            pnl_pct = (c["close"] - entry) / entry
+            trades.append({"entry_time": position["entry_time"], "exit_time": c["time"],
+                            "entry": entry, "exit": c["close"], "pnl_pct": round(pnl_pct * 100, 3),
+                            "result": "WIN" if pnl_pct > 0 else "LOSS", "exit_reason": "signal"})
+            position = None
+    return trades, position
+
+
+def ft5_optimize_symbol(symbol):
+    """Grid search over (buy_rsi, buy_fisher, sell_rsi) — FT5_PARAM_GRID_
+    BUY_RSI x FT5_PARAM_GRID_BUY_FISHER x FT5_PARAM_GRID_SELL_RSI, 36
+    combos. Selects by EV directly (mean pnl_pct per trade) rather than
+    winrate — FT5's trades are already %-based (not a fixed-RR system
+    the way Volume/EMA/Divergence are), so there's no separate winrate-
+    vs-RR translation needed the way Volume's own optimizer required
+    fixing in v0.95.6; average pnl_pct per trade already IS the EV.
+    Mirrors optimize_symbol()'s own shape (grid search, min-trades bar,
+    best-effort fallback) for consistency with the rest of this app."""
+    now = time.time()
+    candles = get_candles_range(symbol, FT5_TF, now - FT5_BACKTEST_DAYS * 86400, now)
+    if len(candles) < 300:
+        return {"error": "not enough history"}
+    best = None
+    best_avg_pnl = None
+    tried = []
+    for buy_rsi in FT5_PARAM_GRID_BUY_RSI:
+        for buy_fisher in FT5_PARAM_GRID_BUY_FISHER:
+            for sell_rsi in FT5_PARAM_GRID_SELL_RSI:
+                trades, _ = ft5_run_backtest(candles, buy_rsi=buy_rsi, buy_fisher=buy_fisher, sell_rsi=sell_rsi)
+                tried.append(len(trades))
+                if len(trades) < FT5_MIN_BACKTEST_TRADES:
+                    continue
+                avg_pnl = sum(t["pnl_pct"] for t in trades) / len(trades)
+                if best is None or avg_pnl > best_avg_pnl:
+                    wins = sum(1 for t in trades if t["result"] == "WIN")
+                    best = {
+                        "buy_rsi": buy_rsi, "buy_fisher": buy_fisher, "sell_rsi": sell_rsi,
+                        "trades": len(trades), "wins": wins, "losses": len(trades) - wins,
+                        "winrate": round(wins / len(trades) * 100, 1),
+                        "avg_pnl_pct": round(avg_pnl, 3),
+                        "optimized_at": now, "candles_used": len(candles),
+                    }
+                    best_avg_pnl = avg_pnl
+    if best is None:
+        best = {
+            "buy_rsi": FT5_PARAM_GRID_BUY_RSI[len(FT5_PARAM_GRID_BUY_RSI) // 2],
+            "buy_fisher": FT5_PARAM_GRID_BUY_FISHER[len(FT5_PARAM_GRID_BUY_FISHER) // 2],
+            "sell_rsi": FT5_PARAM_GRID_SELL_RSI[len(FT5_PARAM_GRID_SELL_RSI) // 2],
+            "trades": 0, "wins": 0, "losses": 0, "winrate": None, "avg_pnl_pct": None,
+            "optimized_at": now, "candles_used": len(candles),
+            "note": f"insufficient trades across all 36 combos tried (max {max(tried) if tried else 0}, need {FT5_MIN_BACKTEST_TRADES}); using middle-of-grid defaults",
+        }
+    return best
+
+
+def ft5_build_universe():
+    """Liquid-symbol pool, same top-by-24h-volume source and shape as
+    build_session_universe() — capped to FT5_UNIVERSE_SIZE since the
+    36-combo grid search per symbol is the expensive part here."""
+    tickers = get_tickers()
+    seen_vol = {}
+    for t in tickers:
+        name = t.get("contract", "")
+        if not name.endswith("_USDT"):
+            continue
+        vol = t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0
+        try:
+            vol = float(vol)
+        except (TypeError, ValueError):
+            vol = 0.0
+        if vol < MIN_VOL_USD:
+            continue
+        if name not in seen_vol or vol > seen_vol[name]:
+            seen_vol[name] = vol
+    ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
+    return [s[0] for s in ranked[:FT5_UNIVERSE_SIZE]]
+
+
+_ft5_signal_cooldowns = {}  # symbol -> last-signaled entry_time
+_ft5_signal_cooldowns_lock = threading.Lock()
+FT5_MAX_HOLD_SEC = 7 * 24 * 3600  # safety-net TIMEOUT if somehow neither the ROI ladder, sell-signal, nor stoploss ever resolves a position — shouldn't happen given the ROI ladder guarantees an eventual exit condition, but every other module in this app has a hold-time backstop, so this one does too
+
+
+def ft5_scan_symbol_live(symbol):
+    """Live counterpart to ft5_optimize_symbol()/ft5_run_backtest() —
+    fetches recent history, runs the walk-forward detector with this
+    symbol's own optimized (buy_rsi, buy_fisher, sell_rsi) from
+    FT5_SYMBOL_OVERRIDES (falling back to the middle of each grid if
+    not optimized yet), and fires only if a position just opened on the
+    LAST candle.
+    Deliberately does NOT call execute_autotrade() or sim_execute_trade()
+    — unlike every other module here, FT5's real exit logic (stoploss OR
+    a time-decaying ROI ladder OR either of two sell-signal conditions)
+    isn't a fixed (SL, TP) price pair; execute_autotrade/sim_execute_
+    trade are both built around exactly that shape. Approximating it
+    with a single static TP (e.g. the largest ROI rung) would silently
+    misrepresent FT5's actual exit behavior to real money or the paper
+    simulator — faithfully trading FT5 would need active position
+    management (a loop that sends a real close-order the moment ROI-
+    ladder/signal/stoploss conditions are met), which hasn't been
+    built. AUTOTRADE_ENABLED_FT5 exists in settings for future use but
+    is a no-op here for now; ft5_signals are informational only,
+    tracked with their own pnl_pct via update_ft5_signal_outcomes()."""
+    if not FT5_ENABLED:
+        return
+    try:
+        with state_lock:
+            override = STATE["ft5_symbol_overrides"].get(symbol) or {}
+        buy_rsi = override.get("buy_rsi", FT5_PARAM_GRID_BUY_RSI[len(FT5_PARAM_GRID_BUY_RSI) // 2])
+        buy_fisher = override.get("buy_fisher", FT5_PARAM_GRID_BUY_FISHER[len(FT5_PARAM_GRID_BUY_FISHER) // 2])
+        sell_rsi = override.get("sell_rsi", FT5_PARAM_GRID_SELL_RSI[len(FT5_PARAM_GRID_SELL_RSI) // 2])
+        interval_sec = INTERVAL_SECONDS.get(FT5_TF, 300)
+        now = time.time()
+        lookback_bars = max(FT5_SMA_PERIOD, FT5_VOLUME_AVG_PERIOD) + 100
+        candles = get_candles(symbol, interval=FT5_TF, limit=lookback_bars)
+        candles = [c for c in candles if c["time"] + interval_sec <= now]  # drop still-forming candle, same reasoning as every other live scanner here
+        if len(candles) < lookback_bars - 20:
+            return
+        _, open_position = ft5_run_backtest(candles, buy_rsi=buy_rsi, buy_fisher=buy_fisher, sell_rsi=sell_rsi)
+        if open_position is None or open_position["entry_time"] != candles[-1]["time"]:
+            return  # nothing open, or it opened on an earlier bar — already handled or stale
+        with _ft5_signal_cooldowns_lock:
+            if _ft5_signal_cooldowns.get(symbol) == open_position["entry_time"]:
+                return
+            _ft5_signal_cooldowns[symbol] = open_position["entry_time"]
+        if has_open_signal_any_module(symbol, exclude="ft5_signals"):
+            return
+        entry = open_position["entry"]
+        record = {
+            "symbol": symbol, "direction": "LONG", "entry": entry,
+            "entry_time": open_position["entry_time"],
+            "buy_rsi": buy_rsi, "buy_fisher": buy_fisher, "sell_rsi": sell_rsi,
+            "detected_at": now, "status": "OPEN", "result": None,
+            "exit_price": None, "exit_time": None, "exit_reason": None,
+            "pnl_pct": None, "app_version": APP_VERSION,
+        }
+        with state_lock:
+            STATE["ft5_signals"].appendleft(record)
+        send_telegram(
+            f"\u2b06\ufe0f LONG {symbol} (FT5 \u2014 Strategy005, \u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422\u0410\u041b\u042c\u041d\u041e, \u0438\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u043e\u043d\u043d\u043e)\n"
+            f"entry: {entry:.6g}\n"
+            f"buy_rsi={buy_rsi} buy_fisher={buy_fisher} sell_rsi={sell_rsi}",
+            category="ft5",
+        )
+    except Exception as e:
+        log_error(f"ft5_live {symbol}: {e}")
+
+
+def update_ft5_signal_outcomes():
+    """For each OPEN ft5_signal, re-runs ft5_run_backtest on an extended
+    window (from a bit before the signal's own entry_time through now)
+    using that signal's own recorded params — deterministic and
+    no-lookahead, so it reproduces the exact same entry at the exact
+    same bar, then naturally continues through the newer candles to
+    check whether stoploss/ROI/sell-signal has since triggered. Reuses
+    the walk-forward detector rather than building a separate
+    resume-from-open-position code path."""
+    now = time.time()
+    with state_lock:
+        open_signals = [s for s in STATE["ft5_signals"] if s["status"] == "OPEN"]
+    interval_sec = INTERVAL_SECONDS.get(FT5_TF, 300)
+    warmup_bars = max(FT5_SMA_PERIOD, FT5_VOLUME_AVG_PERIOD) + 100
+    for sig in open_signals:
+        try:
+            fetch_start = sig["entry_time"] - warmup_bars * interval_sec
+            candles = get_candles_range(sig["symbol"], FT5_TF, fetch_start, now)
+            candles = [c for c in candles if c["time"] + interval_sec <= now]
+            if not candles:
+                continue
+            trades, open_position = ft5_run_backtest(
+                candles, buy_rsi=sig["buy_rsi"], buy_fisher=sig["buy_fisher"], sell_rsi=sig["sell_rsi"])
+            matched = next((t for t in trades if t["entry_time"] == sig["entry_time"]), None)
+            timed_out = (now - sig["detected_at"]) > FT5_MAX_HOLD_SEC
+            with state_lock:
+                if matched:
+                    sig["status"] = "CLOSED"
+                    sig["result"] = matched["result"]
+                    sig["exit_price"] = matched["exit"]
+                    sig["exit_time"] = matched["exit_time"]
+                    sig["exit_reason"] = matched["exit_reason"]
+                    sig["pnl_pct"] = matched["pnl_pct"]
+                elif timed_out:
+                    sig["status"] = "CLOSED"
+                    sig["result"] = "TIMEOUT"
+                    sig["exit_price"] = candles[-1]["close"] if candles else None
+                    sig["exit_time"] = candles[-1]["time"] if candles else None
+                    sig["exit_reason"] = "max_hold_timeout"
+                    if sig["exit_price"]:
+                        sig["pnl_pct"] = round((sig["exit_price"] - sig["entry"]) / sig["entry"] * 100, 3)
+        except Exception as e:
+            log_error(f"ft5_outcome {sig['symbol']}: {e}")
+
+
+def compute_ft5_signal_stats():
+    with state_lock:
+        signals = list(STATE["ft5_signals"])
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+    wins = sum(1 for s in closed if s["result"] == "WIN")
+    losses = sum(1 for s in closed if s["result"] == "LOSS")
+    timeouts = sum(1 for s in signals if s.get("result") == "TIMEOUT")
+    open_n = sum(1 for s in signals if s["status"] == "OPEN")
+    total_closed = len(closed)
+    winrate = round(wins / total_closed * 100, 1) if total_closed else None
+    pnls = [s["pnl_pct"] for s in closed if s.get("pnl_pct") is not None]
+    avg_pnl = round(sum(pnls) / len(pnls), 3) if pnls else None
+    return {"total": len(signals), "wins": wins, "losses": losses, "timeouts": timeouts,
+            "open": open_n, "winrate": winrate, "avg_pnl_pct": avg_pnl}
 
 
 # EMA diagnostics — v0.62.0, per direct user request to understand the
@@ -8424,6 +9034,8 @@ def save_state():
                 "session_signals": list(STATE["session_signals"]),
                 "session_ny_signals": list(STATE["session_ny_signals"]),
                 "xau_lg_signals": list(STATE["xau_lg_signals"]),
+                "ft5_signals": list(STATE["ft5_signals"]),
+                "ft5_symbol_overrides": STATE["ft5_symbol_overrides"],
                 "autotrade_log": list(STATE["autotrade_log"]),
                 "sim_balance": STATE["sim_balance"],
                 # Both PENDING and SETTLED now (previously PENDING was
@@ -8502,6 +9114,8 @@ def load_state():
         session_signals = data.get("session_signals", [])
         session_ny_signals = data.get("session_ny_signals", [])
         xau_lg_signals = data.get("xau_lg_signals", [])
+        ft5_signals = data.get("ft5_signals", [])
+        ft5_symbol_overrides = data.get("ft5_symbol_overrides", {})
         autotrade_log = data.get("autotrade_log", [])
         sim_trades = data.get("sim_trades", [])
         risk_autotune_log = data.get("risk_autotune_log", [])
@@ -8514,6 +9128,8 @@ def load_state():
             STATE["session_signals"] = deque(session_signals, maxlen=SESSION_SIGNAL_HISTORY)
             STATE["session_ny_signals"] = deque(session_ny_signals, maxlen=SESSION_NY_SIGNAL_HISTORY)
             STATE["xau_lg_signals"] = deque(xau_lg_signals, maxlen=XAU_LG_SIGNAL_HISTORY)
+            STATE["ft5_signals"] = deque(ft5_signals, maxlen=FT5_SIGNAL_HISTORY)
+            STATE["ft5_symbol_overrides"] = ft5_symbol_overrides
             STATE["autotrade_log"] = deque(autotrade_log, maxlen=AUTOTRADE_TRADE_HISTORY)
             STATE["risk_autotune_log"] = deque(risk_autotune_log, maxlen=200)
             STATE["risk_autotune_last_change"] = risk_autotune_last_change
@@ -8795,6 +9411,8 @@ def send_telegram(text, category=None):
     if category == "session_ny" and not TELEGRAM_ALERTS_SESSION_NY:
         return
     if category == "xau_lg" and not TELEGRAM_ALERTS_XAU_LG:
+        return
+    if category == "ft5" and not TELEGRAM_ALERTS_FT5:
         return
 
     def _do_send():
@@ -10331,6 +10949,60 @@ def xau_lg_live_loop():
 # ============================================================================
 
 
+# ============================================================================
+# EXPERIMENTAL: FT5 — port of freqtrade-strategies' Strategy005 — loops
+# ============================================================================
+def ft5_backtest_loop():
+    while True:
+        try:
+            if not FT5_ENABLED:
+                time.sleep(60)
+                continue
+            t0 = time.time()
+            universe = ft5_build_universe()
+            with state_lock:
+                STATE["ft5_universe"] = universe
+                STATE["ft5_symbols_done"] = 0
+            for symbol in universe:
+                try:
+                    result = ft5_optimize_symbol(symbol)
+                    with state_lock:
+                        STATE["ft5_symbol_overrides"][symbol] = result
+                        STATE["ft5_symbols_done"] += 1
+                except Exception as e:
+                    log_error(f"ft5_optimize {symbol}: {e}")
+            with state_lock:
+                STATE["ft5_last_backtest_finished"] = time.time()
+                STATE["ft5_last_backtest_duration"] = round(time.time() - t0, 1)
+        except Exception as e:
+            log_error(f"ft5_backtest_loop: {e}")
+        time.sleep(max(3600, FT5_REFRESH_SEC))
+
+
+def ft5_live_loop():
+    while True:
+        try:
+            if not FT5_ENABLED:
+                time.sleep(60)
+                continue
+            with state_lock:
+                universe = list(STATE["ft5_universe"])
+            if universe:
+                with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe))) as ex:
+                    futs = [ex.submit(ft5_scan_symbol_live, s) for s in universe]
+                    for _ in as_completed(futs):
+                        pass
+            update_ft5_signal_outcomes()
+        except Exception as e:
+            log_error(f"ft5_live_loop: {e}")
+        time.sleep(max(60, FT5_SCAN_INTERVAL_SEC))
+
+
+# ============================================================================
+# END EXPERIMENTAL: FT5
+# ============================================================================
+
+
 # ----------------------------------------------------------------------------
 # API
 # ----------------------------------------------------------------------------
@@ -10987,6 +11659,58 @@ def api_reset_xau_lg():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/ft5/status")
+def api_ft5_status():
+    """EXPERIMENTAL — port of freqtrade-strategies' Strategy005, see
+    that module's own header comment for the full source-skepticism
+    reasoning."""
+    with state_lock:
+        overrides = dict(STATE["ft5_symbol_overrides"])
+        universe = list(STATE["ft5_universe"])
+        symbols_done = STATE["ft5_symbols_done"]
+        last_backtest_finished = STATE["ft5_last_backtest_finished"]
+        last_backtest_duration = STATE["ft5_last_backtest_duration"]
+    ranked = [dict(v, symbol=sym) for sym, v in overrides.items() if v and not v.get("error")]
+    ranked.sort(key=lambda r: (r.get("avg_pnl_pct") or -999), reverse=True)
+    return jsonify({
+        "enabled": FT5_ENABLED,
+        "universe_size": len(universe),
+        "symbols_done": symbols_done,
+        "last_backtest_finished": last_backtest_finished,
+        "last_backtest_duration": last_backtest_duration,
+        "signals_stats": compute_ft5_signal_stats(),
+        "config": {
+            "tf": FT5_TF, "stoploss_pct": FT5_STOPLOSS_PCT,
+            "roi_ladder": FT5_ROI_LADDER, "backtest_days": FT5_BACKTEST_DAYS,
+            "grid_buy_rsi": FT5_PARAM_GRID_BUY_RSI, "grid_buy_fisher": FT5_PARAM_GRID_BUY_FISHER,
+            "grid_sell_rsi": FT5_PARAM_GRID_SELL_RSI,
+        },
+        "top": ranked,
+    })
+
+
+@app.route("/api/ft5/signals")
+def api_ft5_signals():
+    with state_lock:
+        return jsonify(list(STATE["ft5_signals"]))
+
+
+@app.route("/api/reset/ft5", methods=["POST"])
+def api_reset_ft5():
+    try:
+        with state_lock:
+            STATE["ft5_universe"] = []
+            STATE["ft5_symbol_overrides"] = {}
+            STATE["ft5_symbols_done"] = 0
+            STATE["ft5_last_backtest_finished"] = None
+            STATE["ft5_last_backtest_duration"] = None
+            STATE["ft5_signals"].clear()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset_ft5: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/reset/ema", methods=["POST"])
 def api_reset_ema():
     try:
@@ -11075,6 +11799,7 @@ def api_autotrade_status():
             "divergence": AUTOTRADE_ENABLED_DIVERGENCE, "ema": AUTOTRADE_ENABLED_EMA,
             "scalp": AUTOTRADE_ENABLED_SCALP, "session": AUTOTRADE_ENABLED_SESSION,
             "session_ny": AUTOTRADE_ENABLED_SESSION_NY, "xau_lg": AUTOTRADE_ENABLED_XAU_LG,
+            "ft5": AUTOTRADE_ENABLED_FT5,
         },
     })
 
@@ -11216,7 +11941,7 @@ INDEX_HTML = """<!doctype html>
   body { margin:0; background:#0b0e14; color:#d7dee8; font-family: -apple-system, Roboto, Segoe UI, sans-serif; }
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
   #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetXauLgBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetXauLgBtn, #resetFt5Btn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #settingsModal.open { display:flex; flex-direction:column; }
@@ -11327,6 +12052,7 @@ INDEX_HTML = """<!doctype html>
       <button id="resetSessionBtn">Очистить сессию</button>
       <button id="resetSessionNyBtn">Очистить сессию NY</button>
       <button id="resetXauLgBtn">Очистить XAU LG</button>
+      <button id="resetFt5Btn">Очистить FT5</button>
       <button id="resetSimulatorBtn">Сбросить симулятор</button>
     </div>
   </div>
@@ -11346,6 +12072,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="session">Сессия</div>
   <div class="tab" data-tab="session_ny">Сессия NY</div>
   <div class="tab" data-tab="xau_lg" style="color:#e0a030;">XAU LG ⚠️</div>
+  <div class="tab" data-tab="ft5" style="color:#e0a030;">FT5 ⚠️</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
 </div>
@@ -11369,6 +12096,7 @@ INDEX_HTML = """<!doctype html>
   <div id="sessionPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="sessionNyPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="xauLgPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
+  <div id="ft5Panel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="simulatorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
@@ -11772,6 +12500,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('sessionPanel').style.display = activeTab === 'session' ? 'block' : 'none';
     document.getElementById('sessionNyPanel').style.display = activeTab === 'session_ny' ? 'block' : 'none';
     document.getElementById('xauLgPanel').style.display = activeTab === 'xau_lg' ? 'block' : 'none';
+    document.getElementById('ft5Panel').style.display = activeTab === 'ft5' ? 'block' : 'none';
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
     document.getElementById('simulatorPanel').style.display = activeTab === 'simulator' ? 'block' : 'none';
     if (activeTab === 'signals') refreshTuning();
@@ -11781,6 +12510,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'session') refreshSession();
     if (activeTab === 'session_ny') refreshSessionNy();
     if (activeTab === 'xau_lg') refreshXauLg();
+    if (activeTab === 'ft5') refreshFt5();
     if (activeTab === 'autotrade') refreshAutotrade();
     if (activeTab === 'simulator') refreshSimulator();
   };
@@ -12593,6 +13323,70 @@ async function refreshXauLg() {
   panel.innerHTML = warnHtml + headerHtml + signalsTableHtml + btTableHtml;
 }
 
+// ---------------- FT5 — port of freqtrade Strategy005 (EXPERIMENTAL, v0.96.0) ----------------
+async function refreshFt5() {
+  const status = await (await fetch('/api/ft5/status')).json();
+  const signals = await (await fetch('/api/ft5/signals')).json();
+  const panel = document.getElementById('ft5Panel');
+  const cfg = status.config || {};
+  const ss = status.signals_stats || {};
+  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
+  const avgPnlTxt = ss.avg_pnl_pct !== null && ss.avg_pnl_pct !== undefined ? `${ss.avg_pnl_pct > 0 ? '+' : ''}${ss.avg_pnl_pct}%` : '-';
+  const buildTxt = status.last_backtest_finished
+    ? `последний перебор параметров: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · монет: ${status.symbols_done}/${status.universe_size}`
+    : `перебор параметров ещё не завершился (${status.symbols_done}/${status.universe_size || '?'})`;
+  const warnHtml = `
+    <div style="background:#2a1f0e;border:1px solid #e0a030;border-radius:10px;padding:10px 14px;margin-bottom:12px;">
+      <b style="color:#e0a030;">⚠️ Экспериментально</b><br>
+      <span style="font-size:12px;color:#d9c08a;">Портирована структура Strategy005 (github.com/freqtrade/freqtrade-strategies, автор Gerald Lonlas) — 6 индикаторов (MACD, Minus DI, RSI+Fisher, Stochastic, SAR, SMA) + лесенка тейка по времени + фикс. стоп -10%. Оригинальные hyperopt-параметры взяты из бэктеста на 20 днях 2018 года — почти наверняка переподогнаны под тот период, поэтому НЕ скопированы напрямую: здесь свой перебор параметров на реальных данных этой биржи. Автоторговля и общий симулятор сознательно НЕ подключены — у стратегии нет единого фиксированного тейка (выход по времени/сигналу/стопу), а вся текущая инфраструктура рассчитана на пару SL/TP. Сигналы ниже — информационные, только LONG.</span>
+    </div>`;
+  const headerHtml = `
+    <div class="dim" style="margin-bottom:8px;">
+      ТФ ${cfg.tf} · стоп ${(cfg.stoploss_pct*100).toFixed(0)}% · перебор: buy_rsi${JSON.stringify(cfg.grid_buy_rsi)} × buy_fisher${JSON.stringify(cfg.grid_buy_fisher)} × sell_rsi${JSON.stringify(cfg.grid_sell_rsi)}<br>
+      ${buildTxt}<br>
+      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · средний P&L/сделку: ${avgPnlTxt} · открытых: ${ss.open||0} · всего: ${ss.total||0}
+    </div>`;
+  const signalsRows = signals.map(s => {
+    let statusHtml;
+    if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
+    else if (s.result === 'WIN') statusHtml = `<span class="win">WIN (${s.exit_reason}) ${s.pnl_pct>0?'+':''}${s.pnl_pct}%</span>`;
+    else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS (${s.exit_reason}) ${s.pnl_pct}%</span>`;
+    else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
+    return `<tr>
+      <td>${s.symbol}</td><td>${fmt(s.entry)}</td>
+      <td class="dim">rsi${s.buy_rsi}/fish${s.buy_fisher}/sell${s.sell_rsi}</td>
+      <td>${statusHtml}</td><td class="dim">${fmtDateTime(s.entry_time)}</td>
+    </tr>`;
+  }).join('');
+  const signalsTableHtml = signals.length ? `
+    <div style="overflow-x:auto;margin-bottom:14px;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>Symbol</th><th>Entry</th><th>Параметры</th><th>Status</th><th>Время входа</th></tr></thead>
+      <tbody>${signalsRows}</tbody>
+    </table>
+    </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
+  const btRows = (status.top || []).map(r => {
+    const pnlClass = (r.avg_pnl_pct || 0) >= 0 ? 'win' : 'loss';
+    return `<tr>
+      <td>${r.symbol}</td>
+      <td class="dim">rsi${r.buy_rsi}/fish${r.buy_fisher}/sell${r.sell_rsi}</td>
+      <td class="${pnlClass}">${r.avg_pnl_pct>0?'+':''}${r.avg_pnl_pct}%</td>
+      <td class="dim">n=${r.trades}</td>
+      <td class="win">${r.wins}W</td>
+      <td class="loss">${r.losses}L</td>
+    </tr>`;
+  }).join('');
+  const btTableHtml = (status.top || []).length ? `
+    <div class="dim" style="margin-bottom:6px;"><b>Перебор параметров по монетам</b> (${cfg.backtest_days} дней истории, отбор по среднему P&L на сделку):</div>
+    <div style="overflow-x:auto;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>Symbol</th><th>Параметры</th><th>Avg P&L</th><th>n</th><th>W</th><th>L</th></tr></thead>
+      <tbody>${btRows}</tbody>
+    </table>
+    </div>` : '<div class="dim">Перебор параметров ещё не готов.</div>';
+  panel.innerHTML = warnHtml + headerHtml + signalsTableHtml + btTableHtml;
+}
+
 async function refreshAutotradeBanner() {
   try {
     const s = await (await fetch('/api/autotrade/status')).json();
@@ -12614,7 +13408,7 @@ async function refreshAutotrade() {
     (await fetch('/api/autotrade/log')).json(),
   ]);
   const panel = document.getElementById('autotradePanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5'};
   const enabledTxt = Object.entries(status.enabled)
     .map(([k, v]) => `<span class="${v ? 'win' : 'dim'}">${modeLabels[k]}: ${v ? 'вкл' : 'выкл'}</span>`)
     .join(' &nbsp;·&nbsp; ');
@@ -12674,7 +13468,7 @@ async function refreshSimulator() {
     (await fetch('/api/autotrade/status')).json(),
   ]);
   const panel = document.getElementById('simulatorPanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5'};
 
   const pnlClass = status.pnl_total >= 0 ? 'win' : 'loss';
   const sizeTxt = status.size_mode === 'percent' ? `${status.size_value}% от баланса` : `фикс. $${status.size_value}`;
@@ -12744,6 +13538,7 @@ async function refreshAll() {
   if (activeTab === 'session') await refreshSession();
   if (activeTab === 'session_ny') await refreshSessionNy();
   if (activeTab === 'xau_lg') await refreshXauLg();
+  if (activeTab === 'ft5') await refreshFt5();
   if (activeTab === 'autotrade') await refreshAutotrade();
   if (activeTab === 'simulator') await refreshSimulator();
 }
@@ -13666,6 +14461,8 @@ if __name__ == "__main__":
     threading.Thread(target=session_ny_live_loop, daemon=True).start()
     threading.Thread(target=xau_lg_backtest_loop, daemon=True).start()
     threading.Thread(target=xau_lg_live_loop, daemon=True).start()
+    threading.Thread(target=ft5_backtest_loop, daemon=True).start()
+    threading.Thread(target=ft5_live_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     threading.Thread(target=risk_autotune_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
