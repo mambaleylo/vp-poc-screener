@@ -3980,6 +3980,47 @@ v0.97.1 - split FT5's single universe into an analysis pool and a
          comfortably finish within FT5_REFRESH_SEC's 24h cadence, but
          worth knowing if the "последний перебор параметров" timestamp
          starts lagging noticeably behind schedule.
+
+v0.97.2 - added a risk-autotune reset button, per direct user question
+         about whether one was worth having given the tuning rules are
+         already bidirectional (they are — confirmed by re-reading each
+         rule's step logic before answering). Argued for building it
+         anyway on a concrete precedent already in this session: v0.95.3/
+         v0.95.4/v0.95.6 each fixed a tuning FORMULA after it had
+         already computed and persisted bad values with the old, buggy
+         one — without a reset, those stale values only limp back
+         toward correct over several more cooldown-gated passes (6-24h
+         apart) instead of restarting clean right after a fix.
+         New /api/reset/risk_autotune: resets every parameter risk_
+         autotune_pass() touches (ema_min_rr, ema_sl_atr_mult, ema_
+         invert_signals, ema_tp_pct, div_min_rr, div_sl_atr_mult, div_
+         invert_signals, div_tp_pct, scalp_min_rr, scalp_sl_buffer_mult,
+         session_invert_signals) to its own code-level default — the
+         literal fallback value in that constant's own os.environ.get()
+         call, hardcoded into the endpoint since the live global may
+         already be tuned away from it, which is exactly the state this
+         button undoes — then clears STATE["risk_autotune_log"] and
+         every cooldown timestamp in STATE["risk_autotune_last_change"]
+         so the next pass evaluates fresh. New "Сбросить авто-тюнинг"
+         button in the header, wired via the existing wireResetButton
+         confirm-dialog pattern.
+         Process note, found while wiring this: repeated the EXACT same
+         class of mistake as v0.96.0's refreshAutotradeBanner incident —
+         a str_replace's old_str included the next function's `@app.
+         route(...)`/`def api_reset_ema():` lines for uniqueness, but
+         the new_str dropped them, decapitating that function. Caught
+         it manually again rather than by an automated check, which
+         prompted actually building the check this time instead of
+         just noting the near-miss: a small script scanning the whole
+         file for every `@app.route(...)` and confirming a `def` line
+         follows within a couple lines, run once to confirm this
+         specific incident was fully fixed and nothing else in the file
+         had the same problem (it hadn't, elsewhere). Also surfaced,
+         independently, while auditing: resetFt5Btn (added in v0.96.0)
+         had a button in the HTML/CSS but was NEVER wired to wireReset
+         Button — clicking "Очистить FT5" has done nothing since it was
+         added. Fixed alongside the new button rather than left for
+         later, since it was found in the course of this same work.
 """
 
 import os
@@ -3999,7 +4040,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.97.1"
+APP_VERSION = "0.97.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12020,6 +12061,45 @@ def api_reset_ft5():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/reset/risk_autotune", methods=["POST"])
+def api_reset_risk_autotune():
+    """Resets every parameter risk_autotune_pass() touches back to its
+    own code-level default (the fallback value in each constant's own
+    os.environ.get(...) call — hardcoded here as literals since by the
+    time this runs the live globals may already be tuned away from
+    them, which is exactly the state this button exists to undo), and
+    clears the tuning log + every cooldown timestamp so the very next
+    pass re-evaluates fresh rather than slowly re-converging from
+    wherever settings.json happened to be.
+    Concrete motivation, not just a "just in case": this exact scenario
+    already happened earlier this session — the v0.95.3/v0.95.4/v0.95.6
+    fixes all corrected a tuning FORMULA after bad values had already
+    been computed and persisted by the old, buggy one. Without this
+    button those stale values would only limp back toward correct over
+    several more cooldown-gated passes (6-24h apart) instead of
+    restarting clean immediately after a fix like that."""
+    try:
+        _set_ema_min_rr(0.7)
+        _set_ema_sl_atr_mult(1.5)
+        _set_ema_invert(False)
+        _set_ema_tp_pct(0.015)
+        _set_div_min_rr(0.0)
+        _set_div_sl_atr_mult(1.5)
+        _set_div_invert(False)
+        _set_div_tp_pct(0.01)
+        _set_scalp_min_rr(0.5)
+        _set_scalp_sl_buffer_mult(0.25)
+        _set_session_invert(False)
+        with state_lock:
+            STATE["risk_autotune_log"].clear()
+            STATE["risk_autotune_last_change"] = {}
+        save_state()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset_risk_autotune: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/reset/ema", methods=["POST"])
 def api_reset_ema():
     try:
@@ -12250,7 +12330,7 @@ INDEX_HTML = """<!doctype html>
   body { margin:0; background:#0b0e14; color:#d7dee8; font-family: -apple-system, Roboto, Segoe UI, sans-serif; }
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
   #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetXauLgBtn, #resetFt5Btn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetXauLgBtn, #resetFt5Btn, #resetRiskAutotuneBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #settingsModal.open { display:flex; flex-direction:column; }
@@ -12369,6 +12449,7 @@ INDEX_HTML = """<!doctype html>
       <button id="resetXauLgBtn">Очистить XAU LG</button>
       <button id="resetFt5Btn">Очистить FT5</button>
       <button id="resetSimulatorBtn">Сбросить симулятор</button>
+      <button id="resetRiskAutotuneBtn">Сбросить авто-тюнинг</button>
     </div>
   </div>
   <div id="status">загрузка...</div>
@@ -13951,6 +14032,12 @@ wireResetButton('resetSessionNyBtn', '/api/reset/session_ny',
 wireResetButton('resetXauLgBtn', '/api/reset/xau_lg',
   'Удалить накопленный бэктест и сигналы экспериментального XAU Liquidity Grab? Остальное не тронет. Это необратимо.',
   'Очистить XAU LG');
+wireResetButton('resetFt5Btn', '/api/reset/ft5',
+  'Удалить накопленный анализ параметров и сигналы экспериментального FT5? Остальное не тронет. Это необратимо.',
+  'Очистить FT5');
+wireResetButton('resetRiskAutotuneBtn', '/api/reset/risk_autotune',
+  'Сбросить все параметры авто-тюнинга риска (EMA/Дивергенция/Скальпинг/Сессия) к значениям по умолчанию из кода, очистить лог и cooldown? Сами сигналы и статистику не тронет. Это необратимо.',
+  'Сбросить авто-тюнинг');
 wireResetButton('resetSimulatorBtn', '/api/simulator/reset',
   'Сбросить симулятор баланса к стартовому значению и удалить всю историю сделок? Это необратимо.',
   'Сбросить симулятор');
