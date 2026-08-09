@@ -3945,6 +3945,41 @@ v0.97.0 - removed the routine TIMEOUT close from every module that had
          update_xau_lg_signal_outcomes left over from the timeout
          removal), and node --check on the extracted <script> block —
          all clean.
+
+v0.97.1 - split FT5's single universe into an analysis pool and a
+         live-scan subset, per direct user request ("используем 200
+         монет для анализа, но в сигналах топ 5"). Previously
+         FT5_UNIVERSE_SIZE (default 40) controlled both what got
+         backtested/optimized AND what got live-scanned — one number
+         for two different jobs. Now FT5_UNIVERSE_SIZE (raised to 200)
+         controls only the analysis pool, and a new FT5_LIVE_TOP_N
+         (default 5) controls how many of those 200 — ranked by the
+         optimizer's own avg_pnl_pct, same metric/sort key api_ft5_
+         status()'s "top" display already used — actually get scanned
+         for live signals. Analyze broadly, trade narrowly on the best
+         performers only.
+         ft5_backtest_loop() computes this ranking once per full pass
+         (after all 200 symbols are optimized) and stores it as STATE[
+         "ft5_live_universe"]; ft5_live_loop() now reads that instead of
+         the full STATE["ft5_universe"]. Symbols with no result, an
+         error, or too few backtested trades sort to the bottom
+         (avg_pnl_pct treated as worst-case) and naturally never make
+         the live cut — verified this behaviorally with a synthetic
+         overrides dict mixing valid results, None, and error entries,
+         not just by reading the sort key. Neither ft5_universe nor
+         ft5_live_universe is persisted across restarts (matching the
+         pre-existing choice not to persist ft5_universe) — both rebuild
+         within the first backtest cycle after startup regardless.
+         /api/ft5/status now returns live_universe and live_top_n
+         alongside the existing universe_size; the panel header shows
+         both explicitly ("анализ: N/200 монет · живой скан: топ-5
+         (SYM1, SYM2, ...)") rather than one ambiguous count.
+         Scale note, flagged rather than silently absorbed: 200 symbols
+         x 36 grid-search combos is 7200 backtest runs per daily cycle,
+         5x the work the previous 40-symbol default did — should still
+         comfortably finish within FT5_REFRESH_SEC's 24h cadence, but
+         worth knowing if the "последний перебор параметров" timestamp
+         starts lagging noticeably behind schedule.
 """
 
 import os
@@ -3964,7 +3999,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.97.0"
+APP_VERSION = "0.97.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4499,7 +4534,8 @@ XAU_LG_SCAN_INTERVAL_SEC = int(os.environ.get("VP_XAU_LG_SCAN_INTERVAL_SEC", 300
 # ============================================================================
 FT5_ENABLED = os.environ.get("VP_FT5_ENABLED", "1") == "1"
 FT5_TF = os.environ.get("VP_FT5_TF", "5m")  # matches Strategy005's own timeframe
-FT5_UNIVERSE_SIZE = int(os.environ.get("VP_FT5_UNIVERSE_SIZE", 40))
+FT5_UNIVERSE_SIZE = int(os.environ.get("VP_FT5_UNIVERSE_SIZE", 200))  # how many symbols get analyzed/optimized — wide net for finding what works
+FT5_LIVE_TOP_N = int(os.environ.get("VP_FT5_LIVE_TOP_N", 5))  # how many of the analyzed symbols (ranked by the optimizer's own avg_pnl_pct) actually get scanned for live signals — per direct user request: analyze broadly, trade narrowly on the best performers only
 FT5_BACKTEST_DAYS = int(os.environ.get("VP_FT5_BACKTEST_DAYS", 30))
 FT5_SIGNAL_HISTORY = 200
 FT5_REFRESH_SEC = int(os.environ.get("VP_FT5_REFRESH_SEC", 24 * 3600))  # daily backtest/param-search refresh, same cadence as Volume's optimizer
@@ -5121,6 +5157,7 @@ STATE = {
     # EXPERIMENTAL FT5 (port of freqtrade's Strategy005, v0.96.0) — see
     # that module's own header comment. All keys prefixed ft5_.
     "ft5_universe": [],
+    "ft5_live_universe": [],  # top FT5_LIVE_TOP_N of ft5_universe by avg_pnl_pct, computed after each backtest pass — only these get live-scanned
     "ft5_symbol_overrides": {},  # symbol -> {buy_rsi, buy_fisher, sell_rsi, trades, winrate, avg_pnl_pct, optimized_at}
     "ft5_symbols_done": 0,
     "ft5_last_backtest_finished": None,
@@ -11190,7 +11227,21 @@ def ft5_backtest_loop():
                         STATE["ft5_symbols_done"] += 1
                 except Exception as e:
                     log_error(f"ft5_optimize {symbol}: {e}")
+            # Rank the full FT5_UNIVERSE_SIZE analysis pool by avg_pnl_pct
+            # (same metric/sort key api_ft5_status's own "top" list uses)
+            # and keep only the best FT5_LIVE_TOP_N for live scanning — per
+            # direct user request: analyze widely, trade narrowly. Symbols
+            # with no result, an error, or too few backtested trades sort
+            # to the bottom (avg_pnl_pct is None -> treated as worst) and
+            # naturally never make the live cut.
             with state_lock:
+                overrides = dict(STATE["ft5_symbol_overrides"])
+                ranked = sorted(
+                    overrides.items(),
+                    key=lambda kv: (kv[1].get("avg_pnl_pct") if kv[1] and not kv[1].get("error") else None) or -999,
+                    reverse=True,
+                )
+                STATE["ft5_live_universe"] = [sym for sym, _ in ranked[:FT5_LIVE_TOP_N]]
                 STATE["ft5_last_backtest_finished"] = time.time()
                 STATE["ft5_last_backtest_duration"] = round(time.time() - t0, 1)
         except Exception as e:
@@ -11205,10 +11256,10 @@ def ft5_live_loop():
                 time.sleep(60)
                 continue
             with state_lock:
-                universe = list(STATE["ft5_universe"])
-            if universe:
-                with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe))) as ex:
-                    futs = [ex.submit(ft5_scan_symbol_live, s) for s in universe]
+                live_universe = list(STATE["ft5_live_universe"])
+            if live_universe:
+                with ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe))) as ex:
+                    futs = [ex.submit(ft5_scan_symbol_live, s) for s in live_universe]
                     for _ in as_completed(futs):
                         pass
             update_ft5_signal_outcomes()
@@ -11885,6 +11936,7 @@ def api_ft5_status():
     with state_lock:
         overrides = dict(STATE["ft5_symbol_overrides"])
         universe = list(STATE["ft5_universe"])
+        live_universe = list(STATE["ft5_live_universe"])
         symbols_done = STATE["ft5_symbols_done"]
         last_backtest_finished = STATE["ft5_last_backtest_finished"]
         last_backtest_duration = STATE["ft5_last_backtest_duration"]
@@ -11893,6 +11945,8 @@ def api_ft5_status():
     return jsonify({
         "enabled": FT5_ENABLED,
         "universe_size": len(universe),
+        "live_universe": live_universe,
+        "live_top_n": FT5_LIVE_TOP_N,
         "symbols_done": symbols_done,
         "last_backtest_finished": last_backtest_finished,
         "last_backtest_duration": last_backtest_duration,
@@ -13636,8 +13690,8 @@ async function refreshFt5() {
     ? `план. тейк:стоп (лесенка) ${Math.min(...roiRrRange).toFixed(2)}\u2013${Math.max(...roiRrRange).toFixed(2)}`
     : '';
   const buildTxt = status.last_backtest_finished
-    ? `последний перебор параметров: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · монет: ${status.symbols_done}/${status.universe_size}`
-    : `перебор параметров ещё не завершился (${status.symbols_done}/${status.universe_size || '?'})`;
+    ? `последний перебор параметров: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · анализ: ${status.symbols_done}/${status.universe_size} монет · живой скан: топ-${status.live_top_n} (${(status.live_universe||[]).join(', ') || 'ещё не выбраны'})`
+    : `перебор параметров ещё не завершился (${status.symbols_done}/${status.universe_size || '?'}) — живой скан начнётся после первого прохода`;
   const warnHtml = `
     <div style="background:#2a1f0e;border:1px solid #e0a030;border-radius:10px;padding:10px 14px;margin-bottom:12px;">
       <b style="color:#e0a030;">⚠️ Экспериментально</b><br>
