@@ -3821,6 +3821,30 @@ v0.96.1 - FT5: RR display and a chart modal, per direct user request
          — a lesson that the verification tooling itself needs the same
          scrutiny as the code it's checking, not blind trust that a
          failing check means the checked code is wrong.
+
+v0.96.2 - added a Telegram close alert for FT5 signals, per direct user
+         request ("добавь алерты в тг, когда открывать и после сигнала
+         закрытия тоже"). The entry alert already existed (ft5_scan_
+         symbol_live, since v0.96.0) — this adds the missing exit side.
+         Notably, no OTHER module in this app currently sends a close
+         alert either (checked before building this — every send_
+         telegram() call site across Volume/Divergence/EMA/Session/
+         XAU_LG only fires on entry), so this isn't copying an existing
+         pattern, it's a new one, built carefully: update_ft5_signal_
+         outcomes() collects every signal that transitions OPEN->CLOSED
+         during that pass into a plain list (just_closed) while still
+         holding state_lock for the mutation itself, then sends all the
+         Telegram messages in a separate loop AFTER the lock is
+         released — sending a network call while holding state_lock
+         would block every other thread waiting on it (scan_loop, other
+         modules' outcome-updaters, the settings API, etc.) for however
+         long Telegram takes to respond or retry.
+         Message includes result (WIN/LOSS/TIMEOUT with a matching
+         icon), which of the three exit paths fired (stoploss/roi/
+         signal/max_hold_timeout), exit price, realized pnl_pct, and
+         the realized RR from v0.96.1 — verified the exact message
+         formatting behaviorally (both a WIN and a LOSS case) rather
+         than just reading the f-string and assuming it's right.
 """
 
 import os
@@ -3840,7 +3864,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.96.1"
+APP_VERSION = "0.96.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5718,12 +5742,19 @@ def update_ft5_signal_outcomes():
     same bar, then naturally continues through the newer candles to
     check whether stoploss/ROI/sell-signal has since triggered. Reuses
     the walk-forward detector rather than building a separate
-    resume-from-open-position code path."""
+    resume-from-open-position code path.
+    v0.96.2: also sends a Telegram close alert for each signal that
+    just transitioned OPEN -> CLOSED this pass, per direct user
+    request — collected during the lock-held update and sent AFTER
+    state_lock is released, so a slow/retrying network call never
+    holds up other threads waiting on the lock (same reasoning behind
+    every other network call in this app happening outside a lock)."""
     now = time.time()
     with state_lock:
         open_signals = [s for s in STATE["ft5_signals"] if s["status"] == "OPEN"]
     interval_sec = INTERVAL_SECONDS.get(FT5_TF, 300)
     warmup_bars = max(FT5_SMA_PERIOD, FT5_VOLUME_AVG_PERIOD) + 100
+    just_closed = []
     for sig in open_signals:
         try:
             fetch_start = sig["entry_time"] - warmup_bars * interval_sec
@@ -5752,6 +5783,7 @@ def update_ft5_signal_outcomes():
                     # comment on why a static TP isn't a faithful concept
                     # for this strategy's ROI-ladder/signal exit shape.
                     sig["rr"] = round(matched["pnl_pct"] / (FT5_STOPLOSS_PCT * 100), 3)
+                    just_closed.append(dict(sig))
                 elif timed_out:
                     sig["status"] = "CLOSED"
                     sig["result"] = "TIMEOUT"
@@ -5761,8 +5793,26 @@ def update_ft5_signal_outcomes():
                     if sig["exit_price"]:
                         sig["pnl_pct"] = round((sig["exit_price"] - sig["entry"]) / sig["entry"] * 100, 3)
                         sig["rr"] = round(sig["pnl_pct"] / (FT5_STOPLOSS_PCT * 100), 3)
+                    just_closed.append(dict(sig))
         except Exception as e:
             log_error(f"ft5_outcome {sig['symbol']}: {e}")
+
+    for sig in just_closed:
+        try:
+            result = sig.get("result")
+            icon = "\u2705" if result == "WIN" else ("\u274c" if result == "LOSS" else "\u23f1\ufe0f")
+            pnl = sig.get("pnl_pct")
+            pnl_txt = f"{'+' if pnl and pnl > 0 else ''}{pnl}%" if pnl is not None else "?"
+            rr = sig.get("rr")
+            rr_txt = f" \u00b7 RR {'+' if rr and rr > 0 else ''}{rr}" if rr is not None else ""
+            send_telegram(
+                f"{icon} {result} {sig['symbol']} (FT5 \u2014 \u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422\u0410\u041b\u042c\u041d\u041e, \u0438\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u043e\u043d\u043d\u043e)\n"
+                f"\u0432\u044b\u0445\u043e\u0434: {sig.get('exit_reason')} \u0432 {sig.get('exit_price')}\n"
+                f"P&L: {pnl_txt}{rr_txt}",
+                category="ft5",
+            )
+        except Exception as e:
+            log_error(f"ft5_close_alert {sig.get('symbol')}: {e}")
 
 
 def compute_ft5_signal_stats():
