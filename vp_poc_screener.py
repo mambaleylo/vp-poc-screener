@@ -3900,6 +3900,51 @@ v0.96.4 - clarified FT5's RR display, per direct user correction ("Про
          different, still-useful question (what actually happened),
          and removing it would lose real information the user didn't
          ask to lose.
+
+v0.97.0 - removed the routine TIMEOUT close from every module that had
+         one, per direct user request after a screenshot showed EMA's
+         live signals table dominated by TIMEOUT results — several with
+         MFE already well past 1.0 (favorable movement that had already
+         exceeded what a win would need), cut off by the clock rather
+         than ever actually reaching TP or SL. A signal now waits as
+         long as it takes to hit either one, never expiring into an
+         ambiguous third outcome.
+         Found and removed in four places, not just EMA: Volume and
+         Divergence shared SIGNAL_TIMEOUT_SEC (6h), EMA had its own
+         separate EMA_SIGNAL_TIMEOUT_SEC (12h, widened from the shared
+         default earlier this session for the same underlying reason),
+         and XAU_LG had an inline 24h cutoff (`24 * 3600`, not a named
+         constant — found on a second, more careful pass specifically
+         because the first search for "every module's timeout constant"
+         only caught named constants and missed this one; worth naming
+         plainly that the first pass was incomplete). Session/Session
+         NY/Scalp were checked and confirmed to have no equivalent live
+         routine-timeout (Scalp's was already removed in the v0.87 era,
+         Session's TIMEOUT concept only exists inside the backtest
+         walk-forward window, not for live open signals).
+         Cleaned up EMA_SIGNAL_TIMEOUT_SEC's full settings-system
+         footprint rather than leaving a dead setting behind that would
+         silently do nothing: removed from SETTINGS_KEYS, get_settings(),
+         apply_settings() (global declaration + handler), api_ema_
+         status()'s config block, the "↳ EMA тайм-аут (ч)" settings row,
+         and its setInputs binding — both now-orphaned constants (SIGNAL_
+         TIMEOUT_SEC, EMA_SIGNAL_TIMEOUT_SEC) deleted outright rather
+         than left defined-but-unused.
+         FT5_MAX_HOLD_SEC (7 days) deliberately left untouched — asked
+         the user directly rather than assuming, since it's structurally
+         different from the other four: a genuine safety backstop for
+         the case where neither the ROI ladder, sell-signal, nor
+         stoploss ever resolves a position (which the ROI ladder's own
+         design should make very unlikely, but isn't literally
+         impossible on a coin trading sideways in a narrow band
+         indefinitely), not a routine early cutoff of an otherwise-
+         healthy trade the way the other four were. Confirmed to keep it
+         as-is.
+         Verified with py_compile, an actual runtime start, pyflakes
+         (caught and removed one now-genuinely-unused local variable in
+         update_xau_lg_signal_outcomes left over from the timeout
+         removal), and node --check on the extracted <script> block —
+         all clean.
 """
 
 import os
@@ -3919,7 +3964,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.96.4"
+APP_VERSION = "0.97.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4003,8 +4048,6 @@ RR_BOUNCE = float(os.environ.get("VP_RR_BOUNCE", RR))
 RR_BREAKOUT = float(os.environ.get("VP_RR_BREAKOUT", RR))
 BUFFER_PCT_BOUNCE = float(os.environ.get("VP_BUFFER_PCT_BOUNCE", ZONE_BUFFER_PCT))
 BUFFER_PCT_BREAKOUT = float(os.environ.get("VP_BUFFER_PCT_BREAKOUT", ZONE_BUFFER_PCT))
-SIGNAL_TIMEOUT_SEC = int(os.environ.get("VP_SIGNAL_TIMEOUT", 6 * 3600))  # close as TIMEOUT if neither TP/SL hit — shared by Volume and Divergence
-EMA_SIGNAL_TIMEOUT_SEC = int(os.environ.get("VP_EMA_SIGNAL_TIMEOUT", 12 * 3600))  # separate from SIGNAL_TIMEOUT_SEC above, per direct user request — widened to 12h (doubled from the shared 6h default) since EMA's timeout rate looked high (12/46 closed) at the current 6h; adjustable live via settings, doesn't touch Volume/Divergence's shared timeout
 SIGNAL_MAX_STALENESS_SEC = int(os.environ.get("VP_SIGNAL_MAX_STALENESS_SEC", 300))  # 5 min (raised from 3 min — 60s before that, 5 min before that) — a full universe scan cycle now regularly takes ~296s (observed live), since v0.76.0 deliberately lowered WORKERS 12->8 to fix network reliability, which slowed the cycle back down. 180s was too tight for that slower cadence: live data showed "устарел: 17" leading Volume's own rejection counts for a cycle where candidates were actually being found (not the earlier zero-candidate problem) — most of them just aged past 180s before the scan reached them. Raised to roughly match the observed full-cycle duration rather than picked arbitrarily. Entry/SL/TP are computed off that candle's close (sig["price"]), but the real market order fills at whatever price exists NOW — if too much time has passed, price has likely already moved well past where the signal detected it, so the trade enters late into an already-spent move rather than near its start. Reject (skip) the signal if now - candle_close_time exceeds this.
 MFE_TRACK_SEC = int(os.environ.get("VP_MFE_TRACK_SEC", 24 * 3600))  # keep measuring max favorable/adverse excursion this long after detection, past TP/SL/timeout
 # Breakeven stop-move for breakout signals only (bounce is disabled by
@@ -4593,7 +4636,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_sig
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5",
                   "autotrade_size_mode", "autotrade_size_value",
                   "scalp_size_mode", "scalp_size_value",
-                  "ema_min_rr", "ema_signal_timeout_hours",
+                  "ema_min_rr",
                   "ema_adx_filter_enabled", "ema_adx_min", "ema_min_gap_pct",
                   "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session", "autotrade_leverage_session_ny", "autotrade_leverage_xau_lg", "autotrade_leverage_ft5",
                   # v0.93.0 — moved into the settings system specifically so
@@ -4657,7 +4700,6 @@ def get_settings():
         "autotrade_leverage_divergence": AUTOTRADE_LEVERAGE_DIVERGENCE,
         "autotrade_leverage_ema": AUTOTRADE_LEVERAGE_EMA,
         "ema_min_rr": EMA_MIN_RR,
-        "ema_signal_timeout_hours": round(EMA_SIGNAL_TIMEOUT_SEC / 3600, 2),
         "ema_adx_filter_enabled": EMA_ADX_FILTER_ENABLED,
         "ema_adx_min": EMA_ADX_MIN,
         "ema_min_gap_pct": EMA_MIN_GAP_PCT,
@@ -4688,7 +4730,6 @@ def apply_settings(updates):
     global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
     global SCALP_SIZE_MODE, SCALP_SIZE_VALUE
     global EMA_MIN_RR
-    global EMA_SIGNAL_TIMEOUT_SEC
     global EMA_ADX_FILTER_ENABLED, EMA_ADX_MIN, EMA_MIN_GAP_PCT
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT, SESSION_SL_MULT
     global EMA_SL_ATR_MULT, DIV_SL_ATR_MULT
@@ -4791,13 +4832,6 @@ def apply_settings(updates):
             v = float(updates["ema_min_rr"])
             if v >= 0:  # 0 is a valid value here (disables the filter), unlike the size fields above
                 EMA_MIN_RR = v
-        except (TypeError, ValueError):
-            pass
-    if "ema_signal_timeout_hours" in updates:
-        try:
-            v = float(updates["ema_signal_timeout_hours"])
-            if v > 0:
-                EMA_SIGNAL_TIMEOUT_SEC = int(v * 3600)
         except (TypeError, ValueError):
             pass
     if "ema_adx_filter_enabled" in updates:
@@ -6974,9 +7008,11 @@ def update_divergence_outcomes():
                         elif c["low"] <= sig["tp"]:
                             close_div_signal(sig, "WIN", sig["tp"], exit_candle=c)
 
-            if sig["status"] == "OPEN" and now - sig["detected_at"] > SIGNAL_TIMEOUT_SEC:
-                last_price = candles[-1]["close"] if candles else entry
-                close_div_signal(sig, "TIMEOUT", last_price)
+            # Timeout removed per direct request — a signal now waits as long
+            # as it takes to hit either TP or SL, never expiring into an
+            # ambiguous TIMEOUT result. Matches the same removal already
+            # done for Scalp (v0.87 era) and now applied consistently to
+            # every module that still had one (Volume, Divergence, EMA).
         except Exception as e:
             log_error(f"update_divergence_outcomes {sig.get('symbol')}: {e}")
 
@@ -7164,9 +7200,9 @@ def update_ema_outcomes():
                         elif c["low"] <= sig["tp"]:
                             close_ema_signal(sig, "WIN", sig["tp"], exit_candle=c)
 
-            if sig["status"] == "OPEN" and now - sig["detected_at"] > EMA_SIGNAL_TIMEOUT_SEC:
-                last_price = candles[-1]["close"] if candles else entry
-                close_ema_signal(sig, "TIMEOUT", last_price)
+            # Timeout removed per direct request — see the same removal in
+            # update_divergence_outcomes()'s comment right above for the
+            # full reasoning (applied consistently across every module).
         except Exception as e:
             log_error(f"update_ema_outcomes {sig.get('symbol')}: {e}")
 
@@ -9923,9 +9959,9 @@ def update_signal_outcomes():
                         elif c["low"] <= sig["tp"]:
                             close_signal(sig, "WIN", sig["tp"], exit_candle=c)
 
-            if sig["status"] == "OPEN" and now - sig["detected_at"] > SIGNAL_TIMEOUT_SEC:
-                last_price = candles[-1]["close"] if candles else entry
-                close_signal(sig, "TIMEOUT", last_price)
+            # Timeout removed per direct request — see the same removal in
+            # update_divergence_outcomes()'s comment for the full reasoning
+            # (applied consistently across every module).
         except Exception as e:
             log_error(f"update_signal_outcomes {sig.get('symbol')}: {e}")
 
@@ -11028,7 +11064,6 @@ def xau_lg_scan_symbol_live(symbol):
 
 
 def update_xau_lg_signal_outcomes():
-    now = time.time()
     with state_lock:
         open_signals = [s for s in STATE["xau_lg_signals"] if s["status"] == "OPEN"]
     all_candles = fetch_candles_concurrent([(s["symbol"], XAU_LG_TF, 300) for s in open_signals])
@@ -11055,18 +11090,19 @@ def update_xau_lg_signal_outcomes():
                     if c["low"] <= sig["tp"]:
                         result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
                         break
-            timed_out = (now - sig["detected_at"]) > 24 * 3600
+            # Timeout removed per direct request — see the same removal in
+            # update_divergence_outcomes()'s comment for the full reasoning
+            # (applied consistently across every module that had one,
+            # including this one — found on a second pass, since this
+            # timeout was an inline literal (24 * 3600) rather than a
+            # named constant, so it didn't show up in the first search
+            # for other modules' timeout constants).
             with state_lock:
                 if result:
                     sig["status"] = "CLOSED"
                     sig["result"] = result
                     sig["exit_price"] = exit_price
                     sig["exit_time"] = exit_time
-                elif timed_out:
-                    sig["status"] = "CLOSED"
-                    sig["result"] = "TIMEOUT"
-                    sig["exit_price"] = candles[-1]["close"] if candles else None
-                    sig["exit_time"] = candles[-1]["time"] if candles else None
         except Exception as e:
             log_error(f"xau_lg_outcome {sig['symbol']}: {e}")
 
@@ -11418,7 +11454,6 @@ def api_ema_status():
             "config": {
                 "sl_mode": EMA_SL_MODE, "sl_atr_mult": EMA_SL_ATR_MULT, "rr_fallback": EMA_RR, "tp_pct": EMA_TP_PCT,
                 "min_rr": EMA_MIN_RR,
-                "signal_timeout_hours": round(EMA_SIGNAL_TIMEOUT_SEC / 3600, 2),
                 "adx_filter_enabled": EMA_ADX_FILTER_ENABLED, "adx_min": EMA_ADX_MIN, "adx_period": EMA_ADX_PERIOD,
                 "min_gap_pct": EMA_MIN_GAP_PCT,
                 "len7": EMA_LEN_7, "len14": EMA_LEN_14, "len28": EMA_LEN_28,
@@ -12670,13 +12705,6 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ EMA тайм-аут (ч)</div>
-          <div class="sub">закрыть как TIMEOUT, если ни TP, ни SL не сработали за это время — отдельно от Volume/Дивергенций</div>
-        </div>
-        <input type="number" id="setEmaSignalTimeoutHours" step="1" min="1" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;width:100px;">
-      </div>
-      <div class="settingRow">
-        <div>
           <div class="label">↳ EMA фильтр ADX</div>
           <div class="sub">не торговать кроссовер, если тренд слишком слабый (Уайлдер, стандартный порог)</div>
         </div>
@@ -13916,7 +13944,6 @@ const setValueInputs = {
   scalp_size_mode: document.getElementById('setScalpSizeMode'),
   scalp_size_value: document.getElementById('setScalpSizeValue'),
   ema_min_rr: document.getElementById('setEmaMinRr'),
-  ema_signal_timeout_hours: document.getElementById('setEmaSignalTimeoutHours'),
   ema_adx_min: document.getElementById('setEmaAdxMin'),
   ema_min_gap_pct: document.getElementById('setEmaMinGapPct'),
   autotrade_leverage_bounce: document.getElementById('setAutotradeLevBounce'),
