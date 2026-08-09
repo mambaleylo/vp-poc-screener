@@ -3872,6 +3872,34 @@ v0.96.3 - fixed a real gap, per a direct user question ("галочка
          Ft5, the latter two carrying their modules' own ⚠️ marker),
          wired into the shared setInputs object that already handles
          loading/saving every other toggle generically.
+
+v0.96.4 - clarified FT5's RR display, per direct user correction ("Про
+         re когда я говорил я имел ввиду соотношение тейка и стопа" —
+         they meant the classic take:stop ratio EMA/Divergence/Session
+         show, not the realized-outcome RR v0.96.1 built. Both concepts
+         are legitimately called "RR" and the earlier build picked the
+         wrong one without checking.
+         The honest complication, explained in the UI rather than
+         picking one number and hiding the nuance: FT5's stoploss IS a
+         single fixed price (10%), but its "take profit" isn't — it's a
+         time-decaying ladder (5% right after entry, down to 1% after
+         24h) plus two signal-based exits with no price target at all.
+         So there's no single planned take:stop ratio the way EMA's
+         fixed TP_PCT/SL gives one. Added the closest honest equivalent:
+         each ROI ladder rung divided by the fixed stoploss gives its
+         own ratio (0.1 at the low end up to 0.5 right after entry),
+         computed and shown as a range ("план. тейк:стоп (лесенка)
+         0.10–0.50") in the panel header — pure client-side arithmetic
+         from data the API already returns (config.roi_ladder, config.
+         stoploss_pct), no backend change needed. Verified the exact
+         computation behaviorally against the real ladder values (node
+         -e reproducing the same math), not just read as correct.
+         Kept the realized-RR display from v0.96.1 alongside it (now
+         labeled "реализ. RR" in the header and "RR (факт)" in both
+         table column headers) rather than replacing it — it answers a
+         different, still-useful question (what actually happened),
+         and removing it would lose real information the user didn't
+         ask to lose.
 """
 
 import os
@@ -3891,7 +3919,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.96.3"
+APP_VERSION = "0.96.4"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13563,19 +13591,33 @@ async function refreshFt5() {
   const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
   const avgPnlTxt = ss.avg_pnl_pct !== null && ss.avg_pnl_pct !== undefined ? `${ss.avg_pnl_pct > 0 ? '+' : ''}${ss.avg_pnl_pct}%` : '-';
   const rrTxt = ss.rr_avg !== null && ss.rr_avg !== undefined
-    ? `RR ср. ${ss.rr_avg>0?'+':''}${ss.rr_avg} (медиана ${ss.rr_median>0?'+':''}${ss.rr_median})`
-    : 'RR ещё нет данных';
+    ? `реализ. RR ср. ${ss.rr_avg>0?'+':''}${ss.rr_avg} (медиана ${ss.rr_median>0?'+':''}${ss.rr_median})`
+    : 'реализ. RR ещё нет данных';
+  // Плановое соотношение тейк:стоп — НЕ одно число, как у EMA/Дивергенции/
+  // Сессии, потому что тейк здесь не фиксированная цена, а лесенка по
+  // времени (см. предупреждение ниже): чем дольше сделка открыта, тем
+  // меньше прибыли требуется для автозакрытия. Каждая ступень лесенки
+  // делённая на фиксированный стоп даёт свой RR — показываем весь
+  // диапазон, а не выдумываем одну усреднённую цифру.
+  const roiLadder = cfg.roi_ladder || [];
+  const stoplossPct = cfg.stoploss_pct || 0;
+  const roiRrRange = stoplossPct > 0 && roiLadder.length
+    ? roiLadder.map(r => r[1] / stoplossPct)
+    : [];
+  const plannedRrTxt = roiRrRange.length
+    ? `план. тейк:стоп (лесенка) ${Math.min(...roiRrRange).toFixed(2)}\u2013${Math.max(...roiRrRange).toFixed(2)}`
+    : '';
   const buildTxt = status.last_backtest_finished
     ? `последний перебор параметров: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · монет: ${status.symbols_done}/${status.universe_size}`
     : `перебор параметров ещё не завершился (${status.symbols_done}/${status.universe_size || '?'})`;
   const warnHtml = `
     <div style="background:#2a1f0e;border:1px solid #e0a030;border-radius:10px;padding:10px 14px;margin-bottom:12px;">
       <b style="color:#e0a030;">⚠️ Экспериментально</b><br>
-      <span style="font-size:12px;color:#d9c08a;">Портирована структура Strategy005 (github.com/freqtrade/freqtrade-strategies, автор Gerald Lonlas) — 6 индикаторов (MACD, Minus DI, RSI+Fisher, Stochastic, SAR, SMA) + лесенка тейка по времени + фикс. стоп -10%. Оригинальные hyperopt-параметры взяты из бэктеста на 20 днях 2018 года — почти наверняка переподогнаны под тот период, поэтому НЕ скопированы напрямую: здесь свой перебор параметров на реальных данных этой биржи. Автоторговля и общий симулятор сознательно НЕ подключены — у стратегии нет единого фиксированного тейка (выход по времени/сигналу/стопу), а вся текущая инфраструктура рассчитана на пару SL/TP. Сигналы ниже — информационные, только LONG. RR ниже — реализованный (P&L относительно риска на стопе), не заранее заданный, раз фиксированного тейка нет.</span>
+      <span style="font-size:12px;color:#d9c08a;">Портирована структура Strategy005 (github.com/freqtrade/freqtrade-strategies, автор Gerald Lonlas) — 6 индикаторов (MACD, Minus DI, RSI+Fisher, Stochastic, SAR, SMA) + лесенка тейка по времени + фикс. стоп -10%. Оригинальные hyperopt-параметры взяты из бэктеста на 20 днях 2018 года — почти наверняка переподогнаны под тот период, поэтому НЕ скопированы напрямую: здесь свой перебор параметров на реальных данных этой биржи. Автоторговля и общий симулятор сознательно НЕ подключены — у стратегии нет единого фиксированного тейка (выход по времени/сигналу/стопу), а вся текущая инфраструктура рассчитана на пару SL/TP. Сигналы ниже — информационные, только LONG. Соотношение тейк:стоп здесь не одно число: тейк — лесенка по времени (5%→1%), стоп фиксирован (10%), поэтому ниже показан и плановый диапазон (лесенка/стоп), и реализованный RR по факту закрытых сделок.</span>
     </div>`;
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
-      ТФ ${cfg.tf} · стоп ${(cfg.stoploss_pct*100).toFixed(0)}% · перебор: buy_rsi${JSON.stringify(cfg.grid_buy_rsi)} × buy_fisher${JSON.stringify(cfg.grid_buy_fisher)} × sell_rsi${JSON.stringify(cfg.grid_sell_rsi)}<br>
+      ТФ ${cfg.tf} · стоп ${(cfg.stoploss_pct*100).toFixed(0)}% · ${plannedRrTxt} · перебор: buy_rsi${JSON.stringify(cfg.grid_buy_rsi)} × buy_fisher${JSON.stringify(cfg.grid_buy_fisher)} × sell_rsi${JSON.stringify(cfg.grid_sell_rsi)}<br>
       ${buildTxt}<br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · средний P&L/сделку: ${avgPnlTxt} · ${rrTxt} · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
       <span style="font-size:11px;">Клик по строке сигнала открывает график входа/выхода.</span>
@@ -13596,7 +13638,7 @@ async function refreshFt5() {
   const signalsTableHtml = signals.length ? `
     <div style="overflow-x:auto;margin-bottom:14px;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Entry</th><th>Параметры</th><th>Status</th><th>RR</th><th>Время входа</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Entry</th><th>Параметры</th><th>Status</th><th>RR (факт)</th><th>Время входа</th></tr></thead>
       <tbody>${signalsRows}</tbody>
     </table>
     </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
@@ -13617,7 +13659,7 @@ async function refreshFt5() {
     <div class="dim" style="margin-bottom:6px;"><b>Перебор параметров по монетам</b> (${cfg.backtest_days} дней истории, отбор по среднему P&L на сделку):</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Параметры</th><th>Avg P&L</th><th>RR</th><th>n</th><th>W</th><th>L</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Параметры</th><th>Avg P&L</th><th>RR (факт)</th><th>n</th><th>W</th><th>L</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Перебор параметров ещё не готов.</div>';
