@@ -4021,6 +4021,11 @@ v0.97.2 - added a risk-autotune reset button, per direct user question
          Button — clicking "Очистить FT5" has done nothing since it was
          added. Fixed alongside the new button rather than left for
          later, since it was found in the course of this same work.
+
+v0.97.3 - FT5_LIVE_TOP_N raised 5 -> 10, per direct follow-up request.
+         No other logic changed — same ranking (by the optimizer's own
+         avg_pnl_pct), same 200-symbol analysis pool, just a wider
+         live-scan slice off the top of it.
 """
 
 import os
@@ -4040,7 +4045,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.97.2"
+APP_VERSION = "0.97.3"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4576,7 +4581,7 @@ XAU_LG_SCAN_INTERVAL_SEC = int(os.environ.get("VP_XAU_LG_SCAN_INTERVAL_SEC", 300
 FT5_ENABLED = os.environ.get("VP_FT5_ENABLED", "1") == "1"
 FT5_TF = os.environ.get("VP_FT5_TF", "5m")  # matches Strategy005's own timeframe
 FT5_UNIVERSE_SIZE = int(os.environ.get("VP_FT5_UNIVERSE_SIZE", 200))  # how many symbols get analyzed/optimized — wide net for finding what works
-FT5_LIVE_TOP_N = int(os.environ.get("VP_FT5_LIVE_TOP_N", 5))  # how many of the analyzed symbols (ranked by the optimizer's own avg_pnl_pct) actually get scanned for live signals — per direct user request: analyze broadly, trade narrowly on the best performers only
+FT5_LIVE_TOP_N = int(os.environ.get("VP_FT5_LIVE_TOP_N", 10))  # how many of the analyzed symbols (ranked by the optimizer's own avg_pnl_pct) actually get scanned for live signals — per direct user request: analyze broadly, trade narrowly on the best performers only (raised 5->10 per a follow-up request)
 FT5_BACKTEST_DAYS = int(os.environ.get("VP_FT5_BACKTEST_DAYS", 30))
 FT5_SIGNAL_HISTORY = 200
 FT5_REFRESH_SEC = int(os.environ.get("VP_FT5_REFRESH_SEC", 24 * 3600))  # daily backtest/param-search refresh, same cadence as Volume's optimizer
