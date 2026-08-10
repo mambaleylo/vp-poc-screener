@@ -4207,6 +4207,61 @@ v0.98.2 - fixed a real complaint about VGI, per direct user report
          node --check on the extracted <script> block, and both the
          route/def integrity and stale-default-parameter checks across
          the whole file — all clean.
+
+v0.98.3 - fixed FT5's top-symbol selection to weigh sample frequency, per
+         direct user report ("по ft5 ни одного сигнала за вечер и
+         ночь"). Diagnosed rather than guessed: FT5's entry conditions
+         (4x volume spike + price below SMA40 + RSI/Fisher thresholds
+         all at once) are genuinely rare — with the bare FT5_MIN_
+         BACKTEST_TRADES=5 floor, ranking by raw avg_pnl_pct let a
+         combo with a single lucky trade in a tiny sample outrank a
+         combo firing far more often at a slightly lower average. The
+         "top 10" that actually got live-scanned could therefore be
+         structurally rare setups rather than reliably active ones —
+         illustrated the math directly (n=5 trades over 30 days ≈ once
+         every 6 days per symbol; pooled across 10 symbols, a single
+         evening+night having zero signals is well within normal
+         variance even for a healthy setup, let alone a rare-by-
+         selection one).
+         Fix (user picked this option directly over two alternatives —
+         raising the min-trades floor, or just surfacing n in the UI
+         unchanged): new ft5_ranking_score(avg_pnl_pct, n, k) — score =
+         total_pnl/(n+K) = avg_pnl_pct * n/(n+K), a Bayesian/Wilson-
+         style shrinkage that discounts the average toward zero at
+         small n and converges to the raw average as n grows, so a
+         combo needs both a real edge AND enough trades behind it to
+         rank highly. New FT5_RANK_SHRINKAGE_K (default 15) controls
+         how aggressively small samples get discounted; resolved from
+         the live global at call time (default parameter is None, not
+         a frozen literal), avoiding the exact v0.95.7-class stale-
+         default bug this session already found and fixed elsewhere.
+         Verified the formula's behavior with worked examples before
+         wiring it in (n=30/avg=0.35% correctly outscores n=5/avg=0.5%;
+         a genuinely strong n=5/avg=1.0% outlier can still win, so this
+         isn't a blunt "frequency always wins" rule).
+         Applied consistently everywhere FT5 picks a "best" option:
+         ft5_optimize_symbol()'s within-symbol combo selection (36
+         combos), ft5_backtest_loop()'s cross-symbol live_universe
+         selection (which of the 200 analyzed symbols become the live-
+         scanned FT5_LIVE_TOP_N), and api_ft5_status()'s own display
+         ranking (so what the user sees ranked matches what actually
+         got selected for live scanning, rather than showing one order
+         while a different one determined the real cut). UI: leaderboard
+         table gained a Score column and a green-dot marker on symbols
+         currently in the live pool, with the sorting explanation
+         rewritten to say why (small lucky samples no longer win).
+         Verified end-to-end on synthetic candle data: computed all 21
+         valid grid combos' raw average AND score independently, found
+         a genuine divergence beyond just the #1 spot (a combo with
+         n=17 at nearly the same average correctly outranks one with
+         n=9 that used to rank higher under raw-average sorting), then
+         confirmed ft5_optimize_symbol() actually selects the score-
+         ranked winner in practice — not just read the code and assumed
+         it was correct.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the extracted <script> block, and both the
+         route/def integrity and stale-default-parameter checks — all
+         clean.
 """
 
 import os
@@ -4226,7 +4281,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.98.2"
+APP_VERSION = "0.98.3"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4818,6 +4873,7 @@ FT5_SIGNAL_HISTORY = 200
 FT5_REFRESH_SEC = int(os.environ.get("VP_FT5_REFRESH_SEC", 24 * 3600))  # daily backtest/param-search refresh, same cadence as Volume's optimizer
 FT5_SCAN_INTERVAL_SEC = int(os.environ.get("VP_FT5_SCAN_INTERVAL_SEC", 300))
 FT5_MIN_BACKTEST_TRADES = int(os.environ.get("VP_FT5_MIN_BACKTEST_TRADES", 5))  # a combo with fewer trades than this in the backtest window isn't a confident pick — same bar Volume's optimizer uses (MIN_BACKTEST_TRADES)
+FT5_RANK_SHRINKAGE_K = float(os.environ.get("VP_FT5_RANK_SHRINKAGE_K", 15))  # v0.98.3 — per direct user report of zero live signals over an evening: ranking purely by avg_pnl_pct (with only a bare n>=5 floor) let a small, noisy sample with one lucky trade rank above a symbol that fires far more often at a slightly lower average, so the "top 10" that actually got live-scanned could be structurally rare setups rather than reliably active ones. ft5_ranking_score() below discounts avg_pnl_pct by n/(n+K) — as n grows the score converges to the raw average (a "mature" estimate); at small n it's shrunk hard toward zero, so a combo needs both a real edge AND enough trades to back it up to rank highly.
 
 # Fixed structural parameters (not grid-searched — kept at the original's
 # own defaults, since re-deriving every one of Strategy005's 8 hyperopt
@@ -6092,6 +6148,26 @@ def vgi_evaluate_signal(profile, price, delta_threshold_pct, max_zone_distance_p
             "delta_pct": round(local_delta, 2), "zone_dist_pct": round(dist * 100, 3)}
 
 
+def ft5_ranking_score(avg_pnl_pct, n, k=None):
+    """Frequency-weighted ranking score for FT5 combos/symbols — replaces
+    raw avg_pnl_pct as the selection criterion wherever FT5 picks a
+    "best" option (best param combo per symbol, best symbols for the
+    live-scan pool). score = total_pnl_pct / (n + K) = avg_pnl_pct *
+    n/(n+K): as n grows the discount factor n/(n+K) approaches 1 (score
+    converges to the raw average, a mature estimate); at small n it's
+    shrunk hard toward zero, so a handful of lucky trades can't outrank
+    a combo that fires far more often at a slightly lower average. Same
+    principle as a Bayesian/Wilson-style confidence-weighted average.
+    k defaults to FT5_RANK_SHRINKAGE_K if not given (resolved at call
+    time from the live global, not frozen as a signature default —
+    avoiding the exact v0.95.7-class stale-default bug this session
+    already found and fixed elsewhere)."""
+    if avg_pnl_pct is None or not n:
+        return -999
+    kk = k if k is not None else FT5_RANK_SHRINKAGE_K
+    return avg_pnl_pct * n / (n + kk)
+
+
 def ft5_run_backtest(candles, buy_rsi=26, buy_fisher=5, sell_rsi=74,
                       buy_fastd_min=1, buy_volume_avg=FT5_VOLUME_AVG_PERIOD,
                       buy_volume_mult=FT5_VOLUME_SPIKE_MULT, sma_period=FT5_SMA_PERIOD,
@@ -6194,11 +6270,16 @@ def ft5_run_backtest(candles, buy_rsi=26, buy_fisher=5, sell_rsi=74,
 def ft5_optimize_symbol(symbol):
     """Grid search over (buy_rsi, buy_fisher, sell_rsi) — FT5_PARAM_GRID_
     BUY_RSI x FT5_PARAM_GRID_BUY_FISHER x FT5_PARAM_GRID_SELL_RSI, 36
-    combos. Selects by EV directly (mean pnl_pct per trade) rather than
-    winrate — FT5's trades are already %-based (not a fixed-RR system
-    the way Volume/EMA/Divergence are), so there's no separate winrate-
-    vs-RR translation needed the way Volume's own optimizer required
-    fixing in v0.95.6; average pnl_pct per trade already IS the EV.
+    combos. Selects by ft5_ranking_score() (avg pnl_pct per trade,
+    shrunk by sample size via FT5_RANK_SHRINKAGE_K) rather than raw
+    avg_pnl_pct — per direct user report of zero live signals over an
+    evening, traced to the bare n>=5 floor letting a small, lucky
+    sample outrank a combo that fires far more often at a slightly
+    lower average. FT5's trades are already %-based (not a fixed-RR
+    system the way Volume/EMA/Divergence are), so there's no separate
+    winrate-vs-RR translation needed the way Volume's own optimizer
+    required fixing in v0.95.6 — avg_pnl_pct per trade already IS the
+    EV, this just adds a confidence discount on top of it.
     Mirrors optimize_symbol()'s own shape (grid search, min-trades bar,
     best-effort fallback) for consistency with the rest of this app."""
     now = time.time()
@@ -6206,7 +6287,7 @@ def ft5_optimize_symbol(symbol):
     if len(candles) < 300:
         return {"error": "not enough history"}
     best = None
-    best_avg_pnl = None
+    best_score = None
     tried = []
     for buy_rsi in FT5_PARAM_GRID_BUY_RSI:
         for buy_fisher in FT5_PARAM_GRID_BUY_FISHER:
@@ -6216,22 +6297,23 @@ def ft5_optimize_symbol(symbol):
                 if len(trades) < FT5_MIN_BACKTEST_TRADES:
                     continue
                 avg_pnl = sum(t["pnl_pct"] for t in trades) / len(trades)
-                if best is None or avg_pnl > best_avg_pnl:
+                score = ft5_ranking_score(avg_pnl, len(trades))
+                if best is None or score > best_score:
                     wins = sum(1 for t in trades if t["result"] == "WIN")
                     best = {
                         "buy_rsi": buy_rsi, "buy_fisher": buy_fisher, "sell_rsi": sell_rsi,
                         "trades": len(trades), "wins": wins, "losses": len(trades) - wins,
                         "winrate": round(wins / len(trades) * 100, 1),
-                        "avg_pnl_pct": round(avg_pnl, 3),
+                        "avg_pnl_pct": round(avg_pnl, 3), "score": round(score, 4),
                         "optimized_at": now, "candles_used": len(candles),
                     }
-                    best_avg_pnl = avg_pnl
+                    best_score = score
     if best is None:
         best = {
             "buy_rsi": FT5_PARAM_GRID_BUY_RSI[len(FT5_PARAM_GRID_BUY_RSI) // 2],
             "buy_fisher": FT5_PARAM_GRID_BUY_FISHER[len(FT5_PARAM_GRID_BUY_FISHER) // 2],
             "sell_rsi": FT5_PARAM_GRID_SELL_RSI[len(FT5_PARAM_GRID_SELL_RSI) // 2],
-            "trades": 0, "wins": 0, "losses": 0, "winrate": None, "avg_pnl_pct": None,
+            "trades": 0, "wins": 0, "losses": 0, "winrate": None, "avg_pnl_pct": None, "score": None,
             "optimized_at": now, "candles_used": len(candles),
             "note": f"insufficient trades across all 36 combos tried (max {max(tried) if tried else 0}, need {FT5_MIN_BACKTEST_TRADES}); using middle-of-grid defaults",
         }
@@ -11694,18 +11776,24 @@ def ft5_backtest_loop():
                         STATE["ft5_symbols_done"] += 1
                 except Exception as e:
                     log_error(f"ft5_optimize {symbol}: {e}")
-            # Rank the full FT5_UNIVERSE_SIZE analysis pool by avg_pnl_pct
-            # (same metric/sort key api_ft5_status's own "top" list uses)
-            # and keep only the best FT5_LIVE_TOP_N for live scanning — per
-            # direct user request: analyze widely, trade narrowly. Symbols
-            # with no result, an error, or too few backtested trades sort
-            # to the bottom (avg_pnl_pct is None -> treated as worst) and
-            # naturally never make the live cut.
+            # Rank the full FT5_UNIVERSE_SIZE analysis pool by ft5_ranking_
+            # score() (avg_pnl_pct shrunk by sample size, computed once per
+            # symbol in ft5_optimize_symbol()) and keep only the best FT5_
+            # LIVE_TOP_N for live scanning — per direct user request:
+            # analyze widely, trade narrowly. Switched from raw avg_pnl_pct
+            # (v0.98.0) after a direct report of zero live signals over an
+            # evening: with only a bare n>=5 floor, a small lucky sample
+            # could rank above a symbol firing far more often at a
+            # slightly lower average, so the "top 10" that actually got
+            # live-scanned could be structurally rare setups rather than
+            # reliably active ones. Symbols with no result, an error, or
+            # too few backtested trades sort to the bottom and naturally
+            # never make the live cut.
             with state_lock:
                 overrides = dict(STATE["ft5_symbol_overrides"])
                 ranked = sorted(
                     overrides.items(),
-                    key=lambda kv: (kv[1].get("avg_pnl_pct") if kv[1] and not kv[1].get("error") else None) or -999,
+                    key=lambda kv: (kv[1].get("score") if kv[1] and not kv[1].get("error") else None) or -999,
                     reverse=True,
                 )
                 STATE["ft5_live_universe"] = [sym for sym, _ in ranked[:FT5_LIVE_TOP_N]]
@@ -12672,7 +12760,7 @@ def api_ft5_status():
         last_backtest_finished = STATE["ft5_last_backtest_finished"]
         last_backtest_duration = STATE["ft5_last_backtest_duration"]
     ranked = [dict(v, symbol=sym) for sym, v in overrides.items() if v and not v.get("error")]
-    ranked.sort(key=lambda r: (r.get("avg_pnl_pct") or -999), reverse=True)
+    ranked.sort(key=lambda r: (r.get("score") or -999), reverse=True)
     return jsonify({
         "enabled": FT5_ENABLED,
         "universe_size": len(universe),
@@ -14672,10 +14760,12 @@ async function refreshFt5() {
   const btRows = (status.top || []).map(r => {
     const pnlClass = (r.avg_pnl_pct || 0) >= 0 ? 'win' : 'loss';
     const rr = r.avg_pnl_pct !== null && r.avg_pnl_pct !== undefined && cfg.stoploss_pct ? Math.round((r.avg_pnl_pct / (cfg.stoploss_pct*100)) * 100) / 100 : null;
+    const inLive = (status.live_universe || []).includes(r.symbol);
     return `<tr>
-      <td>${r.symbol}</td>
+      <td>${r.symbol}${inLive ? ' <span style="color:#3ddc97;" title="в живом скане">●</span>' : ''}</td>
       <td class="dim">rsi${r.buy_rsi}/fish${r.buy_fisher}/sell${r.sell_rsi}</td>
       <td class="${pnlClass}">${r.avg_pnl_pct>0?'+':''}${r.avg_pnl_pct}%</td>
+      <td class="dim">${r.score !== null && r.score !== undefined ? r.score : '-'}</td>
       <td class="${pnlClass}">${rr !== null ? (rr>0?'+':'')+rr : '-'}</td>
       <td class="dim">n=${r.trades}</td>
       <td class="win">${r.wins}W</td>
@@ -14683,10 +14773,10 @@ async function refreshFt5() {
     </tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
-    <div class="dim" style="margin-bottom:6px;"><b>Перебор параметров по монетам</b> (${cfg.backtest_days} дней истории, отбор по среднему P&L на сделку):</div>
+    <div class="dim" style="margin-bottom:6px;"><b>Перебор параметров по монетам</b> (${cfg.backtest_days} дней истории, отбор по score — среднему P&L, урезанному под размер выборки, чтобы редкая удачная сделка не выигрывала у частого стабильного сетапа). Зелёная точка — монета сейчас в живом скане (топ-${status.live_top_n}):</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Параметры</th><th>Avg P&L</th><th>RR (факт)</th><th>n</th><th>W</th><th>L</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Параметры</th><th>Avg P&L</th><th>Score</th><th>RR (факт)</th><th>n</th><th>W</th><th>L</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Перебор параметров ещё не готов.</div>';
