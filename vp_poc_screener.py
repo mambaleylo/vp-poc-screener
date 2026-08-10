@@ -4428,6 +4428,47 @@ v0.98.6 - CRITICAL FIX: outcome-tracking across seven functions in five
          integrity check, and the stale-default-parameter check — all
          clean. Confirmed zero remaining `>= sig[` occurrences and ten
          correct `> sig[` occurrences across the file.
+
+v0.98.7 - fixed a real flaw in FT5's ranking formula, per direct user
+         report with a concrete counterexample from the live leaderboard:
+         UB_USDT (21W/7L, avg +1.353%) outranked AKE_USDT (13W/2L, avg
+         +1.488%) — a combo with MORE losses AND a lower average beat
+         one with fewer losses and a higher average, purely because
+         UB's larger n gave it a smaller size-based discount under the
+         v0.98.3 formula (avg_pnl_pct * n/(n+K)). That formula rewarded
+         sample size unconditionally but never separately weighed how
+         much of that sample was actual losses — "варианты с бо́льшим
+         количеством стопов должны меньше веса иметь."
+         Replaced with a proper lower-confidence-bound on the mean:
+         ft5_ranking_score(pnls) now computes score = mean - Z*stderr
+         (stderr = sample_std/sqrt(n)) directly from the list of per-
+         trade pnl_pct values, instead of just avg+n. This fixes the
+         reported issue as a natural CONSEQUENCE of the statistics,
+         not a bolted-on second penalty: frequent large losses mixed
+         with modest wins directly inflate the variance (std), which
+         inflates stderr, which lowers the score — the same mechanism
+         that already discounted small samples (small n also inflates
+         stderr) now also discounts high-variance ones, with one
+         formula and one constant (FT5_RANK_Z, default 1.0 — the "one-
+         standard-error rule", replacing FT5_RANK_SHRINKAGE_K) instead
+         of needing a second, separately-tuned loss-count penalty.
+         Verified twice, not just derived and trusted: first on
+         reconstructed synthetic data matching the real screenshot
+         numbers (confirmed AKE's profile scores higher, reversing the
+         old ranking exactly as reported), then again by calling the
+         actual ft5_ranking_score() function as it now exists in the
+         file (not a standalone draft) with the same reconstructed
+         data, confirming the real code produces the same reversal.
+         Updated both docstrings (ft5_optimize_symbol, the ranking
+         comment in ft5_backtest_loop) and the leaderboard's own UI
+         hint text (visible in the reported screenshot, "урезанному под
+         размер выборки") to describe the new formula honestly rather
+         than leaving stale text that no longer matched what the code
+         does.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the extracted <script> block, and both the
+         route/def integrity and stale-default-parameter checks — all
+         clean.
 """
 
 import os
@@ -4447,7 +4488,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.98.6"
+APP_VERSION = "0.98.7"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5040,7 +5081,7 @@ FT5_SIGNAL_HISTORY = 200
 FT5_REFRESH_SEC = int(os.environ.get("VP_FT5_REFRESH_SEC", 24 * 3600))  # daily backtest/param-search refresh, same cadence as Volume's optimizer
 FT5_SCAN_INTERVAL_SEC = int(os.environ.get("VP_FT5_SCAN_INTERVAL_SEC", 300))
 FT5_MIN_BACKTEST_TRADES = int(os.environ.get("VP_FT5_MIN_BACKTEST_TRADES", 5))  # a combo with fewer trades than this in the backtest window isn't a confident pick — same bar Volume's optimizer uses (MIN_BACKTEST_TRADES)
-FT5_RANK_SHRINKAGE_K = float(os.environ.get("VP_FT5_RANK_SHRINKAGE_K", 15))  # v0.98.3 — per direct user report of zero live signals over an evening: ranking purely by avg_pnl_pct (with only a bare n>=5 floor) let a small, noisy sample with one lucky trade rank above a symbol that fires far more often at a slightly lower average, so the "top 10" that actually got live-scanned could be structurally rare setups rather than reliably active ones. ft5_ranking_score() below discounts avg_pnl_pct by n/(n+K) — as n grows the score converges to the raw average (a "mature" estimate); at small n it's shrunk hard toward zero, so a combo needs both a real edge AND enough trades to back it up to rank highly.
+FT5_RANK_Z = float(os.environ.get("VP_FT5_RANK_Z", 1.0))  # v0.98.7 — confidence multiplier for ft5_ranking_score()'s lower-confidence-bound (mean - Z*stderr); Z=1.0 is the "one-standard-error rule" (~84% one-sided confidence), a common, moderate default for this kind of model/combo selection. Higher Z = more conservative (favors low-variance/high-n combos more strongly); lower Z moves closer to trusting the raw average.
 
 # Fixed structural parameters (not grid-searched — kept at the original's
 # own defaults, since re-deriving every one of Strategy005's 8 hyperopt
@@ -6323,24 +6364,46 @@ def vgi_evaluate_signal(profile, price, delta_threshold_pct, max_zone_distance_p
             "delta_pct": round(local_delta, 2), "zone_dist_pct": round(dist * 100, 3)}
 
 
-def ft5_ranking_score(avg_pnl_pct, n, k=None):
-    """Frequency-weighted ranking score for FT5 combos/symbols — replaces
-    raw avg_pnl_pct as the selection criterion wherever FT5 picks a
-    "best" option (best param combo per symbol, best symbols for the
-    live-scan pool). score = total_pnl_pct / (n + K) = avg_pnl_pct *
-    n/(n+K): as n grows the discount factor n/(n+K) approaches 1 (score
-    converges to the raw average, a mature estimate); at small n it's
-    shrunk hard toward zero, so a handful of lucky trades can't outrank
-    a combo that fires far more often at a slightly lower average. Same
-    principle as a Bayesian/Wilson-style confidence-weighted average.
-    k defaults to FT5_RANK_SHRINKAGE_K if not given (resolved at call
-    time from the live global, not frozen as a signature default —
-    avoiding the exact v0.95.7-class stale-default bug this session
-    already found and fixed elsewhere)."""
-    if avg_pnl_pct is None or not n:
+def ft5_ranking_score(pnls, z=None):
+    """Ranking score for FT5 combos/symbols — replaces raw avg_pnl_pct as
+    the selection criterion wherever FT5 picks a "best" option (best
+    param combo per symbol, best symbols for the live-scan pool).
+    v0.98.7: switched from a sample-size-only shrinkage (avg_pnl_pct *
+    n/(n+K)) to a proper lower-confidence-bound on the mean: score =
+    mean - Z * stderr, stderr = sample_std / sqrt(n). Per direct user
+    report with a concrete counterexample: the old formula let a combo
+    with MORE losses (UB_USDT: 21W/7L, avg +1.353%) outrank one with
+    FEWER losses and a HIGHER average (AKE_USDT: 13W/2L, avg +1.488%),
+    purely because UB_USDT's larger n gave it a smaller size-based
+    discount — the old formula rewarded sample size unconditionally,
+    but never separately penalized how much of that sample was actual
+    losses. A lower-confidence-bound fixes this naturally rather than
+    needing a second, separately-tuned loss-count penalty bolted on:
+    frequent large losses mixed with modest wins directly INFLATE the
+    variance (std), which inflates stderr, which lowers the score —
+    the same mechanism that already discounts small samples (small n
+    also inflates stderr) now also discounts high-variance ones,
+    without double-counting or needing a second constant to tune.
+    Reduces to the raw mean as n grows and/or variance shrinks (a
+    mature, consistent estimate), same convergence property the old
+    formula had. Verified directionally on reconstructed data matching
+    the real UB/AKE example: AKE_USDT's lower-variance, fewer-losses
+    profile scored higher under this formula despite a smaller n,
+    reversing the old formula's ranking exactly as reported.
+    z defaults to FT5_RANK_Z if not given (resolved at call time from
+    the live global, not frozen as a signature default — avoiding the
+    exact v0.95.7-class stale-default bug this session already found
+    and fixed elsewhere)."""
+    n = len(pnls) if pnls else 0
+    if n == 0:
         return -999
-    kk = k if k is not None else FT5_RANK_SHRINKAGE_K
-    return avg_pnl_pct * n / (n + kk)
+    mean = sum(pnls) / n
+    if n < 2:
+        return mean
+    zz = z if z is not None else FT5_RANK_Z
+    var = sum((p - mean) ** 2 for p in pnls) / (n - 1)
+    stderr = math.sqrt(var) / math.sqrt(n)
+    return mean - zz * stderr
 
 
 def ft5_run_backtest(candles, buy_rsi=26, buy_fisher=5, sell_rsi=74,
@@ -6445,16 +6508,15 @@ def ft5_run_backtest(candles, buy_rsi=26, buy_fisher=5, sell_rsi=74,
 def ft5_optimize_symbol(symbol):
     """Grid search over (buy_rsi, buy_fisher, sell_rsi) — FT5_PARAM_GRID_
     BUY_RSI x FT5_PARAM_GRID_BUY_FISHER x FT5_PARAM_GRID_SELL_RSI, 36
-    combos. Selects by ft5_ranking_score() (avg pnl_pct per trade,
-    shrunk by sample size via FT5_RANK_SHRINKAGE_K) rather than raw
-    avg_pnl_pct — per direct user report of zero live signals over an
-    evening, traced to the bare n>=5 floor letting a small, lucky
-    sample outrank a combo that fires far more often at a slightly
-    lower average. FT5's trades are already %-based (not a fixed-RR
-    system the way Volume/EMA/Divergence are), so there's no separate
-    winrate-vs-RR translation needed the way Volume's own optimizer
-    required fixing in v0.95.6 — avg_pnl_pct per trade already IS the
-    EV, this just adds a confidence discount on top of it.
+    combos. Selects by ft5_ranking_score() — a lower-confidence-bound
+    on the mean (mean - Z*stderr, v0.98.7) rather than raw avg_pnl_pct.
+    Originally just shrunk by sample size (v0.98.3, fixing a small-
+    lucky-sample-outranks-a-frequent-setup issue), then rebuilt as a
+    proper confidence bound after a direct counterexample showed the
+    size-only version let a combo with MORE losses outrank one with
+    FEWER losses and a higher average, since it only rewarded n and
+    never separately weighed how much of that n was losses — see
+    ft5_ranking_score()'s own docstring for the full reasoning.
     Mirrors optimize_symbol()'s own shape (grid search, min-trades bar,
     best-effort fallback) for consistency with the rest of this app."""
     now = time.time()
@@ -6471,8 +6533,9 @@ def ft5_optimize_symbol(symbol):
                 tried.append(len(trades))
                 if len(trades) < FT5_MIN_BACKTEST_TRADES:
                     continue
-                avg_pnl = sum(t["pnl_pct"] for t in trades) / len(trades)
-                score = ft5_ranking_score(avg_pnl, len(trades))
+                pnls = [t["pnl_pct"] for t in trades]
+                avg_pnl = sum(pnls) / len(pnls)
+                score = ft5_ranking_score(pnls)
                 if best is None or score > best_score:
                     wins = sum(1 for t in trades if t["result"] == "WIN")
                     best = {
@@ -12040,18 +12103,22 @@ def ft5_backtest_loop():
                 except Exception as e:
                     log_error(f"ft5_optimize {symbol}: {e}")
             # Rank the full FT5_UNIVERSE_SIZE analysis pool by ft5_ranking_
-            # score() (avg_pnl_pct shrunk by sample size, computed once per
-            # symbol in ft5_optimize_symbol()) and keep only the best FT5_
-            # LIVE_TOP_N for live scanning — per direct user request:
-            # analyze widely, trade narrowly. Switched from raw avg_pnl_pct
-            # (v0.98.0) after a direct report of zero live signals over an
-            # evening: with only a bare n>=5 floor, a small lucky sample
-            # could rank above a symbol firing far more often at a
-            # slightly lower average, so the "top 10" that actually got
-            # live-scanned could be structurally rare setups rather than
-            # reliably active ones. Symbols with no result, an error, or
-            # too few backtested trades sort to the bottom and naturally
-            # never make the live cut.
+            # score() (a lower-confidence-bound on the mean, v0.98.7 —
+            # computed once per symbol in ft5_optimize_symbol()) and keep
+            # only the best FT5_LIVE_TOP_N for live scanning — per direct
+            # user request: analyze widely, trade narrowly. Went through
+            # two fixes: raw avg_pnl_pct (v0.98.0) let a small lucky
+            # sample rank above a symbol firing far more often at a
+            # slightly lower average; sample-size shrinkage (v0.98.3)
+            # fixed that but still let a combo with MORE losses outrank
+            # one with fewer losses and a higher average, since it never
+            # separately weighed loss frequency, only n. The confidence-
+            # bound version naturally penalizes both small samples and
+            # high-variance ones (frequent large losses inflate variance
+            # directly) with one formula instead of two stacked ad-hoc
+            # discounts. Symbols with no result, an error, or too few
+            # backtested trades sort to the bottom and naturally never
+            # make the live cut.
             with state_lock:
                 overrides = dict(STATE["ft5_symbol_overrides"])
                 ranked = sorted(
@@ -15076,7 +15143,7 @@ async function refreshFt5() {
     </tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
-    <div class="dim" style="margin-bottom:6px;"><b>Перебор параметров по монетам</b> (${cfg.backtest_days} дней истории, отбор по score — среднему P&L, урезанному под размер выборки, чтобы редкая удачная сделка не выигрывала у частого стабильного сетапа). Зелёная точка — монета сейчас в живом скане (топ-${status.live_top_n}):</div>
+    <div class="dim" style="margin-bottom:6px;"><b>Перебор параметров по монетам</b> (${cfg.backtest_days} дней истории, отбор по score — нижней доверительной границе среднего P&L: чем меньше выборка ИЛИ чем больше разброс (частые крупные лоссы вперемешку с выигрышами) — тем сильнее штраф, независимо от n). Зелёная точка — монета сейчас в живом скане (топ-${status.live_top_n}):</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
       <thead><tr><th>Symbol</th><th>Параметры</th><th>Avg P&L</th><th>Score</th><th>RR (факт)</th><th>n</th><th>W</th><th>L</th></tr></thead>
