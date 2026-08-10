@@ -4114,6 +4114,39 @@ v0.98.0 - VGI: full integration of the user's own separate repo
          one step. Ran the established route/def integrity check and
          the mutable-global-as-default-parameter check across the whole
          file (not just new code) before pushing — both clean.
+
+v0.98.1 - graphical chart display for Scalp signals, per the second half
+         of the same request that produced VGI. Scalp's own signal
+         shape (fixed entry/target_price/sl_price) is structurally
+         identical to VGI's (v0.98.0) — rather than duplicating ~90
+         lines of canvas drawing code a third time, openVgiChart()
+         gained an optional (endpoint, extraQuery) pair (default '/api/
+         vgi/chart', '' — existing 2-arg calls unaffected) and a thin
+         openScalpChart(symbol, interval, sigTime) wrapper points it at
+         a new /api/scalp/chart/<symbol> endpoint instead. Same reuse-
+         when-genuinely-identical judgment call already applied to
+         Session NY's chart in v0.94.0 and just reasoned through again
+         for VGI itself.
+         New endpoint returns the same response shape api_vgi_chart
+         does (entry/sl/tp/rr/result/exit/candles) so the shared modal
+         needs no branching — interval is a required extra query param
+         (unlike VGI/FT5, Scalp runs multiple timeframes per symbol at
+         once via SCALP_INTERVALS, so symbol+time alone doesn't uniquely
+         identify a signal). rr computed as target_pct/sl_pct — verified
+         against the exact CYS_USDT example from earlier in this session
+         (RR 0.415), not just trusted as an obviously-correct formula.
+         Signal rows in the Scalp panel are now clickable — used a
+         distinct data-signal-* attribute set (data-signal-symbol/
+         -interval/-time) rather than reusing data-symbol, since the
+         panel's OTHER table (per-symbol recommendations) already uses
+         data-symbol for its own click handler (opens openScalpDetail);
+         reusing the same attribute would have silently double-wired or
+         misrouted clicks on one of the two tables. Verified the actual
+         resulting URL template resolves correctly (node -e), not just
+         read as correct.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the extracted <script> block, and the route/
+         def integrity check — all clean.
 """
 
 import os
@@ -4133,7 +4166,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.98.0"
+APP_VERSION = "0.98.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12705,6 +12738,45 @@ def api_vgi_chart(symbol):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/scalp/chart/<symbol>")
+def api_scalp_chart(symbol):
+    """Same response shape as api_vgi_chart (entry/sl/tp/rr/exit/candles)
+    per direct user request to add graphical display for Scalp signals
+    — Scalp's own record shape (fixed entry/target_price/sl_price) is
+    structurally identical to VGI's, so the frontend reuses the same
+    chart modal (openVgiChart/drawVgiChart) via an endpoint parameter
+    rather than duplicating ~90 lines of canvas drawing code, matching
+    the reuse-when-genuinely-identical judgment call already applied to
+    Session NY's chart in v0.94.0. interval is required in addition to
+    time to disambiguate — a symbol can have open scalp signals on
+    multiple timeframes (SCALP_INTERVALS) at once, unlike VGI/FT5 which
+    only ever run one timeframe."""
+    try:
+        interval = request.args.get("interval", "")
+        sig_time = float(request.args.get("time"))
+        with state_lock:
+            sig = next((s for s in STATE["scalp_signals"]
+                        if s["symbol"] == symbol and s["interval"] == interval and s["time"] == sig_time), None)
+        if sig is None:
+            return jsonify({"error": "signal not found"}), 404
+        interval_sec = INTERVAL_SECONDS.get(interval, 300)
+        lookback_bars = 150
+        fetch_start = sig_time - lookback_bars * interval_sec
+        fetch_end = (sig["exit_time"] + 6 * interval_sec) if sig.get("exit_time") else time.time()
+        candles = get_candles_range(symbol, interval, fetch_start, fetch_end)
+        rr = round(sig["target_pct"] / sig["sl_pct"], 3) if sig.get("sl_pct") else None
+        return jsonify({
+            "symbol": symbol, "candles": candles[-150:], "time": sig_time,
+            "direction": sig["direction"], "entry": sig["entry"],
+            "tp": sig["target_price"], "sl": sig["sl_price"],
+            "result": sig.get("result"), "exit_time": sig.get("exit_time"), "exit_price": sig.get("exit_price"),
+            "rr": rr,
+        })
+    except Exception as e:
+        log_error(f"api_scalp_chart {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/reset/vgi", methods=["POST"])
 def api_reset_vgi():
     try:
@@ -14068,7 +14140,8 @@ async function refreshScalp() {
       ${buildTxt} · без безопасной конфигурации: ${status.no_safe_config_count}<br>
       <b>Живые сигналы</b> (вход на закрытии свечи, топ-${cfg.signal_top_n || 1} по score): ${ssWr} (${ss.wins||0}W/${ss.losses||0}L/${ss.timeouts||0}TIMEOUT) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
       <span style="font-size:11px;">~ рядом с буфером = MMR не подтверждён с Gate.io, используется консервативный дефолт ${(cfg.default_mmr_pct*100).toFixed(2)}%<br>
-      ~ рядом с плечом = макс. плечо биржи для монеты не подтверждено, используется дефолт ${cfg.default_max_leverage}x — проверь реальный лимит на бирже перед входом</span>
+      ~ рядом с плечом = макс. плечо биржи для монеты не подтверждено, используется дефолт ${cfg.default_max_leverage}x — проверь реальный лимит на бирже перед входом<br>
+      Клик по строке живого сигнала открывает график входа/выхода.</span>
     </div>
     ${mfeMaeHtml}`;
   const signalsRows = signals.map(s => {
@@ -14078,7 +14151,7 @@ async function refreshScalp() {
     else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
     else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
     else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
-    return `<tr>
+    return `<tr data-signal-symbol="${s.symbol}" data-signal-interval="${s.interval}" data-signal-time="${s.time}" style="cursor:pointer;">
       <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td><td class="dim">${s.interval}</td>
       <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.target_price)} (${s.target_pct}%)</td>
       <td class="dim">${s.sl_price !== undefined ? fmt(s.sl_price)+' ('+s.sl_pct+'%)' : '-'}</td>
@@ -14094,6 +14167,9 @@ async function refreshScalp() {
     </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
   if (!status.top || status.top.length === 0) {
     panel.innerHTML = headerHtml + signalsTableHtml + '<div class="dim">Пока нет рекомендаций — либо ещё считается, либо ни одна монета не прошла проверку безопасности при текущих настройках.</div>';
+    document.querySelectorAll('#scalpPanel tbody tr[data-signal-time]').forEach(tr => {
+      tr.onclick = () => openScalpChart(tr.dataset.signalSymbol, tr.dataset.signalInterval, tr.dataset.signalTime);
+    });
     return;
   }
   const rows = status.top.map((r, i) => fmtScalpRow(r, i + 1)).join('');
@@ -14111,6 +14187,9 @@ async function refreshScalp() {
     <div id="scalpDetail" style="margin-top:12px;"></div>`;
   document.querySelectorAll('#scalpPanel tbody tr[data-symbol]').forEach(tr => {
     tr.onclick = () => openScalpDetail(tr.dataset.symbol);
+  });
+  document.querySelectorAll('#scalpPanel tbody tr[data-signal-time]').forEach(tr => {
+    tr.onclick = () => openScalpChart(tr.dataset.signalSymbol, tr.dataset.signalInterval, tr.dataset.signalTime);
   });
 }
 
@@ -15661,12 +15740,12 @@ function drawFt5Chart(data) {
 const vgiModal = document.getElementById('vgiModal');
 document.getElementById('vgiCloseBtn').onclick = () => vgiModal.classList.remove('open');
 
-async function openVgiChart(symbol, sigTime) {
+async function openVgiChart(symbol, sigTime, endpoint = '/api/vgi/chart', extraQuery = '') {
   document.getElementById('vgiModalTitle').textContent = symbol;
   document.getElementById('vgiModalParams').textContent = 'загрузка...';
   vgiModal.classList.add('open');
   try {
-    const data = await (await fetch(`/api/vgi/chart/${symbol}?time=${sigTime}`)).json();
+    const data = await (await fetch(`${endpoint}/${symbol}?time=${sigTime}${extraQuery}`)).json();
     if (data.error) { document.getElementById('vgiModalParams').textContent = data.error; return; }
     const resTxt = data.result ? ` · ${data.result}${data.exit_price !== null && data.exit_price !== undefined ? ' @ '+fmtNum(data.exit_price) : ''}` : ' · OPEN';
     document.getElementById('vgiModalParams').textContent =
@@ -15675,6 +15754,16 @@ async function openVgiChart(symbol, sigTime) {
   } catch (e) {
     document.getElementById('vgiModalParams').textContent = `ошибка загрузки: ${e}`;
   }
+}
+
+function openScalpChart(symbol, interval, sigTime) {
+  // Thin wrapper, not a duplicate — Scalp's signal shape (fixed entry/
+  // target_price/sl_price) is structurally identical to VGI's, so this
+  // reuses the exact same modal/canvas (openVgiChart/drawVgiChart)
+  // rather than duplicating ~90 lines of canvas drawing code. Same
+  // reuse-when-genuinely-identical judgment call already applied to
+  // Session NY's chart in v0.94.0.
+  return openVgiChart(symbol, sigTime, '/api/scalp/chart', `&interval=${interval}`);
 }
 
 function drawVgiChart(data) {
