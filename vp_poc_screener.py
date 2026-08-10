@@ -4307,6 +4307,74 @@ v0.98.4 - fixed VGI's backtest loop silently stalling, diagnosed live
          — clean. (Session's own RR/SL-mult autotune work, requested in
          the same conversation, was paused mid-way to handle this
          time-sensitive live issue first — continues next.)
+
+v0.98.5 - Session's RR is now managed by risk-autotune end to end, per
+         direct user request ("Надо чтобы этим управлял автотюнинг")
+         after establishing that SESSION_REVERSE_RR was a permanently
+         hardcoded "2" (the tp = entry +/- risk*2 formula, literal in
+         the code) and SESSION_SL_MULT couldn't be overshoot-tuned like
+         EMA/Divergence/Scalp's own SL-width knobs because Session had
+         no MFE/MAE tracking on its signals at all — a real, previously
+         acknowledged gap, not silently worked around.
+         Added MFE/MAE tracking to Session (update_session_signal_
+         outcomes(), mirroring update_divergence_outcomes()'s live-
+         tracking shape but without the post-close continued-tracking
+         window, since risk_autotune_pass() only ever needs the at-
+         close values) — R = abs(entry-sl), the actual risk used at
+         signal creation, which correctly covers both non-inverted
+         trades (sweep-based stop) and inverted trades (risk*SESSION_SL_
+         MULT-widened stop) since sl was already set correctly per-mode
+         when the record was created. compute_session_signal_stats()
+         gained the same mfe_r_wins_at_close/mae_r_losses_at_close
+         aggregates (avg/median/p25/p75) EMA/Divergence/Scalp already
+         expose.
+         New SESSION_REVERSE_RR constant (default 2.0) replaces the
+         literal "2" in both reverse-mode TP formulas (LONG and SHORT
+         branches), wired through the full settings system (SETTINGS_
+         KEYS/get_settings/apply_settings/setter) same as SESSION_SL_
+         MULT already was.
+         _risk_autotune_tp_extend() (previously EMA/DIV-only, %-of-price
+         scale) gained an optional bounds parameter so Session could
+         reuse it directly for an RR-scale value instead of duplicating
+         the function — passing SESSION_REVERSE_RR as both current_tp_
+         pct and current_rr works cleanly since Session's target is
+         already natively expressed as a pure R-multiple, no %-of-price
+         translation needed the way EMA/DIV require. New RISK_AUTOTUNE_
+         SESSION_RR_BOUNDS (0.5-5.0), since a valid RR range and a valid
+         %-of-price range (0.3%-5%) share nothing but both being "some
+         positive number." Verified behaviorally, not just read as
+         correct: called the rule with win_mfe_r=3.0 against current
+         RR=2.0, confirmed it moved to 2.2 (the bounded per-pass step,
+         not jumping straight to 3.0) using the RR-scale bounds rather
+         than the %-scale ones that would have clamped it to ~0.05.
+         risk_autotune_pass()'s Session block rewritten to call compute_
+         session_signal_stats() directly (matching EMA's own structure)
+         instead of the old _session_reverse_stats() helper (deleted —
+         it only had this one call site, and its whole reason to exist,
+         "no MFE/MAE data," no longer applies). All three rules — reverse
+         flag, SL-mult, RR-extend — only run while SESSION_INVERT_
+         SIGNALS is on, since only the inverted sizing is risk/RR-based;
+         noted the same caveat the codebase already accepts elsewhere in
+         this system: records don't distinguish which mode a closed
+         trade opened under, so this reacts to recent aggregate stats
+         under the assumption the reverse flag hasn't flipped recently
+         (its own 24h cooldown usually makes that true), not a per-trade
+         exact reconstruction.
+         api_reset_risk_autotune() now also resets SESSION_SL_MULT/
+         SESSION_REVERSE_RR to their code defaults, matching every other
+         tuned parameter. api_session_status()'s config gained sl_mult/
+         reverse_rr; the panel header's hardcoded "РЕВЕРС ВКЛЮЧЁН (RR 2)"
+         text now shows the real live values, and a new MFE/MAE display
+         block (matching Scalp's own) was added to the Session panel.
+         Also fixed the same hardcoded "(RR 2)" text in the settings
+         modal's Session row (Session NY's own row correctly keeps it —
+         that module wasn't touched this round, still genuinely fixed
+         at 2, noted explicitly as a known, currently out-of-scope
+         parallel gap rather than silently left inconsistent).
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the extracted <script> block, and both the
+         route/def integrity and stale-default-parameter checks — all
+         clean.
 """
 
 import os
@@ -4326,7 +4394,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.98.4"
+APP_VERSION = "0.98.5"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7228,8 +7296,25 @@ def compute_session_signal_stats():
     open_n = sum(1 for s in signals if s["status"] == "OPEN")
     total_closed = len(closed)
     winrate = round(wins / total_closed * 100, 1) if total_closed else None
+
+    def agg(key, subset):
+        vals = [s[key] for s in subset if s.get(key) is not None]
+        if not vals:
+            return None
+        vals_sorted = sorted(vals)
+        n = len(vals_sorted)
+        return {
+            "avg": round(sum(vals) / n, 3), "median": round(vals_sorted[n // 2], 3),
+            "p25": round(vals_sorted[int(n * 0.25)], 3),
+            "p75": round(vals_sorted[min(int(n * 0.75), n - 1)], 3), "n": n,
+        }
+
+    win_set = [s for s in closed if s["result"] == "WIN"]
+    loss_set = [s for s in closed if s["result"] == "LOSS"]
     return {"total": len(signals), "wins": wins, "losses": losses, "timeouts": timeouts,
-            "open": open_n, "winrate": winrate}
+            "open": open_n, "winrate": winrate,
+            "mfe_r_wins_at_close": agg("mfe_r_at_close", win_set), "mae_r_wins_at_close": agg("mae_r_at_close", win_set),
+            "mfe_r_losses_at_close": agg("mfe_r_at_close", loss_set), "mae_r_losses_at_close": agg("mae_r_at_close", loss_set)}
 
 
 def update_session_ny_signal_outcomes():
@@ -11144,17 +11229,19 @@ def reconcile_loop():
 # EV). NOT the same system as auto_tune_cycle()/AUTO_TUNE_ENABLED above,
 # which searches Volume Profile detection parameters per symbol — this one
 # tunes EMA_MIN_RR, DIV_MIN_RR, SCALP_MIN_RR (a floor on target/stop ratio),
-# EMA_SL_ATR_MULT, DIV_SL_ATR_MULT, SCALP_SL_BUFFER_MULT (stop width), and
-# DIV_INVERT_SIGNALS/EMA_INVERT_SIGNALS/SESSION_INVERT_SIGNALS (direction).
+# EMA_SL_ATR_MULT, DIV_SL_ATR_MULT, SCALP_SL_BUFFER_MULT, SESSION_SL_MULT
+# (stop width), SESSION_REVERSE_RR/EMA_TP_PCT/DIV_TP_PCT (target extension),
+# and DIV_INVERT_SIGNALS/EMA_INVERT_SIGNALS/SESSION_INVERT_SIGNALS (direction).
 # Per direct user request for FULL automation including reverse — the
 # safeguards below (min sample sizes, bounded step sizes, cooldowns) aren't
 # a hedge against that choice, just how "automatic" avoids being self-
 # destructive on noisy data: a fixed formula chasing every small sample
 # would thrash a parameter back and forth on noise alone.
-# Known gap: Session has no MFE/MAE tracking on its signals at all (never
-# added), so SESSION_SL_MULT can't be auto-tuned the same overshoot-based
-# way as the other three SL-width knobs — only its reverse flag is tunable
-# here, computed directly from entry/sl/exit_price instead.
+# v0.98.4: Session gained MFE/MAE tracking (update_session_signal_outcomes())
+# specifically so SESSION_SL_MULT and SESSION_REVERSE_RR (previously a
+# hardcoded "2", never tunable at all) could join the other modules' full
+# overshoot/target-extend treatment instead of only ever being changed by
+# hand — this used to be a known, permanent gap; it isn't anymore.
 # ----------------------------------------------------------------------------
 RISK_AUTOTUNE_ENABLED = os.environ.get("VP_RISK_AUTOTUNE_ENABLED", "1") == "1"
 RISK_AUTOTUNE_INTERVAL_SEC = int(os.environ.get("VP_RISK_AUTOTUNE_INTERVAL_SEC", 3600))  # hourly
@@ -11181,6 +11268,7 @@ RISK_AUTOTUNE_REVERSE_EV_THRESHOLD = -0.03  # only flip a direction flag if the 
 RISK_AUTOTUNE_TP_TOLERANCE_RATIO = 0.15  # ignore if WIN MFE is within 15% of the current RR — avoid chasing noise
 RISK_AUTOTUNE_TP_STEP_RATIO = 0.1  # max 10% change to TP_PCT per pass — same bounded-step philosophy as the RR/SL-mult nudges
 RISK_AUTOTUNE_TP_PCT_BOUNDS = (0.003, 0.05)  # 0.3%-5% — sane range; below is barely worth the fees, above is an unrealistic single fixed target
+RISK_AUTOTUNE_SESSION_RR_BOUNDS = (0.5, 5.0)  # v0.98.4 — Session's SESSION_REVERSE_RR is an RR multiple, not a %-of-price like EMA/DIV's TP_PCT, so it needs its own bounds on a completely different scale when reusing _risk_autotune_tp_extend for it
 
 
 def _risk_autotune_log(module, param, old_value, new_value, reason, sample_n):
@@ -11434,6 +11522,18 @@ def _set_session_invert(v):
     save_settings()
 
 
+def _set_session_sl_mult(v):
+    global SESSION_SL_MULT
+    SESSION_SL_MULT = v
+    save_settings()
+
+
+def _set_session_reverse_rr(v):
+    global SESSION_REVERSE_RR
+    SESSION_REVERSE_RR = v
+    save_settings()
+
+
 def _scalp_closed_rr_stats():
     """Median target_pct/sl_pct ratio across closed scalp trades — scalp
     doesn't carry a stats-function-level rr_all the way EMA/Divergence
@@ -11456,27 +11556,6 @@ def _scalp_loss_mae_avg_r():
     if not vals:
         return None, 0
     return sum(vals) / len(vals), len(vals)
-
-
-def _session_reverse_stats():
-    """Session has no MFE/MAE tracking on its signals (never added — a
-    real gap, not silently worked around), so this computes realized R
-    directly from entry/sl/exit_price on CLOSED trades instead. Only
-    meaningful while SESSION_INVERT_SIGNALS is on: only the inverted
-    sizing is risk/RR-based (see detect_session_manipulation()) — the
-    non-inverted TP sits at the opposite range edge, an arbitrary
-    distance unrelated to risk, so there's no consistent "R" to compute
-    for that side. Returns (winrate_pct, rr, n); rr is fixed at
-    SESSION_SL_MULT-derived RR=2 by construction when inverted."""
-    with state_lock:
-        signals = list(STATE["session_signals"])
-    closed = [s for s in signals if s.get("status") == "CLOSED" and s.get("result") in ("WIN", "LOSS")]
-    n = len(closed)
-    if not n:
-        return None, None, 0
-    wins = sum(1 for s in closed if s["result"] == "WIN")
-    winrate_pct = round(wins / n * 100, 1)
-    return winrate_pct, 2.0, n  # RR=2 fixed by SESSION_INVERT_SIGNALS's own construction (v0.80.0)
 
 
 def risk_autotune_pass():
@@ -11540,12 +11619,38 @@ def risk_autotune_pass():
         log_error(f"risk_autotune scalp: {e}")
 
     try:
-        if SESSION_INVERT_SIGNALS:  # see _session_reverse_stats' docstring — only meaningful in inverted mode
-            winrate, rr, n = _session_reverse_stats()
-            if winrate is not None:
-                _risk_autotune_reverse("session", "session_invert_signals", SESSION_INVERT_SIGNALS, winrate, rr, n, _set_session_invert)
-        # session_sl_mult intentionally not auto-tuned — no MFE/MAE data
-        # exists to base an overshoot check on (see module docstring above).
+        s = compute_session_signal_stats()
+        winrate = s.get("winrate")
+        closed_n = (s.get("wins", 0) or 0) + (s.get("losses", 0) or 0)
+        loss_mae = s.get("mae_r_losses_at_close")
+        win_mfe = s.get("mfe_r_wins_at_close")
+        # v0.98.4: was "no MFE/MAE data exists to base an overshoot check
+        # on" — per direct user request to have autotune manage
+        # SESSION_SL_MULT and the RR itself (previously a permanently
+        # hardcoded "2"), Session signals now track mfe_r/mae_r the same
+        # way EMA/Divergence do (update_session_signal_outcomes()), so
+        # all three rules below use real data instead of either being
+        # skipped or assuming a fixed overshoot=1.0/RR=2.
+        # All three only apply in inverted mode: only SESSION_INVERT_
+        # SIGNALS's own sizing is risk/RR-based (see detect_session_
+        # manipulation()) — the non-inverted TP sits at the opposite
+        # range edge, an arbitrary distance unrelated to risk, so there's
+        # no consistent "R" to tune for that side. This app's records
+        # don't currently distinguish which mode a CLOSED trade was
+        # opened under, so — same level of rigor the rest of this
+        # already-approximate system uses — this reacts to the most
+        # recent aggregate stats under the assumption the reverse flag
+        # hasn't flipped recently (its own 24h cooldown makes that
+        # usually true), not a per-trade-exact reconstruction.
+        if SESSION_INVERT_SIGNALS:
+            if winrate is not None and closed_n:
+                _risk_autotune_reverse("session", "session_invert_signals", SESSION_INVERT_SIGNALS, winrate, SESSION_REVERSE_RR, closed_n, _set_session_invert,
+                                        avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
+            if loss_mae:
+                _risk_autotune_sl_mult("session", "session_sl_mult", SESSION_SL_MULT, loss_mae["avg"], s.get("losses", 0) or 0, _set_session_sl_mult)
+            if win_mfe:
+                _risk_autotune_tp_extend("session", "session_reverse_rr", SESSION_REVERSE_RR, win_mfe["median"], SESSION_REVERSE_RR, closed_n, _set_session_reverse_rr,
+                                          bounds=RISK_AUTOTUNE_SESSION_RR_BOUNDS)
     except Exception as e:
         log_error(f"risk_autotune session: {e}")
 
@@ -12631,6 +12736,7 @@ def api_session_status():
             "manipulation_window_min": SESSION_MANIPULATION_WINDOW_MIN,
             "min_sample": SESSION_MIN_SAMPLE, "backtest_days": SESSION_BACKTEST_DAYS,
             "invert_signals": SESSION_INVERT_SIGNALS,
+            "sl_mult": SESSION_SL_MULT, "reverse_rr": SESSION_REVERSE_RR,
         },
         "top": ranked,
     })
@@ -13111,6 +13217,8 @@ def api_reset_risk_autotune():
         _set_scalp_min_rr(0.5)
         _set_scalp_sl_buffer_mult(0.25)
         _set_session_invert(False)
+        _set_session_sl_mult(1.5)
+        _set_session_reverse_rr(2.0)
         with state_lock:
             STATE["risk_autotune_log"].clear()
             STATE["risk_autotune_last_change"] = {}
@@ -13694,8 +13802,8 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Реверс сигналов (RR 2)</div>
-          <div class="sub">торговать в обратную сторону; риск как у обычного стопа, тейк = 2×риска</div>
+          <div class="label">↳ Реверс сигналов</div>
+          <div class="sub">торговать в обратную сторону; риск как у обычного стопа, тейк = RR×риска — сам RR и множитель стопа теперь управляются авто-тюнингом, см. вкладку Сессия</div>
         </div>
         <label class="switch"><input type="checkbox" id="setSessionInvert"><span class="switchSlider"></span></label>
       </div>
@@ -14546,17 +14654,26 @@ async function refreshSession() {
     const label = {ranked: 'в рейтинге', zero_manipulations_found: 'манипуляций не найдено', not_yet_processed: 'ещё считается', not_in_universe: 'не в вселенной'}[w.status] || w.status;
     return `${sym}: ${label}${w.n !== null && w.n !== undefined ? ' (n='+w.n+')' : ''}`;
   }).join(' · ');
+  const mfeMaeHtml = (ss.wins || ss.losses) ? `
+    <div style="margin-bottom:8px;"><b>MFE/MAE (R, R = риск конкретной сделки) на закрытии</b> — сколько реально было хода в плюс/минус к моменту исхода (${ss.wins||0}W/${ss.losses||0}L):<br>
+      <span class="win">WIN MFE: ${fmtStat(ss.mfe_r_wins_at_close)}</span><br>
+      <span class="win">WIN MAE: ${fmtStat(ss.mae_r_wins_at_close)}</span><br>
+      <span class="loss">LOSS MFE: ${fmtStat(ss.mfe_r_losses_at_close)}</span><br>
+      <span class="loss">LOSS MAE: ${fmtStat(ss.mae_r_losses_at_close)}</span><br>
+      <span class="dim" style="font-size:11px;">Только для реверс-режима (RR риск/тейк-based) — в обычном режиме тейк это край диапазона, R там не единая величина. Эти цифры теперь и питают авто-тюнинг SESSION_SL_MULT/RR.</span>
+    </div>` : '<div class="dim" style="margin-bottom:8px;">MFE/MAE статистика пока копится — нужны закрытые сделки.</div>';
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
       Открытие сессии: ${cfg.open_hour_local}:00 (UTC+${cfg.utc_offset_hours}, фикс.) · диапазон проторговки: с ${cfg.range_start_utc_hour}:00 UTC до открытия, ТФ ${cfg.range_tf} ·
-      окно манипуляции: первые ${cfg.manipulation_window_min} мин после открытия · мин. выборка для ранжирования: ${cfg.min_sample}${cfg.invert_signals ? ' · <span style="color:#ffcc55;font-weight:bold;">РЕВЕРС ВКЛЮЧЁН (RR 2)</span>' : ''}<br>
+      окно манипуляции: первые ${cfg.manipulation_window_min} мин после открытия · мин. выборка для ранжирования: ${cfg.min_sample}${cfg.invert_signals ? ` · <span style="color:#ffcc55;font-weight:bold;">РЕВЕРС ВКЛЮЧЁН (RR ${cfg.reverse_rr}, множитель стопа ${cfg.sl_mult})</span>` : ''}<br>
       ${buildTxt} · ${nextOpenTxt}<br>
       Монет в рейтинге: ${(status.top||[]).length} · манипуляций не найдено: ${status.zero_manipulation_count||0} · ещё не обработано: ${status.not_yet_processed_count||0}<br>
       ${watchTxt}<br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
       <span style="font-size:11px;">~ рядом с винрейтом = меньше минимальной выборки (${cfg.min_sample}) — цифра пока ненадёжна<br>
       "манипуляций не найдено" = монета прошла отбор по ликвидности и была проверена, просто ни разу не дала подходящий паттерн — не исключена как неликвидная</span>
-    </div>`;
+    </div>
+    ${mfeMaeHtml}`;
   const signalsRows = signals.map(s => {
     const dirClass = s.direction === 'LONG' ? 'long' : 'short';
     let statusHtml;
