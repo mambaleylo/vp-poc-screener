@@ -4026,6 +4026,94 @@ v0.97.3 - FT5_LIVE_TOP_N raised 5 -> 10, per direct follow-up request.
          No other logic changed — same ranking (by the optimizer's own
          avg_pnl_pct), same 200-symbol analysis pool, just a wider
          live-scan slice off the top of it.
+
+v0.98.0 - VGI: full integration of the user's own separate repo
+         (github.com/mambaleylo/vgi-trader), per direct request —
+         "возьми его логику и интегрируй нам новой вкладкой со всеми
+         плюшками, уведомления, автоторговлю, графическое отображение".
+         Source is a Python re-implementation of the TradingView
+         indicator "Volume Gaps & Imbalances (Zeiierman)" (CC BY-NC-SA
+         4.0 — the original Pine isn't reproduced, this is a further
+         independent re-port of the author's own already-independent
+         port): builds a row-based volume profile over a rolling
+         lookback window, finds zero-volume "gap" zones (merged runs of
+         empty adjacent rows — "price magnets"), and per-section delta
+         ((Bull-Bear)/Total*100) for local bias. Direction comes from
+         local delta first, falls back to the nearest zone if delta is
+         neutral, and skips entirely if delta and the nearest zone
+         disagree (source's own "too much noise" reasoning). TP = far
+         edge of the nearest zone; SL = reward/min_rr, guaranteeing
+         RR >= min_rr by construction (stop sized FROM the target, not
+         measured independently).
+         Ported to pure Python (vgi_build_profile/vgi_section_at_price/
+         vgi_nearest_zone/vgi_evaluate_signal) — no numpy, unlike the
+         source, staying consistent with this whole app's stdlib-only
+         style rather than adding a dependency for one module on a
+         phone/Termux setup. Verified behaviorally against synthetic
+         candle data before building anything on top: zones/sections
+         computed correctly, RR exactly matched the configured minimum.
+         Found and fixed the symbol-selection bug the user reported
+         ("сейчас тупо по алфавиту первые 40 чтоли берет"): the source's
+         own resolve_symbols() (trader.py) sorts by volume_24h_quote
+         from Gate.io's /contracts endpoint, which this app already
+         learned (building ft5_build_universe/build_session_universe)
+         is frequently empty there — an always-zero sort key makes
+         Python's stable sort a no-op, silently preserving whatever
+         order /contracts happened to return (plausibly close to
+         alphabetical/ID order, matching exactly what was observed).
+         vgi_build_universe() uses get_tickers() with the same fallback
+         field chain already proven correct for FT5/Session instead.
+         Unlike FT5, VGI genuinely has ONE fixed (SL, TP) pair per
+         signal — so real autotrade and the shared paper simulator ARE
+         wired (execute_autotrade()/sim_execute_trade(), both called
+         from vgi_scan_symbol_live() when AUTOTRADE_ENABLED_VGI is on,
+         off by default same as every other module here), with a real
+         settings-UI leverage/toggle row (unlike FT5/XAU_LG, which
+         deliberately left autotrade UI-less as a scope decision — VGI
+         gets the full row since the user asked for autotrade as a
+         first-class feature and the fixed-TP/SL shape makes it honest
+         to offer).
+         vgi_run_backtest(): walk-forward backtest the source repo
+         doesn't have at all (it's a live-only "online" screener) — built
+         anyway per this session's standing discipline of testing before
+         trusting a source's own design. At each closed bar, rebuilds
+         the profile using ONLY candles up to that bar (no lookahead),
+         evaluates a signal, and tracks forward for TP/SL touch, one
+         position at a time. Verified on synthetic random-walk data:
+         132 trades, all internally consistent, win rate slightly below
+         the RR=3 breakeven (25%) — exactly what a real edge-free random
+         walk should produce, not a red flag.
+         Telegram alerts on both open (vgi_scan_symbol_live) and close
+         (update_vgi_signal_outcomes, same lock-then-send-after-release
+         pattern FT5's v0.96.2 established, to avoid holding state_lock
+         during network I/O), each with their own settings toggle.
+         Chart modal: own dedicated modal (vgiModal/openVgiChart/
+         drawVgiChart) rather than reusing FT5's or Session's — VGI's
+         shape (fixed entry/sl/tp, no ROI ladder, no session range box)
+         doesn't match either closely enough to force a clean reuse, so
+         a new ~90-line self-contained function was the safer choice,
+         same judgment call already applied for FT5's own chart.
+         Full plumbing otherwise matches the established per-module
+         shape: STATE persistence through save_state()/load_state(),
+         has_open_signal_any_module() cross-module guard, sim-trade
+         relink module_lists entry (VGI participates in the shared
+         simulator, unlike FT5), daemon threads (vgi_backtest_loop/
+         vgi_live_loop), three-plus-one API endpoints (/api/vgi/status,
+         /signals, /chart/<symbol>, /api/reset/vgi), new "VGI" tab (no
+         warning-color styling, unlike XAU_LG/FT5 — this is the user's
+         own carefully-reasoned indicator with a real RR guarantee, not
+         a shaky external source, though the panel does note real
+         performance is still unverified until backtest numbers exist).
+         Process discipline notes: while inserting the core math
+         functions, a str_replace's old_str matched only the first line
+         of ft5_run_backtest()'s multi-line signature, and the new_str
+         dropped the rest — decapitating it again, same class of mistake
+         as v0.96.0's refreshAutotradeBanner and v0.97.2's api_reset_ema
+         incidents. This time py_compile caught it immediately (genuine
+         Python syntax breakage, unlike the JS-in-string case), fixed in
+         one step. Ran the established route/def integrity check and
+         the mutable-global-as-default-parameter check across the whole
+         file (not just new code) before pushing — both clean.
 """
 
 import os
@@ -4045,7 +4133,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.97.3"
+APP_VERSION = "0.98.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4582,6 +4670,55 @@ FT5_ENABLED = os.environ.get("VP_FT5_ENABLED", "1") == "1"
 FT5_TF = os.environ.get("VP_FT5_TF", "5m")  # matches Strategy005's own timeframe
 FT5_UNIVERSE_SIZE = int(os.environ.get("VP_FT5_UNIVERSE_SIZE", 200))  # how many symbols get analyzed/optimized — wide net for finding what works
 FT5_LIVE_TOP_N = int(os.environ.get("VP_FT5_LIVE_TOP_N", 10))  # how many of the analyzed symbols (ranked by the optimizer's own avg_pnl_pct) actually get scanned for live signals — per direct user request: analyze broadly, trade narrowly on the best performers only (raised 5->10 per a follow-up request)
+
+# ============================================================================
+# VGI — port of mambaleylo/vgi-trader (Volume Gaps & Imbalances), v0.98.0
+# ----------------------------------------------------------------------------
+# Per direct user request: "возьми его логику и интегрируй нам новой вкладкой
+# со всеми плюшками, уведомления, автоторговлю, графическое отображение".
+# Source: github.com/mambaleylo/vgi-trader — the user's OWN separate repo, a
+# Python re-implementation of the TradingView indicator "Volume Gaps &
+# Imbalances (Zeiierman)" (CC BY-NC-SA 4.0 — the original Pine isn't
+# reproduced here, this is a further independent re-port of the author's
+# own already-independent Python port). Ported the math (vgi_build_profile/
+# vgi_evaluate_signal, defined earlier) faithfully; this block is the
+# infrastructure wrapping it — constants, universe, backtest, live scan,
+# autotrade, notifications, chart, matching this app's existing per-module
+# shape (Session/XAU_LG/FT5).
+# Unlike FT5, VGI genuinely has ONE fixed (SL, TP) price pair per signal —
+# the stop is SIZED FROM the target (risk = reward/min_rr), not a separate
+# time-decaying ladder — so this one CAN be wired to real autotrade and the
+# shared paper simulator without the compromise FT5 needed.
+# Symbol-selection bug fix, per direct user report ("сейчас тупо по алфавиту
+# первые 40 чтоли берет"): the source's own resolve_symbols() (trader.py)
+# sorts contracts by volume_24h_quote from Gate.io's /contracts endpoint —
+# but that field is frequently empty/zero there (this app already hit and
+# fixed the identical issue building ft5_build_universe/build_session_
+# universe: /contracts' volume field isn't reliable, /tickers' is). An
+# always-zero sort key makes Python's stable sort a no-op, silently
+# preserving whatever order /contracts happened to return — which is very
+# plausibly close to alphabetical/ID order, matching exactly what was
+# observed. vgi_build_universe() below uses get_tickers() with the same
+# fallback-field chain already proven working for FT5/Session instead.
+# ============================================================================
+VGI_ENABLED = os.environ.get("VP_VGI_ENABLED", "1") == "1"
+VGI_TF = os.environ.get("VP_VGI_TF", "1h")  # matches the source's own default timeframe
+VGI_LOOKBACK = int(os.environ.get("VP_VGI_LOOKBACK", 200))
+VGI_ROWS = int(os.environ.get("VP_VGI_ROWS", 50))
+VGI_SUM_SECTIONS = int(os.environ.get("VP_VGI_SUM_SECTIONS", 20))
+VGI_MIN_ZONE_ROWS = int(os.environ.get("VP_VGI_MIN_ZONE_ROWS", 1))
+VGI_DELTA_THRESHOLD_PCT = float(os.environ.get("VP_VGI_DELTA_THRESHOLD_PCT", 20.0))
+VGI_MAX_ZONE_DISTANCE_PCT = float(os.environ.get("VP_VGI_MAX_ZONE_DISTANCE_PCT", 8.0))
+VGI_MIN_RR = float(os.environ.get("VP_VGI_MIN_RR", 3.0))
+VGI_UNIVERSE_SIZE = int(os.environ.get("VP_VGI_UNIVERSE_SIZE", 40))  # matches source's own max_symbols default; unlike FT5 there's no per-symbol param search here (source treats these as one fixed global config, not hyperopt-tuned), so no analysis/live split is needed the way FT5 has one
+VGI_SIGNAL_HISTORY = 200
+VGI_BACKTEST_DAYS = int(os.environ.get("VP_VGI_BACKTEST_DAYS", 30))
+VGI_SCAN_INTERVAL_SEC = int(os.environ.get("VP_VGI_SCAN_INTERVAL_SEC", 300))
+VGI_REFRESH_SEC = int(os.environ.get("VP_VGI_REFRESH_SEC", 24 * 3600))  # daily universe/backtest refresh, same cadence as FT5/Volume
+AUTOTRADE_ENABLED_VGI = os.environ.get("VP_AUTOTRADE_VGI", "0") == "1"  # off by default, same reasoning as every other new module here — user opts in after seeing real backtest numbers
+AUTOTRADE_LEVERAGE_VGI = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_VGI", 5))  # matches source's own default leverage
+TELEGRAM_ALERTS_VGI = os.environ.get("VP_TG_ALERTS_VGI", "1") == "1"
+
 FT5_BACKTEST_DAYS = int(os.environ.get("VP_FT5_BACKTEST_DAYS", 30))
 FT5_SIGNAL_HISTORY = 200
 FT5_REFRESH_SEC = int(os.environ.get("VP_FT5_REFRESH_SEC", 24 * 3600))  # daily backtest/param-search refresh, same cadence as Volume's optimizer
@@ -4713,14 +4850,14 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "div_min_rr", "bounce_enabled", "breakout_enabled",
-                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session", "telegram_alerts_session_ny", "telegram_alerts_xau_lg", "telegram_alerts_ft5",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5",
+                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "vgi_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session", "telegram_alerts_session_ny", "telegram_alerts_xau_lg", "telegram_alerts_ft5", "telegram_alerts_vgi",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5", "autotrade_vgi",
                   "autotrade_size_mode", "autotrade_size_value",
                   "scalp_size_mode", "scalp_size_value",
                   "ema_min_rr",
                   "ema_adx_filter_enabled", "ema_adx_min", "ema_min_gap_pct",
-                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session", "autotrade_leverage_session_ny", "autotrade_leverage_xau_lg", "autotrade_leverage_ft5",
+                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session", "autotrade_leverage_session_ny", "autotrade_leverage_xau_lg", "autotrade_leverage_ft5", "autotrade_leverage_vgi",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
                   # same save_settings() path everything else already uses,
@@ -4752,6 +4889,7 @@ def get_settings():
         "session_ny_invert_signals": SESSION_NY_INVERT_SIGNALS,
         "xau_lg_enabled": XAU_LG_ENABLED,
         "ft5_enabled": FT5_ENABLED,
+        "vgi_enabled": VGI_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
         "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
@@ -4762,6 +4900,7 @@ def get_settings():
         "telegram_alerts_session_ny": TELEGRAM_ALERTS_SESSION_NY,
         "telegram_alerts_xau_lg": TELEGRAM_ALERTS_XAU_LG,
         "telegram_alerts_ft5": TELEGRAM_ALERTS_FT5,
+        "telegram_alerts_vgi": TELEGRAM_ALERTS_VGI,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
         "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
@@ -4773,6 +4912,7 @@ def get_settings():
         "autotrade_session_ny": AUTOTRADE_ENABLED_SESSION_NY,
         "autotrade_xau_lg": AUTOTRADE_ENABLED_XAU_LG,
         "autotrade_ft5": AUTOTRADE_ENABLED_FT5,
+        "autotrade_vgi": AUTOTRADE_ENABLED_VGI,
         "autotrade_size_mode": AUTOTRADE_SIZE_MODE,
         "autotrade_size_value": AUTOTRADE_SIZE_VALUE,
         "scalp_size_mode": SCALP_SIZE_MODE,
@@ -4789,6 +4929,7 @@ def get_settings():
         "autotrade_leverage_session_ny": AUTOTRADE_LEVERAGE_SESSION_NY,
         "autotrade_leverage_xau_lg": AUTOTRADE_LEVERAGE_XAU_LG,
         "autotrade_leverage_ft5": AUTOTRADE_LEVERAGE_FT5,
+        "autotrade_leverage_vgi": AUTOTRADE_LEVERAGE_VGI,
         "scalp_min_rr": SCALP_MIN_RR,
         "scalp_sl_buffer_mult": SCALP_SL_BUFFER_MULT,
         "session_sl_mult": SESSION_SL_MULT,
@@ -4805,10 +4946,10 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, FT5_ENABLED, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, FT5_ENABLED, VGI_ENABLED, HOURLY_STATS_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
-    global TELEGRAM_ALERTS_SESSION_NY, TELEGRAM_ALERTS_XAU_LG, TELEGRAM_ALERTS_FT5
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5
+    global TELEGRAM_ALERTS_SESSION_NY, TELEGRAM_ALERTS_XAU_LG, TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_VGI
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_VGI
     global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
     global SCALP_SIZE_MODE, SCALP_SIZE_VALUE
     global EMA_MIN_RR
@@ -4853,6 +4994,8 @@ def apply_settings(updates):
         XAU_LG_ENABLED = bool(updates["xau_lg_enabled"])
     if "ft5_enabled" in updates:
         FT5_ENABLED = bool(updates["ft5_enabled"])
+    if "vgi_enabled" in updates:
+        VGI_ENABLED = bool(updates["vgi_enabled"])
     if "hourly_stats_enabled" in updates:
         HOURLY_STATS_ENABLED = bool(updates["hourly_stats_enabled"])
     if "telegram_enabled" in updates:
@@ -4871,6 +5014,8 @@ def apply_settings(updates):
         TELEGRAM_ALERTS_XAU_LG = bool(updates["telegram_alerts_xau_lg"])
     if "telegram_alerts_ft5" in updates:
         TELEGRAM_ALERTS_FT5 = bool(updates["telegram_alerts_ft5"])
+    if "telegram_alerts_vgi" in updates:
+        TELEGRAM_ALERTS_VGI = bool(updates["telegram_alerts_vgi"])
     if "autotrade_dry_run" in updates:
         AUTOTRADE_DRY_RUN = bool(updates["autotrade_dry_run"])
     if "autotrade_bounce" in updates:
@@ -4891,6 +5036,8 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_XAU_LG = bool(updates["autotrade_xau_lg"])
     if "autotrade_ft5" in updates:
         AUTOTRADE_ENABLED_FT5 = bool(updates["autotrade_ft5"])
+    if "autotrade_vgi" in updates:
+        AUTOTRADE_ENABLED_VGI = bool(updates["autotrade_vgi"])
     if "autotrade_size_mode" in updates and updates["autotrade_size_mode"] in ("percent", "fixed"):
         AUTOTRADE_SIZE_MODE = updates["autotrade_size_mode"]
     if "autotrade_size_value" in updates:
@@ -4941,6 +5088,7 @@ def apply_settings(updates):
         ("autotrade_leverage_session_ny", "AUTOTRADE_LEVERAGE_SESSION_NY"),
         ("autotrade_leverage_xau_lg", "AUTOTRADE_LEVERAGE_XAU_LG"),
         ("autotrade_leverage_ft5", "AUTOTRADE_LEVERAGE_FT5"),
+        ("autotrade_leverage_vgi", "AUTOTRADE_LEVERAGE_VGI"),
     ):
         if key in updates:
             try:
@@ -5209,6 +5357,13 @@ STATE = {
     "ft5_last_backtest_finished": None,
     "ft5_last_backtest_duration": None,
     "ft5_signals": deque(maxlen=FT5_SIGNAL_HISTORY),
+    # VGI (v0.98.0) — see that module's own header comment.
+    "vgi_universe": [],
+    "vgi_backtest_results": {},
+    "vgi_backtest_summary": {},
+    "vgi_last_backtest_finished": None,
+    "vgi_last_backtest_duration": None,
+    "vgi_signals": deque(maxlen=VGI_SIGNAL_HISTORY),
     "autotrade_log": deque(maxlen=AUTOTRADE_TRADE_HISTORY),  # every attempted auto-trade, dry-run or real, with its outcome
     "sim_balance": AUTOTRADE_SIM_START_BALANCE,
     "sim_trades": deque(maxlen=AUTOTRADE_SIM_TRADE_HISTORY),  # pending + settled paper trades
@@ -5266,6 +5421,7 @@ def has_open_signal_any_module(symbol, exclude=None):
         "ema_signals": STATE["ema_signals"], "scalp_signals": STATE["scalp_signals"],
         "session_signals": STATE["session_signals"], "session_ny_signals": STATE["session_ny_signals"],
         "xau_lg_signals": STATE["xau_lg_signals"], "ft5_signals": STATE["ft5_signals"],
+        "vgi_signals": STATE["vgi_signals"],
     }
     with state_lock:
         for name, lst in lists.items():
@@ -5675,6 +5831,159 @@ def compute_sar(candles, af_start=0.02, af_increment=0.02, af_max=0.2):
                 af = min(af + af_increment, af_max)
         sar[i] = cur_sar
     return sar
+
+
+def vgi_build_profile(candles, lookback, rows, sum_sections, min_zone_rows=1):
+    """Pure-Python port of mambaleylo/vgi-trader's volume_profile.py
+    build_profile() (itself a port of the TradingView indicator "Volume
+    Gaps & Imbalances" by Zeiierman, CC BY-NC-SA 4.0 — the original Pine
+    isn't reproduced here, this is an independent re-port of the
+    author's own already-independent Python re-implementation) — no
+    numpy dependency, unlike the source repo, since this whole app
+    stays pure-Python/stdlib throughout (a phone/Termux setup is not a
+    great place to add a new heavy dependency for one module). Same
+    math, 1:1: builds a row-based volume profile over the last
+    `lookback` bars, buckets each bar's volume into a bull or bear row
+    by hlc3 price (matches Pine's default input.source), finds zero-
+    volume "gap" zones (merged runs of adjacent empty rows — the
+    original labels these "acts as a price magnet"), and delta
+    sections ((Bull-Bear)/Total*100) for local buy/sell bias.
+    Returns a dict {hi, lo, rows, lvls, zones, sections} — zones/
+    sections are lists of plain dicts, not dataclasses, matching this
+    app's existing style everywhere else rather than the source's."""
+    window = candles[-lookback:]
+    if len(window) < 2:
+        raise ValueError("недостаточно свечей для профиля VGI")
+    hi = max(c["high"] for c in window)
+    lo = min(c["low"] for c in window)
+    if hi <= lo:
+        raise ValueError("некорректный диапазон цены для профиля VGI")
+    step = (hi - lo) / rows
+    lvls = [lo + step * i for i in range(rows + 1)]
+    bull_vols = [0.0] * rows
+    bear_vols = [0.0] * rows
+    for c in window:
+        src = (c["high"] + c["low"] + c["close"]) / 3.0
+        is_bull = c["close"] > c["open"]
+        row_idx = int(math.ceil((src - lo) / step)) - 1
+        row_idx = max(0, min(rows - 1, row_idx))
+        if is_bull:
+            bull_vols[row_idx] += c["volume"]
+        else:
+            bear_vols[row_idx] += c["volume"]
+
+    zones = []
+    i = 0
+    while i < rows:
+        if bull_vols[i] + bear_vols[i] <= 0:
+            j = i
+            while j + 1 < rows and bull_vols[j + 1] + bear_vols[j + 1] <= 0:
+                j += 1
+            if (j - i + 1) >= min_zone_rows:
+                zones.append({"bottom": lvls[i], "top": lvls[j + 1]})
+            i = j + 1
+        else:
+            i += 1
+
+    sec_rows = max(1, rows // sum_sections)
+    sections = []
+    for s in range(sum_sections):
+        start = s * sec_rows
+        end = (rows - 1) if s == sum_sections - 1 else min(rows - 1, (s + 1) * sec_rows - 1)
+        if start > end:
+            continue
+        seg_bull = sum(bull_vols[start:end + 1])
+        seg_bear = sum(bear_vols[start:end + 1])
+        total = seg_bull + seg_bear
+        if total <= 0:
+            continue
+        delta_pct = (seg_bull - seg_bear) / total * 100.0
+        sections.append({"bottom": lvls[start], "top": lvls[end + 1],
+                          "bull_vol": seg_bull, "bear_vol": seg_bear, "delta_pct": delta_pct})
+
+    return {"hi": hi, "lo": lo, "rows": rows, "lvls": lvls, "zones": zones, "sections": sections}
+
+
+def vgi_section_at_price(profile, price):
+    for sec in profile["sections"]:
+        if sec["bottom"] <= price <= sec["top"]:
+            return sec
+    return None
+
+
+def vgi_nearest_zone(profile, price, direction):
+    """Nearest zero-volume zone above price (direction='up') or below
+    ('down') — port of nearest_zone()."""
+    candidates = []
+    for z in profile["zones"]:
+        if direction == "up" and z["bottom"] >= price:
+            candidates.append(z)
+        elif direction == "down" and z["top"] <= price:
+            candidates.append(z)
+    if not candidates:
+        return None
+    if direction == "up":
+        return min(candidates, key=lambda z: z["bottom"])
+    return max(candidates, key=lambda z: z["top"])
+
+
+def vgi_evaluate_signal(profile, price, delta_threshold_pct, max_zone_distance_pct, min_rr):
+    """Port of signal_engine.py's evaluate(). Direction comes from local
+    delta bias first (the section containing the current price); if
+    that's neutral, falls back to whichever zero-volume zone is nearer
+    (the "price magnet" reading) — if both exist and disagree, no
+    signal at all (source's own reasoning: too much conflicting noise
+    to trade). TP = far edge of the nearest zone in trade direction; SL
+    = reward/min_rr, which guarantees RR >= min_rr by construction (the
+    stop is SIZED FROM the target, not measured independently — same
+    approach the source explicitly chose).
+    Direction strings are LONG/SHORT (this app's convention throughout)
+    rather than the source's lowercase long/short."""
+    max_zone_dist = max_zone_distance_pct / 100.0
+    sec = vgi_section_at_price(profile, price)
+    local_delta = sec["delta_pct"] if sec else 0.0
+
+    zone_up = vgi_nearest_zone(profile, price, "up")
+    zone_down = vgi_nearest_zone(profile, price, "down")
+    dist_up = (zone_up["bottom"] - price) / price if zone_up else None
+    dist_down = (price - zone_down["top"]) / price if zone_down else None
+
+    magnet_dir = None
+    if dist_up is not None and (dist_down is None or dist_up <= dist_down):
+        magnet_dir = "LONG"
+    elif dist_down is not None:
+        magnet_dir = "SHORT"
+
+    delta_dir = None
+    if local_delta >= delta_threshold_pct:
+        delta_dir = "LONG"
+    elif local_delta <= -delta_threshold_pct:
+        delta_dir = "SHORT"
+
+    if delta_dir and magnet_dir and delta_dir != magnet_dir:
+        return None
+
+    direction = delta_dir or magnet_dir
+    if direction is None:
+        return None
+
+    zone = zone_up if direction == "LONG" else zone_down
+    if zone is None:
+        return None
+    dist = dist_up if direction == "LONG" else dist_down
+    if dist is None or dist > max_zone_dist:
+        return None
+
+    tp = zone["top"] if direction == "LONG" else zone["bottom"]
+    reward = abs(tp - price)
+    if reward <= 0:
+        return None
+    risk = reward / min_rr
+    sl = price - risk if direction == "LONG" else price + risk
+    rr = round(reward / risk, 3) if risk > 0 else None
+
+    return {"direction": direction, "entry": price, "tp": tp, "sl": sl, "rr": rr,
+            "delta_pct": round(local_delta, 2), "zone_dist_pct": round(dist * 100, 3)}
 
 
 def ft5_run_backtest(candles, buy_rsi=26, buy_fisher=5, sell_rsi=74,
@@ -9338,6 +9647,7 @@ def save_state():
                 "xau_lg_signals": list(STATE["xau_lg_signals"]),
                 "ft5_signals": list(STATE["ft5_signals"]),
                 "ft5_symbol_overrides": STATE["ft5_symbol_overrides"],
+                "vgi_signals": list(STATE["vgi_signals"]),
                 "autotrade_log": list(STATE["autotrade_log"]),
                 "sim_balance": STATE["sim_balance"],
                 # Both PENDING and SETTLED now (previously PENDING was
@@ -9384,6 +9694,7 @@ def _relink_sim_trade(trade):
         "scalp": STATE["scalp_signals"], "session": STATE["session_signals"],
         "session_ny": STATE["session_ny_signals"],
         "xau_lg": STATE["xau_lg_signals"],
+        "vgi": STATE["vgi_signals"],
     }
     candidates = module_lists.get(trade.get("mode"))
     if not candidates:
@@ -9418,6 +9729,7 @@ def load_state():
         xau_lg_signals = data.get("xau_lg_signals", [])
         ft5_signals = data.get("ft5_signals", [])
         ft5_symbol_overrides = data.get("ft5_symbol_overrides", {})
+        vgi_signals = data.get("vgi_signals", [])
         autotrade_log = data.get("autotrade_log", [])
         sim_trades = data.get("sim_trades", [])
         risk_autotune_log = data.get("risk_autotune_log", [])
@@ -9432,6 +9744,7 @@ def load_state():
             STATE["xau_lg_signals"] = deque(xau_lg_signals, maxlen=XAU_LG_SIGNAL_HISTORY)
             STATE["ft5_signals"] = deque(ft5_signals, maxlen=FT5_SIGNAL_HISTORY)
             STATE["ft5_symbol_overrides"] = ft5_symbol_overrides
+            STATE["vgi_signals"] = deque(vgi_signals, maxlen=VGI_SIGNAL_HISTORY)
             STATE["autotrade_log"] = deque(autotrade_log, maxlen=AUTOTRADE_TRADE_HISTORY)
             STATE["risk_autotune_log"] = deque(risk_autotune_log, maxlen=200)
             STATE["risk_autotune_last_change"] = risk_autotune_last_change
@@ -9715,6 +10028,8 @@ def send_telegram(text, category=None):
     if category == "xau_lg" and not TELEGRAM_ALERTS_XAU_LG:
         return
     if category == "ft5" and not TELEGRAM_ALERTS_FT5:
+        return
+    if category == "vgi" and not TELEGRAM_ALERTS_VGI:
         return
 
     def _do_send():
@@ -11319,6 +11634,270 @@ def ft5_live_loop():
 # ============================================================================
 
 
+# ============================================================================
+# VGI — port of mambaleylo/vgi-trader — infrastructure
+# ----------------------------------------------------------------------------
+# vgi_build_profile()/vgi_evaluate_signal() (the ported math) are defined
+# earlier, right before ft5_run_backtest — everything below is the wrapping
+# infrastructure (universe, backtest, live scan, outcomes, autotrade).
+# ============================================================================
+def vgi_build_universe():
+    """Liquid-symbol pool by real 24h volume — uses get_tickers() with the
+    same fallback field chain already proven correct for FT5/Session,
+    fixing the source repo's own resolve_symbols() bug (sorted by a
+    /contracts field that's frequently empty, making the sort a no-op)."""
+    tickers = get_tickers()
+    seen_vol = {}
+    for t in tickers:
+        name = t.get("contract", "")
+        if not name.endswith("_USDT"):
+            continue
+        vol = t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0
+        try:
+            vol = float(vol)
+        except (TypeError, ValueError):
+            vol = 0.0
+        if vol < MIN_VOL_USD:
+            continue
+        if name not in seen_vol or vol > seen_vol[name]:
+            seen_vol[name] = vol
+    ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
+    return [s[0] for s in ranked[:VGI_UNIVERSE_SIZE]]
+
+
+def vgi_run_backtest(candles, lookback=VGI_LOOKBACK, rows=VGI_ROWS, sum_sections=VGI_SUM_SECTIONS,
+                      min_zone_rows=VGI_MIN_ZONE_ROWS, delta_threshold_pct=VGI_DELTA_THRESHOLD_PCT,
+                      max_zone_distance_pct=VGI_MAX_ZONE_DISTANCE_PCT, min_rr=VGI_MIN_RR):
+    """Walk-forward backtest — the source repo has NO historical backtest
+    at all (it's a live-only "online" screener), but this app's standing
+    discipline all session has been "test on real data before trusting a
+    source's own numbers/design," so this was built rather than skipped.
+    At each closed bar i (i >= lookback), rebuilds the profile using ONLY
+    candles[:i+1] (no lookahead — the profile at bar i never sees bar
+    i+1's data), evaluates a signal at that bar's close, and if one
+    fires, tracks forward for TP/SL touch. One position at a time (skips
+    new entries while one is open), matching every other module's own
+    walk-forward convention here.
+    Returns a list of closed trades: {entry_time, exit_time, direction,
+    entry, tp, sl, rr, result}."""
+    n = len(candles)
+    trades = []
+    position = None
+    for i in range(lookback, n):
+        c = candles[i]
+        if position is not None:
+            if position["direction"] == "LONG":
+                if c["low"] <= position["sl"]:
+                    trades.append({**position, "exit_time": c["time"], "exit_price": position["sl"], "result": "LOSS"})
+                    position = None
+                elif c["high"] >= position["tp"]:
+                    trades.append({**position, "exit_time": c["time"], "exit_price": position["tp"], "result": "WIN"})
+                    position = None
+            else:
+                if c["high"] >= position["sl"]:
+                    trades.append({**position, "exit_time": c["time"], "exit_price": position["sl"], "result": "LOSS"})
+                    position = None
+                elif c["low"] <= position["tp"]:
+                    trades.append({**position, "exit_time": c["time"], "exit_price": position["tp"], "result": "WIN"})
+                    position = None
+            continue
+        try:
+            profile = vgi_build_profile(candles[:i + 1], lookback, rows, sum_sections, min_zone_rows)
+        except ValueError:
+            continue
+        sig = vgi_evaluate_signal(profile, c["close"], delta_threshold_pct, max_zone_distance_pct, min_rr)
+        if sig is None:
+            continue
+        position = {"entry_time": c["time"], "direction": sig["direction"],
+                    "entry": sig["entry"], "tp": sig["tp"], "sl": sig["sl"], "rr": sig["rr"]}
+    return trades
+
+
+def vgi_summarize_backtest(trades):
+    total = len(trades)
+    if not total:
+        return {"n": 0, "win_rate": None, "wins": 0, "losses": 0}
+    wins = sum(1 for t in trades if t["result"] == "WIN")
+    losses = total - wins
+    win_rate = round(wins / total * 100, 1) if total else None
+    return {"n": total, "win_rate": win_rate, "wins": wins, "losses": losses}
+
+
+_vgi_signal_cooldowns = {}  # symbol -> last-signaled entry_time
+_vgi_signal_cooldowns_lock = threading.Lock()
+
+
+def vgi_scan_symbol_live(symbol):
+    """Live counterpart to vgi_run_backtest() — fetches recent history,
+    builds the profile off the latest CLOSED bar only (matching the
+    source's own process_symbol(), which explicitly drops the still-
+    forming last candle), evaluates a signal, and fires if it's new
+    (same sig_key dedup idea the source uses — direction + rounded TP —
+    so the same setup doesn't re-alert every scan while price sits near
+    the same zone)."""
+    if not VGI_ENABLED:
+        return
+    try:
+        interval_sec = INTERVAL_SECONDS.get(VGI_TF, 3600)
+        now = time.time()
+        candles = get_candles(symbol, interval=VGI_TF, limit=VGI_LOOKBACK + 20)
+        candles = [c for c in candles if c["time"] + interval_sec <= now]
+        if len(candles) < VGI_LOOKBACK + 5:
+            return
+        price = candles[-1]["close"]
+        profile = vgi_build_profile(candles, VGI_LOOKBACK, VGI_ROWS, VGI_SUM_SECTIONS, VGI_MIN_ZONE_ROWS)
+        sig = vgi_evaluate_signal(profile, price, VGI_DELTA_THRESHOLD_PCT, VGI_MAX_ZONE_DISTANCE_PCT, VGI_MIN_RR)
+        if sig is None:
+            return
+        sig_key = (sig["direction"], round(sig["tp"], 6))
+        with _vgi_signal_cooldowns_lock:
+            if _vgi_signal_cooldowns.get(symbol) == sig_key:
+                return
+            _vgi_signal_cooldowns[symbol] = sig_key
+        if has_open_signal_any_module(symbol, exclude="vgi_signals"):
+            return
+        record = {
+            "symbol": symbol, "direction": sig["direction"], "entry": sig["entry"],
+            "tp": sig["tp"], "sl": sig["sl"], "rr": sig["rr"],
+            "delta_pct": sig["delta_pct"], "zone_dist_pct": sig["zone_dist_pct"],
+            "time": candles[-1]["time"], "detected_at": now, "status": "OPEN",
+            "result": None, "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
+        }
+        with state_lock:
+            STATE["vgi_signals"].appendleft(record)
+        if AUTOTRADE_ENABLED_VGI:
+            execute_autotrade("vgi", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"], AUTOTRADE_LEVERAGE_VGI)
+            sim_execute_trade("vgi", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"], AUTOTRADE_LEVERAGE_VGI, record)
+        arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
+        send_telegram(
+            f"{arrow} {symbol} (VGI \u2014 Volume Gaps & Imbalances)\n"
+            f"entry: {sig['entry']:.6g}\nTP: {sig['tp']:.6g}  SL: {sig['sl']:.6g}  RR: {sig['rr']}\n"
+            f"delta={sig['delta_pct']}% zone_dist={sig['zone_dist_pct']}%",
+            category="vgi",
+        )
+    except Exception as e:
+        log_error(f"vgi_live {symbol}: {e}")
+
+
+def update_vgi_signal_outcomes():
+    with state_lock:
+        open_signals = [s for s in STATE["vgi_signals"] if s["status"] == "OPEN"]
+    all_candles = fetch_candles_concurrent([(s["symbol"], VGI_TF, 300) for s in open_signals])
+    just_closed = []
+    for sig, candles in zip(open_signals, all_candles):
+        try:
+            if candles is None:
+                continue
+            future = [c for c in candles if c["time"] >= sig["time"]]
+            result, exit_price, exit_time = None, None, None
+            for c in future:
+                if sig["direction"] == "LONG":
+                    if c["low"] <= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["high"] >= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+                else:
+                    if c["high"] >= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["low"] <= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+            if result:
+                with state_lock:
+                    sig["status"] = "CLOSED"
+                    sig["result"] = result
+                    sig["exit_price"] = exit_price
+                    sig["exit_time"] = exit_time
+                just_closed.append(dict(sig))
+        except Exception as e:
+            log_error(f"vgi_outcome {sig['symbol']}: {e}")
+
+    for sig in just_closed:
+        try:
+            icon = "\u2705" if sig["result"] == "WIN" else "\u274c"
+            send_telegram(
+                f"{icon} {sig['result']} {sig['symbol']} (VGI)\n"
+                f"\u0432\u044b\u0445\u043e\u0434: {sig.get('exit_price')} \u00b7 RR {sig.get('rr')}",
+                category="vgi",
+            )
+        except Exception as e:
+            log_error(f"vgi_close_alert {sig.get('symbol')}: {e}")
+
+
+def compute_vgi_signal_stats():
+    with state_lock:
+        signals = list(STATE["vgi_signals"])
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+    wins = sum(1 for s in closed if s["result"] == "WIN")
+    losses = len(closed) - wins
+    open_n = sum(1 for s in signals if s["status"] == "OPEN")
+    winrate = round(wins / len(closed) * 100, 1) if closed else None
+    rrs = [s["rr"] for s in signals if s.get("rr") is not None]
+    rr_avg = round(sum(rrs) / len(rrs), 2) if rrs else None
+    return {"total": len(signals), "wins": wins, "losses": losses, "open": open_n,
+            "winrate": winrate, "rr_avg": rr_avg}
+
+
+def vgi_backtest_loop():
+    while True:
+        try:
+            if not VGI_ENABLED:
+                time.sleep(60)
+                continue
+            t0 = time.time()
+            universe = vgi_build_universe()
+            with state_lock:
+                STATE["vgi_universe"] = universe
+            results_by_symbol = {}
+            summary_by_symbol = {}
+            now = time.time()
+            for symbol in universe:
+                try:
+                    candles = get_candles_range(symbol, VGI_TF, now - VGI_BACKTEST_DAYS * 86400, now)
+                    if len(candles) < VGI_LOOKBACK + 20:
+                        continue
+                    trades = vgi_run_backtest(candles)
+                    results_by_symbol[symbol] = trades
+                    summary_by_symbol[symbol] = vgi_summarize_backtest(trades)
+                except Exception as e:
+                    log_error(f"vgi_backtest {symbol}: {e}")
+            with state_lock:
+                STATE["vgi_backtest_results"] = results_by_symbol
+                STATE["vgi_backtest_summary"] = summary_by_symbol
+                STATE["vgi_last_backtest_finished"] = time.time()
+                STATE["vgi_last_backtest_duration"] = round(time.time() - t0, 1)
+        except Exception as e:
+            log_error(f"vgi_backtest_loop: {e}")
+        time.sleep(max(3600, VGI_REFRESH_SEC))
+
+
+def vgi_live_loop():
+    while True:
+        try:
+            if not VGI_ENABLED:
+                time.sleep(60)
+                continue
+            with state_lock:
+                universe = list(STATE["vgi_universe"])
+            if universe:
+                with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe))) as ex:
+                    futs = [ex.submit(vgi_scan_symbol_live, s) for s in universe]
+                    for _ in as_completed(futs):
+                        pass
+            update_vgi_signal_outcomes()
+        except Exception as e:
+            log_error(f"vgi_live_loop: {e}")
+        time.sleep(max(60, VGI_SCAN_INTERVAL_SEC))
+
+
+# ============================================================================
+# END VGI
+# ============================================================================
+
+
 # ----------------------------------------------------------------------------
 # API
 # ----------------------------------------------------------------------------
@@ -12066,6 +12645,82 @@ def api_reset_ft5():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/vgi/status")
+def api_vgi_status():
+    with state_lock:
+        summary = dict(STATE["vgi_backtest_summary"])
+        universe = list(STATE["vgi_universe"])
+        last_backtest_finished = STATE["vgi_last_backtest_finished"]
+        last_backtest_duration = STATE["vgi_last_backtest_duration"]
+    ranked = [dict(s, symbol=sym) for sym, s in summary.items()]
+    ranked.sort(key=lambda r: (r.get("win_rate") or 0, r.get("n") or 0), reverse=True)
+    return jsonify({
+        "enabled": VGI_ENABLED,
+        "universe_size": len(universe),
+        "last_backtest_finished": last_backtest_finished,
+        "last_backtest_duration": last_backtest_duration,
+        "signals_stats": compute_vgi_signal_stats(),
+        "config": {
+            "tf": VGI_TF, "lookback": VGI_LOOKBACK, "rows": VGI_ROWS,
+            "sum_sections": VGI_SUM_SECTIONS, "min_zone_rows": VGI_MIN_ZONE_ROWS,
+            "delta_threshold_pct": VGI_DELTA_THRESHOLD_PCT,
+            "max_zone_distance_pct": VGI_MAX_ZONE_DISTANCE_PCT, "min_rr": VGI_MIN_RR,
+            "backtest_days": VGI_BACKTEST_DAYS,
+        },
+        "top": ranked,
+    })
+
+
+@app.route("/api/vgi/signals")
+def api_vgi_signals():
+    with state_lock:
+        return jsonify(list(STATE["vgi_signals"]))
+
+
+@app.route("/api/vgi/chart/<symbol>")
+def api_vgi_chart(symbol):
+    """VGI has one fixed (SL, TP) pair per signal, unlike FT5 — no need
+    to re-derive anything via a backtest re-run, just fetch candles
+    around the signal's own time window and return the already-known
+    entry/sl/tp/exit values alongside them."""
+    try:
+        sig_time = float(request.args.get("time"))
+        with state_lock:
+            sig = next((s for s in STATE["vgi_signals"]
+                        if s["symbol"] == symbol and s["time"] == sig_time), None)
+        if sig is None:
+            return jsonify({"error": "signal not found"}), 404
+        interval_sec = INTERVAL_SECONDS.get(VGI_TF, 3600)
+        fetch_start = sig_time - VGI_LOOKBACK * interval_sec
+        fetch_end = (sig["exit_time"] + 6 * interval_sec) if sig.get("exit_time") else time.time()
+        candles = get_candles_range(symbol, VGI_TF, fetch_start, fetch_end)
+        return jsonify({
+            "symbol": symbol, "candles": candles[-150:], "time": sig_time,
+            "direction": sig["direction"], "entry": sig["entry"], "tp": sig["tp"], "sl": sig["sl"],
+            "result": sig.get("result"), "exit_time": sig.get("exit_time"), "exit_price": sig.get("exit_price"),
+            "rr": sig.get("rr"),
+        })
+    except Exception as e:
+        log_error(f"api_vgi_chart {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/reset/vgi", methods=["POST"])
+def api_reset_vgi():
+    try:
+        with state_lock:
+            STATE["vgi_universe"] = []
+            STATE["vgi_backtest_results"] = {}
+            STATE["vgi_backtest_summary"] = {}
+            STATE["vgi_last_backtest_finished"] = None
+            STATE["vgi_last_backtest_duration"] = None
+            STATE["vgi_signals"].clear()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset_vgi: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/reset/risk_autotune", methods=["POST"])
 def api_reset_risk_autotune():
     """Resets every parameter risk_autotune_pass() touches back to its
@@ -12194,6 +12849,7 @@ def api_autotrade_status():
             "scalp": AUTOTRADE_ENABLED_SCALP, "session": AUTOTRADE_ENABLED_SESSION,
             "session_ny": AUTOTRADE_ENABLED_SESSION_NY, "xau_lg": AUTOTRADE_ENABLED_XAU_LG,
             "ft5": AUTOTRADE_ENABLED_FT5,
+            "vgi": AUTOTRADE_ENABLED_VGI,
         },
     })
 
@@ -12335,7 +12991,7 @@ INDEX_HTML = """<!doctype html>
   body { margin:0; background:#0b0e14; color:#d7dee8; font-family: -apple-system, Roboto, Segoe UI, sans-serif; }
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
   #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetXauLgBtn, #resetFt5Btn, #resetRiskAutotuneBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetXauLgBtn, #resetFt5Btn, #resetRiskAutotuneBtn, #resetVgiBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #settingsModal.open { display:flex; flex-direction:column; }
@@ -12408,6 +13064,12 @@ INDEX_HTML = """<!doctype html>
   #ft5ModalHeader h2 { font-size:15px; margin:0; }
   #ft5CloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
   #ft5ChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
+  #vgiModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
+  #vgiModal.open { display:flex; flex-direction:column; }
+  #vgiModalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
+  #vgiModalHeader h2 { font-size:15px; margin:0; }
+  #vgiCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
+  #vgiChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
   .dim { color:#8b98ab; }
   .empty { padding:30px 14px; text-align:center; color:#6b7688; font-size:13px; }
 
@@ -12455,6 +13117,7 @@ INDEX_HTML = """<!doctype html>
       <button id="resetFt5Btn">Очистить FT5</button>
       <button id="resetSimulatorBtn">Сбросить симулятор</button>
       <button id="resetRiskAutotuneBtn">Сбросить авто-тюнинг</button>
+      <button id="resetVgiBtn">Очистить VGI</button>
     </div>
   </div>
   <div id="status">загрузка...</div>
@@ -12474,6 +13137,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="session_ny">Сессия NY</div>
   <div class="tab" data-tab="xau_lg" style="color:#e0a030;">XAU LG ⚠️</div>
   <div class="tab" data-tab="ft5" style="color:#e0a030;">FT5 ⚠️</div>
+  <div class="tab" data-tab="vgi">VGI</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
 </div>
@@ -12498,6 +13162,7 @@ INDEX_HTML = """<!doctype html>
   <div id="sessionNyPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="xauLgPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="ft5Panel" style="display:none;padding:8px 4px;font-size:12px;"></div>
+  <div id="vgiPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="simulatorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
@@ -12559,6 +13224,17 @@ INDEX_HTML = """<!doctype html>
     <button id="ft5CloseBtn">Закрыть</button>
   </div>
   <div id="ft5ChartWrap"><canvas id="ft5ChartCanvas"></canvas></div>
+</div>
+
+<div id="vgiModal">
+  <div id="vgiModalHeader">
+    <div>
+      <h2 id="vgiModalTitle">-</h2>
+      <div id="vgiModalParams" class="dim" style="font-size:11px;margin-top:2px;"></div>
+    </div>
+    <button id="vgiCloseBtn">Закрыть</button>
+  </div>
+  <div id="vgiChartWrap"><canvas id="vgiChartCanvas"></canvas></div>
 </div>
 
 <div id="settingsModal">
@@ -12694,6 +13370,17 @@ INDEX_HTML = """<!doctype html>
     </div>
 
     <div class="settingsGroup">
+      <div class="settingsGroupTitle">VGI (Volume Gaps & Imbalances)</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Сканирование</div>
+          <div class="sub">порт собственного индикатора (mambaleylo/vgi-trader) — профиль объёма, единый TP/SL на сигнал</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setVgi"><span class="switchSlider"></span></label>
+      </div>
+    </div>
+
+    <div class="settingsGroup">
       <div class="settingsGroupTitle">Telegram</div>
       <div class="settingRow">
         <div>
@@ -12750,6 +13437,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">экспериментально — открытие и закрытие сигналов</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramFt5"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Алерты VGI</div>
+          <div class="sub">открытие и закрытие сигналов</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramVgi"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -12890,6 +13584,16 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="label">↳ VGI</div>
+          <div class="sub">плечо, если включено — единый TP/SL на сигнал, честная автоторговля без компромиссов</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="number" id="setAutotradeLevVgi" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+          <label class="switch"><input type="checkbox" id="setAutotradeVgi"><span class="switchSlider"></span></label>
+        </div>
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Сессия NY</div>
           <div class="sub">плечо, если включено</div>
         </div>
@@ -12927,6 +13631,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('sessionNyPanel').style.display = activeTab === 'session_ny' ? 'block' : 'none';
     document.getElementById('xauLgPanel').style.display = activeTab === 'xau_lg' ? 'block' : 'none';
     document.getElementById('ft5Panel').style.display = activeTab === 'ft5' ? 'block' : 'none';
+    document.getElementById('vgiPanel').style.display = activeTab === 'vgi' ? 'block' : 'none';
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
     document.getElementById('simulatorPanel').style.display = activeTab === 'simulator' ? 'block' : 'none';
     if (activeTab === 'signals') refreshTuning();
@@ -12937,6 +13642,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'session_ny') refreshSessionNy();
     if (activeTab === 'xau_lg') refreshXauLg();
     if (activeTab === 'ft5') refreshFt5();
+    if (activeTab === 'vgi') refreshVgi();
     if (activeTab === 'autotrade') refreshAutotrade();
     if (activeTab === 'simulator') refreshSimulator();
   };
@@ -13837,6 +14543,73 @@ async function refreshFt5() {
   });
 }
 
+// ---------------- VGI — port of mambaleylo/vgi-trader ----------------
+async function refreshVgi() {
+  const status = await (await fetch('/api/vgi/status')).json();
+  const signals = await (await fetch('/api/vgi/signals')).json();
+  const panel = document.getElementById('vgiPanel');
+  const cfg = status.config || {};
+  const ss = status.signals_stats || {};
+  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
+  const rrAvgTxt = ss.rr_avg !== null && ss.rr_avg !== undefined ? `RR ср. ${ss.rr_avg}` : '';
+  const buildTxt = status.last_backtest_finished
+    ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · монет: ${status.universe_size}`
+    : `бэктест ещё не завершился (монет в вселенной: ${status.universe_size || '?'})`;
+  const infoHtml = `
+    <div style="background:#0e1f2a;border:1px solid #2e7d9e;border-radius:10px;padding:10px 14px;margin-bottom:12px;">
+      <span style="font-size:12px;color:#9ecbe0;">Портирована логика Volume Gaps & Imbalances (github.com/mambaleylo/vgi-trader, порт TradingView-индикатора Zeiierman, CC BY-NC-SA 4.0) — профиль объёма по рядам, направление по локальной дельте или ближайшей zero-volume зоне ("магнит"), тейк = дальний край зоны, стоп = тейк/RR (гарантированный RR по построению). Отбор монет — по реальному 24ч объёму (в оригинале был баг: сортировка по полю, которое часто пустое на Gate.io — здесь взят уже проверенный источник объёма). Автоторговля и симулятор — можно включать по-настоящему, здесь единый фиксированный TP/SL на сигнал.</span>
+    </div>`;
+  const headerHtml = `
+    <div class="dim" style="margin-bottom:8px;">
+      ТФ ${cfg.tf} · lookback ${cfg.lookback} · rows ${cfg.rows} · delta порог ${cfg.delta_threshold_pct}% · макс. дистанция до зоны ${cfg.max_zone_distance_pct}% · мин. RR ${cfg.min_rr}<br>
+      ${buildTxt}<br>
+      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · ${rrAvgTxt} · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
+      <span style="font-size:11px;">Клик по строке сигнала открывает график входа/выхода.</span>
+    </div>`;
+  const signalsRows = signals.map(s => {
+    const dirClass = s.direction === 'LONG' ? 'long' : 'short';
+    let statusHtml;
+    if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
+    else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}</span>`;
+    else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}</span>`;
+    else statusHtml = '<span class="dim">-</span>';
+    return `<tr data-symbol="${s.symbol}" data-time="${s.time}" style="cursor:pointer;">
+      <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td>
+      <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.sl)}</td><td class="dim">${fmt(s.tp)}</td>
+      <td>${s.rr}</td><td>${statusHtml}</td><td class="dim">${fmtDateTime(s.time)}</td>
+    </tr>`;
+  }).join('');
+  const signalsTableHtml = signals.length ? `
+    <div style="overflow-x:auto;margin-bottom:14px;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Status</th><th>Время</th></tr></thead>
+      <tbody>${signalsRows}</tbody>
+    </table>
+    </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
+  const btRows = (status.top || []).map(r => {
+    const wrClass = (r.win_rate === null || r.win_rate === undefined) ? 'dim' : (r.win_rate >= 50 ? 'win' : 'loss');
+    return `<tr>
+      <td>${r.symbol}</td>
+      <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
+      <td class="dim">n=${r.n}</td>
+      <td class="win">${r.wins}W</td>
+      <td class="loss">${r.losses}L</td>
+    </tr>`;
+  }).join('');
+  const btTableHtml = (status.top || []).length ? `
+    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории, без заглядывания вперёд):</div>
+    <div style="overflow-x:auto;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>Symbol</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th></tr></thead>
+      <tbody>${btRows}</tbody>
+    </table>
+    </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
+  panel.innerHTML = infoHtml + headerHtml + signalsTableHtml + btTableHtml;
+  panel.querySelectorAll('tbody tr[data-time]').forEach(tr => {
+    tr.onclick = () => openVgiChart(tr.dataset.symbol, tr.dataset.time);
+  });
+}
+
 async function refreshAutotradeBanner() {
   try {
     const s = await (await fetch('/api/autotrade/status')).json();
@@ -13858,7 +14631,7 @@ async function refreshAutotrade() {
     (await fetch('/api/autotrade/log')).json(),
   ]);
   const panel = document.getElementById('autotradePanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5', vgi: 'VGI'};
   const enabledTxt = Object.entries(status.enabled)
     .map(([k, v]) => `<span class="${v ? 'win' : 'dim'}">${modeLabels[k]}: ${v ? 'вкл' : 'выкл'}</span>`)
     .join(' &nbsp;·&nbsp; ');
@@ -13918,7 +14691,7 @@ async function refreshSimulator() {
     (await fetch('/api/autotrade/status')).json(),
   ]);
   const panel = document.getElementById('simulatorPanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5', vgi: 'VGI'};
 
   const pnlClass = status.pnl_total >= 0 ? 'win' : 'loss';
   const sizeTxt = status.size_mode === 'percent' ? `${status.size_value}% от баланса` : `фикс. $${status.size_value}`;
@@ -13989,6 +14762,7 @@ async function refreshAll() {
   if (activeTab === 'session_ny') await refreshSessionNy();
   if (activeTab === 'xau_lg') await refreshXauLg();
   if (activeTab === 'ft5') await refreshFt5();
+  if (activeTab === 'vgi') await refreshVgi();
   if (activeTab === 'autotrade') await refreshAutotrade();
   if (activeTab === 'simulator') await refreshSimulator();
 }
@@ -14043,6 +14817,9 @@ wireResetButton('resetFt5Btn', '/api/reset/ft5',
 wireResetButton('resetRiskAutotuneBtn', '/api/reset/risk_autotune',
   'Сбросить все параметры авто-тюнинга риска (EMA/Дивергенция/Скальпинг/Сессия) к значениям по умолчанию из кода, очистить лог и cooldown? Сами сигналы и статистику не тронет. Это необратимо.',
   'Сбросить авто-тюнинг');
+wireResetButton('resetVgiBtn', '/api/reset/vgi',
+  'Удалить накопленный бэктест и сигналы VGI? Остальное не тронет. Это необратимо.',
+  'Очистить VGI');
 wireResetButton('resetSimulatorBtn', '/api/simulator/reset',
   'Сбросить симулятор баланса к стартовому значению и удалить всю историю сделок? Это необратимо.',
   'Сбросить симулятор');
@@ -14065,6 +14842,7 @@ const setInputs = {
   session_ny_enabled: document.getElementById('setSessionNy'),
   session_ny_invert_signals: document.getElementById('setSessionNyInvert'),
   xau_lg_enabled: document.getElementById('setXauLg'),
+  vgi_enabled: document.getElementById('setVgi'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
   telegram_alerts_div: document.getElementById('setTelegramDiv'),
@@ -14074,6 +14852,7 @@ const setInputs = {
   telegram_alerts_session_ny: document.getElementById('setTelegramSessionNy'),
   telegram_alerts_xau_lg: document.getElementById('setTelegramXauLg'),
   telegram_alerts_ft5: document.getElementById('setTelegramFt5'),
+  telegram_alerts_vgi: document.getElementById('setTelegramVgi'),
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
   autotrade_bounce: document.getElementById('setAutotradeBounce'),
   autotrade_breakout: document.getElementById('setAutotradeBreakout'),
@@ -14081,6 +14860,7 @@ const setInputs = {
   autotrade_ema: document.getElementById('setAutotradeEma'),
   autotrade_scalp: document.getElementById('setAutotradeScalp'),
   autotrade_session: document.getElementById('setAutotradeSession'),
+  autotrade_vgi: document.getElementById('setAutotradeVgi'),
   autotrade_session_ny: document.getElementById('setAutotradeSessionNy'),
 };
 
@@ -14097,6 +14877,7 @@ const setValueInputs = {
   autotrade_leverage_divergence: document.getElementById('setAutotradeLevDivergence'),
   autotrade_leverage_ema: document.getElementById('setAutotradeLevEma'),
   autotrade_leverage_session: document.getElementById('setAutotradeLevSession'),
+  autotrade_leverage_vgi: document.getElementById('setAutotradeLevVgi'),
   autotrade_leverage_session_ny: document.getElementById('setAutotradeLevSessionNy'),
 };
 
@@ -14871,6 +15652,112 @@ function drawFt5Chart(data) {
   }
 }
 
+// ---------------- VGI chart modal ----------------
+// Own modal/canvas, same reasoning as FT5's — but VGI's shape is actually
+// simpler and closer to Session's original (one fixed entry/sl/tp triple
+// per signal, no ROI ladder, no missing-TP case), just kept separate
+// rather than force-reusing drawSessionChart to avoid any risk to a
+// function already working for two other modules.
+const vgiModal = document.getElementById('vgiModal');
+document.getElementById('vgiCloseBtn').onclick = () => vgiModal.classList.remove('open');
+
+async function openVgiChart(symbol, sigTime) {
+  document.getElementById('vgiModalTitle').textContent = symbol;
+  document.getElementById('vgiModalParams').textContent = 'загрузка...';
+  vgiModal.classList.add('open');
+  try {
+    const data = await (await fetch(`/api/vgi/chart/${symbol}?time=${sigTime}`)).json();
+    if (data.error) { document.getElementById('vgiModalParams').textContent = data.error; return; }
+    const resTxt = data.result ? ` · ${data.result}${data.exit_price !== null && data.exit_price !== undefined ? ' @ '+fmtNum(data.exit_price) : ''}` : ' · OPEN';
+    document.getElementById('vgiModalParams').textContent =
+      `${fmtDateTime(sigTime)} · ${data.direction} · entry ${fmtNum(data.entry)} · SL ${fmtNum(data.sl)} · TP ${fmtNum(data.tp)} · RR ${data.rr}${resTxt}`;
+    drawVgiChart(data);
+  } catch (e) {
+    document.getElementById('vgiModalParams').textContent = `ошибка загрузки: ${e}`;
+  }
+}
+
+function drawVgiChart(data) {
+  const canvas = document.getElementById('vgiChartCanvas');
+  const wrap = document.getElementById('vgiChartWrap');
+  const dpr = window.devicePixelRatio || 1;
+  const W = wrap.clientWidth, H = wrap.clientHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+
+  const candles = data.candles || [];
+  if (!candles.length) return;
+  const entry = data.entry, sl = data.sl, tp = data.tp;
+  const exitPrice = data.exit_price;
+
+  const padRight = 54;
+  const chartW = W - padRight;
+  const n = candles.length;
+  const slot = chartW / n;
+  const bodyW = Math.max(1, slot * 0.6);
+  const xAt = (i) => i * slot + slot / 2;
+
+  const { hi, lo } = computeYRangeSimple(candles, entry, sl, tp);
+  const range = hi - lo || 1;
+  const yP = (price) => (hi - price) / range * H;
+
+  candles.forEach((c, i) => {
+    const cx = xAt(i);
+    const up = c.close >= c.open;
+    ctx.strokeStyle = ctx.fillStyle = up ? '#3ddc97' : '#ff6b6b';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx, yP(c.high));
+    ctx.lineTo(cx, yP(c.low));
+    ctx.stroke();
+    const top = yP(Math.max(c.open, c.close));
+    const h = Math.max(1, Math.abs(yP(c.open) - yP(c.close)));
+    ctx.fillRect(cx - bodyW / 2, top, bodyW, h);
+  });
+
+  ctx.fillStyle = '#6b7688';
+  ctx.font = '10px sans-serif';
+  for (let i = 0; i <= 3; i++) {
+    const p = hi - (range * i / 3);
+    const yy = yP(p);
+    ctx.fillText(fmtNum(p), chartW + 4, yy + 3);
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(chartW, yy); ctx.stroke();
+  }
+
+  const drawLevelLine = (price, color, label) => {
+    const yy = yP(price);
+    ctx.strokeStyle = color;
+    ctx.setLineDash([5, 4]);
+    ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(chartW, yy); ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.fillStyle = color;
+    ctx.font = 'bold 10px sans-serif';
+    ctx.fillText(label, 4, yy - 3);
+  };
+  drawLevelLine(entry, '#5a9fff', 'ENTRY');
+  drawLevelLine(sl, '#ff6b6b', 'SL');
+  drawLevelLine(tp, '#3ddc97', 'TP');
+
+  const sigIdx = candles.findIndex(c => c.time === data.time);
+  if (sigIdx >= 0) {
+    const sx = xAt(sigIdx);
+    ctx.fillStyle = '#5a9fff';
+    ctx.beginPath(); ctx.arc(sx, yP(entry), 4, 0, Math.PI * 2); ctx.fill();
+  }
+  if (data.exit_time && exitPrice !== null && exitPrice !== undefined) {
+    const exitIdx = candles.findIndex(c => c.time === data.exit_time);
+    if (exitIdx >= 0) {
+      const exx = xAt(exitIdx);
+      ctx.fillStyle = data.result === 'WIN' ? '#3ddc97' : '#ff6b6b';
+      ctx.beginPath(); ctx.arc(exx, yP(exitPrice), 4, 0, Math.PI * 2); ctx.fill();
+    }
+  }
+}
+
 function openSessionNyChart(symbol, sessionOpen) {
   // Thin wrapper, not a duplicate — reuses the exact same modal/canvas
   // (openSessionChart/drawSessionChart) since this is pure chart-display
@@ -15031,6 +15918,8 @@ if __name__ == "__main__":
     threading.Thread(target=xau_lg_live_loop, daemon=True).start()
     threading.Thread(target=ft5_backtest_loop, daemon=True).start()
     threading.Thread(target=ft5_live_loop, daemon=True).start()
+    threading.Thread(target=vgi_backtest_loop, daemon=True).start()
+    threading.Thread(target=vgi_live_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     threading.Thread(target=risk_autotune_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
