@@ -4375,6 +4375,59 @@ v0.98.5 - Session's RR is now managed by risk-autotune end to end, per
          node --check on the extracted <script> block, and both the
          route/def integrity and stale-default-parameter checks — all
          clean.
+
+v0.98.6 - CRITICAL FIX: outcome-tracking across seven functions in five
+         modules was including the entry candle's OWN high/low in the
+         SL/TP check, even though entry happens at that candle's CLOSE
+         — meaning a wick that formed before we were even in the trade
+         could falsely trigger an immediate "LOSS". Found from a direct
+         user report with a VGI chart screenshot (BMT_USDT SHORT, LOSS
+         @ SL) and a precise diagnosis of why it looked wrong: "стоп не
+         зайдет, разве что на свече входа, но мы то входим на закрытии."
+         Confirmed by reading the code: every affected function built
+         its forward-looking window as `c["time"] >= sig["time"]` (or
+         `>= sig["confirm_time"]`) — since sig["time"]/confirm_time IS
+         the entry candle's own timestamp (set at signal creation from
+         that same candle's close), >= includes that candle in the SL/
+         TP scan. Checked every module systematically rather than just
+         fixing the one reported: EMA (update_ema_outcomes), Divergence
+         (update_divergence_outcomes), and Volume (update_signal_
+         outcomes) already used strict > and were correct; Session,
+         Session NY, Scalp, XAU_LG, and VGI all had the bug.
+         Fixed all seven: track_session_outcome() and track_session_ny_
+         outcome() (both used for BACKTESTING — meaning this wasn't
+         just a live-tracking bug for Session/Session NY, the backtest-
+         derived win rates users have been looking at all session were
+         also affected, always in the pessimistic direction since it
+         could only ever manufacture false LOSSes, never false WINs,
+         given SL is checked before TP on any bar), update_session_
+         signal_outcomes(), update_session_ny_signal_outcomes(),
+         update_scalp_signal_outcomes(), update_xau_lg_signal_
+         outcomes(), and update_vgi_signal_outcomes() (the one from the
+         live report). VGI's own vgi_run_backtest() was independently
+         verified NOT to have this bug — its position-tracking control
+         flow structurally never checks the entry bar's own high/low
+         (the position only exists starting the NEXT loop iteration),
+         so VGI's backtest numbers were always honest; only its LIVE
+         tracker had the problem.
+         Process note, stated plainly: while applying this fix, two
+         separate str_replace edits (Session's live tracker, then
+         Scalp's) each accidentally dropped 3-5 lines of surrounding
+         code the same way v0.96.0/v0.97.2/v0.98.0's incidents did —
+         both caught this time by manually re-reading the full edited
+         function immediately after each change, not by py_compile or
+         pyflakes (verified directly: pyflakes does NOT catch a
+         variable assigned only inside one conditional branch and read
+         outside it, confirmed with a minimal reproduction before
+         relying on that conclusion). Every one of the seven edited
+         functions was individually re-read in full after editing, not
+         just compile-checked, specifically because of this repeated
+         failure mode.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the extracted <script> block, the route/def
+         integrity check, and the stale-default-parameter check — all
+         clean. Confirmed zero remaining `>= sig[` occurrences and ten
+         correct `> sig[` occurrences across the file.
 """
 
 import os
@@ -4394,7 +4447,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.98.5"
+APP_VERSION = "0.98.6"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6931,8 +6984,14 @@ def track_session_outcome(candles, sig, max_wait_sec=24 * 3600):
     touch. If a single candle's range covers both (can't tell from OHLC
     alone which came first), SL is checked first — the conservative
     assumption, consistent with how a real position would behave if
-    price is volatile enough to touch both in one bar."""
-    future = [c for c in candles if c["time"] >= sig["confirm_time"]]
+    price is volatile enough to touch both in one bar.
+    v0.98.6: strictly > confirm_time, not >= — entry is the confirm
+    candle's own CLOSE, so its own high/low (formed before that close)
+    can't have triggered SL/TP; we weren't in the trade yet. Found via
+    a live user report of a VGI trade appearing to hit SL on a candle
+    the position couldn't have been open for — same bug pattern,
+    checked and fixed everywhere else it also existed."""
+    future = [c for c in candles if c["time"] > sig["confirm_time"]]
     for c in future:
         if c["time"] - sig["confirm_time"] > max_wait_sec:
             return "TIMEOUT", None
@@ -6951,8 +7010,8 @@ def track_session_outcome(candles, sig, max_wait_sec=24 * 3600):
 
 def track_session_ny_outcome(candles, sig, max_wait_sec=24 * 3600):
     """New York counterpart of track_session_outcome() — identical
-    walk-forward logic."""
-    future = [c for c in candles if c["time"] >= sig["confirm_time"]]
+    walk-forward logic (same v0.98.6 entry-candle-exclusion fix)."""
+    future = [c for c in candles if c["time"] > sig["confirm_time"]]
     for c in future:
         if c["time"] - sig["confirm_time"] > max_wait_sec:
             return "TIMEOUT", None
@@ -7231,7 +7290,7 @@ def update_session_signal_outcomes():
         try:
             if candles is None:
                 continue
-            future = [c for c in candles if c["time"] >= sig["confirm_time"]]
+            future = [c for c in candles if c["time"] > sig["confirm_time"]]
             direction = sig["direction"]
             entry = sig["entry"]
             risk = abs(entry - sig["sl"]) or 1e-9
@@ -7328,7 +7387,7 @@ def update_session_ny_signal_outcomes():
         try:
             if candles is None:
                 continue
-            future = [c for c in candles if c["time"] >= sig["confirm_time"]]
+            future = [c for c in candles if c["time"] > sig["confirm_time"]]
             result = None
             exit_price = None
             exit_time = None
@@ -9472,15 +9531,15 @@ def update_scalp_signal_outcomes():
         try:
             if candles is None:
                 continue
-            future = [c for c in candles if c["time"] >= sig["time"]]
-            result = None
-            exit_price = None
-            exit_time = None
-            sl_price = sig.get("sl_price")  # older signals created before SL existed won't have this — falls back to WIN/TIMEOUT only, same as before
+            future = [c for c in candles if c["time"] > sig["time"]]
             entry = sig["entry"]
             direction = sig["direction"]
             mfe_price = sig.get("mfe_price", entry)
             mae_price = sig.get("mae_price", entry)
+            result = None
+            exit_price = None
+            exit_time = None
+            sl_price = sig.get("sl_price")  # older signals created before SL existed won't have this — falls back to WIN/TIMEOUT only, same as before
             for c in future:
                 if direction == "LONG":
                     mfe_price = max(mfe_price, c["high"])
@@ -11861,7 +11920,7 @@ def update_xau_lg_signal_outcomes():
         try:
             if candles is None:
                 continue
-            future = [c for c in candles if c["time"] >= sig["time"]]
+            future = [c for c in candles if c["time"] > sig["time"]]
             result = None
             exit_price = None
             exit_time = None
@@ -12186,7 +12245,7 @@ def update_vgi_signal_outcomes():
         try:
             if candles is None:
                 continue
-            future = [c for c in candles if c["time"] >= sig["time"]]
+            future = [c for c in candles if c["time"] > sig["time"]]
             result, exit_price, exit_time = None, None, None
             for c in future:
                 if sig["direction"] == "LONG":
