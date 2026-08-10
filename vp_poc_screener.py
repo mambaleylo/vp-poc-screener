@@ -4262,6 +4262,51 @@ v0.98.3 - fixed FT5's top-symbol selection to weigh sample frequency, per
          node --check on the extracted <script> block, and both the
          route/def integrity and stale-default-parameter checks — all
          clean.
+
+v0.98.4 - fixed VGI's backtest loop silently stalling, diagnosed live
+         from a direct user report ("Vgi молчит") plus two screenshots
+         rather than guessed at. First screenshot showed universe_size
+         still "?" (STATE["vgi_universe"] never populated) with zero
+         signals and "бэктест ещё не готов" — ruled out the obvious
+         guesses first: VGI's enable toggle was confirmed ON, and
+         vgi_run_backtest() itself was measured at 0.02s for a full
+         720-candle (30-day, 1h) walk-forward, so compute speed wasn't
+         it. Second screenshot's error panel showed exactly one entry:
+         a "Read timed out" on api.gateio.ws from an unrelated function
+         (reconcile_positions_and_orders) — independent evidence Gate.io
+         was responding slowly for this user right then. That pointed
+         at the real bug: vgi_backtest_loop() fetched each universe
+         symbol's candles in a plain sequential `for symbol in universe`
+         loop, unlike the live scan loops (which already use a
+         ThreadPoolExecutor per symbol) — under normal conditions this
+         was merely slower than it needed to be, but under a live
+         network slowdown, one symbol's fetch retrying/stalling blocks
+         every symbol queued behind it, so total wall-clock time scales
+         with the SUM of fetch times rather than the worst one — easily
+         explaining an empty universe that never even got far enough to
+         log a real error.
+         Fixed by extracting _vgi_backtest_one_symbol() (fetch + backtest
+         + summarize for one symbol, exceptions caught internally so one
+         bad symbol can't take down the batch) and running it through a
+         ThreadPoolExecutor across the whole universe, matching the
+         concurrency pattern already used elsewhere in this app rather
+         than inventing a new one. Verified behaviorally, not just read
+         as correct: mocked get_candles_range with one deliberately slow
+         ("SLOW_USDT", +0.3s) symbol among five, confirmed total wall-
+         clock time matched the single slowest fetch (~0.37s) rather
+         than the sum of all five (~0.55s), and that all five symbols'
+         results still came back correctly.
+         Noted, not fixed this round: ft5_backtest_loop() has the
+         identical sequential-fetch structure (`for symbol in universe:
+         ft5_optimize_symbol(symbol)`), across up to 200 symbols by
+         default — an even larger version of the same vulnerability.
+         Flagged directly rather than silently left inconsistent; not
+         changed here since the live report was specifically about VGI
+         and FT5 wasn't reported as currently broken.
+         Verified with py_compile, an actual runtime start, and pyflakes
+         — clean. (Session's own RR/SL-mult autotune work, requested in
+         the same conversation, was paused mid-way to handle this
+         time-sensitive live issue first — continues next.)
 """
 
 import os
@@ -4281,7 +4326,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.98.3"
+APP_VERSION = "0.98.4"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4465,6 +4510,7 @@ EMA_TREND_FILTER = os.environ.get("VP_EMA_TREND_FILTER", "1") == "1"  # only BUY
 EMA_INVERT_SIGNALS = os.environ.get("VP_EMA_INVERT_SIGNALS", "0") == "1"  # user hypothesis: this indicator's config has been systematically wrong more often than right (22.4% win rate at RR=2) — worth testing whether trading the OPPOSITE of what it says works, with its own (smaller, asymmetric) TP/SL rather than reusing the original's
 SESSION_INVERT_SIGNALS = os.environ.get("VP_SESSION_INVERT_SIGNALS", "0") == "1"  # per direct user request after live session winrate looked bad (~11%) — mirrors DIV_INVERT_SIGNALS/EMA_INVERT_SIGNALS, but with its OWN sizing rather than just flipping direction and reusing the original sl/tp: the ORIGINAL sl distance (sweep_extreme + SESSION_SL_BUFFER_PCT, i.e. the same risk a non-inverted trade would have taken) becomes the inverted trade's own SL distance too, applied on the opposite side of entry — TP is fixed at 2x that same risk (RR=2), not the original TP (opposite side of the consolidation range, an arbitrary distance tied to range width rather than to risk). Implemented inside detect_session_manipulation() itself (not as a separate post-processing step) so both live scanning AND the historical backtest ranking see the same inverted direction/sizing consistently — avoids the kind of sign mismatch found and fixed for divergence's pivot-stability stat, where the live/backtest paths could disagree about which direction was "the one actually traded."
 SESSION_SL_MULT = float(os.environ.get("VP_SESSION_SL_MULT", 1.5))  # per direct user request after a live example (CYS_USDT) hit its SL — multiplies the base risk distance (sweep_extreme + SESSION_SL_BUFFER_PCT vs entry) before it's used for the inverted trade's SL AND its RR=2 TP, so both scale together and RR stays exactly 2 at the new, wider stop. Only affects SESSION_INVERT_SIGNALS's own sizing (see its comment above) — the non-inverted trade still uses its original sl/tp (sweep-based stop, opposite-range-edge take), untouched by this.
+SESSION_REVERSE_RR = float(os.environ.get("VP_SESSION_REVERSE_RR", 2.0))  # v0.98.4 — was a literal "2" hardcoded directly in the tp = entry +/- risk*2 formula, per direct user request to have risk-autotune manage this instead of it being a permanently fixed ratio. Only used inside SESSION_INVERT_SIGNALS's own sizing branch, same scope as SESSION_SL_MULT right above.
 EMA_COOLDOWN_SEC = int(os.environ.get("VP_EMA_COOLDOWN", 3600))
 EMA_SIGNAL_HISTORY = 200
 # the Pine Script only plots BUY/SELL labels, no TP/SL of its own — added
@@ -5017,7 +5063,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_sig
                   # plain module constants with NO persistence at all, so any
                   # manual env-var override would silently revert on restart
                   # too — now they follow the same rules as ema_min_rr etc.
-                  "scalp_min_rr", "scalp_sl_buffer_mult", "session_sl_mult", "ema_sl_atr_mult", "div_sl_atr_mult",
+                  "scalp_min_rr", "scalp_sl_buffer_mult", "session_sl_mult", "session_reverse_rr", "ema_sl_atr_mult", "div_sl_atr_mult",
                   "ema_tp_pct", "div_tp_pct")
 
 
@@ -5083,6 +5129,7 @@ def get_settings():
         "scalp_min_rr": SCALP_MIN_RR,
         "scalp_sl_buffer_mult": SCALP_SL_BUFFER_MULT,
         "session_sl_mult": SESSION_SL_MULT,
+        "session_reverse_rr": SESSION_REVERSE_RR,
         "ema_sl_atr_mult": EMA_SL_ATR_MULT,
         "div_sl_atr_mult": DIV_SL_ATR_MULT,
         "ema_tp_pct": EMA_TP_PCT,
@@ -5104,7 +5151,7 @@ def apply_settings(updates):
     global SCALP_SIZE_MODE, SCALP_SIZE_VALUE
     global EMA_MIN_RR
     global EMA_ADX_FILTER_ENABLED, EMA_ADX_MIN, EMA_MIN_GAP_PCT
-    global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT, SESSION_SL_MULT
+    global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT, SESSION_SL_MULT, SESSION_REVERSE_RR
     global EMA_SL_ATR_MULT, DIV_SL_ATR_MULT
     global EMA_TP_PCT, DIV_TP_PCT
     if "volume_profile_enabled" in updates:
@@ -5268,6 +5315,13 @@ def apply_settings(updates):
             v = float(updates["session_sl_mult"])
             if v > 0:
                 SESSION_SL_MULT = v
+        except (TypeError, ValueError):
+            pass
+    if "session_reverse_rr" in updates:
+        try:
+            v = float(updates["session_reverse_rr"])
+            if v > 0:
+                SESSION_REVERSE_RR = v
         except (TypeError, ValueError):
             pass
     if "ema_sl_atr_mult" in updates:
@@ -6710,7 +6764,7 @@ def detect_session_manipulation(candles, session_open_ts):
             risk = abs(entry - orig_sl)
             if SESSION_INVERT_SIGNALS:
                 risk *= SESSION_SL_MULT
-                direction, sl, tp = "LONG", entry - risk, entry + risk * 2
+                direction, sl, tp = "LONG", entry - risk, entry + risk * SESSION_REVERSE_RR
             else:
                 direction, sl, tp = "SHORT", orig_sl, range_low
             return {"direction": direction, "entry": entry, "sl": sl, "tp": tp,
@@ -6723,7 +6777,7 @@ def detect_session_manipulation(candles, session_open_ts):
             risk = abs(entry - orig_sl)
             if SESSION_INVERT_SIGNALS:
                 risk *= SESSION_SL_MULT
-                direction, sl, tp = "SHORT", entry + risk, entry - risk * 2
+                direction, sl, tp = "SHORT", entry + risk, entry - risk * SESSION_REVERSE_RR
             else:
                 direction, sl, tp = "LONG", orig_sl, range_high
             return {"direction": direction, "entry": entry, "sl": sl, "tp": tp,
@@ -7013,6 +7067,8 @@ def scan_symbol_session_live(symbol, session_open_ts):
             "session_open": session_open_ts, "confirm_time": sig["confirm_time"],
             "detected_at": time.time(), "status": "OPEN", "result": None,
             "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
+            "mfe_r": 0.0, "mae_r": 0.0, "mfe_price": None, "mae_price": None,
+            "mfe_r_at_close": None, "mae_r_at_close": None,
         }
         with state_lock:
             STATE["session_signals"].appendleft(record)
@@ -7085,6 +7141,20 @@ def scan_symbol_session_ny_live(symbol, session_open_ts):
 
 
 def update_session_signal_outcomes():
+    """v0.98.4: also tracks mfe_r/mae_r (R = abs(entry-sl), the actual
+    risk used at signal creation — this naturally covers both non-
+    inverted trades, whose sl is the sweep-based stop, and inverted
+    trades, whose sl is risk*SESSION_SL_MULT wider, since sl was already
+    set correctly per-mode when the record was created) as it walks
+    forward, freezing mfe_r_at_close/mae_r_at_close once a trade
+    resolves — same shape as update_divergence_outcomes()'s live
+    tracking, minus the post-close continued-tracking window (mfe_
+    tracking_until), kept simpler since risk_autotune_pass() only ever
+    needs the at-close values, not what happened after. Added
+    specifically so SESSION_SL_MULT and SESSION_REVERSE_RR (previously
+    a hardcoded "2") can be driven by risk-autotune the same
+    overshoot/target-extend way EMA/Divergence/Scalp already are,
+    instead of only ever being changed by hand."""
     now = time.time()
     with state_lock:
         open_signals = [s for s in STATE["session_signals"] if s["status"] == "OPEN"]
@@ -7094,11 +7164,27 @@ def update_session_signal_outcomes():
             if candles is None:
                 continue
             future = [c for c in candles if c["time"] >= sig["confirm_time"]]
+            direction = sig["direction"]
+            entry = sig["entry"]
+            risk = abs(entry - sig["sl"]) or 1e-9
             result = None
             exit_price = None
             exit_time = None
             for c in future:
-                if sig["direction"] == "SHORT":
+                if direction == "LONG":
+                    fav, adv = c["high"] - entry, entry - c["low"]
+                else:
+                    fav, adv = entry - c["low"], c["high"] - entry
+                fav_r, adv_r = fav / risk, adv / risk
+                if fav_r > sig["mfe_r"] or adv_r > sig["mae_r"]:
+                    with state_lock:
+                        if fav_r > sig["mfe_r"]:
+                            sig["mfe_r"] = round(fav_r, 3)
+                            sig["mfe_price"] = c["high"] if direction == "LONG" else c["low"]
+                        if adv_r > sig["mae_r"]:
+                            sig["mae_r"] = round(adv_r, 3)
+                            sig["mae_price"] = c["low"] if direction == "LONG" else c["high"]
+                if direction == "SHORT":
                     if c["high"] >= sig["sl"]:
                         result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
                         break
@@ -7119,11 +7205,15 @@ def update_session_signal_outcomes():
                     sig["result"] = result
                     sig["exit_price"] = exit_price
                     sig["exit_time"] = exit_time
+                    sig["mfe_r_at_close"] = sig["mfe_r"]
+                    sig["mae_r_at_close"] = sig["mae_r"]
                 elif timed_out:
                     sig["status"] = "CLOSED"
                     sig["result"] = "TIMEOUT"
                     sig["exit_price"] = candles[-1]["close"] if candles else None
                     sig["exit_time"] = candles[-1]["time"] if candles else None
+                    sig["mfe_r_at_close"] = sig["mfe_r"]
+                    sig["mae_r_at_close"] = sig["mae_r"]
         except Exception as e:
             log_error(f"session_outcome {sig['symbol']}: {e}")
 
@@ -11230,22 +11320,31 @@ def _risk_autotune_reverse(module, param_key, current_flag, winrate_pct, rr, sam
                         f"ev={ev:+.3f} winrate={winrate_pct:.1f}% rr={rr:.3f} overshoot={overshoot:.3f}", sample_n)
 
 
-def _risk_autotune_tp_extend(module, param_key, current_tp_pct, win_mfe_r, current_rr, sample_n, setter):
-    """Nudges a fixed TP_PCT (EMA_TP_PCT / DIV_TP_PCT) toward matching the
-    R-multiple winning trades actually reach before closing (win_mfe_r —
-    pass mfe_r_wins_at_close specifically, NOT the full-24h-window MFE,
-    since that includes post-close movement that isn't tradeable under
-    the current exit logic and the app's own UI already labels it "не
-    для оценки конкретной сделки"). If wins consistently run well past
-    the R-multiple the current TP sits at (current_rr — pass rr_all's
-    median or avg), the target is cutting profit short: extend it. If
-    wins rarely get anywhere near it, the target may be unrealistic:
-    trim it. Mirrors _risk_autotune_sl_mult()'s two-directional nudge,
-    just for the reward side instead of the risk side.
+def _risk_autotune_tp_extend(module, param_key, current_tp_pct, win_mfe_r, current_rr, sample_n, setter, bounds=None):
+    """Nudges a fixed TP_PCT (EMA_TP_PCT / DIV_TP_PCT) — or, since v0.98.4,
+    a directly RR-expressed target like Session's SESSION_REVERSE_RR —
+    toward matching the R-multiple winning trades actually reach before
+    closing (win_mfe_r — pass mfe_r_wins_at_close specifically, NOT the
+    full-24h-window MFE, since that includes post-close movement that
+    isn't tradeable under the current exit logic and the app's own UI
+    already labels it "не для оценки конкретной сделки"). If wins
+    consistently run well past the R-multiple the current target sits
+    at (current_rr — pass rr_all's median or avg, or the target's own
+    current value for a module like Session where the target IS
+    directly an RR with no separate %-of-price translation needed), the
+    target is cutting profit short: extend it. If wins rarely get
+    anywhere near it, the target may be unrealistic: trim it. Mirrors
+    _risk_autotune_sl_mult()'s two-directional nudge, just for the
+    reward side instead of the risk side.
     Since SL is ATR-based (varies per trade) while TP_PCT is one fixed %
     for everyone, R and TP_PCT move proportionally — scaling TP_PCT by
     (win_mfe_r / current_rr) is the direct translation, bounded to a
-    max step per pass same as every other nudge here."""
+    max step per pass same as every other nudge here.
+    bounds defaults to RISK_AUTOTUNE_TP_PCT_BOUNDS (the existing EMA/
+    DIV %-of-price range) if not given — Session passes its own RR-scale
+    bounds instead, since a valid RR range (e.g. 0.5-5) and a valid
+    %-of-price range (0.3%-5%) share nothing but both happening to be
+    "some positive number.\""""
     if not RISK_AUTOTUNE_ENABLED or sample_n < RISK_AUTOTUNE_MIN_SAMPLE:
         return
     if win_mfe_r is None or current_rr is None or current_rr <= 0:
@@ -11256,7 +11355,7 @@ def _risk_autotune_tp_extend(module, param_key, current_tp_pct, win_mfe_r, curre
     if abs(ratio - 1.0) < RISK_AUTOTUNE_TP_TOLERANCE_RATIO:
         return
     ratio = max(1 - RISK_AUTOTUNE_TP_STEP_RATIO, min(1 + RISK_AUTOTUNE_TP_STEP_RATIO, ratio))
-    lo, hi = RISK_AUTOTUNE_TP_PCT_BOUNDS
+    lo, hi = bounds if bounds is not None else RISK_AUTOTUNE_TP_PCT_BOUNDS
     new_value = round(min(hi, max(lo, current_tp_pct * ratio)), 5)
     if new_value == current_tp_pct:
         return
@@ -12035,6 +12134,24 @@ def compute_vgi_signal_stats():
             "winrate": winrate, "rr_avg": rr_avg}
 
 
+def _vgi_backtest_one_symbol(symbol, now):
+    """Fetch + backtest + summarize for a single symbol — factored out
+    so vgi_backtest_loop() can run it concurrently across the whole
+    universe instead of sequentially. Returns (symbol, trades, summary)
+    or None if there wasn't enough history; exceptions are caught here
+    (not propagated) so one bad/slow symbol can't take down the whole
+    batch, matching every other per-symbol worker in this app."""
+    try:
+        candles = get_candles_range(symbol, VGI_TF, now - VGI_BACKTEST_DAYS * 86400, now)
+        if len(candles) < VGI_LOOKBACK + 20:
+            return None
+        trades = vgi_run_backtest(candles)
+        return symbol, trades, vgi_summarize_backtest(trades)
+    except Exception as e:
+        log_error(f"vgi_backtest {symbol}: {e}")
+        return None
+
+
 def vgi_backtest_loop():
     while True:
         try:
@@ -12048,16 +12165,26 @@ def vgi_backtest_loop():
             results_by_symbol = {}
             summary_by_symbol = {}
             now = time.time()
-            for symbol in universe:
-                try:
-                    candles = get_candles_range(symbol, VGI_TF, now - VGI_BACKTEST_DAYS * 86400, now)
-                    if len(candles) < VGI_LOOKBACK + 20:
+            # v0.98.4: was a plain sequential `for symbol in universe`
+            # loop — under normal network conditions this was tolerable,
+            # but a live user report of an empty universe traced to a
+            # concurrent Gate.io API slowdown (an independent "Read timed
+            # out" error was already showing in the scanner log for a
+            # different endpoint) showed the real cost: one slow/timing-
+            # out symbol blocks every symbol behind it in the sequence,
+            # so total wall-clock time scales with the SUM of all fetch
+            # times rather than the worst one. Switched to the same
+            # ThreadPoolExecutor-per-symbol pattern the live scan loops
+            # already use elsewhere in this app.
+            with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
+                futs = [ex.submit(_vgi_backtest_one_symbol, s, now) for s in universe]
+                for fut in as_completed(futs):
+                    res = fut.result()
+                    if res is None:
                         continue
-                    trades = vgi_run_backtest(candles)
+                    symbol, trades, summary = res
                     results_by_symbol[symbol] = trades
-                    summary_by_symbol[symbol] = vgi_summarize_backtest(trades)
-                except Exception as e:
-                    log_error(f"vgi_backtest {symbol}: {e}")
+                    summary_by_symbol[symbol] = summary
             with state_lock:
                 STATE["vgi_backtest_results"] = results_by_symbol
                 STATE["vgi_backtest_summary"] = summary_by_symbol
