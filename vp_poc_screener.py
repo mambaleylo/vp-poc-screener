@@ -4147,6 +4147,66 @@ v0.98.1 - graphical chart display for Scalp signals, per the second half
          Verified with py_compile, an actual runtime start, pyflakes,
          node --check on the extracted <script> block, and the route/
          def integrity check — all clean.
+
+v0.98.2 - fixed a real complaint about VGI, per direct user report
+         ("сразу стоп выбивает") and a request to verify against the
+         actual original Pine indicator (which the user then uploaded).
+         Confirmed from the real Pine source: it's a pure visual
+         indicator (indicator(), not strategy() — no strategy.entry,
+         no alert, no stop-loss concept anywhere in it at all). Every
+         piece of trading logic (direction, TP/SL, leverage, position
+         sizing) lives entirely in the user's own vgi-trader repo
+         (signal_engine.py/trader.py), layered on top of the visual
+         indicator — confirmed this is explicitly how the repo's own
+         README describes it ("min_zone_rows/delta_threshold_pct/
+         max_zone_distance_pct не из оригинального индикатора").
+         Also cleared up a mix-up while re-verifying trader.py/config.
+         example.json directly rather than from memory: leverage is 5
+         in the source (matches this app's own default exactly) — the
+         "10" the user recalled is risk_usdt: 10.0, a separate dollar-
+         risk-per-trade sizing field, not leverage at all.
+         Root cause of the immediate-stopout complaint, confirmed
+         against the source's own formula (which this port already
+         matches exactly): SL = reward/min_rr sizes the stop from an
+         UNRELATED quantity — distance to the nearest zero-volume zone
+         — not actual price volatility. When that zone happens to sit
+         close to price, the resulting stop can end up tighter than
+         ordinary 1h candle noise for that symbol, so it gets hit by
+         normal wicks rather than a genuine invalidation. This is a
+         real property of the source's own design, not a fidelity gap
+         introduced by porting it.
+         Also surfaced, while re-reading trader.py's size_from_risk():
+         the source sizes POSITION SIZE from a fixed dollar risk (qty =
+         risk_usdt / |entry-sl| — tighter stop means MORE contracts, to
+         hold dollar risk constant), but this app's VGI integration
+         currently uses the shared AUTOTRADE_SIZE_MODE/SIZE_VALUE
+         mechanism instead, same as every other module — meaning a
+         tight stop here does NOT get a correspondingly smaller/larger
+         position the way the source's own sizing would. Flagged
+         directly, left unchanged this round per explicit user
+         instruction (keep the app's shared sizing mechanism), not
+         silently absorbed.
+         Fix chosen after presenting the tradeoff directly and getting
+         a clear answer: added VGI_MIN_SL_DISTANCE_PCT (default 0.5%)
+         — vgi_evaluate_signal() gained an optional min_sl_distance_pct
+         parameter (resolves to the live global at call time if not
+         given, avoiding the exact v0.95.7-class stale-default bug this
+         session already found and fixed elsewhere) and now rejects a
+         signal outright if its computed SL distance is tighter than
+         this floor, rather than letting it fire with an unrealistically
+         tight stop. Doesn't touch TP or the RR math at all — a
+         rejected signal is simply never taken, not resized. Verified
+         behaviorally with two synthetic profiles (a close zone
+         producing a sub-threshold stop, correctly rejected; a farther
+         zone producing a ~2.3% stop, correctly passed through with
+         RR still exactly 3.0) rather than trusting the logic by
+         inspection alone. Exposed in /api/vgi/status's config block
+         and in the panel's own header text, explaining directly why
+         some setups won't fire.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the extracted <script> block, and both the
+         route/def integrity and stale-default-parameter checks across
+         the whole file — all clean.
 """
 
 import os
@@ -4166,7 +4226,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.98.1"
+APP_VERSION = "0.98.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4743,6 +4803,7 @@ VGI_MIN_ZONE_ROWS = int(os.environ.get("VP_VGI_MIN_ZONE_ROWS", 1))
 VGI_DELTA_THRESHOLD_PCT = float(os.environ.get("VP_VGI_DELTA_THRESHOLD_PCT", 20.0))
 VGI_MAX_ZONE_DISTANCE_PCT = float(os.environ.get("VP_VGI_MAX_ZONE_DISTANCE_PCT", 8.0))
 VGI_MIN_RR = float(os.environ.get("VP_VGI_MIN_RR", 3.0))
+VGI_MIN_SL_DISTANCE_PCT = float(os.environ.get("VP_VGI_MIN_SL_DISTANCE_PCT", 0.5))  # v0.98.2 — SL = reward/min_rr, so it's sized off an unrelated quantity (distance to the nearest volume zone), not actual price volatility. When the nearest zone happens to be close, this can produce a stop tighter than normal 1h candle noise, getting hit by ordinary wicks rather than a real invalidation — reported directly by the user ("сразу стоп выбивает"), confirmed against the source's own formula. Signals with a computed SL distance below this threshold are skipped entirely rather than allowed to fire with an unrealistically tight stop; doesn't touch the TP/RR math at all, purely a pre-entry filter.
 VGI_UNIVERSE_SIZE = int(os.environ.get("VP_VGI_UNIVERSE_SIZE", 40))  # matches source's own max_symbols default; unlike FT5 there's no per-symbol param search here (source treats these as one fixed global config, not hyperopt-tuned), so no analysis/live split is needed the way FT5 has one
 VGI_SIGNAL_HISTORY = 200
 VGI_BACKTEST_DAYS = int(os.environ.get("VP_VGI_BACKTEST_DAYS", 30))
@@ -5960,7 +6021,7 @@ def vgi_nearest_zone(profile, price, direction):
     return max(candidates, key=lambda z: z["top"])
 
 
-def vgi_evaluate_signal(profile, price, delta_threshold_pct, max_zone_distance_pct, min_rr):
+def vgi_evaluate_signal(profile, price, delta_threshold_pct, max_zone_distance_pct, min_rr, min_sl_distance_pct=None):
     """Port of signal_engine.py's evaluate(). Direction comes from local
     delta bias first (the section containing the current price); if
     that's neutral, falls back to whichever zero-volume zone is nearer
@@ -5971,7 +6032,16 @@ def vgi_evaluate_signal(profile, price, delta_threshold_pct, max_zone_distance_p
     stop is SIZED FROM the target, not measured independently — same
     approach the source explicitly chose).
     Direction strings are LONG/SHORT (this app's convention throughout)
-    rather than the source's lowercase long/short."""
+    rather than the source's lowercase long/short.
+    v0.98.2: min_sl_distance_pct (defaults to VGI_MIN_SL_DISTANCE_PCT if
+    not given) rejects a signal whose SL ends up closer than this — per
+    direct user report that stops were getting hit almost immediately.
+    Root cause confirmed against the source's own formula: SL is sized
+    from reward/min_rr, an unrelated quantity to actual price
+    volatility, so when the nearest zone (and therefore reward) happens
+    to be close, the resulting stop can be tighter than ordinary candle
+    noise for that timeframe. This filter doesn't touch the TP/RR math
+    at all — a rejected signal is simply never taken, not resized."""
     max_zone_dist = max_zone_distance_pct / 100.0
     sec = vgi_section_at_price(profile, price)
     local_delta = sec["delta_pct"] if sec else 0.0
@@ -6012,6 +6082,9 @@ def vgi_evaluate_signal(profile, price, delta_threshold_pct, max_zone_distance_p
     if reward <= 0:
         return None
     risk = reward / min_rr
+    min_sl_dist = (min_sl_distance_pct if min_sl_distance_pct is not None else VGI_MIN_SL_DISTANCE_PCT) / 100.0
+    if risk / price < min_sl_dist:
+        return None
     sl = price - risk if direction == "LONG" else price + risk
     rr = round(reward / risk, 3) if risk > 0 else None
 
@@ -12698,6 +12771,7 @@ def api_vgi_status():
             "sum_sections": VGI_SUM_SECTIONS, "min_zone_rows": VGI_MIN_ZONE_ROWS,
             "delta_threshold_pct": VGI_DELTA_THRESHOLD_PCT,
             "max_zone_distance_pct": VGI_MAX_ZONE_DISTANCE_PCT, "min_rr": VGI_MIN_RR,
+            "min_sl_distance_pct": VGI_MIN_SL_DISTANCE_PCT,
             "backtest_days": VGI_BACKTEST_DAYS,
         },
         "top": ranked,
@@ -14640,7 +14714,8 @@ async function refreshVgi() {
     </div>`;
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
-      ТФ ${cfg.tf} · lookback ${cfg.lookback} · rows ${cfg.rows} · delta порог ${cfg.delta_threshold_pct}% · макс. дистанция до зоны ${cfg.max_zone_distance_pct}% · мин. RR ${cfg.min_rr}<br>
+      ТФ ${cfg.tf} · lookback ${cfg.lookback} · rows ${cfg.rows} · delta порог ${cfg.delta_threshold_pct}% · макс. дистанция до зоны ${cfg.max_zone_distance_pct}% · мин. RR ${cfg.min_rr} · мин. стоп ${cfg.min_sl_distance_pct}%<br>
+      <span style="font-size:11px;">Сигналы со стопом уже минимального % пропускаются — иначе он теснее обычного рыночного шума на этом ТФ (найдено по прямому сообщению о том, что стоп выбивает почти сразу).</span><br>
       ${buildTxt}<br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · ${rrAvgTxt} · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
       <span style="font-size:11px;">Клик по строке сигнала открывает график входа/выхода.</span>
