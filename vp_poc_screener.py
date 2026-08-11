@@ -4592,6 +4592,81 @@ v0.98.9 - VGI now has a reverse mode and full risk-autotune coverage,
          node --check on the extracted <script> block, the route/def
          integrity check, and the stale-default-parameter check — all
          clean.
+
+v0.98.10 - FT5 gains reverse mode + MFE/MAE tracking + a reverse-flag
+         autotune rule, completing the same direct user request v0.98.9
+         addressed for VGI ("Vgi и ft5 надо чтобы тоже автотюнились и
+         имели режим реверса... надо чтобы отслеживались и параметры
+         движения, аналогия с другими индикаторами").
+         ft5_run_backtest() gained an invert parameter (resolved from
+         the live FT5_INVERT_SIGNALS global at call time, not frozen as
+         a signature default). The same entry trigger fires but opens a
+         SHORT instead of LONG; stoploss and the ROI ladder are both
+         mirrored exactly (pure %-of-entry rules, safe to reflect). The
+         sell-signal exit (RSI cross + MACD + MinusDI, or SAR flip +
+         Fisher) is deliberately NOT mirrored for inverted trades —
+         it's tuned to detect bullish exhaustion for exiting a LONG,
+         and MinusDI/SAR/Fisher don't reduce to their bearish-
+         exhaustion equivalents via a mechanical sign flip the way
+         PlusDI/MinusDI genuinely mirror each other; building a properly
+         redesigned bearish-exhaustion detector was judged out of scope
+         for this pass. Inverted trades exit only via stoploss or the
+         ROI ladder — same "own, simplified exit rather than reusing
+         original complexity" pattern this app's other invert modes
+         already use.
+         Verified behaviorally at multiple levels rather than trusted
+         from the math alone: unit-level (SHORT ROI exits land below
+         entry with positive pnl_pct; searched across 50 seeds to find
+         a SHORT stoploss exit specifically, confirmed it lands above
+         entry with negative pnl_pct exactly as a real short-side stop
+         should), and end-to-end (ran the full ft5_optimize_symbol()
+         pipeline in both directions on synthetic data, confirmed clean
+         completion with sane, genuinely different results each way).
+         MFE/MAE added to FT5 for the first time (it never tracked this
+         at all before) — added directly inside ft5_run_backtest()'s
+         walk-forward loop itself, since FT5's outcome-checking already
+         works by fully RE-DERIVING via a fresh backtest call each poll
+         (unlike every other module's incremental live-update pattern),
+         so tracking had to live inside the walk-forward itself rather
+         than as a separate polling update. R-unit is entry*stoploss_pct,
+         matching FT5's own existing RR convention (pnl_pct/(stoploss_
+         pct*100)). Verified behaviorally: searched seeds for an actual
+         stoploss-exit trade, confirmed its mae_r landed at ~1.0 (should
+         reach almost exactly the full risked distance by definition).
+         Two real, pre-existing bugs found and fixed while wiring this
+         through, unrelated to the new invert logic itself: (1) the live
+         signal record's direction field and its Telegram entry alert
+         were both hardcoded to "LONG" — harmless before this change
+         since FT5 really was LONG-only, but would have silently
+         mislabeled every inverted SHORT signal. (2) api_ft5_chart()'s
+         SL-price calculation was hardcoded to the LONG-side formula
+         (entry*(1-stoploss_pct)) — for a SHORT trade this is simply
+         wrong (the stop sits above entry, not below); fixed to branch
+         on the signal's own recorded direction.
+         risk_autotune_pass() gained an FT5 block — but ONLY the
+         reverse-flag rule (via _risk_autotune_reverse, using the new
+         MFE/MAE data), not a stoploss-width nudge: FT5's own "RR" is
+         DEFINED relative to FT5_STOPLOSS_PCT (rr = pnl_pct/(stoploss_
+         pct*100)), so auto-tuning that constant would retroactively
+         change what every already-recorded trade's RR even means, and
+         would also need coordinating with the grid-search optimizer's
+         own use of it (FT5_RANK_PRIOR_TARGET's pseudo-loss level) —
+         judged a comparably subtle new inconsistency not worth
+         introducing this round, left alone deliberately rather than
+         silently.
+         FT5 also gained real settings UI for the first time — it
+         previously had only a Telegram-alerts checkbox, no "enabled"
+         toggle or anything else, unlike every other module. New
+         settings group with both an enabled toggle and the reverse-
+         mode toggle. Panel gains a direction column in the signals
+         table (previously omitted entirely, since direction was always
+         implicitly LONG), a "РЕВЕРС ВКЛЮЧЁН" indicator, an MFE/MAE
+         display block (matching Session/VGI's own), and corrected
+         warning text that previously said "только LONG" unconditionally.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the extracted <script> block, the route/def
+         integrity check, and the stale-default-parameter check — all
+         clean.
 """
 
 import os
@@ -4611,7 +4686,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.98.9"
+APP_VERSION = "0.98.10"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5221,6 +5296,7 @@ FT5_STOCH_D = int(os.environ.get("VP_FT5_STOCH_D", 3))
 FT5_SELL_MINUS_DI = float(os.environ.get("VP_FT5_SELL_MINUS_DI", 4.0))
 FT5_SELL_FISHER = float(os.environ.get("VP_FT5_SELL_FISHER", 30.0))  # compared against fisher_rsi_norma (0-100), see header comment on the corrected variable
 FT5_STOPLOSS_PCT = float(os.environ.get("VP_FT5_STOPLOSS_PCT", 0.10))  # matches Strategy005's fixed -10% stoploss
+FT5_INVERT_SIGNALS = os.environ.get("VP_FT5_INVERT_SIGNALS", "0") == "1"  # v0.98.10 — per direct user request for a reverse mode "по аналогии с другими индикаторами". Mirrors stoploss/ROI-ladder exactly (both pure %-of-entry rules); deliberately does NOT mirror the sell-signal exit (RSI/MACD/MinusDI/SAR) — see ft5_run_backtest()'s own docstring for why that can't be safely done with a mechanical sign flip.
 FT5_ROI_LADDER = [(1440, 0.01), (80, 0.02), (40, 0.03), (20, 0.04), (0, 0.05)]  # (minutes_in_trade_at_least, min_profit_pct_required) — first entry (by descending minutes) whose time threshold is cleared applies; matches Strategy005's minimal_roi table exactly
 
 # Grid-searched per symbol (FT5_PARAM_GRID_* + FT5_SYMBOL_OVERRIDES), same
@@ -5332,7 +5408,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "div_min_rr", "bounce_enabled", "breakout_enabled",
-                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "vgi_enabled", "vgi_invert_signals", "hourly_stats_enabled", "telegram_enabled",
+                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "ft5_invert_signals", "vgi_enabled", "vgi_invert_signals", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session", "telegram_alerts_session_ny", "telegram_alerts_xau_lg", "telegram_alerts_ft5", "telegram_alerts_vgi",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5", "autotrade_vgi",
                   "autotrade_size_mode", "autotrade_size_value",
@@ -5371,6 +5447,7 @@ def get_settings():
         "session_ny_invert_signals": SESSION_NY_INVERT_SIGNALS,
         "xau_lg_enabled": XAU_LG_ENABLED,
         "ft5_enabled": FT5_ENABLED,
+        "ft5_invert_signals": FT5_INVERT_SIGNALS,
         "vgi_enabled": VGI_ENABLED,
         "vgi_invert_signals": VGI_INVERT_SIGNALS,
         "vgi_min_rr": VGI_MIN_RR,
@@ -5431,7 +5508,7 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, FT5_ENABLED, VGI_ENABLED, VGI_INVERT_SIGNALS, VGI_MIN_RR, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, VGI_ENABLED, VGI_INVERT_SIGNALS, VGI_MIN_RR, HOURLY_STATS_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
     global TELEGRAM_ALERTS_SESSION_NY, TELEGRAM_ALERTS_XAU_LG, TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_VGI
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_VGI
@@ -5479,6 +5556,8 @@ def apply_settings(updates):
         XAU_LG_ENABLED = bool(updates["xau_lg_enabled"])
     if "ft5_enabled" in updates:
         FT5_ENABLED = bool(updates["ft5_enabled"])
+    if "ft5_invert_signals" in updates:
+        FT5_INVERT_SIGNALS = bool(updates["ft5_invert_signals"])
     if "vgi_enabled" in updates:
         VGI_ENABLED = bool(updates["vgi_enabled"])
     if "vgi_invert_signals" in updates:
@@ -6619,7 +6698,7 @@ def ft5_run_backtest(candles, buy_rsi=26, buy_fisher=5, sell_rsi=74,
                       buy_fastd_min=1, buy_volume_avg=FT5_VOLUME_AVG_PERIOD,
                       buy_volume_mult=FT5_VOLUME_SPIKE_MULT, sma_period=FT5_SMA_PERIOD,
                       sell_minus_di=FT5_SELL_MINUS_DI, sell_fisher=FT5_SELL_FISHER,
-                      stoploss_pct=FT5_STOPLOSS_PCT, roi_ladder=None):
+                      stoploss_pct=FT5_STOPLOSS_PCT, roi_ladder=None, invert=None):
     """Core FT5 walk-forward simulator — computes every indicator ONCE
     over the whole candle list, then walks forward bar by bar with no
     lookahead: an entry at bar i only ever uses indicator values through
@@ -6632,15 +6711,37 @@ def ft5_run_backtest(candles, buy_rsi=26, buy_fisher=5, sell_rsi=74,
     history, check whether a position would have just opened/closed on
     the last bar) — same "one function serves both" principle as every
     other detector in this app.
-    Long-only, matching Strategy005's own design (see this module's
-    header comment for the full list of deliberate deviations from the
-    literal freqtrade source).
+    Long-only by default, matching Strategy005's own design (see this
+    module's header comment for the full list of deliberate deviations
+    from the literal freqtrade source).
+    v0.98.10: invert, per direct user request for reverse mode "по
+    аналогии с другими индикаторами" (defaults to the live FT5_INVERT_
+    SIGNALS global if not given — resolved at call time, not frozen as
+    a signature default, since that constant IS settings-mutable,
+    avoiding the exact v0.95.7-class stale-default bug this session
+    already found and fixed elsewhere). When on, the SAME entry trigger
+    fires but opens a SHORT instead of a LONG, with stoploss and the
+    ROI ladder both mirrored (both are pure %-of-entry rules, safe to
+    reflect exactly). The sell-signal exit (RSI cross + MACD + MinusDI,
+    or SAR flip + Fisher) is deliberately NOT mirrored and simply
+    doesn't fire for inverted trades — it's tuned to detect bullish
+    exhaustion for exiting a LONG, and MinusDI/SAR/Fisher don't mirror
+    to their bearish-exhaustion equivalents by simply flipping a
+    comparison operator (unlike PlusDI/MinusDI, which ARE genuine
+    mirrors of each other, this indicator SET as a whole measures
+    direction-specific things that would need their own redesign, not
+    a mechanical sign flip, to detect the opposite exhaustion honestly).
+    Inverted trades exit only via stoploss or the ROI ladder — simpler
+    than the LONG side, same "own, simplified exit rather than reusing
+    original complexity" pattern this app's other invert modes already
+    use (see EMA_INVERT_SIGNALS/SESSION_INVERT_SIGNALS's own comments).
     Returns (trades, open_position): trades is a list of CLOSED trades
     ({entry_time, exit_time, entry, exit, pnl_pct, result, exit_reason});
     open_position is None, or {entry, entry_time} if a position was
     still open when the candle list ran out — the live scanner uses
     this to detect a position that just opened on the very last bar."""
     roi_ladder = roi_ladder or FT5_ROI_LADDER
+    inv = invert if invert is not None else FT5_INVERT_SIGNALS
     n = len(candles)
     warmup = max(sma_period, buy_volume_avg) + 30
     if n < warmup + 20:
@@ -6667,15 +6768,47 @@ def ft5_run_backtest(candles, buy_rsi=26, buy_fisher=5, sell_rsi=74,
                     rsi[i] is not None and rsi[i] > buy_rsi and
                     fastd[i] > buy_fastd_min and
                     fisher_norma[i] is not None and fisher_norma[i] < buy_fisher):
-                position = {"entry": c["close"], "entry_time": c["time"]}
+                position = {"entry": c["close"], "entry_time": c["time"], "direction": "SHORT" if inv else "LONG",
+                            "mfe_r": 0.0, "mae_r": 0.0}
             continue
 
         entry = position["entry"]
         minutes_in_trade = (c["time"] - position["entry_time"]) / 60
+        r_unit = entry * stoploss_pct
+        if position["direction"] == "LONG":
+            fav_r, adv_r = (c["high"] - entry) / r_unit, (entry - c["low"]) / r_unit
+        else:
+            fav_r, adv_r = (entry - c["low"]) / r_unit, (c["high"] - entry) / r_unit
+        position["mfe_r"] = max(position["mfe_r"], fav_r)
+        position["mae_r"] = max(position["mae_r"], adv_r)
+
+        if inv:
+            sl_price = entry * (1 + stoploss_pct)
+            if c["high"] >= sl_price:
+                trades.append({**position, "exit_time": c["time"],
+                                "exit": sl_price, "pnl_pct": round(-stoploss_pct * 100, 3),
+                                "result": "LOSS", "exit_reason": "stoploss"})
+                position = None
+                continue
+
+            roi_threshold = None
+            for min_minutes, min_pct in roi_ladder:
+                if minutes_in_trade >= min_minutes:
+                    roi_threshold = min_pct
+                    break
+            if roi_threshold is not None:
+                roi_price = entry * (1 - roi_threshold)
+                if c["low"] <= roi_price:
+                    trades.append({**position, "exit_time": c["time"],
+                                    "exit": roi_price, "pnl_pct": round(roi_threshold * 100, 3),
+                                    "result": "WIN", "exit_reason": "roi"})
+                    position = None
+            continue
+
         sl_price = entry * (1 - stoploss_pct)
         if c["low"] <= sl_price:
-            trades.append({"entry_time": position["entry_time"], "exit_time": c["time"],
-                            "entry": entry, "exit": sl_price, "pnl_pct": round(-stoploss_pct * 100, 3),
+            trades.append({**position, "exit_time": c["time"],
+                            "exit": sl_price, "pnl_pct": round(-stoploss_pct * 100, 3),
                             "result": "LOSS", "exit_reason": "stoploss"})
             position = None
             continue
@@ -6688,8 +6821,8 @@ def ft5_run_backtest(candles, buy_rsi=26, buy_fisher=5, sell_rsi=74,
         if roi_threshold is not None:
             roi_price = entry * (1 + roi_threshold)
             if c["high"] >= roi_price:
-                trades.append({"entry_time": position["entry_time"], "exit_time": c["time"],
-                                "entry": entry, "exit": roi_price, "pnl_pct": round(roi_threshold * 100, 3),
+                trades.append({**position, "exit_time": c["time"],
+                                "exit": roi_price, "pnl_pct": round(roi_threshold * 100, 3),
                                 "result": "WIN", "exit_reason": "roi"})
                 position = None
                 continue
@@ -6707,8 +6840,8 @@ def ft5_run_backtest(candles, buy_rsi=26, buy_fisher=5, sell_rsi=74,
             sell_signal = True
         if sell_signal:
             pnl_pct = (c["close"] - entry) / entry
-            trades.append({"entry_time": position["entry_time"], "exit_time": c["time"],
-                            "entry": entry, "exit": c["close"], "pnl_pct": round(pnl_pct * 100, 3),
+            trades.append({**position, "exit_time": c["time"],
+                            "exit": c["close"], "pnl_pct": round(pnl_pct * 100, 3),
                             "result": "WIN" if pnl_pct > 0 else "LOSS", "exit_reason": "signal"})
             position = None
     return trades, position
@@ -6842,17 +6975,20 @@ def ft5_scan_symbol_live(symbol):
             return
         entry = open_position["entry"]
         record = {
-            "symbol": symbol, "direction": "LONG", "entry": entry,
+            "symbol": symbol, "direction": open_position["direction"], "entry": entry,
             "entry_time": open_position["entry_time"],
             "buy_rsi": buy_rsi, "buy_fisher": buy_fisher, "sell_rsi": sell_rsi,
             "detected_at": now, "status": "OPEN", "result": None,
             "exit_price": None, "exit_time": None, "exit_reason": None,
             "pnl_pct": None, "app_version": APP_VERSION,
+            "mfe_r": open_position.get("mfe_r", 0.0), "mae_r": open_position.get("mae_r", 0.0),
+            "mfe_r_at_close": None, "mae_r_at_close": None,
         }
         with state_lock:
             STATE["ft5_signals"].appendleft(record)
+        arrow = "\u2b06\ufe0f LONG" if open_position["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         send_telegram(
-            f"\u2b06\ufe0f LONG {symbol} (FT5 \u2014 Strategy005, \u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422\u0410\u041b\u042c\u041d\u041e, \u0438\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u043e\u043d\u043d\u043e)\n"
+            f"{arrow} {symbol} (FT5 \u2014 Strategy005, \u042d\u041a\u0421\u041f\u0415\u0420\u0418\u041c\u0415\u041d\u0422\u0410\u041b\u042c\u041d\u041e, \u0438\u043d\u0444\u043e\u0440\u043c\u0430\u0446\u0438\u043e\u043d\u043d\u043e)\n"
             f"entry: {entry:.6g}\n"
             f"buy_rsi={buy_rsi} buy_fisher={buy_fisher} sell_rsi={sell_rsi}",
             category="ft5",
@@ -6894,6 +7030,9 @@ def update_ft5_signal_outcomes():
             matched = next((t for t in trades if t["entry_time"] == sig["entry_time"]), None)
             timed_out = (now - sig["detected_at"]) > FT5_MAX_HOLD_SEC
             with state_lock:
+                if not matched and open_position and open_position["entry_time"] == sig["entry_time"]:
+                    sig["mfe_r"] = round(open_position.get("mfe_r", sig.get("mfe_r", 0.0)), 3)
+                    sig["mae_r"] = round(open_position.get("mae_r", sig.get("mae_r", 0.0)), 3)
                 if matched:
                     sig["status"] = "CLOSED"
                     sig["result"] = matched["result"]
@@ -6910,6 +7049,10 @@ def update_ft5_signal_outcomes():
                     # comment on why a static TP isn't a faithful concept
                     # for this strategy's ROI-ladder/signal exit shape.
                     sig["rr"] = round(matched["pnl_pct"] / (FT5_STOPLOSS_PCT * 100), 3)
+                    sig["mfe_r"] = round(matched.get("mfe_r", 0.0), 3)
+                    sig["mae_r"] = round(matched.get("mae_r", 0.0), 3)
+                    sig["mfe_r_at_close"] = sig["mfe_r"]
+                    sig["mae_r_at_close"] = sig["mae_r"]
                     just_closed.append(dict(sig))
                 elif timed_out:
                     sig["status"] = "CLOSED"
@@ -6920,6 +7063,8 @@ def update_ft5_signal_outcomes():
                     if sig["exit_price"]:
                         sig["pnl_pct"] = round((sig["exit_price"] - sig["entry"]) / sig["entry"] * 100, 3)
                         sig["rr"] = round(sig["pnl_pct"] / (FT5_STOPLOSS_PCT * 100), 3)
+                    sig["mfe_r_at_close"] = sig.get("mfe_r", 0.0)
+                    sig["mae_r_at_close"] = sig.get("mae_r", 0.0)
                     just_closed.append(dict(sig))
         except Exception as e:
             log_error(f"ft5_outcome {sig['symbol']}: {e}")
@@ -6957,9 +7102,26 @@ def compute_ft5_signal_stats():
     rrs = sorted(s["rr"] for s in closed if s.get("rr") is not None)
     rr_avg = round(sum(rrs) / len(rrs), 3) if rrs else None
     rr_median = round(rrs[len(rrs) // 2], 3) if rrs else None
+
+    def agg(key, subset):
+        vals = [s[key] for s in subset if s.get(key) is not None]
+        if not vals:
+            return None
+        vals_sorted = sorted(vals)
+        n = len(vals_sorted)
+        return {
+            "avg": round(sum(vals) / n, 3), "median": round(vals_sorted[n // 2], 3),
+            "p25": round(vals_sorted[int(n * 0.25)], 3),
+            "p75": round(vals_sorted[min(int(n * 0.75), n - 1)], 3), "n": n,
+        }
+
+    win_set = [s for s in closed if s["result"] == "WIN"]
+    loss_set = [s for s in closed if s["result"] == "LOSS"]
     return {"total": len(signals), "wins": wins, "losses": losses, "timeouts": timeouts,
             "open": open_n, "winrate": winrate, "avg_pnl_pct": avg_pnl,
-            "rr_avg": rr_avg, "rr_median": rr_median}
+            "rr_avg": rr_avg, "rr_median": rr_median,
+            "mfe_r_wins_at_close": agg("mfe_r_at_close", win_set), "mae_r_wins_at_close": agg("mae_r_at_close", win_set),
+            "mfe_r_losses_at_close": agg("mfe_r_at_close", loss_set), "mae_r_losses_at_close": agg("mae_r_at_close", loss_set)}
 
 
 # EMA diagnostics — v0.62.0, per direct user request to understand the
@@ -11891,6 +12053,12 @@ def _set_vgi_min_rr(v):
     save_settings()
 
 
+def _set_ft5_invert(v):
+    global FT5_INVERT_SIGNALS
+    FT5_INVERT_SIGNALS = v
+    save_settings()
+
+
 def _scalp_closed_rr_stats():
     """Median target_pct/sl_pct ratio across closed scalp trades — scalp
     doesn't carry a stats-function-level rr_all the way EMA/Divergence
@@ -12038,6 +12206,32 @@ def risk_autotune_pass():
                                       bounds=RISK_AUTOTUNE_VGI_RR_BOUNDS)
     except Exception as e:
         log_error(f"risk_autotune vgi: {e}")
+
+    try:
+        # v0.98.10: per the same direct user request as VGI's block above.
+        # FT5 already has its own daily grid-search auto-optimizer
+        # (ft5_optimize_symbol()), which is arguably a MORE thorough form
+        # of parameter tuning than this pass's usual overshoot-nudge
+        # style — so the only genuinely NEW lever here is the reverse
+        # flag itself, using the MFE/MAE data FT5 gained this round.
+        # Deliberately does NOT tune FT5_STOPLOSS_PCT: FT5's own "RR"
+        # meaning is DEFINED relative to it (rr = pnl_pct/(stoploss_pct*
+        # 100), see update_ft5_signal_outcomes()'s own comment) — nudging
+        # the stoploss itself would retroactively change what every
+        # already-recorded trade's RR even means, and would also need
+        # coordinating with the grid-search optimizer's own use of it
+        # (FT5_RANK_PRIOR_TARGET's pseudo-loss level). Left alone rather
+        # than risking a comparably subtle new inconsistency.
+        s = compute_ft5_signal_stats()
+        winrate = s.get("winrate")
+        closed_n = (s.get("wins", 0) or 0) + (s.get("losses", 0) or 0)
+        loss_mae = s.get("mae_r_losses_at_close")
+        rr_ref = s.get("rr_median")
+        if winrate is not None and closed_n and rr_ref:
+            _risk_autotune_reverse("ft5", "ft5_invert_signals", FT5_INVERT_SIGNALS, winrate, rr_ref, closed_n, _set_ft5_invert,
+                                    avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
+    except Exception as e:
+        log_error(f"risk_autotune ft5: {e}")
 
 
 def risk_autotune_loop():
@@ -13448,7 +13642,7 @@ def api_ft5_status():
             "tf": FT5_TF, "stoploss_pct": FT5_STOPLOSS_PCT,
             "roi_ladder": FT5_ROI_LADDER, "backtest_days": FT5_BACKTEST_DAYS,
             "grid_buy_rsi": FT5_PARAM_GRID_BUY_RSI, "grid_buy_fisher": FT5_PARAM_GRID_BUY_FISHER,
-            "grid_sell_rsi": FT5_PARAM_GRID_SELL_RSI,
+            "grid_sell_rsi": FT5_PARAM_GRID_SELL_RSI, "invert_signals": FT5_INVERT_SIGNALS,
         },
         "top": ranked,
     })
@@ -13483,10 +13677,11 @@ def api_ft5_chart(symbol):
         trades, open_position = ft5_run_backtest(
             candles, buy_rsi=sig["buy_rsi"], buy_fisher=sig["buy_fisher"], sell_rsi=sig["sell_rsi"])
         matched = next((t for t in trades if t["entry_time"] == entry_time), None)
-        sl_price = sig["entry"] * (1 - FT5_STOPLOSS_PCT)
+        direction = sig.get("direction", "LONG")
+        sl_price = sig["entry"] * (1 + FT5_STOPLOSS_PCT) if direction == "SHORT" else sig["entry"] * (1 - FT5_STOPLOSS_PCT)
         return jsonify({
             "symbol": symbol, "candles": candles, "entry_time": entry_time,
-            "entry": sig["entry"], "sl": sl_price,
+            "entry": sig["entry"], "sl": sl_price, "direction": direction,
             "result": sig.get("result"), "exit_time": sig.get("exit_time"),
             "exit_price": sig.get("exit_price"), "exit_reason": sig.get("exit_reason"),
             "pnl_pct": sig.get("pnl_pct"), "rr": sig.get("rr"),
@@ -13663,6 +13858,7 @@ def api_reset_risk_autotune():
         _set_session_reverse_rr(2.0)
         _set_vgi_invert(False)
         _set_vgi_min_rr(3.0)
+        _set_ft5_invert(False)
         with state_lock:
             STATE["risk_autotune_log"].clear()
             STATE["risk_autotune_last_change"] = {}
@@ -14279,6 +14475,24 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">идея из непроверенного источника — см. предупреждение на вкладке. Автоторговля ниже выключена по умолчанию.</div>
         </div>
         <label class="switch"><input type="checkbox" id="setXauLg"><span class="switchSlider"></span></label>
+      </div>
+    </div>
+
+    <div class="settingsGroup">
+      <div class="settingsGroupTitle" style="color:#e0a030;">FT5 ⚠️ Экспериментально</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Сканирование</div>
+          <div class="sub">порт Strategy005 (freqtrade) — свой перебор параметров на реальных данных, сигналы информационные (не подключены к автоторговле)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setFt5"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Реверс сигналов</div>
+          <div class="sub">та же точка входа, но SHORT вместо LONG — выход только по стопу/лесенке (сигнальный выход не зеркалится, см. вкладку)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setFt5Invert"><span class="switchSlider"></span></label>
       </div>
     </div>
 
@@ -15423,15 +15637,23 @@ async function refreshFt5() {
   const warnHtml = `
     <div style="background:#2a1f0e;border:1px solid #e0a030;border-radius:10px;padding:10px 14px;margin-bottom:12px;">
       <b style="color:#e0a030;">⚠️ Экспериментально</b><br>
-      <span style="font-size:12px;color:#d9c08a;">Портирована структура Strategy005 (github.com/freqtrade/freqtrade-strategies, автор Gerald Lonlas) — 6 индикаторов (MACD, Minus DI, RSI+Fisher, Stochastic, SAR, SMA) + лесенка тейка по времени + фикс. стоп -10%. Оригинальные hyperopt-параметры взяты из бэктеста на 20 днях 2018 года — почти наверняка переподогнаны под тот период, поэтому НЕ скопированы напрямую: здесь свой перебор параметров на реальных данных этой биржи. Автоторговля и общий симулятор сознательно НЕ подключены — у стратегии нет единого фиксированного тейка (выход по времени/сигналу/стопу), а вся текущая инфраструктура рассчитана на пару SL/TP. Сигналы ниже — информационные, только LONG. Соотношение тейк:стоп здесь не одно число: тейк — лесенка по времени (5%→1%), стоп фиксирован (10%), поэтому ниже показан и плановый диапазон (лесенка/стоп), и реализованный RR по факту закрытых сделок.</span>
+      <span style="font-size:12px;color:#d9c08a;">Портирована структура Strategy005 (github.com/freqtrade/freqtrade-strategies, автор Gerald Lonlas) — 6 индикаторов (MACD, Minus DI, RSI+Fisher, Stochastic, SAR, SMA) + лесенка тейка по времени + фикс. стоп -10%. Оригинальные hyperopt-параметры взяты из бэктеста на 20 днях 2018 года — почти наверняка переподогнаны под тот период, поэтому НЕ скопированы напрямую: здесь свой перебор параметров на реальных данных этой биржи. Автоторговля и общий симулятор сознательно НЕ подключены — у стратегии нет единого фиксированного тейка (выход по времени/сигналу/стопу), а вся текущая инфраструктура рассчитана на пару SL/TP. Сигналы ниже — информационные. Соотношение тейк:стоп здесь не одно число: тейк — лесенка по времени (5%→1%), стоп фиксирован (10%), поэтому ниже показан и плановый диапазон (лесенка/стоп), и реализованный RR по факту закрытых сделок. В реверс-режиме — та же точка входа, но SHORT со стопом/лесенкой зеркально; сигнальный выход (RSI/MACD/MinusDI/SAR) не зеркалится и для реверс-сделок не используется.</span>
     </div>`;
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
-      ТФ ${cfg.tf} · стоп ${(cfg.stoploss_pct*100).toFixed(0)}% · ${plannedRrTxt} · перебор: buy_rsi${JSON.stringify(cfg.grid_buy_rsi)} × buy_fisher${JSON.stringify(cfg.grid_buy_fisher)} × sell_rsi${JSON.stringify(cfg.grid_sell_rsi)}<br>
+      ТФ ${cfg.tf} · стоп ${(cfg.stoploss_pct*100).toFixed(0)}% · ${plannedRrTxt} · перебор: buy_rsi${JSON.stringify(cfg.grid_buy_rsi)} × buy_fisher${JSON.stringify(cfg.grid_buy_fisher)} × sell_rsi${JSON.stringify(cfg.grid_sell_rsi)}${cfg.invert_signals ? ` · <span style="color:#ffcc55;font-weight:bold;">РЕВЕРС ВКЛЮЧЁН</span>` : ''}<br>
       ${buildTxt}<br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · средний P&L/сделку: ${avgPnlTxt} · ${rrTxt} · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
       <span style="font-size:11px;">Клик по строке сигнала открывает график входа/выхода.</span>
-    </div>`;
+    </div>
+    ${(ss.wins || ss.losses) ? `
+    <div style="margin-bottom:8px;"><b>MFE/MAE (R) на закрытии</b> — сколько реально было хода в плюс/минус к моменту исхода (${ss.wins||0}W/${ss.losses||0}L):<br>
+      <span class="win">WIN MFE: ${fmtStat(ss.mfe_r_wins_at_close)}</span><br>
+      <span class="win">WIN MAE: ${fmtStat(ss.mae_r_wins_at_close)}</span><br>
+      <span class="loss">LOSS MFE: ${fmtStat(ss.mfe_r_losses_at_close)}</span><br>
+      <span class="loss">LOSS MAE: ${fmtStat(ss.mae_r_losses_at_close)}</span><br>
+      <span class="dim" style="font-size:11px;">Эти цифры питают авто-тюнинг решения о реверсе.</span>
+    </div>` : ''}`;
   const signalsRows = signals.map(s => {
     let statusHtml;
     if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
@@ -15439,8 +15661,9 @@ async function refreshFt5() {
     else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS (${s.exit_reason}) ${s.pnl_pct}%</span>`;
     else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
     const rrTd = s.rr !== null && s.rr !== undefined ? `<td class="${s.rr>=0?'win':'loss'}">${s.rr>0?'+':''}${s.rr}</td>` : '<td class="dim">-</td>';
+    const dirClass = s.direction === 'SHORT' ? 'short' : 'long';
     return `<tr data-symbol="${s.symbol}" data-entry-time="${s.entry_time}" style="cursor:pointer;">
-      <td>${s.symbol}</td><td>${fmt(s.entry)}</td>
+      <td>${s.symbol}</td><td class="${dirClass}">${s.direction || 'LONG'}</td><td>${fmt(s.entry)}</td>
       <td class="dim">rsi${s.buy_rsi}/fish${s.buy_fisher}/sell${s.sell_rsi}</td>
       <td>${statusHtml}</td>${rrTd}<td class="dim">${fmtDateTime(s.entry_time)}</td>
     </tr>`;
@@ -15448,7 +15671,7 @@ async function refreshFt5() {
   const signalsTableHtml = signals.length ? `
     <div style="overflow-x:auto;margin-bottom:14px;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Entry</th><th>Параметры</th><th>Status</th><th>RR (факт)</th><th>Время входа</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>Параметры</th><th>Status</th><th>RR (факт)</th><th>Время входа</th></tr></thead>
       <tbody>${signalsRows}</tbody>
     </table>
     </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
@@ -15789,6 +16012,8 @@ const setInputs = {
   session_ny_enabled: document.getElementById('setSessionNy'),
   session_ny_invert_signals: document.getElementById('setSessionNyInvert'),
   xau_lg_enabled: document.getElementById('setXauLg'),
+  ft5_enabled: document.getElementById('setFt5'),
+  ft5_invert_signals: document.getElementById('setFt5Invert'),
   vgi_enabled: document.getElementById('setVgi'),
   vgi_invert_signals: document.getElementById('setVgiInvert'),
   telegram_enabled: document.getElementById('setTelegram'),
