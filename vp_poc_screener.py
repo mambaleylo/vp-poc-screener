@@ -4667,6 +4667,48 @@ v0.98.10 - FT5 gains reverse mode + MFE/MAE tracking + a reverse-flag
          node --check on the extracted <script> block, the route/def
          integrity check, and the stale-default-parameter check — all
          clean.
+
+v0.98.11 - CRITICAL FIX: KeyError: 'mfe_r' crashing outcome-checking for
+         Session and VGI (and, latently, FT5/Divergence/EMA/Volume too,
+         though not yet observed in the wild), caught from a direct
+         error-log screenshot ("session_outcome NIL_USDT: 'mfe_r'",
+         "vgi_outcome ...: 'mfe_r'" repeated across many symbols).
+         Root cause: this session added MFE/MAE tracking to six modules
+         (Session, EMA, Divergence, Volume, VGI, FT5) at different
+         points, and several of their outcome functions access sig[
+         "mfe_r"]/sig["mae_r"] directly rather than via .get() — correct
+         for any signal created AFTER that module gained MFE/MAE, but
+         a signal persisted to disk BEFORE that point (loaded back via
+         load_state() on the next restart) has no such key at all,
+         so a direct dict access raises KeyError. Every affected
+         signal's outcome-checking pass then failed silently into the
+         scanner's error log instead of ever resolving — exactly what
+         the screenshot showed happening repeatedly, every scan cycle.
+         Fixed with a single centralized backfill (_backfill_mfe_mae())
+         at the one place all persisted signals get loaded from disk,
+         rather than patching each individual direct-access site —
+         considered patching every site instead (~30 occurrences across
+         6 functions found by grep) and deliberately rejected it: that
+         many edits to multi-line blocks would have meant that many
+         chances to repeat this session's own recurring line-dropping
+         mistake, for a fix a single well-placed .setdefault() sweep
+         handles at once and covers any future direct-access site too,
+         not just the ones found today. Applied to exactly the six
+         signal lists confirmed to have direct mfe_r/mae_r access
+         (signals, div_signals, ema_signals, session_signals, ft5_
+         signals, vgi_signals) — session_ny_signals, xau_lg_signals, and
+         scalp_signals never gained MFE/MAE tracking this session and
+         were confirmed to have no such access, left untouched rather
+         than backfilled unnecessarily.
+         Verified behaviorally, not just read as correct: constructed an
+         old-shape signal dict with no mfe_r/mae_r keys at all alongside
+         a new-shape one that already had real values, ran the actual
+         _backfill_mfe_mae() from the file, confirmed the old one got
+         safe defaults for every missing field, the new one's real
+         values were left untouched, and that direct sig["mfe_r"] access
+         on the backfilled record no longer raises.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         and the route/def integrity check — all clean.
 """
 
 import os
@@ -4686,7 +4728,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.98.10"
+APP_VERSION = "0.98.11"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -10580,6 +10622,33 @@ def _relink_sim_trade(trade):
     return best
 
 
+def _backfill_mfe_mae(signal_list):
+    """Fills in mfe_r/mae_r/mfe_price/mae_price/mfe_r_at_close/mae_r_at_
+    close with safe defaults on any signal loaded from persisted state
+    that predates these fields — v0.98.11: several outcome-tracking
+    functions (FT5, Session, Divergence, EMA, Volume, VGI) access
+    sig["mfe_r"]/sig["mae_r"] directly (not via .get()), which is fine
+    for signals created AFTER MFE/MAE tracking was added to that
+    module, but raises KeyError for older persisted signals that
+    predate it — confirmed live via a direct error-log screenshot
+    showing exactly this (session_outcome/vgi_outcome: 'mfe_r').
+    Patching every individual access site was considered and rejected:
+    ~30 occurrences across 6 functions, each edit risking the exact
+    line-dropping mistake this session has already made several times
+    when touching multi-line blocks — one centralized backfill at the
+    single point signals get loaded from disk is safer and covers
+    every current and future direct-access site at once, without
+    needing to know where they all are."""
+    for sig in signal_list:
+        sig.setdefault("mfe_r", 0.0)
+        sig.setdefault("mae_r", 0.0)
+        sig.setdefault("mfe_price", None)
+        sig.setdefault("mae_price", None)
+        sig.setdefault("mfe_r_at_close", None)
+        sig.setdefault("mae_r_at_close", None)
+    return signal_list
+
+
 def load_state():
     if not os.path.exists(STATE_FILE):
         return
@@ -10602,16 +10671,16 @@ def load_state():
         risk_autotune_log = data.get("risk_autotune_log", [])
         risk_autotune_last_change = data.get("risk_autotune_last_change", {})
         with state_lock:
-            STATE["signals"] = deque(signals, maxlen=SIGNAL_HISTORY)
-            STATE["div_signals"] = deque(div_signals, maxlen=DIV_SIGNAL_HISTORY)
-            STATE["ema_signals"] = deque(ema_signals, maxlen=EMA_SIGNAL_HISTORY)
+            STATE["signals"] = deque(_backfill_mfe_mae(signals), maxlen=SIGNAL_HISTORY)
+            STATE["div_signals"] = deque(_backfill_mfe_mae(div_signals), maxlen=DIV_SIGNAL_HISTORY)
+            STATE["ema_signals"] = deque(_backfill_mfe_mae(ema_signals), maxlen=EMA_SIGNAL_HISTORY)
             STATE["scalp_signals"] = deque(scalp_signals, maxlen=SCALP_SIGNAL_HISTORY)
-            STATE["session_signals"] = deque(session_signals, maxlen=SESSION_SIGNAL_HISTORY)
+            STATE["session_signals"] = deque(_backfill_mfe_mae(session_signals), maxlen=SESSION_SIGNAL_HISTORY)
             STATE["session_ny_signals"] = deque(session_ny_signals, maxlen=SESSION_NY_SIGNAL_HISTORY)
             STATE["xau_lg_signals"] = deque(xau_lg_signals, maxlen=XAU_LG_SIGNAL_HISTORY)
-            STATE["ft5_signals"] = deque(ft5_signals, maxlen=FT5_SIGNAL_HISTORY)
+            STATE["ft5_signals"] = deque(_backfill_mfe_mae(ft5_signals), maxlen=FT5_SIGNAL_HISTORY)
             STATE["ft5_symbol_overrides"] = ft5_symbol_overrides
-            STATE["vgi_signals"] = deque(vgi_signals, maxlen=VGI_SIGNAL_HISTORY)
+            STATE["vgi_signals"] = deque(_backfill_mfe_mae(vgi_signals), maxlen=VGI_SIGNAL_HISTORY)
             STATE["autotrade_log"] = deque(autotrade_log, maxlen=AUTOTRADE_TRADE_HISTORY)
             STATE["risk_autotune_log"] = deque(risk_autotune_log, maxlen=200)
             STATE["risk_autotune_last_change"] = risk_autotune_last_change
