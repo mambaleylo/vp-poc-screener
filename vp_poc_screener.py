@@ -4469,6 +4469,70 @@ v0.98.7 - fixed a real flaw in FT5's ranking formula, per direct user
          node --check on the extracted <script> block, and both the
          route/def integrity and stale-default-parameter checks — all
          clean.
+
+v0.98.8 - two more real flaws in FT5's ranking formula, each found from
+         a direct user report with a concrete leaderboard example, each
+         fixed and behaviorally verified in sequence — and the full
+         combination re-verified against every prior counterexample at
+         the end, since fixing the second one initially reintroduced
+         the first.
+         (1) A second concurrent finding, unrelated to ranking: eight
+         outcome-tracking functions across five modules (Session,
+         Session NY, Divergence, EMA, Scalp, Volume, XAU_LG, VGI) were
+         checking SL/TP against the STILL-FORMING, not-yet-closed
+         candle — fetch_candles_concurrent() doesn't filter it out
+         (confirmed by reading its implementation), and unlike every
+         signal-DETECTION function in this app (which all correctly
+         drop it), only FT5's own outcome tracker happened to already
+         filter correctly. Found from a live VGI report: a SHORT on
+         HYPE_USDT hit LOSS just 5 minutes after entry despite VGI
+         running on a 1h timeframe — mechanically impossible from a
+         genuinely closed candle. Fixed all seven missing spots with
+         the same `candles = [c for c in candles if c["time"] +
+         interval_sec <= now]` filter every live scanner already uses,
+         each re-read in full after editing (not just compile-checked)
+         given this session's repeated line-dropping mistakes. Verified
+         behaviorally with a synthetic still-forming candle, confirmed
+         it gets excluded.
+         (2) FT5's ranking formula (v0.98.7's lower-confidence-bound)
+         had two more real gaps, per a direct leaderboard screenshot:
+         DEXE_USDT (n=5, 5W/0L, avg +2.957%) outranked 龙虾_USDT (n=24,
+         22W/2L, avg +1.084%) — a 5-trade all-win streak's OBSERVED
+         variance looked deceptively tiny simply because it hadn't hit
+         a loss yet, not because it was actually lower-risk. Two-step
+         fix: t_critical(n-1) (a hardcoded, interpolated Student's-t
+         table — computed once via scipy.stats.t.ppf and embedded as
+         plain numbers rather than adding scipy as an app dependency,
+         same reasoning as avoiding numpy for VGI) replaced the fixed
+         Z=1.0 from v0.98.7, accounting for a small sample's extra
+         uncertainty in its own variance ESTIMATE. Verified against
+         real scipy output (max 0.0004 interpolation error across
+         tested df) — but alone this wasn't enough to fully close the
+         DEXE gap (no reasonable fixed multiplier fixes a near-zero
+         observed variance). Added a Bayesian prior: since FT5's
+         stoploss is a FIXED, KNOWN quantity, max(0, FT5_RANK_PRIOR_
+         TARGET - losses_count) pseudo-trades at -FT5_STOPLOSS_PCT are
+         blended in before computing mean/variance. Tested a flat
+         +3-always version first — it fixed DEXE but flipped the
+         ORIGINAL UB/AKE case back the wrong way, since a fixed prior
+         count lands disproportionately harder on a smaller-but-still-
+         real sample (AKE, 2 real losses) than a larger one that
+         already has plenty of honest loss experience (UB, 7 real
+         losses) — caught by re-testing both original counterexamples
+         together, not just the new one in isolation. Switched to
+         tapering by ACTUAL losses_count (FT5_RANK_PRIOR_TARGET=1, so
+         only combos with zero or one real observed loss get any
+         adjustment at all) — confirmed via the real ft5_ranking_score()
+         function in the file, both original reported cases correct
+         simultaneously.
+         ft5_ranking_score()'s signature changed to require losses_count
+         explicitly (was pnls-only) — its one call site in ft5_optimize_
+         symbol() now computes wins/losses before scoring instead of
+         after. FT5_RANK_Z (v0.98.7) removed as dead code, replaced by
+         FT5_RANK_PRIOR_TARGET.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         the route/def integrity check, and the stale-default-parameter
+         check — all clean.
 """
 
 import os
@@ -4488,7 +4552,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.98.7"
+APP_VERSION = "0.98.8"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5081,7 +5145,7 @@ FT5_SIGNAL_HISTORY = 200
 FT5_REFRESH_SEC = int(os.environ.get("VP_FT5_REFRESH_SEC", 24 * 3600))  # daily backtest/param-search refresh, same cadence as Volume's optimizer
 FT5_SCAN_INTERVAL_SEC = int(os.environ.get("VP_FT5_SCAN_INTERVAL_SEC", 300))
 FT5_MIN_BACKTEST_TRADES = int(os.environ.get("VP_FT5_MIN_BACKTEST_TRADES", 5))  # a combo with fewer trades than this in the backtest window isn't a confident pick — same bar Volume's optimizer uses (MIN_BACKTEST_TRADES)
-FT5_RANK_Z = float(os.environ.get("VP_FT5_RANK_Z", 1.0))  # v0.98.7 — confidence multiplier for ft5_ranking_score()'s lower-confidence-bound (mean - Z*stderr); Z=1.0 is the "one-standard-error rule" (~84% one-sided confidence), a common, moderate default for this kind of model/combo selection. Higher Z = more conservative (favors low-variance/high-n combos more strongly); lower Z moves closer to trusting the raw average.
+FT5_RANK_PRIOR_TARGET = int(os.environ.get("VP_FT5_RANK_PRIOR_TARGET", 1))  # v0.98.8 — ft5_ranking_score() blends in max(0, TARGET - losses_count) pseudo-trades at the known -FT5_STOPLOSS_PCT level, so a small loss-free sample can't look artificially low-risk just because it hasn't hit its (structurally always-possible) stop yet. Tapered by ACTUAL real losses (not a flat count on every combo) — a flat prior tested worse, disproportionately hurting smaller-but-still-real samples. See ft5_ranking_score()'s own docstring for the full reasoning, including why TARGET=1 specifically. Replaces FT5_RANK_Z (v0.98.7), which is no longer referenced — the confidence multiplier is now t_critical(n-1), not a fixed Z.
 
 # Fixed structural parameters (not grid-searched — kept at the original's
 # own defaults, since re-deriving every one of Strategy005's 8 hyperopt
@@ -6364,7 +6428,50 @@ def vgi_evaluate_signal(profile, price, delta_threshold_pct, max_zone_distance_p
             "delta_pct": round(local_delta, 2), "zone_dist_pct": round(dist * 100, 3)}
 
 
-def ft5_ranking_score(pnls, z=None):
+_T_CRITICAL_TABLE = [  # (df, t-value at ~84.13% one-sided confidence, i.e. Phi(1.0) — chosen so this smoothly converges to the old fixed Z=1.0 at large df) — computed once via scipy.stats.t.ppf and hardcoded as plain numbers rather than adding scipy as an app dependency (same reasoning as avoiding numpy for VGI — this needs to run on a phone via Termux)
+    (1, 1.8373), (2, 1.3213), (3, 1.1969), (4, 1.1416), (5, 1.1105),
+    (6, 1.0906), (7, 1.0767), (8, 1.0665), (9, 1.0587), (10, 1.0526),
+    (12, 1.0434), (15, 1.0345), (20, 1.0256), (25, 1.0204), (30, 1.0169),
+    (40, 1.0127), (60, 1.0084), (100, 1.0050),
+]
+_T_CRITICAL_MAX_DF = _T_CRITICAL_TABLE[-1][0]
+_T_CRITICAL_INF = 1.0  # Phi^-1(0.8413) — the Normal-distribution limit as df -> infinity
+
+
+def t_critical(df):
+    """Linear-interpolated one-sided ~84% t-critical value for df degrees
+    of freedom — see _T_CRITICAL_TABLE's own comment for why this is a
+    hardcoded table instead of scipy.stats.t.ppf(). v0.98.8: added
+    because a fixed Z (however statistically reasonable-looking) can't
+    tell the difference between "n=5, genuinely low variance" and "n=5,
+    simply hasn't had the chance to show a loss yet" — a small sample's
+    OBSERVED variance is itself an unreliable estimate of the TRUE
+    variance, and a fixed Z doesn't account for that extra layer of
+    uncertainty the way a t-distribution's fatter tails at low df do.
+    Diagnosed from a direct, concrete counterexample: DEXE_USDT (n=5,
+    5W/0L, avg +2.957%) outranked 龙虾_USDT (n=24, 22W/2L, avg +1.084%)
+    under the fixed-Z formula — an all-win 5-trade sample looked "low
+    variance" simply because it hadn't lost yet, not because it was
+    actually more reliable than a 24-trade sample with real (if small)
+    downside experience. t_critical(4) ≈ 1.14 vs the old fixed 1.0
+    isn't a huge jump on its own, but the effect compounds: the SAME
+    all-win-so-far sample also has an artificially small observed std,
+    so the two errors were stacking in the same direction — the wider
+    critical value directly counteracts that."""
+    if df <= 0:
+        return _T_CRITICAL_TABLE[0][1]
+    if df >= _T_CRITICAL_MAX_DF:
+        return _T_CRITICAL_INF
+    for i in range(len(_T_CRITICAL_TABLE) - 1):
+        df_lo, t_lo = _T_CRITICAL_TABLE[i]
+        df_hi, t_hi = _T_CRITICAL_TABLE[i + 1]
+        if df_lo <= df <= df_hi:
+            frac = (df - df_lo) / (df_hi - df_lo)
+            return t_lo + frac * (t_hi - t_lo)
+    return _T_CRITICAL_INF
+
+
+def ft5_ranking_score(pnls, losses_count, z=None):
     """Ranking score for FT5 combos/symbols — replaces raw avg_pnl_pct as
     the selection criterion wherever FT5 picks a "best" option (best
     param combo per symbol, best symbols for the live-scan pool).
@@ -6375,34 +6482,51 @@ def ft5_ranking_score(pnls, z=None):
     with MORE losses (UB_USDT: 21W/7L, avg +1.353%) outrank one with
     FEWER losses and a HIGHER average (AKE_USDT: 13W/2L, avg +1.488%),
     purely because UB_USDT's larger n gave it a smaller size-based
-    discount — the old formula rewarded sample size unconditionally,
-    but never separately penalized how much of that sample was actual
-    losses. A lower-confidence-bound fixes this naturally rather than
-    needing a second, separately-tuned loss-count penalty bolted on:
-    frequent large losses mixed with modest wins directly INFLATE the
-    variance (std), which inflates stderr, which lowers the score —
-    the same mechanism that already discounts small samples (small n
-    also inflates stderr) now also discounts high-variance ones,
-    without double-counting or needing a second constant to tune.
-    Reduces to the raw mean as n grows and/or variance shrinks (a
-    mature, consistent estimate), same convergence property the old
-    formula had. Verified directionally on reconstructed data matching
-    the real UB/AKE example: AKE_USDT's lower-variance, fewer-losses
-    profile scored higher under this formula despite a smaller n,
-    reversing the old formula's ranking exactly as reported.
-    z defaults to FT5_RANK_Z if not given (resolved at call time from
-    the live global, not frozen as a signature default — avoiding the
-    exact v0.95.7-class stale-default bug this session already found
-    and fixed elsewhere)."""
+    discount. A lower-confidence-bound fixes this naturally: frequent
+    large losses mixed with modest wins directly inflate variance,
+    which inflates stderr, which lowers the score.
+    v0.98.8: two more direct counterexamples, fixed in sequence rather
+    than guessed at once — each verified behaviorally before moving to
+    the next, and the combination re-verified against BOTH original
+    cases at the end, since a naive second fix reintroduced the first.
+    (1) DEXE_USDT (n=5, 5W/0L, avg +2.957%) outranked 龙虾_USDT (n=24,
+    22W/2L, avg +1.084%) — a small sample's OBSERVED variance can look
+    deceptively tiny simply because it hasn't happened to hit a loss
+    yet. Fixed with t_critical(n-1), a proper Student's-t critical
+    value instead of a fixed Z — see t_critical()'s own docstring.
+    (2) t_critical alone wasn't quite enough for the all-win DEXE case
+    (no reasonable fixed multiplier closes the gap when observed
+    variance is near-zero) — added a Bayesian prior: since FT5's
+    stoploss is a FIXED, KNOWN quantity (not something to estimate from
+    data — every trade structurally CAN reach -FT5_STOPLOSS_PCT*100),
+    max(0, FT5_RANK_PRIOR_TARGET - losses_count) pseudo-trades at that
+    loss level are blended in before computing mean/variance. Tapering
+    by ACTUAL losses_count (not a flat count added to every combo
+    regardless) was essential, found by testing: a flat +3 prior fixed
+    DEXE but flipped UB/AKE back the wrong way, since 3 fixed pseudo-
+    losses land disproportionately harder on AKE's smaller real sample
+    (2 real losses) than on UB's larger one (7 real losses already
+    telling an honest, undiluted story). FT5_RANK_PRIOR_TARGET=1 means
+    only a combo with ZERO or ONE real observed loss gets any prior
+    adjustment at all; two or more real losses are trusted as-is.
+    Reduces to the raw mean as n grows, variance shrinks, and/or real
+    losses accumulate — same convergence property every version had.
+    z, if given, overrides the automatic t_critical lookup entirely
+    (mainly for testing) — resolved at call time either way, not frozen
+    as a signature default, avoiding the exact v0.95.7-class stale-
+    default bug this session already found and fixed elsewhere."""
     n = len(pnls) if pnls else 0
     if n == 0:
         return -999
-    mean = sum(pnls) / n
-    if n < 2:
+    prior_n = max(0, FT5_RANK_PRIOR_TARGET - losses_count)
+    prior_pnls = pnls + [-FT5_STOPLOSS_PCT * 100] * prior_n
+    pn = len(prior_pnls)
+    mean = sum(prior_pnls) / pn
+    if pn < 2:
         return mean
-    zz = z if z is not None else FT5_RANK_Z
-    var = sum((p - mean) ** 2 for p in pnls) / (n - 1)
-    stderr = math.sqrt(var) / math.sqrt(n)
+    zz = z if z is not None else t_critical(pn - 1)
+    var = sum((p - mean) ** 2 for p in prior_pnls) / (pn - 1)
+    stderr = math.sqrt(var) / math.sqrt(pn)
     return mean - zz * stderr
 
 
@@ -6535,9 +6659,10 @@ def ft5_optimize_symbol(symbol):
                     continue
                 pnls = [t["pnl_pct"] for t in trades]
                 avg_pnl = sum(pnls) / len(pnls)
-                score = ft5_ranking_score(pnls)
+                wins = sum(1 for t in trades if t["result"] == "WIN")
+                losses = len(trades) - wins
+                score = ft5_ranking_score(pnls, losses)
                 if best is None or score > best_score:
-                    wins = sum(1 for t in trades if t["result"] == "WIN")
                     best = {
                         "buy_rsi": buy_rsi, "buy_fisher": buy_fisher, "sell_rsi": sell_rsi,
                         "trades": len(trades), "wins": wins, "losses": len(trades) - wins,
@@ -7349,10 +7474,12 @@ def update_session_signal_outcomes():
     with state_lock:
         open_signals = [s for s in STATE["session_signals"] if s["status"] == "OPEN"]
     all_candles = fetch_candles_concurrent([(s["symbol"], SESSION_RANGE_TF, 300) for s in open_signals])
+    session_interval_sec = INTERVAL_SECONDS.get(SESSION_RANGE_TF, 3600)
     for sig, candles in zip(open_signals, all_candles):
         try:
             if candles is None:
                 continue
+            candles = [c for c in candles if c["time"] + session_interval_sec <= now]  # v0.98.8: drop still-forming candle — same filter every live scanner already has, missing here
             future = [c for c in candles if c["time"] > sig["confirm_time"]]
             direction = sig["direction"]
             entry = sig["entry"]
@@ -7446,10 +7573,12 @@ def update_session_ny_signal_outcomes():
     with state_lock:
         open_signals = [s for s in STATE["session_ny_signals"] if s["status"] == "OPEN"]
     all_candles = fetch_candles_concurrent([(s["symbol"], SESSION_NY_RANGE_TF, 300) for s in open_signals])
+    session_ny_interval_sec = INTERVAL_SECONDS.get(SESSION_NY_RANGE_TF, 3600)
     for sig, candles in zip(open_signals, all_candles):
         try:
             if candles is None:
                 continue
+            candles = [c for c in candles if c["time"] + session_ny_interval_sec <= now]  # v0.98.8: drop still-forming candle
             future = [c for c in candles if c["time"] > sig["confirm_time"]]
             result = None
             exit_price = None
@@ -7849,10 +7978,12 @@ def update_divergence_outcomes():
             if s.get("status") == "OPEN" or now < s.get("mfe_tracking_until", 0)
         ]
     all_candles = fetch_candles_concurrent([(s["symbol"], DIV_INTERVAL, 300) for s in active])
+    div_interval_sec = INTERVAL_SECONDS.get(DIV_INTERVAL, 3600)
     for sig, candles in zip(active, all_candles):
         try:
             if candles is None:
                 continue
+            candles = [c for c in candles if c["time"] + div_interval_sec <= now]  # v0.98.8: drop still-forming candle
             relevant = [c for c in candles if c["time"] > sig["time"]]
             direction = sig["direction"]
             entry = sig["entry"]
@@ -8045,6 +8176,8 @@ def update_ema_outcomes():
         try:
             if candles is None:
                 continue
+            ema_interval_sec = INTERVAL_SECONDS.get(sig.get("interval", EMA_INTERVAL), 3600)
+            candles = [c for c in candles if c["time"] + ema_interval_sec <= now]  # v0.98.8: drop still-forming candle
             relevant = [c for c in candles if c["time"] > sig["time"]]
             direction = sig["direction"]
             entry = sig["entry"]
@@ -9594,6 +9727,8 @@ def update_scalp_signal_outcomes():
         try:
             if candles is None:
                 continue
+            scalp_interval_sec = INTERVAL_SECONDS.get(sig["interval"], 300)
+            candles = [c for c in candles if c["time"] + scalp_interval_sec <= now]  # v0.98.8: drop still-forming candle
             future = [c for c in candles if c["time"] > sig["time"]]
             entry = sig["entry"]
             direction = sig["direction"]
@@ -10780,10 +10915,12 @@ def update_signal_outcomes():
             if s.get("status") == "OPEN" or now < s.get("mfe_tracking_until", 0)
         ]
     all_candles = fetch_candles_concurrent([(s["symbol"], INTERVAL, 300) for s in active])
+    vp_interval_sec = INTERVAL_SECONDS.get(INTERVAL, 3600)
     for sig, candles in zip(active, all_candles):
         try:
             if candles is None:
                 continue
+            candles = [c for c in candles if c["time"] + vp_interval_sec <= now]  # v0.98.8: drop still-forming candle
             # Strictly AFTER the trigger candle: that candle's own wick is
             # what produced the signal (its high/low drove the zone touch),
             # so checking it against SL/TP would count the very move that
@@ -11976,13 +12113,16 @@ def xau_lg_scan_symbol_live(symbol):
 
 
 def update_xau_lg_signal_outcomes():
+    now = time.time()
     with state_lock:
         open_signals = [s for s in STATE["xau_lg_signals"] if s["status"] == "OPEN"]
     all_candles = fetch_candles_concurrent([(s["symbol"], XAU_LG_TF, 300) for s in open_signals])
+    xau_lg_interval_sec = INTERVAL_SECONDS.get(XAU_LG_TF, 900)
     for sig, candles in zip(open_signals, all_candles):
         try:
             if candles is None:
                 continue
+            candles = [c for c in candles if c["time"] + xau_lg_interval_sec <= now]  # v0.98.8: drop still-forming candle
             future = [c for c in candles if c["time"] > sig["time"]]
             result = None
             exit_price = None
@@ -12304,14 +12444,17 @@ def vgi_scan_symbol_live(symbol):
 
 
 def update_vgi_signal_outcomes():
+    now = time.time()
     with state_lock:
         open_signals = [s for s in STATE["vgi_signals"] if s["status"] == "OPEN"]
     all_candles = fetch_candles_concurrent([(s["symbol"], VGI_TF, 300) for s in open_signals])
+    vgi_interval_sec = INTERVAL_SECONDS.get(VGI_TF, 3600)
     just_closed = []
     for sig, candles in zip(open_signals, all_candles):
         try:
             if candles is None:
                 continue
+            candles = [c for c in candles if c["time"] + vgi_interval_sec <= now]  # v0.98.8: drop still-forming candle — the exact bug reported live (LOSS 5 minutes after a 1h-timeframe entry)
             future = [c for c in candles if c["time"] > sig["time"]]
             result, exit_price, exit_time = None, None, None
             for c in future:
