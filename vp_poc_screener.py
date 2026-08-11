@@ -4533,6 +4533,65 @@ v0.98.8 - two more real flaws in FT5's ranking formula, each found from
          Verified with py_compile, an actual runtime start, pyflakes,
          the route/def integrity check, and the stale-default-parameter
          check — all clean.
+
+v0.98.9 - VGI now has a reverse mode and full risk-autotune coverage,
+         per direct user request ("Vgi и ft5 надо чтобы тоже
+         автотюнились и имели режим реверса... надо чтобы отслеживались
+         и параметры движения, аналогия с другими индикаторами"). FT5's
+         half of this request is bigger (its ROI-ladder exit logic is
+         hardcoded LONG-only throughout) and follows in a later pass —
+         this round is VGI only.
+         vgi_evaluate_signal() gained an invert parameter. Unlike EMA/
+         Session's own invert (flip direction, repurpose the original
+         sizing), VGI already computes BOTH zone_up and zone_down every
+         evaluation, so inverting retargets the OPPOSITE zone (the one
+         NOT selected by the normal delta/magnet read) instead of
+         flipping direction while keeping a target that no longer makes
+         directional sense — keeps VGI's own "trade toward a magnet
+         zone" reasoning coherent even inverted, betting the other zone
+         is the real magnet rather than an arbitrary sign-flip. Same
+         risk=reward/min_rr sizing applies to the new target's own
+         distance. Verified behaviorally: direction flips, target
+         becomes the opposite zone, RR still guaranteed by construction.
+         New VGI_INVERT_SIGNALS, wired through vgi_run_backtest() (both
+         backtest and live scanning see the same inverted logic
+         consistently, same reasoning as Session's own invert
+         implementation) and the full settings system.
+         VGI gained MFE/MAE tracking (update_vgi_signal_outcomes()),
+         mirroring Session's own pattern exactly — R = abs(entry-sl),
+         correctly covering both normal and inverted trades since sl is
+         already set correctly per-mode at signal creation. compute_
+         vgi_signal_stats() gained the same mfe_r_wins_at_close/etc
+         aggregates every other tuned module exposes.
+         risk_autotune_pass() gained a VGI block: the reverse-flag rule
+         and an RR-extend rule for VGI_MIN_RR (reusing _risk_autotune_
+         tp_extend, same mechanism as Session's own RR — VGI's target
+         is already natively an R-multiple). Simpler than Session's own
+         three-rule treatment: VGI's sizing is IDENTICAL whether
+         inverted or not (no "only in inverted mode" gating needed), and
+         there's no separate SL-width knob to tune since SL is fully
+         DERIVED from (reward, min_rr) — only min_rr itself and the
+         reverse flag are independent, tunable quantities. New
+         RISK_AUTOTUNE_VGI_RR_BOUNDS (1.0-8.0, VGI's own RR-scale range).
+         api_reset_risk_autotune() now also resets vgi_invert_signals/
+         vgi_min_rr. UI: new reverse-mode toggle in VGI's settings row,
+         "РЕВЕРС ВКЛЮЧЁН" indicator and an MFE/MAE display block added
+         to VGI's panel (same shape as Session's own).
+         Caught by this session's own automated stale-default-parameter
+         check before shipping, not by inspection: vgi_run_backtest()'s
+         signature had `min_rr=VGI_MIN_RR` as a frozen default — safe
+         when VGI_MIN_RR was truly constant, but this change made it
+         settings-mutable, so the exact v0.95.7-class bug would have
+         applied (auto-tune changing VGI_MIN_RR would silently never
+         reach a caller relying on the default). Fixed to `min_rr=None`
+         resolved at call time, verified behaviorally (changed VGI_
+         MIN_RR live via the real setter, confirmed a fresh backtest
+         call picked up the new value immediately rather than staying
+         frozen at whatever it was when the module loaded).
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the extracted <script> block, the route/def
+         integrity check, and the stale-default-parameter check — all
+         clean.
 """
 
 import os
@@ -4552,7 +4611,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.98.8"
+APP_VERSION = "0.98.9"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5131,6 +5190,7 @@ VGI_DELTA_THRESHOLD_PCT = float(os.environ.get("VP_VGI_DELTA_THRESHOLD_PCT", 20.
 VGI_MAX_ZONE_DISTANCE_PCT = float(os.environ.get("VP_VGI_MAX_ZONE_DISTANCE_PCT", 8.0))
 VGI_MIN_RR = float(os.environ.get("VP_VGI_MIN_RR", 3.0))
 VGI_MIN_SL_DISTANCE_PCT = float(os.environ.get("VP_VGI_MIN_SL_DISTANCE_PCT", 0.5))  # v0.98.2 — SL = reward/min_rr, so it's sized off an unrelated quantity (distance to the nearest volume zone), not actual price volatility. When the nearest zone happens to be close, this can produce a stop tighter than normal 1h candle noise, getting hit by ordinary wicks rather than a real invalidation — reported directly by the user ("сразу стоп выбивает"), confirmed against the source's own formula. Signals with a computed SL distance below this threshold are skipped entirely rather than allowed to fire with an unrealistically tight stop; doesn't touch the TP/RR math at all, purely a pre-entry filter.
+VGI_INVERT_SIGNALS = os.environ.get("VP_VGI_INVERT_SIGNALS", "0") == "1"  # v0.98.9 — per direct user request for a reverse mode "по аналогии с другими индикаторами" (mirrors DIV_INVERT_SIGNALS/EMA_INVERT_SIGNALS/SESSION_INVERT_SIGNALS). Retargets the OPPOSITE zero-volume zone rather than a plain direction flip — see vgi_evaluate_signal()'s own docstring for why.
 VGI_UNIVERSE_SIZE = int(os.environ.get("VP_VGI_UNIVERSE_SIZE", 40))  # matches source's own max_symbols default; unlike FT5 there's no per-symbol param search here (source treats these as one fixed global config, not hyperopt-tuned), so no analysis/live split is needed the way FT5 has one
 VGI_SIGNAL_HISTORY = 200
 VGI_BACKTEST_DAYS = int(os.environ.get("VP_VGI_BACKTEST_DAYS", 30))
@@ -5272,7 +5332,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "div_min_rr", "bounce_enabled", "breakout_enabled",
-                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "vgi_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "vgi_enabled", "vgi_invert_signals", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session", "telegram_alerts_session_ny", "telegram_alerts_xau_lg", "telegram_alerts_ft5", "telegram_alerts_vgi",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5", "autotrade_vgi",
                   "autotrade_size_mode", "autotrade_size_value",
@@ -5289,7 +5349,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_sig
                   # plain module constants with NO persistence at all, so any
                   # manual env-var override would silently revert on restart
                   # too — now they follow the same rules as ema_min_rr etc.
-                  "scalp_min_rr", "scalp_sl_buffer_mult", "session_sl_mult", "session_reverse_rr", "ema_sl_atr_mult", "div_sl_atr_mult",
+                  "scalp_min_rr", "scalp_sl_buffer_mult", "session_sl_mult", "session_reverse_rr", "ema_sl_atr_mult", "div_sl_atr_mult", "vgi_min_rr",
                   "ema_tp_pct", "div_tp_pct")
 
 
@@ -5312,6 +5372,8 @@ def get_settings():
         "xau_lg_enabled": XAU_LG_ENABLED,
         "ft5_enabled": FT5_ENABLED,
         "vgi_enabled": VGI_ENABLED,
+        "vgi_invert_signals": VGI_INVERT_SIGNALS,
+        "vgi_min_rr": VGI_MIN_RR,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
         "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
@@ -5369,7 +5431,7 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, FT5_ENABLED, VGI_ENABLED, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, FT5_ENABLED, VGI_ENABLED, VGI_INVERT_SIGNALS, VGI_MIN_RR, HOURLY_STATS_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
     global TELEGRAM_ALERTS_SESSION_NY, TELEGRAM_ALERTS_XAU_LG, TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_VGI
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_VGI
@@ -5419,6 +5481,15 @@ def apply_settings(updates):
         FT5_ENABLED = bool(updates["ft5_enabled"])
     if "vgi_enabled" in updates:
         VGI_ENABLED = bool(updates["vgi_enabled"])
+    if "vgi_invert_signals" in updates:
+        VGI_INVERT_SIGNALS = bool(updates["vgi_invert_signals"])
+    if "vgi_min_rr" in updates:
+        try:
+            v = float(updates["vgi_min_rr"])
+            if v > 0:
+                VGI_MIN_RR = v
+        except (TypeError, ValueError):
+            pass
     if "hourly_stats_enabled" in updates:
         HOURLY_STATS_ENABLED = bool(updates["hourly_stats_enabled"])
     if "telegram_enabled" in updates:
@@ -6357,7 +6428,7 @@ def vgi_nearest_zone(profile, price, direction):
     return max(candidates, key=lambda z: z["top"])
 
 
-def vgi_evaluate_signal(profile, price, delta_threshold_pct, max_zone_distance_pct, min_rr, min_sl_distance_pct=None):
+def vgi_evaluate_signal(profile, price, delta_threshold_pct, max_zone_distance_pct, min_rr, min_sl_distance_pct=None, invert=False):
     """Port of signal_engine.py's evaluate(). Direction comes from local
     delta bias first (the section containing the current price); if
     that's neutral, falls back to whichever zero-volume zone is nearer
@@ -6377,7 +6448,18 @@ def vgi_evaluate_signal(profile, price, delta_threshold_pct, max_zone_distance_p
     volatility, so when the nearest zone (and therefore reward) happens
     to be close, the resulting stop can be tighter than ordinary candle
     noise for that timeframe. This filter doesn't touch the TP/RR math
-    at all — a rejected signal is simply never taken, not resized."""
+    at all — a rejected signal is simply never taken, not resized.
+    v0.98.9: invert, per direct user request for a reverse mode "по
+    аналогии с другими индикаторами". Unlike EMA/Session's invert (flip
+    direction, keep/repurpose the original sizing), VGI already computes
+    BOTH zone_up and zone_down every evaluation — so inverting here
+    means retargeting the OPPOSITE zone (the one NOT selected by the
+    normal delta/magnet read) rather than flipping direction while
+    keeping a target that no longer makes directional sense. Keeps
+    VGI's own "trade toward a magnet zone" reasoning coherent even
+    inverted: it's a bet that the OTHER zone is the real magnet, not an
+    arbitrary sign-flip of an unrelated target. Same risk=reward/min_rr
+    sizing rule applies to the new target's own distance."""
     max_zone_dist = max_zone_distance_pct / 100.0
     sec = vgi_section_at_price(profile, price)
     local_delta = sec["delta_pct"] if sec else 0.0
@@ -6405,6 +6487,9 @@ def vgi_evaluate_signal(profile, price, delta_threshold_pct, max_zone_distance_p
     direction = delta_dir or magnet_dir
     if direction is None:
         return None
+
+    if invert:
+        direction = "SHORT" if direction == "LONG" else "LONG"
 
     zone = zone_up if direction == "LONG" else zone_down
     if zone is None:
@@ -11528,6 +11613,7 @@ RISK_AUTOTUNE_TP_TOLERANCE_RATIO = 0.15  # ignore if WIN MFE is within 15% of th
 RISK_AUTOTUNE_TP_STEP_RATIO = 0.1  # max 10% change to TP_PCT per pass — same bounded-step philosophy as the RR/SL-mult nudges
 RISK_AUTOTUNE_TP_PCT_BOUNDS = (0.003, 0.05)  # 0.3%-5% — sane range; below is barely worth the fees, above is an unrealistic single fixed target
 RISK_AUTOTUNE_SESSION_RR_BOUNDS = (0.5, 5.0)  # v0.98.4 — Session's SESSION_REVERSE_RR is an RR multiple, not a %-of-price like EMA/DIV's TP_PCT, so it needs its own bounds on a completely different scale when reusing _risk_autotune_tp_extend for it
+RISK_AUTOTUNE_VGI_RR_BOUNDS = (1.0, 8.0)  # v0.98.9 — same reasoning as Session's own RR bounds above, sized for VGI_MIN_RR's own default (3.0) and the fact RR is guaranteed to equal min_rr exactly by construction (unlike Session), so a somewhat wider practical range makes sense
 
 
 def _risk_autotune_log(module, param, old_value, new_value, reason, sample_n):
@@ -11793,6 +11879,18 @@ def _set_session_reverse_rr(v):
     save_settings()
 
 
+def _set_vgi_invert(v):
+    global VGI_INVERT_SIGNALS
+    VGI_INVERT_SIGNALS = v
+    save_settings()
+
+
+def _set_vgi_min_rr(v):
+    global VGI_MIN_RR
+    VGI_MIN_RR = v
+    save_settings()
+
+
 def _scalp_closed_rr_stats():
     """Median target_pct/sl_pct ratio across closed scalp trades — scalp
     doesn't carry a stats-function-level rr_all the way EMA/Divergence
@@ -11912,6 +12010,34 @@ def risk_autotune_pass():
                                           bounds=RISK_AUTOTUNE_SESSION_RR_BOUNDS)
     except Exception as e:
         log_error(f"risk_autotune session: {e}")
+
+    try:
+        # v0.98.9: per direct user request ("Vgi и ft5 надо чтобы тоже
+        # автотюнились и имели режим реверса... надо чтобы отслеживались
+        # и параметры движения, аналогия с другими индикаторами").
+        # Unlike Session, VGI's sizing (risk = reward/min_rr) is used
+        # identically whether VGI_INVERT_SIGNALS is on or off — invert
+        # just retargets the opposite zone, same formula either way (see
+        # vgi_evaluate_signal()'s own docstring) — so both rules below
+        # apply unconditionally, no "only in inverted mode" gating the
+        # way Session needed. VGI also has no separate SL-width knob to
+        # tune the way Session's SL_MULT is: SL is fully DERIVED from
+        # (reward, min_rr), so there's nothing independent to nudge —
+        # only VGI_MIN_RR itself (via the same tp_extend mechanism
+        # Session's own RR uses) and the reverse flag.
+        s = compute_vgi_signal_stats()
+        winrate = s.get("winrate")
+        closed_n = (s.get("wins", 0) or 0) + (s.get("losses", 0) or 0)
+        loss_mae = s.get("mae_r_losses_at_close")
+        win_mfe = s.get("mfe_r_wins_at_close")
+        if winrate is not None and closed_n:
+            _risk_autotune_reverse("vgi", "vgi_invert_signals", VGI_INVERT_SIGNALS, winrate, VGI_MIN_RR, closed_n, _set_vgi_invert,
+                                    avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
+        if win_mfe:
+            _risk_autotune_tp_extend("vgi", "vgi_min_rr", VGI_MIN_RR, win_mfe["median"], VGI_MIN_RR, closed_n, _set_vgi_min_rr,
+                                      bounds=RISK_AUTOTUNE_VGI_RR_BOUNDS)
+    except Exception as e:
+        log_error(f"risk_autotune vgi: {e}")
 
 
 def risk_autotune_loop():
@@ -12331,7 +12457,7 @@ def vgi_build_universe():
 
 def vgi_run_backtest(candles, lookback=VGI_LOOKBACK, rows=VGI_ROWS, sum_sections=VGI_SUM_SECTIONS,
                       min_zone_rows=VGI_MIN_ZONE_ROWS, delta_threshold_pct=VGI_DELTA_THRESHOLD_PCT,
-                      max_zone_distance_pct=VGI_MAX_ZONE_DISTANCE_PCT, min_rr=VGI_MIN_RR):
+                      max_zone_distance_pct=VGI_MAX_ZONE_DISTANCE_PCT, min_rr=None, invert=None):
     """Walk-forward backtest — the source repo has NO historical backtest
     at all (it's a live-only "online" screener), but this app's standing
     discipline all session has been "test on real data before trusting a
@@ -12342,9 +12468,18 @@ def vgi_run_backtest(candles, lookback=VGI_LOOKBACK, rows=VGI_ROWS, sum_sections
     fires, tracks forward for TP/SL touch. One position at a time (skips
     new entries while one is open), matching every other module's own
     walk-forward convention here.
+    min_rr and invert both default to the live VGI_MIN_RR/VGI_INVERT_
+    SIGNALS globals if not given — resolved at call time, not frozen as
+    signature defaults, since v0.98.9 made VGI_MIN_RR settings-mutable
+    too (unlike lookback/rows/etc above, which never change at
+    runtime) — avoiding the exact v0.95.7-class stale-default bug this
+    session already found and fixed elsewhere; caught here by this
+    session's own automated stale-default check before it could ship.
     Returns a list of closed trades: {entry_time, exit_time, direction,
     entry, tp, sl, rr, result}."""
     n = len(candles)
+    rr_floor = min_rr if min_rr is not None else VGI_MIN_RR
+    inv = invert if invert is not None else VGI_INVERT_SIGNALS
     trades = []
     position = None
     for i in range(lookback, n):
@@ -12369,7 +12504,7 @@ def vgi_run_backtest(candles, lookback=VGI_LOOKBACK, rows=VGI_ROWS, sum_sections
             profile = vgi_build_profile(candles[:i + 1], lookback, rows, sum_sections, min_zone_rows)
         except ValueError:
             continue
-        sig = vgi_evaluate_signal(profile, c["close"], delta_threshold_pct, max_zone_distance_pct, min_rr)
+        sig = vgi_evaluate_signal(profile, c["close"], delta_threshold_pct, max_zone_distance_pct, rr_floor, invert=inv)
         if sig is None:
             continue
         position = {"entry_time": c["time"], "direction": sig["direction"],
@@ -12410,7 +12545,7 @@ def vgi_scan_symbol_live(symbol):
             return
         price = candles[-1]["close"]
         profile = vgi_build_profile(candles, VGI_LOOKBACK, VGI_ROWS, VGI_SUM_SECTIONS, VGI_MIN_ZONE_ROWS)
-        sig = vgi_evaluate_signal(profile, price, VGI_DELTA_THRESHOLD_PCT, VGI_MAX_ZONE_DISTANCE_PCT, VGI_MIN_RR)
+        sig = vgi_evaluate_signal(profile, price, VGI_DELTA_THRESHOLD_PCT, VGI_MAX_ZONE_DISTANCE_PCT, VGI_MIN_RR, invert=VGI_INVERT_SIGNALS)
         if sig is None:
             return
         sig_key = (sig["direction"], round(sig["tp"], 6))
@@ -12426,6 +12561,8 @@ def vgi_scan_symbol_live(symbol):
             "delta_pct": sig["delta_pct"], "zone_dist_pct": sig["zone_dist_pct"],
             "time": candles[-1]["time"], "detected_at": now, "status": "OPEN",
             "result": None, "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
+            "mfe_r": 0.0, "mae_r": 0.0, "mfe_price": None, "mae_price": None,
+            "mfe_r_at_close": None, "mae_r_at_close": None,
         }
         with state_lock:
             STATE["vgi_signals"].appendleft(record)
@@ -12456,9 +12593,25 @@ def update_vgi_signal_outcomes():
                 continue
             candles = [c for c in candles if c["time"] + vgi_interval_sec <= now]  # v0.98.8: drop still-forming candle — the exact bug reported live (LOSS 5 minutes after a 1h-timeframe entry)
             future = [c for c in candles if c["time"] > sig["time"]]
+            direction = sig["direction"]
+            entry = sig["entry"]
+            risk = abs(entry - sig["sl"]) or 1e-9
             result, exit_price, exit_time = None, None, None
             for c in future:
-                if sig["direction"] == "LONG":
+                if direction == "LONG":
+                    fav, adv = c["high"] - entry, entry - c["low"]
+                else:
+                    fav, adv = entry - c["low"], c["high"] - entry
+                fav_r, adv_r = fav / risk, adv / risk
+                if fav_r > sig["mfe_r"] or adv_r > sig["mae_r"]:
+                    with state_lock:
+                        if fav_r > sig["mfe_r"]:
+                            sig["mfe_r"] = round(fav_r, 3)
+                            sig["mfe_price"] = c["high"] if direction == "LONG" else c["low"]
+                        if adv_r > sig["mae_r"]:
+                            sig["mae_r"] = round(adv_r, 3)
+                            sig["mae_price"] = c["low"] if direction == "LONG" else c["high"]
+                if direction == "LONG":
                     if c["low"] <= sig["sl"]:
                         result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
                         break
@@ -12478,6 +12631,8 @@ def update_vgi_signal_outcomes():
                     sig["result"] = result
                     sig["exit_price"] = exit_price
                     sig["exit_time"] = exit_time
+                    sig["mfe_r_at_close"] = sig["mfe_r"]
+                    sig["mae_r_at_close"] = sig["mae_r"]
                 just_closed.append(dict(sig))
         except Exception as e:
             log_error(f"vgi_outcome {sig['symbol']}: {e}")
@@ -12504,8 +12659,25 @@ def compute_vgi_signal_stats():
     winrate = round(wins / len(closed) * 100, 1) if closed else None
     rrs = [s["rr"] for s in signals if s.get("rr") is not None]
     rr_avg = round(sum(rrs) / len(rrs), 2) if rrs else None
+
+    def agg(key, subset):
+        vals = [s[key] for s in subset if s.get(key) is not None]
+        if not vals:
+            return None
+        vals_sorted = sorted(vals)
+        n = len(vals_sorted)
+        return {
+            "avg": round(sum(vals) / n, 3), "median": round(vals_sorted[n // 2], 3),
+            "p25": round(vals_sorted[int(n * 0.25)], 3),
+            "p75": round(vals_sorted[min(int(n * 0.75), n - 1)], 3), "n": n,
+        }
+
+    win_set = [s for s in closed if s["result"] == "WIN"]
+    loss_set = [s for s in closed if s["result"] == "LOSS"]
     return {"total": len(signals), "wins": wins, "losses": losses, "open": open_n,
-            "winrate": winrate, "rr_avg": rr_avg}
+            "winrate": winrate, "rr_avg": rr_avg,
+            "mfe_r_wins_at_close": agg("mfe_r_at_close", win_set), "mae_r_wins_at_close": agg("mae_r_at_close", win_set),
+            "mfe_r_losses_at_close": agg("mfe_r_at_close", loss_set), "mae_r_losses_at_close": agg("mae_r_at_close", loss_set)}
 
 
 def _vgi_backtest_one_symbol(symbol, now):
@@ -13362,6 +13534,7 @@ def api_vgi_status():
             "delta_threshold_pct": VGI_DELTA_THRESHOLD_PCT,
             "max_zone_distance_pct": VGI_MAX_ZONE_DISTANCE_PCT, "min_rr": VGI_MIN_RR,
             "min_sl_distance_pct": VGI_MIN_SL_DISTANCE_PCT,
+            "invert_signals": VGI_INVERT_SIGNALS,
             "backtest_days": VGI_BACKTEST_DAYS,
         },
         "top": ranked,
@@ -13488,6 +13661,8 @@ def api_reset_risk_autotune():
         _set_session_invert(False)
         _set_session_sl_mult(1.5)
         _set_session_reverse_rr(2.0)
+        _set_vgi_invert(False)
+        _set_vgi_min_rr(3.0)
         with state_lock:
             STATE["risk_autotune_log"].clear()
             STATE["risk_autotune_last_change"] = {}
@@ -14115,6 +14290,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">порт собственного индикатора (mambaleylo/vgi-trader) — профиль объёма, единый TP/SL на сигнал</div>
         </div>
         <label class="switch"><input type="checkbox" id="setVgi"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Реверс сигналов</div>
+          <div class="sub">целится в противоположную zero-volume зону вместо обычной; RR и статус реверса теперь управляются авто-тюнингом</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setVgiInvert"><span class="switchSlider"></span></label>
       </div>
     </div>
 
@@ -15317,12 +15499,20 @@ async function refreshVgi() {
     </div>`;
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
-      ТФ ${cfg.tf} · lookback ${cfg.lookback} · rows ${cfg.rows} · delta порог ${cfg.delta_threshold_pct}% · макс. дистанция до зоны ${cfg.max_zone_distance_pct}% · мин. RR ${cfg.min_rr} · мин. стоп ${cfg.min_sl_distance_pct}%<br>
+      ТФ ${cfg.tf} · lookback ${cfg.lookback} · rows ${cfg.rows} · delta порог ${cfg.delta_threshold_pct}% · макс. дистанция до зоны ${cfg.max_zone_distance_pct}% · мин. RR ${cfg.min_rr} · мин. стоп ${cfg.min_sl_distance_pct}%${cfg.invert_signals ? ` · <span style="color:#ffcc55;font-weight:bold;">РЕВЕРС ВКЛЮЧЁН</span>` : ''}<br>
       <span style="font-size:11px;">Сигналы со стопом уже минимального % пропускаются — иначе он теснее обычного рыночного шума на этом ТФ (найдено по прямому сообщению о том, что стоп выбивает почти сразу).</span><br>
       ${buildTxt}<br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · ${rrAvgTxt} · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
       <span style="font-size:11px;">Клик по строке сигнала открывает график входа/выхода.</span>
-    </div>`;
+    </div>
+    ${(ss.wins || ss.losses) ? `
+    <div style="margin-bottom:8px;"><b>MFE/MAE (R) на закрытии</b> — сколько реально было хода в плюс/минус к моменту исхода (${ss.wins||0}W/${ss.losses||0}L):<br>
+      <span class="win">WIN MFE: ${fmtStat(ss.mfe_r_wins_at_close)}</span><br>
+      <span class="win">WIN MAE: ${fmtStat(ss.mae_r_wins_at_close)}</span><br>
+      <span class="loss">LOSS MFE: ${fmtStat(ss.mfe_r_losses_at_close)}</span><br>
+      <span class="loss">LOSS MAE: ${fmtStat(ss.mae_r_losses_at_close)}</span><br>
+      <span class="dim" style="font-size:11px;">Эти цифры питают авто-тюнинг мин. RR и решение о реверсе.</span>
+    </div>` : ''}`;
   const signalsRows = signals.map(s => {
     const dirClass = s.direction === 'LONG' ? 'long' : 'short';
     let statusHtml;
@@ -15600,6 +15790,7 @@ const setInputs = {
   session_ny_invert_signals: document.getElementById('setSessionNyInvert'),
   xau_lg_enabled: document.getElementById('setXauLg'),
   vgi_enabled: document.getElementById('setVgi'),
+  vgi_invert_signals: document.getElementById('setVgiInvert'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
   telegram_alerts_div: document.getElementById('setTelegramDiv'),
