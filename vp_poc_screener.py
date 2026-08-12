@@ -4850,6 +4850,46 @@ v0.99.3 - MSNR chart: fixed level-label text overlapping itself — per
          the price says; only the text moves.
          Verified: py_compile, node --check on the extracted <script>
          block — clean.
+
+v0.99.4 - CRITICAL FIX: MSNR TP could land on the wrong side of entry —
+         found by direct user chart review of a backtest trade: a LONG
+         signal (entry 4333.52, SL 4320.51) had TP at 4259.99, BELOW
+         both entry AND the stop. That trade could only ever "WIN" by
+         accident, not by the Storyline actually playing out.
+         Root cause: TP = "the opposite active OCL level" was taken
+         unconditionally. active_a/active_v just track whichever pivot
+         of each type was MOST RECENTLY CONFIRMED chronologically — with
+         no check that it's still positioned ahead of current price. In
+         the reported trade, the paired A-shape (4259.99) had been
+         confirmed well before the V-shape it was paired with (4328.32)
+         and price had since moved past it, leaving it stranded below
+         entry — a used-up level, not a real unmet Storyline target, but
+         msnr_detect_signals() didn't know the difference.
+         Every prior MSNR backtest number (win-rate, RR, expectancy) the
+         user has seen was computed with this bug live, so likely
+         includes some fraction of trades that could only "WIN" by TP
+         being trivially close to (or on the wrong side of) entry —
+         inflating win-rate in a way that has nothing to do with the
+         actual QM/Storyline mechanism working.
+         Fix: msnr_detect_signals() now only uses the opposite active
+         level as TP when it's genuinely on the correct side of entry
+         (below entry for SHORT, above for LONG) — otherwise falls back
+         to the existing fixed-RR placeholder, same as when that side
+         hasn't confirmed yet at all. Same guard added symmetrically to
+         both the SHORT (off A-shape) and LONG (off V-shape) branches.
+         Old signals/backtest results already sitting in state.json were
+         computed under the bug and are not meaningful — NOT auto-
+         cleared on deploy (state.json persists across restarts via
+         load_state(), a version bump alone doesn't touch it); the
+         existing "Очистить MSNR" button / /api/reset/msnr already does
+         exactly this and should be pressed once after updating.
+         Verified: two targeted unit tests (LONG and SHORT), each
+         monkeypatching msnr_build_pivots() to force the exact bug shape
+         (a stale opposite-type pivot confirmed earlier than the
+         triggering level but priced on the wrong side of it) and
+         asserting the resulting signal's tp is no longer the invalid
+         stale level and is correctly falls back to fixed RR on the
+         right side of entry — both pass. py_compile clean.
 """
 
 import os
@@ -4869,7 +4909,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.3"
+APP_VERSION = "0.99.4"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12907,8 +12947,14 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
     (sweep through the currently-active A or V level, then close back on
     the origin side within qm_lookback bars) — the SBR/RBS entry the
     source actually trades. TP is the OTHER active level of the pair
-    (the "Storyline" target); if that side hasn't been confirmed yet,
-    falls back to a fixed RR (fallback_rr) as a placeholder.
+    (the "Storyline" target) ONLY if that level is still genuinely ahead
+    of price (on the correct side of entry) — a pivot confirmed long ago
+    can end up anywhere relative to current price by the time a much-
+    later signal fires, and using it regardless of side produced invalid
+    trades (TP below SL on a LONG — found via direct user chart review
+    of a backtest trade, see v0.99.4). Falls back to a fixed RR
+    (fallback_rr) whenever the paired level isn't confirmed yet OR isn't
+    on the correct side of entry.
     A level only fires once per "reign" (consumed on signal, same as
     xau_lg's active_support=None pattern) — replaced by the next
     confirmed pivot of that type resets it.
@@ -12949,12 +12995,23 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
                     sl = sweep_extreme * (1 + sl_buffer_pct)
                     risk = sl - entry
                     if risk > 0:
-                        tp = active_v["price"] if active_v is not None else entry - risk * fallback_rr
+                        # TP is the paired V-shape ONLY if it's actually still
+                        # ahead of price (below entry, for a SHORT) — a V-shape
+                        # confirmed long ago can sit anywhere price has been
+                        # since, including above the current entry once a
+                        # later uptrend leg passed it. Using a stale level on
+                        # the wrong side of entry produced nonsense trades
+                        # (TP below SL on a LONG, found via direct user
+                        # screenshot review of a backtest trade) — a target
+                        # that isn't a genuine unmet objective isn't a valid
+                        # Storyline pair, so fall back to fixed RR instead.
+                        opp = active_v["price"] if active_v is not None else None
+                        tp = opp if (opp is not None and opp < entry) else entry - risk * fallback_rr
                         signals.append({
                             "index": i, "time": c["time"], "direction": "SHORT",
                             "entry": entry, "sl": sl, "tp": tp,
                             "level": level, "level_type": "A",
-                            "opposite_level": active_v["price"] if active_v is not None else None,
+                            "opposite_level": opp if tp == opp else None,
                         })
                         a_fired = True
 
@@ -12968,12 +13025,16 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
                     sl = sweep_extreme * (1 - sl_buffer_pct)
                     risk = entry - sl
                     if risk > 0:
-                        tp = active_a["price"] if active_a is not None else entry + risk * fallback_rr
+                        # Same "opposite level must still be ahead of price"
+                        # check, mirrored for LONG: the paired A-shape is only
+                        # a valid TP if it's above entry.
+                        opp = active_a["price"] if active_a is not None else None
+                        tp = opp if (opp is not None and opp > entry) else entry + risk * fallback_rr
                         signals.append({
                             "index": i, "time": c["time"], "direction": "LONG",
                             "entry": entry, "sl": sl, "tp": tp,
                             "level": level, "level_type": "V",
-                            "opposite_level": active_a["price"] if active_a is not None else None,
+                            "opposite_level": opp if tp == opp else None,
                         })
                         v_fired = True
 
