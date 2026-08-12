@@ -5041,6 +5041,60 @@ v0.99.7 - MSNR autotrade, per direct user request. Investigated before
          node --check on the extracted <script> block, the route/def
          integrity check, and the stale-default-parameter check — all
          clean.
+
+v0.99.8 - get_candles() now retries on HTTP 429 (Too Many Requests)
+         instead of failing immediately, per a direct user report that
+         XAU_USDT was silently absent from MSNR's backtest results
+         while XAUT_USDT/PAXG_USDT showed up fine. Diagnosed via the
+         same error-log-screenshot approach that's worked repeatedly
+         this session: confirmed XAU_USDT is a real, valid Gate.io
+         contract (checked directly rather than assumed) — the actual
+         error was a 429, and critically, the SAME 429 was hitting
+         XAU_USDT across THREE unrelated modules (Volume's fetch_
+         candles_concurrent, Session NY's process_one, MSNR's own
+         backtest) within the same minute, alongside unrelated symbols
+         (CL_USDT, SOXL_USDT, ETH_USDT, BTC_USDT...) — pointing at this
+         app's overall concurrent request volume across modules
+         occasionally exceeding Gate.io's rate limit as a whole, not a
+         XAU_USDT-specific or MSNR-specific problem.
+         Root cause in the code: get_candles()'s own docstring stated
+         "Does NOT retry on HTTP error responses (4xx/5xx) — a 4xx/5xx
+         is a real answer, not a connectivity blip" — true for a
+         genuine 404/400, but wrong for 429 specifically: that status
+         code is explicitly DEFINED to mean "you're being rate-limited,
+         back off and retry," not a final answer. Applying the general
+         4xx/5xx rule to this one exception case was the actual bug —
+         confirmed msnr_backtest_loop()'s per-symbol try/except was
+         working exactly as designed (catch, log, move on), so a failed
+         XAU_USDT fetch correctly never got an entry in results_by_
+         symbol at all, matching what was observed as "just missing,"
+         not shown as an explicit error — the real fix belonged in
+         get_candles() itself, not in how MSNR handles its failure.
+         Implementation: new GET_CANDLES_RATE_LIMIT_RETRIES (3) and
+         GET_CANDLES_RATE_LIMIT_DELAY (4s base, doubling per attempt —
+         deliberately longer than the existing 1.5s connection-retry
+         delay, since a rate-limit window needs more time to clear than
+         a transient blip), tracked as its own independent budget
+         separate from GET_CANDLES_RETRIES/conn_attempt. Honors Gate.io's
+         own Retry-After header when present, falling back to the
+         exponential default otherwise. Rewrote the retry loop from a
+         `for attempt in range(...)` (sized only for the connection-
+         retry count) to a `while True` with two independently-tracked
+         counters — caught during implementation, before shipping, that
+         nesting the 429 retry inside the connection-sized for-loop
+         would have capped its own budget prematurely whenever both
+         retry types fired in the same call. Every OTHER 4xx/5xx status
+         code still gets zero retries, unchanged.
+         Verified behaviorally with three mocked-request scenarios, not
+         just read as correct: (1) two 429s followed by success still
+         succeeds within budget; (2) a permanently-429ing endpoint fails
+         cleanly after exhausting its budget (4 total attempts) rather
+         than hanging forever; (3) a Retry-After: 7 header is actually
+         honored — the real sleep duration used was confirmed to be
+         exactly 7.0s, not just assumed from reading the code.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         and the route/def integrity and stale-default-parameter
+         checks — all clean.
 """
 
 import os
@@ -5060,7 +5114,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.7"
+APP_VERSION = "0.99.8"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9301,6 +9355,8 @@ def _parse_candles(raw):
 
 GET_CANDLES_RETRIES = int(os.environ.get("VP_GET_CANDLES_RETRIES", 2))  # extra attempts on connection-level failures (DNS, connect timeout) before giving up — a brief network blip shouldn't get a symbol miscounted as illiquid, see excluded_fetch_error below
 GET_CANDLES_RETRY_DELAY = float(os.environ.get("VP_GET_CANDLES_RETRY_DELAY", 1.5))  # seconds between retries
+GET_CANDLES_RATE_LIMIT_RETRIES = int(os.environ.get("VP_GET_CANDLES_RATE_LIMIT_RETRIES", 3))  # v0.99.8 — separate, more generous retry budget specifically for HTTP 429 (Too Many Requests). Confirmed live via an error-log screenshot: many DIFFERENT modules (Volume, Session NY, MSNR) all hit 429 on the SAME symbol (XAU_USDT) within the same minute, consistent with this app's overall concurrent request volume across modules occasionally exceeding Gate.io's rate limit, not a per-symbol problem. A 429 is fundamentally different from a generic 4xx (404/400 are real, final answers unlikely to change) — it's the one status code specifically designed to mean "back off and retry," so treating it the same as "don't retry 4xx/5xx" (the general rule, still correct for every OTHER 4xx/5xx) was the actual bug.
+GET_CANDLES_RATE_LIMIT_DELAY = float(os.environ.get("VP_GET_CANDLES_RATE_LIMIT_DELAY", 4.0))  # base seconds between 429 retries — deliberately longer than GET_CANDLES_RETRY_DELAY's 1.5s, since a rate-limit window needs more time to clear than a transient connection blip; doubles per attempt (4s, 8s, 16s) unless Gate.io's own Retry-After header says otherwise
 
 
 def get_candles(symbol, interval=INTERVAL, limit=LOOKBACK + 5):
@@ -9319,25 +9375,48 @@ def get_candles(symbol, interval=INTERVAL, limit=LOOKBACK + 5):
     retry count stays capped at GET_CANDLES_RETRIES either way, so even
     if this guess is wrong for some future real outage, it adds bounded
     extra latency (a few seconds per symbol), not an unbounded pile-up.
-    Does NOT retry on HTTP error responses (4xx/5xx) — the request DID
-    complete there, and a 4xx/5xx is a real answer, not a connectivity
-    blip, so retrying wouldn't change the outcome."""
-    last_err = None
-    for attempt in range(GET_CANDLES_RETRIES + 1):
+    v0.99.8: HTTP 429 (Too Many Requests) now gets its OWN retry budget
+    (GET_CANDLES_RATE_LIMIT_RETRIES, longer exponential backoff via
+    GET_CANDLES_RATE_LIMIT_DELAY, honoring Gate.io's own Retry-After
+    header when present) instead of failing immediately — found from a
+    live error-log screenshot showing 429s hitting the SAME symbol
+    (XAU_USDT) across three UNRELATED modules (Volume's fetch_candles_
+    concurrent, Session NY's process_one, MSNR's own backtest) within
+    the same minute, which pointed at this app's overall concurrent
+    request volume across modules occasionally exceeding Gate.io's rate
+    limit — not a per-symbol or per-module problem, and specifically
+    NOT the "don't retry 4xx/5xx" logic below being wrong in general:
+    429 is the one status code explicitly designed to mean "back off
+    and retry," fundamentally different from a genuine 404/400 (a real,
+    final answer unlikely to change). Every OTHER 4xx/5xx status still
+    gets zero retries, unchanged."""
+    conn_attempt = 0
+    rate_limit_attempt = 0
+    while True:
         try:
             r = requests.get(
                 f"{GATE_BASE}/futures/usdt/candlesticks",
                 params={"contract": symbol, "interval": interval, "limit": limit},
                 timeout=HTTP_TIMEOUT,
             )
+            if r.status_code == 429 and rate_limit_attempt < GET_CANDLES_RATE_LIMIT_RETRIES:
+                retry_after = r.headers.get("Retry-After")
+                try:
+                    delay = float(retry_after) if retry_after else GET_CANDLES_RATE_LIMIT_DELAY * (2 ** rate_limit_attempt)
+                except ValueError:
+                    delay = GET_CANDLES_RATE_LIMIT_DELAY * (2 ** rate_limit_attempt)
+                rate_limit_attempt += 1
+                time.sleep(delay)
+                continue
             r.raise_for_status()
             # Gate.io returns oldest->newest already; fields: t,v,c,h,l,o,sum (varies by version)
             return _parse_candles(r.json())
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-            last_err = e
-            if attempt < GET_CANDLES_RETRIES:
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+            if conn_attempt < GET_CANDLES_RETRIES:
+                conn_attempt += 1
                 time.sleep(GET_CANDLES_RETRY_DELAY)
-    raise last_err
+                continue
+            raise
 
 
 def fetch_candles_concurrent(fetch_specs, workers=WORKERS):
