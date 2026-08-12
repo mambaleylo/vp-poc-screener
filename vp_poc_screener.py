@@ -5493,6 +5493,77 @@ v0.99.17 - MSNR gains automatic live-scan promotion: a symbol from the
          node --check on the extracted <script> block, the route/def
          integrity check, and the stale-default-parameter check — all
          clean.
+
+v0.99.18 - MSNR gains sortable backtest columns and 6 individual per-
+         symbol autotrade toggles, per direct follow-up request:
+         "сделай сортировку по винрейту и количеству сигналов бектеста,
+         добавь возможность включать автоторговлю не только по золоту,
+         но и по топ 3 после сортировки не считая золота, то есть всего
+         6 полей для автоторговли."
+         New msnr_rank_by_winrate_sample(overrides, exclude): sorts by
+         winrate DESC, closed-trade sample (wins+losses) as tiebreaker.
+         New msnr_autotrade_eligible_symbols(): MSNR_SYMBOLS (gold,
+         unconditional) + the current top 3 non-gold by that ranking —
+         exactly the 6 the user asked for. Both pure functions of the
+         overrides dict, directly testable. Verified behaviorally: six
+         synthetic cases covering ties (same winrate, different sample
+         size correctly breaks the tie), an errored-but-good-numbers
+         symbol correctly excluded regardless, and gold's unconditional
+         inclusion regardless of its own numbers.
+         Replaced the single AUTOTRADE_ENABLED_MSNR gate entirely with a
+         new per-symbol STATE dict (msnr_autotrade_symbols) — deliberately
+         NOT validated at write time by its own setter (_set_msnr_
+         autotrade_symbol doesn't check current eligibility, so a
+         previously-set toggle for a symbol that later falls out of the
+         top 3 survives dormant rather than being deleted, and resumes
+         if that symbol re-qualifies later) but IS re-validated at both
+         the API layer (api_msnr_autotrade_toggle rejects toggling a
+         symbol that isn't currently one of the 6, HTTP 400) and at the
+         actual trade-trigger point in msnr_scan_symbol_live() (requires
+         BOTH the saved toggle AND current eligibility before calling
+         execute_autotrade/sim_execute_trade) — a demoted symbol's stale
+         "on" toggle can't silently keep trading real money just because
+         it once qualified. Verified behaviorally end-to-end through the
+         real endpoint: a genuinely-eligible symbol and gold both toggle
+         successfully; an ineligible symbol is rejected with a clear
+         error and confirmed to NOT land in the saved state at all.
+         Wired into persistence (save_state/load_state) — survives a
+         restart, unlike a purely in-memory dict would.
+         api_msnr_status() gained autotrade_eligible (the current 6) and
+         each leaderboard row gained autotrade_eligible/autotrade_on, so
+         the panel can render exactly 6 checkboxes, correctly pre-
+         checked, without a separate round-trip. api_reset_msnr() now
+         also clears msnr_live_universe (stale derived data, same
+         reasoning as clearing overrides) but deliberately does NOT
+         clear msnr_autotrade_symbols — that's the user's own stated
+         preference, not derived backtest state that should vanish just
+         because old backtest numbers did.
+         Panel: Win-rate and n column headers are now clickable (msnr
+         SortBy()), with a small ▾/▴ indicator showing the active sort
+         key and direction; sort state lives outside the render function
+         (same pattern _msnrExpanded already used) so it survives the
+         panel's full re-render on every auto-refresh tick. New "Авто"
+         column with a checkbox for eligible rows (— for the rest),
+         wired to a new msnrToggleAutotrade() that reverts the checkbox
+         and shows a clear error if the server rejects the change (the
+         eligible-6 set can shift between page load and click, if a new
+         backtest cycle finished in between).
+         Removed the old single MSNR autotrade checkbox from the
+         settings modal (repurposed that row to explain the new per-
+         symbol mechanism and point at the panel; kept the shared
+         leverage input, since leverage is still one value across all 6
+         symbols, not per-symbol). Caught and fixed a real crash this
+         removal would otherwise have caused, before it could ship: the
+         settings-modal JS iterates a fixed `setInputs` map and directly
+         sets `.checked` on each mapped DOM element — the entry pointing
+         at the now-removed checkbox would have resolved to null, and
+         `null.checked = ...` throws every single time the settings
+         modal opens. Removed that dead mapping entry entirely rather
+         than leaving it dangling.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the extracted <script> block, the route/def
+         integrity check, and the stale-default-parameter check — all
+         clean.
 """
 
 import os
@@ -5512,7 +5583,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.17"
+APP_VERSION = "0.99.18"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6881,6 +6952,7 @@ STATE = {
     "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at}
     "msnr_backtest_universe": [],  # v0.99.9 — MSNR_SYMBOLS union'd with the top-liquid backtest-only exploration set, see msnr_build_backtest_universe()
     "msnr_live_universe": [],  # v0.99.17 — MSNR_SYMBOLS union'd with any backtest-qualifying symbol (win-rate/sample threshold), see msnr_compute_live_universe(); msnr_live_loop() scans THIS, not the static MSNR_SYMBOLS constant directly, so it stays empty (falls back to MSNR_SYMBOLS at the call site) until the first backtest cycle populates it
+    "msnr_autotrade_symbols": {},  # v0.99.18 — per-symbol autotrade toggle, {symbol: bool}. Replaces the old single AUTOTRADE_ENABLED_MSNR gate — per direct user request for exactly 6 individually-toggleable fields (3 gold, always eligible + the current top 3 non-gold by msnr_rank_by_winrate_sample()). A symbol missing from this dict is treated as off (same "off unless explicitly on" default every other autotrade toggle in this app already uses). See msnr_autotrade_eligible_symbols() for which 6 symbols can currently be toggled, and _set_msnr_autotrade_symbol()'s own docstring for what happens to a saved toggle when its symbol falls out of the top 3.
     "msnr_backtest_total": 0,  # v0.99.15 — progress tracking for the CURRENT (or most recent) backtest cycle, per direct user request for visibility during a long-running cycle
     "msnr_backtest_done": 0,
     "msnr_backtest_in_flight": [],  # symbols currently being fetched/optimized right now, not yet resolved
@@ -11524,6 +11596,7 @@ def save_state():
                 "xau_lg_signals": list(STATE["xau_lg_signals"]),
                 "msnr_signals": list(STATE["msnr_signals"]),
                 "msnr_symbol_overrides": STATE["msnr_symbol_overrides"],
+                "msnr_autotrade_symbols": STATE["msnr_autotrade_symbols"],
                 "ft5_signals": list(STATE["ft5_signals"]),
                 "ft5_symbol_overrides": STATE["ft5_symbol_overrides"],
                 "vgi_signals": list(STATE["vgi_signals"]),
@@ -11636,6 +11709,7 @@ def load_state():
         xau_lg_signals = data.get("xau_lg_signals", [])
         msnr_signals = data.get("msnr_signals", [])
         msnr_symbol_overrides = data.get("msnr_symbol_overrides", {})
+        msnr_autotrade_symbols = data.get("msnr_autotrade_symbols", {})
         ft5_signals = data.get("ft5_signals", [])
         ft5_symbol_overrides = data.get("ft5_symbol_overrides", {})
         vgi_signals = data.get("vgi_signals", [])
@@ -11653,6 +11727,7 @@ def load_state():
             STATE["xau_lg_signals"] = deque(xau_lg_signals, maxlen=XAU_LG_SIGNAL_HISTORY)
             STATE["msnr_signals"] = deque(msnr_signals, maxlen=MSNR_SIGNAL_HISTORY)
             STATE["msnr_symbol_overrides"] = msnr_symbol_overrides
+            STATE["msnr_autotrade_symbols"] = msnr_autotrade_symbols
             STATE["ft5_signals"] = deque(_backfill_mfe_mae(ft5_signals), maxlen=FT5_SIGNAL_HISTORY)
             STATE["ft5_symbol_overrides"] = ft5_symbol_overrides
             STATE["vgi_signals"] = deque(_backfill_mfe_mae(vgi_signals), maxlen=VGI_SIGNAL_HISTORY)
@@ -13165,6 +13240,24 @@ def _set_msnr_max_rr(v):
     save_settings()
 
 
+def _set_msnr_autotrade_symbol(symbol, enabled):
+    """Sets one symbol's individual autotrade toggle. Deliberately does
+    NOT validate that `symbol` is currently in msnr_autotrade_eligible_
+    symbols() — the eligible set can shift between backtest cycles as
+    rankings change, and a symbol that WAS in the top 3 (toggled on),
+    then falls out, then comes BACK in a later cycle should reasonably
+    resume whatever state the user last set for it rather than silently
+    forgetting it. The actual GATING check (in msnr_scan_symbol_live())
+    requires BOTH this toggle AND current eligibility — so a toggle for
+    a currently-ineligible symbol is simply inert, not deleted, until/
+    unless that symbol re-qualifies. Persisted via save_state() (this is
+    a STATE dict entry, not a fixed named setting) rather than
+    save_settings()."""
+    with state_lock:
+        STATE["msnr_autotrade_symbols"][symbol] = bool(enabled)
+    save_state()
+
+
 def _scalp_closed_rr_stats():
     """Median target_pct/sl_pct ratio across closed scalp trades — scalp
     doesn't carry a stats-function-level rr_all the way EMA/Divergence
@@ -14168,7 +14261,19 @@ def msnr_scan_symbol_live(symbol):
         }
         with state_lock:
             STATE["msnr_signals"].appendleft(record)
-        if AUTOTRADE_ENABLED_MSNR:
+            autotrade_symbols = dict(STATE["msnr_autotrade_symbols"])
+            overrides_snapshot = dict(STATE["msnr_symbol_overrides"])
+        # v0.99.18: replaced the old single AUTOTRADE_ENABLED_MSNR gate
+        # with a per-symbol toggle, per direct user request for exactly
+        # 6 individually-toggleable fields (3 gold + current top 3 non-
+        # gold by msnr_rank_by_winrate_sample()). Re-checks CURRENT
+        # eligibility here, not just the saved toggle — a symbol that
+        # was toggled on while in the top 3, then later fell out of it,
+        # should NOT keep autotrading just because its old toggle value
+        # is still True; see _set_msnr_autotrade_symbol()'s own
+        # docstring for why the toggle itself isn't deleted in that
+        # case (so it resumes if the symbol re-qualifies later).
+        if autotrade_symbols.get(symbol) and symbol in msnr_autotrade_eligible_symbols(overrides_snapshot):
             execute_autotrade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                AUTOTRADE_LEVERAGE_MSNR)
             sim_execute_trade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
@@ -14300,6 +14405,43 @@ def msnr_compute_live_universe(overrides):
         if winrate is not None and winrate > MSNR_LIVE_PROMOTE_MIN_WINRATE and closed_n > MSNR_LIVE_PROMOTE_MIN_SAMPLE:
             promoted.append(sym)
     return promoted
+
+
+def msnr_rank_by_winrate_sample(overrides, exclude=None):
+    """Ranks symbols (excluding `exclude`, e.g. gold — it's handled as
+    its own fixed set, not part of this ranking) by winrate DESC, closed-
+    trade sample size (wins+losses) as the tiebreaker — per direct user
+    request: "сделай сортировку по винрейту и количеству сигналов
+    бектеста." Symbols with an error or no winrate are excluded (nothing
+    to honestly rank them by, same as everywhere else this app already
+    filters errored overrides out of a ranking). Pure function of
+    `overrides`, same reasoning as msnr_compute_live_universe() above —
+    no locks, no I/O, directly testable.
+    Returns a list of (symbol, override_dict) tuples, already sorted,
+    highest-ranked first — feeds both the panel's own sortable display
+    and _msnr_autotrade_top3() below (which just needs [:3])."""
+    exclude = exclude or set()
+    candidates = [(sym, ov) for sym, ov in overrides.items()
+                  if ov and not ov.get("error") and ov.get("winrate") is not None and sym not in exclude]
+    candidates.sort(key=lambda kv: (kv[1]["winrate"], (kv[1].get("wins", 0) or 0) + (kv[1].get("losses", 0) or 0)), reverse=True)
+    return candidates
+
+
+def msnr_autotrade_eligible_symbols(overrides):
+    """The exactly-6 symbols eligible for an individual autotrade toggle:
+    all 3 of MSNR_SYMBOLS (gold — always eligible, regardless of its own
+    backtest numbers, same unconditional treatment msnr_compute_live_
+    universe() gives it) plus the current top 3 non-gold symbols by
+    msnr_rank_by_winrate_sample(). Per direct user request: "включать
+    автоторговлю не только по золоту, но и по топ 3 после сортировки не
+    считая золота, то есть всего 6 полей для автоторговли."
+    This set can change between backtest cycles as rankings shift — see
+    _set_msnr_autotrade_symbol()'s own docstring for what happens to a
+    symbol's saved toggle state when it falls out of the top 3."""
+    gold = set(MSNR_SYMBOLS)
+    ranked = msnr_rank_by_winrate_sample(overrides, exclude=gold)
+    top3 = [sym for sym, _ov in ranked[:3]]
+    return list(MSNR_SYMBOLS) + top3
 
 
 def _msnr_backtest_one_symbol(symbol):
@@ -15509,6 +15651,7 @@ def api_msnr_status():
         backtest_universe = list(STATE["msnr_backtest_universe"])
         backtest_results = dict(STATE["msnr_backtest_results"])
         live_universe = list(STATE["msnr_live_universe"]) or list(MSNR_SYMBOLS)
+        autotrade_symbols = dict(STATE["msnr_autotrade_symbols"])
         last_backtest_finished = STATE["msnr_last_backtest_finished"]
         last_backtest_duration = STATE["msnr_last_backtest_duration"]
         backtest_total = STATE["msnr_backtest_total"]
@@ -15525,7 +15668,15 @@ def api_msnr_status():
     # v0.99.17: "live" now checks the DYNAMIC promoted set (live_universe),
     # not the static MSNR_SYMBOLS constant — a symbol can be live because
     # it's gold OR because it earned promotion via win-rate/sample.
-    ranked = [dict(v, symbol=sym, live=(sym in live_universe)) for sym, v in overrides.items() if v and not v.get("error")]
+    # v0.99.18: autotrade_eligible (exactly the 6 symbols — gold + current
+    # top 3 by msnr_rank_by_winrate_sample()) and each entry's own
+    # autotrade_on state, so the panel can render exactly 6 checkboxes,
+    # correctly pre-checked, without a separate round-trip.
+    autotrade_eligible = msnr_autotrade_eligible_symbols(overrides)
+    ranked = [dict(v, symbol=sym, live=(sym in live_universe),
+                   autotrade_eligible=(sym in autotrade_eligible),
+                   autotrade_on=bool(autotrade_symbols.get(sym)))
+              for sym, v in overrides.items() if v and not v.get("error")]
     ranked.sort(key=lambda r: (r.get("score") if r.get("score") is not None else -999), reverse=True)
     # v0.99.11: RR-bucket win-rate, pooled across every symbol's own
     # backtest trades — per direct user observation (SPCX: rr>6 trades
@@ -15539,6 +15690,7 @@ def api_msnr_status():
         "enabled": MSNR_ENABLED,
         "symbols": MSNR_SYMBOLS,
         "live_universe": live_universe,
+        "autotrade_eligible": autotrade_eligible,
         "backtest_universe_size": len(backtest_universe),
         "last_backtest_finished": last_backtest_finished,
         "last_backtest_duration": last_backtest_duration,
@@ -15704,12 +15856,45 @@ def api_reset_msnr():
             STATE["msnr_backtest_results"] = {}
             STATE["msnr_backtest_summary"] = {}
             STATE["msnr_symbol_overrides"] = {}
+            STATE["msnr_live_universe"] = []  # v0.99.18: stale derived data, same reasoning as clearing overrides above — msnr_live_loop() falls back to MSNR_SYMBOLS (gold) until the next backtest cycle repopulates it
             STATE["msnr_last_backtest_finished"] = None
             STATE["msnr_last_backtest_duration"] = None
             STATE["msnr_signals"].clear()
         return jsonify({"ok": True})
     except Exception as e:
         log_error(f"api_reset_msnr: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/msnr/autotrade_toggle", methods=["POST"])
+def api_msnr_autotrade_toggle():
+    """Toggles ONE symbol's individual MSNR autotrade state. Per direct
+    user request for exactly 6 individually-toggleable fields (3 gold +
+    current top 3 non-gold by msnr_rank_by_winrate_sample()) — replaces
+    the old single AUTOTRADE_ENABLED_MSNR checkbox.
+    Rejects a symbol that isn't currently in msnr_autotrade_eligible_
+    symbols() — the request body must name one of the exactly-6 symbols
+    the panel is actually showing checkboxes for right now, not an
+    arbitrary symbol; this is a deliberate write-time guard (unlike
+    _set_msnr_autotrade_symbol() itself, which doesn't validate, so a
+    PREVIOUSLY-set toggle for a since-demoted symbol survives — see its
+    own docstring). A person can't toggle a symbol the UI never offered
+    them in the first place."""
+    try:
+        data = request.get_json(force=True) or {}
+        symbol = data.get("symbol")
+        enabled = bool(data.get("enabled"))
+        if not symbol:
+            return jsonify({"ok": False, "error": "symbol required"}), 400
+        with state_lock:
+            overrides_snapshot = dict(STATE["msnr_symbol_overrides"])
+        eligible = msnr_autotrade_eligible_symbols(overrides_snapshot)
+        if symbol not in eligible:
+            return jsonify({"ok": False, "error": f"{symbol} is not currently eligible (not gold, not in current top 3)"}), 400
+        _set_msnr_autotrade_symbol(symbol, enabled)
+        return jsonify({"ok": True, "symbol": symbol, "enabled": enabled})
+    except Exception as e:
+        log_error(f"api_msnr_autotrade_toggle: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
@@ -16867,11 +17052,10 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">↳ MSNR ⚠️</div>
-          <div class="sub">плечо, если включено — экспериментальная логика, статус не проверен, выключено по умолчанию</div>
+          <div class="sub">плечо (общее на все монеты) — сам переключатель теперь индивидуальный на каждую монету, см. таблицу автотюнинга на вкладке MSNR (6 полей: золото + текущий топ-3 по винрейту)</div>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="number" id="setAutotradeLevMsnr" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
-          <label class="switch"><input type="checkbox" id="setAutotradeMsnr"><span class="switchSlider"></span></label>
         </div>
       </div>
       <div class="settingRow">
@@ -17756,6 +17940,40 @@ async function refreshXauLg() {
 }
 
 // ---------------- MSNR — Malaysian SNR / Storyline gold strategy (EXPERIMENTAL, v0.99.0) ----------------
+// v0.99.18: sort state for the backtest leaderboard table — lives
+// OUTSIDE refreshMsnr() for the same reason _msnrExpanded does (survives
+// the panel's full re-render on every auto-refresh tick). Defaults to
+// score (this table's own pre-existing default ranking), switches to
+// winrate or trades(n) on header click, per direct user request:
+// "сделай сортировку по винрейту и количеству сигналов бектеста."
+let _msnrSortKey = 'score';
+let _msnrSortDir = -1;  // -1 = descending (best first), 1 = ascending
+function msnrSortBy(key) {
+  if (_msnrSortKey === key) { _msnrSortDir *= -1; } else { _msnrSortKey = key; _msnrSortDir = -1; }
+  refreshMsnr();
+}
+
+async function msnrToggleAutotrade(symbol, enabled, checkboxEl) {
+  try {
+    const resp = await fetch('/api/msnr/autotrade_toggle', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({symbol, enabled}),
+    });
+    const data = await resp.json();
+    if (!data.ok) {
+      // v0.99.18: the eligible-6 set can shift between page load and
+      // click (a new backtest cycle finished in between) — the server
+      // is the source of truth, so on rejection revert the checkbox
+      // rather than leave it showing a state that didn't actually take.
+      if (checkboxEl) checkboxEl.checked = !enabled;
+      alert(`Не удалось изменить автоторговлю для ${symbol}: ${data.error || 'неизвестная ошибка'}`);
+    }
+  } catch (e) {
+    if (checkboxEl) checkboxEl.checked = !enabled;
+    console.error('msnrToggleAutotrade', e);
+  }
+}
+
 async function refreshMsnr() {
   const status = await (await fetch('/api/msnr/status')).json();
   const signals = await (await fetch('/api/msnr/signals')).json();
@@ -17831,13 +18049,22 @@ async function refreshMsnr() {
       <tbody>${signalsRows}</tbody>
     </table>
     </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
-  const btRows = (status.top || []).map(r => {
+  const btRows = [...(status.top || [])].sort((a, b) => {
+    const av = a[_msnrSortKey], bv = b[_msnrSortKey];
+    if (av === null || av === undefined) return 1;
+    if (bv === null || bv === undefined) return -1;
+    return av < bv ? -_msnrSortDir : (av > bv ? _msnrSortDir : 0);
+  }).map(r => {
     const wrClass = (r.winrate === null || r.winrate === undefined) ? 'dim' : (r.winrate >= 50 ? 'win' : 'loss');
     const expClass = (r.expectancy_r === null || r.expectancy_r === undefined) ? 'dim' : (r.expectancy_r > 0 ? 'win' : 'loss');
     const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431`;
     const noteTxt = r.note ? ` \u26a0\ufe0f ${r.note}` : '';
+    const autotradeCell = r.autotrade_eligible
+      ? `<input type="checkbox" ${r.autotrade_on ? 'checked' : ''} onclick="event.stopPropagation(); msnrToggleAutotrade('${r.symbol}', this.checked, this)">`
+      : '<span class="dim" style="font-size:10px;">\u2014</span>';
     return `<tr onclick="toggleMsnrBacktestTrades('${r.symbol}')" style="cursor:pointer;">
       <td>${_msnrExpanded.has(r.symbol) ? '\u25be' : '\u25b8'} ${r.symbol}${r.live ? ' <span style="color:#3ddc97;" title="торгуется вживую">\u25cf</span>' : ' <span class="dim" style="font-size:10px;" title="только бэктест, не торгуется">\u0431\u044d\u043a\u0442\u0435\u0441\u0442</span>'}</td>
+      <td onclick="event.stopPropagation();">${autotradeCell}</td>
       <td class="${wrClass}">${r.winrate !== null && r.winrate !== undefined ? r.winrate+'%' : '-'}</td>
       <td class="dim">n=${r.trades}</td>
       <td class="win">${r.wins}W</td>
@@ -17848,13 +18075,13 @@ async function refreshMsnr() {
       <td class="dim">${r.score !== null && r.score !== undefined ? r.score : '-'}</td>
       <td class="dim">${paramsTxt}${noteTxt}</td>
     </tr>
-    <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="10" style="padding:0;"><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0430...</div></td></tr>`;
+    <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="11" style="padding:0;"><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0430...</div></td></tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
     <div class="dim" style="margin-bottom:6px;"><b>\u0410\u0432\u0442\u043e\u0442\u044e\u043d\u0438\u043d\u0433 \u043f\u043e \u043c\u043e\u043d\u0435\u0442\u0430\u043c</b> (${cfg.backtest_days} \u0434\u043d\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438, \u043f\u0435\u0440\u0435\u0431\u043e\u0440 ${cfg.grid_min_leg_atr.length}\u00d7${cfg.grid_qm_zone_pct.length}\u00d7${cfg.grid_qm_lookback.length}=${cfg.grid_min_leg_atr.length*cfg.grid_qm_zone_pct.length*cfg.grid_qm_lookback.length} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432 \u043d\u0430 \u0441\u0438\u043c\u0432\u043e\u043b \u2014 \u043c\u0438\u043d. \u0438\u043c\u043f\u0443\u043b\u044c\u0441 (\u00d7ATR) / QM-\u0437\u043e\u043d\u0430 (%) / \u043e\u043a\u043d\u043e QM (\u0431\u0430\u0440\u044b), \u0442\u0430\u0431\u043b\u0438\u0446\u0430 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u0443\u0436\u0435 \u043b\u0443\u0447\u0448\u0438\u0439 \u043d\u0430\u0439\u0434\u0435\u043d\u043d\u044b\u0439 \u043a\u043e\u043c\u0431\u043e \u043f\u043e \u043a\u0430\u0436\u0434\u043e\u043c\u0443 \u0441\u0438\u043c\u0432\u043e\u043b\u0443) \u00b7 <b>score</b> \u2014 \u043d\u0438\u0436\u043d\u044f\u044f \u0434\u043e\u0432\u0435\u0440\u0438\u0442\u0435\u043b\u044c\u043d\u0430\u044f \u0433\u0440\u0430\u043d\u0438\u0446\u0430 \u0441\u0440\u0435\u0434\u043d\u0435\u0433\u043e R (\u043f\u043e \u043d\u0435\u0439 \u0438 \u0432\u044b\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044f \u043b\u0443\u0447\u0448\u0438\u0439 \u043a\u043e\u043c\u0431\u043e, \u0430 \u043d\u0435 \u043f\u043e \u0441\u044b\u0440\u043e\u043c\u0443 expectancy \u2014 \u0447\u0442\u043e\u0431\u044b \u043c\u0430\u043b\u0435\u043d\u044c\u043a\u0430\u044f \u0432\u044b\u0431\u043e\u0440\u043a\u0430 \u0441 \u0432\u0435\u0437\u0435\u043d\u0438\u0435\u043c \u043d\u0435 \u043f\u043e\u0431\u0435\u0436\u0434\u0430\u043b\u0430 \u0431\u043e\u043b\u044c\u0448\u0443\u044e \u0441\u0442\u0430\u0431\u0438\u043b\u044c\u043d\u0443\u044e) \u00b7 \u043a\u043b\u0438\u043a \u043f\u043e \u0441\u0442\u0440\u043e\u043a\u0435 \u2014 \u0440\u0430\u0441\u043a\u0440\u044b\u0442\u044c \u0441\u0434\u0435\u043b\u043a\u0438:</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th><th>T</th><th>RR</th><th>Expectancy</th><th>Score</th><th>\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Авто</th><th style="cursor:pointer;" onclick="msnrSortBy('winrate')">Win-rate${_msnrSortKey==='winrate' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th style="cursor:pointer;" onclick="msnrSortBy('trades')">n${_msnrSortKey==='trades' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th>W</th><th>L</th><th>T</th><th>RR</th><th>Expectancy</th><th>Score</th><th>\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">\u0411\u044d\u043a\u0442\u0435\u0441\u0442 \u0435\u0449\u0451 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432.</div>';
@@ -18524,7 +18751,10 @@ const setInputs = {
   autotrade_scalp: document.getElementById('setAutotradeScalp'),
   autotrade_session: document.getElementById('setAutotradeSession'),
   autotrade_vgi: document.getElementById('setAutotradeVgi'),
-  autotrade_msnr: document.getElementById('setAutotradeMsnr'),
+  // v0.99.18: autotrade_msnr checkbox removed from settings (replaced by
+  // 6 individual per-symbol toggles in the MSNR panel itself) — no
+  // longer mapped here, since setInputs[key].checked on a null element
+  // (the DOM node no longer exists) would throw every time settings load
   autotrade_session_ny: document.getElementById('setAutotradeSessionNy'),
 };
 
