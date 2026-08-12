@@ -4709,6 +4709,69 @@ v0.98.11 - CRITICAL FIX: KeyError: 'mfe_r' crashing outcome-checking for
          on the backfilled record no longer raises.
          Verified with py_compile, an actual runtime start, pyflakes,
          and the route/def integrity check — all clean.
+
+v0.99.0 - new EXPERIMENTAL "MSNR ⚠️" tab — per direct user request, built
+         from screenshots of the @xaubymedovyk Telegram channel's "MSNR
+         education by Medovyk" slide deck (line-chart A-shape/V-shape/
+         SBR/RBS/QM diagrams) plus a forwarded chat screenshot showing
+         the full H1->M15->M5 cascade in practice. Cross-checked against
+         the wider public "Malaysian SNR" material (an established named
+         retail methodology, not the channel's own invention) to pin
+         down what OCL/A-shape/V-shape/SBR/RBS/QM actually mean before
+         writing any detection code.
+         Translation into a precise no-lookahead algorithm:
+           - OCL levels built from a CLOSE-only line chart on the
+             structure timeframe (msnr_build_pivots()), never high/low.
+           - A-shape = confirmed pivot HIGH on that close line, V-shape =
+             confirmed pivot LOW — only kept if the leg from the
+             previous opposite pivot is >= MSNR_MIN_LEG_ATR x ATR (a
+             real impulsive "Storyline" leg, not chop).
+           - Entry is the SBR/RBS mechanism itself: a QM (sweep through
+             the active OCL level, close back on the origin side within
+             MSNR_QM_LOOKBACK_BARS) on the faster MSNR_ENTRY_TF —
+             msnr_detect_signals(), mirroring detect_session_
+             manipulation()'s sweep-then-reject-cluster shape.
+           - TP is the OTHER active OCL level of the current A/V pair
+             (the Storyline target) — structural, not a fixed multiple,
+             which is what gives this its very high R:R by construction
+             (matches the source's own 10-24R screenshotted examples).
+             Falls back to MSNR_FALLBACK_RR only if that side isn't
+             confirmed yet.
+         Two-stage cascade (structure TF for A/V levels, entry TF for the
+         QM trigger) rather than the full H1->M15->M5 three-stage
+         waterfall shown in one screenshot — deliberately collapsed for
+         a first testable cut, same "ship the core mechanism, refine
+         later" approach as XAU_LG/FT5's own introduction.
+         Full module: msnr_build_pivots()/msnr_detect_signals()/msnr_
+         track_outcome() (detection), msnr_backtest_symbol()/msnr_
+         summarize_backtest() (backtest), msnr_scan_symbol_live()/
+         update_msnr_signal_outcomes()/compute_msnr_signal_stats()
+         (live), msnr_backtest_loop()/msnr_live_loop() (daemon threads),
+         four API endpoints (/api/msnr/status, /signals, /chart/<symbol>,
+         /api/reset/msnr), msnr_signals STATE deque + backtest results/
+         summary, settings wiring (msnr_enabled, telegram_alerts_msnr,
+         autotrade_msnr, autotrade_leverage_msnr — same shape as XAU_LG's
+         own settings keys), new "MSNR ⚠️" tab + panel (refreshMsnr,
+         table of live signals with A-shape/V-shape column) + its own
+         chart modal (msnrModal/openMsnrChart/drawMsnrChart) drawing the
+         candles, both OCL levels (orange A-shape, teal V-shape), and
+         entry/SL/TP — unlike XAU_LG this DOES get a chart view, per
+         direct user request to actually see the levels drawn.
+         Same treatment as XAU_LG/FT5: symbols restricted to XAU_USDT/
+         XAUT_USDT/PAXG_USDT (channel is gold-only), autotrade OFF by
+         default (AUTOTRADE_ENABLED_MSNR), status UNVERIFIED — this is a
+         faithful translation of the source material into code, not a
+         backtested-and-proven edge; the tab's own warning banner says
+         so explicitly, same wording pattern as XAU_LG's.
+         Verified: synthetic-data smoke test (consolidation -> impulsive
+         drop -> slow return) confirmed msnr_build_pivots() correctly
+         finds the A-shape/V-shape pair and msnr_detect_signals() fires
+         the expected SHORT QM signal on retest with TP at the V-shape
+         level. py_compile, ast.parse, node --check on the extracted
+         <script> block (taking the LAST "<script>" occurrence per the
+         v0.96.0 lesson above, not the first), and the route/def
+         integrity check — all clean, zero duplicate routes or defs
+         introduced.
 """
 
 import os
@@ -4728,7 +4791,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.98.11"
+APP_VERSION = "0.99.0"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5111,6 +5174,7 @@ TELEGRAM_ALERTS_EMA = os.environ.get("VP_TG_ALERTS_EMA", "1") == "1"
 TELEGRAM_ALERTS_HOURLY = os.environ.get("VP_TG_ALERTS_HOURLY", "1") == "1"
 TELEGRAM_ALERTS_SESSION = os.environ.get("VP_TG_ALERTS_SESSION", "1") == "1"
 TELEGRAM_ALERTS_SESSION_NY = os.environ.get("VP_TG_ALERTS_SESSION_NY", "1") == "1"
+TELEGRAM_ALERTS_MSNR = os.environ.get("VP_TG_ALERTS_MSNR", "1") == "1"
 TELEGRAM_ALERTS_XAU_LG = os.environ.get("VP_TG_ALERTS_XAU_LG", "1") == "1"
 TELEGRAM_ALERTS_FT5 = os.environ.get("VP_TG_ALERTS_FT5", "1") == "1"
 HOURLY_STATS_ENABLED = os.environ.get("VP_HOURLY_STATS_ENABLED", "1") == "1"
@@ -5225,6 +5289,77 @@ XAU_LG_BACKTEST_DAYS = int(os.environ.get("VP_XAU_LG_BACKTEST_DAYS", 30))
 XAU_LG_SIGNAL_HISTORY = 200
 XAU_LG_REFRESH_SEC = int(os.environ.get("VP_XAU_LG_REFRESH_SEC", 3600))  # hourly backtest refresh — small fixed symbol list, cheap compared to Session's 50-symbol universe scan
 XAU_LG_SCAN_INTERVAL_SEC = int(os.environ.get("VP_XAU_LG_SCAN_INTERVAL_SEC", 300))  # live scan cadence — 15m candles, checking every 5 min is plenty
+
+# ============================================================================
+# EXPERIMENTAL: MSNR — Malaysian SNR / "Storyline" gold strategy (v0.99.0)
+# ----------------------------------------------------------------------------
+# Every name prefixed MSNR_/msnr_, same "findable and deletable" reasoning
+# as XAU_LG. Source: the @xaubymedovyk Telegram channel + its "MSNR
+# education by Medovyk" slide deck, screenshotted and forwarded by the user
+# — cross-checked against the wider public "Malaysian SNR" material (this
+# is an established, named retail methodology, not the channel author's own
+# invention) to pin down what the slide-deck abbreviations actually mean.
+# Translation from the (informal, screenshot-only) source material into a
+# precise no-lookahead algorithm, as literally as the source allows:
+#   - OCL (Open-Close Level): levels are built from a CLOSE-only line
+#     chart, not wicks — msnr_detect_signals() pivots on `close`, never
+#     high/low, for the structure timeframe.
+#   - A-shape / V-shape: a confirmed pivot HIGH on that close-line is an
+#     "A-shape" (origin/resistance-type OCL); a confirmed pivot LOW is a
+#     "V-shape" (origin/support-type OCL) — named for the letter each
+#     forms on the line chart. Only pivots whose leg from the previous
+#     opposite pivot is at least MSNR_MIN_LEG_ATR x ATR count — this is
+#     what the source calls an impulsive "Storyline" leg, as opposed to
+#     ordinary chop, which the slides never treat as forming a real A/V.
+#   - SBR / RBS (Support-Become-Resistance / Resistance-Become-Support):
+#     the trade this module actually takes IS the SBR/RBS mechanism — a
+#     confirmed A-shape (resistance-type) or V-shape (support-type) level
+#     gets re-tested, and the entry is the rejection off it, i.e. "the
+#     broken/former level now respected in the opposite role" is exactly
+#     what the QM confirmation below fires on.
+#   - QM (Quasimodo): the entry trigger, on a faster execution timeframe.
+#     Price sweeps through the OCL level (wick beyond it) and then closes
+#     back on the origin side within a short bar cluster — msnr_detect_
+#     signals()'s inner loop, deliberately mirrored on detect_session_
+#     manipulation()'s sweep-then-reject-cluster shape since it's the same
+#     underlying pattern (liquidity grab + reversal confirmation).
+#   - Storyline / target: the CURRENT opposite active OCL level (the other
+#     side of the same A/V pair) is used as TP — this is what gives the
+#     source's screenshots their very high R:R (10-24R examples), and is
+#     structural rather than a fixed multiple: TP is wherever the paired
+#     level actually is, not a fixed distance.
+# Two-stage multi-timeframe cascade (MSNR_STRUCTURE_TF for the OCL/A/V
+# levels, MSNR_ENTRY_TF for the QM trigger) rather than the source's full
+# three/four-stage H1->M15->M5 waterfall shown in one forwarded screenshot
+# — collapsed to two stages for a first, testable cut; can be extended to
+# a third stage later if the two-stage version's own backtest looks worth
+# refining further.
+# Universe restricted to the same gold-tracking symbols as XAU_LG, per the
+# channel being XAU-only.
+# Status: UNVERIFIED, same as XAU_LG/FT5 were at their own introduction —
+# this is a faithful translation of the source material, not a backtested-
+# and-proven edge. Autotrade OFF by default (MSNR_ENABLED itself defaults
+# ON, matching XAU_LG, since this module only shows signals/runs its own
+# backtest unless autotrade is separately turned on).
+# Constants placed here (before STATE) for the same reason as XAU_LG's —
+# STATE references MSNR_SIGNAL_HISTORY at construction time.
+# ============================================================================
+MSNR_ENABLED = os.environ.get("VP_MSNR_ENABLED", "1") == "1"
+MSNR_SYMBOLS = [s.strip() for s in os.environ.get("VP_MSNR_SYMBOLS", "XAU_USDT,XAUT_USDT,PAXG_USDT").split(",") if s.strip()]
+MSNR_STRUCTURE_TF = os.environ.get("VP_MSNR_STRUCTURE_TF", "1h")  # timeframe the OCL / A-shape / V-shape "Storyline" levels are built on
+MSNR_ENTRY_TF = os.environ.get("VP_MSNR_ENTRY_TF", "15m")  # faster timeframe the QM sweep+rejection trigger is watched on
+MSNR_PIVOT_LEFT = int(os.environ.get("VP_MSNR_PIVOT_LEFT", 2))
+MSNR_PIVOT_RIGHT = int(os.environ.get("VP_MSNR_PIVOT_RIGHT", 2))
+MSNR_ATR_PERIOD = int(os.environ.get("VP_MSNR_ATR_PERIOD", 14))
+MSNR_MIN_LEG_ATR = float(os.environ.get("VP_MSNR_MIN_LEG_ATR", 2.5))  # min impulsive-leg size (structure-TF ATR multiples) for a pivot to count as a real A-shape/V-shape rather than noise
+MSNR_QM_ZONE_PCT = float(os.environ.get("VP_MSNR_QM_ZONE_PCT", 0.006))  # how close (as % of price) the sweep extreme must land to the OCL level to count as testing THAT level
+MSNR_QM_LOOKBACK_BARS = int(os.environ.get("VP_MSNR_QM_LOOKBACK_BARS", 6))  # entry-TF bar cluster width the sweep and the close-back-inside confirmation are allowed to span, same idea as SESSION_MAX_THRUST_BARS
+MSNR_SL_BUFFER_PCT = float(os.environ.get("VP_MSNR_SL_BUFFER_PCT", 0.0015))
+MSNR_FALLBACK_RR = float(os.environ.get("VP_MSNR_FALLBACK_RR", 4.0))  # used only when the opposite OCL level isn't confirmed yet (Storyline has just one side so far) — a placeholder TP, not the normal path
+MSNR_BACKTEST_DAYS = int(os.environ.get("VP_MSNR_BACKTEST_DAYS", 30))
+MSNR_SIGNAL_HISTORY = 200
+MSNR_REFRESH_SEC = int(os.environ.get("VP_MSNR_REFRESH_SEC", 3600))
+MSNR_SCAN_INTERVAL_SEC = int(os.environ.get("VP_MSNR_SCAN_INTERVAL_SEC", 300))
 
 # ============================================================================
 # EXPERIMENTAL: FT5 — port of freqtrade-strategies' Strategy005 (v0.96.0)
@@ -5394,6 +5529,8 @@ AUTOTRADE_LEVERAGE_SESSION = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SESSION",
 AUTOTRADE_LEVERAGE_SESSION_NY = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SESSION_NY", 10))
 AUTOTRADE_ENABLED_XAU_LG = os.environ.get("VP_AUTOTRADE_XAU_LG", "0") == "1"  # off by default — see the XAU_LG module's own header comment on why this strategy is treated as unverified
 AUTOTRADE_LEVERAGE_XAU_LG = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_XAU_LG", 10))
+AUTOTRADE_ENABLED_MSNR = os.environ.get("VP_AUTOTRADE_MSNR", "0") == "1"  # off by default — same "unverified source" treatment as XAU_LG/FT5
+AUTOTRADE_LEVERAGE_MSNR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_MSNR", 10))
 AUTOTRADE_ENABLED_FT5 = os.environ.get("VP_AUTOTRADE_FT5", "0") == "1"  # off by default — same reasoning as XAU_LG: unverified source, and the freqtrade backtest table this was ported from is a near-certain overfitting example (20-day 2018 window)
 AUTOTRADE_LEVERAGE_FT5 = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_FT5", 10))
 AUTOTRADE_TRADE_HISTORY = 300
@@ -5450,14 +5587,14 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "div_min_rr", "bounce_enabled", "breakout_enabled",
-                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "ft5_invert_signals", "vgi_enabled", "vgi_invert_signals", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session", "telegram_alerts_session_ny", "telegram_alerts_xau_lg", "telegram_alerts_ft5", "telegram_alerts_vgi",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5", "autotrade_vgi",
+                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "ft5_invert_signals", "vgi_enabled", "vgi_invert_signals", "msnr_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session", "telegram_alerts_session_ny", "telegram_alerts_xau_lg", "telegram_alerts_ft5", "telegram_alerts_vgi", "telegram_alerts_msnr",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5", "autotrade_vgi", "autotrade_msnr",
                   "autotrade_size_mode", "autotrade_size_value",
                   "scalp_size_mode", "scalp_size_value",
                   "ema_min_rr",
                   "ema_adx_filter_enabled", "ema_adx_min", "ema_min_gap_pct",
-                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session", "autotrade_leverage_session_ny", "autotrade_leverage_xau_lg", "autotrade_leverage_ft5", "autotrade_leverage_vgi",
+                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session", "autotrade_leverage_session_ny", "autotrade_leverage_xau_lg", "autotrade_leverage_ft5", "autotrade_leverage_vgi", "autotrade_leverage_msnr",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
                   # same save_settings() path everything else already uses,
@@ -5493,6 +5630,7 @@ def get_settings():
         "vgi_enabled": VGI_ENABLED,
         "vgi_invert_signals": VGI_INVERT_SIGNALS,
         "vgi_min_rr": VGI_MIN_RR,
+        "msnr_enabled": MSNR_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
         "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
@@ -5504,6 +5642,7 @@ def get_settings():
         "telegram_alerts_xau_lg": TELEGRAM_ALERTS_XAU_LG,
         "telegram_alerts_ft5": TELEGRAM_ALERTS_FT5,
         "telegram_alerts_vgi": TELEGRAM_ALERTS_VGI,
+        "telegram_alerts_msnr": TELEGRAM_ALERTS_MSNR,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
         "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
@@ -5516,6 +5655,7 @@ def get_settings():
         "autotrade_xau_lg": AUTOTRADE_ENABLED_XAU_LG,
         "autotrade_ft5": AUTOTRADE_ENABLED_FT5,
         "autotrade_vgi": AUTOTRADE_ENABLED_VGI,
+        "autotrade_msnr": AUTOTRADE_ENABLED_MSNR,
         "autotrade_size_mode": AUTOTRADE_SIZE_MODE,
         "autotrade_size_value": AUTOTRADE_SIZE_VALUE,
         "scalp_size_mode": SCALP_SIZE_MODE,
@@ -5533,6 +5673,7 @@ def get_settings():
         "autotrade_leverage_xau_lg": AUTOTRADE_LEVERAGE_XAU_LG,
         "autotrade_leverage_ft5": AUTOTRADE_LEVERAGE_FT5,
         "autotrade_leverage_vgi": AUTOTRADE_LEVERAGE_VGI,
+        "autotrade_leverage_msnr": AUTOTRADE_LEVERAGE_MSNR,
         "scalp_min_rr": SCALP_MIN_RR,
         "scalp_sl_buffer_mult": SCALP_SL_BUFFER_MULT,
         "session_sl_mult": SESSION_SL_MULT,
@@ -5550,10 +5691,10 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, VGI_ENABLED, VGI_INVERT_SIGNALS, VGI_MIN_RR, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, VGI_ENABLED, VGI_INVERT_SIGNALS, VGI_MIN_RR, MSNR_ENABLED, HOURLY_STATS_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
-    global TELEGRAM_ALERTS_SESSION_NY, TELEGRAM_ALERTS_XAU_LG, TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_VGI
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_VGI
+    global TELEGRAM_ALERTS_SESSION_NY, TELEGRAM_ALERTS_XAU_LG, TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_VGI, TELEGRAM_ALERTS_MSNR
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_VGI, AUTOTRADE_ENABLED_MSNR
     global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
     global SCALP_SIZE_MODE, SCALP_SIZE_VALUE
     global EMA_MIN_RR
@@ -5611,6 +5752,8 @@ def apply_settings(updates):
                 VGI_MIN_RR = v
         except (TypeError, ValueError):
             pass
+    if "msnr_enabled" in updates:
+        MSNR_ENABLED = bool(updates["msnr_enabled"])
     if "hourly_stats_enabled" in updates:
         HOURLY_STATS_ENABLED = bool(updates["hourly_stats_enabled"])
     if "telegram_enabled" in updates:
@@ -5631,6 +5774,8 @@ def apply_settings(updates):
         TELEGRAM_ALERTS_FT5 = bool(updates["telegram_alerts_ft5"])
     if "telegram_alerts_vgi" in updates:
         TELEGRAM_ALERTS_VGI = bool(updates["telegram_alerts_vgi"])
+    if "telegram_alerts_msnr" in updates:
+        TELEGRAM_ALERTS_MSNR = bool(updates["telegram_alerts_msnr"])
     if "autotrade_dry_run" in updates:
         AUTOTRADE_DRY_RUN = bool(updates["autotrade_dry_run"])
     if "autotrade_bounce" in updates:
@@ -5653,6 +5798,8 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_FT5 = bool(updates["autotrade_ft5"])
     if "autotrade_vgi" in updates:
         AUTOTRADE_ENABLED_VGI = bool(updates["autotrade_vgi"])
+    if "autotrade_msnr" in updates:
+        AUTOTRADE_ENABLED_MSNR = bool(updates["autotrade_msnr"])
     if "autotrade_size_mode" in updates and updates["autotrade_size_mode"] in ("percent", "fixed"):
         AUTOTRADE_SIZE_MODE = updates["autotrade_size_mode"]
     if "autotrade_size_value" in updates:
@@ -5704,6 +5851,7 @@ def apply_settings(updates):
         ("autotrade_leverage_xau_lg", "AUTOTRADE_LEVERAGE_XAU_LG"),
         ("autotrade_leverage_ft5", "AUTOTRADE_LEVERAGE_FT5"),
         ("autotrade_leverage_vgi", "AUTOTRADE_LEVERAGE_VGI"),
+        ("autotrade_leverage_msnr", "AUTOTRADE_LEVERAGE_MSNR"),
     ):
         if key in updates:
             try:
@@ -5970,6 +6118,13 @@ STATE = {
     "xau_lg_backtest_summary": {},
     "xau_lg_last_backtest_finished": None,
     "xau_lg_last_backtest_duration": None,
+    # EXPERIMENTAL MSNR (Malaysian SNR / Storyline gold strategy, v0.99.0) —
+    # see that module's own header comment. All keys prefixed msnr_.
+    "msnr_signals": deque(maxlen=MSNR_SIGNAL_HISTORY),
+    "msnr_backtest_results": {},
+    "msnr_backtest_summary": {},
+    "msnr_last_backtest_finished": None,
+    "msnr_last_backtest_duration": None,
     # EXPERIMENTAL FT5 (port of freqtrade's Strategy005, v0.96.0) — see
     # that module's own header comment. All keys prefixed ft5_.
     "ft5_universe": [],
@@ -10554,6 +10709,7 @@ def save_state():
                 "session_signals": list(STATE["session_signals"]),
                 "session_ny_signals": list(STATE["session_ny_signals"]),
                 "xau_lg_signals": list(STATE["xau_lg_signals"]),
+                "msnr_signals": list(STATE["msnr_signals"]),
                 "ft5_signals": list(STATE["ft5_signals"]),
                 "ft5_symbol_overrides": STATE["ft5_symbol_overrides"],
                 "vgi_signals": list(STATE["vgi_signals"]),
@@ -10603,6 +10759,7 @@ def _relink_sim_trade(trade):
         "scalp": STATE["scalp_signals"], "session": STATE["session_signals"],
         "session_ny": STATE["session_ny_signals"],
         "xau_lg": STATE["xau_lg_signals"],
+        "msnr": STATE["msnr_signals"],
         "vgi": STATE["vgi_signals"],
     }
     candidates = module_lists.get(trade.get("mode"))
@@ -10663,6 +10820,7 @@ def load_state():
         session_signals = data.get("session_signals", [])
         session_ny_signals = data.get("session_ny_signals", [])
         xau_lg_signals = data.get("xau_lg_signals", [])
+        msnr_signals = data.get("msnr_signals", [])
         ft5_signals = data.get("ft5_signals", [])
         ft5_symbol_overrides = data.get("ft5_symbol_overrides", {})
         vgi_signals = data.get("vgi_signals", [])
@@ -12610,6 +12768,361 @@ def xau_lg_live_loop():
 
 
 # ============================================================================
+# EXPERIMENTAL: MSNR — Malaysian SNR / "Storyline" gold strategy — functions
+# (constants are up top, see that block's own header comment for the full
+# OCL/A-shape/V-shape/SBR/RBS/QM translation from the source material)
+# ============================================================================
+def msnr_build_pivots(structure_candles, pivot_left=MSNR_PIVOT_LEFT, pivot_right=MSNR_PIVOT_RIGHT,
+                       min_leg_atr=MSNR_MIN_LEG_ATR, atr_period=MSNR_ATR_PERIOD):
+    """Single walk-forward pass over structure_candles (MSNR_STRUCTURE_TF,
+    oldest first) building confirmed OCL pivots off the CLOSE line — never
+    high/low, per the source's "Open-Close Level" definition. A close-pivot
+    at bar j only becomes confirmed once bar j+pivot_right has been seen
+    (same no-lookahead confirmation delay as xau_lg_detect_signals()'s
+    high/low pivots). Alternates strictly A/V (a new A-shape can't follow
+    another A-shape — the intervening V is what makes it a genuine
+    impulsive leg) and only keeps a pivot whose distance from the
+    previous opposite pivot is >= min_leg_atr x ATR(atr_period) at that
+    point, i.e. a real "Storyline" leg, not chop.
+    Returns a list of {"type": "A"|"V", "price": close, "confirm_time": ts},
+    oldest first."""
+    n = len(structure_candles)
+    if n < atr_period + pivot_left + pivot_right + 2:
+        return []
+    closes = [c["close"] for c in structure_candles]
+    tr = _true_range_series(structure_candles)
+    atr = _atr_series(tr, atr_period)
+    pivots = []
+    last_price = None
+    last_type = None
+    for confirm_idx in range(pivot_left, n - pivot_right):
+        cc_close = closes[confirm_idx]
+        atr_here = atr[confirm_idx] if confirm_idx < len(atr) and atr[confirm_idx] else None
+        if not atr_here:
+            continue
+        is_high = (all(cc_close >= closes[confirm_idx - j] for j in range(1, pivot_left + 1)) and
+                   all(cc_close >= closes[confirm_idx + j] for j in range(1, pivot_right + 1)))
+        is_low = (all(cc_close <= closes[confirm_idx - j] for j in range(1, pivot_left + 1)) and
+                  all(cc_close <= closes[confirm_idx + j] for j in range(1, pivot_right + 1)))
+        if is_high and last_type != "A":
+            leg = abs(cc_close - last_price) if last_price is not None else None
+            if leg is None or leg >= min_leg_atr * atr_here:
+                pivots.append({"type": "A", "price": cc_close, "confirm_time": structure_candles[confirm_idx]["time"]})
+                last_price, last_type = cc_close, "A"
+        elif is_low and last_type != "V":
+            leg = abs(cc_close - last_price) if last_price is not None else None
+            if leg is None or leg >= min_leg_atr * atr_here:
+                pivots.append({"type": "V", "price": cc_close, "confirm_time": structure_candles[confirm_idx]["time"]})
+                last_price, last_type = cc_close, "V"
+    return pivots
+
+
+def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_LEFT, pivot_right=MSNR_PIVOT_RIGHT,
+                         min_leg_atr=MSNR_MIN_LEG_ATR, atr_period=MSNR_ATR_PERIOD,
+                         qm_zone_pct=MSNR_QM_ZONE_PCT, qm_lookback=MSNR_QM_LOOKBACK_BARS,
+                         sl_buffer_pct=MSNR_SL_BUFFER_PCT, fallback_rr=MSNR_FALLBACK_RR):
+    """Combined walk-forward pass, no lookahead — mirrors detect_session_
+    manipulation()/xau_lg_detect_signals() in spirit. Builds confirmed A-
+    shape/V-shape OCL pivots off structure_candles as it goes (via
+    msnr_build_pivots(), pre-computed since it doesn't depend on
+    entry_candles at all), then walks entry_candles watching for a QM
+    (sweep through the currently-active A or V level, then close back on
+    the origin side within qm_lookback bars) — the SBR/RBS entry the
+    source actually trades. TP is the OTHER active level of the pair
+    (the "Storyline" target); if that side hasn't been confirmed yet,
+    falls back to a fixed RR (fallback_rr) as a placeholder.
+    A level only fires once per "reign" (consumed on signal, same as
+    xau_lg's active_support=None pattern) — replaced by the next
+    confirmed pivot of that type resets it.
+    Returns (signals, pivots). signals: list of dicts with index (into
+    entry_candles), time, direction, entry, sl, tp, level, level_type."""
+    pivots = msnr_build_pivots(structure_candles, pivot_left, pivot_right, min_leg_atr, atr_period)
+    signals = []
+    if not entry_candles:
+        return signals, pivots
+    pi = 0
+    active_a = None
+    active_v = None
+    a_fired = False
+    v_fired = False
+    n_p = len(pivots)
+    for i, c in enumerate(entry_candles):
+        while pi < n_p and pivots[pi]["confirm_time"] <= c["time"]:
+            piv = pivots[pi]
+            if piv["type"] == "A":
+                if active_a is None or piv["price"] != active_a["price"]:
+                    active_a = piv
+                    a_fired = False
+            else:
+                if active_v is None or piv["price"] != active_v["price"]:
+                    active_v = piv
+                    v_fired = False
+            pi += 1
+
+        cluster = entry_candles[max(0, i - qm_lookback + 1): i + 1]
+
+        if active_a is not None and not a_fired:
+            level = active_a["price"]
+            swept = [cc["high"] for cc in cluster if cc["high"] > level]
+            if swept and c["close"] < level:
+                sweep_extreme = max(swept)
+                if level > 0 and (sweep_extreme - level) / level <= qm_zone_pct:
+                    entry = c["close"]
+                    sl = sweep_extreme * (1 + sl_buffer_pct)
+                    risk = sl - entry
+                    if risk > 0:
+                        tp = active_v["price"] if active_v is not None else entry - risk * fallback_rr
+                        signals.append({
+                            "index": i, "time": c["time"], "direction": "SHORT",
+                            "entry": entry, "sl": sl, "tp": tp,
+                            "level": level, "level_type": "A",
+                            "opposite_level": active_v["price"] if active_v is not None else None,
+                        })
+                        a_fired = True
+
+        if active_v is not None and not v_fired:
+            level = active_v["price"]
+            swept = [cc["low"] for cc in cluster if cc["low"] < level]
+            if swept and c["close"] > level:
+                sweep_extreme = min(swept)
+                if level > 0 and (level - sweep_extreme) / level <= qm_zone_pct:
+                    entry = c["close"]
+                    sl = sweep_extreme * (1 - sl_buffer_pct)
+                    risk = entry - sl
+                    if risk > 0:
+                        tp = active_a["price"] if active_a is not None else entry + risk * fallback_rr
+                        signals.append({
+                            "index": i, "time": c["time"], "direction": "LONG",
+                            "entry": entry, "sl": sl, "tp": tp,
+                            "level": level, "level_type": "V",
+                            "opposite_level": active_a["price"] if active_a is not None else None,
+                        })
+                        v_fired = True
+
+    signals.sort(key=lambda s: s["index"])
+    return signals, pivots
+
+
+def msnr_track_outcome(entry_candles, sig, max_wait_bars=300):
+    """Walks forward from sig['index']+1 looking for TP/SL touch — SL
+    checked first on any bar covering both, same conservative convention
+    as track_session_outcome()/xau_lg_track_outcome()."""
+    n = len(entry_candles)
+    for k in range(sig["index"] + 1, min(n, sig["index"] + 1 + max_wait_bars)):
+        c = entry_candles[k]
+        if sig["direction"] == "LONG":
+            if c["low"] <= sig["sl"]:
+                return "LOSS", c["time"]
+            if c["high"] >= sig["tp"]:
+                return "WIN", c["time"]
+        else:
+            if c["high"] >= sig["sl"]:
+                return "LOSS", c["time"]
+            if c["low"] <= sig["tp"]:
+                return "WIN", c["time"]
+    return "TIMEOUT", None
+
+
+def msnr_backtest_symbol(symbol, days=MSNR_BACKTEST_DAYS):
+    """Fetches MSNR_BACKTEST_DAYS of both MSNR_STRUCTURE_TF and MSNR_
+    ENTRY_TF history and runs the detector + outcome tracker over the
+    whole window. Structure candles are fetched with extra lookback
+    (structure TF is coarser, so this stays cheap) so the earliest
+    entry-TF bars already have a real A/V pair to test against."""
+    now = time.time()
+    structure_start = now - (days + 20) * 86400
+    structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, now)
+    entry_start = now - days * 86400
+    entry_candles = get_candles_range(symbol, MSNR_ENTRY_TF, entry_start, now)
+    if len(structure_candles) < MSNR_ATR_PERIOD + 10 or len(entry_candles) < 10:
+        return []
+    sigs, _pivots = msnr_detect_signals(structure_candles, entry_candles)
+    results = []
+    for sig in sigs:
+        result, exit_time = msnr_track_outcome(entry_candles, sig)
+        results.append({
+            "time": sig["time"], "direction": sig["direction"],
+            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
+            "level": sig["level"], "level_type": sig["level_type"],
+            "result": result, "exit_time": exit_time,
+        })
+    return results
+
+
+def msnr_summarize_backtest(results):
+    total = len(results)
+    if not total:
+        return {"n": 0, "win_rate": None, "wins": 0, "losses": 0, "timeouts": 0}
+    wins = sum(1 for r in results if r["result"] == "WIN")
+    losses = sum(1 for r in results if r["result"] == "LOSS")
+    timeouts = sum(1 for r in results if r["result"] == "TIMEOUT")
+    closed = wins + losses
+    win_rate = round(wins / closed * 100, 1) if closed else None
+    return {"n": total, "win_rate": win_rate, "wins": wins, "losses": losses, "timeouts": timeouts}
+
+
+_msnr_signal_cooldowns = {}  # symbol -> last signaled entry-candle time
+_msnr_signal_cooldowns_lock = threading.Lock()
+
+
+def msnr_scan_symbol_live(symbol):
+    """Live counterpart to msnr_backtest_symbol() — fetches recent
+    structure + entry history, runs the SAME detector, and fires only if
+    the LAST entry candle produced a brand-new signal not already seen
+    for this symbol."""
+    if not MSNR_ENABLED:
+        return
+    try:
+        structure_candles = get_candles(symbol, interval=MSNR_STRUCTURE_TF, limit=MSNR_ATR_PERIOD + 250)
+        entry_candles = get_candles(symbol, interval=MSNR_ENTRY_TF, limit=MSNR_QM_LOOKBACK_BARS + 200)
+        now = time.time()
+        s_interval_sec = INTERVAL_SECONDS.get(MSNR_STRUCTURE_TF, 3600)
+        e_interval_sec = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
+        structure_candles = [c for c in structure_candles if c["time"] + s_interval_sec <= now]
+        entry_candles = [c for c in entry_candles if c["time"] + e_interval_sec <= now]
+        if len(structure_candles) < MSNR_ATR_PERIOD + 10 or len(entry_candles) < 10:
+            return
+        sigs, _pivots = msnr_detect_signals(structure_candles, entry_candles)
+        if not sigs:
+            return
+        sig = sigs[-1]
+        if sig["index"] != len(entry_candles) - 1:
+            return  # most recent signal isn't off the latest closed entry-TF candle — stale
+        with _msnr_signal_cooldowns_lock:
+            if _msnr_signal_cooldowns.get(symbol) == sig["time"]:
+                return
+            _msnr_signal_cooldowns[symbol] = sig["time"]
+        if has_open_signal_any_module(symbol, exclude="msnr_signals"):
+            return
+        record = {
+            "symbol": symbol, "direction": sig["direction"],
+            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
+            "level": sig["level"], "level_type": sig["level_type"],
+            "opposite_level": sig["opposite_level"], "time": sig["time"],
+            "detected_at": time.time(), "status": "OPEN", "result": None,
+            "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
+        }
+        with state_lock:
+            STATE["msnr_signals"].appendleft(record)
+        if AUTOTRADE_ENABLED_MSNR:
+            execute_autotrade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                               AUTOTRADE_LEVERAGE_MSNR)
+            sim_execute_trade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                               AUTOTRADE_LEVERAGE_MSNR, record)
+        arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
+        level_txt = "A-shape (resist)" if sig["level_type"] == "A" else "V-shape (support)"
+        send_telegram(
+            f"{arrow} {symbol} (MSNR QM off {level_txt} — ЭКСПЕРИМЕНТАЛЬНО)\n"
+            f"entry: {sig['entry']:.6g}\n"
+            f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}",
+            category="msnr",
+        )
+    except Exception as e:
+        log_error(f"msnr_live {symbol}: {e}")
+
+
+def update_msnr_signal_outcomes():
+    now = time.time()
+    with state_lock:
+        open_signals = [s for s in STATE["msnr_signals"] if s["status"] == "OPEN"]
+    all_candles = fetch_candles_concurrent([(s["symbol"], MSNR_ENTRY_TF, 400) for s in open_signals])
+    msnr_interval_sec = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
+    for sig, candles in zip(open_signals, all_candles):
+        try:
+            if candles is None:
+                continue
+            candles = [c for c in candles if c["time"] + msnr_interval_sec <= now]
+            future = [c for c in candles if c["time"] > sig["time"]]
+            result = None
+            exit_price = None
+            exit_time = None
+            for c in future:
+                if sig["direction"] == "LONG":
+                    if c["low"] <= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["high"] >= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+                else:
+                    if c["high"] >= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["low"] <= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+            with state_lock:
+                if result:
+                    sig["status"] = "CLOSED"
+                    sig["result"] = result
+                    sig["exit_price"] = exit_price
+                    sig["exit_time"] = exit_time
+        except Exception as e:
+            log_error(f"msnr_outcome {sig['symbol']}: {e}")
+
+
+def compute_msnr_signal_stats():
+    with state_lock:
+        signals = list(STATE["msnr_signals"])
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+    wins = sum(1 for s in closed if s["result"] == "WIN")
+    losses = sum(1 for s in closed if s["result"] == "LOSS")
+    timeouts = sum(1 for s in signals if s.get("result") == "TIMEOUT")
+    open_n = sum(1 for s in signals if s["status"] == "OPEN")
+    total_closed = len(closed)
+    winrate = round(wins / total_closed * 100, 1) if total_closed else None
+    return {"total": len(signals), "wins": wins, "losses": losses, "timeouts": timeouts,
+            "open": open_n, "winrate": winrate}
+
+
+def msnr_backtest_loop():
+    while True:
+        try:
+            if not MSNR_ENABLED:
+                time.sleep(60)
+                continue
+            t0 = time.time()
+            results_by_symbol = {}
+            summary_by_symbol = {}
+            for symbol in MSNR_SYMBOLS:
+                try:
+                    results = msnr_backtest_symbol(symbol)
+                    results_by_symbol[symbol] = results
+                    summary_by_symbol[symbol] = msnr_summarize_backtest(results)
+                except Exception as e:
+                    log_error(f"msnr_backtest {symbol}: {e}")
+            with state_lock:
+                STATE["msnr_backtest_results"] = results_by_symbol
+                STATE["msnr_backtest_summary"] = summary_by_symbol
+                STATE["msnr_last_backtest_finished"] = time.time()
+                STATE["msnr_last_backtest_duration"] = round(time.time() - t0, 1)
+        except Exception as e:
+            log_error(f"msnr_backtest_loop: {e}")
+        time.sleep(max(300, MSNR_REFRESH_SEC))
+
+
+def msnr_live_loop():
+    while True:
+        try:
+            if not MSNR_ENABLED:
+                time.sleep(60)
+                continue
+            with ThreadPoolExecutor(max_workers=min(WORKERS, len(MSNR_SYMBOLS) or 1)) as ex:
+                futs = [ex.submit(msnr_scan_symbol_live, s) for s in MSNR_SYMBOLS]
+                for _ in as_completed(futs):
+                    pass
+            update_msnr_signal_outcomes()
+        except Exception as e:
+            log_error(f"msnr_live_loop: {e}")
+        time.sleep(max(60, MSNR_SCAN_INTERVAL_SEC))
+
+
+# ============================================================================
+# END EXPERIMENTAL: MSNR
+# ============================================================================
+
+
+# ============================================================================
 # EXPERIMENTAL: FT5 — port of freqtrade-strategies' Strategy005 — loops
 # ============================================================================
 def ft5_backtest_loop():
@@ -13684,6 +14197,102 @@ def api_reset_xau_lg():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/msnr/status")
+def api_msnr_status():
+    """EXPERIMENTAL — see the MSNR module's own header comment."""
+    with state_lock:
+        summary = dict(STATE["msnr_backtest_summary"])
+        last_backtest_finished = STATE["msnr_last_backtest_finished"]
+        last_backtest_duration = STATE["msnr_last_backtest_duration"]
+    ranked = [dict(s, symbol=sym) for sym, s in summary.items()]
+    ranked.sort(key=lambda r: (r["win_rate"] or 0, r["n"]), reverse=True)
+    return jsonify({
+        "enabled": MSNR_ENABLED,
+        "symbols": MSNR_SYMBOLS,
+        "last_backtest_finished": last_backtest_finished,
+        "last_backtest_duration": last_backtest_duration,
+        "signals_stats": compute_msnr_signal_stats(),
+        "config": {
+            "structure_tf": MSNR_STRUCTURE_TF, "entry_tf": MSNR_ENTRY_TF,
+            "pivot_left": MSNR_PIVOT_LEFT, "pivot_right": MSNR_PIVOT_RIGHT,
+            "min_leg_atr": MSNR_MIN_LEG_ATR, "qm_zone_pct": MSNR_QM_ZONE_PCT,
+            "qm_lookback_bars": MSNR_QM_LOOKBACK_BARS, "backtest_days": MSNR_BACKTEST_DAYS,
+        },
+        "top": ranked,
+    })
+
+
+@app.route("/api/msnr/signals")
+def api_msnr_signals():
+    with state_lock:
+        return jsonify(list(STATE["msnr_signals"]))
+
+
+@app.route("/api/msnr/chart/<symbol>")
+def api_msnr_chart(symbol):
+    """Re-derives structure pivots (A-shape/V-shape) and the QM signal
+    around a given entry time by re-running msnr_detect_signals() on
+    freshly fetched candles — same "fully deterministic from candle data
+    alone" principle as api_session_chart(). `time` (optional) is a
+    signal's entry_candle time; when given, the fetch window is centered
+    on it. Without it, returns the most recent window (for browsing the
+    current live Storyline even with no confirmed signal yet)."""
+    try:
+        sig_time = request.args.get("time")
+        now = time.time()
+        anchor = float(sig_time) if sig_time else now
+        e_interval_sec = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
+        s_interval_sec = INTERVAL_SECONDS.get(MSNR_STRUCTURE_TF, 3600)
+        entry_end = min(now, anchor + 60 * e_interval_sec)
+        entry_start = anchor - 220 * e_interval_sec
+        structure_start = anchor - 260 * s_interval_sec
+        structure_end = min(now, anchor + 60 * e_interval_sec)
+        structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, structure_end)
+        entry_candles = get_candles_range(symbol, MSNR_ENTRY_TF, entry_start, entry_end)
+        sigs, pivots = msnr_detect_signals(structure_candles, entry_candles)
+        sig = None
+        if sig_time:
+            target = float(sig_time)
+            sig = next((s for s in sigs if abs(s["time"] - target) < e_interval_sec), None)
+        elif sigs:
+            sig = sigs[-1]
+        result = None
+        exit_time = None
+        exit_price = None
+        if sig:
+            result, exit_time = msnr_track_outcome(entry_candles, sig)
+            if result == "WIN":
+                exit_price = sig["tp"]
+            elif result == "LOSS":
+                exit_price = sig["sl"]
+        # Only pivots confirmed within the returned entry-candle window are
+        # worth drawing — older ones would just be off-screen level clutter.
+        window_start = entry_candles[0]["time"] if entry_candles else structure_start
+        visible_pivots = [p for p in pivots if p["confirm_time"] >= window_start - 30 * s_interval_sec]
+        return jsonify({
+            "symbol": symbol, "candles": entry_candles, "pivots": visible_pivots,
+            "signal": sig, "result": result, "exit_time": exit_time, "exit_price": exit_price,
+        })
+    except Exception as e:
+        log_error(f"api_msnr_chart {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/reset/msnr", methods=["POST"])
+def api_reset_msnr():
+    try:
+        with state_lock:
+            STATE["msnr_backtest_results"] = {}
+            STATE["msnr_backtest_summary"] = {}
+            STATE["msnr_last_backtest_finished"] = None
+            STATE["msnr_last_backtest_duration"] = None
+            STATE["msnr_signals"].clear()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset_msnr: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/ft5/status")
 def api_ft5_status():
     """EXPERIMENTAL — port of freqtrade-strategies' Strategy005, see
@@ -14169,7 +14778,7 @@ INDEX_HTML = """<!doctype html>
   body { margin:0; background:#0b0e14; color:#d7dee8; font-family: -apple-system, Roboto, Segoe UI, sans-serif; }
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
   #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetXauLgBtn, #resetFt5Btn, #resetRiskAutotuneBtn, #resetVgiBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetXauLgBtn, #resetMsnrBtn, #resetFt5Btn, #resetRiskAutotuneBtn, #resetVgiBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #settingsModal.open { display:flex; flex-direction:column; }
@@ -14236,6 +14845,12 @@ INDEX_HTML = """<!doctype html>
   #sessionModalHeader h2 { font-size:15px; margin:0; }
   #sessionCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
   #sessionChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
+  #msnrModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
+  #msnrModal.open { display:flex; flex-direction:column; }
+  #msnrModalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
+  #msnrModalHeader h2 { font-size:15px; margin:0; }
+  #msnrCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
+  #msnrChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
   #ft5Modal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #ft5Modal.open { display:flex; flex-direction:column; }
   #ft5ModalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
@@ -14292,6 +14907,7 @@ INDEX_HTML = """<!doctype html>
       <button id="resetSessionBtn">Очистить сессию</button>
       <button id="resetSessionNyBtn">Очистить сессию NY</button>
       <button id="resetXauLgBtn">Очистить XAU LG</button>
+      <button id="resetMsnrBtn">Очистить MSNR</button>
       <button id="resetFt5Btn">Очистить FT5</button>
       <button id="resetSimulatorBtn">Сбросить симулятор</button>
       <button id="resetRiskAutotuneBtn">Сбросить авто-тюнинг</button>
@@ -14314,6 +14930,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="session">Сессия</div>
   <div class="tab" data-tab="session_ny">Сессия NY</div>
   <div class="tab" data-tab="xau_lg" style="color:#e0a030;">XAU LG ⚠️</div>
+  <div class="tab" data-tab="msnr" style="color:#e0a030;">MSNR ⚠️</div>
   <div class="tab" data-tab="ft5" style="color:#e0a030;">FT5 ⚠️</div>
   <div class="tab" data-tab="vgi">VGI</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
@@ -14339,6 +14956,7 @@ INDEX_HTML = """<!doctype html>
   <div id="sessionPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="sessionNyPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="xauLgPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
+  <div id="msnrPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="ft5Panel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="vgiPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
@@ -14391,6 +15009,17 @@ INDEX_HTML = """<!doctype html>
     <button id="sessionCloseBtn">Закрыть</button>
   </div>
   <div id="sessionChartWrap"><canvas id="sessionChartCanvas"></canvas></div>
+</div>
+
+<div id="msnrModal">
+  <div id="msnrModalHeader">
+    <div>
+      <h2 id="msnrModalTitle">-</h2>
+      <div id="msnrModalParams" class="dim" style="font-size:11px;margin-top:2px;"></div>
+    </div>
+    <button id="msnrCloseBtn">Закрыть</button>
+  </div>
+  <div id="msnrChartWrap"><canvas id="msnrChartCanvas"></canvas></div>
 </div>
 
 <div id="ft5Modal">
@@ -14833,6 +15462,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('sessionPanel').style.display = activeTab === 'session' ? 'block' : 'none';
     document.getElementById('sessionNyPanel').style.display = activeTab === 'session_ny' ? 'block' : 'none';
     document.getElementById('xauLgPanel').style.display = activeTab === 'xau_lg' ? 'block' : 'none';
+    document.getElementById('msnrPanel').style.display = activeTab === 'msnr' ? 'block' : 'none';
     document.getElementById('ft5Panel').style.display = activeTab === 'ft5' ? 'block' : 'none';
     document.getElementById('vgiPanel').style.display = activeTab === 'vgi' ? 'block' : 'none';
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
@@ -14844,6 +15474,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'session') refreshSession();
     if (activeTab === 'session_ny') refreshSessionNy();
     if (activeTab === 'xau_lg') refreshXauLg();
+    if (activeTab === 'msnr') refreshMsnr();
     if (activeTab === 'ft5') refreshFt5();
     if (activeTab === 'vgi') refreshVgi();
     if (activeTab === 'autotrade') refreshAutotrade();
@@ -15674,6 +16305,182 @@ async function refreshXauLg() {
   panel.innerHTML = warnHtml + headerHtml + signalsTableHtml + btTableHtml;
 }
 
+// ---------------- MSNR — Malaysian SNR / Storyline gold strategy (EXPERIMENTAL, v0.99.0) ----------------
+async function refreshMsnr() {
+  const status = await (await fetch('/api/msnr/status')).json();
+  const signals = await (await fetch('/api/msnr/signals')).json();
+  const panel = document.getElementById('msnrPanel');
+  const cfg = status.config || {};
+  const ss = status.signals_stats || {};
+  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
+  const buildTxt = status.last_backtest_finished
+    ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s)`
+    : 'бэктест ещё не завершился';
+  const warnHtml = `
+    <div style="background:#2a1f0e;border:1px solid #e0a030;border-radius:10px;padding:10px 14px;margin-bottom:12px;">
+      <b style="color:#e0a030;">⚠️ Экспериментально</b><br>
+      <span style="font-size:12px;color:#d9c08a;">Логика с канала @xaubymedovyk (методика Malaysian SNR): OCL-уровни по линии закрытий (${cfg.structure_tf}), A-shape/V-shape — импульсные пивоты, вход — QM (ложный вынос + возврат) на ${cfg.entry_tf}, тейк — противоположный уровень пары (даёт естественно высокий R:R). Честный бэктест по нашим данным без заглядывания вперёд. Автоторговля выключена по умолчанию.</span>
+    </div>`;
+  const headerHtml = `
+    <div class="dim" style="margin-bottom:8px;">
+      Символы: ${(status.symbols||[]).join(', ')} · структура ${cfg.structure_tf} (пивоты L${cfg.pivot_left}/R${cfg.pivot_right}, мин. импульс ${cfg.min_leg_atr}×ATR) · вход ${cfg.entry_tf} (QM-зона ${(cfg.qm_zone_pct*100).toFixed(2)}%, окно ${cfg.qm_lookback_bars} баров)<br>
+      ${buildTxt}<br>
+      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0} · клик по строке — график
+    </div>`;
+  const signalsRows = signals.map((s, idx) => {
+    const dirClass = s.direction === 'LONG' ? 'long' : 'short';
+    let statusHtml;
+    if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
+    else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
+    else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
+    else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
+    const levelTxt = s.level_type === 'A' ? 'A-shape' : 'V-shape';
+    return `<tr onclick="openMsnrChart('${s.symbol}', ${s.time})" style="cursor:pointer;">
+      <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td><td class="dim">${levelTxt}</td>
+      <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.sl)}</td><td class="dim">${fmt(s.tp)}</td>
+      <td>${statusHtml}</td><td class="dim">${fmtDateTime(s.time)}</td>
+    </tr>`;
+  }).join('');
+  const signalsTableHtml = signals.length ? `
+    <div style="overflow-x:auto;margin-bottom:14px;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>Symbol</th><th>Dir</th><th>Уровень</th><th>Entry</th><th>SL</th><th>TP</th><th>Status</th><th>Время</th></tr></thead>
+      <tbody>${signalsRows}</tbody>
+    </table>
+    </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
+  const btRows = (status.top || []).map(r => {
+    const wrClass = (r.win_rate === null || r.win_rate === undefined) ? 'dim' : (r.win_rate >= 50 ? 'win' : 'loss');
+    return `<tr>
+      <td>${r.symbol}</td>
+      <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
+      <td class="dim">n=${r.n}</td>
+      <td class="win">${r.wins}W</td>
+      <td class="loss">${r.losses}L</td>
+      <td class="status-timeout">${r.timeouts}T</td>
+    </tr>`;
+  }).join('');
+  const btTableHtml = (status.top || []).length ? `
+    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории, без заглядывания вперёд):</div>
+    <div style="overflow-x:auto;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>Symbol</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th><th>T</th></tr></thead>
+      <tbody>${btRows}</tbody>
+    </table>
+    </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
+  panel.innerHTML = warnHtml + headerHtml + signalsTableHtml + btTableHtml;
+}
+
+let currentMsnrData = null;
+
+async function openMsnrChart(symbol, sigTime) {
+  document.getElementById('msnrModalTitle').textContent = symbol;
+  document.getElementById('msnrModalParams').textContent = 'загрузка...';
+  msnrModal.classList.add('open');
+  try {
+    const q = sigTime ? `?time=${sigTime}` : '';
+    const data = await (await fetch(`/api/msnr/chart/${symbol}${q}`)).json();
+    if (data.error) { document.getElementById('msnrModalParams').textContent = data.error; return; }
+    currentMsnrData = data;
+    const sig = data.signal;
+    if (!sig) {
+      document.getElementById('msnrModalParams').textContent = 'подтверждённого QM-сигнала в этом окне нет — показан текущий Storyline';
+    } else {
+      const resTxt = data.result ? ` · ${data.result}${data.exit_price ? ' @ '+fmtNum(data.exit_price) : ''}` : '';
+      const levelTxt = sig.level_type === 'A' ? 'A-shape (resist)' : 'V-shape (support)';
+      document.getElementById('msnrModalParams').textContent =
+        `${fmtDateTime(sig.time)} · ${sig.direction} от ${levelTxt} · entry ${fmtNum(sig.entry)} · SL ${fmtNum(sig.sl)} · TP ${fmtNum(sig.tp)}${resTxt}`;
+    }
+    drawMsnrChart(data);
+  } catch (e) {
+    console.error(e);
+  }
+}
+
+function drawMsnrChart(data) {
+  const canvas = document.getElementById('msnrChartCanvas');
+  const wrap = document.getElementById('msnrChartWrap');
+  const dpr = window.devicePixelRatio || 1;
+  const W = wrap.clientWidth, H = wrap.clientHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+  ctx.clearRect(0, 0, W, H);
+
+  const candles = data.candles || [];
+  if (!candles.length) return;
+  const sig = data.signal;
+  const pivots = data.pivots || [];
+
+  const padRight = 54;
+  const chartW = W - padRight;
+  const n = candles.length;
+  const slot = chartW / n;
+  const bodyW = Math.max(1, slot * 0.6);
+  const xAt = (i) => i * slot + slot / 2;
+
+  const entry = sig ? sig.entry : undefined;
+  const sl = sig ? sig.sl : undefined;
+  const tp = sig ? sig.tp : undefined;
+  // computeYRangeSimple() only reads entry/sl/tp — A-shape/V-shape levels
+  // can sit well outside that (this chart's whole point is to show price
+  // traveling from one back to the other), so the range is built by hand
+  // here rather than reusing it, to guarantee both pivot lines stay
+  // on-screen even for a signal-less "current Storyline" view.
+  let hi = Math.max(...candles.map(c => c.high));
+  let lo = Math.min(...candles.map(c => c.low));
+  [entry, sl, tp, ...pivots.map(p => p.price)].forEach(v => {
+    if (v !== undefined && v !== null) { hi = Math.max(hi, v); lo = Math.min(lo, v); }
+  });
+  const range0 = (hi - lo) || (hi * 0.02) || 1;
+  const pad = range0 * 0.05;
+  hi += pad; lo -= pad;
+  const range = hi - lo || 1;
+  const yP = (price) => (hi - price) / range * H;
+
+  candles.forEach((c, i) => {
+    const cx = xAt(i);
+    const up = c.close >= c.open;
+    ctx.strokeStyle = ctx.fillStyle = up ? '#3ddc97' : '#ff6b6b';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cx, yP(c.high));
+    ctx.lineTo(cx, yP(c.low));
+    ctx.stroke();
+    const top = yP(Math.max(c.open, c.close));
+    const h = Math.max(1, Math.abs(yP(c.open) - yP(c.close)));
+    ctx.fillRect(cx - bodyW / 2, top, bodyW, h);
+  });
+
+  ctx.fillStyle = '#6b7688';
+  ctx.font = '10px sans-serif';
+  for (let i = 0; i <= 3; i++) {
+    const p = hi - (range * i / 3);
+    const yy = yP(p);
+    ctx.fillText(fmtNum(p), chartW + 4, yy + 3);
+    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
+    ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(chartW, yy); ctx.stroke();
+  }
+
+  // A-shape / V-shape structure levels (OCL) — orange for A (resistance),
+  // teal for V (support), so the pair reads at a glance like the source's
+  // own red-line slide diagrams.
+  pivots.forEach(p => {
+    const color = p.type === 'A' ? '#e8b93d' : '#3ddc97';
+    const label = (p.type === 'A' ? 'A-shape ' : 'V-shape ') + fmtNum(p.price);
+    drawLevelLine(ctx, yP(p.price), chartW, color, label);
+  });
+
+  if (sig) {
+    drawLevelLine(ctx, yP(sig.entry), chartW, '#5aa8ff', 'ENTRY ' + fmtNum(sig.entry));
+    drawLevelLine(ctx, yP(sig.sl), chartW, '#ff6b6b', 'SL ' + fmtNum(sig.sl));
+    drawLevelLine(ctx, yP(sig.tp), chartW, '#3ddc97', 'TP ' + fmtNum(sig.tp));
+    const entryIdx = findCandleIndex(candles, sig.time);
+    if (entryIdx >= 0) {
+      drawEntryMarker(ctx, entryIdx * slot + slot / 2, yP(sig.entry), '#5aa8ff');
+    }
+  }
+}
+
 // ---------------- FT5 — port of freqtrade Strategy005 (EXPERIMENTAL, v0.96.0) ----------------
 async function refreshFt5() {
   const status = await (await fetch('/api/ft5/status')).json();
@@ -16000,6 +16807,7 @@ async function refreshAll() {
   if (activeTab === 'session') await refreshSession();
   if (activeTab === 'session_ny') await refreshSessionNy();
   if (activeTab === 'xau_lg') await refreshXauLg();
+  if (activeTab === 'msnr') await refreshMsnr();
   if (activeTab === 'ft5') await refreshFt5();
   if (activeTab === 'vgi') await refreshVgi();
   if (activeTab === 'autotrade') await refreshAutotrade();
@@ -16050,6 +16858,9 @@ wireResetButton('resetSessionNyBtn', '/api/reset/session_ny',
 wireResetButton('resetXauLgBtn', '/api/reset/xau_lg',
   'Удалить накопленный бэктест и сигналы экспериментального XAU Liquidity Grab? Остальное не тронет. Это необратимо.',
   'Очистить XAU LG');
+wireResetButton('resetMsnrBtn', '/api/reset/msnr',
+  'Удалить накопленный бэктест и сигналы экспериментального MSNR? Остальное не тронет. Это необратимо.',
+  'Очистить MSNR');
 wireResetButton('resetFt5Btn', '/api/reset/ft5',
   'Удалить накопленный анализ параметров и сигналы экспериментального FT5? Остальное не тронет. Это необратимо.',
   'Очистить FT5');
@@ -16784,6 +17595,10 @@ const sessionModal = document.getElementById('sessionModal');
 document.getElementById('sessionCloseBtn').onclick = () => sessionModal.classList.remove('open');
 let currentSessionData = null;
 
+// ---------------- MSNR chart modal ----------------
+const msnrModal = document.getElementById('msnrModal');
+document.getElementById('msnrCloseBtn').onclick = () => msnrModal.classList.remove('open');
+
 // ---------------- FT5 chart modal ----------------
 // Own modal/canvas rather than reusing Session's — FT5's shape is
 // meaningfully different (no session range box, no single fixed TP;
@@ -17138,6 +17953,9 @@ window.addEventListener('resize', () => {
   if (sessionModal.classList.contains('open') && currentSessionData) {
     drawSessionChart(currentSessionData);
   }
+  if (msnrModal.classList.contains('open') && currentMsnrData) {
+    drawMsnrChart(currentMsnrData);
+  }
 });
 </script>
 </body>
@@ -17168,6 +17986,8 @@ if __name__ == "__main__":
     threading.Thread(target=session_ny_live_loop, daemon=True).start()
     threading.Thread(target=xau_lg_backtest_loop, daemon=True).start()
     threading.Thread(target=xau_lg_live_loop, daemon=True).start()
+    threading.Thread(target=msnr_backtest_loop, daemon=True).start()
+    threading.Thread(target=msnr_live_loop, daemon=True).start()
     threading.Thread(target=ft5_backtest_loop, daemon=True).start()
     threading.Thread(target=ft5_live_loop, daemon=True).start()
     threading.Thread(target=vgi_backtest_loop, daemon=True).start()
