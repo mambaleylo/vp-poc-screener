@@ -15177,6 +15177,17 @@ INDEX_HTML = """<!doctype html>
     </div>
 
     <div class="settingsGroup">
+      <div class="settingsGroupTitle" style="color:#e0a030;">MSNR ⚠️ Экспериментально</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Сканирование (только золото)</div>
+          <div class="sub">Malaysian SNR / Storyline — см. предупреждение на вкладке. Автоторговля выключена по умолчанию.</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setMsnr"><span class="switchSlider"></span></label>
+      </div>
+    </div>
+
+    <div class="settingsGroup">
       <div class="settingsGroupTitle" style="color:#e0a030;">FT5 ⚠️ Экспериментально</div>
       <div class="settingRow">
         <div>
@@ -15262,6 +15273,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">экспериментально — живые сигналы liquidity grab по золоту</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramXauLg"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Алерты MSNR ⚠️</div>
+          <div class="sub">экспериментально — живые QM-сигналы по золоту</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramMsnr"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -16892,6 +16910,7 @@ const setInputs = {
   session_ny_enabled: document.getElementById('setSessionNy'),
   session_ny_invert_signals: document.getElementById('setSessionNyInvert'),
   xau_lg_enabled: document.getElementById('setXauLg'),
+  msnr_enabled: document.getElementById('setMsnr'),
   ft5_enabled: document.getElementById('setFt5'),
   ft5_invert_signals: document.getElementById('setFt5Invert'),
   vgi_enabled: document.getElementById('setVgi'),
@@ -16904,6 +16923,7 @@ const setInputs = {
   telegram_alerts_session: document.getElementById('setTelegramSession'),
   telegram_alerts_session_ny: document.getElementById('setTelegramSessionNy'),
   telegram_alerts_xau_lg: document.getElementById('setTelegramXauLg'),
+  telegram_alerts_msnr: document.getElementById('setTelegramMsnr'),
   telegram_alerts_ft5: document.getElementById('setTelegramFt5'),
   telegram_alerts_vgi: document.getElementById('setTelegramVgi'),
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
