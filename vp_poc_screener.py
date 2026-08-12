@@ -5189,6 +5189,71 @@ v0.99.10 - CRITICAL FIX: MSNR's chart modal showed "подтверждённог
          finds the nearest candle rather than requiring an exact time
          match, so no special-casing was needed for exit_time not
          landing precisely on a candle boundary.
+
+v0.99.11 - MSNR gains an RR ceiling driven by real statistics, per direct
+         user request: "по statistike должно быть видно, а автотюнинг
+         должен ориентироваться на статистику" — off a concrete
+         observation (SPCX: trades with rr>6 consistently hit stop,
+         essentially never reaching TP).
+         MSNR's TP is the genuine opposite structural level (the
+         Storyline pair), not a risk-derived point — "shortening the
+         take" the way the user offered as one option would mean
+         inventing an arbitrary price with no structural meaning, so
+         instead reused the ALREADY-EXISTING fallback path (fixed
+         fallback_rr, previously triggered only when no valid opposite
+         level exists at all) — a signal whose genuine opposite level
+         would produce rr > MSNR_MAX_RR now falls through that exact
+         same path instead of a new mechanism. New MSNR_MAX_RR (default
+         8.0), resolved from the live global at call time (not frozen
+         as a signature default, learning proactively from the exact
+         v0.95.7-class mistake this session already made and fixed for
+         VGI_MIN_RR — applied here BEFORE shipping, not after a report).
+         New msnr_rr_bucket_stats(): buckets closed trades (MSNR_RR_
+         BUCKETS = 0-3/3-5/5-7/7-10/10+) by their own realized rr,
+         win-rate per bucket — the user's own point that pooled stats
+         hide this pattern verified directly: reconstructed the SPCX-
+         like scenario synthetically (60% win-rate at rr~2.5 vs 6.7% at
+         rr~8) and confirmed the bucket table makes it directly visible
+         where one pooled average couldn't.
+         New _risk_autotune_msnr_max_rr(): pools trades across ALL
+         symbols' backtest results (a single symbol's own sample is
+         usually too small to bucket reliably — MSNR_MAX_RR is one
+         global cap, not a per-symbol tuned param), finds the lowest
+         bucket failing its own breakeven with sufficient sample
+         (RISK_AUTOTUNE_MIN_SAMPLE), steps the cap toward it by a
+         bounded 10%-per-pass — deliberately one-directional (only ever
+         tightens off solid evidence, never guesses at loosening back
+         up): the two mistakes aren't symmetric, a too-tight cap just
+         costs some upside, a too-loose one keeps letting the reported
+         problem through.
+         Two real bugs in this rule's own logic caught by behavioral
+         testing before shipping, not by inspection: (1) a cap value
+         set below MSNR_FALLBACK_RR (4.0) is self-defeating — the
+         fallback trade it falls through to would itself exceed the
+         "cap" supposedly being enforced. Fixed by keeping RISK_
+         AUTOTUNE_MSNR_MAX_RR_BOUNDS' lower bound (5.5) safely above
+         it. (2) The breakeven check originally used each bucket's
+         LOWER boundary as the reference RR — broke down for the first
+         bucket (lo=0), whose implied breakeven of 100% made the rule
+         fire almost unconditionally even on healthy synthetic data (a
+         "nothing should change" test case incorrectly triggered a
+         change). Fixed by computing each bucket's own actual average
+         realized rr instead and using that for the breakeven
+         comparison; re-verified both the false-positive case (now
+         correctly inert) and the real-failure case (still correctly
+         fires) after the fix.
+         Full plumbing: MSNR_MAX_RR wired through the complete settings
+         system (SETTINGS_KEYS/get_settings/apply_settings/_set_msnr_
+         max_rr), reset by api_reset_risk_autotune() alongside every
+         other tuned parameter, exposed in api_msnr_status()'s config
+         and as a new pooled rr_buckets field. Panel header now states
+         the current ceiling and what it does in plain language; new RR-
+         bucket win-rate table added to the MSNR panel so the pattern
+         the user described is directly visible, not just assumed.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the extracted <script> block, the route/def
+         integrity check, and the stale-default-parameter check — all
+         clean.
 """
 
 import os
@@ -5208,7 +5273,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.10"
+APP_VERSION = "0.99.11"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5773,6 +5838,7 @@ MSNR_QM_ZONE_PCT = float(os.environ.get("VP_MSNR_QM_ZONE_PCT", 0.006))  # how cl
 MSNR_QM_LOOKBACK_BARS = int(os.environ.get("VP_MSNR_QM_LOOKBACK_BARS", 6))  # entry-TF bar cluster width the sweep and the close-back-inside confirmation are allowed to span, same idea as SESSION_MAX_THRUST_BARS
 MSNR_SL_BUFFER_PCT = float(os.environ.get("VP_MSNR_SL_BUFFER_PCT", 0.0015))
 MSNR_FALLBACK_RR = float(os.environ.get("VP_MSNR_FALLBACK_RR", 4.0))  # used only when the opposite OCL level isn't confirmed yet (Storyline has just one side so far) — a placeholder TP, not the normal path
+MSNR_MAX_RR = float(os.environ.get("VP_MSNR_MAX_RR", 8.0))  # v0.99.11 — per direct user observation (SPCX: trades with rr>6 consistently hit stop, never TP) that a genuine opposite-level TP can sit SO far away the trade is structurally unlikely to ever reach it before reversing. When the real opposite level would produce rr > this cap, msnr_detect_signals() falls back to fallback_rr's fixed target instead — reusing the exact same fallback path already used when no opposite level is confirmed at all, not a new mechanism. Auto-tuned by risk_autotune_pass() off pooled RR-bucket win-rate stats — see msnr_rr_bucket_stats() and _risk_autotune_msnr_max_rr().
 MSNR_BACKTEST_DAYS = int(os.environ.get("VP_MSNR_BACKTEST_DAYS", 30))
 MSNR_SIGNAL_HISTORY = 200
 MSNR_REFRESH_SEC = int(os.environ.get("VP_MSNR_REFRESH_SEC", 3600))
@@ -6042,7 +6108,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_sig
                   # plain module constants with NO persistence at all, so any
                   # manual env-var override would silently revert on restart
                   # too — now they follow the same rules as ema_min_rr etc.
-                  "scalp_min_rr", "scalp_sl_buffer_mult", "session_sl_mult", "session_reverse_rr", "ema_sl_atr_mult", "div_sl_atr_mult", "vgi_min_rr",
+                  "scalp_min_rr", "scalp_sl_buffer_mult", "session_sl_mult", "session_reverse_rr", "ema_sl_atr_mult", "div_sl_atr_mult", "vgi_min_rr", "msnr_max_rr",
                   "ema_tp_pct", "div_tp_pct")
 
 
@@ -6068,6 +6134,7 @@ def get_settings():
         "vgi_enabled": VGI_ENABLED,
         "vgi_invert_signals": VGI_INVERT_SIGNALS,
         "vgi_min_rr": VGI_MIN_RR,
+        "msnr_max_rr": MSNR_MAX_RR,
         "msnr_enabled": MSNR_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
@@ -6129,7 +6196,7 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, VGI_ENABLED, VGI_INVERT_SIGNALS, VGI_MIN_RR, MSNR_ENABLED, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, VGI_ENABLED, VGI_INVERT_SIGNALS, VGI_MIN_RR, MSNR_ENABLED, MSNR_MAX_RR, HOURLY_STATS_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
     global TELEGRAM_ALERTS_SESSION_NY, TELEGRAM_ALERTS_XAU_LG, TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_VGI, TELEGRAM_ALERTS_MSNR
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_VGI, AUTOTRADE_ENABLED_MSNR
@@ -6192,6 +6259,13 @@ def apply_settings(updates):
             pass
     if "msnr_enabled" in updates:
         MSNR_ENABLED = bool(updates["msnr_enabled"])
+    if "msnr_max_rr" in updates:
+        try:
+            v = float(updates["msnr_max_rr"])
+            if v > 0:
+                MSNR_MAX_RR = v
+        except (TypeError, ValueError):
+            pass
     if "hourly_stats_enabled" in updates:
         HOURLY_STATS_ENABLED = bool(updates["hourly_stats_enabled"])
     if "telegram_enabled" in updates:
@@ -12472,6 +12546,7 @@ RISK_AUTOTUNE_TP_STEP_RATIO = 0.1  # max 10% change to TP_PCT per pass — same 
 RISK_AUTOTUNE_TP_PCT_BOUNDS = (0.003, 0.05)  # 0.3%-5% — sane range; below is barely worth the fees, above is an unrealistic single fixed target
 RISK_AUTOTUNE_SESSION_RR_BOUNDS = (0.5, 5.0)  # v0.98.4 — Session's SESSION_REVERSE_RR is an RR multiple, not a %-of-price like EMA/DIV's TP_PCT, so it needs its own bounds on a completely different scale when reusing _risk_autotune_tp_extend for it
 RISK_AUTOTUNE_VGI_RR_BOUNDS = (1.0, 8.0)  # v0.98.9 — same reasoning as Session's own RR bounds above, sized for VGI_MIN_RR's own default (3.0) and the fact RR is guaranteed to equal min_rr exactly by construction (unlike Session), so a somewhat wider practical range makes sense
+RISK_AUTOTUNE_MSNR_MAX_RR_BOUNDS = (5.5, 15.0)  # v0.99.11 — lower bound deliberately kept above MSNR_FALLBACK_RR (4.0): caught via behavioral testing that a cap set BELOW fallback_rr is self-defeating (the fallback trade it falls through to would itself exceed the "cap" it was supposed to enforce). Upper bound just gives room to relax the cap if the data doesn't actually support tightening it.
 
 
 def _risk_autotune_log(module, param, old_value, new_value, reason, sample_n):
@@ -12571,6 +12646,61 @@ def _risk_autotune_sl_mult(module, param_key, current_value, loss_mae_avg_r, sam
     _risk_autotune_mark(param_key)
     _risk_autotune_log(module, param_key, current_value, new_value,
                         f"loss_mae_avg_r={loss_mae_avg_r:+.3f} overshoot={overshoot:+.3f}", sample_n)
+
+
+def _risk_autotune_msnr_max_rr(pooled_trades, current_max_rr, setter):
+    """MSNR-specific rule: per direct user observation (SPCX — trades
+    with rr>6 consistently hit stop) that a genuine opposite-level TP
+    can sit so far away the trade structurally rarely reaches it before
+    reversing. Uses msnr_rr_bucket_stats() (pooled across ALL symbols'
+    backtest trades — a single symbol's own sample is usually too small
+    to bucket reliably) to find the LOWEST RR bucket that's actually
+    failing its own breakeven, then steps MSNR_MAX_RR toward that
+    bucket's lower edge — not straight to it, same bounded-step
+    philosophy as every other nudge here, so one noisy pass can't swing
+    the cap wildly.
+    "Failing" means: enough closed trades in that bucket (>= RISK_
+    AUTOTUNE_MIN_SAMPLE) AND its own win-rate sits below the breakeven
+    win-rate for that bucket's own ACTUAL average realized rr (not the
+    bucket's lower boundary — caught via behavioral testing that using
+    the lower edge breaks down for the first bucket, whose lo=0 implies
+    a nonsensical 100% breakeven requirement and made the rule fire
+    almost unconditionally on realistic data).
+    If no bucket is clearly failing, leaves the cap alone — this rule
+    only ever tightens the cap off solid evidence, it doesn't guess at
+    loosening it back up (unlike the tp_extend-style rules elsewhere,
+    which nudge in both directions off MFE data): a cap that's too
+    tight just costs some upside on trades that would have won anyway,
+    a cap that's too loose keeps letting the reported problem through —
+    the two mistakes aren't symmetric, so this stays one-directional
+    on purpose."""
+    if not RISK_AUTOTUNE_ENABLED:
+        return
+    if not _risk_autotune_cooldown_ok("msnr_max_rr", RISK_AUTOTUNE_COOLDOWN_SEC):
+        return
+    buckets = msnr_rr_bucket_stats(pooled_trades)
+    failing_edges = []
+    for b in buckets:
+        if b["n"] < RISK_AUTOTUNE_MIN_SAMPLE or b["winrate"] is None or not b["avg_rr"]:
+            continue
+        breakeven = 100.0 / (1.0 + b["avg_rr"])
+        if b["winrate"] < breakeven:
+            failing_edges.append(b["lo"])
+    if not failing_edges:
+        return
+    target = min(failing_edges)
+    lo, hi = RISK_AUTOTUNE_MSNR_MAX_RR_BOUNDS
+    if current_max_rr <= target:
+        return  # already at or below the failing edge, nothing to tighten
+    step = min(RISK_AUTOTUNE_TP_STEP_RATIO * current_max_rr, current_max_rr - target)
+    new_value = round(max(lo, min(hi, current_max_rr - step)), 2)
+    if new_value == current_max_rr:
+        return
+    setter(new_value)
+    _risk_autotune_mark("msnr_max_rr")
+    _risk_autotune_log("msnr", "msnr_max_rr", current_max_rr, new_value,
+                        f"failing bucket edge={target} (winrate below breakeven, n>={RISK_AUTOTUNE_MIN_SAMPLE})",
+                        sum(b["n"] for b in buckets))
 
 
 def _risk_autotune_reverse(module, param_key, current_flag, winrate_pct, rr, sample_n, setter, avg_loss_mae_r=None):
@@ -12752,6 +12882,12 @@ def _set_vgi_min_rr(v):
 def _set_ft5_invert(v):
     global FT5_INVERT_SIGNALS
     FT5_INVERT_SIGNALS = v
+    save_settings()
+
+
+def _set_msnr_max_rr(v):
+    global MSNR_MAX_RR
+    MSNR_MAX_RR = v
     save_settings()
 
 
@@ -12948,6 +13084,22 @@ def risk_autotune_pass():
                                     avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
     except Exception as e:
         log_error(f"risk_autotune ft5: {e}")
+
+    try:
+        # v0.99.11: per direct user request to tune MSNR_MAX_RR off
+        # statistics rather than a one-off manual observation — see
+        # _risk_autotune_msnr_max_rr()'s own docstring for the full
+        # reasoning. Pools trades across every symbol's own backtest
+        # results (msnr_backtest_results is keyed by symbol) rather than
+        # tuning per-symbol, since MSNR_MAX_RR is a single global cap,
+        # not a per-symbol optimized param like min_leg_atr/qm_zone_pct.
+        with state_lock:
+            all_results = list(STATE["msnr_backtest_results"].values())
+        pooled_trades = [t for sym_trades in all_results for t in sym_trades]
+        if pooled_trades:
+            _risk_autotune_msnr_max_rr(pooled_trades, MSNR_MAX_RR, _set_msnr_max_rr)
+    except Exception as e:
+        log_error(f"risk_autotune msnr: {e}")
 
 
 def risk_autotune_loop():
@@ -13309,7 +13461,7 @@ def msnr_build_pivots(structure_candles, pivot_left=MSNR_PIVOT_LEFT, pivot_right
 def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_LEFT, pivot_right=MSNR_PIVOT_RIGHT,
                          min_leg_atr=MSNR_MIN_LEG_ATR, atr_period=MSNR_ATR_PERIOD,
                          qm_zone_pct=MSNR_QM_ZONE_PCT, qm_lookback=MSNR_QM_LOOKBACK_BARS,
-                         sl_buffer_pct=MSNR_SL_BUFFER_PCT, fallback_rr=MSNR_FALLBACK_RR):
+                         sl_buffer_pct=MSNR_SL_BUFFER_PCT, fallback_rr=MSNR_FALLBACK_RR, max_rr=None):
     """Combined walk-forward pass, no lookahead — mirrors detect_session_
     manipulation()/xau_lg_detect_signals() in spirit. Builds confirmed A-
     shape/V-shape OCL pivots off structure_candles as it goes (via
@@ -13326,11 +13478,30 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
     of a backtest trade, see v0.99.4). Falls back to a fixed RR
     (fallback_rr) whenever the paired level isn't confirmed yet OR isn't
     on the correct side of entry.
+    v0.99.11: ALSO falls back to fallback_rr when the paired level IS
+    valid but would produce rr > max_rr — same fallback path, one more
+    trigger condition. Per direct user observation (SPCX: rr>6 trades
+    consistently hit stop, essentially never reaching TP) that a distant
+    genuine opposite level is structurally less likely to be reached
+    before price reverses — reusing the existing "target isn't a
+    reliable objective this time" fallback rather than inventing a
+    separate skip mechanism, since a capped fixed-RR trade and a "no
+    opposite level yet" trade are the same underlying situation: the
+    Storyline pair isn't giving a trustworthy target right now.
+    max_rr defaults to the live MSNR_MAX_RR global if not given —
+    resolved at call time, not frozen as a signature default, since
+    that constant IS settings/autotune-mutable (unlike min_leg_atr/
+    qm_zone_pct/qm_lookback above, which are only ever changed via
+    explicit grid-search **params, never a global reassignment) —
+    avoiding the exact v0.95.7-class stale-default bug this session
+    already found and fixed elsewhere, applied proactively here rather
+    than reactively after a live report.
     A level only fires once per "reign" (consumed on signal, same as
     xau_lg's active_support=None pattern) — replaced by the next
     confirmed pivot of that type resets it.
     Returns (signals, pivots). signals: list of dicts with index (into
     entry_candles), time, direction, entry, sl, tp, level, level_type."""
+    rr_cap = max_rr if max_rr is not None else MSNR_MAX_RR
     pivots = msnr_build_pivots(structure_candles, pivot_left, pivot_right, min_leg_atr, atr_period)
     signals = []
     if not entry_candles:
@@ -13367,22 +13538,26 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
                     risk = sl - entry
                     if risk > 0:
                         # TP is the paired V-shape ONLY if it's actually still
-                        # ahead of price (below entry, for a SHORT) — a V-shape
-                        # confirmed long ago can sit anywhere price has been
-                        # since, including above the current entry once a
-                        # later uptrend leg passed it. Using a stale level on
-                        # the wrong side of entry produced nonsense trades
-                        # (TP below SL on a LONG, found via direct user
-                        # screenshot review of a backtest trade) — a target
-                        # that isn't a genuine unmet objective isn't a valid
-                        # Storyline pair, so fall back to fixed RR instead.
+                        # ahead of price (below entry, for a SHORT) AND doesn't
+                        # imply an rr past the cap — a V-shape confirmed long
+                        # ago can sit anywhere price has been since, including
+                        # above the current entry once a later uptrend leg
+                        # passed it. Using a stale level on the wrong side of
+                        # entry produced nonsense trades (TP below SL on a
+                        # LONG, found via direct user screenshot review of a
+                        # backtest trade) — a target that isn't a genuine
+                        # unmet objective isn't a valid Storyline pair, so
+                        # fall back to fixed RR instead.
                         opp = active_v["price"] if active_v is not None else None
-                        tp = opp if (opp is not None and opp < entry) else entry - risk * fallback_rr
+                        opp_valid = opp is not None and opp < entry
+                        if opp_valid and (entry - opp) / risk > rr_cap:
+                            opp_valid = False
+                        tp = opp if opp_valid else entry - risk * fallback_rr
                         signals.append({
                             "index": i, "time": c["time"], "direction": "SHORT",
                             "entry": entry, "sl": sl, "tp": tp,
                             "level": level, "level_type": "A",
-                            "opposite_level": opp if tp == opp else None,
+                            "opposite_level": opp if opp_valid else None,
                         })
                         a_fired = True
 
@@ -13396,16 +13571,20 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
                     sl = sweep_extreme * (1 - sl_buffer_pct)
                     risk = entry - sl
                     if risk > 0:
-                        # Same "opposite level must still be ahead of price"
-                        # check, mirrored for LONG: the paired A-shape is only
-                        # a valid TP if it's above entry.
+                        # Same "opposite level must still be ahead of price,
+                        # and not imply rr past the cap" check, mirrored for
+                        # LONG: the paired A-shape is only a valid TP if it's
+                        # above entry and close enough.
                         opp = active_a["price"] if active_a is not None else None
-                        tp = opp if (opp is not None and opp > entry) else entry + risk * fallback_rr
+                        opp_valid = opp is not None and opp > entry
+                        if opp_valid and (opp - entry) / risk > rr_cap:
+                            opp_valid = False
+                        tp = opp if opp_valid else entry + risk * fallback_rr
                         signals.append({
                             "index": i, "time": c["time"], "direction": "LONG",
                             "entry": entry, "sl": sl, "tp": tp,
                             "level": level, "level_type": "V",
-                            "opposite_level": opp if tp == opp else None,
+                            "opposite_level": opp if opp_valid else None,
                         })
                         v_fired = True
 
@@ -13605,6 +13784,34 @@ def msnr_summarize_backtest(results):
     expectancy_r = round(sum(r_values) / len(r_values), 2) if r_values else None
     return {"n": total, "win_rate": win_rate, "wins": wins, "losses": losses, "timeouts": timeouts,
             "avg_rr": avg_rr, "median_rr": median_rr, "expectancy_r": expectancy_r}
+
+
+MSNR_RR_BUCKETS = [(0, 3), (3, 5), (5, 7), (7, 10), (10, float("inf"))]  # v0.99.11 — bucket boundaries for msnr_rr_bucket_stats(); chosen so the user's own reported breakpoint (rr>6 consistently failing) falls cleanly inside the 5-7 bucket, not split across two
+
+
+def msnr_rr_bucket_stats(trades):
+    """Buckets CLOSED trades (WIN/LOSS only — TIMEOUT has no real outcome
+    to bucket by) by their OWN realized rr into MSNR_RR_BUCKETS, computing
+    win-rate per bucket. Per direct user observation: pooled stats (avg/
+    median RR, one overall win-rate) can't reveal a pattern like "rr>6
+    trades consistently hit stop, rr<6 trades win normally" — that only
+    becomes visible once trades are actually split by their own RR rather
+    than averaged together. Feeds both the panel's own display (so the
+    pattern the user described becomes directly visible, not just
+    assumed from one example) and _risk_autotune_msnr_max_rr() below."""
+    buckets = []
+    for lo, hi in MSNR_RR_BUCKETS:
+        subset = [t for t in trades if t.get("result") in ("WIN", "LOSS") and t.get("rr") is not None and lo <= t["rr"] < hi]
+        label = f"{lo}-{hi}" if hi != float("inf") else f"{lo}+"
+        if not subset:
+            buckets.append({"range": label, "lo": lo, "hi": hi, "n": 0, "wins": 0, "losses": 0, "winrate": None, "avg_rr": None})
+            continue
+        wins = sum(1 for t in subset if t["result"] == "WIN")
+        n = len(subset)
+        avg_rr = round(sum(t["rr"] for t in subset) / n, 2)
+        buckets.append({"range": label, "lo": lo, "hi": hi, "n": n, "wins": wins,
+                         "losses": n - wins, "winrate": round(wins / n * 100, 1), "avg_rr": avg_rr})
+    return buckets
 
 
 _msnr_signal_cooldowns = {}  # symbol -> last signaled entry-candle time
@@ -14937,6 +15144,7 @@ def api_msnr_status():
     with state_lock:
         overrides = dict(STATE["msnr_symbol_overrides"])
         backtest_universe = list(STATE["msnr_backtest_universe"])
+        backtest_results = dict(STATE["msnr_backtest_results"])
         last_backtest_finished = STATE["msnr_last_backtest_finished"]
         last_backtest_duration = STATE["msnr_last_backtest_duration"]
     # Ranked by msnr_ranking_score() (a lower-confidence-bound on mean R,
@@ -14947,6 +15155,14 @@ def api_msnr_status():
     # looks better. Symbols with an error or no result sort last.
     ranked = [dict(v, symbol=sym, live=(sym in MSNR_SYMBOLS)) for sym, v in overrides.items() if v and not v.get("error")]
     ranked.sort(key=lambda r: (r.get("score") if r.get("score") is not None else -999), reverse=True)
+    # v0.99.11: RR-bucket win-rate, pooled across every symbol's own
+    # backtest trades — per direct user observation (SPCX: rr>6 trades
+    # consistently hit stop) that a pooled avg/median RR can't reveal
+    # this kind of pattern on its own. Same pooling MSNR_MAX_RR's own
+    # autotune rule uses, so what's displayed matches what's actually
+    # driving the cap.
+    pooled_trades = [t for sym_trades in backtest_results.values() for t in sym_trades]
+    rr_buckets = msnr_rr_bucket_stats(pooled_trades)
     return jsonify({
         "enabled": MSNR_ENABLED,
         "symbols": MSNR_SYMBOLS,
@@ -14954,11 +15170,13 @@ def api_msnr_status():
         "last_backtest_finished": last_backtest_finished,
         "last_backtest_duration": last_backtest_duration,
         "signals_stats": compute_msnr_signal_stats(),
+        "rr_buckets": rr_buckets,
         "config": {
             "structure_tf": MSNR_STRUCTURE_TF, "entry_tf": MSNR_ENTRY_TF,
             "pivot_left": MSNR_PIVOT_LEFT, "pivot_right": MSNR_PIVOT_RIGHT,
             "min_leg_atr": MSNR_MIN_LEG_ATR, "qm_zone_pct": MSNR_QM_ZONE_PCT,
             "qm_lookback_bars": MSNR_QM_LOOKBACK_BARS, "backtest_days": MSNR_BACKTEST_DAYS,
+            "max_rr": MSNR_MAX_RR,
             "grid_min_leg_atr": MSNR_PARAM_GRID_MIN_LEG_ATR, "grid_qm_zone_pct": MSNR_PARAM_GRID_QM_ZONE_PCT,
             "grid_qm_lookback": MSNR_PARAM_GRID_QM_LOOKBACK,
         },
@@ -15359,6 +15577,7 @@ def api_reset_risk_autotune():
         _set_vgi_invert(False)
         _set_vgi_min_rr(3.0)
         _set_ft5_invert(False)
+        _set_msnr_max_rr(8.0)
         with state_lock:
             STATE["risk_autotune_log"].clear()
             STATE["risk_autotune_last_change"] = {}
@@ -17174,10 +17393,29 @@ async function refreshMsnr() {
     </div>`;
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
-      Живой скан (только это торгуется): ${(status.symbols||[]).join(', ')} · бэктест дополнительно охватывает топ-${status.backtest_universe_size||'?'} ликвидных монет (только для проверки, автоторговля/живой скан их не касаются) · структура ${cfg.structure_tf} (пивоты L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf} · параметры автотюнятся отдельно на каждую монету (см. столбец «Параметры» в таблице ниже) — значения по умолчанию, пока не подобрано: мин. импульс ${cfg.min_leg_atr}×ATR, QM-зона ${(cfg.qm_zone_pct*100).toFixed(2)}%, окно ${cfg.qm_lookback_bars} баров<br>
+      Живой скан (только это торгуется): ${(status.symbols||[]).join(', ')} · бэктест дополнительно охватывает топ-${status.backtest_universe_size||'?'} ликвидных монет (только для проверки, автоторговля/живой скан их не касаются) · структура ${cfg.structure_tf} (пивоты L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf} · мин. импульс ${cfg.min_leg_atr}×ATR, QM-зона ${(cfg.qm_zone_pct*100).toFixed(2)}%, окно ${cfg.qm_lookback_bars} баров (автотюнятся отдельно на каждую монету, см. столбец «Параметры») · <b>потолок RR ${cfg.max_rr}</b> (если реальный противоположный уровень даёт RR выше — сделка берётся с укороченным фикс. тейком вместо него; авто-тюнится по статистике ниже)<br>
       ${buildTxt}<br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0} · клик по строке — график
     </div>`;
+  const rrBuckets = status.rr_buckets || [];
+  const rrBucketRows = rrBuckets.map(b => {
+    const wrClass = b.winrate === null ? 'dim' : (b.winrate >= 50 ? 'win' : 'loss');
+    return `<tr>
+      <td>${b.range}</td>
+      <td class="${wrClass}">${b.winrate !== null ? b.winrate + '%' : '-'}</td>
+      <td class="dim">n=${b.n}</td>
+      <td class="win">${b.wins}W</td>
+      <td class="loss">${b.losses}L</td>
+    </tr>`;
+  }).join('');
+  const rrBucketsHtml = rrBuckets.some(b => b.n > 0) ? `
+    <div class="dim" style="margin:8px 0 6px;"><b>Винрейт по диапазонам RR</b> (все монеты вместе, по факту закрытых сделок) — здесь видно, если один диапазон RR систематически проваливается, даже если пул усреднённых цифр этого не показывает:</div>
+    <div style="overflow-x:auto;margin-bottom:14px;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>RR</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th></tr></thead>
+      <tbody>${rrBucketRows}</tbody>
+    </table>
+    </div>` : '';
   const signalsRows = signals.map((s, idx) => {
     const dirClass = s.direction === 'LONG' ? 'long' : 'short';
     let statusHtml;
@@ -17226,7 +17464,7 @@ async function refreshMsnr() {
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">\u0411\u044d\u043a\u0442\u0435\u0441\u0442 \u0435\u0449\u0451 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432.</div>';
-  panel.innerHTML = warnHtml + headerHtml + signalsTableHtml + btTableHtml;
+  panel.innerHTML = warnHtml + headerHtml + rrBucketsHtml + signalsTableHtml + btTableHtml;
   restoreMsnrExpansion();
 }
 
