@@ -5337,6 +5337,26 @@ v0.99.13 - Diagnosed a direct user follow-up: gold symbols (XAU_USDT/
          claiming a root cause that wasn't directly observed this time.
          Verified with py_compile, an actual runtime start, pyflakes,
          and node --check on the extracted <script> block — all clean.
+
+v0.99.14 - MSNR_BACKTEST_UNIVERSE_SIZE lowered 30 -> 10, per direct
+         follow-up request. Confirmed first (via the panel's own status
+         text, not assumed) that "bэктест пустой" wasn't a new bug —
+         MSNR's own panel still said "бэктест ещё не завершился", i.e.
+         the cycle was genuinely still running, not stuck or crashed;
+         v0.99.13's error-log fix and the confirmed active rate-limit
+         burst already explained why. With 33 symbols (3 gold + 30
+         liquid) each potentially needing multiple retry-with-backoff
+         candle fetches under the current sustained Gate.io pressure,
+         a full cycle was taking long enough to look indistinguishable
+         from broken. Reducing the exploration set to 13 total (3 gold
+         + 10 liquid) directly cuts how much retry-backoff exposure one
+         cycle can accumulate, without touching gold's own guaranteed
+         inclusion (msnr_build_backtest_universe() still unions MSNR_
+         SYMBOLS in first, verified behaviorally: mocked 40 tickers,
+         confirmed the universe comes out to exactly 13 with all three
+         gold symbols present).
+         Verified with py_compile, an actual runtime start, and
+         pyflakes — all clean.
 """
 
 import os
@@ -5356,7 +5376,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.13"
+APP_VERSION = "0.99.14"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5946,7 +5966,7 @@ MSNR_PARAM_GRID_QM_ZONE_PCT = [0.003, 0.006, 0.010]
 MSNR_PARAM_GRID_QM_LOOKBACK = [4, 6, 9]
 MSNR_MIN_BACKTEST_TRADES = int(os.environ.get("VP_MSNR_MIN_BACKTEST_TRADES", 5))  # same bar as FT5_MIN_BACKTEST_TRADES/Volume's MIN_BACKTEST_TRADES — a combo with fewer trades in the window isn't a confident pick
 MSNR_RANK_PRIOR_TARGET = 1  # same role as FT5_RANK_PRIOR_TARGET — only a combo with 0 or 1 REAL observed loss gets synthetic -1R pseudo-losses blended in (guards against a small all-win sample looking falsely certain); 2+ real losses are trusted as-is
-MSNR_BACKTEST_UNIVERSE_SIZE = int(os.environ.get("VP_MSNR_BACKTEST_UNIVERSE_SIZE", 30))  # v0.99.9 — per direct user request: backtest the top-N most liquid symbols too (union'd with MSNR_SYMBOLS, so gold stays included), to see whether this signal logic generalizes beyond gold — explicitly backtest-only for now, msnr_live_loop still scans only MSNR_SYMBOLS, unchanged.
+MSNR_BACKTEST_UNIVERSE_SIZE = int(os.environ.get("VP_MSNR_BACKTEST_UNIVERSE_SIZE", 10))  # v0.99.9 — per direct user request: backtest the top-N most liquid symbols too (union'd with MSNR_SYMBOLS, so gold stays included), to see whether this signal logic generalizes beyond gold — explicitly backtest-only for now, msnr_live_loop still scans only MSNR_SYMBOLS, unchanged. Lowered 30->10 in v0.99.14 per direct follow-up request — under the current sustained Gate.io rate-limiting, 33 symbols (3 gold + 30 liquid) each potentially needing multiple retry-with-backoff candle fetches was leaving the backtest cycle stuck "ещё не завершился" for a long time; a smaller exploration set finishes faster and is less exposed to the same pressure.
 
 # ============================================================================
 # EXPERIMENTAL: FT5 — port of freqtrade-strategies' Strategy005 (v0.96.0)
