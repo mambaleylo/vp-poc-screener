@@ -5414,6 +5414,20 @@ v0.99.15 - Two things, per direct user follow-up after the backtest
          node --check on the extracted <script> block, the route/def
          integrity check, and the stale-default-parameter check — all
          clean.
+
+v0.99.16 - MSNR_BACKTEST_UNIVERSE_SIZE raised 10 -> 70, per direct
+         follow-up request (73 symbols total with gold, more than
+         double v0.99.9's original 30). Reasonable now that v0.99.15
+         closed get_candles_range()'s own missing 429-retry gap and
+         added live per-symbol progress tracking — a longer cycle is at
+         least visibly progressing (done/total count, which symbols are
+         currently in flight) rather than looking indistinguishable from
+         stuck, which was the real problem the smaller universe was
+         papering over rather than fixing directly. Verified
+         behaviorally: mocked 100 tickers, confirmed the universe comes
+         out to exactly 73 with all three gold symbols still present.
+         Verified with py_compile, an actual runtime start, and
+         pyflakes — all clean.
 """
 
 import os
@@ -5433,7 +5447,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.15"
+APP_VERSION = "0.99.16"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6023,7 +6037,7 @@ MSNR_PARAM_GRID_QM_ZONE_PCT = [0.003, 0.006, 0.010]
 MSNR_PARAM_GRID_QM_LOOKBACK = [4, 6, 9]
 MSNR_MIN_BACKTEST_TRADES = int(os.environ.get("VP_MSNR_MIN_BACKTEST_TRADES", 5))  # same bar as FT5_MIN_BACKTEST_TRADES/Volume's MIN_BACKTEST_TRADES — a combo with fewer trades in the window isn't a confident pick
 MSNR_RANK_PRIOR_TARGET = 1  # same role as FT5_RANK_PRIOR_TARGET — only a combo with 0 or 1 REAL observed loss gets synthetic -1R pseudo-losses blended in (guards against a small all-win sample looking falsely certain); 2+ real losses are trusted as-is
-MSNR_BACKTEST_UNIVERSE_SIZE = int(os.environ.get("VP_MSNR_BACKTEST_UNIVERSE_SIZE", 10))  # v0.99.9 — per direct user request: backtest the top-N most liquid symbols too (union'd with MSNR_SYMBOLS, so gold stays included), to see whether this signal logic generalizes beyond gold — explicitly backtest-only for now, msnr_live_loop still scans only MSNR_SYMBOLS, unchanged. Lowered 30->10 in v0.99.14 per direct follow-up request — under the current sustained Gate.io rate-limiting, 33 symbols (3 gold + 30 liquid) each potentially needing multiple retry-with-backoff candle fetches was leaving the backtest cycle stuck "ещё не завершился" for a long time; a smaller exploration set finishes faster and is less exposed to the same pressure.
+MSNR_BACKTEST_UNIVERSE_SIZE = int(os.environ.get("VP_MSNR_BACKTEST_UNIVERSE_SIZE", 70))  # v0.99.9 — per direct user request: backtest the top-N most liquid symbols too (union'd with MSNR_SYMBOLS, so gold stays included), to see whether this signal logic generalizes beyond gold — explicitly backtest-only for now, msnr_live_loop still scans only MSNR_SYMBOLS, unchanged. Lowered 30->10 in v0.99.14 when the cycle was stuck "ещё не завершился" for a long time under sustained Gate.io rate-limiting; raised back up to 70 in v0.99.16 per direct follow-up request, now that get_candles_range() ALSO retries on 429 (v0.99.15 — it previously had its own separate, unretried request loop) and the panel shows live per-symbol progress instead of a binary done/not-done, so a longer cycle is at least visibly progressing rather than looking stuck.
 
 # ============================================================================
 # EXPERIMENTAL: FT5 — port of freqtrade-strategies' Strategy005 (v0.96.0)
