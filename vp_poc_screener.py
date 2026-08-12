@@ -5138,6 +5138,46 @@ v0.99.9 - MSNR's backtest now also explores the top-30 most liquid
          node --check on the extracted <script> block, the route/def
          integrity check, and the stale-default-parameter check — all
          clean.
+
+v0.99.10 - CRITICAL FIX: MSNR's chart modal showed "подтверждённого
+         QM-сигнала в этом окне нет" for a backtest trade the user
+         clicked directly from the leaderboard's own expandable trades
+         table — meaning the exact trade being displayed as historical
+         evidence couldn't be re-confirmed by the chart meant to show
+         it. Root cause: api_msnr_chart() always blindly RE-DERIVED
+         everything by re-running msnr_detect_signals() with msnr_
+         symbol_params(symbol) — the symbol's CURRENT live parameter
+         override, not whatever combo actually produced the clicked
+         trade. If a newer backtest/autotune cycle ran since (very
+         plausible right after v0.99.9 expanded MSNR to 30+ symbols,
+         triggering fresh optimize passes for many of them), the
+         winning params can differ enough that the same historical
+         signal simply doesn't get re-detected at all.
+         Fixed by having the endpoint check for the actual stored
+         record FIRST — both STATE["msnr_signals"] (live) and STATE[
+         "msnr_backtest_results"][symbol] (backtest) — before ever
+         attempting re-derivation. Every stored trade (msnr_run_
+         backtest()'s own return shape) and every live signal record
+         already carries complete entry/sl/tp/direction/level/result/
+         exit_time — there was never a need to re-derive an already-
+         known signal from scratch with parameters that could have
+         since drifted. Re-derivation is now purely a fallback, used
+         only for genuinely browsing the CURRENT live Storyline (no
+         `time` given, or a `time` that matches nothing stored) — same
+         principle FT5's api_ft5_chart() already uses its own stored
+         trade data for, applied here where MSNR's own chart endpoint
+         had drifted from it.
+         Verified behaviorally with two scenarios, not just read as
+         correct: (1) a stored backtest trade with entry/sl/tp values
+         deliberately different from whatever `msnr_detect_signals`
+         would freshly compute — confirmed the endpoint returns the
+         STORED values unchanged, not re-derived ones; (2) a `time`
+         matching nothing stored anywhere — confirmed the fallback
+         path still runs cleanly with no error, same as before this
+         fix for that case.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         the route/def integrity check, and the stale-default-parameter
+         check — all clean.
 """
 
 import os
@@ -5157,7 +5197,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.9"
+APP_VERSION = "0.99.10"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14935,26 +14975,90 @@ def api_msnr_backtest_trades(symbol):
 
 @app.route("/api/msnr/chart/<symbol>")
 def api_msnr_chart(symbol):
-    """Re-derives structure pivots (A-shape/V-shape) and the QM signal
-    around a given entry time by re-running msnr_detect_signals() on
-    freshly fetched candles — same "fully deterministic from candle data
-    alone" principle as api_session_chart(). `time` (optional) is a
-    signal's entry_candle time; when given, the fetch window is centered
-    on it. Without it, returns the most recent window (for browsing the
-    current live Storyline even with no confirmed signal yet)."""
+    """Draws a signal — backtest trade or live signal — using its OWN
+    already-recorded entry/sl/tp/direction/level data directly when
+    `time` matches one, rather than blindly re-deriving via a fresh
+    msnr_detect_signals() call with the symbol's CURRENT live params.
+    v0.99.10: that re-derivation was the original design (still used as
+    the fallback below, for browsing the current live Storyline with no
+    specific historical signal in mind) — but it broke for backtest
+    trades specifically, confirmed from a direct user report (chart for
+    a QQQX_USDT backtest trade said "нет подтверждённого QM-сигнала").
+    Root cause: msnr_symbol_params(symbol) fetches the CURRENT override
+    — if a newer backtest/autotune cycle has run since the clicked
+    trade was originally found (very plausible right after v0.99.9
+    expanded MSNR to 30+ symbols, meaning fresh optimize passes for
+    many of them), the winning (min_leg_atr, qm_zone_pct, qm_lookback)
+    combo can differ from whatever combo actually produced that trade —
+    different params can easily fail to re-detect the same signal
+    entirely. Since every stored trade (msnr_run_backtest()'s own
+    return shape) and every live signal record already carries its own
+    complete entry/sl/tp/direction/level/result/exit_time, there was
+    never a need to re-derive anything for an already-known signal —
+    same principle FT5's api_ft5_chart() already uses its own stored
+    trade data for, rather than re-deriving with live-mutable params."""
     try:
         sig_time = request.args.get("time")
         now = time.time()
+        found_sig = None
+        found_result = None
+        found_exit_time = None
+        found_exit_price = None
+        if sig_time:
+            target = float(sig_time)
+            e_interval_sec = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
+            with state_lock:
+                live_match = next((s for s in STATE["msnr_signals"]
+                                    if s["symbol"] == symbol and abs(s["time"] - target) < e_interval_sec), None)
+                bt_trades = list(STATE["msnr_backtest_results"].get(symbol, []))
+            if live_match:
+                found_sig = {"time": live_match["time"], "direction": live_match["direction"],
+                              "entry": live_match["entry"], "sl": live_match["sl"], "tp": live_match["tp"],
+                              "level": live_match["level"], "level_type": live_match["level_type"],
+                              "opposite_level": live_match.get("opposite_level")}
+                found_result = live_match.get("result")
+                found_exit_time = live_match.get("exit_time")
+                found_exit_price = live_match.get("exit_price")
+            else:
+                bt_match = next((t for t in bt_trades if abs(t["time"] - target) < e_interval_sec), None)
+                if bt_match:
+                    found_sig = {"time": bt_match["time"], "direction": bt_match["direction"],
+                                  "entry": bt_match["entry"], "sl": bt_match["sl"], "tp": bt_match["tp"],
+                                  "level": bt_match["level"], "level_type": bt_match["level_type"],
+                                  "opposite_level": bt_match.get("opposite_level")}
+                    found_result = bt_match.get("result")
+                    found_exit_time = bt_match.get("exit_time")
+                    if found_result == "WIN":
+                        found_exit_price = bt_match["tp"]
+                    elif found_result == "LOSS":
+                        found_exit_price = bt_match["sl"]
+
         anchor = float(sig_time) if sig_time else now
-        params = msnr_symbol_params(symbol)
         e_interval_sec = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
         s_interval_sec = INTERVAL_SECONDS.get(MSNR_STRUCTURE_TF, 3600)
         entry_end = min(now, anchor + 60 * e_interval_sec)
         entry_start = anchor - 220 * e_interval_sec
         structure_start = anchor - 260 * s_interval_sec
         structure_end = min(now, anchor + 60 * e_interval_sec)
-        structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, structure_end)
         entry_candles = get_candles_range(symbol, MSNR_ENTRY_TF, entry_start, entry_end)
+
+        if found_sig:
+            structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, structure_end)
+            params = msnr_symbol_params(symbol)
+            _sigs, pivots = msnr_detect_signals(structure_candles, entry_candles, **params)
+            window_start = entry_candles[0]["time"] if entry_candles else structure_start
+            visible_pivots = [p for p in pivots if p["confirm_time"] >= window_start - 30 * s_interval_sec]
+            return jsonify({
+                "symbol": symbol, "candles": entry_candles, "pivots": visible_pivots,
+                "signal": found_sig, "result": found_result, "exit_time": found_exit_time,
+                "exit_price": found_exit_price,
+            })
+
+        # Fallback: no stored signal/trade matched `time` (or none was
+        # given at all) — browse the CURRENT live Storyline instead,
+        # same behavior this endpoint always had for that case.
+        params = msnr_symbol_params(symbol)
+        structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, structure_end)
         sigs, pivots = msnr_detect_signals(structure_candles, entry_candles, **params)
         sig = None
         if sig_time:
