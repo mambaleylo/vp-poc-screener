@@ -4829,6 +4829,27 @@ v0.99.2 - CRITICAL FIX: MSNR backtest-trades row would expand once, then
          manually against the exact repro in the user's report (open ->
          auto-refresh tick -> re-open) to confirm loadMsnrTrades() now
          fires on that second open instead of being skipped.
+
+v0.99.3 - MSNR chart: fixed level-label text overlapping itself — per
+         direct user report + screenshot showing "A-shape 4357.86" and
+         another A-shape label drawn on top of each other, illegible.
+         Cause: the shared drawLevelLine() helper (used by every other
+         experimental tab's chart too) prints each level's label right
+         at that line's own y — fine when a chart has 2-3 well-spaced
+         lines, but MSNR routinely has several close A-shape/V-shape
+         pivots PLUS entry/SL/TP all sitting within a narrow price band
+         (the whole point of the QM entry is that it fires right next
+         to the level it just rejected off), so labels collided.
+         Left drawLevelLine() itself untouched (other tabs' charts don't
+         have this problem and don't need the extra complexity) — MSNR's
+         own drawMsnrChart() now draws each dashed line immediately at
+         its true y via a small local helper, but collects all labels
+         into a list and calls the new layoutMsnrLabels() once at the
+         end, which greedily spaces overlapping labels 12px apart
+         top-to-bottom before drawing any text. Lines stay exactly where
+         the price says; only the text moves.
+         Verified: py_compile, node --check on the extracted <script>
+         block — clean.
 """
 
 import os
@@ -4848,7 +4869,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.2"
+APP_VERSION = "0.99.3"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16641,22 +16662,62 @@ function drawMsnrChart(data) {
 
   // A-shape / V-shape structure levels (OCL) — orange for A (resistance),
   // teal for V (support), so the pair reads at a glance like the source's
-  // own red-line slide diagrams.
+  // own red-line slide diagrams. MSNR routinely has several close-together
+  // levels plus entry/SL/TP all in a narrow band (unlike the other tabs'
+  // 2-3 well-spaced lines), so the shared drawLevelLine() — which prints
+  // each label right at its own line's y — was stacking text on top of
+  // text. Lines are drawn immediately at their true y; labels are
+  // collected and spread apart afterward via layoutMsnrLabels() instead.
+  const msnrLabels = [];
+  const drawMsnrDashedLine = (yy, color) => {
+    ctx.setLineDash([2, 4]);
+    ctx.lineWidth = 1.5;
+    ctx.strokeStyle = color;
+    ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(chartW, yy); ctx.stroke();
+    ctx.setLineDash([]);
+  };
+
   pivots.forEach(p => {
     const color = p.type === 'A' ? '#e8b93d' : '#3ddc97';
-    const label = (p.type === 'A' ? 'A-shape ' : 'V-shape ') + fmtNum(p.price);
-    drawLevelLine(ctx, yP(p.price), chartW, color, label);
+    const yy = yP(p.price);
+    drawMsnrDashedLine(yy, color);
+    msnrLabels.push({ y: yy, text: (p.type === 'A' ? 'A-shape ' : 'V-shape ') + fmtNum(p.price), color });
   });
 
   if (sig) {
-    drawLevelLine(ctx, yP(sig.entry), chartW, '#5aa8ff', 'ENTRY ' + fmtNum(sig.entry));
-    drawLevelLine(ctx, yP(sig.sl), chartW, '#ff6b6b', 'SL ' + fmtNum(sig.sl));
-    drawLevelLine(ctx, yP(sig.tp), chartW, '#3ddc97', 'TP ' + fmtNum(sig.tp));
+    drawMsnrDashedLine(yP(sig.entry), '#5aa8ff');
+    drawMsnrDashedLine(yP(sig.sl), '#ff6b6b');
+    drawMsnrDashedLine(yP(sig.tp), '#3ddc97');
+    msnrLabels.push({ y: yP(sig.entry), text: 'ENTRY ' + fmtNum(sig.entry), color: '#5aa8ff' });
+    msnrLabels.push({ y: yP(sig.sl), text: 'SL ' + fmtNum(sig.sl), color: '#ff6b6b' });
+    msnrLabels.push({ y: yP(sig.tp), text: 'TP ' + fmtNum(sig.tp), color: '#3ddc97' });
     const entryIdx = findCandleIndex(candles, sig.time);
     if (entryIdx >= 0) {
       drawEntryMarker(ctx, entryIdx * slot + slot / 2, yP(sig.entry), '#5aa8ff');
     }
   }
+
+  layoutMsnrLabels(ctx, msnrLabels);
+}
+
+function layoutMsnrLabels(ctx, labels) {
+  // Greedy top-to-bottom separation so close levels (very common here —
+  // e.g. two A-shape pivots a few dollars apart, or entry sitting right
+  // next to an A-shape it just rejected off) get readable, non-
+  // overlapping text instead of drawing on top of each other. Lines
+  // themselves were already drawn at their true y — this only moves text.
+  const minGap = 12;
+  const sorted = [...labels].sort((a, b) => a.y - b.y);
+  for (let i = 1; i < sorted.length; i++) {
+    if (sorted[i].y - sorted[i - 1].y < minGap) {
+      sorted[i].y = sorted[i - 1].y + minGap;
+    }
+  }
+  ctx.font = 'bold 10px sans-serif';
+  sorted.forEach(l => {
+    ctx.fillStyle = l.color;
+    ctx.fillText(l.text, 4, l.y - 4);
+  });
 }
 
 // ---------------- FT5 — port of freqtrade Strategy005 (EXPERIMENTAL, v0.96.0) ----------------
