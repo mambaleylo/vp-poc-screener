@@ -4802,6 +4802,33 @@ v0.99.1 - MSNR: per direct user request, added real R:R visibility to the
          (10+12-1)/3 — confirms the per-trade (not average-RR-based)
          formula. py_compile, ast.parse, node --check on the extracted
          <script> block, and the route/def integrity check — all clean.
+
+v0.99.2 - CRITICAL FIX: MSNR backtest-trades row would expand once, then
+         hang on "загрузка..." forever on every subsequent open — found
+         live by direct user report ("1 раз список увидел, потом он
+         сбросился, раскрываю заново и висит загрузка").
+         Root cause: refreshMsnr() fully replaces panel.innerHTML on
+         every auto-refresh tick (same as every other tab), which
+         silently collapsed any row the user had open AND reset its
+         body content back to "загрузка..." — but the v0.99.1 stale-
+         fetch guard (_msnrTradesLoaded[symbol]) was a plain JS object
+         living OUTSIDE that rebuild, so it kept remembering "already
+         loaded" across the rebuild even though the actual DOM content
+         had just been wiped. Next click: guard says skip fetching,
+         body stays on its post-rebuild "загрузка..." text forever.
+         Fix: replaced the loaded-flag cache with _msnrExpanded, a Set
+         that is the single source of truth for which rows the user
+         wants open. New restoreMsnrExpansion(), called at the end of
+         every refreshMsnr(), re-applies display:table-row AND re-
+         fetches (via extracted loadMsnrTrades()) for every symbol in
+         that set — so an open row survives auto-refresh instead of
+         silently collapsing, and always actually has fresh content
+         instead of getting stuck. Row arrow (▸/▾) now reflects real
+         expanded state too.
+         Verified: node --check + py_compile clean; traced the fix
+         manually against the exact repro in the user's report (open ->
+         auto-refresh tick -> re-open) to confirm loadMsnrTrades() now
+         fires on that second open instead of being skipped.
 """
 
 import os
@@ -4821,7 +4848,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.1"
+APP_VERSION = "0.99.2"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16434,7 +16461,7 @@ async function refreshMsnr() {
     const wrClass = (r.win_rate === null || r.win_rate === undefined) ? 'dim' : (r.win_rate >= 50 ? 'win' : 'loss');
     const expClass = (r.expectancy_r === null || r.expectancy_r === undefined) ? 'dim' : (r.expectancy_r > 0 ? 'win' : 'loss');
     return `<tr onclick="toggleMsnrBacktestTrades('${r.symbol}')" style="cursor:pointer;">
-      <td>▸ ${r.symbol}</td>
+      <td>${_msnrExpanded.has(r.symbol) ? '▾' : '▸'} ${r.symbol}</td>
       <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
       <td class="dim">n=${r.n}</td>
       <td class="win">${r.wins}W</td>
@@ -16454,20 +16481,50 @@ async function refreshMsnr() {
     </table>
     </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
   panel.innerHTML = warnHtml + headerHtml + signalsTableHtml + btTableHtml;
+  restoreMsnrExpansion();
 }
 
-const _msnrTradesLoaded = {};
-async function toggleMsnrBacktestTrades(symbol) {
+// Expanded-row state lives OUTSIDE refreshMsnr()'s panel.innerHTML rebuild
+// on purpose — the whole panel gets re-rendered from scratch on every
+// auto-refresh tick, which was wiping out both which rows were open AND
+// the stale-fetch guard (that guard used to live keyed off a flag that
+// survived the rebuild while the DOM/content didn't, so a re-opened row
+// after a refresh tick would skip fetching entirely and hang on
+// "загрузка..." forever). _msnrExpanded is the single source of truth
+// for "should this row be open", restoreMsnrExpansion() re-applies it
+// (and re-fetches, since the row's body content is always fresh
+// "загрузка..." right after a rebuild) after every refreshMsnr() call.
+const _msnrExpanded = new Set();
+
+function toggleMsnrBacktestTrades(symbol) {
   const row = document.getElementById(`msnrTrades_${symbol}`);
-  const body = document.getElementById(`msnrTradesBody_${symbol}`);
   if (!row) return;
-  const opening = row.style.display === 'none';
-  row.style.display = opening ? 'table-row' : 'none';
-  if (!opening || _msnrTradesLoaded[symbol]) return;
-  _msnrTradesLoaded[symbol] = true;
+  if (_msnrExpanded.has(symbol)) {
+    _msnrExpanded.delete(symbol);
+    row.style.display = 'none';
+  } else {
+    _msnrExpanded.add(symbol);
+    row.style.display = 'table-row';
+    loadMsnrTrades(symbol);
+  }
+}
+
+function restoreMsnrExpansion() {
+  for (const symbol of _msnrExpanded) {
+    const row = document.getElementById(`msnrTrades_${symbol}`);
+    if (!row) continue;  // symbol no longer in the (re-rendered) top list
+    row.style.display = 'table-row';
+    loadMsnrTrades(symbol);
+  }
+}
+
+async function loadMsnrTrades(symbol) {
+  const body = document.getElementById(`msnrTradesBody_${symbol}`);
+  if (!body) return;
+  body.textContent = 'загрузка...';
   try {
     const trades = await (await fetch(`/api/msnr/backtest/${symbol}`)).json();
-    if (!trades.length) { body.innerHTML = 'сделок нет'; return; }
+    if (!trades.length) { body.textContent = 'сделок нет'; return; }
     const rows = trades.map(t => {
       const dirClass = t.direction === 'LONG' ? 'long' : 'short';
       const resClass = t.result === 'WIN' ? 'win' : (t.result === 'LOSS' ? 'loss' : 'status-timeout');
@@ -16486,7 +16543,7 @@ async function toggleMsnrBacktestTrades(symbol) {
       <tbody>${rows}</tbody>
     </table>`;
   } catch (e) {
-    body.innerHTML = 'ошибка загрузки';
+    body.textContent = 'ошибка загрузки';
     console.error(e);
   }
 }
