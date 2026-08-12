@@ -5000,6 +5000,47 @@ v0.99.6 - Synced from GitHub first (local sandbox copy was stale at
          Verified with py_compile, an actual runtime start, pyflakes,
          and the route/def integrity and stale-default-parameter
          checks — all clean.
+
+v0.99.7 - MSNR autotrade, per direct user request. Investigated before
+         building anything new, since MSNR is a module built while this
+         session's sandbox copy was stale (only discovered on syncing
+         for v0.99.6) — found the backend infrastructure (AUTOTRADE_
+         ENABLED_MSNR/AUTOTRADE_LEVERAGE_MSNR constants, full settings
+         wiring, the actual execute_autotrade()/sim_execute_trade()
+         call site in the live scanner) already existed and was
+         correctly built, off by default same as XAU_LG/FT5's own
+         "unverified source" treatment. What was actually missing:
+         (1) msnr_signals wasn't registered in has_open_signal_any_
+         module()'s lists dict — a real gap, not cosmetic: this meant
+         MSNR's own open positions were invisible to every OTHER
+         module's cross-module duplicate-position guard, and vice
+         versa, so multiple modules could pile into the same symbol
+         simultaneously, defeating the whole point of that guard.
+         Fixed by adding the missing entry. (2) No settings-UI row
+         existed for the autotrade toggle/leverage at all (only the
+         backend constants + generic settings-key wiring were present)
+         — added one, matching VGI's own established template exactly,
+         marked ⚠️ same as MSNR's own experimental-warning styling
+         elsewhere in the app. (3) /api/autotrade/status's own "enabled"
+         summary dict was also missing an "msnr" key — fixed too, found
+         while double-checking every place a per-module autotrade flag
+         gets surfaced, not just the one the user could see directly.
+         One suspected issue investigated and ruled out rather than
+         "fixed": sim_execute_trade() being called INSIDE the `if
+         AUTOTRADE_ENABLED_MSNR:` block looked at first like it might
+         be gating the paper simulator behind the real-autotrade toggle
+         incorrectly — checked against VGI's and Session's own call
+         sites (the newest and the most mature module respectively) and
+         confirmed both have the IDENTICAL structure: this is this
+         app's established, intentional design (the simulator mirrors
+         what autotrade would do only once a module's own toggle is on,
+         not a shadow-mode for every signal unconditionally), not a bug
+         needing correction — left MSNR's code exactly as it already
+         was for that part.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the extracted <script> block, the route/def
+         integrity check, and the stale-default-parameter check — all
+         clean.
 """
 
 import os
@@ -5019,7 +5060,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.6"
+APP_VERSION = "0.99.7"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6447,7 +6488,7 @@ def has_open_signal_any_module(symbol, exclude=None):
         "ema_signals": STATE["ema_signals"], "scalp_signals": STATE["scalp_signals"],
         "session_signals": STATE["session_signals"], "session_ny_signals": STATE["session_ny_signals"],
         "xau_lg_signals": STATE["xau_lg_signals"], "ft5_signals": STATE["ft5_signals"],
-        "vgi_signals": STATE["vgi_signals"],
+        "vgi_signals": STATE["vgi_signals"], "msnr_signals": STATE["msnr_signals"],
     }
     with state_lock:
         for name, lst in lists.items():
@@ -15118,6 +15159,7 @@ def api_autotrade_status():
             "session_ny": AUTOTRADE_ENABLED_SESSION_NY, "xau_lg": AUTOTRADE_ENABLED_XAU_LG,
             "ft5": AUTOTRADE_ENABLED_FT5,
             "vgi": AUTOTRADE_ENABLED_VGI,
+            "msnr": AUTOTRADE_ENABLED_MSNR,
         },
     })
 
@@ -15921,6 +15963,16 @@ INDEX_HTML = """<!doctype html>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="number" id="setAutotradeLevVgi" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
           <label class="switch"><input type="checkbox" id="setAutotradeVgi"><span class="switchSlider"></span></label>
+        </div>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ MSNR ⚠️</div>
+          <div class="sub">плечо, если включено — экспериментальная логика, статус не проверен, выключено по умолчанию</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="number" id="setAutotradeLevMsnr" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+          <label class="switch"><input type="checkbox" id="setAutotradeMsnr"><span class="switchSlider"></span></label>
         </div>
       </div>
       <div class="settingRow">
@@ -17528,6 +17580,7 @@ const setInputs = {
   autotrade_scalp: document.getElementById('setAutotradeScalp'),
   autotrade_session: document.getElementById('setAutotradeSession'),
   autotrade_vgi: document.getElementById('setAutotradeVgi'),
+  autotrade_msnr: document.getElementById('setAutotradeMsnr'),
   autotrade_session_ny: document.getElementById('setAutotradeSessionNy'),
 };
 
@@ -17545,6 +17598,7 @@ const setValueInputs = {
   autotrade_leverage_ema: document.getElementById('setAutotradeLevEma'),
   autotrade_leverage_session: document.getElementById('setAutotradeLevSession'),
   autotrade_leverage_vgi: document.getElementById('setAutotradeLevVgi'),
+  autotrade_leverage_msnr: document.getElementById('setAutotradeLevMsnr'),
   autotrade_leverage_session_ny: document.getElementById('setAutotradeLevSessionNy'),
 };
 
