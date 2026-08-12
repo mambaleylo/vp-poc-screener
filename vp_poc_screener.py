@@ -4949,6 +4949,57 @@ v0.99.5 - MSNR: added autotune, per direct user request ("можно какой-
          synthetic data didn't produce enough closed trades per combo.
          py_compile, node --check on the extracted <script> block, and
          the route/def integrity check — all clean.
+
+v0.99.6 - Synced from GitHub first (local sandbox copy was stale at
+         v0.98.11; actual repo had moved to v0.99.5 — downloaded the
+         real current file via the raw content URL, since GitHub's
+         Contents API omits the base64 `content` field for files over
+         ~1MB, before making any further edits, to avoid overwriting
+         work already pushed).
+         CRITICAL FIX: Session's auto-tune reverse rule had a chicken-
+         and-egg bug — the entire block including _risk_autotune_
+         reverse() was nested inside `if SESSION_INVERT_SIGNALS:`,
+         meaning it could only ever run once reverse was ALREADY on, so
+         it was structurally impossible for auto-tune to ever turn
+         reverse ON from the OFF state, no matter how negative normal-
+         mode's own EV was. Found from a direct user report: Session
+         sitting at 17.1% winrate (7W/34L, n=41) after 30 auto-tune
+         passes, reverse never triggered despite a winrate nowhere near
+         breakeven for any plausible RR. Confirmed by comparing against
+         EMA's own block, which correctly runs its reverse rule
+         unconditionally (gated only on data availability, not on
+         EMA_INVERT_SIGNALS's current value).
+         Fixed by moving the reverse-flag rule OUTSIDE the invert-mode
+         gate — SESSION_SL_MULT and SESSION_REVERSE_RR's own tp_extend
+         rule correctly stay gated (they tune the INVERTED trade's own
+         sizing specifically, meaningless data otherwise), but the
+         reverse decision itself must not be gated by the very flag
+         it's deciding whether to flip. The rr passed to the reverse
+         check now depends on which mode is CURRENTLY active: SESSION_
+         REVERSE_RR (exact, fixed by construction) when already
+         inverted; win_mfe_r's own average (already expressed in R-
+         multiples, the same data the tp_extend rule already uses) as
+         the best available empirical stand-in when not inverted, since
+         normal-mode's TP sits at the opposite range edge with no
+         single fixed RR to reference directly.
+         Verified behaviorally with the exact numbers from the report
+         (winrate=17.1%, n=41): confirmed the rule now actually flips
+         the flag from False, where before this same call would never
+         even execute. Verified the round-trip too, not just the one
+         direction: reverse correctly stays on when performing well
+         (winrate=65%, no flip) and correctly flips back off if it also
+         turns out unprofitable (winrate=15%, flips False) — a fix here
+         needed to work in both directions, not just unstick the one
+         case that was reported.
+         Also searched systematically for the same gating pattern
+         (reverse-rule call nested inside its own INVERT_SIGNALS check)
+         across the entire file rather than assuming Session was the
+         only instance — confirmed no other module (including the new
+         MSNR module, unfamiliar territory after the version sync) has
+         this bug; Session was the only affected block.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         and the route/def integrity and stale-default-parameter
+         checks — all clean.
 """
 
 import os
@@ -4968,7 +5019,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.5"
+APP_VERSION = "0.99.6"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12578,28 +12629,48 @@ def risk_autotune_pass():
         closed_n = (s.get("wins", 0) or 0) + (s.get("losses", 0) or 0)
         loss_mae = s.get("mae_r_losses_at_close")
         win_mfe = s.get("mfe_r_wins_at_close")
-        # v0.98.4: was "no MFE/MAE data exists to base an overshoot check
-        # on" — per direct user request to have autotune manage
-        # SESSION_SL_MULT and the RR itself (previously a permanently
-        # hardcoded "2"), Session signals now track mfe_r/mae_r the same
-        # way EMA/Divergence do (update_session_signal_outcomes()), so
-        # all three rules below use real data instead of either being
-        # skipped or assuming a fixed overshoot=1.0/RR=2.
-        # All three only apply in inverted mode: only SESSION_INVERT_
-        # SIGNALS's own sizing is risk/RR-based (see detect_session_
+        # v0.99.6: CRITICAL FIX — the reverse-flag rule was nested inside
+        # `if SESSION_INVERT_SIGNALS:` below, meaning it could only ever
+        # run once reverse was ALREADY on: a chicken-and-egg bug that
+        # made it structurally impossible for auto-tune to ever turn
+        # reverse ON from the OFF state in the first place, no matter
+        # how negative normal-mode's own EV was. Found from a direct
+        # user report: Session sitting at 17.1% winrate (7W/34L) across
+        # 30 auto-tune passes, reverse never triggered. Confirmed by
+        # comparing against EMA's own block, which correctly runs its
+        # reverse rule unconditionally (only gated on data availability,
+        # not on EMA_INVERT_SIGNALS's current value) — Session's SL-mult
+        # and RR-extend rules genuinely DO need the invert-mode gate
+        # (they tune the INVERTED sizing specifically, meaningless data
+        # otherwise), but the reverse decision itself must not be gated
+        # by the very flag it's deciding whether to flip.
+        # rr passed to the reverse check depends on which mode is
+        # CURRENTLY active, since that's whose real performance is being
+        # evaluated: when inverted, SESSION_REVERSE_RR is the exact,
+        # fixed reward-per-risk (guaranteed by construction); when not
+        # inverted, there's no single fixed RR — the TP sits at the
+        # opposite range edge, a variable distance — so win_mfe_r's own
+        # average (already expressed in R-multiples via risk=abs(entry-
+        # sl), see update_session_signal_outcomes()) serves as the best
+        # available empirical stand-in for "typical reward when this
+        # side wins," the same real data already computed for the
+        # tp_extend rule below.
+        rr_for_reverse = SESSION_REVERSE_RR if SESSION_INVERT_SIGNALS else (win_mfe["avg"] if win_mfe else None)
+        if winrate is not None and closed_n and rr_for_reverse:
+            _risk_autotune_reverse("session", "session_invert_signals", SESSION_INVERT_SIGNALS, winrate, rr_for_reverse, closed_n, _set_session_invert,
+                                    avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
+        # SESSION_SL_MULT and SESSION_REVERSE_RR themselves only apply
+        # to the inverted trade's own sizing (see detect_session_
         # manipulation()) — the non-inverted TP sits at the opposite
-        # range edge, an arbitrary distance unrelated to risk, so there's
-        # no consistent "R" to tune for that side. This app's records
-        # don't currently distinguish which mode a CLOSED trade was
-        # opened under, so — same level of rigor the rest of this
+        # range edge, an arbitrary distance unrelated to risk, so
+        # there's no consistent "R" to tune for that side. This app's
+        # records don't currently distinguish which mode a CLOSED trade
+        # was opened under, so — same level of rigor the rest of this
         # already-approximate system uses — this reacts to the most
         # recent aggregate stats under the assumption the reverse flag
         # hasn't flipped recently (its own 24h cooldown makes that
         # usually true), not a per-trade-exact reconstruction.
         if SESSION_INVERT_SIGNALS:
-            if winrate is not None and closed_n:
-                _risk_autotune_reverse("session", "session_invert_signals", SESSION_INVERT_SIGNALS, winrate, SESSION_REVERSE_RR, closed_n, _set_session_invert,
-                                        avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
             if loss_mae:
                 _risk_autotune_sl_mult("session", "session_sl_mult", SESSION_SL_MULT, loss_mae["avg"], s.get("losses", 0) or 0, _set_session_sl_mult)
             if win_mfe:
