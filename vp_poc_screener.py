@@ -5428,6 +5428,71 @@ v0.99.16 - MSNR_BACKTEST_UNIVERSE_SIZE raised 10 -> 70, per direct
          out to exactly 73 with all three gold symbols still present.
          Verified with py_compile, an actual runtime start, and
          pyflakes — all clean.
+
+v0.99.17 - MSNR gains automatic live-scan promotion: a symbol from the
+         wider backtest exploration set now gets added to LIVE scanning
+         once its winning combo's win-rate/sample clear a bar, per
+         direct user request: "для монет более 50% винрейт и с выборкой
+         более 40 сигналов на бэктесте добавлять их в онлайн торговлю."
+         New MSNR_LIVE_PROMOTE_MIN_WINRATE (50%) and MSNR_LIVE_PROMOTE_
+         MIN_SAMPLE (40). Sample size deliberately checked against
+         wins+losses (closed trades), not the raw "trades" count — that
+         also includes timeouts, which say nothing about win-rate
+         reliability and would let a mostly-timing-out symbol qualify on
+         volume alone.
+         New msnr_compute_live_universe(overrides): MSNR_SYMBOLS (gold)
+         union'd with every symbol clearing both bars — a pure function
+         of the overrides dict, no locks or I/O, so it's cheap to call
+         and easy to test directly. Gold stays live unconditionally
+         regardless of its own backtest numbers, matching its existing
+         role as the floor MSNR_SYMBOLS always represents — this only
+         ever ADDS symbols on top, never removes gold.
+         msnr_backtest_loop() computes this right alongside the rest of
+         each cycle's results (same state_lock write, so live_universe
+         and backtest_results/overrides always reflect the SAME cycle,
+         never a stale mix) into a new STATE["msnr_live_universe"].
+         msnr_live_loop() now scans that instead of the static MSNR_
+         SYMBOLS constant directly — falls back to MSNR_SYMBOLS itself
+         if the backtest hasn't populated it yet (e.g. right after a
+         fresh restart), so live scanning can never end up empty.
+         Noted directly, not silently: MSNR's existing AUTOTRADE_ENABLED_
+         MSNR toggle (off by default) applies to WHATEVER gets live-
+         scanned — if a user already has it on, a newly-promoted symbol
+         starts trading real money on its very next signal, same as any
+         other live-scanned symbol. This is the natural, intended
+         consequence of "add them to live scanning," not a separate
+         decision snuck in — surfaced explicitly in the panel's own
+         header text so it's not a silent behavior change: "Автоторговля
+         MSNR (если включена) применяется ко всем монетам из живого
+         скана, включая только что квалифицированные — не только к
+         золоту."
+         api_msnr_status()'s "live" flag on each leaderboard row (the
+         green-dot indicator) switched from checking the static
+         MSNR_SYMBOLS constant to checking the dynamic live_universe —
+         it was checking the wrong thing as soon as promotion existed.
+         Panel header rewritten entirely — the old text explicitly
+         claimed "только это торгуется" (only gold trades) and
+         "автоторговля/живой скан их не касаются" (autotrade/live scan
+         don't touch the wider set), both now false; new text states
+         the promotion criteria directly and lists the actual current
+         live set.
+         Verified behaviorally at two levels: (1) msnr_compute_live_
+         universe() directly against six synthetic cases — a symbol
+         clearing both bars (promoted), clearing win-rate but not
+         sample size (rejected), clearing sample size but not win-rate
+         (rejected), clearing both but flagged with a backtest error
+         (rejected regardless of good numbers), and both non-gold and
+         gold-with-terrible-numbers cases confirming gold's
+         unconditional inclusion; (2) end-to-end through the actual
+         api_msnr_status() function with realistic STATE data, confirming
+         valid JSON (no stray Infinity — checked directly, not assumed,
+         given v0.99.12's exact incident), the promoted symbol appearing
+         in live_universe, and its leaderboard row correctly showing
+         live=true.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the extracted <script> block, the route/def
+         integrity check, and the stale-default-parameter check — all
+         clean.
 """
 
 import os
@@ -5447,7 +5512,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.16"
+APP_VERSION = "0.99.17"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6038,6 +6103,8 @@ MSNR_PARAM_GRID_QM_LOOKBACK = [4, 6, 9]
 MSNR_MIN_BACKTEST_TRADES = int(os.environ.get("VP_MSNR_MIN_BACKTEST_TRADES", 5))  # same bar as FT5_MIN_BACKTEST_TRADES/Volume's MIN_BACKTEST_TRADES — a combo with fewer trades in the window isn't a confident pick
 MSNR_RANK_PRIOR_TARGET = 1  # same role as FT5_RANK_PRIOR_TARGET — only a combo with 0 or 1 REAL observed loss gets synthetic -1R pseudo-losses blended in (guards against a small all-win sample looking falsely certain); 2+ real losses are trusted as-is
 MSNR_BACKTEST_UNIVERSE_SIZE = int(os.environ.get("VP_MSNR_BACKTEST_UNIVERSE_SIZE", 70))  # v0.99.9 — per direct user request: backtest the top-N most liquid symbols too (union'd with MSNR_SYMBOLS, so gold stays included), to see whether this signal logic generalizes beyond gold — explicitly backtest-only for now, msnr_live_loop still scans only MSNR_SYMBOLS, unchanged. Lowered 30->10 in v0.99.14 when the cycle was stuck "ещё не завершился" for a long time under sustained Gate.io rate-limiting; raised back up to 70 in v0.99.16 per direct follow-up request, now that get_candles_range() ALSO retries on 429 (v0.99.15 — it previously had its own separate, unretried request loop) and the panel shows live per-symbol progress instead of a binary done/not-done, so a longer cycle is at least visibly progressing rather than looking stuck.
+MSNR_LIVE_PROMOTE_MIN_WINRATE = float(os.environ.get("VP_MSNR_LIVE_PROMOTE_MIN_WINRATE", 50.0))  # v0.99.17 — per direct user request: a backtest-only symbol (from the wider MSNR_BACKTEST_UNIVERSE_SIZE exploration set) gets promoted into LIVE scanning once its winning combo's own closed-trade win-rate clears this bar. Union'd with MSNR_SYMBOLS (gold), never replaces it — gold stays live regardless of its own backtest numbers.
+MSNR_LIVE_PROMOTE_MIN_SAMPLE = int(os.environ.get("VP_MSNR_LIVE_PROMOTE_MIN_SAMPLE", 40))  # v0.99.17 — closed trades (wins+losses, NOT the raw "trades" count which also includes timeouts that say nothing about win-rate) needed before a symbol's win-rate is trusted enough to promote it to live scanning.
 
 # ============================================================================
 # EXPERIMENTAL: FT5 — port of freqtrade-strategies' Strategy005 (v0.96.0)
@@ -6813,6 +6880,7 @@ STATE = {
     "msnr_last_backtest_duration": None,
     "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at}
     "msnr_backtest_universe": [],  # v0.99.9 — MSNR_SYMBOLS union'd with the top-liquid backtest-only exploration set, see msnr_build_backtest_universe()
+    "msnr_live_universe": [],  # v0.99.17 — MSNR_SYMBOLS union'd with any backtest-qualifying symbol (win-rate/sample threshold), see msnr_compute_live_universe(); msnr_live_loop() scans THIS, not the static MSNR_SYMBOLS constant directly, so it stays empty (falls back to MSNR_SYMBOLS at the call site) until the first backtest cycle populates it
     "msnr_backtest_total": 0,  # v0.99.15 — progress tracking for the CURRENT (or most recent) backtest cycle, per direct user request for visibility during a long-running cycle
     "msnr_backtest_done": 0,
     "msnr_backtest_in_flight": [],  # symbols currently being fetched/optimized right now, not yet resolved
@@ -14176,11 +14244,14 @@ def msnr_build_backtest_universe():
     scan list) UNION'd with the top MSNR_BACKTEST_UNIVERSE_SIZE most
     liquid _USDT symbols by real 24h volume — same get_tickers()
     fallback-field pattern already proven correct for VGI/FT5/Session.
-    Purely exploratory, per direct user request: does this "Malaysian
-    SNR" OCL/QM-sweep signal logic generalize beyond gold, or is it
-    specific to gold's own price behavior? msnr_live_loop() still only
-    ever scans MSNR_SYMBOLS — this broader universe feeds the backtest
-    only, deliberately not wired to live scanning or autotrade yet."""
+    Explores whether this "Malaysian SNR" OCL/QM-sweep signal logic
+    generalizes beyond gold, or is specific to gold's own price
+    behavior. v0.99.17: a symbol from this wider exploration set that
+    proves itself (see msnr_compute_live_universe() below) now DOES get
+    promoted into live scanning, per direct follow-up request — this
+    function's own job (which symbols get BACKTESTED) is unchanged,
+    it's simply no longer true that live scanning stays gold-only
+    forever regardless of what the backtest finds."""
     tickers = get_tickers()
     seen_vol = {}
     for t in tickers:
@@ -14203,6 +14274,32 @@ def msnr_build_backtest_universe():
         if sym not in combined:
             combined.append(sym)
     return combined
+
+
+def msnr_compute_live_universe(overrides):
+    """MSNR_SYMBOLS (gold — always live, regardless of its own backtest
+    numbers) UNION'd with every OTHER symbol whose winning backtest
+    combo clears BOTH MSNR_LIVE_PROMOTE_MIN_WINRATE (win-rate on closed
+    trades) AND MSNR_LIVE_PROMOTE_MIN_SAMPLE (wins+losses — deliberately
+    NOT the raw "trades" count, which also includes timeouts that say
+    nothing about win-rate reliability). Per direct user request: "для
+    монет более 50% винрейт и с выборкой более 40 сигналов на бэктесте
+    добавлять их в онлайн торговлю."
+    Pure function of `overrides` (STATE["msnr_symbol_overrides"], keyed
+    by symbol) — takes no locks, does no I/O, so it's cheap to call and
+    easy to test directly against a plain dict rather than needing to
+    mock STATE or the network."""
+    promoted = list(MSNR_SYMBOLS)
+    for sym, ov in overrides.items():
+        if not ov or ov.get("error") or sym in promoted:
+            continue
+        winrate = ov.get("winrate")
+        wins = ov.get("wins", 0) or 0
+        losses = ov.get("losses", 0) or 0
+        closed_n = wins + losses
+        if winrate is not None and winrate > MSNR_LIVE_PROMOTE_MIN_WINRATE and closed_n > MSNR_LIVE_PROMOTE_MIN_SAMPLE:
+            promoted.append(sym)
+    return promoted
 
 
 def _msnr_backtest_one_symbol(symbol):
@@ -14278,6 +14375,7 @@ def msnr_backtest_loop():
                     STATE["msnr_backtest_summary"] = summary_by_symbol
                     STATE["msnr_symbol_overrides"] = overrides_by_symbol
                     STATE["msnr_backtest_universe"] = universe
+                    STATE["msnr_live_universe"] = msnr_compute_live_universe(overrides_by_symbol)
                     STATE["msnr_last_backtest_finished"] = time.time()
                     STATE["msnr_last_backtest_duration"] = round(time.time() - t0, 1)
             finally:
@@ -14303,8 +14401,18 @@ def msnr_live_loop():
             if not MSNR_ENABLED:
                 time.sleep(60)
                 continue
-            with ThreadPoolExecutor(max_workers=min(WORKERS, len(MSNR_SYMBOLS) or 1)) as ex:
-                futs = [ex.submit(msnr_scan_symbol_live, s) for s in MSNR_SYMBOLS]
+            # v0.99.17: scans STATE["msnr_live_universe"] (MSNR_SYMBOLS
+            # union'd with any backtest-qualifying symbol — see msnr_
+            # compute_live_universe()), not the static MSNR_SYMBOLS
+            # constant directly, per direct user request. Falls back to
+            # MSNR_SYMBOLS itself if the backtest hasn't populated this
+            # yet (e.g. right after a fresh restart) — gold is always
+            # correct to scan regardless of backtest state, so this
+            # fallback can't ever leave live scanning empty.
+            with state_lock:
+                live_universe = list(STATE["msnr_live_universe"]) or list(MSNR_SYMBOLS)
+            with ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe) or 1)) as ex:
+                futs = [ex.submit(msnr_scan_symbol_live, s) for s in live_universe]
                 for _ in as_completed(futs):
                     pass
             update_msnr_signal_outcomes()
@@ -15400,6 +15508,7 @@ def api_msnr_status():
         overrides = dict(STATE["msnr_symbol_overrides"])
         backtest_universe = list(STATE["msnr_backtest_universe"])
         backtest_results = dict(STATE["msnr_backtest_results"])
+        live_universe = list(STATE["msnr_live_universe"]) or list(MSNR_SYMBOLS)
         last_backtest_finished = STATE["msnr_last_backtest_finished"]
         last_backtest_duration = STATE["msnr_last_backtest_duration"]
         backtest_total = STATE["msnr_backtest_total"]
@@ -15413,7 +15522,10 @@ def api_msnr_status():
     # sample or unevenly-distributed wins/losses across RR shouldn't
     # outrank a larger, steadier combo just because its raw average
     # looks better. Symbols with an error or no result sort last.
-    ranked = [dict(v, symbol=sym, live=(sym in MSNR_SYMBOLS)) for sym, v in overrides.items() if v and not v.get("error")]
+    # v0.99.17: "live" now checks the DYNAMIC promoted set (live_universe),
+    # not the static MSNR_SYMBOLS constant — a symbol can be live because
+    # it's gold OR because it earned promotion via win-rate/sample.
+    ranked = [dict(v, symbol=sym, live=(sym in live_universe)) for sym, v in overrides.items() if v and not v.get("error")]
     ranked.sort(key=lambda r: (r.get("score") if r.get("score") is not None else -999), reverse=True)
     # v0.99.11: RR-bucket win-rate, pooled across every symbol's own
     # backtest trades — per direct user observation (SPCX: rr>6 trades
@@ -15426,6 +15538,7 @@ def api_msnr_status():
     return jsonify({
         "enabled": MSNR_ENABLED,
         "symbols": MSNR_SYMBOLS,
+        "live_universe": live_universe,
         "backtest_universe_size": len(backtest_universe),
         "last_backtest_finished": last_backtest_finished,
         "last_backtest_duration": last_backtest_duration,
@@ -15442,6 +15555,8 @@ def api_msnr_status():
             "min_leg_atr": MSNR_MIN_LEG_ATR, "qm_zone_pct": MSNR_QM_ZONE_PCT,
             "qm_lookback_bars": MSNR_QM_LOOKBACK_BARS, "backtest_days": MSNR_BACKTEST_DAYS,
             "max_rr": MSNR_MAX_RR,
+            "live_promote_min_winrate": MSNR_LIVE_PROMOTE_MIN_WINRATE,
+            "live_promote_min_sample": MSNR_LIVE_PROMOTE_MIN_SAMPLE,
             "grid_min_leg_atr": MSNR_PARAM_GRID_MIN_LEG_ATR, "grid_qm_zone_pct": MSNR_PARAM_GRID_QM_ZONE_PCT,
             "grid_qm_lookback": MSNR_PARAM_GRID_QM_LOOKBACK,
         },
@@ -17670,7 +17785,8 @@ async function refreshMsnr() {
     </div>`;
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
-      Живой скан (только это торгуется): ${(status.symbols||[]).join(', ')} · бэктест дополнительно охватывает топ-${status.backtest_universe_size||'?'} ликвидных монет (только для проверки, автоторговля/живой скан их не касаются) · структура ${cfg.structure_tf} (пивоты L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf} · мин. импульс ${cfg.min_leg_atr}×ATR, QM-зона ${(cfg.qm_zone_pct*100).toFixed(2)}%, окно ${cfg.qm_lookback_bars} баров (автотюнятся отдельно на каждую монету, см. столбец «Параметры») · <b>потолок RR ${cfg.max_rr}</b> (если реальный противоположный уровень даёт RR выше — сделка берётся с укороченным фикс. тейком вместо него; авто-тюнится по статистике ниже)<br>
+      Живой скан: ${(status.live_universe||status.symbols||[]).join(', ')} (золото — всегда; остальные — прошли квалификацию на бэктесте) · бэктест дополнительно охватывает топ-${status.backtest_universe_size||'?'} ликвидных монет · <b>квалификация в живой скан</b>: винрейт &gt;${cfg.live_promote_min_winrate}% и выборка &gt;${cfg.live_promote_min_sample} закрытых сделок · структура ${cfg.structure_tf} (пивоты L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf} · мин. импульс ${cfg.min_leg_atr}×ATR, QM-зона ${(cfg.qm_zone_pct*100).toFixed(2)}%, окно ${cfg.qm_lookback_bars} баров (автотюнятся отдельно на каждую монету, см. столбец «Параметры») · <b>потолок RR ${cfg.max_rr}</b> (если реальный противоположный уровень даёт RR выше — сделка берётся с укороченным фикс. тейком вместо него; авто-тюнится по статистике ниже)<br>
+      <span style="font-size:11px;">Автоторговля MSNR (если включена в настройках) применяется ко всем монетам из живого скана, включая только что квалифицированные — не только к золоту.</span><br>
       ${buildTxt}<br>
       ${progressBarHtml}
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0} · клик по строке — график
