@@ -5299,6 +5299,44 @@ v0.99.12 - CRITICAL FIX: the MSNR tab went completely black (empty panel,
          jsonify() call — none found; this was the only leak.
          Verified with py_compile, an actual runtime start, pyflakes,
          and the route/def integrity check — all clean.
+
+v0.99.13 - Diagnosed a direct user follow-up: gold symbols (XAU_USDT/
+         XAUT_USDT/PAXG_USDT) missing entirely from MSNR's leaderboard,
+         including their green "live" dot, after v0.99.12's fix.
+         Confirmed msnr_build_backtest_universe() itself is correct —
+         MSNR_SYMBOLS is always unioned in first, gold can't be excluded
+         by that logic. Asked directly whether the scanner's error log
+         showed any msnr_backtest XAU_USDT/XAUT_USDT/PAXG_USDT entries —
+         user checked and found none for gold specifically, but the very
+         next screenshot showed the app under heavy, ACTIVE rate-limit
+         pressure right then: 429s hitting many DIFFERENT modules
+         simultaneously (session, ft5_optimize, msnr_backtest — on BNB_
+         USDT/PROM_USDT, not gold) within the same minute.
+         Root cause identified, not just theorized: STATE["errors"] is a
+         30-entry deque, but the API only ever returned the LAST 10 of
+         it. During a burst like the one just witnessed — many symbols
+         across many modules all failing within the same short window —
+         an earlier failure (plausibly gold's own) gets pushed out of
+         the visible 10 long before the underlying 30-entry buffer would
+         have discarded it, making a real error look like "no error
+         happened" when it's actually just "scrolled out of a too-short
+         display window."
+         Fixed by showing the full 30-entry buffer instead of slicing
+         to the last 10 — a genuinely useful diagnostic improvement on
+         its own (this exact kind of ambiguity — "did X actually fail,
+         or did something else's spam just push it out of view" — has
+         come up multiple times this session), not a fix for MSNR
+         specifically. The panel's own "(N)" count label was already
+         dynamic (${errList.length}), so no separate text change needed
+         — it now correctly shows the true count instead of always
+         capping at 10.
+         Honest about scope: this doesn't confirm gold's own failure was
+         rate-limiting rather than something else — it makes the NEXT
+         occurrence (or the next few minutes, once this burst settles)
+         actually diagnosable instead of guessed at, rather than
+         claiming a root cause that wasn't directly observed this time.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         and node --check on the extracted <script> block — all clean.
 """
 
 import os
@@ -5318,7 +5356,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.12"
+APP_VERSION = "0.99.13"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14589,7 +14627,7 @@ def api_status():
             "last_scan_started": STATE["last_scan_started"],
             "last_scan_finished": STATE["last_scan_finished"],
             "last_scan_duration": STATE["last_scan_duration"],
-            "errors": list(STATE["errors"])[-10:],
+            "errors": list(STATE["errors"]),
             "stats": stats,
             "auto_tune": {
                 "enabled": AUTO_TUNE_ENABLED,
