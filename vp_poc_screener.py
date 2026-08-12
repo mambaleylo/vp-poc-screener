@@ -5178,6 +5178,17 @@ v0.99.10 - CRITICAL FIX: MSNR's chart modal showed "подтверждённог
          Verified with py_compile, an actual runtime start, pyflakes,
          the route/def integrity check, and the stale-default-parameter
          check — all clean.
+         Also added, per direct user follow-up before pushing: an exit
+         marker (a dot at the SL or TP price, on the candle where the
+         trade actually closed, colored green WIN / red LOSS) alongside
+         the existing entry marker — MSNR's chart previously only ever
+         marked entry, unlike VGI's own chart (openVgiChart/
+         drawVgiChart), which this mirrors exactly for consistency.
+         Reused the existing shared drawEntryMarker() and findCandleIndex()
+         helpers rather than adding new ones — findCandleIndex() already
+         finds the nearest candle rather than requiring an exact time
+         match, so no special-casing was needed for exit_time not
+         landing precisely on a candle boundary.
 """
 
 import os
@@ -17408,6 +17419,18 @@ function drawMsnrChart(data) {
     const entryIdx = findCandleIndex(candles, sig.time);
     if (entryIdx >= 0) {
       drawEntryMarker(ctx, entryIdx * slot + slot / 2, yP(sig.entry), '#5aa8ff');
+    }
+    // Exit marker — a dot at the SL or TP price, on the candle where the
+    // trade actually closed, colored by outcome (green WIN / red LOSS).
+    // Same shared drawEntryMarker() shape as the entry dot above, just at
+    // a different point — matches the exit-marker pattern VGI's own
+    // chart already uses (openVgiChart/drawVgiChart).
+    if (data.exit_time && data.exit_price !== null && data.exit_price !== undefined) {
+      const exitIdx = findCandleIndex(candles, data.exit_time);
+      if (exitIdx >= 0) {
+        const exitColor = data.result === 'WIN' ? '#3ddc97' : (data.result === 'LOSS' ? '#ff6b6b' : '#e0a030');
+        drawEntryMarker(ctx, exitIdx * slot + slot / 2, yP(data.exit_price), exitColor);
+      }
     }
   }
 
