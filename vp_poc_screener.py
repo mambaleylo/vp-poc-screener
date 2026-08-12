@@ -5357,6 +5357,63 @@ v0.99.14 - MSNR_BACKTEST_UNIVERSE_SIZE lowered 30 -> 10, per direct
          gold symbols present).
          Verified with py_compile, an actual runtime start, and
          pyflakes — all clean.
+
+v0.99.15 - Two things, per direct user follow-up after the backtest
+         eventually completed but took much longer than before: (1)
+         investigate where the real bottleneck is, (2) add a progress
+         bar for MSNR specifically — symbol-loading progress and overall
+         status, not just a binary "завершился/не завершился".
+         Investigation: confirmed msnr_optimize_symbol() does NOT
+         re-fetch candles per grid-search combo (candles fetched ONCE
+         per symbol, msnr_run_backtest() is pure CPU per combo — the
+         function's own docstring already documented this correctly,
+         verified it still matches the actual code). Found a real,
+         separate gap instead: get_candles_range() — used for MSNR's
+         structure/entry candles (and session's multi-week backtests,
+         and the "magnified profile" data) — has its OWN request loop,
+         entirely separate from get_candles(), and NEVER got the 429-
+         retry fix from v0.99.8. A multi-day range fetch needs several
+         paginated chunk requests (chunk_points=900 per request), and
+         previously ANY single chunk hitting a 429 aborted the WHOLE
+         symbol's fetch with zero retry — unlike get_candles()'s own
+         single-shot fetches, which already retry generously. Checked
+         honestly before claiming it as THE root cause: an unretried
+         429 fails FAST, not slow, so this alone doesn't explain a
+         multi-minute hang — but it's a real, separate reliability gap
+         worth closing regardless, and under the currently-confirmed
+         heavy concurrent rate-limit pressure across many modules, it
+         meaningfully increases how often a symbol's fetch fails outright
+         rather than gracefully retrying through it.
+         Fixed by applying the identical 429-retry-with-backoff logic
+         (GET_CANDLES_RATE_LIMIT_RETRIES, GET_CANDLES_RATE_LIMIT_DELAY,
+         Retry-After header support) to get_candles_range()'s chunk
+         loop. Verified behaviorally with realistic current timestamps
+         (an earlier attempt using stale hardcoded 2023-era timestamps
+         silently short-circuited via the function's own "too old, don't
+         even try" clamp — caught and corrected before trusting a false
+         negative): two consecutive 429s followed by success now
+         succeeds; a permanently-429ing endpoint still fails cleanly
+         after exhausting its budget (4 total attempts) rather than
+         hanging forever.
+         Progress bar: new STATE fields (msnr_backtest_total/_done/
+         _in_flight/_running/_started_at) updated live as each symbol
+         resolves — _msnr_backtest_one_symbol() marks itself "in flight"
+         on start and removes itself (via try/finally, so this can't
+         leak even on an exception) on completion. msnr_backtest_loop()
+         itself wraps its whole cycle body in try/finally too, so
+         "running" always clears even if the cycle dies partway through
+         (e.g. msnr_build_backtest_universe() itself failing) — a stale
+         "still running" flag left on after a real failure would be
+         worse than the original "no detail" problem this is meant to
+         fix. api_msnr_status() exposes all of this; the panel now shows
+         a live percentage bar plus which symbols are currently being
+         fetched (up to 6 named, "+N" for the rest), and the status text
+         switches between "выполняется: X/Y монет · идёт Zс" while
+         running and the existing last-finished text once done.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the extracted <script> block, the route/def
+         integrity check, and the stale-default-parameter check — all
+         clean.
 """
 
 import os
@@ -5376,7 +5433,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.14"
+APP_VERSION = "0.99.15"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6742,6 +6799,11 @@ STATE = {
     "msnr_last_backtest_duration": None,
     "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at}
     "msnr_backtest_universe": [],  # v0.99.9 — MSNR_SYMBOLS union'd with the top-liquid backtest-only exploration set, see msnr_build_backtest_universe()
+    "msnr_backtest_total": 0,  # v0.99.15 — progress tracking for the CURRENT (or most recent) backtest cycle, per direct user request for visibility during a long-running cycle
+    "msnr_backtest_done": 0,
+    "msnr_backtest_in_flight": [],  # symbols currently being fetched/optimized right now, not yet resolved
+    "msnr_backtest_running": False,
+    "msnr_backtest_started_at": None,
     # EXPERIMENTAL FT5 (port of freqtrade's Strategy005, v0.96.0) — see
     # that module's own header comment. All keys prefixed ft5_.
     "ft5_universe": [],
@@ -9777,6 +9839,7 @@ def get_candles_range(symbol, interval, start_ts, end_ts):
     end_ts = int(end_ts)
     while cur < end_ts:
         net_attempt = 0
+        rate_limit_attempt = 0
         while True:
             chunk_span = interval_sec * chunk_points
             chunk_end = min(cur + chunk_span, end_ts)
@@ -9786,6 +9849,32 @@ def get_candles_range(symbol, interval, start_ts, end_ts):
                     params={"contract": symbol, "interval": interval, "from": cur, "to": chunk_end},
                     timeout=HTTP_TIMEOUT,
                 )
+                # v0.99.15 — same 429-retry gap get_candles() already had
+                # fixed in v0.99.8, missed here: this function has its OWN
+                # separate request loop, so that fix never covered it.
+                # Found while investigating a direct report of MSNR's
+                # backtest taking far longer than before — a multi-chunk
+                # range fetch (this function, used for MSNR's structure/
+                # entry candles, session's multi-week backtests, and the
+                # "magnified profile" data) previously failed a WHOLE
+                # symbol's fetch on the very first 429 hit on ANY chunk,
+                # with zero retry, unlike get_candles()'s own single-shot
+                # fetches which already retry generously. Checked before
+                # applying: doesn't explain a multi-minute HANG on its own
+                # (an unretried 429 fails FAST, not slow) — but it's a
+                # real, separate gap worth closing regardless, and
+                # combined with genuinely heavy concurrent rate-limit
+                # pressure across many modules at once, still meaningfully
+                # increases how often a symbol's fetch fails outright.
+                if r.status_code == 429 and rate_limit_attempt < GET_CANDLES_RATE_LIMIT_RETRIES:
+                    retry_after = r.headers.get("Retry-After")
+                    try:
+                        delay = float(retry_after) if retry_after else GET_CANDLES_RATE_LIMIT_DELAY * (2 ** rate_limit_attempt)
+                    except ValueError:
+                        delay = GET_CANDLES_RATE_LIMIT_DELAY * (2 ** rate_limit_attempt)
+                    rate_limit_attempt += 1
+                    time.sleep(delay)
+                    continue
                 r.raise_for_status()
                 break
             except requests.exceptions.HTTPError as e:
@@ -14114,13 +14203,26 @@ def _msnr_backtest_one_symbol(symbol):
     here is the other half of that same fix, applied proactively rather
     than waiting for a live report to force it. Exceptions are caught
     here (not propagated) so one bad/slow symbol can't take down the
-    whole batch, matching every other per-symbol worker in this app."""
+    whole batch, matching every other per-symbol worker in this app.
+    v0.99.15: marks itself "in flight" in STATE for the duration of its
+    own work, so the panel's progress bar can show which symbols are
+    currently being fetched/optimized right now, not just a done/total
+    count — per direct user request for visibility into exactly this
+    kind of long-running cycle, after a report that a cycle appeared
+    stuck with no way to tell what was actually happening."""
+    with state_lock:
+        STATE["msnr_backtest_in_flight"].append(symbol)
     try:
         override, results = msnr_optimize_symbol(symbol)
         return symbol, override, results, msnr_summarize_backtest(results)
     except Exception as e:
         log_error(f"msnr_backtest {symbol}: {e}")
         return None
+    finally:
+        with state_lock:
+            if symbol in STATE["msnr_backtest_in_flight"]:
+                STATE["msnr_backtest_in_flight"].remove(symbol)
+            STATE["msnr_backtest_done"] += 1
 
 
 def msnr_backtest_loop():
@@ -14134,29 +14236,48 @@ def msnr_backtest_loop():
             results_by_symbol = {}
             summary_by_symbol = {}
             overrides_by_symbol = {}
-            # Autotune (v0.99.5): grid-search each symbol's own
-            # (min_leg_atr, qm_zone_pct, qm_lookback) instead of always
-            # backtesting the module-default params — see msnr_optimize_
-            # symbol()'s own docstring. The winning combo's trades ARE
-            # the backtest shown/drilled-into in the UI; no separate
-            # un-tuned backtest run needed.
-            with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
-                futs = [ex.submit(_msnr_backtest_one_symbol, s) for s in universe]
-                for fut in as_completed(futs):
-                    res = fut.result()
-                    if res is None:
-                        continue
-                    symbol, override, results, summary = res
-                    overrides_by_symbol[symbol] = override
-                    results_by_symbol[symbol] = results
-                    summary_by_symbol[symbol] = summary
             with state_lock:
-                STATE["msnr_backtest_results"] = results_by_symbol
-                STATE["msnr_backtest_summary"] = summary_by_symbol
-                STATE["msnr_symbol_overrides"] = overrides_by_symbol
-                STATE["msnr_backtest_universe"] = universe
-                STATE["msnr_last_backtest_finished"] = time.time()
-                STATE["msnr_last_backtest_duration"] = round(time.time() - t0, 1)
+                STATE["msnr_backtest_total"] = len(universe)
+                STATE["msnr_backtest_done"] = 0
+                STATE["msnr_backtest_in_flight"] = []
+                STATE["msnr_backtest_running"] = True
+                STATE["msnr_backtest_started_at"] = t0
+            try:
+                # Autotune (v0.99.5): grid-search each symbol's own
+                # (min_leg_atr, qm_zone_pct, qm_lookback) instead of always
+                # backtesting the module-default params — see msnr_optimize_
+                # symbol()'s own docstring. The winning combo's trades ARE
+                # the backtest shown/drilled-into in the UI; no separate
+                # un-tuned backtest run needed.
+                with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
+                    futs = [ex.submit(_msnr_backtest_one_symbol, s) for s in universe]
+                    for fut in as_completed(futs):
+                        res = fut.result()
+                        if res is None:
+                            continue
+                        symbol, override, results, summary = res
+                        overrides_by_symbol[symbol] = override
+                        results_by_symbol[symbol] = results
+                        summary_by_symbol[symbol] = summary
+                with state_lock:
+                    STATE["msnr_backtest_results"] = results_by_symbol
+                    STATE["msnr_backtest_summary"] = summary_by_symbol
+                    STATE["msnr_symbol_overrides"] = overrides_by_symbol
+                    STATE["msnr_backtest_universe"] = universe
+                    STATE["msnr_last_backtest_finished"] = time.time()
+                    STATE["msnr_last_backtest_duration"] = round(time.time() - t0, 1)
+            finally:
+                # v0.99.15 — always clears "running" even if the cycle
+                # above raised partway through (e.g. msnr_build_backtest_
+                # universe() itself failing), per direct user request for
+                # a progress indicator: a stale "running" flag left on
+                # after a genuine failure would be worse than the
+                # original "не завершился, no detail" problem it's meant
+                # to fix — it would show 100% confident progress on a
+                # cycle that already died.
+                with state_lock:
+                    STATE["msnr_backtest_running"] = False
+                    STATE["msnr_backtest_in_flight"] = []
         except Exception as e:
             log_error(f"msnr_backtest_loop: {e}")
         time.sleep(max(300, MSNR_REFRESH_SEC))
@@ -15267,6 +15388,11 @@ def api_msnr_status():
         backtest_results = dict(STATE["msnr_backtest_results"])
         last_backtest_finished = STATE["msnr_last_backtest_finished"]
         last_backtest_duration = STATE["msnr_last_backtest_duration"]
+        backtest_total = STATE["msnr_backtest_total"]
+        backtest_done = STATE["msnr_backtest_done"]
+        backtest_in_flight = list(STATE["msnr_backtest_in_flight"])
+        backtest_running = STATE["msnr_backtest_running"]
+        backtest_started_at = STATE["msnr_backtest_started_at"]
     # Ranked by msnr_ranking_score() (a lower-confidence-bound on mean R,
     # v0.99.5 — see msnr_ranking_score()'s own docstring), not raw
     # win-rate — same reasoning as FT5's api_ft5_status(): a lucky small
@@ -15289,6 +15415,11 @@ def api_msnr_status():
         "backtest_universe_size": len(backtest_universe),
         "last_backtest_finished": last_backtest_finished,
         "last_backtest_duration": last_backtest_duration,
+        "backtest_running": backtest_running,
+        "backtest_total": backtest_total,
+        "backtest_done": backtest_done,
+        "backtest_in_flight": backtest_in_flight,
+        "backtest_started_at": backtest_started_at,
         "signals_stats": compute_msnr_signal_stats(),
         "rr_buckets": rr_buckets,
         "config": {
@@ -17503,9 +17634,21 @@ async function refreshMsnr() {
   const cfg = status.config || {};
   const ss = status.signals_stats || {};
   const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
-  const buildTxt = status.last_backtest_finished
-    ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s)`
-    : 'бэктест ещё не завершился';
+  const buildTxt = status.backtest_running
+    ? `бэктест выполняется: ${status.backtest_done||0}/${status.backtest_total||'?'} монет${status.backtest_started_at ? ' · идёт ' + Math.round((Date.now()/1000 - status.backtest_started_at)) + 'с' : ''}`
+    : (status.last_backtest_finished
+      ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s)`
+      : 'бэктест ещё не запускался');
+  const progressPct = status.backtest_total ? Math.round((status.backtest_done||0) / status.backtest_total * 100) : 0;
+  const progressBarHtml = status.backtest_running ? `
+    <div style="margin:6px 0 8px;">
+      <div style="background:#1c2433;border-radius:6px;height:8px;overflow:hidden;">
+        <div style="background:#3ddc97;height:100%;width:${progressPct}%;transition:width 0.4s;"></div>
+      </div>
+      <div class="dim" style="font-size:11px;margin-top:3px;">
+        ${progressPct}% · сейчас: ${(status.backtest_in_flight||[]).slice(0,6).join(', ') || '—'}${(status.backtest_in_flight||[]).length > 6 ? ` +${status.backtest_in_flight.length-6}` : ''}
+      </div>
+    </div>` : '';
   const warnHtml = `
     <div style="background:#2a1f0e;border:1px solid #e0a030;border-radius:10px;padding:10px 14px;margin-bottom:12px;">
       <b style="color:#e0a030;">⚠️ Экспериментально</b><br>
@@ -17515,6 +17658,7 @@ async function refreshMsnr() {
     <div class="dim" style="margin-bottom:8px;">
       Живой скан (только это торгуется): ${(status.symbols||[]).join(', ')} · бэктест дополнительно охватывает топ-${status.backtest_universe_size||'?'} ликвидных монет (только для проверки, автоторговля/живой скан их не касаются) · структура ${cfg.structure_tf} (пивоты L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf} · мин. импульс ${cfg.min_leg_atr}×ATR, QM-зона ${(cfg.qm_zone_pct*100).toFixed(2)}%, окно ${cfg.qm_lookback_bars} баров (автотюнятся отдельно на каждую монету, см. столбец «Параметры») · <b>потолок RR ${cfg.max_rr}</b> (если реальный противоположный уровень даёт RR выше — сделка берётся с укороченным фикс. тейком вместо него; авто-тюнится по статистике ниже)<br>
       ${buildTxt}<br>
+      ${progressBarHtml}
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0} · клик по строке — график
     </div>`;
   const rrBuckets = status.rr_buckets || [];
