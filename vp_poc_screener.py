@@ -4890,6 +4890,65 @@ v0.99.4 - CRITICAL FIX: MSNR TP could land on the wrong side of entry —
          asserting the resulting signal's tp is no longer the invalid
          stale level and is correctly falls back to fixed RR on the
          right side of entry — both pass. py_compile clean.
+
+v0.99.5 - MSNR: added autotune, per direct user request ("можно какой-то
+         автотюнинг сделать для улучшения результатов? Какие параметры
+         можно перебирать"). Same grid-search + confidence-bound-scoring
+         shape this app already uses for FT5 (ft5_optimize_symbol()/
+         ft5_ranking_score()) and, going further back, Volume's own
+         PARAM_GRID_* optimizer — adapted from "% pnl" to "R multiple"
+         since MSNR trades don't have a fixed stoploss %: each trade's
+         reward is whatever the paired opposite OCL level happens to be,
+         so results compare in R (risk-normalized), not raw price %.
+         Grid: MSNR_PARAM_GRID_MIN_LEG_ATR (1.5/2.5/3.5 — how big an
+         impulse counts as a real A/V leg) x MSNR_PARAM_GRID_QM_ZONE_PCT
+         (0.3/0.6/1.0% — how close price must get to "be testing" a
+         level) x MSNR_PARAM_GRID_QM_LOOKBACK (4/6/9 bars — how many
+         bars the sweep+reject cluster can span), 27 combos. Left
+         MSNR_STRUCTURE_TF/MSNR_ENTRY_TF and MSNR_SL_BUFFER_PCT out of
+         the grid — timeframes would mean re-fetching different candles
+         per combo (expensive, 27x the network calls), and the SL
+         buffer only nudges risk size, not the actual mechanism.
+         New msnr_optimize_symbol(): fetches candles ONCE per symbol,
+         then msnr_run_backtest() (extracted from the old msnr_
+         backtest_symbol(), now a thin fetch-then-delegate wrapper) runs
+         all 27 combos as pure CPU — same cost shape as FT5's 36-combo
+         search. New msnr_ranking_score(): lower-confidence-bound on
+         mean R (mean - t_critical*stderr), with max(0,
+         MSNR_RANK_PRIOR_TARGET - losses_count) synthetic -1R pseudo-
+         losses blended in — same technique as ft5_ranking_score() but
+         simpler, since MSNR's structural loss is already exactly -1R
+         by construction (no stoploss_pct lookup needed, unlike FT5).
+         Winning combo per symbol stored in STATE["msnr_symbol_
+         overrides"] (persisted, mirrors ft5_symbol_overrides) and used
+         by BOTH msnr_scan_symbol_live() (via new msnr_symbol_params()
+         helper) and api_msnr_chart() — the chart now always reflects
+         the exact params that actually produced whatever signal it's
+         showing, not the module defaults. api_msnr_status()'s "top"
+         list now ranks by score (not raw win-rate) and carries each
+         symbol's winning params. Falls back to the middle of the grid
+         if no combo clears MSNR_MIN_BACKTEST_TRADES closed trades,
+         same as FT5's insufficient-data fallback, with a visible note
+         in the UI.
+         Frontend: backtest table gains Score and Параметры columns
+         (per-symbol tuned min-leg-ATR/QM-zone/QM-lookback, plus a ⚠️
+         note when a symbol fell back to grid-middle defaults).
+         Also fixed, found while touching this code path: msnr_signals
+         was being read back from state.json on load_state() but never
+         actually assigned into STATE — every MSNR live signal was lost
+         on every server restart since the tab shipped in v0.99.0. Now
+         assigned like every other module's signal deque.
+         Verified: msnr_ranking_score() reproduces the same qualitative
+         effect FT5's fix was built for — a small all-win sample (n=2,
+         raw mean 11.0) scored LOWER (1.66) than a larger sample with
+         real losses mixed in (n=8, 3L, raw mean only 4.625) scored
+         HIGHER (2.79), confirming the confidence-bound correctly
+         penalizes the lucky-small-sample case. msnr_optimize_symbol()
+         exercised end-to-end against a mocked candle fetcher, correctly
+         falling back to grid-middle defaults with a note when the
+         synthetic data didn't produce enough closed trades per combo.
+         py_compile, node --check on the extracted <script> block, and
+         the route/def integrity check — all clean.
 """
 
 import os
@@ -4909,7 +4968,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.4"
+APP_VERSION = "0.99.5"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5478,6 +5537,26 @@ MSNR_BACKTEST_DAYS = int(os.environ.get("VP_MSNR_BACKTEST_DAYS", 30))
 MSNR_SIGNAL_HISTORY = 200
 MSNR_REFRESH_SEC = int(os.environ.get("VP_MSNR_REFRESH_SEC", 3600))
 MSNR_SCAN_INTERVAL_SEC = int(os.environ.get("VP_MSNR_SCAN_INTERVAL_SEC", 300))
+# Autotune (v0.99.5), per direct user request — same grid-search +
+# confidence-bound-scoring shape as FT5's ft5_optimize_symbol()/
+# ft5_ranking_score(), adapted from "% pnl" to "R multiple" since MSNR
+# trades don't have a fixed stoploss %: each trade's reward is whatever
+# the paired opposite OCL level happens to be, so results are compared
+# in R (risk-normalized) rather than raw price % — a trade's OWN rr on
+# a win, -1R on a loss (structural: the position is sized to lose
+# exactly 1R at the stop by construction), TIMEOUTs excluded (no real
+# outcome to score). Grid covers the 3 params most likely to move
+# results: how big an impulse counts as a real A/V leg, how close price
+# must get to "be testing" a level, and how many bars the QM sweep+
+# reject cluster can span. Left MSNR_STRUCTURE_TF/MSNR_ENTRY_TF and
+# MSNR_SL_BUFFER_PCT out of the grid — changing timeframes means
+# re-fetching different candles per combo (expensive), and the SL
+# buffer only nudges risk size, not the actual mechanism being tested.
+MSNR_PARAM_GRID_MIN_LEG_ATR = [1.5, 2.5, 3.5]
+MSNR_PARAM_GRID_QM_ZONE_PCT = [0.003, 0.006, 0.010]
+MSNR_PARAM_GRID_QM_LOOKBACK = [4, 6, 9]
+MSNR_MIN_BACKTEST_TRADES = int(os.environ.get("VP_MSNR_MIN_BACKTEST_TRADES", 5))  # same bar as FT5_MIN_BACKTEST_TRADES/Volume's MIN_BACKTEST_TRADES — a combo with fewer trades in the window isn't a confident pick
+MSNR_RANK_PRIOR_TARGET = 1  # same role as FT5_RANK_PRIOR_TARGET — only a combo with 0 or 1 REAL observed loss gets synthetic -1R pseudo-losses blended in (guards against a small all-win sample looking falsely certain); 2+ real losses are trusted as-is
 
 # ============================================================================
 # EXPERIMENTAL: FT5 — port of freqtrade-strategies' Strategy005 (v0.96.0)
@@ -6243,6 +6322,7 @@ STATE = {
     "msnr_backtest_summary": {},
     "msnr_last_backtest_finished": None,
     "msnr_last_backtest_duration": None,
+    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at}
     # EXPERIMENTAL FT5 (port of freqtrade's Strategy005, v0.96.0) — see
     # that module's own header comment. All keys prefixed ft5_.
     "ft5_universe": [],
@@ -10828,6 +10908,7 @@ def save_state():
                 "session_ny_signals": list(STATE["session_ny_signals"]),
                 "xau_lg_signals": list(STATE["xau_lg_signals"]),
                 "msnr_signals": list(STATE["msnr_signals"]),
+                "msnr_symbol_overrides": STATE["msnr_symbol_overrides"],
                 "ft5_signals": list(STATE["ft5_signals"]),
                 "ft5_symbol_overrides": STATE["ft5_symbol_overrides"],
                 "vgi_signals": list(STATE["vgi_signals"]),
@@ -10939,6 +11020,7 @@ def load_state():
         session_ny_signals = data.get("session_ny_signals", [])
         xau_lg_signals = data.get("xau_lg_signals", [])
         msnr_signals = data.get("msnr_signals", [])
+        msnr_symbol_overrides = data.get("msnr_symbol_overrides", {})
         ft5_signals = data.get("ft5_signals", [])
         ft5_symbol_overrides = data.get("ft5_symbol_overrides", {})
         vgi_signals = data.get("vgi_signals", [])
@@ -10954,6 +11036,8 @@ def load_state():
             STATE["session_signals"] = deque(_backfill_mfe_mae(session_signals), maxlen=SESSION_SIGNAL_HISTORY)
             STATE["session_ny_signals"] = deque(session_ny_signals, maxlen=SESSION_NY_SIGNAL_HISTORY)
             STATE["xau_lg_signals"] = deque(xau_lg_signals, maxlen=XAU_LG_SIGNAL_HISTORY)
+            STATE["msnr_signals"] = deque(msnr_signals, maxlen=MSNR_SIGNAL_HISTORY)
+            STATE["msnr_symbol_overrides"] = msnr_symbol_overrides
             STATE["ft5_signals"] = deque(_backfill_mfe_mae(ft5_signals), maxlen=FT5_SIGNAL_HISTORY)
             STATE["ft5_symbol_overrides"] = ft5_symbol_overrides
             STATE["vgi_signals"] = deque(_backfill_mfe_mae(vgi_signals), maxlen=VGI_SIGNAL_HISTORY)
@@ -13062,20 +13146,15 @@ def msnr_track_outcome(entry_candles, sig, max_wait_bars=300):
     return "TIMEOUT", None
 
 
-def msnr_backtest_symbol(symbol, days=MSNR_BACKTEST_DAYS):
-    """Fetches MSNR_BACKTEST_DAYS of both MSNR_STRUCTURE_TF and MSNR_
-    ENTRY_TF history and runs the detector + outcome tracker over the
-    whole window. Structure candles are fetched with extra lookback
-    (structure TF is coarser, so this stays cheap) so the earliest
-    entry-TF bars already have a real A/V pair to test against."""
-    now = time.time()
-    structure_start = now - (days + 20) * 86400
-    structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, now)
-    entry_start = now - days * 86400
-    entry_candles = get_candles_range(symbol, MSNR_ENTRY_TF, entry_start, now)
-    if len(structure_candles) < MSNR_ATR_PERIOD + 10 or len(entry_candles) < 10:
-        return []
-    sigs, _pivots = msnr_detect_signals(structure_candles, entry_candles)
+def msnr_run_backtest(structure_candles, entry_candles, **params):
+    """Runs msnr_detect_signals(**params) + msnr_track_outcome() over the
+    result and returns the full per-trade list (time/direction/entry/sl/
+    tp/level/rr/result). The shared core behind both a plain single-
+    params backtest and msnr_optimize_symbol()'s grid search — params
+    are whichever of msnr_detect_signals()'s own kwargs (min_leg_atr,
+    qm_zone_pct, qm_lookback, ...) the caller wants to override; anything
+    not given keeps msnr_detect_signals()'s own module-default."""
+    sigs, _pivots = msnr_detect_signals(structure_candles, entry_candles, **params)
     results = []
     for sig in sigs:
         result, exit_time = msnr_track_outcome(entry_candles, sig)
@@ -13090,6 +13169,125 @@ def msnr_backtest_symbol(symbol, days=MSNR_BACKTEST_DAYS):
             "result": result, "exit_time": exit_time, "rr": rr,
         })
     return results
+
+
+def msnr_backtest_symbol(symbol, days=MSNR_BACKTEST_DAYS, **params):
+    """Fetches MSNR_BACKTEST_DAYS of both MSNR_STRUCTURE_TF and MSNR_
+    ENTRY_TF history and runs msnr_run_backtest() over the whole window.
+    Structure candles are fetched with extra lookback (structure TF is
+    coarser, so this stays cheap) so the earliest entry-TF bars already
+    have a real A/V pair to test against. Accepts the same param
+    overrides as msnr_detect_signals — used both for a plain module-
+    defaults backtest and, via msnr_optimize_symbol(), a specific
+    symbol's autotuned params."""
+    now = time.time()
+    structure_start = now - (days + 20) * 86400
+    structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, now)
+    entry_start = now - days * 86400
+    entry_candles = get_candles_range(symbol, MSNR_ENTRY_TF, entry_start, now)
+    if len(structure_candles) < MSNR_ATR_PERIOD + 10 or len(entry_candles) < 10:
+        return []
+    return msnr_run_backtest(structure_candles, entry_candles, **params)
+
+
+def msnr_ranking_score(r_values, losses_count, z=None):
+    """Lower-confidence-bound on mean R — same technique and reasoning as
+    ft5_ranking_score() (see that function's own docstring for the full
+    multi-iteration story of why raw mean/avg_pnl isn't enough), adapted
+    from "% pnl" to "R multiple": score = mean - t_critical * stderr,
+    with max(0, MSNR_RANK_PRIOR_TARGET - losses_count) synthetic -1R
+    pseudo-losses blended in first. MSNR's structural loss is already
+    exactly -1R by construction (the stop defines what 1R even means),
+    so — unlike FT5, which needed a lookup at its fixed stoploss_pct —
+    the prior needs no external lookup at all. Guards a small all-win
+    combo (a handful of lucky signals, zero real losses YET) from
+    outranking a larger, steadier one purely because it hasn't happened
+    to lose yet; 2+ real losses are trusted as-is."""
+    n = len(r_values) if r_values else 0
+    if n == 0:
+        return -999
+    prior_n = max(0, MSNR_RANK_PRIOR_TARGET - losses_count)
+    prior_r = r_values + [-1.0] * prior_n
+    pn = len(prior_r)
+    mean = sum(prior_r) / pn
+    if pn < 2:
+        return mean
+    zz = z if z is not None else t_critical(pn - 1)
+    var = sum((r - mean) ** 2 for r in prior_r) / (pn - 1)
+    stderr = math.sqrt(var) / math.sqrt(pn)
+    return mean - zz * stderr
+
+
+def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
+    """Grid search over (min_leg_atr, qm_zone_pct, qm_lookback) —
+    MSNR_PARAM_GRID_MIN_LEG_ATR x MSNR_PARAM_GRID_QM_ZONE_PCT x
+    MSNR_PARAM_GRID_QM_LOOKBACK, 27 combos. Candles fetched ONCE per
+    symbol; msnr_run_backtest() is pure CPU per combo (no network calls
+    inside the grid loop), same cost shape as ft5_optimize_symbol()'s
+    36-combo search. Selected by msnr_ranking_score() rather than raw
+    win-rate or avg_rr, for the same reason FT5 needed it: a lucky small
+    sample, or wins/losses landing unevenly across RR, shouldn't
+    outrank a larger steadier combo just because its raw average looks
+    higher. Falls back to the middle of the grid (~module defaults) if
+    no combo clears MSNR_MIN_BACKTEST_TRADES closed trades.
+    Returns (override_dict, trades_list) — the trades_list IS the
+    winning combo's backtest, reused directly for display rather than
+    re-run afterward."""
+    now = time.time()
+    structure_start = now - (days + 20) * 86400
+    structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, now)
+    entry_start = now - days * 86400
+    entry_candles = get_candles_range(symbol, MSNR_ENTRY_TF, entry_start, now)
+    if len(structure_candles) < MSNR_ATR_PERIOD + 10 or len(entry_candles) < 10:
+        return {"error": "not enough history"}, []
+    best = None
+    best_score = None
+    best_results = []
+    tried = []
+    for min_leg_atr in MSNR_PARAM_GRID_MIN_LEG_ATR:
+        for qm_zone_pct in MSNR_PARAM_GRID_QM_ZONE_PCT:
+            for qm_lookback in MSNR_PARAM_GRID_QM_LOOKBACK:
+                results = msnr_run_backtest(structure_candles, entry_candles,
+                                             min_leg_atr=min_leg_atr, qm_zone_pct=qm_zone_pct,
+                                             qm_lookback=qm_lookback)
+                tried.append(len(results))
+                closed = [r for r in results if r["result"] in ("WIN", "LOSS")]
+                if len(closed) < MSNR_MIN_BACKTEST_TRADES:
+                    continue
+                wins = sum(1 for r in closed if r["result"] == "WIN")
+                losses_count = len(closed) - wins
+                r_values = [r["rr"] for r in closed if r["result"] == "WIN" and r["rr"] is not None]
+                r_values += [-1.0] * losses_count
+                score = msnr_ranking_score(r_values, losses_count)
+                if best is None or score > best_score:
+                    summary = msnr_summarize_backtest(results)
+                    best = {
+                        "min_leg_atr": min_leg_atr, "qm_zone_pct": qm_zone_pct, "qm_lookback_bars": qm_lookback,
+                        "trades": len(results), "wins": wins, "losses": losses_count,
+                        "timeouts": len(results) - len(closed),
+                        "winrate": summary["win_rate"], "avg_rr": summary["avg_rr"],
+                        "median_rr": summary["median_rr"], "expectancy_r": summary["expectancy_r"],
+                        "score": round(score, 4), "optimized_at": now, "candles_used": len(entry_candles),
+                    }
+                    best_score = score
+                    best_results = results
+    if best is None:
+        mid_atr = MSNR_PARAM_GRID_MIN_LEG_ATR[len(MSNR_PARAM_GRID_MIN_LEG_ATR) // 2]
+        mid_zone = MSNR_PARAM_GRID_QM_ZONE_PCT[len(MSNR_PARAM_GRID_QM_ZONE_PCT) // 2]
+        mid_lookback = MSNR_PARAM_GRID_QM_LOOKBACK[len(MSNR_PARAM_GRID_QM_LOOKBACK) // 2]
+        best_results = msnr_run_backtest(structure_candles, entry_candles,
+                                          min_leg_atr=mid_atr, qm_zone_pct=mid_zone, qm_lookback=mid_lookback)
+        combos = len(MSNR_PARAM_GRID_MIN_LEG_ATR) * len(MSNR_PARAM_GRID_QM_ZONE_PCT) * len(MSNR_PARAM_GRID_QM_LOOKBACK)
+        best = {
+            "min_leg_atr": mid_atr, "qm_zone_pct": mid_zone, "qm_lookback_bars": mid_lookback,
+            "trades": len(best_results), "wins": 0, "losses": 0, "timeouts": 0,
+            "winrate": None, "avg_rr": None, "median_rr": None, "expectancy_r": None, "score": None,
+            "optimized_at": now, "candles_used": len(entry_candles),
+            "note": f"insufficient closed trades across all {combos} combos tried "
+                    f"(max {max(tried) if tried else 0}, need {MSNR_MIN_BACKTEST_TRADES}); "
+                    f"using middle-of-grid defaults",
+        }
+    return best, best_results
 
 
 def msnr_summarize_backtest(results):
@@ -13126,16 +13324,36 @@ _msnr_signal_cooldowns = {}  # symbol -> last signaled entry-candle time
 _msnr_signal_cooldowns_lock = threading.Lock()
 
 
+def msnr_symbol_params(symbol):
+    """This symbol's autotuned (min_leg_atr, qm_zone_pct, qm_lookback)
+    from STATE["msnr_symbol_overrides"], falling back to the module
+    defaults for any not yet optimized (or for a symbol whose optimize
+    run errored, e.g. not enough history yet) — same fallback shape as
+    ft5_scan_symbol_live()'s override.get(..., grid-middle) pattern.
+    Used by BOTH the live scanner and the chart endpoint, so a chart
+    always reflects the exact params that actually produced whatever
+    signal it's showing."""
+    with state_lock:
+        override = STATE["msnr_symbol_overrides"].get(symbol) or {}
+    return {
+        "min_leg_atr": override.get("min_leg_atr", MSNR_MIN_LEG_ATR),
+        "qm_zone_pct": override.get("qm_zone_pct", MSNR_QM_ZONE_PCT),
+        "qm_lookback": override.get("qm_lookback_bars", MSNR_QM_LOOKBACK_BARS),
+    }
+
+
 def msnr_scan_symbol_live(symbol):
     """Live counterpart to msnr_backtest_symbol() — fetches recent
-    structure + entry history, runs the SAME detector, and fires only if
-    the LAST entry candle produced a brand-new signal not already seen
-    for this symbol."""
+    structure + entry history, runs the SAME detector (with this
+    symbol's autotuned params, see msnr_symbol_params()), and fires only
+    if the LAST entry candle produced a brand-new signal not already
+    seen for this symbol."""
     if not MSNR_ENABLED:
         return
     try:
+        params = msnr_symbol_params(symbol)
         structure_candles = get_candles(symbol, interval=MSNR_STRUCTURE_TF, limit=MSNR_ATR_PERIOD + 250)
-        entry_candles = get_candles(symbol, interval=MSNR_ENTRY_TF, limit=MSNR_QM_LOOKBACK_BARS + 200)
+        entry_candles = get_candles(symbol, interval=MSNR_ENTRY_TF, limit=params["qm_lookback"] + 200)
         now = time.time()
         s_interval_sec = INTERVAL_SECONDS.get(MSNR_STRUCTURE_TF, 3600)
         e_interval_sec = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
@@ -13143,7 +13361,7 @@ def msnr_scan_symbol_live(symbol):
         entry_candles = [c for c in entry_candles if c["time"] + e_interval_sec <= now]
         if len(structure_candles) < MSNR_ATR_PERIOD + 10 or len(entry_candles) < 10:
             return
-        sigs, _pivots = msnr_detect_signals(structure_candles, entry_candles)
+        sigs, _pivots = msnr_detect_signals(structure_candles, entry_candles, **params)
         if not sigs:
             return
         sig = sigs[-1]
@@ -13245,9 +13463,17 @@ def msnr_backtest_loop():
             t0 = time.time()
             results_by_symbol = {}
             summary_by_symbol = {}
+            overrides_by_symbol = {}
             for symbol in MSNR_SYMBOLS:
                 try:
-                    results = msnr_backtest_symbol(symbol)
+                    # Autotune (v0.99.5): grid-search this symbol's own
+                    # (min_leg_atr, qm_zone_pct, qm_lookback) instead of
+                    # always backtesting the module-default params — see
+                    # msnr_optimize_symbol()'s own docstring. The winning
+                    # combo's trades ARE the backtest shown/drilled-into
+                    # in the UI; no separate un-tuned backtest run needed.
+                    override, results = msnr_optimize_symbol(symbol)
+                    overrides_by_symbol[symbol] = override
                     results_by_symbol[symbol] = results
                     summary_by_symbol[symbol] = msnr_summarize_backtest(results)
                 except Exception as e:
@@ -13255,6 +13481,7 @@ def msnr_backtest_loop():
             with state_lock:
                 STATE["msnr_backtest_results"] = results_by_symbol
                 STATE["msnr_backtest_summary"] = summary_by_symbol
+                STATE["msnr_symbol_overrides"] = overrides_by_symbol
                 STATE["msnr_last_backtest_finished"] = time.time()
                 STATE["msnr_last_backtest_duration"] = round(time.time() - t0, 1)
         except Exception as e:
@@ -14362,11 +14589,17 @@ def api_reset_xau_lg():
 def api_msnr_status():
     """EXPERIMENTAL — see the MSNR module's own header comment."""
     with state_lock:
-        summary = dict(STATE["msnr_backtest_summary"])
+        overrides = dict(STATE["msnr_symbol_overrides"])
         last_backtest_finished = STATE["msnr_last_backtest_finished"]
         last_backtest_duration = STATE["msnr_last_backtest_duration"]
-    ranked = [dict(s, symbol=sym) for sym, s in summary.items()]
-    ranked.sort(key=lambda r: (r["win_rate"] or 0, r["n"]), reverse=True)
+    # Ranked by msnr_ranking_score() (a lower-confidence-bound on mean R,
+    # v0.99.5 — see msnr_ranking_score()'s own docstring), not raw
+    # win-rate — same reasoning as FT5's api_ft5_status(): a lucky small
+    # sample or unevenly-distributed wins/losses across RR shouldn't
+    # outrank a larger, steadier combo just because its raw average
+    # looks better. Symbols with an error or no result sort last.
+    ranked = [dict(v, symbol=sym) for sym, v in overrides.items() if v and not v.get("error")]
+    ranked.sort(key=lambda r: (r.get("score") if r.get("score") is not None else -999), reverse=True)
     return jsonify({
         "enabled": MSNR_ENABLED,
         "symbols": MSNR_SYMBOLS,
@@ -14378,6 +14611,8 @@ def api_msnr_status():
             "pivot_left": MSNR_PIVOT_LEFT, "pivot_right": MSNR_PIVOT_RIGHT,
             "min_leg_atr": MSNR_MIN_LEG_ATR, "qm_zone_pct": MSNR_QM_ZONE_PCT,
             "qm_lookback_bars": MSNR_QM_LOOKBACK_BARS, "backtest_days": MSNR_BACKTEST_DAYS,
+            "grid_min_leg_atr": MSNR_PARAM_GRID_MIN_LEG_ATR, "grid_qm_zone_pct": MSNR_PARAM_GRID_QM_ZONE_PCT,
+            "grid_qm_lookback": MSNR_PARAM_GRID_QM_LOOKBACK,
         },
         "top": ranked,
     })
@@ -14414,6 +14649,7 @@ def api_msnr_chart(symbol):
         sig_time = request.args.get("time")
         now = time.time()
         anchor = float(sig_time) if sig_time else now
+        params = msnr_symbol_params(symbol)
         e_interval_sec = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
         s_interval_sec = INTERVAL_SECONDS.get(MSNR_STRUCTURE_TF, 3600)
         entry_end = min(now, anchor + 60 * e_interval_sec)
@@ -14422,7 +14658,7 @@ def api_msnr_chart(symbol):
         structure_end = min(now, anchor + 60 * e_interval_sec)
         structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, structure_end)
         entry_candles = get_candles_range(symbol, MSNR_ENTRY_TF, entry_start, entry_end)
-        sigs, pivots = msnr_detect_signals(structure_candles, entry_candles)
+        sigs, pivots = msnr_detect_signals(structure_candles, entry_candles, **params)
         sig = None
         if sig_time:
             target = float(sig_time)
@@ -14457,6 +14693,7 @@ def api_reset_msnr():
         with state_lock:
             STATE["msnr_backtest_results"] = {}
             STATE["msnr_backtest_summary"] = {}
+            STATE["msnr_symbol_overrides"] = {}
             STATE["msnr_last_backtest_finished"] = None
             STATE["msnr_last_backtest_duration"] = None
             STATE["msnr_signals"].clear()
@@ -16514,7 +16751,7 @@ async function refreshMsnr() {
     </div>`;
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
-      Символы: ${(status.symbols||[]).join(', ')} · структура ${cfg.structure_tf} (пивоты L${cfg.pivot_left}/R${cfg.pivot_right}, мин. импульс ${cfg.min_leg_atr}×ATR) · вход ${cfg.entry_tf} (QM-зона ${(cfg.qm_zone_pct*100).toFixed(2)}%, окно ${cfg.qm_lookback_bars} баров)<br>
+      Символы: ${(status.symbols||[]).join(', ')} · структура ${cfg.structure_tf} (пивоты L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf} · параметры автотюнятся отдельно на каждую монету (см. столбец «Параметры» в таблице ниже) — значения по умолчанию, пока не подобрано: мин. импульс ${cfg.min_leg_atr}×ATR, QM-зона ${(cfg.qm_zone_pct*100).toFixed(2)}%, окно ${cfg.qm_lookback_bars} баров<br>
       ${buildTxt}<br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0} · клик по строке — график
     </div>`;
@@ -16540,28 +16777,32 @@ async function refreshMsnr() {
     </table>
     </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
   const btRows = (status.top || []).map(r => {
-    const wrClass = (r.win_rate === null || r.win_rate === undefined) ? 'dim' : (r.win_rate >= 50 ? 'win' : 'loss');
+    const wrClass = (r.winrate === null || r.winrate === undefined) ? 'dim' : (r.winrate >= 50 ? 'win' : 'loss');
     const expClass = (r.expectancy_r === null || r.expectancy_r === undefined) ? 'dim' : (r.expectancy_r > 0 ? 'win' : 'loss');
+    const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431`;
+    const noteTxt = r.note ? ` \u26a0\ufe0f ${r.note}` : '';
     return `<tr onclick="toggleMsnrBacktestTrades('${r.symbol}')" style="cursor:pointer;">
-      <td>${_msnrExpanded.has(r.symbol) ? '▾' : '▸'} ${r.symbol}</td>
-      <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
-      <td class="dim">n=${r.n}</td>
+      <td>${_msnrExpanded.has(r.symbol) ? '\u25be' : '\u25b8'} ${r.symbol}</td>
+      <td class="${wrClass}">${r.winrate !== null && r.winrate !== undefined ? r.winrate+'%' : '-'}</td>
+      <td class="dim">n=${r.trades}</td>
       <td class="win">${r.wins}W</td>
       <td class="loss">${r.losses}L</td>
       <td class="status-timeout">${r.timeouts}T</td>
       <td class="dim">avg ${r.avg_rr ?? '-'}R / med ${r.median_rr ?? '-'}R</td>
       <td class="${expClass}">${r.expectancy_r !== null && r.expectancy_r !== undefined ? (r.expectancy_r > 0 ? '+' : '') + r.expectancy_r + 'R' : '-'}</td>
+      <td class="dim">${r.score !== null && r.score !== undefined ? r.score : '-'}</td>
+      <td class="dim">${paramsTxt}${noteTxt}</td>
     </tr>
-    <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="8" style="padding:0;"><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">загрузка...</div></td></tr>`;
+    <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="10" style="padding:0;"><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0430...</div></td></tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
-    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории, без заглядывания вперёд) · <b>expectancy</b> — средний результат сделки в R (учитывает реальный RR каждой сделки, а не только win-rate — так видно, оправдан ли win-rate ~50% при высоком RR) · клик по строке — раскрыть сделки:</div>
+    <div class="dim" style="margin-bottom:6px;"><b>\u0410\u0432\u0442\u043e\u0442\u044e\u043d\u0438\u043d\u0433 \u043f\u043e \u043c\u043e\u043d\u0435\u0442\u0430\u043c</b> (${cfg.backtest_days} \u0434\u043d\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438, \u043f\u0435\u0440\u0435\u0431\u043e\u0440 ${cfg.grid_min_leg_atr.length}\u00d7${cfg.grid_qm_zone_pct.length}\u00d7${cfg.grid_qm_lookback.length}=${cfg.grid_min_leg_atr.length*cfg.grid_qm_zone_pct.length*cfg.grid_qm_lookback.length} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432 \u043d\u0430 \u0441\u0438\u043c\u0432\u043e\u043b \u2014 \u043c\u0438\u043d. \u0438\u043c\u043f\u0443\u043b\u044c\u0441 (\u00d7ATR) / QM-\u0437\u043e\u043d\u0430 (%) / \u043e\u043a\u043d\u043e QM (\u0431\u0430\u0440\u044b), \u0442\u0430\u0431\u043b\u0438\u0446\u0430 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u0443\u0436\u0435 \u043b\u0443\u0447\u0448\u0438\u0439 \u043d\u0430\u0439\u0434\u0435\u043d\u043d\u044b\u0439 \u043a\u043e\u043c\u0431\u043e \u043f\u043e \u043a\u0430\u0436\u0434\u043e\u043c\u0443 \u0441\u0438\u043c\u0432\u043e\u043b\u0443) \u00b7 <b>score</b> \u2014 \u043d\u0438\u0436\u043d\u044f\u044f \u0434\u043e\u0432\u0435\u0440\u0438\u0442\u0435\u043b\u044c\u043d\u0430\u044f \u0433\u0440\u0430\u043d\u0438\u0446\u0430 \u0441\u0440\u0435\u0434\u043d\u0435\u0433\u043e R (\u043f\u043e \u043d\u0435\u0439 \u0438 \u0432\u044b\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044f \u043b\u0443\u0447\u0448\u0438\u0439 \u043a\u043e\u043c\u0431\u043e, \u0430 \u043d\u0435 \u043f\u043e \u0441\u044b\u0440\u043e\u043c\u0443 expectancy \u2014 \u0447\u0442\u043e\u0431\u044b \u043c\u0430\u043b\u0435\u043d\u044c\u043a\u0430\u044f \u0432\u044b\u0431\u043e\u0440\u043a\u0430 \u0441 \u0432\u0435\u0437\u0435\u043d\u0438\u0435\u043c \u043d\u0435 \u043f\u043e\u0431\u0435\u0436\u0434\u0430\u043b\u0430 \u0431\u043e\u043b\u044c\u0448\u0443\u044e \u0441\u0442\u0430\u0431\u0438\u043b\u044c\u043d\u0443\u044e) \u00b7 \u043a\u043b\u0438\u043a \u043f\u043e \u0441\u0442\u0440\u043e\u043a\u0435 \u2014 \u0440\u0430\u0441\u043a\u0440\u044b\u0442\u044c \u0441\u0434\u0435\u043b\u043a\u0438:</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th><th>T</th><th>RR</th><th>Expectancy</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th><th>T</th><th>RR</th><th>Expectancy</th><th>Score</th><th>\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
-    </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
+    </div>` : '<div class="dim">\u0411\u044d\u043a\u0442\u0435\u0441\u0442 \u0435\u0449\u0451 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432.</div>';
   panel.innerHTML = warnHtml + headerHtml + signalsTableHtml + btTableHtml;
   restoreMsnrExpansion();
 }
