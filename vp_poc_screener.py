@@ -5254,6 +5254,51 @@ v0.99.11 - MSNR gains an RR ceiling driven by real statistics, per direct
          node --check on the extracted <script> block, the route/def
          integrity check, and the stale-default-parameter check — all
          clean.
+
+v0.99.12 - CRITICAL FIX: the MSNR tab went completely black (empty panel,
+         every other tab fine) immediately after v0.99.11 shipped — a
+         real live regression, reported directly and reproduced exactly
+         via a screenshot showing the empty tab.
+         Root cause: msnr_rr_bucket_stats() (new in v0.99.11) included a
+         raw "hi" field in each returned bucket dict — MSNR_RR_BUCKETS'
+         last bucket has hi=float("inf"), and Flask's jsonify() happily
+         serializes that as the literal token `Infinity`, which is NOT
+         valid JSON (RFC 8259 only allows finite numbers). refreshMsnr()'s
+         very first line (`await response.json()`) then throws a
+         SyntaxError parsing it — confirmed directly, not just inferred:
+         reproduced the exact failure with `node -e "JSON.parse('...
+         Infinity...')"`, which threw "Unexpected token 'I'", the exact
+         class of error that would abort refreshMsnr() before panel.
+         innerHTML was ever set (no try/catch wraps that fetch), leaving
+         the tab empty — matching the screenshot precisely.
+         This exact lesson (float('inf') → invalid JSON → don't persist
+         or serialize it) was ALREADY learned and explicitly documented
+         in this codebase twice before (Scalp's timeout_sec, XAU_LG-
+         adjacent code) — noted honestly rather than glossed over: this
+         wasn't a novel discovery, it was the same known trap re-
+         introduced fresh while adding a new feature, the prior
+         documentation didn't get checked against before writing
+         MSNR_RR_BUCKETS.
+         Fixed by removing "hi" from the returned bucket dicts entirely
+         — it was never actually consumed anywhere (the "range" label
+         already encodes both boundaries as text for display, and _risk_
+         autotune_msnr_max_rr() only ever reads "lo", which is always
+         finite: 0/3/5/7/10). Chose dropping the field over sanitizing
+         inf->None at the jsonify boundary, since it eliminates the
+         whole class of "some other future numeric field might also
+         carry inf into a JSON response," not just patches this one
+         instance.
+         Verified end-to-end with the real function, not just read as
+         fixed: built realistic STATE data with a trade deliberately
+         placed in the top ("10+") bucket — exactly the case that
+         previously broke — called the actual api_msnr_status() function,
+         confirmed the raw response body contains no "Infinity" token,
+         and confirmed Node's own JSON.parse() succeeds on it where it
+         previously threw. Also searched the whole file for any other
+         place MSNR_RR_BUCKETS or a raw "hi" value might reach a
+         jsonify() call — none found; this was the only leak.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         and the route/def integrity check — all clean.
 """
 
 import os
@@ -5273,7 +5318,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.11"
+APP_VERSION = "0.99.12"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13798,18 +13843,35 @@ def msnr_rr_bucket_stats(trades):
     becomes visible once trades are actually split by their own RR rather
     than averaged together. Feeds both the panel's own display (so the
     pattern the user described becomes directly visible, not just
-    assumed from one example) and _risk_autotune_msnr_max_rr() below."""
+    assumed from one example) and _risk_autotune_msnr_max_rr() below.
+    v0.99.12: returned dicts deliberately do NOT include a raw "hi" key
+    (only "lo") — CRITICAL FIX: MSNR_RR_BUCKETS' last bucket's hi is
+    float("inf"), and jsonify() happily serializes that as the literal
+    token `Infinity`, which is NOT valid JSON (RFC 8259 only allows
+    finite numbers) — the browser's JSON.parse() then throws a
+    SyntaxError on it, confirmed directly (`node -e "JSON.parse(...)"`)
+    to reproduce the exact failure. Since refreshMsnr()'s very first
+    line awaits response.json() with no try/catch around it, that parse
+    failure meant the WHOLE function threw before panel.innerHTML was
+    ever set — explaining the reported "black screen" (empty MSNR tab,
+    every other tab fine) precisely. "hi" was never actually consumed
+    anywhere (the label string already encodes both boundaries as text,
+    and _risk_autotune_msnr_max_rr() only ever reads "lo") — dropping it
+    entirely is safer than sanitizing inf->None at the jsonify boundary,
+    since it removes the whole class of "some other future numeric
+    field might also carry inf into a JSON response" risk, not just
+    this one instance of it."""
     buckets = []
     for lo, hi in MSNR_RR_BUCKETS:
         subset = [t for t in trades if t.get("result") in ("WIN", "LOSS") and t.get("rr") is not None and lo <= t["rr"] < hi]
         label = f"{lo}-{hi}" if hi != float("inf") else f"{lo}+"
         if not subset:
-            buckets.append({"range": label, "lo": lo, "hi": hi, "n": 0, "wins": 0, "losses": 0, "winrate": None, "avg_rr": None})
+            buckets.append({"range": label, "lo": lo, "n": 0, "wins": 0, "losses": 0, "winrate": None, "avg_rr": None})
             continue
         wins = sum(1 for t in subset if t["result"] == "WIN")
         n = len(subset)
         avg_rr = round(sum(t["rr"] for t in subset) / n, 2)
-        buckets.append({"range": label, "lo": lo, "hi": hi, "n": n, "wins": wins,
+        buckets.append({"range": label, "lo": lo, "n": n, "wins": wins,
                          "losses": n - wins, "winrate": round(wins / n * 100, 1), "avg_rr": avg_rr})
     return buckets
 
