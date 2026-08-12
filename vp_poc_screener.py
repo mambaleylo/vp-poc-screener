@@ -4772,6 +4772,36 @@ v0.99.0 - new EXPERIMENTAL "MSNR ⚠️" tab — per direct user request, built
          v0.96.0 lesson above, not the first), and the route/def
          integrity check — all clean, zero duplicate routes or defs
          introduced.
+
+v0.99.1 - MSNR: per direct user request, added real R:R visibility to the
+         backtest table (win-rate alone doesn't tell you if a ~50% rate
+         is actually good when targets are structural, not fixed) and a
+         way to inspect individual backtest trades on the chart, not
+         just live signals.
+         Each backtest trade now carries its own rr (reward/risk from
+         that specific A/V pair, not a module-wide constant — this
+         strategy's whole premise is that R:R varies trade to trade
+         based on how far apart the Storyline levels are).
+         msnr_summarize_backtest() gains avg_rr, median_rr, and
+         expectancy_r — expectancy computed per-trade (each WIN scores
+         its own rr, each LOSS scores -1, TIMEOUTs excluded as no real
+         outcome) rather than win_rate x avg_rr, since a flat average
+         RR would hide whether the wins are disproportionately the
+         high-RR trades or not.
+         New /api/msnr/backtest/<symbol> endpoint returns the full
+         per-trade list (the status endpoint only ever had aggregates).
+         Backtest table rows are now clickable (toggleMsnrBacktestTrades)
+         and expand a per-symbol trade list inline, each trade itself
+         clickable into openMsnrChart() — same chart/level-drawing code
+         already built for live signals, so backtest trades get the
+         identical "see the A-shape/V-shape and the QM zone" view. This
+         is what actually answers the user's "are the levels even being
+         built correctly" question, not just a win-rate number.
+         Verified: msnr_summarize_backtest() on a synthetic 4-trade set
+         (2W at 10R/12R, 1L, 1 timeout) returns expectancy_r=7.0, i.e.
+         (10+12-1)/3 — confirms the per-trade (not average-RR-based)
+         formula. py_compile, ast.parse, node --check on the extracted
+         <script> block, and the route/def integrity check — all clean.
 """
 
 import os
@@ -4791,7 +4821,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.0"
+APP_VERSION = "0.99.1"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12940,11 +12970,15 @@ def msnr_backtest_symbol(symbol, days=MSNR_BACKTEST_DAYS):
     results = []
     for sig in sigs:
         result, exit_time = msnr_track_outcome(entry_candles, sig)
+        risk = abs(sig["entry"] - sig["sl"])
+        reward = abs(sig["tp"] - sig["entry"])
+        rr = round(reward / risk, 2) if risk > 0 else None
         results.append({
             "time": sig["time"], "direction": sig["direction"],
             "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
             "level": sig["level"], "level_type": sig["level_type"],
-            "result": result, "exit_time": exit_time,
+            "opposite_level": sig.get("opposite_level"),
+            "result": result, "exit_time": exit_time, "rr": rr,
         })
     return results
 
@@ -12952,13 +12986,31 @@ def msnr_backtest_symbol(symbol, days=MSNR_BACKTEST_DAYS):
 def msnr_summarize_backtest(results):
     total = len(results)
     if not total:
-        return {"n": 0, "win_rate": None, "wins": 0, "losses": 0, "timeouts": 0}
+        return {"n": 0, "win_rate": None, "wins": 0, "losses": 0, "timeouts": 0,
+                "avg_rr": None, "median_rr": None, "expectancy_r": None}
     wins = sum(1 for r in results if r["result"] == "WIN")
     losses = sum(1 for r in results if r["result"] == "LOSS")
     timeouts = sum(1 for r in results if r["result"] == "TIMEOUT")
     closed = wins + losses
     win_rate = round(wins / closed * 100, 1) if closed else None
-    return {"n": total, "win_rate": win_rate, "wins": wins, "losses": losses, "timeouts": timeouts}
+    rrs = [r["rr"] for r in results if r["rr"] is not None]
+    avg_rr = round(sum(rrs) / len(rrs), 2) if rrs else None
+    if rrs:
+        srr = sorted(rrs)
+        mid = len(srr) // 2
+        median_rr = round(srr[mid] if len(srr) % 2 else (srr[mid - 1] + srr[mid]) / 2, 2)
+    else:
+        median_rr = None
+    # Expectancy in R, using each closed trade's OWN rr (not just avg_rr) —
+    # win contributes +its own rr, loss contributes -1, timeout excluded
+    # (no real outcome to score). This is what actually tells you whether
+    # the ~50% win-rate is sound: with real 10R+ targets, even a coin-flip
+    # win-rate should show strongly positive expectancy.
+    r_values = [r["rr"] for r in results if r["result"] == "WIN" and r["rr"] is not None]
+    r_values += [-1.0 for r in results if r["result"] == "LOSS"]
+    expectancy_r = round(sum(r_values) / len(r_values), 2) if r_values else None
+    return {"n": total, "win_rate": win_rate, "wins": wins, "losses": losses, "timeouts": timeouts,
+            "avg_rr": avg_rr, "median_rr": median_rr, "expectancy_r": expectancy_r}
 
 
 _msnr_signal_cooldowns = {}  # symbol -> last signaled entry-candle time
@@ -14226,6 +14278,18 @@ def api_msnr_status():
 def api_msnr_signals():
     with state_lock:
         return jsonify(list(STATE["msnr_signals"]))
+
+
+@app.route("/api/msnr/backtest/<symbol>")
+def api_msnr_backtest_trades(symbol):
+    """Full per-trade backtest list for one symbol (the summary table only
+    shows aggregates) — each trade's `time` can be fed straight into
+    /api/msnr/chart/<symbol>?time=... to see exactly how that A/V pair
+    and QM trigger were derived."""
+    with state_lock:
+        trades = list(STATE["msnr_backtest_results"].get(symbol, []))
+    trades.sort(key=lambda t: t["time"], reverse=True)
+    return jsonify(trades)
 
 
 @app.route("/api/msnr/chart/<symbol>")
@@ -16368,24 +16432,63 @@ async function refreshMsnr() {
     </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
   const btRows = (status.top || []).map(r => {
     const wrClass = (r.win_rate === null || r.win_rate === undefined) ? 'dim' : (r.win_rate >= 50 ? 'win' : 'loss');
-    return `<tr>
-      <td>${r.symbol}</td>
+    const expClass = (r.expectancy_r === null || r.expectancy_r === undefined) ? 'dim' : (r.expectancy_r > 0 ? 'win' : 'loss');
+    return `<tr onclick="toggleMsnrBacktestTrades('${r.symbol}')" style="cursor:pointer;">
+      <td>▸ ${r.symbol}</td>
       <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
       <td class="dim">n=${r.n}</td>
       <td class="win">${r.wins}W</td>
       <td class="loss">${r.losses}L</td>
       <td class="status-timeout">${r.timeouts}T</td>
-    </tr>`;
+      <td class="dim">avg ${r.avg_rr ?? '-'}R / med ${r.median_rr ?? '-'}R</td>
+      <td class="${expClass}">${r.expectancy_r !== null && r.expectancy_r !== undefined ? (r.expectancy_r > 0 ? '+' : '') + r.expectancy_r + 'R' : '-'}</td>
+    </tr>
+    <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="8" style="padding:0;"><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">загрузка...</div></td></tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
-    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории, без заглядывания вперёд):</div>
+    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории, без заглядывания вперёд) · <b>expectancy</b> — средний результат сделки в R (учитывает реальный RR каждой сделки, а не только win-rate — так видно, оправдан ли win-rate ~50% при высоком RR) · клик по строке — раскрыть сделки:</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th><th>T</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th><th>T</th><th>RR</th><th>Expectancy</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
   panel.innerHTML = warnHtml + headerHtml + signalsTableHtml + btTableHtml;
+}
+
+const _msnrTradesLoaded = {};
+async function toggleMsnrBacktestTrades(symbol) {
+  const row = document.getElementById(`msnrTrades_${symbol}`);
+  const body = document.getElementById(`msnrTradesBody_${symbol}`);
+  if (!row) return;
+  const opening = row.style.display === 'none';
+  row.style.display = opening ? 'table-row' : 'none';
+  if (!opening || _msnrTradesLoaded[symbol]) return;
+  _msnrTradesLoaded[symbol] = true;
+  try {
+    const trades = await (await fetch(`/api/msnr/backtest/${symbol}`)).json();
+    if (!trades.length) { body.innerHTML = 'сделок нет'; return; }
+    const rows = trades.map(t => {
+      const dirClass = t.direction === 'LONG' ? 'long' : 'short';
+      const resClass = t.result === 'WIN' ? 'win' : (t.result === 'LOSS' ? 'loss' : 'status-timeout');
+      const levelTxt = t.level_type === 'A' ? 'A-shape' : 'V-shape';
+      return `<tr onclick="event.stopPropagation(); openMsnrChart('${symbol}', ${t.time})" style="cursor:pointer;">
+        <td class="dim">${fmtDateTime(t.time)}</td>
+        <td class="${dirClass}">${t.direction}</td>
+        <td class="dim">${levelTxt}</td>
+        <td>${fmt(t.entry)}</td><td class="dim">${fmt(t.sl)}</td><td class="dim">${fmt(t.tp)}</td>
+        <td class="dim">${t.rr ?? '-'}R</td>
+        <td class="${resClass}">${t.result}</td>
+      </tr>`;
+    }).join('');
+    body.innerHTML = `<table style="font-size:11px;white-space:nowrap;width:100%;">
+      <thead><tr><th>Время</th><th>Dir</th><th>Уровень</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Result</th></tr></thead>
+      <tbody>${rows}</tbody>
+    </table>`;
+  } catch (e) {
+    body.innerHTML = 'ошибка загрузки';
+    console.error(e);
+  }
 }
 
 let currentMsnrData = null;
