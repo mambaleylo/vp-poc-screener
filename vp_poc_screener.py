@@ -5095,6 +5095,49 @@ v0.99.8 - get_candles() now retries on HTTP 429 (Too Many Requests)
          Verified with py_compile, an actual runtime start, pyflakes,
          and the route/def integrity and stale-default-parameter
          checks — all clean.
+
+v0.99.9 - MSNR's backtest now also explores the top-30 most liquid
+         symbols, per direct user request ("может где-то тоже такая
+         логика сигналов прокатит, пока только для бэктеста") — live
+         scanning stays exactly gold-only (MSNR_SYMBOLS), unchanged.
+         New msnr_build_backtest_universe(): MSNR_SYMBOLS UNION'd with
+         the top MSNR_BACKTEST_UNIVERSE_SIZE (30) symbols by real 24h
+         volume, same get_tickers() fallback-field pattern already
+         proven correct for VGI/FT5/Session's own universe-builders —
+         union rather than replace, so gold stays backtested even if
+         its own liquidity wouldn't independently place it in a top-30
+         cut. Verified behaviorally with mocked tickers: union produced
+         the expected size, all three gold symbols present even with a
+         deliberately-low mocked volume for one of them, no duplicates.
+         msnr_backtest_loop() switched from sequential (`for symbol in
+         MSNR_SYMBOLS`) to a ThreadPoolExecutor, applying VGI's own
+         v0.98.4 concurrency fix PROACTIVELY here rather than waiting
+         for a live 429 report to force it — the exact same rate-limit
+         pressure this session already diagnosed (v0.99.8) is far more
+         likely to bite with 30+ symbols than the original 3, and a
+         sequential loop over that many would be both slower and more
+         exposed to it. Factored the per-symbol work into _msnr_
+         backtest_one_symbol() (exceptions caught internally, matching
+         every other per-symbol worker in this app) submitted to the
+         pool.
+         msnr_backtest_universe added to STATE (was about to be
+         referenced without an initial declaration — caught and fixed
+         before it could ship as a silently-created-on-first-write key,
+         inconsistent with how every other STATE entry in this app is
+         declared upfront).
+         api_msnr_status() gained backtest_universe_size, and each
+         ranked leaderboard entry gained a live boolean (symbol in
+         MSNR_SYMBOLS) so the UI can honestly distinguish gold (actually
+         tradeable) from the broader exploration set (backtest-only,
+         nothing wired to autotrade or live scanning). Panel header
+         rewritten to say this explicitly instead of just listing
+         "Символы: ..." as if that were the whole scanned set; each
+         leaderboard row now shows a green dot for live-tradeable
+         symbols or a "бэктест" label for exploration-only ones.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the extracted <script> block, the route/def
+         integrity check, and the stale-default-parameter check — all
+         clean.
 """
 
 import os
@@ -5114,7 +5157,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.8"
+APP_VERSION = "0.99.9"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5703,6 +5746,7 @@ MSNR_PARAM_GRID_QM_ZONE_PCT = [0.003, 0.006, 0.010]
 MSNR_PARAM_GRID_QM_LOOKBACK = [4, 6, 9]
 MSNR_MIN_BACKTEST_TRADES = int(os.environ.get("VP_MSNR_MIN_BACKTEST_TRADES", 5))  # same bar as FT5_MIN_BACKTEST_TRADES/Volume's MIN_BACKTEST_TRADES — a combo with fewer trades in the window isn't a confident pick
 MSNR_RANK_PRIOR_TARGET = 1  # same role as FT5_RANK_PRIOR_TARGET — only a combo with 0 or 1 REAL observed loss gets synthetic -1R pseudo-losses blended in (guards against a small all-win sample looking falsely certain); 2+ real losses are trusted as-is
+MSNR_BACKTEST_UNIVERSE_SIZE = int(os.environ.get("VP_MSNR_BACKTEST_UNIVERSE_SIZE", 30))  # v0.99.9 — per direct user request: backtest the top-N most liquid symbols too (union'd with MSNR_SYMBOLS, so gold stays included), to see whether this signal logic generalizes beyond gold — explicitly backtest-only for now, msnr_live_loop still scans only MSNR_SYMBOLS, unchanged.
 
 # ============================================================================
 # EXPERIMENTAL: FT5 — port of freqtrade-strategies' Strategy005 (v0.96.0)
@@ -6469,6 +6513,7 @@ STATE = {
     "msnr_last_backtest_finished": None,
     "msnr_last_backtest_duration": None,
     "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at}
+    "msnr_backtest_universe": [],  # v0.99.9 — MSNR_SYMBOLS union'd with the top-liquid backtest-only exploration set, see msnr_build_backtest_universe()
     # EXPERIMENTAL FT5 (port of freqtrade's Strategy005, v0.96.0) — see
     # that module's own header comment. All keys prefixed ft5_.
     "ft5_universe": [],
@@ -13645,6 +13690,61 @@ def compute_msnr_signal_stats():
             "open": open_n, "winrate": winrate}
 
 
+def msnr_build_backtest_universe():
+    """Backtest-only universe: MSNR_SYMBOLS (the original gold-only live-
+    scan list) UNION'd with the top MSNR_BACKTEST_UNIVERSE_SIZE most
+    liquid _USDT symbols by real 24h volume — same get_tickers()
+    fallback-field pattern already proven correct for VGI/FT5/Session.
+    Purely exploratory, per direct user request: does this "Malaysian
+    SNR" OCL/QM-sweep signal logic generalize beyond gold, or is it
+    specific to gold's own price behavior? msnr_live_loop() still only
+    ever scans MSNR_SYMBOLS — this broader universe feeds the backtest
+    only, deliberately not wired to live scanning or autotrade yet."""
+    tickers = get_tickers()
+    seen_vol = {}
+    for t in tickers:
+        name = t.get("contract", "")
+        if not name.endswith("_USDT"):
+            continue
+        vol = t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0
+        try:
+            vol = float(vol)
+        except (TypeError, ValueError):
+            vol = 0.0
+        if vol < MIN_VOL_USD:
+            continue
+        if name not in seen_vol or vol > seen_vol[name]:
+            seen_vol[name] = vol
+    ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
+    top_liquid = [s[0] for s in ranked[:MSNR_BACKTEST_UNIVERSE_SIZE]]
+    combined = list(MSNR_SYMBOLS)
+    for sym in top_liquid:
+        if sym not in combined:
+            combined.append(sym)
+    return combined
+
+
+def _msnr_backtest_one_symbol(symbol):
+    """Fetch + optimize + summarize for a single symbol — factored out
+    so msnr_backtest_loop() can run it concurrently across the whole
+    backtest universe instead of sequentially, same reasoning (and the
+    same real-world trigger — Gate.io rate-limit pressure under a
+    sequential loop) as VGI's own v0.98.4 fix: with up to 30+ symbols
+    now instead of 3, a sequential loop would be meaningfully slower
+    and more exposed to exactly the 429 pile-up this session already
+    diagnosed and fixed at the get_candles() retry level — concurrency
+    here is the other half of that same fix, applied proactively rather
+    than waiting for a live report to force it. Exceptions are caught
+    here (not propagated) so one bad/slow symbol can't take down the
+    whole batch, matching every other per-symbol worker in this app."""
+    try:
+        override, results = msnr_optimize_symbol(symbol)
+        return symbol, override, results, msnr_summarize_backtest(results)
+    except Exception as e:
+        log_error(f"msnr_backtest {symbol}: {e}")
+        return None
+
+
 def msnr_backtest_loop():
     while True:
         try:
@@ -13652,27 +13752,31 @@ def msnr_backtest_loop():
                 time.sleep(60)
                 continue
             t0 = time.time()
+            universe = msnr_build_backtest_universe()
             results_by_symbol = {}
             summary_by_symbol = {}
             overrides_by_symbol = {}
-            for symbol in MSNR_SYMBOLS:
-                try:
-                    # Autotune (v0.99.5): grid-search this symbol's own
-                    # (min_leg_atr, qm_zone_pct, qm_lookback) instead of
-                    # always backtesting the module-default params — see
-                    # msnr_optimize_symbol()'s own docstring. The winning
-                    # combo's trades ARE the backtest shown/drilled-into
-                    # in the UI; no separate un-tuned backtest run needed.
-                    override, results = msnr_optimize_symbol(symbol)
+            # Autotune (v0.99.5): grid-search each symbol's own
+            # (min_leg_atr, qm_zone_pct, qm_lookback) instead of always
+            # backtesting the module-default params — see msnr_optimize_
+            # symbol()'s own docstring. The winning combo's trades ARE
+            # the backtest shown/drilled-into in the UI; no separate
+            # un-tuned backtest run needed.
+            with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
+                futs = [ex.submit(_msnr_backtest_one_symbol, s) for s in universe]
+                for fut in as_completed(futs):
+                    res = fut.result()
+                    if res is None:
+                        continue
+                    symbol, override, results, summary = res
                     overrides_by_symbol[symbol] = override
                     results_by_symbol[symbol] = results
-                    summary_by_symbol[symbol] = msnr_summarize_backtest(results)
-                except Exception as e:
-                    log_error(f"msnr_backtest {symbol}: {e}")
+                    summary_by_symbol[symbol] = summary
             with state_lock:
                 STATE["msnr_backtest_results"] = results_by_symbol
                 STATE["msnr_backtest_summary"] = summary_by_symbol
                 STATE["msnr_symbol_overrides"] = overrides_by_symbol
+                STATE["msnr_backtest_universe"] = universe
                 STATE["msnr_last_backtest_finished"] = time.time()
                 STATE["msnr_last_backtest_duration"] = round(time.time() - t0, 1)
         except Exception as e:
@@ -14781,6 +14885,7 @@ def api_msnr_status():
     """EXPERIMENTAL — see the MSNR module's own header comment."""
     with state_lock:
         overrides = dict(STATE["msnr_symbol_overrides"])
+        backtest_universe = list(STATE["msnr_backtest_universe"])
         last_backtest_finished = STATE["msnr_last_backtest_finished"]
         last_backtest_duration = STATE["msnr_last_backtest_duration"]
     # Ranked by msnr_ranking_score() (a lower-confidence-bound on mean R,
@@ -14789,11 +14894,12 @@ def api_msnr_status():
     # sample or unevenly-distributed wins/losses across RR shouldn't
     # outrank a larger, steadier combo just because its raw average
     # looks better. Symbols with an error or no result sort last.
-    ranked = [dict(v, symbol=sym) for sym, v in overrides.items() if v and not v.get("error")]
+    ranked = [dict(v, symbol=sym, live=(sym in MSNR_SYMBOLS)) for sym, v in overrides.items() if v and not v.get("error")]
     ranked.sort(key=lambda r: (r.get("score") if r.get("score") is not None else -999), reverse=True)
     return jsonify({
         "enabled": MSNR_ENABLED,
         "symbols": MSNR_SYMBOLS,
+        "backtest_universe_size": len(backtest_universe),
         "last_backtest_finished": last_backtest_finished,
         "last_backtest_duration": last_backtest_duration,
         "signals_stats": compute_msnr_signal_stats(),
@@ -16953,7 +17059,7 @@ async function refreshMsnr() {
     </div>`;
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
-      Символы: ${(status.symbols||[]).join(', ')} · структура ${cfg.structure_tf} (пивоты L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf} · параметры автотюнятся отдельно на каждую монету (см. столбец «Параметры» в таблице ниже) — значения по умолчанию, пока не подобрано: мин. импульс ${cfg.min_leg_atr}×ATR, QM-зона ${(cfg.qm_zone_pct*100).toFixed(2)}%, окно ${cfg.qm_lookback_bars} баров<br>
+      Живой скан (только это торгуется): ${(status.symbols||[]).join(', ')} · бэктест дополнительно охватывает топ-${status.backtest_universe_size||'?'} ликвидных монет (только для проверки, автоторговля/живой скан их не касаются) · структура ${cfg.structure_tf} (пивоты L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf} · параметры автотюнятся отдельно на каждую монету (см. столбец «Параметры» в таблице ниже) — значения по умолчанию, пока не подобрано: мин. импульс ${cfg.min_leg_atr}×ATR, QM-зона ${(cfg.qm_zone_pct*100).toFixed(2)}%, окно ${cfg.qm_lookback_bars} баров<br>
       ${buildTxt}<br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0} · клик по строке — график
     </div>`;
@@ -16984,7 +17090,7 @@ async function refreshMsnr() {
     const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431`;
     const noteTxt = r.note ? ` \u26a0\ufe0f ${r.note}` : '';
     return `<tr onclick="toggleMsnrBacktestTrades('${r.symbol}')" style="cursor:pointer;">
-      <td>${_msnrExpanded.has(r.symbol) ? '\u25be' : '\u25b8'} ${r.symbol}</td>
+      <td>${_msnrExpanded.has(r.symbol) ? '\u25be' : '\u25b8'} ${r.symbol}${r.live ? ' <span style="color:#3ddc97;" title="торгуется вживую">\u25cf</span>' : ' <span class="dim" style="font-size:10px;" title="только бэктест, не торгуется">\u0431\u044d\u043a\u0442\u0435\u0441\u0442</span>'}</td>
       <td class="${wrClass}">${r.winrate !== null && r.winrate !== undefined ? r.winrate+'%' : '-'}</td>
       <td class="dim">n=${r.trades}</td>
       <td class="win">${r.wins}W</td>
