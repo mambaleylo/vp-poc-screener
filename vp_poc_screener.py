@@ -6365,6 +6365,42 @@ v0.99.34 - Direct user question: "как добавить сигналы по mn
          Verified with py_compile, an actual runtime start, pyflakes,
          the Flask route/def integrity check (still 63 routes), and an
          AST walk for duplicate top-level defs (none introduced).
+
+v0.99.35 - Direct user question about the green ● dot: after v0.99.32
+         unioned toggled-on+eligible symbols into what msnr_live_loop()
+         actually scans, that union was built INLINE inside the loop
+         itself and never written back anywhere api_msnr_status() could
+         see — so the dot the person actually looks at kept reading the
+         narrower, OLDER msnr_live_universe alone (gold + winrate>50%+
+         sample>40, msnr_compute_live_universe(), v0.99.17). Net effect:
+         since v0.99.32 shipped, a symbol toggled on and eligible but
+         below the 50% winrate bar has been genuinely scanned live with
+         no dot to show for it — exactly the mismatch the question
+         surfaced, and confirmed with the QQQX_USDT example in the
+         screenshot (54.2% winrate, n=49, autotrade checked — the dot's
+         absence there specifically prompted the question).
+         New msnr_effective_live_universe(live_universe, overrides,
+         autotrade_symbols): the exact union v0.99.32 built inline,
+         pulled out into its own function so it has ONE definition
+         instead of two copies that can silently drift apart again.
+         msnr_live_loop() now calls it instead of building the union
+         itself; api_msnr_status() now runs live_universe through it
+         too before computing each row's "live" flag — so the dot
+         means "genuinely being scanned right now," not "cleared the
+         old promotion criterion," matching what msnr_live_loop() is
+         actually doing byte-for-byte, by construction, not by two
+         independently-maintained pieces of logic staying in sync by
+         accident.
+         Verified with py_compile, an actual runtime start (synthetic
+         two-symbol case reproducing the screenshot's shape — GOODWR_
+         USDT at 54.2% winrate promoted by the old rule alone;
+         BADWR_USDT at 44.4% winrate, toggled autotrade-on, absent from
+         the old promoted set — confirmed msnr_effective_live_universe()
+         correctly adds BADWR_USDT via the union, matching what msnr_
+         live_loop() has been doing since v0.99.32), pyflakes, node
+         --check on the correctly-last <script> block, the Flask
+         route/def integrity check (still 63 routes), and an AST walk
+         for duplicate top-level defs (none introduced).
 """
 
 import os
@@ -6384,7 +6420,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.34"
+APP_VERSION = "0.99.35"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16005,9 +16041,12 @@ def msnr_live_loop():
             # Telegram notification, no order, ever, regardless of the
             # checkbox — which is exactly what a live report described
             # ("был сигнал, но ни уведомления, ни авто-открытия").
-            eligible_now = msnr_autotrade_eligible_symbols(overrides_snapshot)
-            toggled_on_eligible = [sym for sym, on in autotrade_symbols.items() if on and sym in eligible_now]
-            live_universe = list(dict.fromkeys(live_universe + toggled_on_eligible))
+            # v0.99.35 — this union now lives in msnr_effective_live_
+            # universe() (shared with api_msnr_status()'s own "live" dot,
+            # which had drifted out of sync with this exact union — see
+            # that function's own docstring) instead of being built
+            # inline here a second time.
+            live_universe = msnr_effective_live_universe(live_universe, overrides_snapshot, autotrade_symbols)
             with ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe) or 1)) as ex:
                 futs = [ex.submit(msnr_scan_symbol_live, s) for s in live_universe]
                 for _ in as_completed(futs):
@@ -17098,6 +17137,28 @@ def api_reset_xau_lg():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+def msnr_effective_live_universe(live_universe, overrides, autotrade_symbols):
+    """v0.99.35, per direct user question after the green ● dot didn't
+    line up with which symbols the checkbox/eligible list suggested
+    were actually trading: the REAL set msnr_live_loop() scans is
+    msnr_compute_live_universe()'s own promoted set (gold + winrate>
+    MSNR_LIVE_PROMOTE_MIN_WINRATE with sample>MSNR_LIVE_PROMOTE_MIN_
+    SAMPLE) UNION'd with whatever's toggled autotrade-ON and currently
+    eligible (top-N by score, not stress_test_failed) — v0.99.32 built
+    that exact union, but built it INLINE inside msnr_live_loop()
+    itself rather than as a reusable function, so api_msnr_status()'s
+    own "live" flag (the dot the person actually sees) kept reading
+    the narrower msnr_live_universe alone. A toggled-on, eligible
+    symbol below the winrate bar was — correctly, since v0.99.32 — being
+    scanned live with no dot to show for it, which is exactly the
+    mismatch that question surfaced. Pulled out into its own function
+    so both call sites share one definition and can't drift apart on
+    this again."""
+    eligible_now = msnr_autotrade_eligible_symbols(overrides)
+    toggled_on_eligible = [sym for sym, on in autotrade_symbols.items() if on and sym in eligible_now]
+    return list(dict.fromkeys(list(live_universe) + toggled_on_eligible))
+
+
 @app.route("/api/msnr/status")
 def api_msnr_status():
     """EXPERIMENTAL — see the MSNR module's own header comment."""
@@ -17128,7 +17189,12 @@ def api_msnr_status():
     # autotrade_on state, so the panel can render exactly 6 checkboxes,
     # correctly pre-checked, without a separate round-trip.
     autotrade_eligible = msnr_autotrade_eligible_symbols(overrides)
-    ranked = [dict(v, symbol=sym, live=(sym in live_universe),
+    # v0.99.35 — the dot shown per row now uses the SAME effective set
+    # msnr_live_loop() actually scans (msnr_effective_live_universe()),
+    # not the narrower promoted-only live_universe — see that function's
+    # own docstring for why those two had drifted apart since v0.99.32.
+    effective_live_universe = msnr_effective_live_universe(live_universe, overrides, autotrade_symbols)
+    ranked = [dict(v, symbol=sym, live=(sym in effective_live_universe),
                    autotrade_eligible=(sym in autotrade_eligible),
                    autotrade_on=bool(autotrade_symbols.get(sym)))
               for sym, v in overrides.items() if v and not v.get("error")]
