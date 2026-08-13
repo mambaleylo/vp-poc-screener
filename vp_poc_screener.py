@@ -6219,6 +6219,57 @@ v0.99.31 - Direct user report: "Шапка относительно таблиц
          re-inspected the edited static-table skeleton and the
          loadMsnrTrades() template string for balanced div/table
          nesting (every opened div has exactly one matching close).
+
+v0.99.32 - Direct user question: "Был недавно сигнал но уведомления не
+         было как и авто открытия, условий не нужно дополнительных,
+         достаточно топ 10 плюс галочка." Traced msnr_live_loop() end to
+         end and found a real architecture gap between two DIFFERENT
+         promotion criteria that were never reconciled: the autotrade
+         checkbox's own eligibility (msnr_autotrade_eligible_symbols(),
+         top MSNR_AUTOTRADE_TOP_N by SCORE — a lower-confidence-bound on
+         mean R) is entirely separate from msnr_live_universe (msnr_
+         compute_live_universe(), v0.99.17 — requires winrate > 50% AND
+         >40 closed trades). Nothing guarantees a symbol clearing one
+         also clears the other: score and raw winrate measure different
+         things, so a symbol can rank comfortably in the autotrade top
+         10 while sitting at, say, 44% winrate — well under the live-
+         promotion bar. Confirmed with a synthetic symbol at exactly
+         that shape: eligible for autotrade, absent from live_universe.
+         The consequence was silent and total: msnr_live_loop() only
+         ever calls msnr_scan_symbol_live() for symbols IN live_
+         universe — a symbol outside it is simply never scanned, so
+         checking its autotrade box did nothing whatsoever. No signal
+         gets recorded, no Telegram notification fires, no order gets
+         placed — not "blocked by a filter," literally never evaluated
+         — regardless of how the checkbox looks in the UI. This matches
+         the report exactly: an eligible, checked symbol producing
+         neither a notification nor an order.
+         Fixed in msnr_live_loop(): live_universe is now unioned with
+         every symbol the person has explicitly toggled autotrade ON
+         for AND that's currently autotrade-eligible (top-N by score,
+         not stress_test_failed) — so checking that box is now
+         sufficient on its own to guarantee the symbol gets scanned,
+         matching the user's own stated expectation, without touching
+         msnr_live_universe's existing winrate-based promotion for
+         everything else (still drives what's scanned but NOT
+         individually toggled — unaffected).
+         Explicitly did NOT touch, and want to be clear these are a
+         different category from the bug above: the skip_rr_min/skip_
+         sl_pct_min/liquidation checks inside msnr_scan_symbol_live()
+         itself (v0.99.22/26) — those were added at this same user's own
+         earlier direct request this session and are deliberate safety
+         filters a signal must still pass even once scanned, not an
+         accidental gap; nor has_open_signal_any_module()'s cross-module
+         open-position lock, which is an intentional guard against
+         stacking multiple modules' positions on the same symbol.
+         Verified with py_compile, an actual runtime start (synthetic
+         symbol at winrate 44.4%/score 0.5: confirmed msnr_autotrade_
+         eligible_symbols() includes it while msnr_compute_live_
+         universe() excludes it — reproducing the gap directly — then
+         confirmed the union logic correctly merges it back in once
+         autotrade_symbols marks it toggled-on), pyflakes, the Flask
+         route/def integrity check (still 63 routes), and an AST walk
+         for duplicate top-level defs (none introduced).
 """
 
 import os
@@ -6238,7 +6289,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.31"
+APP_VERSION = "0.99.32"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -15727,6 +15778,29 @@ def msnr_live_loop():
             # fallback can't ever leave live scanning empty.
             with state_lock:
                 live_universe = list(STATE["msnr_live_universe"]) or list(MSNR_SYMBOLS)
+                autotrade_symbols = dict(STATE["msnr_autotrade_symbols"])
+                overrides_snapshot = dict(STATE["msnr_symbol_overrides"])
+            # v0.99.32, per direct user request ("топ 10 плюс галочка,
+            # доп условий не нужно"): union in any symbol the person has
+            # explicitly toggled autotrade ON for AND that's currently
+            # autotrade-eligible (top-MSNR_AUTOTRADE_TOP_N by score, not
+            # stress_test_failed) — msnr_live_universe above is a
+            # SEPARATE, older promotion criterion (>50% winrate AND >40
+            # closed trades, msnr_compute_live_universe()) that a
+            # top-10-by-score symbol can easily fail even while ranking
+            # well by score (score is a lower-confidence-bound on mean
+            # R, not raw winrate — the two measure different things, so
+            # nothing guarantees a symbol clearing one also clears the
+            # other). Without this union, checking a top-10 symbol's own
+            # autotrade box did literally nothing whenever that symbol's
+            # winrate sat at or below 50%: msnr_scan_symbol_live() would
+            # never even get CALLED for it — no signal recorded, no
+            # Telegram notification, no order, ever, regardless of the
+            # checkbox — which is exactly what a live report described
+            # ("был сигнал, но ни уведомления, ни авто-открытия").
+            eligible_now = msnr_autotrade_eligible_symbols(overrides_snapshot)
+            toggled_on_eligible = [sym for sym, on in autotrade_symbols.items() if on and sym in eligible_now]
+            live_universe = list(dict.fromkeys(live_universe + toggled_on_eligible))
             with ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe) or 1)) as ex:
                 futs = [ex.submit(msnr_scan_symbol_live, s) for s in live_universe]
                 for _ in as_completed(futs):
