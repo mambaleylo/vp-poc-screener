@@ -6072,6 +6072,32 @@ v0.99.27 - Direct user follow-up, with a real live example: SKHY_USDT
          <script> block, the Flask route/def integrity check (still 63
          routes), and an AST walk for duplicate top-level defs (none
          introduced).
+
+v0.99.28 - Direct user request after a live portrait-mode phone
+         screenshot of the MSNR backtest table: "может сделать мельче
+         и с меньшим отступом чтобы больше в ширину влазило инфы?" —
+         the mobile @media (max-width:640px) block (v0.89.0) already
+         shrank table cells once (from the 8px 10px / 13px desktop
+         default down to 6px 8px / 12px), but on a genuinely narrow
+         phone in portrait that still wasn't tight enough for a wide
+         multi-column table like MSNR's (Symbol/Авто/Win-rate/n/W/L/T/
+         RR/Expectancy/Score/Параметры) — most of the visible width
+         went to padding rather than data, forcing horizontal scroll
+         for columns that could otherwise fit.
+         th, td padding tightened 6px 8px -> 4px 6px, font-size 12px
+         -> 10.5px (matching the size already used for #status/
+         #overview/#autotradeBanner on mobile, not an arbitrary new
+         number). CSS-only, one shared rule — applies to every table on
+         the page (the same "works for both static and dynamically-
+         injected tables" reasoning the v0.89.0 comment above it
+         already documented), not just MSNR's, since every other
+         module's backtest table (FT5/VGI/session/etc) is built the
+         same dense multi-column way and benefits equally.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the correctly-last <script> block, and the
+         Flask route/def integrity check (still 63 routes) — a CSS-
+         only change, so no Python logic or JS control flow to
+         behaviorally re-verify beyond confirming nothing else broke.
 """
 
 import os
@@ -6091,7 +6117,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.27"
+APP_VERSION = "0.99.28"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -17567,7 +17593,21 @@ INDEX_HTML = """<!doctype html>
     .tabs { flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; padding-bottom:2px; }
     .tab { flex-shrink:0; font-size:12px; padding:6px 10px; }
     table { display:block; overflow-x:auto; white-space:nowrap; -webkit-overflow-scrolling:touch; max-width:100%; }
-    th, td { padding:6px 8px; font-size:12px; }
+    /* v0.99.28, per direct user request after a live portrait-mode
+       screenshot of the MSNR backtest table: cells were still padded/
+       sized for a desktop-width table, wasting horizontal space that
+       matters far more on a narrow phone than the extra tap-target
+       size does — shrunk from the original 6px 8px / 12px (already a
+       reduction from the 8px 10px / 13px desktop default) to fit
+       meaningfully more columns before horizontal scroll kicks in.
+       Applies to every table on the page (same "one CSS-only rule,
+       works for both static and dynamically-injected tables" reasoning
+       v0.89.0 already established above) — the dense multi-column
+       backtest tables (MSNR/FT5/VGI/session/etc, all built the same
+       way) are the ones that actually needed it, but a uniformly
+       tighter mobile table is a reasonable default everywhere, not
+       just there. */
+    th, td { padding:4px 6px; font-size:10.5px; }
   }
 </style>
 </head>
