@@ -5768,6 +5768,58 @@ v0.99.22 - Per direct user request, following a screenshot review of the
          grabs that prose instead of the real HTML template, which
          reliably comes last in the file; fixed by taking the LAST
          occurrence instead, same lesson already learned once before.)
+
+v0.99.23 - Direct user follow-up to v0.99.22: "so maybe backtest signals
+         failing skip_rr_min shouldn't be counted/shown either" — v0.99.22
+         only stopped FIRING new live signals past a symbol's own skip
+         floor; the backtest trade list and its aggregate stats (n/W/L/T,
+         avg/med R, Expectancy, Score) still included every trade,
+         including the ones the skip floor says shouldn't count as part
+         of this symbol's system.
+         msnr_optimize_symbol() now filters best_results in this exact
+         order: (1) run the winning grid combo's full backtest, (2)
+         derive skip_rr_min off that FULL unfiltered set (msnr_symbol_
+         rr_skip_min() needs the complete sample for its own min-sample
+         gate to mean anything), (3) ONLY THEN drop every trade whose
+         own rr >= skip_rr_min (closed trades AND timeouts alike — a
+         timeout in a bad bucket is still evidence against it, no
+         reason to keep it) and recompute trades/wins/losses/timeouts/
+         winrate/avg_rr/median_rr/expectancy_r/score off what's left.
+         Filtering before deriving the threshold would have shrunk the
+         very evidence msnr_symbol_rr_skip_min()'s sample-size gate
+         relies on — checked this ordering explicitly before shipping.
+         This filtered best_results is what both /api/msnr/backtest/
+         <symbol> (the expanded per-trade list) and the summary table
+         (n/W/L/T/avg/med/Expectancy/Score columns) now show — the
+         numbers on screen and the numbers backing autotrade eligibility
+         are the same numbers a user drilling into a symbol would see.
+         Caught a real side effect before shipping, not after: msnr_
+         backtest_results (the same dict the filtered trades now live
+         in) was ALSO the pooled source for two things that need the
+         FULL unfiltered picture — _risk_autotune_msnr_max_rr()'s
+         global cap tuning and /api/msnr/status's rr_buckets display,
+         both of which pool trades across every symbol specifically
+         BECAUSE any one symbol's own sample is usually too small to
+         trust (that's the whole reason MSNR_MAX_RR is a single global
+         cap instead of per-symbol in the first place — see that
+         function's own docstring). Pointing them at the newly-filtered
+         dict would have quietly starved them of exactly the bad-RR
+         evidence they exist to catch, once a symbol's own skip filter
+         had already removed it. Fixed by keeping a SEPARATE raw copy:
+         msnr_optimize_symbol() now returns (override, filtered_
+         results, raw_results) instead of two values; new STATE key
+         msnr_backtest_results_raw holds the unfiltered per-symbol
+         trades, and both call sites (_risk_autotune_msnr_max_rr's
+         pooling and api_msnr_status's rr_buckets) were switched to
+         read from it instead of the now-filtered msnr_backtest_results.
+         Also cleared on /api/reset/msnr alongside the existing key.
+         Verified with py_compile, an actual runtime start (synthetic
+         30-trade set: a bad 5.5R bucket at 2W/18L alongside a good 2.0R
+         bucket at 6W/4L — confirmed skip_rr_min=5 and the filtered
+         summary reports exactly the surviving 10 trades, 60% win rate),
+         pyflakes, node --check on the correctly-last <script> block,
+         the Flask route/def integrity check (still 63 routes), and an
+         AST walk for duplicate top-level defs (none introduced).
 """
 
 import os
@@ -5787,7 +5839,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.22"
+APP_VERSION = "0.99.23"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7152,6 +7204,7 @@ STATE = {
     # see that module's own header comment. All keys prefixed msnr_.
     "msnr_signals": deque(maxlen=MSNR_SIGNAL_HISTORY),
     "msnr_backtest_results": {},
+    "msnr_backtest_results_raw": {},  # v0.99.23 — same shape, UNFILTERED by any symbol's skip_rr_min; see msnr_optimize_symbol()'s own docstring for why the pooled autotune/display needs this separate copy
     "msnr_backtest_summary": {},
     "msnr_last_backtest_finished": None,
     "msnr_last_backtest_duration": None,
@@ -13690,11 +13743,17 @@ def risk_autotune_pass():
         # statistics rather than a one-off manual observation — see
         # _risk_autotune_msnr_max_rr()'s own docstring for the full
         # reasoning. Pools trades across every symbol's own backtest
-        # results (msnr_backtest_results is keyed by symbol) rather than
-        # tuning per-symbol, since MSNR_MAX_RR is a single global cap,
-        # not a per-symbol optimized param like min_leg_atr/qm_zone_pct.
+        # results (msnr_backtest_results_raw is keyed by symbol) rather
+        # than tuning per-symbol, since MSNR_MAX_RR is a single global
+        # cap, not a per-symbol optimized param like min_leg_atr/
+        # qm_zone_pct. v0.99.23: switched from msnr_backtest_results to
+        # the _raw variant — the former now has each symbol's own skip_
+        # rr_min-failing trades already filtered out (per direct user
+        # request, see msnr_optimize_symbol()), which would quietly
+        # starve THIS pooled rule of exactly the evidence it exists to
+        # catch if left pointed at the filtered copy.
         with state_lock:
-            all_results = list(STATE["msnr_backtest_results"].values())
+            all_results = list(STATE["msnr_backtest_results_raw"].values())
         pooled_trades = [t for sym_trades in all_results for t in sym_trades]
         if pooled_trades:
             _risk_autotune_msnr_max_rr(pooled_trades, MSNR_MAX_RR, _set_msnr_max_rr)
@@ -14296,9 +14355,16 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
     outrank a larger steadier combo just because its raw average looks
     higher. Falls back to the middle of the grid (~module defaults) if
     no combo clears MSNR_MIN_BACKTEST_TRADES closed trades.
-    Returns (override_dict, trades_list) — the trades_list IS the
-    winning combo's backtest, reused directly for display rather than
-    re-run afterward."""
+    Returns (override_dict, trades_list, raw_trades_list) — trades_list
+    is the winning combo's backtest with any skip_rr_min-failing trades
+    already filtered out (v0.99.23, see below); raw_trades_list is the
+    SAME winning combo's backtest UNFILTERED, kept separately for the
+    global pooled-across-symbols MSNR_MAX_RR autotune and the /api/msnr/
+    status rr_buckets display — those deliberately need the full
+    picture (including whatever this symbol's own skip filter just
+    removed) since they're a different mechanism judging RR badness
+    pooled across the WHOLE universe, not this symbol alone; filtering
+    per-symbol first would quietly starve that pooled evidence."""
     now = time.time()
     structure_start = now - (days + 20) * 86400
     structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, now)
@@ -14343,6 +14409,7 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
         mid_lookback = MSNR_PARAM_GRID_QM_LOOKBACK[len(MSNR_PARAM_GRID_QM_LOOKBACK) // 2]
         best_results = msnr_run_backtest(structure_candles, entry_candles,
                                           min_leg_atr=mid_atr, qm_zone_pct=mid_zone, qm_lookback=mid_lookback)
+        raw_results = best_results
         combos = len(MSNR_PARAM_GRID_MIN_LEG_ATR) * len(MSNR_PARAM_GRID_QM_ZONE_PCT) * len(MSNR_PARAM_GRID_QM_LOOKBACK)
         best = {
             "min_leg_atr": mid_atr, "qm_zone_pct": mid_zone, "qm_lookback_bars": mid_lookback,
@@ -14360,7 +14427,44 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
         # the winning combo's own trades are what's actually shown/
         # traded, same reasoning as reusing best_results for display).
         best["skip_rr_min"] = msnr_symbol_rr_skip_min(best_results)
-    return best, best_results
+        # v0.99.23, per direct user follow-up: once the skip floor is
+        # known, DON'T keep showing/counting the trades it would skip —
+        # the whole point was "statistically bad signals for this coin
+        # shouldn't be treated as part of this coin's system," not just
+        # "don't fire them live going forward." Deliberately computed
+        # in THIS order (skip_rr_min off the full unfiltered sample,
+        # THEN filter) — filtering first would shrink the very bucket
+        # evidence the threshold is judged from, undermining the same
+        # min-sample protection msnr_symbol_rr_skip_min() relies on.
+        # raw_results keeps the pre-filter list for the pooled global
+        # autotune/display (see this function's own docstring) — only
+        # best_results (per-symbol display + live gating) gets filtered.
+        # timeouts (rr present, no WIN/LOSS result) are dropped by the
+        # same rr>=skip_rr_min test as closed trades — a timeout is
+        # still evidence the setup didn't work, no reason to keep it
+        # once its own rr says it's in the skipped range.
+        raw_results = best_results
+        if best["skip_rr_min"] is not None:
+            skip_min = best["skip_rr_min"]
+            best_results = [t for t in best_results if t["rr"] is None or t["rr"] < skip_min]
+            filtered_summary = msnr_summarize_backtest(best_results)
+            best["trades"] = filtered_summary["n"]
+            best["wins"] = filtered_summary["wins"]
+            best["losses"] = filtered_summary["losses"]
+            best["timeouts"] = filtered_summary["timeouts"]
+            best["winrate"] = filtered_summary["win_rate"]
+            best["avg_rr"] = filtered_summary["avg_rr"]
+            best["median_rr"] = filtered_summary["median_rr"]
+            best["expectancy_r"] = filtered_summary["expectancy_r"]
+            # score also recomputed off the filtered set — same
+            # r_values-from-closed-trades shape the grid loop used to
+            # pick this combo in the first place (msnr_ranking_score()),
+            # so ranking/sort in the UI reflects the post-skip picture
+            # too, not a stale pre-filter number.
+            r_values = [t["rr"] for t in best_results if t["result"] == "WIN" and t["rr"] is not None]
+            r_values += [-1.0] * filtered_summary["losses"]
+            best["score"] = round(msnr_ranking_score(r_values, filtered_summary["losses"]), 4) if r_values else None
+    return best, best_results, raw_results
 
 
 def msnr_summarize_backtest(results):
@@ -14796,8 +14900,8 @@ def _msnr_backtest_one_symbol(symbol):
     with state_lock:
         STATE["msnr_backtest_in_flight"].append(symbol)
     try:
-        override, results = msnr_optimize_symbol(symbol)
-        return symbol, override, results, msnr_summarize_backtest(results)
+        override, results, raw_results = msnr_optimize_symbol(symbol)
+        return symbol, override, results, raw_results, msnr_summarize_backtest(results)
     except Exception as e:
         log_error(f"msnr_backtest {symbol}: {e}")
         return None
@@ -14817,6 +14921,7 @@ def msnr_backtest_loop():
             t0 = time.time()
             universe = msnr_build_backtest_universe()
             results_by_symbol = {}
+            raw_results_by_symbol = {}
             summary_by_symbol = {}
             overrides_by_symbol = {}
             with state_lock:
@@ -14838,12 +14943,14 @@ def msnr_backtest_loop():
                         res = fut.result()
                         if res is None:
                             continue
-                        symbol, override, results, summary = res
+                        symbol, override, results, raw_results, summary = res
                         overrides_by_symbol[symbol] = override
                         results_by_symbol[symbol] = results
+                        raw_results_by_symbol[symbol] = raw_results
                         summary_by_symbol[symbol] = summary
                 with state_lock:
                     STATE["msnr_backtest_results"] = results_by_symbol
+                    STATE["msnr_backtest_results_raw"] = raw_results_by_symbol
                     STATE["msnr_backtest_summary"] = summary_by_symbol
                     STATE["msnr_symbol_overrides"] = overrides_by_symbol
                     STATE["msnr_backtest_universe"] = universe
@@ -15979,7 +16086,7 @@ def api_msnr_status():
     with state_lock:
         overrides = dict(STATE["msnr_symbol_overrides"])
         backtest_universe = list(STATE["msnr_backtest_universe"])
-        backtest_results = dict(STATE["msnr_backtest_results"])
+        backtest_results_raw = dict(STATE["msnr_backtest_results_raw"])
         live_universe = list(STATE["msnr_live_universe"]) or list(MSNR_SYMBOLS)
         autotrade_symbols = dict(STATE["msnr_autotrade_symbols"])
         last_backtest_finished = STATE["msnr_last_backtest_finished"]
@@ -16013,8 +16120,12 @@ def api_msnr_status():
     # consistently hit stop) that a pooled avg/median RR can't reveal
     # this kind of pattern on its own. Same pooling MSNR_MAX_RR's own
     # autotune rule uses, so what's displayed matches what's actually
-    # driving the cap.
-    pooled_trades = [t for sym_trades in backtest_results.values() for t in sym_trades]
+    # driving the cap. v0.99.23: reads msnr_backtest_results_raw (pre-
+    # skip-filter), not msnr_backtest_results — the latter now has each
+    # symbol's own skip_rr_min-failing trades already removed, which
+    # would silently understate exactly the badness this pooled bucket
+    # view exists to surface.
+    pooled_trades = [t for sym_trades in backtest_results_raw.values() for t in sym_trades]
     rr_buckets = msnr_rr_bucket_stats(pooled_trades)
     return jsonify({
         "enabled": MSNR_ENABLED,
@@ -16184,6 +16295,7 @@ def api_reset_msnr():
     try:
         with state_lock:
             STATE["msnr_backtest_results"] = {}
+            STATE["msnr_backtest_results_raw"] = {}
             STATE["msnr_backtest_summary"] = {}
             STATE["msnr_symbol_overrides"] = {}
             STATE["msnr_live_universe"] = []  # v0.99.18: stale derived data, same reasoning as clearing overrides above — msnr_live_loop() falls back to MSNR_SYMBOLS (gold) until the next backtest cycle repopulates it
