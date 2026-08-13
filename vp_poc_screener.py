@@ -6169,6 +6169,56 @@ v0.99.30 - Direct user follow-up ("давай закрепим") after v0.99.29 
          node --check on the correctly-last <script> block, and the
          Flask route/def integrity check (still 63 routes) — CSS-only,
          no Python logic or JS control flow changed.
+
+v0.99.31 - Direct user report: "Шапка относительно таблицы съезжает" —
+         the header row drifting out of alignment with the body as a
+         wide table gets scrolled. Root cause, found by auditing every
+         <table> in the page: the v0.89.0 mobile rule put `display:
+         block; overflow-x:auto` directly ON every <table> element,
+         making the table ITSELF a scroll container — fine for the 4
+         tables that had no OTHER scroll container (the 3 static
+         signals/div/ema tables, and loadMsnrTrades()'s per-trade
+         table), but 17 other dynamically-built tables (MSNR backtest,
+         session, ft5, vgi, etc) were ALREADY wrapped in their own
+         `<div style="overflow-x:auto;">`, so those ended up with TWO
+         independent, nested horizontal scroll containers per table.
+         That double-nesting is exactly what broke it: v0.99.30's
+         `position:sticky` resolves against whichever scroll container
+         is nearest, and with two stacked ones, which one actually
+         ends up "nearest" doesn't reliably match where the visible
+         scroll offset lives; separately, `display:block` on <table>
+         also breaks the browser's native guarantee that thead and
+         tbody share one column grid, letting each auto-size
+         independently — a second, unrelated source of the exact same
+         symptom.
+         Fixed at the root rather than patched around: <table> no
+         longer overrides display or scrolls on its own at all (stays
+         native `display:table`, keeping thead/tbody on one shared
+         column grid) — ALL horizontal scrolling now goes through the
+         div wrapper alone, everywhere, so there's exactly one scroll
+         ancestor per table for sticky to resolve against, never two.
+         Added the missing wrapper to the 4 tables that didn't have
+         one: the 3 static tables in the HTML skeleton (signalsTable/
+         divTable/emaTable — their existing id-based `.style.display`
+         JS toggles keep working unchanged, since wrapping in a div
+         doesn't move or rename the table element itself) and
+         loadMsnrTrades()'s per-trade table. New `div[style*=
+         "overflow-x:auto"]` attribute-substring selector picks up
+         momentum scrolling (-webkit-overflow-scrolling:touch) and
+         max-width:100% on every EXISTING wrapper div without touching
+         17+ render functions just to add a shared class name to
+         each's already-consistent inline style — checked it doesn't
+         accidentally also match .tabs or #headerTop's own div (both
+         get overflow-x:auto from an external class/media rule, not an
+         inline style attribute, so the substring genuinely isn't
+         present in their markup).
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the correctly-last <script> block, the Flask
+         route/def integrity check (still 63 routes), an AST walk for
+         duplicate top-level defs (none introduced), and manually
+         re-inspected the edited static-table skeleton and the
+         loadMsnrTrades() template string for balanced div/table
+         nesting (every opened div has exactly one matching close).
 """
 
 import os
@@ -6188,7 +6238,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.30"
+APP_VERSION = "0.99.31"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -17644,13 +17694,41 @@ INDEX_HTML = """<!doctype html>
      screenshot showed the header button row wrapping across ~4 lines
      (eating most of the visible screen before any actual data) and the
      12-column tables (EMA's, worst case) rendering all columns crushed
-     into unreadable widths on a narrow phone viewport. Deliberately
-     CSS-only: no JS/markup changes needed, since it works for BOTH the
-     three static <table> elements (signals/div/ema) AND the
-     dynamically-generated ones (scalp/session panels build their own
-     <table> via innerHTML) — the `table { display:block; overflow-x:
-     auto }` rule applies to any table on the page, present now or
-     injected later, without needing to touch each render function. */
+     into unreadable widths on a narrow phone viewport.
+     v0.99.31: this rule used to put `display:block; overflow-x:auto`
+     directly ON every <table> element itself, applying to any table on
+     the page — present now or injected later — without needing to
+     touch each render function. That worked fine for the 4 tables that
+     had NO other scroll container of their own (the 3 static signals/
+     div/ema tables, and loadMsnrTrades()'s per-trade table), but every
+     OTHER dynamically-built table (MSNR backtest, session, ft5, vgi,
+     etc — 17 of them, all already wrapped in their own `<div style=
+     "overflow-x:auto;">`) ended up with TWO independent horizontal
+     scroll containers nested inside each other: the div wrapper AND
+     the table itself. Per direct user report ("шапка относительно
+     таблицы съезжает" — the header sliding out of sync with the body
+     as you scroll): that double-nesting is exactly what broke it —
+     v0.99.30's `position:sticky` sticks relative to whichever scroll
+     container is NEAREST, and with two nested ones per table, which
+     one actually ends up "nearest" (and therefore what the sticky
+     column sticks against) can end up being the WRONG one relative to
+     where the visible scroll offset actually lives, and `display:block`
+     on <table> also breaks the browser's native guarantee that thead
+     and tbody share one column grid (each can end up auto-sizing
+     independently), which is its own separate source of drift.
+     Fixed at the root instead of patching around it: <table> no longer
+     overrides its own display or becomes its own scroll container at
+     all (keeps native `display:table`, so thead/tbody column widths
+     stay a single shared grid, and sticky has exactly ONE scroll
+     ancestor to resolve against, never two) — ALL scrolling now goes
+     through the div wrapper alone. Added a wrapper to the 4 tables
+     that didn't have one (signals/div/ema tables in the static HTML
+     skeleton, and loadMsnrTrades()'s per-trade table) instead of
+     relying on the table-level rule for them specifically. The
+     `div[style*="overflow-x:auto"]` selector below (an attribute
+     substring match, not a class) reaches every existing wrapper div
+     without needing to touch 17+ render functions just to add a
+     shared class name to each one's already-consistent inline style. */
   @media (max-width: 640px) {
     header { padding:8px 10px; position:static; }
     header h1 { font-size:15px; margin-bottom:6px; }
@@ -17663,7 +17741,8 @@ INDEX_HTML = """<!doctype html>
     #status, #overview, #autotradeBanner { font-size:10.5px; }
     .tabs { flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; padding-bottom:2px; }
     .tab { flex-shrink:0; font-size:12px; padding:6px 10px; }
-    table { display:block; overflow-x:auto; white-space:nowrap; -webkit-overflow-scrolling:touch; max-width:100%; }
+    table { white-space:nowrap; }
+    div[style*="overflow-x:auto"] { -webkit-overflow-scrolling:touch; max-width:100%; }
     /* v0.99.28, per direct user request after a live portrait-mode
        screenshot of the MSNR backtest table: cells were still padded/
        sized for a desktop-width table, wasting horizontal space that
@@ -17686,17 +17765,16 @@ INDEX_HTML = """<!doctype html>
        stable horizontal scroll for a few seconds without knowing which
        ROW you're looking at was the next obvious friction point.
        position:sticky sticks relative to the nearest scrolling
-       ancestor, which is the table element itself here (it's the one
-       with overflow-x:auto, from the v0.89.0 rule above) — this works
-       precisely BECAUSE that rule already turned every table into its
-       own horizontal scroll container; a sticky column wouldn't do
-       anything useful against page-level scroll. Needs an explicit
-       background (not "transparent", the actual body background
-       color) since a sticky cell that's otherwise transparent lets
-       every OTHER column's text scroll visibly underneath it instead
-       of being hidden by it — defeats the purpose. Scoped to mobile
-       only: on desktop these tables generally fit without horizontal
-       scroll in the first place, so there's nothing to pin against. */
+       ancestor — v0.99.31 made that ALWAYS the div wrapper now (never
+       the table itself), so there's exactly one unambiguous scroll
+       container per table for this to resolve against. Needs an
+       explicit background (not "transparent", the actual body
+       background color) since a sticky cell that's otherwise
+       transparent lets every OTHER column's text scroll visibly
+       underneath it instead of being hidden by it — defeats the
+       purpose. Scoped to mobile only: on desktop these tables
+       generally fit without horizontal scroll in the first place, so
+       there's nothing to pin against. */
     th:first-child, td:first-child { position:sticky; left:0; z-index:2; background:#0b0e14; }
     tr:active td:first-child { background:#182036; }
   }
@@ -17746,20 +17824,26 @@ INDEX_HTML = """<!doctype html>
 </div>
 <div class="panel">
   <div id="tuningPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
+  <div style="overflow-x:auto;">
   <table id="signalsTable" style="display:table">
     <thead><tr><th>Symbol</th><th>Dir</th><th>Reason</th><th>Entry</th><th>SL</th><th>TP</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
     <tbody></tbody>
   </table>
+  </div>
   <div id="divStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
+  <div style="overflow-x:auto;">
   <table id="divTable" style="display:none">
     <thead><tr><th>Symbol</th><th>Dir</th><th>Kind</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
     <tbody></tbody>
   </table>
+  </div>
   <div id="emaStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
+  <div style="overflow-x:auto;">
   <table id="emaTable" style="display:none">
     <thead><tr><th>Symbol</th><th>Dir</th><th>TF</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>ADX</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
     <tbody></tbody>
   </table>
+  </div>
   <div id="scalpPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="sessionPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="sessionNyPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
@@ -19429,10 +19513,10 @@ async function loadMsnrTrades(symbol) {
         <td>${compTxt}</td>
       </tr>`;
     }).join('');
-    body.innerHTML = `<table style="font-size:11px;white-space:nowrap;width:100%;">
+    body.innerHTML = `<div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;width:100%;">
       <thead><tr><th>Время</th><th>Dir</th><th>Уровень</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Result</th><th>Баланс</th></tr></thead>
       <tbody>${rows}</tbody>
-    </table>`;
+    </table></div>`;
   } catch (e) {
     body.textContent = 'ошибка загрузки';
     console.error(e);
