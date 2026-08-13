@@ -5564,6 +5564,55 @@ v0.99.18 - MSNR gains sortable backtest columns and 6 individual per-
          node --check on the extracted <script> block, the route/def
          integrity check, and the stale-default-parameter check — all
          clean.
+
+v0.99.19 - Two direct follow-ups from the same v0.99.18 feature.
+         (1) "Чекбоксы есть, сортировки не вижу, монеты с галочками
+         разбросаны по всему списку, дай возможность ставить галочки
+         для топ 10." Verified the sort logic itself was actually
+         correct (simulated it directly in Node against sample data
+         before touching anything) — the real problem was UX, not a
+         bug: the table's default order was still by score (unchanged
+         from before sortable columns existed), so opening the panel
+         never visibly showed a winrate/n-sorted view without an
+         explicit click, and eligible (checkbox-showing) rows could
+         land anywhere in that order.
+         Fixed the "scattered checkboxes" complaint directly: eligible
+         rows now group to the top of the table UNCONDITIONALLY, ahead
+         of whatever sort key is active — verified behaviorally (Node
+         simulation: an eligible low-score row correctly outranks an
+         ineligible high-score one). Added a visible separator row
+         exactly at the eligible/rest boundary so the grouping is
+         obvious rather than requiring the reader to notice checkboxes
+         stop appearing partway down.
+         MSNR_AUTOTRADE_TOP_N raised 3->10 (13 total fields with gold) —
+         msnr_autotrade_eligible_symbols() genuinely already supported
+         an arbitrary N via this one constant, not a hardcoded 3, so
+         this was a one-line change. Verified behaviorally: 15 synthetic
+         candidates in, confirmed exactly 13 come out (3 gold + 10).
+         (2) "Не только по винрейту, важно ещё количество сделок" — a
+         second, sharper follow-up after the first fix shipped. The
+         previous ranking (raw winrate DESC, sample size only as a
+         tiebreaker for EXACT ties) still let a small lucky sample
+         (e.g. 7 trades at 70%) outrank a large steady one (100 trades
+         at 55%) in the completely ordinary case where their winrates
+         merely differ — a tiebreaker does nothing there. Switched
+         msnr_rank_by_winrate_sample() to rank by `score` instead — the
+         SAME lower-confidence-bound-on-mean-R metric this app already
+         built and uses to pick each symbol's own winning grid-search
+         combo (msnr_ranking_score()), reused here rather than inventing
+         a second, differently-tuned formula for the identical
+         underlying problem (a small sample's apparent edge needing to
+         be discounted, not just tie-broken). Verified behaviorally
+         with the exact small-lucky-vs-large-steady scenario: the
+         large-sample, lower-winrate symbol now correctly outranks the
+         small-sample, higher-winrate one. Function name kept as-is
+         (renaming would have touched many more call sites/docs for a
+         cosmetic gain) — its own docstring now explains explicitly why
+         it ranks by score despite the name.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the extracted <script> block, the route/def
+         integrity check, and the stale-default-parameter check — all
+         clean.
 """
 
 import os
@@ -5583,7 +5632,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.18"
+APP_VERSION = "0.99.19"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6176,6 +6225,7 @@ MSNR_RANK_PRIOR_TARGET = 1  # same role as FT5_RANK_PRIOR_TARGET — only a comb
 MSNR_BACKTEST_UNIVERSE_SIZE = int(os.environ.get("VP_MSNR_BACKTEST_UNIVERSE_SIZE", 70))  # v0.99.9 — per direct user request: backtest the top-N most liquid symbols too (union'd with MSNR_SYMBOLS, so gold stays included), to see whether this signal logic generalizes beyond gold — explicitly backtest-only for now, msnr_live_loop still scans only MSNR_SYMBOLS, unchanged. Lowered 30->10 in v0.99.14 when the cycle was stuck "ещё не завершился" for a long time under sustained Gate.io rate-limiting; raised back up to 70 in v0.99.16 per direct follow-up request, now that get_candles_range() ALSO retries on 429 (v0.99.15 — it previously had its own separate, unretried request loop) and the panel shows live per-symbol progress instead of a binary done/not-done, so a longer cycle is at least visibly progressing rather than looking stuck.
 MSNR_LIVE_PROMOTE_MIN_WINRATE = float(os.environ.get("VP_MSNR_LIVE_PROMOTE_MIN_WINRATE", 50.0))  # v0.99.17 — per direct user request: a backtest-only symbol (from the wider MSNR_BACKTEST_UNIVERSE_SIZE exploration set) gets promoted into LIVE scanning once its winning combo's own closed-trade win-rate clears this bar. Union'd with MSNR_SYMBOLS (gold), never replaces it — gold stays live regardless of its own backtest numbers.
 MSNR_LIVE_PROMOTE_MIN_SAMPLE = int(os.environ.get("VP_MSNR_LIVE_PROMOTE_MIN_SAMPLE", 40))  # v0.99.17 — closed trades (wins+losses, NOT the raw "trades" count which also includes timeouts that say nothing about win-rate) needed before a symbol's win-rate is trusted enough to promote it to live scanning.
+MSNR_AUTOTRADE_TOP_N = int(os.environ.get("VP_MSNR_AUTOTRADE_TOP_N", 10))  # v0.99.19 — how many non-gold symbols (by msnr_rank_by_winrate_sample()) get an individual autotrade toggle, on top of the always-eligible 3 gold ones. Raised 3->10 per direct follow-up request.
 
 # ============================================================================
 # EXPERIMENTAL: FT5 — port of freqtrade-strategies' Strategy005 (v0.96.0)
@@ -6952,7 +7002,7 @@ STATE = {
     "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at}
     "msnr_backtest_universe": [],  # v0.99.9 — MSNR_SYMBOLS union'd with the top-liquid backtest-only exploration set, see msnr_build_backtest_universe()
     "msnr_live_universe": [],  # v0.99.17 — MSNR_SYMBOLS union'd with any backtest-qualifying symbol (win-rate/sample threshold), see msnr_compute_live_universe(); msnr_live_loop() scans THIS, not the static MSNR_SYMBOLS constant directly, so it stays empty (falls back to MSNR_SYMBOLS at the call site) until the first backtest cycle populates it
-    "msnr_autotrade_symbols": {},  # v0.99.18 — per-symbol autotrade toggle, {symbol: bool}. Replaces the old single AUTOTRADE_ENABLED_MSNR gate — per direct user request for exactly 6 individually-toggleable fields (3 gold, always eligible + the current top 3 non-gold by msnr_rank_by_winrate_sample()). A symbol missing from this dict is treated as off (same "off unless explicitly on" default every other autotrade toggle in this app already uses). See msnr_autotrade_eligible_symbols() for which 6 symbols can currently be toggled, and _set_msnr_autotrade_symbol()'s own docstring for what happens to a saved toggle when its symbol falls out of the top 3.
+    "msnr_autotrade_symbols": {},  # v0.99.18 — per-symbol autotrade toggle, {symbol: bool}. Replaces the old single AUTOTRADE_ENABLED_MSNR gate — per direct user request for individually-toggleable fields (3 gold, always eligible + the current top MSNR_AUTOTRADE_TOP_N non-gold by msnr_rank_by_winrate_sample(), which despite its name ranks by `score` — see that function's own v0.99.19 docstring). A symbol missing from this dict is treated as off (same "off unless explicitly on" default every other autotrade toggle in this app already uses). See msnr_autotrade_eligible_symbols() for which symbols can currently be toggled, and _set_msnr_autotrade_symbol()'s own docstring for what happens to a saved toggle when its symbol falls out of that set.
     "msnr_backtest_total": 0,  # v0.99.15 — progress tracking for the CURRENT (or most recent) backtest cycle, per direct user request for visibility during a long-running cycle
     "msnr_backtest_done": 0,
     "msnr_backtest_in_flight": [],  # symbols currently being fetched/optimized right now, not yet resolved
@@ -14409,39 +14459,54 @@ def msnr_compute_live_universe(overrides):
 
 def msnr_rank_by_winrate_sample(overrides, exclude=None):
     """Ranks symbols (excluding `exclude`, e.g. gold — it's handled as
-    its own fixed set, not part of this ranking) by winrate DESC, closed-
-    trade sample size (wins+losses) as the tiebreaker — per direct user
-    request: "сделай сортировку по винрейту и количеству сигналов
-    бектеста." Symbols with an error or no winrate are excluded (nothing
-    to honestly rank them by, same as everywhere else this app already
-    filters errored overrides out of a ranking). Pure function of
-    `overrides`, same reasoning as msnr_compute_live_universe() above —
-    no locks, no I/O, directly testable.
+    its own fixed set, not part of this ranking) by `score` DESC — the
+    same lower-confidence-bound-on-mean-R metric already used to pick
+    each symbol's own winning grid-search combo (see msnr_ranking_
+    score()'s own docstring) and already the backtest table's own
+    original default sort before this function existed.
+    v0.99.19: switched from raw winrate (with sample size only as a
+    tiebreaker) to score, per a direct follow-up: "не только по
+    винрейту, важно ещё количество сделок." A tiebreaker only matters
+    when two symbols have the EXACT same winrate — it does nothing for
+    the much more common case of a small-sample 70% winrate outranking
+    a large-sample 55% one despite the large sample being the more
+    trustworthy edge. `score` already solves exactly this (a proper
+    confidence bound naturally discounts a small sample's apparent
+    edge, the same reasoning FT5's own ranking score was built around
+    earlier this session) — reusing it here instead of inventing a
+    second, differently-tuned combined metric for the same underlying
+    problem.
+    Symbols with an error or no score are excluded (nothing to honestly
+    rank them by, same as everywhere else this app already filters
+    errored overrides out of a ranking). Pure function of `overrides`,
+    same reasoning as msnr_compute_live_universe() above — no locks, no
+    I/O, directly testable.
     Returns a list of (symbol, override_dict) tuples, already sorted,
-    highest-ranked first — feeds both the panel's own sortable display
-    and _msnr_autotrade_top3() below (which just needs [:3])."""
+    highest-ranked first — feeds msnr_autotrade_eligible_symbols()
+    below (which just needs [:MSNR_AUTOTRADE_TOP_N])."""
     exclude = exclude or set()
     candidates = [(sym, ov) for sym, ov in overrides.items()
-                  if ov and not ov.get("error") and ov.get("winrate") is not None and sym not in exclude]
-    candidates.sort(key=lambda kv: (kv[1]["winrate"], (kv[1].get("wins", 0) or 0) + (kv[1].get("losses", 0) or 0)), reverse=True)
+                  if ov and not ov.get("error") and ov.get("score") is not None and sym not in exclude]
+    candidates.sort(key=lambda kv: kv[1]["score"], reverse=True)
     return candidates
 
 
 def msnr_autotrade_eligible_symbols(overrides):
-    """The exactly-6 symbols eligible for an individual autotrade toggle:
-    all 3 of MSNR_SYMBOLS (gold — always eligible, regardless of its own
-    backtest numbers, same unconditional treatment msnr_compute_live_
-    universe() gives it) plus the current top 3 non-gold symbols by
-    msnr_rank_by_winrate_sample(). Per direct user request: "включать
+    """The symbols eligible for an individual autotrade toggle: all 3 of
+    MSNR_SYMBOLS (gold — always eligible, regardless of its own backtest
+    numbers, same unconditional treatment msnr_compute_live_universe()
+    gives it) plus the current top MSNR_AUTOTRADE_TOP_N non-gold symbols
+    by msnr_rank_by_winrate_sample(). Per direct user request: "включать
     автоторговлю не только по золоту, но и по топ 3 после сортировки не
-    считая золота, то есть всего 6 полей для автоторговли."
+    считая золота" (v0.99.18), raised to top 10 in v0.99.19 per direct
+    follow-up.
     This set can change between backtest cycles as rankings shift — see
     _set_msnr_autotrade_symbol()'s own docstring for what happens to a
-    symbol's saved toggle state when it falls out of the top 3."""
+    symbol's saved toggle state when it falls out of the top N."""
     gold = set(MSNR_SYMBOLS)
     ranked = msnr_rank_by_winrate_sample(overrides, exclude=gold)
-    top3 = [sym for sym, _ov in ranked[:3]]
-    return list(MSNR_SYMBOLS) + top3
+    top_n = [sym for sym, _ov in ranked[:MSNR_AUTOTRADE_TOP_N]]
+    return list(MSNR_SYMBOLS) + top_n
 
 
 def _msnr_backtest_one_symbol(symbol):
@@ -18050,11 +18115,18 @@ async function refreshMsnr() {
     </table>
     </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
   const btRows = [...(status.top || [])].sort((a, b) => {
+    // v0.99.19: autotrade-eligible rows (the ones with a checkbox) are
+    // grouped to the TOP of the table first, regardless of the active
+    // sort key — per direct user report that checked/eligible coins
+    // were scattered throughout the list, easy to lose track of among
+    // dozens of backtest-only rows. Within each group (eligible /
+    // not-eligible), the normal sort key still applies.
+    if (a.autotrade_eligible !== b.autotrade_eligible) return a.autotrade_eligible ? -1 : 1;
     const av = a[_msnrSortKey], bv = b[_msnrSortKey];
     if (av === null || av === undefined) return 1;
     if (bv === null || bv === undefined) return -1;
     return av < bv ? -_msnrSortDir : (av > bv ? _msnrSortDir : 0);
-  }).map(r => {
+  }).map((r, idx, arr) => {
     const wrClass = (r.winrate === null || r.winrate === undefined) ? 'dim' : (r.winrate >= 50 ? 'win' : 'loss');
     const expClass = (r.expectancy_r === null || r.expectancy_r === undefined) ? 'dim' : (r.expectancy_r > 0 ? 'win' : 'loss');
     const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431`;
@@ -18062,7 +18134,14 @@ async function refreshMsnr() {
     const autotradeCell = r.autotrade_eligible
       ? `<input type="checkbox" ${r.autotrade_on ? 'checked' : ''} onclick="event.stopPropagation(); msnrToggleAutotrade('${r.symbol}', this.checked, this)">`
       : '<span class="dim" style="font-size:10px;">\u2014</span>';
-    return `<tr onclick="toggleMsnrBacktestTrades('${r.symbol}')" style="cursor:pointer;">
+    // v0.99.19: a visible separator row exactly at the eligible/rest
+    // boundary — the sort above already groups eligible rows first,
+    // this makes that grouping obvious at a glance instead of relying
+    // on the reader to notice checkboxes stop appearing partway down.
+    const separatorHtml = (idx > 0 && arr[idx - 1].autotrade_eligible && !r.autotrade_eligible)
+      ? `<tr><td colspan="11" class="dim" style="font-size:10px;padding:4px 0;border-top:1px solid #1c2433;">\u2014 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 (\u0442\u043e\u043b\u044c\u043a\u043e \u0431\u044d\u043a\u0442\u0435\u0441\u0442, \u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u0430) \u2014</td></tr>`
+      : '';
+    return separatorHtml + `<tr onclick="toggleMsnrBacktestTrades('${r.symbol}')" style="cursor:pointer;">
       <td>${_msnrExpanded.has(r.symbol) ? '\u25be' : '\u25b8'} ${r.symbol}${r.live ? ' <span style="color:#3ddc97;" title="торгуется вживую">\u25cf</span>' : ' <span class="dim" style="font-size:10px;" title="только бэктест, не торгуется">\u0431\u044d\u043a\u0442\u0435\u0441\u0442</span>'}</td>
       <td onclick="event.stopPropagation();">${autotradeCell}</td>
       <td class="${wrClass}">${r.winrate !== null && r.winrate !== undefined ? r.winrate+'%' : '-'}</td>
