@@ -5937,6 +5937,89 @@ v0.99.25 - Direct user follow-up, after screenshotting the live table:
          correctly-last <script> block, the Flask route/def integrity
          check (still 63 routes), and an AST walk for duplicate
          top-level defs (none introduced).
+
+v0.99.26 - Direct user follow-up, after confirming the compounding math
+         (v0.99.25's per-trade "Баланс" column) checked out on
+         APR_USDT: the trade that blew the account to $0 had a SL 12.25%
+         wide, which at 10x leverage means a -122.5% margin move —
+         floored to -100%, but structurally that same 12.25% move would
+         have hit Gate.io's own liquidation price BEFORE ever reaching
+         that SL, at roughly a 9.3% adverse move (confirmed by hand:
+         compute_scalp_liquidation_move_pct('SHORT', 10, 0.6%) = 9.29%).
+         Two asks: (1) "фильтр по ширине стопа" — a statistical filter
+         by SL width, symmetric to skip_rr_min; (2) "узнавать
+         максимальное плечо на бирже... уже где-то в коде реализовано" —
+         and it was: execute_autotrade() has run exactly this
+         liquidation check since v0.70.0 for every OTHER mode
+         (bounce/breakout/divergence/ema/session), just never wired
+         into MSNR's backtest/live-signal path — only applied reactively
+         at real order time, too late to keep a bad trade out of the
+         backtest stats or a live signal from ever showing up.
+         New msnr_sl_bucket_stats()/msnr_symbol_sl_skip_min(): SL-width
+         counterparts to msnr_rr_bucket_stats()/msnr_symbol_rr_skip_min()
+         — same MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE bar, same one-directional
+         stance, bucketed by SL-distance % (new MSNR_SL_PCT_BUCKETS:
+         0-2/2-4/4-6/6-10/10+) instead of rr. Deliberately separate from
+         the RR filter: a symbol can have fine RR ratios while still
+         routinely eating unusually WIDE-in-%-terms stops — RR alone
+         doesn't capture that.
+         New msnr_symbol_effective_leverage(symbol): AUTOTRADE_LEVERAGE_
+         MSNR clamped to this contract's own leverage_max (get_
+         contract_spec()) — the EXACT clamp execute_autotrade() already
+         applies before a real order, reused rather than reimplemented.
+         New msnr_trade_beyond_liquidation(symbol, direction, entry, sl,
+         leverage=None): the EXACT liquidation-safety check execute_
+         autotrade() already runs (same compute_scalp_liquidation_
+         move_pct() formula, same STATE["scalp_mmr_map"] source with
+         its own "MMR is a property of the contract, not the module"
+         reasoning quoted verbatim, same SCALP_SAFETY_MARGIN buffer) —
+         deterministic, not statistical, applied proactively here
+         instead of only reactively at order time.
+         msnr_optimize_symbol() now runs three filters on best_results
+         in sequence, each recomputing trades/wins/losses/timeouts/
+         winrate/avg_rr/median_rr/expectancy_r/score before the next:
+         skip_rr_min (v0.99.23) -> beyond-liquidation (unconditional,
+         new "liquidation_filtered_count" field) -> skip_sl_pct_min
+         (new). Factored the repeated recompute block into a new
+         _msnr_recompute_summary_score() helper — was about to become a
+         third near-identical copy, which is exactly the kind of thing
+         that quietly drifts apart over time. New "effective_leverage"
+         field stored per symbol; msnr_compound_return() now runs at
+         THIS symbol's effective_leverage instead of always the flat
+         configured AUTOTRADE_LEVERAGE_MSNR, so a coin the exchange caps
+         lower no longer shows an unrealistically optimistic "доход".
+         msnr_scan_symbol_live() gained the same two live-signal gates
+         (liquidation check, skip_sl_pct_min) alongside the existing
+         skip_rr_min one — a signal failing either never fires, matching
+         what execute_autotrade() would also reject at order time.
+         New msnr_symbol_skip_sl_min(symbol) lookup, same "separate from
+         msnr_symbol_params() to avoid a **params TypeError" reasoning
+         msnr_symbol_skip_rr_min() already documented.
+         UI: params row gained "skip SL≥X%" (loss-red), "N за
+         ликвидацией" when the liquidation filter actually dropped
+         trades, and "плечо Nx (лимит биржи)" when this symbol's
+         effective leverage is clamped below the configured setting —
+         all appended to the same string skip_rr_min/доход already
+         write to, per the user's own established "в строке параметров"
+         placement.
+         Verified with py_compile, an actual runtime start (msnr_
+         symbol_sl_skip_min on a synthetic wide-stop/bad-winrate bucket
+         vs a narrow-stop/good-winrate bucket correctly isolated the
+         bad one at its 6% edge; msnr_trade_beyond_liquidation() on the
+         EXACT APR_USDT numbers from the screenshot — entry=0.19948,
+         sl=0.223915, 10x — returned True, and a narrow-stop trade from
+         the same symbol's own history returned False; confirmed the
+         liquidation filter alone drops exactly the one trade that blew
+         the account from a 2-trade synthetic list; confirmed msnr_
+         symbol_effective_leverage() degrades to the configured default
+         rather than raising when get_contract_spec() fails over the
+         network), pyflakes, node --check on the correctly-last
+         <script> block, the Flask route/def integrity check (still 63
+         routes), an AST walk for duplicate top-level defs (none
+         introduced, 6 new functions all present), and confirmed msnr_
+         trade_beyond_liquidation()'s leverage default resolves live at
+         call time rather than being frozen — same stale-default class
+         already fixed twice this session.
 """
 
 import os
@@ -5956,7 +6039,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.25"
+APP_VERSION = "0.99.26"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7326,7 +7409,7 @@ STATE = {
     "msnr_backtest_summary": {},
     "msnr_last_backtest_finished": None,
     "msnr_last_backtest_duration": None,
-    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at, skip_rr_min, compound_final_balance, compound_return_pct, compound_blown_at}
+    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at, skip_rr_min, skip_sl_pct_min, effective_leverage, liquidation_filtered_count, compound_final_balance, compound_return_pct, compound_blown_at}
     "msnr_backtest_universe": [],  # v0.99.9 — MSNR_SYMBOLS union'd with the top-liquid backtest-only exploration set, see msnr_build_backtest_universe()
     "msnr_live_universe": [],  # v0.99.17 — MSNR_SYMBOLS union'd with any backtest-qualifying symbol (win-rate/sample threshold), see msnr_compute_live_universe(); msnr_live_loop() scans THIS, not the static MSNR_SYMBOLS constant directly, so it stays empty (falls back to MSNR_SYMBOLS at the call site) until the first backtest cycle populates it
     "msnr_autotrade_symbols": {},  # v0.99.18 — per-symbol autotrade toggle, {symbol: bool}. Replaces the old single AUTOTRADE_ENABLED_MSNR gate — per direct user request for individually-toggleable fields (3 gold, always eligible + the current top MSNR_AUTOTRADE_TOP_N non-gold by msnr_rank_by_winrate_sample(), which despite its name ranks by `score` — see that function's own v0.99.19 docstring). A symbol missing from this dict is treated as off (same "off unless explicitly on" default every other autotrade toggle in this app already uses). See msnr_autotrade_eligible_symbols() for which symbols can currently be toggled, and _set_msnr_autotrade_symbol()'s own docstring for what happens to a saved toggle when its symbol falls out of that set.
@@ -14461,6 +14544,27 @@ def msnr_ranking_score(r_values, losses_count, z=None):
     return mean - zz * stderr
 
 
+def _msnr_recompute_summary_score(best, best_results):
+    """v0.99.26 — shared recompute step reused by every post-hoc filter
+    in msnr_optimize_symbol() (skip_rr_min, liquidation, skip_sl_pct_
+    min): keeps trades/wins/losses/timeouts/winrate/avg_rr/median_rr/
+    expectancy_r and score in sync with whatever subset of best_results
+    survived filtering, in ONE place instead of near-identical copies
+    at each filter step that could quietly drift apart over time."""
+    filtered_summary = msnr_summarize_backtest(best_results)
+    best["trades"] = filtered_summary["n"]
+    best["wins"] = filtered_summary["wins"]
+    best["losses"] = filtered_summary["losses"]
+    best["timeouts"] = filtered_summary["timeouts"]
+    best["winrate"] = filtered_summary["win_rate"]
+    best["avg_rr"] = filtered_summary["avg_rr"]
+    best["median_rr"] = filtered_summary["median_rr"]
+    best["expectancy_r"] = filtered_summary["expectancy_r"]
+    r_values = [t["rr"] for t in best_results if t["result"] == "WIN" and t["rr"] is not None]
+    r_values += [-1.0] * filtered_summary["losses"]
+    best["score"] = round(msnr_ranking_score(r_values, filtered_summary["losses"]), 4) if r_values else None
+
+
 def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
     """Grid search over (min_leg_atr, qm_zone_pct, qm_lookback) —
     MSNR_PARAM_GRID_MIN_LEG_ATR x MSNR_PARAM_GRID_QM_ZONE_PCT x
@@ -14474,15 +14578,17 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
     higher. Falls back to the middle of the grid (~module defaults) if
     no combo clears MSNR_MIN_BACKTEST_TRADES closed trades.
     Returns (override_dict, trades_list, raw_trades_list) — trades_list
-    is the winning combo's backtest with any skip_rr_min-failing trades
-    already filtered out (v0.99.23, see below); raw_trades_list is the
-    SAME winning combo's backtest UNFILTERED, kept separately for the
-    global pooled-across-symbols MSNR_MAX_RR autotune and the /api/msnr/
-    status rr_buckets display — those deliberately need the full
-    picture (including whatever this symbol's own skip filter just
-    removed) since they're a different mechanism judging RR badness
-    pooled across the WHOLE universe, not this symbol alone; filtering
-    per-symbol first would quietly starve that pooled evidence."""
+    is the winning combo's backtest with skip_rr_min-failing (v0.99.23),
+    beyond-liquidation (v0.99.26), and skip_sl_pct_min-failing (v0.99.26)
+    trades already filtered out, in that order (see below); raw_trades_
+    list is the SAME winning combo's backtest UNFILTERED, kept
+    separately for the global pooled-across-symbols MSNR_MAX_RR autotune
+    and the /api/msnr/status rr_buckets display — those deliberately
+    need the full picture (including whatever this symbol's own filters
+    just removed) since they're a different mechanism judging RR
+    badness pooled across the WHOLE universe, not this symbol alone;
+    filtering per-symbol first would quietly starve that pooled
+    evidence."""
     now = time.time()
     structure_start = now - (days + 20) * 86400
     structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, now)
@@ -14534,6 +14640,8 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
             "trades": len(best_results), "wins": 0, "losses": 0, "timeouts": 0,
             "winrate": None, "avg_rr": None, "median_rr": None, "expectancy_r": None, "score": None,
             "optimized_at": now, "candles_used": len(entry_candles), "skip_rr_min": None,
+            "skip_sl_pct_min": None, "liquidation_filtered_count": 0,
+            "effective_leverage": msnr_symbol_effective_leverage(symbol),
             "note": f"insufficient closed trades across all {combos} combos tried "
                     f"(max {max(tried) if tried else 0}, need {MSNR_MIN_BACKTEST_TRADES}); "
                     f"using middle-of-grid defaults",
@@ -14565,30 +14673,49 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
         if best["skip_rr_min"] is not None:
             skip_min = best["skip_rr_min"]
             best_results = [t for t in best_results if t["rr"] is None or t["rr"] < skip_min]
-            filtered_summary = msnr_summarize_backtest(best_results)
-            best["trades"] = filtered_summary["n"]
-            best["wins"] = filtered_summary["wins"]
-            best["losses"] = filtered_summary["losses"]
-            best["timeouts"] = filtered_summary["timeouts"]
-            best["winrate"] = filtered_summary["win_rate"]
-            best["avg_rr"] = filtered_summary["avg_rr"]
-            best["median_rr"] = filtered_summary["median_rr"]
-            best["expectancy_r"] = filtered_summary["expectancy_r"]
-            # score also recomputed off the filtered set — same
-            # r_values-from-closed-trades shape the grid loop used to
-            # pick this combo in the first place (msnr_ranking_score()),
-            # so ranking/sort in the UI reflects the post-skip picture
-            # too, not a stale pre-filter number.
-            r_values = [t["rr"] for t in best_results if t["result"] == "WIN" and t["rr"] is not None]
-            r_values += [-1.0] * filtered_summary["losses"]
-            best["score"] = round(msnr_ranking_score(r_values, filtered_summary["losses"]), 4) if r_values else None
+            _msnr_recompute_summary_score(best, best_results)
+        # v0.99.26, per direct user request ("иногда стоп будет за
+        # ликвидацией и просто избегать этого"): deterministic filter,
+        # not statistical — a trade whose own SL sits past this
+        # symbol's effective-leverage liquidation buffer gets dropped
+        # unconditionally, sample size doesn't matter here since it's
+        # Gate's own margin math, not a pattern being inferred from
+        # history. Applied AFTER the skip_rr_min filter (on whatever
+        # survived it) and BEFORE the SL-width statistical filter below
+        # — the SL-width bucket stats should reflect only trades that
+        # could have actually played out as scored, not ones that were
+        # never mechanically reachable in the first place.
+        best["effective_leverage"] = msnr_symbol_effective_leverage(symbol)
+        before_liq = len(best_results)
+        best_results = [t for t in best_results
+                         if not msnr_trade_beyond_liquidation(symbol, t["direction"], t["entry"], t["sl"],
+                                                               leverage=best["effective_leverage"])]
+        best["liquidation_filtered_count"] = before_liq - len(best_results)
+        if best["liquidation_filtered_count"]:
+            _msnr_recompute_summary_score(best, best_results)
+        # v0.99.26, per direct user request ("фильтр по ширине стопа"):
+        # SL-width counterpart to the skip_rr_min block above — same
+        # ordering reasoning (derive the floor off the full surviving
+        # sample first, THEN filter), same "skip entirely" behavior.
+        best["skip_sl_pct_min"] = msnr_symbol_sl_skip_min(best_results)
+        if best["skip_sl_pct_min"] is not None:
+            skip_sl = best["skip_sl_pct_min"]
+            best_results = [t for t in best_results
+                             if not t.get("entry") or t["entry"] <= 0 or t.get("sl") is None
+                             or abs(t["entry"] - t["sl"]) / t["entry"] * 100 < skip_sl]
+            _msnr_recompute_summary_score(best, best_results)
     # v0.99.24, per direct user request: a $ compounding simulation
     # (start MSNR_COMPOUND_START_BALANCE, reinvest the whole balance
-    # at AUTOTRADE_LEVERAGE_MSNR every trade) over best_results — the
-    # FILTERED (post skip_rr_min) list, matching what this symbol
-    # would actually be traded as, same reasoning as the R-multiple
-    # stats above using the filtered set rather than raw_results.
-    compound = msnr_compound_return(best_results)
+    # every trade) over best_results — the FILTERED list (skip_rr_min +
+    # v0.99.26's liquidation/skip_sl_pct_min filters), matching what
+    # this symbol would actually be traded as, same reasoning as the
+    # R-multiple stats above using the filtered set rather than
+    # raw_results. v0.99.26: leverage now resolves to this symbol's own
+    # effective_leverage (contract-capped, see msnr_symbol_effective_
+    # leverage()) when known, rather than always the flat configured
+    # AUTOTRADE_LEVERAGE_MSNR — a coin the exchange caps below that
+    # setting would otherwise show an unrealistically optimistic sim.
+    compound = msnr_compound_return(best_results, leverage=best.get("effective_leverage"))
     best["compound_final_balance"] = compound["final_balance"] if compound else None
     best["compound_return_pct"] = compound["return_pct"] if compound else None
     best["compound_blown_at"] = compound["blown_at_trade"] if compound else None
@@ -14697,6 +14824,136 @@ def msnr_symbol_rr_skip_min(trades):
     return min(failing_edges) if failing_edges else None
 
 
+MSNR_SL_PCT_BUCKETS = [(0, 2), (2, 4), (4, 6), (6, 10), (10, float("inf"))]  # v0.99.26 — % SL-distance buckets for msnr_sl_bucket_stats(), same shape as MSNR_RR_BUCKETS but keyed on stop width instead of RR
+
+
+def msnr_sl_bucket_stats(trades):
+    """v0.99.26, per direct user request: SL-width counterpart to msnr_
+    rr_bucket_stats() — buckets CLOSED trades (WIN/LOSS only) by their
+    OWN SL distance as a % of entry price (not by rr) into MSNR_SL_PCT_
+    BUCKETS, computing win-rate AND avg_rr per bucket (avg_rr is needed
+    here too, same as the RR-bucket version, to judge each bucket
+    against its own breakeven). A wide stop matters independently of
+    RR: a single very-wide-stop loss can wipe a fixed-leverage
+    compounding account outright (see msnr_compound_return()) even
+    when that trade's RR looked perfectly ordinary — RR alone (reward
+    relative to risk) says nothing about how big the risk itself was
+    in absolute % terms.
+    Same "hi" key omitted (only "lo") for the same JSON-Infinity reason
+    msnr_rr_bucket_stats() already documented — the last bucket's hi is
+    float("inf") and would break jsonify()."""
+    buckets = []
+    for lo, hi in MSNR_SL_PCT_BUCKETS:
+        subset = []
+        for t in trades:
+            if t.get("result") not in ("WIN", "LOSS"):
+                continue
+            entry = t.get("entry")
+            sl = t.get("sl")
+            if not entry or entry <= 0 or sl is None:
+                continue
+            sl_pct = abs(entry - sl) / entry * 100
+            if lo <= sl_pct < hi:
+                subset.append(t)
+        label = f"{lo}-{hi}" if hi != float("inf") else f"{lo}+"
+        if not subset:
+            buckets.append({"range": label, "lo": lo, "n": 0, "wins": 0, "losses": 0, "winrate": None, "avg_rr": None})
+            continue
+        wins = sum(1 for t in subset if t["result"] == "WIN")
+        n = len(subset)
+        rrs = [t["rr"] for t in subset if t.get("rr") is not None]
+        avg_rr = round(sum(rrs) / len(rrs), 2) if rrs else None
+        buckets.append({"range": label, "lo": lo, "n": n, "wins": wins,
+                         "losses": n - wins, "winrate": round(wins / n * 100, 1), "avg_rr": avg_rr})
+    return buckets
+
+
+def msnr_symbol_sl_skip_min(trades):
+    """v0.99.26, per direct user request ("фильтр по ширине стопа"):
+    SL-width counterpart to msnr_symbol_rr_skip_min() — same shape,
+    same sample bar (MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE — no reason for a
+    separate one, it's the same "trust this symbol's own bucket"
+    question either way), same one-directional-only stance, but
+    bucketed by msnr_sl_bucket_stats() instead of msnr_rr_bucket_
+    stats(). Returns this symbol's own SL% floor — live signals whose
+    OWN SL distance lands at or above it get skipped for this symbol —
+    or None if no bucket clears the sample bar.
+    Deliberately separate from msnr_symbol_rr_skip_min(): a symbol can
+    have a fine RR distribution (good reward-to-risk ratios) while
+    still routinely getting stopped out on unusually WIDE stops in
+    absolute % terms — RR alone doesn't capture that, only the SL's
+    own size does."""
+    buckets = msnr_sl_bucket_stats(trades)
+    failing_edges = [b["lo"] for b in buckets
+                      if b["n"] >= MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE and b["winrate"] is not None and b["avg_rr"]
+                      and b["winrate"] < 100.0 / (1.0 + b["avg_rr"])]
+    return min(failing_edges) if failing_edges else None
+
+
+def msnr_symbol_effective_leverage(symbol):
+    """v0.99.26, per direct user request ("узнавать максимальное плечо
+    на бирже"): AUTOTRADE_LEVERAGE_MSNR clamped to THIS contract's own
+    exchange-enforced leverage_max — exactly the same clamp execute_
+    autotrade() already applies right before sending a real order (see
+    its own leverage_max handling), reused here so the backtest/live-
+    gate liquidation math and the compounding simulation both reflect
+    the leverage a real order would actually get, not the configured
+    setting regardless of what Gate.io allows on this specific
+    contract (altcoins often carry a much lower cap than majors)."""
+    try:
+        contract_max_lev = get_contract_spec(symbol).get("leverage_max")
+    except Exception as e:
+        log_error(f"msnr_symbol_effective_leverage {symbol}: {e}")
+        contract_max_lev = None
+    if contract_max_lev and contract_max_lev < AUTOTRADE_LEVERAGE_MSNR:
+        return contract_max_lev
+    return AUTOTRADE_LEVERAGE_MSNR
+
+
+def msnr_trade_beyond_liquidation(symbol, direction, entry, sl, leverage=None):
+    """v0.99.26, per direct user request ("иногда стоп будет за
+    ликвидацией и просто избегать этого"): True if this trade's own SL
+    sits past (or too close to) where Gate.io would force-liquidate
+    the position first, at this symbol's effective leverage. A wide
+    enough stop combined with this contract's own leverage cap and
+    maintenance margin rate means the exchange liquidates the position
+    — at a worse price, eating extra maintenance-margin/fees — before
+    price ever reaches the SL msnr_detect_signals() computed. This
+    app's backtest only tracks SL/TP price touches, not margin math, so
+    it can't price this in after the fact; has to be filtered before.
+    This is the EXACT same check execute_autotrade() already runs
+    (v0.70.0) right before a real order — same compute_scalp_
+    liquidation_move_pct() formula (Gate's own isolated-margin
+    liquidation math — not scalp-specific despite the name, just first
+    written for that module), same STATE["scalp_mmr_map"] source
+    ("MMR is a property of the Gate contract itself, not of which
+    module is trading it" — that function's own reasoning, reused
+    verbatim here) with the same SCALP_DEFAULT_MMR_PCT fallback, and
+    the same SCALP_SAFETY_MARGIN buffer factor — deliberately not a
+    separate/looser threshold, so a trade this function lets through
+    is one execute_autotrade() would also actually place.
+    Applied here PROACTIVELY (before a backtest trade counts toward a
+    symbol's stats, or before a live signal fires) rather than only
+    reactively at order time, so the backtest/ranking never credits a
+    symbol with a "WIN" or "LOSS" outcome msnr_track_outcome() computed
+    off a pure price-touch that a real order would never have survived
+    to see.
+    entry<=0 or a missing SL returns False (can't evaluate — same
+    "skip without penalizing" stance used for other malformed-record
+    cases) rather than blocking on incomplete data."""
+    if not entry or entry <= 0 or sl is None:
+        return False
+    leverage = leverage if leverage is not None else msnr_symbol_effective_leverage(symbol)
+    with state_lock:
+        mmr_map = STATE.get("scalp_mmr_map", {})
+    mmr_pct = mmr_map.get(symbol, SCALP_DEFAULT_MMR_PCT)
+    liq_buffer_pct = compute_scalp_liquidation_move_pct(direction, leverage, mmr_pct)
+    if liq_buffer_pct is None:
+        return False
+    sl_distance_pct = abs(entry - sl) / entry * 100
+    return liq_buffer_pct < sl_distance_pct * SCALP_SAFETY_MARGIN
+
+
 _msnr_signal_cooldowns = {}  # symbol -> last signaled entry-candle time
 _msnr_signal_cooldowns_lock = threading.Lock()
 
@@ -14731,6 +14988,16 @@ def msnr_symbol_skip_rr_min(symbol):
     with state_lock:
         override = STATE["msnr_symbol_overrides"].get(symbol) or {}
     return override.get("skip_rr_min")
+
+
+def msnr_symbol_skip_sl_min(symbol):
+    """v0.99.26 — SL-width counterpart to msnr_symbol_skip_rr_min(),
+    same reasoning for being a separate lookup (msnr_symbol_params()'s
+    return value gets spread as **params into msnr_detect_signals(),
+    which has no skip_sl_pct_min kwarg either)."""
+    with state_lock:
+        override = STATE["msnr_symbol_overrides"].get(symbol) or {}
+    return override.get("skip_sl_pct_min")
 
 
 def msnr_compound_trail(trades, start_balance=None, leverage=None):
@@ -14872,6 +15139,26 @@ def msnr_scan_symbol_live(symbol):
             sig_rr = reward / risk if risk > 0 else None
             if sig_rr is not None and sig_rr >= skip_rr_min:
                 return  # this symbol's own history says rr this high fails here — skip, don't fire
+        # v0.99.26, per direct user request ("иногда стоп будет за
+        # ликвидацией и просто избегать этого"): deterministic check —
+        # if this signal's own SL sits past where Gate.io would force-
+        # liquidate the position at this symbol's effective leverage,
+        # skip firing regardless of any statistics. Same check the
+        # backtest filter (msnr_optimize_symbol()) and execute_
+        # autotrade()'s own v0.70.0 order-time gate both use — a signal
+        # that fails here would also get SKIPPED at order time anyway,
+        # this just avoids ever showing it as a live signal in the
+        # first place.
+        if msnr_trade_beyond_liquidation(symbol, sig["direction"], sig["entry"], sig["sl"]):
+            return
+        # v0.99.26, per direct user request ("фильтр по ширине стопа"):
+        # SL-width counterpart to the skip_rr_min check above — see
+        # msnr_symbol_sl_skip_min().
+        skip_sl_min = msnr_symbol_skip_sl_min(symbol)
+        if skip_sl_min is not None and sig["entry"]:
+            sig_sl_pct = abs(sig["entry"] - sig["sl"]) / sig["entry"] * 100
+            if sig_sl_pct >= skip_sl_min:
+                return  # this symbol's own history says a stop this wide fails here — skip, don't fire
         with _msnr_signal_cooldowns_lock:
             if _msnr_signal_cooldowns.get(symbol) == sig["time"]:
                 return
@@ -18762,12 +19049,17 @@ async function refreshMsnr() {
     const wrClass = (r.winrate === null || r.winrate === undefined) ? 'dim' : (r.winrate >= 50 ? 'win' : 'loss');
     const expClass = (r.expectancy_r === null || r.expectancy_r === undefined) ? 'dim' : (r.expectancy_r > 0 ? 'win' : 'loss');
     const skipTxt = (r.skip_rr_min !== null && r.skip_rr_min !== undefined) ? ` \u00b7 <span class="loss">skip rr\u2265${r.skip_rr_min}</span>` : '';
+    const skipSlTxt = (r.skip_sl_pct_min !== null && r.skip_sl_pct_min !== undefined) ? ` \u00b7 <span class="loss">skip SL\u2265${r.skip_sl_pct_min}%</span>` : '';
+    const liqTxt = r.liquidation_filtered_count ? ` \u00b7 <span class="loss">${r.liquidation_filtered_count} \u0437\u0430 \u043b\u0438\u043a\u0432\u0438\u0434\u0430\u0446\u0438\u0435\u0439</span>` : '';
+    const levTxt = (r.effective_leverage !== null && r.effective_leverage !== undefined && r.effective_leverage < cfg.compound_leverage)
+      ? ` \u00b7 <span class="dim">\u043f\u043b\u0435\u0447\u043e ${r.effective_leverage}x (\u043b\u0438\u043c\u0438\u0442 \u0431\u0438\u0440\u0436\u0438)</span>`
+      : '';
     const compClass = (r.compound_return_pct === null || r.compound_return_pct === undefined) ? 'dim' : (r.compound_return_pct > 0 ? 'win' : 'loss');
     const compBlownTxt = r.compound_blown_at ? ` (\u0441\u043b\u0438\u0432 \u043d\u0430 #${r.compound_blown_at})` : '';
     const compTxt = (r.compound_return_pct !== null && r.compound_return_pct !== undefined)
       ? ` \u00b7 <span class="${compClass}">\u0434\u043e\u0445\u043e\u0434 ${r.compound_return_pct > 0 ? '+' : ''}${r.compound_return_pct}% ($${cfg.compound_start_balance}\u2192$${r.compound_final_balance})${compBlownTxt}</span>`
       : '';
-    const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431${skipTxt}${compTxt}`;
+    const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431${skipTxt}${skipSlTxt}${liqTxt}${levTxt}${compTxt}`;
     const noteTxt = r.note ? ` \u26a0\ufe0f ${r.note}` : '';
     const autotradeCell = r.autotrade_eligible
       ? `<input type="checkbox" ${r.autotrade_on ? 'checked' : ''} onclick="event.stopPropagation(); msnrToggleAutotrade('${r.symbol}', this.checked, this)">`
