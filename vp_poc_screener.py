@@ -6270,6 +6270,72 @@ v0.99.32 - Direct user question: "Был недавно сигнал но уве
          autotrade_symbols marks it toggled-on), pyflakes, the Flask
          route/def integrity check (still 63 routes), and an AST walk
          for duplicate top-level defs (none introduced).
+
+v0.99.33 - Direct user request: "чёткий размер позиции, 40 долларов для
+         первой сделки, размер второй сделки зависит от исхода первой,
+         по сути как на бэктесте... начинать с 40," hard-capped at $500,
+         and only for LIVE signals — the backtest's own compounding
+         simulation (msnr_compound_return/trail, v0.99.24-25) stays
+         exactly as-is, unaffected. Until now every MSNR autotrade order
+         used the shared AUTOTRADE_SIZE_MODE/VALUE every OTHER mode
+         also uses — no connection at all to a symbol's own trade
+         history.
+         New MSNR_LIVE_BALANCE_MAX (500.0) alongside the existing
+         MSNR_COMPOUND_START_BALANCE ($40, already used by the backtest
+         sim — reused here rather than a second constant for the same
+         number). New STATE["msnr_live_balance"]: symbol -> current
+         REAL margin in USD; missing means never autotrade-fired yet.
+         New msnr_live_balance_for_symbol(symbol): returns the stored
+         balance clamped to [0, MSNR_LIVE_BALANCE_MAX], or MSNR_
+         COMPOUND_START_BALANCE if the symbol has none yet — this IS
+         the size a new order gets.
+         New msnr_update_live_balance(symbol, result, entry, sl, tp,
+         leverage): the live counterpart of msnr_compound_trail()'s own
+         per-trade math — deliberately the EXACT same formula (price
+         move % from entry/sl/tp, scaled by leverage, isolated-margin
+         floor at -100%), not a parallel reimplementation that could
+         drift from it. Result additionally capped at MSNR_LIVE_
+         BALANCE_MAX (the backtest sim has no such ceiling — a real
+         account isn't supposed to compound unbounded) and floored at
+         0 (a wiped symbol prices future orders at $0 margin, which
+         compute_position_size() already skips rather than sending a
+         doomed order — same passive-stop the backtest's own blown
+         trail already has, no separate kill-switch needed).
+         msnr_scan_symbol_live() now resolves this symbol's effective
+         (contract-capped) leverage ONCE via msnr_symbol_effective_
+         leverage() and passes it straight to execute_autotrade()
+         together with size_mode="fixed", size_value=msnr_live_
+         balance_for_symbol(symbol) — replacing the flat AUTOTRADE_
+         LEVERAGE_MSNR/shared-size call. Each live signal record now
+         also carries autotrade_fired/live_size_usd/leverage_used, so
+         update_msnr_signal_outcomes() can tell WHICH closed signals
+         actually had real money behind them (only those should move
+         the balance — a signal nobody traded touching TP/SL by chance
+         must not compound anything) and calls msnr_update_live_balance()
+         with the exact leverage that specific order used, called
+         OUTSIDE the state_lock block since that function takes its
+         own lock and state_lock isn't reentrant (threading.Lock(), not
+         RLock — checked before writing the call site, not after).
+         UI: the live-signals table gained a "Размер" column showing
+         "$X @ Yx" for autotrade-fired signals, dim "—" otherwise.
+         Caught and fixed a self-inflicted mistake before shipping: an
+         early str_replace edit adding the two new functions
+         accidentally swallowed msnr_trade_beyond_liquidation()'s own
+         `def` line and docstring opening, leaving orphaned docstring
+         body text with no function header — caught immediately by
+         re-grepping for that function's def line, found it missing,
+         and repaired the exact three-line header before proceeding to
+         any further edits or verification.
+         Verified with py_compile, an actual runtime start (synthetic
+         symbol: confirmed the very first balance reads exactly $40;
+         a +200%-move WIN scaled it to $120, a second identical WIN to
+         $360, a third correctly clamped at the $500 cap instead of
+         continuing to compound past it; a separate synthetic LOSS with
+         an 11%-wide stop at 10x correctly floored the balance at $0),
+         pyflakes, node --check on the correctly-last <script> block,
+         the Flask route/def integrity check (still 63 routes), and an
+         AST walk for duplicate top-level defs (none introduced — all
+         three new functions present exactly once).
 """
 
 import os
@@ -6289,7 +6355,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.32"
+APP_VERSION = "0.99.33"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7056,6 +7122,7 @@ AUTOTRADE_LEVERAGE_XAU_LG = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_XAU_LG", 1
 AUTOTRADE_ENABLED_MSNR = os.environ.get("VP_AUTOTRADE_MSNR", "0") == "1"  # off by default — same "unverified source" treatment as XAU_LG/FT5
 AUTOTRADE_LEVERAGE_MSNR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_MSNR", 10))
 MSNR_COMPOUND_START_BALANCE = float(os.environ.get("VP_MSNR_COMPOUND_START_BALANCE", 40.0))  # v0.99.24 — per direct user request: $ margin the backtest's compounding simulation starts with on the first closed trade. Leverage for this simulation deliberately reuses AUTOTRADE_LEVERAGE_MSNR above (not a separate constant) so the simulated compounding always matches whatever leverage this symbol would actually be traded at live — see msnr_compound_return().
+MSNR_LIVE_BALANCE_MAX = float(os.environ.get("VP_MSNR_LIVE_BALANCE_MAX", 500.0))  # v0.99.33 — per direct user request: hard ceiling on the REAL per-symbol compounding margin (see msnr_live_balance_for_symbol()) — a symbol's live-trading balance still starts at MSNR_COMPOUND_START_BALANCE and reinvests its own result every closed trade exactly like the backtest simulation, but never sizes a real order above this cap regardless of how far the compounding would otherwise have grown it.
 AUTOTRADE_ENABLED_FT5 = os.environ.get("VP_AUTOTRADE_FT5", "0") == "1"  # off by default — same reasoning as XAU_LG: unverified source, and the freqtrade backtest table this was ported from is a near-certain overfitting example (20-day 2018 window)
 AUTOTRADE_LEVERAGE_FT5 = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_FT5", 10))
 AUTOTRADE_TRADE_HISTORY = 300
@@ -7663,6 +7730,7 @@ STATE = {
     "msnr_backtest_universe": [],  # v0.99.9 — MSNR_SYMBOLS union'd with the top-liquid backtest-only exploration set, see msnr_build_backtest_universe()
     "msnr_live_universe": [],  # v0.99.17 — MSNR_SYMBOLS union'd with any backtest-qualifying symbol (win-rate/sample threshold), see msnr_compute_live_universe(); msnr_live_loop() scans THIS, not the static MSNR_SYMBOLS constant directly, so it stays empty (falls back to MSNR_SYMBOLS at the call site) until the first backtest cycle populates it
     "msnr_autotrade_symbols": {},  # v0.99.18 — per-symbol autotrade toggle, {symbol: bool}. Replaces the old single AUTOTRADE_ENABLED_MSNR gate — per direct user request for individually-toggleable fields (3 gold, always eligible + the current top MSNR_AUTOTRADE_TOP_N non-gold by msnr_rank_by_winrate_sample(), which despite its name ranks by `score` — see that function's own v0.99.19 docstring). A symbol missing from this dict is treated as off (same "off unless explicitly on" default every other autotrade toggle in this app already uses). See msnr_autotrade_eligible_symbols() for which symbols can currently be toggled, and _set_msnr_autotrade_symbol()'s own docstring for what happens to a saved toggle when its symbol falls out of that set.
+    "msnr_live_balance": {},  # v0.99.33 — symbol -> current REAL compounding margin in USD for that symbol's live autotrade sizing. Missing = never traded yet, defaults to MSNR_COMPOUND_START_BALANCE ($40) on the first fire — see msnr_live_balance_for_symbol(). Updated by update_msnr_signal_outcomes() off each autotrade-fired signal's own WIN/LOSS result, same price-move-%-times-leverage math msnr_compound_trail() already uses for the backtest simulation, capped at MSNR_LIVE_BALANCE_MAX. In-memory only, same as every other STATE dict here — resets to empty (so every symbol restarts at $40) on app restart, which is the correct "start with 40" behavior, not a gap to fix.
     "msnr_backtest_total": 0,  # v0.99.15 — progress tracking for the CURRENT (or most recent) backtest cycle, per direct user request for visibility during a long-running cycle
     "msnr_backtest_done": 0,
     "msnr_backtest_in_flight": [],  # symbols currently being fetched/optimized right now, not yet resolved
@@ -15173,6 +15241,66 @@ def msnr_symbol_effective_leverage(symbol):
     return AUTOTRADE_LEVERAGE_MSNR
 
 
+def msnr_live_balance_for_symbol(symbol):
+    """v0.99.33, per direct user request: "40 долларов для первой
+    сделки, размер второй сделки зависит от исхода первой, по сути как
+    на бэктесте... начинать с 40" — the REAL per-symbol compounding
+    margin used to size actual live autotrade orders, mirroring msnr_
+    compound_trail()'s backtest math exactly, but tracked against real
+    outcomes (update_msnr_signal_outcomes()) instead of historical
+    ones. A symbol with no stored balance yet (STATE["msnr_live_
+    balance"] missing that key) has never had an autotrade-fired live
+    trade — starts at MSNR_COMPOUND_START_BALANCE, same $40 the
+    backtest simulation starts at. Always clamped to [0, MSNR_LIVE_
+    BALANCE_MAX] on read as well as on write (defensive: covers the
+    cap being lowered via settings after a balance already grew past
+    the new, smaller ceiling)."""
+    with state_lock:
+        balance = STATE["msnr_live_balance"].get(symbol)
+    if balance is None:
+        balance = MSNR_COMPOUND_START_BALANCE
+    return max(0.0, min(balance, MSNR_LIVE_BALANCE_MAX))
+
+
+def msnr_update_live_balance(symbol, result, entry, sl, tp, leverage):
+    """v0.99.33 — updates this symbol's REAL live compounding balance
+    (see msnr_live_balance_for_symbol()) after an autotrade-fired
+    signal actually closes WIN or LOSS. Deliberately the EXACT same
+    per-trade P&L formula msnr_compound_trail() uses for the backtest
+    simulation (price move % from entry/sl/tp, scaled by `leverage`,
+    isolated-margin floor at -100% for a single loss) — this is
+    supposed to be the live counterpart of that same math, not a
+    parallel implementation that could quietly drift from it. Result
+    is additionally capped at MSNR_LIVE_BALANCE_MAX (the hard $ ceiling
+    the backtest simulation doesn't have, since compounding an actual
+    account isn't supposed to run away unbounded) and floored at 0 (a
+    wiped symbol simply prices future orders at $0 margin, which
+    compute_position_size() already skips rather than sending a doomed
+    order — same passive-stop behavior the backtest's own blown-to-
+    zero trail already has, no separate "disable autotrade" step
+    needed).
+    Called only for WIN/LOSS — a TIMEOUT or still-OPEN signal has no
+    realized P&L to compound with, exactly like msnr_compound_trail()
+    already treats a TIMEOUT trade."""
+    if not entry or entry <= 0 or sl is None or tp is None:
+        return  # malformed signal — leave the balance untouched rather than guess
+    if result == "WIN":
+        move_pct = abs(tp - entry) / entry
+        pnl_frac = move_pct * leverage
+    elif result == "LOSS":
+        move_pct = abs(entry - sl) / entry
+        pnl_frac = -move_pct * leverage
+    else:
+        return
+    pnl_frac = max(pnl_frac, -1.0)
+    with state_lock:
+        current = STATE["msnr_live_balance"].get(symbol)
+        if current is None:
+            current = MSNR_COMPOUND_START_BALANCE
+        new_balance = max(0.0, min(current * (1 + pnl_frac), MSNR_LIVE_BALANCE_MAX))
+        STATE["msnr_live_balance"][symbol] = round(new_balance, 2)
+
+
 def msnr_trade_beyond_liquidation(symbol, direction, entry, sl, leverage=None):
     """v0.99.26, per direct user request ("иногда стоп будет за
     ликвидацией и просто избегать этого"): True if this trade's own SL
@@ -15435,6 +15563,15 @@ def msnr_scan_symbol_live(symbol):
             "opposite_level": sig["opposite_level"], "time": sig["time"],
             "detected_at": time.time(), "status": "OPEN", "result": None,
             "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
+            # v0.99.33 — see msnr_live_balance_for_symbol()'s own docstring.
+            # autotrade_fired/leverage_used are what msnr_update_live_
+            # balance() (called from update_msnr_signal_outcomes() once
+            # this signal closes WIN/LOSS) needs to know whether/how to
+            # update this symbol's real compounding balance — a signal
+            # nobody actually traded (autotrade off, or not eligible)
+            # has no real P&L to compound with, so it must NOT move the
+            # balance just because the price happened to hit TP/SL.
+            "autotrade_fired": False, "live_size_usd": None, "leverage_used": None,
         }
         with state_lock:
             STATE["msnr_signals"].appendleft(record)
@@ -15451,10 +15588,29 @@ def msnr_scan_symbol_live(symbol):
         # docstring for why the toggle itself isn't deleted in that
         # case (so it resumes if the symbol re-qualifies later).
         if autotrade_symbols.get(symbol) and symbol in msnr_autotrade_eligible_symbols(overrides_snapshot):
+            # v0.99.33, per direct user request: real order sizing now
+            # compounds off THIS symbol's own live trade history — $40
+            # on the very first autotrade-fired trade, then the whole
+            # resulting balance (same math as the backtest simulation,
+            # msnr_compound_trail()) on every trade after, hard-capped
+            # at MSNR_LIVE_BALANCE_MAX — instead of the shared AUTOTRADE_
+            # SIZE_MODE/VALUE every other mode uses. leverage resolved
+            # to this symbol's effective (contract-capped) leverage
+            # HERE, once, and stored on the record — execute_autotrade()
+            # would independently re-derive the same clamp anyway, but
+            # pre-resolving it guarantees msnr_update_live_balance()
+            # later compounds against the EXACT leverage the real order
+            # actually used, not a value that could in principle drift
+            # if the contract's own leverage_max changed in between.
+            live_leverage = msnr_symbol_effective_leverage(symbol)
+            live_size = msnr_live_balance_for_symbol(symbol)
             execute_autotrade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
-                               AUTOTRADE_LEVERAGE_MSNR)
+                               live_leverage, size_mode="fixed", size_value=live_size)
             sim_execute_trade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
-                               AUTOTRADE_LEVERAGE_MSNR, record)
+                               live_leverage, record)
+            record["autotrade_fired"] = True
+            record["live_size_usd"] = live_size
+            record["leverage_used"] = live_leverage
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         level_txt = "A-shape (resist)" if sig["level_type"] == "A" else "V-shape (support)"
         send_telegram(
@@ -15503,6 +15659,16 @@ def update_msnr_signal_outcomes():
                     sig["result"] = result
                     sig["exit_price"] = exit_price
                     sig["exit_time"] = exit_time
+            # v0.99.33, per direct user request: this signal's REAL
+            # per-symbol live compounding balance only moves for a
+            # signal an actual autotrade order was placed for — see
+            # this record's own "autotrade_fired" flag, set at signal
+            # time in msnr_scan_symbol_live(). Called OUTSIDE the
+            # state_lock block above: msnr_update_live_balance() takes
+            # its own lock internally, and state_lock isn't reentrant.
+            if result and sig.get("autotrade_fired") and sig.get("leverage_used"):
+                msnr_update_live_balance(sig["symbol"], result, sig["entry"], sig["sl"], sig["tp"],
+                                          sig["leverage_used"])
         except Exception as e:
             log_error(f"msnr_outcome {sig['symbol']}: {e}")
 
@@ -19425,16 +19591,26 @@ async function refreshMsnr() {
     else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
     else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
     const levelTxt = s.level_type === 'A' ? 'A-shape' : 'V-shape';
+    // v0.99.33, per direct user request: real per-symbol compounding
+    // margin ($40 first trade, then whatever the previous trade's own
+    // result left the balance at, capped at MSNR_LIVE_BALANCE_MAX) —
+    // only shown for signals an actual order was placed for
+    // (autotrade_fired), since a signal nobody traded never had a
+    // real margin behind it at all.
+    const sizeTxt = s.autotrade_fired
+      ? `$${s.live_size_usd}${s.leverage_used ? ' @ '+s.leverage_used+'x' : ''}`
+      : '<span class="dim">\u2014</span>';
     return `<tr onclick="openMsnrChart('${s.symbol}', ${s.time})" style="cursor:pointer;">
       <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td><td class="dim">${levelTxt}</td>
       <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.sl)}</td><td class="dim">${fmt(s.tp)}</td>
+      <td class="dim">${sizeTxt}</td>
       <td>${statusHtml}</td><td class="dim">${fmtDateTime(s.time)}</td>
     </tr>`;
   }).join('');
   const signalsTableHtml = signals.length ? `
     <div style="overflow-x:auto;margin-bottom:14px;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Dir</th><th>Уровень</th><th>Entry</th><th>SL</th><th>TP</th><th>Status</th><th>Время</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Dir</th><th>Уровень</th><th>Entry</th><th>SL</th><th>TP</th><th>Размер</th><th>Status</th><th>Время</th></tr></thead>
       <tbody>${signalsRows}</tbody>
     </table>
     </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
