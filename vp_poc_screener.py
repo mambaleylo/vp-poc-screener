@@ -5820,6 +5820,62 @@ v0.99.23 - Direct user follow-up to v0.99.22: "so maybe backtest signals
          pyflakes, node --check on the correctly-last <script> block,
          the Flask route/def integrity check (still 63 routes), and an
          AST walk for duplicate top-level defs (none introduced).
+
+v0.99.24 - Direct user request: compute a real $ profit figure per symbol
+         in the backtest, described exactly as "$40 margin at 10x on the
+         first trade, then the WHOLE resulting balance at the same
+         leverage on the next trade, and so on through every trade" —
+         a compounding position-sizing simulation, deliberately
+         separate from the R-multiple stats (avg/med R, Expectancy)
+         already shown, which measure the strategy's edge independent
+         of how much money is actually put behind each trade.
+         New msnr_compound_return(trades, start_balance=None,
+         leverage=None): walks a symbol's CLOSED (WIN/LOSS) trades in
+         chronological order (the order they're already stored in),
+         starting at MSNR_COMPOUND_START_BALANCE (new setting, default
+         $40, matching the user's own example) at AUTOTRADE_LEVERAGE_
+         MSNR (existing setting, already defaults to 10x — reused
+         rather than a new separate leverage constant so the
+         simulation always matches whatever leverage this symbol would
+         actually trade at live, not a number that can drift out of
+         sync with it). Each trade's own entry/sl/tp (not the stored
+         rr field) gives the exact price-move %, scaled by leverage
+         against the CURRENT balance — genuinely "reinvest it all,"
+         not a fixed-fraction model. TIMEOUT trades are skipped (no
+         exit price is ever recorded for them — msnr_track_outcome()'s
+         own return shape — so there's no realized P&L to compound
+         with); floors a single loss at -100% of margin (isolated-
+         margin liquidation, same as real Gate.io futures — can't lose
+         more than what was put up) and stops the whole simulation the
+         moment balance hits 0, since every trade after that is a
+         mathematically guaranteed $0-in-$0-out no-op.
+         msnr_optimize_symbol() computes this off best_results — the
+         SAME post-skip_rr_min-filtered list the R-multiple stats now
+         use (v0.99.23), not raw_results — so the compounding
+         simulation reflects what this symbol's system would actually
+         trade, not signals it's already been told to skip. Stored as
+         compound_final_balance/compound_return_pct/compound_blown_at
+         in the symbol override dict.
+         UI: per direct user instruction ("в строке параметров" — in
+         the params row), appended to the SAME params-column string
+         skip_rr_min already writes to (v0.99.22), not a new table
+         column — e.g. "доход +187.3% ($40→$114.92)", red with a
+         "слив на #N" note when the account hit zero partway through.
+         api_msnr_status()'s config block gained compound_start_
+         balance/compound_leverage so the UI can show the real $
+         figures the simulation ran with, not hardcoded ones.
+         Verified with py_compile, an actual runtime start with two
+         hand-checked synthetic cases (a WIN then a LOSS: 40 -> 120 ->
+         60, exactly matching manual arithmetic; a single >100%-of-
+         margin LOSS: confirmed balance floors at exactly 0, return
+         -100%, blown_at_trade=1, and a trailing WIN after it is
+         correctly never counted), pyflakes, node --check on the
+         correctly-last <script> block, the Flask route/def integrity
+         check (still 63 routes), an AST walk for duplicate top-level
+         defs (none introduced), and confirmed msnr_compound_return()'s
+         start_balance/leverage defaults resolve live at call time (not
+         frozen at def time) — same stale-default class of bug already
+         fixed once this session for msnr_detect_signals()'s max_rr.
 """
 
 import os
@@ -5839,7 +5895,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.23"
+APP_VERSION = "0.99.24"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6605,6 +6661,7 @@ AUTOTRADE_ENABLED_XAU_LG = os.environ.get("VP_AUTOTRADE_XAU_LG", "0") == "1"  # 
 AUTOTRADE_LEVERAGE_XAU_LG = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_XAU_LG", 10))
 AUTOTRADE_ENABLED_MSNR = os.environ.get("VP_AUTOTRADE_MSNR", "0") == "1"  # off by default — same "unverified source" treatment as XAU_LG/FT5
 AUTOTRADE_LEVERAGE_MSNR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_MSNR", 10))
+MSNR_COMPOUND_START_BALANCE = float(os.environ.get("VP_MSNR_COMPOUND_START_BALANCE", 40.0))  # v0.99.24 — per direct user request: $ margin the backtest's compounding simulation starts with on the first closed trade. Leverage for this simulation deliberately reuses AUTOTRADE_LEVERAGE_MSNR above (not a separate constant) so the simulated compounding always matches whatever leverage this symbol would actually be traded at live — see msnr_compound_return().
 AUTOTRADE_ENABLED_FT5 = os.environ.get("VP_AUTOTRADE_FT5", "0") == "1"  # off by default — same reasoning as XAU_LG: unverified source, and the freqtrade backtest table this was ported from is a near-certain overfitting example (20-day 2018 window)
 AUTOTRADE_LEVERAGE_FT5 = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_FT5", 10))
 AUTOTRADE_TRADE_HISTORY = 300
@@ -7208,7 +7265,7 @@ STATE = {
     "msnr_backtest_summary": {},
     "msnr_last_backtest_finished": None,
     "msnr_last_backtest_duration": None,
-    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at, skip_rr_min}
+    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at, skip_rr_min, compound_final_balance, compound_return_pct, compound_blown_at}
     "msnr_backtest_universe": [],  # v0.99.9 — MSNR_SYMBOLS union'd with the top-liquid backtest-only exploration set, see msnr_build_backtest_universe()
     "msnr_live_universe": [],  # v0.99.17 — MSNR_SYMBOLS union'd with any backtest-qualifying symbol (win-rate/sample threshold), see msnr_compute_live_universe(); msnr_live_loop() scans THIS, not the static MSNR_SYMBOLS constant directly, so it stays empty (falls back to MSNR_SYMBOLS at the call site) until the first backtest cycle populates it
     "msnr_autotrade_symbols": {},  # v0.99.18 — per-symbol autotrade toggle, {symbol: bool}. Replaces the old single AUTOTRADE_ENABLED_MSNR gate — per direct user request for individually-toggleable fields (3 gold, always eligible + the current top MSNR_AUTOTRADE_TOP_N non-gold by msnr_rank_by_winrate_sample(), which despite its name ranks by `score` — see that function's own v0.99.19 docstring). A symbol missing from this dict is treated as off (same "off unless explicitly on" default every other autotrade toggle in this app already uses). See msnr_autotrade_eligible_symbols() for which symbols can currently be toggled, and _set_msnr_autotrade_symbol()'s own docstring for what happens to a saved toggle when its symbol falls out of that set.
@@ -14464,6 +14521,16 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
             r_values = [t["rr"] for t in best_results if t["result"] == "WIN" and t["rr"] is not None]
             r_values += [-1.0] * filtered_summary["losses"]
             best["score"] = round(msnr_ranking_score(r_values, filtered_summary["losses"]), 4) if r_values else None
+    # v0.99.24, per direct user request: a $ compounding simulation
+    # (start MSNR_COMPOUND_START_BALANCE, reinvest the whole balance
+    # at AUTOTRADE_LEVERAGE_MSNR every trade) over best_results — the
+    # FILTERED (post skip_rr_min) list, matching what this symbol
+    # would actually be traded as, same reasoning as the R-multiple
+    # stats above using the filtered set rather than raw_results.
+    compound = msnr_compound_return(best_results)
+    best["compound_final_balance"] = compound["final_balance"] if compound else None
+    best["compound_return_pct"] = compound["return_pct"] if compound else None
+    best["compound_blown_at"] = compound["blown_at_trade"] if compound else None
     return best, best_results, raw_results
 
 
@@ -14603,6 +14670,77 @@ def msnr_symbol_skip_rr_min(symbol):
     with state_lock:
         override = STATE["msnr_symbol_overrides"].get(symbol) or {}
     return override.get("skip_rr_min")
+
+
+def msnr_compound_return(trades, start_balance=None, leverage=None):
+    """Per direct user request: a compounding $ P&L simulation over one
+    symbol's backtest — deliberately separate from msnr_summarize_
+    backtest()'s R-multiple stats, which measure the STRATEGY's edge
+    independent of position sizing. This measures what actually
+    happens to a real account: start with start_balance USD margin
+    (default MSNR_COMPOUND_START_BALANCE) at `leverage`x (default the
+    live AUTOTRADE_LEVERAGE_MSNR — resolved at call time, not frozen
+    as a signature default, same reasoning as msnr_detect_signals()'s
+    own max_rr handling, since that global IS settings-mutable) on the
+    FIRST closed (WIN/LOSS) trade in chronological order, then
+    reinvests the ENTIRE resulting balance at the same leverage into
+    the next closed trade, and so on through every closed trade in
+    the list passed in — literally "va-bank" the whole account every
+    single trade, per the user's own description.
+    TIMEOUT trades are skipped (msnr_track_outcome() never records an
+    exit price for them, so there's no realized P&L to compound with)
+    — they neither help nor hurt the running balance, same treatment
+    msnr_summarize_backtest() already gives them for win-rate.
+    Each trade's own P&L comes directly from its own entry/sl/tp, NOT
+    from the stored `rr` field: a WIN moves price by |tp-entry|/entry,
+    a LOSS moves it by |entry-sl|/entry, both scaled by `leverage`
+    against the CURRENT balance (not a fixed slice of the starting
+    balance) since reinvesting the whole account is exactly what was
+    asked for. Isolated-margin assumption: a single loss is floored so
+    the balance can't go negative (a move worse than 100%/leverage
+    would have been liquidated in reality, losing exactly the margin,
+    never more) — same floor real isolated-margin futures enforce.
+    Once the balance hits 0, every later trade sizes to $0 margin and
+    produces $0 P&L by construction, so the loop stops there instead
+    of grinding through the rest of the list for a mathematical no-op;
+    the result records which closed-trade number (1-based) blew the
+    account, if any.
+    Returns {"final_balance", "return_pct", "trades_compounded",
+    "blown_at_trade"}, or None if there are no closed trades to
+    compound over at all."""
+    start_balance = start_balance if start_balance is not None else MSNR_COMPOUND_START_BALANCE
+    leverage = leverage if leverage is not None else AUTOTRADE_LEVERAGE_MSNR
+    closed = [t for t in trades if t.get("result") in ("WIN", "LOSS")]
+    if not closed:
+        return None
+    balance = start_balance
+    blown_at = None
+    compounded = 0
+    for i, t in enumerate(closed, start=1):
+        entry = t.get("entry")
+        sl = t.get("sl")
+        tp = t.get("tp")
+        if not entry or entry <= 0 or sl is None or tp is None:
+            continue  # malformed trade record — skip without touching the running balance
+        if t["result"] == "WIN":
+            move_pct = abs(tp - entry) / entry
+            pnl_frac = move_pct * leverage
+        else:
+            move_pct = abs(entry - sl) / entry
+            pnl_frac = -move_pct * leverage
+        pnl_frac = max(pnl_frac, -1.0)  # isolated-margin floor — can't lose more than the margin risked
+        balance = balance * (1 + pnl_frac)
+        compounded += 1
+        if balance <= 0:
+            balance = 0.0
+            blown_at = i
+            break
+    return {
+        "final_balance": round(balance, 2),
+        "return_pct": round((balance / start_balance - 1) * 100, 1) if start_balance else None,
+        "trades_compounded": compounded,
+        "blown_at_trade": blown_at,
+    }
 
 
 def msnr_scan_symbol_live(symbol):
@@ -16152,6 +16290,7 @@ def api_msnr_status():
             "live_promote_min_sample": MSNR_LIVE_PROMOTE_MIN_SAMPLE,
             "grid_min_leg_atr": MSNR_PARAM_GRID_MIN_LEG_ATR, "grid_qm_zone_pct": MSNR_PARAM_GRID_QM_ZONE_PCT,
             "grid_qm_lookback": MSNR_PARAM_GRID_QM_LOOKBACK,
+            "compound_start_balance": MSNR_COMPOUND_START_BALANCE, "compound_leverage": AUTOTRADE_LEVERAGE_MSNR,
         },
         "top": ranked,
     })
@@ -18507,7 +18646,12 @@ async function refreshMsnr() {
     const wrClass = (r.winrate === null || r.winrate === undefined) ? 'dim' : (r.winrate >= 50 ? 'win' : 'loss');
     const expClass = (r.expectancy_r === null || r.expectancy_r === undefined) ? 'dim' : (r.expectancy_r > 0 ? 'win' : 'loss');
     const skipTxt = (r.skip_rr_min !== null && r.skip_rr_min !== undefined) ? ` \u00b7 <span class="loss">skip rr\u2265${r.skip_rr_min}</span>` : '';
-    const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431${skipTxt}`;
+    const compClass = (r.compound_return_pct === null || r.compound_return_pct === undefined) ? 'dim' : (r.compound_return_pct > 0 ? 'win' : 'loss');
+    const compBlownTxt = r.compound_blown_at ? ` (\u0441\u043b\u0438\u0432 \u043d\u0430 #${r.compound_blown_at})` : '';
+    const compTxt = (r.compound_return_pct !== null && r.compound_return_pct !== undefined)
+      ? ` \u00b7 <span class="${compClass}">\u0434\u043e\u0445\u043e\u0434 ${r.compound_return_pct > 0 ? '+' : ''}${r.compound_return_pct}% ($${cfg.compound_start_balance}\u2192$${r.compound_final_balance})${compBlownTxt}</span>`
+      : '';
+    const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431${skipTxt}${compTxt}`;
     const noteTxt = r.note ? ` \u26a0\ufe0f ${r.note}` : '';
     const autotradeCell = r.autotrade_eligible
       ? `<input type="checkbox" ${r.autotrade_on ? 'checked' : ''} onclick="event.stopPropagation(); msnrToggleAutotrade('${r.symbol}', this.checked, this)">`
