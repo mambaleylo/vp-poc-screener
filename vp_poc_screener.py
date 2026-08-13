@@ -6143,6 +6143,32 @@ v0.99.29 - Direct user report: expanding a signals/trade list and
          route/def integrity check (still 63 routes), and an AST walk
          for duplicate top-level defs (none introduced — this was a
          JS-only change, but re-ran the check as a matter of course).
+
+v0.99.30 - Direct user follow-up ("давай закрепим") after v0.99.29 fixed
+         horizontal scroll actually surviving a refresh cycle: sitting
+         on a stable scroll position for a few seconds without any way
+         to tell which ROW you're looking at (Symbol is the first
+         column, scrolled off to the left) was the next obvious
+         friction point on a wide table.
+         Mobile-only (@media max-width:640px, same scope as every other
+         table-density rule already in this block): `th:first-child,
+         td:first-child { position:sticky; left:0; }`. Works precisely
+         BECAUSE the table itself is the horizontal-scroll container
+         (v0.89.0's `table { overflow-x:auto }` rule) — sticky sticks
+         relative to its nearest SCROLLING ancestor, so pinning against
+         page-level scroll would've done nothing here; it had to be
+         this specific rule that made it work. Needed an explicit
+         background color (#0b0e14, the body background) rather than
+         leaving it transparent — a "sticky" cell with no opaque
+         background just lets every other column's text visibly scroll
+         underneath it, defeating the entire point; added a matching
+         `tr:active td:first-child` background too so the pinned Symbol
+         cell doesn't look visually disconnected from the rest of a
+         tapped row's highlight.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the correctly-last <script> block, and the
+         Flask route/def integrity check (still 63 routes) — CSS-only,
+         no Python logic or JS control flow changed.
 """
 
 import os
@@ -6162,7 +6188,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.29"
+APP_VERSION = "0.99.30"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -17653,6 +17679,26 @@ INDEX_HTML = """<!doctype html>
        tighter mobile table is a reasonable default everywhere, not
        just there. */
     th, td { padding:4px 6px; font-size:10.5px; }
+    /* v0.99.30, per direct user request ("давай закрепим"): pin the
+       first column (Symbol, in every one of these tables) so it stays
+       visible while swiping through the rest — now that v0.99.29 fixed
+       scroll position actually surviving a refresh, sitting on a
+       stable horizontal scroll for a few seconds without knowing which
+       ROW you're looking at was the next obvious friction point.
+       position:sticky sticks relative to the nearest scrolling
+       ancestor, which is the table element itself here (it's the one
+       with overflow-x:auto, from the v0.89.0 rule above) — this works
+       precisely BECAUSE that rule already turned every table into its
+       own horizontal scroll container; a sticky column wouldn't do
+       anything useful against page-level scroll. Needs an explicit
+       background (not "transparent", the actual body background
+       color) since a sticky cell that's otherwise transparent lets
+       every OTHER column's text scroll visibly underneath it instead
+       of being hidden by it — defeats the purpose. Scoped to mobile
+       only: on desktop these tables generally fit without horizontal
+       scroll in the first place, so there's nothing to pin against. */
+    th:first-child, td:first-child { position:sticky; left:0; z-index:2; background:#0b0e14; }
+    tr:active td:first-child { background:#182036; }
   }
 </style>
 </head>
