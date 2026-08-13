@@ -5696,6 +5696,78 @@ v0.99.21 - CRITICAL FIX: get_tickers() gained the same HTTP 429 retry
          silently left for later.
          Verified with py_compile, an actual runtime start, pyflakes,
          and the route/def integrity check — all clean.
+
+v0.99.22 - Per direct user request, following a screenshot review of the
+         MSNR backtest's expanded per-symbol trade list: the displayed
+         "avg R / med R" is avg_rr/median_rr from msnr_summarize_
+         backtest() — averaged over EVERY closed trade's TARGET rr,
+         including LOSSES, not the trade's actual realized outcome. A
+         losing trade whose TP target was 6.89R away still counts as
+         +6.89R toward that average even though it hit SL, which is why
+         the number looked implausibly good next to a sub-50% win rate.
+         Confirmed this doesn't affect scoring/ranking (msnr_ranking_
+         score() already uses each WIN's own rr and -1.0 per LOSS,
+         correctly) or the existing Expectancy column (expectancy_r,
+         same correct math) — purely a misleading-if-misread display
+         label, not a functional bug.
+         User's actual ask, though, wasn't "fix the average" — it was
+         "per coin, find RR ranges that are statistically bad and skip
+         those signals for that coin", i.e. a system-stability filter,
+         not a return-chasing one. MSNR_MAX_RR already does something
+         adjacent (_risk_autotune_msnr_max_rr(), via msnr_rr_bucket_
+         stats()) but pools trades across ALL symbols specifically
+         because a single symbol's own sample is usually too small to
+         trust — leaving no way to catch a symbol whose OWN pattern is
+         bad even though the pooled average looks fine.
+         New msnr_symbol_rr_skip_min(trades): per-symbol counterpart —
+         buckets THIS symbol's own closed backtest trades by rr (same
+         msnr_rr_bucket_stats()), finds the lowest bucket with >=
+         MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE (new setting, default 15 —
+         deliberately higher than the pooled rule's sample bar, since
+         this judges one symbol off its own trades only) of this
+         symbol's own trades AND failing breakeven at its own actual
+         average realized rr (not the bucket's lower edge — same fix
+         the pooled rule already needed, lo=0 on the first bucket
+         implies a nonsensical 100% breakeven). One-directional like
+         the pooled rule: only ever adds a skip floor off solid
+         evidence, never loosens one back out on its own.
+         msnr_optimize_symbol() now computes this off the winning
+         combo's own best_results (not re-run per grid combo) and
+         stores it as "skip_rr_min" in STATE["msnr_symbol_overrides"].
+         New msnr_symbol_skip_rr_min(symbol) reads it back — kept
+         DELIBERATELY separate from msnr_symbol_params(), whose return
+         value gets spread as **params straight into msnr_detect_
+         signals() at three call sites with no skip_rr_min kwarg in
+         that signature; folding it in there would have thrown
+         TypeError at all three, not just the live scanner that needs
+         it. Caught this before shipping by grepping every msnr_symbol_
+         params() call site, not just the one being edited.
+         msnr_scan_symbol_live() computes the live signal's own rr
+         (same reward/risk formula msnr_run_backtest() uses — msnr_
+         detect_signals() itself doesn't compute rr) and skips firing
+         entirely (not a fallback target, an actual skip — matches
+         "пропускать" in the user's own request) once rr >= this
+         symbol's skip_rr_min, if one is set.
+         UI: backtest table's params column now appends "skip rr≥X" in
+         loss-red when a symbol has an active skip floor, so it's
+         visible at a glance which coins are being filtered and where.
+         Verified with py_compile, an actual runtime start (incl. a
+         synthetic 20-trade bucket to confirm msnr_symbol_rr_skip_min()
+         actually returns the failing edge), pyflakes, node --check on
+         the extracted JS (first extraction attempt grabbed the WRONG
+         <script> occurrence — this changelog literally contains the
+         string "<script>" earlier in this same entry's own explanation
+         of a past instance of that exact mistake — switched to the
+         last-occurrence approach per that established convention), the
+         Flask route/def integrity check, and grep across every msnr_
+         symbol_params() call site for the **params spread issue above.
+         (The wrong-<script>-occurrence mistake reproduced here was
+         against an EARLIER changelog entry elsewhere in this same
+         docstring that happens to mention the literal string
+         "<script>" in its own prose — a naive first-occurrence regex
+         grabs that prose instead of the real HTML template, which
+         reliably comes last in the file; fixed by taking the LAST
+         occurrence instead, same lesson already learned once before.)
 """
 
 import os
@@ -5715,7 +5787,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.21"
+APP_VERSION = "0.99.22"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6281,6 +6353,7 @@ MSNR_QM_LOOKBACK_BARS = int(os.environ.get("VP_MSNR_QM_LOOKBACK_BARS", 6))  # en
 MSNR_SL_BUFFER_PCT = float(os.environ.get("VP_MSNR_SL_BUFFER_PCT", 0.0015))
 MSNR_FALLBACK_RR = float(os.environ.get("VP_MSNR_FALLBACK_RR", 4.0))  # used only when the opposite OCL level isn't confirmed yet (Storyline has just one side so far) — a placeholder TP, not the normal path
 MSNR_MAX_RR = float(os.environ.get("VP_MSNR_MAX_RR", 8.0))  # v0.99.11 — per direct user observation (SPCX: trades with rr>6 consistently hit stop, never TP) that a genuine opposite-level TP can sit SO far away the trade is structurally unlikely to ever reach it before reversing. When the real opposite level would produce rr > this cap, msnr_detect_signals() falls back to fallback_rr's fixed target instead — reusing the exact same fallback path already used when no opposite level is confirmed at all, not a new mechanism. Auto-tuned by risk_autotune_pass() off pooled RR-bucket win-rate stats — see msnr_rr_bucket_stats() and _risk_autotune_msnr_max_rr().
+MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE = int(os.environ.get("VP_MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE", 15))  # v0.99.22 — per direct user request: MSNR_MAX_RR above is a single GLOBAL cap tuned off trades pooled across every symbol, which was a deliberate compromise (a single symbol's own sample is usually too small to bucket reliably) but leaves no way to catch a symbol whose OWN rr-vs-outcome pattern is bad even though the pooled average looks fine. This is the min closed-trade count a single symbol's OWN rr bucket (see msnr_rr_bucket_stats()) needs before msnr_symbol_rr_skip_min() trusts it enough to skip live signals in that range for that symbol specifically — see msnr_optimize_symbol()'s own "skip_rr_min" field and msnr_scan_symbol_live().
 MSNR_BACKTEST_DAYS = int(os.environ.get("VP_MSNR_BACKTEST_DAYS", 30))
 MSNR_SIGNAL_HISTORY = 200
 MSNR_REFRESH_SEC = int(os.environ.get("VP_MSNR_REFRESH_SEC", 3600))
@@ -7082,7 +7155,7 @@ STATE = {
     "msnr_backtest_summary": {},
     "msnr_last_backtest_finished": None,
     "msnr_last_backtest_duration": None,
-    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at}
+    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at, skip_rr_min}
     "msnr_backtest_universe": [],  # v0.99.9 — MSNR_SYMBOLS union'd with the top-liquid backtest-only exploration set, see msnr_build_backtest_universe()
     "msnr_live_universe": [],  # v0.99.17 — MSNR_SYMBOLS union'd with any backtest-qualifying symbol (win-rate/sample threshold), see msnr_compute_live_universe(); msnr_live_loop() scans THIS, not the static MSNR_SYMBOLS constant directly, so it stays empty (falls back to MSNR_SYMBOLS at the call site) until the first backtest cycle populates it
     "msnr_autotrade_symbols": {},  # v0.99.18 — per-symbol autotrade toggle, {symbol: bool}. Replaces the old single AUTOTRADE_ENABLED_MSNR gate — per direct user request for individually-toggleable fields (3 gold, always eligible + the current top MSNR_AUTOTRADE_TOP_N non-gold by msnr_rank_by_winrate_sample(), which despite its name ranks by `score` — see that function's own v0.99.19 docstring). A symbol missing from this dict is treated as off (same "off unless explicitly on" default every other autotrade toggle in this app already uses). See msnr_autotrade_eligible_symbols() for which symbols can currently be toggled, and _set_msnr_autotrade_symbol()'s own docstring for what happens to a saved toggle when its symbol falls out of that set.
@@ -14275,11 +14348,18 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
             "min_leg_atr": mid_atr, "qm_zone_pct": mid_zone, "qm_lookback_bars": mid_lookback,
             "trades": len(best_results), "wins": 0, "losses": 0, "timeouts": 0,
             "winrate": None, "avg_rr": None, "median_rr": None, "expectancy_r": None, "score": None,
-            "optimized_at": now, "candles_used": len(entry_candles),
+            "optimized_at": now, "candles_used": len(entry_candles), "skip_rr_min": None,
             "note": f"insufficient closed trades across all {combos} combos tried "
                     f"(max {max(tried) if tried else 0}, need {MSNR_MIN_BACKTEST_TRADES}); "
                     f"using middle-of-grid defaults",
         }
+    else:
+        # v0.99.22, per direct user request: derive this symbol's own
+        # RR-skip floor off the winning combo's own trades (not
+        # re-run per grid combo — would be needlessly expensive and
+        # the winning combo's own trades are what's actually shown/
+        # traded, same reasoning as reusing best_results for display).
+        best["skip_rr_min"] = msnr_symbol_rr_skip_min(best_results)
     return best, best_results
 
 
@@ -14358,6 +14438,33 @@ def msnr_rr_bucket_stats(trades):
     return buckets
 
 
+def msnr_symbol_rr_skip_min(trades):
+    """v0.99.22, per direct user request: a per-SYMBOL counterpart to
+    _risk_autotune_msnr_max_rr()'s pooled-across-all-symbols cap.
+    Bucket THIS symbol's own closed backtest trades by rr (same
+    msnr_rr_bucket_stats() the pooled rule uses), and find the lowest
+    bucket that both (a) has enough of this symbol's own trades to
+    trust (>= MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE — deliberately a higher
+    single-symbol bar than the pooled rule's RISK_AUTOTUNE_MIN_SAMPLE,
+    since this is judging one symbol off its own sample rather than
+    the whole universe) and (b) is failing its own breakeven at its
+    own actual average realized rr (not the bucket's lower edge —
+    same fix as the pooled rule, since lo=0 on the first bucket implies
+    a nonsensical 100% breakeven requirement).
+    Returns that bucket's lower edge — this symbol's live scanner skips
+    any new signal whose own rr lands at or above it — or None if no
+    bucket for this symbol clears the sample bar, in which case the
+    symbol trades normally (falls through to the global MSNR_MAX_RR
+    cap same as before). Deliberately one-directional like the pooled
+    rule: this only ever adds a skip floor off solid per-symbol
+    evidence, it never widens one back out on its own."""
+    buckets = msnr_rr_bucket_stats(trades)
+    failing_edges = [b["lo"] for b in buckets
+                      if b["n"] >= MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE and b["winrate"] is not None and b["avg_rr"]
+                      and b["winrate"] < 100.0 / (1.0 + b["avg_rr"])]
+    return min(failing_edges) if failing_edges else None
+
+
 _msnr_signal_cooldowns = {}  # symbol -> last signaled entry-candle time
 _msnr_signal_cooldowns_lock = threading.Lock()
 
@@ -14378,6 +14485,20 @@ def msnr_symbol_params(symbol):
         "qm_zone_pct": override.get("qm_zone_pct", MSNR_QM_ZONE_PCT),
         "qm_lookback": override.get("qm_lookback_bars", MSNR_QM_LOOKBACK_BARS),
     }
+
+
+def msnr_symbol_skip_rr_min(symbol):
+    """v0.99.22 — this symbol's own live-signal RR-skip floor (see
+    msnr_symbol_rr_skip_min()), kept as a SEPARATE lookup from msnr_
+    symbol_params() rather than folded into that dict: msnr_symbol_
+    params()'s return value gets spread as **params straight into msnr_
+    detect_signals() at three call sites, whose signature has no skip_
+    rr_min kwarg — adding it there would throw a TypeError at every one
+    of those call sites, not just the live scanner that actually needs
+    it."""
+    with state_lock:
+        override = STATE["msnr_symbol_overrides"].get(symbol) or {}
+    return override.get("skip_rr_min")
 
 
 def msnr_scan_symbol_live(symbol):
@@ -14405,6 +14526,19 @@ def msnr_scan_symbol_live(symbol):
         sig = sigs[-1]
         if sig["index"] != len(entry_candles) - 1:
             return  # most recent signal isn't off the latest closed entry-TF candle — stale
+        # v0.99.22, per direct user request: skip firing if THIS symbol's
+        # own backtest showed its rr bucket at-or-above skip_rr_min
+        # failing breakeven — see msnr_symbol_rr_skip_min(). Computed
+        # from entry/sl/tp directly (same formula msnr_run_backtest()
+        # uses), not stored on sig, since msnr_detect_signals() itself
+        # doesn't compute rr.
+        skip_rr_min = msnr_symbol_skip_rr_min(symbol)
+        if skip_rr_min is not None:
+            risk = abs(sig["entry"] - sig["sl"])
+            reward = abs(sig["tp"] - sig["entry"])
+            sig_rr = reward / risk if risk > 0 else None
+            if sig_rr is not None and sig_rr >= skip_rr_min:
+                return  # this symbol's own history says rr this high fails here — skip, don't fire
         with _msnr_signal_cooldowns_lock:
             if _msnr_signal_cooldowns.get(symbol) == sig["time"]:
                 return
@@ -18260,7 +18394,8 @@ async function refreshMsnr() {
   }).map((r, idx, arr) => {
     const wrClass = (r.winrate === null || r.winrate === undefined) ? 'dim' : (r.winrate >= 50 ? 'win' : 'loss');
     const expClass = (r.expectancy_r === null || r.expectancy_r === undefined) ? 'dim' : (r.expectancy_r > 0 ? 'win' : 'loss');
-    const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431`;
+    const skipTxt = (r.skip_rr_min !== null && r.skip_rr_min !== undefined) ? ` \u00b7 <span class="loss">skip rr\u2265${r.skip_rr_min}</span>` : '';
+    const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431${skipTxt}`;
     const noteTxt = r.note ? ` \u26a0\ufe0f ${r.note}` : '';
     const autotradeCell = r.autotrade_eligible
       ? `<input type="checkbox" ${r.autotrade_on ? 'checked' : ''} onclick="event.stopPropagation(); msnrToggleAutotrade('${r.symbol}', this.checked, this)">`
