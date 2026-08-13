@@ -6020,6 +6020,58 @@ v0.99.26 - Direct user follow-up, after confirming the compounding math
          trade_beyond_liquidation()'s leverage default resolves live at
          call time rather than being frozen — same stale-default class
          already fixed twice this session.
+
+v0.99.27 - Direct user follow-up, with a real live example: SKHY_USDT
+         ranked highly by score (0.4006, expectancy +0.75R) despite its
+         own $ compound simulation losing -67.6% ($40→$12.96) even
+         AFTER the v0.99.26 liquidation filter dropped 8 of its own
+         trades. Discussed three options (rank by geometric/compound
+         return instead of R; keep R-based score but add a penalty for
+         a weak compound result; or a hard gate — fails the $ stress
+         test, doesn't rank at all, regardless of score). User picked
+         the gate: "давай 3 пункт, просто не попадает в топ."
+         New "stress_test_failed" field on the symbol override dict,
+         set in msnr_optimize_symbol() right after the compound
+         simulation: True when compound_return_pct is not None and <=
+         0 (covers any loss, including a full blow-up to 0) — None
+         (no compound result at all, e.g. zero trades survived
+         filtering) deliberately reads as "no evidence either way," not
+         silently as "passed."
+         This is a HARD GATE, not a score penalty, applied in two
+         places so it can't be outweighed by an otherwise-strong score:
+         msnr_rank_by_winrate_sample() now excludes stress_test_failed
+         symbols from its candidate list entirely — this is what feeds
+         msnr_autotrade_eligible_symbols(), so a failed symbol can never
+         become autotrade-eligible no matter its score. api_msnr_
+         status()'s own `ranked` sort (the full table's default order)
+         now sorts by (not stress_test_failed, score) instead of score
+         alone, so a failed symbol sinks below every symbol that
+         passed regardless of how good its score looks — it can still
+         be found by scrolling, but structurally can't land near the
+         top of the table the user actually looks at.
+         UI: loadMsnrTrades()'s own client-side re-sort (which
+         overrides backend order and already groups autotrade_eligible
+         to the top) gained the same stress_test_failed tier, one level
+         below eligible — mirrors the same "sort key doesn't matter,
+         this tier wins" logic used for the existing eligible/not-
+         eligible split, and can't collide with it since msnr_rank_by_
+         winrate_sample() already keeps a failed symbol out of
+         eligibility in the first place, so within the eligible group
+         this check is always false. New separator row ("— провалили
+         $-симуляцию депозита ... —", red) at exactly the boundary
+         where failed rows begin, same v0.99.19 pattern already used
+         for the eligible/rest boundary.
+         Verified with py_compile, an actual runtime start (a synthetic
+         two-symbol case — BAD_USDT at score 0.6 but stress_test_
+         failed=True vs GOOD_USDT at score 0.3, stress_test_failed=
+         False — confirmed msnr_rank_by_winrate_sample() returns ONLY
+         GOOD_USDT despite BAD_USDT's higher raw score; confirmed the
+         stress_test_failed condition against three concrete cases:
+         -67.6% -> True, +108.1% -> False, no compound result at all
+         -> False), pyflakes, node --check on the correctly-last
+         <script> block, the Flask route/def integrity check (still 63
+         routes), and an AST walk for duplicate top-level defs (none
+         introduced).
 """
 
 import os
@@ -6039,7 +6091,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.26"
+APP_VERSION = "0.99.27"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7409,7 +7461,7 @@ STATE = {
     "msnr_backtest_summary": {},
     "msnr_last_backtest_finished": None,
     "msnr_last_backtest_duration": None,
-    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at, skip_rr_min, skip_sl_pct_min, effective_leverage, liquidation_filtered_count, compound_final_balance, compound_return_pct, compound_blown_at}
+    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at, skip_rr_min, skip_sl_pct_min, effective_leverage, liquidation_filtered_count, compound_final_balance, compound_return_pct, compound_blown_at, stress_test_failed}
     "msnr_backtest_universe": [],  # v0.99.9 — MSNR_SYMBOLS union'd with the top-liquid backtest-only exploration set, see msnr_build_backtest_universe()
     "msnr_live_universe": [],  # v0.99.17 — MSNR_SYMBOLS union'd with any backtest-qualifying symbol (win-rate/sample threshold), see msnr_compute_live_universe(); msnr_live_loop() scans THIS, not the static MSNR_SYMBOLS constant directly, so it stays empty (falls back to MSNR_SYMBOLS at the call site) until the first backtest cycle populates it
     "msnr_autotrade_symbols": {},  # v0.99.18 — per-symbol autotrade toggle, {symbol: bool}. Replaces the old single AUTOTRADE_ENABLED_MSNR gate — per direct user request for individually-toggleable fields (3 gold, always eligible + the current top MSNR_AUTOTRADE_TOP_N non-gold by msnr_rank_by_winrate_sample(), which despite its name ranks by `score` — see that function's own v0.99.19 docstring). A symbol missing from this dict is treated as off (same "off unless explicitly on" default every other autotrade toggle in this app already uses). See msnr_autotrade_eligible_symbols() for which symbols can currently be toggled, and _set_msnr_autotrade_symbol()'s own docstring for what happens to a saved toggle when its symbol falls out of that set.
@@ -14719,6 +14771,19 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
     best["compound_final_balance"] = compound["final_balance"] if compound else None
     best["compound_return_pct"] = compound["return_pct"] if compound else None
     best["compound_blown_at"] = compound["blown_at_trade"] if compound else None
+    # v0.99.27, per direct user request ("просто не попадает в топ"):
+    # a hard gate, not a score penalty — a symbol whose own $ compound
+    # simulation lost money (return_pct <= 0, which trivially includes
+    # a full blow-up to 0) is unfit for ranking/autotrade regardless of
+    # how good its R-multiple score looks; msnr_rank_by_winrate_sample()
+    # excludes it outright and api_msnr_status()'s sort sinks it below
+    # every symbol that passed, so it structurally can't land near the
+    # top of the table the user actually looks at. None (not False) when
+    # there's no compound result to judge at all (e.g. zero closed
+    # trades survived filtering) — "no evidence either way" shouldn't
+    # silently read as "passed."
+    best["stress_test_failed"] = (best["compound_return_pct"] is not None
+                                   and best["compound_return_pct"] <= 0)
     return best, best_results, raw_results
 
 
@@ -15362,7 +15427,15 @@ def msnr_rank_by_winrate_sample(overrides, exclude=None):
     Symbols with an error, no score, or closed_n at or below MSNR_LIVE_
     PROMOTE_MIN_SAMPLE are excluded — nothing to honestly rank a tiny
     sample by, same as everywhere else this app already filters
-    unreliable data out of a ranking. Pure function of `overrides`, same
+    unreliable data out of a ranking.
+    v0.99.27, per direct user request ("просто не попадает в топ"):
+    also excludes any symbol with stress_test_failed=True (see msnr_
+    optimize_symbol()'s own docstring) — a symbol whose own $
+    compounding simulation lost money is unfit to rank/autotrade no
+    matter how good its R-multiple score looks; this is a hard gate,
+    not a score penalty, so it can't be outweighed by an otherwise
+    strong score the way a penalty could be.
+    Pure function of `overrides`, same
     reasoning as msnr_compute_live_universe() above — no locks, no I/O,
     directly testable.
     Returns a list of (symbol, override_dict) tuples, already sorted,
@@ -15371,6 +15444,7 @@ def msnr_rank_by_winrate_sample(overrides, exclude=None):
     exclude = exclude or set()
     candidates = [(sym, ov) for sym, ov in overrides.items()
                   if ov and not ov.get("error") and ov.get("score") is not None and sym not in exclude
+                  and not ov.get("stress_test_failed")
                   and ((ov.get("wins", 0) or 0) + (ov.get("losses", 0) or 0)) > MSNR_LIVE_PROMOTE_MIN_SAMPLE]
     candidates.sort(key=lambda kv: kv[1]["score"], reverse=True)
     return candidates
@@ -16630,7 +16704,19 @@ def api_msnr_status():
                    autotrade_eligible=(sym in autotrade_eligible),
                    autotrade_on=bool(autotrade_symbols.get(sym)))
               for sym, v in overrides.items() if v and not v.get("error")]
-    ranked.sort(key=lambda r: (r.get("score") if r.get("score") is not None else -999), reverse=True)
+    # v0.99.27, per direct user request ("просто не попадает в топ"):
+    # stress_test_failed symbols (see msnr_optimize_symbol()'s own
+    # docstring — a losing $ compound simulation) sort BELOW every
+    # symbol that passed, regardless of score — `not stress_test_failed`
+    # as the primary sort key (True > False, so passing symbols come
+    # first under reverse=True) with score as the secondary key within
+    # each group. A hard sort-order gate, not a score penalty — msnr_
+    # rank_by_winrate_sample() (autotrade eligibility) already excludes
+    # these outright; this keeps the general table's own visual order
+    # consistent with that instead of a failed symbol still floating
+    # near the top by score alone.
+    ranked.sort(key=lambda r: (not r.get("stress_test_failed"),
+                                r.get("score") if r.get("score") is not None else -999), reverse=True)
     # v0.99.11: RR-bucket win-rate, pooled across every symbol's own
     # backtest trades — per direct user observation (SPCX: rr>6 trades
     # consistently hit stop) that a pooled avg/median RR can't reveal
@@ -19041,6 +19127,16 @@ async function refreshMsnr() {
     // dozens of backtest-only rows. Within each group (eligible /
     // not-eligible), the normal sort key still applies.
     if (a.autotrade_eligible !== b.autotrade_eligible) return a.autotrade_eligible ? -1 : 1;
+    // v0.99.27, per direct user request ("просто не попадает в топ"):
+    // stress_test_failed rows (a losing $ compound simulation, see
+    // msnr_optimize_symbol()'s own docstring) sink BELOW every row
+    // that passed, regardless of the active sort key — same reasoning
+    // as the eligible/not-eligible split above, one tier lower. Can't
+    // collide with the eligible check: msnr_rank_by_winrate_sample()
+    // already excludes stress_test_failed symbols from eligibility
+    // entirely, so this only ever matters within the non-eligible
+    // group, which is exactly where it needs to matter.
+    if (!!a.stress_test_failed !== !!b.stress_test_failed) return a.stress_test_failed ? 1 : -1;
     const av = a[_msnrSortKey], bv = b[_msnrSortKey];
     if (av === null || av === undefined) return 1;
     if (bv === null || bv === undefined) return -1;
@@ -19071,7 +19167,16 @@ async function refreshMsnr() {
     const separatorHtml = (idx > 0 && arr[idx - 1].autotrade_eligible && !r.autotrade_eligible)
       ? `<tr><td colspan="11" class="dim" style="font-size:10px;padding:4px 0;border-top:1px solid #1c2433;">\u2014 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 (\u0442\u043e\u043b\u044c\u043a\u043e \u0431\u044d\u043a\u0442\u0435\u0441\u0442, \u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u0430) \u2014</td></tr>`
       : '';
-    return separatorHtml + `<tr onclick="toggleMsnrBacktestTrades('${r.symbol}')" style="cursor:pointer;">
+    // v0.99.27, per direct user request: same idea, one tier lower —
+    // a visible separator exactly where stress_test_failed rows begin
+    // (they're already sunk to the bottom by the sort above), so it's
+    // obvious at a glance that everything past this line failed its
+    // own $ compounding simulation and is excluded from ranking/
+    // autotrade entirely, not just scored lower.
+    const stressSeparatorHtml = (idx > 0 && !arr[idx - 1].stress_test_failed && r.stress_test_failed)
+      ? `<tr><td colspan="11" class="loss" style="font-size:10px;padding:4px 0;border-top:1px solid #1c2433;">\u2014 \u043f\u0440\u043e\u0432\u0430\u043b\u0438\u043b\u0438 $-\u0441\u0438\u043c\u0443\u043b\u044f\u0446\u0438\u044e \u0434\u0435\u043f\u043e\u0437\u0438\u0442\u0430 (\u0434\u043e\u0445\u043e\u0434 \u2264 0%), \u0438\u0441\u043a\u043b\u044e\u0447\u0435\u043d\u044b \u0438\u0437 \u0442\u043e\u043f\u0430/\u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u0438 \u2014</td></tr>`
+      : '';
+    return separatorHtml + stressSeparatorHtml + `<tr onclick="toggleMsnrBacktestTrades('${r.symbol}')" style="cursor:pointer;">
       <td>${_msnrExpanded.has(r.symbol) ? '\u25be' : '\u25b8'} ${r.symbol}${r.live ? ' <span style="color:#3ddc97;" title="торгуется вживую">\u25cf</span>' : ' <span class="dim" style="font-size:10px;" title="только бэктест, не торгуется">\u0431\u044d\u043a\u0442\u0435\u0441\u0442</span>'}</td>
       <td onclick="event.stopPropagation();">${autotradeCell}</td>
       <td class="${wrClass}">${r.winrate !== null && r.winrate !== undefined ? r.winrate+'%' : '-'}</td>
