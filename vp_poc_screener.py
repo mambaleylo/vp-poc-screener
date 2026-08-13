@@ -5613,6 +5613,45 @@ v0.99.19 - Two direct follow-ups from the same v0.99.18 feature.
          node --check on the extracted <script> block, the route/def
          integrity check, and the stale-default-parameter check — all
          clean.
+
+v0.99.20 - Fixed a real structural gap in MSNR's autotrade ranking, per
+         a direct follow-up with a concrete reported case: "иногда
+         монеты с 42 винрейта держат средний RR больше 3, и выборкой
+         больше 50 но даже в топ 10 не попали. А в топ 10 при этом
+         выборка с 10 монетами есть, потому что винрейт 50."
+         Reproduced the exact case directly, not just read as plausible:
+         built a 55-trade sample at 42% winrate with wide-variance wins
+         (some near breakeven, some near MSNR_MAX_RR — genuinely
+         realistic for MSNR specifically, since its TP is a real
+         structural level rather than a bounded ROI-ladder step, unlike
+         FT5's) against a 10-trade sample at 50% winrate with tightly-
+         clustered wins — confirmed the smaller sample's score (0.60)
+         DID outrank the larger one's (0.48). The lower-confidence-bound
+         formula (v0.99.19) was doing its statistically correct job —
+         genuinely wide variance legitimately lowers confidence in a
+         mean, even at n=55 — but that exposed a deeper, separate gap:
+         msnr_rank_by_winrate_sample() (the autotrade-eligibility
+         ranking) had NO minimum sample size at all, while msnr_compute_
+         live_universe() (which decides LIVE-SCAN promotion) already
+         requires closed_n > MSNR_LIVE_PROMOTE_MIN_SAMPLE. A tiny-sample
+         symbol could therefore rank into the autotrade top N purely via
+         score, showing the user a checkbox that would be entirely
+         INERT in practice — msnr_live_loop() only ever scans symbols
+         already in the promoted live_universe, so a symbol that never
+         cleared the promotion sample floor can never actually fire
+         regardless of what its autotrade toggle says. The autotrade-
+         eligibility gate being LOOSER than the live-scan-visibility
+         gate was backwards.
+         Fixed by requiring the SAME MSNR_LIVE_PROMOTE_MIN_SAMPLE floor
+         in msnr_rank_by_winrate_sample() before a symbol is even
+         considered for ranking — the two gates are now consistent.
+         Re-verified the exact reproduced case after the fix: the n=10
+         symbol (whose raw score was still numerically higher) is now
+         correctly excluded from the ranking entirely, while the n=55
+         symbol remains eligible and gets a fair shot at the top N.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         the route/def integrity check, and the stale-default-parameter
+         check — all clean.
 """
 
 import os
@@ -5632,7 +5671,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.19"
+APP_VERSION = "0.99.20"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14470,23 +14509,44 @@ def msnr_rank_by_winrate_sample(overrides, exclude=None):
     when two symbols have the EXACT same winrate — it does nothing for
     the much more common case of a small-sample 70% winrate outranking
     a large-sample 55% one despite the large sample being the more
-    trustworthy edge. `score` already solves exactly this (a proper
-    confidence bound naturally discounts a small sample's apparent
-    edge, the same reasoning FT5's own ranking score was built around
-    earlier this session) — reusing it here instead of inventing a
-    second, differently-tuned combined metric for the same underlying
-    problem.
-    Symbols with an error or no score are excluded (nothing to honestly
-    rank them by, same as everywhere else this app already filters
-    errored overrides out of a ranking). Pure function of `overrides`,
-    same reasoning as msnr_compute_live_universe() above — no locks, no
-    I/O, directly testable.
+    trustworthy edge.
+    v0.99.20: score ALONE still wasn't enough, per a second, sharper
+    follow-up with a concrete reported case — a symbol at 42% winrate,
+    avg RR > 3, n > 50 failed to make the top 10, while a symbol at 50%
+    winrate with only n=10 DID. Reproduced directly: when a symbol's
+    winning trades have naturally wide RR variance (genuinely common
+    for MSNR specifically, since TP is a real structural level, not a
+    bounded ROI-ladder step the way FT5's is — a win can land anywhere
+    from just above breakeven up to MSNR_MAX_RR), that variance inflates
+    stderr enough that even n=55 doesn't out-discount a tight, lucky
+    n=10 sample; a lower-confidence-bound is doing exactly its
+    statistical job there, but the practical effect — a barely-tested
+    symbol outranking a well-established one — undermines trust in the
+    ranking. The deeper, structural issue this exposed: this function
+    had NO minimum sample size at all, while msnr_compute_live_universe()
+    (which decides LIVE-SCAN promotion) requires closed_n > MSNR_LIVE_
+    PROMOTE_MIN_SAMPLE — meaning a symbol could rank into the autotrade
+    top N via score alone with almost no track record, showing the user
+    a checkbox that would be entirely INERT in practice (msnr_live_loop()
+    only ever scans symbols already in the promoted live_universe, so a
+    tiny-sample symbol's toggle can never actually fire regardless of
+    its score). Fixed by requiring the SAME MSNR_LIVE_PROMOTE_MIN_SAMPLE
+    floor here — the two gates (what's live-scanned, what's autotrade-
+    rankable) are now consistent instead of the autotrade one being
+    looser than the visibility one, which was backwards.
+    Symbols with an error, no score, or closed_n at or below MSNR_LIVE_
+    PROMOTE_MIN_SAMPLE are excluded — nothing to honestly rank a tiny
+    sample by, same as everywhere else this app already filters
+    unreliable data out of a ranking. Pure function of `overrides`, same
+    reasoning as msnr_compute_live_universe() above — no locks, no I/O,
+    directly testable.
     Returns a list of (symbol, override_dict) tuples, already sorted,
     highest-ranked first — feeds msnr_autotrade_eligible_symbols()
     below (which just needs [:MSNR_AUTOTRADE_TOP_N])."""
     exclude = exclude or set()
     candidates = [(sym, ov) for sym, ov in overrides.items()
-                  if ov and not ov.get("error") and ov.get("score") is not None and sym not in exclude]
+                  if ov and not ov.get("error") and ov.get("score") is not None and sym not in exclude
+                  and ((ov.get("wins", 0) or 0) + (ov.get("losses", 0) or 0)) > MSNR_LIVE_PROMOTE_MIN_SAMPLE]
     candidates.sort(key=lambda kv: kv[1]["score"], reverse=True)
     return candidates
 
