@@ -5652,6 +5652,50 @@ v0.99.20 - Fixed a real structural gap in MSNR's autotrade ranking, per
          Verified with py_compile, an actual runtime start, pyflakes,
          the route/def integrity check, and the stale-default-parameter
          check — all clean.
+
+v0.99.21 - CRITICAL FIX: get_tickers() gained the same HTTP 429 retry
+         logic get_candles() already got in v0.99.8 — this function was
+         somehow never given that fix at the time, and it's a much more
+         severe gap here than it looked: msnr_build_backtest_universe()
+         calls get_tickers() BEFORE msnr_backtest_loop() ever sets
+         STATE["msnr_backtest_running"]=True, so an un-retried 429 here
+         meant the whole backtest cycle could fail before the progress
+         bar (v0.99.15) had any chance to show anything at all — worse
+         than the original "stuck, no detail" problem that progress bar
+         was specifically built to fix, since now there was no visible
+         indication a cycle was even being attempted. Direct user
+         report: "версия обновилась, но минут 20 ничего не происходит,
+         шкалы загрузки нет" — exactly this symptom, especially given
+         this session's own confirmed sustained Gate.io rate-limit
+         pressure hitting many other endpoints throughout.
+         Caught and fixed a self-inflicted bug while implementing the
+         fix, before shipping: first pass left TWO separate docstring
+         literals in a row (the second one silently became a no-op
+         expression statement, not documentation) and an unreachable
+         trailing `raise last_err` after the while-True loop — same
+         class of mistake this session already made once for get_
+         candles() itself. Caught by re-viewing the whole function
+         after editing (not just running py_compile, which doesn't
+         flag either issue) — merged into one docstring, removed the
+         dead code and the now-unused last_err variable.
+         Verified behaviorally, not just read as fixed: mocked two
+         consecutive 429 responses followed by success, confirmed
+         get_tickers() retries through them and returns the data.
+         Also searched systematically for the same unretried-429
+         pattern across every other function making a direct requests.
+         get() call — found four more (get_contracts, get_contract_
+         stats, get_contract_spec, get_futures_risk_limit_tiers).
+         get_contracts() turned out to be genuinely dead code (defined,
+         never called anywhere) — not worth touching. The other three
+         ARE used, and two of them (get_contract_spec, get_futures_
+         risk_limit_tiers) sit on the AUTOTRADE order-placement path
+         (leverage, tick size, risk limits) — deliberately left alone
+         this round rather than rushing a change to real-money-order
+         code without the same careful behavioral verification given to
+         everything else this session; flagged directly instead of
+         silently left for later.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         and the route/def integrity check — all clean.
 """
 
 import os
@@ -5671,7 +5715,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.20"
+APP_VERSION = "0.99.21"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -10154,18 +10198,45 @@ def get_tickers():
     scan_loop()'s own try/except still catches whatever gets past this
     (any exception, not just network ones) so one bad cycle was never
     able to kill the scan thread outright — but that fallback means
-    losing the whole cycle, this retry means usually not needing to."""
-    last_err = None
-    for attempt in range(GET_CANDLES_RETRIES + 1):
+    losing the whole cycle, this retry means usually not needing to.
+    v0.99.21: also retries on HTTP 429 now (GET_CANDLES_RATE_LIMIT_
+    RETRIES/DELAY, honoring Retry-After — same mechanism and constants
+    as get_candles()'s own v0.99.8 fix, reused rather than duplicated
+    with its own tuning). This function was somehow never given that
+    fix when get_candles() got it — confirmed as a real, direct cause of
+    a live-reported problem, not just theorized: msnr_build_backtest_
+    universe() calls this BEFORE msnr_backtest_loop() ever sets
+    STATE["msnr_backtest_running"]=True, so an un-retried 429 here means
+    the whole cycle fails before the progress bar (v0.99.15) has any
+    chance to show anything at all — worse than the "stuck, no detail"
+    problem that progress bar was built to fix, since now there's no
+    visible indication a cycle is even being attempted, let alone
+    failing. Direct user report: "версия обновилась, но минут 20 ничего
+    не происходит, шкалы загрузки нет" — exactly the symptom of this
+    exact gap, especially given this session's confirmed sustained
+    Gate.io rate-limit pressure across many other endpoints."""
+    conn_attempt = 0
+    rate_limit_attempt = 0
+    while True:
         try:
             r = requests.get(f"{GATE_BASE}/futures/usdt/tickers", timeout=HTTP_TIMEOUT)
+            if r.status_code == 429 and rate_limit_attempt < GET_CANDLES_RATE_LIMIT_RETRIES:
+                retry_after = r.headers.get("Retry-After")
+                try:
+                    delay = float(retry_after) if retry_after else GET_CANDLES_RATE_LIMIT_DELAY * (2 ** rate_limit_attempt)
+                except ValueError:
+                    delay = GET_CANDLES_RATE_LIMIT_DELAY * (2 ** rate_limit_attempt)
+                rate_limit_attempt += 1
+                time.sleep(delay)
+                continue
             r.raise_for_status()
             return r.json()
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
-            last_err = e
-            if attempt < GET_CANDLES_RETRIES:
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+            if conn_attempt < GET_CANDLES_RETRIES:
+                conn_attempt += 1
                 time.sleep(GET_CANDLES_RETRY_DELAY)
-    raise last_err
+                continue
+            raise
 
 
 _contract_spec_cache = {}
