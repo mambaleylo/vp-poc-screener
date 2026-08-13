@@ -6093,11 +6093,56 @@ v0.99.28 - Direct user request after a live portrait-mode phone
          already documented), not just MSNR's, since every other
          module's backtest table (FT5/VGI/session/etc) is built the
          same dense multi-column way and benefits equally.
-         Verified with py_compile, an actual runtime start, pyflakes,
-         node --check on the correctly-last <script> block, and the
-         Flask route/def integrity check (still 63 routes) — a CSS-
-         only change, so no Python logic or JS control flow to
          behaviorally re-verify beyond confirming nothing else broke.
+
+v0.99.29 - Direct user report: expanding a signals/trade list and
+         swiping right on the resulting wide table kept snapping back
+         to the left every couple seconds — impossible to actually
+         read anything past the first few columns. Root cause:
+         refreshAll() re-fetches and rebuilds EVERY module panel on a
+         15s timer (setInterval(refreshAll, 15000)), and each refresh*
+         function does a full `panel.innerHTML = ...` rebuild — which
+         tears down and recreates every DOM element inside it,
+         discarding whatever scrollLeft the person's mid-swipe had set
+         on the wide table. Not an MSNR-only bug: every module panel
+         (scalp/session/session_ny/xau_lg/msnr/ft5/vgi/autotrade/
+         simulator) rebuilds the exact same way on the same timer —
+         grepped every `panel.innerHTML =` call site (13 total) rather
+         than patching only the one in the screenshot. Two were
+         checked and correctly excluded: refreshDivergence and
+         refreshEma's panels are plain stat divs, no <table> at all,
+         nothing to preserve.
+         New setPanelHtml(panel, html): captures scrollLeft from every
+         scrollable element in the panel (scrollWidth > clientWidth)
+         BEFORE the innerHTML rebuild, then restores those same values
+         onto the Nth scrollable element found AFTER the rebuild —
+         positional matching, not id-based, since the HTML is rebuilt
+         from scratch every cycle with no stable element ids to match
+         against, but which tables appear and in what order is stable
+         cycle-to-cycle in the overwhelmingly common case (same
+         symbols, same sort). Swapped in at all 11 applicable call
+         sites (9 single-line statements plus 3 multi-line template
+         literals, where only the opening `panel.innerHTML = ` and the
+         closing `` `; `` needed to change to `setPanelHtml(panel, `
+         and `` `); `` respectively — the HTML content itself
+         untouched) via precise line-number edits rather than str_
+         replace, since three of these lines are textually identical
+         to each other and wouldn't have matched uniquely.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the correctly-last <script> block, a
+         standalone Node simulation of setPanelHtml() against a mock
+         DOM (a fake scrollable element starting at scrollLeft=157,
+         whose innerHTML setter mimics real DOM behavior by resetting
+         scrollLeft to 0 on assignment — confirmed the wrapped call
+         restores exactly 157 afterward, where an unwrapped assignment
+         would have left it at the reset 0), a grep confirming exactly
+         13 setPanelHtml( occurrences (12 call sites + the function's
+         own definition) and zero unintended remaining bare `panel.
+         innerHTML =` assignments outside the helper itself and the
+         two intentionally-untouched table-less panels, the Flask
+         route/def integrity check (still 63 routes), and an AST walk
+         for duplicate top-level defs (none introduced — this was a
+         JS-only change, but re-ran the check as a matter of course).
 """
 
 import os
@@ -6117,7 +6162,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.28"
+APP_VERSION = "0.99.29"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -18226,6 +18271,36 @@ document.querySelectorAll('.tab').forEach(el => {
   };
 });
 
+// v0.99.29, per direct user report: swiping right on a wide table (the
+// MSNR backtest table, in this case) kept snapping back to the left
+// every refresh cycle — because every refresh* function below rebuilds
+// its ENTIRE panel via `panel.innerHTML = ...`, which tears down and
+// recreates every DOM element inside it, discarding whatever scrollLeft
+// the person had mid-swipe. Every module panel (session/session_ny/
+// xau_lg/msnr/ft5/vgi/autotrade/simulator) rebuilds the exact same way
+// on the same refreshAll() timer, so this wasn't an MSNR-only bug —
+// grepped every `panel.innerHTML =` call site and applied the same fix
+// at each one that can contain a scrollable table (refreshDivergence
+// and refreshEma were checked and excluded: their panels are plain
+// stat divs, no <table> at all, nothing to preserve).
+// Positional matching (the Nth scrollable element before the rebuild
+// gets its scrollLeft restored onto the Nth scrollable element after)
+// rather than any kind of ID-based matching: the HTML is rebuilt from
+// scratch every cycle with no stable element ids to match against, but
+// which tables appear and in what order is stable cycle-to-cycle in
+// the overwhelmingly common case (same symbols, same sort order), so
+// position is a reliable-enough proxy without threading ids through
+// every render function in the app.
+function setPanelHtml(panel, html) {
+  const scrollable = el => el.scrollWidth > el.clientWidth;
+  const before = Array.from(panel.querySelectorAll('*')).filter(scrollable).map(el => el.scrollLeft);
+  panel.innerHTML = html;
+  if (before.length) {
+    const after = Array.from(panel.querySelectorAll('*')).filter(scrollable);
+    before.forEach((sl, i) => { if (after[i]) after[i].scrollLeft = sl; });
+  }
+}
+
 async function refreshStatus() {
   try {
     const s = await (await fetch('/api/status')).json();
@@ -18672,14 +18747,14 @@ async function refreshScalp() {
     </table>
     </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
   if (!status.top || status.top.length === 0) {
-    panel.innerHTML = headerHtml + signalsTableHtml + '<div class="dim">Пока нет рекомендаций — либо ещё считается, либо ни одна монета не прошла проверку безопасности при текущих настройках.</div>';
+    setPanelHtml(panel, headerHtml + signalsTableHtml + '<div class="dim">Пока нет рекомендаций — либо ещё считается, либо ни одна монета не прошла проверку безопасности при текущих настройках.</div>');
     document.querySelectorAll('#scalpPanel tbody tr[data-signal-time]').forEach(tr => {
       tr.onclick = () => openScalpChart(tr.dataset.signalSymbol, tr.dataset.signalInterval, tr.dataset.signalTime);
     });
     return;
   }
   const rows = status.top.map((r, i) => fmtScalpRow(r, i + 1)).join('');
-  panel.innerHTML = headerHtml + signalsTableHtml + `
+  setPanelHtml(panel, headerHtml + signalsTableHtml + `
     <div class="dim" style="margin-bottom:6px;"><b>Рекомендации по монетам</b> (для справки, откуда берутся сигналы):</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
@@ -18690,7 +18765,7 @@ async function refreshScalp() {
       <tbody>${rows}</tbody>
     </table>
     </div>
-    <div id="scalpDetail" style="margin-top:12px;"></div>`;
+    <div id="scalpDetail" style="margin-top:12px;"></div>`);
   document.querySelectorAll('#scalpPanel tbody tr[data-symbol]').forEach(tr => {
     tr.onclick = () => openScalpDetail(tr.dataset.symbol);
   });
@@ -18804,12 +18879,12 @@ async function refreshSession() {
     </table>
     </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
   if (!status.top || status.top.length === 0) {
-    panel.innerHTML = headerHtml + signalsTableHtml + '<div class="dim">Пока нет результатов бэктеста — либо ещё считается, либо ни у одной монеты не нашлось манипуляций.</div>';
+    setPanelHtml(panel, headerHtml + signalsTableHtml + '<div class="dim">Пока нет результатов бэктеста — либо ещё считается, либо ни у одной монеты не нашлось манипуляций.</div>');
     wireSessionRowClicks();
     return;
   }
   const rows = status.top.map((r, i) => fmtSessionRow(r, i + 1)).join('');
-  panel.innerHTML = headerHtml + signalsTableHtml + `
+  setPanelHtml(panel, headerHtml + signalsTableHtml + `
     <div id="sessionDetail" style="margin-bottom:12px;"></div>
     <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (сортировка: сначала прошедшие мин. выборку, потом по винрейту):</div>
     <div style="overflow-x:auto;">
@@ -18817,7 +18892,7 @@ async function refreshSession() {
       <thead><tr><th>#</th><th>Symbol</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th><th>T</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    </div>`;
+    </div>`);
   wireSessionRowClicks();
 }
 
@@ -18926,12 +19001,12 @@ async function refreshSessionNy() {
     </table>
     </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
   if (!status.top || status.top.length === 0) {
-    panel.innerHTML = headerHtml + signalsTableHtml + '<div class="dim">Пока нет результатов бэктеста — либо ещё считается, либо ни у одной монеты не нашлось манипуляций.</div>';
+    setPanelHtml(panel, headerHtml + signalsTableHtml + '<div class="dim">Пока нет результатов бэктеста — либо ещё считается, либо ни у одной монеты не нашлось манипуляций.</div>');
     wireSessionNyRowClicks();
     return;
   }
   const rows = status.top.map((r, i) => fmtSessionNyRow(r, i + 1)).join('');
-  panel.innerHTML = headerHtml + signalsTableHtml + `
+  setPanelHtml(panel, headerHtml + signalsTableHtml + `
     <div id="sessionNyDetail" style="margin-bottom:12px;"></div>
     <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (сортировка: сначала прошедшие мин. выборку, потом по винрейту):</div>
     <div style="overflow-x:auto;">
@@ -18939,7 +19014,7 @@ async function refreshSessionNy() {
       <thead><tr><th>#</th><th>Symbol</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th><th>T</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
-    </div>`;
+    </div>`);
   wireSessionNyRowClicks();
 }
 
@@ -19046,7 +19121,7 @@ async function refreshXauLg() {
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
-  panel.innerHTML = warnHtml + headerHtml + signalsTableHtml + btTableHtml;
+  setPanelHtml(panel, warnHtml + headerHtml + signalsTableHtml + btTableHtml);
 }
 
 // ---------------- MSNR — Malaysian SNR / Storyline gold strategy (EXPERIMENTAL, v0.99.0) ----------------
@@ -19239,7 +19314,7 @@ async function refreshMsnr() {
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">\u0411\u044d\u043a\u0442\u0435\u0441\u0442 \u0435\u0449\u0451 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432.</div>';
-  panel.innerHTML = warnHtml + headerHtml + rrBucketsHtml + signalsTableHtml + btTableHtml;
+  setPanelHtml(panel, warnHtml + headerHtml + rrBucketsHtml + signalsTableHtml + btTableHtml);
   restoreMsnrExpansion();
 }
 
@@ -19574,7 +19649,7 @@ async function refreshFt5() {
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Перебор параметров ещё не готов.</div>';
-  panel.innerHTML = warnHtml + headerHtml + signalsTableHtml + btTableHtml;
+  setPanelHtml(panel, warnHtml + headerHtml + signalsTableHtml + btTableHtml);
   panel.querySelectorAll('tbody tr[data-entry-time]').forEach(tr => {
     tr.onclick = () => openFt5Chart(tr.dataset.symbol, tr.dataset.entryTime);
   });
@@ -19650,7 +19725,7 @@ async function refreshVgi() {
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
-  panel.innerHTML = infoHtml + headerHtml + signalsTableHtml + btTableHtml;
+  setPanelHtml(panel, infoHtml + headerHtml + signalsTableHtml + btTableHtml);
   panel.querySelectorAll('tbody tr[data-time]').forEach(tr => {
     tr.onclick = () => openVgiChart(tr.dataset.symbol, tr.dataset.time);
   });
@@ -19727,7 +19802,7 @@ async function refreshAutotrade() {
     </table>
     </div>` : '<div class="dim">Пока нет попыток автоторговли.</div>';
 
-  panel.innerHTML = headerHtml + tableHtml;
+  setPanelHtml(panel, headerHtml + tableHtml);
 }
 
 async function refreshSimulator() {
@@ -19792,7 +19867,7 @@ async function refreshSimulator() {
     </table>
     </div>` : '<div class="dim">Пока нет сделок симулятора.</div>';
 
-  panel.innerHTML = headerHtml + tableHtml;
+  setPanelHtml(panel, headerHtml + tableHtml);
 }
 
 async function refreshAll() {
