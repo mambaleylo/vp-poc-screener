@@ -6336,6 +6336,35 @@ v0.99.33 - Direct user request: "чёткий размер позиции, 40 д
          the Flask route/def integrity check (still 63 routes), and an
          AST walk for duplicate top-level defs (none introduced — all
          three new functions present exactly once).
+
+v0.99.34 - Direct user question: "как добавить сигналы по mnsr в
+         симулятор?" Confirmed the wiring already exists — sim_
+         execute_trade() gets called for every MSNR signal an autotrade
+         order actually fires for, same as every other module, by
+         DESIGN: the paper simulator mirrors what real autotrade would
+         do once a module's own per-symbol toggle is on, not a shadow-
+         mode running for every signal unconditionally, regardless of
+         the toggle — this exact question was investigated and
+         confirmed intentional once before, back in v0.99.7. So the
+         answer to "how do I add MSNR to the simulator" is: check the
+         autotrade box for at least one eligible MSNR symbol (gold, or
+         a top-MSNR_AUTOTRADE_TOP_N-by-score symbol) — no separate
+         simulator-only setting exists or is needed.
+         Found and fixed a real gap while re-checking this call site,
+         though: v0.99.33 wired the new per-symbol live-balance
+         compounding sizing into the REAL execute_autotrade() call
+         (size_mode="fixed", size_value=<this symbol's own compounding
+         balance>) but missed updating the sim_execute_trade() call
+         right next to it, which was left defaulting to the shared
+         AUTOTRADE_SIZE_MODE/VALUE — meaning the paper simulator would
+         have silently shown a DIFFERENT position size than what the
+         real order actually risked, for every MSNR trade, undermining
+         the entire point of it being a faithful mirror. Passed the
+         same size_mode="fixed"/size_value=live_size to sim_execute_
+         trade() too, so both now agree.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         the Flask route/def integrity check (still 63 routes), and an
+         AST walk for duplicate top-level defs (none introduced).
 """
 
 import os
@@ -6355,7 +6384,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.33"
+APP_VERSION = "0.99.34"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -15606,8 +15635,20 @@ def msnr_scan_symbol_live(symbol):
             live_size = msnr_live_balance_for_symbol(symbol)
             execute_autotrade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                live_leverage, size_mode="fixed", size_value=live_size)
+            # v0.99.34, per direct user follow-up ("как добавить сигналы
+            # по msnr в симулятор"): sim_execute_trade() already gets
+            # called for every autotrade-fired MSNR signal (same design
+            # every other module uses — the paper simulator mirrors
+            # real autotrade, not a shadow-mode for every signal
+            # unconditionally, confirmed intentional back in v0.99.7),
+            # but this call was missed when v0.99.33 wired the new per-
+            # symbol live-balance sizing into the REAL order above —
+            # left defaulting to the shared AUTOTRADE_SIZE_MODE/VALUE,
+            # meaning the paper simulator would silently disagree with
+            # what the real order actually risked. Passing the same
+            # size_mode="fixed"/size_value=live_size here closes that gap.
             sim_execute_trade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
-                               live_leverage, record)
+                               live_leverage, record, size_mode="fixed", size_value=live_size)
             record["autotrade_fired"] = True
             record["live_size_usd"] = live_size
             record["leverage_used"] = live_leverage
