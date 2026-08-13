@@ -5876,6 +5876,67 @@ v0.99.24 - Direct user request: compute a real $ profit figure per symbol
          start_balance/leverage defaults resolve live at call time (not
          frozen at def time) — same stale-default class of bug already
          fixed once this session for msnr_detect_signals()'s max_rr.
+
+v0.99.25 - Direct user follow-up, after screenshotting the live table:
+         APR_USDT ranked #2 by score (0.5501) despite its own compound
+         "доход" reading -100% ($40→$0, слив на #40) — the user wants
+         to see the compounding balance next to EACH trade once a
+         symbol's row is expanded, to verify the math trade-by-trade
+         BEFORE deciding whether/how top-10 ranking needs to account
+         for this kind of blow-up risk (score currently only reflects
+         R-multiple stats, nothing about compounding survival).
+         Refactored msnr_compound_return() around a new msnr_compound_
+         trail(trades, start_balance=None, leverage=None): the exact
+         same per-trade walk (entry/sl/tp-derived price move × leverage
+         against the CURRENT balance, TIMEOUT/malformed trades skipped,
+         isolated-margin -100% floor, stops the moment balance hits 0),
+         but returns one row per actually-compounded trade — {time,
+         direction, result, pnl_pct, balance_before, balance_after} —
+         instead of collapsing straight to a final number. msnr_
+         compound_return() is now a thin reduction over this same
+         trail (final row's balance_after, len(trail) as trades_
+         compounded), so the per-trade display and the summary "доход"
+         figure share one calculation and can never silently disagree.
+         /api/msnr/backtest/<symbol> now runs msnr_compound_trail() on
+         that symbol's trades and annotates each with compound_
+         balance_before/after/pnl_pct before returning them. Matched
+         back to trades by (time, direction), not time alone — caught
+         before shipping that an A-shape and V-shape level can
+         structurally resolve on the exact same entry candle (msnr_
+         detect_signals() checks them in separate if-blocks, not
+         elif), which would collide on a time-only key and silently
+         attribute one trade's balance to the other; verified with a
+         synthetic same-timestamp LONG+SHORT pair that each correctly
+         got its own distinct balance back. A trade past the point the
+         account hit $0 (or a TIMEOUT) has no trail entry — balance_
+         before/after come back null for it rather than a misleading
+         $0, same "never actually reached" reasoning the compounding
+         functions already used.
+         UI: loadMsnrTrades() gained a "Баланс" column showing each
+         trade's own balance_after and pnl_pct (green/red by sign),
+         dim "—" for trades with no trail entry — right next to the
+         existing per-trade Entry/SL/TP/RR/Result columns, so the
+         compounding math is checkable trade-by-trade exactly where
+         the user asked for it.
+         Explicitly NOT touched this round, per the user's own
+         sequencing ("сначала проверить, потом пересмотреть топ-10"):
+         msnr_ranking_score()/the score column itself — still pure
+         R-multiple, no compounding/ruin-risk awareness yet. Flagged
+         directly rather than silently bundled in, since that's a
+         separate decision (how to weigh blow-up risk against
+         win-rate) waiting on the user confirming this trade-by-trade
+         math is correct first.
+         Verified with py_compile, an actual runtime start (5-trade
+         synthetic case — WIN/LOSS/TIMEOUT/blow-up-LOSS/trailing-WIN —
+         confirmed the trail has exactly 3 rows [40→120→60→0], the
+         TIMEOUT and the post-blow-up WIN are correctly absent, and
+         msnr_compound_return() built from the SAME trail agrees
+         exactly: -100%, blown_at_trade=3; a separate same-timestamp
+         LONG+SHORT synthetic pair confirmed the (time, direction) key
+         keeps their balances distinct), pyflakes, node --check on the
+         correctly-last <script> block, the Flask route/def integrity
+         check (still 63 routes), and an AST walk for duplicate
+         top-level defs (none introduced).
 """
 
 import os
@@ -5895,7 +5956,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.24"
+APP_VERSION = "0.99.25"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14672,6 +14733,62 @@ def msnr_symbol_skip_rr_min(symbol):
     return override.get("skip_rr_min")
 
 
+def msnr_compound_trail(trades, start_balance=None, leverage=None):
+    """v0.99.25, per direct user follow-up to msnr_compound_return():
+    the SAME walk, but returns one entry per actually-compounded CLOSED
+    trade instead of collapsing straight to a final number — so the
+    compounding math can be checked trade-by-trade (used to annotate
+    /api/msnr/backtest/<symbol>'s expanded per-trade UI) rather than
+    just trusted as a single end figure. msnr_compound_return() below
+    is now a thin reduction over this same trail, so the per-trade
+    display and the summary "доход" figure can never silently disagree
+    about the underlying math — one calculation, two views of it.
+    TIMEOUT trades and malformed records (missing/invalid entry/sl/tp)
+    are skipped entirely — absent from the trail, not shown at some
+    placeholder balance — same skip conditions msnr_compound_return()
+    already documented. Stops (trail simply ends) once a trade drives
+    the balance to 0; a trade that would come after that in time never
+    actually happened for this account, so it isn't in the trail.
+    Returns a list of dicts in chronological order: {"time",
+    "direction", "result", "pnl_pct", "balance_before",
+    "balance_after"} — direction included alongside time so callers
+    matching trail rows back to trade records (e.g. api_msnr_backtest_
+    trades()) have a collision-safe key: an A-shape and V-shape level
+    can structurally resolve on the exact same entry candle, and time
+    alone wouldn't disambiguate that pair."""
+    start_balance = start_balance if start_balance is not None else MSNR_COMPOUND_START_BALANCE
+    leverage = leverage if leverage is not None else AUTOTRADE_LEVERAGE_MSNR
+    closed = [t for t in trades if t.get("result") in ("WIN", "LOSS")]
+    trail = []
+    balance = start_balance
+    for t in closed:
+        if balance <= 0:
+            break
+        entry = t.get("entry")
+        sl = t.get("sl")
+        tp = t.get("tp")
+        if not entry or entry <= 0 or sl is None or tp is None:
+            continue  # malformed trade record — skip without touching the running balance
+        if t["result"] == "WIN":
+            move_pct = abs(tp - entry) / entry
+            pnl_frac = move_pct * leverage
+        else:
+            move_pct = abs(entry - sl) / entry
+            pnl_frac = -move_pct * leverage
+        pnl_frac = max(pnl_frac, -1.0)  # isolated-margin floor — can't lose more than the margin risked
+        balance_before = balance
+        balance = balance * (1 + pnl_frac)
+        if balance <= 0:
+            balance = 0.0
+        trail.append({
+            "time": t["time"], "direction": t.get("direction"), "result": t["result"],
+            "pnl_pct": round(pnl_frac * 100, 1),
+            "balance_before": round(balance_before, 2),
+            "balance_after": round(balance, 2),
+        })
+    return trail
+
+
 def msnr_compound_return(trades, start_balance=None, leverage=None):
     """Per direct user request: a compounding $ P&L simulation over one
     symbol's backtest — deliberately separate from msnr_summarize_
@@ -14687,58 +14804,32 @@ def msnr_compound_return(trades, start_balance=None, leverage=None):
     the next closed trade, and so on through every closed trade in
     the list passed in — literally "va-bank" the whole account every
     single trade, per the user's own description.
-    TIMEOUT trades are skipped (msnr_track_outcome() never records an
-    exit price for them, so there's no realized P&L to compound with)
-    — they neither help nor hurt the running balance, same treatment
-    msnr_summarize_backtest() already gives them for win-rate.
-    Each trade's own P&L comes directly from its own entry/sl/tp, NOT
-    from the stored `rr` field: a WIN moves price by |tp-entry|/entry,
-    a LOSS moves it by |entry-sl|/entry, both scaled by `leverage`
-    against the CURRENT balance (not a fixed slice of the starting
-    balance) since reinvesting the whole account is exactly what was
-    asked for. Isolated-margin assumption: a single loss is floored so
-    the balance can't go negative (a move worse than 100%/leverage
-    would have been liquidated in reality, losing exactly the margin,
-    never more) — same floor real isolated-margin futures enforce.
-    Once the balance hits 0, every later trade sizes to $0 margin and
-    produces $0 P&L by construction, so the loop stops there instead
-    of grinding through the rest of the list for a mathematical no-op;
-    the result records which closed-trade number (1-based) blew the
-    account, if any.
+    v0.99.25: now a thin reduction over msnr_compound_trail() (see its
+    own docstring for the full per-trade mechanics — TIMEOUT handling,
+    the isolated-margin loss floor, why entry/sl/tp drive the math
+    instead of the stored rr field) rather than its own separate walk,
+    so this summary and the per-trade trail can never drift apart.
     Returns {"final_balance", "return_pct", "trades_compounded",
-    "blown_at_trade"}, or None if there are no closed trades to
-    compound over at all."""
+    "blown_at_trade"} (blown_at_trade is the 1-based position WITHIN
+    the trail — i.e. among trades actually compounded, not raw
+    position in the input list, since a malformed trade is skipped
+    without consuming a slot), or None if there are no closed trades
+    to compound over at all."""
     start_balance = start_balance if start_balance is not None else MSNR_COMPOUND_START_BALANCE
     leverage = leverage if leverage is not None else AUTOTRADE_LEVERAGE_MSNR
     closed = [t for t in trades if t.get("result") in ("WIN", "LOSS")]
     if not closed:
         return None
-    balance = start_balance
-    blown_at = None
-    compounded = 0
-    for i, t in enumerate(closed, start=1):
-        entry = t.get("entry")
-        sl = t.get("sl")
-        tp = t.get("tp")
-        if not entry or entry <= 0 or sl is None or tp is None:
-            continue  # malformed trade record — skip without touching the running balance
-        if t["result"] == "WIN":
-            move_pct = abs(tp - entry) / entry
-            pnl_frac = move_pct * leverage
-        else:
-            move_pct = abs(entry - sl) / entry
-            pnl_frac = -move_pct * leverage
-        pnl_frac = max(pnl_frac, -1.0)  # isolated-margin floor — can't lose more than the margin risked
-        balance = balance * (1 + pnl_frac)
-        compounded += 1
-        if balance <= 0:
-            balance = 0.0
-            blown_at = i
-            break
+    trail = msnr_compound_trail(trades, start_balance, leverage)
+    if not trail:
+        return {"final_balance": round(start_balance, 2), "return_pct": 0.0,
+                "trades_compounded": 0, "blown_at_trade": None}
+    final_balance = trail[-1]["balance_after"]
+    blown_at = len(trail) if final_balance <= 0 else None
     return {
-        "final_balance": round(balance, 2),
-        "return_pct": round((balance / start_balance - 1) * 100, 1) if start_balance else None,
-        "trades_compounded": compounded,
+        "final_balance": final_balance,
+        "return_pct": round((final_balance / start_balance - 1) * 100, 1) if start_balance else None,
+        "trades_compounded": len(trail),
         "blown_at_trade": blown_at,
     }
 
@@ -16307,9 +16398,34 @@ def api_msnr_backtest_trades(symbol):
     """Full per-trade backtest list for one symbol (the summary table only
     shows aggregates) — each trade's `time` can be fed straight into
     /api/msnr/chart/<symbol>?time=... to see exactly how that A/V pair
-    and QM trigger were derived."""
+    and QM trigger were derived.
+    v0.99.25, per direct user request after noticing a symbol that
+    compounds to $0 (APR_USDT) still ranked near the top of the table
+    by score: each trade is now also annotated with the compounding
+    balance immediately before/after it (msnr_compound_trail()), so
+    the "доход" figure in the summary row can be checked trade-by-
+    trade instead of trusted as a single opaque number — exactly what
+    was asked for, before deciding whether/how the ranking itself
+    needs to account for this kind of blow-up risk. Matched to each
+    trade by `time` (the trail is computed in chronological order,
+    this endpoint's own list is sorted newest-first for display, so a
+    plain zip() would pair the wrong rows). TIMEOUT trades and any
+    trade after the account already hit $0 have no trail entry —
+    balance_before/after come back None for those, same "wasn't
+    actually reached" reasoning the compounding functions use."""
     with state_lock:
         trades = list(STATE["msnr_backtest_results"].get(symbol, []))
+    # v0.99.25: keyed by (time, direction), not time alone — an A-shape
+    # and a V-shape level can structurally both resolve on the exact
+    # same entry candle (rare, but msnr_detect_signals() checks them in
+    # separate if-blocks, not elif), which would collide on a time-only
+    # key and silently misattribute one trade's balance to the other.
+    trail_by_key = {(row["time"], row.get("direction")): row for row in msnr_compound_trail(trades)}
+    for t in trades:
+        row = trail_by_key.get((t["time"], t.get("direction")))
+        t["compound_balance_before"] = row["balance_before"] if row else None
+        t["compound_balance_after"] = row["balance_after"] if row else None
+        t["compound_pnl_pct"] = row["pnl_pct"] if row else None
     trades.sort(key=lambda t: t["time"], reverse=True)
     return jsonify(trades)
 
@@ -18735,6 +18851,16 @@ async function loadMsnrTrades(symbol) {
       const dirClass = t.direction === 'LONG' ? 'long' : 'short';
       const resClass = t.result === 'WIN' ? 'win' : (t.result === 'LOSS' ? 'loss' : 'status-timeout');
       const levelTxt = t.level_type === 'A' ? 'A-shape' : 'V-shape';
+      // v0.99.25, per direct user request: show the compounding balance
+      // right next to each trade, not just the summary "доход" figure —
+      // so the compounding math can be checked trade-by-trade. Null
+      // means this trade was never reached by the simulation (a
+      // TIMEOUT, or the account already hit $0 on an earlier trade —
+      // see msnr_compound_trail()'s own docstring), shown as a dim
+      // dash rather than a misleading $0.
+      const compTxt = (t.compound_balance_after !== null && t.compound_balance_after !== undefined)
+        ? `<span class="${t.compound_pnl_pct >= 0 ? 'win' : 'loss'}">$${t.compound_balance_after} (${t.compound_pnl_pct >= 0 ? '+' : ''}${t.compound_pnl_pct}%)</span>`
+        : '<span class="dim">\u2014</span>';
       return `<tr onclick="event.stopPropagation(); openMsnrChart('${symbol}', ${t.time})" style="cursor:pointer;">
         <td class="dim">${fmtDateTime(t.time)}</td>
         <td class="${dirClass}">${t.direction}</td>
@@ -18742,10 +18868,11 @@ async function loadMsnrTrades(symbol) {
         <td>${fmt(t.entry)}</td><td class="dim">${fmt(t.sl)}</td><td class="dim">${fmt(t.tp)}</td>
         <td class="dim">${t.rr ?? '-'}R</td>
         <td class="${resClass}">${t.result}</td>
+        <td>${compTxt}</td>
       </tr>`;
     }).join('');
     body.innerHTML = `<table style="font-size:11px;white-space:nowrap;width:100%;">
-      <thead><tr><th>Время</th><th>Dir</th><th>Уровень</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Result</th></tr></thead>
+      <thead><tr><th>Время</th><th>Dir</th><th>Уровень</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Result</th><th>Баланс</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>`;
   } catch (e) {
