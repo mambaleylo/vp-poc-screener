@@ -6895,6 +6895,46 @@ v0.99.52 - Direct user follow-up to a question about the MSNR RR-bucket
          correctly-last <script> block, the Flask route/def integrity
          check (still 63 routes), and an AST walk for duplicate
          top-level defs (none introduced).
+
+v0.99.53 - Direct user question: "а проверка на уже открытую сделку на
+         бирже есть?" Answer was no — every duplicate-position guard in
+         this app until now (has_open_signal_any_module(), and MSNR's
+         own v0.99.50 fix) only checked this app's OWN internal STATE,
+         never the actual exchange. reconcile_positions_and_orders()
+         (already called right before every real order) does something
+         different: alerts on unprotected positions and cancels
+         orphaned trigger orders, it was never a duplicate-position
+         gate. If STATE ever drifts from reality — a position closed on
+         Gate before this app's own outcome-tracking loop caught up, a
+         manual close via the Gate app itself, STATE getting reset/
+         corrupted while a real position stayed open, two app instances
+         sharing one Gate account — every STATE-only check would wave a
+         genuinely duplicate order straight through with no way to
+         catch it, since none of them ever asked the exchange itself.
+         Added a direct get_open_positions() check inside execute_
+         autotrade() (the single shared entry point every module's
+         signal source already calls — bounce/breakout/divergence/ema/
+         scalp/session/msnr/ft5/vgi all get this for free, not just
+         MSNR), right before a real order would be placed: if this
+         symbol already has a nonzero position on the exchange, skip
+         with status "SKIPPED" and a clear detail message instead of
+         stacking a second one. Placed after the AUTOTRADE_DRY_RUN
+         branch (a dry-run never touches the real account, nothing to
+         check) and before reconcile_positions_and_orders() (no reason
+         to run that cleanup pass first if this is about to skip
+         anyway). Same fail-open shape as the existing liquidation-
+         safety check right above it in the same function: if the
+         exchange query itself errors, log it and proceed rather than
+         blocking every future trade on one flaky API call — this is
+         additive insurance on top of the existing STATE-based guards,
+         not their replacement, so losing it for one cycle isn't fatal
+         the way losing the STATE-based checks entirely would be.
+         Verified with py_compile, an actual runtime start (synthetic
+         open-positions list: confirmed a symbol present in it correctly
+         matches for skipping, a symbol absent correctly doesn't),
+         pyflakes, node --check on the correctly-last <script> block,
+         the Flask route/def integrity check (still 63 routes), and an
+         AST walk for duplicate top-level defs (none introduced).
 """
 
 import os
@@ -6914,7 +6954,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.52"
+APP_VERSION = "0.99.53"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12074,6 +12114,41 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=No
             with state_lock:
                 STATE["autotrade_log"].appendleft(record)
             return record
+
+        # v0.99.53, per direct user question ("а проверка на уже
+        # открытую сделку на бирже есть?"): until now, every duplicate-
+        # position guard in this app (has_open_signal_any_module(), and
+        # MSNR's own v0.99.50 fix) only checked this app's OWN internal
+        # STATE — never the actual exchange. If STATE ever drifts from
+        # reality (a position closed on Gate before this app's own
+        # outcome-tracking loop caught up, a manual close via the Gate
+        # app itself, STATE getting reset/corrupted while a real
+        # position stayed open, two app instances sharing one Gate
+        # account, etc.) every one of those STATE-only checks would
+        # wave a genuinely duplicate order straight through with no way
+        # to catch it. This queries the exchange directly, right before
+        # placing a new order — the actual ground truth, not this app's
+        # belief about it. Placed AFTER the DRY_RUN branch above (a
+        # dry-run never touches the real account, nothing to check
+        # against) and BEFORE reconcile_positions_and_orders() below
+        # (no reason to run that cleanup pass first if this is about to
+        # skip anyway). Same fail-open defensive shape as the
+        # liquidation-safety check above it: if the exchange query
+        # itself fails, log it and proceed rather than blocking every
+        # future trade on one flaky API call — this check is additive
+        # insurance on top of the existing STATE-based guards, not
+        # their replacement, so losing it for one cycle isn't fatal the
+        # way losing the STATE-based checks entirely would be.
+        try:
+            existing_positions = get_open_positions()
+            if any(p.get("contract") == symbol for p in existing_positions):
+                record["status"] = "SKIPPED"
+                record["detail"] = f"{symbol} already has an open position on the exchange — skipping to avoid stacking a duplicate"
+                with state_lock:
+                    STATE["autotrade_log"].appendleft(record)
+                return record
+        except Exception as e:
+            log_error(f"execute_autotrade {symbol}: exchange position check failed ({e}), proceeding without it — this is exactly the kind of STATE/exchange desync this check exists to catch, so treat any recurrence as worth investigating")
 
         try:
             reconcile_positions_and_orders()
