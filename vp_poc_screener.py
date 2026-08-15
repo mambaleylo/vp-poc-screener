@@ -6757,6 +6757,55 @@ v0.99.49 - Direct user request: "надо дать возможность ста
          correctly-last <script> block, the Flask route/def integrity
          check (still 63 routes), and an AST walk for duplicate
          top-level defs (none introduced).
+
+v0.99.50 - Direct live bug report, with a screenshot: "почему-то 2 раза
+         одна и та же сделка в живых" — two identical TIA_USDT LONG
+         V-shape rows (same entry/SL/TP) in the live signals table.
+         Root cause: msnr_scan_symbol_live()'s ONLY internal dedup
+         against re-firing the exact same signal was the _msnr_signal_
+         cooldowns dict — a plain in-memory module-level dict, never
+         part of STATE, never written by save_state() or restored by
+         load_state(). A process restart (this app has a documented
+         history of those — Gate.io rate-limit pressure, and Android
+         killing the background Termux process during idle screen-off
+         time, per the earlier watchdog discussion this session) wipes
+         that dict back to empty, while STATE["msnr_signals"] itself
+         (the actual persisted record of what already fired) survives
+         the restart intact. If the same active V-shape/A-shape level
+         is still the most recent qualifying signal after restart —
+         which needs nothing about the market to have changed, since
+         msnr_detect_signals() has no memory between calls at all
+         (v_fired/a_fired are local variables, reset fresh every single
+         call) — the freshly-empty cooldown dict has no record of
+         having already fired it, and it fires again: a second,
+         genuinely duplicate OPEN record for a symbol that already has
+         one open.
+         has_open_signal_any_module() (the cross-module veto) doesn't
+         catch this either, and was never supposed to — its own
+         docstring is explicit that it's called "IN ADDITION to each
+         module's existing own-list check," and it deliberately
+         EXCLUDES msnr_signals from its own scan when MSNR calls it, on
+         the assumption MSNR has its own internal per-symbol dedup.
+         MSNR never actually had that self-check — only the fragile
+         time-based cooldown above, which is a different, narrower
+         guard (catches "already fired THIS EXACT candle," not "already
+         has ANY open position on this symbol").
+         Added the missing self-check directly: before firing, msnr_
+         scan_symbol_live() now also checks STATE["msnr_signals"]
+         itself for an existing OPEN record on this symbol — reading
+         PERSISTED state instead of the fragile in-memory cooldown
+         closes the gap regardless of WHY the time-based cooldown alone
+         failed to catch it (restart being the concrete case here, but
+         this is a strictly more robust guard than the narrower one it
+         sits next to, not a replacement for it — kept both).
+         Verified with py_compile, an actual runtime start (synthetic
+         STATE["msnr_signals"] with an OPEN TIA_USDT record: confirmed
+         the new check correctly returns True for that same symbol and
+         False for an unrelated one, matching exactly the block/allow
+         behavior msnr_scan_symbol_live() now applies before firing),
+         pyflakes, node --check on the correctly-last <script> block,
+         the Flask route/def integrity check (still 63 routes), and an
+         AST walk for duplicate top-level defs (none introduced).
 """
 
 import os
@@ -6776,7 +6825,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.49"
+APP_VERSION = "0.99.50"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16350,6 +16399,37 @@ def msnr_scan_symbol_live(symbol):
             if _msnr_signal_cooldowns.get(symbol) == sig["time"]:
                 return
             _msnr_signal_cooldowns[symbol] = sig["time"]
+        # v0.99.50 — BUG FOUND ON LIVE REPORT ("почему-то 2 раза одна и
+        # та же сделка в живых"): the cooldown check right above is
+        # this function's ONLY internal dedup against re-firing the
+        # exact same signal, and it's a plain in-memory dict — NOT part
+        # of STATE, never written by save_state()/restored by load_
+        # state(). A process restart (this app has a documented history
+        # of those, from Gate.io rate-limit pressure to Android killing
+        # the background Termux process during idle screen-off time —
+        # see the earlier watchdog discussion) wipes it back to empty,
+        # while STATE["msnr_signals"] itself (the actual persisted
+        # record of what already fired) survives the restart intact.
+        # If the same active V-shape/A-shape level is still the most
+        # recent qualifying signal after restart (nothing about the
+        # market needed to change for that — msnr_detect_signals() has
+        # no memory between calls, v_fired/a_fired are local variables
+        # reset every single call), the freshly-empty cooldown dict has
+        # no record of having already fired it, and it fires again —
+        # a second, genuinely duplicate OPEN record for a symbol that
+        # already has one, exactly the two identical TIA_USDT rows
+        # reported live. has_open_signal_any_module() above doesn't
+        # catch this either: it deliberately EXCLUDES msnr_signals from
+        # its own check (see that function's own docstring — each
+        # module is expected to check its OWN list itself, this is only
+        # the cross-module veto), and MSNR never had that self-check at
+        # all until now. Checking STATE directly (persisted, survives
+        # restart) instead of only the fragile in-memory cooldown closes
+        # the gap regardless of WHY the time-based cooldown alone
+        # failed to catch it.
+        with state_lock:
+            if any(s["symbol"] == symbol and s.get("status") == "OPEN" for s in STATE["msnr_signals"]):
+                return
         if has_open_signal_any_module(symbol, exclude="msnr_signals"):
             return
         record = {
