@@ -6649,6 +6649,49 @@ v0.99.47 - Direct user follow-up to v0.99.46: "чёт лучше не стало
          the Flask route/def integrity check (still 63 routes), and an
          AST walk for duplicate top-level defs (msnr_leverage_for_stop
          confirmed fully removed, no duplicates among the 313 total).
+
+v0.99.48 - Direct user request: "может не выбирать топ 70 ликвидных
+         монет, а в целом выбирать из всех десятку лучших." msnr_build_
+         backtest_universe() used to slice ranked-by-volume symbols
+         down to the top MSNR_BACKTEST_UNIVERSE_SIZE (70) BEFORE the
+         top-10 score ranking ever ran — meaning a symbol with a
+         genuinely better score/compound_return_pct could never even
+         be considered if ~70 other symbols happened to trade more
+         24h volume that day. Liquidity rank and signal quality are
+         different things; the cap was silently using one as a gate
+         on the other.
+         Dropped the `[:MSNR_BACKTEST_UNIVERSE_SIZE]` slice — every
+         _USDT symbol clearing the existing MIN_VOL_USD floor (same
+         liquidity gate used elsewhere in this app, $500k 24h volume
+         by default) is now backtested, not just the 70 most liquid
+         among them. MSNR_BACKTEST_UNIVERSE_SIZE itself left defined
+         (its own comment updated to say so) rather than deleted, in
+         case a future session wants to reintroduce a cap deliberately
+         — nothing reads it by default anymore.
+         Named trade-off in the function's own docstring rather than
+         silently absorbed: this backtests noticeably more symbols per
+         cycle now (every liquid pair, likely 180+ based on this app's
+         own liquid-universe counts elsewhere, not the 70-symbol cap
+         this replaces) — a longer cycle and more aggregate Gate.io
+         API load per cycle. Not mitigated here on the assumption
+         that's an acceptable trade for genuinely considering the full
+         pool: GLOBAL_HTTP_SEMAPHORE/_global_rate_gate() (v0.99.37/38,
+         the other session's fix for exactly this class of problem)
+         already cap the aggregate request rate/concurrency app-wide
+         regardless of how many symbols any one loop works through, so
+         this doesn't reopen the rate-limiting problem those fixes
+         addressed — it just makes MSNR's own cycle take longer to
+         grind through a bigger list within that same shared budget.
+         Verified with py_compile, an actual runtime start (mocked
+         get_tickers() with 150 synthetic liquid symbols: confirmed all
+         150 + gold now appear in the built universe, where the old
+         cap would have kept it at 70 + gold; a separate liquidity-
+         floor check confirmed a symbol below MIN_VOL_USD is still
+         correctly excluded — the floor itself wasn't touched, only
+         the additional rank-based cap on top of it), pyflakes, node
+         --check on the correctly-last <script> block, the Flask
+         route/def integrity check (still 63 routes), and an AST walk
+         for duplicate top-level defs (none introduced).
 """
 
 import os
@@ -6668,7 +6711,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.47"
+APP_VERSION = "0.99.48"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7330,7 +7373,7 @@ MSNR_PARAM_GRID_QM_ZONE_PCT = [0.003, 0.006, 0.010]
 MSNR_PARAM_GRID_QM_LOOKBACK = [4, 6, 9]
 MSNR_MIN_BACKTEST_TRADES = int(os.environ.get("VP_MSNR_MIN_BACKTEST_TRADES", 5))  # same bar as FT5_MIN_BACKTEST_TRADES/Volume's MIN_BACKTEST_TRADES — a combo with fewer trades in the window isn't a confident pick
 MSNR_RANK_PRIOR_TARGET = 1  # same role as FT5_RANK_PRIOR_TARGET — only a combo with 0 or 1 REAL observed loss gets synthetic -1R pseudo-losses blended in (guards against a small all-win sample looking falsely certain); 2+ real losses are trusted as-is
-MSNR_BACKTEST_UNIVERSE_SIZE = int(os.environ.get("VP_MSNR_BACKTEST_UNIVERSE_SIZE", 70))  # v0.99.9 — per direct user request: backtest the top-N most liquid symbols too (union'd with MSNR_SYMBOLS, so gold stays included), to see whether this signal logic generalizes beyond gold — explicitly backtest-only for now, msnr_live_loop still scans only MSNR_SYMBOLS, unchanged. Lowered 30->10 in v0.99.14 when the cycle was stuck "ещё не завершился" for a long time under sustained Gate.io rate-limiting; raised back up to 70 in v0.99.16 per direct follow-up request, now that get_candles_range() ALSO retries on 429 (v0.99.15 — it previously had its own separate, unretried request loop) and the panel shows live per-symbol progress instead of a binary done/not-done, so a longer cycle is at least visibly progressing rather than looking stuck.
+MSNR_BACKTEST_UNIVERSE_SIZE = int(os.environ.get("VP_MSNR_BACKTEST_UNIVERSE_SIZE", 70))  # v0.99.9 — per direct user request: backtest the top-N most liquid symbols too (union'd with MSNR_SYMBOLS, so gold stays included), to see whether this signal logic generalizes beyond gold — explicitly backtest-only for now, msnr_live_loop still scans only MSNR_SYMBOLS, unchanged. Lowered 30->10 in v0.99.14 when the cycle was stuck "ещё не завершился" for a long time under sustained Gate.io rate-limiting; raised back up to 70 in v0.99.16 per direct follow-up request, now that get_candles_range() ALSO retries on 429 (v0.99.15 — it previously had its own separate, unretried request loop) and the panel shows live per-symbol progress instead of a binary done/not-done, so a longer cycle is at least visibly progressing rather than looking stuck. v0.99.48 — msnr_build_backtest_universe() no longer applies this cap on top of MIN_VOL_USD (per direct user request: liquidity rank was silently gating which symbols the top-10 SCORE ranking could even consider, unrelated to signal quality) — left defined, unused by default, in case a future session wants to reintroduce a cap deliberately.
 MSNR_LIVE_PROMOTE_MIN_WINRATE = float(os.environ.get("VP_MSNR_LIVE_PROMOTE_MIN_WINRATE", 50.0))  # v0.99.17 — per direct user request: a backtest-only symbol (from the wider MSNR_BACKTEST_UNIVERSE_SIZE exploration set) gets promoted into LIVE scanning once its winning combo's own closed-trade win-rate clears this bar. Union'd with MSNR_SYMBOLS (gold), never replaces it — gold stays live regardless of its own backtest numbers.
 MSNR_LIVE_PROMOTE_MIN_SAMPLE = int(os.environ.get("VP_MSNR_LIVE_PROMOTE_MIN_SAMPLE", 40))  # v0.99.17 — closed trades (wins+losses, NOT the raw "trades" count which also includes timeouts that say nothing about win-rate) needed before a symbol's win-rate is trusted enough to promote it to live scanning.
 # v0.99.39 — per direct user request: the top-10 autotrade ranking
@@ -16418,8 +16461,8 @@ def compute_msnr_signal_stats():
 
 def msnr_build_backtest_universe():
     """Backtest-only universe: MSNR_SYMBOLS (the original gold-only live-
-    scan list) UNION'd with the top MSNR_BACKTEST_UNIVERSE_SIZE most
-    liquid _USDT symbols by real 24h volume — same get_tickers()
+    scan list) UNION'd with every _USDT symbol clearing MIN_VOL_USD (the
+    same liquidity floor used elsewhere in this app) — same get_tickers()
     fallback-field pattern already proven correct for VGI/FT5/Session.
     Explores whether this "Malaysian SNR" OCL/QM-sweep signal logic
     generalizes beyond gold, or is specific to gold's own price
@@ -16428,7 +16471,35 @@ def msnr_build_backtest_universe():
     promoted into live scanning, per direct follow-up request — this
     function's own job (which symbols get BACKTESTED) is unchanged,
     it's simply no longer true that live scanning stays gold-only
-    forever regardless of what the backtest finds."""
+    forever regardless of what the backtest finds.
+    v0.99.48, per direct user request ("может не выбирать топ 70
+    ликвидных монет, а в целом выбирать из всех десятку лучших"):
+    dropped the additional top-MSNR_BACKTEST_UNIVERSE_SIZE-by-volume
+    slice that used to sit on top of the MIN_VOL_USD floor — every
+    symbol clearing that floor is now backtested, not just the 70
+    MOST liquid among them. The whole point of the top-10 ranking
+    (msnr_rank_by_winrate_sample()) is to find the best-PERFORMING
+    symbols; capping the candidate pool by liquidity rank first meant
+    a symbol with a genuinely better score/compound_return_pct could
+    never even be CONSIDERED just because ~70 other symbols happened
+    to trade more volume that day — liquidity and signal quality are
+    different things, and the cap was silently picking one as a proxy
+    for the other. MSNR_BACKTEST_UNIVERSE_SIZE itself is left defined
+    (unused by this function now) rather than deleted outright, in
+    case a future session wants to reintroduce a cap deliberately —
+    but nothing here reads it anymore.
+    Trade-off worth knowing: this backtests noticeably MORE symbols
+    per cycle now (every sufficiently-liquid _USDT pair — around 180+
+    based on this app's own liquid-universe counts elsewhere, not the
+    70-symbol cap this replaces), meaning a longer cycle duration and
+    more aggregate Gate.io API load per cycle. Not reduced here on
+    the assumption that's an acceptable trade for genuinely
+    considering the full pool — GLOBAL_HTTP_SEMAPHORE/_global_rate_
+    gate() (v0.99.37/38) already cap the aggregate request rate/
+    concurrency app-wide regardless of how many symbols any one loop
+    is working through, so this doesn't reopen the rate-limiting
+    problem those fixes addressed, just makes MSNR's own cycle take
+    longer to grind through a bigger list within that same budget."""
     tickers = get_tickers()
     seen_vol = {}
     for t in tickers:
@@ -16445,7 +16516,7 @@ def msnr_build_backtest_universe():
         if name not in seen_vol or vol > seen_vol[name]:
             seen_vol[name] = vol
     ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
-    top_liquid = [s[0] for s in ranked[:MSNR_BACKTEST_UNIVERSE_SIZE]]
+    top_liquid = [s[0] for s in ranked]
     combined = list(MSNR_SYMBOLS)
     for sym in top_liquid:
         if sym not in combined:
