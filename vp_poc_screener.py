@@ -6564,6 +6564,91 @@ v0.99.46 - Direct user request, following a live example: "skhynix
          --check on the correctly-last <script> block, the Flask
          route/def integrity check (still 63 routes), and an AST walk
          for duplicate top-level defs (none introduced).
+
+v0.99.47 - Direct user follow-up to v0.99.46: "чёт лучше не стало,
+         будто даже хуже" -> "может как-то для каждой монеты в рамках
+         автотюнинга автоматически выбирать оптимальное плечо для
+         долгосрочного роста?" Root cause of the regression: v0.99.46's
+         "lose exactly MSNR_TARGET_STOP_LOSS_PCT on a stop-out" rule
+         scaled leverage up SYMMETRICALLY — it amplified the WIN side
+         by the exact same factor as the loss side on every tight-stop
+         trade. Under full-reinvestment compounding, higher variance
+         can REDUCE long-run geometric growth even at an unchanged (or
+         better) arithmetic edge — the Kelly-criterion "over-betting
+         past optimal hurts compounded growth" point already raised
+         earlier this session about the sizing model in general, now
+         confirmed live: a target-% heuristic has no way to know it's
+         on the wrong side of that curve for a given symbol, only
+         actually testing against that symbol's own history can tell.
+         REPLACED msnr_leverage_for_stop() (removed entirely — no
+         longer referenced anywhere) with new msnr_optimal_leverage_
+         for_symbol(trades, ceiling_leverage): finds the single flat
+         leverage L, applied to EVERY trade in the symbol's own
+         history (not varied per-trade by stop width), that maximizes
+         E[log(1 + pnl_frac(L))] over that history — the textbook
+         "optimal f" / Kelly-criterion objective, since maximizing
+         expected log-growth is exactly what maximizes long-run
+         COMPOUNDED wealth (a consequence of the strong law of large
+         numbers applied to a sequence of multiplicative returns, not
+         a heuristic). Any candidate leverage where even ONE historical
+         trade's own pnl_frac(L) <= -1 (would have wiped the account)
+         scores -infinity outright for that candidate — ruin is
+         absorbing. Searched as a plain 0.5x-step grid from AUTOTRADE_
+         LEVERAGE_MSNR up to ceiling_leverage (not a smarter optimizer
+         — this objective is well-behaved/concave for realistic trade
+         distributions, and a grid is simpler to verify correct at
+         negligible extra compute). Floored at AUTOTRADE_LEVERAGE_MSNR,
+         same "never go below the default" stance v0.99.46 already had
+         — a symbol whose own history says even the default is past
+         Kelly-optimal is a stress_test_failed/skip_sl_pct_min
+         candidate handled elsewhere already.
+         msnr_compound_trail()/msnr_compound_return() reverted to ONE
+         flat `leverage` parameter (undoing v0.99.46's per-trade
+         ceiling_leverage variant) — Kelly-optimal is inherently a
+         single number for the whole betting sequence, not something
+         that varies signal-by-signal off one visible feature.
+         msnr_optimize_symbol() now computes best["optimal_leverage"]
+         (via msnr_optimal_leverage_for_symbol()) against best_results
+         AFTER every filter (skip_rr_min/liquidation/skip_sl_pct_min)
+         has already run, and passes it flat into msnr_compound_return()
+         — replacing the ceiling_leverage/per-trade call from v0.99.46.
+         New msnr_symbol_optimal_leverage(symbol) live lookup (same
+         separate-lookup pattern msnr_symbol_skip_rr_min()/msnr_symbol_
+         skip_sl_pct_min() already established, since msnr_symbol_
+         params()'s return value gets spread as **params into msnr_
+         detect_signals(), which has no matching kwarg). msnr_scan_
+         symbol_live() now resolves dyn_leverage via this lookup
+         instead of computing it fresh per-signal off stop width —
+         same downstream liquidation-safety walk-down as v0.99.46 kept
+         intact (the symbol's own optimal leverage still has no
+         awareness of live MMR at firing time).
+         api_msnr_backtest_trades() now passes the symbol's own
+         optimal_leverage (not leverage_ceiling) into msnr_compound_
+         trail() so the expanded per-trade view matches the summary
+         row's "доход" again.
+         UI: summary row's leverage indicator now reads "плечо Xx
+         (Kelly-оптимум)" when optimal_leverage clears the configured
+         default, plain "плечо Xx" otherwise, with the exchange-cap
+         note ("лимит биржи Xx") shown separately when relevant instead
+         of conflated into one range string.
+         Verified with py_compile, an actual runtime start (synthetic
+         bad-quality narrow-stop symbol at 40% win-rate correctly
+         stayed at the 10x floor — no unjustified leverage-up; a good-
+         quality narrow-stop symbol at 70% win-rate/RR=2 correctly
+         climbed to the 75x ceiling; a synthetic history containing one
+         historically-ruinous wide-stop trade correctly forced the
+         floor regardless of ceiling, since every candidate above it
+         also scored -infinity via that same trade; an end-to-end
+         comparison on the good-quality symbol — msnr_compound_return()
+         at the found optimal leverage vs. the flat default — showed
+         $1024.63 (+2461.6%) at the Kelly-optimal 75x against $68.48
+         (+71.2%) at the flat 10x on the identical 20-trade history,
+         confirming the optimizer captures real upside a flat default
+         leaves on the table when a symbol's own quality justifies it),
+         pyflakes, node --check on the correctly-last <script> block,
+         the Flask route/def integrity check (still 63 routes), and an
+         AST walk for duplicate top-level defs (msnr_leverage_for_stop
+         confirmed fully removed, no duplicates among the 313 total).
 """
 
 import os
@@ -6583,7 +6668,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.46"
+APP_VERSION = "0.99.47"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -8070,7 +8155,7 @@ STATE = {
     "msnr_backtest_summary": {},
     "msnr_last_backtest_finished": None,
     "msnr_last_backtest_duration": None,
-    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at, skip_rr_min, skip_sl_pct_min, effective_leverage, leverage_ceiling, liquidation_filtered_count, compound_final_balance, compound_return_pct, compound_blown_at, stress_test_failed}
+    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at, skip_rr_min, skip_sl_pct_min, effective_leverage, leverage_ceiling, optimal_leverage, liquidation_filtered_count, compound_final_balance, compound_return_pct, compound_blown_at, stress_test_failed}
     "msnr_backtest_universe": [],  # v0.99.9 — MSNR_SYMBOLS union'd with the top-liquid backtest-only exploration set, see msnr_build_backtest_universe()
     "msnr_live_universe": [],  # v0.99.17 — MSNR_SYMBOLS union'd with any backtest-qualifying symbol (win-rate/sample threshold), see msnr_compute_live_universe(); msnr_live_loop() scans THIS, not the static MSNR_SYMBOLS constant directly, so it stays empty (falls back to MSNR_SYMBOLS at the call site) until the first backtest cycle populates it
     "msnr_autotrade_symbols": {},  # v0.99.18 — per-symbol autotrade toggle, {symbol: bool}. Replaces the old single AUTOTRADE_ENABLED_MSNR gate — per direct user request for individually-toggleable fields (3 gold, always eligible + the current top MSNR_AUTOTRADE_TOP_N non-gold by msnr_rank_by_winrate_sample(), which despite its name ranks by `avg_rr` (score before v0.99.39) — see that function's own docstring). A symbol missing from this dict is treated as off (same "off unless explicitly on" default every other autotrade toggle in this app already uses). See msnr_autotrade_eligible_symbols() for which symbols can currently be toggled, and _set_msnr_autotrade_symbol()'s own docstring for what happens to a saved toggle when its symbol falls out of that set.
@@ -15374,6 +15459,7 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
                                           min_leg_atr=mid_atr, qm_zone_pct=mid_zone, qm_lookback=mid_lookback)
         raw_results = best_results
         combos = len(MSNR_PARAM_GRID_MIN_LEG_ATR) * len(MSNR_PARAM_GRID_QM_ZONE_PCT) * len(MSNR_PARAM_GRID_QM_LOOKBACK)
+        leverage_ceiling = msnr_symbol_contract_max_leverage(symbol)
         best = {
             "min_leg_atr": mid_atr, "qm_zone_pct": mid_zone, "qm_lookback_bars": mid_lookback,
             "trades": len(best_results), "wins": 0, "losses": 0, "timeouts": 0,
@@ -15381,7 +15467,8 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
             "optimized_at": now, "candles_used": len(entry_candles), "skip_rr_min": None,
             "skip_sl_pct_min": None, "liquidation_filtered_count": 0,
             "effective_leverage": msnr_symbol_effective_leverage(symbol),
-            "leverage_ceiling": msnr_symbol_contract_max_leverage(symbol),
+            "leverage_ceiling": leverage_ceiling,
+            "optimal_leverage": msnr_optimal_leverage_for_symbol(best_results, leverage_ceiling),
             "note": f"insufficient closed trades across all {combos} combos tried "
                     f"(max {max(tried) if tried else 0}, need {MSNR_MIN_BACKTEST_TRADES}); "
                     f"using middle-of-grid defaults",
@@ -15445,22 +15532,28 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
                              if not t.get("entry") or t["entry"] <= 0 or t.get("sl") is None
                              or abs(t["entry"] - t["sl"]) / t["entry"] * 100 < skip_sl]
             _msnr_recompute_summary_score(best, best_results)
+    # v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше не
+    # стало, будто даже хуже" -> Kelly/optimal-f search instead of a
+    # fixed stop-width target): ONE flat leverage for this symbol,
+    # chosen to maximize long-run compounded growth against its OWN
+    # (already-filtered) trade history — see msnr_optimal_leverage_
+    # for_symbol()'s own docstring for the full reasoning. Computed
+    # against best_results AFTER every filter above (skip_rr_min,
+    # liquidation, skip_sl_pct_min) — the same final trade set the
+    # compound simulation right below already uses, not the raw
+    # unfiltered history.
+    best["optimal_leverage"] = msnr_optimal_leverage_for_symbol(best_results, best.get("leverage_ceiling"))
     # v0.99.24, per direct user request: a $ compounding simulation
     # (start MSNR_COMPOUND_START_BALANCE, reinvest the whole balance
     # every trade) over best_results — the FILTERED list (skip_rr_min +
     # v0.99.26's liquidation/skip_sl_pct_min filters), matching what
     # this symbol would actually be traded as, same reasoning as the
     # R-multiple stats above using the filtered set rather than
-    # raw_results. v0.99.46, per direct user request ("давай
-    # ориентировать на стоп"): leverage is no longer this symbol's flat
-    # effective_leverage for the whole simulation — msnr_compound_
-    # return() now resolves it PER TRADE off that trade's own stop
-    # width (msnr_leverage_for_stop()), capped at leverage_ceiling (the
-    # contract's raw exchange max, NOT pre-clamped to the configured
-    # default the way effective_leverage is — clamping to the default
-    # here would defeat the entire point of scaling leverage up for a
-    # tight stop).
-    compound = msnr_compound_return(best_results, ceiling_leverage=best.get("leverage_ceiling"))
+    # raw_results. v0.99.47: leverage is this symbol's own Kelly-optimal
+    # value (just computed above) — flat for the whole simulation, not
+    # varied per-trade by stop width (v0.99.46, reverted — see msnr_
+    # compound_trail()'s own docstring for why).
+    compound = msnr_compound_return(best_results, leverage=best["optimal_leverage"])
     best["compound_final_balance"] = compound["final_balance"] if compound else None
     best["compound_return_pct"] = compound["return_pct"] if compound else None
     best["compound_blown_at"] = compound["blown_at_trade"] if compound else None
@@ -15691,43 +15784,95 @@ def msnr_symbol_contract_max_leverage(symbol):
     return contract_max_lev if contract_max_lev else AUTOTRADE_LEVERAGE_MSNR
 
 
-def msnr_leverage_for_stop(entry, sl, ceiling_leverage):
-    """v0.99.46, per direct user request, following a live example:
-    "skhynix сигнал пришел, стоп меньше 1 доллара... давай ориентировать
-    на стоп, 10 плечо по умолчанию, но нужно чтобы по стопу терялось не
-    менее 10%." At the flat AUTOTRADE_LEVERAGE_MSNR, a stop this tight
-    (well under 1% of a several-hundred-dollar entry) barely dents the
-    account if hit — the position is effectively too small to matter
-    either way, wasting most of the trade's real risk budget.
-    Computes the leverage that would make a stop-out cost roughly
-    MSNR_TARGET_STOP_LOSS_PCT of margin: leverage = target_pct /
-    stop_distance_pct. Floored at AUTOTRADE_LEVERAGE_MSNR — this ONLY
-    scales leverage UP for unusually tight stops, never down for wide
-    ones; a wide stop already carries full weight at the default
-    leverage, and reducing leverage for THOSE is a different, already-
-    solved problem (msnr_symbol_sl_skip_min()/msnr_trade_beyond_
-    liquidation() skip a signal outright rather than under-sizing it —
-    silently shrinking the position would just mask the same risk
-    msnr_symbol_sl_skip_min() is specifically there to refuse).
-    Capped at `ceiling_leverage` (the caller resolves this — typically
-    msnr_symbol_contract_max_leverage() for the exchange's own cap;
-    msnr_scan_symbol_live() additionally walks the result back down
-    against msnr_trade_beyond_liquidation() before use, since pushing
-    leverage up specifically to hit this target is exactly the kind of
-    change that can push a previously-safe stop past the liquidation
-    buffer — that walk-down lives at the call site, not here, since it
-    needs the live per-symbol MMR lookup this pure function
-    deliberately doesn't touch).
-    Returns AUTOTRADE_LEVERAGE_MSNR unchanged for a malformed/zero-
-    width stop — nothing to size against."""
-    if not entry or entry <= 0 or sl is None:
-        return AUTOTRADE_LEVERAGE_MSNR
-    stop_pct = abs(entry - sl) / entry * 100
-    if stop_pct <= 0:
-        return AUTOTRADE_LEVERAGE_MSNR
-    desired = MSNR_TARGET_STOP_LOSS_PCT / stop_pct
+def msnr_optimal_leverage_for_symbol(trades, ceiling_leverage=None):
+    """v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше не
+    стало, будто даже хуже" -> "давай для каждой монеты в рамках
+    автотюнинга автоматически выбирать оптимальное плечо для
+    долгосрочного роста"): REPLACES v0.99.46's msnr_leverage_for_stop()
+    — that heuristic hit its own "lose ~10% of margin on a stop-out"
+    target correctly, but a fixed target loss % scales leverage up
+    SYMMETRICALLY, amplifying the WIN side by the exact same factor as
+    the loss side. Under full-reinvestment compounding, higher
+    variance can REDUCE long-run geometric growth even at an unchanged
+    (or better) arithmetic edge — the same Kelly-criterion "over-
+    betting past optimal hurts compounded growth" point already raised
+    earlier this session about the sizing model in general. A target-%
+    heuristic has no way to know it's on the wrong side of that curve
+    for a given symbol; only actually testing against that symbol's
+    own trade history can tell.
+    Finds the single leverage L, applied FLAT to every trade in this
+    symbol's own history (not varied per-trade by stop width, unlike
+    the function this replaces), that MAXIMIZES E[log(1 + pnl_frac(L))]
+    over the symbol's own closed (WIN/LOSS) trades — the textbook
+    "optimal f" / Kelly-criterion objective for choosing bet size under
+    repeated, reinvested exposure: maximizing expected log-growth is
+    exactly what maximizes long-run COMPOUNDED wealth (a mathematical
+    consequence of the strong law of large numbers applied to a
+    sequence of multiplicative i.i.d.-ish returns, not a heuristic
+    itself). A single trade's own probability of WIN vs LOSS isn't
+    knowable in advance beyond what the symbol's pooled historical
+    distribution already implies, so — same reasoning "optimal f"
+    (Ralph Vince) already uses — this optimizes ONE leverage against
+    the whole historical distribution and applies it uniformly to
+    every future trade on this symbol, rather than trying to vary it
+    signal-by-signal off a single visible feature (stop width) the way
+    the replaced heuristic did.
+    Any candidate leverage where even ONE historical trade's own
+    pnl_frac(L) <= -1 (would have wiped the account) scores negative
+    infinity for that candidate outright — ruin is absorbing; no
+    amount of upside on other trades compensates for a leverage that
+    has already blown the account once in its own visible history.
+    Searched as a plain grid from AUTOTRADE_LEVERAGE_MSNR up to
+    ceiling_leverage in 0.5x steps rather than a smarter optimizer
+    (gradient ascent / golden-section search): this objective is
+    well-behaved (concave) for realistic win-rate/RR distributions,
+    but a grid is simpler to verify correct, and cheap enough at this
+    scale (well under a few hundred candidates even against a very
+    high exchange leverage cap) that a fancier search isn't worth the
+    risk of a subtler bug for the compute it would save.
+    Floored at AUTOTRADE_LEVERAGE_MSNR — never recommends LESS than
+    the configured default; a symbol whose own history says even the
+    default is already past Kelly-optimal is a stress_test_failed/
+    skip_sl_pct_min candidate handled elsewhere, not something this
+    function should try to further de-risk by going below the floor.
+    Returns AUTOTRADE_LEVERAGE_MSNR if there are no valid closed trades
+    to optimize against at all."""
     ceiling = ceiling_leverage if ceiling_leverage else AUTOTRADE_LEVERAGE_MSNR
-    return max(AUTOTRADE_LEVERAGE_MSNR, min(desired, ceiling))
+    moves = []
+    for t in trades:
+        if t.get("result") not in ("WIN", "LOSS"):
+            continue
+        entry = t.get("entry")
+        sl = t.get("sl")
+        tp = t.get("tp")
+        if not entry or entry <= 0 or sl is None or tp is None:
+            continue
+        if t["result"] == "WIN":
+            moves.append((1, abs(tp - entry) / entry))
+        else:
+            moves.append((-1, abs(entry - sl) / entry))
+    if not moves:
+        return AUTOTRADE_LEVERAGE_MSNR
+
+    def _log_growth(lev):
+        total = 0.0
+        for sign, move_pct in moves:
+            pnl_frac = sign * move_pct * lev
+            if pnl_frac <= -1.0:
+                return float("-inf")
+            total += math.log(1 + pnl_frac)
+        return total / len(moves)
+
+    best_lev = AUTOTRADE_LEVERAGE_MSNR
+    best_score = _log_growth(best_lev)
+    lev = AUTOTRADE_LEVERAGE_MSNR + 0.5
+    while lev <= ceiling:
+        score = _log_growth(lev)
+        if score > best_score:
+            best_score = score
+            best_lev = lev
+        lev += 0.5
+    return round(best_lev, 1)
 
 
 def msnr_live_balance_for_symbol(symbol):
@@ -15880,7 +16025,23 @@ def msnr_symbol_skip_sl_min(symbol):
     return override.get("skip_sl_pct_min")
 
 
-def msnr_compound_trail(trades, start_balance=None, ceiling_leverage=None):
+def msnr_symbol_optimal_leverage(symbol):
+    """v0.99.47 — this symbol's own Kelly-optimal leverage (msnr_
+    optimal_leverage_for_symbol(), computed once per backtest cycle in
+    msnr_optimize_symbol() against this symbol's own filtered trade
+    history), looked up for live signal firing. Same separate-lookup
+    reasoning msnr_symbol_skip_rr_min()/msnr_symbol_skip_sl_min()
+    already documented — this isn't threaded through msnr_symbol_
+    params() either. Falls back to AUTOTRADE_LEVERAGE_MSNR if this
+    symbol has no override yet (e.g. its very first backtest cycle
+    hasn't completed)."""
+    with state_lock:
+        override = STATE["msnr_symbol_overrides"].get(symbol) or {}
+    optimal = override.get("optimal_leverage")
+    return optimal if optimal is not None else AUTOTRADE_LEVERAGE_MSNR
+
+
+def msnr_compound_trail(trades, start_balance=None, leverage=None):
     """v0.99.25, per direct user follow-up to msnr_compound_return():
     the SAME walk, but returns one entry per actually-compounded CLOSED
     trade instead of collapsing straight to a final number — so the
@@ -15890,20 +16051,20 @@ def msnr_compound_trail(trades, start_balance=None, ceiling_leverage=None):
     is now a thin reduction over this same trail, so the per-trade
     display and the summary "доход" figure can never silently disagree
     about the underlying math — one calculation, two views of it.
-    v0.99.46, per direct user request ("давай ориентировать на стоп"):
-    each trade's leverage is no longer one flat value for the whole
-    walk — it's msnr_leverage_for_stop(entry, sl, ceiling_leverage),
-    computed FRESH per trade off THAT trade's own stop distance, same
-    as msnr_scan_symbol_live() now does for real orders. `ceiling_
-    leverage` (typically msnr_symbol_contract_max_leverage(symbol))
-    replaces the old flat `leverage` param — this function no longer
-    trades at one fixed leverage throughout, a tight-stop trade in the
-    middle of the trail can use a much higher leverage than a wide-
-    stop trade right next to it, exactly mirroring what live trading
-    now does. Falls back to AUTOTRADE_LEVERAGE_MSNR (no scale-up
-    headroom) when ceiling_leverage isn't given, same "flat behavior"
-    this function had before v0.99.46 for any caller that doesn't pass
-    one.
+    v0.99.46 briefly varied leverage PER TRADE off that trade's own
+    stop width — reverted in v0.99.47, per direct user follow-up
+    ("чёт лучше не стало, будто даже хуже"): that scaled the WIN side
+    up by the exact same factor as the loss side on every tight-stop
+    trade, and under full-reinvestment compounding, the resulting
+    higher variance reduced long-run geometric growth for some symbols
+    even though each individual trade's own edge hadn't changed — see
+    msnr_optimal_leverage_for_symbol()'s own docstring for the
+    Kelly-criterion reasoning. Back to ONE flat `leverage` for the
+    whole walk, same as before v0.99.46 — callers now pass the
+    symbol's own Kelly-optimal value (msnr_optimal_leverage_for_
+    symbol()) instead of a stop-width-derived one. Resolves to
+    AUTOTRADE_LEVERAGE_MSNR when not given, same default this
+    parameter always had.
     TIMEOUT trades and malformed records (missing/invalid entry/sl/tp)
     are skipped entirely — absent from the trail, not shown at some
     placeholder balance — same skip conditions msnr_compound_return()
@@ -15916,10 +16077,12 @@ def msnr_compound_trail(trades, start_balance=None, ceiling_leverage=None):
     matching trail rows back to trade records (e.g. api_msnr_backtest_
     trades()) have a collision-safe key: an A-shape and V-shape level
     can structurally resolve on the exact same entry candle, and time
-    alone wouldn't disambiguate that pair. `leverage` is this specific
-    trade's own resolved value, not a single number for the whole
-    trail — new in v0.99.46."""
+    alone wouldn't disambiguate that pair. `leverage` echoes the flat
+    value used for the whole trail (kept per-row, not just once, so
+    the UI's existing per-trade rendering doesn't need special-casing
+    for "one value vs per-trade" between backtest and live views)."""
     start_balance = start_balance if start_balance is not None else MSNR_COMPOUND_START_BALANCE
+    leverage = leverage if leverage is not None else AUTOTRADE_LEVERAGE_MSNR
     closed = [t for t in trades if t.get("result") in ("WIN", "LOSS")]
     trail = []
     balance = start_balance
@@ -15931,7 +16094,6 @@ def msnr_compound_trail(trades, start_balance=None, ceiling_leverage=None):
         tp = t.get("tp")
         if not entry or entry <= 0 or sl is None or tp is None:
             continue  # malformed trade record — skip without touching the running balance
-        leverage = msnr_leverage_for_stop(entry, sl, ceiling_leverage)
         if t["result"] == "WIN":
             move_pct = abs(tp - entry) / entry
             pnl_frac = move_pct * leverage
@@ -15953,7 +16115,7 @@ def msnr_compound_trail(trades, start_balance=None, ceiling_leverage=None):
     return trail
 
 
-def msnr_compound_return(trades, start_balance=None, ceiling_leverage=None):
+def msnr_compound_return(trades, start_balance=None, leverage=None):
     """Per direct user request: a compounding $ P&L simulation over one
     symbol's backtest — deliberately separate from msnr_summarize_
     backtest()'s R-multiple stats, which measure the STRATEGY's edge
@@ -15964,9 +16126,10 @@ def msnr_compound_return(trades, start_balance=None, ceiling_leverage=None):
     resulting balance into the next closed trade, and so on through
     every closed trade in the list passed in — literally "va-bank" the
     whole account every single trade, per the user's own description.
-    v0.99.46: leverage is no longer one flat number for the whole
-    simulation — see msnr_compound_trail()'s own docstring for the
-    per-trade stop-based sizing this now delegates to.
+    v0.99.47: `leverage` is a single flat value again (msnr_optimal_
+    leverage_for_symbol()'s own Kelly-optimal choice for this symbol,
+    typically) — see msnr_compound_trail()'s own docstring for why
+    v0.99.46's per-trade stop-width variant was reverted.
     v0.99.25: a thin reduction over msnr_compound_trail() (see its own
     docstring for the full per-trade mechanics — TIMEOUT handling, the
     isolated-margin loss floor, why entry/sl/tp drive the math instead
@@ -15982,7 +16145,7 @@ def msnr_compound_return(trades, start_balance=None, ceiling_leverage=None):
     closed = [t for t in trades if t.get("result") in ("WIN", "LOSS")]
     if not closed:
         return None
-    trail = msnr_compound_trail(trades, start_balance, ceiling_leverage)
+    trail = msnr_compound_trail(trades, start_balance, leverage)
     if not trail:
         return {"final_balance": round(start_balance, 2), "return_pct": 0.0,
                 "trades_compounded": 0, "blown_at_trade": None}
@@ -16034,21 +16197,18 @@ def msnr_scan_symbol_live(symbol):
             sig_rr = reward / risk if risk > 0 else None
             if sig_rr is not None and sig_rr >= skip_rr_min:
                 return  # this symbol's own history says rr this high fails here — skip, don't fire
-        # v0.99.46, per direct user request ("давай ориентировать на
-        # стоп... 10 плечо по умолчанию, но нужно чтобы по стопу
-        # терялось не менее 10%"): this signal's own leverage is no
-        # longer the flat msnr_symbol_effective_leverage() default —
-        # msnr_leverage_for_stop() scales it UP toward the contract's
-        # own exchange max when the stop is tighter than what a 10%-
-        # of-margin loss target implies (SKHYNIX_USDT example: a sub-
-        # 1%-wide stop at the flat 10x barely dents the account either
-        # way). Computed BEFORE the liquidation check below so that
-        # check evaluates the leverage this trade will ACTUALLY use,
-        # not the old flat default — pushing leverage up specifically
-        # to hit this target is exactly the kind of change that can
-        # push a previously-safe stop past the liquidation buffer.
-        contract_max_lev = msnr_symbol_contract_max_leverage(symbol)
-        dyn_leverage = msnr_leverage_for_stop(sig["entry"], sig["sl"], contract_max_lev)
+        # v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше
+        # не стало, будто даже хуже" -> Kelly/optimal-f search instead
+        # of a fixed stop-width target): this signal uses THIS symbol's
+        # own Kelly-optimal leverage (msnr_symbol_optimal_leverage(),
+        # computed once per backtest cycle against the symbol's whole
+        # trade history — msnr_optimal_leverage_for_symbol()'s own
+        # docstring has the full reasoning) — a single flat value per
+        # symbol, not derived from this one signal's own stop width the
+        # way v0.99.46 did. Computed BEFORE the liquidation check below
+        # so that check evaluates the leverage this trade will ACTUALLY
+        # use.
+        dyn_leverage = msnr_symbol_optimal_leverage(symbol)
         # v0.99.26, per direct user request ("иногда стоп будет за
         # ликвидацией и просто избегать этого"): deterministic check —
         # if this signal's own SL sits past where Gate.io would force-
@@ -16061,10 +16221,10 @@ def msnr_scan_symbol_live(symbol):
         # the first place.
         # v0.99.46: walks dyn_leverage DOWN in 0.5x steps (never below
         # AUTOTRADE_LEVERAGE_MSNR) until the liquidation-safety margin
-        # clears, since msnr_leverage_for_stop()'s own target-driven
-        # value has no awareness of THIS symbol's live MMR — only after
-        # exhausting that headroom does a still-failing check mean skip
-        # the signal entirely, same as before v0.99.46.
+        # clears, since the symbol's own optimal leverage has no
+        # awareness of THIS signal's live MMR at firing time — only
+        # after exhausting that headroom does a still-failing check
+        # mean skip the signal entirely.
         while dyn_leverage > AUTOTRADE_LEVERAGE_MSNR and msnr_trade_beyond_liquidation(
                 symbol, sig["direction"], sig["entry"], sig["sl"], leverage=dyn_leverage):
             dyn_leverage = max(AUTOTRADE_LEVERAGE_MSNR, dyn_leverage - 0.5)
@@ -16123,15 +16283,15 @@ def msnr_scan_symbol_live(symbol):
             # msnr_compound_trail()) on every trade after, hard-capped
             # at MSNR_LIVE_BALANCE_MAX — instead of the shared AUTOTRADE_
             # SIZE_MODE/VALUE every other mode uses.
-            # v0.99.46: leverage is now dyn_leverage — resolved BEFORE
-            # this block, off this signal's own stop width via msnr_
-            # leverage_for_stop(), then walked back down against the
-            # liquidation-safety check (see that check's own comment
-            # above) — no longer the flat msnr_symbol_effective_
-            # leverage() default. Reusing the SAME already-checked
-            # value here (rather than re-deriving it) guarantees the
-            # leverage this order actually places at is the exact one
-            # the liquidation check above already verified is safe.
+            # v0.99.47: leverage is dyn_leverage — this symbol's own
+            # Kelly-optimal value (msnr_symbol_optimal_leverage()),
+            # resolved BEFORE this block and walked back down against
+            # the liquidation-safety check (see that check's own
+            # comment above), not the old v0.99.46 stop-width-derived
+            # value. Reusing the SAME already-checked value here
+            # (rather than re-deriving it) guarantees the leverage this
+            # order actually places at is the exact one the liquidation
+            # check above already verified is safe.
             live_leverage = dyn_leverage
             live_size = msnr_live_balance_for_symbol(symbol)
             # v0.99.45 — BUG FOUND ON AUDIT (per direct user request to
@@ -17830,20 +17990,20 @@ def api_msnr_backtest_trades(symbol):
     actually reached" reasoning the compounding functions use."""
     with state_lock:
         trades = list(STATE["msnr_backtest_results"].get(symbol, []))
-        ceiling_leverage = (STATE["msnr_symbol_overrides"].get(symbol) or {}).get("leverage_ceiling")
+        optimal_leverage = (STATE["msnr_symbol_overrides"].get(symbol) or {}).get("optimal_leverage")
     # v0.99.25: keyed by (time, direction), not time alone — an A-shape
     # and a V-shape level can structurally both resolve on the exact
     # same entry candle (rare, but msnr_detect_signals() checks them in
     # separate if-blocks, not elif), which would collide on a time-only
     # key and silently misattribute one trade's balance to the other.
-    # v0.99.46: passes this symbol's own leverage_ceiling through so the
-    # trail's per-trade leverage/pnl_pct match what the summary row's
+    # v0.99.47: passes this symbol's own Kelly-optimal leverage through
+    # so the trail's per-trade pnl_pct matches what the summary row's
     # own "доход" figure was computed with (msnr_optimize_symbol() now
-    # resolves the SAME ceiling for its own msnr_compound_return() call)
-    # — leaving this at the old flat default would make the expanded
+    # resolves the SAME value for its own msnr_compound_return() call)
+    # — leaving this at the flat default would make the expanded
     # per-trade view silently disagree with the summary above it.
     trail_by_key = {(row["time"], row.get("direction")): row
-                     for row in msnr_compound_trail(trades, ceiling_leverage=ceiling_leverage)}
+                     for row in msnr_compound_trail(trades, leverage=optimal_leverage)}
     for t in trades:
         row = trail_by_key.get((t["time"], t.get("direction")))
         t["compound_balance_before"] = row["balance_before"] if row else None
@@ -20315,24 +20475,29 @@ async function refreshMsnr() {
     const skipTxt = (r.skip_rr_min !== null && r.skip_rr_min !== undefined) ? ` \u00b7 <span class="loss">skip rr\u2265${r.skip_rr_min}</span>` : '';
     const skipSlTxt = (r.skip_sl_pct_min !== null && r.skip_sl_pct_min !== undefined) ? ` \u00b7 <span class="loss">skip SL\u2265${r.skip_sl_pct_min}%</span>` : '';
     const liqTxt = r.liquidation_filtered_count ? ` \u00b7 <span class="loss">${r.liquidation_filtered_count} \u0437\u0430 \u043b\u0438\u043a\u0432\u0438\u0434\u0430\u0446\u0438\u0435\u0439</span>` : '';
-    // v0.99.46, per direct user request ("давай ориентировать на
-    // стоп"): leverage is no longer one flat number per symbol —
-    // msnr_leverage_for_stop() scales it UP per trade, toward
-    // leverage_ceiling (this contract's raw exchange max), for a
-    // signal whose own stop is tighter than the MSNR_TARGET_STOP_
-    // LOSS_PCT target implies. Shows the actual [default, ceiling]
-    // range now in play instead of the old single flat value — a
-    // ceiling ABOVE the configured default means real headroom to
-    // scale up; a ceiling AT OR BELOW it means the exchange itself
-    // caps this symbol at (or below) the default, same "лимит биржи"
-    // case the old text already covered.
+    // v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше не
+    // стало, будто даже хуже" -> Kelly/optimal-f search): leverage is
+    // back to ONE flat value per symbol — msnr_optimal_leverage_for_
+    // symbol()'s own choice, maximizing long-run compounded growth
+    // against this symbol's own trade history, not a stop-width-
+    // derived value. Shown plainly, with a "Kelly-оптимум" note only
+    // when it's ABOVE the configured default (meaning the symbol's own
+    // history justified more than the default, not just hitting the
+    // floor). The exchange-cap note is now separate from the leverage
+    // value itself — msnr_optimal_leverage_for_symbol() already search-
+    // bounds against leverage_ceiling internally, so a low exchange cap
+    // shows up as optLev sitting at or near it, but the raw ceiling is
+    // still useful context on its own (this symbol simply can't ever
+    // exceed it, regardless of what the optimizer would otherwise pick).
     const defLev = cfg.compound_leverage;
+    const optLev = r.optimal_leverage;
     const ceilLev = r.leverage_ceiling;
     let levTxt = '';
-    if (ceilLev !== null && ceilLev !== undefined) {
-      levTxt = ceilLev > defLev
-        ? ` \u00b7 <span class="dim">\u043f\u043b\u0435\u0447\u043e ${defLev}-${ceilLev}x (\u043f\u043e \u0441\u0442\u043e\u043f\u0443)</span>`
-        : ` \u00b7 <span class="dim">\u043f\u043b\u0435\u0447\u043e ${ceilLev}x (\u043b\u0438\u043c\u0438\u0442 \u0431\u0438\u0440\u0436\u0438)</span>`;
+    if (optLev !== null && optLev !== undefined) {
+      levTxt = ` \u00b7 <span class="dim">\u043f\u043b\u0435\u0447\u043e ${optLev}x${optLev > defLev ? ' (Kelly-\u043e\u043f\u0442\u0438\u043c\u0443\u043c)' : ''}</span>`;
+    }
+    if (ceilLev !== null && ceilLev !== undefined && ceilLev < defLev) {
+      levTxt += ` \u00b7 <span class="dim">\u043b\u0438\u043c\u0438\u0442 \u0431\u0438\u0440\u0436\u0438 ${ceilLev}x</span>`;
     }
     const compClass = (r.compound_return_pct === null || r.compound_return_pct === undefined) ? 'dim' : (r.compound_return_pct > 0 ? 'win' : 'loss');
     const compBlownTxt = r.compound_blown_at ? ` (\u0441\u043b\u0438\u0432 \u043d\u0430 #${r.compound_blown_at})` : '';
