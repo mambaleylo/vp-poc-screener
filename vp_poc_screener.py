@@ -6994,6 +6994,58 @@ v0.99.55 - Direct user request: "добавь в уведы телеграмм �
          the correctly-last <script> block, the Flask route/def
          integrity check (still 63 routes), and an AST walk for
          duplicate top-level defs (none introduced).
+
+v0.99.56 - Direct user follow-up to a discussion about which filter
+         would be most effective to add next: time-of-day, per symbol.
+         Reasoning discussed first: the whole QM/SNR pattern bets that
+         a sweep-and-reclaim reflects REAL institutional order flow,
+         not noise — and that's exactly the kind of thing that varies
+         by session (London/NY open genuinely has that flow behind it,
+         thin overnight hours often don't; this app's own separate
+         "Сессия" module already trades that same premise directly).
+         Symmetric with the existing skip_rr_min/skip_sl_pct_min
+         filters, not a single global "only trade London" rule (which
+         would repeat the same overfitting mistake already found and
+         fixed for the liquid-universe cap) — per-symbol, since one
+         symbol's bad hour can be another's fine one.
+         New msnr_hour_bucket_stats(trades): buckets closed trades by
+         the UTC hour (0-23, via time.gmtime()) of their own entry
+         candle, computing win-rate and avg_rr per hour — same shape as
+         msnr_rr_bucket_stats()/msnr_sl_bucket_stats(). New msnr_
+         symbol_skip_hours(trades): same sample bar (MSNR_SYMBOL_RR_
+         SKIP_MIN_SAMPLE) and per-bucket-breakeven test as the RR/SL
+         filters, but returns a SET of specific bad hours rather than a
+         single threshold — hour-of-day has no natural "everything past
+         this point is bad" ordering the way RR/SL width does, a symbol
+         could be fine at both 2:00 and 22:00 UTC but bad specifically
+         at 14:00.
+         Wired into msnr_optimize_symbol() in the same filter chain as
+         skip_rr_min/liquidation/skip_sl_pct_min — derives skip_hours
+         off the full surviving sample, THEN filters best_results and
+         recomputes stats, same ordering reasoning already established
+         for the other two. Runs BEFORE the Kelly-optimal-leverage
+         computation, so leverage search sees the final, fully-filtered
+         trade set. New msnr_symbol_skip_hours_live(symbol) lookup
+         (same separate-lookup pattern as msnr_symbol_skip_rr_min()/
+         msnr_symbol_skip_sl_min(), for the same **params-spread-into-
+         msnr_detect_signals() reason) wired into msnr_scan_symbol_
+         live()'s existing filter chain.
+         UI: params row gained "skip часы(UTC) 14,22" (loss-red, same
+         styling as the other skip indicators) when a symbol has any
+         flagged hours.
+         Verified with py_compile, an actual runtime start (synthetic
+         two-hour case: hour 14 at 15% win-rate/RR=4 — below that RR's
+         20% breakeven — correctly flagged; hour 3 at 70% correctly
+         wasn't; also confirmed a NAIVE-looking-bad 30% win-rate at
+         RR=4 correctly does NOT get flagged, since 30% clears that
+         RR's own 20% breakeven — the same RR-adjusted judgment the
+         RR/SL filters already use, not a flat win-rate cutoff; an
+         end-to-end filter pass on a 40-trade synthetic set correctly
+         dropped exactly the 20 bad-hour trades and kept the 20 good-
+         hour ones), pyflakes, node --check on the correctly-last
+         <script> block, the Flask route/def integrity check (still 63
+         routes), and an AST walk for duplicate top-level defs (none
+         introduced, all three new functions present exactly once).
 """
 
 import os
@@ -7013,7 +7065,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.55"
+APP_VERSION = "0.99.56"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -8500,7 +8552,7 @@ STATE = {
     "msnr_backtest_summary": {},
     "msnr_last_backtest_finished": None,
     "msnr_last_backtest_duration": None,
-    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at, skip_rr_min, skip_sl_pct_min, effective_leverage, leverage_ceiling, optimal_leverage, liquidation_filtered_count, compound_final_balance, compound_return_pct, compound_blown_at, stress_test_failed}
+    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at, skip_rr_min, skip_sl_pct_min, skip_hours, effective_leverage, leverage_ceiling, optimal_leverage, liquidation_filtered_count, compound_final_balance, compound_return_pct, compound_blown_at, stress_test_failed}
     "msnr_backtest_universe": [],  # v0.99.9 — MSNR_SYMBOLS union'd with the top-liquid backtest-only exploration set, see msnr_build_backtest_universe()
     "msnr_live_universe": [],  # v0.99.17 — MSNR_SYMBOLS union'd with any backtest-qualifying symbol (win-rate/sample threshold), see msnr_compute_live_universe(); msnr_live_loop() scans THIS, not the static MSNR_SYMBOLS constant directly, so it stays empty (falls back to MSNR_SYMBOLS at the call site) until the first backtest cycle populates it
     "msnr_autotrade_symbols": {},  # v0.99.18 — per-symbol autotrade toggle, {symbol: bool}. Replaces the old single AUTOTRADE_ENABLED_MSNR gate — per direct user request for individually-toggleable fields (3 gold, always eligible + the current top MSNR_AUTOTRADE_TOP_N non-gold by msnr_rank_by_winrate_sample(), which despite its name ranks by `avg_rr` (score before v0.99.39) — see that function's own docstring). A symbol missing from this dict is treated as off (same "off unless explicitly on" default every other autotrade toggle in this app already uses). See msnr_autotrade_eligible_symbols() for which symbols can currently be toggled, and _set_msnr_autotrade_symbol()'s own docstring for what happens to a saved toggle when its symbol falls out of that set.
@@ -15867,7 +15919,7 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
             "trades": len(best_results), "wins": 0, "losses": 0, "timeouts": 0,
             "winrate": None, "avg_rr": None, "median_rr": None, "expectancy_r": None, "score": None,
             "optimized_at": now, "candles_used": len(entry_candles), "skip_rr_min": None,
-            "skip_sl_pct_min": None, "liquidation_filtered_count": 0,
+            "skip_sl_pct_min": None, "liquidation_filtered_count": 0, "skip_hours": [],
             "effective_leverage": msnr_symbol_effective_leverage(symbol),
             "leverage_ceiling": leverage_ceiling,
             "optimal_leverage": msnr_optimal_leverage_for_symbol(best_results, leverage_ceiling),
@@ -15933,6 +15985,21 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
             best_results = [t for t in best_results
                              if not t.get("entry") or t["entry"] <= 0 or t.get("sl") is None
                              or abs(t["entry"] - t["sl"]) / t["entry"] * 100 < skip_sl]
+            _msnr_recompute_summary_score(best, best_results)
+        # v0.99.56, per direct user request ("какой фильтр сигналов был
+        # бы самым эффективным для внедрения" -> time-of-day): same
+        # ordering reasoning as skip_rr_min/skip_sl_pct_min above —
+        # derive the bad-hours SET off the full surviving sample first,
+        # THEN filter, so msnr_symbol_skip_hours()'s own sample-size
+        # gate judges against undiminished evidence. Unlike the RR/SL
+        # filters above (a single threshold), this drops a SET of
+        # specific UTC hours — see that function's own docstring for
+        # why hour-of-day has no natural "past this point" ordering.
+        best["skip_hours"] = msnr_symbol_skip_hours(best_results)
+        if best["skip_hours"]:
+            skip_hour_set = set(best["skip_hours"])
+            best_results = [t for t in best_results
+                             if t.get("time") is None or time.gmtime(t["time"])[3] not in skip_hour_set]
             _msnr_recompute_summary_score(best, best_results)
     # v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше не
     # стало, будто даже хуже" -> Kelly/optimal-f search instead of a
@@ -16141,6 +16208,74 @@ def msnr_symbol_sl_skip_min(trades):
                       if b["n"] >= MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE and b["winrate"] is not None and b["avg_rr"]
                       and b["winrate"] < 100.0 / (1.0 + b["avg_rr"])]
     return min(failing_edges) if failing_edges else None
+
+
+def msnr_hour_bucket_stats(trades):
+    """v0.99.56, per direct user request ("какой фильтр сигналов был бы
+    самым эффективным"): time-of-day counterpart to msnr_rr_bucket_
+    stats()/msnr_sl_bucket_stats() — buckets CLOSED trades (WIN/LOSS
+    only) by the UTC hour (0-23) of their OWN entry candle's time,
+    computing win-rate AND avg_rr per hour (avg_rr needed for the same
+    per-bucket-breakeven judgment the RR/SL bucket versions already
+    use). The whole QM/SNR pattern is a bet that a sweep-and-reclaim
+    reflects REAL institutional order flow, not noise — and that's
+    exactly the kind of thing that varies by session: London/NY open
+    genuinely has that flow behind it, thin overnight hours often
+    don't, and this app's own separate "Сессия" module already trades
+    that same premise directly. Symmetric with the RR/SL bucket
+    functions in every other way, including which hours a given
+    symbol tends to actually trade in at all being visible via which
+    buckets even have a nonzero n.
+    UTC via time.gmtime() (stdlib, already imported) — deliberately
+    NOT the app's own Moscow-fixed-offset convention the Session
+    module uses (that offset exists specifically to avoid a system
+    tzdata dependency for one fixed daily reference point, 10:00 MSK;
+    this needs the actual UTC hour of arbitrary historical timestamps
+    across 24 buckets, which time.gmtime() gives directly with no
+    timezone-database dependency either)."""
+    buckets_by_hour = {h: [] for h in range(24)}
+    for t in trades:
+        if t.get("result") not in ("WIN", "LOSS"):
+            continue
+        if t.get("time") is None:
+            continue
+        hour = time.gmtime(t["time"])[3]
+        buckets_by_hour[hour].append(t)
+    result = []
+    for h in range(24):
+        subset = buckets_by_hour[h]
+        if not subset:
+            result.append({"hour": h, "n": 0, "wins": 0, "losses": 0, "winrate": None, "avg_rr": None})
+            continue
+        wins = sum(1 for t in subset if t["result"] == "WIN")
+        n = len(subset)
+        rrs = [t["rr"] for t in subset if t.get("rr") is not None]
+        avg_rr = round(sum(rrs) / len(rrs), 2) if rrs else None
+        result.append({"hour": h, "n": n, "wins": wins, "losses": n - wins,
+                        "winrate": round(wins / n * 100, 1), "avg_rr": avg_rr})
+    return result
+
+
+def msnr_symbol_skip_hours(trades):
+    """v0.99.56, per direct user request: hour-of-day counterpart to
+    msnr_symbol_rr_skip_min()/msnr_symbol_sl_skip_min() — same sample
+    bar (MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE), same per-bucket-breakeven
+    test, but returns a SET of specific bad hours rather than a single
+    threshold: unlike RR/SL width, hour-of-day has no natural ordering
+    where "everything past this point is bad" makes sense — a symbol
+    could easily be fine at both 2:00 and 22:00 UTC but bad specifically
+    at 14:00, and a single cutoff value couldn't express that shape.
+    Returns a sorted list of UTC hours (0-23) where this symbol's own
+    trade history shows a statistically-trustworthy losing pattern —
+    live signals whose entry candle falls in one of these hours get
+    skipped for this symbol. Empty list if no hour clears the sample
+    bar (the overwhelmingly common case for any symbol without a very
+    long or very lopsided-by-hour trading history)."""
+    buckets = msnr_hour_bucket_stats(trades)
+    bad_hours = [b["hour"] for b in buckets
+                 if b["n"] >= MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE and b["winrate"] is not None and b["avg_rr"]
+                 and b["winrate"] < 100.0 / (1.0 + b["avg_rr"])]
+    return sorted(bad_hours)
 
 
 def msnr_symbol_effective_leverage(symbol):
@@ -16427,6 +16562,18 @@ def msnr_symbol_skip_sl_min(symbol):
     return override.get("skip_sl_pct_min")
 
 
+def msnr_symbol_skip_hours_live(symbol):
+    """v0.99.56 — hour-of-day counterpart to msnr_symbol_skip_rr_min()/
+    msnr_symbol_skip_sl_min(), same separate-lookup reasoning. Returns
+    this symbol's own set of statistically-bad UTC hours (msnr_symbol_
+    skip_hours()) as a plain list — empty (not None) when no hour has
+    been flagged, so callers can use it directly as `hour in skip_
+    hours` without a None-check first."""
+    with state_lock:
+        override = STATE["msnr_symbol_overrides"].get(symbol) or {}
+    return override.get("skip_hours") or []
+
+
 def msnr_symbol_optimal_leverage(symbol):
     """v0.99.47 — this symbol's own Kelly-optimal leverage (msnr_
     optimal_leverage_for_symbol(), computed once per backtest cycle in
@@ -16640,6 +16787,14 @@ def msnr_scan_symbol_live(symbol):
             sig_sl_pct = abs(sig["entry"] - sig["sl"]) / sig["entry"] * 100
             if sig_sl_pct >= skip_sl_min:
                 return  # this symbol's own history says a stop this wide fails here — skip, don't fire
+        # v0.99.56, per direct user request ("какой фильтр сигналов был
+        # бы самым эффективным для внедрения" -> time-of-day): hour-of-
+        # day counterpart to the RR/SL-width checks above — see msnr_
+        # symbol_skip_hours()'s own docstring for why this is a SET of
+        # specific hours rather than a single threshold.
+        skip_hours = msnr_symbol_skip_hours_live(symbol)
+        if skip_hours and time.gmtime(sig["time"])[3] in skip_hours:
+            return  # this symbol's own history says this UTC hour fails here — skip, don't fire
         with _msnr_signal_cooldowns_lock:
             if _msnr_signal_cooldowns.get(symbol) == sig["time"]:
                 return
@@ -21047,6 +21202,14 @@ async function refreshMsnr() {
     const expClass = (r.expectancy_r === null || r.expectancy_r === undefined) ? 'dim' : (r.expectancy_r > 0 ? 'win' : 'loss');
     const skipTxt = (r.skip_rr_min !== null && r.skip_rr_min !== undefined) ? ` \u00b7 <span class="loss">skip rr\u2265${r.skip_rr_min}</span>` : '';
     const skipSlTxt = (r.skip_sl_pct_min !== null && r.skip_sl_pct_min !== undefined) ? ` \u00b7 <span class="loss">skip SL\u2265${r.skip_sl_pct_min}%</span>` : '';
+    // v0.99.56, per direct user request ("какой фильтр сигналов был
+    // бы самым эффективным"): shows the specific bad UTC hours (if
+    // any) this symbol's own history flagged — same loss-red styling
+    // as the other skip indicators, kept short (just the hour list,
+    // no "UTC" repeated per-hour) since a symbol can have several.
+    const skipHoursTxt = (r.skip_hours && r.skip_hours.length)
+      ? ` \u00b7 <span class="loss">skip \u0447\u0430\u0441\u044b(UTC) ${r.skip_hours.join(',')}</span>`
+      : '';
     const liqTxt = r.liquidation_filtered_count ? ` \u00b7 <span class="loss">${r.liquidation_filtered_count} \u0437\u0430 \u043b\u0438\u043a\u0432\u0438\u0434\u0430\u0446\u0438\u0435\u0439</span>` : '';
     // v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше не
     // стало, будто даже хуже" -> Kelly/optimal-f search): leverage is
@@ -21077,7 +21240,7 @@ async function refreshMsnr() {
     const compTxt = (r.compound_return_pct !== null && r.compound_return_pct !== undefined)
       ? ` \u00b7 <span class="${compClass}">\u0434\u043e\u0445\u043e\u0434 ${r.compound_return_pct > 0 ? '+' : ''}${r.compound_return_pct}% ($${cfg.compound_start_balance}\u2192$${r.compound_final_balance})${compBlownTxt}</span>`
       : '';
-    const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431${skipTxt}${skipSlTxt}${liqTxt}${levTxt}${compTxt}`;
+    const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431${skipTxt}${skipSlTxt}${skipHoursTxt}${liqTxt}${levTxt}${compTxt}`;
     const noteTxt = r.note ? ` \u26a0\ufe0f ${r.note}` : '';
     // v0.99.49, per direct user request ("хочу иметь возможность
     // автоторговли и не по топ-10, на свой страх и риск как
