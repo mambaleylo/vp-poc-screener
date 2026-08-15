@@ -6401,6 +6401,169 @@ v0.99.35 - Direct user question about the green ● dot: after v0.99.32
          --check on the correctly-last <script> block, the Flask
          route/def integrity check (still 63 routes), and an AST walk
          for duplicate top-level defs (none introduced).
+
+v0.99.36 through v0.99.44 - made by a different session/device on this
+         same repo between this file's v0.99.35 push and this entry;
+         documented inline near each change rather than here (that
+         session's own convention, not this changelog's usual one) —
+         see the "v0.99.3[6-9]"/"v0.99.4[0-4]" comments scattered through
+         the file for the full detail. Briefly, since a future audit
+         shouldn't have to re-grep all of that cold: v0.99.36 fixed a
+         REAL bug where each MSNR backtest cycle wholesale-overwrote
+         STATE's results/overrides instead of merging, silently dropping
+         any symbol that merely errored THIS cycle (looked exactly like
+         "часовой бэктест слетает без причины" from the outside) — now
+         merges and only drops symbols that fell out of the universe
+         entirely; v0.99.37/38 added a global cross-loop HTTP semaphore
+         + rate gate after live logs showed Gate.io 500s from this app's
+         AGGREGATE request volume across its 14 independent background
+         loops, not any single loop; v0.99.39/43/44 iterated MSNR's
+         top-10 ranking metric (avg_rr alone -> compound_return_pct
+         alone -> a weighted composite of both, MSNR_TOP10_INCOME_
+         WEIGHT) chasing "больше веса для дохода" without losing score's
+         noise-guarding; v0.99.40 made "Очистить MSNR" actually kick off
+         a fresh backtest cycle immediately (MSNR_BACKTEST_TRIGGER)
+         instead of clearing the display and then sitting idle for up
+         to an hour; v0.99.41 raised MSNR_BACKTEST_DAYS 30->40; v0.99.42
+         is the big one worth flagging on its own — a genuine LOOKAHEAD
+         bug in msnr_build_pivots(): confirm_time used the pivot bar's
+         OWN timestamp instead of the confirming bar's (pivot_right bars
+         later), letting both backtest AND live scanning treat a level
+         as tradeable up to pivot_right x MSNR_STRUCTURE_TF early —
+         inflating backtest win-rate/avg-RR on trades that used
+         information not actually available yet at signal time. Fixed
+         to the actual confirming bar's close time.
+
+v0.99.45 - Direct user request: "изучи новые логи, поищи баги" (после
+         обновления с v0.99.35 до v0.99.44). No runtime log access from
+         this session (the app runs locally on the user's own device,
+         not reachable from here) — audited the current MSNR code
+         directly instead, focusing on what changed since this file's
+         own last known-good state.
+         Found one live bug that survived all nine of the other
+         session's versions: msnr_scan_symbol_live()'s execute_
+         autotrade("msnr", ...) call discarded its own return value and
+         set record["autotrade_fired"] = True unconditionally right
+         after — regardless of whether a real order actually opened.
+         execute_autotrade() can legitimately return without opening
+         anything (status "SKIPPED" from its own order-time liquidation-
+         safety re-check or compute_position_size() rejecting the size;
+         "ERROR" from a network/API failure; "DRY_RUN" if AUTOTRADE_
+         DRY_RUN is set) — any of those still marked the signal as
+         autotrade-fired, so once it later resolved WIN/LOSS, msnr_
+         update_live_balance() (v0.99.33's per-symbol compounding
+         balance) would compound real P&L math onto a trade that was
+         NEVER ACTUALLY PLACED, silently corrupting the exact number
+         the NEXT real order's size comes from — the live counterpart
+         of a bug that would otherwise take weeks of drifting numbers
+         to even notice.
+         Fixed by capturing execute_autotrade()'s own return value and
+         gating both sim_execute_trade() and the autotrade_fired/
+         live_size_usd/leverage_used bookkeeping on status being
+         "OPENED" or "OPENED_TP_SL_FAILED" — matching the EXACT same
+         status-check idiom already used at the bounce/breakout call
+         site (line ~13261, `autotrade_result.get("status") in
+         ("OPENED", "OPENED_TP_SL_FAILED")`), confirmed by reading that
+         call site directly rather than inventing a new convention.
+         Also reviewed (no changes needed, confirmed correct): update_
+         msnr_signal_outcomes() only ever processes a signal once (its
+         own open_signals list is re-filtered by status=="OPEN" fresh
+         each call, so a signal already flipped to CLOSED can't be
+         double-compounded on a later pass); msnr_rank_by_winrate_
+         sample()'s new weighted-composite ranking (min-max normalize
+         compound_return_pct and score, guard divide-by-zero when all
+         candidates share a value); MSNR_BACKTEST_DAYS's UI label
+         (${cfg.backtest_days} — confirmed templated, not a stale
+         hardcoded "30 дней" left over from the v0.99.41 30->40 change);
+         MSNR_PARAM_GRID_* (still 3x3x3=27, no drift from the "27
+         комбинаций" UI copy); msnr_effective_live_universe() (my own
+         v0.99.35 fix, confirmed it survived the other session's changes
+         intact).
+         Verified with py_compile, an actual runtime start (confirmed
+         all 5 execute_autotrade statuses map to the correct order_
+         opened boolean: OPENED/OPENED_TP_SL_FAILED -> True, SKIPPED/
+         ERROR/DRY_RUN -> False), pyflakes, node --check on the
+         correctly-last <script> block, the Flask route/def integrity
+         check (still 63 routes), and an AST walk for duplicate
+         top-level defs (none introduced).
+
+v0.99.46 - Direct user request, following a live example: "skhynix
+         сигнал пришел, стоп меньше 1 доллара, давай ориентировать на
+         стоп, 10 плечо по умолчанию, но нужно чтобы по стопу терялось
+         не менее 10%." At the flat AUTOTRADE_LEVERAGE_MSNR (10x), a
+         stop that tight barely dents the account if hit — the position
+         is effectively too small to matter either way, wasting most of
+         the trade's real risk budget.
+         New MSNR_TARGET_STOP_LOSS_PCT (10.0): the target fraction of
+         margin a stop-out should cost. New msnr_symbol_contract_max_
+         leverage(symbol): the RAW exchange leverage_max, deliberately
+         NOT pre-clamped to AUTOTRADE_LEVERAGE_MSNR the way msnr_symbol_
+         effective_leverage() is — clamping to the default here would
+         defeat the entire point of scaling leverage up. New msnr_
+         leverage_for_stop(entry, sl, ceiling_leverage): leverage =
+         target_pct / stop_distance_pct, floored at AUTOTRADE_LEVERAGE_
+         MSNR (only ever scales UP for a tight stop, never down for a
+         wide one — a wide stop already carries full weight at the
+         default, and reducing leverage for THOSE is a different,
+         already-solved problem: msnr_symbol_sl_skip_min()/msnr_trade_
+         beyond_liquidation() skip a signal outright rather than under-
+         sizing it), capped at ceiling_leverage.
+         msnr_compound_trail()/msnr_compound_return() (the backtest's
+         own $ simulation) no longer take a flat `leverage` — replaced
+         with `ceiling_leverage`, and each trade now resolves its OWN
+         leverage via msnr_leverage_for_stop() off that trade's own
+         stop width, instead of one number for the whole walk. msnr_
+         optimize_symbol() now stores a new "leverage_ceiling" field
+         (msnr_symbol_contract_max_leverage()) alongside the existing
+         "effective_leverage", and passes THAT (not effective_leverage)
+         into the compound simulation — per direct user follow-up
+         confirming this: since the backtest's own $ simulation used to
+         run at one flat leverage too, recomputing it with per-trade
+         dynamic leverage can swing some symbols' "доход" figures
+         substantially (a symbol with historically tight stops was
+         being systematically under-leveraged in the old simulation,
+         same as live) — this recomputes automatically on the symbol's
+         next backtest cycle, no separate migration needed.
+         msnr_scan_symbol_live() now resolves dyn_leverage from this
+         signal's own stop width BEFORE the liquidation-safety check
+         (moved earlier in the function specifically so that check
+         evaluates the leverage this trade will ACTUALLY use, not the
+         old flat default), walks it back DOWN in 0.5x steps toward
+         AUTOTRADE_LEVERAGE_MSNR if the target-driven value would push
+         the trade past the liquidation buffer (msnr_leverage_for_
+         stop() has no awareness of this symbol's live MMR on its own),
+         and reuses that same checked value for the real order's
+         leverage, size compounding, and record["leverage_used"] —
+         one resolved value, not three independent re-derivations that
+         could drift.
+         api_msnr_backtest_trades() now passes the symbol's own
+         leverage_ceiling into msnr_compound_trail() so the expanded
+         per-trade view's numbers match what the summary row's "доход"
+         was actually computed with, instead of silently falling back
+         to the flat default.
+         UI: the summary row's leverage indicator now shows the actual
+         [default, ceiling] range ("плечо 10-40x (по стопу)") instead
+         of one flat number, only falling back to the old "лимит биржи"
+         wording when the exchange's own cap sits at or below the
+         configured default (no room to scale up at all). The expanded
+         per-trade table gained a "Плечо" column showing each trade's
+         own resolved leverage, right next to the existing per-trade
+         "Баланс" column.
+         Verified with py_compile, an actual runtime start (synthetic
+         SKHYNIX-shaped case: a 0.25%-wide stop against a 75x contract
+         ceiling resolved to 39.5x, matching MSNR_TARGET_STOP_LOSS_PCT /
+         stop_pct exactly; a normal 2%-wide stop correctly stayed at the
+         10x floor since 10/2=5 < 10; a wide 15%-wide stop also stayed
+         at the floor, not reduced; a two-trade compound trail — one
+         tight-stop, one normal-stop — confirmed each trade's own
+         leverage/pnl_pct differs correctly within the SAME walk; a
+         backward-compatibility check confirmed msnr_compound_trail()
+         called with no ceiling_leverage at all still defaults to the
+         flat AUTOTRADE_LEVERAGE_MSNR, unchanged from pre-v0.99.46
+         behavior for any caller that doesn't pass one), pyflakes, node
+         --check on the correctly-last <script> block, the Flask
+         route/def integrity check (still 63 routes), and an AST walk
+         for duplicate top-level defs (none introduced).
 """
 
 import os
@@ -6420,7 +6583,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.44"
+APP_VERSION = "0.99.46"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7303,6 +7466,7 @@ AUTOTRADE_ENABLED_MSNR = os.environ.get("VP_AUTOTRADE_MSNR", "0") == "1"  # off 
 AUTOTRADE_LEVERAGE_MSNR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_MSNR", 10))
 MSNR_COMPOUND_START_BALANCE = float(os.environ.get("VP_MSNR_COMPOUND_START_BALANCE", 40.0))  # v0.99.24 — per direct user request: $ margin the backtest's compounding simulation starts with on the first closed trade. Leverage for this simulation deliberately reuses AUTOTRADE_LEVERAGE_MSNR above (not a separate constant) so the simulated compounding always matches whatever leverage this symbol would actually be traded at live — see msnr_compound_return().
 MSNR_LIVE_BALANCE_MAX = float(os.environ.get("VP_MSNR_LIVE_BALANCE_MAX", 500.0))  # v0.99.33 — per direct user request: hard ceiling on the REAL per-symbol compounding margin (see msnr_live_balance_for_symbol()) — a symbol's live-trading balance still starts at MSNR_COMPOUND_START_BALANCE and reinvests its own result every closed trade exactly like the backtest simulation, but never sizes a real order above this cap regardless of how far the compounding would otherwise have grown it.
+MSNR_TARGET_STOP_LOSS_PCT = float(os.environ.get("VP_MSNR_TARGET_STOP_LOSS_PCT", 10.0))  # v0.99.46 — per direct user request, after a live SKHYNIX_USDT example: at the flat AUTOTRADE_LEVERAGE_MSNR (10x) on a tight sub-1%-wide stop, hitting SL barely dents the account (well under this %), wasting most of the position's real risk budget on a trade that can't move the needle either way. This is the target fraction of margin a stop-out should cost — msnr_leverage_for_stop() scales leverage UP (never down) from AUTOTRADE_LEVERAGE_MSNR for a signal whose own stop is narrower than what this target implies, capped by the contract's own exchange leverage_max and by the liquidation-safety margin.
 AUTOTRADE_ENABLED_FT5 = os.environ.get("VP_AUTOTRADE_FT5", "0") == "1"  # off by default — same reasoning as XAU_LG: unverified source, and the freqtrade backtest table this was ported from is a near-certain overfitting example (20-day 2018 window)
 AUTOTRADE_LEVERAGE_FT5 = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_FT5", 10))
 AUTOTRADE_TRADE_HISTORY = 300
@@ -7906,7 +8070,7 @@ STATE = {
     "msnr_backtest_summary": {},
     "msnr_last_backtest_finished": None,
     "msnr_last_backtest_duration": None,
-    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at, skip_rr_min, skip_sl_pct_min, effective_leverage, liquidation_filtered_count, compound_final_balance, compound_return_pct, compound_blown_at, stress_test_failed}
+    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at, skip_rr_min, skip_sl_pct_min, effective_leverage, leverage_ceiling, liquidation_filtered_count, compound_final_balance, compound_return_pct, compound_blown_at, stress_test_failed}
     "msnr_backtest_universe": [],  # v0.99.9 — MSNR_SYMBOLS union'd with the top-liquid backtest-only exploration set, see msnr_build_backtest_universe()
     "msnr_live_universe": [],  # v0.99.17 — MSNR_SYMBOLS union'd with any backtest-qualifying symbol (win-rate/sample threshold), see msnr_compute_live_universe(); msnr_live_loop() scans THIS, not the static MSNR_SYMBOLS constant directly, so it stays empty (falls back to MSNR_SYMBOLS at the call site) until the first backtest cycle populates it
     "msnr_autotrade_symbols": {},  # v0.99.18 — per-symbol autotrade toggle, {symbol: bool}. Replaces the old single AUTOTRADE_ENABLED_MSNR gate — per direct user request for individually-toggleable fields (3 gold, always eligible + the current top MSNR_AUTOTRADE_TOP_N non-gold by msnr_rank_by_winrate_sample(), which despite its name ranks by `avg_rr` (score before v0.99.39) — see that function's own docstring). A symbol missing from this dict is treated as off (same "off unless explicitly on" default every other autotrade toggle in this app already uses). See msnr_autotrade_eligible_symbols() for which symbols can currently be toggled, and _set_msnr_autotrade_symbol()'s own docstring for what happens to a saved toggle when its symbol falls out of that set.
@@ -15217,6 +15381,7 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
             "optimized_at": now, "candles_used": len(entry_candles), "skip_rr_min": None,
             "skip_sl_pct_min": None, "liquidation_filtered_count": 0,
             "effective_leverage": msnr_symbol_effective_leverage(symbol),
+            "leverage_ceiling": msnr_symbol_contract_max_leverage(symbol),
             "note": f"insufficient closed trades across all {combos} combos tried "
                     f"(max {max(tried) if tried else 0}, need {MSNR_MIN_BACKTEST_TRADES}); "
                     f"using middle-of-grid defaults",
@@ -15261,6 +15426,7 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
         # could have actually played out as scored, not ones that were
         # never mechanically reachable in the first place.
         best["effective_leverage"] = msnr_symbol_effective_leverage(symbol)
+        best["leverage_ceiling"] = msnr_symbol_contract_max_leverage(symbol)
         before_liq = len(best_results)
         best_results = [t for t in best_results
                          if not msnr_trade_beyond_liquidation(symbol, t["direction"], t["entry"], t["sl"],
@@ -15285,12 +15451,16 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
     # v0.99.26's liquidation/skip_sl_pct_min filters), matching what
     # this symbol would actually be traded as, same reasoning as the
     # R-multiple stats above using the filtered set rather than
-    # raw_results. v0.99.26: leverage now resolves to this symbol's own
-    # effective_leverage (contract-capped, see msnr_symbol_effective_
-    # leverage()) when known, rather than always the flat configured
-    # AUTOTRADE_LEVERAGE_MSNR — a coin the exchange caps below that
-    # setting would otherwise show an unrealistically optimistic sim.
-    compound = msnr_compound_return(best_results, leverage=best.get("effective_leverage"))
+    # raw_results. v0.99.46, per direct user request ("давай
+    # ориентировать на стоп"): leverage is no longer this symbol's flat
+    # effective_leverage for the whole simulation — msnr_compound_
+    # return() now resolves it PER TRADE off that trade's own stop
+    # width (msnr_leverage_for_stop()), capped at leverage_ceiling (the
+    # contract's raw exchange max, NOT pre-clamped to the configured
+    # default the way effective_leverage is — clamping to the default
+    # here would defeat the entire point of scaling leverage up for a
+    # tight stop).
+    compound = msnr_compound_return(best_results, ceiling_leverage=best.get("leverage_ceiling"))
     best["compound_final_balance"] = compound["final_balance"] if compound else None
     best["compound_return_pct"] = compound["return_pct"] if compound else None
     best["compound_blown_at"] = compound["blown_at_trade"] if compound else None
@@ -15498,6 +15668,68 @@ def msnr_symbol_effective_leverage(symbol):
     return AUTOTRADE_LEVERAGE_MSNR
 
 
+def msnr_symbol_contract_max_leverage(symbol):
+    """v0.99.46 — the RAW exchange-enforced leverage_max for this
+    contract (get_contract_spec()), with NO clamp to AUTOTRADE_
+    LEVERAGE_MSNR — unlike msnr_symbol_effective_leverage() above
+    (which picks min(configured, contract_max) for the flat-leverage
+    case), this is the CEILING msnr_leverage_for_stop() is allowed to
+    scale UP TOWARD for an unusually tight-stop signal; msnr_symbol_
+    effective_leverage()'s own min-clamp would silently cap every
+    symbol at the configured default and defeat the entire point of
+    scaling up in the first place.
+    Falls back to AUTOTRADE_LEVERAGE_MSNR itself (i.e. no headroom to
+    scale up beyond the configured default) if the contract spec can't
+    be fetched — same "degrade to the conservative default" stance
+    msnr_symbol_effective_leverage() already takes on the same
+    failure."""
+    try:
+        contract_max_lev = get_contract_spec(symbol).get("leverage_max")
+    except Exception as e:
+        log_error(f"msnr_symbol_contract_max_leverage {symbol}: {e}")
+        contract_max_lev = None
+    return contract_max_lev if contract_max_lev else AUTOTRADE_LEVERAGE_MSNR
+
+
+def msnr_leverage_for_stop(entry, sl, ceiling_leverage):
+    """v0.99.46, per direct user request, following a live example:
+    "skhynix сигнал пришел, стоп меньше 1 доллара... давай ориентировать
+    на стоп, 10 плечо по умолчанию, но нужно чтобы по стопу терялось не
+    менее 10%." At the flat AUTOTRADE_LEVERAGE_MSNR, a stop this tight
+    (well under 1% of a several-hundred-dollar entry) barely dents the
+    account if hit — the position is effectively too small to matter
+    either way, wasting most of the trade's real risk budget.
+    Computes the leverage that would make a stop-out cost roughly
+    MSNR_TARGET_STOP_LOSS_PCT of margin: leverage = target_pct /
+    stop_distance_pct. Floored at AUTOTRADE_LEVERAGE_MSNR — this ONLY
+    scales leverage UP for unusually tight stops, never down for wide
+    ones; a wide stop already carries full weight at the default
+    leverage, and reducing leverage for THOSE is a different, already-
+    solved problem (msnr_symbol_sl_skip_min()/msnr_trade_beyond_
+    liquidation() skip a signal outright rather than under-sizing it —
+    silently shrinking the position would just mask the same risk
+    msnr_symbol_sl_skip_min() is specifically there to refuse).
+    Capped at `ceiling_leverage` (the caller resolves this — typically
+    msnr_symbol_contract_max_leverage() for the exchange's own cap;
+    msnr_scan_symbol_live() additionally walks the result back down
+    against msnr_trade_beyond_liquidation() before use, since pushing
+    leverage up specifically to hit this target is exactly the kind of
+    change that can push a previously-safe stop past the liquidation
+    buffer — that walk-down lives at the call site, not here, since it
+    needs the live per-symbol MMR lookup this pure function
+    deliberately doesn't touch).
+    Returns AUTOTRADE_LEVERAGE_MSNR unchanged for a malformed/zero-
+    width stop — nothing to size against."""
+    if not entry or entry <= 0 or sl is None:
+        return AUTOTRADE_LEVERAGE_MSNR
+    stop_pct = abs(entry - sl) / entry * 100
+    if stop_pct <= 0:
+        return AUTOTRADE_LEVERAGE_MSNR
+    desired = MSNR_TARGET_STOP_LOSS_PCT / stop_pct
+    ceiling = ceiling_leverage if ceiling_leverage else AUTOTRADE_LEVERAGE_MSNR
+    return max(AUTOTRADE_LEVERAGE_MSNR, min(desired, ceiling))
+
+
 def msnr_live_balance_for_symbol(symbol):
     """v0.99.33, per direct user request: "40 долларов для первой
     сделки, размер второй сделки зависит от исхода первой, по сути как
@@ -15648,7 +15880,7 @@ def msnr_symbol_skip_sl_min(symbol):
     return override.get("skip_sl_pct_min")
 
 
-def msnr_compound_trail(trades, start_balance=None, leverage=None):
+def msnr_compound_trail(trades, start_balance=None, ceiling_leverage=None):
     """v0.99.25, per direct user follow-up to msnr_compound_return():
     the SAME walk, but returns one entry per actually-compounded CLOSED
     trade instead of collapsing straight to a final number — so the
@@ -15658,6 +15890,20 @@ def msnr_compound_trail(trades, start_balance=None, leverage=None):
     is now a thin reduction over this same trail, so the per-trade
     display and the summary "доход" figure can never silently disagree
     about the underlying math — one calculation, two views of it.
+    v0.99.46, per direct user request ("давай ориентировать на стоп"):
+    each trade's leverage is no longer one flat value for the whole
+    walk — it's msnr_leverage_for_stop(entry, sl, ceiling_leverage),
+    computed FRESH per trade off THAT trade's own stop distance, same
+    as msnr_scan_symbol_live() now does for real orders. `ceiling_
+    leverage` (typically msnr_symbol_contract_max_leverage(symbol))
+    replaces the old flat `leverage` param — this function no longer
+    trades at one fixed leverage throughout, a tight-stop trade in the
+    middle of the trail can use a much higher leverage than a wide-
+    stop trade right next to it, exactly mirroring what live trading
+    now does. Falls back to AUTOTRADE_LEVERAGE_MSNR (no scale-up
+    headroom) when ceiling_leverage isn't given, same "flat behavior"
+    this function had before v0.99.46 for any caller that doesn't pass
+    one.
     TIMEOUT trades and malformed records (missing/invalid entry/sl/tp)
     are skipped entirely — absent from the trail, not shown at some
     placeholder balance — same skip conditions msnr_compound_return()
@@ -15665,14 +15911,15 @@ def msnr_compound_trail(trades, start_balance=None, leverage=None):
     the balance to 0; a trade that would come after that in time never
     actually happened for this account, so it isn't in the trail.
     Returns a list of dicts in chronological order: {"time",
-    "direction", "result", "pnl_pct", "balance_before",
+    "direction", "result", "leverage", "pnl_pct", "balance_before",
     "balance_after"} — direction included alongside time so callers
     matching trail rows back to trade records (e.g. api_msnr_backtest_
     trades()) have a collision-safe key: an A-shape and V-shape level
     can structurally resolve on the exact same entry candle, and time
-    alone wouldn't disambiguate that pair."""
+    alone wouldn't disambiguate that pair. `leverage` is this specific
+    trade's own resolved value, not a single number for the whole
+    trail — new in v0.99.46."""
     start_balance = start_balance if start_balance is not None else MSNR_COMPOUND_START_BALANCE
-    leverage = leverage if leverage is not None else AUTOTRADE_LEVERAGE_MSNR
     closed = [t for t in trades if t.get("result") in ("WIN", "LOSS")]
     trail = []
     balance = start_balance
@@ -15684,6 +15931,7 @@ def msnr_compound_trail(trades, start_balance=None, leverage=None):
         tp = t.get("tp")
         if not entry or entry <= 0 or sl is None or tp is None:
             continue  # malformed trade record — skip without touching the running balance
+        leverage = msnr_leverage_for_stop(entry, sl, ceiling_leverage)
         if t["result"] == "WIN":
             move_pct = abs(tp - entry) / entry
             pnl_frac = move_pct * leverage
@@ -15697,6 +15945,7 @@ def msnr_compound_trail(trades, start_balance=None, leverage=None):
             balance = 0.0
         trail.append({
             "time": t["time"], "direction": t.get("direction"), "result": t["result"],
+            "leverage": round(leverage, 1),
             "pnl_pct": round(pnl_frac * 100, 1),
             "balance_before": round(balance_before, 2),
             "balance_after": round(balance, 2),
@@ -15704,26 +15953,25 @@ def msnr_compound_trail(trades, start_balance=None, leverage=None):
     return trail
 
 
-def msnr_compound_return(trades, start_balance=None, leverage=None):
+def msnr_compound_return(trades, start_balance=None, ceiling_leverage=None):
     """Per direct user request: a compounding $ P&L simulation over one
     symbol's backtest — deliberately separate from msnr_summarize_
     backtest()'s R-multiple stats, which measure the STRATEGY's edge
     independent of position sizing. This measures what actually
     happens to a real account: start with start_balance USD margin
-    (default MSNR_COMPOUND_START_BALANCE) at `leverage`x (default the
-    live AUTOTRADE_LEVERAGE_MSNR — resolved at call time, not frozen
-    as a signature default, same reasoning as msnr_detect_signals()'s
-    own max_rr handling, since that global IS settings-mutable) on the
-    FIRST closed (WIN/LOSS) trade in chronological order, then
-    reinvests the ENTIRE resulting balance at the same leverage into
-    the next closed trade, and so on through every closed trade in
-    the list passed in — literally "va-bank" the whole account every
-    single trade, per the user's own description.
-    v0.99.25: now a thin reduction over msnr_compound_trail() (see its
-    own docstring for the full per-trade mechanics — TIMEOUT handling,
-    the isolated-margin loss floor, why entry/sl/tp drive the math
-    instead of the stored rr field) rather than its own separate walk,
-    so this summary and the per-trade trail can never drift apart.
+    (default MSNR_COMPOUND_START_BALANCE) on the FIRST closed (WIN/
+    LOSS) trade in chronological order, then reinvests the ENTIRE
+    resulting balance into the next closed trade, and so on through
+    every closed trade in the list passed in — literally "va-bank" the
+    whole account every single trade, per the user's own description.
+    v0.99.46: leverage is no longer one flat number for the whole
+    simulation — see msnr_compound_trail()'s own docstring for the
+    per-trade stop-based sizing this now delegates to.
+    v0.99.25: a thin reduction over msnr_compound_trail() (see its own
+    docstring for the full per-trade mechanics — TIMEOUT handling, the
+    isolated-margin loss floor, why entry/sl/tp drive the math instead
+    of the stored rr field) rather than its own separate walk, so this
+    summary and the per-trade trail can never drift apart.
     Returns {"final_balance", "return_pct", "trades_compounded",
     "blown_at_trade"} (blown_at_trade is the 1-based position WITHIN
     the trail — i.e. among trades actually compounded, not raw
@@ -15731,11 +15979,10 @@ def msnr_compound_return(trades, start_balance=None, leverage=None):
     without consuming a slot), or None if there are no closed trades
     to compound over at all."""
     start_balance = start_balance if start_balance is not None else MSNR_COMPOUND_START_BALANCE
-    leverage = leverage if leverage is not None else AUTOTRADE_LEVERAGE_MSNR
     closed = [t for t in trades if t.get("result") in ("WIN", "LOSS")]
     if not closed:
         return None
-    trail = msnr_compound_trail(trades, start_balance, leverage)
+    trail = msnr_compound_trail(trades, start_balance, ceiling_leverage)
     if not trail:
         return {"final_balance": round(start_balance, 2), "return_pct": 0.0,
                 "trades_compounded": 0, "blown_at_trade": None}
@@ -15787,17 +16034,41 @@ def msnr_scan_symbol_live(symbol):
             sig_rr = reward / risk if risk > 0 else None
             if sig_rr is not None and sig_rr >= skip_rr_min:
                 return  # this symbol's own history says rr this high fails here — skip, don't fire
+        # v0.99.46, per direct user request ("давай ориентировать на
+        # стоп... 10 плечо по умолчанию, но нужно чтобы по стопу
+        # терялось не менее 10%"): this signal's own leverage is no
+        # longer the flat msnr_symbol_effective_leverage() default —
+        # msnr_leverage_for_stop() scales it UP toward the contract's
+        # own exchange max when the stop is tighter than what a 10%-
+        # of-margin loss target implies (SKHYNIX_USDT example: a sub-
+        # 1%-wide stop at the flat 10x barely dents the account either
+        # way). Computed BEFORE the liquidation check below so that
+        # check evaluates the leverage this trade will ACTUALLY use,
+        # not the old flat default — pushing leverage up specifically
+        # to hit this target is exactly the kind of change that can
+        # push a previously-safe stop past the liquidation buffer.
+        contract_max_lev = msnr_symbol_contract_max_leverage(symbol)
+        dyn_leverage = msnr_leverage_for_stop(sig["entry"], sig["sl"], contract_max_lev)
         # v0.99.26, per direct user request ("иногда стоп будет за
         # ликвидацией и просто избегать этого"): deterministic check —
         # if this signal's own SL sits past where Gate.io would force-
-        # liquidate the position at this symbol's effective leverage,
-        # skip firing regardless of any statistics. Same check the
-        # backtest filter (msnr_optimize_symbol()) and execute_
-        # autotrade()'s own v0.70.0 order-time gate both use — a signal
-        # that fails here would also get SKIPPED at order time anyway,
-        # this just avoids ever showing it as a live signal in the
-        # first place.
-        if msnr_trade_beyond_liquidation(symbol, sig["direction"], sig["entry"], sig["sl"]):
+        # liquidate the position at the leverage this trade would
+        # actually use, skip firing regardless of any statistics. Same
+        # check the backtest filter (msnr_optimize_symbol()) and
+        # execute_autotrade()'s own v0.70.0 order-time gate both use —
+        # a signal that fails here would also get SKIPPED at order time
+        # anyway, this just avoids ever showing it as a live signal in
+        # the first place.
+        # v0.99.46: walks dyn_leverage DOWN in 0.5x steps (never below
+        # AUTOTRADE_LEVERAGE_MSNR) until the liquidation-safety margin
+        # clears, since msnr_leverage_for_stop()'s own target-driven
+        # value has no awareness of THIS symbol's live MMR — only after
+        # exhausting that headroom does a still-failing check mean skip
+        # the signal entirely, same as before v0.99.46.
+        while dyn_leverage > AUTOTRADE_LEVERAGE_MSNR and msnr_trade_beyond_liquidation(
+                symbol, sig["direction"], sig["entry"], sig["sl"], leverage=dyn_leverage):
+            dyn_leverage = max(AUTOTRADE_LEVERAGE_MSNR, dyn_leverage - 0.5)
+        if msnr_trade_beyond_liquidation(symbol, sig["direction"], sig["entry"], sig["sl"], leverage=dyn_leverage):
             return
         # v0.99.26, per direct user request ("фильтр по ширине стопа"):
         # SL-width counterpart to the skip_rr_min check above — see
@@ -15851,18 +16122,41 @@ def msnr_scan_symbol_live(symbol):
             # resulting balance (same math as the backtest simulation,
             # msnr_compound_trail()) on every trade after, hard-capped
             # at MSNR_LIVE_BALANCE_MAX — instead of the shared AUTOTRADE_
-            # SIZE_MODE/VALUE every other mode uses. leverage resolved
-            # to this symbol's effective (contract-capped) leverage
-            # HERE, once, and stored on the record — execute_autotrade()
-            # would independently re-derive the same clamp anyway, but
-            # pre-resolving it guarantees msnr_update_live_balance()
-            # later compounds against the EXACT leverage the real order
-            # actually used, not a value that could in principle drift
-            # if the contract's own leverage_max changed in between.
-            live_leverage = msnr_symbol_effective_leverage(symbol)
+            # SIZE_MODE/VALUE every other mode uses.
+            # v0.99.46: leverage is now dyn_leverage — resolved BEFORE
+            # this block, off this signal's own stop width via msnr_
+            # leverage_for_stop(), then walked back down against the
+            # liquidation-safety check (see that check's own comment
+            # above) — no longer the flat msnr_symbol_effective_
+            # leverage() default. Reusing the SAME already-checked
+            # value here (rather than re-deriving it) guarantees the
+            # leverage this order actually places at is the exact one
+            # the liquidation check above already verified is safe.
+            live_leverage = dyn_leverage
             live_size = msnr_live_balance_for_symbol(symbol)
-            execute_autotrade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
-                               live_leverage, size_mode="fixed", size_value=live_size)
+            # v0.99.45 — BUG FOUND ON AUDIT (per direct user request to
+            # review recent MSNR changes for bugs): execute_autotrade()'s
+            # return value was being discarded here, and record[
+            # "autotrade_fired"] was set to True unconditionally right
+            # after the call — regardless of whether a real order
+            # actually opened. execute_autotrade() can legitimately
+            # return without opening anything: status "SKIPPED" (its own
+            # order-time liquidation-safety re-check, or compute_
+            # position_size() rejecting the size/margin), "ERROR" (a
+            # network/API failure), or "DRY_RUN" (AUTOTRADE_DRY_RUN mode
+            # — no real capital moved at all). With the old code, any of
+            # those still set autotrade_fired=True, and once this signal
+            # later resolved WIN/LOSS, msnr_update_live_balance() would
+            # have compounded real P&L math onto this symbol's tracked
+            # live balance for a trade that was NEVER ACTUALLY PLACED —
+            # silently corrupting the exact number the NEXT real order's
+            # size_value comes from. Only "OPENED" and "OPENED_TP_SL_
+            # FAILED" (the position itself DID open, even if the TP/SL
+            # orders had trouble — the risk is real either way) now
+            # count as fired.
+            autotrade_result = execute_autotrade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"],
+                                                  sig["tp"], live_leverage, size_mode="fixed", size_value=live_size)
+            order_opened = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
             # v0.99.34, per direct user follow-up ("как добавить сигналы
             # по msnr в симулятор"): sim_execute_trade() already gets
             # called for every autotrade-fired MSNR signal (same design
@@ -15875,11 +16169,17 @@ def msnr_scan_symbol_live(symbol):
             # meaning the paper simulator would silently disagree with
             # what the real order actually risked. Passing the same
             # size_mode="fixed"/size_value=live_size here closes that gap.
-            sim_execute_trade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
-                               live_leverage, record, size_mode="fixed", size_value=live_size)
-            record["autotrade_fired"] = True
-            record["live_size_usd"] = live_size
-            record["leverage_used"] = live_leverage
+            # v0.99.45 — now gated on order_opened, same reasoning as
+            # autotrade_fired below: a real order that got SKIPPED/
+            # ERRORed shouldn't leave a paper trade behind pretending it
+            # went through either, for the same "mirrors what actually
+            # happened" reason the simulator exists in the first place.
+            if order_opened:
+                sim_execute_trade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                                   live_leverage, record, size_mode="fixed", size_value=live_size)
+                record["autotrade_fired"] = True
+                record["live_size_usd"] = live_size
+                record["leverage_used"] = live_leverage
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         level_txt = "A-shape (resist)" if sig["level_type"] == "A" else "V-shape (support)"
         send_telegram(
@@ -17530,17 +17830,26 @@ def api_msnr_backtest_trades(symbol):
     actually reached" reasoning the compounding functions use."""
     with state_lock:
         trades = list(STATE["msnr_backtest_results"].get(symbol, []))
+        ceiling_leverage = (STATE["msnr_symbol_overrides"].get(symbol) or {}).get("leverage_ceiling")
     # v0.99.25: keyed by (time, direction), not time alone — an A-shape
     # and a V-shape level can structurally both resolve on the exact
     # same entry candle (rare, but msnr_detect_signals() checks them in
     # separate if-blocks, not elif), which would collide on a time-only
     # key and silently misattribute one trade's balance to the other.
-    trail_by_key = {(row["time"], row.get("direction")): row for row in msnr_compound_trail(trades)}
+    # v0.99.46: passes this symbol's own leverage_ceiling through so the
+    # trail's per-trade leverage/pnl_pct match what the summary row's
+    # own "доход" figure was computed with (msnr_optimize_symbol() now
+    # resolves the SAME ceiling for its own msnr_compound_return() call)
+    # — leaving this at the old flat default would make the expanded
+    # per-trade view silently disagree with the summary above it.
+    trail_by_key = {(row["time"], row.get("direction")): row
+                     for row in msnr_compound_trail(trades, ceiling_leverage=ceiling_leverage)}
     for t in trades:
         row = trail_by_key.get((t["time"], t.get("direction")))
         t["compound_balance_before"] = row["balance_before"] if row else None
         t["compound_balance_after"] = row["balance_after"] if row else None
         t["compound_pnl_pct"] = row["pnl_pct"] if row else None
+        t["compound_leverage"] = row["leverage"] if row else None
     trades.sort(key=lambda t: t["time"], reverse=True)
     return jsonify(trades)
 
@@ -20006,9 +20315,25 @@ async function refreshMsnr() {
     const skipTxt = (r.skip_rr_min !== null && r.skip_rr_min !== undefined) ? ` \u00b7 <span class="loss">skip rr\u2265${r.skip_rr_min}</span>` : '';
     const skipSlTxt = (r.skip_sl_pct_min !== null && r.skip_sl_pct_min !== undefined) ? ` \u00b7 <span class="loss">skip SL\u2265${r.skip_sl_pct_min}%</span>` : '';
     const liqTxt = r.liquidation_filtered_count ? ` \u00b7 <span class="loss">${r.liquidation_filtered_count} \u0437\u0430 \u043b\u0438\u043a\u0432\u0438\u0434\u0430\u0446\u0438\u0435\u0439</span>` : '';
-    const levTxt = (r.effective_leverage !== null && r.effective_leverage !== undefined && r.effective_leverage < cfg.compound_leverage)
-      ? ` \u00b7 <span class="dim">\u043f\u043b\u0435\u0447\u043e ${r.effective_leverage}x (\u043b\u0438\u043c\u0438\u0442 \u0431\u0438\u0440\u0436\u0438)</span>`
-      : '';
+    // v0.99.46, per direct user request ("давай ориентировать на
+    // стоп"): leverage is no longer one flat number per symbol —
+    // msnr_leverage_for_stop() scales it UP per trade, toward
+    // leverage_ceiling (this contract's raw exchange max), for a
+    // signal whose own stop is tighter than the MSNR_TARGET_STOP_
+    // LOSS_PCT target implies. Shows the actual [default, ceiling]
+    // range now in play instead of the old single flat value — a
+    // ceiling ABOVE the configured default means real headroom to
+    // scale up; a ceiling AT OR BELOW it means the exchange itself
+    // caps this symbol at (or below) the default, same "лимит биржи"
+    // case the old text already covered.
+    const defLev = cfg.compound_leverage;
+    const ceilLev = r.leverage_ceiling;
+    let levTxt = '';
+    if (ceilLev !== null && ceilLev !== undefined) {
+      levTxt = ceilLev > defLev
+        ? ` \u00b7 <span class="dim">\u043f\u043b\u0435\u0447\u043e ${defLev}-${ceilLev}x (\u043f\u043e \u0441\u0442\u043e\u043f\u0443)</span>`
+        : ` \u00b7 <span class="dim">\u043f\u043b\u0435\u0447\u043e ${ceilLev}x (\u043b\u0438\u043c\u0438\u0442 \u0431\u0438\u0440\u0436\u0438)</span>`;
+    }
     const compClass = (r.compound_return_pct === null || r.compound_return_pct === undefined) ? 'dim' : (r.compound_return_pct > 0 ? 'win' : 'loss');
     const compBlownTxt = r.compound_blown_at ? ` (\u0441\u043b\u0438\u0432 \u043d\u0430 #${r.compound_blown_at})` : '';
     const compTxt = (r.compound_return_pct !== null && r.compound_return_pct !== undefined)
@@ -20117,18 +20442,28 @@ async function loadMsnrTrades(symbol) {
       const compTxt = (t.compound_balance_after !== null && t.compound_balance_after !== undefined)
         ? `<span class="${t.compound_pnl_pct >= 0 ? 'win' : 'loss'}">$${t.compound_balance_after} (${t.compound_pnl_pct >= 0 ? '+' : ''}${t.compound_pnl_pct}%)</span>`
         : '<span class="dim">\u2014</span>';
+      // v0.99.46, per direct user request ("рядом с каждой монетой ещё
+      // и вычислять плечо"): this specific trade's OWN resolved
+      // leverage (msnr_leverage_for_stop(), scaled up from the default
+      // for a tight stop) — same null-means-unreached reasoning as
+      // compTxt above, since a trade with no trail entry never had a
+      // leverage resolved for it either.
+      const levTxt = (t.compound_leverage !== null && t.compound_leverage !== undefined)
+        ? `${t.compound_leverage}x`
+        : '<span class="dim">\u2014</span>';
       return `<tr onclick="event.stopPropagation(); openMsnrChart('${symbol}', ${t.time})" style="cursor:pointer;">
         <td class="dim">${fmtDateTime(t.time)}</td>
         <td class="${dirClass}">${t.direction}</td>
         <td class="dim">${levelTxt}</td>
         <td>${fmt(t.entry)}</td><td class="dim">${fmt(t.sl)}</td><td class="dim">${fmt(t.tp)}</td>
         <td class="dim">${t.rr ?? '-'}R</td>
+        <td class="dim">${levTxt}</td>
         <td class="${resClass}">${t.result}</td>
         <td>${compTxt}</td>
       </tr>`;
     }).join('');
     body.innerHTML = `<div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;width:100%;">
-      <thead><tr><th>Время</th><th>Dir</th><th>Уровень</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Result</th><th>Баланс</th></tr></thead>
+      <thead><tr><th>Время</th><th>Dir</th><th>Уровень</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Плечо</th><th>Result</th><th>Баланс</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>`;
   } catch (e) {
