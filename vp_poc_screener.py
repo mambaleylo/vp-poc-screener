@@ -6692,6 +6692,71 @@ v0.99.48 - Direct user request: "может не выбирать топ 70 ли
          --check on the correctly-last <script> block, the Flask
          route/def integrity check (still 63 routes), and an AST walk
          for duplicate top-level defs (none introduced).
+
+v0.99.49 - Direct user request: "надо дать возможность ставить галочки
+         и над не топ 10, вижу там просто сумасшедшие результаты
+         которые в топ не попадают из-за выборки, на свой страх и риск
+         как эксперимент." Autotrade toggling was gated behind msnr_
+         autotrade_eligible_symbols() (top-N by score, minimum sample)
+         at three independent points — the write-time API validation,
+         the live-firing gate, and the live-scan union — a symbol with
+         a genuinely strong compound_return_pct but too small a sample
+         to rank in the top 10 could never be manually enabled at all.
+         New msnr_manual_toggle_allowed_symbols(overrides): every
+         symbol with completed, non-errored backtest data, EXCLUDING
+         only stress_test_failed ones — a losing $ compound simulation
+         stays a hard block even for this manual override (a much more
+         fundamental "this literally lost money in its own history"
+         signal than "didn't make the top 10 by score/sample," which is
+         specifically what this request asks to bypass). Swapped in at
+         all three gates: api_msnr_autotrade_toggle() (write
+         validation), msnr_scan_symbol_live()'s firing condition, and
+         msnr_effective_live_universe()'s union (feeding both the
+         actual scan set AND the green-dot display) — using the
+         narrower eligible-set at any ONE of these three while widening
+         the others would reproduce the exact "checkbox does nothing"
+         bug already found and fixed once before (v0.99.32, for a
+         different mismatch between two gates).
+         api_msnr_status() now also returns manual_toggle_allowed per
+         symbol so the UI knows which rows get a checkbox.
+         UI, same request's second half ("на планшете даже в ширину не
+         влазит, сократи инфу"): the MSNR backtest table's checkbox
+         column is now ALSO pinned via position:sticky (previously only
+         Symbol was) — scoped to a new .msnr-bt-table class rather than
+         a blanket rule, since a second sticky column needs a matching
+         FIXED width on column 1 to avoid column 2 overlapping it, and
+         only this table's short-ticker first column is narrow/
+         predictable enough to safely fix (92px, tuned to fit a ~12-
+         char symbol like SKHYNIX_USDT plus its arrow/dot markers
+         without truncating in the common case; longer names degrade
+         gracefully via text-overflow:ellipsis rather than breaking
+         layout). Shortened the "бэктест" text label next to non-live
+         symbols to a small dim ○ (mirroring the existing colored ●
+         "live" dot's own visual language) specifically so column 1
+         could be narrow enough for this to work at all. Manually-
+         toggled-on rows OUTSIDE the top 10 get a distinct orange
+         checkbox outline + warning tooltip ("вручную, вне топ-10 — на
+         свой страх и риск") so it's visually obvious which checkboxes
+         are auto-ranked vs a deliberate manual pick. The old "———
+         остальные (только бэктест, автоторговля недоступна) ———"
+         separator wording updated — autotrade is no longer unavailable
+         past that line, just not auto-ranked.
+         Also compacted the table itself per the same request: merged
+         the W/L/T columns into one ("20W/22L/1T"), shortened "Win-rate"
+         to "WR" and "Expectancy" to "Exp" — 11 columns down to 9,
+         updated colspan="11" -> colspan="9" at all three dependent
+         spots (the two section separators and the expanded-trades row).
+         Verified with py_compile, an actual runtime start (synthetic
+         3-symbol case: a small-sample-but-good symbol correctly
+         excluded from the top-10 ranking but present in the manual-
+         allowed set; a stress_test_failed symbol correctly excluded
+         from BOTH; an end-to-end check confirmed a manually-toggled
+         small-sample symbol actually lands in msnr_effective_live_
+         universe()'s result — the real scanned set, not just a UI
+         checkbox with no effect), pyflakes, node --check on the
+         correctly-last <script> block, the Flask route/def integrity
+         check (still 63 routes), and an AST walk for duplicate
+         top-level defs (none introduced).
 """
 
 import os
@@ -6711,7 +6776,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.48"
+APP_VERSION = "0.99.49"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16312,13 +16377,23 @@ def msnr_scan_symbol_live(symbol):
         # with a per-symbol toggle, per direct user request for exactly
         # 6 individually-toggleable fields (3 gold + current top 3 non-
         # gold by msnr_rank_by_winrate_sample()). Re-checks CURRENT
-        # eligibility here, not just the saved toggle — a symbol that
-        # was toggled on while in the top 3, then later fell out of it,
-        # should NOT keep autotrading just because its old toggle value
-        # is still True; see _set_msnr_autotrade_symbol()'s own
-        # docstring for why the toggle itself isn't deleted in that
+        # allowed-ness here, not just the saved toggle — a symbol that
+        # was toggled on while allowed, then later stopped being (e.g.
+        # its backtest started erroring, or it flipped to stress_test_
+        # failed), should NOT keep autotrading just because its old
+        # toggle value is still True; see _set_msnr_autotrade_symbol()'s
+        # own docstring for why the toggle itself isn't deleted in that
         # case (so it resumes if the symbol re-qualifies later).
-        if autotrade_symbols.get(symbol) and symbol in msnr_autotrade_eligible_symbols(overrides_snapshot):
+        # v0.99.49, per direct user request ("хочу иметь возможность
+        # автоторговли и не по топ-10, на свой страх и риск"): checks
+        # against msnr_manual_toggle_allowed_symbols() — every symbol
+        # with valid, non-stress_test_failed backtest data — not the
+        # narrower msnr_autotrade_eligible_symbols() (top-N by score).
+        # Using the narrower set here would make a manually-toggled
+        # non-top-10 symbol's checkbox silently inert, exactly the
+        # v0.99.32 bug pattern this session already fixed once for a
+        # different mismatch.
+        if autotrade_symbols.get(symbol) and symbol in msnr_manual_toggle_allowed_symbols(overrides_snapshot):
             # v0.99.33, per direct user request: real order sizing now
             # compounds off THIS symbol's own live trade history — $40
             # on the very first autotrade-fired trade, then the whole
@@ -16642,6 +16717,36 @@ def msnr_autotrade_eligible_symbols(overrides):
     ranked = msnr_rank_by_winrate_sample(overrides, exclude=gold)
     top_n = [sym for sym, _ov in ranked[:MSNR_AUTOTRADE_TOP_N]]
     return list(MSNR_SYMBOLS) + top_n
+
+
+def msnr_manual_toggle_allowed_symbols(overrides):
+    """v0.99.49, per direct user request ("хочу иметь возможность
+    автоторговли и [не по топ-10] ... на свой страх и риск как
+    эксперимент"): the BROADER set of symbols a person can manually
+    flip autotrade ON for from the full backtest table — every symbol
+    with completed backtest data (not errored), EXCLUDING only
+    stress_test_failed ones. A losing $ compound simulation stays a
+    hard block even for a manual override — that gate is a much more
+    fundamental "this literally lost money in its own history" signal
+    (see msnr_optimize_symbol()'s own docstring) than "didn't make the
+    top 10 by score," which is specifically what this request is
+    asking to bypass — a symbol excluded from the ranked top-10 purely
+    by small sample size (MSNR_AUTOTRADE_TOP_MIN_SAMPLE) despite a
+    genuinely strong compound_return_pct is exactly the case this
+    exists for.
+    Deliberately NOT msnr_autotrade_eligible_symbols() (top-N by score,
+    minimum sample) — that ranking still drives the AUTOMATIC top-10
+    set, its own sort/display grouping, and the checkbox styling that
+    marks a row as "auto-ranked" vs "manual." This is a second, wider
+    set used ONLY for validating/gating a manual toggle — see api_
+    msnr_autotrade_toggle() (write-time validation) and msnr_scan_
+    symbol_live()/msnr_effective_live_universe() (the actual firing/
+    scanning gate, which MUST use this same broader set — a manually-
+    toggled symbol that this function allows but those checks reject
+    would be exactly the "checkbox does nothing" bug already found and
+    fixed once before, v0.99.32, for a different narrower-set
+    mismatch)."""
+    return [sym for sym, ov in overrides.items() if ov and not ov.get("error") and not ov.get("stress_test_failed")]
 
 
 def _msnr_backtest_one_symbol(symbol):
@@ -17922,20 +18027,23 @@ def msnr_effective_live_universe(live_universe, overrides, autotrade_symbols):
     were actually trading: the REAL set msnr_live_loop() scans is
     msnr_compute_live_universe()'s own promoted set (gold + winrate>
     MSNR_LIVE_PROMOTE_MIN_WINRATE with sample>MSNR_LIVE_PROMOTE_MIN_
-    SAMPLE) UNION'd with whatever's toggled autotrade-ON and currently
-    eligible (top-N by score, not stress_test_failed) — v0.99.32 built
-    that exact union, but built it INLINE inside msnr_live_loop()
-    itself rather than as a reusable function, so api_msnr_status()'s
-    own "live" flag (the dot the person actually sees) kept reading
-    the narrower msnr_live_universe alone. A toggled-on, eligible
-    symbol below the winrate bar was — correctly, since v0.99.32 — being
-    scanned live with no dot to show for it, which is exactly the
-    mismatch that question surfaced. Pulled out into its own function
-    so both call sites share one definition and can't drift apart on
-    this again."""
-    eligible_now = msnr_autotrade_eligible_symbols(overrides)
-    toggled_on_eligible = [sym for sym, on in autotrade_symbols.items() if on and sym in eligible_now]
-    return list(dict.fromkeys(list(live_universe) + toggled_on_eligible))
+    SAMPLE) UNION'd with whatever's toggled autotrade-ON and manually
+    allowed (v0.99.49 — was "and currently eligible, top-N by score"
+    until this same class of mismatch showed up again: a manually-
+    toggled symbol outside the top 10 needs the SAME broader set here
+    as api_msnr_autotrade_toggle() validates writes against and msnr_
+    scan_symbol_live() gates firing on — msnr_manual_toggle_allowed_
+    symbols(), not msnr_autotrade_eligible_symbols() — or the toggle
+    would silently do nothing for exactly the symbols this feature
+    exists for). v0.99.32 built the underlying union, but built it
+    INLINE inside msnr_live_loop() itself rather than as a reusable
+    function, so api_msnr_status()'s own "live" flag (the dot the
+    person actually sees) kept reading the narrower msnr_live_universe
+    alone. Pulled out into its own function so both call sites share
+    one definition and can't drift apart on this again."""
+    allowed_now = msnr_manual_toggle_allowed_symbols(overrides)
+    toggled_on_allowed = [sym for sym, on in autotrade_symbols.items() if on and sym in allowed_now]
+    return list(dict.fromkeys(list(live_universe) + toggled_on_allowed))
 
 
 @app.route("/api/msnr/status")
@@ -17968,6 +18076,14 @@ def api_msnr_status():
     # autotrade_on state, so the panel can render exactly 6 checkboxes,
     # correctly pre-checked, without a separate round-trip.
     autotrade_eligible = msnr_autotrade_eligible_symbols(overrides)
+    # v0.99.49, per direct user request ("хочу иметь возможность
+    # автоторговли и не по топ-10, на свой страх и риск"): a SEPARATE,
+    # wider flag — every symbol with valid, non-stress_test_failed
+    # backtest data can now show a checkbox, not just the ranked top-10.
+    # autotrade_eligible above still marks the "auto-ranked" ones (used
+    # for sort grouping and the checkbox's own visual styling); this
+    # marks which OTHER rows are still toggleable manually.
+    manual_toggle_allowed = msnr_manual_toggle_allowed_symbols(overrides)
     # v0.99.35 — the dot shown per row now uses the SAME effective set
     # msnr_live_loop() actually scans (msnr_effective_live_universe()),
     # not the narrower promoted-only live_universe — see that function's
@@ -17975,6 +18091,7 @@ def api_msnr_status():
     effective_live_universe = msnr_effective_live_universe(live_universe, overrides, autotrade_symbols)
     ranked = [dict(v, symbol=sym, live=(sym in effective_live_universe),
                    autotrade_eligible=(sym in autotrade_eligible),
+                   manual_toggle_allowed=(sym in manual_toggle_allowed),
                    autotrade_on=bool(autotrade_symbols.get(sym)))
               for sym, v in overrides.items() if v and not v.get("error")]
     # v0.99.27, per direct user request ("просто не попадает в топ"):
@@ -18229,18 +18346,25 @@ def api_reset_msnr():
 
 @app.route("/api/msnr/autotrade_toggle", methods=["POST"])
 def api_msnr_autotrade_toggle():
-    """Toggles ONE symbol's individual MSNR autotrade state. Per direct
-    user request for exactly 6 individually-toggleable fields (3 gold +
-    current top 3 non-gold by msnr_rank_by_winrate_sample()) — replaces
-    the old single AUTOTRADE_ENABLED_MSNR checkbox.
-    Rejects a symbol that isn't currently in msnr_autotrade_eligible_
-    symbols() — the request body must name one of the exactly-6 symbols
-    the panel is actually showing checkboxes for right now, not an
-    arbitrary symbol; this is a deliberate write-time guard (unlike
-    _set_msnr_autotrade_symbol() itself, which doesn't validate, so a
-    PREVIOUSLY-set toggle for a since-demoted symbol survives — see its
-    own docstring). A person can't toggle a symbol the UI never offered
-    them in the first place."""
+    """Toggles ONE symbol's individual MSNR autotrade state. Originally
+    per direct user request for exactly 6 individually-toggleable
+    fields (3 gold + current top 3 non-gold by msnr_rank_by_winrate_
+    sample()) — replaced the old single AUTOTRADE_ENABLED_MSNR
+    checkbox.
+    v0.99.49, per direct user follow-up ("хочу иметь возможность
+    автоторговли и не по топ-10, на свой страх и риск как эксперимент
+    — вижу там сумасшедшие результаты, которые в топ не попадают из-за
+    выборки"): validates against the BROADER msnr_manual_toggle_
+    allowed_symbols() (every symbol with valid, non-stress_test_failed
+    backtest data) instead of the narrower msnr_autotrade_eligible_
+    symbols() (top-N by score, minimum sample) — a symbol excluded from
+    the ranked top-10 purely by small sample size, despite a genuinely
+    strong compound_return_pct, is exactly the case this widening
+    exists for. Still rejects a symbol whose own backtest errored or
+    is stress_test_failed (a losing $ compound simulation) — those stay
+    a hard block even for a manual, at-your-own-risk toggle; see msnr_
+    manual_toggle_allowed_symbols()'s own docstring for why that
+    particular gate doesn't get bypassed here."""
     try:
         data = request.get_json(force=True) or {}
         symbol = data.get("symbol")
@@ -18249,9 +18373,9 @@ def api_msnr_autotrade_toggle():
             return jsonify({"ok": False, "error": "symbol required"}), 400
         with state_lock:
             overrides_snapshot = dict(STATE["msnr_symbol_overrides"])
-        eligible = msnr_autotrade_eligible_symbols(overrides_snapshot)
-        if symbol not in eligible:
-            return jsonify({"ok": False, "error": f"{symbol} is not currently eligible (not gold, not in current top 3)"}), 400
+        allowed = msnr_manual_toggle_allowed_symbols(overrides_snapshot)
+        if symbol not in allowed:
+            return jsonify({"ok": False, "error": f"{symbol} has no valid backtest data or failed its own $ simulation"}), 400
         _set_msnr_autotrade_symbol(symbol, enabled)
         return jsonify({"ok": True, "symbol": symbol, "enabled": enabled})
     except Exception as e:
@@ -18921,6 +19045,22 @@ INDEX_HTML = """<!doctype html>
        there's nothing to pin against. */
     th:first-child, td:first-child { position:sticky; left:0; z-index:2; background:#0b0e14; }
     tr:active td:first-child { background:#182036; }
+    /* v0.99.49, per direct user request ("галочку как и имя монеты
+       сделай фиксированным при скролле"): pin the SECOND column too,
+       but only for the MSNR backtest table (.msnr-bt-table) — its
+       2nd column is the autotrade checkbox, which is exactly what
+       needs to stay visible alongside the pinned Symbol name while
+       swiping through the rest of that specific table's many columns.
+       Not applied globally like the first-column rule above: other
+       tables' 2nd column varies a lot in width (Dir/Reason/etc), and
+       forcing a second sticky column everywhere would need a matching
+       fixed width for column 1 in EVERY table to avoid column 2
+       overlapping it — only .msnr-bt-table's first column (short
+       ticker symbols) is narrow and predictable enough to give a safe
+       fixed width to. */
+    .msnr-bt-table th:first-child, .msnr-bt-table td:first-child { width:92px; min-width:92px; max-width:92px; overflow:hidden; text-overflow:ellipsis; }
+    .msnr-bt-table th:nth-child(2), .msnr-bt-table td:nth-child(2) { position:sticky; left:92px; z-index:2; background:#0b0e14; }
+    .msnr-bt-table tr:active td:nth-child(2) { background:#182036; }
   }
 </style>
 </head>
@@ -20577,15 +20717,28 @@ async function refreshMsnr() {
       : '';
     const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431${skipTxt}${skipSlTxt}${liqTxt}${levTxt}${compTxt}`;
     const noteTxt = r.note ? ` \u26a0\ufe0f ${r.note}` : '';
-    const autotradeCell = r.autotrade_eligible
-      ? `<input type="checkbox" ${r.autotrade_on ? 'checked' : ''} onclick="event.stopPropagation(); msnrToggleAutotrade('${r.symbol}', this.checked, this)">`
+    // v0.99.49, per direct user request ("хочу иметь возможность
+    // автоторговли и не по топ-10, на свой страх и риск как
+    // эксперимент"): checkbox now renders for every manual_toggle_
+    // allowed row, not just the auto-ranked top-10 (autotrade_
+    // eligible) — a manually-checked row outside the top-10 gets a
+    // distinct orange outline + warning title so it's visually clear
+    // this one isn't auto-ranked, it's a deliberate manual pick.
+    // stress_test_failed rows still get no checkbox at all (excluded
+    // from manual_toggle_allowed too — see that function's own
+    // docstring for why that particular gate isn't bypassable here).
+    const autotradeCell = r.manual_toggle_allowed
+      ? `<input type="checkbox" ${r.autotrade_on ? 'checked' : ''} onclick="event.stopPropagation(); msnrToggleAutotrade('${r.symbol}', this.checked, this)"${r.autotrade_eligible ? '' : ' style="outline:1px solid #d99;" title="вручную, вне топ-10 — на свой страх и риск"'}>`
       : '<span class="dim" style="font-size:10px;">\u2014</span>';
     // v0.99.19: a visible separator row exactly at the eligible/rest
     // boundary — the sort above already groups eligible rows first,
     // this makes that grouping obvious at a glance instead of relying
     // on the reader to notice checkboxes stop appearing partway down.
+    // v0.99.49: wording updated — autotrade is no longer unavailable
+    // past this line, just not auto-ranked; a checkbox still renders
+    // for any manual_toggle_allowed row below it.
     const separatorHtml = (idx > 0 && arr[idx - 1].autotrade_eligible && !r.autotrade_eligible)
-      ? `<tr><td colspan="11" class="dim" style="font-size:10px;padding:4px 0;border-top:1px solid #1c2433;">\u2014 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 (\u0442\u043e\u043b\u044c\u043a\u043e \u0431\u044d\u043a\u0442\u0435\u0441\u0442, \u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u043d\u0435\u0434\u043e\u0441\u0442\u0443\u043f\u043d\u0430) \u2014</td></tr>`
+      ? `<tr><td colspan="9" class="dim" style="font-size:10px;padding:4px 0;border-top:1px solid #1c2433;">\u2014 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 (\u0432\u043d\u0435 \u0442\u043e\u043f-10, \u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u0432\u0440\u0443\u0447\u043d\u0443\u044e \u2014 \u043d\u0430 \u0441\u0432\u043e\u0439 \u0440\u0438\u0441\u043a) \u2014</td></tr>`
       : '';
     // v0.99.27, per direct user request: same idea, one tier lower —
     // a visible separator exactly where stress_test_failed rows begin
@@ -20594,28 +20747,26 @@ async function refreshMsnr() {
     // own $ compounding simulation and is excluded from ranking/
     // autotrade entirely, not just scored lower.
     const stressSeparatorHtml = (idx > 0 && !arr[idx - 1].stress_test_failed && r.stress_test_failed)
-      ? `<tr><td colspan="11" class="loss" style="font-size:10px;padding:4px 0;border-top:1px solid #1c2433;">\u2014 \u043f\u0440\u043e\u0432\u0430\u043b\u0438\u043b\u0438 $-\u0441\u0438\u043c\u0443\u043b\u044f\u0446\u0438\u044e \u0434\u0435\u043f\u043e\u0437\u0438\u0442\u0430 (\u0434\u043e\u0445\u043e\u0434 \u2264 0%), \u0438\u0441\u043a\u043b\u044e\u0447\u0435\u043d\u044b \u0438\u0437 \u0442\u043e\u043f\u0430/\u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u0438 \u2014</td></tr>`
+      ? `<tr><td colspan="9" class="loss" style="font-size:10px;padding:4px 0;border-top:1px solid #1c2433;">\u2014 \u043f\u0440\u043e\u0432\u0430\u043b\u0438\u043b\u0438 $-\u0441\u0438\u043c\u0443\u043b\u044f\u0446\u0438\u044e \u0434\u0435\u043f\u043e\u0437\u0438\u0442\u0430 (\u0434\u043e\u0445\u043e\u0434 \u2264 0%), \u0438\u0441\u043a\u043b\u044e\u0447\u0435\u043d\u044b \u0438\u0437 \u0442\u043e\u043f\u0430/\u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u0438 \u2014</td></tr>`
       : '';
     return separatorHtml + stressSeparatorHtml + `<tr onclick="toggleMsnrBacktestTrades('${r.symbol}')" style="cursor:pointer;">
-      <td>${_msnrExpanded.has(r.symbol) ? '\u25be' : '\u25b8'} ${r.symbol}${r.live ? ' <span style="color:#3ddc97;" title="торгуется вживую">\u25cf</span>' : ' <span class="dim" style="font-size:10px;" title="только бэктест, не торгуется">\u0431\u044d\u043a\u0442\u0435\u0441\u0442</span>'}</td>
+      <td>${_msnrExpanded.has(r.symbol) ? '\u25be' : '\u25b8'} ${r.symbol}${r.live ? ' <span style="color:#3ddc97;" title="торгуется вживую">\u25cf</span>' : ' <span class="dim" title="только бэктест, не торгуется">\u25cb</span>'}</td>
       <td onclick="event.stopPropagation();">${autotradeCell}</td>
       <td class="${wrClass}">${r.winrate !== null && r.winrate !== undefined ? r.winrate+'%' : '-'}</td>
       <td class="dim">n=${r.trades}</td>
-      <td class="win">${r.wins}W</td>
-      <td class="loss">${r.losses}L</td>
-      <td class="status-timeout">${r.timeouts}T</td>
+      <td class="dim"><span class="win">${r.wins}W</span>/<span class="loss">${r.losses}L</span>/<span class="status-timeout">${r.timeouts}T</span></td>
       <td class="dim">avg ${r.avg_rr ?? '-'}R / med ${r.median_rr ?? '-'}R</td>
       <td class="${expClass}">${r.expectancy_r !== null && r.expectancy_r !== undefined ? (r.expectancy_r > 0 ? '+' : '') + r.expectancy_r + 'R' : '-'}</td>
       <td class="dim">${r.score !== null && r.score !== undefined ? r.score : '-'}</td>
       <td class="dim">${paramsTxt}${noteTxt}</td>
     </tr>
-    <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="11" style="padding:0;"><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0430...</div></td></tr>`;
+    <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="9" style="padding:0;"><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0430...</div></td></tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
     <div class="dim" style="margin-bottom:6px;"><b>\u0410\u0432\u0442\u043e\u0442\u044e\u043d\u0438\u043d\u0433 \u043f\u043e \u043c\u043e\u043d\u0435\u0442\u0430\u043c</b> (${cfg.backtest_days} \u0434\u043d\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438, \u043f\u0435\u0440\u0435\u0431\u043e\u0440 ${cfg.grid_min_leg_atr.length}\u00d7${cfg.grid_qm_zone_pct.length}\u00d7${cfg.grid_qm_lookback.length}=${cfg.grid_min_leg_atr.length*cfg.grid_qm_zone_pct.length*cfg.grid_qm_lookback.length} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432 \u043d\u0430 \u0441\u0438\u043c\u0432\u043e\u043b \u2014 \u043c\u0438\u043d. \u0438\u043c\u043f\u0443\u043b\u044c\u0441 (\u00d7ATR) / QM-\u0437\u043e\u043d\u0430 (%) / \u043e\u043a\u043d\u043e QM (\u0431\u0430\u0440\u044b), \u0442\u0430\u0431\u043b\u0438\u0446\u0430 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u0443\u0436\u0435 \u043b\u0443\u0447\u0448\u0438\u0439 \u043d\u0430\u0439\u0434\u0435\u043d\u043d\u044b\u0439 \u043a\u043e\u043c\u0431\u043e \u043f\u043e \u043a\u0430\u0436\u0434\u043e\u043c\u0443 \u0441\u0438\u043c\u0432\u043e\u043b\u0443) \u00b7 <b>score</b> \u2014 \u043d\u0438\u0436\u043d\u044f\u044f \u0434\u043e\u0432\u0435\u0440\u0438\u0442\u0435\u043b\u044c\u043d\u0430\u044f \u0433\u0440\u0430\u043d\u0438\u0446\u0430 \u0441\u0440\u0435\u0434\u043d\u0435\u0433\u043e R (\u043f\u043e \u043d\u0435\u0439 \u0438 \u0432\u044b\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044f \u043b\u0443\u0447\u0448\u0438\u0439 \u043a\u043e\u043c\u0431\u043e, \u0430 \u043d\u0435 \u043f\u043e \u0441\u044b\u0440\u043e\u043c\u0443 expectancy \u2014 \u0447\u0442\u043e\u0431\u044b \u043c\u0430\u043b\u0435\u043d\u044c\u043a\u0430\u044f \u0432\u044b\u0431\u043e\u0440\u043a\u0430 \u0441 \u0432\u0435\u0437\u0435\u043d\u0438\u0435\u043c \u043d\u0435 \u043f\u043e\u0431\u0435\u0436\u0434\u0430\u043b\u0430 \u0431\u043e\u043b\u044c\u0448\u0443\u044e \u0441\u0442\u0430\u0431\u0438\u043b\u044c\u043d\u0443\u044e) \u00b7 \u043a\u043b\u0438\u043a \u043f\u043e \u0441\u0442\u0440\u043e\u043a\u0435 \u2014 \u0440\u0430\u0441\u043a\u0440\u044b\u0442\u044c \u0441\u0434\u0435\u043b\u043a\u0438:</div>
     <div style="overflow-x:auto;">
-    <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Авто</th><th style="cursor:pointer;" onclick="msnrSortBy('winrate')">Win-rate${_msnrSortKey==='winrate' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th style="cursor:pointer;" onclick="msnrSortBy('trades')">n${_msnrSortKey==='trades' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th>W</th><th>L</th><th>T</th><th>RR</th><th>Expectancy</th><th>Score</th><th>\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b</th></tr></thead>
+    <table class="msnr-bt-table" style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>Symbol</th><th>Авто</th><th style="cursor:pointer;" onclick="msnrSortBy('winrate')">WR${_msnrSortKey==='winrate' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th style="cursor:pointer;" onclick="msnrSortBy('trades')">n${_msnrSortKey==='trades' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th>W/L/T</th><th>RR</th><th>Exp</th><th>Score</th><th>\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">\u0411\u044d\u043a\u0442\u0435\u0441\u0442 \u0435\u0449\u0451 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432.</div>';
