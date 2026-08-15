@@ -6860,6 +6860,41 @@ v0.99.51 - Direct user report: "есть баг с сбросом видимог
          loadMsnrTrades() (no accidental duplication from the edit),
          the Flask route/def integrity check (still 63 routes), and an
          AST walk for duplicate top-level defs (none introduced).
+
+v0.99.52 - Direct user follow-up to a question about the MSNR RR-bucket
+         table's own displayed n counts (e.g. 32W/124L, n=156 in the
+         7-10R bucket, pooled across ~180 backtested symbols): "давай
+         вообще уберём не работу, оставим для вида, мне кажется без
+         неё будет лучше." That n=156 pooled across ~180 symbols is
+         under one trade per symbol on average — real-looking at the
+         pooled level, but not an actual per-symbol sample. Adjusting a
+         single GLOBAL MSNR_MAX_RR off that pooled-but-per-symbol-thin
+         evidence risked exactly the "looks fine in aggregate, wrong
+         for the one symbol it's actually capping" failure mode this
+         whole session's per-symbol filters (skip_rr_min, skip_sl_
+         pct_min, Kelly-optimal leverage, stress_test_failed) were
+         built specifically to avoid — this pooled global knob was the
+         one place that reasoning had never been applied.
+         Disabled the _risk_autotune_msnr_max_rr() call inside risk_
+         autotune_pass()'s msnr block — commented out rather than
+         deleted, in case a future session wants it back, with the
+         reasoning above recorded right there. MSNR_MAX_RR itself, the
+         function definition, and _set_msnr_max_rr() are all left fully
+         intact — only the automatic pooled-evidence-driven adjustment
+         stopped; MSNR_MAX_RR now just sits at whatever value it's
+         configured/last set to.
+         The RR-bucket table itself keeps showing in the UI exactly as
+         before ("для вида") — api_msnr_status() computes rr_buckets
+         independently, straight from msnr_backtest_results_raw, with
+         no dependency on the now-disabled autotune call; confirmed by
+         reading that call site directly rather than assuming.
+         Verified with py_compile, an actual runtime start (confirmed
+         MSNR_MAX_RR still reads normally, unaffected), pyflakes (no
+         unused-name complaints from the now-dead call — the function/
+         setter stay referenced elsewhere), node --check on the
+         correctly-last <script> block, the Flask route/def integrity
+         check (still 63 routes), and an AST walk for duplicate
+         top-level defs (none introduced).
 """
 
 import os
@@ -6879,7 +6914,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.51"
+APP_VERSION = "0.99.52"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14947,6 +14982,27 @@ def risk_autotune_pass():
         log_error(f"risk_autotune ft5: {e}")
 
     try:
+        # v0.99.52, per direct user request ("уберём не работу, оставим
+        # для вида, мне кажется без неё будет лучше"): disabled — kept
+        # commented rather than deleted in case a future session wants
+        # it back. Root reasoning from the conversation that led here:
+        # this pools trades across ALL ~180 backtested symbols into one
+        # global RR-bucket table, but a bucket's pooled n (e.g. n=156
+        # for the 7-10R bucket) divided across that many symbols is
+        # under one trade per symbol on average — not a real per-symbol
+        # sample, just noise that happens to average out smoothly at
+        # the pooled level. Adjusting a single GLOBAL MSNR_MAX_RR off
+        # that pooled-but-per-symbol-thin evidence risks exactly the
+        # "looks fine in aggregate, wrong for the one symbol it's
+        # actually capping" failure mode this whole session's per-
+        # symbol filters (skip_rr_min, skip_sl_pct_min, Kelly leverage,
+        # stress_test_failed) were built specifically to avoid at the
+        # per-symbol level — this global knob was the one place that
+        # reasoning was never applied.
+        # The rr_buckets table itself stays fully displayed in the UI
+        # (api_msnr_status() computes it independently of this call,
+        # straight from msnr_backtest_results_raw) — informational only
+        # now, doesn't feed back into MSNR_MAX_RR or anything else.
         # v0.99.11: per direct user request to tune MSNR_MAX_RR off
         # statistics rather than a one-off manual observation — see
         # _risk_autotune_msnr_max_rr()'s own docstring for the full
@@ -14960,11 +15016,12 @@ def risk_autotune_pass():
         # request, see msnr_optimize_symbol()), which would quietly
         # starve THIS pooled rule of exactly the evidence it exists to
         # catch if left pointed at the filtered copy.
-        with state_lock:
-            all_results = list(STATE["msnr_backtest_results_raw"].values())
-        pooled_trades = [t for sym_trades in all_results for t in sym_trades]
-        if pooled_trades:
-            _risk_autotune_msnr_max_rr(pooled_trades, MSNR_MAX_RR, _set_msnr_max_rr)
+        # with state_lock:
+        #     all_results = list(STATE["msnr_backtest_results_raw"].values())
+        # pooled_trades = [t for sym_trades in all_results for t in sym_trades]
+        # if pooled_trades:
+        #     _risk_autotune_msnr_max_rr(pooled_trades, MSNR_MAX_RR, _set_msnr_max_rr)
+        pass
     except Exception as e:
         log_error(f"risk_autotune msnr: {e}")
 
