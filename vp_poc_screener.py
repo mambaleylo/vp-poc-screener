@@ -6806,6 +6806,60 @@ v0.99.50 - Direct live bug report, with a screenshot: "почему-то 2 ра�
          pyflakes, node --check on the correctly-last <script> block,
          the Flask route/def integrity check (still 63 routes), and an
          AST walk for duplicate top-level defs (none introduced).
+
+v0.99.51 - Direct user report: "есть баг с сбросом видимого окна при
+         скролле и масштабировании, когда смотрю сделки и листаю
+         список монет." Two compounding causes, both in setPanelHtml()/
+         loadMsnrTrades() territory:
+         (1) setPanelHtml() (v0.99.29) only ever preserved HORIZONTAL
+         scrollLeft inside individual tables — it never touched the
+         PAGE's own vertical scroll (window.scrollY) at all. Every 15s
+         refreshAll() tick rebuilds the whole panel via panel.innerHTML
+         = ..., and while the pixel value of window.scrollY doesn't
+         necessarily change just because content below it shrinks, the
+         CONTENT at that same pixel offset does — which is exactly what
+         "the visible window resets" looks like from the outside, even
+         though technically nothing browser-side moved the scrollbar.
+         Now also saves/restores window.scrollY around the rebuild, the
+         same save-before/restore-after shape the horizontal fix
+         already used.
+         (2) The actual height-shifting culprit underneath that:
+         restoreMsnrExpansion() re-calls loadMsnrTrades() for every
+         already-expanded coin on EVERY refresh tick, and that function
+         unconditionally blanked the trade table back to one line of
+         "загрузка..." text before re-fetching — so an expanded coin's
+         section briefly collapsed to nothing and then re-expanded to
+         full height on every single 15s tick, regardless of whether
+         window.scrollY itself got restored correctly. Restoring a
+         scroll position doesn't help when the content actually AT
+         that position keeps disappearing and reappearing underneath
+         it. Fixed by only showing the "загрузка..." placeholder the
+         FIRST time a coin is expanded (body genuinely empty) — a
+         routine refresh of an already-populated table now keeps
+         showing the OLD data while the new fetch is in flight, and
+         only swaps it in once the response actually arrives, removing
+         the height oscillation for the by-far most common case.
+         Also named as a likely contributing factor in the same
+         report, not separately mitigated: some mobile browsers reset
+         pinch-zoom level alongside an unexpected scroll jump on a
+         large synchronous DOM replacement like this one — the
+         window.scrollY restore above is expected to reduce this too,
+         since it's the same underlying "big reflow moved the visible
+         viewport" trigger, though this wasn't independently verified
+         (no way to test pinch-zoom behavior from this environment).
+         Verified with py_compile, an actual runtime start, pyflakes,
+         a standalone Node simulation of setPanelHtml()'s scrollY save/
+         restore against a mock window object that resets scrollY
+         mid-rebuild (confirmed the final value matches what was saved
+         beforehand, not the reset-to-0 the mock injected), a second
+         standalone check confirming loadMsnrTrades()'s new hasContent
+         condition correctly distinguishes "body already has a table"
+         (skip the placeholder) from "body is empty" (show it), node
+         --check on the correctly-last <script> block, a grep
+         confirming exactly one definition each of setPanelHtml()/
+         loadMsnrTrades() (no accidental duplication from the edit),
+         the Flask route/def integrity check (still 63 routes), and an
+         AST walk for duplicate top-level defs (none introduced).
 """
 
 import os
@@ -6825,7 +6879,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.50"
+APP_VERSION = "0.99.51"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -19788,11 +19842,32 @@ document.querySelectorAll('.tab').forEach(el => {
 function setPanelHtml(panel, html) {
   const scrollable = el => el.scrollWidth > el.clientWidth;
   const before = Array.from(panel.querySelectorAll('*')).filter(scrollable).map(el => el.scrollLeft);
+  // v0.99.51, per direct user report ("сброс видимого окна при
+  // скролле и масштабировании, когда смотрю сделки и листаю список
+  // монет"): also save/restore the PAGE's own vertical scroll
+  // (window.scrollY) around the rebuild — v0.99.29 only preserved
+  // horizontal scrollLeft inside individual tables, never how far
+  // DOWN the page itself the person had scrolled. A full panel.
+  // innerHTML rebuild briefly changes the document's total height
+  // (an expanded coin's trade table collapses back to a "загрузка..."
+  // placeholder before loadMsnrTrades() re-fetches and repopulates
+  // it — see restoreMsnrExpansion()), and that height change during
+  // the rebuild is exactly what makes the visible viewport appear to
+  // jump even when window.scrollY itself never numerically changed:
+  // the same pixel offset now points at different content until
+  // layout settles back to its old shape. Explicitly restoring it
+  // right after the rebuild (rather than trusting the browser to
+  // leave it alone) also guards against the pinch-zoom level getting
+  // reset on some mobile browsers, which tends to happen together
+  // with an unexpected scroll jump on a large synchronous DOM
+  // replacement like this one.
+  const scrollY = window.scrollY;
   panel.innerHTML = html;
   if (before.length) {
     const after = Array.from(panel.querySelectorAll('*')).filter(scrollable);
     before.forEach((sl, i) => { if (after[i]) after[i].scrollLeft = sl; });
   }
+  window.scrollTo(window.scrollX, scrollY);
 }
 
 async function refreshStatus() {
@@ -20891,7 +20966,23 @@ function restoreMsnrExpansion() {
 async function loadMsnrTrades(symbol) {
   const body = document.getElementById(`msnrTradesBody_${symbol}`);
   if (!body) return;
-  body.textContent = 'загрузка...';
+  // v0.99.51, per direct user report ("сброс видимого окна при
+  // скролле и масштабировании, когда смотрю сделки и листаю список
+  // монет"): only show the "загрузка..." placeholder the FIRST time
+  // this coin is expanded (body still empty). restoreMsnrExpansion()
+  // re-calls this for every already-expanded coin on EVERY 15s
+  // refresh tick — unconditionally blanking an already-populated
+  // trade table back to one short line of text before the fetch
+  // resolves made the page's total height oscillate on every single
+  // tick, which is exactly what made the visible viewport look like
+  // it kept "resetting" even after setPanelHtml() started restoring
+  // window.scrollY (restoring a scroll position doesn't help if the
+  // content AT that position keeps disappearing and reappearing).
+  // Keeping the OLD table visible while the new one loads in the
+  // background removes that height flicker entirely for the by-far
+  // most common case — a routine refresh of an already-expanded coin.
+  const hasContent = body.querySelector('table') !== null;
+  if (!hasContent) body.textContent = 'загрузка...';
   try {
     const trades = await (await fetch(`/api/msnr/backtest/${symbol}`)).json();
     if (!trades.length) { body.textContent = 'сделок нет'; return; }
