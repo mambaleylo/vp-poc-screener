@@ -7046,6 +7046,61 @@ v0.99.56 - Direct user follow-up to a discussion about which filter
          <script> block, the Flask route/def integrity check (still 63
          routes), and an AST walk for duplicate top-level defs (none
          introduced, all three new functions present exactly once).
+
+v0.99.57 - Direct user follow-up to v0.99.56: "теперь количество сделок
+         снизится и монеты могут перестать проходить по выборке, может
+         выборку считать как раньше, но потом просто писать сколько
+         сделок отмечено по такой-то причине." Real gap: msnr_rank_by_
+         winrate_sample()/msnr_compute_live_universe() gate top-10/
+         live-promotion eligibility on wins+losses — the POST-FILTER,
+         DISPLAYED count, which had already been shrinking since
+         v0.99.23 (skip_rr_min) and kept shrinking further with every
+         filter added since (liquidation, skip_sl_pct_min, and now
+         skip_hours). A symbol with a genuinely large real trade
+         history could fall below the sample-size bar purely from
+         filtering, even though the underlying data was never actually
+         thin — filtering was never meant to also silently tighten the
+         eligibility gate it gets judged against.
+         New best["raw_closed_n"], captured in msnr_optimize_symbol()
+         at the very start of the filter chain (right after the
+         winning grid combo is chosen, before skip_rr_min/liquidation/
+         skip_sl_pct_min/skip_hours run) — the symbol's TRUE closed-
+         trade count, immune to how many filters exist or how much
+         they end up removing. msnr_rank_by_winrate_sample()/msnr_
+         compute_live_universe() now gate on THIS instead of wins+
+         losses (falling back to wins+losses for a pre-existing STATE
+         override that predates this field, so nothing silently reads
+         as sample-size zero on upgrade). wins/losses/winrate/trades
+         themselves are UNCHANGED — still the filtered, displayed
+         values, since the v0.99.23 reasoning ("filtered trades
+         shouldn't count as part of this coin's system") still holds
+         for what's shown and what fires live; only the ELIGIBILITY
+         gate needed decoupling from that shrinking count, not the
+         count itself.
+         Second half of the request — "просто писать сколько сделок
+         отмечено по такой-то причине": each filter step now also
+         records how many trades IT specifically removed (new best[
+         "rr_filtered_count"]/["sl_filtered_count"]/["hours_filtered_
+         count"], alongside the existing liquidation_filtered_count) —
+         before/after diffs at each step, purely informational, no
+         effect on raw_closed_n above. UI: each skip indicator (skip
+         rr≥X / skip SL≥X% / skip часы(UTC)) now shows its own count in
+         parens, e.g. "skip rr≥4 (12)"; the n= cell gained "(было N)"
+         showing the pre-filter total whenever it's larger than what's
+         displayed, so the gap between "real sample" and "shown sample"
+         is visible at a glance instead of needing to add up every
+         individual filter's own count by hand.
+         Verified with py_compile, an actual runtime start (synthetic
+         symbol: raw_closed_n=60, wins+losses=25 — well under both
+         MSNR_AUTOTRADE_TOP_MIN_SAMPLE=35 and MSNR_LIVE_PROMOTE_MIN_
+         SAMPLE=40 — confirmed it now clears BOTH gates on raw_closed_n
+         alone; a second synthetic pre-existing override with no raw_
+         closed_n field at all and wins+losses=40 confirmed the
+         fallback path still correctly passes, matching pre-v0.99.57
+         behavior for any override saved before this version), pyflakes,
+         node --check on the correctly-last <script> block, the Flask
+         route/def integrity check (still 63 routes), and an AST walk
+         for duplicate top-level defs (none introduced).
 """
 
 import os
@@ -7065,7 +7120,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.56"
+APP_VERSION = "0.99.57"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -8552,7 +8607,7 @@ STATE = {
     "msnr_backtest_summary": {},
     "msnr_last_backtest_finished": None,
     "msnr_last_backtest_duration": None,
-    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at, skip_rr_min, skip_sl_pct_min, skip_hours, effective_leverage, leverage_ceiling, optimal_leverage, liquidation_filtered_count, compound_final_balance, compound_return_pct, compound_blown_at, stress_test_failed}
+    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at, raw_closed_n, skip_rr_min, rr_filtered_count, skip_sl_pct_min, sl_filtered_count, skip_hours, hours_filtered_count, effective_leverage, leverage_ceiling, optimal_leverage, liquidation_filtered_count, compound_final_balance, compound_return_pct, compound_blown_at, stress_test_failed}
     "msnr_backtest_universe": [],  # v0.99.9 — MSNR_SYMBOLS union'd with the top-liquid backtest-only exploration set, see msnr_build_backtest_universe()
     "msnr_live_universe": [],  # v0.99.17 — MSNR_SYMBOLS union'd with any backtest-qualifying symbol (win-rate/sample threshold), see msnr_compute_live_universe(); msnr_live_loop() scans THIS, not the static MSNR_SYMBOLS constant directly, so it stays empty (falls back to MSNR_SYMBOLS at the call site) until the first backtest cycle populates it
     "msnr_autotrade_symbols": {},  # v0.99.18 — per-symbol autotrade toggle, {symbol: bool}. Replaces the old single AUTOTRADE_ENABLED_MSNR gate — per direct user request for individually-toggleable fields (3 gold, always eligible + the current top MSNR_AUTOTRADE_TOP_N non-gold by msnr_rank_by_winrate_sample(), which despite its name ranks by `avg_rr` (score before v0.99.39) — see that function's own docstring). A symbol missing from this dict is treated as off (same "off unless explicitly on" default every other autotrade toggle in this app already uses). See msnr_autotrade_eligible_symbols() for which symbols can currently be toggled, and _set_msnr_autotrade_symbol()'s own docstring for what happens to a saved toggle when its symbol falls out of that set.
@@ -15920,6 +15975,7 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
             "winrate": None, "avg_rr": None, "median_rr": None, "expectancy_r": None, "score": None,
             "optimized_at": now, "candles_used": len(entry_candles), "skip_rr_min": None,
             "skip_sl_pct_min": None, "liquidation_filtered_count": 0, "skip_hours": [],
+            "raw_closed_n": 0, "rr_filtered_count": 0, "sl_filtered_count": 0, "hours_filtered_count": 0,
             "effective_leverage": msnr_symbol_effective_leverage(symbol),
             "leverage_ceiling": leverage_ceiling,
             "optimal_leverage": msnr_optimal_leverage_for_symbol(best_results, leverage_ceiling),
@@ -15950,11 +16006,34 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
         # same rr>=skip_rr_min test as closed trades — a timeout is
         # still evidence the setup didn't work, no reason to keep it
         # once its own rr says it's in the skipped range.
+        # v0.99.57, per direct user follow-up ("теперь количество сделок
+        # снизится и монеты могут перестать проходить по выборке"):
+        # captured HERE, before any of the filters below run — this is
+        # the symbol's own true closed-trade sample size, independent
+        # of how many of those trades later get excluded from wins/
+        # losses/winrate by skip_rr_min/liquidation/skip_sl_pct_min/
+        # skip_hours. msnr_rank_by_winrate_sample()/msnr_compute_live_
+        # universe() gate eligibility on THIS field now, not wins+
+        # losses — a symbol shouldn't lose its shot at ranking/live
+        # promotion just because more filters got added over time and
+        # progressively shrank the DISPLAYED win/loss count; the
+        # v0.99.23 reasoning ("filtered trades shouldn't count as part
+        # of this coin's system") still holds for win-rate/compound/
+        # what-fires, it was never meant to also silently tighten the
+        # sample-size bar these filters get judged against.
+        best["raw_closed_n"] = best["wins"] + best["losses"]
         raw_results = best_results
+        # v0.99.57 — per-reason exclusion counts (how many trades THIS
+        # specific step removed), purely informational for the UI: "просто
+        # писать сколько сделок отмечено по такой-то причине" — doesn't
+        # affect raw_closed_n above, which is already fixed before any
+        # of these run.
+        before_rr = len(best_results)
         if best["skip_rr_min"] is not None:
             skip_min = best["skip_rr_min"]
             best_results = [t for t in best_results if t["rr"] is None or t["rr"] < skip_min]
             _msnr_recompute_summary_score(best, best_results)
+        best["rr_filtered_count"] = before_rr - len(best_results)
         # v0.99.26, per direct user request ("иногда стоп будет за
         # ликвидацией и просто избегать этого"): deterministic filter,
         # not statistical — a trade whose own SL sits past this
@@ -15979,6 +16058,7 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
         # SL-width counterpart to the skip_rr_min block above — same
         # ordering reasoning (derive the floor off the full surviving
         # sample first, THEN filter), same "skip entirely" behavior.
+        before_sl = len(best_results)
         best["skip_sl_pct_min"] = msnr_symbol_sl_skip_min(best_results)
         if best["skip_sl_pct_min"] is not None:
             skip_sl = best["skip_sl_pct_min"]
@@ -15986,6 +16066,7 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
                              if not t.get("entry") or t["entry"] <= 0 or t.get("sl") is None
                              or abs(t["entry"] - t["sl"]) / t["entry"] * 100 < skip_sl]
             _msnr_recompute_summary_score(best, best_results)
+        best["sl_filtered_count"] = before_sl - len(best_results)
         # v0.99.56, per direct user request ("какой фильтр сигналов был
         # бы самым эффективным для внедрения" -> time-of-day): same
         # ordering reasoning as skip_rr_min/skip_sl_pct_min above —
@@ -15995,12 +16076,14 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
         # filters above (a single threshold), this drops a SET of
         # specific UTC hours — see that function's own docstring for
         # why hour-of-day has no natural "past this point" ordering.
+        before_hours = len(best_results)
         best["skip_hours"] = msnr_symbol_skip_hours(best_results)
         if best["skip_hours"]:
             skip_hour_set = set(best["skip_hours"])
             best_results = [t for t in best_results
                              if t.get("time") is None or time.gmtime(t["time"])[3] not in skip_hour_set]
             _msnr_recompute_summary_score(best, best_results)
+        best["hours_filtered_count"] = before_hours - len(best_results)
     # v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше не
     # стало, будто даже хуже" -> Kelly/optimal-f search instead of a
     # fixed stop-width target): ONE flat leverage for this symbol,
@@ -17100,11 +17183,18 @@ def msnr_compute_live_universe(overrides):
     """MSNR_SYMBOLS (gold — always live, regardless of its own backtest
     numbers) UNION'd with every OTHER symbol whose winning backtest
     combo clears BOTH MSNR_LIVE_PROMOTE_MIN_WINRATE (win-rate on closed
-    trades) AND MSNR_LIVE_PROMOTE_MIN_SAMPLE (wins+losses — deliberately
-    NOT the raw "trades" count, which also includes timeouts that say
-    nothing about win-rate reliability). Per direct user request: "для
-    монет более 50% винрейт и с выборкой более 40 сигналов на бэктесте
-    добавлять их в онлайн торговлю."
+    trades) AND MSNR_LIVE_PROMOTE_MIN_SAMPLE. Per direct user request:
+    "для монет более 50% винрейт и с выборкой более 40 сигналов на
+    бэктесте добавлять их в онлайн торговлю."
+    v0.99.57, per direct user follow-up: the sample-size check is now
+    raw_closed_n (the symbol's TRUE closed-trade count, captured in
+    msnr_optimize_symbol() BEFORE skip_rr_min/liquidation/skip_sl_
+    pct_min/skip_hours filtering) — used to be wins+losses (the post-
+    filter, DISPLAYED count, which also excludes timeouts). As more
+    per-symbol filters got added over time, that display count kept
+    shrinking, and a symbol could fall below this sample bar purely
+    from filtering, despite having plenty of real trade history overall
+    — see msnr_optimize_symbol()'s own docstring for the full reasoning.
     Pure function of `overrides` (STATE["msnr_symbol_overrides"], keyed
     by symbol) — takes no locks, does no I/O, so it's cheap to call and
     easy to test directly against a plain dict rather than needing to
@@ -17114,9 +17204,21 @@ def msnr_compute_live_universe(overrides):
         if not ov or ov.get("error") or sym in promoted:
             continue
         winrate = ov.get("winrate")
-        wins = ov.get("wins", 0) or 0
-        losses = ov.get("losses", 0) or 0
-        closed_n = wins + losses
+        # v0.99.57, per direct user follow-up ("монеты могут перестать
+        # проходить по выборке" — see msnr_optimize_symbol()'s own
+        # docstring for the full reasoning): gates on raw_closed_n (the
+        # symbol's TRUE closed-trade count, captured before skip_rr_min/
+        # liquidation/skip_sl_pct_min/skip_hours filtering) instead of
+        # wins+losses (the post-filter, DISPLAYED count) — a symbol
+        # shouldn't lose live-promotion eligibility just because more
+        # per-symbol filters got added over time and progressively
+        # shrank what's actually shown. Falls back to wins+losses for a
+        # symbol optimized before this field existed (persisted STATE
+        # from an older version), so an old override doesn't silently
+        # read as sample-size zero.
+        closed_n = ov.get("raw_closed_n")
+        if closed_n is None:
+            closed_n = (ov.get("wins", 0) or 0) + (ov.get("losses", 0) or 0)
         if winrate is not None and winrate > MSNR_LIVE_PROMOTE_MIN_WINRATE and closed_n > MSNR_LIVE_PROMOTE_MIN_SAMPLE:
             promoted.append(sym)
     return promoted
@@ -17135,6 +17237,12 @@ def msnr_rank_by_winrate_sample(overrides, exclude=None):
     v0.99.20: added the MSNR_LIVE_PROMOTE_MIN_SAMPLE floor so a tiny-
     sample symbol can't rank via score alone with almost no track
     record.
+    v0.99.57, per direct user follow-up ("монеты могут перестать
+    проходить по выборке" after more per-symbol filters got added):
+    the sample-size floor below now checks raw_closed_n (the symbol's
+    true closed-trade count, before filtering) instead of wins+losses
+    (the post-filter DISPLAYED count) — same fix, same reasoning as
+    msnr_compute_live_universe()'s own docstring.
     v0.99.27, per direct user request ("просто не попадает в топ"):
     also excludes any symbol with stress_test_failed=True (see msnr_
     optimize_symbol()'s own docstring) — a symbol whose own $
@@ -17176,11 +17284,15 @@ def msnr_rank_by_winrate_sample(overrides, exclude=None):
     highest-ranked first — feeds msnr_autotrade_eligible_symbols()
     below (which just needs [:MSNR_AUTOTRADE_TOP_N])."""
     exclude = exclude or set()
+    # v0.99.57 — same raw_closed_n gating fix as msnr_compute_live_
+    # universe() above, same fallback-to-wins+losses for a pre-existing
+    # override that predates this field.
     candidates = [(sym, ov) for sym, ov in overrides.items()
                   if ov and not ov.get("error") and ov.get("compound_return_pct") is not None
                   and ov.get("score") is not None and sym not in exclude
                   and not ov.get("stress_test_failed")
-                  and ((ov.get("wins", 0) or 0) + (ov.get("losses", 0) or 0)) >= MSNR_AUTOTRADE_TOP_MIN_SAMPLE]
+                  and (ov.get("raw_closed_n") if ov.get("raw_closed_n") is not None
+                       else (ov.get("wins", 0) or 0) + (ov.get("losses", 0) or 0)) >= MSNR_AUTOTRADE_TOP_MIN_SAMPLE]
     if not candidates:
         return []
 
@@ -21200,15 +21312,23 @@ async function refreshMsnr() {
   }).map((r, idx, arr) => {
     const wrClass = (r.winrate === null || r.winrate === undefined) ? 'dim' : (r.winrate >= 50 ? 'win' : 'loss');
     const expClass = (r.expectancy_r === null || r.expectancy_r === undefined) ? 'dim' : (r.expectancy_r > 0 ? 'win' : 'loss');
-    const skipTxt = (r.skip_rr_min !== null && r.skip_rr_min !== undefined) ? ` \u00b7 <span class="loss">skip rr\u2265${r.skip_rr_min}</span>` : '';
-    const skipSlTxt = (r.skip_sl_pct_min !== null && r.skip_sl_pct_min !== undefined) ? ` \u00b7 <span class="loss">skip SL\u2265${r.skip_sl_pct_min}%</span>` : '';
+    const skipTxt = (r.skip_rr_min !== null && r.skip_rr_min !== undefined) ? ` \u00b7 <span class="loss">skip rr\u2265${r.skip_rr_min}${r.rr_filtered_count ? ` (${r.rr_filtered_count})` : ''}</span>` : '';
+    const skipSlTxt = (r.skip_sl_pct_min !== null && r.skip_sl_pct_min !== undefined) ? ` \u00b7 <span class="loss">skip SL\u2265${r.skip_sl_pct_min}%${r.sl_filtered_count ? ` (${r.sl_filtered_count})` : ''}</span>` : '';
     // v0.99.56, per direct user request ("какой фильтр сигналов был
     // бы самым эффективным"): shows the specific bad UTC hours (if
     // any) this symbol's own history flagged — same loss-red styling
     // as the other skip indicators, kept short (just the hour list,
     // no "UTC" repeated per-hour) since a symbol can have several.
+    // v0.99.57: each skip indicator above now also shows the COUNT of
+    // trades it actually excluded, in parens — per direct user request
+    // ("просто писать сколько сделок отмечено по такой-то причине")
+    // after noticing the sample-size gate itself was being unfairly
+    // shrunk by these same filters (see msnr_optimize_symbol()'s own
+    // docstring) — the gate is fixed at raw_closed_n now, this is
+    // purely the informational breakdown of why the DISPLAYED n is
+    // smaller than that.
     const skipHoursTxt = (r.skip_hours && r.skip_hours.length)
-      ? ` \u00b7 <span class="loss">skip \u0447\u0430\u0441\u044b(UTC) ${r.skip_hours.join(',')}</span>`
+      ? ` \u00b7 <span class="loss">skip \u0447\u0430\u0441\u044b(UTC) ${r.skip_hours.join(',')}${r.hours_filtered_count ? ` (${r.hours_filtered_count})` : ''}</span>`
       : '';
     const liqTxt = r.liquidation_filtered_count ? ` \u00b7 <span class="loss">${r.liquidation_filtered_count} \u0437\u0430 \u043b\u0438\u043a\u0432\u0438\u0434\u0430\u0446\u0438\u0435\u0439</span>` : '';
     // v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше не
@@ -21278,7 +21398,7 @@ async function refreshMsnr() {
       <td>${_msnrExpanded.has(r.symbol) ? '\u25be' : '\u25b8'} ${r.symbol}${r.live ? ' <span style="color:#3ddc97;" title="торгуется вживую">\u25cf</span>' : ' <span class="dim" title="только бэктест, не торгуется">\u25cb</span>'}</td>
       <td onclick="event.stopPropagation();">${autotradeCell}</td>
       <td class="${wrClass}">${r.winrate !== null && r.winrate !== undefined ? r.winrate+'%' : '-'}</td>
-      <td class="dim">n=${r.trades}</td>
+      <td class="dim">n=${r.trades}${(r.raw_closed_n !== null && r.raw_closed_n !== undefined && r.raw_closed_n > r.trades) ? ` <span title="исходная выборка до фильтров — именно её смотрит отбор в топ/live">(было ${r.raw_closed_n})</span>` : ''}</td>
       <td class="dim"><span class="win">${r.wins}W</span>/<span class="loss">${r.losses}L</span>/<span class="status-timeout">${r.timeouts}T</span></td>
       <td class="dim">avg ${r.avg_rr ?? '-'}R / med ${r.median_rr ?? '-'}R</td>
       <td class="${expClass}">${r.expectancy_r !== null && r.expectancy_r !== undefined ? (r.expectancy_r > 0 ? '+' : '') + r.expectancy_r + 'R' : '-'}</td>
