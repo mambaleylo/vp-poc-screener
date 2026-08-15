@@ -6971,6 +6971,29 @@ v0.99.54 - Direct user request: "сделай вкладку mnsr главной
          (still 63 routes), and an AST walk for duplicate top-level
          defs (none introduced) — this was a markup/copy-only change,
          no Python logic touched.
+
+v0.99.55 - Direct user request: "добавь в уведы телеграмм ещё плечо."
+         The MSNR Telegram notification fires for EVERY detected
+         signal, not just ones autotrade actually fired for — but the
+         block that computes live_leverage/record["leverage_used"]
+         only runs inside the "this symbol's autotrade is on AND
+         eligible" branch, so record.get("leverage_used") is None for
+         a signal that's only being logged (the far more common case,
+         since most symbols shown in the backtest table don't have
+         autotrade toggled on). Falls back to msnr_symbol_optimal_
+         leverage(symbol) — the same Kelly-optimal value the UI already
+         shows next to this symbol's row — so the message always says
+         something useful, labeled differently ("плечо (реком.):" vs
+         plain "плечо:") specifically so a signal that never actually
+         placed an order can't be misread as having used that leverage
+         for real.
+         Verified with py_compile, an actual runtime start (synthetic
+         check of both branches: a record with leverage_used=39.5
+         formats as "плечо: 39.5x", one with leverage_used=None falls
+         back to "плечо (реком.): 22.0x"), pyflakes, node --check on
+         the correctly-last <script> block, the Flask route/def
+         integrity check (still 63 routes), and an AST walk for
+         duplicate top-level defs (none introduced).
 """
 
 import os
@@ -6990,7 +7013,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.54"
+APP_VERSION = "0.99.55"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16762,10 +16785,27 @@ def msnr_scan_symbol_live(symbol):
                 record["leverage_used"] = live_leverage
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         level_txt = "A-shape (resist)" if sig["level_type"] == "A" else "V-shape (support)"
+        # v0.99.55, per direct user request ("добавь в уведы телеграмм
+        # ещё плечо"): this notification fires for EVERY detected
+        # signal, not just ones autotrade actually fired for — the
+        # block above that computes live_leverage/record["leverage_
+        # used"] only runs when this symbol's own autotrade toggle is
+        # on AND eligible, so record.get("leverage_used") is None for
+        # a signal that's only being logged/notified. Falls back to
+        # msnr_symbol_optimal_leverage(symbol) (the same Kelly-optimal
+        # value the UI already shows next to this symbol) so the
+        # message still says SOMETHING useful either way, labeled
+        # differently so it's never misread as "a real order used
+        # this" when no order was actually placed.
+        if record.get("leverage_used"):
+            leverage_txt = f"плечо: {record['leverage_used']}x"
+        else:
+            leverage_txt = f"плечо (реком.): {msnr_symbol_optimal_leverage(symbol)}x"
         send_telegram(
             f"{arrow} {symbol} (MSNR QM off {level_txt})\n"
             f"entry: {sig['entry']:.6g}\n"
-            f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}",
+            f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n"
+            f"{leverage_txt}",
             category="msnr",
         )
     except Exception as e:
