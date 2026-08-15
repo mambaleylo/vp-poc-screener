@@ -6935,6 +6935,42 @@ v0.99.53 - Direct user question: "а проверка на уже открыту
          pyflakes, node --check on the correctly-last <script> block,
          the Flask route/def integrity check (still 63 routes), and an
          AST walk for duplicate top-level defs (none introduced).
+
+v0.99.54 - Direct user request: "сделай вкладку mnsr главной и убери
+         предупреждения, это уже основной индикатор." MSNR started as
+         an EXPERIMENTAL tab (v0.99.0) with a "⚠️" tab label and a big
+         orange warning box at the top of its own panel — after this
+         entire session's worth of work (per-symbol filters, Kelly-
+         optimal leverage, duplicate-signal fixes, exchange-position
+         checks, wider backtest universe), the user no longer considers
+         it experimental.
+         Made MSNR the default tab: activeTab now starts as 'msnr'
+         (was 'signals'/Volume), swapped which tab has the initial
+         "active" CSS class and which panel starts visible (signals
+         Table now display:none, msnrPanel now display:block) so the
+         static HTML skeleton and the JS default agree with each other
+         from first paint, not just after the first refreshAll() tick.
+         Removed the "⚠️" from the MSNR tab label itself (XAU LG and
+         FT5 keep theirs — this request was specifically about MSNR).
+         Removed the warning presentation in three more places: the
+         orange-bordered "⚠️ Экспериментально" box at the top of the
+         MSNR panel (kept the actual methodology description — source
+         channel, OCL/QM logic — just without the alarm styling or
+         the now-stale "автоторговля выключена по умолчанию" aside,
+         since the user has been actively configuring MSNR autotrade
+         all session); the Telegram signal notification's own
+         "— ЭКСПЕРИМЕНТАЛЬНО" suffix (XAU LG's own notification text
+         is untouched, only MSNR's); the settings panel's "Алерты
+         MSNR ⚠️" label and "экспериментально —" prefix on its
+         description.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the correctly-last <script> block, a grep
+         confirming exactly one tab carries the "active" class and
+         that signalsTable/msnrPanel's initial display values are the
+         intended none/block swap, the Flask route/def integrity check
+         (still 63 routes), and an AST walk for duplicate top-level
+         defs (none introduced) — this was a markup/copy-only change,
+         no Python logic touched.
 """
 
 import os
@@ -6954,7 +6990,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.53"
+APP_VERSION = "0.99.54"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16727,7 +16763,7 @@ def msnr_scan_symbol_live(symbol):
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         level_txt = "A-shape (resist)" if sig["level_type"] == "A" else "V-shape (support)"
         send_telegram(
-            f"{arrow} {symbol} (MSNR QM off {level_txt} — ЭКСПЕРИМЕНТАЛЬНО)\n"
+            f"{arrow} {symbol} (MSNR QM off {level_txt})\n"
             f"entry: {sig['entry']:.6g}\n"
             f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}",
             category="msnr",
@@ -19359,14 +19395,14 @@ INDEX_HTML = """<!doctype html>
   </details>
 </header>
 <div class="tabs">
-  <div class="tab active" data-tab="signals">Volume</div>
+  <div class="tab" data-tab="signals">Volume</div>
   <div class="tab" data-tab="divergence">Дивергенции</div>
   <div class="tab" data-tab="ema">EMA</div>
   <div class="tab" data-tab="scalp">Скальпинг</div>
   <div class="tab" data-tab="session">Сессия</div>
   <div class="tab" data-tab="session_ny">Сессия NY</div>
   <div class="tab" data-tab="xau_lg" style="color:#e0a030;">XAU LG ⚠️</div>
-  <div class="tab" data-tab="msnr" style="color:#e0a030;">MSNR ⚠️</div>
+  <div class="tab active" data-tab="msnr">MSNR</div>
   <div class="tab" data-tab="ft5" style="color:#e0a030;">FT5 ⚠️</div>
   <div class="tab" data-tab="vgi">VGI</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
@@ -19375,7 +19411,7 @@ INDEX_HTML = """<!doctype html>
 <div class="panel">
   <div id="tuningPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
   <div style="overflow-x:auto;">
-  <table id="signalsTable" style="display:table">
+  <table id="signalsTable" style="display:none">
     <thead><tr><th>Symbol</th><th>Dir</th><th>Reason</th><th>Entry</th><th>SL</th><th>TP</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
     <tbody></tbody>
   </table>
@@ -19398,7 +19434,7 @@ INDEX_HTML = """<!doctype html>
   <div id="sessionPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="sessionNyPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="xauLgPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
-  <div id="msnrPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
+  <div id="msnrPanel" style="display:block;padding:8px 4px;font-size:12px;"></div>
   <div id="ft5Panel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="vgiPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
@@ -19718,8 +19754,8 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Алерты MSNR ⚠️</div>
-          <div class="sub">экспериментально — живые QM-сигналы по золоту</div>
+          <div class="label">↳ Алерты MSNR</div>
+          <div class="sub">живые QM-сигналы по золоту</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramMsnr"><span class="switchSlider"></span></label>
       </div>
@@ -19914,7 +19950,7 @@ const fmt = (n, d=6) => n === null || n === undefined ? '-' : Number(n).toPrecis
 const fmtTime = (t) => t ? new Date(t*1000).toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit'}) : '-';
 const fmtDateTime = (t) => t ? new Date(t*1000).toLocaleString('ru-RU', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'}) : '-';  // date+time, not just time — Session's own open time is the SAME 10:00 every day by design, so time-only gives no way to tell which day's session a row belongs to
 
-let activeTab = 'signals';
+let activeTab = 'msnr';
 let vpModeChecked = false;
 document.querySelectorAll('.tab').forEach(el => {
   el.onclick = () => {
@@ -20883,9 +20919,8 @@ async function refreshMsnr() {
       </div>
     </div>` : '';
   const warnHtml = `
-    <div style="background:#2a1f0e;border:1px solid #e0a030;border-radius:10px;padding:10px 14px;margin-bottom:12px;">
-      <b style="color:#e0a030;">⚠️ Экспериментально</b><br>
-      <span style="font-size:12px;color:#d9c08a;">Логика с канала @xaubymedovyk (методика Malaysian SNR): OCL-уровни по линии закрытий (${cfg.structure_tf}), A-shape/V-shape — импульсные пивоты, вход — QM (ложный вынос + возврат) на ${cfg.entry_tf}, тейк — противоположный уровень пары (даёт естественно высокий R:R). Честный бэктест по нашим данным без заглядывания вперёд. Автоторговля выключена по умолчанию.</span>
+    <div class="dim" style="font-size:12px;margin-bottom:12px;">
+      Логика с канала @xaubymedovyk (методика Malaysian SNR): OCL-уровни по линии закрытий (${cfg.structure_tf}), A-shape/V-shape — импульсные пивоты, вход — QM (ложный вынос + возврат) на ${cfg.entry_tf}, тейк — противоположный уровень пары (даёт естественно высокий R:R). Честный бэктест по нашим данным без заглядывания вперёд.
     </div>`;
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
@@ -21703,7 +21738,7 @@ wireResetButton('resetXauLgBtn', '/api/reset/xau_lg',
   'Удалить накопленный бэктест и сигналы экспериментального XAU Liquidity Grab? Остальное не тронет. Это необратимо.',
   'Очистить XAU LG');
 wireResetButton('resetMsnrBtn', '/api/reset/msnr',
-  'Удалить накопленный бэктест и сигналы экспериментального MSNR? Остальное не тронет. Это необратимо.',
+  'Удалить накопленный бэктест и сигналы MSNR? Остальное не тронет. Это необратимо.',
   'Очистить MSNR');
 wireResetButton('resetFt5Btn', '/api/reset/ft5',
   'Удалить накопленный анализ параметров и сигналы экспериментального FT5? Остальное не тронет. Это необратимо.',
