@@ -7296,6 +7296,40 @@ v0.99.62 - Direct user request: "ещё планшет huawei mate 12.2 2025 в
          block, the Flask route/def integrity check (still 63 routes),
          and an AST walk for duplicate top-level defs (none introduced
          — no Python functions touched, JS/CSS-only change).
+
+v0.99.63 - Direct user follow-up, with a screenshot circling the exact
+         cause: v0.99.62's padding/RR trims weren't enough — the real
+         width driver is the Параметры column itself, which packs grid
+         params + up to 4 skip indicators + liquidation count + Kelly
+         leverage + доход into ONE unbroken single-line string (the
+         circled ALLO_USDT row: "1.5×ATR / 0.30% / 96 · skip rr≥3 (21)
+         · 4 за ликвидацией · плечо 17.5x (Kelly-оптимум) · доход
+         +677.7% ($40→$311.07)" — comfortably over 100 characters on
+         one line, however tight the padding/font get). Every other
+         column in this table is short and bounded (a percentage, a
+         count, a couple of letters); this ONE column's variable,
+         unbounded length was what forced the whole table wider than
+         the viewport, not the padding.
+         Fixed by letting ONLY this column wrap (white-space:normal,
+         min-width:220px inline on the <td>) instead of trying to
+         shrink its content further — the table itself still sets
+         white-space:nowrap (.msnr-bt-table), but an inline style on
+         one cell always wins that cascade regardless of specificity,
+         so every other column stays single-line/compact while this
+         one grows TALLER (wraps to a few lines) instead of forcing the
+         table WIDER. Trades a slightly taller row for a table that
+         actually fits the viewport, which is the trade the person
+         asked for specifically after v0.99.62's padding/RR trims
+         still left this one column overflowing.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         a grep confirming the table's own white-space:nowrap rule and
+         this cell's inline white-space:normal override coexist as
+         intended (inline style takes precedence over the tag-level
+         rule regardless of load order), node --check on the
+         correctly-last <script> block, the Flask route/def integrity
+         check (still 63 routes), and an AST walk for duplicate
+         top-level defs (none introduced — no Python functions
+         touched, JS/CSS-only change).
 """
 
 import os
@@ -7315,7 +7349,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.62"
+APP_VERSION = "0.99.63"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21867,7 +21901,7 @@ async function refreshMsnr() {
       <td class="dim" title="med ${r.median_rr ?? '-'}R">avg ${r.avg_rr ?? '-'}R</td>
       <td class="${expClass}">${r.expectancy_r !== null && r.expectancy_r !== undefined ? (r.expectancy_r > 0 ? '+' : '') + r.expectancy_r + 'R' : '-'}</td>
       <td class="dim">${r.score !== null && r.score !== undefined ? r.score : '-'}</td>
-      <td class="dim">${paramsTxt}${noteTxt}</td>
+      <td class="dim" style="white-space:normal;min-width:220px;">${paramsTxt}${noteTxt}</td>
     </tr>
     <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="9" style="padding:0;"><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0430...</div></td></tr>`;
   }).join('');
