@@ -7423,6 +7423,80 @@ v0.99.65 - CRITICAL FIX, direct user report with a live screenshot:
          correctly-last <script> block, the Flask route/def integrity
          check (still 63 routes), and an AST walk for duplicate
          top-level defs (none introduced).
+
+v0.99.66 - Completes the XAU LG feature-parity request from v0.99.64
+         (interrupted mid-work by the v0.99.65 VGI fix): chart display
+         on signal click, invert mode with honest stop/take refitting +
+         RR, and auto-tuning — all "как везде."
+         New _xau_lg_signal_dict(i, c, direction, entry, extreme,
+         level) — shared construction helper (was inlined twice
+         before), computes risk = abs(entry-extreme) * XAU_LG_SL_
+         BUFFER_MULT (1.0 = old un-buffered behavior, unchanged) and
+         tp = entry ± risk*XAU_LG_RR, stores "rr" on the signal (never
+         existed before). xau_lg_detect_signals() now checks XAU_LG_
+         INVERT_SIGNALS at both signal sites (support-break, resistance-
+         break): inverted fires the OPPOSITE direction using the SAME
+         risk distance (this candle's own range) on the swapped side,
+         TP re-derived via the same risk*RR formula — never just
+         flipping direction while keeping a now-meaningless original
+         TP/SL, same principle SESSION_INVERT_SIGNALS already
+         established. Verified via synthetic candle sequence: inverted
+         signal's entry/sl are exactly the non-inverted signal's sl/
+         entry swapped, same risk magnitude either way.
+         "rr" threaded through xau_lg_backtest_symbol()'s results and
+         xau_lg_scan_symbol_live()'s live record (which also gained
+         mfe_r/mae_r/mfe_price/mae_price/mfe_r_at_close/mae_r_at_close,
+         initialized the same way every other module's live record is).
+         update_xau_lg_signal_outcomes() now tracks mfe_r/mae_r while
+         walking forward and freezes them at close — same shape as
+         update_session_signal_outcomes(). compute_xau_lg_signal_stats()
+         gained the same agg()-based mfe_r_wins_at_close/mae_r_losses_
+         at_close stats every autotuned module already returns.
+         New risk_autotune_pass() xau_lg block: reverse-flip (_risk_
+         autotune_reverse), SL-buffer nudge (_risk_autotune_sl_mult),
+         RR/TP nudge (_risk_autotune_tp_extend, new RISK_AUTOTUNE_
+         XAU_LG_RR_BOUNDS). Deliberately re-verified this does NOT
+         repeat v0.99.65's VGI mistake before writing it: XAU LG's own
+         R (risk = abs(entry-sl), set at signal time) is NOT defined in
+         terms of XAU_LG_RR the way VGI's risk=reward/min_rr was — it
+         comes from the raw candle's own range times SL_BUFFER_MULT,
+         completely independent of the RR multiplier being tuned. Same
+         safe shape Session/EMA/DIV already use, not VGI's self-
+         referential trap. Both nudges apply unconditionally regardless
+         of XAU_LG_INVERT_SIGNALS (unlike Session, which needed invert-
+         only gating) — _xau_lg_signal_dict()'s formula is identical in
+         both directions.
+         New /api/xau_lg/chart/<symbol> endpoint: looks up the signal's
+         OWN already-recorded entry/sl/tp/direction/rr from stored data
+         (live STATE["xau_lg_signals"] first, then this symbol's own
+         backtest results) rather than re-deriving via a fresh xau_lg_
+         detect_signals() call with CURRENT live params — same fix
+         already applied to api_msnr_chart() after a real incident (see
+         that route's own docstring): XAU_LG_RR/SL_BUFFER_MULT/INVERT_
+         SIGNALS are now all auto-tuned and can drift between when a
+         trade was found and when its chart is later opened.
+         New openXauLgChart(symbol, sigTime) — thin wrapper reusing
+         openVgiChart/drawVgiChart (XAU LG's signal shape is
+         structurally identical to VGI's, same reuse judgment already
+         applied to Scalp/Session NY rather than duplicating canvas
+         code a third time). refreshXauLg()'s signal rows gained data-
+         symbol/data-time + a post-render click handler, same pattern
+         refreshVgi() already uses. Header now shows RR/reverse-mode/
+         SL-buffer state (only shown when buffer != 1, matching how
+         other modules only surface a multiplier when it's actually
+         non-default).
+         Verified with py_compile, an actual runtime start (synthetic
+         60-candle sequence with a deliberate support-break wick:
+         confirmed non-inverted vs inverted signals share the identical
+         risk magnitude with entry/sl exactly swapped; confirmed every
+         detected signal carries a non-None "rr" field), pyflakes, node
+         --check on the correctly-last <script> block, a grep
+         confirming exactly one definition each of api_xau_lg_chart()/
+         _xau_lg_signal_dict()/openXauLgChart() (no accidental
+         duplication across all these edits), the Flask route/def
+         integrity check (64 routes — up from 63, exactly the one new
+         chart endpoint), and an AST walk for duplicate top-level defs
+         (none introduced).
 """
 
 import os
@@ -7442,7 +7516,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.65"
+APP_VERSION = "0.99.66"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -15610,6 +15684,40 @@ def risk_autotune_pass():
         log_error(f"risk_autotune vgi: {e}")
 
     try:
+        # v0.99.66, per direct user request ("инверсию с подгонкой
+        # стопа и тейка и расчетом rr. Автоматически как везде,
+        # автотюнинг"): unlike VGI (fixed right before this block —
+        # see that block's own docstring), XAU LG's R (risk = abs(
+        # entry-sl), set at signal time by _xau_lg_signal_dict()) is
+        # NOT defined in terms of XAU_LG_RR — risk comes from the raw
+        # candle's own entry-to-extreme distance (times XAU_LG_SL_
+        # BUFFER_MULT), completely independent of the RR multiplier
+        # used to derive TP. Same safe shape Session/EMA/DIV already
+        # use (R independent of the target being tuned), NOT VGI's
+        # self-referential trap (R defined VIA the tuned parameter) —
+        # confirmed by re-reading _xau_lg_signal_dict()'s own formula
+        # specifically to avoid repeating that exact mistake here.
+        # Both nudges apply unconditionally regardless of XAU_LG_
+        # INVERT_SIGNALS — see _xau_lg_signal_dict()'s own docstring:
+        # the same risk/TP formula is used in both directions, unlike
+        # Session's own invert-only sizing that needed a gate.
+        s = compute_xau_lg_signal_stats()
+        winrate = s.get("winrate")
+        closed_n = (s.get("wins", 0) or 0) + (s.get("losses", 0) or 0)
+        loss_mae = s.get("mae_r_losses_at_close")
+        win_mfe = s.get("mfe_r_wins_at_close")
+        if winrate is not None and closed_n:
+            _risk_autotune_reverse("xau_lg", "xau_lg_invert_signals", XAU_LG_INVERT_SIGNALS, winrate, XAU_LG_RR, closed_n, _set_xau_lg_invert,
+                                    avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
+        if loss_mae:
+            _risk_autotune_sl_mult("xau_lg", "xau_lg_sl_buffer_mult", XAU_LG_SL_BUFFER_MULT, loss_mae["avg"], s.get("losses", 0) or 0, _set_xau_lg_sl_buffer_mult)
+        if win_mfe:
+            _risk_autotune_tp_extend("xau_lg", "xau_lg_rr", XAU_LG_RR, win_mfe["median"], XAU_LG_RR, closed_n, _set_xau_lg_rr,
+                                      bounds=RISK_AUTOTUNE_XAU_LG_RR_BOUNDS)
+    except Exception as e:
+        log_error(f"risk_autotune xau_lg: {e}")
+
+    try:
         # v0.98.10: per the same direct user request as VGI's block above.
         # FT5 already has its own daily grid-search auto-optimizer
         # (ft5_optimize_symbol()), which is arguably a MORE thorough form
@@ -15705,6 +15813,31 @@ def risk_autotune_loop():
 # ============================================================================
 
 
+def _xau_lg_signal_dict(i, c, direction, entry, extreme, level):
+    """v0.99.66 — shared signal-construction helper, used by both the
+    normal and inverted branches of xau_lg_detect_signals() below (was
+    inlined twice before this, now once): risk is XAU_LG_SL_BUFFER_MULT
+    times the raw candle's own entry-to-extreme distance (at the
+    default 1.0, identical to the old un-buffered behavior — this
+    multiplier is new, per direct user request ("подгонки стопа"),
+    auto-tuned the same way SESSION_SL_MULT/EMA_SL_ATR_MULT/DIV_SL_
+    ATR_MULT already are), TP is entry ± risk*XAU_LG_RR (also now
+    auto-tunable, was fixed 1:1 and "deliberately excluded"). Returns
+    None for a degenerate zero/negative-risk candle (same skip
+    condition the old inline `if risk > 0:` checks already had)."""
+    risk = abs(entry - extreme) * XAU_LG_SL_BUFFER_MULT
+    if risk <= 0:
+        return None
+    if direction == "LONG":
+        sl = entry - risk
+        tp = entry + risk * XAU_LG_RR
+    else:
+        sl = entry + risk
+        tp = entry - risk * XAU_LG_RR
+    return {"index": i, "time": c["time"], "direction": direction,
+            "entry": entry, "sl": sl, "tp": tp, "level": level, "rr": XAU_LG_RR}
+
+
 def xau_lg_detect_signals(candles, ema_period=XAU_LG_EMA_PERIOD, pivot_left=XAU_LG_PIVOT_LEFT, pivot_right=XAU_LG_PIVOT_RIGHT):
     """Single walk-forward pass over `candles` (must be XAU_LG_TF, oldest
     first) — maintains the nearest active (unbroken) pivot support/
@@ -15721,7 +15854,22 @@ def xau_lg_detect_signals(candles, ema_period=XAU_LG_EMA_PERIOD, pivot_left=XAU_
     Used identically for backtesting (feed the whole history) and live
     scanning (feed recent history, check whether the LAST bar produced a
     new signal) — same principle as detect_session_manipulation() serving
-    both callers."""
+    both callers.
+    v0.99.66, per direct user request ("инверсию с подгонкой стопа и
+    тейка и расчетом rr... автоматически как везде"): when XAU_LG_
+    INVERT_SIGNALS is on, each event fires the OPPOSITE-direction trade
+    instead — same reasoning as SESSION_INVERT_SIGNALS (see its own
+    docstring): the ORIGINAL risk distance (this candle's own entry-to-
+    extreme range, times XAU_LG_SL_BUFFER_MULT) becomes the inverted
+    trade's own risk too, just applied on the opposite side of a
+    swapped entry, with TP re-derived via the same risk*XAU_LG_RR
+    formula — never just flipping direction while keeping the original
+    (now directionally meaningless) TP/SL. Unlike Session, this needed
+    no special-casing for the inverted branch's OWN sizing rule: XAU
+    LG's TP was ALREADY risk-based in both modes from the start, so
+    inverting here is just entry/extreme swapping into _xau_lg_signal_
+    dict() with the flipped direction — see that helper's own
+    docstring for the exact risk/TP construction both branches share."""
     n = len(candles)
     if n < ema_period + pivot_left + pivot_right + 2:
         return []
@@ -15746,24 +15894,24 @@ def xau_lg_detect_signals(candles, ema_period=XAU_LG_EMA_PERIOD, pivot_left=XAU_
         if active_support is not None:
             if c["low"] < active_support <= c["close"]:
                 if c["close"] > ema[i]:
-                    entry, sl = c["high"], c["low"]
-                    risk = entry - sl
-                    if risk > 0:
-                        tp = entry + risk * XAU_LG_RR
-                        signals.append({"index": i, "time": c["time"], "direction": "LONG",
-                                         "entry": entry, "sl": sl, "tp": tp, "level": active_support})
+                    if not XAU_LG_INVERT_SIGNALS:
+                        sig = _xau_lg_signal_dict(i, c, "LONG", c["high"], c["low"], active_support)
+                    else:
+                        sig = _xau_lg_signal_dict(i, c, "SHORT", c["low"], c["high"], active_support)
+                    if sig:
+                        signals.append(sig)
                 active_support = None
             elif c["close"] < active_support:
                 active_support = None
         if active_resistance is not None:
             if c["high"] > active_resistance >= c["close"]:
                 if c["close"] < ema[i]:
-                    entry, sl = c["low"], c["high"]
-                    risk = sl - entry
-                    if risk > 0:
-                        tp = entry - risk * XAU_LG_RR
-                        signals.append({"index": i, "time": c["time"], "direction": "SHORT",
-                                         "entry": entry, "sl": sl, "tp": tp, "level": active_resistance})
+                    if not XAU_LG_INVERT_SIGNALS:
+                        sig = _xau_lg_signal_dict(i, c, "SHORT", c["low"], c["high"], active_resistance)
+                    else:
+                        sig = _xau_lg_signal_dict(i, c, "LONG", c["high"], c["low"], active_resistance)
+                    if sig:
+                        signals.append(sig)
                 active_resistance = None
             elif c["close"] > active_resistance:
                 active_resistance = None
@@ -15807,7 +15955,7 @@ def xau_lg_backtest_symbol(symbol, days=XAU_LG_BACKTEST_DAYS):
         results.append({
             "time": sig["time"], "direction": sig["direction"],
             "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
-            "result": result, "exit_time": exit_time,
+            "result": result, "exit_time": exit_time, "rr": sig.get("rr"),
         })
     return results
 
@@ -15856,9 +16004,11 @@ def xau_lg_scan_symbol_live(symbol):
         record = {
             "symbol": symbol, "direction": sig["direction"],
             "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
-            "level": sig["level"], "time": sig["time"],
+            "level": sig["level"], "time": sig["time"], "rr": sig.get("rr"),
             "detected_at": time.time(), "status": "OPEN", "result": None,
             "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
+            "mfe_r": 0.0, "mae_r": 0.0, "mfe_price": None, "mae_price": None,
+            "mfe_r_at_close": None, "mae_r_at_close": None,
         }
         with state_lock:
             STATE["xau_lg_signals"].appendleft(record)
@@ -15879,6 +16029,13 @@ def xau_lg_scan_symbol_live(symbol):
 
 
 def update_xau_lg_signal_outcomes():
+    """v0.99.66, per direct user request ("автотюнинг... автоматически
+    как везде"): now also tracks mfe_r/mae_r (R = abs(entry-sl), this
+    trade's own actual risk — set once by _xau_lg_signal_dict()/
+    xau_lg_scan_symbol_live() at signal creation, so it naturally
+    reflects whatever XAU_LG_SL_BUFFER_MULT was in effect at the time)
+    as it walks forward, freezing mfe_r_at_close/mae_r_at_close once a
+    trade resolves — same shape as update_session_signal_outcomes()."""
     now = time.time()
     with state_lock:
         open_signals = [s for s in STATE["xau_lg_signals"] if s["status"] == "OPEN"]
@@ -15890,11 +16047,27 @@ def update_xau_lg_signal_outcomes():
                 continue
             candles = [c for c in candles if c["time"] + xau_lg_interval_sec <= now]  # v0.98.8: drop still-forming candle
             future = [c for c in candles if c["time"] > sig["time"]]
+            direction = sig["direction"]
+            entry = sig["entry"]
+            risk = abs(entry - sig["sl"]) or 1e-9
             result = None
             exit_price = None
             exit_time = None
             for c in future:
-                if sig["direction"] == "LONG":
+                if direction == "LONG":
+                    fav, adv = c["high"] - entry, entry - c["low"]
+                else:
+                    fav, adv = entry - c["low"], c["high"] - entry
+                fav_r, adv_r = fav / risk, adv / risk
+                if fav_r > sig["mfe_r"] or adv_r > sig["mae_r"]:
+                    with state_lock:
+                        if fav_r > sig["mfe_r"]:
+                            sig["mfe_r"] = round(fav_r, 3)
+                            sig["mfe_price"] = c["high"] if direction == "LONG" else c["low"]
+                        if adv_r > sig["mae_r"]:
+                            sig["mae_r"] = round(adv_r, 3)
+                            sig["mae_price"] = c["low"] if direction == "LONG" else c["high"]
+                if direction == "LONG":
                     if c["low"] <= sig["sl"]:
                         result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
                         break
@@ -15921,6 +16094,8 @@ def update_xau_lg_signal_outcomes():
                     sig["result"] = result
                     sig["exit_price"] = exit_price
                     sig["exit_time"] = exit_time
+                    sig["mfe_r_at_close"] = sig["mfe_r"]
+                    sig["mae_r_at_close"] = sig["mae_r"]
         except Exception as e:
             log_error(f"xau_lg_outcome {sig['symbol']}: {e}")
 
@@ -15935,8 +16110,29 @@ def compute_xau_lg_signal_stats():
     open_n = sum(1 for s in signals if s["status"] == "OPEN")
     total_closed = len(closed)
     winrate = round(wins / total_closed * 100, 1) if total_closed else None
+
+    # v0.99.66, per direct user request ("автотюнинг... автоматически
+    # как везде"): same agg() shape compute_session_signal_stats()
+    # already uses — feeds risk_autotune_pass()'s new xau_lg block
+    # (reverse-flip, SL-buffer nudge, RR/TP-extend nudge).
+    def agg(key, subset):
+        vals = [s[key] for s in subset if s.get(key) is not None]
+        if not vals:
+            return None
+        vals_sorted = sorted(vals)
+        n = len(vals_sorted)
+        return {
+            "avg": round(sum(vals) / n, 3), "median": round(vals_sorted[n // 2], 3),
+            "p25": round(vals_sorted[int(n * 0.25)], 3),
+            "p75": round(vals_sorted[min(int(n * 0.75), n - 1)], 3), "n": n,
+        }
+
+    win_set = [s for s in closed if s["result"] == "WIN"]
+    loss_set = [s for s in closed if s["result"] == "LOSS"]
     return {"total": len(signals), "wins": wins, "losses": losses, "timeouts": timeouts,
-            "open": open_n, "winrate": winrate}
+            "open": open_n, "winrate": winrate,
+            "mfe_r_wins_at_close": agg("mfe_r_at_close", win_set), "mae_r_wins_at_close": agg("mae_r_at_close", win_set),
+            "mfe_r_losses_at_close": agg("mfe_r_at_close", loss_set), "mae_r_losses_at_close": agg("mae_r_at_close", loss_set)}
 
 
 def xau_lg_backtest_loop():
@@ -19225,9 +19421,72 @@ def api_xau_lg_status():
             "tf": XAU_LG_TF, "ema_period": XAU_LG_EMA_PERIOD,
             "pivot_left": XAU_LG_PIVOT_LEFT, "pivot_right": XAU_LG_PIVOT_RIGHT,
             "rr": XAU_LG_RR, "backtest_days": XAU_LG_BACKTEST_DAYS,
+            "invert_signals": XAU_LG_INVERT_SIGNALS, "sl_buffer_mult": XAU_LG_SL_BUFFER_MULT,
         },
         "top": ranked,
     })
+
+
+@app.route("/api/xau_lg/chart/<symbol>")
+def api_xau_lg_chart(symbol):
+    """v0.99.66, per direct user request ("графическое отображение
+    графиков как везде"). Looks up the signal's OWN already-recorded
+    entry/sl/tp/direction/rr from stored data — live STATE["xau_lg_
+    signals"] first, then this symbol's own backtest results — rather
+    than re-deriving via a fresh xau_lg_detect_signals() call with
+    CURRENT live params. Same fix already applied to api_msnr_chart()
+    (see that route's own docstring for the full incident): XAU_LG_RR/
+    XAU_LG_SL_BUFFER_MULT/XAU_LG_INVERT_SIGNALS are now all auto-tuned
+    and can drift between when a trade was found and when its chart is
+    later opened — re-deriving with today's params could silently fail
+    to reproduce yesterday's signal, or reproduce a different one."""
+    try:
+        sig_time = request.args.get("time")
+        found_sig = None
+        found_result = None
+        found_exit_time = None
+        found_exit_price = None
+        if sig_time:
+            target = float(sig_time)
+            interval_sec = INTERVAL_SECONDS.get(XAU_LG_TF, 900)
+            with state_lock:
+                live_match = next((s for s in STATE["xau_lg_signals"]
+                                    if s["symbol"] == symbol and abs(s["time"] - target) < interval_sec), None)
+                bt_trades = list(STATE["xau_lg_backtest_results"].get(symbol, []))
+            if live_match:
+                found_sig = {"time": live_match["time"], "direction": live_match["direction"],
+                              "entry": live_match["entry"], "sl": live_match["sl"], "tp": live_match["tp"],
+                              "level": live_match.get("level"), "rr": live_match.get("rr")}
+                found_result = live_match.get("result")
+                found_exit_time = live_match.get("exit_time")
+                found_exit_price = live_match.get("exit_price")
+            else:
+                bt_match = next((t for t in bt_trades if abs(t["time"] - target) < interval_sec), None)
+                if bt_match:
+                    found_sig = {"time": bt_match["time"], "direction": bt_match["direction"],
+                                  "entry": bt_match["entry"], "sl": bt_match["sl"], "tp": bt_match["tp"],
+                                  "level": bt_match.get("level"), "rr": bt_match.get("rr")}
+                    found_result = bt_match.get("result")
+                    found_exit_time = bt_match.get("exit_time")
+                    if found_result == "WIN":
+                        found_exit_price = bt_match["tp"]
+                    elif found_result == "LOSS":
+                        found_exit_price = bt_match["sl"]
+        if found_sig is None:
+            return jsonify({"error": "сигнал не найден"}), 404
+        interval_sec = INTERVAL_SECONDS.get(XAU_LG_TF, 900)
+        fetch_start = found_sig["time"] - (XAU_LG_EMA_PERIOD + XAU_LG_PIVOT_LEFT + XAU_LG_PIVOT_RIGHT + 30) * interval_sec
+        fetch_end = (found_exit_time + 6 * interval_sec) if found_exit_time else (found_sig["time"] + 200 * interval_sec)
+        candles = get_candles_range(symbol, XAU_LG_TF, fetch_start, fetch_end)
+        return jsonify({
+            "symbol": symbol, "candles": candles[-250:], "time": found_sig["time"],
+            "direction": found_sig["direction"], "entry": found_sig["entry"],
+            "sl": found_sig["sl"], "tp": found_sig["tp"], "rr": found_sig.get("rr"),
+            "result": found_result, "exit_time": found_exit_time, "exit_price": found_exit_price,
+        })
+    except Exception as e:
+        log_error(f"api_xau_lg_chart {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/xau_lg/signals")
@@ -21750,9 +22009,9 @@ async function refreshXauLg() {
     </div>`;
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
-      Символы: ${(status.symbols||[]).join(', ')} · ТФ ${cfg.tf} · EMA(${cfg.ema_period}) фильтр тренда · пивоты L${cfg.pivot_left}/R${cfg.pivot_right} · RR фикс. ${cfg.rr}<br>
+      Символы: ${(status.symbols||[]).join(', ')} · ТФ ${cfg.tf} · EMA(${cfg.ema_period}) фильтр тренда · пивоты L${cfg.pivot_left}/R${cfg.pivot_right} · RR ${cfg.rr}${cfg.invert_signals ? ' · <span style="color:#e0a030;">РЕВЕРС ВКЛЮЧЁН</span>' : ''}${cfg.sl_buffer_mult && cfg.sl_buffer_mult !== 1 ? ` · SL×${cfg.sl_buffer_mult}` : ''}<br>
       ${buildTxt}<br>
-      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0}
+      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0} · клик по строке — график
     </div>`;
   const signalsRows = signals.map(s => {
     const dirClass = s.direction === 'LONG' ? 'long' : 'short';
@@ -21761,7 +22020,7 @@ async function refreshXauLg() {
     else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
     else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
     else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
-    return `<tr>
+    return `<tr data-symbol="${s.symbol}" data-time="${s.time}" style="cursor:pointer;">
       <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td>
       <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.sl)}</td><td class="dim">${fmt(s.tp)}</td>
       <td>${statusHtml}</td><td class="dim">${fmtDateTime(s.time)}</td>
@@ -21794,6 +22053,12 @@ async function refreshXauLg() {
     </table>
     </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
   setPanelHtml(panel, warnHtml + headerHtml + signalsTableHtml + btTableHtml);
+  // v0.99.66, per direct user request ("графическое отображение
+  // графиков как везде"): same data-symbol/data-time + post-render
+  // wiring pattern refreshVgi() already uses.
+  panel.querySelectorAll('tbody tr[data-time]').forEach(tr => {
+    tr.onclick = () => openXauLgChart(tr.dataset.symbol, tr.dataset.time);
+  });
 }
 
 // ---------------- MSNR — Malaysian SNR / Storyline gold strategy (EXPERIMENTAL, v0.99.0) ----------------
@@ -23632,6 +23897,16 @@ function openScalpChart(symbol, interval, sigTime) {
   // reuse-when-genuinely-identical judgment call already applied to
   // Session NY's chart in v0.94.0.
   return openVgiChart(symbol, sigTime, '/api/scalp/chart', `&interval=${interval}`);
+}
+
+function openXauLgChart(symbol, sigTime) {
+  // v0.99.66, per direct user request ("графическое отображение
+  // графиков как везде"). Thin wrapper, not a duplicate — XAU LG's
+  // signal shape (fixed entry/sl/tp/direction/rr per signal) is
+  // structurally identical to VGI's, same reuse judgment already
+  // applied to Scalp/Session NY above rather than duplicating the
+  // canvas drawing code a third time.
+  return openVgiChart(symbol, sigTime, '/api/xau_lg/chart', '');
 }
 
 function drawVgiChart(data) {
