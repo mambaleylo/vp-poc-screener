@@ -7330,6 +7330,99 @@ v0.99.63 - Direct user follow-up, with a screenshot circling the exact
          check (still 63 routes), and an AST walk for duplicate
          top-level defs (none introduced — no Python functions
          touched, JS/CSS-only change).
+
+v0.99.64 - In-progress groundwork for a direct user request to bring
+         XAU LG to feature parity with the other modules: chart display
+         on signal click, an invert mode with honest stop/take re-
+         fitting and RR, and auto-tuning — all "как везде." Not yet
+         complete (interrupted by the v0.99.65 fix below, resuming
+         after); this version bump covers only the safe, inert pieces
+         landed so far, nothing behavior-changing yet:
+         New XAU_LG_INVERT_SIGNALS (mirrors DIV/EMA/SESSION_INVERT_
+         SIGNALS) and XAU_LG_SL_BUFFER_MULT (mirrors SESSION_SL_MULT/
+         EMA_SL_ATR_MULT/DIV_SL_ATR_MULT) constants, defaulting to off/
+         1.0 (no-op) — not yet read anywhere. XAU_LG_RR's own comment
+         updated: no longer "deliberately excluded" from auto-tuning,
+         since the whole point of this request is to change that.
+         New RISK_AUTOTUNE_XAU_LG_RR_BOUNDS (same range as Session's
+         own RR bounds). New setters _set_xau_lg_invert()/_set_xau_lg_
+         sl_buffer_mult()/_set_xau_lg_rr() (save_settings() pattern,
+         unused so far). Wired all three into apply_settings()/get_
+         settings()/SETTINGS_KEYS so a future manual or auto-tuned
+         change to any of them actually persists across a restart —
+         this part matters NOW even before the feature is wired up,
+         since leaving it out would be a silent gap once it is.
+         Remaining work (chart endpoint + frontend, xau_lg_detect_
+         signals() actually applying invert/sl_buffer_mult and storing
+         rr, MFE/MAE tracking, the risk_autotune_pass() block) picks
+         back up in a later version.
+
+v0.99.65 - CRITICAL FIX, direct user report with a live screenshot:
+         VGI winrate near-zero (6W/154L, 3.8%) while auto-tune had
+         pushed vgi_min_rr 5 -> 7.78 (toward its own 8.0 ceiling) —
+         the WRONG direction, actively making things worse, not
+         better. User's own instinct ("логичнее инверсию включать и
+         переосмысливать тейк и стоп") pointed at the right area;
+         investigation found the actual mechanism, which persisted
+         even with reverse already on (confirming it wasn't primarily
+         a direction problem).
+         Root cause #1: vgi_evaluate_signal()'s own formula is risk =
+         reward/min_rr — min_rr doesn't just FILTER signals here, it
+         directly SETS the stop distance, inversely. Raising min_rr
+         shrinks the stop for every taken signal, making it easier to
+         get stopped out by ordinary noise before price reaches the
+         (unchanged) target — mechanically WORSENS win-rate, the
+         opposite of what a normal *_MIN_RR filter does elsewhere
+         (there RR is computed independently of an ATR/structure-based
+         stop, so raising the bar only rejects more low-quality
+         setups without touching accepted ones' own stops).
+         Root cause #2, compounding #1 in the same wrong direction:
+         the auto-tune rule feeding this (_risk_autotune_tp_extend,
+         via win_mfe_r) had a structural, near-tautological upward
+         bias specific to VGI — update_vgi_signal_outcomes() records
+         mfe_r off the SAME win-triggering candle's own high/low
+         BEFORE checking for the win and breaking, so a winning
+         candle's ordinary wick past the exact TP price (typical, not
+         an edge case) makes fav_r >= min_rr almost every single pass
+         — because R itself (risk = reward/min_rr) is defined in terms
+         of the very parameter being tuned. "Did wins run past the
+         target" is near-circular here, not genuine evidence quality
+         improved, unlike Session/EMA/DIV where R comes from an
+         independent stop untouched by the target being tuned.
+         Fixed by disabling that specific _risk_autotune_tp_extend
+         call for vgi_min_rr (commented out with the full reasoning
+         in place, not deleted — matches the same "disable a confirmed-
+         broken rule, don't rush a replacement in the same pass"
+         approach already used for MSNR_MAX_RR's pooled-bucket autotune
+         in v0.99.52). A properly-designed VGI-specific rule (reacting
+         to real adverse excursion the way _risk_autotune_sl_mult()
+         does elsewhere, but inverted — here HIGHER min_rr means a
+         TIGHTER stop, opposite of a normal multiplier) needs its own
+         careful design as separate follow-up work, not a rushed
+         substitute found in the same debugging pass. The reverse-flag
+         rule (_risk_autotune_reverse) is untouched — VGI's own sizing
+         is identical whichever direction is active (only WHICH zone
+         gets targeted changes), so that rule doesn't share the same
+         structural flaw and should react more sensibly once real
+         (unbiased) performance data comes in post-fix.
+         Also added a one-time corrective reset at startup: disabling
+         the broken rule alone wouldn't undo the damage already
+         persisted in settings.json — load_settings() would keep
+         reloading the same bad 7.78 every future startup otherwise.
+         If the loaded vgi_min_rr exceeds a 5.0 sanity ceiling
+         (comfortably above the 3.0 default, so a genuine future
+         manual choice in that range survives untouched), it's reset
+         to 3.0 and logged — bounded, one-time migration for this
+         specific incident, not a permanent ongoing clamp.
+         Verified with py_compile, an actual runtime start (confirmed
+         RISK_AUTOTUNE_VGI_RR_BOUNDS unchanged at (1.0, 8.0) — the
+         value was inside its own bounds the whole time, this was
+         never a bounds-violation bug, purely a wrong-direction-and-
+         biased-input one; confirmed a fresh import's own VGI_MIN_RR
+         default reads 3.0 as expected), pyflakes, node --check on the
+         correctly-last <script> block, the Flask route/def integrity
+         check (still 63 routes), and an AST walk for duplicate
+         top-level defs (none introduced).
 """
 
 import os
@@ -7349,7 +7442,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.63"
+APP_VERSION = "0.99.65"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7913,8 +8006,10 @@ XAU_LG_TF = os.environ.get("VP_XAU_LG_TF", "15m")
 XAU_LG_EMA_PERIOD = int(os.environ.get("VP_XAU_LG_EMA_PERIOD", 30))
 XAU_LG_PIVOT_LEFT = int(os.environ.get("VP_XAU_LG_PIVOT_LEFT", 1))
 XAU_LG_PIVOT_RIGHT = int(os.environ.get("VP_XAU_LG_PIVOT_RIGHT", 1))
-XAU_LG_RR = float(os.environ.get("VP_XAU_LG_RR", 1.0))  # fixed 1:1, per the source's own stated rule — not auto-tuned by risk_autotune_pass(), deliberately excluded since this whole module is provisional
+XAU_LG_RR = float(os.environ.get("VP_XAU_LG_RR", 1.0))  # v0.99.64 — started at fixed 1:1 per the source's own stated rule, "deliberately excluded" from auto-tuning since this module was provisional; per direct user request ("автотюнинг... автоматически как везде") it's now tuned by risk_autotune_pass() (_risk_autotune_tp_extend, same mechanism EMA_TP_PCT/DIV_TP_PCT/SESSION_REVERSE_RR already use) toward the R-multiple wins actually reach before closing, same as everywhere else
 XAU_LG_BACKTEST_DAYS = int(os.environ.get("VP_XAU_LG_BACKTEST_DAYS", 30))
+XAU_LG_INVERT_SIGNALS = os.environ.get("VP_XAU_LG_INVERT_SIGNALS", "0") == "1"  # v0.99.64, per direct user request ("инверсию... как везде") — mirrors DIV_INVERT_SIGNALS/EMA_INVERT_SIGNALS/SESSION_INVERT_SIGNALS. Implemented inside xau_lg_detect_signals() itself (not a post-processing flip) so live scanning AND the historical backtest see the same inverted direction/sizing consistently. Unlike Session (whose non-inverted TP sits at an arbitrary range-width distance, needing special inverted-mode sizing), XAU LG's TP is ALREADY risk*XAU_LG_RR in both modes — inverting here just swaps which side of the signal candle is entry vs stop and flips direction, reusing the exact same risk distance and RR formula pointed the other way; see xau_lg_detect_signals()'s own docstring for the precise "подгонка стопа и тейка" this produces.
+XAU_LG_SL_BUFFER_MULT = float(os.environ.get("VP_XAU_LG_SL_BUFFER_MULT", 1.0))  # v0.99.64, per direct user request ("подгонки стопа") — multiplies the raw signal candle's own risk distance (entry-to-extreme) before it becomes the actual SL, same "widen/tighten a stop multiplier off real adverse excursion" idea SESSION_SL_MULT/EMA_SL_ATR_MULT/DIV_SL_ATR_MULT already apply for their own modules, auto-tuned the same way (_risk_autotune_sl_mult) once enough closed trades exist.
 XAU_LG_SIGNAL_HISTORY = 200
 XAU_LG_REFRESH_SEC = int(os.environ.get("VP_XAU_LG_REFRESH_SEC", 3600))  # hourly backtest refresh — small fixed symbol list, cheap compared to Session's 50-symbol universe scan
 XAU_LG_SCAN_INTERVAL_SEC = int(os.environ.get("VP_XAU_LG_SCAN_INTERVAL_SEC", 300))  # live scan cadence — 15m candles, checking every 5 min is plenty
@@ -8308,7 +8403,19 @@ SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_sig
                   # manual env-var override would silently revert on restart
                   # too — now they follow the same rules as ema_min_rr etc.
                   "scalp_min_rr", "scalp_sl_buffer_mult", "session_sl_mult", "session_reverse_rr", "ema_sl_atr_mult", "div_sl_atr_mult", "vgi_min_rr", "msnr_max_rr",
-                  "ema_tp_pct", "div_tp_pct")
+                  "ema_tp_pct", "div_tp_pct",
+                  # v0.99.64 — xau_lg_invert_signals/xau_lg_sl_buffer_mult/
+                  # xau_lg_rr: added to apply_settings()/get_settings() as
+                  # groundwork for bringing XAU LG to feature parity with
+                  # the other modules (chart display, invert mode, auto-
+                  # tuned SL/TP — per direct user request, in progress).
+                  # Listed here too so a manual settings change or a future
+                  # auto-tune adjustment to any of the three actually
+                  # persists across a restart, same as every other tunable
+                  # value above — leaving them out of SETTINGS_KEYS while
+                  # apply_settings() already accepts them would be a real
+                  # gap (settable, but silently reverting on reload).
+                  "xau_lg_invert_signals", "xau_lg_sl_buffer_mult", "xau_lg_rr")
 
 
 def get_settings():
@@ -8328,6 +8435,9 @@ def get_settings():
         "session_ny_enabled": SESSION_NY_ENABLED,
         "session_ny_invert_signals": SESSION_NY_INVERT_SIGNALS,
         "xau_lg_enabled": XAU_LG_ENABLED,
+        "xau_lg_invert_signals": XAU_LG_INVERT_SIGNALS,
+        "xau_lg_sl_buffer_mult": XAU_LG_SL_BUFFER_MULT,
+        "xau_lg_rr": XAU_LG_RR,
         "ft5_enabled": FT5_ENABLED,
         "ft5_invert_signals": FT5_INVERT_SIGNALS,
         "vgi_enabled": VGI_ENABLED,
@@ -8395,7 +8505,7 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, VGI_ENABLED, VGI_INVERT_SIGNALS, VGI_MIN_RR, MSNR_ENABLED, MSNR_MAX_RR, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, XAU_LG_INVERT_SIGNALS, XAU_LG_SL_BUFFER_MULT, XAU_LG_RR, FT5_ENABLED, FT5_INVERT_SIGNALS, VGI_ENABLED, VGI_INVERT_SIGNALS, VGI_MIN_RR, MSNR_ENABLED, MSNR_MAX_RR, HOURLY_STATS_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
     global TELEGRAM_ALERTS_SESSION_NY, TELEGRAM_ALERTS_XAU_LG, TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_VGI, TELEGRAM_ALERTS_MSNR
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_VGI, AUTOTRADE_ENABLED_MSNR
@@ -8441,6 +8551,22 @@ def apply_settings(updates):
         SESSION_NY_INVERT_SIGNALS = bool(updates["session_ny_invert_signals"])
     if "xau_lg_enabled" in updates:
         XAU_LG_ENABLED = bool(updates["xau_lg_enabled"])
+    if "xau_lg_invert_signals" in updates:
+        XAU_LG_INVERT_SIGNALS = bool(updates["xau_lg_invert_signals"])
+    if "xau_lg_sl_buffer_mult" in updates:
+        try:
+            v = float(updates["xau_lg_sl_buffer_mult"])
+            if v > 0:
+                XAU_LG_SL_BUFFER_MULT = v
+        except (TypeError, ValueError):
+            pass
+    if "xau_lg_rr" in updates:
+        try:
+            v = float(updates["xau_lg_rr"])
+            if v > 0:
+                XAU_LG_RR = v
+        except (TypeError, ValueError):
+            pass
     if "ft5_enabled" in updates:
         FT5_ENABLED = bool(updates["ft5_enabled"])
     if "ft5_invert_signals" in updates:
@@ -14894,6 +15020,7 @@ RISK_AUTOTUNE_TP_TOLERANCE_RATIO = 0.15  # ignore if WIN MFE is within 15% of th
 RISK_AUTOTUNE_TP_STEP_RATIO = 0.1  # max 10% change to TP_PCT per pass — same bounded-step philosophy as the RR/SL-mult nudges
 RISK_AUTOTUNE_TP_PCT_BOUNDS = (0.003, 0.05)  # 0.3%-5% — sane range; below is barely worth the fees, above is an unrealistic single fixed target
 RISK_AUTOTUNE_SESSION_RR_BOUNDS = (0.5, 5.0)  # v0.98.4 — Session's SESSION_REVERSE_RR is an RR multiple, not a %-of-price like EMA/DIV's TP_PCT, so it needs its own bounds on a completely different scale when reusing _risk_autotune_tp_extend for it
+RISK_AUTOTUNE_XAU_LG_RR_BOUNDS = (0.5, 5.0)  # v0.99.64 — same reasoning/range as Session's own RR bounds above: XAU_LG_RR is a direct RR multiple, not a %-of-price
 RISK_AUTOTUNE_VGI_RR_BOUNDS = (1.0, 8.0)  # v0.98.9 — same reasoning as Session's own RR bounds above, sized for VGI_MIN_RR's own default (3.0) and the fact RR is guaranteed to equal min_rr exactly by construction (unlike Session), so a somewhat wider practical range makes sense
 RISK_AUTOTUNE_MSNR_MAX_RR_BOUNDS = (5.5, 15.0)  # v0.99.11 — lower bound deliberately kept above MSNR_FALLBACK_RR (4.0): caught via behavioral testing that a cap set BELOW fallback_rr is self-defeating (the fallback trade it falls through to would itself exceed the "cap" it was supposed to enforce). Upper bound just gives room to relax the cap if the data doesn't actually support tightening it.
 
@@ -15216,6 +15343,24 @@ def _set_session_reverse_rr(v):
     save_settings()
 
 
+def _set_xau_lg_invert(v):
+    global XAU_LG_INVERT_SIGNALS
+    XAU_LG_INVERT_SIGNALS = v
+    save_settings()
+
+
+def _set_xau_lg_sl_buffer_mult(v):
+    global XAU_LG_SL_BUFFER_MULT
+    XAU_LG_SL_BUFFER_MULT = v
+    save_settings()
+
+
+def _set_xau_lg_rr(v):
+    global XAU_LG_RR
+    XAU_LG_RR = v
+    save_settings()
+
+
 def _set_vgi_invert(v):
     global VGI_INVERT_SIGNALS
     VGI_INVERT_SIGNALS = v
@@ -15420,9 +15565,47 @@ def risk_autotune_pass():
         if winrate is not None and closed_n:
             _risk_autotune_reverse("vgi", "vgi_invert_signals", VGI_INVERT_SIGNALS, winrate, VGI_MIN_RR, closed_n, _set_vgi_invert,
                                     avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
-        if win_mfe:
-            _risk_autotune_tp_extend("vgi", "vgi_min_rr", VGI_MIN_RR, win_mfe["median"], VGI_MIN_RR, closed_n, _set_vgi_min_rr,
-                                      bounds=RISK_AUTOTUNE_VGI_RR_BOUNDS)
+        # v0.99.65 — CRITICAL FIX, per direct user report with a live
+        # screenshot: winrate near-zero (6W/154L, 3.8%) while auto-tune
+        # had pushed vgi_min_rr 5 -> 7.78 (toward the bound ceiling of
+        # 8.0), the WRONG direction — raising it was making things
+        # actively worse, not better. Root cause confirmed against
+        # vgi_evaluate_signal()'s own formula: risk = reward/min_rr,
+        # so min_rr doesn't just filter signals here — it directly SETS
+        # the stop's distance, inversely. Raising min_rr shrinks the
+        # stop for every taken signal, making it easier to get stopped
+        # out by ordinary noise before price reaches the (unchanged)
+        # target — mechanically WORSENS win-rate, the opposite of what
+        # a normal *_MIN_RR filter threshold does elsewhere (there, RR
+        # is computed independently of an ATR/structure-based stop, so
+        # raising the bar just rejects more low-quality setups without
+        # touching the stop those ACCEPTED setups actually use).
+        # A second, compounding bug in the SAME direction: _risk_
+        # autotune_tp_extend() (below, now disabled) fed it win_mfe_r —
+        # but update_vgi_signal_outcomes() records mfe_r using the SAME
+        # WIN-triggering candle's own high/low BEFORE checking for the
+        # win and breaking, so a winning candle's natural wick past the
+        # exact TP price (typical, not an edge case) makes fav_r >=
+        # min_rr almost every single time, structurally — because R
+        # itself (risk = reward/min_rr) is DEFINED in terms of the very
+        # parameter being tuned. "Did wins run past the target" is
+        # near-tautological here, not real evidence quality improved,
+        # unlike Session/EMA/DIV where R comes from an independent
+        # stop. The rule saw this built-in bias as "wins keep running
+        # past the target, extend it" every single pass, regardless of
+        # whether raising min_rr was actually helping — a one-directional
+        # ratchet baked into the measurement itself, compounding with
+        # the stop-tightening effect above into the death spiral
+        # reported live.
+        # Disabled below rather than replaced blind — a properly-
+        # designed VGI-specific rule (reacting to real adverse excursion
+        # the way _risk_autotune_sl_mult() does elsewhere, but inverted
+        # since here HIGHER min_rr means a TIGHTER stop, opposite of a
+        # normal multiplier) needs its own careful design, not a rushed
+        # substitute in the same pass that found this bug.
+        # if win_mfe:
+        #     _risk_autotune_tp_extend("vgi", "vgi_min_rr", VGI_MIN_RR, win_mfe["median"], VGI_MIN_RR, closed_n, _set_vgi_min_rr,
+        #                               bounds=RISK_AUTOTUNE_VGI_RR_BOUNDS)
     except Exception as e:
         log_error(f"risk_autotune vgi: {e}")
 
@@ -23680,6 +23863,22 @@ def index():
 if __name__ == "__main__":
     load_state()
     load_settings()
+    # v0.99.65 — ONE-TIME CORRECTIVE RESET, per direct user report (live
+    # screenshot: vgi_min_rr autotuned to 7.78, winrate 3.8%): the auto-
+    # tune rule that pushed vgi_min_rr this high has a confirmed bug
+    # (see risk_autotune_pass()'s own vgi block, now disabled) — but
+    # disabling that rule alone doesn't undo the damage already
+    # persisted in settings.json; load_settings() above would just
+    # reload the same bad 7.78 every future startup otherwise. Resets
+    # back to the original VGI_MIN_RR default (3.0) ONLY if the loaded
+    # value overshot a sanity ceiling (5.0 — comfortably above the
+    # default, so a genuine future manual choice in that range survives
+    # untouched) — a bounded, one-time migration for this specific
+    # incident, not a permanent behavioral clamp (nothing should push
+    # it back up that high again with the broken rule disabled).
+    if VGI_MIN_RR > 5.0:
+        log_error(f"startup: vgi_min_rr was {VGI_MIN_RR} (from a now-disabled buggy auto-tune rule), resetting to 3.0")
+        _set_vgi_min_rr(3.0)
     load_credentials()
     _load_alert_cfg()
     threading.Thread(target=_telegram_sender_worker, daemon=True).start()
