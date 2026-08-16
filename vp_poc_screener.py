@@ -7684,6 +7684,66 @@ v0.99.70 - CRITICAL FIX, direct user follow-up to v0.99.69's own
          correctly-last <script> block, the Flask route/def integrity
          check (still 64 routes), and an AST walk for duplicate
          top-level defs (none introduced).
+
+v0.99.71 - Direct user request: "проведи глобальную проверку всех
+         индикаторов, найди проблемы и сделай исправления будто ты
+         профессиональный трейдер." Systematic pass across every
+         module for the same classes of issue already found this
+         session:
+         (1) Checked every _risk_autotune_tp_extend() call site (EMA,
+         DIV, Session, XAU LG) for VGI's own self-referential-R trap
+         (v0.99.65) — confirmed all four are safe: each module's own R
+         (SL distance) comes from an independent source (ATR for EMA/
+         DIV, SESSION_SL_MULT/XAU_LG_SL_BUFFER_MULT for the other two)
+         that doesn't depend on the RR/TP parameter being tuned, unlike
+         VGI's risk=reward/min_rr. No changes needed.
+         (2) Checked liquidation safety across every module — confirmed
+         execute_autotrade() (v0.70.0) already runs the SAME liquidation
+         check for every mode (bounce/breakout/divergence/ema/session/
+         msnr/ft5/vgi/xau_lg) at order time, not just MSNR. No gap
+         found.
+         (3) Found and fixed a REAL issue: msnr_optimal_leverage_for_
+         symbol()'s Kelly-search objective and msnr_compound_trail()'s
+         $ simulation both computed pnl_frac with ZERO taker-fee
+         deduction, despite AUTOTRADE_SIM_FEE_PCT already existing in
+         this codebase for exactly this purpose (used elsewhere for the
+         paper simulator and liquidation-price math, never wired into
+         either of these). Round-trip fee cost, as a fraction of
+         MARGIN, is `2 * AUTOTRADE_SIM_FEE_PCT * leverage` — it scales
+         LINEARLY with leverage, since fees are charged on notional
+         (margin * leverage) at both entry and exit. A fee-blind Kelly
+         search finds the leverage optimal in a zero-fee world, a
+         strict overestimate of the true fee-inclusive optimum — as
+         leverage grows, fee drag grows right along with it. Both
+         functions now subtract fee_frac = 2*AUTOTRADE_SIM_FEE_PCT*
+         leverage from every trade's pnl_frac, win or lose (the
+         exchange collects it either way), same ruin/isolated-margin
+         treatment applying on top of the fee-adjusted figure.
+         Verified with a synthetic 20-trade 80%-winrate/2%-stop
+         history: Kelly-optimal leverage correctly dropped from 30x
+         (fee-blind) to 27.5x (fee-aware) — a real, if modest, shift in
+         the SELECTED leverage; far more strikingly, the simulated
+         compound balance dropped from $1888.95 (fee-blind, at the old
+         30x) to $1062.39 (fee-aware, at the new, slightly lower
+         27.5x) — a ~44% overstatement in the previously-displayed
+         "доход" figure purely from ignoring a fee that was already
+         one line away in the same file. At the found leverage, the
+         round-trip fee alone costs 2.75% of margin on every single
+         trade regardless of outcome.
+         Audit scope note: this pass focused on the highest-impact
+         "would a professional trader lose real money to this"
+         categories — leverage/liquidation safety and fee-inclusive
+         sizing — across every module. A few smaller modules (Scalp,
+         FT5, plain Volume bounce/breakout) don't run a $ leverage
+         simulation the way MSNR does, so this specific fee-blindness
+         class doesn't apply to them the same way; their own R-multiple
+         statistics aren't leverage-scaled and weren't flagged by this
+         pass.
+         Verified with py_compile, an actual runtime start (the
+         synthetic reproduction above), pyflakes, node --check on the
+         correctly-last <script> block, the Flask route/def integrity
+         check (still 64 routes), and an AST walk for duplicate
+         top-level defs (none introduced).
 """
 
 import os
@@ -7703,7 +7763,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.70"
+APP_VERSION = "0.99.71"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -17519,6 +17579,22 @@ def msnr_optimal_leverage_for_symbol(trades, ceiling_leverage=None, symbol=None)
     default is already past Kelly-optimal is a stress_test_failed/
     skip_sl_pct_min candidate handled elsewhere, not something this
     function should try to further de-risk by going below the floor.
+    v0.99.71 — CRITICAL FIX, found on a direct user request for a full
+    professional-trader-style audit of every indicator: this objective
+    was computing pnl_frac with NO taker-fee deduction at all, despite
+    AUTOTRADE_SIM_FEE_PCT already existing in this codebase for exactly
+    this purpose elsewhere. Round-trip fee cost, as a fraction of
+    MARGIN (not notional), is `2 * AUTOTRADE_SIM_FEE_PCT * leverage` —
+    it scales linearly WITH leverage, because notional = margin *
+    leverage and both entry and exit each pay a taker fee on that
+    notional. A fee-blind Kelly search finds the leverage optimal in a
+    zero-fee world, which is a strict OVERESTIMATE of the true fee-
+    inclusive optimum — as leverage grows, fee drag grows right along
+    with it, pulling the real optimum lower than what this function
+    used to report. Now subtracted from every trade's pnl_frac
+    (charged regardless of WIN or LOSS — the exchange collects it
+    either way), same ruin/liquidation treatment applying on top of
+    the fee-adjusted figure.
     Returns AUTOTRADE_LEVERAGE_MSNR if there are no valid closed trades
     to optimize against at all."""
     ceiling = ceiling_leverage if ceiling_leverage else AUTOTRADE_LEVERAGE_MSNR
@@ -17545,12 +17621,13 @@ def msnr_optimal_leverage_for_symbol(trades, ceiling_leverage=None, symbol=None)
 
     def _log_growth(lev):
         total = 0.0
+        fee_frac = 2 * AUTOTRADE_SIM_FEE_PCT * lev
         for sign, move_pct, direction in moves:
             if sign == -1 and mmr_pct is not None and direction:
                 liq_buffer_pct = compute_scalp_liquidation_move_pct(direction, lev, mmr_pct)
                 if liq_buffer_pct is not None and move_pct * 100 * SCALP_SAFETY_MARGIN > liq_buffer_pct:
                     return float("-inf")
-            pnl_frac = sign * move_pct * lev
+            pnl_frac = sign * move_pct * lev - fee_frac
             if pnl_frac <= -1.0:
                 return float("-inf")
             total += math.log(1 + pnl_frac)
@@ -17799,9 +17876,25 @@ def msnr_compound_trail(trades, start_balance=None, leverage=None):
     alone wouldn't disambiguate that pair. `leverage` echoes the flat
     value used for the whole trail (kept per-row, not just once, so
     the UI's existing per-trade rendering doesn't need special-casing
-    for "one value vs per-trade" between backtest and live views)."""
+    for "one value vs per-trade" between backtest and live views).
+    v0.99.71 — CRITICAL FIX, found on a direct user request for a full
+    professional-trader-style audit of every indicator: pnl_frac had NO
+    taker-fee deduction at all, despite AUTOTRADE_SIM_FEE_PCT already
+    existing in this codebase for exactly this purpose. Round-trip fee,
+    as a fraction of MARGIN, is `2 * AUTOTRADE_SIM_FEE_PCT * leverage`
+    — scales linearly with leverage since fees are charged on notional
+    (margin * leverage), both entry and exit. At leverage=30x and the
+    0.05%/side default, that's already 3% of margin gone to fees alone
+    on EVERY trade, win or lose — compounding multiplicatively across a
+    trail the same way returns do. The displayed "доход $40→$Y" figure
+    was systematically overstated by ignoring this. Now subtracted from
+    every trade's pnl_frac (same as msnr_optimal_leverage_for_symbol()'s
+    own matching fix — see that function's docstring), charged
+    regardless of WIN or LOSS, same isolated-margin floor applying on
+    top of the fee-adjusted figure."""
     start_balance = start_balance if start_balance is not None else MSNR_COMPOUND_START_BALANCE
     leverage = leverage if leverage is not None else AUTOTRADE_LEVERAGE_MSNR
+    fee_frac = 2 * AUTOTRADE_SIM_FEE_PCT * leverage
     closed = [t for t in trades if t.get("result") in ("WIN", "LOSS")]
     trail = []
     balance = start_balance
@@ -17815,10 +17908,10 @@ def msnr_compound_trail(trades, start_balance=None, leverage=None):
             continue  # malformed trade record — skip without touching the running balance
         if t["result"] == "WIN":
             move_pct = abs(tp - entry) / entry
-            pnl_frac = move_pct * leverage
+            pnl_frac = move_pct * leverage - fee_frac
         else:
             move_pct = abs(entry - sl) / entry
-            pnl_frac = -move_pct * leverage
+            pnl_frac = -move_pct * leverage - fee_frac
         pnl_frac = max(pnl_frac, -1.0)  # isolated-margin floor — can't lose more than the margin risked
         balance_before = balance
         balance = balance * (1 + pnl_frac)
