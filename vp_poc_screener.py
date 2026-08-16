@@ -7101,6 +7101,51 @@ v0.99.57 - Direct user follow-up to v0.99.56: "теперь количество
          node --check on the correctly-last <script> block, the Flask
          route/def integrity check (still 63 routes), and an AST walk
          for duplicate top-level defs (none introduced).
+
+v0.99.58 - Direct user request ("актуализировать описание... короткий
+         содержательный и более тезисный"), plus a live report in the
+         same message ("ночью несколько часов прошло а ребэктеста не
+         было давно" — the exact scenario this session's own earlier
+         watchdog discussion predicted, left undone at the time per
+         direct user choice: "Пока забей").
+         Rewrote the MSNR panel's description from two dense prose
+         paragraphs (methodology explained in running sentences, then
+         a full config dump in one more long sentence) into a short
+         bulleted <ul> — same facts, none of the connective wording.
+         Fixed a stale framing bug while rewriting: "топ-N ликвидных
+         монет" implied a liquidity-rank CUTOFF still exists, but
+         v0.99.48 removed that cap entirely — every symbol clearing
+         MIN_VOL_USD gets backtested now, not just the top N by volume
+         — now reads "N ликвидных монет" without the misleading "топ-"
+         prefix. The live-scan symbol list (unbounded — grows as more
+         symbols qualify) is now truncated to the first 8 with a
+         "+N ещё" tail, same pattern the progress bar's own in-flight
+         list already used.
+         Second half — the stale-backtest report: added a prominent
+         red warning box when the last completed cycle is older than
+         max(1h, 2.5×MSNR_REFRESH_SEC) — new cfg.refresh_sec exposes
+         MSNR_REFRESH_SEC to the frontend for this. This is detection,
+         not a fix: the app can't restart its own OS process from
+         inside itself, and the most likely real cause (Android
+         suspending/killing the background Termux process during idle
+         screen-off time, discussed earlier this session) isn't
+         something server-side code can prevent — this at least makes
+         the person SEE a stall happened instead of discovering it by
+         chance hours or days later. The generous threshold (2.5x, not
+         1x) is specifically to avoid false-positiving on one genuinely
+         slow cycle now that the backtest universe is substantially
+         larger since v0.99.48 dropped the old 70-symbol cap.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         a standalone Node simulation of the staleness math against
+         the EXACT reported scenario (last backtest 2.87h ago, i.e.
+         01:40 -> 04:32, refresh_sec=3600 -> 2.5h threshold: correctly
+         warns) and a normal case (finished 20 minutes ago: correctly
+         doesn't), a grep confirming backtest_universe_size is a real
+         backend field (len(backtest_universe), not a template typo —
+         the "?" seen in one screenshot was pre-first-load, not a bug),
+         node --check on the correctly-last <script> block, the Flask
+         route/def integrity check (still 63 routes), and an AST walk
+         for duplicate top-level defs (none introduced).
 """
 
 import os
@@ -7120,7 +7165,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.57"
+APP_VERSION = "0.99.58"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -18754,6 +18799,7 @@ def api_msnr_status():
             "grid_min_leg_atr": MSNR_PARAM_GRID_MIN_LEG_ATR, "grid_qm_zone_pct": MSNR_PARAM_GRID_QM_ZONE_PCT,
             "grid_qm_lookback": MSNR_PARAM_GRID_QM_LOOKBACK,
             "compound_start_balance": MSNR_COMPOUND_START_BALANCE, "compound_leverage": AUTOTRADE_LEVERAGE_MSNR,
+            "refresh_sec": MSNR_REFRESH_SEC,
         },
         "top": ranked,
     })
@@ -21215,6 +21261,30 @@ async function refreshMsnr() {
     : (status.last_backtest_finished
       ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s)`
       : 'бэктест ещё не запускался');
+  // v0.99.58, per direct user report ("ночью несколько часов прошло а
+  // ребэктеста не было давно" — the exact scenario this session's own
+  // earlier watchdog discussion predicted, at the time left unfixed
+  // per direct user choice): a prominent warning when the last
+  // completed cycle is much older than a normal gap between cycles
+  // should ever be. Threshold is 2.5x MSNR_REFRESH_SEC (via cfg.
+  // refresh_sec) with a 1h floor — generous enough that one genuinely
+  // slow cycle (this app's own backtest universe grew substantially in
+  // v0.99.48, dropping the old 70-symbol cap) doesn't false-positive,
+  // but still catches a multi-hour stall like the one reported. This
+  // is detection, not a fix — the app can't restart its own OS process
+  // from inside itself, and the most likely real cause (Android
+  // suspending/killing the background Termux process during idle
+  // screen-off time) isn't something code here can prevent; this at
+  // least makes the person SEE it happened instead of discovering it
+  // by chance days later.
+  const staleSec = (!status.backtest_running && status.last_backtest_finished)
+    ? (Date.now()/1000 - status.last_backtest_finished) : null;
+  const staleThresholdSec = Math.max(3600, (cfg.refresh_sec || 3600) * 2.5);
+  const staleWarnHtml = (staleSec !== null && staleSec > staleThresholdSec) ? `
+    <div style="background:#3a1414;border:1px solid #e05050;border-radius:8px;padding:8px 12px;margin-bottom:10px;">
+      <b style="color:#ff8080;">\u26a0\ufe0f \u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442 \u0431\u044b\u043b ${Math.round(staleSec/3600*10)/10} \u0447 \u043d\u0430\u0437\u0430\u0434</b><br>
+      <span style="font-size:11px;color:#e0a0a0;">\u0426\u0438\u043a\u043b \u043c\u043e\u0433 \u0437\u0430\u0432\u0438\u0441\u043d\u0443\u0442\u044c \u0438\u043b\u0438 \u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u0435 \u0431\u044b\u043b\u043e \u043f\u0440\u0438\u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u043e (\u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440, Android \u043c\u043e\u0433 \u0443\u0431\u0438\u0442\u044c \u0444\u043e\u043d\u043e\u0432\u044b\u0439 Termux \u043f\u0440\u0438 \u043f\u0440\u043e\u0441\u0442\u043e\u0435 \u0441 \u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d\u043d\u044b\u043c \u044d\u043a\u0440\u0430\u043d\u043e\u043c). \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435, \u0447\u0442\u043e \u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u0435 \u0436\u0438\u0432\u043e, \u0438\u043b\u0438 \u043e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 \u0437\u0430\u043d\u043e\u0432\u043e.</span>
+    </div>` : '';
   const progressPct = status.backtest_total ? Math.round((status.backtest_done||0) / status.backtest_total * 100) : 0;
   const progressBarHtml = status.backtest_running ? `
     <div style="margin:6px 0 8px;">
@@ -21225,14 +21295,36 @@ async function refreshMsnr() {
         ${progressPct}% · сейчас: ${(status.backtest_in_flight||[]).slice(0,6).join(', ') || '—'}${(status.backtest_in_flight||[]).length > 6 ? ` +${status.backtest_in_flight.length-6}` : ''}
       </div>
     </div>` : '';
+  // v0.99.58, per direct user request ("актуализировать описание,
+  // сделать его коротким содержательным и более тезисным"): replaced
+  // the old two-paragraph prose block (methodology + full config
+  // dump in running sentences) with a short bulleted list — same
+  // facts, none of the connective-tissue wording. Also fixed a stale
+  // framing bug while rewriting: "топ-N ликвидных монет" implied a
+  // liquidity-rank CUTOFF still exists, but v0.99.48 removed that cap
+  // — every symbol clearing MIN_VOL_USD gets backtested now, not just
+  // the top N by volume, so this now says "N ликвидных монет" without
+  // the misleading "топ-" prefix. The live-scan symbol list is
+  // truncated to the first 8 with a "+N ещё" tail (same pattern the
+  // progress bar's own in-flight list already used above) since it
+  // can grow arbitrarily long as more symbols qualify.
+  const liveSymbols = status.live_universe || status.symbols || [];
+  const liveSymbolsTxt = liveSymbols.slice(0, 8).join(', ') + (liveSymbols.length > 8 ? ` +${liveSymbols.length - 8}` : '');
   const warnHtml = `
-    <div class="dim" style="font-size:12px;margin-bottom:12px;">
-      Логика с канала @xaubymedovyk (методика Malaysian SNR): OCL-уровни по линии закрытий (${cfg.structure_tf}), A-shape/V-shape — импульсные пивоты, вход — QM (ложный вынос + возврат) на ${cfg.entry_tf}, тейк — противоположный уровень пары (даёт естественно высокий R:R). Честный бэктест по нашим данным без заглядывания вперёд.
+    <div class="dim" style="font-size:12px;margin-bottom:10px;">
+      <b>MSNR / Malaysian SNR</b> (@xaubymedovyk): OCL-уровни по закрытиям, A/V-shape пивоты, вход — QM (ложный вынос + возврат), тейк — противоположный уровень (высокий R:R от природы паттерна). Бэктест честный, без заглядывания вперёд.
     </div>`;
   const headerHtml = `
-    <div class="dim" style="margin-bottom:8px;">
-      Живой скан: ${(status.live_universe||status.symbols||[]).join(', ')} (золото — всегда; остальные — прошли квалификацию на бэктесте) · бэктест дополнительно охватывает топ-${status.backtest_universe_size||'?'} ликвидных монет · <b>квалификация в живой скан</b>: винрейт &gt;${cfg.live_promote_min_winrate}% и выборка &gt;${cfg.live_promote_min_sample} закрытых сделок · структура ${cfg.structure_tf} (пивоты L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf} · мин. импульс ${cfg.min_leg_atr}×ATR, QM-зона ${(cfg.qm_zone_pct*100).toFixed(2)}%, окно ${cfg.qm_lookback_bars} баров (автотюнятся отдельно на каждую монету, см. столбец «Параметры») · <b>потолок RR ${cfg.max_rr}</b> (если реальный противоположный уровень даёт RR выше — сделка берётся с укороченным фикс. тейком вместо него; авто-тюнится по статистике ниже)<br>
-      <span style="font-size:11px;">Автоторговля MSNR (если включена в настройках) применяется ко всем монетам из живого скана, включая только что квалифицированные — не только к золоту.</span><br>
+    <div class="dim" style="margin-bottom:8px;font-size:12px;">
+      <ul style="margin:0 0 6px 18px;padding:0;">
+        <li>Живой скан: золото всегда + квалифицированные (${liveSymbolsTxt || '—'})</li>
+        <li>Квалификация: винрейт &gt;${cfg.live_promote_min_winrate}%, выборка &gt;${cfg.live_promote_min_sample} закрытых сделок</li>
+        <li>Бэктест: ${status.backtest_universe_size || '?'} ликвидных монет · структура ${cfg.structure_tf} (L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf}</li>
+        <li>Параметры (импульс/QM-зона/окно) автотюнятся отдельно на каждую монету — см. «Параметры» в таблице</li>
+        <li>Потолок RR ${cfg.max_rr}: выше — укороченный фикс. тейк вместо реального уровня</li>
+        <li>Автоторговля (если включена в настройках) — по всем монетам живого скана, не только по золоту</li>
+      </ul>
+      ${staleWarnHtml}
       ${buildTxt}<br>
       ${progressBarHtml}
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0} · клик по строке — график
