@@ -7744,6 +7744,53 @@ v0.99.71 - Direct user request: "проведи глобальную прове�
          correctly-last <script> block, the Flask route/def integrity
          check (still 64 routes), and an AST walk for duplicate
          top-level defs (none introduced).
+
+v0.99.72 - Direct user report with screenshots: a live MSNR signal
+         (TRX_USDT) opened, but no Telegram notification arrived. The
+         report itself connected this to the symbol's autotrade
+         checkbox being off — investigation confirmed msnr_scan_symbol_
+         live()'s own send_telegram() call is unconditional, NOT gated
+         by the per-symbol checkbox at all (already documented at that
+         call site since v0.99.55), so that specific theory doesn't
+         hold — but the investigation surfaced a real, separate bug
+         while checking: TELEGRAM_ALERTS_MSNR is properly defined (env
+         default, wired into get_settings()/apply_settings(), a real
+         "Алерты MSNR" checkbox in the settings UI) but send_telegram()
+         never actually checked it — every other module's own category
+         (vp/div/ema/hourly/session/session_ny/xau_lg/ft5/vgi) has a
+         matching gate, msnr's was simply missing. Toggling "Алерты
+         MSNR" off in settings had zero effect — a dead control. Fixed
+         by adding the matching check. Note this direction (a missing
+         check) can't itself explain a MISSING notification — it only
+         means messages were never blocked by this setting, not more
+         likely to be — so it doesn't fully explain the reported
+         symptom.
+         The more likely explanation for the actual missing
+         notification, documented in place rather than fixed this
+         turn (would mean touching the shared Telegram delivery
+         pipeline every module relies on, a bigger and riskier change
+         than this pass's scope): _telegram_send_queue is a plain in-
+         memory queue.Queue, never persisted. If the background process
+         restarts (this app has documented restart issues — see the
+         MSNR staleness warning this same session's screenshots showed
+         firing again, "последний бэктест был 2.8 ч назад", same
+         Android/Termux-kill suspicion already raised then) between a
+         signal being queued for Telegram and the background sender
+         worker actually draining it, the queued message is lost for
+         good — while STATE["msnr_signals"] itself (persisted via
+         save_state()) survives the restart intact, which is exactly
+         why the signal correctly shows as OPEN in the UI/table with no
+         corresponding Telegram message ever having arrived. Not
+         implemented as a fix in this pass — flagged as a real,
+         higher-effort follow-up (persisting pending Telegram sends
+         the same way signal state already is) rather than rushed into
+         the same turn as an unrelated confirmed bug fix.
+         Verified with py_compile, an actual runtime start (confirmed
+         TELEGRAM_ALERTS_MSNR is a real, already-existing module-level
+         constant, not something that needed defining from scratch),
+         pyflakes, node --check on the correctly-last <script> block,
+         and the Flask route/def integrity check (still 64 routes) —
+         one-line logic fix, no new endpoints.
 """
 
 import os
@@ -7763,7 +7810,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.71"
+APP_VERSION = "0.99.72"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14463,6 +14510,29 @@ def send_telegram(text, category=None):
     if category == "ft5" and not TELEGRAM_ALERTS_FT5:
         return
     if category == "vgi" and not TELEGRAM_ALERTS_VGI:
+        return
+    # v0.99.72 — BUG FOUND, per direct user report ("монета не пришла в
+    # уведомление телеграм... как оказалось галочки на монете нет"):
+    # investigating that report found a SEPARATE, real bug — TELEGRAM_
+    # ALERTS_MSNR is properly defined (env default, get_settings()/
+    # apply_settings() wiring, a real "Алерты MSNR" checkbox in the UI)
+    # but was never actually CHECKED here, unlike every other module's
+    # own category. The setting was a dead control: toggling "Алерты
+    # MSNR" off in settings had zero effect on whether MSNR messages
+    # actually sent — this direction doesn't explain a MISSING
+    # notification (a missing check means messages are never blocked,
+    # not more likely to be), but it's a real correctness gap found
+    # along the way and worth closing regardless. The actual reported
+    # symptom's more likely explanation is separate — see msnr_scan_
+    # symbol_live()'s own send_telegram() call site, which already
+    # documents that it's unconditional and NOT gated by the per-
+    # symbol autotrade checkbox — and _telegram_send_queue's own
+    # in-memory (not persisted) nature, which can silently lose an
+    # already-queued message if the process restarts before the
+    # background worker drains it — the same class of background-
+    # process-kill issue this app's own MSNR staleness warning already
+    # flags separately.
+    if category == "msnr" and not TELEGRAM_ALERTS_MSNR:
         return
 
     def _do_send():
