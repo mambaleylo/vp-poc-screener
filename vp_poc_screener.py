@@ -7628,6 +7628,62 @@ v0.99.69 - Direct user report with a screenshot: a live OPEN MSNR
          node --check on the correctly-last <script> block, and the
          Flask route/def integrity check (still 64 routes) — UI-only
          change, no Python logic touched.
+
+v0.99.70 - CRITICAL FIX, direct user follow-up to v0.99.69's own
+         explanation: "получается на бэктесте плечо выходящее за рамки
+         ликвидации?" Confirmed yes: msnr_optimal_leverage_for_symbol()
+         only ever guarded against a NOMINAL isolated-margin ruin
+         (pnl_frac <= -1.0, i.e. move_pct*leverage >= 100%) — never the
+         REAL exchange maintenance-margin liquidation price, which
+         compute_scalp_liquidation_move_pct()'s own docstring already
+         states is ALWAYS at or before that naive point ("a non-
+         negative MMR+fee can only ever SHRINK this buffer... never
+         enlarge it"). That's exactly the same real liquidation check
+         msnr_trade_beyond_liquidation() already runs before a live
+         signal fires and before a backtest trade counts toward stats
+         — but the Kelly-optimal SEARCH itself never checked its own
+         candidate leverages against it, so the search could (and, per
+         a synthetic reproduction below, does) select and report a
+         leverage where a historical LOSS trade's own SL sits PAST
+         where the exchange would have actually force-liquidated the
+         position first.
+         This meant: the "Kelly-оптимум" shown in the backtest table
+         and used for the $ compound simulation was not necessarily a
+         leverage genuinely safe for every trade it was computed
+         against — msnr_scan_symbol_live()'s own liquidation walk-down
+         (v0.99.46) was doing ALL the real safety work for live orders,
+         while the backtest's own number (and the "доход" figures
+         computed at it) stayed unaware of the constraint entirely.
+         Fixed at the source: msnr_optimal_leverage_for_symbol() gained
+         an optional `symbol` parameter — when given, each candidate
+         leverage's own log-growth evaluation now ALSO checks every
+         historical LOSS trade's SL distance against that symbol's
+         real liquidation buffer (same compute_scalp_liquidation_move_
+         pct()/STATE["scalp_mmr_map"]/SCALP_DEFAULT_MMR_PCT/SCALP_
+         SAFETY_MARGIN this app's other liquidation checks already
+         use) — a leverage that would have breached it scores -inf,
+         same absorbing-ruin treatment the nominal check already had.
+         Both call sites in msnr_optimize_symbol() (the fallback branch
+         and the main branch) now pass symbol=symbol. Backward-
+         compatible: omitting `symbol` skips the new check entirely,
+         same "can't evaluate, don't penalize" stance already used
+         elsewhere for missing data, not a silent behavior change for
+         any other caller.
+         Verified with py_compile, an actual runtime start (synthetic
+         20-trade 80%-winrate history with a 2%-wide stop: without a
+         symbol, Kelly search picked 30x exactly as before the fix
+         (confirmed unchanged backward-compat behavior); with a
+         synthetic symbol at MMR=5%, the search correctly dropped to
+         12.5x — and directly confirmed WHY via compute_scalp_
+         liquidation_move_pct() itself: at the old 30x/MMR=5%, the real
+         liquidation buffer is only 1.81%, tighter than the trade's own
+         2% stop, meaning the exchange would have force-liquidated
+         before price ever reached the nominal SL — exactly the
+         scenario the user's question was asking about, now
+         reproduced and fixed), pyflakes, node --check on the
+         correctly-last <script> block, the Flask route/def integrity
+         check (still 64 routes), and an AST walk for duplicate
+         top-level defs (none introduced).
 """
 
 import os
@@ -7647,7 +7703,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.69"
+APP_VERSION = "0.99.70"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16805,7 +16861,7 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
             "skip_volume_below": None, "volume_filtered_count": 0,
             "effective_leverage": msnr_symbol_effective_leverage(symbol),
             "leverage_ceiling": leverage_ceiling,
-            "optimal_leverage": msnr_optimal_leverage_for_symbol(best_results, leverage_ceiling),
+            "optimal_leverage": msnr_optimal_leverage_for_symbol(best_results, leverage_ceiling, symbol=symbol),
             "note": f"insufficient closed trades across all {combos} combos tried "
                     f"(max {max(tried) if tried else 0}, need {MSNR_MIN_BACKTEST_TRADES}); "
                     f"using middle-of-grid defaults",
@@ -16936,7 +16992,7 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
     # liquidation, skip_sl_pct_min) — the same final trade set the
     # compound simulation right below already uses, not the raw
     # unfiltered history.
-    best["optimal_leverage"] = msnr_optimal_leverage_for_symbol(best_results, best.get("leverage_ceiling"))
+    best["optimal_leverage"] = msnr_optimal_leverage_for_symbol(best_results, best.get("leverage_ceiling"), symbol=symbol)
     # v0.99.24, per direct user request: a $ compounding simulation
     # (start MSNR_COMPOUND_START_BALANCE, reinvest the whole balance
     # every trade) over best_results — the FILTERED list (skip_rr_min +
@@ -17388,7 +17444,7 @@ def msnr_symbol_contract_max_leverage(symbol):
     return contract_max_lev if contract_max_lev else AUTOTRADE_LEVERAGE_MSNR
 
 
-def msnr_optimal_leverage_for_symbol(trades, ceiling_leverage=None):
+def msnr_optimal_leverage_for_symbol(trades, ceiling_leverage=None, symbol=None):
     """v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше не
     стало, будто даже хуже" -> "давай для каждой монеты в рамках
     автотюнинга автоматически выбирать оптимальное плечо для
@@ -17422,10 +17478,34 @@ def msnr_optimal_leverage_for_symbol(trades, ceiling_leverage=None):
     signal-by-signal off a single visible feature (stop width) the way
     the replaced heuristic did.
     Any candidate leverage where even ONE historical trade's own
-    pnl_frac(L) <= -1 (would have wiped the account) scores negative
-    infinity for that candidate outright — ruin is absorbing; no
-    amount of upside on other trades compensates for a leverage that
-    has already blown the account once in its own visible history.
+    pnl_frac(L) <= -1 (would have wiped the account, isolated-margin
+    nominal loss) scores negative infinity for that candidate outright
+    — ruin is absorbing; no amount of upside on other trades
+    compensates for a leverage that has already blown the account once
+    in its own visible history.
+    v0.99.70 — CRITICAL FIX, per direct user question ("получается на
+    бэктесте плечо выходящее за рамки ликвидации?"): the nominal-loss
+    ruin check above is NOT the tightest constraint. Gate's own
+    maintenance-margin liquidation price is ALWAYS at or before the
+    naive 100%-of-margin point (compute_scalp_liquidation_move_pct()'s
+    own docstring: "a non-negative MMR+fee can only ever SHRINK this
+    buffer... never enlarge it"), so a candidate leverage could pass
+    the nominal check above while still meaning some historical LOSS
+    trade's own SL sits PAST where the exchange would have actually
+    force-liquidated the position first — the exact same "trade beyond
+    liquidation" condition msnr_trade_beyond_liquidation() already
+    guards live signals against, but this search was never checking it
+    against its OWN candidate leverages. When `symbol` is given, each
+    LOSS trade's own SL distance is now ALSO checked against that
+    symbol's real liquidation buffer (compute_scalp_liquidation_move_
+    pct(), same STATE["scalp_mmr_map"]/SCALP_DEFAULT_MMR_PCT/SCALP_
+    SAFETY_MARGIN this app's other liquidation checks already use) at
+    each candidate leverage — a leverage that would have breached it
+    scores -inf too, same absorbing-ruin treatment as the nominal
+    check. Without a symbol (backward-compatible default), this check
+    is skipped — same "can't evaluate, don't penalize" stance the rest
+    of this codebase takes for missing data, not a silent widening of
+    what counts as safe.
     Searched as a plain grid from AUTOTRADE_LEVERAGE_MSNR up to
     ceiling_leverage in 0.5x steps rather than a smarter optimizer
     (gradient ascent / golden-section search): this objective is
@@ -17442,6 +17522,11 @@ def msnr_optimal_leverage_for_symbol(trades, ceiling_leverage=None):
     Returns AUTOTRADE_LEVERAGE_MSNR if there are no valid closed trades
     to optimize against at all."""
     ceiling = ceiling_leverage if ceiling_leverage else AUTOTRADE_LEVERAGE_MSNR
+    mmr_pct = None
+    if symbol is not None:
+        with state_lock:
+            mmr_map = STATE.get("scalp_mmr_map", {})
+        mmr_pct = mmr_map.get(symbol, SCALP_DEFAULT_MMR_PCT)
     moves = []
     for t in trades:
         if t.get("result") not in ("WIN", "LOSS"):
@@ -17452,15 +17537,19 @@ def msnr_optimal_leverage_for_symbol(trades, ceiling_leverage=None):
         if not entry or entry <= 0 or sl is None or tp is None:
             continue
         if t["result"] == "WIN":
-            moves.append((1, abs(tp - entry) / entry))
+            moves.append((1, abs(tp - entry) / entry, None))
         else:
-            moves.append((-1, abs(entry - sl) / entry))
+            moves.append((-1, abs(entry - sl) / entry, t.get("direction")))
     if not moves:
         return AUTOTRADE_LEVERAGE_MSNR
 
     def _log_growth(lev):
         total = 0.0
-        for sign, move_pct in moves:
+        for sign, move_pct, direction in moves:
+            if sign == -1 and mmr_pct is not None and direction:
+                liq_buffer_pct = compute_scalp_liquidation_move_pct(direction, lev, mmr_pct)
+                if liq_buffer_pct is not None and move_pct * 100 * SCALP_SAFETY_MARGIN > liq_buffer_pct:
+                    return float("-inf")
             pnl_frac = sign * move_pct * lev
             if pnl_frac <= -1.0:
                 return float("-inf")
