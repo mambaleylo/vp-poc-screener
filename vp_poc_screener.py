@@ -7497,6 +7497,47 @@ v0.99.66 - Completes the XAU LG feature-parity request from v0.99.64
          integrity check (64 routes — up from 63, exactly the one new
          chart endpoint), and an AST walk for duplicate top-level defs
          (none introduced).
+
+v0.99.67 - Direct user report with screenshots: "возле сделок я не вижу
+         rr, я не вижу средний rr по всем сделкам, я вижу просто в
+         тексте rr2." Root cause, found by reading the actual record
+         construction: Volume's bounce/breakout signal record NEVER
+         stored "rr" at all — `rr = bounce_rr if ... else breakout_rr`
+         (this SYMBOL's own tuned value, from optimize_symbol()'s
+         per-symbol grid search over PARAM_GRID_RR — genuinely varies
+         trade to trade, as the earlier conversation about breakout's
+         RR-tuning mechanism established) was computed and used to
+         build sl/tp, then silently discarded — never written onto the
+         record itself. Every other RR-bearing module (VGI, Scalp,
+         EMA/DIV reverse mode, XAU LG since v0.99.66) already stores
+         its own per-trade rr; Volume/bounce/breakout was the one place
+         that got skipped, which is exactly why the header could only
+         ever show one flat global RR/RR_BREAKOUT constant text ("RR
+         2") instead of anything real — there was no per-trade data to
+         aggregate from.
+         Fixed at the source: record now stores "rr". compute_signal_
+         stats() gained a new _agg_rr() helper (avg/median/p25/p75,
+         same shape EMA/DIV's own rr_all already returns) — both
+         overall (new "rr_all") and per-reason (by_reason[reason][
+         "rr"]), computed from the actual stored per-trade values.
+         Trades closed before this fix have no "rr" and are correctly
+         excluded from the aggregate rather than counted as 0.
+         UI: the header's bounce/breakout summary now shows each
+         reason's own real avg RR inline (replacing the removed flat
+         "RR ${config.rr}" text that never reflected per-symbol tuning
+         at all); the main signals table gained an "RR" column between
+         TP and MFE(R), showing each individual trade's own value.
+         Verified with py_compile, an actual runtime start (synthetic
+         5-signal STATE: 3 breakout trades with rr 2.0/1.5/2.5 ->
+         avg 2.0 exactly; 1 bounce trade with rr=3.0 plus 1 legacy
+         bounce trade with rr=None -> bounce aggregate correctly shows
+         n=1, not diluted or zero-filled by the missing-rr trade;
+         overall rr_all correctly aggregates all 4 rr-bearing trades
+         together), pyflakes, node --check on the correctly-last
+         <script> block, the Flask route/def integrity check (still 64
+         routes — this was a data/display fix, no new endpoints), and
+         a grep confirming no stale colspan was left pointing at the
+         signals table's old 10-column count now that it has 11.
 """
 
 import os
@@ -7516,7 +7557,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.66"
+APP_VERSION = "0.99.67"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14374,6 +14415,23 @@ def scan_symbol(symbol, candles=None):
                 rr = bounce_rr if sig["reason"] == "bounce" else breakout_rr
                 buffer_pct = bounce_buffer if sig["reason"] == "bounce" else breakout_buffer
                 sl, tp, risk = compute_tp_sl(sig["direction"], sig["price"], sig["zone"], rr=rr, buffer_pct=buffer_pct)
+                # v0.99.67 — BUG FOUND, per direct user report with
+                # screenshots ("возле сделок я не вижу rr, я не вижу
+                # средний rr по всем сделкам, я вижу просто в тексте
+                # rr2"): `rr` above is THIS symbol's own tuned value
+                # (bounce_rr/breakout_rr, from optimize_symbol()'s own
+                # per-symbol grid search over PARAM_GRID_RR — genuinely
+                # varies symbol to symbol, unlike the flat header text
+                # that was showing) — it was used to compute sl/tp right
+                # above, then silently discarded: never stored on the
+                # record itself. Every OTHER RR-bearing module (VGI,
+                # Scalp, EMA/DIV's own reverse mode, XAU LG since
+                # v0.99.66) stores its own per-trade rr; Volume/bounce/
+                # breakout was the one place that got skipped. Now
+                # stored so the signals table can show it per-trade and
+                # a real avg/median can be computed from actual trades,
+                # not just echo whatever the global RR/RR_BREAKOUT
+                # constant happens to be right now.
                 record = {
                     "symbol": symbol,
                     "direction": sig["direction"],
@@ -14383,6 +14441,7 @@ def scan_symbol(symbol, candles=None):
                     "sl": sl,
                     "tp": tp,
                     "risk": risk,
+                    "rr": rr,
                     "zone_top": sig["zone"]["top"],
                     "zone_bottom": sig["zone"]["bottom"],
                     "time": sig["time"],
@@ -14563,13 +14622,37 @@ def compute_signal_stats():
     open_count = sum(1 for s in signals if s.get("status") == "OPEN")
     winrate = round(wins / total * 100, 1) if total else None
 
+    # v0.99.67, per direct user report ("возле сделок я не вижу rr, я
+    # не вижу средний rr по всем сделкам, я вижу просто в тексте rr2"):
+    # bounce/breakout RR is auto-tuned per SYMBOL (optimize_symbol()'s
+    # own grid search over PARAM_GRID_RR) and genuinely varies trade to
+    # trade — the header was showing one flat global RR/RR_BREAKOUT
+    # constant instead of anything real. Now aggregates the actual
+    # per-trade "rr" field (only just started being stored on the
+    # record itself — see the record-construction fix in scan_symbol())
+    # into avg/median/p25/p75, same shape EMA/DIV's own rr_all already
+    # uses. Trades closed before this fix won't have "rr" set — they're
+    # silently excluded (not shown as 0), same "don't fabricate history
+    # that wasn't recorded" stance every other agg() helper in this
+    # file already takes for a newly-added field.
+    def _agg_rr(subset):
+        vals = [s["rr"] for s in subset if s.get("rr") is not None]
+        if not vals:
+            return None
+        vals_sorted = sorted(vals)
+        n = len(vals_sorted)
+        return {"avg": round(sum(vals) / n, 3), "median": round(vals_sorted[n // 2], 3),
+                "p25": round(vals_sorted[int(n * 0.25)], 3),
+                "p75": round(vals_sorted[min(int(n * 0.75), n - 1)], 3), "n": n}
+
     by_reason = {}
     for reason in ("bounce", "breakout"):
         rc = [s for s in closed if s.get("reason") == reason]
         rw = sum(1 for s in rc if s["result"] == "WIN")
         rl = sum(1 for s in rc if s["result"] == "LOSS")
         rt = rw + rl
-        by_reason[reason] = {"wins": rw, "losses": rl, "total": rt, "winrate": round(rw / rt * 100, 1) if rt else None}
+        by_reason[reason] = {"wins": rw, "losses": rl, "total": rt, "winrate": round(rw / rt * 100, 1) if rt else None,
+                              "rr": _agg_rr(rc)}
 
     # signals detected under the currently-running version's signal logic —
     # lets a version bump that changes detection/filters be evaluated on
@@ -14588,6 +14671,7 @@ def compute_signal_stats():
         "open": open_count, "wins": wins, "losses": losses,
         "timeouts": timeouts, "winrate": winrate, "closed_total": total,
         "by_reason": by_reason, "current_version": current_version,
+        "rr_all": _agg_rr(closed),
     }
 
 
@@ -20606,7 +20690,7 @@ INDEX_HTML = """<!doctype html>
   <div id="tuningPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
   <div style="overflow-x:auto;">
   <table id="signalsTable" style="display:none">
-    <thead><tr><th>Symbol</th><th>Dir</th><th>Reason</th><th>Entry</th><th>SL</th><th>TP</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
+    <thead><tr><th>Symbol</th><th>Dir</th><th>Reason</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
     <tbody></tbody>
   </table>
   </div>
@@ -21315,6 +21399,7 @@ async function refreshSignals() {
       <td>${fmt(r.entry)}</td>
       <td class="dim">${fmt(r.sl)}</td>
       <td class="dim">${fmt(r.tp)}</td>
+      <td class="dim">${r.rr !== undefined && r.rr !== null ? r.rr : '-'}</td>
       <td class="dim" title="на закрытии → полное окно 24ч">${fmtMfeMae(r, 'mfe_r')}</td>
       <td class="dim" title="на закрытии → полное окно 24ч">${fmtMfeMae(r, 'mae_r')}</td>
       <td>${statusHtml}</td>
@@ -21354,8 +21439,18 @@ async function refreshTuning() {
     ? `автотюнинг: ${at.tuned_symbols}/${s.universe_size} монет уже подобрано (обновление каждые ${at.refresh_hours}ч, +${at.per_cycle}/скан)`
     : 'автотюнинг выключен';
   const br = st.by_reason || {};
-  const bounceTxt = br.bounce && br.bounce.total ? `bounce ${br.bounce.winrate}% (${br.bounce.total})` : 'bounce -';
-  const breakoutTxt = br.breakout && br.breakout.total ? `breakout ${br.breakout.winrate}% (${br.breakout.total})` : 'breakout -';
+  // v0.99.67, per direct user report ("возле сделок я не вижу rr, я
+  // не вижу средний rr по всем сделкам, я вижу просто в тексте rr2"):
+  // each reason's own real avg RR (from actual closed trades, now that
+  // scan_symbol()'s record finally stores "rr" — see that fix's own
+  // comment) folded right into the existing bounce/breakout summary,
+  // replacing the flat single "RR ${s.config.rr}" that used to sit at
+  // the end of this line and never reflected the real per-symbol-
+  // tuned values at all.
+  const bounceRrTxt = br.bounce && br.bounce.rr ? ` · RR ${br.bounce.rr.avg}` : '';
+  const breakoutRrTxt = br.breakout && br.breakout.rr ? ` · RR ${br.breakout.rr.avg}` : '';
+  const bounceTxt = br.bounce && br.bounce.total ? `bounce ${br.bounce.winrate}% (${br.bounce.total})${bounceRrTxt}` : 'bounce -';
+  const breakoutTxt = br.breakout && br.breakout.total ? `breakout ${br.breakout.winrate}% (${br.breakout.total})${breakoutRrTxt}` : 'breakout -';
   const cv = st.current_version || {};
   const cvTxt = cv.total ? `с v${s.version}: ${cv.winrate}% (${cv.wins}W/${cv.losses}L)` : `с v${s.version}: пока нет закрытых`;
   const errList = s.errors || [];
@@ -21366,7 +21461,7 @@ async function refreshTuning() {
     </div>` : '';
   const detailHtml = `
     <div class="dim" style="margin-bottom:10px;">
-      <b>Volume</b> · Винрейт: ${wr} (${st.wins||0}W / ${st.losses||0}L, timeout ${st.timeouts||0}) · ${bounceTxt} · ${breakoutTxt} · открытых: ${st.open||0} · RR ${s.config ? s.config.rr : ''}<br>
+      <b>Volume</b> · Винрейт: ${wr} (${st.wins||0}W / ${st.losses||0}L, timeout ${st.timeouts||0}) · ${bounceTxt} · ${breakoutTxt} · открытых: ${st.open||0}<br>
       ${atTxt}<br>
       За этот скан отклонено — тренд: ${s.filtered_by_trend||0}, объём: ${s.filtered_by_volume||0}, OI: ${s.filtered_by_oi||0}, устарел: ${s.filtered_by_staleness||0} · ${cvTxt}
     </div>${errHtml}`;
