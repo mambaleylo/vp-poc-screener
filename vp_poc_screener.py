@@ -7271,6 +7271,31 @@ v0.99.61 - Direct user question: "в описании потолок 8rr, это
          node --check on the correctly-last <script> block, the Flask
          route/def integrity check (still 63 routes) — comment-only
          change, no logic touched.
+
+v0.99.62 - Direct user request: "ещё планшет huawei mate 12.2 2025 в
+         ширину все не влазит, надо скролить, немного буквально."
+         Found a real bug while investigating: skipVolumeTxt (v0.99.60's
+         volume-filter indicator) was defined but never actually
+         inserted into the paramsTxt template string — it's been
+         computed every render since v0.99.60 and never once shown.
+         Fixed by adding it into the concatenation, in the same
+         skip-indicator order the others already follow.
+         For the actual width request: trimmed the RR column from
+         "avg XR / med YR" down to just "avg XR" (median moved to a
+         hover title instead of taking permanent column width — score
+         already accounts for sample-size/variance concerns the median
+         was partly there to hint at, so dropping it from the always-
+         visible text loses little). Also trimmed the global mobile
+         table cell padding 6px -> 4px horizontal (vertical unchanged)
+         — a small, uniform saving across every column of every table
+         under this same rule, not just MSNR's.
+         Verified with py_compile, an actual runtime start, pyflakes, a
+         grep confirming paramsTxt's template literal now references
+         skipVolumeTxt exactly where the other four skip indicators
+         already sit, node --check on the correctly-last <script>
+         block, the Flask route/def integrity check (still 63 routes),
+         and an AST walk for duplicate top-level defs (none introduced
+         — no Python functions touched, JS/CSS-only change).
 """
 
 import os
@@ -7290,7 +7315,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.61"
+APP_VERSION = "0.99.62"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -20014,7 +20039,13 @@ INDEX_HTML = """<!doctype html>
        way) are the ones that actually needed it, but a uniformly
        tighter mobile table is a reasonable default everywhere, not
        just there. */
-    th, td { padding:4px 6px; font-size:10.5px; }
+    th, td { padding:4px 4px; font-size:10.5px; }
+    /* v0.99.62, per direct user report (Huawei MatePad 12.2, landscape
+       — "все не влазит, надо скролить, немного буквально"): horizontal
+       cell padding trimmed 6px -> 4px per side (vertical unchanged) —
+       a small, uniform width saving across every column of every table
+       this same global rule already covers, rather than touching any
+       one table's own layout specifically. */
     /* v0.99.30, per direct user request ("давай закрепим"): pin the
        first column (Symbol, in every one of these tables) so it stays
        visible while swiping through the rest — now that v0.99.29 fixed
@@ -21793,7 +21824,7 @@ async function refreshMsnr() {
     const compTxt = (r.compound_return_pct !== null && r.compound_return_pct !== undefined)
       ? ` \u00b7 <span class="${compClass}">\u0434\u043e\u0445\u043e\u0434 ${r.compound_return_pct > 0 ? '+' : ''}${r.compound_return_pct}% ($${cfg.compound_start_balance}\u2192$${r.compound_final_balance})${compBlownTxt}</span>`
       : '';
-    const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431${skipTxt}${skipSlTxt}${skipHoursTxt}${liqTxt}${levTxt}${compTxt}`;
+    const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431${skipTxt}${skipSlTxt}${skipHoursTxt}${skipVolumeTxt}${liqTxt}${levTxt}${compTxt}`;
     const noteTxt = r.note ? ` \u26a0\ufe0f ${r.note}` : '';
     // v0.99.49, per direct user request ("хочу иметь возможность
     // автоторговли и не по топ-10, на свой страх и риск как
@@ -21833,7 +21864,7 @@ async function refreshMsnr() {
       <td class="${wrClass}">${r.winrate !== null && r.winrate !== undefined ? r.winrate+'%' : '-'}</td>
       <td class="dim">n=${r.trades}${(r.raw_closed_n !== null && r.raw_closed_n !== undefined && r.raw_closed_n > r.trades) ? ` <span title="исходная выборка до фильтров — именно её смотрит отбор в топ/live">(было ${r.raw_closed_n})</span>` : ''}</td>
       <td class="dim"><span class="win">${r.wins}W</span>/<span class="loss">${r.losses}L</span>/<span class="status-timeout">${r.timeouts}T</span></td>
-      <td class="dim">avg ${r.avg_rr ?? '-'}R / med ${r.median_rr ?? '-'}R</td>
+      <td class="dim" title="med ${r.median_rr ?? '-'}R">avg ${r.avg_rr ?? '-'}R</td>
       <td class="${expClass}">${r.expectancy_r !== null && r.expectancy_r !== undefined ? (r.expectancy_r > 0 ? '+' : '') + r.expectancy_r + 'R' : '-'}</td>
       <td class="dim">${r.score !== null && r.score !== undefined ? r.score : '-'}</td>
       <td class="dim">${paramsTxt}${noteTxt}</td>
