@@ -7791,6 +7791,47 @@ v0.99.72 - Direct user report with screenshots: a live MSNR signal
          pyflakes, node --check on the correctly-last <script> block,
          and the Flask route/def integrity check (still 64 routes) —
          one-line logic fix, no new endpoints.
+
+v0.99.73 - Direct user follow-up, alarmed: "уведомления и нет потому
+         что это правильно, монета не в топ 10, галочки нет, тогда
+         какого фига по ней открылась сделка, TRX?" — the previous
+         turn had misread the report; this is about whether a REAL
+         trade opened on a symbol with no autotrade checkbox, not about
+         the missing notification.
+         Re-verified by reading msnr_scan_symbol_live()'s actual record
+         construction directly: record["status"]="OPEN" is set
+         UNCONDITIONALLY the instant any signal is detected — BEFORE
+         the autotrade-eligibility check (`if autotrade_symbols.get(
+         symbol) and symbol in msnr_manual_toggle_allowed_symbols(...)`)
+         even runs. That later block is the ONLY place execute_
+         autotrade() gets called and autotrade_fired/live_size_usd/
+         leverage_used get set — for a symbol with no checkbox, that
+         whole block is skipped, so autotrade_fired stays False and
+         live_size_usd/leverage_used stay None, exactly matching the
+         "РАЗМЕР: —" the report's own screenshot already showed. No
+         real order was placed for TRX_USDT — confirmed, not assumed.
+         "OPEN" here has always meant "this signal is being tracked
+         toward a WIN/LOSS outcome for statistics" (so a symbol outside
+         the top-10 keeps accumulating its own track record even while
+         not being traded — the record's own existing comment already
+         explains why msnr_update_live_balance() specifically needs
+         autotrade_fired=False signals to NOT move real money), never
+         "a real position is open." The green live-scan dot means "in
+         the scan universe" (getting checked for signals at all), a
+         different question from "being traded" — nothing in the UI
+         made that distinction obvious, which is what actually caused
+         the alarm.
+         Fixed the display gap rather than treating this as a false
+         alarm to dismiss: the live signals table's STATUS cell now
+         shows "OPEN (сигнал)" instead of a bare "OPEN" specifically
+         when autotrade_fired is false, with a hover tooltip spelling
+         out why — a tracked-only signal no longer reads the same as a
+         real, funded position. s.autotrade_fired itself (the actual
+         data) is untouched; this is display-only.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the correctly-last <script> block, and the
+         Flask route/def integrity check (still 64 routes) — JS/display
+         change only, no Python logic touched.
 """
 
 import os
@@ -7810,7 +7851,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.72"
+APP_VERSION = "0.99.73"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22657,7 +22698,25 @@ async function refreshMsnr() {
   const signalsRows = signals.map((s, idx) => {
     const dirClass = s.direction === 'LONG' ? 'long' : 'short';
     let statusHtml;
-    if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
+    // v0.99.73, per direct live user alarm ("какого фига по ней
+    // открылась сделка?" — TRX_USDT, no autotrade checkbox, green
+    // "in live scan" dot lit): confirmed by re-reading the actual
+    // record-construction code that "OPEN" here NEVER meant a real
+    // position — record["status"]="OPEN" is set unconditionally the
+    // moment ANY signal is detected, before the autotrade-eligibility
+    // check even runs, specifically so a symbol's own track record
+    // keeps accumulating (win-rate/RR/hour/volume stats) whether or
+    // not it's currently toggled for real trading — see the record's
+    // own comment for why msnr_update_live_balance() needs autotrade_
+    // fired=False signals to NOT move real money either. The green dot
+    // means "in the live SCAN universe" (getting checked for signals
+    // at all), never "being traded" — those are different questions,
+    // and the wording alone didn't make that obvious. Now says "OPEN
+    // (сигнал)" instead of a bare "OPEN" specifically when autotrade_
+    // fired is false, so a signal that never risked real money doesn't
+    // read as one that did — s.autotrade_fired itself is untouched,
+    // this is display-only.
+    if (s.status === 'OPEN') statusHtml = s.autotrade_fired ? '<span class="status-open">OPEN</span>' : '<span class="status-open" title="сигнал отслеживается для статистики — реальная сделка не открыта (нет галочки/не в топ-10)">OPEN (сигнал)</span>';
     else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
     else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
     else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
