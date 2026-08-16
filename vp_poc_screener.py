@@ -7236,6 +7236,41 @@ v0.99.60 - Two pieces of work landing in this one push, since the first
          routes), and an AST walk for duplicate top-level defs (none
          introduced — all five touched/new functions present exactly
          once each).
+
+v0.99.61 - Direct user question: "в описании потолок 8rr, это правда?"
+         Confirmed: MSNR_MAX_RR's own env default genuinely is 8.0, and
+         the UI text (cfg.max_rr) pulls the live value dynamically, not
+         a hardcoded string — so whatever the panel shows IS the real
+         current cap, not stale copy. The v0.99.58 description rewrite
+         had already dropped the "авто-тюнится по статистике ниже"
+         claim correctly (verified by re-reading the current template),
+         so the user-visible text wasn't the problem.
+         Found a REAL staleness while checking, though: MSNR_MAX_RR's
+         own source comment still said "Auto-tuned by risk_autotune_
+         pass() off pooled RR-bucket win-rate stats" — describing
+         behavior that v0.99.52 disabled (per direct user request,
+         "уберём не работу, оставим для вида") by commenting out the
+         _risk_autotune_msnr_max_rr() call inside risk_autotune_pass()'s
+         msnr block. Nothing about that disabling touched THIS
+         constant's own comment, so it kept describing present-tense
+         behavior that hadn't been true for 9 versions — exactly the
+         kind of comment that could mislead a future session (or
+         person) auditing this code into thinking auto-tuning was still
+         live. Rewritten to state plainly that the value only ever
+         changes via manual settings now (_set_msnr_max_rr()), or
+         wherever the autotune last left it before v0.99.52 disabled
+         it (settings persist — disabling the autotune didn't reset the
+         value back to this env default on its own, only stopped moving
+         it further).
+         Verified with py_compile, an actual runtime start (confirmed
+         MSNR_MAX_RR reads exactly 8.0 on a fresh import with no
+         persisted settings override — matches the env default, though
+         a real device with a differently-persisted settings file could
+         legitimately show something else, which is exactly the caveat
+         given directly to the user rather than assumed away), pyflakes,
+         node --check on the correctly-last <script> block, the Flask
+         route/def integrity check (still 63 routes) — comment-only
+         change, no logic touched.
 """
 
 import os
@@ -7255,7 +7290,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.60"
+APP_VERSION = "0.99.61"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7892,7 +7927,7 @@ MSNR_QM_LOOKBACK_BARS = int(os.environ.get("VP_MSNR_QM_LOOKBACK_BARS", 6))  # en
 MSNR_VOLUME_LOOKBACK_BARS = int(os.environ.get("VP_MSNR_VOLUME_LOOKBACK_BARS", 20))  # v0.99.59, per direct user request ("второй фильтр" — the volume-confirmation candidate discussed alongside the time-of-day one, v0.99.56): how many entry-TF bars BEFORE the sweep/QM candle set that candle's own volume baseline (mean of that trailing window, excluding the signal candle itself). The QM/SNR pattern's whole premise is that a sweep-and-reclaim reflects REAL institutional order flow — a sweep on genuinely low relative volume is a plausible tell that it doesn't, same reasoning already used for the time-of-day filter. Separate constant from FT5_VOLUME_AVG_PERIOD (70) rather than reusing it — that's tuned for FT5's own strategy/timeframe, no reason to assume the same window suits MSNR's typically-shorter MSNR_ENTRY_TF.
 MSNR_SL_BUFFER_PCT = float(os.environ.get("VP_MSNR_SL_BUFFER_PCT", 0.0015))
 MSNR_FALLBACK_RR = float(os.environ.get("VP_MSNR_FALLBACK_RR", 4.0))  # used only when the opposite OCL level isn't confirmed yet (Storyline has just one side so far) — a placeholder TP, not the normal path
-MSNR_MAX_RR = float(os.environ.get("VP_MSNR_MAX_RR", 8.0))  # v0.99.11 — per direct user observation (SPCX: trades with rr>6 consistently hit stop, never TP) that a genuine opposite-level TP can sit SO far away the trade is structurally unlikely to ever reach it before reversing. When the real opposite level would produce rr > this cap, msnr_detect_signals() falls back to fallback_rr's fixed target instead — reusing the exact same fallback path already used when no opposite level is confirmed at all, not a new mechanism. Auto-tuned by risk_autotune_pass() off pooled RR-bucket win-rate stats — see msnr_rr_bucket_stats() and _risk_autotune_msnr_max_rr().
+MSNR_MAX_RR = float(os.environ.get("VP_MSNR_MAX_RR", 8.0))  # v0.99.11 — per direct user observation (SPCX: trades with rr>6 consistently hit stop, never TP) that a genuine opposite-level TP can sit SO far away the trade is structurally unlikely to ever reach it before reversing. When the real opposite level would produce rr > this cap, msnr_detect_signals() falls back to fallback_rr's fixed target instead — reusing the exact same fallback path already used when no opposite level is confirmed at all, not a new mechanism. v0.99.52, per direct user question ("а проверка... таблица... что-то даёт вообще?" -> "уберём не работу"): the pooled-RR-bucket autotune this comment used to describe (risk_autotune_pass() calling _risk_autotune_msnr_max_rr() off msnr_rr_bucket_stats()) was DISABLED — that call is commented out in risk_autotune_pass()'s own msnr block, not deleted. This value no longer changes on its own; it only ever moves via a manual settings update (_set_msnr_max_rr()) or whatever it was already set to before the autotune got disabled (settings persist across that change, nothing resets it back to this env default automatically). The rr_buckets table itself still displays in the UI, informational only now.
 MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE = int(os.environ.get("VP_MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE", 15))  # v0.99.22 — per direct user request: MSNR_MAX_RR above is a single GLOBAL cap tuned off trades pooled across every symbol, which was a deliberate compromise (a single symbol's own sample is usually too small to bucket reliably) but leaves no way to catch a symbol whose OWN rr-vs-outcome pattern is bad even though the pooled average looks fine. This is the min closed-trade count a single symbol's OWN rr bucket (see msnr_rr_bucket_stats()) needs before msnr_symbol_rr_skip_min() trusts it enough to skip live signals in that range for that symbol specifically — see msnr_optimize_symbol()'s own "skip_rr_min" field and msnr_scan_symbol_live().
 MSNR_BACKTEST_DAYS = int(os.environ.get("VP_MSNR_BACKTEST_DAYS", 40))  # v0.99.41 — was 30, raised per direct user request. Confirmed feasible against Gate's own ~10000-candle recency floor (get_candles_range()'s own docstring): at interval=15m that floor is ~102 days back, so 40 days (3840 candles) sits well inside it with room to spare — get_candles_range() already paginates in ~900-point/~9.4-day chunks regardless of the total span requested, so this just means ~5 chunks per symbol instead of ~4, not a new code path.
 MSNR_SIGNAL_HISTORY = 200
