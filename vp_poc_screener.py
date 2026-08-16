@@ -7146,6 +7146,96 @@ v0.99.58 - Direct user request ("актуализировать описание
          node --check on the correctly-last <script> block, the Flask
          route/def integrity check (still 63 routes), and an AST walk
          for duplicate top-level defs (none introduced).
+
+v0.99.60 - Two pieces of work landing in this one push, since the first
+         (originally going to be v0.99.59) never shipped separately —
+         a direct user follow-up request arrived and changed its design
+         before it was ever pushed, so the pieces below are folded into
+         a single version bump. Inline comments referencing "v0.99.59"
+         throughout this diff describe that original, since-superseded
+         design intent accurately; "v0.99.60" comments describe what
+         changed relative to it.
+         (1) The SECOND per-symbol filter from the "which filter would
+         be most effective" discussion (v0.99.56 built the first, time-
+         of-day): volume confirmation on the sweep candle. The QM/SNR
+         pattern's whole premise is that a sweep-and-reclaim reflects
+         REAL institutional order flow — a sweep on conspicuously LOW
+         relative volume is a plausible tell that it doesn't, which
+         tests the pattern's own stated mechanism more directly than
+         the time-of-day filter (a proxy for WHEN flow tends to show
+         up). msnr_detect_signals() now computes volume_ratio (this
+         signal candle's own volume ÷ mean of the MSNR_VOLUME_LOOKBACK_
+         BARS=20 bars immediately before it, excluding the signal
+         candle itself) once per bar and attaches it to whichever
+         signal fires — threaded through msnr_run_backtest()'s per-
+         trade records and msnr_scan_symbol_live()'s live signal alike,
+         since both share the same detector. New msnr_symbol_volume_
+         skip_below(): same per-bucket-breakeven test and MSNR_SYMBOL_
+         RR_SKIP_MIN_SAMPLE bar as the RR/SL/hour filters, but skips
+         BELOW a ceiling instead of above a floor — opposite direction
+         from RR/SL (their hypothesis: too HIGH is bad; this one's: too
+         LOW is). Wired into msnr_optimize_symbol()'s filter chain
+         (after skip_hours, before Kelly-leverage) and msnr_scan_
+         symbol_live()'s live gate, with the same raw_closed_n/
+         volume_filtered_count bookkeeping v0.99.57 already established
+         for the other filters — per direct user reminder ("про n как в
+         первом не забудь") this session had already learned the hard
+         way once, not repeated here.
+         (2) Direct user follow-up ("может добавить вариативность...
+         авто перебор параметров фильтра") — with an explicit warning
+         given back before implementing it: searching for whichever
+         threshold gives the best-LOOKING result, without a
+         significance test, would just be curve-fitting the filter
+         itself to backtest noise, the exact overfitting failure mode
+         already found and fixed elsewhere this session (liquid-
+         universe cap, pooled RR-bucket autotune). User chose "оба
+         варианта вместе" from two significance-preserving options:
+         REPLACED the volume filter's fixed MSNR_VOLUME_RATIO_BUCKETS
+         (0-0.5/0.5-0.8/0.8-1.2/1.2-2/2+, tuned for one assumed
+         "typical" distribution) with new msnr_volume_quantile_
+         buckets(trades, k): splits THIS symbol's own volume_ratio
+         values into k roughly-EQUAL-sized groups by sorted rank —
+         adapts to each symbol's own distribution shape instead of
+         assuming a universal one. msnr_symbol_volume_skip_below() now
+         searches MSNR_VOLUME_QUANTILE_GROUPS=[5,4,3] from finest to
+         coarsest, using the first k where some group BOTH fails the
+         breakeven test AND clears the sample bar — every candidate k
+         still runs the exact same significance test, only the
+         grouping varies, never "pick whichever k scores best."
+         msnr_hour_bucket_stats() gained a `group_width` parameter
+         (new MSNR_HOUR_GROUP_WIDTHS=[1,2,3]) for the same idea applied
+         to the time-of-day filter — quantile splitting doesn't apply
+         to hour-of-day (already 24 natural discrete bins), so this is
+         granularity search alone: msnr_symbol_skip_hours() tries
+         single-hour resolution first, then 2h/3h groupings as a
+         fallback for a symbol whose per-hour sample is too thin to
+         ever individually clear the bar. A flagged wide group skips
+         every individual hour it covers.
+         Verified with py_compile, an actual runtime start: (volume)
+         100-trade synthetic case with the bottom quintile deliberately
+         bad (15% win-rate at RR=4, breakeven 20%) — k=5 correctly gave
+         5 groups of exactly 20 each and flagged the bottom one at its
+         own upper edge; a 45-trade case where k=5 and k=4 groups were
+         individually too thin (9 and 11, under the 15-sample bar) but
+         k=3 (15 each) correctly caught the same pattern, confirming
+         the cascade; (hours) a 40-trade two-hour case where the bad
+         hours (14, 15) are adjacent confirmed the cascade lands
+         exactly on width=2 and returns precisely [14,15], not a wider
+         group pulling in an unrelated hour; a companion case with
+         non-adjacent-under-width-2 bad hours (13 alone, 14 alone, each
+         paired with an empty neighbor) confirmed the cascade correctly
+         falls through to width=3 where they merge into one group with
+         enough combined sample, returning [12,13,14] — the empty hour
+         12 included because it's structurally part of that flagged
+         group, not a bug; both filters confirmed to degrade cleanly on
+         edge cases (empty trade list, records missing volume_ratio/
+         time entirely) with no exceptions, matching old-STATE-override
+         backward compatibility already established for the other
+         filters), pyflakes, node --check on the correctly-last
+         <script> block, the Flask route/def integrity check (still 63
+         routes), and an AST walk for duplicate top-level defs (none
+         introduced — all five touched/new functions present exactly
+         once each).
 """
 
 import os
@@ -7165,7 +7255,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.58"
+APP_VERSION = "0.99.60"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7799,6 +7889,7 @@ MSNR_ATR_PERIOD = int(os.environ.get("VP_MSNR_ATR_PERIOD", 14))
 MSNR_MIN_LEG_ATR = float(os.environ.get("VP_MSNR_MIN_LEG_ATR", 2.5))  # min impulsive-leg size (structure-TF ATR multiples) for a pivot to count as a real A-shape/V-shape rather than noise
 MSNR_QM_ZONE_PCT = float(os.environ.get("VP_MSNR_QM_ZONE_PCT", 0.006))  # how close (as % of price) the sweep extreme must land to the OCL level to count as testing THAT level
 MSNR_QM_LOOKBACK_BARS = int(os.environ.get("VP_MSNR_QM_LOOKBACK_BARS", 6))  # entry-TF bar cluster width the sweep and the close-back-inside confirmation are allowed to span, same idea as SESSION_MAX_THRUST_BARS
+MSNR_VOLUME_LOOKBACK_BARS = int(os.environ.get("VP_MSNR_VOLUME_LOOKBACK_BARS", 20))  # v0.99.59, per direct user request ("второй фильтр" — the volume-confirmation candidate discussed alongside the time-of-day one, v0.99.56): how many entry-TF bars BEFORE the sweep/QM candle set that candle's own volume baseline (mean of that trailing window, excluding the signal candle itself). The QM/SNR pattern's whole premise is that a sweep-and-reclaim reflects REAL institutional order flow — a sweep on genuinely low relative volume is a plausible tell that it doesn't, same reasoning already used for the time-of-day filter. Separate constant from FT5_VOLUME_AVG_PERIOD (70) rather than reusing it — that's tuned for FT5's own strategy/timeframe, no reason to assume the same window suits MSNR's typically-shorter MSNR_ENTRY_TF.
 MSNR_SL_BUFFER_PCT = float(os.environ.get("VP_MSNR_SL_BUFFER_PCT", 0.0015))
 MSNR_FALLBACK_RR = float(os.environ.get("VP_MSNR_FALLBACK_RR", 4.0))  # used only when the opposite OCL level isn't confirmed yet (Storyline has just one side so far) — a placeholder TP, not the normal path
 MSNR_MAX_RR = float(os.environ.get("VP_MSNR_MAX_RR", 8.0))  # v0.99.11 — per direct user observation (SPCX: trades with rr>6 consistently hit stop, never TP) that a genuine opposite-level TP can sit SO far away the trade is structurally unlikely to ever reach it before reversing. When the real opposite level would produce rr > this cap, msnr_detect_signals() falls back to fallback_rr's fixed target instead — reusing the exact same fallback path already used when no opposite level is confirmed at all, not a new mechanism. Auto-tuned by risk_autotune_pass() off pooled RR-bucket win-rate stats — see msnr_rr_bucket_stats() and _risk_autotune_msnr_max_rr().
@@ -8652,7 +8743,7 @@ STATE = {
     "msnr_backtest_summary": {},
     "msnr_last_backtest_finished": None,
     "msnr_last_backtest_duration": None,
-    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at, raw_closed_n, skip_rr_min, rr_filtered_count, skip_sl_pct_min, sl_filtered_count, skip_hours, hours_filtered_count, effective_leverage, leverage_ceiling, optimal_leverage, liquidation_filtered_count, compound_final_balance, compound_return_pct, compound_blown_at, stress_test_failed}
+    "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at, raw_closed_n, skip_rr_min, rr_filtered_count, skip_sl_pct_min, sl_filtered_count, skip_hours, hours_filtered_count, skip_volume_below, volume_filtered_count, effective_leverage, leverage_ceiling, optimal_leverage, liquidation_filtered_count, compound_final_balance, compound_return_pct, compound_blown_at, stress_test_failed}
     "msnr_backtest_universe": [],  # v0.99.9 — MSNR_SYMBOLS union'd with the top-liquid backtest-only exploration set, see msnr_build_backtest_universe()
     "msnr_live_universe": [],  # v0.99.17 — MSNR_SYMBOLS union'd with any backtest-qualifying symbol (win-rate/sample threshold), see msnr_compute_live_universe(); msnr_live_loop() scans THIS, not the static MSNR_SYMBOLS constant directly, so it stays empty (falls back to MSNR_SYMBOLS at the call site) until the first backtest cycle populates it
     "msnr_autotrade_symbols": {},  # v0.99.18 — per-symbol autotrade toggle, {symbol: bool}. Replaces the old single AUTOTRADE_ENABLED_MSNR gate — per direct user request for individually-toggleable fields (3 gold, always eligible + the current top MSNR_AUTOTRADE_TOP_N non-gold by msnr_rank_by_winrate_sample(), which despite its name ranks by `avg_rr` (score before v0.99.39) — see that function's own docstring). A symbol missing from this dict is treated as off (same "off unless explicitly on" default every other autotrade toggle in this app already uses). See msnr_autotrade_eligible_symbols() for which symbols can currently be toggled, and _set_msnr_autotrade_symbol()'s own docstring for what happens to a saved toggle when its symbol falls out of that set.
@@ -15764,6 +15855,24 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
             pi += 1
 
         cluster = entry_candles[max(0, i - qm_lookback + 1): i + 1]
+        # v0.99.59, per direct user request ("второй фильтр" — volume
+        # confirmation on the sweep, discussed as the more-in-the-
+        # pattern-itself alternative to the time-of-day filter):
+        # this candle's own volume relative to the MEAN volume of the
+        # MSNR_VOLUME_LOOKBACK_BARS bars immediately before it
+        # (deliberately excluding c itself — including it would let a
+        # single huge-volume sweep partially inflate its own baseline).
+        # Computed unconditionally here (once per bar, not duplicated
+        # in the A-shape/V-shape blocks below) since it only depends on
+        # i/c, not on direction — attached to whichever signal (if any)
+        # actually fires on this candle. None near the very start of
+        # the series where there's no lookback window yet, or if that
+        # window's own volumes happen to sum to zero (matches msnr_
+        # symbol_volume_skip_below()'s own "can't judge, don't touch
+        # the trade" stance for a None ratio).
+        vol_window = entry_candles[max(0, i - MSNR_VOLUME_LOOKBACK_BARS):i]
+        vol_avg = (sum(cc["volume"] for cc in vol_window) / len(vol_window)) if vol_window else None
+        volume_ratio = round(c["volume"] / vol_avg, 3) if vol_avg and vol_avg > 0 else None
 
         if active_a is not None and not a_fired:
             level = active_a["price"]
@@ -15796,6 +15905,7 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
                             "entry": entry, "sl": sl, "tp": tp,
                             "level": level, "level_type": "A",
                             "opposite_level": opp if opp_valid else None,
+                            "volume_ratio": volume_ratio,
                         })
                         a_fired = True
 
@@ -15823,6 +15933,7 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
                             "entry": entry, "sl": sl, "tp": tp,
                             "level": level, "level_type": "V",
                             "opposite_level": opp if opp_valid else None,
+                            "volume_ratio": volume_ratio,
                         })
                         v_fired = True
 
@@ -15871,6 +15982,7 @@ def msnr_run_backtest(structure_candles, entry_candles, **params):
             "level": sig["level"], "level_type": sig["level_type"],
             "opposite_level": sig.get("opposite_level"),
             "result": result, "exit_time": exit_time, "rr": rr,
+            "volume_ratio": sig.get("volume_ratio"),
         })
     return results
 
@@ -16021,6 +16133,7 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
             "optimized_at": now, "candles_used": len(entry_candles), "skip_rr_min": None,
             "skip_sl_pct_min": None, "liquidation_filtered_count": 0, "skip_hours": [],
             "raw_closed_n": 0, "rr_filtered_count": 0, "sl_filtered_count": 0, "hours_filtered_count": 0,
+            "skip_volume_below": None, "volume_filtered_count": 0,
             "effective_leverage": msnr_symbol_effective_leverage(symbol),
             "leverage_ceiling": leverage_ceiling,
             "optimal_leverage": msnr_optimal_leverage_for_symbol(best_results, leverage_ceiling),
@@ -16129,6 +16242,21 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
                              if t.get("time") is None or time.gmtime(t["time"])[3] not in skip_hour_set]
             _msnr_recompute_summary_score(best, best_results)
         best["hours_filtered_count"] = before_hours - len(best_results)
+        # v0.99.59, per direct user request ("второй фильтр... про n
+        # как в первом не забудь" — volume confirmation on the sweep):
+        # same ordering reasoning as every filter above — derive the
+        # floor off the full surviving sample first, THEN filter. See
+        # msnr_symbol_volume_skip_below()'s own docstring for why this
+        # skips BELOW a ceiling (opposite direction from skip_rr_min/
+        # skip_sl_pct_min, which skip ABOVE a floor).
+        before_volume = len(best_results)
+        best["skip_volume_below"] = msnr_symbol_volume_skip_below(best_results)
+        if best["skip_volume_below"] is not None:
+            skip_vol = best["skip_volume_below"]
+            best_results = [t for t in best_results
+                             if t.get("volume_ratio") is None or t["volume_ratio"] >= skip_vol]
+            _msnr_recompute_summary_score(best, best_results)
+        best["volume_filtered_count"] = before_volume - len(best_results)
     # v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше не
     # стало, будто даже хуже" -> Kelly/optimal-f search instead of a
     # fixed stop-width target): ONE flat leverage for this symbol,
@@ -16338,7 +16466,10 @@ def msnr_symbol_sl_skip_min(trades):
     return min(failing_edges) if failing_edges else None
 
 
-def msnr_hour_bucket_stats(trades):
+MSNR_HOUR_GROUP_WIDTHS = [1, 2, 3]  # v0.99.60, per direct user request ("оба варианта вместе" — granularity/threshold search paired with the volume filter's quantile adaptation): candidate UTC-hour group widths for msnr_hour_bucket_stats(), tried FINEST first (single-hour resolution, the original v0.99.56 behavior) then progressively wider — a symbol whose per-hour sample never clears MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE still gets a shot at a coarser, still-legitimate 2h or 3h grouping instead of the filter finding nothing at all purely from thin per-hour data.
+
+
+def msnr_hour_bucket_stats(trades, group_width=1):
     """v0.99.56, per direct user request ("какой фильтр сигналов был бы
     самым эффективным"): time-of-day counterpart to msnr_rr_bucket_
     stats()/msnr_sl_bucket_stats() — buckets CLOSED trades (WIN/LOSS
@@ -16360,26 +16491,39 @@ def msnr_hour_bucket_stats(trades):
     tzdata dependency for one fixed daily reference point, 10:00 MSK;
     this needs the actual UTC hour of arbitrary historical timestamps
     across 24 buckets, which time.gmtime() gives directly with no
-    timezone-database dependency either)."""
-    buckets_by_hour = {h: [] for h in range(24)}
+    timezone-database dependency either).
+    v0.99.60: `group_width` groups consecutive UTC hours together
+    (e.g. width=3 -> 0-2, 3-5, 6-8, ...) instead of always a single
+    hour per bucket — msnr_symbol_skip_hours() searches MSNR_HOUR_
+    GROUP_WIDTHS from finest to coarsest, using this parameter, so a
+    symbol whose per-HOUR sample is too thin to ever clear the
+    significance bar still gets evaluated at a coarser, still-
+    legitimate resolution instead of the filter simply finding
+    nothing. Each returned dict's "hours" field lists every individual
+    UTC hour that group covers, so a caller can expand a flagged group
+    back into the specific hours it represents."""
+    n_groups = -(-24 // group_width)  # ceiling division — width=1 -> 24 groups, width=3 -> 8 groups
+    buckets_by_group = {g: [] for g in range(n_groups)}
     for t in trades:
         if t.get("result") not in ("WIN", "LOSS"):
             continue
         if t.get("time") is None:
             continue
         hour = time.gmtime(t["time"])[3]
-        buckets_by_hour[hour].append(t)
+        buckets_by_group[hour // group_width].append(t)
     result = []
-    for h in range(24):
-        subset = buckets_by_hour[h]
+    for g in range(n_groups):
+        lo_hour = g * group_width
+        hours = list(range(lo_hour, min(24, lo_hour + group_width)))
+        subset = buckets_by_group[g]
         if not subset:
-            result.append({"hour": h, "n": 0, "wins": 0, "losses": 0, "winrate": None, "avg_rr": None})
+            result.append({"hours": hours, "n": 0, "wins": 0, "losses": 0, "winrate": None, "avg_rr": None})
             continue
         wins = sum(1 for t in subset if t["result"] == "WIN")
         n = len(subset)
         rrs = [t["rr"] for t in subset if t.get("rr") is not None]
         avg_rr = round(sum(rrs) / len(rrs), 2) if rrs else None
-        result.append({"hour": h, "n": n, "wins": wins, "losses": n - wins,
+        result.append({"hours": hours, "n": n, "wins": wins, "losses": n - wins,
                         "winrate": round(wins / n * 100, 1), "avg_rr": avg_rr})
     return result
 
@@ -16393,17 +16537,143 @@ def msnr_symbol_skip_hours(trades):
     where "everything past this point is bad" makes sense — a symbol
     could easily be fine at both 2:00 and 22:00 UTC but bad specifically
     at 14:00, and a single cutoff value couldn't express that shape.
+    v0.99.60, per direct user follow-up ("добавить вариативность...
+    оба варианта вместе"): searches MSNR_HOUR_GROUP_WIDTHS from finest
+    (single-hour) to coarsest — the first width that finds ANY group
+    clearing both the significance test and the sample bar wins; a
+    thin trade history simply never reaches the finer widths' own per-
+    group sample requirement, so it falls through to a coarser, still-
+    legitimate grouping instead of finding nothing. When a WIDER group
+    is flagged, every individual UTC hour it covers gets skipped —
+    less precise than single-hour resolution, but still statistically
+    supported, which single-hour buckets on a thin history wouldn't be.
     Returns a sorted list of UTC hours (0-23) where this symbol's own
     trade history shows a statistically-trustworthy losing pattern —
     live signals whose entry candle falls in one of these hours get
-    skipped for this symbol. Empty list if no hour clears the sample
-    bar (the overwhelmingly common case for any symbol without a very
-    long or very lopsided-by-hour trading history)."""
-    buckets = msnr_hour_bucket_stats(trades)
-    bad_hours = [b["hour"] for b in buckets
-                 if b["n"] >= MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE and b["winrate"] is not None and b["avg_rr"]
-                 and b["winrate"] < 100.0 / (1.0 + b["avg_rr"])]
-    return sorted(bad_hours)
+    skipped for this symbol. Empty list if nothing at any tried
+    granularity clears the sample bar (the overwhelmingly common case
+    for any symbol without a very long or very lopsided-by-hour trading
+    history)."""
+    for width in MSNR_HOUR_GROUP_WIDTHS:
+        buckets = msnr_hour_bucket_stats(trades, group_width=width)
+        bad_groups = [b for b in buckets
+                      if b["n"] >= MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE and b["winrate"] is not None and b["avg_rr"]
+                      and b["winrate"] < 100.0 / (1.0 + b["avg_rr"])]
+        if bad_groups:
+            bad_hours = set()
+            for b in bad_groups:
+                bad_hours.update(b["hours"])
+            return sorted(bad_hours)
+    return []
+
+
+MSNR_VOLUME_QUANTILE_GROUPS = [5, 4, 3]  # v0.99.60, per direct user request ("оба варианта вместе" — quantile-adaptive bucketing AND granularity/threshold search, applied together): candidate group counts for msnr_volume_quantile_buckets(), tried FINEST first (5 roughly-equal groups) then progressively coarser as a fallback — finer groups are more precise but need more of this symbol's own trades to individually clear MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE; a symbol with a thinner trade history still gets a shot at a coarser, still-significant split instead of the filter just giving up.
+
+
+def msnr_volume_quantile_buckets(trades, k):
+    """v0.99.60, per direct user follow-up to v0.99.59 ("может в первый
+    фильтр и во второй добавить некую вариативность... авто перебор
+    параметров фильтра для лучшего результата?"): REPLACES the old
+    fixed MSNR_VOLUME_RATIO_BUCKETS (0-0.5/0.5-0.8/0.8-1.2/1.2-2/2+)
+    with QUANTILE buckets computed fresh from THIS symbol's own
+    volume_ratio distribution — splits its CLOSED trades (with a known
+    volume_ratio) into k roughly-equal-SIZED groups by sorted value,
+    rather than assuming one universal set of absolute cutoffs fits
+    every symbol's typical volume behavior. A generally choppy/spiky
+    symbol and a generally calm one don't share a "normal" volume_ratio
+    range — fixed absolute buckets would leave one of them with nearly
+    all its trades crammed into a single bucket (useless — no
+    resolution) while the other's trades scatter thinly across all
+    five (useless — no bucket ever reaches significant sample size).
+    Quantile splitting sidesteps that entirely: every bucket gets
+    n/k trades by construction, regardless of the symbol's own
+    distribution shape.
+    IMPORTANT — this is explicitly NOT "search for whichever k gives
+    the best-looking result": every candidate k still goes through the
+    exact same breakeven-at-sufficient-sample test msnr_symbol_volume_
+    skip_below() already used before this change (see that function's
+    own docstring) — this only varies HOW the trades get grouped, not
+    whether a group has to prove itself significant to matter. Reusing
+    a threshold-hunting search without that same significance gate
+    would just be curve-fitting the filter itself to this backtest's
+    own noise, exactly the overfitting failure mode already found and
+    fixed elsewhere this session (the liquid-universe cap, the pooled
+    RR-bucket autotune) — the whole point of asking for "оба варианта
+    вместе" was adding flexibility WITHOUT reopening that door.
+    Returns a list of k (or fewer, if there aren't enough closed trades
+    with a volume_ratio to fill k groups) dicts: {"n", "wins", "losses",
+    "winrate", "avg_rr", "hi"} — "hi" is that group's own maximum
+    volume_ratio (the boundary msnr_symbol_volume_skip_below() treats
+    as a candidate ceiling), in ascending group order."""
+    closed = [t for t in trades if t.get("result") in ("WIN", "LOSS") and t.get("volume_ratio") is not None]
+    if len(closed) < k:
+        return []
+    closed.sort(key=lambda t: t["volume_ratio"])
+    n = len(closed)
+    buckets = []
+    for i in range(k):
+        lo_idx = i * n // k
+        hi_idx = (i + 1) * n // k
+        subset = closed[lo_idx:hi_idx]
+        if not subset:
+            continue
+        wins = sum(1 for t in subset if t["result"] == "WIN")
+        cnt = len(subset)
+        rrs = [t["rr"] for t in subset if t.get("rr") is not None]
+        avg_rr = round(sum(rrs) / len(rrs), 2) if rrs else None
+        buckets.append({"n": cnt, "wins": wins, "losses": cnt - wins,
+                         "winrate": round(wins / cnt * 100, 1), "avg_rr": avg_rr,
+                         "hi": subset[-1]["volume_ratio"]})
+    return buckets
+
+
+def msnr_volume_bucket_stats(trades):
+    """v0.99.60 — display-only counterpart to msnr_volume_quantile_
+    buckets(): the FINEST quantile split (MSNR_VOLUME_QUANTILE_GROUPS[0]
+    groups) this symbol's own trade count actually supports, purely for
+    showing "what does this symbol's volume-ratio distribution look
+    like" — msnr_symbol_volume_skip_below() does its own independent
+    multi-k search over the full candidate list and doesn't call this."""
+    for k in MSNR_VOLUME_QUANTILE_GROUPS:
+        buckets = msnr_volume_quantile_buckets(trades, k)
+        if buckets:
+            return buckets
+    return []
+
+
+def msnr_symbol_volume_skip_below(trades):
+    """v0.99.59/v0.99.60, per direct user request ("второй фильтр... про
+    n как в первом не забудь" then "добавить вариативность... оба
+    варианта вместе"): volume-ratio counterpart to msnr_symbol_rr_
+    skip_min()/msnr_symbol_sl_skip_min(), same sample bar (MSNR_
+    SYMBOL_RR_SKIP_MIN_SAMPLE) and per-bucket-breakeven test — but
+    skips BELOW a ceiling instead of above a floor, the OPPOSITE
+    direction from the RR/SL filters (their hypothesis: metric too
+    HIGH is unreliable; this one's: volume too LOW is).
+    v0.99.60: searches MSNR_VOLUME_QUANTILE_GROUPS from finest to
+    coarsest (msnr_volume_quantile_buckets()) — the first k that finds
+    ANY group clearing both the significance test and the sample bar
+    wins; a thin trade history simply never reaches the finer k values'
+    own per-group sample requirement, so it falls through to a coarser,
+    still-legitimate split rather than finding nothing at all. The
+    LAST (highest-volume) group of whichever k is used is always
+    excluded from the search — taking its own "hi" as a "skip below"
+    ceiling would, in the pathological case where it still fails,
+    mean skipping literally everything, never the intended outcome.
+    Returns this symbol's own volume-ratio floor — a live signal whose
+    OWN volume_ratio lands BELOW it gets skipped for this symbol — or
+    None if nothing at any tried granularity clears the sample bar, or
+    the symbol's trades don't carry volume_ratio at all (e.g. an
+    override computed before that field existed)."""
+    for k in MSNR_VOLUME_QUANTILE_GROUPS:
+        buckets = msnr_volume_quantile_buckets(trades, k)
+        candidate_buckets = buckets[:-1] if len(buckets) > 1 else []
+        failing_edges = [b["hi"] for b in candidate_buckets
+                          if b["n"] >= MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE and b["winrate"] is not None and b["avg_rr"]
+                          and b["winrate"] < 100.0 / (1.0 + b["avg_rr"])]
+        if failing_edges:
+            return max(failing_edges)
+    return None
 
 
 def msnr_symbol_effective_leverage(symbol):
@@ -16702,6 +16972,20 @@ def msnr_symbol_skip_hours_live(symbol):
     return override.get("skip_hours") or []
 
 
+def msnr_symbol_skip_volume_below(symbol):
+    """v0.99.59 — volume-ratio counterpart to msnr_symbol_skip_rr_min()/
+    msnr_symbol_skip_sl_min()/msnr_symbol_skip_hours_live(), same
+    separate-lookup reasoning (msnr_symbol_params()'s return value gets
+    spread as **params into msnr_detect_signals(), which has no
+    skip_volume_below kwarg either). Returns this symbol's own volume-
+    ratio floor (msnr_symbol_volume_skip_below()) — a live signal whose
+    OWN volume_ratio lands below it gets skipped for this symbol — or
+    None when no low-volume bucket has been flagged."""
+    with state_lock:
+        override = STATE["msnr_symbol_overrides"].get(symbol) or {}
+    return override.get("skip_volume_below")
+
+
 def msnr_symbol_optimal_leverage(symbol):
     """v0.99.47 — this symbol's own Kelly-optimal leverage (msnr_
     optimal_leverage_for_symbol(), computed once per backtest cycle in
@@ -16923,6 +17207,21 @@ def msnr_scan_symbol_live(symbol):
         skip_hours = msnr_symbol_skip_hours_live(symbol)
         if skip_hours and time.gmtime(sig["time"])[3] in skip_hours:
             return  # this symbol's own history says this UTC hour fails here — skip, don't fire
+        # v0.99.59, per direct user request ("второй фильтр... про n
+        # как в первом не забудь" — volume confirmation on the sweep):
+        # LOW relative volume counterpart to the checks above — see
+        # msnr_symbol_volume_skip_below()'s own docstring for why this
+        # skips BELOW a ceiling rather than above a floor (opposite
+        # direction from skip_rr_min/skip_sl_pct_min). sig.get(
+        # "volume_ratio") can genuinely be None (no lookback window yet
+        # near the very start of fetched history, or a zero-volume
+        # baseline) — a None ratio means "can't judge this signal on
+        # volume," not "reject it," so this only skips when there's an
+        # actual number to compare.
+        skip_volume_below = msnr_symbol_skip_volume_below(symbol)
+        if skip_volume_below is not None and sig.get("volume_ratio") is not None:
+            if sig["volume_ratio"] < skip_volume_below:
+                return  # this symbol's own history says a sweep this quiet fails here — skip, don't fire
         with _msnr_signal_cooldowns_lock:
             if _msnr_signal_cooldowns.get(symbol) == sig["time"]:
                 return
@@ -21421,6 +21720,13 @@ async function refreshMsnr() {
     // smaller than that.
     const skipHoursTxt = (r.skip_hours && r.skip_hours.length)
       ? ` \u00b7 <span class="loss">skip \u0447\u0430\u0441\u044b(UTC) ${r.skip_hours.join(',')}${r.hours_filtered_count ? ` (${r.hours_filtered_count})` : ''}</span>`
+      : '';
+    // v0.99.59, per direct user request ("второй фильтр" — volume
+    // confirmation on the sweep): shows the volume-ratio FLOOR (below
+    // which this symbol's history says a sweep is unreliable), same
+    // count-in-parens pattern as the other skip indicators.
+    const skipVolumeTxt = (r.skip_volume_below !== null && r.skip_volume_below !== undefined)
+      ? ` \u00b7 <span class="loss">skip \u043e\u0431\u044a\u0451\u043c<${r.skip_volume_below}${r.volume_filtered_count ? ` (${r.volume_filtered_count})` : ''}</span>`
       : '';
     const liqTxt = r.liquidation_filtered_count ? ` \u00b7 <span class="loss">${r.liquidation_filtered_count} \u0437\u0430 \u043b\u0438\u043a\u0432\u0438\u0434\u0430\u0446\u0438\u0435\u0439</span>` : '';
     // v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше не
