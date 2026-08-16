@@ -7538,6 +7538,65 @@ v0.99.67 - Direct user report with screenshots: "возле сделок я не
          routes — this was a data/display fix, no new endpoints), and
          a grep confirming no stale colspan was left pointing at the
          signals table's old 10-column count now that it has 11.
+
+v0.99.68 - Direct user report: "в оригинале по задумке автора эта
+         стратегия msnr ловит движения с очень большим rr, даже если
+         winrate около 20-30, у нас так не получается." Investigation
+         confirmed a real conflict: msnr_detect_signals() (both the
+         A-shape/SHORT and V-shape/LONG branches) was silently
+         substituting a much smaller MSNR_FALLBACK_RR=4.0 fixed target
+         for ANY genuinely-far opposite level whose implied RR exceeded
+         MSNR_MAX_RR (8.0, and — since v0.99.52 disabled the pooled-
+         bucket autotune that used to move it — permanently stuck
+         there) — directly preventing the large-RR/low-winrate trades
+         this strategy is designed around from ever being taken as
+         designed. Worse: since the record only ever stored the
+         ALREADY-capped rr, msnr_symbol_rr_skip_min()'s own per-symbol
+         statistical test (exactly the right tool for judging "is this
+         RR bucket actually profitable for THIS symbol despite a low
+         win-rate" via its own breakeven-at-sufficient-sample check)
+         never even saw a trade's true RR to judge in the first place —
+         the cap and the filter meant to replace it were fighting each
+         other, not cooperating.
+         Discussed the tension directly rather than picking a fix
+         unilaterally, given how consequential a live-trading change
+         this is; user chose "снять потолок полностью — довериться
+         skip_rr_min целиком" over raising the cap to 15 (the top of
+         its own already-provisioned RISK_AUTOTUNE_MSNR_MAX_RR_BOUNDS)
+         or discussing further.
+         Removed the RR-cap check entirely from both branches of msnr_
+         detect_signals() — a paired opposite level is now used as TP
+         whenever it's genuinely still ahead of price, at whatever RR
+         that implies; msnr_symbol_rr_skip_min() (already built,
+         already correctly per-symbol and sample-gated) is now fully
+         trusted to reject a high-RR bucket where it's actually failing
+         breakeven for a given symbol, and allow it through everywhere
+         it isn't — a distinction a blanket global ceiling could never
+         make. The now-fully-unused `max_rr` parameter was removed from
+         msnr_detect_signals()'s own signature (confirmed via grep: no
+         caller anywhere ever passed a non-default value) rather than
+         left as dead, silently-ignored plumbing. MSNR_MAX_RR the
+         constant itself, its setter, and its settings/UI wiring are
+         all left fully intact — nothing in signal generation reads it
+         anymore, but it's one line to reintroduce a cap deliberately
+         if a future session ever wants to. MSNR_RR_BUCKETS' own top
+         bucket (10, inf) already had no upper bound, so no bucket-grid
+         change was needed for the statistics to absorb whatever RR
+         values start showing up now. Updated the now-inaccurate "потолок
+         RR" line in the MSNR panel's own description (was still
+         claiming the removed behavior) to describe the new skip_rr_min-
+         only stance instead. MSNR_MAX_RR's own top-level comment and
+         msnr_detect_signals()'s docstring rewritten to describe what
+         changed and why, not just delete the old explanation.
+         Verified with py_compile, an actual runtime start (confirmed
+         msnr_detect_signals()'s own signature no longer has a max_rr
+         parameter at all), pyflakes (0 warnings — confirmed the now-
+         dead `rr_cap` local variable was fully removed, not just
+         unused), a grep confirming zero remaining references to
+         `rr_cap` in actual code, only in explanatory comments, node
+         --check on the correctly-last <script> block, the Flask
+         route/def integrity check (still 64 routes), and an AST walk
+         for duplicate top-level defs (none introduced).
 """
 
 import os
@@ -7557,7 +7616,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.67"
+APP_VERSION = "0.99.68"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -8196,7 +8255,7 @@ MSNR_QM_LOOKBACK_BARS = int(os.environ.get("VP_MSNR_QM_LOOKBACK_BARS", 6))  # en
 MSNR_VOLUME_LOOKBACK_BARS = int(os.environ.get("VP_MSNR_VOLUME_LOOKBACK_BARS", 20))  # v0.99.59, per direct user request ("второй фильтр" — the volume-confirmation candidate discussed alongside the time-of-day one, v0.99.56): how many entry-TF bars BEFORE the sweep/QM candle set that candle's own volume baseline (mean of that trailing window, excluding the signal candle itself). The QM/SNR pattern's whole premise is that a sweep-and-reclaim reflects REAL institutional order flow — a sweep on genuinely low relative volume is a plausible tell that it doesn't, same reasoning already used for the time-of-day filter. Separate constant from FT5_VOLUME_AVG_PERIOD (70) rather than reusing it — that's tuned for FT5's own strategy/timeframe, no reason to assume the same window suits MSNR's typically-shorter MSNR_ENTRY_TF.
 MSNR_SL_BUFFER_PCT = float(os.environ.get("VP_MSNR_SL_BUFFER_PCT", 0.0015))
 MSNR_FALLBACK_RR = float(os.environ.get("VP_MSNR_FALLBACK_RR", 4.0))  # used only when the opposite OCL level isn't confirmed yet (Storyline has just one side so far) — a placeholder TP, not the normal path
-MSNR_MAX_RR = float(os.environ.get("VP_MSNR_MAX_RR", 8.0))  # v0.99.11 — per direct user observation (SPCX: trades with rr>6 consistently hit stop, never TP) that a genuine opposite-level TP can sit SO far away the trade is structurally unlikely to ever reach it before reversing. When the real opposite level would produce rr > this cap, msnr_detect_signals() falls back to fallback_rr's fixed target instead — reusing the exact same fallback path already used when no opposite level is confirmed at all, not a new mechanism. v0.99.52, per direct user question ("а проверка... таблица... что-то даёт вообще?" -> "уберём не работу"): the pooled-RR-bucket autotune this comment used to describe (risk_autotune_pass() calling _risk_autotune_msnr_max_rr() off msnr_rr_bucket_stats()) was DISABLED — that call is commented out in risk_autotune_pass()'s own msnr block, not deleted. This value no longer changes on its own; it only ever moves via a manual settings update (_set_msnr_max_rr()) or whatever it was already set to before the autotune got disabled (settings persist across that change, nothing resets it back to this env default automatically). The rr_buckets table itself still displays in the UI, informational only now.
+MSNR_MAX_RR = float(os.environ.get("VP_MSNR_MAX_RR", 8.0))  # v0.99.11 — per direct user observation (SPCX: trades with rr>6 consistently hit stop, never TP) that a genuine opposite-level TP can sit SO far away the trade is structurally unlikely to ever reach it before reversing. When the real opposite level would produce rr > this cap, msnr_detect_signals() used to fall back to fallback_rr's fixed target instead. v0.99.52, per direct user question ("а проверка... таблица... что-то даёт вообще?" -> "уберём не работу"): the pooled-RR-bucket autotune this comment used to describe (risk_autotune_pass() calling _risk_autotune_msnr_max_rr() off msnr_rr_bucket_stats()) was DISABLED (commented out, not deleted) — this value stopped changing on its own. v0.99.68, per direct user request ("в оригинале... эта стратегия ловит движения с очень большим rr, даже если winrate около 20-30, у нас так не получается"): the cap ITSELF was removed from msnr_detect_signals() — it was silently substituting MSNR_FALLBACK_RR=4.0 for any genuinely-far opposite level, preventing exactly the large-RR/low-winrate trades the strategy is designed around, and keeping msnr_symbol_rr_skip_min()'s own per-symbol statistical filter blind to that entire RR range. This constant is now fully vestigial — nothing in signal generation reads it — left defined (still wired through settings/UI) only in case a future session wants to reintroduce a cap deliberately. The rr_buckets table itself still displays in the UI, informational only.
 MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE = int(os.environ.get("VP_MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE", 15))  # v0.99.22 — per direct user request: MSNR_MAX_RR above is a single GLOBAL cap tuned off trades pooled across every symbol, which was a deliberate compromise (a single symbol's own sample is usually too small to bucket reliably) but leaves no way to catch a symbol whose OWN rr-vs-outcome pattern is bad even though the pooled average looks fine. This is the min closed-trade count a single symbol's OWN rr bucket (see msnr_rr_bucket_stats()) needs before msnr_symbol_rr_skip_min() trusts it enough to skip live signals in that range for that symbol specifically — see msnr_optimize_symbol()'s own "skip_rr_min" field and msnr_scan_symbol_live().
 MSNR_BACKTEST_DAYS = int(os.environ.get("VP_MSNR_BACKTEST_DAYS", 40))  # v0.99.41 — was 30, raised per direct user request. Confirmed feasible against Gate's own ~10000-candle recency floor (get_candles_range()'s own docstring): at interval=15m that floor is ~102 days back, so 40 days (3840 candles) sits well inside it with room to spare — get_candles_range() already paginates in ~900-point/~9.4-day chunks regardless of the total span requested, so this just means ~5 chunks per symbol instead of ~4, not a new code path.
 MSNR_SIGNAL_HISTORY = 200
@@ -16347,7 +16406,7 @@ def msnr_build_pivots(structure_candles, pivot_left=MSNR_PIVOT_LEFT, pivot_right
 def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_LEFT, pivot_right=MSNR_PIVOT_RIGHT,
                          min_leg_atr=MSNR_MIN_LEG_ATR, atr_period=MSNR_ATR_PERIOD,
                          qm_zone_pct=MSNR_QM_ZONE_PCT, qm_lookback=MSNR_QM_LOOKBACK_BARS,
-                         sl_buffer_pct=MSNR_SL_BUFFER_PCT, fallback_rr=MSNR_FALLBACK_RR, max_rr=None):
+                         sl_buffer_pct=MSNR_SL_BUFFER_PCT, fallback_rr=MSNR_FALLBACK_RR):
     """Combined walk-forward pass, no lookahead — mirrors detect_session_
     manipulation()/xau_lg_detect_signals() in spirit. Builds confirmed A-
     shape/V-shape OCL pivots off structure_candles as it goes (via
@@ -16364,30 +16423,28 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
     of a backtest trade, see v0.99.4). Falls back to a fixed RR
     (fallback_rr) whenever the paired level isn't confirmed yet OR isn't
     on the correct side of entry.
-    v0.99.11: ALSO falls back to fallback_rr when the paired level IS
-    valid but would produce rr > max_rr — same fallback path, one more
-    trigger condition. Per direct user observation (SPCX: rr>6 trades
-    consistently hit stop, essentially never reaching TP) that a distant
-    genuine opposite level is structurally less likely to be reached
-    before price reverses — reusing the existing "target isn't a
-    reliable objective this time" fallback rather than inventing a
-    separate skip mechanism, since a capped fixed-RR trade and a "no
-    opposite level yet" trade are the same underlying situation: the
-    Storyline pair isn't giving a trustworthy target right now.
-    max_rr defaults to the live MSNR_MAX_RR global if not given —
-    resolved at call time, not frozen as a signature default, since
-    that constant IS settings/autotune-mutable (unlike min_leg_atr/
-    qm_zone_pct/qm_lookback above, which are only ever changed via
-    explicit grid-search **params, never a global reassignment) —
-    avoiding the exact v0.95.7-class stale-default bug this session
-    already found and fixed elsewhere, applied proactively here rather
-    than reactively after a live report.
+    v0.99.11 added, v0.99.68 REMOVED: a cap (MSNR_MAX_RR) that ALSO
+    fell back to fallback_rr whenever the paired level was valid but
+    would produce rr > max_rr. Per direct user request ("в оригинале
+    по задумке автора эта стратегия msnr ловит движения с очень
+    большим rr, даже если winrate около 20-30, у нас так не
+    получается"): that cap was silently substituting a much smaller
+    MSNR_FALLBACK_RR=4.0 target for ANY genuinely-far opposite level,
+    directly preventing the large-RR/low-winrate trades this strategy
+    was designed around — and keeping msnr_symbol_rr_skip_min()'s own
+    per-symbol statistical test (exactly the right tool for "is this
+    RR bucket actually profitable for THIS symbol despite a low
+    win-rate") blind to that entire RR range, since it never saw a
+    trade's true RR once this had already substituted a capped one.
+    Trusting that per-symbol filter fully now instead of a blanket
+    global ceiling that couldn't tell a genuinely unreachable target
+    from a genuinely rare-but-profitable one.
     A level only fires once per "reign" (consumed on signal, same as
     xau_lg's active_support=None pattern) — replaced by the next
     confirmed pivot of that type resets it.
     Returns (signals, pivots). signals: list of dicts with index (into
     entry_candles), time, direction, entry, sl, tp, level, level_type."""
-    rr_cap = max_rr if max_rr is not None else MSNR_MAX_RR
+    pivots = msnr_build_pivots(structure_candles, pivot_left, pivot_right, min_leg_atr, atr_period)
     pivots = msnr_build_pivots(structure_candles, pivot_left, pivot_right, min_leg_atr, atr_period)
     signals = []
     if not entry_candles:
@@ -16442,20 +16499,45 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
                     risk = sl - entry
                     if risk > 0:
                         # TP is the paired V-shape ONLY if it's actually still
-                        # ahead of price (below entry, for a SHORT) AND doesn't
-                        # imply an rr past the cap — a V-shape confirmed long
-                        # ago can sit anywhere price has been since, including
-                        # above the current entry once a later uptrend leg
-                        # passed it. Using a stale level on the wrong side of
-                        # entry produced nonsense trades (TP below SL on a
-                        # LONG, found via direct user screenshot review of a
-                        # backtest trade) — a target that isn't a genuine
-                        # unmet objective isn't a valid Storyline pair, so
-                        # fall back to fixed RR instead.
+                        # ahead of price (below entry, for a SHORT) — a
+                        # V-shape confirmed long ago can sit anywhere price
+                        # has been since, including above the current entry
+                        # once a later uptrend leg passed it. Using a stale
+                        # level on the wrong side of entry produced nonsense
+                        # trades (TP below SL on a LONG, found via direct
+                        # user screenshot review of a backtest trade) — a
+                        # target that isn't a genuine unmet objective isn't
+                        # a valid Storyline pair, so fall back to fixed RR
+                        # instead.
+                        # v0.99.68 — REMOVED the "AND doesn't imply an rr
+                        # past the cap" half of this check, per direct user
+                        # request: "в оригинале по задумке автора эта
+                        # стратегия msnr ловит движения с очень большим rr,
+                        # даже если winrate около 20-30, у нас так не
+                        # получается." MSNR_MAX_RR (rr_cap above) used to
+                        # silently swap ANY genuinely-far opposite level for
+                        # a much smaller MSNR_FALLBACK_RR=4.0 fixed target —
+                        # directly preventing the strategy from ever taking
+                        # the large-RR/low-winrate trades it was designed
+                        # around, and — worse — keeping msnr_symbol_rr_
+                        # skip_min()'s own per-symbol statistical test (which
+                        # is exactly the right tool for "is this RR bucket
+                        # actually profitable for THIS symbol despite a low
+                        # win-rate") blind to that entire RR range, since it
+                        # never saw a trade's true RR once this had already
+                        # substituted a capped one. Full trust now placed in
+                        # that per-symbol statistical filter instead of a
+                        # blanket global ceiling — msnr_symbol_rr_skip_min()
+                        # will correctly reject a high-RR bucket for a
+                        # symbol where it's actually failing breakeven, and
+                        # correctly allow it through for one where it isn't,
+                        # which a fixed cap can never distinguish. rr_cap/
+                        # MSNR_MAX_RR itself is left fully defined (still
+                        # wired through settings/UI) in case a future
+                        # session wants to reintroduce a cap deliberately —
+                        # nothing in signal generation reads it anymore.
                         opp = active_v["price"] if active_v is not None else None
                         opp_valid = opp is not None and opp < entry
-                        if opp_valid and (entry - opp) / risk > rr_cap:
-                            opp_valid = False
                         tp = opp if opp_valid else entry - risk * fallback_rr
                         signals.append({
                             "index": i, "time": c["time"], "direction": "SHORT",
@@ -16476,14 +16558,13 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
                     sl = sweep_extreme * (1 - sl_buffer_pct)
                     risk = entry - sl
                     if risk > 0:
-                        # Same "opposite level must still be ahead of price,
-                        # and not imply rr past the cap" check, mirrored for
-                        # LONG: the paired A-shape is only a valid TP if it's
-                        # above entry and close enough.
+                        # v0.99.68 — same removal as the SHORT branch above
+                        # (see its own comment for the full reasoning): no
+                        # longer checks implied RR against rr_cap, only that
+                        # the paired A-shape is still a genuine unmet target
+                        # ahead of price.
                         opp = active_a["price"] if active_a is not None else None
                         opp_valid = opp is not None and opp > entry
-                        if opp_valid and (opp - entry) / risk > rr_cap:
-                            opp_valid = False
                         tp = opp if opp_valid else entry + risk * fallback_rr
                         signals.append({
                             "index": i, "time": c["time"], "direction": "LONG",
@@ -22263,7 +22344,7 @@ async function refreshMsnr() {
         <li>Квалификация: винрейт &gt;${cfg.live_promote_min_winrate}%, выборка &gt;${cfg.live_promote_min_sample} закрытых сделок</li>
         <li>Бэктест: ${status.backtest_universe_size || '?'} ликвидных монет · структура ${cfg.structure_tf} (L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf}</li>
         <li>Параметры (импульс/QM-зона/окно) автотюнятся отдельно на каждую монету — см. «Параметры» в таблице</li>
-        <li>Потолок RR ${cfg.max_rr}: выше — укороченный фикс. тейк вместо реального уровня</li>
+        <li>TP всегда реальный уровень пары (без потолка RR) — за отсечение невыгодных RR-диапазонов отвечает per-symbol фильтр skip_rr_min</li>
         <li>Автоторговля (если включена в настройках) — по всем монетам живого скана, не только по золоту</li>
       </ul>
       ${staleWarnHtml}
