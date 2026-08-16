@@ -7597,6 +7597,37 @@ v0.99.68 - Direct user report: "в оригинале по задумке авт
          --check on the correctly-last <script> block, the Flask
          route/def integrity check (still 64 routes), and an AST walk
          for duplicate top-level defs (none introduced).
+
+v0.99.69 - Direct user report with a screenshot: a live OPEN MSNR
+         signal's own "РАЗМЕР" column showed "$40 @ 15x" while the
+         backtest table's "плечо ... (Kelly-оптимум)" for the SAME
+         symbol showed 19.5x, and the expanded per-trade table showed
+         19.5x on every row too — looked like a display bug, wasn't
+         one, but was genuinely confusing without an explanation.
+         Confirmed by reading the actual data flow: leverage_used (the
+         live signal's own value) is frozen at the exact moment THAT
+         signal fired — an already-placed order's leverage can't
+         retroactively change just because the recommendation moved
+         later. The backtest table's Kelly value is the CURRENT
+         recommendation and keeps updating every backtest cycle (this
+         session already established these per-symbol values can shift
+         meaningfully cycle to cycle), so it can genuinely diverge from
+         what was true when a still-OPEN signal fired. A second,
+         independent reason they can differ even at the exact same
+         instant: msnr_scan_symbol_live()'s own liquidation-safety
+         check (v0.99.46) walks leverage DOWN from the Kelly value
+         specifically for a trade whose own SL width would otherwise
+         breach the buffer — so a live value below the currently-shown
+         Kelly number is expected either way, never a sign anything's
+         broken.
+         No logic changed (there was nothing to fix) — added a hover
+         tooltip on the live signals table's "РАЗМЕР" cell explaining
+         both reasons in place, so this doesn't need re-explaining from
+         scratch the next time it comes up.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         node --check on the correctly-last <script> block, and the
+         Flask route/def integrity check (still 64 routes) — UI-only
+         change, no Python logic touched.
 """
 
 import os
@@ -7616,7 +7647,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.68"
+APP_VERSION = "0.99.69"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22385,8 +22416,24 @@ async function refreshMsnr() {
     // only shown for signals an actual order was placed for
     // (autotrade_fired), since a signal nobody traded never had a
     // real margin behind it at all.
+    // v0.99.69, per direct user report (screenshot: a live OPEN
+    // signal showing "15x" while the backtest table's own "плечо
+    // ... (Kelly-оптимум)" for the same symbol showed 19.5x — looked
+    // like a bug, isn't one): leverage_used is frozen at the moment
+    // THIS signal fired (an already-placed order's leverage can't
+    // retroactively change), while the backtest table's Kelly value
+    // is the CURRENT recommendation — it keeps updating every
+    // backtest cycle, so it can genuinely move between when a still-
+    // open signal fired and now. It can also differ for a second,
+    // separate reason even at the SAME instant: msnr_scan_symbol_
+    // live()'s own liquidation-safety check walks leverage DOWN from
+    // the Kelly value for a trade whose specific SL width would
+    // otherwise breach the buffer — so a live value below the
+    // current Kelly number is expected either way, never a display
+    // bug. Tooltip added so this isn't confusing again without
+    // needing to re-explain it from scratch each time.
     const sizeTxt = s.autotrade_fired
-      ? `$${s.live_size_usd}${s.leverage_used ? ' @ '+s.leverage_used+'x' : ''}`
+      ? `<span title="\u043f\u043b\u0435\u0447\u043e \u043d\u0430 \u043c\u043e\u043c\u0435\u043d\u0442 \u0441\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u043d\u0438\u044f \u044d\u0442\u043e\u0433\u043e \u0441\u0438\u0433\u043d\u0430\u043b\u0430 \u2014 \u043c\u043e\u0433\u043b\u043e \u043e\u0442\u043b\u0438\u0447\u0430\u0442\u044c\u0441\u044f \u043e\u0442 \u0442\u0435\u043a\u0443\u0449\u0435\u0439 Kelly-\u0440\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0438 \u0432 \u0442\u0430\u0431\u043b\u0438\u0446\u0435 \u043d\u0438\u0436\u0435 \u2014 \u043e\u043d\u0430 \u043e\u0431\u043d\u043e\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u043a\u0430\u0436\u0434\u044b\u0439 \u0446\u0438\u043a\u043b, \u0438\u043b\u0438 \u0435\u0451 \u0441\u043f\u0435\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043e\u0436\u0430\u043b\u0438 \u0432\u043d\u0438\u0437 \u0438\u0437-\u0437\u0430 \u0448\u0438\u0440\u0438\u043d\u044b \u0441\u0442\u043e\u043f\u0430 \u044d\u0442\u043e\u0439 \u0441\u0434\u0435\u043b\u043a\u0438">$${s.live_size_usd}${s.leverage_used ? ' @ '+s.leverage_used+'x' : ''}</span>`
       : '<span class="dim">\u2014</span>';
     return `<tr onclick="openMsnrChart('${s.symbol}', ${s.time})" style="cursor:pointer;">
       <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td><td class="dim">${levelTxt}</td>
