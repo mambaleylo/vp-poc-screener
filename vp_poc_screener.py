@@ -7832,6 +7832,34 @@ v0.99.73 - Direct user follow-up, alarmed: "уведомления и нет п�
          node --check on the correctly-last <script> block, and the
          Flask route/def integrity check (still 64 routes) — JS/display
          change only, no Python logic touched.
+
+v0.99.74 - Direct user request, immediate follow-up to v0.99.73's own
+         clarification: "мне не нужны уведомления в тг по монетам,
+         которые не в автоторговле." msnr_scan_symbol_live()'s
+         send_telegram() call now fires ONLY when record["autotrade_
+         fired"] is True — the exact same flag set (alongside
+         leverage_used/live_size_usd) inside the order_opened branch a
+         few lines above, not a separate approximation of it. Before
+         this, v0.99.55 sent a notification for EVERY detected signal
+         regardless of whether real money was ever at risk, with a
+         "плечо (реком.)" fallback label specifically for the not-
+         autotraded case — that fallback and the notification it
+         labeled are both gone now; a signal on a symbol with no
+         autotrade checkbox simply doesn't message at all. The signal
+         itself is still logged and tracked toward WIN/LOSS exactly as
+         before (record["status"]="OPEN" above is unconditional,
+         unchanged — same v0.99.73 "OPEN (сигнал)" UI distinction
+         still applies for that case) — only the Telegram send became
+         conditional, not the underlying per-symbol statistics
+         collection this session has repeatedly relied on (raw_closed_n,
+         skip_rr_min, the hour/volume filters, etc. all still need
+         every symbol's full history regardless of whether it trades).
+         Verified with py_compile, an actual runtime start, a direct
+         check of the new condition against both cases (autotrade_
+         fired=True correctly notifies, False correctly doesn't),
+         pyflakes, node --check on the correctly-last <script> block,
+         the Flask route/def integrity check (still 64 routes), and an
+         AST walk for duplicate top-level defs (none introduced).
 """
 
 import os
@@ -7851,7 +7879,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.73"
+APP_VERSION = "0.99.74"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -18329,29 +18357,32 @@ def msnr_scan_symbol_live(symbol):
                 record["leverage_used"] = live_leverage
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         level_txt = "A-shape (resist)" if sig["level_type"] == "A" else "V-shape (support)"
-        # v0.99.55, per direct user request ("добавь в уведы телеграмм
-        # ещё плечо"): this notification fires for EVERY detected
-        # signal, not just ones autotrade actually fired for — the
-        # block above that computes live_leverage/record["leverage_
-        # used"] only runs when this symbol's own autotrade toggle is
-        # on AND eligible, so record.get("leverage_used") is None for
-        # a signal that's only being logged/notified. Falls back to
-        # msnr_symbol_optimal_leverage(symbol) (the same Kelly-optimal
-        # value the UI already shows next to this symbol) so the
-        # message still says SOMETHING useful either way, labeled
-        # differently so it's never misread as "a real order used
-        # this" when no order was actually placed.
-        if record.get("leverage_used"):
+        # v0.99.74, per direct user request ("мне не нужны уведомления
+        # в тг по монетам, которые не в автоторговле"): notification now
+        # ONLY fires when a real order actually opened — record[
+        # "autotrade_fired"] is set True (alongside leverage_used/
+        # live_size_usd) only inside the order_opened branch above, so
+        # checking it here is the exact same condition, not a separate
+        # approximation. Before this, v0.99.55 had every detected
+        # signal notify regardless of whether real money was ever at
+        # risk, with a "плечо (реком.)" fallback label specifically for
+        # the not-autotraded case — that fallback (and the whole
+        # notification) is now skipped entirely for those signals
+        # instead of sent with a qualifier. The signal itself is still
+        # logged and tracked toward WIN/LOSS either way (record[
+        # "status"]="OPEN" above runs unconditionally, same as always —
+        # see v0.99.73's own "OPEN (сигнал)" UI label for that exact
+        # tracked-but-not-traded distinction) — only the Telegram
+        # message is now conditional, not the underlying statistics.
+        if record.get("autotrade_fired"):
             leverage_txt = f"плечо: {record['leverage_used']}x"
-        else:
-            leverage_txt = f"плечо (реком.): {msnr_symbol_optimal_leverage(symbol)}x"
-        send_telegram(
-            f"{arrow} {symbol} (MSNR QM off {level_txt})\n"
-            f"entry: {sig['entry']:.6g}\n"
-            f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n"
-            f"{leverage_txt}",
-            category="msnr",
-        )
+            send_telegram(
+                f"{arrow} {symbol} (MSNR QM off {level_txt})\n"
+                f"entry: {sig['entry']:.6g}\n"
+                f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n"
+                f"{leverage_txt}",
+                category="msnr",
+            )
     except Exception as e:
         log_error(f"msnr_live {symbol}: {e}")
 
