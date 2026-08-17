@@ -7860,6 +7860,74 @@ v0.99.74 - Direct user request, immediate follow-up to v0.99.73's own
          pyflakes, node --check on the correctly-last <script> block,
          the Flask route/def integrity check (still 64 routes), and an
          AST walk for duplicate top-level defs (none introduced).
+
+v0.99.75 - Direct user request: "делаем новую сортировку для топ 10 и
+         остального списка, золото принудительно пока убираем,
+         ранжирует по винрейта, количеству в выборке до (фильтров),
+         доход. Эти параметре по убыванию главные. Я должен увидеть
+         плавное убывание в топ 10 и последующее продолжение убывание
+         вне списка." Flagged once, briefly, before implementing
+         exactly as asked: a pure lexicographic sort checks winrate
+         FIRST, so a thin sample with a lucky high winrate can outrank
+         a large, steady one — precisely what msnr_ranking_score()'s
+         lower-confidence-bound existed to prevent. Implemented with
+         eyes open per the explicit request for something simple and
+         transparent over that protection, and reproduced the trade-off
+         concretely in testing (a synthetic 2-trade/100%-winrate symbol
+         ranked #1, above a 70%-winrate/80-trade one) so it's a known,
+         demonstrated consequence, not a surprise later.
+         New msnr_symbol_rank_key(ov): a plain 3-key tuple (winrate,
+         raw_closed_n, compound_return_pct), each DESCENDING, in the
+         exact priority order requested. Replaces TWO previously
+         DIFFERENT sorts that used to disagree with each other — msnr_
+         rank_by_winrate_sample()'s own weighted income/score composite
+         (which decided top-10 membership) and api_msnr_status()'s
+         separate score-only sort (which decided the overall table's
+         display order) — that mismatch is exactly what produced the
+         "не плавное убывание" the request describes: a symbol's table
+         position didn't necessarily track its own top-10 standing.
+         Both now read this same function, so scrolling from #1 through
+         #10 into "the rest" is one continuous ordering.
+         msnr_rank_by_winrate_sample() also DROPPED the MSNR_AUTOTRADE_
+         TOP_MIN_SAMPLE hard exclusion it used to apply — per the same
+         request's own "продолжение убывание вне списка": a hard
+         sample-size cutoff would carve a GAP out of the ranking instead
+         of a smooth decline, and raw_closed_n is now the ranking's own
+         second key anyway, so a thin sample naturally sinks toward the
+         bottom of ties rather than disappearing from the list outright.
+         Gold's forced inclusion removed from BOTH places it existed —
+         msnr_autotrade_eligible_symbols() (used to always prepend
+         MSNR_SYMBOLS regardless of the top-10 ranking) and msnr_
+         compute_live_universe() (used to always seed `promoted` with
+         MSNR_SYMBOLS before the separate winrate>50%+sample>40 rule) —
+         gold now competes for both a top-10 slot and live-scan
+         inclusion purely on the same footing as every other symbol,
+         per "золото принудительно пока убираем." Nothing about gold's
+         own detection/backtesting itself changed.
+         Frontend: _msnrSortKey's default changed from 'score' to null
+         (found while implementing — a client-side re-sort by a
+         DIFFERENT single field on every render was silently undoing
+         the backend's own new continuity the moment the table
+         rendered, a second, separate source of the same "не плавное
+         убывание" complaint). null means "trust the backend's already-
+         sorted order," preserved via a same-array-order comparator
+         return; clicking a column header (WR/n) still overrides with a
+         single-field sort exactly as before. Updated the MSNR panel's
+         own description text (was still claiming "золото всегда",
+         no longer accurate) and added a one-line note explaining the
+         new unified ranking rule.
+         Verified with py_compile, an actual runtime start (synthetic
+         5-symbol case: confirmed a stress_test_failed symbol is
+         excluded regardless of its own numbers; confirmed the small-
+         sample trade-off concretely, as described above; confirmed
+         gold no longer sorts first by construction, landing wherever
+         its own numbers place it; confirmed msnr_compute_live_universe()
+         correctly excludes a low-winrate gold symbol that no longer
+         clears the promotion rule on its own), pyflakes, node --check
+         on the correctly-last <script> block, the Flask route/def
+         integrity check (still 64 routes), and an AST walk for
+         duplicate top-level defs (none introduced — all four touched
+         functions present exactly once).
 """
 
 import os
@@ -7879,7 +7947,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.74"
+APP_VERSION = "0.99.75"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -18517,12 +18585,20 @@ def msnr_build_backtest_universe():
 
 
 def msnr_compute_live_universe(overrides):
-    """MSNR_SYMBOLS (gold — always live, regardless of its own backtest
-    numbers) UNION'd with every OTHER symbol whose winning backtest
-    combo clears BOTH MSNR_LIVE_PROMOTE_MIN_WINRATE (win-rate on closed
-    trades) AND MSNR_LIVE_PROMOTE_MIN_SAMPLE. Per direct user request:
-    "для монет более 50% винрейт и с выборкой более 40 сигналов на
-    бэктесте добавлять их в онлайн торговлю."
+    """Every symbol whose winning backtest combo clears BOTH MSNR_LIVE_
+    PROMOTE_MIN_WINRATE (win-rate on closed trades) AND MSNR_LIVE_
+    PROMOTE_MIN_SAMPLE. Per direct user request: "для монет более 50%
+    винрейт и с выборкой более 40 сигналов на бэктесте добавлять их в
+    онлайн торговлю."
+    v0.99.75, per direct user request ("золото принудительно пока
+    убираем"): MSNR_SYMBOLS (gold) is no longer unconditionally
+    prepended here either — same removal as msnr_autotrade_eligible_
+    symbols()'s own forced-inclusion, applied consistently to this
+    OLDER, separate promotion path too, not just the top-10 one. Gold
+    still gets promoted into the live scan universe if its own winrate/
+    sample clear this rule (or if it lands in the top-10 via msnr_
+    autotrade_eligible_symbols()) — just no longer automatically,
+    regardless of its own numbers.
     v0.99.57, per direct user follow-up: the sample-size check is now
     raw_closed_n (the symbol's TRUE closed-trade count, captured in
     msnr_optimize_symbol() BEFORE skip_rr_min/liquidation/skip_sl_
@@ -18536,7 +18612,7 @@ def msnr_compute_live_universe(overrides):
     by symbol) — takes no locks, does no I/O, so it's cheap to call and
     easy to test directly against a plain dict rather than needing to
     mock STATE or the network."""
-    promoted = list(MSNR_SYMBOLS)
+    promoted = []
     for sym, ov in overrides.items():
         if not ov or ov.get("error") or sym in promoted:
             continue
@@ -18561,108 +18637,108 @@ def msnr_compute_live_universe(overrides):
     return promoted
 
 
+def msnr_symbol_rank_key(ov):
+    """v0.99.75, per direct user request ("делаем новую сортировку для
+    топ 10 и остального списка... ранжирует по винрейта, количеству в
+    выборке до (фильтров), доход. Эти параметре по убыванию главные. Я
+    должен увидеть плавное убывание в топ 10 и последующее продолжение
+    убывание вне списка"): REPLACES msnr_rank_by_winrate_sample()'s own
+    weighted income/score composite AND api_msnr_status()'s separate,
+    DIFFERENT score-only sort for the overall table — those two used to
+    disagree with each other, which is exactly what produced the
+    discontinuity ("не плавное убывание") the request is about: a
+    symbol could rank differently for "is this top-10" vs "where does
+    it sit in the full table," now they can't, because both read
+    THIS SAME function.
+    A plain 3-key lexicographic tuple, each DESCENDING, in the exact
+    priority order requested: (1) winrate, (2) raw_closed_n — the
+    symbol's TRUE closed-trade count captured before skip_rr_min/
+    liquidation/skip_sl_pct_min/skip_hours/skip_volume_below filtering
+    (see msnr_optimize_symbol()'s own docstring for why that's the
+    right count to use, not the post-filter displayed one), (3)
+    compound_return_pct (доход). Deliberately NOT msnr_ranking_score()'s
+    own lower-confidence-bound approach, which existed specifically to
+    stop a small, lucky sample from outranking a larger, steadier one —
+    this request is choosing simple and transparent over that
+    protection, with eyes open: winrate is checked FIRST, so a thin-
+    sample symbol with a high winrate CAN still rank above a large-
+    sample one with a lower winrate, exactly the failure mode the
+    confidence-bound approach was built to prevent. raw_closed_n only
+    breaks TIES on winrate, it doesn't gate winrate's own priority.
+    None values sort last within their own key (treated as the worst
+    possible value for that key) rather than crashing or silently
+    becoming 0, which would misrank a genuinely-missing stat as "zero,
+    worse than everything," not obviously true for every field."""
+    winrate = ov.get("winrate")
+    raw_closed_n = ov.get("raw_closed_n")
+    if raw_closed_n is None:
+        raw_closed_n = (ov.get("wins", 0) or 0) + (ov.get("losses", 0) or 0)
+    income = ov.get("compound_return_pct")
+    return (
+        winrate if winrate is not None else -1.0,
+        raw_closed_n if raw_closed_n is not None else -1,
+        income if income is not None else float("-inf"),
+    )
+
+
 def msnr_rank_by_winrate_sample(overrides, exclude=None):
-    """Ranks symbols (excluding `exclude`, e.g. gold — it's handled as
-    its own fixed set, not part of this ranking) by a WEIGHTED composite
-    of `compound_return_pct` (income) and `score` (statistical lower-
-    confidence-bound on mean R — see msnr_ranking_score()'s own
-    docstring), min-max normalized across the current candidate set and
-    combined via MSNR_TOP10_INCOME_WEIGHT.
-    v0.99.19: switched from raw winrate (with sample size only as a
-    tiebreaker) to a lower-confidence-bound score, per a direct follow-
-    up: "не только по винрейту, важно ещё количество сделок."
-    v0.99.20: added the MSNR_LIVE_PROMOTE_MIN_SAMPLE floor so a tiny-
-    sample symbol can't rank via score alone with almost no track
-    record.
-    v0.99.57, per direct user follow-up ("монеты могут перестать
-    проходить по выборке" after more per-symbol filters got added):
-    the sample-size floor below now checks raw_closed_n (the symbol's
-    true closed-trade count, before filtering) instead of wins+losses
-    (the post-filter DISPLAYED count) — same fix, same reasoning as
-    msnr_compute_live_universe()'s own docstring.
+    """Ranks symbols (excluding `exclude`, if given) by msnr_symbol_
+    rank_key() — see that function's own docstring for the exact
+    3-key (winrate, raw_closed_n, compound_return_pct) criteria and the
+    small-sample-luck trade-off it deliberately accepts, per direct
+    user request.
+    v0.99.75 replaced several earlier iterations of this ranking (a
+    lower-confidence-bound score alone, then a weighted income/score
+    composite) with that plain multi-key sort — kept here as history
+    since this function's own name/role in the pipeline (feeding
+    msnr_autotrade_eligible_symbols() via [:MSNR_AUTOTRADE_TOP_N])
+    hasn't changed, only the ranking rule inside it has, several times.
     v0.99.27, per direct user request ("просто не попадает в топ"):
-    also excludes any symbol with stress_test_failed=True (see msnr_
+    excludes any symbol with stress_test_failed=True (see msnr_
     optimize_symbol()'s own docstring) — a symbol whose own $
     compounding simulation lost money is unfit to rank/autotrade no
-    matter how good its numbers look; this is a hard gate, not a score
-    penalty, so it can't be outweighed by an otherwise strong ranking
-    value the way a penalty could be.
-    v0.99.39, per direct user request: replaced the sample floor (was
-    MSNR_LIVE_PROMOTE_MIN_SAMPLE=40, now its own MSNR_AUTOTRADE_TOP_
-    MIN_SAMPLE=35, closed trades >=) and the sort key with avg_rr DESC.
-    v0.99.43, per direct user follow-up ("больше веса надо для дохода
-    ... доход в разы выше"): avg_rr ignores win-rate entirely — switched
-    the sort key to compound_return_pct alone.
-    v0.99.44, per direct user follow-up to THAT ("топ 10 стал хуже по
-    доходу"): a pure compound_return_pct sort backfired — msnr_optimize_
-    symbol()'s grid search still picks each symbol's winning combo by
-    `score`, never by income, so ranking by compound_return_pct alone
-    was only re-ranking each symbol's already-fixed, score-optimal
-    combo's INCIDENTAL $ outcome, not its true best-achievable income;
-    and raw compounding return is inherently noisy (extremely order/
-    luck-sensitive under full reinvestment) to rank by in isolation —
-    exactly what `score`'s confidence-bound exists to guard against.
-    Neither extreme was right, so this blends both: min-max normalizes
-    compound_return_pct and score separately across the candidates that
-    clear every gate below, then composite = MSNR_TOP10_INCOME_WEIGHT *
-    income_norm + (1 - MSNR_TOP10_INCOME_WEIGHT) * score_norm, sorted
-    DESC — income-weighted (per the literal "больше веса", not "только
-    доход") while score still dampens a noisy compounding outlier from
-    dominating on luck alone. A candidate needs BOTH compound_return_pct
-    and score present (excluded otherwise — nothing honest to normalize
-    a None into); with only one candidate, or all candidates sharing the
-    same value on a metric, that metric's normalized value is fixed at
-    0.5 for everyone (no real spread to rank by, shouldn't silently
-    collapse to 0 via a naive min-max divide).
-    Pure function of `overrides`, same
-    reasoning as msnr_compute_live_universe() above — no locks, no I/O,
-    directly testable.
+    matter how good its other numbers look; this is a hard gate, not
+    part of the ranking key, so it can't be outweighed by strong
+    winrate/sample/income values the way a mere penalty could be.
+    v0.99.75 also DROPPED the MSNR_AUTOTRADE_TOP_MIN_SAMPLE floor that
+    used to sit here — per the same request's own "плавное убывание...
+    продолжение вне списка": a hard sample-size exclusion would create
+    a GAP in the ranking instead of a smooth decline, and raw_closed_n
+    is now the ranking's own second key anyway, so a thin sample
+    naturally sinks toward the bottom of ties on its own rather than
+    disappearing from the list outright.
+    Pure function of `overrides` — no locks, no I/O, directly testable.
     Returns a list of (symbol, override_dict) tuples, already sorted,
-    highest-ranked first — feeds msnr_autotrade_eligible_symbols()
-    below (which just needs [:MSNR_AUTOTRADE_TOP_N])."""
+    highest-ranked first."""
     exclude = exclude or set()
-    # v0.99.57 — same raw_closed_n gating fix as msnr_compute_live_
-    # universe() above, same fallback-to-wins+losses for a pre-existing
-    # override that predates this field.
     candidates = [(sym, ov) for sym, ov in overrides.items()
-                  if ov and not ov.get("error") and ov.get("compound_return_pct") is not None
-                  and ov.get("score") is not None and sym not in exclude
-                  and not ov.get("stress_test_failed")
-                  and (ov.get("raw_closed_n") if ov.get("raw_closed_n") is not None
-                       else (ov.get("wins", 0) or 0) + (ov.get("losses", 0) or 0)) >= MSNR_AUTOTRADE_TOP_MIN_SAMPLE]
-    if not candidates:
-        return []
-
-    def _normalized(values):
-        lo, hi = min(values), max(values)
-        if hi - lo < 1e-12:
-            return {i: 0.5 for i in range(len(values))}
-        return {i: (v - lo) / (hi - lo) for i, v in enumerate(values)}
-
-    income_norm = _normalized([ov["compound_return_pct"] for _sym, ov in candidates])
-    score_norm = _normalized([ov["score"] for _sym, ov in candidates])
-    w = MSNR_TOP10_INCOME_WEIGHT
-    composite = [w * income_norm[i] + (1 - w) * score_norm[i] for i in range(len(candidates))]
-    ranked = sorted(zip(candidates, composite), key=lambda pair: pair[1], reverse=True)
-    return [cand for cand, _c in ranked]
+                  if ov and not ov.get("error") and sym not in exclude
+                  and not ov.get("stress_test_failed")]
+    candidates.sort(key=lambda pair: msnr_symbol_rank_key(pair[1]), reverse=True)
+    return candidates
 
 
 def msnr_autotrade_eligible_symbols(overrides):
-    """The symbols eligible for an individual autotrade toggle: all 3 of
-    MSNR_SYMBOLS (gold — always eligible, regardless of its own backtest
-    numbers, same unconditional treatment msnr_compute_live_universe()
-    gives it) plus the current top MSNR_AUTOTRADE_TOP_N non-gold symbols
-    by msnr_rank_by_winrate_sample(). Per direct user request: "включать
-    автоторговлю не только по золоту, но и по топ 3 после сортировки не
-    считая золота" (v0.99.18), raised to top 10 in v0.99.19 per direct
-    follow-up.
+    """The symbols eligible for an individual autotrade toggle: the
+    current top MSNR_AUTOTRADE_TOP_N symbols by msnr_rank_by_winrate_
+    sample() — see that function's own docstring, and msnr_symbol_
+    rank_key()'s, for the exact ranking criteria. Per direct user
+    request: "включать автоторговлю не только по золоту, но и по топ 3
+    после сортировки не считая золота" (v0.99.18), raised to top 10 in
+    v0.99.19.
+    v0.99.75, per direct user request ("золото принудительно пока
+    убираем"): gold (MSNR_SYMBOLS) is no longer unconditionally
+    prepended to this set regardless of its own numbers — it now
+    competes for a top-10 slot on the exact same footing as every other
+    symbol, via the same msnr_symbol_rank_key() ranking. It can still
+    end up in the top 10 (or not) purely on its own merit; nothing
+    about gold's own detection/backtesting changed, only this forced-
+    inclusion special case.
     This set can change between backtest cycles as rankings shift — see
     _set_msnr_autotrade_symbol()'s own docstring for what happens to a
     symbol's saved toggle state when it falls out of the top N."""
-    gold = set(MSNR_SYMBOLS)
-    ranked = msnr_rank_by_winrate_sample(overrides, exclude=gold)
-    top_n = [sym for sym, _ov in ranked[:MSNR_AUTOTRADE_TOP_N]]
-    return list(MSNR_SYMBOLS) + top_n
+    ranked = msnr_rank_by_winrate_sample(overrides)
+    return [sym for sym, _ov in ranked[:MSNR_AUTOTRADE_TOP_N]]
 
 
 def msnr_manual_toggle_allowed_symbols(overrides):
@@ -20103,19 +20179,30 @@ def api_msnr_status():
                    manual_toggle_allowed=(sym in manual_toggle_allowed),
                    autotrade_on=bool(autotrade_symbols.get(sym)))
               for sym, v in overrides.items() if v and not v.get("error")]
+    # v0.99.75, per direct user request ("плавное убывание в топ 10 и
+    # последующее продолжение убывание вне списка"): this table's own
+    # display order now uses the EXACT same msnr_symbol_rank_key()
+    # msnr_rank_by_winrate_sample() uses to pick the top 10 — before
+    # this, they were two DIFFERENT sorts (this one by `score` alone,
+    # top-10 membership by a weighted income/score composite), which is
+    # exactly what produced the discontinuity the request describes: a
+    # symbol's position in the full table didn't necessarily track its
+    # own top-10 standing. Now they're the same key, so scrolling from
+    # #1 through #10 into "the rest" is one continuous ordering, not two
+    # different ones stitched together.
     # v0.99.27, per direct user request ("просто не попадает в топ"):
     # stress_test_failed symbols (see msnr_optimize_symbol()'s own
-    # docstring — a losing $ compound simulation) sort BELOW every
-    # symbol that passed, regardless of score — `not stress_test_failed`
-    # as the primary sort key (True > False, so passing symbols come
-    # first under reverse=True) with score as the secondary key within
-    # each group. A hard sort-order gate, not a score penalty — msnr_
-    # rank_by_winrate_sample() (autotrade eligibility) already excludes
-    # these outright; this keeps the general table's own visual order
-    # consistent with that instead of a failed symbol still floating
-    # near the top by score alone.
-    ranked.sort(key=lambda r: (not r.get("stress_test_failed"),
-                                r.get("score") if r.get("score") is not None else -999), reverse=True)
+    # docstring — a losing $ compound simulation) still sort BELOW every
+    # symbol that passed, regardless of rank key — `not stress_test_
+    # failed` stays the primary grouping (True > False, so passing
+    # symbols come first under reverse=True), msnr_symbol_rank_key() is
+    # the secondary key within each group. A hard sort-order gate, not
+    # part of the ranking key itself — msnr_rank_by_winrate_sample()
+    # (autotrade eligibility) already excludes these outright; this
+    # keeps the general table's own visual order consistent with that
+    # instead of a failed symbol still floating near the top on winrate
+    # alone.
+    ranked.sort(key=lambda r: (not r.get("stress_test_failed"), msnr_symbol_rank_key(r)), reverse=True)
     # v0.99.11: RR-bucket win-rate, pooled across every symbol's own
     # backtest trades — per direct user observation (SPCX: rr>6 trades
     # consistently hit stop) that a pooled avg/median RR can't reveal
@@ -22595,11 +22682,22 @@ async function refreshXauLg() {
 // ---------------- MSNR — Malaysian SNR / Storyline gold strategy (EXPERIMENTAL, v0.99.0) ----------------
 // v0.99.18: sort state for the backtest leaderboard table — lives
 // OUTSIDE refreshMsnr() for the same reason _msnrExpanded does (survives
-// the panel's full re-render on every auto-refresh tick). Defaults to
-// score (this table's own pre-existing default ranking), switches to
+// the panel's full re-render on every auto-refresh tick). Switches to
 // winrate or trades(n) on header click, per direct user request:
 // "сделай сортировку по винрейту и количеству сигналов бектеста."
-let _msnrSortKey = 'score';
+// v0.99.75, per direct user request ("плавное убывание в топ 10 и
+// последующее продолжение убывание вне списка"): default changed from
+// 'score' to null ("no column override — trust the backend's own
+// order"). The backend's /api/msnr/status now already returns `top`
+// pre-sorted by msnr_symbol_rank_key() (winrate, then raw_closed_n,
+// then доход — the exact same key that decides top-10 membership), so
+// a client-side re-sort by a DIFFERENT single field (score) by default
+// was silently undoing that continuity the moment the table rendered —
+// exactly what produced the "не плавное убывание" the request
+// describes. Clicking a column header still overrides with a single-
+// field sort as before (see the comparator below) — this only changes
+// what happens with NO click yet.
+let _msnrSortKey = null;
 let _msnrSortDir = -1;  // -1 = descending (best first), 1 = ascending
 function msnrSortBy(key) {
   if (_msnrSortKey === key) { _msnrSortDir *= -1; } else { _msnrSortKey = key; _msnrSortDir = -1; }
@@ -22695,13 +22793,14 @@ async function refreshMsnr() {
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;font-size:12px;">
       <ul style="margin:0 0 6px 18px;padding:0;">
-        <li>Живой скан: золото всегда + квалифицированные (${liveSymbolsTxt || '—'})</li>
-        <li>Квалификация: винрейт &gt;${cfg.live_promote_min_winrate}%, выборка &gt;${cfg.live_promote_min_sample} закрытых сделок</li>
+        <li>Живой скан: квалифицированные монеты (${liveSymbolsTxt || '—'}) — золото больше не форсируется, ранжируется наравне со всеми (эксперимент)</li>
+        <li>Квалификация: винрейт &gt;${cfg.live_promote_min_winrate}%, выборка &gt;${cfg.live_promote_min_sample} закрытых сделок, либо топ-10 по (винрейт → выборка → доход)</li>
         <li>Бэктест: ${status.backtest_universe_size || '?'} ликвидных монет · структура ${cfg.structure_tf} (L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf}</li>
         <li>Параметры (импульс/QM-зона/окно) автотюнятся отдельно на каждую монету — см. «Параметры» в таблице</li>
         <li>TP всегда реальный уровень пары (без потолка RR) — за отсечение невыгодных RR-диапазонов отвечает per-symbol фильтр skip_rr_min</li>
-        <li>Автоторговля (если включена в настройках) — по всем монетам живого скана, не только по золоту</li>
+        <li>Автоторговля (если включена в настройках) — по всем монетам живого скана</li>
       </ul>
+      <div class="dim" style="font-size:11px;margin:0 0 6px 0;">Топ-10 и таблица ниже отсортированы одним и тем же правилом: винрейт → выборка (до фильтров) → доход, всё по убыванию — без разрыва между топ-10 и остальными.</div>
       ${staleWarnHtml}
       ${buildTxt}<br>
       ${progressBarHtml}
@@ -22809,6 +22908,11 @@ async function refreshMsnr() {
     // entirely, so this only ever matters within the non-eligible
     // group, which is exactly where it needs to matter.
     if (!!a.stress_test_failed !== !!b.stress_test_failed) return a.stress_test_failed ? 1 : -1;
+    // v0.99.75 — null means "no column clicked yet, trust the backend's
+    // own already-sorted order" (see _msnrSortKey's own comment above).
+    // Returning 0 here preserves the array's existing order rather than
+    // comparing a field that isn't being overridden to anything.
+    if (_msnrSortKey === null) return 0;
     const av = a[_msnrSortKey], bv = b[_msnrSortKey];
     if (av === null || av === undefined) return 1;
     if (bv === null || bv === undefined) return -1;
