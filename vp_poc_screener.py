@@ -8119,6 +8119,50 @@ v0.99.79 - Direct user request: "Skip RR>3, давай подобную пров
          routes), and an AST walk for duplicate top-level defs (none
          introduced — no Python functions added or removed, only two
          call sites disabled).
+
+v0.99.80 - CRITICAL FIX, direct user report with a live number: "в топ
+         [10] попадают монеты с доходом 2% за 52 сделки, это нелогая
+         фигня." Also asked directly whether Kelly leverage-fitting
+         literally maximizes income — confirmed NO (its objective is
+         E[log(1+pnl_frac)], the log-growth/Kelly criterion, specifically
+         NOT the same as maximizing raw return, which would be reckless
+         under repeated compounding) — that wasn't the cause here.
+         Root cause was in msnr_symbol_rank_score() itself (v0.99.76-79's
+         weighted geometric mean, weights 0.5/0.3/0.2 descending):
+         reproduced with a synthetic case matching the report exactly
+         (65% WR/60 trades/800% доход vs 62% WR/52 trades/2% доход) — the
+         2%-доход symbol still scored 0.4943, essentially half the
+         maximum. Cause: raising a normalized value x∈[0,1] to a SMALL
+         exponent w compresses it toward 1 regardless of how bad x is
+         (0.061^0.2 ≈ 0.57) — a weight in a geometric mean sets both "how
+         much a good value helps" AND "how much a bad value hurts" at
+         once, they can't be tuned independently. "Доход matters least"
+         (low weight) and "доход must still be good" (v0.99.77's own
+         stated goal) were mathematically in tension the entire time,
+         not an edge case — any low-weighted factor would have shown
+         this same dilution given a bad-enough value.
+         Presented two fixes (equal weights vs. a hard floor gate on
+         доход, mirroring stress_test_failed); user chose "Равные веса —
+         настоящее «all must be good», без приоритета." MSNR_RANK_
+         WINRATE_WEIGHT/SAMPLE_WEIGHT/INCOME_WEIGHT all changed from
+         0.5/0.3/0.2 to 1/3 each — every factor now punishes and rewards
+         identically, trading away the descending-priority ordering
+         v0.99.76 had tried (and, per this report, failed) to express
+         through weight alone, in exchange for actually delivering "all
+         three must be good."
+         Verified with py_compile, an actual runtime start: re-ran the
+         exact reproduction case — the 2%-доход symbol's composite
+         dropped from 0.4943 to 0.3431 (a real, meaningful punishment,
+         though still nonzero since 2% isn't the pool's absolute worst
+         in a 3-symbol test); a more realistic 16-symbol pool (15
+         reasonably competitive alternatives plus the same FLAT symbol)
+         confirmed it correctly falls to position 15 of 16, well outside
+         top-10, resolving the actual reported symptom. Updated the MSNR
+         panel's own description text (was still saying "винрейт важнее
+         всего, доход меньше всего," no longer true). pyflakes, node
+         --check on the correctly-last <script> block, the Flask
+         route/def integrity check (still 64 routes) — constants-and-
+         docstring change only, no new functions.
 """
 
 import os
@@ -8138,7 +8182,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.79"
+APP_VERSION = "0.99.80"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -8842,13 +8886,29 @@ MSNR_TOP10_INCOME_WEIGHT = float(os.environ.get("VP_MSNR_TOP10_INCOME_WEIGHT", 0
 # tie — which almost never happens with continuous values, so in
 # practice it was ranking by winrate ALONE, not "all three factors."
 # That wasn't what was meant: all three should genuinely pull the
-# ranking, winrate weighted heaviest, sample next, доход last — see
-# msnr_symbol_rank_score()'s own docstring for the normalized-weighted-
-# sum design this replaced it with. Weights sum to 1.0; each one's
-# fraction of that sum is its relative pull on the final composite.
-MSNR_RANK_WINRATE_WEIGHT = float(os.environ.get("VP_MSNR_RANK_WINRATE_WEIGHT", 0.5))
-MSNR_RANK_SAMPLE_WEIGHT = float(os.environ.get("VP_MSNR_RANK_SAMPLE_WEIGHT", 0.3))
-MSNR_RANK_INCOME_WEIGHT = float(os.environ.get("VP_MSNR_RANK_INCOME_WEIGHT", 0.2))
+# ranking — see msnr_symbol_rank_score()'s own docstring for the
+# normalized-weighted-geometric-mean design this replaced it with.
+# v0.99.80 — CRITICAL FIX to that same design, per direct user report
+# with a live example (a symbol at 2% доход over 52 trades still
+# scoring ~0.49, nearly half of the maximum possible, well into top-10
+# territory): descending weights (0.5/0.3/0.2, v0.99.76-79) don't
+# actually deliver "all three must be good" under a weighted GEOMETRIC
+# mean — raising a normalized value x∈[0,1] to a SMALL exponent w
+# COMPRESSES it toward 1 regardless of how bad x is (0.061^0.2≈0.57,
+# nowhere near 0), so a low-weighted factor's badness barely drags the
+# composite down. A weight in a geometric mean controls BOTH "how much
+# a good value on this factor helps" AND "how much a bad value hurts"
+# — they can't be tuned independently, so "доход matters least" and
+# "доход must still be good" were mathematically in tension the whole
+# time. Per direct user choice ("Равные веса — настоящее «all must be
+# good», без приоритета") over adding a separate hard floor on доход:
+# equal weights remove that tension entirely — every factor now
+# punishes/rewards identically, restoring genuine "all three must be
+# good" at the cost of the descending-priority ordering v0.99.76 had
+# tried to express through weight alone.
+MSNR_RANK_WINRATE_WEIGHT = float(os.environ.get("VP_MSNR_RANK_WINRATE_WEIGHT", 1.0 / 3))
+MSNR_RANK_SAMPLE_WEIGHT = float(os.environ.get("VP_MSNR_RANK_SAMPLE_WEIGHT", 1.0 / 3))
+MSNR_RANK_INCOME_WEIGHT = float(os.environ.get("VP_MSNR_RANK_INCOME_WEIGHT", 1.0 / 3))
 # v0.99.40 - CRITICAL FIX, per direct user report: "жму очистить msnr и
 # заново бэктэст не запускается, час ждать что-ли". Root cause: msnr_
 # backtest_loop() ends each cycle with a plain time.sleep(max(300,
@@ -18935,6 +18995,27 @@ def msnr_symbol_rank_score(ov, bounds):
     and under a product this now ALSO zeroes the whole composite,
     consistent with "all three must be good": a metric you can't even
     verify isn't "good."
+    v0.99.80 — CRITICAL FIX, per direct user report with a live example
+    (a symbol at 2% доход over 52 closed trades still scored ~0.49,
+    nearly half the maximum possible, comfortably inside top-10):
+    v0.99.76-79's DESCENDING weights (0.5/0.3/0.2) turned out to break
+    "all three must be good" in a subtle way specific to geometric
+    means — raising a value x∈[0,1] to a SMALL exponent w COMPRESSES it
+    toward 1 no matter how bad x is (0.061^0.2 ≈ 0.57, nowhere near 0),
+    so доход's low weight meant its badness barely dragged the
+    composite down, even though that same low weight was ALSO meant to
+    convey "доход matters less." A weight in a geometric mean sets both
+    of those at once — how much a GOOD value on that factor helps AND
+    how much a BAD value hurts — they can't be tuned independently, so
+    "доход matters least" and "доход must still be good" were
+    mathematically in tension the entire time, not just an edge case.
+    Per direct user choice ("Равные веса — настоящее «all must be
+    good», без приоритета") over adding a separate hard floor on
+    доход: MSNR_RANK_WINRATE_WEIGHT/SAMPLE_WEIGHT/INCOME_WEIGHT are now
+    all 1/3 — every factor punishes and rewards identically, restoring
+    genuine "all three must be good" at the cost of the descending-
+    priority ordering v0.99.76 had tried (and, per this report, failed)
+    to express through weight alone.
     Returns a single float composite (higher = better), NOT a tuple —
     callers sort by this directly."""
     def _norm(val, lo, hi):
@@ -23098,7 +23179,7 @@ async function refreshMsnr() {
         <li>TP всегда реальный уровень пары (без потолка RR), фильтр skip_rr_min отключён — торгуются все RR-диапазоны без исключений</li>
         <li>Автоторговля (если включена в настройках) — по всем монетам живого скана</li>
       </ul>
-      <div class="dim" style="font-size:11px;margin:0 0 6px 0;">Топ-10 и таблица ниже отсортированы одной и той же оценкой — произведением нормализованных винрейта/выборки(до фильтров)/дохода, каждый в своей степени-весе (винрейт важнее всего, доход меньше всего): слабость по любому из трёх параметров обнуляет итог, сильные стороны не компенсируют — без разрыва между топ-10 и остальными.</div>
+      <div class="dim" style="font-size:11px;margin:0 0 6px 0;">Топ-10 и таблица ниже отсортированы одной и той же оценкой — произведением нормализованных винрейта/выборки(до фильтров)/дохода с равными весами: слабость по любому из трёх параметров обнуляет итог, сильные стороны не компенсируют — без разрыва между топ-10 и остальными.</div>
       ${staleWarnHtml}
       ${buildTxt}<br>
       ${progressBarHtml}
