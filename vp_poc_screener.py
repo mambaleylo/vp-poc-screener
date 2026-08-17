@@ -8028,6 +8028,56 @@ v0.99.77 - Direct user follow-up to v0.99.76, immediate: "А доход
          check (still 64 routes), and updated the MSNR panel's own
          description text (was still describing "→" priority ordering,
          now describes the product/none-can-compensate design).
+
+v0.99.78 - Direct user request, pointing at a screenshot of the panel's
+         own description text: "Убери эту квалификацию с вирейтоп 50 и
+         выборкой 40, что раз просил убрать это, технически." Correct
+         catch — an earlier ask_user_input in this same ranking-redesign
+         thread had asked exactly this ("Убрать это старое правило
+         (винрейт>50%+выборка>40)..."), but the reply that followed
+         redirected into designing the new top-10 ranking instead of
+         answering yes/no, and v0.99.75's own gold-removal pass only
+         stripped GOLD's special case OUT OF this rule — the rule
+         itself (MSNR_LIVE_PROMOTE_MIN_WINRATE/MIN_SAMPLE) kept running
+         the whole time, which is exactly why TRX_USDT could still earn
+         the live-scan dot in the original live report despite no
+         top-10 standing and no manual checkbox — the very confusion
+         this whole ranking redesign started from was never actually
+         fully closed off.
+         msnr_compute_live_universe() rewritten to simply delegate to
+         msnr_autotrade_eligible_symbols() (current top-10 by msnr_
+         symbol_rank_score()) — the standalone winrate>50%+sample>40
+         promotion loop is gone, not just gold's exemption from it. A
+         symbol now earns the live-scan dot through exactly two paths:
+         top-10 standing, or msnr_effective_live_universe()'s own
+         separate manual-toggle union — nothing else. Threaded `bounds`
+         through this function too (matching msnr_autotrade_eligible_
+         symbols()'s own v0.99.76 parameter) so the backtest-loop call
+         site computes rank bounds once and passes them through,
+         staying consistent with the same-cycle top-10 selection rather
+         than silently recomputing its own.
+         MSNR_LIVE_PROMOTE_MIN_WINRATE/MIN_SAMPLE left defined (their
+         own comments updated to note the retirement) rather than
+         deleted, matching this session's established "leave vestigial
+         constants for a possible future reintroduction" pattern (same
+         treatment MSNR_MAX_RR got in v0.99.68) — removed from the API
+         config dict and the panel's own description text instead,
+         since displaying a threshold nothing enforces anymore would be
+         actively misleading, the same complaint that started this fix.
+         Verified with py_compile, an actual runtime start (synthetic
+         13-symbol case: a TRX_USDT-shaped entry — 56.1% winrate, 59
+         trades, well clear of the old 50%/40 thresholds on its own —
+         placed among 12 stronger competitors correctly does NOT appear
+         in the live universe now, confirming the old rule's standalone
+         promotion path is truly gone and not just gold's exemption
+         from it; also confirmed a small pool where every candidate
+         naturally fits within top-10 still includes it, for the
+         mundane reason of clearing top-10 on the merits, not the
+         retired rule), pyflakes, a grep confirming zero remaining
+         references to the removed config fields anywhere in the JS,
+         node --check on the correctly-last <script> block, the Flask
+         route/def integrity check (still 64 routes), and an AST walk
+         for duplicate top-level defs (none introduced).
 """
 
 import os
@@ -8047,7 +8097,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.77"
+APP_VERSION = "0.99.78"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -8713,8 +8763,8 @@ MSNR_PARAM_GRID_QM_LOOKBACK = [4, 6, 9]
 MSNR_MIN_BACKTEST_TRADES = int(os.environ.get("VP_MSNR_MIN_BACKTEST_TRADES", 5))  # same bar as FT5_MIN_BACKTEST_TRADES/Volume's MIN_BACKTEST_TRADES — a combo with fewer trades in the window isn't a confident pick
 MSNR_RANK_PRIOR_TARGET = 1  # same role as FT5_RANK_PRIOR_TARGET — only a combo with 0 or 1 REAL observed loss gets synthetic -1R pseudo-losses blended in (guards against a small all-win sample looking falsely certain); 2+ real losses are trusted as-is
 MSNR_BACKTEST_UNIVERSE_SIZE = int(os.environ.get("VP_MSNR_BACKTEST_UNIVERSE_SIZE", 70))  # v0.99.9 — per direct user request: backtest the top-N most liquid symbols too (union'd with MSNR_SYMBOLS, so gold stays included), to see whether this signal logic generalizes beyond gold — explicitly backtest-only for now, msnr_live_loop still scans only MSNR_SYMBOLS, unchanged. Lowered 30->10 in v0.99.14 when the cycle was stuck "ещё не завершился" for a long time under sustained Gate.io rate-limiting; raised back up to 70 in v0.99.16 per direct follow-up request, now that get_candles_range() ALSO retries on 429 (v0.99.15 — it previously had its own separate, unretried request loop) and the panel shows live per-symbol progress instead of a binary done/not-done, so a longer cycle is at least visibly progressing rather than looking stuck. v0.99.48 — msnr_build_backtest_universe() no longer applies this cap on top of MIN_VOL_USD (per direct user request: liquidity rank was silently gating which symbols the top-10 SCORE ranking could even consider, unrelated to signal quality) — left defined, unused by default, in case a future session wants to reintroduce a cap deliberately.
-MSNR_LIVE_PROMOTE_MIN_WINRATE = float(os.environ.get("VP_MSNR_LIVE_PROMOTE_MIN_WINRATE", 50.0))  # v0.99.17 — per direct user request: a backtest-only symbol (from the wider MSNR_BACKTEST_UNIVERSE_SIZE exploration set) gets promoted into LIVE scanning once its winning combo's own closed-trade win-rate clears this bar. Union'd with MSNR_SYMBOLS (gold), never replaces it — gold stays live regardless of its own backtest numbers.
-MSNR_LIVE_PROMOTE_MIN_SAMPLE = int(os.environ.get("VP_MSNR_LIVE_PROMOTE_MIN_SAMPLE", 40))  # v0.99.17 — closed trades (wins+losses, NOT the raw "trades" count which also includes timeouts that say nothing about win-rate) needed before a symbol's win-rate is trusted enough to promote it to live scanning.
+MSNR_LIVE_PROMOTE_MIN_WINRATE = float(os.environ.get("VP_MSNR_LIVE_PROMOTE_MIN_WINRATE", 50.0))  # v0.99.17 — per direct user request: a backtest-only symbol (from the wider MSNR_BACKTEST_UNIVERSE_SIZE exploration set) gets promoted into LIVE scanning once its winning combo's own closed-trade win-rate clears this bar. Union'd with MSNR_SYMBOLS (gold), never replaces it — gold stays live regardless of its own backtest numbers. v0.99.78, per direct user request ("Убери эту квалификацию... что раз просил убрать это"): the promotion rule this fed (msnr_compute_live_universe()) was retired — it now just delegates to the top-10 ranking instead. No longer read anywhere; left defined only as history/in case a future session wants a standalone promotion rule again.
+MSNR_LIVE_PROMOTE_MIN_SAMPLE = int(os.environ.get("VP_MSNR_LIVE_PROMOTE_MIN_SAMPLE", 40))  # v0.99.17 — closed trades (wins+losses, NOT the raw "trades" count which also includes timeouts that say nothing about win-rate) needed before a symbol's win-rate is trusted enough to promote it to live scanning. v0.99.78 — same retirement as MSNR_LIVE_PROMOTE_MIN_WINRATE above, no longer read anywhere.
 # v0.99.39 — per direct user request: the top-10 autotrade ranking
 # (msnr_rank_by_winrate_sample()) now uses its OWN sample floor and its
 # own sort key, deliberately separate from MSNR_LIVE_PROMOTE_MIN_SAMPLE/
@@ -18698,57 +18748,32 @@ def msnr_build_backtest_universe():
     return combined
 
 
-def msnr_compute_live_universe(overrides):
-    """Every symbol whose winning backtest combo clears BOTH MSNR_LIVE_
-    PROMOTE_MIN_WINRATE (win-rate on closed trades) AND MSNR_LIVE_
-    PROMOTE_MIN_SAMPLE. Per direct user request: "для монет более 50%
-    винрейт и с выборкой более 40 сигналов на бэктесте добавлять их в
-    онлайн торговлю."
-    v0.99.75, per direct user request ("золото принудительно пока
-    убираем"): MSNR_SYMBOLS (gold) is no longer unconditionally
-    prepended here either — same removal as msnr_autotrade_eligible_
-    symbols()'s own forced-inclusion, applied consistently to this
-    OLDER, separate promotion path too, not just the top-10 one. Gold
-    still gets promoted into the live scan universe if its own winrate/
-    sample clear this rule (or if it lands in the top-10 via msnr_
-    autotrade_eligible_symbols()) — just no longer automatically,
-    regardless of its own numbers.
-    v0.99.57, per direct user follow-up: the sample-size check is now
-    raw_closed_n (the symbol's TRUE closed-trade count, captured in
-    msnr_optimize_symbol() BEFORE skip_rr_min/liquidation/skip_sl_
-    pct_min/skip_hours filtering) — used to be wins+losses (the post-
-    filter, DISPLAYED count, which also excludes timeouts). As more
-    per-symbol filters got added over time, that display count kept
-    shrinking, and a symbol could fall below this sample bar purely
-    from filtering, despite having plenty of real trade history overall
-    — see msnr_optimize_symbol()'s own docstring for the full reasoning.
-    Pure function of `overrides` (STATE["msnr_symbol_overrides"], keyed
-    by symbol) — takes no locks, does no I/O, so it's cheap to call and
-    easy to test directly against a plain dict rather than needing to
-    mock STATE or the network."""
-    promoted = []
-    for sym, ov in overrides.items():
-        if not ov or ov.get("error") or sym in promoted:
-            continue
-        winrate = ov.get("winrate")
-        # v0.99.57, per direct user follow-up ("монеты могут перестать
-        # проходить по выборке" — see msnr_optimize_symbol()'s own
-        # docstring for the full reasoning): gates on raw_closed_n (the
-        # symbol's TRUE closed-trade count, captured before skip_rr_min/
-        # liquidation/skip_sl_pct_min/skip_hours filtering) instead of
-        # wins+losses (the post-filter, DISPLAYED count) — a symbol
-        # shouldn't lose live-promotion eligibility just because more
-        # per-symbol filters got added over time and progressively
-        # shrank what's actually shown. Falls back to wins+losses for a
-        # symbol optimized before this field existed (persisted STATE
-        # from an older version), so an old override doesn't silently
-        # read as sample-size zero.
-        closed_n = ov.get("raw_closed_n")
-        if closed_n is None:
-            closed_n = (ov.get("wins", 0) or 0) + (ov.get("losses", 0) or 0)
-        if winrate is not None and winrate > MSNR_LIVE_PROMOTE_MIN_WINRATE and closed_n > MSNR_LIVE_PROMOTE_MIN_SAMPLE:
-            promoted.append(sym)
-    return promoted
+def msnr_compute_live_universe(overrides, bounds=None):
+    """v0.99.78, per direct user request ("Убери эту квалификацию с
+    вирейтоп 50 и выборкой 40, что раз просил убрать это, технически"):
+    the standalone MSNR_LIVE_PROMOTE_MIN_WINRATE/MIN_SAMPLE promotion
+    rule is RETIRED — it was the exact mechanism behind the original
+    live report this whole ranking redesign started from ("зелёные
+    точки не могут стоять не в монетах не из топ 10, если не стоит
+    галочка принудительно"): a symbol could earn the live-scan dot
+    purely by clearing 50% winrate / 40 closed trades, with no top-10
+    standing and no manual checkbox at all. v0.99.75 already removed
+    gold's forced inclusion from this rule but left the rule itself
+    still running — a symbol could (and, per the live TRX_USDT report,
+    did) still get promoted through it alone. This time the rule itself
+    is gone, not just gold's special case within it.
+    Now simply delegates to msnr_autotrade_eligible_symbols() — the
+    current top MSNR_AUTOTRADE_TOP_N by msnr_symbol_rank_score() (see
+    that function's own docstring for the winrate/sample/доход
+    geometric-mean ranking). A symbol earns the live-scan dot ONLY by
+    landing in the top 10, or via msnr_effective_live_universe()'s own
+    SEPARATE manual-toggle union (msnr_manual_toggle_allowed_symbols())
+    — exactly the two paths the original request described, nothing
+    else. `bounds` (from msnr_compute_rank_bounds()) is passed through
+    unchanged so this stays consistent with whatever else in the same
+    request/cycle is using the same ranking — see msnr_compute_rank_
+    bounds()'s own docstring for why sharing it matters."""
+    return msnr_autotrade_eligible_symbols(overrides, bounds=bounds)
 
 
 def msnr_compute_rank_bounds(overrides):
@@ -19075,7 +19100,16 @@ def msnr_backtest_loop():
                     STATE["msnr_backtest_summary"] = merged_summary
                     STATE["msnr_symbol_overrides"] = merged_overrides
                     STATE["msnr_backtest_universe"] = universe
-                    STATE["msnr_live_universe"] = msnr_compute_live_universe(merged_overrides)
+                    # v0.99.78 — bounds computed here (once, off the just-
+                    # merged overrides) and threaded through so this
+                    # cycle's live-universe promotion uses the SAME
+                    # ranking reference api_msnr_status() will compute
+                    # fresh for itself moments later — see msnr_compute_
+                    # rank_bounds()'s own docstring for why sharing
+                    # bounds (not just the formula) matters for staying
+                    # consistent across callers.
+                    msnr_rank_bounds = msnr_compute_rank_bounds(merged_overrides)
+                    STATE["msnr_live_universe"] = msnr_compute_live_universe(merged_overrides, bounds=msnr_rank_bounds)
                     STATE["msnr_last_backtest_finished"] = time.time()
                     STATE["msnr_last_backtest_duration"] = round(time.time() - t0, 1)
             finally:
@@ -20436,8 +20470,6 @@ def api_msnr_status():
             "min_leg_atr": MSNR_MIN_LEG_ATR, "qm_zone_pct": MSNR_QM_ZONE_PCT,
             "qm_lookback_bars": MSNR_QM_LOOKBACK_BARS, "backtest_days": MSNR_BACKTEST_DAYS,
             "max_rr": MSNR_MAX_RR,
-            "live_promote_min_winrate": MSNR_LIVE_PROMOTE_MIN_WINRATE,
-            "live_promote_min_sample": MSNR_LIVE_PROMOTE_MIN_SAMPLE,
             "grid_min_leg_atr": MSNR_PARAM_GRID_MIN_LEG_ATR, "grid_qm_zone_pct": MSNR_PARAM_GRID_QM_ZONE_PCT,
             "grid_qm_lookback": MSNR_PARAM_GRID_QM_LOOKBACK,
             "compound_start_balance": MSNR_COMPOUND_START_BALANCE, "compound_leverage": AUTOTRADE_LEVERAGE_MSNR,
@@ -22994,7 +23026,7 @@ async function refreshMsnr() {
     <div class="dim" style="margin-bottom:8px;font-size:12px;">
       <ul style="margin:0 0 6px 18px;padding:0;">
         <li>Живой скан: квалифицированные монеты (${liveSymbolsTxt || '—'}) — золото больше не форсируется, ранжируется наравне со всеми (эксперимент)</li>
-        <li>Квалификация: винрейт &gt;${cfg.live_promote_min_winrate}%, выборка &gt;${cfg.live_promote_min_sample} закрытых сделок, либо топ-10 по совместной оценке (винрейт, выборка, доход)</li>
+        <li>Квалификация в живой скан: только топ-10 по совместной оценке (винрейт, выборка, доход) или ручная галочка — старое правило «винрейт&gt;50%/выборка&gt;40» убрано</li>
         <li>Бэктест: ${status.backtest_universe_size || '?'} ликвидных монет · структура ${cfg.structure_tf} (L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf}</li>
         <li>Параметры (импульс/QM-зона/окно) автотюнятся отдельно на каждую монету — см. «Параметры» в таблице</li>
         <li>TP всегда реальный уровень пары (без потолка RR) — за отсечение невыгодных RR-диапазонов отвечает per-symbol фильтр skip_rr_min</li>
