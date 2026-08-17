@@ -8078,6 +8078,47 @@ v0.99.78 - Direct user request, pointing at a screenshot of the panel's
          node --check on the correctly-last <script> block, the Flask
          route/def integrity check (still 64 routes), and an AST walk
          for duplicate top-level defs (none introduced).
+
+v0.99.79 - Direct user request: "Skip RR>3, давай подобную проверку
+         тоже уберем, пока важно все RR торговать." Same treatment as
+         v0.99.68's MSNR_MAX_RR removal — skip_rr_min was exactly the
+         per-symbol statistical filter that removal said should be
+         "fully trusted" to judge which RR ranges are worth trading
+         ("довериться skip_rr_min целиком"); now even that gets
+         disabled so no RR range is excluded at all while more raw data
+         accumulates across the full spectrum, matching the strategy's
+         own stated design (catch large-RR/low-winrate moves).
+         Disabled at both the two places it was applied, same
+         "comment out, don't delete" pattern used throughout this
+         session for reversible experiments (MSNR_MAX_RR's pooled
+         autotune in v0.99.52, VGI's tp_extend rule in v0.99.65):
+         msnr_optimize_symbol() now hardcodes best["skip_rr_min"]=None
+         instead of calling msnr_symbol_rr_skip_min() — the filtering
+         block right after it (guarded by `if best["skip_rr_min"] is
+         not None`) becomes a natural no-op rather than needing its own
+         separate disable, and rr_filtered_count stays a real (not
+         hardcoded-elsewhere) computation off before/after len(), so it
+         self-corrects to 0 automatically rather than needing to
+         remember updating it too if this is ever reintroduced.
+         msnr_scan_symbol_live()'s own live-firing check (would have
+         become a no-op naturally after the next backtest cycle refreshed
+         the now-always-None override anyway) was also commented out
+         directly, for immediate effect rather than waiting on a stale
+         cached value. Both msnr_symbol_rr_skip_min() (backtest-side
+         computation) and msnr_symbol_skip_rr_min() (live-side lookup)
+         are left fully defined and untouched, same as MSNR_MAX_RR's own
+         vestigial treatment — one call away from reintroduction if a
+         future session wants it back. Updated the MSNR panel's own
+         description text (was still describing skip_rr_min as actively
+         filtering) to say it's disabled and every RR range trades.
+         Verified with py_compile, an actual runtime start (confirmed
+         both msnr_symbol_rr_skip_min() and msnr_symbol_skip_rr_min()
+         remain defined and callable, just no longer invoked from either
+         call site), pyflakes, node --check on the correctly-last
+         <script> block, the Flask route/def integrity check (still 64
+         routes), and an AST walk for duplicate top-level defs (none
+         introduced — no Python functions added or removed, only two
+         call sites disabled).
 """
 
 import os
@@ -8097,7 +8138,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.78"
+APP_VERSION = "0.99.79"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -17303,7 +17344,19 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
         # re-run per grid combo — would be needlessly expensive and
         # the winning combo's own trades are what's actually shown/
         # traded, same reasoning as reusing best_results for display).
-        best["skip_rr_min"] = msnr_symbol_rr_skip_min(best_results)
+        # v0.99.79 — DISABLED (not deleted), per direct user request
+        # ("Skip RR>3, давай подобную проверку тоже уберем, пока важно
+        # все RR торговать"): same reasoning/treatment as v0.99.68's
+        # MSNR_MAX_RR removal — this per-symbol statistical filter was
+        # exactly the mechanism v0.99.68 said should be fully trusted
+        # to judge which RR ranges are worth trading ("довериться
+        # skip_rr_min целиком"), but the user now wants NO RR range
+        # excluded at all while more raw data accumulates across the
+        # full RR spectrum, matching the strategy's own stated design
+        # (catch large-RR moves even at low win-rate). Left fully
+        # defined (msnr_symbol_rr_skip_min() itself untouched) in case
+        # a future session wants to reintroduce it.
+        best["skip_rr_min"] = None
         # v0.99.23, per direct user follow-up: once the skip floor is
         # known, DON'T keep showing/counting the trades it would skip —
         # the whole point was "statistically bad signals for this coin
@@ -17342,6 +17395,11 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
         # писать сколько сделок отмечено по такой-то причине" — doesn't
         # affect raw_closed_n above, which is already fixed before any
         # of these run.
+        # v0.99.79 — always 0 now that the filter above is disabled;
+        # kept as a real (not hardcoded-elsewhere) computation so it
+        # stays correct automatically if skip_rr_min is ever
+        # reintroduced, rather than needing to remember to also revert
+        # this line.
         before_rr = len(best_results)
         if best["skip_rr_min"] is not None:
             skip_min = best["skip_rr_min"]
@@ -18373,13 +18431,21 @@ def msnr_scan_symbol_live(symbol):
         # from entry/sl/tp directly (same formula msnr_run_backtest()
         # uses), not stored on sig, since msnr_detect_signals() itself
         # doesn't compute rr.
-        skip_rr_min = msnr_symbol_skip_rr_min(symbol)
-        if skip_rr_min is not None:
-            risk = abs(sig["entry"] - sig["sl"])
-            reward = abs(sig["tp"] - sig["entry"])
-            sig_rr = reward / risk if risk > 0 else None
-            if sig_rr is not None and sig_rr >= skip_rr_min:
-                return  # this symbol's own history says rr this high fails here — skip, don't fire
+        # v0.99.79 — DISABLED (not deleted), per direct user request
+        # ("Skip RR>3, давай подобную проверку тоже уберем, пока важно
+        # все RR торговать"): matches msnr_optimize_symbol()'s own
+        # disabling of this filter's computation (that override field
+        # is always None now, so this check would naturally become a
+        # no-op after the next backtest cycle anyway — disabled
+        # directly here too for immediate effect and clarity, not left
+        # to a stale cached value to quietly stop mattering on its own).
+        # skip_rr_min = msnr_symbol_skip_rr_min(symbol)
+        # if skip_rr_min is not None:
+        #     risk = abs(sig["entry"] - sig["sl"])
+        #     reward = abs(sig["tp"] - sig["entry"])
+        #     sig_rr = reward / risk if risk > 0 else None
+        #     if sig_rr is not None and sig_rr >= skip_rr_min:
+        #         return  # this symbol's own history says rr this high fails here — skip, don't fire
         # v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше
         # не стало, будто даже хуже" -> Kelly/optimal-f search instead
         # of a fixed stop-width target): this signal uses THIS symbol's
@@ -23029,7 +23095,7 @@ async function refreshMsnr() {
         <li>Квалификация в живой скан: только топ-10 по совместной оценке (винрейт, выборка, доход) или ручная галочка — старое правило «винрейт&gt;50%/выборка&gt;40» убрано</li>
         <li>Бэктест: ${status.backtest_universe_size || '?'} ликвидных монет · структура ${cfg.structure_tf} (L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf}</li>
         <li>Параметры (импульс/QM-зона/окно) автотюнятся отдельно на каждую монету — см. «Параметры» в таблице</li>
-        <li>TP всегда реальный уровень пары (без потолка RR) — за отсечение невыгодных RR-диапазонов отвечает per-symbol фильтр skip_rr_min</li>
+        <li>TP всегда реальный уровень пары (без потолка RR), фильтр skip_rr_min отключён — торгуются все RR-диапазоны без исключений</li>
         <li>Автоторговля (если включена в настройках) — по всем монетам живого скана</li>
       </ul>
       <div class="dim" style="font-size:11px;margin:0 0 6px 0;">Топ-10 и таблица ниже отсортированы одной и той же оценкой — произведением нормализованных винрейта/выборки(до фильтров)/дохода, каждый в своей степени-весе (винрейт важнее всего, доход меньше всего): слабость по любому из трёх параметров обнуляет итог, сильные стороны не компенсируют — без разрыва между топ-10 и остальными.</div>
