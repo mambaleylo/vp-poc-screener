@@ -7980,6 +7980,54 @@ v0.99.76 - Direct user follow-up to v0.99.75, immediate: "Так для того
          new/touched functions present exactly once, old msnr_symbol_
          rank_key() fully removed, no dangling references left in code,
          only in historical changelog/comment text).
+
+v0.99.77 - Direct user follow-up to v0.99.76, immediate: "А доход
+         учтен? Все три компонента должны быть хорошими." Confirmed
+         income (доход) genuinely was already being read into v0.99.76's
+         weighted sum — but "все три компонента должны быть хорошими"
+         is a stronger requirement a weighted ARITHMETIC sum can't
+         actually guarantee: addition always lets a large value on one
+         metric COMPENSATE for weakness on another, and with an
+         unbounded metric like compound_return_pct (no natural ceiling
+         the way winrate has), there's always some extreme-enough
+         income figure that could offset a mediocre winrate/sample
+         regardless of how the weights are tuned.
+         msnr_symbol_rank_score() switched from a weighted sum to a
+         WEIGHTED GEOMETRIC MEAN (product) of the same three normalized
+         factors: winrate_norm^w1 * sample_norm^w2 * income_norm^w3,
+         same weights (0.5/0.3/0.2) reused directly as exponents. A
+         product structurally cannot be rescued by strength elsewhere —
+         if any one normalized factor is 0, the whole composite is 0,
+         which is the actual mathematical shape of "all three must be
+         good," not something weight-tuning under addition could ever
+         fully deliver. Bounds computation (msnr_compute_rank_bounds())
+         and the shared-bounds-across-both-callers design are completely
+         unchanged — only the combination step changed.
+         Documented (not hidden) a real consequence of the switch: min-
+         max normalization gives the single worst symbol in the current
+         pool on any one metric an exact 0.0 there, and under a product
+         that zeroes its ENTIRE composite even if the other two metrics
+         are fine — can look harsh for a symbol only marginally the
+         pool's worst on one axis. Left as-is rather than softening
+         with an artificial floor, which would just be a smaller-scale
+         reintroduction of the same compensation this change exists to
+         remove; for ranking purposes only relative order matters.
+         Verified with py_compile, an actual runtime start (re-ran the
+         same 5-symbol synthetic case used to verify v0.99.76: LOTTERY_
+         USDT — 20% winrate, 10 trades, but a 2000% income 10x anything
+         else in the pool — now scores EXACTLY 0.0 despite that income,
+         confirming no amount of one strong metric rescues being the
+         pool's worst on another; also surfaced the documented floor
+         consequence directly in this same test, AVG3_USDT independently
+         hit 0.0 too purely for being the pool's lowest-income entry,
+         despite unremarkable-but-not-worst winrate/sample — exactly the
+         harsh-floor trade-off called out above, now demonstrated, not
+         just described; confirmed backward-compatible default bounds
+         still work when omitted), pyflakes, node --check on the
+         correctly-last <script> block, the Flask route/def integrity
+         check (still 64 routes), and updated the MSNR panel's own
+         description text (was still describing "→" priority ordering,
+         now describes the product/none-can-compensate design).
 """
 
 import os
@@ -7999,7 +8047,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.76"
+APP_VERSION = "0.99.77"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -18753,24 +18801,49 @@ def msnr_symbol_rank_score(ov, bounds):
     a lexicographic sort checks its first key almost to the exclusion
     of the rest (the later keys only ever matter on an exact tie, rare
     with continuous values) — that's not "all three factors," that's
-    "winrate alone in practice." This replaces it with a genuine
-    weighted blend: min-max normalizes winrate/raw_closed_n/
-    compound_return_pct each to [0, 1] using msnr_compute_rank_
-    bounds()'s own SHARED bounds (see that function's docstring for why
-    shared, not per-view), then combines them as MSNR_RANK_WINRATE_
-    WEIGHT*winrate_norm + MSNR_RANK_SAMPLE_WEIGHT*sample_norm + MSNR_
-    RANK_INCOME_WEIGHT*income_norm — winrate weighted heaviest (0.5),
-    sample next (0.3), доход last (0.2) by default, matching "эти
-    параметре по убыванию главные" (these parameters, in descending
-    [priority] — now expressed as descending WEIGHT, not descending
-    sort-key precedence).
+    "winrate alone in practice."
+    v0.99.77, per direct further follow-up ("Все три компонента должны
+    быть хорошими" — "all three components must be good"): a WEIGHTED
+    ARITHMETIC sum (v0.99.76's own first attempt) doesn't actually
+    guarantee that either — addition lets a large value on one metric
+    COMPENSATE for a weak one on another; with an unbounded metric like
+    доход (compound_return_pct has no natural ceiling the way winrate
+    does), there's always some extreme-enough income figure that offsets
+    a mediocre winrate/sample, no matter how the weights are tuned. What
+    "all three must be good" actually calls for mathematically is a
+    WEIGHTED GEOMETRIC MEAN (product, not sum) of the three normalized
+    factors: winrate_norm^w1 * sample_norm^w2 * income_norm^w3 (weights
+    still MSNR_RANK_WINRATE_WEIGHT/SAMPLE_WEIGHT/INCOME_WEIGHT, still
+    summing to 1, still descending 0.5/0.3/0.2 by default, matching "эти
+    параметре по убыванию главные"). A product structurally CANNOT be
+    rescued by strength elsewhere: if any one normalized factor is 0,
+    the whole composite is 0, full stop, regardless of how good the
+    other two are — this is the actual mathematical shape of "must be
+    good on all three," not something weight-tuning under addition could
+    ever fully guarantee.
+    Known, accepted consequence of switching to a product: min-max
+    normalization gives the single WORST symbol in the current pool on
+    any one metric an exact 0.0 on that term — under a product, that
+    symbol's WHOLE composite collapses to 0 even if its other two
+    metrics are otherwise fine, which can look harsh for a symbol that's
+    only marginally the pool's worst on one axis (e.g. barely the
+    lowest winrate in a tightly-clustered group). Left as-is rather than
+    softening it (e.g. a floor above 0) — softening would just be a
+    smaller-scale reintroduction of the same compensation this whole
+    change exists to remove, and for RANKING purposes (only relative
+    order matters, mainly who clears the top 10) collapsing the current
+    worst-on-some-axis symbol toward the bottom is the intended
+    behavior, not a bug.
+    min-max normalizes winrate/raw_closed_n/compound_return_pct each to
+    [0, 1] using msnr_compute_rank_bounds()'s own SHARED bounds (see
+    that function's docstring for why shared, not per-view) exactly as
+    before — only the combination step (product vs sum) changed.
     A symbol missing a given metric scores 0.0 (worst) on that metric's
     normalized term rather than being skipped or defaulting to the
     population average — "no data" isn't evidence of average quality,
-    treating it as the population's best-case would be generous, and
-    silently excluding the symbol from ranking entirely would violate
-    the same "плавное убывание" continuity requirement v0.99.75 already
-    established.
+    and under a product this now ALSO zeroes the whole composite,
+    consistent with "all three must be good": a metric you can't even
+    verify isn't "good."
     Returns a single float composite (higher = better), NOT a tuple —
     callers sort by this directly."""
     def _norm(val, lo, hi):
@@ -18786,9 +18859,9 @@ def msnr_symbol_rank_score(ov, bounds):
     winrate_norm = _norm(ov.get("winrate"), *bounds["winrate"])
     sample_norm = _norm(raw_closed_n, *bounds["sample"])
     income_norm = _norm(ov.get("compound_return_pct"), *bounds["income"])
-    return (MSNR_RANK_WINRATE_WEIGHT * winrate_norm +
-            MSNR_RANK_SAMPLE_WEIGHT * sample_norm +
-            MSNR_RANK_INCOME_WEIGHT * income_norm)
+    return ((winrate_norm ** MSNR_RANK_WINRATE_WEIGHT) *
+            (sample_norm ** MSNR_RANK_SAMPLE_WEIGHT) *
+            (income_norm ** MSNR_RANK_INCOME_WEIGHT))
 
 
 def msnr_rank_by_winrate_sample(overrides, exclude=None, bounds=None):
@@ -22921,13 +22994,13 @@ async function refreshMsnr() {
     <div class="dim" style="margin-bottom:8px;font-size:12px;">
       <ul style="margin:0 0 6px 18px;padding:0;">
         <li>Живой скан: квалифицированные монеты (${liveSymbolsTxt || '—'}) — золото больше не форсируется, ранжируется наравне со всеми (эксперимент)</li>
-        <li>Квалификация: винрейт &gt;${cfg.live_promote_min_winrate}%, выборка &gt;${cfg.live_promote_min_sample} закрытых сделок, либо топ-10 по (винрейт → выборка → доход)</li>
+        <li>Квалификация: винрейт &gt;${cfg.live_promote_min_winrate}%, выборка &gt;${cfg.live_promote_min_sample} закрытых сделок, либо топ-10 по совместной оценке (винрейт, выборка, доход)</li>
         <li>Бэктест: ${status.backtest_universe_size || '?'} ликвидных монет · структура ${cfg.structure_tf} (L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf}</li>
         <li>Параметры (импульс/QM-зона/окно) автотюнятся отдельно на каждую монету — см. «Параметры» в таблице</li>
         <li>TP всегда реальный уровень пары (без потолка RR) — за отсечение невыгодных RR-диапазонов отвечает per-symbol фильтр skip_rr_min</li>
         <li>Автоторговля (если включена в настройках) — по всем монетам живого скана</li>
       </ul>
-      <div class="dim" style="font-size:11px;margin:0 0 6px 0;">Топ-10 и таблица ниже отсортированы одним и тем же правилом: винрейт → выборка (до фильтров) → доход, всё по убыванию — без разрыва между топ-10 и остальными.</div>
+      <div class="dim" style="font-size:11px;margin:0 0 6px 0;">Топ-10 и таблица ниже отсортированы одной и той же оценкой — произведением нормализованных винрейта/выборки(до фильтров)/дохода, каждый в своей степени-весе (винрейт важнее всего, доход меньше всего): слабость по любому из трёх параметров обнуляет итог, сильные стороны не компенсируют — без разрыва между топ-10 и остальными.</div>
       ${staleWarnHtml}
       ${buildTxt}<br>
       ${progressBarHtml}
