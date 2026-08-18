@@ -8207,6 +8207,46 @@ v0.99.81 - Direct user report: "термукс был жив, сигналы р�
          pyflakes, node --check on the correctly-last <script> block,
          the Flask route/def integrity check (still 64 routes), and an
          AST walk for duplicate top-level defs (none introduced).
+
+v0.99.82 - Direct user report with a screenshot (CHIP_USDT, an older
+         breakout signal): "volume криво отображает график, точка входа
+         не на графике, стопа или тейка не видно тоже." Investigated
+         and found the real cause wasn't a rendering/scale bug at all:
+         api_profile() (the Volume Profile chart endpoint) always
+         fetched "the latest N candles" via get_candles(limit=...), with
+         no way to anchor to a SPECIFIC past signal's own time. Clicking
+         an older/resolved signal — especially one where price has since
+         moved a lot — showed TODAY's candles with that old trade's
+         entry/sl/tp lines overlaid at their own historical price
+         levels; if price moved far enough, those levels genuinely sit
+         outside the displayed window, matching "точка входа не на
+         графике" exactly. Same class of bug already found and fixed
+         for MSNR's own chart (api_msnr_chart()'s own docstring has that
+         fuller incident) — re-deriving/re-fetching against CURRENT
+         state instead of anchoring to the historical moment actually
+         being reviewed.
+         Fixed: openChart()/the "Оптимизировать" re-fetch now pass
+         `time` (the clicked row's own signal time — already present on
+         every row, already used for fmtTime(r.time) in the same table,
+         nothing new to track) to api_profile(). When given, the
+         backend now fetches via get_candles_range() anchored around
+         THAT time (lookback+10 bars before, 90 after) instead of
+         "whatever's most recent" — and the volume PROFILE itself is
+         built only from candles AT OR BEFORE the signal's own time,
+         matching what the original trade's own zones would actually
+         have been computed from (no lookahead into price action the
+         trade couldn't have known about at the time). Omitting `time`
+         keeps the exact original "latest N candles" behavior — fully
+         backward compatible for any other caller of this endpoint.
+         Verified with py_compile, an actual runtime start, pyflakes,
+         a synthetic candle-filtering test (200 candles, signal at
+         index 100: confirmed the profile-source list correctly stops
+         at the signal's own time — 101 candles, last one's time <=
+         sig_time — while the DISPLAY candle list correctly still
+         extends past it, so the chart can show the trade's own
+         resolution), node --check on the correctly-last <script>
+         block, and the Flask route/def integrity check (still 64
+         routes — no new endpoints, existing one extended).
 """
 
 import os
@@ -8226,7 +8266,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.81"
+APP_VERSION = "0.99.82"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -19995,9 +20035,47 @@ def api_profile(symbol):
     interval = request.args.get("interval", INTERVAL)
     lookback = int(request.args.get("lookback", ov.get("lookback", LOOKBACK)))
     hvn_top_n = int(request.args.get("hvn_top_n", ov.get("hvn_top_n", HVN_TOP_N)))
+    # v0.99.82, per direct user report with a screenshot ("volume криво
+    # отображает график, точка входа не на графике, стопа или тейка не
+    # видно тоже" — CHIP_USDT, a resolved/older signal): confirmed the
+    # actual cause wasn't a rendering/scale bug at all — this endpoint
+    # always fetched "the latest N candles" via get_candles(), with no
+    # way to anchor to a SPECIFIC past signal's own time. Clicking an
+    # older signal (especially one where price has since moved a lot)
+    # showed TODAY's candles with that old trade's entry/sl/tp lines
+    # overlaid — if price moved far enough, those levels genuinely sit
+    # outside the displayed window entirely, exactly matching "точка
+    # входа не на графике." Same class of bug already found and fixed
+    # for MSNR's own chart (api_msnr_chart()'s docstring has the fuller
+    # incident writeup) — re-deriving/re-fetching with CURRENT state
+    # instead of anchoring to the historical moment being reviewed.
+    # openChart()/the "Оптимизировать" re-fetch now pass `time` (the
+    # clicked row's own signal time, already present on every row —
+    # used elsewhere for fmtTime(r.time) in the same table) when
+    # available. When given, candles are fetched via get_candles_range()
+    # anchored around THAT time instead of "whatever's most recent" —
+    # and the volume PROFILE itself is built only from candles AT OR
+    # BEFORE the signal's own time, matching what the original trade's
+    # own zones would actually have been computed from (no lookahead
+    # into price action the trade couldn't have known about). Omitting
+    # `time` (any other caller of this endpoint, if one exists) keeps
+    # the original "latest N candles" behavior exactly as before —
+    # fully backward compatible.
+    sig_time = request.args.get("time")
     try:
-        candles = get_candles(symbol, interval=interval, limit=lookback + 5)
-        profile = build_profile_for_symbol(symbol, candles, lookback, segs=SEGS, interval=interval)
+        if sig_time:
+            sig_time = float(sig_time)
+            interval_sec = INTERVAL_SECONDS.get(interval, 300)
+            fetch_start = sig_time - (lookback + 10) * interval_sec
+            fetch_end = sig_time + 90 * interval_sec
+            all_candles = get_candles_range(symbol, interval, fetch_start, fetch_end)
+            profile_source = [c for c in all_candles if c["time"] <= sig_time]
+            display_candles = all_candles
+        else:
+            all_candles = get_candles(symbol, interval=interval, limit=lookback + 5)
+            profile_source = all_candles
+            display_candles = all_candles[-lookback:]
+        profile = build_profile_for_symbol(symbol, profile_source, lookback, segs=SEGS, interval=interval)
         if not profile:
             return jsonify({"error": "not enough data"}), 400
         zones = extract_hvn_zones(profile, top_n=hvn_top_n)
@@ -20007,7 +20085,7 @@ def api_profile(symbol):
         return jsonify({
             "symbol": symbol,
             "reason": reason,
-            "candles": candles[-lookback:],
+            "candles": display_candles,
             "borders": profile["borders"],
             "bin_vols": profile["bin_vols"],
             "zones": zones,
@@ -24376,7 +24454,13 @@ async function openChart(row) {
   modal.classList.add('open');
   try {
     const reason = row.reason || 'bounce';
-    const data = await (await fetch(`/api/profile/${row.symbol}?reason=${reason}`)).json();
+    // v0.99.82 — pass this signal's own time (already on every row —
+    // see fmtTime(r.time) in the same table) so the backend anchors
+    // candles/profile to THIS historical moment instead of always
+    // "whatever's most recent" — see api_profile()'s own docstring for
+    // the full incident this fixes.
+    const timeParam = row.time !== undefined && row.time !== null ? `&time=${row.time}` : '';
+    const data = await (await fetch(`/api/profile/${row.symbol}?reason=${reason}${timeParam}`)).json();
     currentData = data;
     renderParams(data);
     drawChart(data, row);
@@ -24412,7 +24496,12 @@ document.getElementById('optimizeBtn').onclick = async () => {
       document.getElementById('modalParams').textContent =
         fmtOptimizeResult(res.bounce, 'bounce') + '  |  ' + fmtOptimizeResult(res.breakout, 'breakout');
       const reason = currentRow.reason || 'bounce';
-      const data = await (await fetch(`/api/profile/${currentRow.symbol}?reason=${reason}`)).json();
+      // v0.99.82 — same anchoring as openChart() above, same reasoning:
+      // stay consistent with whichever candle window is already shown
+      // (this signal's own historical time) rather than switching to
+      // "latest" just because the params were re-optimized.
+      const timeParam = currentRow.time !== undefined && currentRow.time !== null ? `&time=${currentRow.time}` : '';
+      const data = await (await fetch(`/api/profile/${currentRow.symbol}?reason=${reason}${timeParam}`)).json();
       currentData = data;
       drawChart(data, currentRow);
     }
