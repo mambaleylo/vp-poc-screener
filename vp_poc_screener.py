@@ -8247,6 +8247,74 @@ v0.99.82 - Direct user report with a screenshot (CHIP_USDT, an older
          resolution), node --check on the correctly-last <script>
          block, and the Flask route/def integrity check (still 64
          routes — no new endpoints, existing one extended).
+
+v0.99.83 - Direct user request: "можно удалить все что связано с
+         дивергенцией, ема, сессия, сессия ny, xau lg, vgi, аккуратно,
+         с перепроверкой чтобы не удалить лишнего, а так прям все, из
+         настроек и тп все убрать будто и небыло." A large, multi-turn
+         removal across six modules — this version covers ONLY the
+         first, VGI, done completely and verified before moving to the
+         next (given the file's scale and the risk of a blind mass
+         edit, each module gets its own full removal + verification
+         pass rather than all six at once).
+         Found one important cross-module dependency BEFORE removing
+         anything, per the "не удалить лишнего" part of the request:
+         openVgiChart()/drawVgiChart() (the chart modal/canvas) is
+         genuinely SHARED infrastructure — openScalpChart() and
+         openXauLgChart() both reuse it (v0.94.0/v0.99.66's own "thin
+         wrapper, not a duplicate" reasoning) rather than each
+         duplicating ~90 lines of canvas code. Since Scalp isn't being
+         removed, this modal/canvas had to stay — only VGI's OWN usage
+         of it (a direct call with no endpoint override, from VGI's
+         now-deleted signals table) was removed. openVgiChart()'s
+         `endpoint` parameter lost its default value (used to point at
+         '/api/vgi/chart', now a deleted route) since both remaining
+         callers always pass their own explicit endpoint — a future
+         caller that forgets one now gets an immediate error instead
+         of silently 404ing.
+         Removed: vgi_build_profile/vgi_section_at_price/vgi_nearest_
+         zone/vgi_evaluate_signal (the ported math), all VGI_* constants,
+         AUTOTRADE_ENABLED_VGI/AUTOTRADE_LEVERAGE_VGI/TELEGRAM_ALERTS_
+         VGI, every VGI STATE key (universe/backtest_results/summary/
+         signals/timestamps) including its entries in has_open_signal_
+         any_module() and the full-state snapshot, the entire backtest/
+         live-scan/outcomes infrastructure (vgi_build_universe through
+         vgi_live_loop, ~340 lines), all 4 API routes (status/signals/
+         chart/reset), the risk_autotune_pass() vgi block, both setters
+         (_set_vgi_invert/_set_vgi_min_rr) and their own now-dead
+         one-time-migration startup code (v0.99.65's vgi_min_rr
+         death-spiral correction — meaningless once VGI_MIN_RR itself
+         is gone), all SETTINGS_KEYS/apply_settings/get_settings wiring
+         (3 lists + 2 update blocks + 3 dict entries + 2 global
+         declarations), the send_telegram() category gate, both
+         background thread starts, and the entire frontend footprint:
+         tab button, panel div, refreshVgi() (~75 lines), the reset
+         button + its wireResetButton() call + CSS selector, both
+         settings-panel rows (Telegram alerts, autotrade+leverage), and
+         all activeTab==='vgi' branches (4 places).
+         Historical changelog text describing VGI's own past development
+         (top-of-file docstring, ~150+ lines across v0.98.0-v0.98.9)
+         deliberately LEFT AS-IS — matches this file's own established
+         pattern of preserving historical reasoning for removed/replaced
+         features elsewhere (e.g. MSNR_MAX_RR's comment still describes
+         its now-disabled autotune history) rather than erasing project
+         history; it's dead documentation with zero effect on runtime,
+         not a functional trace of the module "как будто было".
+         Verified with py_compile, an actual runtime start, pyflakes
+         (iterated to a fully clean run — caught 7 live references
+         py_compile alone couldn't: a dangling vgi_signals STATE restore
+         in load_state(), both setters still called from api_reset_
+         risk_autotune() AND the (now also removed) startup migration,
+         and both background thread starts — none of these are syntax
+         errors, only real NameErrors at runtime, exactly the class of
+         bug py_compile structurally cannot catch), node --check on the
+         correctly-last <script> block, the Flask route/def integrity
+         check (60 routes — down from 64, exactly the 4 VGI endpoints
+         removed, none of the other 60 touched), an AST walk confirming
+         zero VGI functions remain at module level and no duplicates
+         were introduced, and a grep confirming every remaining "vgi"
+         hit in the file is either the shared openVgiChart infrastructure
+         (correctly kept) or historical changelog text (inert).
 """
 
 import os
@@ -8266,7 +8334,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.82"
+APP_VERSION = "0.99.83"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9070,56 +9138,6 @@ FT5_TF = os.environ.get("VP_FT5_TF", "5m")  # matches Strategy005's own timefram
 FT5_UNIVERSE_SIZE = int(os.environ.get("VP_FT5_UNIVERSE_SIZE", 200))  # how many symbols get analyzed/optimized — wide net for finding what works
 FT5_LIVE_TOP_N = int(os.environ.get("VP_FT5_LIVE_TOP_N", 10))  # how many of the analyzed symbols (ranked by the optimizer's own avg_pnl_pct) actually get scanned for live signals — per direct user request: analyze broadly, trade narrowly on the best performers only (raised 5->10 per a follow-up request)
 
-# ============================================================================
-# VGI — port of mambaleylo/vgi-trader (Volume Gaps & Imbalances), v0.98.0
-# ----------------------------------------------------------------------------
-# Per direct user request: "возьми его логику и интегрируй нам новой вкладкой
-# со всеми плюшками, уведомления, автоторговлю, графическое отображение".
-# Source: github.com/mambaleylo/vgi-trader — the user's OWN separate repo, a
-# Python re-implementation of the TradingView indicator "Volume Gaps &
-# Imbalances (Zeiierman)" (CC BY-NC-SA 4.0 — the original Pine isn't
-# reproduced here, this is a further independent re-port of the author's
-# own already-independent Python port). Ported the math (vgi_build_profile/
-# vgi_evaluate_signal, defined earlier) faithfully; this block is the
-# infrastructure wrapping it — constants, universe, backtest, live scan,
-# autotrade, notifications, chart, matching this app's existing per-module
-# shape (Session/XAU_LG/FT5).
-# Unlike FT5, VGI genuinely has ONE fixed (SL, TP) price pair per signal —
-# the stop is SIZED FROM the target (risk = reward/min_rr), not a separate
-# time-decaying ladder — so this one CAN be wired to real autotrade and the
-# shared paper simulator without the compromise FT5 needed.
-# Symbol-selection bug fix, per direct user report ("сейчас тупо по алфавиту
-# первые 40 чтоли берет"): the source's own resolve_symbols() (trader.py)
-# sorts contracts by volume_24h_quote from Gate.io's /contracts endpoint —
-# but that field is frequently empty/zero there (this app already hit and
-# fixed the identical issue building ft5_build_universe/build_session_
-# universe: /contracts' volume field isn't reliable, /tickers' is). An
-# always-zero sort key makes Python's stable sort a no-op, silently
-# preserving whatever order /contracts happened to return — which is very
-# plausibly close to alphabetical/ID order, matching exactly what was
-# observed. vgi_build_universe() below uses get_tickers() with the same
-# fallback-field chain already proven working for FT5/Session instead.
-# ============================================================================
-VGI_ENABLED = os.environ.get("VP_VGI_ENABLED", "1") == "1"
-VGI_TF = os.environ.get("VP_VGI_TF", "1h")  # matches the source's own default timeframe
-VGI_LOOKBACK = int(os.environ.get("VP_VGI_LOOKBACK", 200))
-VGI_ROWS = int(os.environ.get("VP_VGI_ROWS", 50))
-VGI_SUM_SECTIONS = int(os.environ.get("VP_VGI_SUM_SECTIONS", 20))
-VGI_MIN_ZONE_ROWS = int(os.environ.get("VP_VGI_MIN_ZONE_ROWS", 1))
-VGI_DELTA_THRESHOLD_PCT = float(os.environ.get("VP_VGI_DELTA_THRESHOLD_PCT", 20.0))
-VGI_MAX_ZONE_DISTANCE_PCT = float(os.environ.get("VP_VGI_MAX_ZONE_DISTANCE_PCT", 8.0))
-VGI_MIN_RR = float(os.environ.get("VP_VGI_MIN_RR", 3.0))
-VGI_MIN_SL_DISTANCE_PCT = float(os.environ.get("VP_VGI_MIN_SL_DISTANCE_PCT", 0.5))  # v0.98.2 — SL = reward/min_rr, so it's sized off an unrelated quantity (distance to the nearest volume zone), not actual price volatility. When the nearest zone happens to be close, this can produce a stop tighter than normal 1h candle noise, getting hit by ordinary wicks rather than a real invalidation — reported directly by the user ("сразу стоп выбивает"), confirmed against the source's own formula. Signals with a computed SL distance below this threshold are skipped entirely rather than allowed to fire with an unrealistically tight stop; doesn't touch the TP/RR math at all, purely a pre-entry filter.
-VGI_INVERT_SIGNALS = os.environ.get("VP_VGI_INVERT_SIGNALS", "0") == "1"  # v0.98.9 — per direct user request for a reverse mode "по аналогии с другими индикаторами" (mirrors DIV_INVERT_SIGNALS/EMA_INVERT_SIGNALS/SESSION_INVERT_SIGNALS). Retargets the OPPOSITE zero-volume zone rather than a plain direction flip — see vgi_evaluate_signal()'s own docstring for why.
-VGI_UNIVERSE_SIZE = int(os.environ.get("VP_VGI_UNIVERSE_SIZE", 40))  # matches source's own max_symbols default; unlike FT5 there's no per-symbol param search here (source treats these as one fixed global config, not hyperopt-tuned), so no analysis/live split is needed the way FT5 has one
-VGI_SIGNAL_HISTORY = 200
-VGI_BACKTEST_DAYS = int(os.environ.get("VP_VGI_BACKTEST_DAYS", 30))
-VGI_SCAN_INTERVAL_SEC = int(os.environ.get("VP_VGI_SCAN_INTERVAL_SEC", 300))
-VGI_REFRESH_SEC = int(os.environ.get("VP_VGI_REFRESH_SEC", 24 * 3600))  # daily universe/backtest refresh, same cadence as FT5/Volume
-AUTOTRADE_ENABLED_VGI = os.environ.get("VP_AUTOTRADE_VGI", "0") == "1"  # off by default, same reasoning as every other new module here — user opts in after seeing real backtest numbers
-AUTOTRADE_LEVERAGE_VGI = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_VGI", 5))  # matches source's own default leverage
-TELEGRAM_ALERTS_VGI = os.environ.get("VP_TG_ALERTS_VGI", "1") == "1"
-
 FT5_BACKTEST_DAYS = int(os.environ.get("VP_FT5_BACKTEST_DAYS", 30))
 FT5_SIGNAL_HISTORY = 200
 FT5_REFRESH_SEC = int(os.environ.get("VP_FT5_REFRESH_SEC", 24 * 3600))  # daily backtest/param-search refresh, same cadence as Volume's optimizer
@@ -9259,13 +9277,13 @@ CREDENTIALS_FILE = os.environ.get(
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "div_min_rr", "bounce_enabled", "breakout_enabled",
                   "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "ft5_invert_signals", "vgi_enabled", "vgi_invert_signals", "msnr_enabled", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session", "telegram_alerts_session_ny", "telegram_alerts_xau_lg", "telegram_alerts_ft5", "telegram_alerts_vgi", "telegram_alerts_msnr",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5", "autotrade_vgi", "autotrade_msnr",
+                  "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session", "telegram_alerts_session_ny", "telegram_alerts_xau_lg", "telegram_alerts_ft5", "telegram_alerts_msnr",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5", "autotrade_msnr",
                   "autotrade_size_mode", "autotrade_size_value",
                   "scalp_size_mode", "scalp_size_value",
                   "ema_min_rr",
                   "ema_adx_filter_enabled", "ema_adx_min", "ema_min_gap_pct",
-                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session", "autotrade_leverage_session_ny", "autotrade_leverage_xau_lg", "autotrade_leverage_ft5", "autotrade_leverage_vgi", "autotrade_leverage_msnr",
+                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session", "autotrade_leverage_session_ny", "autotrade_leverage_xau_lg", "autotrade_leverage_ft5", "autotrade_leverage_msnr",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
                   # same save_settings() path everything else already uses,
@@ -9328,7 +9346,6 @@ def get_settings():
         "telegram_alerts_session_ny": TELEGRAM_ALERTS_SESSION_NY,
         "telegram_alerts_xau_lg": TELEGRAM_ALERTS_XAU_LG,
         "telegram_alerts_ft5": TELEGRAM_ALERTS_FT5,
-        "telegram_alerts_vgi": TELEGRAM_ALERTS_VGI,
         "telegram_alerts_msnr": TELEGRAM_ALERTS_MSNR,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
@@ -9341,7 +9358,6 @@ def get_settings():
         "autotrade_session_ny": AUTOTRADE_ENABLED_SESSION_NY,
         "autotrade_xau_lg": AUTOTRADE_ENABLED_XAU_LG,
         "autotrade_ft5": AUTOTRADE_ENABLED_FT5,
-        "autotrade_vgi": AUTOTRADE_ENABLED_VGI,
         "autotrade_msnr": AUTOTRADE_ENABLED_MSNR,
         "autotrade_size_mode": AUTOTRADE_SIZE_MODE,
         "autotrade_size_value": AUTOTRADE_SIZE_VALUE,
@@ -9359,7 +9375,6 @@ def get_settings():
         "autotrade_leverage_session_ny": AUTOTRADE_LEVERAGE_SESSION_NY,
         "autotrade_leverage_xau_lg": AUTOTRADE_LEVERAGE_XAU_LG,
         "autotrade_leverage_ft5": AUTOTRADE_LEVERAGE_FT5,
-        "autotrade_leverage_vgi": AUTOTRADE_LEVERAGE_VGI,
         "autotrade_leverage_msnr": AUTOTRADE_LEVERAGE_MSNR,
         "scalp_min_rr": SCALP_MIN_RR,
         "scalp_sl_buffer_mult": SCALP_SL_BUFFER_MULT,
@@ -9380,8 +9395,8 @@ def apply_settings(updates):
     scan cycle / next alert, no restart needed."""
     global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, XAU_LG_INVERT_SIGNALS, XAU_LG_SL_BUFFER_MULT, XAU_LG_RR, FT5_ENABLED, FT5_INVERT_SIGNALS, VGI_ENABLED, VGI_INVERT_SIGNALS, VGI_MIN_RR, MSNR_ENABLED, MSNR_MAX_RR, HOURLY_STATS_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
-    global TELEGRAM_ALERTS_SESSION_NY, TELEGRAM_ALERTS_XAU_LG, TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_VGI, TELEGRAM_ALERTS_MSNR
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_VGI, AUTOTRADE_ENABLED_MSNR
+    global TELEGRAM_ALERTS_SESSION_NY, TELEGRAM_ALERTS_XAU_LG, TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR
     global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
     global SCALP_SIZE_MODE, SCALP_SIZE_VALUE
     global EMA_MIN_RR
@@ -9482,8 +9497,6 @@ def apply_settings(updates):
         TELEGRAM_ALERTS_XAU_LG = bool(updates["telegram_alerts_xau_lg"])
     if "telegram_alerts_ft5" in updates:
         TELEGRAM_ALERTS_FT5 = bool(updates["telegram_alerts_ft5"])
-    if "telegram_alerts_vgi" in updates:
-        TELEGRAM_ALERTS_VGI = bool(updates["telegram_alerts_vgi"])
     if "telegram_alerts_msnr" in updates:
         TELEGRAM_ALERTS_MSNR = bool(updates["telegram_alerts_msnr"])
     if "autotrade_dry_run" in updates:
@@ -9506,8 +9519,6 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_XAU_LG = bool(updates["autotrade_xau_lg"])
     if "autotrade_ft5" in updates:
         AUTOTRADE_ENABLED_FT5 = bool(updates["autotrade_ft5"])
-    if "autotrade_vgi" in updates:
-        AUTOTRADE_ENABLED_VGI = bool(updates["autotrade_vgi"])
     if "autotrade_msnr" in updates:
         AUTOTRADE_ENABLED_MSNR = bool(updates["autotrade_msnr"])
     if "autotrade_size_mode" in updates and updates["autotrade_size_mode"] in ("percent", "fixed"):
@@ -9560,7 +9571,6 @@ def apply_settings(updates):
         ("autotrade_leverage_session_ny", "AUTOTRADE_LEVERAGE_SESSION_NY"),
         ("autotrade_leverage_xau_lg", "AUTOTRADE_LEVERAGE_XAU_LG"),
         ("autotrade_leverage_ft5", "AUTOTRADE_LEVERAGE_FT5"),
-        ("autotrade_leverage_vgi", "AUTOTRADE_LEVERAGE_VGI"),
         ("autotrade_leverage_msnr", "AUTOTRADE_LEVERAGE_MSNR"),
     ):
         if key in updates:
@@ -9855,13 +9865,6 @@ STATE = {
     "ft5_last_backtest_finished": None,
     "ft5_last_backtest_duration": None,
     "ft5_signals": deque(maxlen=FT5_SIGNAL_HISTORY),
-    # VGI (v0.98.0) — see that module's own header comment.
-    "vgi_universe": [],
-    "vgi_backtest_results": {},
-    "vgi_backtest_summary": {},
-    "vgi_last_backtest_finished": None,
-    "vgi_last_backtest_duration": None,
-    "vgi_signals": deque(maxlen=VGI_SIGNAL_HISTORY),
     "autotrade_log": deque(maxlen=AUTOTRADE_TRADE_HISTORY),  # every attempted auto-trade, dry-run or real, with its outcome
     "sim_balance": AUTOTRADE_SIM_START_BALANCE,
     "sim_trades": deque(maxlen=AUTOTRADE_SIM_TRADE_HISTORY),  # pending + settled paper trades
@@ -9919,7 +9922,7 @@ def has_open_signal_any_module(symbol, exclude=None):
         "ema_signals": STATE["ema_signals"], "scalp_signals": STATE["scalp_signals"],
         "session_signals": STATE["session_signals"], "session_ny_signals": STATE["session_ny_signals"],
         "xau_lg_signals": STATE["xau_lg_signals"], "ft5_signals": STATE["ft5_signals"],
-        "vgi_signals": STATE["vgi_signals"], "msnr_signals": STATE["msnr_signals"],
+        "msnr_signals": STATE["msnr_signals"],
     }
     with state_lock:
         for name, lst in lists.items():
@@ -10331,183 +10334,6 @@ def compute_sar(candles, af_start=0.02, af_increment=0.02, af_max=0.2):
     return sar
 
 
-def vgi_build_profile(candles, lookback, rows, sum_sections, min_zone_rows=1):
-    """Pure-Python port of mambaleylo/vgi-trader's volume_profile.py
-    build_profile() (itself a port of the TradingView indicator "Volume
-    Gaps & Imbalances" by Zeiierman, CC BY-NC-SA 4.0 — the original Pine
-    isn't reproduced here, this is an independent re-port of the
-    author's own already-independent Python re-implementation) — no
-    numpy dependency, unlike the source repo, since this whole app
-    stays pure-Python/stdlib throughout (a phone/Termux setup is not a
-    great place to add a new heavy dependency for one module). Same
-    math, 1:1: builds a row-based volume profile over the last
-    `lookback` bars, buckets each bar's volume into a bull or bear row
-    by hlc3 price (matches Pine's default input.source), finds zero-
-    volume "gap" zones (merged runs of adjacent empty rows — the
-    original labels these "acts as a price magnet"), and delta
-    sections ((Bull-Bear)/Total*100) for local buy/sell bias.
-    Returns a dict {hi, lo, rows, lvls, zones, sections} — zones/
-    sections are lists of plain dicts, not dataclasses, matching this
-    app's existing style everywhere else rather than the source's."""
-    window = candles[-lookback:]
-    if len(window) < 2:
-        raise ValueError("недостаточно свечей для профиля VGI")
-    hi = max(c["high"] for c in window)
-    lo = min(c["low"] for c in window)
-    if hi <= lo:
-        raise ValueError("некорректный диапазон цены для профиля VGI")
-    step = (hi - lo) / rows
-    lvls = [lo + step * i for i in range(rows + 1)]
-    bull_vols = [0.0] * rows
-    bear_vols = [0.0] * rows
-    for c in window:
-        src = (c["high"] + c["low"] + c["close"]) / 3.0
-        is_bull = c["close"] > c["open"]
-        row_idx = int(math.ceil((src - lo) / step)) - 1
-        row_idx = max(0, min(rows - 1, row_idx))
-        if is_bull:
-            bull_vols[row_idx] += c["volume"]
-        else:
-            bear_vols[row_idx] += c["volume"]
-
-    zones = []
-    i = 0
-    while i < rows:
-        if bull_vols[i] + bear_vols[i] <= 0:
-            j = i
-            while j + 1 < rows and bull_vols[j + 1] + bear_vols[j + 1] <= 0:
-                j += 1
-            if (j - i + 1) >= min_zone_rows:
-                zones.append({"bottom": lvls[i], "top": lvls[j + 1]})
-            i = j + 1
-        else:
-            i += 1
-
-    sec_rows = max(1, rows // sum_sections)
-    sections = []
-    for s in range(sum_sections):
-        start = s * sec_rows
-        end = (rows - 1) if s == sum_sections - 1 else min(rows - 1, (s + 1) * sec_rows - 1)
-        if start > end:
-            continue
-        seg_bull = sum(bull_vols[start:end + 1])
-        seg_bear = sum(bear_vols[start:end + 1])
-        total = seg_bull + seg_bear
-        if total <= 0:
-            continue
-        delta_pct = (seg_bull - seg_bear) / total * 100.0
-        sections.append({"bottom": lvls[start], "top": lvls[end + 1],
-                          "bull_vol": seg_bull, "bear_vol": seg_bear, "delta_pct": delta_pct})
-
-    return {"hi": hi, "lo": lo, "rows": rows, "lvls": lvls, "zones": zones, "sections": sections}
-
-
-def vgi_section_at_price(profile, price):
-    for sec in profile["sections"]:
-        if sec["bottom"] <= price <= sec["top"]:
-            return sec
-    return None
-
-
-def vgi_nearest_zone(profile, price, direction):
-    """Nearest zero-volume zone above price (direction='up') or below
-    ('down') — port of nearest_zone()."""
-    candidates = []
-    for z in profile["zones"]:
-        if direction == "up" and z["bottom"] >= price:
-            candidates.append(z)
-        elif direction == "down" and z["top"] <= price:
-            candidates.append(z)
-    if not candidates:
-        return None
-    if direction == "up":
-        return min(candidates, key=lambda z: z["bottom"])
-    return max(candidates, key=lambda z: z["top"])
-
-
-def vgi_evaluate_signal(profile, price, delta_threshold_pct, max_zone_distance_pct, min_rr, min_sl_distance_pct=None, invert=False):
-    """Port of signal_engine.py's evaluate(). Direction comes from local
-    delta bias first (the section containing the current price); if
-    that's neutral, falls back to whichever zero-volume zone is nearer
-    (the "price magnet" reading) — if both exist and disagree, no
-    signal at all (source's own reasoning: too much conflicting noise
-    to trade). TP = far edge of the nearest zone in trade direction; SL
-    = reward/min_rr, which guarantees RR >= min_rr by construction (the
-    stop is SIZED FROM the target, not measured independently — same
-    approach the source explicitly chose).
-    Direction strings are LONG/SHORT (this app's convention throughout)
-    rather than the source's lowercase long/short.
-    v0.98.2: min_sl_distance_pct (defaults to VGI_MIN_SL_DISTANCE_PCT if
-    not given) rejects a signal whose SL ends up closer than this — per
-    direct user report that stops were getting hit almost immediately.
-    Root cause confirmed against the source's own formula: SL is sized
-    from reward/min_rr, an unrelated quantity to actual price
-    volatility, so when the nearest zone (and therefore reward) happens
-    to be close, the resulting stop can be tighter than ordinary candle
-    noise for that timeframe. This filter doesn't touch the TP/RR math
-    at all — a rejected signal is simply never taken, not resized.
-    v0.98.9: invert, per direct user request for a reverse mode "по
-    аналогии с другими индикаторами". Unlike EMA/Session's invert (flip
-    direction, keep/repurpose the original sizing), VGI already computes
-    BOTH zone_up and zone_down every evaluation — so inverting here
-    means retargeting the OPPOSITE zone (the one NOT selected by the
-    normal delta/magnet read) rather than flipping direction while
-    keeping a target that no longer makes directional sense. Keeps
-    VGI's own "trade toward a magnet zone" reasoning coherent even
-    inverted: it's a bet that the OTHER zone is the real magnet, not an
-    arbitrary sign-flip of an unrelated target. Same risk=reward/min_rr
-    sizing rule applies to the new target's own distance."""
-    max_zone_dist = max_zone_distance_pct / 100.0
-    sec = vgi_section_at_price(profile, price)
-    local_delta = sec["delta_pct"] if sec else 0.0
-
-    zone_up = vgi_nearest_zone(profile, price, "up")
-    zone_down = vgi_nearest_zone(profile, price, "down")
-    dist_up = (zone_up["bottom"] - price) / price if zone_up else None
-    dist_down = (price - zone_down["top"]) / price if zone_down else None
-
-    magnet_dir = None
-    if dist_up is not None and (dist_down is None or dist_up <= dist_down):
-        magnet_dir = "LONG"
-    elif dist_down is not None:
-        magnet_dir = "SHORT"
-
-    delta_dir = None
-    if local_delta >= delta_threshold_pct:
-        delta_dir = "LONG"
-    elif local_delta <= -delta_threshold_pct:
-        delta_dir = "SHORT"
-
-    if delta_dir and magnet_dir and delta_dir != magnet_dir:
-        return None
-
-    direction = delta_dir or magnet_dir
-    if direction is None:
-        return None
-
-    if invert:
-        direction = "SHORT" if direction == "LONG" else "LONG"
-
-    zone = zone_up if direction == "LONG" else zone_down
-    if zone is None:
-        return None
-    dist = dist_up if direction == "LONG" else dist_down
-    if dist is None or dist > max_zone_dist:
-        return None
-
-    tp = zone["top"] if direction == "LONG" else zone["bottom"]
-    reward = abs(tp - price)
-    if reward <= 0:
-        return None
-    risk = reward / min_rr
-    min_sl_dist = (min_sl_distance_pct if min_sl_distance_pct is not None else VGI_MIN_SL_DISTANCE_PCT) / 100.0
-    if risk / price < min_sl_dist:
-        return None
-    sl = price - risk if direction == "LONG" else price + risk
-    rr = round(reward / risk, 3) if risk > 0 else None
-
-    return {"direction": direction, "entry": price, "tp": tp, "sl": sl, "rr": rr,
-            "delta_pct": round(local_delta, 2), "zone_dist_pct": round(dist * 100, 3)}
 
 
 _T_CRITICAL_TABLE = [  # (df, t-value at ~84.13% one-sided confidence, i.e. Phi(1.0) — chosen so this smoothly converges to the old fixed Z=1.0 at large df) — computed once via scipy.stats.t.ppf and hardcoded as plain numbers rather than adding scipy as an app dependency (same reasoning as avoiding numpy for VGI — this needs to run on a phone via Termux)
@@ -14598,7 +14424,6 @@ def save_state():
                 "msnr_autotrade_symbols": STATE["msnr_autotrade_symbols"],
                 "ft5_signals": list(STATE["ft5_signals"]),
                 "ft5_symbol_overrides": STATE["ft5_symbol_overrides"],
-                "vgi_signals": list(STATE["vgi_signals"]),
                 "autotrade_log": list(STATE["autotrade_log"]),
                 "sim_balance": STATE["sim_balance"],
                 # Both PENDING and SETTLED now (previously PENDING was
@@ -14711,7 +14536,6 @@ def load_state():
         msnr_autotrade_symbols = data.get("msnr_autotrade_symbols", {})
         ft5_signals = data.get("ft5_signals", [])
         ft5_symbol_overrides = data.get("ft5_symbol_overrides", {})
-        vgi_signals = data.get("vgi_signals", [])
         autotrade_log = data.get("autotrade_log", [])
         sim_trades = data.get("sim_trades", [])
         risk_autotune_log = data.get("risk_autotune_log", [])
@@ -14729,7 +14553,6 @@ def load_state():
             STATE["msnr_autotrade_symbols"] = msnr_autotrade_symbols
             STATE["ft5_signals"] = deque(_backfill_mfe_mae(ft5_signals), maxlen=FT5_SIGNAL_HISTORY)
             STATE["ft5_symbol_overrides"] = ft5_symbol_overrides
-            STATE["vgi_signals"] = deque(_backfill_mfe_mae(vgi_signals), maxlen=VGI_SIGNAL_HISTORY)
             STATE["autotrade_log"] = deque(autotrade_log, maxlen=AUTOTRADE_TRADE_HISTORY)
             STATE["risk_autotune_log"] = deque(risk_autotune_log, maxlen=200)
             STATE["risk_autotune_last_change"] = risk_autotune_last_change
@@ -15013,8 +14836,6 @@ def send_telegram(text, category=None):
     if category == "xau_lg" and not TELEGRAM_ALERTS_XAU_LG:
         return
     if category == "ft5" and not TELEGRAM_ALERTS_FT5:
-        return
-    if category == "vgi" and not TELEGRAM_ALERTS_VGI:
         return
     # v0.99.72 — BUG FOUND, per direct user report ("монета не пришла в
     # уведомление телеграм... как оказалось галочки на монете нет"):
@@ -16300,18 +16121,6 @@ def _set_xau_lg_rr(v):
     save_settings()
 
 
-def _set_vgi_invert(v):
-    global VGI_INVERT_SIGNALS
-    VGI_INVERT_SIGNALS = v
-    save_settings()
-
-
-def _set_vgi_min_rr(v):
-    global VGI_MIN_RR
-    VGI_MIN_RR = v
-    save_settings()
-
-
 def _set_ft5_invert(v):
     global FT5_INVERT_SIGNALS
     FT5_INVERT_SIGNALS = v
@@ -16482,71 +16291,6 @@ def risk_autotune_pass():
     except Exception as e:
         log_error(f"risk_autotune session: {e}")
 
-    try:
-        # v0.98.9: per direct user request ("Vgi и ft5 надо чтобы тоже
-        # автотюнились и имели режим реверса... надо чтобы отслеживались
-        # и параметры движения, аналогия с другими индикаторами").
-        # Unlike Session, VGI's sizing (risk = reward/min_rr) is used
-        # identically whether VGI_INVERT_SIGNALS is on or off — invert
-        # just retargets the opposite zone, same formula either way (see
-        # vgi_evaluate_signal()'s own docstring) — so both rules below
-        # apply unconditionally, no "only in inverted mode" gating the
-        # way Session needed. VGI also has no separate SL-width knob to
-        # tune the way Session's SL_MULT is: SL is fully DERIVED from
-        # (reward, min_rr), so there's nothing independent to nudge —
-        # only VGI_MIN_RR itself (via the same tp_extend mechanism
-        # Session's own RR uses) and the reverse flag.
-        s = compute_vgi_signal_stats()
-        winrate = s.get("winrate")
-        closed_n = (s.get("wins", 0) or 0) + (s.get("losses", 0) or 0)
-        loss_mae = s.get("mae_r_losses_at_close")
-        win_mfe = s.get("mfe_r_wins_at_close")
-        if winrate is not None and closed_n:
-            _risk_autotune_reverse("vgi", "vgi_invert_signals", VGI_INVERT_SIGNALS, winrate, VGI_MIN_RR, closed_n, _set_vgi_invert,
-                                    avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
-        # v0.99.65 — CRITICAL FIX, per direct user report with a live
-        # screenshot: winrate near-zero (6W/154L, 3.8%) while auto-tune
-        # had pushed vgi_min_rr 5 -> 7.78 (toward the bound ceiling of
-        # 8.0), the WRONG direction — raising it was making things
-        # actively worse, not better. Root cause confirmed against
-        # vgi_evaluate_signal()'s own formula: risk = reward/min_rr,
-        # so min_rr doesn't just filter signals here — it directly SETS
-        # the stop's distance, inversely. Raising min_rr shrinks the
-        # stop for every taken signal, making it easier to get stopped
-        # out by ordinary noise before price reaches the (unchanged)
-        # target — mechanically WORSENS win-rate, the opposite of what
-        # a normal *_MIN_RR filter threshold does elsewhere (there, RR
-        # is computed independently of an ATR/structure-based stop, so
-        # raising the bar just rejects more low-quality setups without
-        # touching the stop those ACCEPTED setups actually use).
-        # A second, compounding bug in the SAME direction: _risk_
-        # autotune_tp_extend() (below, now disabled) fed it win_mfe_r —
-        # but update_vgi_signal_outcomes() records mfe_r using the SAME
-        # WIN-triggering candle's own high/low BEFORE checking for the
-        # win and breaking, so a winning candle's natural wick past the
-        # exact TP price (typical, not an edge case) makes fav_r >=
-        # min_rr almost every single time, structurally — because R
-        # itself (risk = reward/min_rr) is DEFINED in terms of the very
-        # parameter being tuned. "Did wins run past the target" is
-        # near-tautological here, not real evidence quality improved,
-        # unlike Session/EMA/DIV where R comes from an independent
-        # stop. The rule saw this built-in bias as "wins keep running
-        # past the target, extend it" every single pass, regardless of
-        # whether raising min_rr was actually helping — a one-directional
-        # ratchet baked into the measurement itself, compounding with
-        # the stop-tightening effect above into the death spiral
-        # reported live.
-        # Disabled below rather than replaced blind — a properly-
-        # designed VGI-specific rule (reacting to real adverse excursion
-        # the way _risk_autotune_sl_mult() does elsewhere, but inverted
-        # since here HIGHER min_rr means a TIGHTER stop, opposite of a
-        # normal multiplier) needs its own careful design, not a rushed
-        # substitute in the same pass that found this bug.
-        # if win_mfe:
-        #     _risk_autotune_tp_extend("vgi", "vgi_min_rr", VGI_MIN_RR, win_mfe["median"], VGI_MIN_RR, closed_n, _set_vgi_min_rr,
-        #                               bounds=RISK_AUTOTUNE_VGI_RR_BOUNDS)
-    except Exception as e:
-        log_error(f"risk_autotune vgi: {e}")
 
     try:
         # v0.99.66, per direct user request ("инверсию с подгонкой
@@ -19569,345 +19313,6 @@ def ft5_live_loop():
 # ============================================================================
 
 
-# ============================================================================
-# VGI — port of mambaleylo/vgi-trader — infrastructure
-# ----------------------------------------------------------------------------
-# vgi_build_profile()/vgi_evaluate_signal() (the ported math) are defined
-# earlier, right before ft5_run_backtest — everything below is the wrapping
-# infrastructure (universe, backtest, live scan, outcomes, autotrade).
-# ============================================================================
-def vgi_build_universe():
-    """Liquid-symbol pool by real 24h volume — uses get_tickers() with the
-    same fallback field chain already proven correct for FT5/Session,
-    fixing the source repo's own resolve_symbols() bug (sorted by a
-    /contracts field that's frequently empty, making the sort a no-op)."""
-    tickers = get_tickers()
-    seen_vol = {}
-    for t in tickers:
-        name = t.get("contract", "")
-        if not name.endswith("_USDT"):
-            continue
-        vol = t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0
-        try:
-            vol = float(vol)
-        except (TypeError, ValueError):
-            vol = 0.0
-        if vol < MIN_VOL_USD:
-            continue
-        if name not in seen_vol or vol > seen_vol[name]:
-            seen_vol[name] = vol
-    ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
-    return [s[0] for s in ranked[:VGI_UNIVERSE_SIZE]]
-
-
-def vgi_run_backtest(candles, lookback=VGI_LOOKBACK, rows=VGI_ROWS, sum_sections=VGI_SUM_SECTIONS,
-                      min_zone_rows=VGI_MIN_ZONE_ROWS, delta_threshold_pct=VGI_DELTA_THRESHOLD_PCT,
-                      max_zone_distance_pct=VGI_MAX_ZONE_DISTANCE_PCT, min_rr=None, invert=None):
-    """Walk-forward backtest — the source repo has NO historical backtest
-    at all (it's a live-only "online" screener), but this app's standing
-    discipline all session has been "test on real data before trusting a
-    source's own numbers/design," so this was built rather than skipped.
-    At each closed bar i (i >= lookback), rebuilds the profile using ONLY
-    candles[:i+1] (no lookahead — the profile at bar i never sees bar
-    i+1's data), evaluates a signal at that bar's close, and if one
-    fires, tracks forward for TP/SL touch. One position at a time (skips
-    new entries while one is open), matching every other module's own
-    walk-forward convention here.
-    min_rr and invert both default to the live VGI_MIN_RR/VGI_INVERT_
-    SIGNALS globals if not given — resolved at call time, not frozen as
-    signature defaults, since v0.98.9 made VGI_MIN_RR settings-mutable
-    too (unlike lookback/rows/etc above, which never change at
-    runtime) — avoiding the exact v0.95.7-class stale-default bug this
-    session already found and fixed elsewhere; caught here by this
-    session's own automated stale-default check before it could ship.
-    Returns a list of closed trades: {entry_time, exit_time, direction,
-    entry, tp, sl, rr, result}."""
-    n = len(candles)
-    rr_floor = min_rr if min_rr is not None else VGI_MIN_RR
-    inv = invert if invert is not None else VGI_INVERT_SIGNALS
-    trades = []
-    position = None
-    for i in range(lookback, n):
-        c = candles[i]
-        if position is not None:
-            if position["direction"] == "LONG":
-                if c["low"] <= position["sl"]:
-                    trades.append({**position, "exit_time": c["time"], "exit_price": position["sl"], "result": "LOSS"})
-                    position = None
-                elif c["high"] >= position["tp"]:
-                    trades.append({**position, "exit_time": c["time"], "exit_price": position["tp"], "result": "WIN"})
-                    position = None
-            else:
-                if c["high"] >= position["sl"]:
-                    trades.append({**position, "exit_time": c["time"], "exit_price": position["sl"], "result": "LOSS"})
-                    position = None
-                elif c["low"] <= position["tp"]:
-                    trades.append({**position, "exit_time": c["time"], "exit_price": position["tp"], "result": "WIN"})
-                    position = None
-            continue
-        try:
-            profile = vgi_build_profile(candles[:i + 1], lookback, rows, sum_sections, min_zone_rows)
-        except ValueError:
-            continue
-        sig = vgi_evaluate_signal(profile, c["close"], delta_threshold_pct, max_zone_distance_pct, rr_floor, invert=inv)
-        if sig is None:
-            continue
-        position = {"entry_time": c["time"], "direction": sig["direction"],
-                    "entry": sig["entry"], "tp": sig["tp"], "sl": sig["sl"], "rr": sig["rr"]}
-    return trades
-
-
-def vgi_summarize_backtest(trades):
-    total = len(trades)
-    if not total:
-        return {"n": 0, "win_rate": None, "wins": 0, "losses": 0}
-    wins = sum(1 for t in trades if t["result"] == "WIN")
-    losses = total - wins
-    win_rate = round(wins / total * 100, 1) if total else None
-    return {"n": total, "win_rate": win_rate, "wins": wins, "losses": losses}
-
-
-_vgi_signal_cooldowns = {}  # symbol -> last-signaled entry_time
-_vgi_signal_cooldowns_lock = threading.Lock()
-
-
-def vgi_scan_symbol_live(symbol):
-    """Live counterpart to vgi_run_backtest() — fetches recent history,
-    builds the profile off the latest CLOSED bar only (matching the
-    source's own process_symbol(), which explicitly drops the still-
-    forming last candle), evaluates a signal, and fires if it's new
-    (same sig_key dedup idea the source uses — direction + rounded TP —
-    so the same setup doesn't re-alert every scan while price sits near
-    the same zone)."""
-    if not VGI_ENABLED:
-        return
-    try:
-        interval_sec = INTERVAL_SECONDS.get(VGI_TF, 3600)
-        now = time.time()
-        candles = get_candles(symbol, interval=VGI_TF, limit=VGI_LOOKBACK + 20)
-        candles = [c for c in candles if c["time"] + interval_sec <= now]
-        if len(candles) < VGI_LOOKBACK + 5:
-            return
-        price = candles[-1]["close"]
-        profile = vgi_build_profile(candles, VGI_LOOKBACK, VGI_ROWS, VGI_SUM_SECTIONS, VGI_MIN_ZONE_ROWS)
-        sig = vgi_evaluate_signal(profile, price, VGI_DELTA_THRESHOLD_PCT, VGI_MAX_ZONE_DISTANCE_PCT, VGI_MIN_RR, invert=VGI_INVERT_SIGNALS)
-        if sig is None:
-            return
-        sig_key = (sig["direction"], round(sig["tp"], 6))
-        with _vgi_signal_cooldowns_lock:
-            if _vgi_signal_cooldowns.get(symbol) == sig_key:
-                return
-            _vgi_signal_cooldowns[symbol] = sig_key
-        if has_open_signal_any_module(symbol, exclude="vgi_signals"):
-            return
-        record = {
-            "symbol": symbol, "direction": sig["direction"], "entry": sig["entry"],
-            "tp": sig["tp"], "sl": sig["sl"], "rr": sig["rr"],
-            "delta_pct": sig["delta_pct"], "zone_dist_pct": sig["zone_dist_pct"],
-            "time": candles[-1]["time"], "detected_at": now, "status": "OPEN",
-            "result": None, "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
-            "mfe_r": 0.0, "mae_r": 0.0, "mfe_price": None, "mae_price": None,
-            "mfe_r_at_close": None, "mae_r_at_close": None,
-        }
-        with state_lock:
-            STATE["vgi_signals"].appendleft(record)
-        if AUTOTRADE_ENABLED_VGI:
-            execute_autotrade("vgi", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"], AUTOTRADE_LEVERAGE_VGI)
-            sim_execute_trade("vgi", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"], AUTOTRADE_LEVERAGE_VGI, record)
-        arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
-        send_telegram(
-            f"{arrow} {symbol} (VGI \u2014 Volume Gaps & Imbalances)\n"
-            f"entry: {sig['entry']:.6g}\nTP: {sig['tp']:.6g}  SL: {sig['sl']:.6g}  RR: {sig['rr']}\n"
-            f"delta={sig['delta_pct']}% zone_dist={sig['zone_dist_pct']}%",
-            category="vgi",
-        )
-    except Exception as e:
-        log_error(f"vgi_live {symbol}: {e}")
-
-
-def update_vgi_signal_outcomes():
-    now = time.time()
-    with state_lock:
-        open_signals = [s for s in STATE["vgi_signals"] if s["status"] == "OPEN"]
-    all_candles = fetch_candles_concurrent([(s["symbol"], VGI_TF, 300) for s in open_signals])
-    vgi_interval_sec = INTERVAL_SECONDS.get(VGI_TF, 3600)
-    just_closed = []
-    for sig, candles in zip(open_signals, all_candles):
-        try:
-            if candles is None:
-                continue
-            candles = [c for c in candles if c["time"] + vgi_interval_sec <= now]  # v0.98.8: drop still-forming candle — the exact bug reported live (LOSS 5 minutes after a 1h-timeframe entry)
-            future = [c for c in candles if c["time"] > sig["time"]]
-            direction = sig["direction"]
-            entry = sig["entry"]
-            risk = abs(entry - sig["sl"]) or 1e-9
-            result, exit_price, exit_time = None, None, None
-            for c in future:
-                if direction == "LONG":
-                    fav, adv = c["high"] - entry, entry - c["low"]
-                else:
-                    fav, adv = entry - c["low"], c["high"] - entry
-                fav_r, adv_r = fav / risk, adv / risk
-                if fav_r > sig["mfe_r"] or adv_r > sig["mae_r"]:
-                    with state_lock:
-                        if fav_r > sig["mfe_r"]:
-                            sig["mfe_r"] = round(fav_r, 3)
-                            sig["mfe_price"] = c["high"] if direction == "LONG" else c["low"]
-                        if adv_r > sig["mae_r"]:
-                            sig["mae_r"] = round(adv_r, 3)
-                            sig["mae_price"] = c["low"] if direction == "LONG" else c["high"]
-                if direction == "LONG":
-                    if c["low"] <= sig["sl"]:
-                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
-                        break
-                    if c["high"] >= sig["tp"]:
-                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
-                        break
-                else:
-                    if c["high"] >= sig["sl"]:
-                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
-                        break
-                    if c["low"] <= sig["tp"]:
-                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
-                        break
-            if result:
-                with state_lock:
-                    sig["status"] = "CLOSED"
-                    sig["result"] = result
-                    sig["exit_price"] = exit_price
-                    sig["exit_time"] = exit_time
-                    sig["mfe_r_at_close"] = sig["mfe_r"]
-                    sig["mae_r_at_close"] = sig["mae_r"]
-                just_closed.append(dict(sig))
-        except Exception as e:
-            log_error(f"vgi_outcome {sig['symbol']}: {e}")
-
-    for sig in just_closed:
-        try:
-            icon = "\u2705" if sig["result"] == "WIN" else "\u274c"
-            send_telegram(
-                f"{icon} {sig['result']} {sig['symbol']} (VGI)\n"
-                f"\u0432\u044b\u0445\u043e\u0434: {sig.get('exit_price')} \u00b7 RR {sig.get('rr')}",
-                category="vgi",
-            )
-        except Exception as e:
-            log_error(f"vgi_close_alert {sig.get('symbol')}: {e}")
-
-
-def compute_vgi_signal_stats():
-    with state_lock:
-        signals = list(STATE["vgi_signals"])
-    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
-    wins = sum(1 for s in closed if s["result"] == "WIN")
-    losses = len(closed) - wins
-    open_n = sum(1 for s in signals if s["status"] == "OPEN")
-    winrate = round(wins / len(closed) * 100, 1) if closed else None
-    rrs = [s["rr"] for s in signals if s.get("rr") is not None]
-    rr_avg = round(sum(rrs) / len(rrs), 2) if rrs else None
-
-    def agg(key, subset):
-        vals = [s[key] for s in subset if s.get(key) is not None]
-        if not vals:
-            return None
-        vals_sorted = sorted(vals)
-        n = len(vals_sorted)
-        return {
-            "avg": round(sum(vals) / n, 3), "median": round(vals_sorted[n // 2], 3),
-            "p25": round(vals_sorted[int(n * 0.25)], 3),
-            "p75": round(vals_sorted[min(int(n * 0.75), n - 1)], 3), "n": n,
-        }
-
-    win_set = [s for s in closed if s["result"] == "WIN"]
-    loss_set = [s for s in closed if s["result"] == "LOSS"]
-    return {"total": len(signals), "wins": wins, "losses": losses, "open": open_n,
-            "winrate": winrate, "rr_avg": rr_avg,
-            "mfe_r_wins_at_close": agg("mfe_r_at_close", win_set), "mae_r_wins_at_close": agg("mae_r_at_close", win_set),
-            "mfe_r_losses_at_close": agg("mfe_r_at_close", loss_set), "mae_r_losses_at_close": agg("mae_r_at_close", loss_set)}
-
-
-def _vgi_backtest_one_symbol(symbol, now):
-    """Fetch + backtest + summarize for a single symbol — factored out
-    so vgi_backtest_loop() can run it concurrently across the whole
-    universe instead of sequentially. Returns (symbol, trades, summary)
-    or None if there wasn't enough history; exceptions are caught here
-    (not propagated) so one bad/slow symbol can't take down the whole
-    batch, matching every other per-symbol worker in this app."""
-    try:
-        candles = get_candles_range(symbol, VGI_TF, now - VGI_BACKTEST_DAYS * 86400, now)
-        if len(candles) < VGI_LOOKBACK + 20:
-            return None
-        trades = vgi_run_backtest(candles)
-        return symbol, trades, vgi_summarize_backtest(trades)
-    except Exception as e:
-        log_error(f"vgi_backtest {symbol}: {e}")
-        return None
-
-
-def vgi_backtest_loop():
-    while True:
-        try:
-            if not VGI_ENABLED:
-                time.sleep(60)
-                continue
-            t0 = time.time()
-            universe = vgi_build_universe()
-            with state_lock:
-                STATE["vgi_universe"] = universe
-            results_by_symbol = {}
-            summary_by_symbol = {}
-            now = time.time()
-            # v0.98.4: was a plain sequential `for symbol in universe`
-            # loop — under normal network conditions this was tolerable,
-            # but a live user report of an empty universe traced to a
-            # concurrent Gate.io API slowdown (an independent "Read timed
-            # out" error was already showing in the scanner log for a
-            # different endpoint) showed the real cost: one slow/timing-
-            # out symbol blocks every symbol behind it in the sequence,
-            # so total wall-clock time scales with the SUM of all fetch
-            # times rather than the worst one. Switched to the same
-            # ThreadPoolExecutor-per-symbol pattern the live scan loops
-            # already use elsewhere in this app.
-            with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
-                futs = [ex.submit(_vgi_backtest_one_symbol, s, now) for s in universe]
-                for fut in as_completed(futs):
-                    res = fut.result()
-                    if res is None:
-                        continue
-                    symbol, trades, summary = res
-                    results_by_symbol[symbol] = trades
-                    summary_by_symbol[symbol] = summary
-            with state_lock:
-                STATE["vgi_backtest_results"] = results_by_symbol
-                STATE["vgi_backtest_summary"] = summary_by_symbol
-                STATE["vgi_last_backtest_finished"] = time.time()
-                STATE["vgi_last_backtest_duration"] = round(time.time() - t0, 1)
-        except Exception as e:
-            log_error(f"vgi_backtest_loop: {e}")
-        time.sleep(max(3600, VGI_REFRESH_SEC))
-
-
-def vgi_live_loop():
-    while True:
-        try:
-            if not VGI_ENABLED:
-                time.sleep(60)
-                continue
-            with state_lock:
-                universe = list(STATE["vgi_universe"])
-            if universe:
-                with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe))) as ex:
-                    futs = [ex.submit(vgi_scan_symbol_live, s) for s in universe]
-                    for _ in as_completed(futs):
-                        pass
-            update_vgi_signal_outcomes()
-        except Exception as e:
-            log_error(f"vgi_live_loop: {e}")
-        time.sleep(max(60, VGI_SCAN_INTERVAL_SEC))
-
-
-# ============================================================================
-# END VGI
-# ============================================================================
 
 
 # ----------------------------------------------------------------------------
@@ -21141,68 +20546,6 @@ def api_reset_ft5():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-@app.route("/api/vgi/status")
-def api_vgi_status():
-    with state_lock:
-        summary = dict(STATE["vgi_backtest_summary"])
-        universe = list(STATE["vgi_universe"])
-        last_backtest_finished = STATE["vgi_last_backtest_finished"]
-        last_backtest_duration = STATE["vgi_last_backtest_duration"]
-    ranked = [dict(s, symbol=sym) for sym, s in summary.items()]
-    ranked.sort(key=lambda r: (r.get("win_rate") or 0, r.get("n") or 0), reverse=True)
-    return jsonify({
-        "enabled": VGI_ENABLED,
-        "universe_size": len(universe),
-        "last_backtest_finished": last_backtest_finished,
-        "last_backtest_duration": last_backtest_duration,
-        "signals_stats": compute_vgi_signal_stats(),
-        "config": {
-            "tf": VGI_TF, "lookback": VGI_LOOKBACK, "rows": VGI_ROWS,
-            "sum_sections": VGI_SUM_SECTIONS, "min_zone_rows": VGI_MIN_ZONE_ROWS,
-            "delta_threshold_pct": VGI_DELTA_THRESHOLD_PCT,
-            "max_zone_distance_pct": VGI_MAX_ZONE_DISTANCE_PCT, "min_rr": VGI_MIN_RR,
-            "min_sl_distance_pct": VGI_MIN_SL_DISTANCE_PCT,
-            "invert_signals": VGI_INVERT_SIGNALS,
-            "backtest_days": VGI_BACKTEST_DAYS,
-        },
-        "top": ranked,
-    })
-
-
-@app.route("/api/vgi/signals")
-def api_vgi_signals():
-    with state_lock:
-        return jsonify(list(STATE["vgi_signals"]))
-
-
-@app.route("/api/vgi/chart/<symbol>")
-def api_vgi_chart(symbol):
-    """VGI has one fixed (SL, TP) pair per signal, unlike FT5 — no need
-    to re-derive anything via a backtest re-run, just fetch candles
-    around the signal's own time window and return the already-known
-    entry/sl/tp/exit values alongside them."""
-    try:
-        sig_time = float(request.args.get("time"))
-        with state_lock:
-            sig = next((s for s in STATE["vgi_signals"]
-                        if s["symbol"] == symbol and s["time"] == sig_time), None)
-        if sig is None:
-            return jsonify({"error": "signal not found"}), 404
-        interval_sec = INTERVAL_SECONDS.get(VGI_TF, 3600)
-        fetch_start = sig_time - VGI_LOOKBACK * interval_sec
-        fetch_end = (sig["exit_time"] + 6 * interval_sec) if sig.get("exit_time") else time.time()
-        candles = get_candles_range(symbol, VGI_TF, fetch_start, fetch_end)
-        return jsonify({
-            "symbol": symbol, "candles": candles[-150:], "time": sig_time,
-            "direction": sig["direction"], "entry": sig["entry"], "tp": sig["tp"], "sl": sig["sl"],
-            "result": sig.get("result"), "exit_time": sig.get("exit_time"), "exit_price": sig.get("exit_price"),
-            "rr": sig.get("rr"),
-        })
-    except Exception as e:
-        log_error(f"api_vgi_chart {symbol}: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
 @app.route("/api/scalp/chart/<symbol>")
 def api_scalp_chart(symbol):
     """Same response shape as api_vgi_chart (entry/sl/tp/rr/exit/candles)
@@ -21242,22 +20585,6 @@ def api_scalp_chart(symbol):
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/reset/vgi", methods=["POST"])
-def api_reset_vgi():
-    try:
-        with state_lock:
-            STATE["vgi_universe"] = []
-            STATE["vgi_backtest_results"] = {}
-            STATE["vgi_backtest_summary"] = {}
-            STATE["vgi_last_backtest_finished"] = None
-            STATE["vgi_last_backtest_duration"] = None
-            STATE["vgi_signals"].clear()
-        return jsonify({"ok": True})
-    except Exception as e:
-        log_error(f"api_reset_vgi: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
 @app.route("/api/reset/risk_autotune", methods=["POST"])
 def api_reset_risk_autotune():
     """Resets every parameter risk_autotune_pass() touches back to its
@@ -21289,8 +20616,6 @@ def api_reset_risk_autotune():
         _set_session_invert(False)
         _set_session_sl_mult(1.5)
         _set_session_reverse_rr(2.0)
-        _set_vgi_invert(False)
-        _set_vgi_min_rr(3.0)
         _set_ft5_invert(False)
         _set_msnr_max_rr(8.0)
         with state_lock:
@@ -21392,7 +20717,6 @@ def api_autotrade_status():
             "scalp": AUTOTRADE_ENABLED_SCALP, "session": AUTOTRADE_ENABLED_SESSION,
             "session_ny": AUTOTRADE_ENABLED_SESSION_NY, "xau_lg": AUTOTRADE_ENABLED_XAU_LG,
             "ft5": AUTOTRADE_ENABLED_FT5,
-            "vgi": AUTOTRADE_ENABLED_VGI,
             "msnr": AUTOTRADE_ENABLED_MSNR,
         },
     })
@@ -21535,7 +20859,7 @@ INDEX_HTML = """<!doctype html>
   body { margin:0; background:#0b0e14; color:#d7dee8; font-family: -apple-system, Roboto, Segoe UI, sans-serif; }
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
   #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetXauLgBtn, #resetMsnrBtn, #resetFt5Btn, #resetRiskAutotuneBtn, #resetVgiBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetXauLgBtn, #resetMsnrBtn, #resetFt5Btn, #resetRiskAutotuneBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #settingsModal.open { display:flex; flex-direction:column; }
@@ -21752,7 +21076,6 @@ INDEX_HTML = """<!doctype html>
       <button id="resetFt5Btn">Очистить FT5</button>
       <button id="resetSimulatorBtn">Сбросить симулятор</button>
       <button id="resetRiskAutotuneBtn">Сбросить авто-тюнинг</button>
-      <button id="resetVgiBtn">Очистить VGI</button>
     </div>
   </div>
   <div id="status">загрузка...</div>
@@ -21773,7 +21096,6 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="xau_lg" style="color:#e0a030;">XAU LG ⚠️</div>
   <div class="tab active" data-tab="msnr">MSNR</div>
   <div class="tab" data-tab="ft5" style="color:#e0a030;">FT5 ⚠️</div>
-  <div class="tab" data-tab="vgi">VGI</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
 </div>
@@ -21805,7 +21127,6 @@ INDEX_HTML = """<!doctype html>
   <div id="xauLgPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="msnrPanel" style="display:block;padding:8px 4px;font-size:12px;"></div>
   <div id="ft5Panel" style="display:none;padding:8px 4px;font-size:12px;"></div>
-  <div id="vgiPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="simulatorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
@@ -22137,13 +21458,6 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Алерты VGI</div>
-          <div class="sub">открытие и закрытие сигналов</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramVgi"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
           <div class="label">↳ Часовая статистика</div>
           <div class="sub">сводка винрейта по всем режимам, раз в час</div>
         </div>
@@ -22281,16 +21595,6 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ VGI</div>
-          <div class="sub">плечо, если включено — единый TP/SL на сигнал, честная автоторговля без компромиссов</div>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <input type="number" id="setAutotradeLevVgi" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
-          <label class="switch"><input type="checkbox" id="setAutotradeVgi"><span class="switchSlider"></span></label>
-        </div>
-      </div>
-      <div class="settingRow">
-        <div>
           <div class="label">↳ MSNR ⚠️</div>
           <div class="sub">плечо (общее на все монеты) — сам переключатель теперь индивидуальный на каждую монету, см. таблицу автотюнинга на вкладке MSNR (6 полей: золото + текущий топ-3 по винрейту)</div>
         </div>
@@ -22338,7 +21642,6 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('xauLgPanel').style.display = activeTab === 'xau_lg' ? 'block' : 'none';
     document.getElementById('msnrPanel').style.display = activeTab === 'msnr' ? 'block' : 'none';
     document.getElementById('ft5Panel').style.display = activeTab === 'ft5' ? 'block' : 'none';
-    document.getElementById('vgiPanel').style.display = activeTab === 'vgi' ? 'block' : 'none';
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
     document.getElementById('simulatorPanel').style.display = activeTab === 'simulator' ? 'block' : 'none';
     if (activeTab === 'signals') refreshTuning();
@@ -22350,7 +21653,6 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'xau_lg') refreshXauLg();
     if (activeTab === 'msnr') refreshMsnr();
     if (activeTab === 'ft5') refreshFt5();
-    if (activeTab === 'vgi') refreshVgi();
     if (activeTab === 'autotrade') refreshAutotrade();
     if (activeTab === 'simulator') refreshSimulator();
   };
@@ -23965,82 +23267,6 @@ async function refreshFt5() {
   });
 }
 
-// ---------------- VGI — port of mambaleylo/vgi-trader ----------------
-async function refreshVgi() {
-  const status = await (await fetch('/api/vgi/status')).json();
-  const signals = await (await fetch('/api/vgi/signals')).json();
-  const panel = document.getElementById('vgiPanel');
-  const cfg = status.config || {};
-  const ss = status.signals_stats || {};
-  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
-  const rrAvgTxt = ss.rr_avg !== null && ss.rr_avg !== undefined ? `RR ср. ${ss.rr_avg}` : '';
-  const buildTxt = status.last_backtest_finished
-    ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · монет: ${status.universe_size}`
-    : `бэктест ещё не завершился (монет в вселенной: ${status.universe_size || '?'})`;
-  const infoHtml = `
-    <div style="background:#0e1f2a;border:1px solid #2e7d9e;border-radius:10px;padding:10px 14px;margin-bottom:12px;">
-      <span style="font-size:12px;color:#9ecbe0;">Портирована логика Volume Gaps & Imbalances (github.com/mambaleylo/vgi-trader, порт TradingView-индикатора Zeiierman, CC BY-NC-SA 4.0) — профиль объёма по рядам, направление по локальной дельте или ближайшей zero-volume зоне ("магнит"), тейк = дальний край зоны, стоп = тейк/RR (гарантированный RR по построению). Отбор монет — по реальному 24ч объёму (в оригинале был баг: сортировка по полю, которое часто пустое на Gate.io — здесь взят уже проверенный источник объёма). Автоторговля и симулятор — можно включать по-настоящему, здесь единый фиксированный TP/SL на сигнал.</span>
-    </div>`;
-  const headerHtml = `
-    <div class="dim" style="margin-bottom:8px;">
-      ТФ ${cfg.tf} · lookback ${cfg.lookback} · rows ${cfg.rows} · delta порог ${cfg.delta_threshold_pct}% · макс. дистанция до зоны ${cfg.max_zone_distance_pct}% · мин. RR ${cfg.min_rr} · мин. стоп ${cfg.min_sl_distance_pct}%${cfg.invert_signals ? ` · <span style="color:#ffcc55;font-weight:bold;">РЕВЕРС ВКЛЮЧЁН</span>` : ''}<br>
-      <span style="font-size:11px;">Сигналы со стопом уже минимального % пропускаются — иначе он теснее обычного рыночного шума на этом ТФ (найдено по прямому сообщению о том, что стоп выбивает почти сразу).</span><br>
-      ${buildTxt}<br>
-      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · ${rrAvgTxt} · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
-      <span style="font-size:11px;">Клик по строке сигнала открывает график входа/выхода.</span>
-    </div>
-    ${(ss.wins || ss.losses) ? `
-    <div style="margin-bottom:8px;"><b>MFE/MAE (R) на закрытии</b> — сколько реально было хода в плюс/минус к моменту исхода (${ss.wins||0}W/${ss.losses||0}L):<br>
-      <span class="win">WIN MFE: ${fmtStat(ss.mfe_r_wins_at_close)}</span><br>
-      <span class="win">WIN MAE: ${fmtStat(ss.mae_r_wins_at_close)}</span><br>
-      <span class="loss">LOSS MFE: ${fmtStat(ss.mfe_r_losses_at_close)}</span><br>
-      <span class="loss">LOSS MAE: ${fmtStat(ss.mae_r_losses_at_close)}</span><br>
-      <span class="dim" style="font-size:11px;">Эти цифры питают авто-тюнинг мин. RR и решение о реверсе.</span>
-    </div>` : ''}`;
-  const signalsRows = signals.map(s => {
-    const dirClass = s.direction === 'LONG' ? 'long' : 'short';
-    let statusHtml;
-    if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
-    else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}</span>`;
-    else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}</span>`;
-    else statusHtml = '<span class="dim">-</span>';
-    return `<tr data-symbol="${s.symbol}" data-time="${s.time}" style="cursor:pointer;">
-      <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td>
-      <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.sl)}</td><td class="dim">${fmt(s.tp)}</td>
-      <td>${s.rr}</td><td>${statusHtml}</td><td class="dim">${fmtDateTime(s.time)}</td>
-    </tr>`;
-  }).join('');
-  const signalsTableHtml = signals.length ? `
-    <div style="overflow-x:auto;margin-bottom:14px;">
-    <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Status</th><th>Время</th></tr></thead>
-      <tbody>${signalsRows}</tbody>
-    </table>
-    </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
-  const btRows = (status.top || []).map(r => {
-    const wrClass = (r.win_rate === null || r.win_rate === undefined) ? 'dim' : (r.win_rate >= 50 ? 'win' : 'loss');
-    return `<tr>
-      <td>${r.symbol}</td>
-      <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
-      <td class="dim">n=${r.n}</td>
-      <td class="win">${r.wins}W</td>
-      <td class="loss">${r.losses}L</td>
-    </tr>`;
-  }).join('');
-  const btTableHtml = (status.top || []).length ? `
-    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории, без заглядывания вперёд):</div>
-    <div style="overflow-x:auto;">
-    <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th></tr></thead>
-      <tbody>${btRows}</tbody>
-    </table>
-    </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
-  setPanelHtml(panel, infoHtml + headerHtml + signalsTableHtml + btTableHtml);
-  panel.querySelectorAll('tbody tr[data-time]').forEach(tr => {
-    tr.onclick = () => openVgiChart(tr.dataset.symbol, tr.dataset.time);
-  });
-}
-
 async function refreshAutotradeBanner() {
   try {
     const s = await (await fetch('/api/autotrade/status')).json();
@@ -24194,7 +23420,6 @@ async function refreshAll() {
   if (activeTab === 'xau_lg') await refreshXauLg();
   if (activeTab === 'msnr') await refreshMsnr();
   if (activeTab === 'ft5') await refreshFt5();
-  if (activeTab === 'vgi') await refreshVgi();
   if (activeTab === 'autotrade') await refreshAutotrade();
   if (activeTab === 'simulator') await refreshSimulator();
 }
@@ -24252,9 +23477,6 @@ wireResetButton('resetFt5Btn', '/api/reset/ft5',
 wireResetButton('resetRiskAutotuneBtn', '/api/reset/risk_autotune',
   'Сбросить все параметры авто-тюнинга риска (EMA/Дивергенция/Скальпинг/Сессия) к значениям по умолчанию из кода, очистить лог и cooldown? Сами сигналы и статистику не тронет. Это необратимо.',
   'Сбросить авто-тюнинг');
-wireResetButton('resetVgiBtn', '/api/reset/vgi',
-  'Удалить накопленный бэктест и сигналы VGI? Остальное не тронет. Это необратимо.',
-  'Очистить VGI');
 wireResetButton('resetSimulatorBtn', '/api/simulator/reset',
   'Сбросить симулятор баланса к стартовому значению и удалить всю историю сделок? Это необратимо.',
   'Сбросить симулятор');
@@ -24292,7 +23514,6 @@ const setInputs = {
   telegram_alerts_xau_lg: document.getElementById('setTelegramXauLg'),
   telegram_alerts_msnr: document.getElementById('setTelegramMsnr'),
   telegram_alerts_ft5: document.getElementById('setTelegramFt5'),
-  telegram_alerts_vgi: document.getElementById('setTelegramVgi'),
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
   autotrade_bounce: document.getElementById('setAutotradeBounce'),
   autotrade_breakout: document.getElementById('setAutotradeBreakout'),
@@ -24300,7 +23521,6 @@ const setInputs = {
   autotrade_ema: document.getElementById('setAutotradeEma'),
   autotrade_scalp: document.getElementById('setAutotradeScalp'),
   autotrade_session: document.getElementById('setAutotradeSession'),
-  autotrade_vgi: document.getElementById('setAutotradeVgi'),
   // v0.99.18: autotrade_msnr checkbox removed from settings (replaced by
   // 6 individual per-symbol toggles in the MSNR panel itself) — no
   // longer mapped here, since setInputs[key].checked on a null element
@@ -24321,7 +23541,6 @@ const setValueInputs = {
   autotrade_leverage_divergence: document.getElementById('setAutotradeLevDivergence'),
   autotrade_leverage_ema: document.getElementById('setAutotradeLevEma'),
   autotrade_leverage_session: document.getElementById('setAutotradeLevSession'),
-  autotrade_leverage_vgi: document.getElementById('setAutotradeLevVgi'),
   autotrade_leverage_msnr: document.getElementById('setAutotradeLevMsnr'),
   autotrade_leverage_session_ny: document.getElementById('setAutotradeLevSessionNy'),
 };
@@ -25121,7 +24340,21 @@ function drawFt5Chart(data) {
 const vgiModal = document.getElementById('vgiModal');
 document.getElementById('vgiCloseBtn').onclick = () => vgiModal.classList.remove('open');
 
-async function openVgiChart(symbol, sigTime, endpoint = '/api/vgi/chart', extraQuery = '') {
+async function openVgiChart(symbol, sigTime, endpoint, extraQuery = '') {
+  // v0.99.83, per direct user request ("удалить все что связано с
+  // дивергенцией, ема, сессия, сессия ny, xau lg, vgi... будто и не
+  // было"): VGI itself is gone, but this modal/canvas is now genuinely
+  // SHARED infrastructure — openScalpChart()/openXauLgChart() below
+  // both still call it, always with their OWN explicit endpoint (never
+  // relying on a default). `endpoint` lost its old '/api/vgi/chart'
+  // default value, which pointed at a now-deleted route — no default
+  // at all now, so a future caller that forgets to pass one gets an
+  // immediate, obvious error instead of silently hitting a 404. Not
+  // renamed away from "Vgi" in the function/element names themselves
+  // (vgiModal, drawVgiChart, etc.) — cosmetic only, a bigger and
+  // riskier touch than this removal pass needs; the underlying DOM/
+  // canvas machinery works exactly the same regardless of what it's
+  // called.
   document.getElementById('vgiModalTitle').textContent = symbol;
   document.getElementById('vgiModalParams').textContent = 'загрузка...';
   vgiModal.classList.add('open');
@@ -25386,22 +24619,6 @@ def index():
 if __name__ == "__main__":
     load_state()
     load_settings()
-    # v0.99.65 — ONE-TIME CORRECTIVE RESET, per direct user report (live
-    # screenshot: vgi_min_rr autotuned to 7.78, winrate 3.8%): the auto-
-    # tune rule that pushed vgi_min_rr this high has a confirmed bug
-    # (see risk_autotune_pass()'s own vgi block, now disabled) — but
-    # disabling that rule alone doesn't undo the damage already
-    # persisted in settings.json; load_settings() above would just
-    # reload the same bad 7.78 every future startup otherwise. Resets
-    # back to the original VGI_MIN_RR default (3.0) ONLY if the loaded
-    # value overshot a sanity ceiling (5.0 — comfortably above the
-    # default, so a genuine future manual choice in that range survives
-    # untouched) — a bounded, one-time migration for this specific
-    # incident, not a permanent behavioral clamp (nothing should push
-    # it back up that high again with the broken rule disabled).
-    if VGI_MIN_RR > 5.0:
-        log_error(f"startup: vgi_min_rr was {VGI_MIN_RR} (from a now-disabled buggy auto-tune rule), resetting to 3.0")
-        _set_vgi_min_rr(3.0)
     load_credentials()
     _load_alert_cfg()
     threading.Thread(target=_telegram_sender_worker, daemon=True).start()
@@ -25420,8 +24637,6 @@ if __name__ == "__main__":
     threading.Thread(target=msnr_backtest_watchdog, daemon=True).start()
     threading.Thread(target=ft5_backtest_loop, daemon=True).start()
     threading.Thread(target=ft5_live_loop, daemon=True).start()
-    threading.Thread(target=vgi_backtest_loop, daemon=True).start()
-    threading.Thread(target=vgi_live_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     threading.Thread(target=risk_autotune_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
