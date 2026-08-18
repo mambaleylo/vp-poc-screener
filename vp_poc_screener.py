@@ -8163,6 +8163,50 @@ v0.99.80 - CRITICAL FIX, direct user report with a live number: "в топ
          --check on the correctly-last <script> block, the Flask
          route/def integrity check (still 64 routes) — constants-and-
          docstring change only, no new functions.
+
+v0.99.81 - Direct user report: "термукс был жив, сигналы работали, но
+         бэктест не выполнялся больше 5 часов, проверь почему так может
+         быть." Investigated thoroughly rather than defaulting back to
+         the earlier Android-kill theory (which the report itself rules
+         out — a killed process wouldn't leave live signals running):
+         confirmed every individual HTTP request in get_candles_range()
+         is bounded (HTTP_TIMEOUT=15s, capped retries on both 429 and
+         connection-error paths, no unbounded inner loop) — no literal
+         infinite hang exists in that function. Worst-case arithmetic
+         (every chunk of every symbol maxing out every retry, 150+
+         symbols across 8 workers) only reaches ~1.8h, well short of the
+         reported ~5h — the exact mechanism for the gap between that
+         calculation and the live report remains genuinely unconfirmed
+         (likely compounding delay under sustained bad network
+         conditions and/or GLOBAL_HTTP_SEMAPHORE contention shared
+         across this app's 14 other background loops, but not proven).
+         Presented this honestly rather than overclaiming a fix, and
+         offered three options; user chose "Только диагностика...
+         ничего не менять" — observability only, no change to actual
+         cycle timing/retry/wait behavior.
+         New msnr_backtest_watchdog(): an independent daemon thread
+         (separate from msnr_backtest_loop() itself, so it keeps
+         checking in even if that loop really were stuck on something
+         invisible to it) polling every MSNR_BACKTEST_WATCHDOG_
+         INTERVAL_SEC (5 min) — if STATE["msnr_backtest_running"] has
+         been true longer than MSNR_BACKTEST_WATCHDOG_THRESHOLD_SEC (20
+         min, comfortably above the ~6-9 min baseline this app's own
+         logs have shown), logs STATE["msnr_backtest_in_flight"] (the
+         same list _msnr_backtest_one_symbol() already maintains, no
+         new tracking needed) plus done/total progress — so a repeat
+         leaves a concrete trail of exactly which symbol(s) were still
+         pending, instead of another silent multi-hour gap with nothing
+         to diagnose from afterward. Warns once per threshold-crossing
+         per cycle (resets the moment the loop observes the cycle isn't
+         running anymore), not every 5 minutes for hours.
+         Verified with py_compile, an actual runtime start (synthetic
+         STATE: backtest "running" for 25 simulated minutes with two
+         symbols still in msnr_backtest_in_flight — confirmed the
+         watchdog's own threshold check correctly fires and would log
+         exactly those two symbols plus the done/total progress),
+         pyflakes, node --check on the correctly-last <script> block,
+         the Flask route/def integrity check (still 64 routes), and an
+         AST walk for duplicate top-level defs (none introduced).
 """
 
 import os
@@ -8182,7 +8226,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.80"
+APP_VERSION = "0.99.81"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -8827,6 +8871,25 @@ MSNR_BACKTEST_DAYS = int(os.environ.get("VP_MSNR_BACKTEST_DAYS", 40))  # v0.99.4
 MSNR_SIGNAL_HISTORY = 200
 MSNR_REFRESH_SEC = int(os.environ.get("VP_MSNR_REFRESH_SEC", 3600))
 MSNR_SCAN_INTERVAL_SEC = int(os.environ.get("VP_MSNR_SCAN_INTERVAL_SEC", 300))
+# v0.99.81, per direct user report ("термукс был жив, сигналы
+# работали, но бэктест не выполнялся больше 5 часов"): investigation
+# found no infinite-hang bug (every individual HTTP request/retry path
+# in get_candles_range() is bounded — HTTP_TIMEOUT + a capped retry
+# count either way), but also no ceiling on the CYCLE as a whole —
+# worst-case arithmetic on every chunk of every symbol maxing out
+# retries only reached ~1.8h, well short of the reported ~5h, so the
+# actual mechanism (compounding delay under sustained bad network
+# conditions, shared GLOBAL_HTTP_SEMAPHORE contention across this
+# app's 14 other background loops, or something else not yet
+# identified) is still genuinely unconfirmed. Per direct user choice
+# ("Только диагностика... ничего не менять") this pass adds ONLY
+# observability — msnr_backtest_watchdog() below — not a cycle-level
+# timeout or any change to actual retry/wait behavior, so a repeat
+# leaves a concrete log entry (which symbols were still in flight, how
+# long the cycle had been running) instead of another silent multi-
+# hour gap with nothing to diagnose from afterward.
+MSNR_BACKTEST_WATCHDOG_INTERVAL_SEC = int(os.environ.get("VP_MSNR_BACKTEST_WATCHDOG_INTERVAL_SEC", 300))  # how often the watchdog checks in — 5 min, frequent enough to catch the problem developing without being noisy
+MSNR_BACKTEST_WATCHDOG_THRESHOLD_SEC = int(os.environ.get("VP_MSNR_BACKTEST_WATCHDOG_THRESHOLD_SEC", 1200))  # 20 min — comfortably above the ~6-9 min this app's own logs have shown a normal full-universe cycle taking, so this doesn't fire on ordinary variance, only on a cycle that's genuinely running long
 # Autotune (v0.99.5), per direct user request — same grid-search +
 # confidence-bound-scoring shape as FT5's ft5_optimize_symbol()/
 # ft5_ranking_score(), adapted from "% pnl" to "R multiple" since MSNR
@@ -19283,6 +19346,54 @@ def msnr_backtest_loop():
         MSNR_BACKTEST_TRIGGER.clear()
 
 
+def msnr_backtest_watchdog():
+    """v0.99.81, per direct user report ("термукс был жив, сигналы
+    работали, но бэктест не выполнялся больше 5 часов"): diagnostics-
+    only, per direct user choice ("Только диагностика... ничего не
+    менять") — does NOT touch msnr_backtest_loop()'s own completion-
+    waiting behavior, timeouts, or retry logic in any way. Runs as its
+    own lightweight daemon thread, independent of the backtest loop
+    itself (so it keeps checking in even if that loop really were stuck
+    on something this watchdog can't see into). Every MSNR_BACKTEST_
+    WATCHDOG_INTERVAL_SEC, checks whether a cycle has been running
+    (STATE["msnr_backtest_running"]) longer than MSNR_BACKTEST_
+    WATCHDOG_THRESHOLD_SEC — if so, logs the CURRENT STATE["msnr_
+    backtest_in_flight"] list (the same field _msnr_backtest_one_
+    symbol() already appends/removes itself from at start/end, no new
+    tracking needed) plus done/total progress, so a repeat of this
+    incident leaves a concrete trail of exactly which symbol(s) were
+    still pending and how far the cycle had gotten — instead of
+    another silent multi-hour gap with nothing to diagnose from
+    afterward. Only logs ONCE per threshold-crossing per cycle (a
+    symbol still stuck 5 minutes later doesn't need a second nearly-
+    identical log line — `warned_this_cycle` resets the moment the
+    loop next observes the cycle NOT running, i.e. it finished or gave
+    up, ready to warn again on the next cycle if that one also runs
+    long)."""
+    warned_this_cycle = False
+    while True:
+        time.sleep(MSNR_BACKTEST_WATCHDOG_INTERVAL_SEC)
+        try:
+            with state_lock:
+                running = STATE.get("msnr_backtest_running")
+                started_at = STATE.get("msnr_backtest_started_at")
+                in_flight = list(STATE.get("msnr_backtest_in_flight") or [])
+                done = STATE.get("msnr_backtest_done")
+                total = STATE.get("msnr_backtest_total")
+            if not running or not started_at:
+                warned_this_cycle = False
+                continue
+            elapsed = time.time() - started_at
+            if elapsed > MSNR_BACKTEST_WATCHDOG_THRESHOLD_SEC and not warned_this_cycle:
+                log_error(
+                    f"msnr_backtest_watchdog: cycle running {round(elapsed / 60, 1)}min "
+                    f"(done {done}/{total}), still in flight: {in_flight}"
+                )
+                warned_this_cycle = True
+        except Exception as e:
+            log_error(f"msnr_backtest_watchdog: {e}")
+
+
 def msnr_live_loop():
     while True:
         try:
@@ -25217,6 +25328,7 @@ if __name__ == "__main__":
     threading.Thread(target=xau_lg_live_loop, daemon=True).start()
     threading.Thread(target=msnr_backtest_loop, daemon=True).start()
     threading.Thread(target=msnr_live_loop, daemon=True).start()
+    threading.Thread(target=msnr_backtest_watchdog, daemon=True).start()
     threading.Thread(target=ft5_backtest_loop, daemon=True).start()
     threading.Thread(target=ft5_live_loop, daemon=True).start()
     threading.Thread(target=vgi_backtest_loop, daemon=True).start()
