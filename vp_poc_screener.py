@@ -8362,6 +8362,80 @@ v0.99.84 - CRITICAL FOLLOW-UP FIX, found while starting the next
          specifically, not just trust py_compile+pyflakes+node --check
          to catch everything — they structurally can't catch either of
          those two categories.
+
+v0.99.85 - Direct user request continued: 2nd of 6 modules removed
+         entirely — Divergence. Same "будто и не было" scope as VGI
+         (v0.99.83): code, STATE, routes, settings, autotrade/Telegram
+         wiring, frontend. Structurally different from VGI though —
+         Divergence was integrated into the SHARED scan_loop() via `if
+         DIVERGENCE_ENABLED:` blocks appending to one futures list
+         alongside Volume/EMA/Scalp/Session (which stay), not its own
+         independent background loop — required surgically removing 3
+         such blocks rather than deleting a whole function.
+         Two real correctness bugs found and fixed along the way, both
+         the same class as v0.99.84's own critical VGI fix (dict string
+         keys py_compile/pyflakes structurally can't see): (1) _relink_
+         sim_trade()'s module_lists dict still had "divergence": STATE[
+         "div_signals"] — same eager-dict-literal KeyError-on-every-call
+         bug as VGI's own; (2) SNAPSHOT_MODULE_KEYS (a separate .get()-
+         based dispatch dict for a different snapshot feature) also had
+         a "divergence": "div_signals" entry — safe via .get() but dead
+         weight pointing at a removed STATE key.
+         One near-miss, caught before it caused damage: initially
+         deleted compute_rsi() alongside find_pivots()/simulate_pivot_
+         stability() (all three sat in the same "RSI divergence" code
+         block) — but a fresh pyflakes/grep check found FT5's own
+         run_ft5_backtest() calls compute_rsi() directly as part of its
+         own indicator stack (compute_fisher_rsi/compute_macd/compute_
+         adx/compute_stoch_fast/compute_sma/compute_sar), unrelated to
+         Divergence despite living in the same file section — genuinely
+         shared infrastructure, the same category openVgiChart() turned
+         out to be during the VGI pass. Restored compute_rsi() alone
+         (find_pivots()/simulate_pivot_stability() confirmed truly
+         divergence-only via a dedicated grep before leaving them
+         removed), with period's default changed from the now-deleted
+         DIV_RSI_PERIOD constant to its own literal former value (14) —
+         FT5's call site never passed period explicitly either way.
+         Also found and fixed TWO leftover VGI settings-UI elements
+         missed in v0.99.83/84's own removal passes — a full "VGI
+         (Volume Gaps & Imbalances)" settingsGroup (scan toggle +
+         invert-signals row) and their own vgi_enabled/vgi_invert_
+         signals entries in the JS settings-mapping object — found only
+         because this pass's own exhaustive frontend grep happened to
+         pattern-match "div" broadly enough to also catch "individual"-
+         adjacent VGI leftovers sitting nearby; confirms the earlier
+         lesson generalizes past just Python dict keys to frontend
+         markup too.
+         Removed: detect_divergence()/_rsi_cut_through() (the ported
+         math), compute_div_tp_sl()/has_open_divergence_signal()/scan_
+         symbol_divergence()/close_div_signal()/update_divergence_
+         outcomes()/compute_divergence_stats() (infrastructure), find_
+         pivots()/simulate_pivot_stability() (confirmed divergence-only,
+         unlike compute_rsi), div_stability_cycle() and its own _div_
+         stability_cursor/DIV_STABILITY_PER_CYCLE, all 4 setters, the
+         risk_autotune_pass() divergence block, all 4 API routes
+         (status/signals/chart/reset), all DIV_* constants (one 63-line
+         block), AUTOTRADE_ENABLED_DIVERGENCE/AUTOTRADE_LEVERAGE_
+         DIVERGENCE/TELEGRAM_ALERTS_DIV and every settings/dispatch-dict
+         reference to them, _div_cooldowns/_div_cooldowns_lock, div_
+         signals/div_pivot_stability/div_last_scan_finished/div_last_
+         scan_duration/filtered_by_div_min_rr STATE keys and every read/
+         write site (load_state, save/snapshot, scan_loop, api_reset()),
+         and the entire frontend footprint (tab, table+stats-panel pair,
+         refreshDivergence(), reset button, settings group, both
+         modeLabels dict entries, the vpModeChecked fallback redirect —
+         now points at 'ema' instead of the deleted 'divergence' tab).
+         Verified with py_compile, an actual runtime start (confirmed
+         _relink_sim_trade() no longer raises KeyError for either
+         "divergence" or "vgi" trade modes; confirmed compute_rsi()
+         still produces correct-length output), pyflakes (clean),
+         node --check on the correctly-last <script> block, the Flask
+         route/def integrity check (56 routes — down from 60, exactly
+         the 4 divergence endpoints removed), an AST walk confirming
+         zero divergence functions remain at module level with no
+         duplicates introduced, and an exhaustive grep pass confirming
+         every remaining div_*/DIV_* hit in the file is either an inline
+         comment on an unrelated constant or historical changelog text.
 """
 
 import os
@@ -8381,7 +8455,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.84"
+APP_VERSION = "0.99.85"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -8546,69 +8620,6 @@ MFE_TRACK_SEC = int(os.environ.get("VP_MFE_TRACK_SEC", 24 * 3600))  # keep measu
 # instead of full losses, without touching TP.
 BREAKOUT_BREAKEVEN_TRIGGER_R = float(os.environ.get("VP_BREAKOUT_BREAKEVEN_TRIGGER_R", 0.8))
 BREAKOUT_BREAKEVEN_BUFFER_PCT = float(os.environ.get("VP_BREAKOUT_BREAKEVEN_BUFFER_PCT", 0.001))  # 0.1% beyond pure entry, in the trade's favor — so a dead-even wick still covers fees/slippage instead of landing exactly on entry
-
-# ----------------------------------------------------------------------------
-# RSI divergence: a completely separate signal source from the volume
-# profile screener above — own timeframe, own scan, own history/stats,
-# own chart. Bearish (regular) divergence: price makes a higher high while
-# RSI makes a lower high at the same two pivots -> SHORT. Bullish: price
-# lower low, RSI higher low -> LONG.
-# ----------------------------------------------------------------------------
-DIVERGENCE_ENABLED = os.environ.get("VP_DIVERGENCE_ENABLED", "1") == "1"
-DIV_INTERVAL = os.environ.get("VP_DIV_INTERVAL", "1h")
-DIV_FETCH_LIMIT = int(os.environ.get("VP_DIV_FETCH_LIMIT", 200))  # candles pulled per symbol per scan
-DIV_RSI_PERIOD = int(os.environ.get("VP_DIV_RSI_PERIOD", 14))
-DIV_PIVOT_LEFT = int(os.environ.get("VP_DIV_PIVOT_LEFT", 5))
-DIV_PIVOT_RIGHT = int(os.environ.get("VP_DIV_PIVOT_RIGHT", 3))  # reverted from 2 -> 3 after a live example showed the divergence firing well after the bounce had already largely played out (screenshot: entry sat below a candle that had already tagged above TP). Note: going slower should, if anything, make lateness worse, not better, by the pivot-confirmation-delay logic alone — reverted per direct request anyway, worth watching pre_move_pct data to see if it actually helps
-# Стандартная практика торговли дивергенциями: сигнал считается живым
-# ровно в момент подтверждения пивота (right баров после самого пивота),
-# а не ещё сколько-то баров сверху. По умолчанию равен DIV_PIVOT_RIGHT —
-# это минимально возможное значение (раньше пивот физически не может
-# быть подтверждён), поэтому сигнал срабатывает один раз, точно на баре
-# подтверждения, и не "протухает" через дополнительные 5 баров, как было
-# при freshness=8 vs right=3.
-DIV_FRESHNESS_BARS = int(os.environ.get("VP_DIV_FRESHNESS_BARS", DIV_PIVOT_RIGHT))
-# Diagnostic only, doesn't affect live detection: for each fired signal,
-# check whether a SMALLER right-confirmation window would have picked the
-# exact same pivot bar using only the data that would actually have been
-# available at that earlier point in time (not the full future dataset —
-# that comparison is meaningless, since a pivot confirmed with the full
-# window trivially also satisfies any smaller one in hindsight). This is
-# what actually tells us the risk of reducing VP_DIV_PIVOT_RIGHT: how
-# often would going faster have picked a different, wrong point instead.
-DIV_SHADOW_RIGHTS = [int(x) for x in os.environ.get("VP_DIV_SHADOW_RIGHTS", "1,2").split(",") if x.strip()]  # only values below DIV_PIVOT_RIGHT are meaningful for the stability diagnostic
-DIV_RR = float(os.environ.get("VP_DIV_RR", 2.0))  # round 2 retune — see DIV_TP_PCT comment. Was 0.867 for round 1 (pre-data guess).
-DIV_TP_PCT = float(os.environ.get("VP_DIV_TP_PCT", 0.01))  # TP is a fixed % move from entry — SL is then sized backward from this via DIV_RR, rather than TP being derived from a pivot-based SL.
-# ATR-based SL for divergence, v0.88.0 — mirrors EMA's v0.65.0 fix, per
-# direct user request after live MFE/MAE data showed the same root
-# cause: DIV_RR-derived SL is a fixed 0.5% (DIV_TP_PCT/DIV_RR) regardless
-# of the symbol's actual volatility, and LOSS MAE at close averaged
-# 3.23R / median 1.851R — losses were overshooting the nominal -1.0R
-# stop by 3x+ on average, an even bigger gap than EMA's original ~2x
-# before its own ATR fix. A fixed % can't adapt per-symbol; ATR can.
-DIV_SL_MODE = os.environ.get("VP_DIV_SL_MODE", "atr")  # "atr" or "fixed_pct" — fixed_pct reproduces the exact old DIV_RR-derived behavior, for comparison/rollback
-DIV_SL_ATR_MULT = float(os.environ.get("VP_DIV_SL_ATR_MULT", 1.5))  # SL = ATR(EMA_DIAG_ATR_PERIOD) * this, in price units — same period constant EMA's own ATR diagnostic/SL already uses, not a separate one
-DIV_MIN_RR = float(os.environ.get("VP_DIV_MIN_RR", 0))  # 0 = disabled by default — mirrors EMA_MIN_RR, added for symmetry so the auto-tuner (v0.93.0) has the same lever on divergence that it already has on EMA
-# TP stays a fixed % of entry (DIV_TP_PCT) — only the STOP moves to ATR,
-# same split EMA uses. RR is no longer one constant; every signal now
-# carries its own "rr" field (tp_dist / atr-based-risk), and
-# compute_divergence_stats() exposes rr_all/rr_wins/rr_losses for the
-# header display that used to just show the old fixed DIV_RR.
-# Round 1 (0.011/RR2.0 -> 0.0065/RR0.867) was a pre-data guess for the
-# reversed hypothesis, off the ORIGINAL direction's own stats.
-# Round 2, off the REVERSED direction's own live at-close data (n=8,
-# 5W/3L — still a tiny sample, weaker basis than EMA's round-2 retune
-# which had n=86): WIN MFE sat at median 1.348R/avg 1.935R (R=0.75%
-# then) — well above the old target, meaning TP was cutting winners
-# short — so TP moved up to ~1.0%. WIN MAE sat at median 0/avg 0.264R
-# — winners barely dipped toward the stop at all — so SL tightened to
-# ~0.5% (RR=2.0), giving headroom above the p75 WIN MAE (0.337R at the
-# old R, ~0.253%) without going razor-thin on an 8-trade sample.
-# CAVEAT: even more than round 1, this is a low-confidence tune —
-# treat as a starting guess to test forward, not a validated figure.
-DIV_INVERT_SIGNALS = os.environ.get("VP_DIV_INVERT_SIGNALS", "0") == "1"  # a live example showed the divergence-implied bounce often already largely played out by the time the signal actually fires — worth testing whether trading the OPPOSITE direction (effectively fading the already-completed move) does better than trading the original signal late
-DIV_COOLDOWN_SEC = int(os.environ.get("VP_DIV_COOLDOWN", 3600))
-DIV_SIGNAL_HISTORY = 200
 
 # ----------------------------------------------------------------------------
 # EMA 7/14/28 signal indicator — ported from a user-supplied Pine Script
@@ -8830,7 +8841,6 @@ TELEGRAM_ENABLED = os.environ.get("VP_TG_ENABLED", "1") == "1"  # separate from 
 # above — lets someone mute just one signal source without losing alerts
 # from the other.
 TELEGRAM_ALERTS_VP = os.environ.get("VP_TG_ALERTS_VP", "1") == "1"
-TELEGRAM_ALERTS_DIV = os.environ.get("VP_TG_ALERTS_DIV", "1") == "1"
 TELEGRAM_ALERTS_EMA = os.environ.get("VP_TG_ALERTS_EMA", "1") == "1"
 TELEGRAM_ALERTS_HOURLY = os.environ.get("VP_TG_ALERTS_HOURLY", "1") == "1"
 TELEGRAM_ALERTS_SESSION = os.environ.get("VP_TG_ALERTS_SESSION", "1") == "1"
@@ -9240,7 +9250,6 @@ SESSION_NY_SL_MULT = float(os.environ.get("VP_SESSION_NY_SL_MULT", 1.5))
 AUTOTRADE_DRY_RUN = os.environ.get("VP_AUTOTRADE_DRY_RUN", "1") == "1"  # default ON — log what WOULD happen, no real orders, until explicitly turned off
 AUTOTRADE_ENABLED_BOUNCE = os.environ.get("VP_AUTOTRADE_BOUNCE", "0") == "1"
 AUTOTRADE_ENABLED_BREAKOUT = os.environ.get("VP_AUTOTRADE_BREAKOUT", "0") == "1"
-AUTOTRADE_ENABLED_DIVERGENCE = os.environ.get("VP_AUTOTRADE_DIVERGENCE", "0") == "1"
 AUTOTRADE_ENABLED_EMA = os.environ.get("VP_AUTOTRADE_EMA", "0") == "1"
 AUTOTRADE_ENABLED_SCALP = os.environ.get("VP_AUTOTRADE_SCALP", "0") == "1"
 AUTOTRADE_ENABLED_SESSION = os.environ.get("VP_AUTOTRADE_SESSION", "0") == "1"
@@ -9256,7 +9265,6 @@ SCALP_SIZE_MODE = os.environ.get("VP_SCALP_SIZE_MODE", AUTOTRADE_SIZE_MODE)
 SCALP_SIZE_VALUE = float(os.environ.get("VP_SCALP_SIZE_VALUE", AUTOTRADE_SIZE_VALUE))
 AUTOTRADE_LEVERAGE_BOUNCE = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_BOUNCE", 10))
 AUTOTRADE_LEVERAGE_BREAKOUT = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_BREAKOUT", 10))
-AUTOTRADE_LEVERAGE_DIVERGENCE = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_DIVERGENCE", 10))
 AUTOTRADE_LEVERAGE_EMA = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_EMA", 10))
 AUTOTRADE_LEVERAGE_SESSION = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SESSION", 10))
 AUTOTRADE_LEVERAGE_SESSION_NY = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SESSION_NY", 10))
@@ -9322,15 +9330,15 @@ CREDENTIALS_FILE = os.environ.get(
     "VP_CREDENTIALS_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
-SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "div_min_rr", "bounce_enabled", "breakout_enabled",
+SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
                   "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session", "telegram_alerts_session_ny", "telegram_alerts_xau_lg", "telegram_alerts_ft5", "telegram_alerts_msnr",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5", "autotrade_msnr",
+                  "telegram_alerts_vp", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session", "telegram_alerts_session_ny", "telegram_alerts_xau_lg", "telegram_alerts_ft5", "telegram_alerts_msnr",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5", "autotrade_msnr",
                   "autotrade_size_mode", "autotrade_size_value",
                   "scalp_size_mode", "scalp_size_value",
                   "ema_min_rr",
                   "ema_adx_filter_enabled", "ema_adx_min", "ema_min_gap_pct",
-                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_divergence", "autotrade_leverage_ema", "autotrade_leverage_session", "autotrade_leverage_session_ny", "autotrade_leverage_xau_lg", "autotrade_leverage_ft5", "autotrade_leverage_msnr",
+                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_ema", "autotrade_leverage_session", "autotrade_leverage_session_ny", "autotrade_leverage_xau_lg", "autotrade_leverage_ft5", "autotrade_leverage_msnr",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
                   # same save_settings() path everything else already uses,
@@ -9340,8 +9348,8 @@ SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_sig
                   # plain module constants with NO persistence at all, so any
                   # manual env-var override would silently revert on restart
                   # too — now they follow the same rules as ema_min_rr etc.
-                  "scalp_min_rr", "scalp_sl_buffer_mult", "session_sl_mult", "session_reverse_rr", "ema_sl_atr_mult", "div_sl_atr_mult", "msnr_max_rr",
-                  "ema_tp_pct", "div_tp_pct",
+                  "scalp_min_rr", "scalp_sl_buffer_mult", "session_sl_mult", "session_reverse_rr", "ema_sl_atr_mult", "msnr_max_rr",
+                  "ema_tp_pct",
                   # v0.99.64 — xau_lg_invert_signals/xau_lg_sl_buffer_mult/
                   # xau_lg_rr: added to apply_settings()/get_settings() as
                   # groundwork for bringing XAU LG to feature parity with
@@ -9359,9 +9367,6 @@ SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_sig
 def get_settings():
     return {
         "volume_profile_enabled": VOLUME_PROFILE_ENABLED,
-        "divergence_enabled": DIVERGENCE_ENABLED,
-        "div_invert_signals": DIV_INVERT_SIGNALS,
-        "div_min_rr": DIV_MIN_RR,
         "bounce_enabled": BOUNCE_ENABLED,
         "breakout_enabled": BREAKOUT_ENABLED,
         "ema_enabled": EMA_ENABLED,
@@ -9383,7 +9388,6 @@ def get_settings():
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
         "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
-        "telegram_alerts_div": TELEGRAM_ALERTS_DIV,
         "telegram_alerts_ema": TELEGRAM_ALERTS_EMA,
         "telegram_alerts_hourly": TELEGRAM_ALERTS_HOURLY,
         "telegram_alerts_session": TELEGRAM_ALERTS_SESSION,
@@ -9395,7 +9399,6 @@ def get_settings():
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
         "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
         "autotrade_breakout": AUTOTRADE_ENABLED_BREAKOUT,
-        "autotrade_divergence": AUTOTRADE_ENABLED_DIVERGENCE,
         "autotrade_ema": AUTOTRADE_ENABLED_EMA,
         "autotrade_scalp": AUTOTRADE_ENABLED_SCALP,
         "autotrade_session": AUTOTRADE_ENABLED_SESSION,
@@ -9409,7 +9412,6 @@ def get_settings():
         "scalp_size_value": SCALP_SIZE_VALUE,
         "autotrade_leverage_bounce": AUTOTRADE_LEVERAGE_BOUNCE,
         "autotrade_leverage_breakout": AUTOTRADE_LEVERAGE_BREAKOUT,
-        "autotrade_leverage_divergence": AUTOTRADE_LEVERAGE_DIVERGENCE,
         "autotrade_leverage_ema": AUTOTRADE_LEVERAGE_EMA,
         "ema_min_rr": EMA_MIN_RR,
         "ema_adx_filter_enabled": EMA_ADX_FILTER_ENABLED,
@@ -9425,9 +9427,7 @@ def get_settings():
         "session_sl_mult": SESSION_SL_MULT,
         "session_reverse_rr": SESSION_REVERSE_RR,
         "ema_sl_atr_mult": EMA_SL_ATR_MULT,
-        "div_sl_atr_mult": DIV_SL_ATR_MULT,
         "ema_tp_pct": EMA_TP_PCT,
-        "div_tp_pct": DIV_TP_PCT,
     }
 
 
@@ -9437,30 +9437,19 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, XAU_LG_INVERT_SIGNALS, XAU_LG_SL_BUFFER_MULT, XAU_LG_RR, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, HOURLY_STATS_ENABLED
-    global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
+    global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, XAU_LG_INVERT_SIGNALS, XAU_LG_SL_BUFFER_MULT, XAU_LG_RR, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, HOURLY_STATS_ENABLED
+    global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
     global TELEGRAM_ALERTS_SESSION_NY, TELEGRAM_ALERTS_XAU_LG, TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR
     global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
     global SCALP_SIZE_MODE, SCALP_SIZE_VALUE
     global EMA_MIN_RR
     global EMA_ADX_FILTER_ENABLED, EMA_ADX_MIN, EMA_MIN_GAP_PCT
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT, SESSION_SL_MULT, SESSION_REVERSE_RR
-    global EMA_SL_ATR_MULT, DIV_SL_ATR_MULT
-    global EMA_TP_PCT, DIV_TP_PCT
+    global EMA_SL_ATR_MULT
+    global EMA_TP_PCT
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
-    if "divergence_enabled" in updates:
-        DIVERGENCE_ENABLED = bool(updates["divergence_enabled"])
-    if "div_invert_signals" in updates:
-        DIV_INVERT_SIGNALS = bool(updates["div_invert_signals"])
-    if "div_min_rr" in updates:
-        try:
-            v = float(updates["div_min_rr"])
-            if v >= 0:
-                DIV_MIN_RR = v
-        except (TypeError, ValueError):
-            pass
     if "bounce_enabled" in updates:
         BOUNCE_ENABLED = bool(updates["bounce_enabled"])
     if "breakout_enabled" in updates:
@@ -9518,8 +9507,6 @@ def apply_settings(updates):
         TELEGRAM_ENABLED = bool(updates["telegram_enabled"])
     if "telegram_alerts_vp" in updates:
         TELEGRAM_ALERTS_VP = bool(updates["telegram_alerts_vp"])
-    if "telegram_alerts_div" in updates:
-        TELEGRAM_ALERTS_DIV = bool(updates["telegram_alerts_div"])
     if "telegram_alerts_ema" in updates:
         TELEGRAM_ALERTS_EMA = bool(updates["telegram_alerts_ema"])
     if "telegram_alerts_session" in updates:
@@ -9538,8 +9525,6 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_BOUNCE = bool(updates["autotrade_bounce"])
     if "autotrade_breakout" in updates:
         AUTOTRADE_ENABLED_BREAKOUT = bool(updates["autotrade_breakout"])
-    if "autotrade_divergence" in updates:
-        AUTOTRADE_ENABLED_DIVERGENCE = bool(updates["autotrade_divergence"])
     if "autotrade_ema" in updates:
         AUTOTRADE_ENABLED_EMA = bool(updates["autotrade_ema"])
     if "autotrade_scalp" in updates:
@@ -9598,7 +9583,6 @@ def apply_settings(updates):
     for key, glob_name in (
         ("autotrade_leverage_bounce", "AUTOTRADE_LEVERAGE_BOUNCE"),
         ("autotrade_leverage_breakout", "AUTOTRADE_LEVERAGE_BREAKOUT"),
-        ("autotrade_leverage_divergence", "AUTOTRADE_LEVERAGE_DIVERGENCE"),
         ("autotrade_leverage_ema", "AUTOTRADE_LEVERAGE_EMA"),
         ("autotrade_leverage_session", "AUTOTRADE_LEVERAGE_SESSION"),
         ("autotrade_leverage_session_ny", "AUTOTRADE_LEVERAGE_SESSION_NY"),
@@ -9650,25 +9634,11 @@ def apply_settings(updates):
                 EMA_SL_ATR_MULT = v
         except (TypeError, ValueError):
             pass
-    if "div_sl_atr_mult" in updates:
-        try:
-            v = float(updates["div_sl_atr_mult"])
-            if v > 0:
-                DIV_SL_ATR_MULT = v
-        except (TypeError, ValueError):
-            pass
     if "ema_tp_pct" in updates:
         try:
             v = float(updates["ema_tp_pct"])
             if v > 0:
                 EMA_TP_PCT = v
-        except (TypeError, ValueError):
-            pass
-    if "div_tp_pct" in updates:
-        try:
-            v = float(updates["div_tp_pct"])
-            if v > 0:
-                DIV_TP_PCT = v
         except (TypeError, ValueError):
             pass
 
@@ -9790,21 +9760,12 @@ STATE = {
     "filtered_by_oi": 0,
     "filtered_by_staleness": 0,
     "filtered_by_min_rr": 0,
-    "filtered_by_div_min_rr": 0,
     "filtered_by_adx": 0,
     "filtered_by_min_gap": 0,
     "last_scan_started": None,
     "last_scan_finished": None,
     "last_scan_duration": None,
     "errors": deque(maxlen=30),
-    # RSI divergence — kept fully separate from the volume-profile
-    # screener above (own history, own stats, own "page").
-    "div_signals": deque(maxlen=DIV_SIGNAL_HISTORY),
-    "div_last_scan_finished": None,
-    "div_last_scan_duration": None,
-    # rotating diagnostic: how often would a smaller DIV_PIVOT_RIGHT have
-    # agreed with the rigorous one, accumulated one symbol per cycle
-    "div_pivot_stability": {str(r): {"agree": 0, "disagree": 0, "gain_sum": 0.0, "gain_count": 0} for r in DIV_SHADOW_RIGHTS},
     # EMA 7/14/28 signal indicator — same "own page" treatment as divergence
     "ema_signals": deque(maxlen=EMA_SIGNAL_HISTORY),
     "ema_last_scan_finished": None,
@@ -9904,8 +9865,6 @@ STATE = {
 }
 _cooldowns = {}  # (symbol, zone_key) -> last_alert_ts
 _cooldowns_lock = threading.Lock()
-_div_cooldowns = {}  # symbol -> last_alert_ts
-_div_cooldowns_lock = threading.Lock()
 _ema_cooldowns = {}  # symbol -> last_alert_ts
 _ema_cooldowns_lock = threading.Lock()
 _scalp_signal_cooldowns = {}  # (symbol, interval) -> last_signal_ts
@@ -9951,7 +9910,7 @@ def has_open_signal_any_module(symbol, exclude=None):
     regardless of interval, so they pass their own list name too, purely
     for clarity (their own already-called check makes it a no-op)."""
     lists = {
-        "signals": STATE["signals"], "div_signals": STATE["div_signals"],
+        "signals": STATE["signals"],
         "ema_signals": STATE["ema_signals"], "scalp_signals": STATE["scalp_signals"],
         "session_signals": STATE["session_signals"], "session_ny_signals": STATE["session_ny_signals"],
         "xau_lg_signals": STATE["xau_lg_signals"], "ft5_signals": STATE["ft5_signals"],
@@ -9966,10 +9925,23 @@ def has_open_signal_any_module(symbol, exclude=None):
     return False
 
 
-# ----------------------------------------------------------------------------
-# RSI divergence: RSI calc, swing-pivot detection, divergence match
-# ----------------------------------------------------------------------------
-def compute_rsi(closes, period=DIV_RSI_PERIOD):
+def compute_rsi(closes, period=14):
+    """v0.99.85 — RESTORED after being deleted along with Divergence's
+    own detect_divergence()/find_pivots(): this specific function is
+    NOT divergence-only. FT5's own run_ft5_backtest() calls it directly
+    as part of its own indicator stack (alongside compute_fisher_rsi/
+    compute_macd/compute_adx/compute_stoch_fast/compute_sma/compute_sar)
+    — genuinely shared infrastructure the same way openVgiChart() turned
+    out to be for Scalp/XAU LG during the VGI removal. find_pivots()/
+    simulate_pivot_stability() (the OTHER two functions removed in this
+    same original block) really were divergence-only — confirmed via a
+    fresh grep before restoring only this one, not blindly reverting
+    the whole deletion.
+    `period` default changed from DIV_RSI_PERIOD (now a deleted
+    constant) to a literal 14 (DIV_RSI_PERIOD's own former default
+    value) — FT5's own call site never passed period explicitly either
+    way, so this default was always what actually got used there.
+    Standard Wilder RSI."""
     n = len(closes)
     rsi = [None] * n
     if n < period + 1:
@@ -9993,151 +9965,6 @@ def compute_rsi(closes, period=DIV_RSI_PERIOD):
     return rsi
 
 
-def find_pivots(values, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT, kind="high"):
-    """A bar is a pivot high/low if it's the max/min of the window
-    `left` bars before it through `right` bars after it — a pivot only
-    gets confirmed `right` bars after it actually happened."""
-    n = len(values)
-    pivots = []
-    for i in range(left, n - right):
-        if values[i] is None:
-            continue
-        window = values[i - left:i + right + 1]
-        if any(v is None for v in window):
-            continue
-        if kind == "high" and values[i] == max(window):
-            pivots.append(i)
-        elif kind == "low" and values[i] == min(window):
-            pivots.append(i)
-    return pivots
-
-
-def simulate_pivot_stability(values, closes, left, real_right, shadow_right, kind, stride=1):
-    """Walk bar-by-bar as if running live: at each point T, compute what
-    the SHADOW (smaller right) method would currently call its most
-    recent pivot, using only data up to T. Check whether that specific
-    bar is ALSO a pivot per the RIGOROUS (full right) method computed
-    with full hindsight over the whole series — that's genuine ground
-    truth, unlike checking a single already-known-correct bar (which is
-    guaranteed to always agree, a mistake caught before shipping this).
-    Only counts cases where the rigorous method has had a full chance to
-    judge that bar (excludes the unconfirmable tail), so a "disagree"
-    here means a real false start, not just "not confirmed yet".
-
-    On every AGREEING case (same real pivot either way — an apples-to-
-    apples comparison), also records the % price move given up while
-    waiting the extra (real_right - shadow_right) bars for full
-    confirmation: close price at shadow-confirmation time vs close price
-    at full-confirmation time, signed so positive always means "the
-    earlier entry would have been better" (for a high/bearish pivot a
-    higher price is better; for a low/bullish pivot a lower price is
-    better, so that side is flipped)."""
-    n = len(values)
-    real_pivots = set(find_pivots(values, left, real_right, kind))
-    agree = disagree = 0
-    pct_gains = []
-    for T in range(left + shadow_right, n, stride):
-        shadow_pivots = find_pivots(values[:T + 1], left, shadow_right, kind)
-        if not shadow_pivots:
-            continue
-        latest = shadow_pivots[-1]
-        if latest + real_right >= n:
-            continue  # rigorous method hasn't had a full chance to judge this bar yet
-        if latest in real_pivots:
-            agree += 1
-            shadow_t, real_t = latest + shadow_right, latest + real_right
-            p_shadow, p_real = closes[shadow_t], closes[real_t]
-            if p_real:
-                pct = (p_shadow - p_real) / p_real * 100
-                if kind == "low":
-                    pct = -pct
-                pct_gains.append(pct)
-        else:
-            disagree += 1
-    return agree, disagree, pct_gains
-
-
-def _rsi_cut_through(rsi, p1, p2, r1, r2, mode):
-    """Стандартная проверка валидности дивергенции (аналог опции
-    "Check Cut-Through" в референсном индикаторе дивергенций
-    LonesomeTheBlue): между двумя пивотами RSI не должен пробивать
-    прямую линию, соединяющую r1->r2 — иначе на самом деле RSI не
-    делал чистый lower-high/higher-low относительно ценовых пивотов,
-    а полученная "дивергенция" ненадёжна. Отбраковка такого сигнала —
-    правильный способ обработать случай "линия режет более высокий
-    пик между точками", а не перенос точки в сторону от реального
-    бара ценового пивота (как было в v0.17.0 через _rsi_extreme_near)."""
-    if p2 <= p1:
-        return False
-    span = p2 - p1
-    for i in range(p1 + 1, p2):
-        v = rsi[i]
-        if v is None:
-            continue
-        interp = r1 + (r2 - r1) * (i - p1) / span
-        if mode == "high" and v > interp:
-            return True
-        if mode == "low" and v < interp:
-            return True
-    return False
-
-
-def detect_divergence(candles, rsi, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT,
-                       freshness=DIV_FRESHNESS_BARS):
-    """Ценовые пивоты берутся из find_pivots(). RSI читается СТРОГО на
-    тех же барах, что и ценовые пивоты — это стандартный подход
-    (так пары цена/осциллятор сравнивают референсные индикаторы
-    дивергенций), а не отдельно найденный локальный экстремум RSI в
-    окне (как было в v0.17.0) — это как раз и рассинхронизировало
-    x-координаты верхней и нижней трендлиний на графике. Кандидат
-    отбраковывается, если RSI между пивотами пробивает линию,
-    соединяющую его значения на этих пивотах (_rsi_cut_through) —
-    правильная обработка "более высокого пика между точками" вместо
-    переноса точки. Сигнал засчитывается, только если второй пивот
-    отстоит от последнего бара не больше чем на `freshness` баров
-    (по умолчанию freshness == right, т.е. сигнал живой ровно в
-    момент подтверждения пивота, а не ещё долго после)."""
-    highs = [c["high"] for c in candles]
-    lows = [c["low"] for c in candles]
-    n = len(candles)
-
-    pivot_highs = find_pivots(highs, left, right, "high")
-    if len(pivot_highs) >= 2:
-        p1, p2 = pivot_highs[-2], pivot_highs[-1]
-        r1, r2 = rsi[p1], rsi[p2]
-        if (r1 is not None and r2 is not None and highs[p2] > highs[p1] and r2 < r1
-                and n - 1 - p2 <= freshness
-                and not _rsi_cut_through(rsi, p1, p2, r1, r2, "high")):
-            return {
-                "direction": "LONG" if DIV_INVERT_SIGNALS else "SHORT", "kind": "bearish",
-                "p1": p1, "p2": p2,
-                "price_p1": highs[p1], "price_p2": highs[p2],
-                "rsi_p1": r1, "rsi_p2": r2,
-                "time_p1": candles[p1]["time"], "time_p2": candles[p2]["time"],
-                "rsi_time_p1": candles[p1]["time"], "rsi_time_p2": candles[p2]["time"],
-            }
-
-    pivot_lows = find_pivots(lows, left, right, "low")
-    if len(pivot_lows) >= 2:
-        p1, p2 = pivot_lows[-2], pivot_lows[-1]
-        r1, r2 = rsi[p1], rsi[p2]
-        if (r1 is not None and r2 is not None and lows[p2] < lows[p1] and r2 > r1
-                and n - 1 - p2 <= freshness
-                and not _rsi_cut_through(rsi, p1, p2, r1, r2, "low")):
-            return {
-                "direction": "SHORT" if DIV_INVERT_SIGNALS else "LONG", "kind": "bullish",
-                "p1": p1, "p2": p2,
-                "price_p1": lows[p1], "price_p2": lows[p2],
-                "rsi_p1": r1, "rsi_p2": r2,
-                "time_p1": candles[p1]["time"], "time_p2": candles[p2]["time"],
-                "rsi_time_p1": candles[p1]["time"], "rsi_time_p2": candles[p2]["time"],
-            }
-    return None
-
-
-# ----------------------------------------------------------------------------
-# EMA 7/14/28 signal indicator — ported from a user-supplied Pine Script.
-# ----------------------------------------------------------------------------
 def compute_ema(values, period):
     """Matches Pine Script's ta.ema exactly: seeds with the first value
     (no SMA warm-up), then applies alpha=2/(period+1) recursively."""
@@ -11823,232 +11650,6 @@ def compute_scalp_leverage_for_target(target_pct, account_usd=SCALP_ACCOUNT_USD,
     return required_notional / account_usd
 
 
-def compute_div_tp_sl(direction, entry, atr=None, tp_pct=None, atr_mult=None, fallback_rr=None):
-    """TP is always a fixed % of entry (tp_pct) — the divergence pattern
-    itself doesn't imply a TP, this was always synthetic. SL depends on
-    DIV_SL_MODE:
-      - "atr" (default): SL = atr * atr_mult in price units. Pass None
-        or 0 for atr to force the fixed_rr fallback for this call even
-        in atr mode (e.g. ATR unavailable for this candle set).
-      - "fixed_pct" or ATR unavailable: reproduces the old behavior —
-        risk = tp_distance / fallback_rr (DIV_RR).
-    Returns (sl, tp, risk, rr) — rr computed FROM the actual resulting
-    distances rather than assumed, since ATR mode makes it vary signal
-    to signal instead of being one fixed constant.
-    v0.95.7: same fix as compute_ema_tp_sl() — tp_pct/atr_mult/
-    fallback_rr now resolve to the CURRENT DIV_TP_PCT/DIV_SL_ATR_MULT/
-    DIV_RR globals inside the function body instead of being frozen as
-    literal default parameter values at module-load time. See that
-    function's docstring for the full explanation; same bug, same fix,
-    found in the same audit pass."""
-    if tp_pct is None:
-        tp_pct = DIV_TP_PCT
-    if atr_mult is None:
-        atr_mult = DIV_SL_ATR_MULT
-    if fallback_rr is None:
-        fallback_rr = DIV_RR
-    if direction == "SHORT":
-        tp = entry * (1 - tp_pct)
-        tp_dist = entry - tp
-        if DIV_SL_MODE == "atr" and atr:
-            risk = atr * atr_mult
-        else:
-            risk = tp_dist / fallback_rr
-        sl = entry + risk
-    else:
-        tp = entry * (1 + tp_pct)
-        tp_dist = tp - entry
-        if DIV_SL_MODE == "atr" and atr:
-            risk = atr * atr_mult
-        else:
-            risk = tp_dist / fallback_rr
-        sl = entry - risk
-    rr = round(tp_dist / risk, 3) if risk else None
-    return sl, tp, risk, rr
-
-
-def has_open_divergence_signal(symbol):
-    with state_lock:
-        return any(s["symbol"] == symbol and s.get("status") == "OPEN" for s in STATE["div_signals"])
-
-
-def scan_symbol_divergence(symbol, candles=None):
-    if not DIVERGENCE_ENABLED:
-        return
-    try:
-        if candles is None:
-            candles = get_candles(symbol, interval=DIV_INTERVAL, limit=DIV_FETCH_LIMIT)
-        min_needed = DIV_RSI_PERIOD + DIV_PIVOT_LEFT + DIV_PIVOT_RIGHT + 20
-        if len(candles) < min_needed:
-            return
-        ok, _reason = data_quality_check(candles[-min(len(candles), 100):])
-        if not ok:
-            return
-        closes = [c["close"] for c in candles]
-        rsi = compute_rsi(closes, period=DIV_RSI_PERIOD)
-        sig = detect_divergence(candles, rsi, left=DIV_PIVOT_LEFT, right=DIV_PIVOT_RIGHT, freshness=DIV_FRESHNESS_BARS)
-        if not sig:
-            return
-        if has_open_divergence_signal(symbol) or has_open_signal_any_module(symbol, exclude="div_signals"):
-            return
-
-        now = time.time()
-        with _div_cooldowns_lock:
-            last_ts = _div_cooldowns.get(symbol, 0)
-            allowed = now - last_ts >= DIV_COOLDOWN_SEC
-            if allowed:
-                _div_cooldowns[symbol] = now
-        if not allowed:
-            return
-
-        entry = candles[-1]["close"]
-        atr_pct = None
-        atr_price = None
-        if len(candles) >= EMA_DIAG_ATR_PERIOD * 2:
-            tr = _true_range_series(candles)
-            atr_series = _atr_series(tr, EMA_DIAG_ATR_PERIOD)
-            last_atr = atr_series[-1]
-            if last_atr and entry:
-                atr_price = last_atr
-                atr_pct = round(last_atr / entry * 100, 4)
-        sl, tp, risk, rr = compute_div_tp_sl(sig["direction"], entry, atr=atr_price)
-        if DIV_MIN_RR > 0 and rr is not None and rr < DIV_MIN_RR:
-            with state_lock:
-                STATE["filtered_by_div_min_rr"] += 1
-            return  # ATR-based stop came out too wide relative to the fixed TP — mirrors EMA_MIN_RR. Applied AFTER the cooldown consumption above (unlike EMA, where it's checked before) since divergence's cooldown is keyed by symbol only, not symbol+interval — restructuring the order wasn't worth the risk for this addition; a filtered signal here does still consume the symbol's cooldown slot, a minor inconsistency versus EMA's ordering, not a correctness issue
-        # how much of the anticipated move already happened between the
-        # pivot forming and the signal actually firing (confirmation +
-        # freshness delay) — positive means price already moved in the
-        # favorable direction before we could enter, i.e. "already played
-        # out" by the time the alert arrives.
-        p2 = sig["price_p2"]
-        if sig["direction"] == "SHORT":
-            pre_move_pct = (p2 - entry) / p2 * 100 if p2 else 0.0
-        else:
-            pre_move_pct = (entry - p2) / p2 * 100 if p2 else 0.0
-        record = {
-            "symbol": symbol,
-            "direction": sig["direction"],
-            "kind": sig["kind"],  # bearish / bullish
-            "entry": entry,
-            "sl": sl,
-            "tp": tp,
-            "risk": risk,
-            "rr": rr,  # varies per signal in ATR mode — see DIV_SL_MODE / compute_div_tp_sl
-            "atr_pct": atr_pct,
-            "price_p1": sig["price_p1"], "price_p2": sig["price_p2"],
-            "rsi_p1": sig["rsi_p1"], "rsi_p2": sig["rsi_p2"],
-            "time_p1": sig["time_p1"], "time_p2": sig["time_p2"],
-            "rsi_time_p1": sig["rsi_time_p1"], "rsi_time_p2": sig["rsi_time_p2"],
-            "pre_move_pct": round(pre_move_pct, 4),
-            "time": candles[-1]["time"],
-            "detected_at": now,
-            "status": "OPEN",
-            "result": None,
-            "closed_at": None,
-            "exit_price": None,
-            "exit_time": None,
-            "exit_candle": None,
-            "app_version": APP_VERSION,
-            "mfe_r": 0.0,
-            "mae_r": 0.0,
-            "mfe_price": None,
-            "mae_price": None,
-            "mfe_tracking_until": now + MFE_TRACK_SEC,
-        }
-        with state_lock:
-            STATE["div_signals"].appendleft(record)
-        if AUTOTRADE_ENABLED_DIVERGENCE:
-            execute_autotrade("divergence", symbol, sig["direction"], entry, sl, tp,
-                               AUTOTRADE_LEVERAGE_DIVERGENCE, extra={"kind": sig["kind"]})
-            sim_execute_trade("divergence", symbol, sig["direction"], entry, sl, tp,
-                               AUTOTRADE_LEVERAGE_DIVERGENCE, record)
-        arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
-        rr_txt = f"{rr:g}" if rr is not None else "?"
-        send_telegram(
-            f"{arrow} {symbol} (RSI {sig['kind']} divergence)\n"
-            f"entry: {entry:.6g}\n"
-            f"SL: {sl:.6g}  TP: {tp:.6g}  (RR {rr_txt})",
-            category="div",
-        )
-    except Exception as e:
-        log_error(f"div {symbol}: {e}")
-
-
-def close_div_signal(sig, result, exit_price, exit_candle=None):
-    with state_lock:
-        sig["status"] = "CLOSED"
-        sig["result"] = result
-        sig["exit_price"] = exit_price
-        sig["closed_at"] = time.time()
-        sig["mfe_r_at_close"] = sig["mfe_r"]
-        sig["mae_r_at_close"] = sig["mae_r"]
-        if exit_candle:
-            sig["exit_time"] = exit_candle["time"]
-            sig["exit_candle"] = {
-                "open": exit_candle["open"], "high": exit_candle["high"],
-                "low": exit_candle["low"], "close": exit_candle["close"],
-            }
-    if result in ("WIN", "LOSS"):
-        arrow = "\u2705" if result == "WIN" else "\u274c"
-        send_telegram(f"{arrow} {sig['symbol']} divergence {sig['direction']} closed: {result} @ {exit_price:.6g}", category="div")
-
-
-def update_divergence_outcomes():
-    now = time.time()
-    with state_lock:
-        active = [
-            s for s in STATE["div_signals"]
-            if s.get("status") == "OPEN" or now < s.get("mfe_tracking_until", 0)
-        ]
-    all_candles = fetch_candles_concurrent([(s["symbol"], DIV_INTERVAL, 300) for s in active])
-    div_interval_sec = INTERVAL_SECONDS.get(DIV_INTERVAL, 3600)
-    for sig, candles in zip(active, all_candles):
-        try:
-            if candles is None:
-                continue
-            candles = [c for c in candles if c["time"] + div_interval_sec <= now]  # v0.98.8: drop still-forming candle
-            relevant = [c for c in candles if c["time"] > sig["time"]]
-            direction = sig["direction"]
-            entry = sig["entry"]
-            risk = sig.get("risk") or abs(entry - sig["sl"]) or 1e-9
-
-            for c in relevant:
-                if direction == "LONG":
-                    fav, adv = c["high"] - entry, entry - c["low"]
-                else:
-                    fav, adv = entry - c["low"], c["high"] - entry
-                fav_r, adv_r = fav / risk, adv / risk
-                if fav_r > sig["mfe_r"] or adv_r > sig["mae_r"]:
-                    with state_lock:
-                        if fav_r > sig["mfe_r"]:
-                            sig["mfe_r"] = round(fav_r, 3)
-                            sig["mfe_price"] = c["high"] if direction == "LONG" else c["low"]
-                        if adv_r > sig["mae_r"]:
-                            sig["mae_r"] = round(adv_r, 3)
-                            sig["mae_price"] = c["low"] if direction == "LONG" else c["high"]
-
-                if sig["status"] == "OPEN":
-                    if direction == "LONG":
-                        if c["low"] <= sig["sl"]:
-                            close_div_signal(sig, "LOSS", sig["sl"], exit_candle=c)
-                        elif c["high"] >= sig["tp"]:
-                            close_div_signal(sig, "WIN", sig["tp"], exit_candle=c)
-                    else:
-                        if c["high"] >= sig["sl"]:
-                            close_div_signal(sig, "LOSS", sig["sl"], exit_candle=c)
-                        elif c["low"] <= sig["tp"]:
-                            close_div_signal(sig, "WIN", sig["tp"], exit_candle=c)
-
-            # Timeout removed per direct request — a signal now waits as long
-            # as it takes to hit either TP or SL, never expiring into an
-            # ambiguous TIMEOUT result. Matches the same removal already
-            # done for Scalp (v0.87 era) and now applied consistently to
-            # every module that still had one (Volume, Divergence, EMA).
-        except Exception as e:
-            log_error(f"update_divergence_outcomes {sig.get('symbol')}: {e}")
-
-
 def has_open_ema_signal(symbol, interval):
     with state_lock:
         return any(s["symbol"] == symbol and s.get("interval") == interval and s.get("status") == "OPEN" for s in STATE["ema_signals"])
@@ -12243,7 +11844,6 @@ def update_ema_outcomes():
 
 SNAPSHOT_MODULE_KEYS = {
     "volume": "signals",
-    "divergence": "div_signals",
     "ema": "ema_signals",
     "scalp": "scalp_signals",
     "session": "session_signals",
@@ -12434,60 +12034,6 @@ def compute_ema_stats(interval=None):
         # global constant — this is what the header display shows in
         # place of the old fixed EMA_RR value.
         "rr_all": agg("rr", dataset), "rr_wins": agg("rr", win_set), "rr_losses": agg("rr", loss_set),
-    }
-
-
-def compute_divergence_stats():
-    with state_lock:
-        signals = list(STATE["div_signals"])
-    closed = [s for s in signals if s.get("status") == "CLOSED" and s.get("result") in ("WIN", "LOSS")]
-    wins = sum(1 for s in closed if s["result"] == "WIN")
-    losses = sum(1 for s in closed if s["result"] == "LOSS")
-    total = wins + losses
-    timeouts = sum(1 for s in signals if s.get("result") == "TIMEOUT")
-    open_count = sum(1 for s in signals if s.get("status") == "OPEN")
-    winrate = round(wins / total * 100, 1) if total else None
-
-    dataset = [s for s in signals if s.get("mfe_price") is not None]
-
-    def agg(key, subset):
-        vals = [s[key] for s in subset if s.get(key) is not None]
-        if not vals:
-            return None
-        vals_sorted = sorted(vals)
-        n = len(vals_sorted)
-        return {
-            "avg": round(sum(vals) / n, 3),
-            "median": round(vals_sorted[n // 2], 3),
-            "p25": round(vals_sorted[int(n * 0.25)], 3),
-            "p75": round(vals_sorted[min(int(n * 0.75), n - 1)], 3),
-            "n": n,
-        }
-
-    win_set = [s for s in dataset if s.get("result") == "WIN"]
-    loss_set = [s for s in dataset if s.get("result") == "LOSS"]
-    open_set = [s for s in dataset if s.get("status") == "OPEN"]
-    win_set_all = [s for s in signals if s.get("result") == "WIN"]
-    loss_set_all = [s for s in signals if s.get("result") == "LOSS"]
-
-    return {
-        "open": open_count, "wins": wins, "losses": losses,
-        "timeouts": timeouts, "winrate": winrate, "closed_total": total,
-        "mfe_r_all": agg("mfe_r", dataset), "mae_r_all": agg("mae_r", dataset),
-        "mfe_r_wins": agg("mfe_r", win_set), "mae_r_wins": agg("mae_r", win_set),
-        "mfe_r_losses": agg("mfe_r", loss_set), "mae_r_losses": agg("mae_r", loss_set),
-        "mfe_r_open": agg("mfe_r", open_set), "mae_r_open": agg("mae_r", open_set),
-        "mfe_r_wins_at_close": agg("mfe_r_at_close", win_set), "mae_r_wins_at_close": agg("mae_r_at_close", win_set),
-        "mfe_r_losses_at_close": agg("mfe_r_at_close", loss_set), "mae_r_losses_at_close": agg("mae_r_at_close", loss_set),
-        "pre_move_pct_all": agg("pre_move_pct", signals),
-        "pre_move_pct_wins": agg("pre_move_pct", win_set_all),
-        "pre_move_pct_losses": agg("pre_move_pct", loss_set_all),
-        # rr is per-signal now (v0.88.0, ATR-based SL) instead of one
-        # global constant — this is what the header display shows in
-        # place of the old fixed DIV_RR value.
-        "rr_all": agg("rr", dataset), "rr_wins": agg("rr", win_set), "rr_losses": agg("rr", loss_set),
-        "atr_pct_wins": agg("atr_pct", win_set), "atr_pct_losses": agg("atr_pct", loss_set),
-        "dataset_count": len(dataset),
     }
 
 
@@ -14446,7 +13992,6 @@ def save_state():
             data = {
                 "overrides": SYMBOL_OVERRIDES,
                 "signals": list(STATE["signals"]),
-                "div_signals": list(STATE["div_signals"]),
                 "ema_signals": list(STATE["ema_signals"]),
                 "scalp_signals": list(STATE["scalp_signals"]),
                 "session_signals": list(STATE["session_signals"]),
@@ -14499,7 +14044,7 @@ def _relink_sim_trade(trade):
     (e.g. that signal itself fell out of its own history maxlen)."""
     module_lists = {
         "bounce": STATE["signals"], "breakout": STATE["signals"],
-        "divergence": STATE["div_signals"], "ema": STATE["ema_signals"],
+        "ema": STATE["ema_signals"],
         "scalp": STATE["scalp_signals"], "session": STATE["session_signals"],
         "session_ny": STATE["session_ny_signals"],
         "xau_lg": STATE["xau_lg_signals"],
@@ -14557,7 +14102,6 @@ def load_state():
             data = json.load(f)
         SYMBOL_OVERRIDES.update(data.get("overrides", {}))
         signals = data.get("signals", [])
-        div_signals = data.get("div_signals", [])
         ema_signals = data.get("ema_signals", [])
         scalp_signals = data.get("scalp_signals", [])
         session_signals = data.get("session_signals", [])
@@ -14574,7 +14118,6 @@ def load_state():
         risk_autotune_last_change = data.get("risk_autotune_last_change", {})
         with state_lock:
             STATE["signals"] = deque(_backfill_mfe_mae(signals), maxlen=SIGNAL_HISTORY)
-            STATE["div_signals"] = deque(_backfill_mfe_mae(div_signals), maxlen=DIV_SIGNAL_HISTORY)
             STATE["ema_signals"] = deque(_backfill_mfe_mae(ema_signals), maxlen=EMA_SIGNAL_HISTORY)
             STATE["scalp_signals"] = deque(scalp_signals, maxlen=SCALP_SIGNAL_HISTORY)
             STATE["session_signals"] = deque(_backfill_mfe_mae(session_signals), maxlen=SESSION_SIGNAL_HISTORY)
@@ -14601,7 +14144,7 @@ def load_state():
                     t["_signal_ref"] = match
                 restored_trades.append(t)
             STATE["sim_trades"] = deque(restored_trades, maxlen=AUTOTRADE_SIM_TRADE_HISTORY)
-        print(f"Loaded persisted state: {len(SYMBOL_OVERRIDES)} overrides, {len(signals)} signals, {len(div_signals)} divergence signals, {len(ema_signals)} EMA signals, {len(scalp_signals)} scalp signals, {len(session_signals)} session signals, {len(autotrade_log)} autotrade log entries, {len(restored_trades)} sim trades ({dropped_pending} pending trades couldn't be re-linked and were dropped)")
+        print(f"Loaded persisted state: {len(SYMBOL_OVERRIDES)} overrides, {len(signals)} signals, {len(ema_signals)} EMA signals, {len(scalp_signals)} scalp signals, {len(session_signals)} session signals, {len(autotrade_log)} autotrade log entries, {len(restored_trades)} sim trades ({dropped_pending} pending trades couldn't be re-linked and were dropped)")
     except Exception as e:
         log_error(f"load_state: {e}")
 
@@ -14769,74 +14312,6 @@ def auto_tune_cycle(universe):
             log_error(f"auto_tune {sym}: {e}")
 
 
-_div_stability_cursor = 0
-DIV_STABILITY_PER_CYCLE = int(os.environ.get("VP_DIV_STABILITY_PER_CYCLE", 2))  # was 1, raised alongside MAX_SYMBOLS
-
-
-def div_stability_cycle(universe):
-    """Rotates through the universe (like auto_tune_cycle), one symbol per
-    cycle, accumulating pivot-stability diagnostics — real data on how
-    much VP_DIV_PIVOT_RIGHT could safely be reduced. Doesn't affect live
-    detection at all, purely observational."""
-    global _div_stability_cursor
-    if not DIVERGENCE_ENABLED or not universe or DIV_STABILITY_PER_CYCLE <= 0 or not DIV_SHADOW_RIGHTS:
-        return
-    n = len(universe)
-    picks = [universe[(_div_stability_cursor + i) % n] for i in range(min(DIV_STABILITY_PER_CYCLE, n))]
-    _div_stability_cursor = (_div_stability_cursor + len(picks)) % n
-
-    for symbol in picks:
-        try:
-            candles = get_candles(symbol, interval=DIV_INTERVAL, limit=DIV_FETCH_LIMIT)
-            if len(candles) < DIV_RSI_PERIOD + DIV_PIVOT_LEFT + max(DIV_SHADOW_RIGHTS) + DIV_PIVOT_RIGHT + 10:
-                continue
-            highs = [c["high"] for c in candles]
-            lows = [c["low"] for c in candles]
-            closes = [c["close"] for c in candles]
-            for shadow_r in DIV_SHADOW_RIGHTS:
-                if shadow_r >= DIV_PIVOT_RIGHT:
-                    continue
-                a1, d1, g1 = simulate_pivot_stability(highs, closes, DIV_PIVOT_LEFT, DIV_PIVOT_RIGHT, shadow_r, "high")
-                a2, d2, g2 = simulate_pivot_stability(lows, closes, DIV_PIVOT_LEFT, DIV_PIVOT_RIGHT, shadow_r, "low")
-                gains = g1 + g2
-                if DIV_INVERT_SIGNALS:
-                    # simulate_pivot_stability's sign convention assumes the
-                    # NATURAL trade direction for each pivot kind (SHORT on
-                    # a high/bearish pivot, LONG on a low/bullish one) — see
-                    # its own docstring. With DIV_INVERT_SIGNALS on, every
-                    # live trade goes the OPPOSITE direction, so "earlier
-                    # entry is better" flips to "earlier entry is worse" by
-                    # the same magnitude — caught by direct user question
-                    # about why this stat didn't seem to account for reverse
-                    # mode being active. Flipping here (not in
-                    # simulate_pivot_stability itself, which stays a neutral
-                    # measurement) makes gain_sum/gain_count — and therefore
-                    # the "vход раньше в среднем на X% лучше/хуже" figure —
-                    # correct for whichever direction is ACTUALLY being
-                    # traded right now.
-                    gains = [-g for g in gains]
-                with state_lock:
-                    bucket = STATE["div_pivot_stability"].setdefault(
-                        str(shadow_r), {"agree": 0, "disagree": 0, "gain_sum": 0.0, "gain_count": 0})
-                    bucket["agree"] += a1 + a2
-                    bucket["disagree"] += d1 + d2
-                    bucket["gain_sum"] += sum(gains)
-                    bucket["gain_count"] += len(gains)
-        except Exception as e:
-            log_error(f"div_stability {symbol}: {e}")
-
-
-# ----------------------------------------------------------------------------
-# Telegram
-# ----------------------------------------------------------------------------
-# ----------------------------------------------------------------------------
-# Telegram — queued sender, mirrors the fix already proven in the
-# EMA-screener/Pump_Radar project: Telegram Bot API has a real limit of
-# ~1 message/sec per chat. Firing each alert in its own thread caused
-# silent drops (429s) during bursts (e.g. several signals the same scan
-# cycle). One background worker drains a queue sequentially with a pause
-# between sends instead.
-# ----------------------------------------------------------------------------
 _telegram_send_queue = queue.Queue(maxsize=200)  # bounded — during a long enough outage, a message every scan cycle could otherwise accumulate without limit
 
 
@@ -14854,8 +14329,6 @@ def send_telegram(text, category=None):
     if not TELEGRAM_ENABLED or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     if category == "vp" and not TELEGRAM_ALERTS_VP:
-        return
-    if category == "div" and not TELEGRAM_ALERTS_DIV:
         return
     if category == "ema" and not TELEGRAM_ALERTS_EMA:
         return
@@ -15412,8 +14885,6 @@ def scan_loop():
             # is harmless, fewer would be (which is why scan_symbol()
             # above still falls back to its own fetch on a length miss).
             shared_interval_limits = {}
-            if DIVERGENCE_ENABLED:
-                shared_interval_limits[DIV_INTERVAL] = max(shared_interval_limits.get(DIV_INTERVAL, 0), DIV_FETCH_LIMIT)
             if EMA_ENABLED:
                 for interval in EMA_INTERVALS:
                     shared_interval_limits[interval] = max(shared_interval_limits.get(interval, 0), EMA_FETCH_LIMIT)
@@ -15429,8 +14900,6 @@ def scan_loop():
                 futs = []
                 if VOLUME_PROFILE_ENABLED:
                     futs += [ex.submit(scan_symbol, s) for s in universe]
-                if DIVERGENCE_ENABLED:
-                    futs += [ex.submit(scan_symbol_divergence, s, candle_cache.get((s, DIV_INTERVAL))) for s in universe]
                 if EMA_ENABLED:
                     futs += [ex.submit(scan_symbol_ema, s, interval, candle_cache.get((s, interval))) for s in universe for interval in EMA_INTERVALS]
                 if SCALP_SIGNALS_ENABLED:
@@ -15451,9 +14920,6 @@ def scan_loop():
             if VOLUME_PROFILE_ENABLED:
                 update_signal_outcomes()
                 auto_tune_cycle(universe)
-            if DIVERGENCE_ENABLED:
-                update_divergence_outcomes()
-                div_stability_cycle(universe)
             if EMA_ENABLED:
                 update_ema_outcomes()
             if SCALP_SIGNALS_ENABLED:
@@ -15466,8 +14932,6 @@ def scan_loop():
             with state_lock:
                 STATE["last_scan_finished"] = t1
                 STATE["last_scan_duration"] = round(t1 - t0, 1)
-                STATE["div_last_scan_finished"] = t1
-                STATE["div_last_scan_duration"] = round(t1 - t0, 1)
                 STATE["ema_last_scan_finished"] = t1
                 STATE["ema_last_scan_duration"] = round(t1 - t0, 1)
         except Exception as e:
@@ -15477,7 +14941,6 @@ def scan_loop():
 
 def build_hourly_stats_report():
     vp_s = compute_signal_stats()
-    div_s = compute_divergence_stats()
     ema_s = compute_ema_stats()
     scalp_s = compute_scalp_signal_stats()
 
@@ -15490,16 +14953,13 @@ def build_hourly_stats_report():
     vp_line = (f"<b>Volume</b>: {wr(vp_s['winrate'])} ({vp_s['wins']}W/{vp_s['losses']}L) · "
                f"открытых {vp_s['open']} · bounce {wr(bounce.get('winrate'))}/breakout {wr(breakout.get('winrate'))}")
 
-    div_tag = " [РЕВЕРС]" if DIV_INVERT_SIGNALS else ""
-    div_line = f"<b>Дивергенции</b>{div_tag}: {wr(div_s['winrate'])} ({div_s['wins']}W/{div_s['losses']}L) · открытых {div_s['open']}"
-
     ema_tag = " [РЕВЕРС]" if EMA_INVERT_SIGNALS else ""
     ema_line = f"<b>EMA</b>{ema_tag}: {wr(ema_s['winrate'])} ({ema_s['wins']}W/{ema_s['losses']}L) · открытых {ema_s['open']}"
 
     scalp_line = (f"<b>Скальпинг</b>: {wr(scalp_s['win_rate'])} ({scalp_s['wins']}W/{scalp_s['losses']}L/{scalp_s['timeouts']}TIMEOUT) · "
                   f"открытых {scalp_s['open']}") if SCALP_SIGNALS_ENABLED else None
 
-    lines = [f"📊 Часовая статистика (v{APP_VERSION})", vp_line, div_line, ema_line]
+    lines = [f"📊 Часовая статистика (v{APP_VERSION})", vp_line, ema_line]
     if scalp_line:
         lines.append(scalp_line)
     return "\n".join(lines)
@@ -16081,30 +15541,6 @@ def _set_ema_invert(v):
     save_settings()
 
 
-def _set_div_min_rr(v):
-    global DIV_MIN_RR
-    DIV_MIN_RR = v
-    save_settings()
-
-
-def _set_div_sl_atr_mult(v):
-    global DIV_SL_ATR_MULT
-    DIV_SL_ATR_MULT = v
-    save_settings()
-
-
-def _set_div_tp_pct(v):
-    global DIV_TP_PCT
-    DIV_TP_PCT = v
-    save_settings()
-
-
-def _set_div_invert(v):
-    global DIV_INVERT_SIGNALS
-    DIV_INVERT_SIGNALS = v
-    save_settings()
-
-
 def _set_scalp_min_rr(v):
     global SCALP_MIN_RR
     SCALP_MIN_RR = v
@@ -16229,26 +15665,6 @@ def risk_autotune_pass():
             _risk_autotune_tp_extend("ema", "ema_tp_pct", EMA_TP_PCT, win_mfe["median"], rr_all["median"], closed_n, _set_ema_tp_pct)
     except Exception as e:
         log_error(f"risk_autotune ema: {e}")
-
-    try:
-        s = compute_divergence_stats()
-        rr_all = s.get("rr_all")
-        winrate = s.get("winrate")
-        closed_n = (s.get("wins", 0) or 0) + (s.get("losses", 0) or 0)
-        loss_mae = s.get("mae_r_losses_at_close")
-        if rr_all:
-            _risk_autotune_min_rr("divergence", "div_min_rr", DIV_MIN_RR, rr_all["median"], winrate, closed_n, _set_div_min_rr,
-                                   avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
-        if loss_mae:
-            _risk_autotune_sl_mult("divergence", "div_sl_atr_mult", DIV_SL_ATR_MULT, loss_mae["avg"], s.get("losses", 0) or 0, _set_div_sl_atr_mult)
-        if rr_all:
-            _risk_autotune_reverse("divergence", "div_invert_signals", DIV_INVERT_SIGNALS, winrate, rr_all["avg"], closed_n, _set_div_invert,
-                                    avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
-        win_mfe = s.get("mfe_r_wins_at_close")
-        if win_mfe and rr_all:
-            _risk_autotune_tp_extend("divergence", "div_tp_pct", DIV_TP_PCT, win_mfe["median"], rr_all["median"], closed_n, _set_div_tp_pct)
-    except Exception as e:
-        log_error(f"risk_autotune divergence: {e}")
 
     try:
         median_rr, rr_n = _scalp_closed_rr_stats()
@@ -19356,15 +18772,12 @@ def api_overview():
     header — one call instead of hitting four separate endpoints on
     every poll regardless of which tab is open."""
     vp = compute_signal_stats()
-    div = compute_divergence_stats()
     ema = compute_ema_stats()
     scalp = compute_scalp_signal_stats()
     session = compute_session_signal_stats()
     return jsonify({
         "volume": {"winrate": vp["winrate"], "wins": vp["wins"], "losses": vp["losses"], "open": vp["open"],
                     "enabled": VOLUME_PROFILE_ENABLED},
-        "divergence": {"winrate": div["winrate"], "wins": div["wins"], "losses": div["losses"], "open": div["open"],
-                        "enabled": DIVERGENCE_ENABLED, "invert": DIV_INVERT_SIGNALS},
         "ema": {"winrate": ema["winrate"], "wins": ema["wins"], "losses": ema["losses"], "open": ema["open"],
                  "enabled": EMA_ENABLED, "invert": EMA_INVERT_SIGNALS},
         "scalp": {"winrate": scalp["win_rate"], "wins": scalp["wins"], "losses": scalp["losses"], "timeouts": scalp["timeouts"], "open": scalp["open"],
@@ -19551,53 +18964,6 @@ def api_optimize(symbol):
 @app.route("/api/overrides")
 def api_overrides():
     return jsonify(SYMBOL_OVERRIDES)
-
-
-@app.route("/api/divergence/status")
-def api_divergence_status():
-    stats = compute_divergence_stats()
-    with state_lock:
-        stability_raw = {k: dict(v) for k, v in STATE["div_pivot_stability"].items()}
-        return jsonify({
-            "version": APP_VERSION,
-            "enabled": DIVERGENCE_ENABLED,
-            "interval": DIV_INTERVAL,
-            "last_scan_finished": STATE["div_last_scan_finished"],
-            "last_scan_duration": STATE["div_last_scan_duration"],
-            "filtered_by_min_rr": STATE["filtered_by_div_min_rr"],
-            "stats": stats,
-            "pivot_stability": {
-                k: {
-                    "agree": v["agree"], "disagree": v["disagree"],
-                    "rate": round(v["agree"] / (v["agree"] + v["disagree"]) * 100, 1) if (v["agree"] + v["disagree"]) else None,
-                    "avg_pct_gain": round(v.get("gain_sum", 0) / v["gain_count"], 3) if v.get("gain_count") else None,
-                }
-                for k, v in stability_raw.items()
-            },
-            "config": {
-                "sl_mode": DIV_SL_MODE, "sl_atr_mult": DIV_SL_ATR_MULT, "rr_fallback": DIV_RR, "min_rr": DIV_MIN_RR, "tp_pct": DIV_TP_PCT, "rsi_period": DIV_RSI_PERIOD,
-                "pivot_left": DIV_PIVOT_LEFT, "pivot_right": DIV_PIVOT_RIGHT, "invert_signals": DIV_INVERT_SIGNALS,
-                "freshness_bars": DIV_FRESHNESS_BARS, "cooldown": DIV_COOLDOWN_SEC,
-            },
-        })
-
-
-@app.route("/api/divergence/signals")
-def api_divergence_signals():
-    with state_lock:
-        return jsonify(list(STATE["div_signals"]))
-
-
-@app.route("/api/divergence/chart/<symbol>")
-def api_divergence_chart(symbol):
-    try:
-        candles = get_candles(symbol, interval=DIV_INTERVAL, limit=DIV_FETCH_LIMIT)
-        closes = [c["close"] for c in candles]
-        rsi = compute_rsi(closes, period=DIV_RSI_PERIOD)
-        return jsonify({"symbol": symbol, "interval": DIV_INTERVAL, "candles": candles, "rsi": rsi})
-    except Exception as e:
-        log_error(f"api_divergence_chart {symbol}: {e}")
-        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/ema/status")
@@ -20639,10 +20005,6 @@ def api_reset_risk_autotune():
         _set_ema_sl_atr_mult(1.5)
         _set_ema_invert(False)
         _set_ema_tp_pct(0.015)
-        _set_div_min_rr(0.0)
-        _set_div_sl_atr_mult(1.5)
-        _set_div_invert(False)
-        _set_div_tp_pct(0.01)
         _set_scalp_min_rr(0.5)
         _set_scalp_sl_buffer_mult(0.25)
         _set_session_invert(False)
@@ -20745,7 +20107,7 @@ def api_autotrade_status():
         "skipped": skipped, "errors": errors,
         "enabled": {
             "bounce": AUTOTRADE_ENABLED_BOUNCE, "breakout": AUTOTRADE_ENABLED_BREAKOUT,
-            "divergence": AUTOTRADE_ENABLED_DIVERGENCE, "ema": AUTOTRADE_ENABLED_EMA,
+            "ema": AUTOTRADE_ENABLED_EMA,
             "scalp": AUTOTRADE_ENABLED_SCALP, "session": AUTOTRADE_ENABLED_SESSION,
             "session_ny": AUTOTRADE_ENABLED_SESSION_NY, "xau_lg": AUTOTRADE_ENABLED_XAU_LG,
             "ft5": AUTOTRADE_ENABLED_FT5,
@@ -20827,23 +20189,6 @@ def api_reset_volume():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-@app.route("/api/reset/divergence", methods=["POST"])
-def api_reset_divergence():
-    """Wipe only the divergence side: signal history, cooldowns, and the
-    pivot-stability diagnostic. Leaves volume-profile data untouched."""
-    try:
-        with state_lock:
-            STATE["div_signals"].clear()
-            STATE["div_pivot_stability"] = {str(r): {"agree": 0, "disagree": 0, "gain_sum": 0.0, "gain_count": 0} for r in DIV_SHADOW_RIGHTS}
-        with _div_cooldowns_lock:
-            _div_cooldowns.clear()
-        save_state()
-        return jsonify({"ok": True})
-    except Exception as e:
-        log_error(f"api_reset_divergence: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
     """Wipe everything — both volume-profile and divergence state. Kept
@@ -20853,7 +20198,6 @@ def api_reset():
         with state_lock:
             SYMBOL_OVERRIDES.clear()
             STATE["signals"].clear()
-            STATE["div_signals"].clear()
             STATE["watchlist"].clear()
             STATE["excluded_low_quality"] = 0
             STATE["excluded_fetch_error"] = 0
@@ -20862,11 +20206,8 @@ def api_reset():
             STATE["filtered_by_oi"] = 0
             STATE["filtered_by_staleness"] = 0
             STATE["errors"].clear()
-            STATE["div_pivot_stability"] = {str(r): {"agree": 0, "disagree": 0, "gain_sum": 0.0, "gain_count": 0} for r in DIV_SHADOW_RIGHTS}
         with _cooldowns_lock:
             _cooldowns.clear()
-        with _div_cooldowns_lock:
-            _div_cooldowns.clear()
         global _auto_tune_cursor
         _auto_tune_cursor = 0
         save_state()
@@ -20891,7 +20232,7 @@ INDEX_HTML = """<!doctype html>
   body { margin:0; background:#0b0e14; color:#d7dee8; font-family: -apple-system, Roboto, Segoe UI, sans-serif; }
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
   #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  #resetVolumeBtn, #resetDivBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetXauLgBtn, #resetMsnrBtn, #resetFt5Btn, #resetRiskAutotuneBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #resetVolumeBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetXauLgBtn, #resetMsnrBtn, #resetFt5Btn, #resetRiskAutotuneBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #settingsModal.open { display:flex; flex-direction:column; }
@@ -21098,7 +20439,6 @@ INDEX_HTML = """<!doctype html>
     <div style="display:flex;gap:8px;flex-wrap:wrap;">
       <button id="settingsBtn">⚙️ Настройки</button>
       <button id="resetVolumeBtn">Очистить объём</button>
-      <button id="resetDivBtn">Очистить дивер</button>
       <button id="resetEmaBtn">Очистить индикатор</button>
       <button id="resetScalpBtn">Очистить скальпинг</button>
       <button id="resetSessionBtn">Очистить сессию</button>
@@ -21120,7 +20460,6 @@ INDEX_HTML = """<!doctype html>
 </header>
 <div class="tabs">
   <div class="tab" data-tab="signals">Volume</div>
-  <div class="tab" data-tab="divergence">Дивергенции</div>
   <div class="tab" data-tab="ema">EMA</div>
   <div class="tab" data-tab="scalp">Скальпинг</div>
   <div class="tab" data-tab="session">Сессия</div>
@@ -21136,13 +20475,6 @@ INDEX_HTML = """<!doctype html>
   <div style="overflow-x:auto;">
   <table id="signalsTable" style="display:none">
     <thead><tr><th>Symbol</th><th>Dir</th><th>Reason</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
-    <tbody></tbody>
-  </table>
-  </div>
-  <div id="divStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
-  <div style="overflow-x:auto;">
-  <table id="divTable" style="display:none">
-    <thead><tr><th>Symbol</th><th>Dir</th><th>Kind</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
     <tbody></tbody>
   </table>
   </div>
@@ -21276,24 +20608,6 @@ INDEX_HTML = """<!doctype html>
     </div>
 
     <div class="settingsGroup">
-      <div class="settingsGroupTitle">Дивергенции</div>
-      <div class="settingRow">
-        <div>
-          <div class="label">RSI-дивергенции</div>
-          <div class="sub">отдельный скан на часовом ТФ</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setDivergence"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Реверс сигналов</div>
-          <div class="sub">торговать в обратную сторону от того, что говорит дивергенция</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setDivInvert"><span class="switchSlider"></span></label>
-      </div>
-    </div>
-
-    <div class="settingsGroup">
       <div class="settingsGroupTitle">EMA</div>
       <div class="settingRow">
         <div>
@@ -21406,24 +20720,6 @@ INDEX_HTML = """<!doctype html>
     </div>
 
     <div class="settingsGroup">
-      <div class="settingsGroupTitle">VGI (Volume Gaps & Imbalances)</div>
-      <div class="settingRow">
-        <div>
-          <div class="label">Сканирование</div>
-          <div class="sub">порт собственного индикатора (mambaleylo/vgi-trader) — профиль объёма, единый TP/SL на сигнал</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setVgi"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Реверс сигналов</div>
-          <div class="sub">целится в противоположную zero-volume зону вместо обычной; RR и статус реверса теперь управляются авто-тюнингом</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setVgiInvert"><span class="switchSlider"></span></label>
-      </div>
-    </div>
-
-    <div class="settingsGroup">
       <div class="settingsGroupTitle">Telegram</div>
       <div class="settingRow">
         <div>
@@ -21438,13 +20734,6 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">bounce/breakout сигналы и их закрытие</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramVp"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Алерты дивергенций</div>
-          <div class="sub">сигналы RSI-дивергенций и их закрытие</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramDiv"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -21555,16 +20844,6 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Дивергенции</div>
-          <div class="sub">плечо, если включено</div>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <input type="number" id="setAutotradeLevDivergence" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
-          <label class="switch"><input type="checkbox" id="setAutotradeDivergence"><span class="switchSlider"></span></label>
-        </div>
-      </div>
-      <div class="settingRow">
-        <div>
           <div class="label">↳ EMA</div>
           <div class="sub">плечо, если включено</div>
         </div>
@@ -21664,8 +20943,6 @@ document.querySelectorAll('.tab').forEach(el => {
     activeTab = el.dataset.tab;
     document.getElementById('signalsTable').style.display = activeTab === 'signals' ? 'table' : 'none';
     document.getElementById('tuningPanel').style.display = activeTab === 'signals' ? 'block' : 'none';
-    document.getElementById('divTable').style.display = activeTab === 'divergence' ? 'table' : 'none';
-    document.getElementById('divStatsPanel').style.display = activeTab === 'divergence' ? 'block' : 'none';
     document.getElementById('emaTable').style.display = activeTab === 'ema' ? 'table' : 'none';
     document.getElementById('emaStatsPanel').style.display = activeTab === 'ema' ? 'block' : 'none';
     document.getElementById('scalpPanel').style.display = activeTab === 'scalp' ? 'block' : 'none';
@@ -21677,7 +20954,6 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
     document.getElementById('simulatorPanel').style.display = activeTab === 'simulator' ? 'block' : 'none';
     if (activeTab === 'signals') refreshTuning();
-    if (activeTab === 'divergence') refreshDivergence();
     if (activeTab === 'ema') refreshEma();
     if (activeTab === 'scalp') refreshScalp();
     if (activeTab === 'session') refreshSession();
@@ -21749,7 +21025,11 @@ async function refreshStatus() {
     if (!vpModeChecked) {
       vpModeChecked = true;
       if (s.volume_profile_enabled === false) {
-        document.querySelector('.tab[data-tab="divergence"]').click();
+        // v0.99.85 — was 'divergence' (the next tab over), removed along
+        // with the whole module; redirects to 'ema' (now the next
+        // surviving tab in that position) instead so this fallback
+        // still lands somewhere real rather than silently no-oping.
+        document.querySelector('.tab[data-tab="ema"]').click();
       }
     }
     const el = document.getElementById('status');
@@ -21761,7 +21041,6 @@ async function refreshStatus() {
     if (ra && ra.log && ra.log.length) {
       raBox.style.display = 'block';
       const paramLabels = {ema_min_rr: 'EMA мин.RR', ema_sl_atr_mult: 'EMA ATR-мульт.', ema_invert_signals: 'EMA реверс',
-        div_min_rr: 'Див мин.RR', div_sl_atr_mult: 'Див ATR-мульт.', div_invert_signals: 'Див реверс',
         scalp_min_rr: 'Скальп мин.RR', scalp_sl_buffer_mult: 'Скальп SL-буфер',
         session_invert_signals: 'Сессия реверс'};
       raBox.querySelector('summary').textContent = `Авто-тюнинг риска (${ra.enabled ? 'вкл' : 'выкл'}, последних: ${ra.log.length})`;
@@ -21938,105 +21217,6 @@ async function refreshTuning() {
         <span class="status-open">OPEN: ${fmtStat(t.mae_r_open)}</span>
       </div>
     </details>`;
-}
-
-async function refreshDivergence() {
-  const status = await (await fetch('/api/divergence/status')).json();
-  const rows = await (await fetch('/api/divergence/signals')).json();
-
-  const tbody = document.querySelector('#divTable tbody');
-  tbody.innerHTML = '';
-  document.getElementById('emptyMsg').style.display = (activeTab==='divergence' && rows.length===0) ? 'block' : 'none';
-  for (const r of rows) {
-    const tr = document.createElement('tr');
-    let statusHtml;
-    const exitTitle = r.exit_time
-      ? `title="свеча закрытия: ${fmtTime(r.exit_time)} · O ${fmt(r.exit_candle?.open)} H ${fmt(r.exit_candle?.high)} L ${fmt(r.exit_candle?.low)} C ${fmt(r.exit_candle?.close)}"`
-      : '';
-    if (r.status === 'OPEN') {
-      statusHtml = `<span class="status-open">OPEN</span>`;
-    } else if (r.result === 'WIN') {
-      statusHtml = `<span class="win" ${exitTitle}>WIN @ ${fmt(r.exit_price)}${r.exit_time ? ' ('+fmtTime(r.exit_time)+')' : ''}</span>`;
-    } else if (r.result === 'LOSS') {
-      statusHtml = `<span class="loss" ${exitTitle}>LOSS @ ${fmt(r.exit_price)}${r.exit_time ? ' ('+fmtTime(r.exit_time)+')' : ''}</span>`;
-    } else {
-      statusHtml = `<span class="status-timeout">TIMEOUT</span>`;
-    }
-    tr.innerHTML = `<td>${r.symbol}</td>
-      <td class="${r.direction==='LONG'?'long':'short'}">${r.direction}</td>
-      <td class="dim">${r.kind || '-'}</td>
-      <td>${fmt(r.entry)}</td>
-      <td class="dim">${fmt(r.sl)}</td>
-      <td class="dim">${fmt(r.tp)}</td>
-      <td class="dim">${r.rr !== null && r.rr !== undefined ? r.rr : '-'}</td>
-      <td class="dim" title="на закрытии → полное окно 24ч">${fmtMfeMae(r, 'mfe_r')}</td>
-      <td class="dim" title="на закрытии → полное окно 24ч">${fmtMfeMae(r, 'mae_r')}</td>
-      <td>${statusHtml}</td>
-      <td class="dim">${fmtTime(r.time)}</td>`;
-    tr.onclick = () => openDivergenceChart(r);
-    tbody.appendChild(tr);
-  }
-
-  const s = status.stats || {};
-  const wr = s.winrate !== null && s.winrate !== undefined ? `${s.winrate}%` : '-';
-  const panel = document.getElementById('divStatsPanel');
-  const cfg = status.config || {};
-  const mfeBlock = s.dataset_count ? `
-    <div style="margin-bottom:8px;"><b>MFE/MAE (R) на момент закрытия сделки</b> — сколько реально было хода в плюс/минус, пока сделка была ещё жива:<br>
-      <span class="win">WIN MFE: ${fmtStat(s.mfe_r_wins_at_close)}</span><br>
-      <span class="win">WIN MAE: ${fmtStat(s.mae_r_wins_at_close)}</span><br>
-      <span class="loss">LOSS MFE: ${fmtStat(s.mfe_r_losses_at_close)}</span><br>
-      <span class="loss">LOSS MAE: ${fmtStat(s.mae_r_losses_at_close)}</span>
-    </div>
-    <details style="margin-top:6px;">
-      <summary class="dim" style="cursor:pointer;font-size:12px;">Полное окно (24ч после сигнала, включая то, что было уже после закрытия — для оценки общего запаса, не для оценки конкретной сделки)</summary>
-      <div style="margin-top:8px;"><b>MFE (R):</b><br>
-        <span class="dim">все: ${fmtStat(s.mfe_r_all)}</span><br>
-        <span class="win">WIN: ${fmtStat(s.mfe_r_wins)}</span><br>
-        <span class="loss">LOSS: ${fmtStat(s.mfe_r_losses)}</span><br>
-        <span class="status-open">OPEN: ${fmtStat(s.mfe_r_open)}</span>
-      </div>
-      <div style="margin-top:6px;"><b>MAE (R):</b><br>
-        <span class="dim">все: ${fmtStat(s.mae_r_all)}</span><br>
-        <span class="win">WIN: ${fmtStat(s.mae_r_wins)}</span><br>
-        <span class="loss">LOSS: ${fmtStat(s.mae_r_losses)}</span><br>
-        <span class="status-open">OPEN: ${fmtStat(s.mae_r_open)}</span>
-      </div>
-    </details>` : '<div class="dim">Пока недостаточно закрытых сигналов для MFE/MAE.</div>';
-  const pm = s.pre_move_pct_all;
-  const preMoveBlock = pm ? `
-    <div style="margin-top:10px;padding-top:10px;border-top:1px solid #1c2433;">
-      <b>Сколько % хода уже съедено к моменту входа</b> (от пивота до входа, с учётом задержки подтверждения):<br>
-      <span class="dim">все: ${fmtStat(s.pre_move_pct_all)}</span><br>
-      <span class="win">WIN: ${fmtStat(s.pre_move_pct_wins)}</span><br>
-      <span class="loss">LOSS: ${fmtStat(s.pre_move_pct_losses)}</span><br>
-      <span class="dim" style="font-size:12px;">Положительное — цена уже пошла в нужную сторону до входа (TP ${cfg.tp_pct ? (cfg.tp_pct*100).toFixed(2) : '?'}% — сравни, сколько из него уже "съедено"). Отрицательное — цена ещё не начала двигаться или уже развернулась против.</span>
-    </div>` : '';
-  const ps = status.pivot_stability || {};
-  const psRows = Object.keys(ps).sort((a,b)=>Number(a)-Number(b)).map(r => {
-    const v = ps[r];
-    const total = v.agree + v.disagree;
-    const gainTxt = v.avg_pct_gain !== null && v.avg_pct_gain !== undefined
-      ? ` · вход раньше в среднем на ${Math.abs(v.avg_pct_gain)}% ${v.avg_pct_gain >= 0 ? 'лучше' : 'хуже'}`
-      : '';
-    return total
-      ? `right=${r}: <b>${v.rate}%</b> согласия (${v.agree}/${total})${gainTxt}`
-      : `right=${r}: пока нет данных`;
-  }).join('<br>');
-  const psBlock = psRows ? `
-    <div style="margin-top:10px;padding-top:10px;border-top:1px solid #1c2433;">
-      <b>Насколько можно уменьшить задержку подтверждения пивота (right=${cfg.pivot_right} сейчас):</b><br>
-      <span class="dim" style="font-size:12px;">процент случаев, когда укороченное окно указало бы на ту же точку, что и строгая (текущая) проверка — не ретроспективно на уже известном ответе, а по факту вживую${cfg.invert_signals ? ' · знак "лучше/хуже" уже учитывает реверс — считается для того направления, которое реально торгуется' : ''}</span><br>
-      <span style="font-size:13px;">${psRows}</span>
-    </div>` : '';
-  panel.innerHTML = `
-    <div class="dim" style="margin-bottom:10px;">
-      RSI-дивергенции${cfg.invert_signals ? ' <span style="color:#ffcc55;font-weight:bold;">· РЕВЕРС ВКЛЮЧЁН</span>' : ''} · ТФ ${status.interval} · скан ${status.last_scan_duration!==null && status.last_scan_duration!==undefined ? status.last_scan_duration+'s' : '...'} ·
-      Винрейт: ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ср. ${s.rr_all ? s.rr_all.avg : '?'} (медиана ${s.rr_all ? s.rr_all.median : '?'}) · SL: ${cfg.sl_mode === 'atr' ? `ATR×${cfg.sl_atr_mult}` : `фикс. RR ${cfg.rr_fallback}`}${cfg.min_rr > 0 ? ` · мин. RR ${cfg.min_rr} (отсеяно: ${status.filtered_by_min_rr||0})` : ''}
-    </div>
-    ${mfeBlock}
-    ${preMoveBlock}
-    ${psBlock}`;
 }
 
 async function refreshEma() {
@@ -23320,7 +22500,7 @@ async function refreshAutotrade() {
     (await fetch('/api/autotrade/log')).json(),
   ]);
   const panel = document.getElementById('autotradePanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5', vgi: 'VGI'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5'};
   const enabledTxt = Object.entries(status.enabled)
     .map(([k, v]) => `<span class="${v ? 'win' : 'dim'}">${modeLabels[k]}: ${v ? 'вкл' : 'выкл'}</span>`)
     .join(' &nbsp;·&nbsp; ');
@@ -23380,7 +22560,7 @@ async function refreshSimulator() {
     (await fetch('/api/autotrade/status')).json(),
   ]);
   const panel = document.getElementById('simulatorPanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', divergence: 'Дивергенции', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5', vgi: 'VGI'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5'};
 
   const pnlClass = status.pnl_total >= 0 ? 'win' : 'loss';
   const sizeTxt = status.size_mode === 'percent' ? `${status.size_value}% от баланса` : `фикс. $${status.size_value}`;
@@ -23444,7 +22624,6 @@ async function refreshAll() {
   await refreshAutotradeBanner();
   await refreshSignals();
   if (activeTab === 'signals') await refreshTuning();
-  if (activeTab === 'divergence') await refreshDivergence();
   if (activeTab === 'ema') await refreshEma();
   if (activeTab === 'scalp') await refreshScalp();
   if (activeTab === 'session') await refreshSession();
@@ -23480,11 +22659,8 @@ function wireResetButton(btnId, endpoint, confirmMsg, idleLabel) {
   };
 }
 wireResetButton('resetVolumeBtn', '/api/reset/volume',
-  'Удалить статистику и подобранные параметры Volume Profile (Сигналы/Watchlist/Тюнинг)? Дивергенции не тронет. Это необратимо.',
+  'Удалить статистику и подобранные параметры Volume Profile (Сигналы/Watchlist/Тюнинг)? Это необратимо.',
   'Очистить объём');
-wireResetButton('resetDivBtn', '/api/reset/divergence',
-  'Удалить статистику RSI-дивергенций? Volume Profile не тронет. Это необратимо.',
-  'Очистить дивер');
 wireResetButton('resetEmaBtn', '/api/reset/ema',
   'Удалить статистику EMA-индикатора? Остальное не тронет. Это необратимо.',
   'Очистить индикатор');
@@ -23507,7 +22683,7 @@ wireResetButton('resetFt5Btn', '/api/reset/ft5',
   'Удалить накопленный анализ параметров и сигналы экспериментального FT5? Остальное не тронет. Это необратимо.',
   'Очистить FT5');
 wireResetButton('resetRiskAutotuneBtn', '/api/reset/risk_autotune',
-  'Сбросить все параметры авто-тюнинга риска (EMA/Дивергенция/Скальпинг/Сессия) к значениям по умолчанию из кода, очистить лог и cooldown? Сами сигналы и статистику не тронет. Это необратимо.',
+  'Сбросить все параметры авто-тюнинга риска (EMA/Скальпинг/Сессия) к значениям по умолчанию из кода, очистить лог и cooldown? Сами сигналы и статистику не тронет. Это необратимо.',
   'Сбросить авто-тюнинг');
 wireResetButton('resetSimulatorBtn', '/api/simulator/reset',
   'Сбросить симулятор баланса к стартовому значению и удалить всю историю сделок? Это необратимо.',
@@ -23519,8 +22695,6 @@ const setInputs = {
   volume_profile_enabled: document.getElementById('setVolumeProfile'),
   bounce_enabled: document.getElementById('setBounce'),
   breakout_enabled: document.getElementById('setBreakout'),
-  divergence_enabled: document.getElementById('setDivergence'),
-  div_invert_signals: document.getElementById('setDivInvert'),
   session_invert_signals: document.getElementById('setSessionInvert'),
   ema_enabled: document.getElementById('setEma'),
   ema_invert_signals: document.getElementById('setEmaInvert'),
@@ -23534,11 +22708,8 @@ const setInputs = {
   msnr_enabled: document.getElementById('setMsnr'),
   ft5_enabled: document.getElementById('setFt5'),
   ft5_invert_signals: document.getElementById('setFt5Invert'),
-  vgi_enabled: document.getElementById('setVgi'),
-  vgi_invert_signals: document.getElementById('setVgiInvert'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
-  telegram_alerts_div: document.getElementById('setTelegramDiv'),
   telegram_alerts_ema: document.getElementById('setTelegramEma'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
   telegram_alerts_session: document.getElementById('setTelegramSession'),
@@ -23549,7 +22720,6 @@ const setInputs = {
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
   autotrade_bounce: document.getElementById('setAutotradeBounce'),
   autotrade_breakout: document.getElementById('setAutotradeBreakout'),
-  autotrade_divergence: document.getElementById('setAutotradeDivergence'),
   autotrade_ema: document.getElementById('setAutotradeEma'),
   autotrade_scalp: document.getElementById('setAutotradeScalp'),
   autotrade_session: document.getElementById('setAutotradeSession'),
@@ -23570,7 +22740,6 @@ const setValueInputs = {
   ema_min_gap_pct: document.getElementById('setEmaMinGapPct'),
   autotrade_leverage_bounce: document.getElementById('setAutotradeLevBounce'),
   autotrade_leverage_breakout: document.getElementById('setAutotradeLevBreakout'),
-  autotrade_leverage_divergence: document.getElementById('setAutotradeLevDivergence'),
   autotrade_leverage_ema: document.getElementById('setAutotradeLevEma'),
   autotrade_leverage_session: document.getElementById('setAutotradeLevSession'),
   autotrade_leverage_msnr: document.getElementById('setAutotradeLevMsnr'),
