@@ -8315,6 +8315,53 @@ v0.99.83 - Direct user request: "можно удалить все что свя�
          were introduced, and a grep confirming every remaining "vgi"
          hit in the file is either the shared openVgiChart infrastructure
          (correctly kept) or historical changelog text (inert).
+
+v0.99.84 - CRITICAL FOLLOW-UP FIX, found while starting the next
+         module's removal (Divergence) and doing a fresh exhaustive
+         sweep for VGI leftovers before touching anything new: v0.99.83's
+         own VGI removal had genuinely missed several live references —
+         pyflakes came back clean at the time, but pyflakes only checks
+         Python NAME resolution, not dict STRING KEYS or unused MODULE-
+         level constants, so several classes of leftover reference
+         couldn't have been caught by it in the first place, only by
+         re-reading with fresh eyes.
+         Found and fixed: (1) a second `global VGI_ENABLED, VGI_INVERT_
+         SIGNALS, VGI_MIN_RR, ...` declaration in apply_settings() (a
+         DIFFERENT settings-related function than the one already
+         cleaned), plus the matching get_settings() dict entries and
+         apply_settings() if-blocks that actually assigned them —
+         apparently VGI had its own plain "enabled" toggle beyond the
+         AUTOTRADE_ENABLED_VGI/TELEGRAM_ALERTS_VGI ones already found,
+         never caught in the original sweep; (2) two leftover
+         SETTINGS_KEYS entries ("vgi_enabled"/"vgi_invert_signals" in
+         one list, "vgi_min_rr" in another); (3) a dead module-level
+         constant, RISK_AUTOTUNE_VGI_RR_BOUNDS (pyflakes doesn't flag
+         unused module globals the way it flags unused locals); (4) the
+         actually SERIOUS one — _relink_sim_trade()'s own module_lists
+         dict still had a `"vgi": STATE["vgi_signals"]` entry. Since
+         Python evaluates dict literal VALUES eagerly at construction
+         time (not lazily per key access), this meant STATE["vgi_
+         signals"] was evaluated — and threw KeyError — on EVERY single
+         call to this function, for ANY trade's mode, not just VGI
+         ones. This one wasn't cosmetic dead code like the others; it
+         was a live crash in a function every module's own simulator
+         trade-relinking path depends on.
+         Verified with py_compile, an actual runtime start (directly
+         called _relink_sim_trade({"mode": "vgi", ...}) — confirmed it
+         now returns None cleanly instead of raising KeyError), pyflakes
+         (clean), an exhaustive grep for VGI_ENABLED/VGI_INVERT_SIGNALS/
+         VGI_MIN_RR/RISK_AUTOTUNE_VGI_RR_BOUNDS and any remaining
+         "vgi_"-prefixed string key anywhere in the file (only
+         historical changelog text remains), node --check on the
+         correctly-last <script> block, and the Flask route/def
+         integrity check (still 60 routes, unaffected — none of these
+         were route-level).
+         Lesson for the remaining 5 modules' own removal passes: do a
+         dedicated final sweep for dict STRING KEYS (STATE[...] access,
+         module_lists-style dispatch dicts) and module-level constants
+         specifically, not just trust py_compile+pyflakes+node --check
+         to catch everything — they structurally can't catch either of
+         those two categories.
 """
 
 import os
@@ -8334,7 +8381,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.83"
+APP_VERSION = "0.99.84"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9276,7 +9323,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_signals", "div_min_rr", "bounce_enabled", "breakout_enabled",
-                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "ft5_invert_signals", "vgi_enabled", "vgi_invert_signals", "msnr_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_div", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session", "telegram_alerts_session_ny", "telegram_alerts_xau_lg", "telegram_alerts_ft5", "telegram_alerts_msnr",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_divergence", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5", "autotrade_msnr",
                   "autotrade_size_mode", "autotrade_size_value",
@@ -9293,7 +9340,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "divergence_enabled", "div_invert_sig
                   # plain module constants with NO persistence at all, so any
                   # manual env-var override would silently revert on restart
                   # too — now they follow the same rules as ema_min_rr etc.
-                  "scalp_min_rr", "scalp_sl_buffer_mult", "session_sl_mult", "session_reverse_rr", "ema_sl_atr_mult", "div_sl_atr_mult", "vgi_min_rr", "msnr_max_rr",
+                  "scalp_min_rr", "scalp_sl_buffer_mult", "session_sl_mult", "session_reverse_rr", "ema_sl_atr_mult", "div_sl_atr_mult", "msnr_max_rr",
                   "ema_tp_pct", "div_tp_pct",
                   # v0.99.64 — xau_lg_invert_signals/xau_lg_sl_buffer_mult/
                   # xau_lg_rr: added to apply_settings()/get_settings() as
@@ -9331,9 +9378,6 @@ def get_settings():
         "xau_lg_rr": XAU_LG_RR,
         "ft5_enabled": FT5_ENABLED,
         "ft5_invert_signals": FT5_INVERT_SIGNALS,
-        "vgi_enabled": VGI_ENABLED,
-        "vgi_invert_signals": VGI_INVERT_SIGNALS,
-        "vgi_min_rr": VGI_MIN_RR,
         "msnr_max_rr": MSNR_MAX_RR,
         "msnr_enabled": MSNR_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
@@ -9393,7 +9437,7 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, XAU_LG_INVERT_SIGNALS, XAU_LG_SL_BUFFER_MULT, XAU_LG_RR, FT5_ENABLED, FT5_INVERT_SIGNALS, VGI_ENABLED, VGI_INVERT_SIGNALS, VGI_MIN_RR, MSNR_ENABLED, MSNR_MAX_RR, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, DIVERGENCE_ENABLED, DIV_INVERT_SIGNALS, DIV_MIN_RR, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, XAU_LG_INVERT_SIGNALS, XAU_LG_SL_BUFFER_MULT, XAU_LG_RR, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, HOURLY_STATS_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_DIV, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
     global TELEGRAM_ALERTS_SESSION_NY, TELEGRAM_ALERTS_XAU_LG, TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_DIVERGENCE, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR
@@ -9459,17 +9503,6 @@ def apply_settings(updates):
         FT5_ENABLED = bool(updates["ft5_enabled"])
     if "ft5_invert_signals" in updates:
         FT5_INVERT_SIGNALS = bool(updates["ft5_invert_signals"])
-    if "vgi_enabled" in updates:
-        VGI_ENABLED = bool(updates["vgi_enabled"])
-    if "vgi_invert_signals" in updates:
-        VGI_INVERT_SIGNALS = bool(updates["vgi_invert_signals"])
-    if "vgi_min_rr" in updates:
-        try:
-            v = float(updates["vgi_min_rr"])
-            if v > 0:
-                VGI_MIN_RR = v
-        except (TypeError, ValueError):
-            pass
     if "msnr_enabled" in updates:
         MSNR_ENABLED = bool(updates["msnr_enabled"])
     if "msnr_max_rr" in updates:
@@ -14471,7 +14504,6 @@ def _relink_sim_trade(trade):
         "session_ny": STATE["session_ny_signals"],
         "xau_lg": STATE["xau_lg_signals"],
         "msnr": STATE["msnr_signals"],
-        "vgi": STATE["vgi_signals"],
     }
     candidates = module_lists.get(trade.get("mode"))
     if not candidates:
@@ -15781,7 +15813,7 @@ RISK_AUTOTUNE_TP_STEP_RATIO = 0.1  # max 10% change to TP_PCT per pass — same 
 RISK_AUTOTUNE_TP_PCT_BOUNDS = (0.003, 0.05)  # 0.3%-5% — sane range; below is barely worth the fees, above is an unrealistic single fixed target
 RISK_AUTOTUNE_SESSION_RR_BOUNDS = (0.5, 5.0)  # v0.98.4 — Session's SESSION_REVERSE_RR is an RR multiple, not a %-of-price like EMA/DIV's TP_PCT, so it needs its own bounds on a completely different scale when reusing _risk_autotune_tp_extend for it
 RISK_AUTOTUNE_XAU_LG_RR_BOUNDS = (0.5, 5.0)  # v0.99.64 — same reasoning/range as Session's own RR bounds above: XAU_LG_RR is a direct RR multiple, not a %-of-price
-RISK_AUTOTUNE_VGI_RR_BOUNDS = (1.0, 8.0)  # v0.98.9 — same reasoning as Session's own RR bounds above, sized for VGI_MIN_RR's own default (3.0) and the fact RR is guaranteed to equal min_rr exactly by construction (unlike Session), so a somewhat wider practical range makes sense
+
 RISK_AUTOTUNE_MSNR_MAX_RR_BOUNDS = (5.5, 15.0)  # v0.99.11 — lower bound deliberately kept above MSNR_FALLBACK_RR (4.0): caught via behavioral testing that a cap set BELOW fallback_rr is self-defeating (the fallback trade it falls through to would itself exceed the "cap" it was supposed to enforce). Upper bound just gives room to relax the cap if the data doesn't actually support tightening it.
 
 
