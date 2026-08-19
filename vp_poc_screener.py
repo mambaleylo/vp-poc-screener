@@ -8653,6 +8653,104 @@ v0.99.90 - CRITICAL FIX, direct user report with a screenshot: 3
          (matches the earlier "5+ hour stall" investigation's own
          unresolved territory) — informational by design, not something
          this version needed to fix.
+
+v0.99.91 - NEW MODULE: MIRROR — "зеркальный уровень" (support/resistance
+         polarity-flip) reversal strategy. Built per direct user request
+         after 7 screenshots of a manual trader's methodology (Instagram,
+         "bigtrader88"): a support or resistance level gets BROKEN, and
+         on price's later RETURN to that same level, it flips to the
+         OPPOSITE role — broken support becomes resistance (SHORT setup),
+         broken resistance becomes support (LONG setup). The moment this
+         flip is confirmed by price touching back is "рождение зеркалки"
+         ("birth of the mirror"). Entry is timed with one of four
+         candlestick reversal patterns confirming rejection right at that
+         level — user explicitly chose all four (over a lighter subset)
+         and the full module (backtest + live scan + autotrade, over a
+         lighter detection-only first pass) when scoped.
+         Core detection (mirror_is_inside_bar/tweezers/rails/engulfing_
+         doji, mirror_find_pivots, mirror_detect_signals): standard
+         fractal HIGH/LOW pivots (deliberately NOT MSNR's own OCL/close-
+         based pivots — a different, strategy-specific choice there; a
+         "mirror level" is a classic wick-based S/R concept matching
+         every screenshot's own level lines). A walk-forward state
+         machine tracks each confirmed pivot level through: watched ->
+         broken (a bar CLOSES past it, not just wicks through — a wick
+         poke that immediately reclaims isn't a genuine "зеркалка") ->
+         awaiting return (capped at MIRROR_MAX_BARS_TO_RETURN bars before
+         going stale) -> pattern-confirmed signal, checked in a fixed
+         order (inside_bar, tweezers, rails, engulfing_doji), first match
+         wins, one signal per level. Entry = confirming bar's close;
+         SL = just beyond the PATTERN's own extreme (the natural stop
+         the source material itself draws — not a fixed %/ATR multiple
+         like this app's more mechanical indicators); TP = entry ±
+         risk×MIRROR_RR (a fixed RR target — the source trader's own
+         exits are discretionary, watching for another reversal at the
+         next level, but a mechanical pipeline needs a concrete rule;
+         MIRROR_RR defaults within the 1:3–1:20 range the screenshots
+         themselves report).
+         Full standard infrastructure matching this session's own
+         established module shape (closest to XAU LG's — single-
+         timeframe, no per-symbol grid-search optimizer needed since
+         pattern-matching is deterministic given fixed tolerances):
+         mirror_build_universe() (capped, FT5-style), mirror_backtest_
+         symbol()/mirror_track_outcome()/mirror_summarize_backtest(),
+         mirror_scan_symbol_live() (dedup, has_open_signal_any_module
+         guard, autotrade + sim + Telegram wiring with the pattern name
+         spelled out in Russian), update_mirror_signal_outcomes() (MFE/
+         MAE tracking), compute_mirror_signal_stats() (with a PER-
+         PATTERN winrate breakdown — which of the 4 patterns is actually
+         pulling its weight, same motivation as Volume's own per-reason
+         stats), mirror_backtest_loop()/mirror_live_loop(), 4 API routes
+         (status/chart/signals/reset — the chart route follows the same
+         "look up stored data, don't re-derive with current params" fix
+         already applied to MSNR/XAU LG's own charts), full settings
+         wiring (SETTINGS_KEYS, get/apply_settings, autotrade+leverage,
+         Telegram alerts), and the full frontend (tab now second only to
+         MSNR, panel, refreshMirror(), reset button, settings groups,
+         chart reuse via a thin openMirrorChart() wrapper around
+         openVgiChart() — same "genuinely identical signal shape, don't
+         duplicate ~90 lines of canvas code" judgment already applied to
+         Scalp/XAU LG's own charts).
+         Applied the session's own hard-won lessons proactively rather
+         than discovering them the same painful way VGI/Divergence's
+         removals did: STATE keys, has_open_signal_any_module()'s and
+         _relink_sim_trade()'s own dispatch dicts, SNAPSHOT_MODULE_KEYS,
+         and save_state()/load_state()'s own snapshot/restore all got
+         their "mirror" entries added IMMEDIATELY alongside the STATE
+         dict itself, not as a late follow-up fix. One real bug still
+         caught and fixed mid-build via pyflakes: MIRROR_* constants
+         were initially placed near the module's own logic (end of
+         file), but STATE's own construction (much earlier in the file)
+         needed MIRROR_SIGNAL_HISTORY already defined — moved the whole
+         constant block next to every other module's own constants
+         (right before STATE), matching why FT5_SIGNAL_HISTORY etc. all
+         live there and not near their own modules' logic either. Also
+         caught (via the SAME "no UI template already exists" discovery
+         process): autotrade toggle+leverage rows for a module needed
+         building from scratch by hand (following Session/EMA's own
+         settings-modal pattern) since XAU LG/MSNR/FT5 — the modules
+         checked first as templates — turned out to have NO such UI
+         control at all (XAU LG's autotrade can only be toggled via a
+         raw API call; MSNR's is per-symbol elsewhere; FT5 has none by
+         design) — not a bug in any of them, just not a copyable
+         template for what MIRROR itself needed.
+         Verified with py_compile, an actual runtime start throughout
+         (core pattern functions tested individually with hand-built
+         synthetic candles; the full mirror_detect_signals() pipeline
+         tested end-to-end on a realistic support-break-then-return-then-
+         inside-bar sequence, producing a correctly-priced SHORT signal;
+         mirror_track_outcome()/mirror_summarize_backtest() verified
+         against the same signal resolving to a WIN; a live settings
+         round-trip via get_settings()/apply_settings() confirmed all 7
+         mirror_*/autotrade_mirror*/telegram_alerts_mirror fields read
+         and write correctly), pyflakes (clean throughout, including
+         mid-build — used specifically to catch the constant-ordering
+         bug and a duplicate mirror_rr mapping entry before they could
+         ship), node --check on the correctly-last <script> block, the
+         Flask route/def integrity check (60 routes — up from 56, the
+         4 new MIRROR endpoints, nothing else touched), and an AST walk
+         for duplicate top-level defs (none introduced — 13 new mirror_*
+         functions, each present exactly once).
 """
 
 import os
@@ -8672,7 +8770,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.90"
+APP_VERSION = "0.99.91"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9416,6 +9514,30 @@ FT5_BACKTEST_DAYS = int(os.environ.get("VP_FT5_BACKTEST_DAYS", 30))
 FT5_SIGNAL_HISTORY = 200
 FT5_REFRESH_SEC = int(os.environ.get("VP_FT5_REFRESH_SEC", 24 * 3600))  # daily backtest/param-search refresh, same cadence as Volume's optimizer
 FT5_SCAN_INTERVAL_SEC = int(os.environ.get("VP_FT5_SCAN_INTERVAL_SEC", 300))
+
+# MIRROR — "зеркальный уровень" (support/resistance polarity-flip)
+# reversal strategy. Constants live here (not next to the module's own
+# logic near the end of the file) for the same reason every other
+# module's own constants do — see FT5_SIGNAL_HISTORY etc. just above:
+# STATE's own construction below needs MIRROR_SIGNAL_HISTORY already
+# defined, and Python evaluates top-level code strictly top-to-bottom.
+MIRROR_ENABLED = os.environ.get("VP_MIRROR_ENABLED", "0") == "1"  # off by default, same reasoning as every other new module here — user opts in after seeing real backtest numbers
+MIRROR_INTERVAL = os.environ.get("VP_MIRROR_INTERVAL", "1h")
+MIRROR_PIVOT_LEFT = int(os.environ.get("VP_MIRROR_PIVOT_LEFT", 3))
+MIRROR_PIVOT_RIGHT = int(os.environ.get("VP_MIRROR_PIVOT_RIGHT", 3))
+MIRROR_LOOKBACK = int(os.environ.get("VP_MIRROR_LOOKBACK", 150))  # bars of history considered per backtest/live-scan pass
+MIRROR_UNIVERSE_SIZE = int(os.environ.get("VP_MIRROR_UNIVERSE_SIZE", 60))  # capped, same reasoning as FT5's own — the per-symbol backtest cost adds up across a wide universe
+MIRROR_TOUCH_TOLERANCE_PCT = float(os.environ.get("VP_MIRROR_TOUCH_TOLERANCE_PCT", 0.15))  # how close price must return to a broken level to count as "touching" it (as % of price)
+MIRROR_PATTERN_TOLERANCE_PCT = float(os.environ.get("VP_MIRROR_PATTERN_TOLERANCE_PCT", 30.0))  # tweezers/rails matching-wick/body tolerance, as % of the larger of the two compared values
+MIRROR_RR = float(os.environ.get("VP_MIRROR_RR", 3.0))  # fixed RR target — see mirror_detect_signals()'s own docstring for why a mechanical pipeline needs one despite the source trader's own discretionary exits
+MIRROR_MAX_BARS_TO_RETURN = int(os.environ.get("VP_MIRROR_MAX_BARS_TO_RETURN", 60))  # a level broken this many bars ago without price returning to it goes stale and stops being watched
+MIRROR_SIGNAL_HISTORY = 300
+MIRROR_BACKTEST_DAYS = 40
+MIRROR_REFRESH_SEC = int(os.environ.get("VP_MIRROR_REFRESH_SEC", 3600))
+MIRROR_SCAN_INTERVAL_SEC = int(os.environ.get("VP_MIRROR_SCAN_INTERVAL_SEC", 300))
+AUTOTRADE_ENABLED_MIRROR = os.environ.get("VP_AUTOTRADE_MIRROR", "0") == "1"
+AUTOTRADE_LEVERAGE_MIRROR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_MIRROR", 10))
+TELEGRAM_ALERTS_MIRROR = os.environ.get("VP_TG_ALERTS_MIRROR", "1") == "1"
 FT5_MIN_BACKTEST_TRADES = int(os.environ.get("VP_FT5_MIN_BACKTEST_TRADES", 5))  # a combo with fewer trades than this in the backtest window isn't a confident pick — same bar Volume's optimizer uses (MIN_BACKTEST_TRADES)
 FT5_RANK_PRIOR_TARGET = int(os.environ.get("VP_FT5_RANK_PRIOR_TARGET", 1))  # v0.98.8 — ft5_ranking_score() blends in max(0, TARGET - losses_count) pseudo-trades at the known -FT5_STOPLOSS_PCT level, so a small loss-free sample can't look artificially low-risk just because it hasn't hit its (structurally always-possible) stop yet. Tapered by ACTUAL real losses (not a flat count on every combo) — a flat prior tested worse, disproportionately hurting smaller-but-still-real samples. See ft5_ranking_score()'s own docstring for the full reasoning, including why TARGET=1 specifically. Replaces FT5_RANK_Z (v0.98.7), which is no longer referenced — the confidence multiplier is now t_critical(n-1), not a fixed Z.
 
@@ -9548,14 +9670,15 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session", "telegram_alerts_session_ny", "telegram_alerts_xau_lg", "telegram_alerts_ft5", "telegram_alerts_msnr",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5", "autotrade_msnr",
+                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "mirror_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "telegram_alerts_vp", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session", "telegram_alerts_session_ny", "telegram_alerts_xau_lg", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror",
                   "autotrade_size_mode", "autotrade_size_value",
                   "scalp_size_mode", "scalp_size_value",
                   "ema_min_rr",
                   "ema_adx_filter_enabled", "ema_adx_min", "ema_min_gap_pct",
-                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_ema", "autotrade_leverage_session", "autotrade_leverage_session_ny", "autotrade_leverage_xau_lg", "autotrade_leverage_ft5", "autotrade_leverage_msnr",
+                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_ema", "autotrade_leverage_session", "autotrade_leverage_session_ny", "autotrade_leverage_xau_lg", "autotrade_leverage_ft5", "autotrade_leverage_msnr", "autotrade_leverage_mirror",
+                  "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
                   # same save_settings() path everything else already uses,
@@ -9600,6 +9723,10 @@ def get_settings():
         "xau_lg_rr": XAU_LG_RR,
         "ft5_enabled": FT5_ENABLED,
         "ft5_invert_signals": FT5_INVERT_SIGNALS,
+        "mirror_enabled": MIRROR_ENABLED,
+        "mirror_rr": MIRROR_RR,
+        "mirror_touch_tolerance_pct": MIRROR_TOUCH_TOLERANCE_PCT,
+        "mirror_pattern_tolerance_pct": MIRROR_PATTERN_TOLERANCE_PCT,
         "msnr_max_rr": MSNR_MAX_RR,
         "msnr_enabled": MSNR_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
@@ -9612,6 +9739,7 @@ def get_settings():
         "telegram_alerts_xau_lg": TELEGRAM_ALERTS_XAU_LG,
         "telegram_alerts_ft5": TELEGRAM_ALERTS_FT5,
         "telegram_alerts_msnr": TELEGRAM_ALERTS_MSNR,
+        "telegram_alerts_mirror": TELEGRAM_ALERTS_MIRROR,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
         "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
@@ -9623,6 +9751,7 @@ def get_settings():
         "autotrade_xau_lg": AUTOTRADE_ENABLED_XAU_LG,
         "autotrade_ft5": AUTOTRADE_ENABLED_FT5,
         "autotrade_msnr": AUTOTRADE_ENABLED_MSNR,
+        "autotrade_mirror": AUTOTRADE_ENABLED_MIRROR,
         "autotrade_size_mode": AUTOTRADE_SIZE_MODE,
         "autotrade_size_value": AUTOTRADE_SIZE_VALUE,
         "scalp_size_mode": SCALP_SIZE_MODE,
@@ -9639,6 +9768,7 @@ def get_settings():
         "autotrade_leverage_xau_lg": AUTOTRADE_LEVERAGE_XAU_LG,
         "autotrade_leverage_ft5": AUTOTRADE_LEVERAGE_FT5,
         "autotrade_leverage_msnr": AUTOTRADE_LEVERAGE_MSNR,
+        "autotrade_leverage_mirror": AUTOTRADE_LEVERAGE_MIRROR,
         "scalp_min_rr": SCALP_MIN_RR,
         "scalp_sl_buffer_mult": SCALP_SL_BUFFER_MULT,
         "session_sl_mult": SESSION_SL_MULT,
@@ -9655,9 +9785,10 @@ def apply_settings(updates):
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
     global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, XAU_LG_INVERT_SIGNALS, XAU_LG_SL_BUFFER_MULT, XAU_LG_RR, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, HOURLY_STATS_ENABLED
+    global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
-    global TELEGRAM_ALERTS_SESSION_NY, TELEGRAM_ALERTS_XAU_LG, TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR
+    global TELEGRAM_ALERTS_SESSION_NY, TELEGRAM_ALERTS_XAU_LG, TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR
     global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
     global SCALP_SIZE_MODE, SCALP_SIZE_VALUE
     global EMA_MIN_RR
@@ -9709,6 +9840,29 @@ def apply_settings(updates):
         FT5_ENABLED = bool(updates["ft5_enabled"])
     if "ft5_invert_signals" in updates:
         FT5_INVERT_SIGNALS = bool(updates["ft5_invert_signals"])
+    if "mirror_enabled" in updates:
+        MIRROR_ENABLED = bool(updates["mirror_enabled"])
+    if "mirror_rr" in updates:
+        try:
+            v = float(updates["mirror_rr"])
+            if v > 0:
+                MIRROR_RR = v
+        except (TypeError, ValueError):
+            pass
+    if "mirror_touch_tolerance_pct" in updates:
+        try:
+            v = float(updates["mirror_touch_tolerance_pct"])
+            if v >= 0:
+                MIRROR_TOUCH_TOLERANCE_PCT = v
+        except (TypeError, ValueError):
+            pass
+    if "mirror_pattern_tolerance_pct" in updates:
+        try:
+            v = float(updates["mirror_pattern_tolerance_pct"])
+            if v >= 0:
+                MIRROR_PATTERN_TOLERANCE_PCT = v
+        except (TypeError, ValueError):
+            pass
     if "msnr_enabled" in updates:
         MSNR_ENABLED = bool(updates["msnr_enabled"])
     if "msnr_max_rr" in updates:
@@ -9736,6 +9890,8 @@ def apply_settings(updates):
         TELEGRAM_ALERTS_FT5 = bool(updates["telegram_alerts_ft5"])
     if "telegram_alerts_msnr" in updates:
         TELEGRAM_ALERTS_MSNR = bool(updates["telegram_alerts_msnr"])
+    if "telegram_alerts_mirror" in updates:
+        TELEGRAM_ALERTS_MIRROR = bool(updates["telegram_alerts_mirror"])
     if "autotrade_dry_run" in updates:
         AUTOTRADE_DRY_RUN = bool(updates["autotrade_dry_run"])
     if "autotrade_bounce" in updates:
@@ -9756,6 +9912,8 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_FT5 = bool(updates["autotrade_ft5"])
     if "autotrade_msnr" in updates:
         AUTOTRADE_ENABLED_MSNR = bool(updates["autotrade_msnr"])
+    if "autotrade_mirror" in updates:
+        AUTOTRADE_ENABLED_MIRROR = bool(updates["autotrade_mirror"])
     if "autotrade_size_mode" in updates and updates["autotrade_size_mode"] in ("percent", "fixed"):
         AUTOTRADE_SIZE_MODE = updates["autotrade_size_mode"]
     if "autotrade_size_value" in updates:
@@ -9806,6 +9964,7 @@ def apply_settings(updates):
         ("autotrade_leverage_xau_lg", "AUTOTRADE_LEVERAGE_XAU_LG"),
         ("autotrade_leverage_ft5", "AUTOTRADE_LEVERAGE_FT5"),
         ("autotrade_leverage_msnr", "AUTOTRADE_LEVERAGE_MSNR"),
+        ("autotrade_leverage_mirror", "AUTOTRADE_LEVERAGE_MIRROR"),
     ):
         if key in updates:
             try:
@@ -10076,6 +10235,13 @@ STATE = {
     "ft5_last_backtest_finished": None,
     "ft5_last_backtest_duration": None,
     "ft5_signals": deque(maxlen=FT5_SIGNAL_HISTORY),
+    # MIRROR — "зеркальный уровень" reversal strategy, see that module's
+    # own header comment. All keys prefixed mirror_.
+    "mirror_backtest_results": {},
+    "mirror_backtest_summary": {},
+    "mirror_last_backtest_finished": None,
+    "mirror_last_backtest_duration": None,
+    "mirror_signals": deque(maxlen=MIRROR_SIGNAL_HISTORY),
     "autotrade_log": deque(maxlen=AUTOTRADE_TRADE_HISTORY),  # every attempted auto-trade, dry-run or real, with its outcome
     "sim_balance": AUTOTRADE_SIM_START_BALANCE,
     "sim_trades": deque(maxlen=AUTOTRADE_SIM_TRADE_HISTORY),  # pending + settled paper trades
@@ -10132,6 +10298,7 @@ def has_open_signal_any_module(symbol, exclude=None):
         "session_signals": STATE["session_signals"], "session_ny_signals": STATE["session_ny_signals"],
         "xau_lg_signals": STATE["xau_lg_signals"], "ft5_signals": STATE["ft5_signals"],
         "msnr_signals": STATE["msnr_signals"],
+        "mirror_signals": STATE["mirror_signals"],
     }
     with state_lock:
         for name, lst in lists.items():
@@ -12065,6 +12232,7 @@ SNAPSHOT_MODULE_KEYS = {
     "scalp": "scalp_signals",
     "session": "session_signals",
     "session_ny": "session_ny_signals",
+    "mirror": "mirror_signals",
 }
 
 
@@ -14241,6 +14409,7 @@ def save_state():
                 "msnr_autotrade_symbols": STATE["msnr_autotrade_symbols"],
                 "ft5_signals": list(STATE["ft5_signals"]),
                 "ft5_symbol_overrides": STATE["ft5_symbol_overrides"],
+                "mirror_signals": list(STATE["mirror_signals"]),
                 "autotrade_log": list(STATE["autotrade_log"]),
                 "sim_balance": STATE["sim_balance"],
                 # Both PENDING and SETTLED now (previously PENDING was
@@ -14289,6 +14458,7 @@ def _relink_sim_trade(trade):
         "session_ny": STATE["session_ny_signals"],
         "xau_lg": STATE["xau_lg_signals"],
         "msnr": STATE["msnr_signals"],
+        "mirror": STATE["mirror_signals"],
     }
     candidates = module_lists.get(trade.get("mode"))
     if not candidates:
@@ -14352,6 +14522,7 @@ def load_state():
         msnr_autotrade_symbols = data.get("msnr_autotrade_symbols", {})
         ft5_signals = data.get("ft5_signals", [])
         ft5_symbol_overrides = data.get("ft5_symbol_overrides", {})
+        mirror_signals = data.get("mirror_signals", [])
         autotrade_log = data.get("autotrade_log", [])
         sim_trades = data.get("sim_trades", [])
         risk_autotune_log = data.get("risk_autotune_log", [])
@@ -14368,6 +14539,7 @@ def load_state():
             STATE["msnr_autotrade_symbols"] = msnr_autotrade_symbols
             STATE["ft5_signals"] = deque(_backfill_mfe_mae(ft5_signals), maxlen=FT5_SIGNAL_HISTORY)
             STATE["ft5_symbol_overrides"] = ft5_symbol_overrides
+            STATE["mirror_signals"] = deque(_backfill_mfe_mae(mirror_signals), maxlen=MIRROR_SIGNAL_HISTORY)
             STATE["autotrade_log"] = deque(autotrade_log, maxlen=AUTOTRADE_TRADE_HISTORY)
             STATE["risk_autotune_log"] = deque(risk_autotune_log, maxlen=200)
             STATE["risk_autotune_last_change"] = risk_autotune_last_change
@@ -19186,6 +19358,510 @@ def ft5_live_loop():
 
 
 
+# ============================================================================
+# MIRROR — "зеркальный уровень" (support/resistance polarity-flip) reversal
+# ----------------------------------------------------------------------------
+# Built per direct user request after screenshots of a manual trader's
+# methodology (Instagram, "bigtrader88"): a support or resistance level
+# gets BROKEN, and on price's later RETURN to that same level, it flips to
+# the OPPOSITE role — a broken support becomes resistance (SHORT setup) and
+# a broken resistance becomes support (LONG setup). The moment this flip is
+# confirmed by price touching back is what the trader calls "рождение
+# зеркалки" ("birth of the mirror"). Entry is timed with one of several
+# candlestick reversal patterns confirming rejection right at that level:
+# "внутренний бар" (inside bar), "пинцет" (tweezers — matching wicks),
+# "рельсы" (rails — two opposite-color candles with matching body size),
+# and "поглощение на дожи" (engulfing off a doji). User chose to build all
+# four patterns and the full module (backtest + live scan + autotrade) in
+# one pass, per direct choice over a lighter detection-only first version.
+# Deliberately HIGH/LOW-based pivots (not MSNR's own OCL/close-based
+# pivots — a different, strategy-specific design choice there): a "mirror
+# level" is a classic wick-based support/resistance concept, matching
+# every example screenshot's own level lines sitting at candle wicks.
+# ============================================================================
+def mirror_is_inside_bar(c, prev_c):
+    """"Внутренний бар" (inside bar) — the single most-used confirmation
+    pattern across every example screenshot (used for both entries AND
+    exits there). Current candle's full range sits entirely inside the
+    previous candle's own range — a sharp contraction in range right at
+    the level, read as a stall/reversal signal."""
+    return c["high"] <= prev_c["high"] and c["low"] >= prev_c["low"]
+
+
+def mirror_is_tweezers(c1, c2, direction, tolerance_pct=MIRROR_PATTERN_TOLERANCE_PCT):
+    """"Пинцет" (tweezers) — two adjacent candles with matching wick
+    extremes: matching HIGHS (tweezer top, bearish — direction "SHORT")
+    or matching LOWS (tweezer bottom, bullish — direction "LONG").
+    "Matching" is measured as a % of the larger candle's own RANGE (not
+    absolute price), so the same tolerance is meaningful on both a
+    $0.001 coin and a $100,000 one."""
+    rng = max(c1["high"] - c1["low"], c2["high"] - c2["low"], 1e-12)
+    if direction == "SHORT":
+        return abs(c1["high"] - c2["high"]) / rng <= tolerance_pct / 100.0
+    return abs(c1["low"] - c2["low"]) / rng <= tolerance_pct / 100.0
+
+
+def mirror_is_rails(c1, c2, tolerance_pct=MIRROR_PATTERN_TOLERANCE_PCT):
+    """"Рельсы" (rails) — two adjacent candles of OPPOSITE color with
+    closely matching body sizes (like railway ties) — a sharp stall in
+    directional momentum right at the level. Body size compared as a %
+    of the LARGER of the two bodies, same scale-independence reasoning
+    as tweezers above."""
+    body1 = abs(c1["close"] - c1["open"])
+    body2 = abs(c2["close"] - c2["open"])
+    if body1 < 1e-12 or body2 < 1e-12:
+        return False
+    if (c1["close"] > c1["open"]) == (c2["close"] > c2["open"]):
+        return False  # must be opposite colors
+    return abs(body1 - body2) / max(body1, body2) <= tolerance_pct / 100.0
+
+
+def mirror_is_engulfing_doji(doji_c, engulf_c, direction, doji_body_pct=10.0):
+    """"Поглощение на дожи" (engulfing off a doji) — a doji (body no
+    more than doji_body_pct of its own range — indecision) immediately
+    followed by a candle, in the reversal direction, whose own body
+    fully contains the doji's body."""
+    doji_range = doji_c["high"] - doji_c["low"]
+    if doji_range <= 0:
+        return False
+    if abs(doji_c["close"] - doji_c["open"]) / doji_range * 100.0 > doji_body_pct:
+        return False
+    engulf_up = engulf_c["close"] > engulf_c["open"]
+    if direction == "LONG" and not engulf_up:
+        return False
+    if direction == "SHORT" and engulf_up:
+        return False
+    lo, hi = min(doji_c["open"], doji_c["close"]), max(doji_c["open"], doji_c["close"])
+    e_lo, e_hi = min(engulf_c["open"], engulf_c["close"]), max(engulf_c["open"], engulf_c["close"])
+    return e_lo <= lo and e_hi >= hi
+
+
+def mirror_find_pivots(candles, left=None, right=None):
+    """Standard fractal swing-high/low pivot detector — bar i is a
+    confirmed swing HIGH once `right` more bars have printed and its OWN
+    high is the unique max within [i-left, i+right]; symmetric for swing
+    LOW. Ties (two bars sharing the exact same extreme) are deliberately
+    NOT treated as a pivot — an ambiguous double-top/bottom shouldn't be
+    silently resolved to whichever bar the loop happens to visit first.
+    Returns a list of {"type": "high"|"low", "price": ..., "idx": i,
+    "confirm_idx": i+right} oldest first — confirm_idx is the index at
+    which this pivot becomes KNOWN. No lookahead: nothing before that
+    bar's own close may treat this pivot as existing yet, same no-
+    lookahead discipline every other pivot-based module in this app
+    already follows (see msnr_build_pivots()'s own v0.99.42 fix)."""
+    left = left if left is not None else MIRROR_PIVOT_LEFT
+    right = right if right is not None else MIRROR_PIVOT_RIGHT
+    n = len(candles)
+    pivots = []
+    for i in range(left, n - right):
+        window_highs = [candles[j]["high"] for j in range(i - left, i + right + 1)]
+        window_lows = [candles[j]["low"] for j in range(i - left, i + right + 1)]
+        if candles[i]["high"] == max(window_highs) and window_highs.count(candles[i]["high"]) == 1:
+            pivots.append({"type": "high", "price": candles[i]["high"], "idx": i, "confirm_idx": i + right})
+        if candles[i]["low"] == min(window_lows) and window_lows.count(candles[i]["low"]) == 1:
+            pivots.append({"type": "low", "price": candles[i]["low"], "idx": i, "confirm_idx": i + right})
+    return pivots
+
+
+def mirror_detect_signals(candles, pivot_left=None, pivot_right=None,
+                           touch_tolerance_pct=None, pattern_tolerance_pct=None,
+                           max_bars_to_return=None, rr=None, patterns=None):
+    """Single walk-forward pass over `candles` (oldest first) implementing
+    the full "mirror level" state machine described in this module's own
+    header comment:
+    1. mirror_find_pivots() finds every confirmed swing high/low.
+    2. Each pivot becomes a WATCHED level the moment it's confirmed
+       (confirm_idx) — no lookahead, same discipline as every other
+       pivot-based module here.
+    3. A watched level gets marked BROKEN the first time a bar's own
+       CLOSE moves past it in the "invalidating" direction (a support/
+       low level breaks on a close BELOW it; a resistance/high level
+       breaks on a close ABOVE it) — using the close (not a wick) is
+       deliberate: a single wick poking through and immediately
+       reclaiming the level isn't the kind of break the source material
+       treats as a genuine "зеркалка," only a real close through it is.
+    4. Once broken, a level is watched for up to `max_bars_to_return`
+       further bars for price to TOUCH back to it (within `touch_
+       tolerance_pct` of price) from the other side — a level nobody
+       returns to within that window goes stale and stops being
+       watched, matching the source's own visible examples (the return
+       always happens within a handful of bars, never many days later
+       on the same timeframe).
+    5. At the bar where price touches back, checks whichever of
+       `patterns` (default: all four — inside_bar, tweezers, rails,
+       engulfing_doji) confirm a reversal in the correct direction (a
+       broken-support level implies a SHORT signal on return; a broken-
+       resistance level implies LONG) — the FIRST pattern that matches,
+       checked in the fixed order (inside_bar, tweezers, rails,
+       engulfing_doji), wins; a level only ever fires ONE signal, then
+       stops being watched (matches the source's own examples, which
+       never re-trade the exact same level twice).
+    Entry = the confirming bar's own close. Stop-loss = just beyond the
+    pattern's own extreme in the trade's risk direction (the natural,
+    pattern-defined stop the source material itself draws in every
+    screenshot, not a fixed %/ATR multiple like this app's more
+    mechanical indicators use) — see each pattern's own SL comment
+    inline below. Take-profit = entry ± risk × rr (a fixed RR target;
+    the source trader's OWN exits are discretionary — watching for
+    ANOTHER reversal pattern at the next level rather than one fixed
+    number — but a fixed RR is what a mechanical backtest/live-firing
+    pipeline needs; MIRROR_RR defaults conservatively within the 1:3
+    to 1:20 range the source material itself reports).
+    Returns a list of signal dicts (oldest first): {"direction",
+    "entry", "sl", "tp", "rr", "pattern", "level_price", "level_type",
+    "entry_idx", "entry_time"}."""
+    pivot_left = pivot_left if pivot_left is not None else MIRROR_PIVOT_LEFT
+    pivot_right = pivot_right if pivot_right is not None else MIRROR_PIVOT_RIGHT
+    touch_tolerance_pct = touch_tolerance_pct if touch_tolerance_pct is not None else MIRROR_TOUCH_TOLERANCE_PCT
+    pattern_tolerance_pct = pattern_tolerance_pct if pattern_tolerance_pct is not None else MIRROR_PATTERN_TOLERANCE_PCT
+    max_bars_to_return = max_bars_to_return if max_bars_to_return is not None else MIRROR_MAX_BARS_TO_RETURN
+    rr = rr if rr is not None else MIRROR_RR
+    patterns = patterns if patterns is not None else ("inside_bar", "tweezers", "rails", "engulfing_doji")
+
+    pivots = mirror_find_pivots(candles, pivot_left, pivot_right)
+    by_confirm_idx = {}
+    for p in pivots:
+        by_confirm_idx.setdefault(p["confirm_idx"], []).append(p)
+
+    watched = []  # levels not yet broken
+    broken = []  # levels broken, awaiting a return touch
+    signals = []
+    n = len(candles)
+
+    for i in range(n):
+        for p in by_confirm_idx.get(i, []):
+            watched.append(dict(p))
+
+        c = candles[i]
+        still_watched = []
+        for lvl in watched:
+            if lvl["type"] == "low" and c["close"] < lvl["price"]:
+                lvl["break_idx"] = i
+                broken.append(lvl)
+            elif lvl["type"] == "high" and c["close"] > lvl["price"]:
+                lvl["break_idx"] = i
+                broken.append(lvl)
+            else:
+                still_watched.append(lvl)
+        watched = still_watched
+
+        still_broken = []
+        for lvl in broken:
+            if i - lvl["break_idx"] > max_bars_to_return:
+                continue  # gone stale, drop it silently
+            price = lvl["price"]
+            tol = price * touch_tolerance_pct / 100.0
+            touched = (c["low"] <= price + tol) if lvl["type"] == "low" else (c["high"] >= price - tol)
+            if not touched or i < 1:
+                still_broken.append(lvl)
+                continue
+            direction = "SHORT" if lvl["type"] == "low" else "LONG"
+            prev_c = candles[i - 1]
+            matched_pattern = None
+            sl = None
+            if "inside_bar" in patterns and mirror_is_inside_bar(c, prev_c):
+                matched_pattern = "inside_bar"
+                sl = prev_c["high"] if direction == "SHORT" else prev_c["low"]
+            elif "tweezers" in patterns and mirror_is_tweezers(prev_c, c, direction, pattern_tolerance_pct):
+                matched_pattern = "tweezers"
+                sl = max(prev_c["high"], c["high"]) if direction == "SHORT" else min(prev_c["low"], c["low"])
+            elif "rails" in patterns and mirror_is_rails(prev_c, c, pattern_tolerance_pct):
+                matched_pattern = "rails"
+                sl = max(prev_c["high"], c["high"]) if direction == "SHORT" else min(prev_c["low"], c["low"])
+            elif "engulfing_doji" in patterns and mirror_is_engulfing_doji(prev_c, c, direction):
+                matched_pattern = "engulfing_doji"
+                sl = c["high"] if direction == "SHORT" else c["low"]
+            if matched_pattern is None:
+                still_broken.append(lvl)  # no pattern yet this bar — keep watching (still within max_bars_to_return next time)
+                continue
+            entry = c["close"]
+            risk = abs(entry - sl)
+            if risk <= 0:
+                continue  # degenerate — drop this level, don't emit a zero-risk signal
+            tp = entry + risk * rr if direction == "LONG" else entry - risk * rr
+            signals.append({
+                "direction": direction, "entry": entry, "sl": sl, "tp": tp, "rr": rr,
+                "pattern": matched_pattern, "level_price": price, "level_type": lvl["type"],
+                "entry_idx": i, "entry_time": c["time"],
+            })
+        broken = still_broken
+
+    return signals
+
+
+def mirror_build_universe():
+    """Liquid-symbol pool, same top-by-24h-volume source/shape as ft5_
+    build_universe() — capped to MIRROR_UNIVERSE_SIZE. A "mirror level"
+    is a general price-action concept, not tied to one specific symbol
+    the way XAU LG is to gold, so this scans a broad universe like
+    MSNR/FT5 do, not a fixed symbol list."""
+    tickers = get_tickers()
+    seen_vol = {}
+    for t in tickers:
+        name = t.get("contract", "")
+        if not name.endswith("_USDT"):
+            continue
+        vol = t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0
+        try:
+            vol = float(vol)
+        except (TypeError, ValueError):
+            vol = 0.0
+        if vol < MIN_VOL_USD:
+            continue
+        if name not in seen_vol or vol > seen_vol[name]:
+            seen_vol[name] = vol
+    ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
+    return [s[0] for s in ranked[:MIRROR_UNIVERSE_SIZE]]
+
+
+def mirror_track_outcome(candles, sig, max_wait_bars=200):
+    """Walks forward from sig['entry_idx']+1 looking for TP/SL touch —
+    SL checked first on any bar covering both, same conservative
+    convention as xau_lg_track_outcome()."""
+    n = len(candles)
+    for k in range(sig["entry_idx"] + 1, min(n, sig["entry_idx"] + 1 + max_wait_bars)):
+        c = candles[k]
+        if sig["direction"] == "LONG":
+            if c["low"] <= sig["sl"]:
+                return "LOSS", c["time"]
+            if c["high"] >= sig["tp"]:
+                return "WIN", c["time"]
+        else:
+            if c["high"] >= sig["sl"]:
+                return "LOSS", c["time"]
+            if c["low"] <= sig["tp"]:
+                return "WIN", c["time"]
+    return "TIMEOUT", None
+
+
+def mirror_backtest_symbol(symbol, days=MIRROR_BACKTEST_DAYS):
+    """Fetches MIRROR_BACKTEST_DAYS of MIRROR_INTERVAL history and runs
+    the detector + outcome tracker over the whole window in one pass —
+    same shape as xau_lg_backtest_symbol()."""
+    now = time.time()
+    fetch_start = now - days * 86400
+    candles = get_candles_range(symbol, MIRROR_INTERVAL, fetch_start, now)
+    if len(candles) < MIRROR_PIVOT_LEFT + MIRROR_PIVOT_RIGHT + 20:
+        return []
+    sigs = mirror_detect_signals(candles)
+    results = []
+    for sig in sigs:
+        result, exit_time = mirror_track_outcome(candles, sig)
+        results.append({
+            "time": sig["entry_time"], "direction": sig["direction"],
+            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
+            "rr": sig.get("rr"), "pattern": sig.get("pattern"),
+            "level_price": sig.get("level_price"), "level_type": sig.get("level_type"),
+            "result": result, "exit_time": exit_time,
+        })
+    return results
+
+
+def mirror_summarize_backtest(results):
+    total = len(results)
+    if not total:
+        return {"n": 0, "win_rate": None, "wins": 0, "losses": 0, "timeouts": 0}
+    wins = sum(1 for r in results if r["result"] == "WIN")
+    losses = sum(1 for r in results if r["result"] == "LOSS")
+    timeouts = sum(1 for r in results if r["result"] == "TIMEOUT")
+    closed = wins + losses
+    win_rate = round(wins / closed * 100, 1) if closed else None
+    return {"n": total, "win_rate": win_rate, "wins": wins, "losses": losses, "timeouts": timeouts}
+
+
+_mirror_signal_cooldowns = {}  # symbol -> last-signaled entry_time
+_mirror_signal_cooldowns_lock = threading.Lock()
+
+
+def mirror_scan_symbol_live(symbol):
+    """Live counterpart to mirror_backtest_symbol() — fetches recent
+    history, runs the SAME detector, and fires only if the LAST candle
+    produced a brand-new signal not already seen for this symbol."""
+    if not MIRROR_ENABLED:
+        return
+    try:
+        candles = get_candles(symbol, interval=MIRROR_INTERVAL, limit=MIRROR_LOOKBACK)
+        interval_sec = INTERVAL_SECONDS.get(MIRROR_INTERVAL, 3600)
+        now = time.time()
+        candles = [c for c in candles if c["time"] + interval_sec <= now]  # drop still-forming candle
+        if len(candles) < MIRROR_PIVOT_LEFT + MIRROR_PIVOT_RIGHT + 20:
+            return
+        sigs = mirror_detect_signals(candles)
+        if not sigs:
+            return
+        sig = sigs[-1]
+        if sig["entry_idx"] != len(candles) - 1:
+            return  # most recent signal isn't off the latest closed candle — already stale/handled
+        with _mirror_signal_cooldowns_lock:
+            if _mirror_signal_cooldowns.get(symbol) == sig["entry_time"]:
+                return
+            _mirror_signal_cooldowns[symbol] = sig["entry_time"]
+        if has_open_signal_any_module(symbol, exclude="mirror_signals"):
+            return
+        record = {
+            "symbol": symbol, "direction": sig["direction"],
+            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"], "rr": sig.get("rr"),
+            "pattern": sig.get("pattern"), "level_price": sig.get("level_price"),
+            "level_type": sig.get("level_type"), "time": sig["entry_time"],
+            "detected_at": time.time(), "status": "OPEN", "result": None,
+            "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
+            "mfe_r": 0.0, "mae_r": 0.0, "mfe_price": None, "mae_price": None,
+            "mfe_r_at_close": None, "mae_r_at_close": None,
+        }
+        with state_lock:
+            STATE["mirror_signals"].appendleft(record)
+        if AUTOTRADE_ENABLED_MIRROR:
+            execute_autotrade("mirror", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                               AUTOTRADE_LEVERAGE_MIRROR)
+            sim_execute_trade("mirror", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                               AUTOTRADE_LEVERAGE_MIRROR, record)
+        arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
+        pattern_labels = {"inside_bar": "внутренний бар", "tweezers": "пинцет",
+                           "rails": "рельсы", "engulfing_doji": "поглощение на дожи"}
+        send_telegram(
+            f"{arrow} {symbol} (рождение зеркалки \u2014 {pattern_labels.get(sig['pattern'], sig['pattern'])})\n"
+            f"entry: {sig['entry']:.6g}\n"
+            f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}",
+            category="mirror",
+        )
+    except Exception as e:
+        log_error(f"mirror_live {symbol}: {e}")
+
+
+def update_mirror_signal_outcomes():
+    """Same MFE/MAE-tracking shape as update_xau_lg_signal_outcomes()."""
+    now = time.time()
+    with state_lock:
+        open_signals = [s for s in STATE["mirror_signals"] if s["status"] == "OPEN"]
+    all_candles = fetch_candles_concurrent([(s["symbol"], MIRROR_INTERVAL, 300) for s in open_signals])
+    mirror_interval_sec = INTERVAL_SECONDS.get(MIRROR_INTERVAL, 3600)
+    for sig, candles in zip(open_signals, all_candles):
+        try:
+            if candles is None:
+                continue
+            candles = [c for c in candles if c["time"] + mirror_interval_sec <= now]
+            future = [c for c in candles if c["time"] > sig["time"]]
+            direction = sig["direction"]
+            entry = sig["entry"]
+            risk = abs(entry - sig["sl"]) or 1e-9
+            result = None
+            exit_price = None
+            exit_time = None
+            for c in future:
+                if direction == "LONG":
+                    fav, adv = c["high"] - entry, entry - c["low"]
+                else:
+                    fav, adv = entry - c["low"], c["high"] - entry
+                fav_r, adv_r = fav / risk, adv / risk
+                if fav_r > sig["mfe_r"] or adv_r > sig["mae_r"]:
+                    with state_lock:
+                        if fav_r > sig["mfe_r"]:
+                            sig["mfe_r"] = round(fav_r, 3)
+                            sig["mfe_price"] = c["high"] if direction == "LONG" else c["low"]
+                        if adv_r > sig["mae_r"]:
+                            sig["mae_r"] = round(adv_r, 3)
+                            sig["mae_price"] = c["low"] if direction == "LONG" else c["high"]
+                if direction == "LONG":
+                    if c["low"] <= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["high"] >= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+                else:
+                    if c["high"] >= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["low"] <= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+            with state_lock:
+                if result:
+                    sig["status"] = "CLOSED"
+                    sig["result"] = result
+                    sig["exit_price"] = exit_price
+                    sig["exit_time"] = exit_time
+                    sig["mfe_r_at_close"] = sig["mfe_r"]
+                    sig["mae_r_at_close"] = sig["mae_r"]
+        except Exception as e:
+            log_error(f"mirror_outcome {sig['symbol']}: {e}")
+
+
+def compute_mirror_signal_stats():
+    with state_lock:
+        signals = list(STATE["mirror_signals"])
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+    wins = sum(1 for s in closed if s["result"] == "WIN")
+    losses = sum(1 for s in closed if s["result"] == "LOSS")
+    open_n = sum(1 for s in signals if s["status"] == "OPEN")
+    total_closed = len(closed)
+    winrate = round(wins / total_closed * 100, 1) if total_closed else None
+    # per-pattern breakdown — which of the 4 confirmation patterns is
+    # actually pulling its weight, same motivation as Volume's own
+    # per-reason (bounce/breakout) stats.
+    by_pattern = {}
+    for p in ("inside_bar", "tweezers", "rails", "engulfing_doji"):
+        p_closed = [s for s in closed if s.get("pattern") == p]
+        p_wins = sum(1 for s in p_closed if s["result"] == "WIN")
+        by_pattern[p] = {
+            "n": len(p_closed), "wins": p_wins, "losses": len(p_closed) - p_wins,
+            "winrate": round(p_wins / len(p_closed) * 100, 1) if p_closed else None,
+        }
+    return {"total": len(signals), "wins": wins, "losses": losses,
+            "open": open_n, "winrate": winrate, "by_pattern": by_pattern}
+
+
+def mirror_backtest_loop():
+    while True:
+        try:
+            if not MIRROR_ENABLED:
+                time.sleep(60)
+                continue
+            t0 = time.time()
+            universe = mirror_build_universe()
+            results_by_symbol = {}
+            summary_by_symbol = {}
+            with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
+                futs = {ex.submit(mirror_backtest_symbol, s): s for s in universe}
+                for fut in as_completed(futs):
+                    symbol = futs[fut]
+                    try:
+                        results = fut.result()
+                        results_by_symbol[symbol] = results
+                        summary_by_symbol[symbol] = mirror_summarize_backtest(results)
+                    except Exception as e:
+                        log_error(f"mirror_backtest {symbol}: {e}")
+            with state_lock:
+                STATE["mirror_backtest_results"] = results_by_symbol
+                STATE["mirror_backtest_summary"] = summary_by_symbol
+                STATE["mirror_last_backtest_finished"] = time.time()
+                STATE["mirror_last_backtest_duration"] = round(time.time() - t0, 1)
+        except Exception as e:
+            log_error(f"mirror_backtest_loop: {e}")
+        time.sleep(max(300, MIRROR_REFRESH_SEC))
+
+
+def mirror_live_loop():
+    while True:
+        try:
+            if not MIRROR_ENABLED:
+                time.sleep(60)
+                continue
+            with state_lock:
+                universe = list(STATE.get("mirror_backtest_results", {}).keys()) or mirror_build_universe()
+            with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
+                list(ex.map(mirror_scan_symbol_live, universe))
+            update_mirror_signal_outcomes()
+        except Exception as e:
+            log_error(f"mirror_live_loop: {e}")
+        time.sleep(max(60, MIRROR_SCAN_INTERVAL_SEC))
+
+
+# ============================================================================
+# END MIRROR
+# ============================================================================
+
+
 # ----------------------------------------------------------------------------
 # API
 # ----------------------------------------------------------------------------
@@ -19893,6 +20569,109 @@ def api_reset_xau_lg():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/mirror/status")
+def api_mirror_status():
+    """See the MIRROR module's own header comment (near mirror_is_
+    inside_bar())."""
+    with state_lock:
+        summary = dict(STATE["mirror_backtest_summary"])
+        last_backtest_finished = STATE["mirror_last_backtest_finished"]
+        last_backtest_duration = STATE["mirror_last_backtest_duration"]
+    ranked = [dict(s, symbol=sym) for sym, s in summary.items()]
+    ranked.sort(key=lambda r: (r["win_rate"] or 0, r["n"]), reverse=True)
+    return jsonify({
+        "enabled": MIRROR_ENABLED,
+        "last_backtest_finished": last_backtest_finished,
+        "last_backtest_duration": last_backtest_duration,
+        "signals_stats": compute_mirror_signal_stats(),
+        "config": {
+            "interval": MIRROR_INTERVAL, "pivot_left": MIRROR_PIVOT_LEFT, "pivot_right": MIRROR_PIVOT_RIGHT,
+            "touch_tolerance_pct": MIRROR_TOUCH_TOLERANCE_PCT, "pattern_tolerance_pct": MIRROR_PATTERN_TOLERANCE_PCT,
+            "rr": MIRROR_RR, "max_bars_to_return": MIRROR_MAX_BARS_TO_RETURN,
+            "backtest_days": MIRROR_BACKTEST_DAYS, "universe_size": MIRROR_UNIVERSE_SIZE,
+        },
+        "top": ranked,
+    })
+
+
+@app.route("/api/mirror/chart/<symbol>")
+def api_mirror_chart(symbol):
+    """Same "look up the signal's own already-recorded entry/sl/tp,
+    don't re-derive with CURRENT live params" fix already applied to
+    api_msnr_chart()/api_xau_lg_chart() (see either's own docstring for
+    the full incident this avoids) — MIRROR_RR/MIRROR_TOUCH_TOLERANCE_
+    PCT/MIRROR_PATTERN_TOLERANCE_PCT could all drift between when a
+    trade fired and when its chart is later opened."""
+    try:
+        sig_time = request.args.get("time")
+        found_sig = None
+        found_result = None
+        found_exit_time = None
+        found_exit_price = None
+        if sig_time:
+            target = float(sig_time)
+            interval_sec = INTERVAL_SECONDS.get(MIRROR_INTERVAL, 3600)
+            with state_lock:
+                live_match = next((s for s in STATE["mirror_signals"]
+                                    if s["symbol"] == symbol and abs(s["time"] - target) < interval_sec), None)
+                bt_trades = list(STATE["mirror_backtest_results"].get(symbol, []))
+            if live_match:
+                found_sig = {"time": live_match["time"], "direction": live_match["direction"],
+                              "entry": live_match["entry"], "sl": live_match["sl"], "tp": live_match["tp"],
+                              "pattern": live_match.get("pattern"), "rr": live_match.get("rr")}
+                found_result = live_match.get("result")
+                found_exit_time = live_match.get("exit_time")
+                found_exit_price = live_match.get("exit_price")
+            else:
+                bt_match = next((t for t in bt_trades if abs(t["time"] - target) < interval_sec), None)
+                if bt_match:
+                    found_sig = {"time": bt_match["time"], "direction": bt_match["direction"],
+                                  "entry": bt_match["entry"], "sl": bt_match["sl"], "tp": bt_match["tp"],
+                                  "pattern": bt_match.get("pattern"), "rr": bt_match.get("rr")}
+                    found_result = bt_match.get("result")
+                    found_exit_time = bt_match.get("exit_time")
+                    if found_result == "WIN":
+                        found_exit_price = bt_match["tp"]
+                    elif found_result == "LOSS":
+                        found_exit_price = bt_match["sl"]
+        if found_sig is None:
+            return jsonify({"error": "сигнал не найден"}), 404
+        interval_sec = INTERVAL_SECONDS.get(MIRROR_INTERVAL, 3600)
+        fetch_start = found_sig["time"] - (MIRROR_LOOKBACK + MIRROR_PIVOT_LEFT + MIRROR_PIVOT_RIGHT) * interval_sec
+        fetch_end = (found_exit_time + 6 * interval_sec) if found_exit_time else (found_sig["time"] + 200 * interval_sec)
+        candles = get_candles_range(symbol, MIRROR_INTERVAL, fetch_start, fetch_end)
+        return jsonify({
+            "symbol": symbol, "candles": candles[-250:], "time": found_sig["time"],
+            "direction": found_sig["direction"], "entry": found_sig["entry"],
+            "sl": found_sig["sl"], "tp": found_sig["tp"], "rr": found_sig.get("rr"),
+            "result": found_result, "exit_time": found_exit_time, "exit_price": found_exit_price,
+        })
+    except Exception as e:
+        log_error(f"api_mirror_chart {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/mirror/signals")
+def api_mirror_signals():
+    with state_lock:
+        return jsonify(list(STATE["mirror_signals"]))
+
+
+@app.route("/api/reset/mirror", methods=["POST"])
+def api_reset_mirror():
+    try:
+        with state_lock:
+            STATE["mirror_backtest_results"] = {}
+            STATE["mirror_backtest_summary"] = {}
+            STATE["mirror_last_backtest_finished"] = None
+            STATE["mirror_last_backtest_duration"] = None
+            STATE["mirror_signals"].clear()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset_mirror: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 def msnr_effective_live_universe(live_universe, overrides, autotrade_symbols):
     """v0.99.35, per direct user question after the green ● dot didn't
     line up with which symbols the checkbox/eligible list suggested
@@ -20535,6 +21314,7 @@ def api_autotrade_status():
             "session_ny": AUTOTRADE_ENABLED_SESSION_NY, "xau_lg": AUTOTRADE_ENABLED_XAU_LG,
             "ft5": AUTOTRADE_ENABLED_FT5,
             "msnr": AUTOTRADE_ENABLED_MSNR,
+            "mirror": AUTOTRADE_ENABLED_MIRROR,
         },
     })
 
@@ -20655,7 +21435,7 @@ INDEX_HTML = """<!doctype html>
   body { margin:0; background:#0b0e14; color:#d7dee8; font-family: -apple-system, Roboto, Segoe UI, sans-serif; }
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
   #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  #resetVolumeBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetXauLgBtn, #resetMsnrBtn, #resetFt5Btn, #resetRiskAutotuneBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #resetVolumeBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetXauLgBtn, #resetMsnrBtn, #resetFt5Btn, #resetMirrorBtn, #resetRiskAutotuneBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #settingsModal.open { display:flex; flex-direction:column; }
@@ -20869,6 +21649,7 @@ INDEX_HTML = """<!doctype html>
       <button id="resetXauLgBtn">Очистить XAU LG</button>
       <button id="resetMsnrBtn">Очистить MSNR</button>
       <button id="resetFt5Btn">Очистить FT5</button>
+      <button id="resetMirrorBtn">Очистить Зеркало</button>
       <button id="resetSimulatorBtn">Сбросить симулятор</button>
       <button id="resetRiskAutotuneBtn">Сбросить авто-тюнинг</button>
     </div>
@@ -20890,6 +21671,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="session_ny">Сессия NY</div>
   <div class="tab" data-tab="xau_lg" style="color:#e0a030;">XAU LG ⚠️</div>
   <div class="tab" data-tab="ft5" style="color:#e0a030;">FT5 ⚠️</div>
+  <div class="tab" data-tab="mirror">Зеркало</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
 </div>
@@ -20914,6 +21696,7 @@ INDEX_HTML = """<!doctype html>
   <div id="xauLgPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="msnrPanel" style="display:block;padding:8px 4px;font-size:12px;"></div>
   <div id="ft5Panel" style="display:none;padding:8px 4px;font-size:12px;"></div>
+  <div id="mirrorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="simulatorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
@@ -21143,6 +21926,24 @@ INDEX_HTML = """<!doctype html>
     </div>
 
     <div class="settingsGroup">
+      <div class="settingsGroupTitle">Зеркало</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Сканирование</div>
+          <div class="sub">"зеркальный уровень" — пробитая поддержка/сопротивление меняет роль при возврате цены; вход на паттерне разворота (внутренний бар/пинцет/рельсы/поглощение на дожи)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setMirror"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ RR (тейк-профит)</div>
+          <div class="sub">фиксированное соотношение тейк:стоп от найденного стопа паттерна</div>
+        </div>
+        <input type="number" id="setMirrorRR" min="0.5" max="20" step="0.5" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+      </div>
+    </div>
+
+    <div class="settingsGroup">
       <div class="settingsGroupTitle">Telegram</div>
       <div class="settingRow">
         <div>
@@ -21199,6 +22000,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">экспериментально — открытие и закрытие сигналов</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramFt5"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Алерты Зеркала</div>
+          <div class="sub">открытие и закрытие сигналов</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramMirror"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -21346,6 +22154,16 @@ INDEX_HTML = """<!doctype html>
           <label class="switch"><input type="checkbox" id="setAutotradeSessionNy"><span class="switchSlider"></span></label>
         </div>
       </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Зеркало</div>
+          <div class="sub">плечо, если включено</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:8px;">
+          <input type="number" id="setAutotradeLevMirror" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+          <label class="switch"><input type="checkbox" id="setAutotradeMirror"><span class="switchSlider"></span></label>
+        </div>
+      </div>
     </div>
 
     <div class="dim" style="font-size:12px;margin-top:16px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
@@ -21373,6 +22191,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('xauLgPanel').style.display = activeTab === 'xau_lg' ? 'block' : 'none';
     document.getElementById('msnrPanel').style.display = activeTab === 'msnr' ? 'block' : 'none';
     document.getElementById('ft5Panel').style.display = activeTab === 'ft5' ? 'block' : 'none';
+    document.getElementById('mirrorPanel').style.display = activeTab === 'mirror' ? 'block' : 'none';
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
     document.getElementById('simulatorPanel').style.display = activeTab === 'simulator' ? 'block' : 'none';
     if (activeTab === 'signals') refreshTuning();
@@ -21383,6 +22202,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'xau_lg') refreshXauLg();
     if (activeTab === 'msnr') refreshMsnr();
     if (activeTab === 'ft5') refreshFt5();
+    if (activeTab === 'mirror') refreshMirror();
     if (activeTab === 'autotrade') refreshAutotrade();
     if (activeTab === 'simulator') refreshSimulator();
   };
@@ -22914,6 +23734,75 @@ async function refreshFt5() {
   });
 }
 
+async function refreshMirror() {
+  const status = await (await fetch('/api/mirror/status')).json();
+  const signals = await (await fetch('/api/mirror/signals')).json();
+  const panel = document.getElementById('mirrorPanel');
+  const cfg = status.config || {};
+  const ss = status.signals_stats || {};
+  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
+  const patternLabels = {inside_bar: 'внутренний бар', tweezers: 'пинцет', rails: 'рельсы', engulfing_doji: 'поглощение+дожи'};
+  const byPatternTxt = Object.entries(ss.by_pattern || {}).map(([p, s]) => {
+    const wr = s.winrate !== null && s.winrate !== undefined ? `${s.winrate}%` : '-';
+    return `${patternLabels[p] || p}: ${wr} (n=${s.n})`;
+  }).join(' · ');
+  const buildTxt = status.last_backtest_finished
+    ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s)`
+    : 'бэктест ещё не завершился';
+  const headerHtml = `
+    <div class="dim" style="margin-bottom:8px;">
+      «Зеркальный уровень» — пробитый уровень поддержки/сопротивления при возврате цены меняет роль на противоположную; вход на одном из 4 разворотных паттернов на уровне.<br>
+      ТФ ${cfg.interval} · RR ${cfg.rr} · допуск касания ${cfg.touch_tolerance_pct}% · допуск паттерна ${cfg.pattern_tolerance_pct}% · ${buildTxt}<br>
+      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
+      ${byPatternTxt ? `<span style="font-size:11px;">По паттернам: ${byPatternTxt}</span><br>` : ''}
+      <span style="font-size:11px;">Клик по строке сигнала открывает график входа/выхода.</span>
+    </div>`;
+  const signalsRows = signals.map(s => {
+    let statusHtml;
+    if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
+    else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
+    else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
+    else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
+    const dirClass = s.direction === 'SHORT' ? 'short' : 'long';
+    return `<tr data-symbol="${s.symbol}" data-time="${s.time}" style="cursor:pointer;">
+      <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td>
+      <td class="dim">${patternLabels[s.pattern] || s.pattern}</td>
+      <td>${fmt(s.entry)}</td><td>${fmt(s.sl)}</td><td>${fmt(s.tp)}</td>
+      <td>${s.rr}</td><td>${statusHtml}</td><td class="dim">${fmtDateTime(s.time)}</td>
+    </tr>`;
+  }).join('');
+  const signalsTableHtml = signals.length ? `
+    <div style="overflow-x:auto;margin-bottom:14px;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>Symbol</th><th>Dir</th><th>Паттерн</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Status</th><th>Время</th></tr></thead>
+      <tbody>${signalsRows}</tbody>
+    </table>
+    </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
+  const btRows = (status.top || []).map(r => {
+    const wrClass = (r.win_rate || 0) >= 50 ? 'win' : 'loss';
+    return `<tr>
+      <td>${r.symbol}</td>
+      <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
+      <td class="dim">n=${r.n}</td>
+      <td class="win">${r.wins}W</td>
+      <td class="loss">${r.losses}L</td>
+      <td class="dim">${r.timeouts}T</td>
+    </tr>`;
+  }).join('');
+  const btTableHtml = (status.top || []).length ? `
+    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории):</div>
+    <div style="overflow-x:auto;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th></tr></thead>
+      <tbody>${btRows}</tbody>
+    </table>
+    </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
+  setPanelHtml(panel, headerHtml + signalsTableHtml + btTableHtml);
+  panel.querySelectorAll('tbody tr[data-time]').forEach(tr => {
+    tr.onclick = () => openMirrorChart(tr.dataset.symbol, tr.dataset.time);
+  });
+}
+
 async function refreshAutotradeBanner() {
   try {
     const s = await (await fetch('/api/autotrade/status')).json();
@@ -22935,7 +23824,7 @@ async function refreshAutotrade() {
     (await fetch('/api/autotrade/log')).json(),
   ]);
   const panel = document.getElementById('autotradePanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5', mirror: 'Зеркало'};
   const enabledTxt = Object.entries(status.enabled)
     .map(([k, v]) => `<span class="${v ? 'win' : 'dim'}">${modeLabels[k]}: ${v ? 'вкл' : 'выкл'}</span>`)
     .join(' &nbsp;·&nbsp; ');
@@ -22995,7 +23884,7 @@ async function refreshSimulator() {
     (await fetch('/api/autotrade/status')).json(),
   ]);
   const panel = document.getElementById('simulatorPanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5', mirror: 'Зеркало'};
 
   const pnlClass = status.pnl_total >= 0 ? 'win' : 'loss';
   const sizeTxt = status.size_mode === 'percent' ? `${status.size_value}% от баланса` : `фикс. $${status.size_value}`;
@@ -23066,6 +23955,7 @@ async function refreshAll() {
   if (activeTab === 'xau_lg') await refreshXauLg();
   if (activeTab === 'msnr') await refreshMsnr();
   if (activeTab === 'ft5') await refreshFt5();
+  if (activeTab === 'mirror') await refreshMirror();
   if (activeTab === 'autotrade') await refreshAutotrade();
   if (activeTab === 'simulator') await refreshSimulator();
 }
@@ -23117,6 +24007,9 @@ wireResetButton('resetMsnrBtn', '/api/reset/msnr',
 wireResetButton('resetFt5Btn', '/api/reset/ft5',
   'Удалить накопленный анализ параметров и сигналы экспериментального FT5? Остальное не тронет. Это необратимо.',
   'Очистить FT5');
+wireResetButton('resetMirrorBtn', '/api/reset/mirror',
+  'Удалить накопленный бэктест и сигналы Зеркала? Остальное не тронет. Это необратимо.',
+  'Очистить Зеркало');
 wireResetButton('resetRiskAutotuneBtn', '/api/reset/risk_autotune',
   'Сбросить все параметры авто-тюнинга риска (EMA/Скальпинг/Сессия) к значениям по умолчанию из кода, очистить лог и cooldown? Сами сигналы и статистику не тронет. Это необратимо.',
   'Сбросить авто-тюнинг');
@@ -23143,6 +24036,7 @@ const setInputs = {
   msnr_enabled: document.getElementById('setMsnr'),
   ft5_enabled: document.getElementById('setFt5'),
   ft5_invert_signals: document.getElementById('setFt5Invert'),
+  mirror_enabled: document.getElementById('setMirror'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
   telegram_alerts_ema: document.getElementById('setTelegramEma'),
@@ -23152,6 +24046,7 @@ const setInputs = {
   telegram_alerts_xau_lg: document.getElementById('setTelegramXauLg'),
   telegram_alerts_msnr: document.getElementById('setTelegramMsnr'),
   telegram_alerts_ft5: document.getElementById('setTelegramFt5'),
+  telegram_alerts_mirror: document.getElementById('setTelegramMirror'),
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
   autotrade_bounce: document.getElementById('setAutotradeBounce'),
   autotrade_breakout: document.getElementById('setAutotradeBreakout'),
@@ -23163,6 +24058,7 @@ const setInputs = {
   // longer mapped here, since setInputs[key].checked on a null element
   // (the DOM node no longer exists) would throw every time settings load
   autotrade_session_ny: document.getElementById('setAutotradeSessionNy'),
+  autotrade_mirror: document.getElementById('setAutotradeMirror'),
 };
 
 const setValueInputs = {
@@ -23179,6 +24075,8 @@ const setValueInputs = {
   autotrade_leverage_session: document.getElementById('setAutotradeLevSession'),
   autotrade_leverage_msnr: document.getElementById('setAutotradeLevMsnr'),
   autotrade_leverage_session_ny: document.getElementById('setAutotradeLevSessionNy'),
+  autotrade_leverage_mirror: document.getElementById('setAutotradeLevMirror'),
+  mirror_rr: document.getElementById('setMirrorRR'),
 };
 
 function applySettingsToInputs(s) {
@@ -24026,6 +24924,13 @@ function openXauLgChart(symbol, sigTime) {
   return openVgiChart(symbol, sigTime, '/api/xau_lg/chart', '');
 }
 
+function openMirrorChart(symbol, sigTime) {
+  // Same reuse judgment as openScalpChart/openXauLgChart above —
+  // MIRROR's own signal shape (fixed entry/sl/tp/direction/rr) is
+  // structurally identical to VGI's.
+  return openVgiChart(symbol, sigTime, '/api/mirror/chart', '');
+}
+
 function drawVgiChart(data) {
   const canvas = document.getElementById('vgiChartCanvas');
   const wrap = document.getElementById('vgiChartWrap');
@@ -24273,6 +25178,8 @@ if __name__ == "__main__":
     threading.Thread(target=msnr_backtest_watchdog, daemon=True).start()
     threading.Thread(target=ft5_backtest_loop, daemon=True).start()
     threading.Thread(target=ft5_live_loop, daemon=True).start()
+    threading.Thread(target=mirror_backtest_loop, daemon=True).start()
+    threading.Thread(target=mirror_live_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     threading.Thread(target=risk_autotune_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
