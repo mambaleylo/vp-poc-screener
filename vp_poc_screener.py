@@ -8751,6 +8751,72 @@ v0.99.91 - NEW MODULE: MIRROR — "зеркальный уровень" (support
          4 new MIRROR endpoints, nothing else touched), and an AST walk
          for duplicate top-level defs (none introduced — 13 new mirror_*
          functions, each present exactly once).
+
+v0.99.92 - Direct user follow-up: "покажи как графически это выглядит...
+         придумай лучший фильтр для этого типа торговли, потом по
+         статистике обязательно показывать до после как в msnr. В живых
+         сигналах использовать только бэктестовые монеты с винрейтом
+         более 35%." Showed a diagram of the level-flip mechanism
+         (support forms -> breaks -> price returns -> inside bar
+         confirms -> role flips to resistance -> short entry) before
+         touching any code.
+         New filter: mirror_symbol_sl_skip_min()/mirror_sl_bucket_
+         stats() — SL-width filter, same shape as MSNR's own skip_sl_
+         pct_min, chosen because MIRROR's own stop is entirely pattern-
+         derived (not a fixed %/ATR) — a wide, sloppy-pattern stop is
+         exactly the kind of "the pattern only loosely matched" case
+         worth filtering. Built WITH the granularity cascade (MIRROR_
+         SL_PCT_BUCKET_SCHEMES, 5->3->2 buckets) from day one this
+         time, applying the MSNR v0.99.89 lesson proactively rather
+         than discovering the same gap again later. One real test-
+         design mistake caught and fixed before shipping: an initial
+         synthetic test put the "bad" trades at NARROW SL widths, but
+         this filter is deliberately one-sided (skip ABOVE a floor,
+         matching "wide stop = bad") — the test's own direction was
+         inverted from what the filter actually checks, producing a
+         nonsensical skip_sl_pct_min=0 (skip everything) that looked
+         like a bug until the test itself was corrected to put failing
+         performance at WIDE SL widths instead, matching the real
+         hypothesis; re-ran and confirmed correct (skip=4, catching two
+         under-threshold adjacent fine buckets merged via cascade).
+         Before/after diagnostics: new _mirror_checkpoint() — since
+         every MIRROR signal shares one fixed RR (unlike MSNR's
+         variable per-trade RR), "income" is expressed as R-expectancy
+         (expected R per trade at that checkpoint's own win rate)
+         rather than a compounded %, an honest proxy without inventing
+         an unrelated leverage/compounding model MIRROR doesn't use.
+         mirror_backtest_symbol() now returns (filtered_results, meta)
+         with a 2-stage checkpoint chain (raw -> sl_filter); wired into
+         api_mirror_status()'s per-symbol response and rendered as a
+         "n → n · WR X%→Y% · expR" column in the backtest table.
+         Live-universe winrate gate: mirror_backtest_loop() now derives
+         mirror_live_universe (symbols whose POST-filter winrate clears
+         MIRROR_LIVE_MIN_WINRATE=35%) each cycle; mirror_live_loop()
+         scans only that list instead of the raw universe (falls back
+         to the raw universe only before the first backtest cycle
+         completes, same "don't sit idle" reasoning MSNR's own
+         fallback uses). mirror_scan_symbol_live() also now checks the
+         firing signal's own SL width against that symbol's stored
+         skip_sl_pct_min before firing — same "trust this symbol's own
+         bucket evidence" live-firing check MSNR's own filters use.
+         New STATE keys (mirror_symbol_overrides, mirror_live_universe)
+         added immediately alongside their own logic and wired into
+         save_state()/load_state()'s snapshot/restore and api_reset_
+         mirror(), not as a later follow-up fix.
+         Verified with py_compile, an actual runtime start (mirror_
+         symbol_sl_skip_min() tested against both a correctly- and an
+         incorrectly-directioned synthetic dataset, confirming the
+         cascade catches an under-threshold pair of adjacent bad
+         buckets; a full backtest-shaped pipeline test — detect ->
+         track_outcome -> checkpoint — run end to end on a realistic
+         support-break-return-inside-bar sequence; a live test_client()
+         round-trip against /api/mirror/status confirming live_min_
+         winrate/live_universe/top all serialize correctly), pyflakes
+         (clean throughout), node --check on the correctly-last
+         <script> block, the Flask route/def integrity check (still 60
+         routes — no new endpoints, existing ones extended), and an
+         AST walk for duplicate top-level defs (none introduced — 3 new
+         mirror_*/_mirror_* functions, each present exactly once).
 """
 
 import os
@@ -8770,7 +8836,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.91"
+APP_VERSION = "0.99.92"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9538,6 +9604,18 @@ MIRROR_SCAN_INTERVAL_SEC = int(os.environ.get("VP_MIRROR_SCAN_INTERVAL_SEC", 300
 AUTOTRADE_ENABLED_MIRROR = os.environ.get("VP_AUTOTRADE_MIRROR", "0") == "1"
 AUTOTRADE_LEVERAGE_MIRROR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_MIRROR", 10))
 TELEGRAM_ALERTS_MIRROR = os.environ.get("VP_TG_ALERTS_MIRROR", "1") == "1"
+# v0.99.92, per direct user request ("придумай лучший фильтр для этого
+# типа торговли... по статистике обязательно показывать до после как в
+# msnr... В живых сигналах использовать только бэктестовые монеты с
+# винрейтом более 35%"):
+MIRROR_SYMBOL_SKIP_MIN_SAMPLE = 15  # same per-bucket significance bar MSNR's own filters use
+MIRROR_SL_PCT_BUCKETS = [(0, 1), (1, 2), (2, 4), (4, 7), (7, float("inf"))]
+MIRROR_SL_PCT_BUCKET_SCHEMES = [
+    MIRROR_SL_PCT_BUCKETS,
+    [(0, 2), (2, 5), (5, float("inf"))],
+    [(0, 3), (3, float("inf"))],
+]  # finest -> coarsest cascade, same MSNR v0.99.89 lesson applied from the start here rather than shipping a fixed-only version first
+MIRROR_LIVE_MIN_WINRATE = float(os.environ.get("VP_MIRROR_LIVE_MIN_WINRATE", 35.0))  # a symbol's OWN post-filter backtest winrate must clear this to be live-scanned at all
 FT5_MIN_BACKTEST_TRADES = int(os.environ.get("VP_FT5_MIN_BACKTEST_TRADES", 5))  # a combo with fewer trades than this in the backtest window isn't a confident pick — same bar Volume's optimizer uses (MIN_BACKTEST_TRADES)
 FT5_RANK_PRIOR_TARGET = int(os.environ.get("VP_FT5_RANK_PRIOR_TARGET", 1))  # v0.98.8 — ft5_ranking_score() blends in max(0, TARGET - losses_count) pseudo-trades at the known -FT5_STOPLOSS_PCT level, so a small loss-free sample can't look artificially low-risk just because it hasn't hit its (structurally always-possible) stop yet. Tapered by ACTUAL real losses (not a flat count on every combo) — a flat prior tested worse, disproportionately hurting smaller-but-still-real samples. See ft5_ranking_score()'s own docstring for the full reasoning, including why TARGET=1 specifically. Replaces FT5_RANK_Z (v0.98.7), which is no longer referenced — the confidence multiplier is now t_critical(n-1), not a fixed Z.
 
@@ -10239,6 +10317,8 @@ STATE = {
     # own header comment. All keys prefixed mirror_.
     "mirror_backtest_results": {},
     "mirror_backtest_summary": {},
+    "mirror_symbol_overrides": {},  # symbol -> {skip_sl_pct_min, checkpoints}, see mirror_backtest_symbol()
+    "mirror_live_universe": [],  # symbols whose post-filter backtest winrate cleared MIRROR_LIVE_MIN_WINRATE, see mirror_backtest_loop()
     "mirror_last_backtest_finished": None,
     "mirror_last_backtest_duration": None,
     "mirror_signals": deque(maxlen=MIRROR_SIGNAL_HISTORY),
@@ -14410,6 +14490,8 @@ def save_state():
                 "ft5_signals": list(STATE["ft5_signals"]),
                 "ft5_symbol_overrides": STATE["ft5_symbol_overrides"],
                 "mirror_signals": list(STATE["mirror_signals"]),
+                "mirror_symbol_overrides": STATE["mirror_symbol_overrides"],
+                "mirror_live_universe": STATE["mirror_live_universe"],
                 "autotrade_log": list(STATE["autotrade_log"]),
                 "sim_balance": STATE["sim_balance"],
                 # Both PENDING and SETTLED now (previously PENDING was
@@ -14523,6 +14605,8 @@ def load_state():
         ft5_signals = data.get("ft5_signals", [])
         ft5_symbol_overrides = data.get("ft5_symbol_overrides", {})
         mirror_signals = data.get("mirror_signals", [])
+        mirror_symbol_overrides = data.get("mirror_symbol_overrides", {})
+        mirror_live_universe = data.get("mirror_live_universe", [])
         autotrade_log = data.get("autotrade_log", [])
         sim_trades = data.get("sim_trades", [])
         risk_autotune_log = data.get("risk_autotune_log", [])
@@ -14540,6 +14624,8 @@ def load_state():
             STATE["ft5_signals"] = deque(_backfill_mfe_mae(ft5_signals), maxlen=FT5_SIGNAL_HISTORY)
             STATE["ft5_symbol_overrides"] = ft5_symbol_overrides
             STATE["mirror_signals"] = deque(_backfill_mfe_mae(mirror_signals), maxlen=MIRROR_SIGNAL_HISTORY)
+            STATE["mirror_symbol_overrides"] = mirror_symbol_overrides
+            STATE["mirror_live_universe"] = mirror_live_universe
             STATE["autotrade_log"] = deque(autotrade_log, maxlen=AUTOTRADE_TRADE_HISTORY)
             STATE["risk_autotune_log"] = deque(risk_autotune_log, maxlen=200)
             STATE["risk_autotune_last_change"] = risk_autotune_last_change
@@ -19589,6 +19675,91 @@ def mirror_detect_signals(candles, pivot_left=None, pivot_right=None,
     return signals
 
 
+def mirror_sl_bucket_stats(trades, bucket_scheme=None):
+    """v0.99.92, per direct user request ("придумай лучший фильтр для
+    этого типа торговли"): SL-width bucket stats for MIRROR's own
+    signals, same shape as msnr_sl_bucket_stats() — buckets CLOSED
+    trades (WIN/LOSS only) by their own SL distance as a % of entry
+    price. Chosen as MIRROR's first real filter (over an RR-range or
+    hours/volume filter, MSNR's other options) because SL width here is
+    ENTIRELY pattern-derived, not a fixed %/ATR multiple — a tweezers
+    with barely-matching wicks produces a tight stop, a rails pattern
+    with two large opposite candles produces a wide one. A wide,
+    sloppy-pattern stop is exactly the kind of "the pattern only
+    loosely matched" case worth filtering out, the same reasoning
+    msnr_symbol_sl_skip_min() already established for MSNR.
+    Unlike MSNR's own version, no avg_rr per bucket is needed — every
+    MIRROR signal shares the SAME fixed RR (MIRROR_RR), so the
+    breakeven bar is one constant number, not something to track per
+    bucket."""
+    scheme = bucket_scheme if bucket_scheme is not None else MIRROR_SL_PCT_BUCKETS
+    buckets = []
+    for lo, hi in scheme:
+        subset = []
+        for t in trades:
+            if t.get("result") not in ("WIN", "LOSS"):
+                continue
+            entry = t.get("entry")
+            sl = t.get("sl")
+            if not entry or entry <= 0 or sl is None:
+                continue
+            sl_pct = abs(entry - sl) / entry * 100
+            if lo <= sl_pct < hi:
+                subset.append(t)
+        label = f"{lo}-{hi}" if hi != float("inf") else f"{lo}+"
+        if not subset:
+            buckets.append({"range": label, "lo": lo, "n": 0, "wins": 0, "losses": 0, "winrate": None})
+            continue
+        wins = sum(1 for t in subset if t["result"] == "WIN")
+        n = len(subset)
+        buckets.append({"range": label, "lo": lo, "n": n, "wins": wins,
+                         "losses": n - wins, "winrate": round(wins / n * 100, 1)})
+    return buckets
+
+
+def mirror_symbol_sl_skip_min(trades, rr=None):
+    """v0.99.92 — this symbol's own SL%-width floor: live signals whose
+    OWN SL distance lands at or above it get skipped. Cascades MIRROR_
+    SL_PCT_BUCKET_SCHEMES from finest to coarsest (same MSNR v0.99.89
+    lesson applied from day one here, not discovered the same painful
+    way later) so a modest sample doesn't leave every fine bucket under
+    the significance bar. Breakeven is ONE constant (100/(1+rr)) since
+    every MIRROR signal shares the same fixed RR — no per-bucket avg_rr
+    needed the way MSNR's own RR-range filter requires."""
+    rr = rr if rr is not None else MIRROR_RR
+    breakeven = 100.0 / (1.0 + rr) if rr > 0 else 100.0
+    for scheme in MIRROR_SL_PCT_BUCKET_SCHEMES:
+        buckets = mirror_sl_bucket_stats(trades, bucket_scheme=scheme)
+        failing_edges = [b["lo"] for b in buckets
+                          if b["n"] >= MIRROR_SYMBOL_SKIP_MIN_SAMPLE and b["winrate"] is not None
+                          and b["winrate"] < breakeven]
+        if failing_edges:
+            return min(failing_edges)
+    return None
+
+
+def _mirror_checkpoint(results, rr=None):
+    """v0.99.92, per direct user request ("по статистике обязательно
+    показывать до после как в msnr"): before/after filter diagnostics
+    for MIRROR's own backtest pipeline, matching _msnr_filter_
+    checkpoint() (v0.99.86). Unlike MSNR (variable per-trade RR, real
+    compounding via a Kelly-optimized leverage search), every MIRROR
+    signal shares the SAME fixed RR, so "income" is expressed here as
+    R-expectancy — the expected R gained per trade at this checkpoint's
+    own win rate — rather than a compounded %, a fair and honest proxy
+    without inventing an unrelated leverage/compounding model MIRROR
+    doesn't actually use."""
+    rr = rr if rr is not None else MIRROR_RR
+    closed = [r for r in results if r.get("result") in ("WIN", "LOSS")]
+    n = len(closed)
+    if not n:
+        return {"n": 0, "winrate": None, "expectancy_r": None}
+    wins = sum(1 for r in closed if r["result"] == "WIN")
+    win_frac = wins / n
+    return {"n": n, "winrate": round(win_frac * 100, 1),
+            "expectancy_r": round(win_frac * rr - (1 - win_frac) * 1, 3)}
+
+
 def mirror_build_universe():
     """Liquid-symbol pool, same top-by-24h-volume source/shape as ft5_
     build_universe() — capped to MIRROR_UNIVERSE_SIZE. A "mirror level"
@@ -19635,26 +19806,42 @@ def mirror_track_outcome(candles, sig, max_wait_bars=200):
 
 
 def mirror_backtest_symbol(symbol, days=MIRROR_BACKTEST_DAYS):
-    """Fetches MIRROR_BACKTEST_DAYS of MIRROR_INTERVAL history and runs
-    the detector + outcome tracker over the whole window in one pass —
-    same shape as xau_lg_backtest_symbol()."""
+    """Fetches MIRROR_BACKTEST_DAYS of MIRROR_INTERVAL history, runs the
+    detector + outcome tracker over the whole window, then applies this
+    symbol's own SL-width filter (mirror_symbol_sl_skip_min(), derived
+    from the RAW unfiltered results — filtering first would shrink the
+    very bucket evidence the threshold is judged from, same ordering
+    MSNR's own filters always use). Returns (filtered_results, meta)
+    where meta = {"skip_sl_pct_min", "checkpoints"} — checkpoints is a
+    2-entry before/after chain ("raw" -> "sl_filter"), per direct user
+    request ("по статистике обязательно показывать до после как в
+    msnr")."""
     now = time.time()
     fetch_start = now - days * 86400
     candles = get_candles_range(symbol, MIRROR_INTERVAL, fetch_start, now)
     if len(candles) < MIRROR_PIVOT_LEFT + MIRROR_PIVOT_RIGHT + 20:
-        return []
+        return [], {"skip_sl_pct_min": None, "checkpoints": []}
     sigs = mirror_detect_signals(candles)
-    results = []
+    raw_results = []
     for sig in sigs:
         result, exit_time = mirror_track_outcome(candles, sig)
-        results.append({
+        raw_results.append({
             "time": sig["entry_time"], "direction": sig["direction"],
             "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
             "rr": sig.get("rr"), "pattern": sig.get("pattern"),
             "level_price": sig.get("level_price"), "level_type": sig.get("level_type"),
             "result": result, "exit_time": exit_time,
         })
-    return results
+    checkpoints = [{"stage": "raw", **_mirror_checkpoint(raw_results)}]
+    skip_sl_min = mirror_symbol_sl_skip_min(raw_results)
+    if skip_sl_min is not None:
+        filtered = [r for r in raw_results
+                    if not r.get("entry") or r["entry"] <= 0 or r.get("sl") is None
+                    or abs(r["entry"] - r["sl"]) / r["entry"] * 100 < skip_sl_min]
+    else:
+        filtered = raw_results
+    checkpoints.append({"stage": "sl_filter", **_mirror_checkpoint(filtered)})
+    return filtered, {"skip_sl_pct_min": skip_sl_min, "checkpoints": checkpoints}
 
 
 def mirror_summarize_backtest(results):
@@ -19676,7 +19863,13 @@ _mirror_signal_cooldowns_lock = threading.Lock()
 def mirror_scan_symbol_live(symbol):
     """Live counterpart to mirror_backtest_symbol() — fetches recent
     history, runs the SAME detector, and fires only if the LAST candle
-    produced a brand-new signal not already seen for this symbol."""
+    produced a brand-new signal not already seen for this symbol.
+    v0.99.92 — also applies THIS symbol's own SL-width floor (from its
+    latest backtest, STATE["mirror_symbol_overrides"]) before firing:
+    a live signal whose own SL distance lands in the same statistically-
+    bad-width zone the backtest found for this symbol gets skipped,
+    same "trust this symbol's own bucket evidence" reasoning MSNR's own
+    skip_rr_min/skip_sl_pct_min live-firing checks already use."""
     if not MIRROR_ENABLED:
         return
     try:
@@ -19692,6 +19885,12 @@ def mirror_scan_symbol_live(symbol):
         sig = sigs[-1]
         if sig["entry_idx"] != len(candles) - 1:
             return  # most recent signal isn't off the latest closed candle — already stale/handled
+        with state_lock:
+            skip_sl_min = (STATE["mirror_symbol_overrides"].get(symbol) or {}).get("skip_sl_pct_min")
+        if skip_sl_min is not None and sig["entry"]:
+            sig_sl_pct = abs(sig["entry"] - sig["sl"]) / sig["entry"] * 100
+            if sig_sl_pct >= skip_sl_min:
+                return  # this symbol's own backtest says SL this wide fails here — skip, don't fire
         with _mirror_signal_cooldowns_lock:
             if _mirror_signal_cooldowns.get(symbol) == sig["entry_time"]:
                 return
@@ -19821,19 +20020,35 @@ def mirror_backtest_loop():
             universe = mirror_build_universe()
             results_by_symbol = {}
             summary_by_symbol = {}
+            overrides_by_symbol = {}
+            live_universe = []
             with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
                 futs = {ex.submit(mirror_backtest_symbol, s): s for s in universe}
                 for fut in as_completed(futs):
                     symbol = futs[fut]
                     try:
-                        results = fut.result()
+                        results, meta = fut.result()
                         results_by_symbol[symbol] = results
-                        summary_by_symbol[symbol] = mirror_summarize_backtest(results)
+                        summary = mirror_summarize_backtest(results)
+                        summary_by_symbol[symbol] = summary
+                        overrides_by_symbol[symbol] = meta
+                        # v0.99.92, per direct user request ("В живых
+                        # сигналах использовать только бэктестовые
+                        # монеты с винрейтом более 35%"): gated on the
+                        # POST-filter winrate (summary, from the
+                        # already-SL-filtered results) — the live
+                        # scanner should trust a symbol only to the
+                        # same extent its own backtest, filters
+                        # included, actually earned that trust.
+                        if summary["win_rate"] is not None and summary["win_rate"] > MIRROR_LIVE_MIN_WINRATE:
+                            live_universe.append(symbol)
                     except Exception as e:
                         log_error(f"mirror_backtest {symbol}: {e}")
             with state_lock:
                 STATE["mirror_backtest_results"] = results_by_symbol
                 STATE["mirror_backtest_summary"] = summary_by_symbol
+                STATE["mirror_symbol_overrides"] = overrides_by_symbol
+                STATE["mirror_live_universe"] = live_universe
                 STATE["mirror_last_backtest_finished"] = time.time()
                 STATE["mirror_last_backtest_duration"] = round(time.time() - t0, 1)
         except Exception as e:
@@ -19847,10 +20062,20 @@ def mirror_live_loop():
             if not MIRROR_ENABLED:
                 time.sleep(60)
                 continue
+            # v0.99.92, per direct user request ("В живых сигналах
+            # использовать только бэктестовые монеты с винрейтом более
+            # 35%"): mirror_live_universe is derived once per backtest
+            # cycle in mirror_backtest_loop() above, gated on each
+            # symbol's own POST-filter winrate — until the first
+            # backtest cycle completes, falls back to the raw universe
+            # (same "don't sit idle waiting" reasoning MSNR's own live-
+            # scan fallback uses) rather than scanning nothing at all.
             with state_lock:
-                universe = list(STATE.get("mirror_backtest_results", {}).keys()) or mirror_build_universe()
-            with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
-                list(ex.map(mirror_scan_symbol_live, universe))
+                live_universe = list(STATE.get("mirror_live_universe", []))
+            if not live_universe:
+                live_universe = mirror_build_universe()
+            with ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe) or 1)) as ex:
+                list(ex.map(mirror_scan_symbol_live, live_universe))
             update_mirror_signal_outcomes()
         except Exception as e:
             log_error(f"mirror_live_loop: {e}")
@@ -20575,20 +20800,30 @@ def api_mirror_status():
     inside_bar())."""
     with state_lock:
         summary = dict(STATE["mirror_backtest_summary"])
+        overrides = dict(STATE["mirror_symbol_overrides"])
+        live_universe = list(STATE["mirror_live_universe"])
         last_backtest_finished = STATE["mirror_last_backtest_finished"]
         last_backtest_duration = STATE["mirror_last_backtest_duration"]
-    ranked = [dict(s, symbol=sym) for sym, s in summary.items()]
+    # v0.99.92 — merge each symbol's summary with its own override meta
+    # (skip_sl_pct_min, filter checkpoints) so the UI can render the
+    # before/after picture per direct user request ("по статистике
+    # обязательно показывать до после как в msnr") without a second
+    # round-trip.
+    ranked = [dict(s, symbol=sym, live=(sym in live_universe), **(overrides.get(sym) or {}))
+              for sym, s in summary.items()]
     ranked.sort(key=lambda r: (r["win_rate"] or 0, r["n"]), reverse=True)
     return jsonify({
         "enabled": MIRROR_ENABLED,
         "last_backtest_finished": last_backtest_finished,
         "last_backtest_duration": last_backtest_duration,
         "signals_stats": compute_mirror_signal_stats(),
+        "live_universe": live_universe,
         "config": {
             "interval": MIRROR_INTERVAL, "pivot_left": MIRROR_PIVOT_LEFT, "pivot_right": MIRROR_PIVOT_RIGHT,
             "touch_tolerance_pct": MIRROR_TOUCH_TOLERANCE_PCT, "pattern_tolerance_pct": MIRROR_PATTERN_TOLERANCE_PCT,
             "rr": MIRROR_RR, "max_bars_to_return": MIRROR_MAX_BARS_TO_RETURN,
             "backtest_days": MIRROR_BACKTEST_DAYS, "universe_size": MIRROR_UNIVERSE_SIZE,
+            "live_min_winrate": MIRROR_LIVE_MIN_WINRATE,
         },
         "top": ranked,
     })
@@ -20663,6 +20898,8 @@ def api_reset_mirror():
         with state_lock:
             STATE["mirror_backtest_results"] = {}
             STATE["mirror_backtest_summary"] = {}
+            STATE["mirror_symbol_overrides"] = {}
+            STATE["mirror_live_universe"] = []
             STATE["mirror_last_backtest_finished"] = None
             STATE["mirror_last_backtest_duration"] = None
             STATE["mirror_signals"].clear()
@@ -23747,15 +23984,15 @@ async function refreshMirror() {
     return `${patternLabels[p] || p}: ${wr} (n=${s.n})`;
   }).join(' · ');
   const buildTxt = status.last_backtest_finished
-    ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s)`
+    ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · в живом скане: ${(status.live_universe||[]).length}/${(status.top||[]).length} монет (винрейт > ${cfg.live_min_winrate}%)`
     : 'бэктест ещё не завершился';
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
-      «Зеркальный уровень» — пробитый уровень поддержки/сопротивления при возврате цены меняет роль на противоположную; вход на одном из 4 разворотных паттернов на уровне.<br>
+      «Зеркальный уровень» — пробитый уровень поддержки/сопротивления при возврате цены меняет роль на противоположную; вход на одном из 4 разворотных паттернов на уровне. Стоп по каждой монете дополнительно фильтруется по ширине (см. таблицу ниже — «до» и «после» фильтра).<br>
       ТФ ${cfg.interval} · RR ${cfg.rr} · допуск касания ${cfg.touch_tolerance_pct}% · допуск паттерна ${cfg.pattern_tolerance_pct}% · ${buildTxt}<br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
       ${byPatternTxt ? `<span style="font-size:11px;">По паттернам: ${byPatternTxt}</span><br>` : ''}
-      <span style="font-size:11px;">Клик по строке сигнала открывает график входа/выхода.</span>
+      <span style="font-size:11px;">Зелёная точка — монета сейчас в живом скане. Клик по строке сигнала открывает график входа/выхода.</span>
     </div>`;
   const signalsRows = signals.map(s => {
     let statusHtml;
@@ -23780,20 +24017,38 @@ async function refreshMirror() {
     </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
   const btRows = (status.top || []).map(r => {
     const wrClass = (r.win_rate || 0) >= 50 ? 'win' : 'loss';
+    const liveDot = r.live ? ' <span style="color:#3ddc97;" title="в живом скане">●</span>' : '';
+    const skipTxt = (r.skip_sl_pct_min !== null && r.skip_sl_pct_min !== undefined)
+      ? `<span class="loss">skip SL≥${r.skip_sl_pct_min}%</span>` : '<span class="dim">-</span>';
+    // v0.99.92, per direct user request ("по статистике обязательно
+    // показывать до после как в msnr"): "до" — raw checkpoint (перед
+    // фильтром по ширине стопа), "после" — sl_filter checkpoint
+    // (после). Оба сохранены в r.checkpoints по mirror_backtest_
+    // symbol() — see that function's own docstring.
+    const cps = r.checkpoints || [];
+    const before = cps.find(c => c.stage === 'raw') || {};
+    const after = cps.find(c => c.stage === 'sl_filter') || {};
+    const fmtWr = v => (v === null || v === undefined) ? '?' : `${v}%`;
+    const fmtExp = v => (v === null || v === undefined) ? '?' : `${v > 0 ? '+' : ''}${v}R`;
+    const beforeAfterTxt = cps.length
+      ? `<span class="dim" title="винрейт/ожидание до фильтра по ширине стопа → после">${before.n||0}→${after.n||0} · WR ${fmtWr(before.winrate)}→${fmtWr(after.winrate)} · ${fmtExp(before.expectancy_r)}→${fmtExp(after.expectancy_r)}</span>`
+      : '<span class="dim">-</span>';
     return `<tr>
-      <td>${r.symbol}</td>
+      <td>${r.symbol}${liveDot}</td>
       <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
       <td class="dim">n=${r.n}</td>
       <td class="win">${r.wins}W</td>
       <td class="loss">${r.losses}L</td>
       <td class="dim">${r.timeouts}T</td>
+      <td>${skipTxt}</td>
+      <td>${beforeAfterTxt}</td>
     </tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
-    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории):</div>
+    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории) — итоговый винрейт/n уже ПОСЛЕ фильтра по ширине стопа:</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>Фильтр</th><th>До → После</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
