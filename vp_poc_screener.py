@@ -8851,6 +8851,49 @@ v0.99.93 - Direct user follow-up: "почему я вижу сигналы ра�
          block, the Flask route/def integrity check (still 60 routes —
          no endpoints touched), and an AST walk for duplicate top-level
          defs (none introduced).
+
+v0.99.94 - CRITICAL FIX, direct user report: "монета делает 3000% по
+         ней, проходит следующий бэктест, монета даёт уже 10 процентов,
+         улетает из топа, это точно надо править." This wasn't just
+         that ONE symbol's own score was noisy — msnr_compute_rank_
+         bounds() takes a plain min/max of compound_return_pct across
+         the WHOLE pool as the shared normalization ceiling for every
+         symbol's income_norm term, so a single symbol's rare
+         compounding outlier (one lucky extreme-RR trade sequence,
+         already a known documented instability — "MSNR live ranking
+         still volatile due to grid-search-combo sensitivity to rare
+         extreme-RR trades") silently set the ceiling EVERY other
+         symbol's income got measured against that cycle — compressing
+         everyone else's normalized income toward 0 while the outlier
+         was present, then springing back once it faded. A confirmed
+         mid-pool symbol whose own income never changed at all could
+         swing from score 0.15 to 0.53 across two cycles purely because
+         of a DIFFERENT symbol's noise, reproduced directly with a
+         synthetic 21-symbol pool before touching the fix.
+         Fixed by winsorizing the income ceiling at the pool's own 90th
+         percentile (new MSNR_RANK_INCOME_WINSORIZE_PCT, using the
+         existing _percentile() helper MFE/MAE stats already use)
+         rather than the raw max — nothing below that percentile is
+         affected at all, and msnr_symbol_rank_score()'s own _norm()
+         already clamps anything above the (now-capped) ceiling to
+         income_norm=1.0, so several genuinely strong symbols simply
+         tie at "very good" instead of one outlier distorting the whole
+         pool. Chosen as percentile-based (self-adjusting to whatever
+         the pool's overall performance level is that cycle) over a
+         fixed constant that would eventually need its own re-tuning.
+         Verified with py_compile, an actual runtime start — reproduced
+         the exact reported instability on a synthetic pool (a fixed
+         mid-pool symbol's score before the fix: 0.150 with the outlier
+         present -> 0.526 once it dropped to 10%, a 0.38 swing from
+         another symbol's noise alone; after the fix: 0.518 -> 0.543,
+         an 8x smaller swing), plus edge cases (small 2-symbol pool,
+         every value identical, empty pool — all degrade sensibly, no
+         crashes or nonsensical bounds), and a full msnr_rank_by_
+         winrate_sample() integration check confirming a maxed-income
+         outlier with only mediocre winrate/sample no longer auto-wins
+         top rank purely off an absurd income figure — pyflakes
+         (clean), the Flask route/def integrity check (still 60 routes
+         — no endpoints touched, this is a pure ranking-math fix).
 """
 
 import os
@@ -8870,7 +8913,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.93"
+APP_VERSION = "0.99.94"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9552,6 +9595,7 @@ MSNR_TOP10_INCOME_WEIGHT = float(os.environ.get("VP_MSNR_TOP10_INCOME_WEIGHT", 0
 MSNR_RANK_WINRATE_WEIGHT = float(os.environ.get("VP_MSNR_RANK_WINRATE_WEIGHT", 1.0 / 3))
 MSNR_RANK_SAMPLE_WEIGHT = float(os.environ.get("VP_MSNR_RANK_SAMPLE_WEIGHT", 1.0 / 3))
 MSNR_RANK_INCOME_WEIGHT = float(os.environ.get("VP_MSNR_RANK_INCOME_WEIGHT", 1.0 / 3))
+MSNR_RANK_INCOME_WINSORIZE_PCT = float(os.environ.get("VP_MSNR_RANK_INCOME_WINSORIZE_PCT", 0.9))  # v0.99.94 — see msnr_compute_rank_bounds()'s own docstring: caps the pool-wide income normalization ceiling at this percentile so one symbol's compounding outlier can't distort every other symbol's normalized score
 # v0.99.40 - CRITICAL FIX, per direct user report: "жму очистить msnr и
 # заново бэктэст не запускается, час ждать что-ли". Root cause: msnr_
 # backtest_loop() ends each cycle with a plain time.sleep(max(300,
@@ -18929,6 +18973,28 @@ def msnr_compute_rank_bounds(overrides):
     discontinuity this whole ranking redesign (v0.99.75) exists to fix,
     just moved from "two different sort keys" to "two different
     normalizations of the same key."
+    v0.99.94, per direct user report ("монета делает 3000% по ней,
+    проходит следующий бэктест, монета даёт уже 10 процентов, улетает
+    из топа"): доход's raw max is now WINSORIZED at the pool's own 90th
+    percentile before being used as the normalization ceiling — a
+    single symbol's compounding outlier (a rare, extreme-RR trade
+    sequence one cycle, gone the next — the exact instability already
+    flagged as a known open issue) was setting the ENTIRE POOL's income
+    normalization ceiling, meaning that ONE symbol's noisy compounding
+    result was silently compressing every OTHER symbol's normalized
+    income toward 0 that cycle, then springing back the next cycle once
+    the outlier faded — a systemic ranking instability affecting the
+    whole pool, not just the volatile symbol's own score. Nothing below
+    the 90th percentile is affected at all (msnr_symbol_rank_score()'s
+    own _norm() already clamps any value ABOVE the (now-capped) ceiling
+    to income_norm=1.0 rather than letting it exceed 1.0 — several
+    genuinely-strong symbols tying at "very good" is the correct
+    outcome, not a bug). Deliberately percentile-based rather than a
+    fixed number (e.g. tied to MSNR_LIVE_BALANCE_MAX's own $40->$500
+    growth ceiling) — self-adjusting to whatever the pool's overall
+    performance level happens to be this cycle (bull/bear conditions,
+    strategy-wide edge shifts) rather than a magic constant that would
+    itself eventually need re-tuning.
     Returns {"winrate": (lo, hi), "sample": (lo, hi), "income": (lo,
     hi)} — a metric with zero symbols reporting it falls back to
     (0.0, 1.0), an arbitrary but harmless range (msnr_symbol_rank_
@@ -18951,7 +19017,19 @@ def msnr_compute_rank_bounds(overrides):
     def _bounds(vals):
         return (min(vals), max(vals)) if vals else (0.0, 1.0)
 
-    return {"winrate": _bounds(winrates), "sample": _bounds(samples), "income": _bounds(incomes)}
+    income_bounds = (0.0, 1.0)
+    if incomes:
+        lo = min(incomes)
+        hi_capped = _percentile(sorted(incomes), MSNR_RANK_INCOME_WINSORIZE_PCT)
+        # a capped ceiling at or below the floor (tiny/degenerate pools,
+        # or every value identical) would make _norm()'s own hi-lo<1e-12
+        # branch return 0.5 for everyone — harmless, but fall back to
+        # the true max in that case so a real, meaningful spread isn't
+        # accidentally discarded for a pool too small to have a
+        # sensible 90th percentile distinct from its own minimum.
+        income_bounds = (lo, hi_capped) if hi_capped > lo else _bounds(incomes)
+
+    return {"winrate": _bounds(winrates), "sample": _bounds(samples), "income": income_bounds}
 
 
 def msnr_symbol_rank_score(ov, bounds):
