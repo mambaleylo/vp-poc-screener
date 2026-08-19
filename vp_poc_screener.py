@@ -8562,6 +8562,54 @@ v0.99.88 - Direct user follow-up: "По умолчанию стал ема а н
          historical changelog text, node --check on the correctly-last
          <script> block, and the Flask route/def integrity check
          (still 56 routes — markup/JS-only change).
+
+v0.99.89 - Direct user report: "На некоторых монетах фильтры никакие
+         не применены." Root cause: v0.99.86's own new msnr_symbol_rr_
+         range() (and the pre-existing msnr_symbol_sl_skip_min()) each
+         used a FIXED 5-bucket scheme with no fallback, unlike the
+         hour/volume filters (msnr_symbol_skip_hours()/msnr_symbol_
+         volume_skip_below(), both v0.99.60) which already cascade from
+         finer to coarser groupings when the fine split can't clear
+         MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE=15 per bucket. A modest total
+         sample — the same ~50-trade symbols the ORIGINAL report that
+         motivated v0.99.86 itself described — splits into ~10/bucket
+         on average across 5 fixed RR (or SL) buckets, already under
+         the 15-per-bucket bar even before accounting for any real
+         unevenness in the distribution, so BOTH the RR-range and
+         SL-width filters could end up finding nothing significant at
+         any single symbol with a merely-modest sample, regardless of
+         how bad its actual pattern was — explaining the report
+         directly, and closing a design inconsistency between filters
+         that should never have existed once the hour/volume cascade
+         precedent was already established.
+         Fixed by extending the exact same cascade pattern to both:
+         msnr_rr_bucket_stats()/msnr_sl_bucket_stats() gained an
+         optional `bucket_scheme` parameter (defaults to the existing
+         fixed MSNR_RR_BUCKETS/MSNR_SL_PCT_BUCKETS, so the pooled/
+         display table's own behavior is completely unchanged). New
+         MSNR_RR_BUCKET_SCHEMES/MSNR_SL_PCT_BUCKET_SCHEMES (5 buckets
+         -> 3 -> 2, progressively coarser) — msnr_symbol_rr_range()/
+         msnr_symbol_sl_skip_min() now try each scheme in turn, finest
+         first, stopping at the first one that finds ANYTHING
+         significant on either side, same "first width that clears the
+         bar wins" philosophy MSNR_HOUR_GROUP_WIDTHS/MSNR_VOLUME_
+         QUANTILE_GROUPS already established.
+         Verified with py_compile, an actual runtime start (two
+         targeted synthetic tests: (1) RR — 50 trades split evenly
+         across 5 buckets (10 each, all under the 15 floor) with two
+         adjacent buckets genuinely failing their own breakeven —
+         confirmed the fine scheme finds nothing, but the cascade
+         correctly falls through to the 3-bucket scheme and catches
+         the merged bad region (floor=5); (2) SL-width — same shape,
+         confirmed skip_sl_pct_min correctly resolves to 4 via cascade
+         where the fine scheme alone would find nothing; both also
+         re-verified against a large single-bucket sample to confirm
+         the fine scheme still fires immediately without falling
+         through, unchanged from pre-cascade behavior), pyflakes
+         (clean), node --check on the correctly-last <script> block,
+         the Flask route/def integrity check (still 56 routes — no new
+         endpoints), and an AST walk for duplicate top-level defs (none
+         introduced).
 """
 
 import os
@@ -8581,7 +8629,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.88"
+APP_VERSION = "0.99.89"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -17063,7 +17111,7 @@ def msnr_summarize_backtest(results):
 MSNR_RR_BUCKETS = [(0, 3), (3, 5), (5, 7), (7, 10), (10, float("inf"))]  # v0.99.11 — bucket boundaries for msnr_rr_bucket_stats(); chosen so the user's own reported breakpoint (rr>6 consistently failing) falls cleanly inside the 5-7 bucket, not split across two
 
 
-def msnr_rr_bucket_stats(trades):
+def msnr_rr_bucket_stats(trades, bucket_scheme=None):
     """Buckets CLOSED trades (WIN/LOSS only — TIMEOUT has no real outcome
     to bucket by) by their OWN realized rr into MSNR_RR_BUCKETS, computing
     win-rate per bucket. Per direct user observation: pooled stats (avg/
@@ -17089,9 +17137,21 @@ def msnr_rr_bucket_stats(trades):
     entirely is safer than sanitizing inf->None at the jsonify boundary,
     since it removes the whole class of "some other future numeric
     field might also carry inf into a JSON response" risk, not just
-    this one instance of it."""
+    this one instance of it.
+    v0.99.89 — accepts an optional `bucket_scheme` (a list of (lo, hi)
+    tuples, same shape as MSNR_RR_BUCKETS) to support msnr_symbol_rr_
+    range()'s own granularity cascade (see that function's docstring —
+    found via a direct user report, "на некоторых монетах фильтры
+    никакие не применены," after v0.99.86 shipped this filter with a
+    FIXED 5-bucket scheme and no fallback, unlike the hour/volume
+    filters which already had one since v0.99.60). Defaults to the
+    canonical MSNR_RR_BUCKETS when omitted, preserving the EXACT
+    existing behavior for the pooled/display table below, which always
+    wants the fixed 5-bucket scheme regardless of whatever granularity
+    a per-symbol filter cascade happens to be trying."""
+    scheme = bucket_scheme if bucket_scheme is not None else MSNR_RR_BUCKETS
     buckets = []
-    for lo, hi in MSNR_RR_BUCKETS:
+    for lo, hi in scheme:
         subset = [t for t in trades if t.get("result") in ("WIN", "LOSS") and t.get("rr") is not None and lo <= t["rr"] < hi]
         label = f"{lo}-{hi}" if hi != float("inf") else f"{lo}+"
         if not subset:
@@ -17103,6 +17163,13 @@ def msnr_rr_bucket_stats(trades):
         buckets.append({"range": label, "lo": lo, "n": n, "wins": wins,
                          "losses": n - wins, "winrate": round(wins / n * 100, 1), "avg_rr": avg_rr})
     return buckets
+
+
+MSNR_RR_BUCKET_SCHEMES = [
+    MSNR_RR_BUCKETS,  # finest — v0.99.11's original 5-bucket split
+    [(0, 5), (5, 10), (10, float("inf"))],  # medium — 3 buckets
+    [(0, 7), (7, float("inf"))],  # coarsest — 2 buckets
+]  # v0.99.89, per direct user report ("на некоторых монетах фильтры никакие не применены") after v0.99.86 shipped msnr_symbol_rr_range() with ONLY the fixed 5-bucket scheme and no fallback — a modest total sample (e.g. the ~50-trade symbols the earlier report itself described) splits into ~10/bucket on average across 5 buckets, already below MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE=15 even before accounting for any real unevenness, so NONE of the 5 buckets could ever reach significance and the filter silently found nothing for those symbols. Mirrors the exact cascade shape msnr_symbol_skip_hours()/msnr_symbol_volume_skip_below() already use (MSNR_HOUR_GROUP_WIDTHS/MSNR_VOLUME_QUANTILE_GROUPS, both v0.99.60) — finest tried first, progressively coarser as fallback, first scheme that finds ANYTHING significant wins.
 
 
 def msnr_symbol_rr_range(trades):
@@ -17135,50 +17202,62 @@ def msnr_symbol_rr_range(trades):
       extend the floor, even if a later bucket also happens to fail —
       the floor means "everything below here is bad," which a gap of
       good buckets in between would contradict.
+    v0.99.89 — cascades MSNR_RR_BUCKET_SCHEMES from finest to coarsest
+    (see that constant's own comment for the full reasoning): tries the
+    canonical 5-bucket scheme first; if NEITHER a floor nor a ceiling
+    is found there, retries against a coarser 3-bucket, then 2-bucket
+    scheme, stopping at the first scheme that finds ANYTHING — a symbol
+    whose fine-grained buckets never individually reach the sample bar
+    still gets a shot at a coarser, still-statistically-legitimate
+    split instead of silently passing every trade through unfiltered.
     Either side can independently be None (no statistically significant
-    unprofitable region found there) — a symbol can end up with only a
-    ceiling, only a floor, both, or neither, same "don't invent
-    evidence from a thin sample" stance as the rule this replaces.
+    unprofitable region found there, even at the coarsest tried scheme)
+    — a symbol can end up with only a ceiling, only a floor, both, or
+    neither, same "don't invent evidence from a thin sample" stance as
+    the rule this replaces.
     Returns (floor, ceiling) — floor is the bucket's own upper edge
-    (never returns float("inf") — the top bucket (10, inf) can only
+    (never returns float("inf") — an open-ended top bucket can only
     ever extend a ceiling-seeking search, not a floor-seeking one,
     since a floor search stops at the first non-failing bucket long
-    before reaching the open-ended top bucket in any realistic RR
-    distribution)."""
-    buckets = msnr_rr_bucket_stats(trades)
-
+    before reaching it in any realistic RR distribution)."""
     def _failing(b):
         return (b["n"] >= MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE and b["winrate"] is not None
                 and b["avg_rr"] and b["winrate"] < 100.0 / (1.0 + b["avg_rr"]))
 
-    # v0.99.86 fix, caught by a synthetic test with BOTH ends failing
-    # before shipping: floor is computed FIRST, and ceiling's own search
-    # only considers buckets AFTER the floor's own contiguous run — not
-    # the whole bucket list. Without this split, a failing low-RR bucket
-    # (lo=0) would itself show up as the "lowest failing edge" and get
-    # mistaken for the ceiling too, producing a nonsensical ceiling=0
-    # that would skip literally everything instead of two genuinely
-    # separate bad regions at opposite ends.
-    floor = None
-    floor_bucket_count = 0
-    for lo, hi in MSNR_RR_BUCKETS:
-        b = next(bb for bb in buckets if bb["lo"] == lo)
-        if _failing(b):
-            floor = hi
-            floor_bucket_count += 1
-        else:
-            break
+    for scheme in MSNR_RR_BUCKET_SCHEMES:
+        buckets = msnr_rr_bucket_stats(trades, bucket_scheme=scheme)
 
-    failing_edges = [b["lo"] for i, b in enumerate(buckets) if i >= floor_bucket_count and _failing(b)]
-    ceiling = min(failing_edges) if failing_edges else None
-
-    # a floor at or above the ceiling would leave nothing tradable at
-    # all — shouldn't arise now that ceiling only searches buckets past
-    # the floor's own run, but guarded explicitly rather than trusting
-    # bucket ordering to hold forever.
-    if floor is not None and ceiling is not None and floor >= ceiling:
+        # v0.99.86 fix, caught by a synthetic test with BOTH ends failing
+        # before shipping: floor is computed FIRST, and ceiling's own
+        # search only considers buckets AFTER the floor's own contiguous
+        # run — not the whole bucket list. Without this split, a failing
+        # low-RR bucket (lo=0) would itself show up as the "lowest
+        # failing edge" and get mistaken for the ceiling too, producing
+        # a nonsensical ceiling=0 that would skip literally everything
+        # instead of two genuinely separate bad regions at opposite ends.
         floor = None
-    return floor, ceiling
+        floor_bucket_count = 0
+        for lo, hi in scheme:
+            b = next(bb for bb in buckets if bb["lo"] == lo)
+            if _failing(b):
+                floor = hi
+                floor_bucket_count += 1
+            else:
+                break
+
+        failing_edges = [b["lo"] for i, b in enumerate(buckets) if i >= floor_bucket_count and _failing(b)]
+        ceiling = min(failing_edges) if failing_edges else None
+
+        # a floor at or above the ceiling would leave nothing tradable at
+        # all — shouldn't arise given ceiling only searches buckets past
+        # the floor's own run, but guarded explicitly rather than
+        # trusting bucket ordering to hold forever.
+        if floor is not None and ceiling is not None and floor >= ceiling:
+            floor = None
+
+        if floor is not None or ceiling is not None:
+            return floor, ceiling
+    return None, None
 
 
 def msnr_symbol_rr_skip_min(trades):
@@ -17211,7 +17290,7 @@ def msnr_symbol_rr_skip_min(trades):
 MSNR_SL_PCT_BUCKETS = [(0, 2), (2, 4), (4, 6), (6, 10), (10, float("inf"))]  # v0.99.26 — % SL-distance buckets for msnr_sl_bucket_stats(), same shape as MSNR_RR_BUCKETS but keyed on stop width instead of RR
 
 
-def msnr_sl_bucket_stats(trades):
+def msnr_sl_bucket_stats(trades, bucket_scheme=None):
     """v0.99.26, per direct user request: SL-width counterpart to msnr_
     rr_bucket_stats() — buckets CLOSED trades (WIN/LOSS only) by their
     OWN SL distance as a % of entry price (not by rr) into MSNR_SL_PCT_
@@ -17225,9 +17304,15 @@ def msnr_sl_bucket_stats(trades):
     in absolute % terms.
     Same "hi" key omitted (only "lo") for the same JSON-Infinity reason
     msnr_rr_bucket_stats() already documented — the last bucket's hi is
-    float("inf") and would break jsonify()."""
+    float("inf") and would break jsonify().
+    v0.99.89 — accepts an optional `bucket_scheme`, same reasoning and
+    same shape as msnr_rr_bucket_stats()'s own addition: supports msnr_
+    symbol_sl_skip_min()'s own granularity cascade (MSNR_SL_PCT_BUCKET_
+    SCHEMES) without disturbing the fixed MSNR_SL_PCT_BUCKETS default
+    any other caller relies on."""
+    scheme = bucket_scheme if bucket_scheme is not None else MSNR_SL_PCT_BUCKETS
     buckets = []
-    for lo, hi in MSNR_SL_PCT_BUCKETS:
+    for lo, hi in scheme:
         subset = []
         for t in trades:
             if t.get("result") not in ("WIN", "LOSS"):
@@ -17252,6 +17337,13 @@ def msnr_sl_bucket_stats(trades):
     return buckets
 
 
+MSNR_SL_PCT_BUCKET_SCHEMES = [
+    MSNR_SL_PCT_BUCKETS,  # finest — v0.99.26's original 5-bucket split
+    [(0, 4), (4, 10), (10, float("inf"))],  # medium — 3 buckets
+    [(0, 6), (6, float("inf"))],  # coarsest — 2 buckets
+]  # v0.99.89 — same cascade reasoning/shape as MSNR_RR_BUCKET_SCHEMES above, applied to SL-width instead of RR (found via the same direct user report, "на некоторых монетах фильтры никакие не применены" — this filter had the identical fixed-scheme-no-fallback gap).
+
+
 def msnr_symbol_sl_skip_min(trades):
     """v0.99.26, per direct user request ("фильтр по ширине стопа"):
     SL-width counterpart to msnr_symbol_rr_skip_min() — same shape,
@@ -17261,17 +17353,25 @@ def msnr_symbol_sl_skip_min(trades):
     bucketed by msnr_sl_bucket_stats() instead of msnr_rr_bucket_
     stats(). Returns this symbol's own SL% floor — live signals whose
     OWN SL distance lands at or above it get skipped for this symbol —
-    or None if no bucket clears the sample bar.
+    or None if no bucket clears the sample bar at ANY tried granularity.
     Deliberately separate from msnr_symbol_rr_skip_min(): a symbol can
     have a fine RR distribution (good reward-to-risk ratios) while
     still routinely getting stopped out on unusually WIDE stops in
     absolute % terms — RR alone doesn't capture that, only the SL's
-    own size does."""
-    buckets = msnr_sl_bucket_stats(trades)
-    failing_edges = [b["lo"] for b in buckets
-                      if b["n"] >= MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE and b["winrate"] is not None and b["avg_rr"]
-                      and b["winrate"] < 100.0 / (1.0 + b["avg_rr"])]
-    return min(failing_edges) if failing_edges else None
+    own size does.
+    v0.99.89 — cascades MSNR_SL_PCT_BUCKET_SCHEMES from finest to
+    coarsest, identical reasoning/shape to msnr_symbol_rr_range()'s own
+    cascade addition — a modest total sample can leave every one of the
+    fine scheme's 5 buckets under MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE even
+    when the symbol's overall trade count looks substantial."""
+    for scheme in MSNR_SL_PCT_BUCKET_SCHEMES:
+        buckets = msnr_sl_bucket_stats(trades, bucket_scheme=scheme)
+        failing_edges = [b["lo"] for b in buckets
+                          if b["n"] >= MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE and b["winrate"] is not None and b["avg_rr"]
+                          and b["winrate"] < 100.0 / (1.0 + b["avg_rr"])]
+        if failing_edges:
+            return min(failing_edges)
+    return None
 
 
 MSNR_HOUR_GROUP_WIDTHS = [1, 2, 3]  # v0.99.60, per direct user request ("оба варианта вместе" — granularity/threshold search paired with the volume filter's quantile adaptation): candidate UTC-hour group widths for msnr_hour_bucket_stats(), tried FINEST first (single-hour resolution, the original v0.99.56 behavior) then progressively wider — a symbol whose per-hour sample never clears MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE still gets a shot at a coarser, still-legitimate 2h or 3h grouping instead of the filter finding nothing at all purely from thin per-hour data.
