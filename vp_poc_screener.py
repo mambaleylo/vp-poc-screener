@@ -8499,6 +8499,35 @@ v0.99.86 - Direct user request: "много слабых результатов 
          and a manual check that all new JS variables (skipRrMaxTxt,
          filterImpactTxt) are declared before their use in paramsTxt's
          own template string.
+
+v0.99.87 - Direct user request: "По умолчанию индикатор msnr должен
+         быть первым." Reordered the tab bar's markup — MSNR moved from
+         7th position to 1st (kept its existing "active" class, which
+         was already correctly making it the default-open tab content-
+         wise; only its position in the tab BAR itself was off). Volume
+         moved to 2nd. Checked for any code depending on tab ORDER
+         (indexed access like tabs[0], next/prev-tab logic) before
+         moving anything — found none; every reference to a specific
+         tab already goes through its own data-tab name
+         (querySelector('.tab[data-tab="msnr"]')-style), never a
+         positional index, so reordering the markup couldn't silently
+         break anything else.
+         Also investigated a live report from the same message ("в
+         телефоне не видно volume"): confirmed refreshStatus() fully
+         hides the Volume tab (display:none, not just off-screen) when
+         s.volume_profile_enabled is false — this is a genuine settings
+         toggle (Настройки -> Volume Profile -> "Volume Profile
+         сканер"), not a scroll/CSS cutoff; the mobile @media block's
+         own .tabs rule is overflow-x:auto (horizontally scrollable,
+         tabs stay reachable), which wouldn't produce a fully-missing
+         tab the way this toggle would. Pointed the user at that
+         specific toggle rather than guessing further or touching code
+         for a setting that may simply be off — flagged as the likely
+         cause, not yet confirmed fixed pending their check.
+         Verified with py_compile, an actual runtime start, the Flask
+         route/def integrity check (still 56 routes — markup-only
+         change), and node --check on the correctly-last <script>
+         block.
 """
 
 import os
@@ -8518,7 +8547,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.86"
+APP_VERSION = "0.99.87"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -20653,13 +20682,13 @@ INDEX_HTML = """<!doctype html>
   </details>
 </header>
 <div class="tabs">
+  <div class="tab active" data-tab="msnr">MSNR</div>
   <div class="tab" data-tab="signals">Volume</div>
   <div class="tab" data-tab="ema">EMA</div>
   <div class="tab" data-tab="scalp">Скальпинг</div>
   <div class="tab" data-tab="session">Сессия</div>
   <div class="tab" data-tab="session_ny">Сессия NY</div>
   <div class="tab" data-tab="xau_lg" style="color:#e0a030;">XAU LG ⚠️</div>
-  <div class="tab active" data-tab="msnr">MSNR</div>
   <div class="tab" data-tab="ft5" style="color:#e0a030;">FT5 ⚠️</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
