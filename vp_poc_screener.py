@@ -8436,6 +8436,69 @@ v0.99.85 - Direct user request continued: 2nd of 6 modules removed
          duplicates introduced, and an exhaustive grep pass confirming
          every remaining div_*/DIV_* hit in the file is either an inline
          comment on an unrelated constant or historical changelog text.
+
+v0.99.86 - Direct user request: "много слабых результатов в mnsr, по
+         50 сделок а доход околонулевой, при этом винрейт от 30 до 50,
+         может надо переосмыслить что-то, RR, отсечение всегда
+         убыточного диапазона RR, как снизу так и сверху, придумать
+         новые фильтры. Еще, хочу видеть не только сделок до и после
+         фильтров, а так же винрейт и доход до и после, чтобы понимать
+         эффективность фильтров и менять их на другие своевременно."
+         Two-sided RR filtering: new msnr_symbol_rr_range() replaces
+         msnr_symbol_rr_skip_min() (v0.99.79 had fully disabled the old
+         one-sided version, per an earlier direct request to trade
+         every RR range while more data accumulated — this
+         reintroduces filtering, but as a genuinely different symmetric
+         design, not a plain revert). Same bucket-and-breakeven test
+         every other MSNR filter already uses, applied from BOTH ends:
+         a ceiling (unchanged meaning from the old rule) AND a new
+         floor, found by scanning buckets from RR=0 upward for the
+         longest contiguous run of failing buckets starting at the
+         bottom. Caught and fixed a real logic bug before shipping via
+         a synthetic 3-scenario test: the ceiling search initially
+         didn't exclude the floor's own failing buckets, so a failing
+         low-RR bucket could itself get mistaken for "the ceiling,"
+         producing a nonsensical ceiling=0 that would have skipped
+         everything — fixed by having ceiling search only buckets past
+         the floor's own contiguous run. Verified against 3 cases (both
+         ends failing, only-high failing matching the old rule's
+         behavior, and nothing failing) — all three now correct.
+         Re-enabled in msnr_scan_symbol_live() (was commented out since
+         v0.99.79) checking both skip_rr_min (ceiling) and the new
+         skip_rr_max (floor, msnr_symbol_skip_rr_max() added as its own
+         lookup, same separate-lookup pattern as skip_rr_min's own).
+         Before/after filter diagnostics: new _msnr_filter_checkpoint()
+         snapshots {n, winrate, income_pct} for a trade list, using a
+         FRESH Kelly leverage search at that specific checkpoint rather
+         than reusing the symbol's final leverage — reusing one fixed
+         value would conflate "did this filter change the edge" with
+         "does the final leverage happen to suit this intermediate
+         set." msnr_optimize_symbol()'s filter pipeline (rr_range ->
+         liquidation -> sl_pct -> hours -> volume) now builds a
+         filter_checkpoints chain, one snapshot per STAGE TRANSITION
+         (not two per filter) — each filter's "before" is exactly the
+         previous filter's "after," so this costs one extra leverage-
+         search+compound-sim per filter, not two. Exposed automatically
+         via api_msnr_status()'s existing dict(v, ...) spread (no new
+         endpoint needed) and rendered as a compact "фильтры: N→M · WR
+         X%→Y% · доход A%→B%" summary (raw vs final checkpoint) in each
+         row, with the full per-stage chain still available in the raw
+         API response for anyone wanting per-filter granularity beyond
+         this summary line. Updated the MSNR panel's own description
+         text (was still saying skip_rr_min was disabled) and the
+         skip-indicator display to show the new floor (skip rr<X)
+         alongside the existing ceiling (skip rr≥X).
+         Verified with py_compile, an actual runtime start (msnr_
+         symbol_rr_range()'s own 3-scenario synthetic test described
+         above; _msnr_filter_checkpoint() against an 80-trade realistic
+         synthetic set — confirmed both winrate and income compute
+         sensibly), pyflakes (clean), node --check on the correctly-
+         last <script> block, the Flask route/def integrity check
+         (still 56 routes — no new endpoints, existing one extended),
+         an AST walk for duplicate top-level defs (none introduced),
+         and a manual check that all new JS variables (skipRrMaxTxt,
+         filterImpactTxt) are declared before their use in paramsTxt's
+         own template string.
 """
 
 import os
@@ -8455,7 +8518,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.85"
+APP_VERSION = "0.99.86"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16586,6 +16649,42 @@ def msnr_ranking_score(r_values, losses_count, z=None):
     return mean - zz * stderr
 
 
+def _msnr_filter_checkpoint(trades, symbol, leverage_ceiling):
+    """v0.99.86, per direct user request ("хочу видеть не только сделок
+    до и после фильтров, а так же винрейт и доход до и после, чтобы
+    понимать эффективность фильтров"): a reusable snapshot of {n,
+    winrate, income} for a given trade list, taken at each filter
+    checkpoint in msnr_optimize_symbol() below. Before this, the only
+    per-filter visibility was a trade COUNT delta (rr_filtered_count
+    etc) — no way to tell whether a filter that removed, say, 8 trades
+    actually IMPROVED the remaining set's winrate/income or just
+    shrank the sample for no real gain.
+    Income is computed the same honest way the final display number is
+    — a FRESH msnr_optimal_leverage_for_symbol() search against THIS
+    checkpoint's own trade list, not the symbol's final leverage reused
+    across every checkpoint. Reusing one fixed leverage would silently
+    conflate "did this filter change the edge" with "does the FINAL
+    leverage happen to suit this intermediate set" — using each
+    checkpoint's own best leverage answers the question actually being
+    asked: "if you traded exactly this set, on its own merits, what
+    would it look like."
+    Returns {"n": int, "winrate": float|None, "income_pct": float|None}
+    — None values propagate the same "not enough evidence" meaning
+    msnr_compound_return()/msnr_summarize_backtest() already use, not
+    a silent 0."""
+    closed = [t for t in trades if t.get("result") in ("WIN", "LOSS")]
+    if not closed:
+        return {"n": 0, "winrate": None, "income_pct": None}
+    summary = msnr_summarize_backtest(trades)
+    lev = msnr_optimal_leverage_for_symbol(trades, leverage_ceiling, symbol=symbol)
+    compound = msnr_compound_return(trades, leverage=lev)
+    return {
+        "n": len(closed),
+        "winrate": summary["win_rate"],
+        "income_pct": compound["return_pct"] if compound else None,
+    }
+
+
 def _msnr_recompute_summary_score(best, best_results):
     """v0.99.26 — shared recompute step reused by every post-hoc filter
     in msnr_optimize_symbol() (skip_rr_min, liquidation, skip_sl_pct_
@@ -16683,9 +16782,11 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
             "trades": len(best_results), "wins": 0, "losses": 0, "timeouts": 0,
             "winrate": None, "avg_rr": None, "median_rr": None, "expectancy_r": None, "score": None,
             "optimized_at": now, "candles_used": len(entry_candles), "skip_rr_min": None,
+            "skip_rr_max": None,
             "skip_sl_pct_min": None, "liquidation_filtered_count": 0, "skip_hours": [],
             "raw_closed_n": 0, "rr_filtered_count": 0, "sl_filtered_count": 0, "hours_filtered_count": 0,
             "skip_volume_below": None, "volume_filtered_count": 0,
+            "filter_checkpoints": [],
             "effective_leverage": msnr_symbol_effective_leverage(symbol),
             "leverage_ceiling": leverage_ceiling,
             "optimal_leverage": msnr_optimal_leverage_for_symbol(best_results, leverage_ceiling, symbol=symbol),
@@ -16694,86 +16795,72 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
                     f"using middle-of-grid defaults",
         }
     else:
-        # v0.99.22, per direct user request: derive this symbol's own
-        # RR-skip floor off the winning combo's own trades (not
-        # re-run per grid combo — would be needlessly expensive and
-        # the winning combo's own trades are what's actually shown/
-        # traded, same reasoning as reusing best_results for display).
-        # v0.99.79 — DISABLED (not deleted), per direct user request
-        # ("Skip RR>3, давай подобную проверку тоже уберем, пока важно
-        # все RR торговать"): same reasoning/treatment as v0.99.68's
-        # MSNR_MAX_RR removal — this per-symbol statistical filter was
-        # exactly the mechanism v0.99.68 said should be fully trusted
-        # to judge which RR ranges are worth trading ("довериться
-        # skip_rr_min целиком"), but the user now wants NO RR range
-        # excluded at all while more raw data accumulates across the
-        # full RR spectrum, matching the strategy's own stated design
-        # (catch large-RR moves even at low win-rate). Left fully
-        # defined (msnr_symbol_rr_skip_min() itself untouched) in case
-        # a future session wants to reintroduce it.
-        best["skip_rr_min"] = None
-        # v0.99.23, per direct user follow-up: once the skip floor is
-        # known, DON'T keep showing/counting the trades it would skip —
-        # the whole point was "statistically bad signals for this coin
-        # shouldn't be treated as part of this coin's system," not just
-        # "don't fire them live going forward." Deliberately computed
-        # in THIS order (skip_rr_min off the full unfiltered sample,
-        # THEN filter) — filtering first would shrink the very bucket
-        # evidence the threshold is judged from, undermining the same
-        # min-sample protection msnr_symbol_rr_skip_min() relies on.
-        # raw_results keeps the pre-filter list for the pooled global
-        # autotune/display (see this function's own docstring) — only
-        # best_results (per-symbol display + live gating) gets filtered.
-        # timeouts (rr present, no WIN/LOSS result) are dropped by the
-        # same rr>=skip_rr_min test as closed trades — a timeout is
-        # still evidence the setup didn't work, no reason to keep it
-        # once its own rr says it's in the skipped range.
+        # v0.99.86, per direct user request ("много слабых результатов
+        # в msnr, по 50 сделок а доход околонулевой... отсечение
+        # всегда убыточного диапазона RR, как снизу так и сверху...
+        # хочу видеть винрейт и доход до и после [каждого фильтра]"):
+        # leverage_ceiling/effective_leverage moved up here (used to sit
+        # right before the liquidation filter) — every checkpoint below
+        # needs leverage_ceiling for its own Kelly search, not just the
+        # liquidation filter.
+        best["effective_leverage"] = msnr_symbol_effective_leverage(symbol)
+        best["leverage_ceiling"] = msnr_symbol_contract_max_leverage(symbol)
         # v0.99.57, per direct user follow-up ("теперь количество сделок
         # снизится и монеты могут перестать проходить по выборке"):
-        # captured HERE, before any of the filters below run — this is
-        # the symbol's own true closed-trade sample size, independent
-        # of how many of those trades later get excluded from wins/
-        # losses/winrate by skip_rr_min/liquidation/skip_sl_pct_min/
-        # skip_hours. msnr_rank_by_winrate_sample()/msnr_compute_live_
-        # universe() gate eligibility on THIS field now, not wins+
-        # losses — a symbol shouldn't lose its shot at ranking/live
-        # promotion just because more filters got added over time and
-        # progressively shrank the DISPLAYED win/loss count; the
-        # v0.99.23 reasoning ("filtered trades shouldn't count as part
-        # of this coin's system") still holds for win-rate/compound/
-        # what-fires, it was never meant to also silently tighten the
-        # sample-size bar these filters get judged against.
+        # captured HERE, before any filter below runs — this symbol's
+        # true closed-trade sample size, independent of how many later
+        # get excluded by any filter. msnr_rank_by_winrate_sample()/
+        # msnr_compute_live_universe() gate eligibility on THIS field,
+        # not wins+losses — a symbol shouldn't lose its shot at ranking
+        # just because filters progressively shrink the DISPLAYED
+        # win/loss count.
         best["raw_closed_n"] = best["wins"] + best["losses"]
         raw_results = best_results
-        # v0.99.57 — per-reason exclusion counts (how many trades THIS
-        # specific step removed), purely informational for the UI: "просто
-        # писать сколько сделок отмечено по такой-то причине" — doesn't
-        # affect raw_closed_n above, which is already fixed before any
-        # of these run.
-        # v0.99.79 — always 0 now that the filter above is disabled;
-        # kept as a real (not hardcoded-elsewhere) computation so it
-        # stays correct automatically if skip_rr_min is ever
-        # reintroduced, rather than needing to remember to also revert
-        # this line.
+        # v0.99.86 — the checkpoint chain: one snapshot per stage
+        # transition (not two per filter) — each filter's "before" is
+        # exactly the PREVIOUS filter's "after," so this only costs
+        # ONE fresh leverage-search+compound-sim per filter, not two.
+        # "raw" is the baseline BEFORE any per-symbol filter has run
+        # (the winning grid combo's own unfiltered trade list).
+        checkpoints = [{"stage": "raw", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])}]
+        # v0.99.22/v0.99.79/v0.99.86: derive this symbol's own RR range
+        # off the winning combo's own trades (not re-run per grid combo
+        # — needlessly expensive, and the winning combo's own trades
+        # are what's actually traded). v0.99.79 had disabled the old
+        # ONE-SIDED version entirely ("Skip RR>3, давай подобную
+        # проверку тоже уберем, пока важно все RR торговать") — this
+        # re-enables filtering, but as msnr_symbol_rr_range()'s
+        # genuinely TWO-SIDED (floor AND ceiling) replacement, not a
+        # plain revert to the old rule; see that function's own
+        # docstring for why a one-sided cutoff couldn't catch the
+        # reported pattern (large, trustworthy samples with a middling
+        # winrate but near-zero income — a bad low-RR region dragging
+        # the average down just as much as a bad high-RR one).
+        # Deliberately computed off the FULL unfiltered sample before
+        # any filtering — filtering first would shrink the very bucket
+        # evidence the range is judged from.
         before_rr = len(best_results)
-        if best["skip_rr_min"] is not None:
-            skip_min = best["skip_rr_min"]
-            best_results = [t for t in best_results if t["rr"] is None or t["rr"] < skip_min]
+        rr_floor, rr_ceiling = msnr_symbol_rr_range(best_results)
+        best["skip_rr_min"] = rr_ceiling
+        best["skip_rr_max"] = rr_floor  # v0.99.86 — new field, the floor side; kept named "_max" for symmetry with "_min" meaning "everything past this edge, going the other direction, is skipped"
+        if rr_ceiling is not None or rr_floor is not None:
+            best_results = [t for t in best_results if t["rr"] is None
+                             or ((rr_ceiling is None or t["rr"] < rr_ceiling)
+                                 and (rr_floor is None or t["rr"] >= rr_floor))]
             _msnr_recompute_summary_score(best, best_results)
         best["rr_filtered_count"] = before_rr - len(best_results)
+        checkpoints.append({"stage": "rr_range", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
         # v0.99.26, per direct user request ("иногда стоп будет за
         # ликвидацией и просто избегать этого"): deterministic filter,
         # not statistical — a trade whose own SL sits past this
         # symbol's effective-leverage liquidation buffer gets dropped
         # unconditionally, sample size doesn't matter here since it's
         # Gate's own margin math, not a pattern being inferred from
-        # history. Applied AFTER the skip_rr_min filter (on whatever
+        # history. Applied AFTER the RR-range filter (on whatever
         # survived it) and BEFORE the SL-width statistical filter below
         # — the SL-width bucket stats should reflect only trades that
         # could have actually played out as scored, not ones that were
         # never mechanically reachable in the first place.
-        best["effective_leverage"] = msnr_symbol_effective_leverage(symbol)
-        best["leverage_ceiling"] = msnr_symbol_contract_max_leverage(symbol)
         before_liq = len(best_results)
         best_results = [t for t in best_results
                          if not msnr_trade_beyond_liquidation(symbol, t["direction"], t["entry"], t["sl"],
@@ -16781,8 +16868,9 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
         best["liquidation_filtered_count"] = before_liq - len(best_results)
         if best["liquidation_filtered_count"]:
             _msnr_recompute_summary_score(best, best_results)
+        checkpoints.append({"stage": "liquidation", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
         # v0.99.26, per direct user request ("фильтр по ширине стопа"):
-        # SL-width counterpart to the skip_rr_min block above — same
+        # SL-width counterpart to the RR-range block above — same
         # ordering reasoning (derive the floor off the full surviving
         # sample first, THEN filter), same "skip entirely" behavior.
         before_sl = len(best_results)
@@ -16794,15 +16882,16 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
                              or abs(t["entry"] - t["sl"]) / t["entry"] * 100 < skip_sl]
             _msnr_recompute_summary_score(best, best_results)
         best["sl_filtered_count"] = before_sl - len(best_results)
+        checkpoints.append({"stage": "sl_pct", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
         # v0.99.56, per direct user request ("какой фильтр сигналов был
         # бы самым эффективным для внедрения" -> time-of-day): same
-        # ordering reasoning as skip_rr_min/skip_sl_pct_min above —
-        # derive the bad-hours SET off the full surviving sample first,
-        # THEN filter, so msnr_symbol_skip_hours()'s own sample-size
-        # gate judges against undiminished evidence. Unlike the RR/SL
-        # filters above (a single threshold), this drops a SET of
-        # specific UTC hours — see that function's own docstring for
-        # why hour-of-day has no natural "past this point" ordering.
+        # ordering reasoning as every filter above — derive the
+        # bad-hours SET off the full surviving sample first, THEN
+        # filter, so msnr_symbol_skip_hours()'s own sample-size gate
+        # judges against undiminished evidence. Unlike the RR/SL
+        # filters above (a threshold), this drops a SET of specific UTC
+        # hours — see that function's own docstring for why hour-of-day
+        # has no natural "past this point" ordering.
         before_hours = len(best_results)
         best["skip_hours"] = msnr_symbol_skip_hours(best_results)
         if best["skip_hours"]:
@@ -16811,13 +16900,14 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
                              if t.get("time") is None or time.gmtime(t["time"])[3] not in skip_hour_set]
             _msnr_recompute_summary_score(best, best_results)
         best["hours_filtered_count"] = before_hours - len(best_results)
+        checkpoints.append({"stage": "hours", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
         # v0.99.59, per direct user request ("второй фильтр... про n
         # как в первом не забудь" — volume confirmation on the sweep):
         # same ordering reasoning as every filter above — derive the
         # floor off the full surviving sample first, THEN filter. See
         # msnr_symbol_volume_skip_below()'s own docstring for why this
-        # skips BELOW a ceiling (opposite direction from skip_rr_min/
-        # skip_sl_pct_min, which skip ABOVE a floor).
+        # skips BELOW a ceiling (opposite direction from the RR-range
+        # floor/skip_sl_pct_min, which skip ABOVE a floor).
         before_volume = len(best_results)
         best["skip_volume_below"] = msnr_symbol_volume_skip_below(best_results)
         if best["skip_volume_below"] is not None:
@@ -16826,6 +16916,16 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
                              if t.get("volume_ratio") is None or t["volume_ratio"] >= skip_vol]
             _msnr_recompute_summary_score(best, best_results)
         best["volume_filtered_count"] = before_volume - len(best_results)
+        checkpoints.append({"stage": "volume", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
+        # v0.99.86 — the full chain, one entry per stage transition;
+        # api_msnr_status() surfaces this so the UI can show, per
+        # filter, exactly what its own before->after did to n/winrate/
+        # income — not just a trade count delta, per the direct request
+        # ("чтобы понимать эффективность фильтров и менять их на другие
+        # своевременно"). Each entry's own "stage" names WHICH filter
+        # produced it (i.e. checkpoints[i] is the state AFTER stage
+        # checkpoints[i]["stage"] ran, checkpoints[i-1] is its "before").
+        best["filter_checkpoints"] = checkpoints
     # v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше не
     # стало, будто даже хуже" -> Kelly/optimal-f search instead of a
     # fixed stop-width target): ONE flat leverage for this symbol,
@@ -16940,6 +17040,82 @@ def msnr_rr_bucket_stats(trades):
         buckets.append({"range": label, "lo": lo, "n": n, "wins": wins,
                          "losses": n - wins, "winrate": round(wins / n * 100, 1), "avg_rr": avg_rr})
     return buckets
+
+
+def msnr_symbol_rr_range(trades):
+    """v0.99.86, per direct user request ("отсечение всегда убыточного
+    диапазона RR, как снизу так и сверху... много слабых результатов в
+    msnr, по 50 сделок а доход околонулевой, при этом винрейт от 30 до
+    50"): TWO-SIDED replacement for msnr_symbol_rr_skip_min() above
+    (v0.99.79 disabled that one-sided rule entirely, per an earlier
+    direct request to trade every RR range while more data accumulated
+    — this reintroduces filtering in a genuinely different, symmetric
+    shape, not a plain revert). The live pattern that prompted this —
+    a large, trustworthy sample (~50 trades) with a middling winrate
+    but near-zero compounded income — is exactly what a ONE-SIDED high-
+    RR cutoff can't catch: if the symbol's edge is concentrated in the
+    MIDDLE of its own RR distribution while BOTH extremes (very low RR
+    AND very high RR) drag the average down, cutting only the top
+    leaves the bad low end untouched.
+    Uses the SAME bucket-and-breakeven test every other MSNR filter
+    already uses (msnr_rr_bucket_stats(), MSNR_SYMBOL_RR_SKIP_MIN_
+    SAMPLE) — nothing new statistically, just applied from both ends:
+    - ceiling: the lowest bucket edge among sufficiently-sampled
+      buckets failing their own breakeven (unchanged from the old
+      one-sided rule) — a live signal at or above this RR is skipped.
+    - floor: scans buckets from RR=0 upward and finds the upper edge of
+      the longest CONTIGUOUS run of failing buckets starting at the
+      very bottom — a live signal below this RR is skipped. A single
+      bad low-RR bucket sets the floor to its own upper edge; several
+      consecutive bad low-RR buckets extend it further up. Buckets
+      past the first PASSING (or insufficiently-sampled) one don't
+      extend the floor, even if a later bucket also happens to fail —
+      the floor means "everything below here is bad," which a gap of
+      good buckets in between would contradict.
+    Either side can independently be None (no statistically significant
+    unprofitable region found there) — a symbol can end up with only a
+    ceiling, only a floor, both, or neither, same "don't invent
+    evidence from a thin sample" stance as the rule this replaces.
+    Returns (floor, ceiling) — floor is the bucket's own upper edge
+    (never returns float("inf") — the top bucket (10, inf) can only
+    ever extend a ceiling-seeking search, not a floor-seeking one,
+    since a floor search stops at the first non-failing bucket long
+    before reaching the open-ended top bucket in any realistic RR
+    distribution)."""
+    buckets = msnr_rr_bucket_stats(trades)
+
+    def _failing(b):
+        return (b["n"] >= MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE and b["winrate"] is not None
+                and b["avg_rr"] and b["winrate"] < 100.0 / (1.0 + b["avg_rr"]))
+
+    # v0.99.86 fix, caught by a synthetic test with BOTH ends failing
+    # before shipping: floor is computed FIRST, and ceiling's own search
+    # only considers buckets AFTER the floor's own contiguous run — not
+    # the whole bucket list. Without this split, a failing low-RR bucket
+    # (lo=0) would itself show up as the "lowest failing edge" and get
+    # mistaken for the ceiling too, producing a nonsensical ceiling=0
+    # that would skip literally everything instead of two genuinely
+    # separate bad regions at opposite ends.
+    floor = None
+    floor_bucket_count = 0
+    for lo, hi in MSNR_RR_BUCKETS:
+        b = next(bb for bb in buckets if bb["lo"] == lo)
+        if _failing(b):
+            floor = hi
+            floor_bucket_count += 1
+        else:
+            break
+
+    failing_edges = [b["lo"] for i, b in enumerate(buckets) if i >= floor_bucket_count and _failing(b)]
+    ceiling = min(failing_edges) if failing_edges else None
+
+    # a floor at or above the ceiling would leave nothing tradable at
+    # all — shouldn't arise now that ceiling only searches buckets past
+    # the floor's own run, but guarded explicitly rather than trusting
+    # bucket ordering to hold forever.
+    if floor is not None and ceiling is not None and floor >= ceiling:
+        floor = None
+    return floor, ceiling
 
 
 def msnr_symbol_rr_skip_min(trades):
@@ -17569,6 +17745,19 @@ def msnr_symbol_skip_rr_min(symbol):
     return override.get("skip_rr_min")
 
 
+def msnr_symbol_skip_rr_max(symbol):
+    """v0.99.86 — the FLOOR counterpart to msnr_symbol_skip_rr_min()
+    above, added alongside msnr_symbol_rr_range()'s own two-sided
+    redesign. Named "_max" (not "_min", despite being a floor) for
+    symmetry with the existing "_min" naming: both mean "skip signals
+    past THIS edge, in the direction away from the tradeable middle" —
+    skip_rr_min is the ceiling (skip rr >= this), skip_rr_max is the
+    floor (skip rr < this)."""
+    with state_lock:
+        override = STATE["msnr_symbol_overrides"].get(symbol) or {}
+    return override.get("skip_rr_max")
+
+
 def msnr_symbol_skip_sl_min(symbol):
     """v0.99.26 — SL-width counterpart to msnr_symbol_skip_rr_min(),
     same reasoning for being a separate lookup (msnr_symbol_params()'s
@@ -17786,21 +17975,26 @@ def msnr_scan_symbol_live(symbol):
         # from entry/sl/tp directly (same formula msnr_run_backtest()
         # uses), not stored on sig, since msnr_detect_signals() itself
         # doesn't compute rr.
-        # v0.99.79 — DISABLED (not deleted), per direct user request
+        # v0.99.79 disabled this entirely, per direct user request
         # ("Skip RR>3, давай подобную проверку тоже уберем, пока важно
-        # все RR торговать"): matches msnr_optimize_symbol()'s own
-        # disabling of this filter's computation (that override field
-        # is always None now, so this check would naturally become a
-        # no-op after the next backtest cycle anyway — disabled
-        # directly here too for immediate effect and clarity, not left
-        # to a stale cached value to quietly stop mattering on its own).
-        # skip_rr_min = msnr_symbol_skip_rr_min(symbol)
-        # if skip_rr_min is not None:
-        #     risk = abs(sig["entry"] - sig["sl"])
-        #     reward = abs(sig["tp"] - sig["entry"])
-        #     sig_rr = reward / risk if risk > 0 else None
-        #     if sig_rr is not None and sig_rr >= skip_rr_min:
-        #         return  # this symbol's own history says rr this high fails here — skip, don't fire
+        # все RR торговать"). v0.99.86 RE-ENABLES it, per a direct
+        # follow-up request after live data showed the cost of no RR
+        # filtering at all ("много слабых результатов в msnr, по 50
+        # сделок а доход околонулевой") — but as msnr_symbol_rr_range()'s
+        # two-sided replacement, checking BOTH a ceiling (skip_rr_min,
+        # unchanged meaning) AND a floor (skip_rr_max, new) rather than
+        # just reverting to the old one-sided rule.
+        skip_rr_min = msnr_symbol_skip_rr_min(symbol)
+        skip_rr_max = msnr_symbol_skip_rr_max(symbol)
+        if skip_rr_min is not None or skip_rr_max is not None:
+            risk = abs(sig["entry"] - sig["sl"])
+            reward = abs(sig["tp"] - sig["entry"])
+            sig_rr = reward / risk if risk > 0 else None
+            if sig_rr is not None:
+                if skip_rr_min is not None and sig_rr >= skip_rr_min:
+                    return  # this symbol's own history says rr this high fails here — skip, don't fire
+                if skip_rr_max is not None and sig_rr < skip_rr_max:
+                    return  # this symbol's own history says rr this low ALSO fails here — skip, don't fire
         # v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше
         # не стало, будто даже хуже" -> Kelly/optimal-f search instead
         # of a fixed stop-width target): this signal uses THIS symbol's
@@ -21879,7 +22073,7 @@ async function refreshMsnr() {
         <li>Квалификация в живой скан: только топ-10 по совместной оценке (винрейт, выборка, доход) или ручная галочка — старое правило «винрейт&gt;50%/выборка&gt;40» убрано</li>
         <li>Бэктест: ${status.backtest_universe_size || '?'} ликвидных монет · структура ${cfg.structure_tf} (L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf}</li>
         <li>Параметры (импульс/QM-зона/окно) автотюнятся отдельно на каждую монету — см. «Параметры» в таблице</li>
-        <li>TP всегда реальный уровень пары (без потолка RR), фильтр skip_rr_min отключён — торгуются все RR-диапазоны без исключений</li>
+        <li>TP всегда реальный уровень пары (без потолка RR) — двусторонний фильтр по RR (снизу и сверху) на каждую монету отдельно, по её собственной статистике</li>
         <li>Автоторговля (если включена в настройках) — по всем монетам живого скана</li>
       </ul>
       <div class="dim" style="font-size:11px;margin:0 0 6px 0;">Топ-10 и таблица ниже отсортированы одной и той же оценкой — произведением нормализованных винрейта/выборки(до фильтров)/дохода с равными весами: слабость по любому из трёх параметров обнуляет итог, сильные стороны не компенсируют — без разрыва между топ-10 и остальными.</div>
@@ -22002,8 +22196,31 @@ async function refreshMsnr() {
   }).map((r, idx, arr) => {
     const wrClass = (r.winrate === null || r.winrate === undefined) ? 'dim' : (r.winrate >= 50 ? 'win' : 'loss');
     const expClass = (r.expectancy_r === null || r.expectancy_r === undefined) ? 'dim' : (r.expectancy_r > 0 ? 'win' : 'loss');
+    // v0.99.86 — skip_rr_max (the new floor side) shown alongside the
+    // existing ceiling; both share rr_filtered_count since a single
+    // combined pass removes trades on either side (see msnr_optimize_
+    // symbol()'s own rr_range filtering step).
     const skipTxt = (r.skip_rr_min !== null && r.skip_rr_min !== undefined) ? ` \u00b7 <span class="loss">skip rr\u2265${r.skip_rr_min}${r.rr_filtered_count ? ` (${r.rr_filtered_count})` : ''}</span>` : '';
+    const skipRrMaxTxt = (r.skip_rr_max !== null && r.skip_rr_max !== undefined) ? ` \u00b7 <span class="loss">skip rr<${r.skip_rr_max}</span>` : '';
     const skipSlTxt = (r.skip_sl_pct_min !== null && r.skip_sl_pct_min !== undefined) ? ` \u00b7 <span class="loss">skip SL\u2265${r.skip_sl_pct_min}%${r.sl_filtered_count ? ` (${r.sl_filtered_count})` : ''}</span>` : '';
+    // v0.99.86, per direct user request ("хочу видеть... винрейт и
+    // доход до и после [фильтров], чтобы понимать эффективность
+    // фильтров"): a compact before->after summary built from best_
+    // results' own filter_checkpoints chain — the "raw" (pre-filter)
+    // checkpoint vs the FINAL checkpoint (after every filter that
+    // actually ran), since a per-stage breakdown for every row would
+    // be too dense for this already-packed cell; the full chain is
+    // still available in r.filter_checkpoints for anyone who wants the
+    // per-stage detail (e.g. via the browser console) even though this
+    // summary line doesn't render every stage individually.
+    let filterImpactTxt = '';
+    if (r.filter_checkpoints && r.filter_checkpoints.length > 1) {
+      const before = r.filter_checkpoints[0];
+      const after = r.filter_checkpoints[r.filter_checkpoints.length - 1];
+      const fmtWr = v => (v === null || v === undefined) ? '?' : `${v}%`;
+      const fmtInc = v => (v === null || v === undefined) ? '?' : `${v > 0 ? '+' : ''}${v}%`;
+      filterImpactTxt = ` \u00b7 <span class="dim" title="винрейт/доход до всех фильтров \u2192 после">фильтры: ${before.n}\u2192${after.n} \u00b7 WR ${fmtWr(before.winrate)}\u2192${fmtWr(after.winrate)} \u00b7 доход ${fmtInc(before.income_pct)}\u2192${fmtInc(after.income_pct)}</span>`;
+    }
     // v0.99.56, per direct user request ("какой фильтр сигналов был
     // бы самым эффективным"): shows the specific bad UTC hours (if
     // any) this symbol's own history flagged — same loss-red styling
@@ -22057,7 +22274,7 @@ async function refreshMsnr() {
     const compTxt = (r.compound_return_pct !== null && r.compound_return_pct !== undefined)
       ? ` \u00b7 <span class="${compClass}">\u0434\u043e\u0445\u043e\u0434 ${r.compound_return_pct > 0 ? '+' : ''}${r.compound_return_pct}% ($${cfg.compound_start_balance}\u2192$${r.compound_final_balance})${compBlownTxt}</span>`
       : '';
-    const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431${skipTxt}${skipSlTxt}${skipHoursTxt}${skipVolumeTxt}${liqTxt}${levTxt}${compTxt}`;
+    const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431${skipTxt}${skipRrMaxTxt}${skipSlTxt}${skipHoursTxt}${skipVolumeTxt}${liqTxt}${levTxt}${compTxt}${filterImpactTxt}`;
     const noteTxt = r.note ? ` \u26a0\ufe0f ${r.note}` : '';
     // v0.99.49, per direct user request ("хочу иметь возможность
     // автоторговли и не по топ-10, на свой страх и риск как
