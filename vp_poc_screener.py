@@ -8817,6 +8817,40 @@ v0.99.92 - Direct user follow-up: "покажи как графически эт
          routes — no new endpoints, existing ones extended), and an
          AST walk for duplicate top-level defs (none introduced — 3 new
          mirror_*/_mirror_* functions, each present exactly once).
+
+v0.99.93 - Direct user follow-up: "почему я вижу сигналы раньше чем
+         бэктест... Бэктест быстро проходит, так что лучше ждать, просто
+         в сигналах живых вижу сигнал не удовлетворяющие условию 35%
+         винрейта." Confirmed the cause: v0.99.92's own mirror_live_
+         loop() fell back to scanning the RAW (unfiltered) universe
+         whenever mirror_live_universe was still empty — i.e. before the
+         first backtest cycle ever completed — so early signals weren't
+         gated by the new 35% winrate threshold at all. Flagged this
+         directly against MSNR's own history before changing anything:
+         msnr_compute_live_universe() (v0.99.75-78) had gone through the
+         EXACT same arc — a winrate-only promotion path that let a
+         symbol reach live-scan status without clearing the real gate,
+         retired after a live report of that identical symptom. Given
+         the backtest cycle here is fast (per the user's own report),
+         removed the fallback outright rather than reintroducing a
+         version of the problem MSNR's own history already closed:
+         mirror_live_loop() now scans nothing for NEW signals until
+         mirror_live_universe has been populated at least once by a
+         completed backtest cycle. update_mirror_signal_outcomes()
+         still runs unconditionally on every loop iteration regardless
+         — already-open trades keep getting their MFE/MAE/outcome
+         tracked even while new-signal scanning is paused, so nothing
+         about existing positions is affected. Also updated the panel's
+         own "бэктест ещё не завершился" message to say explicitly that
+         live scanning is paused for this reason, not just silent.
+         Verified with py_compile, an actual runtime start (inspected
+         mirror_live_loop()'s own source to confirm mirror_build_
+         universe() is no longer called from it at all, and that
+         update_mirror_signal_outcomes() still runs unconditionally),
+         pyflakes (clean), node --check on the correctly-last <script>
+         block, the Flask route/def integrity check (still 60 routes —
+         no endpoints touched), and an AST walk for duplicate top-level
+         defs (none introduced).
 """
 
 import os
@@ -8836,7 +8870,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.92"
+APP_VERSION = "0.99.93"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -20062,20 +20096,28 @@ def mirror_live_loop():
             if not MIRROR_ENABLED:
                 time.sleep(60)
                 continue
-            # v0.99.92, per direct user request ("В живых сигналах
-            # использовать только бэктестовые монеты с винрейтом более
-            # 35%"): mirror_live_universe is derived once per backtest
-            # cycle in mirror_backtest_loop() above, gated on each
-            # symbol's own POST-filter winrate — until the first
-            # backtest cycle completes, falls back to the raw universe
-            # (same "don't sit idle waiting" reasoning MSNR's own live-
-            # scan fallback uses) rather than scanning nothing at all.
+            # v0.99.93, per direct user follow-up ("бэктест быстро
+            # проходит, так что лучше ждать, просто в сигналах живых
+            # вижу сигнал не удовлетворяющие условию 35% винрейта"):
+            # the v0.99.92 raw-universe fallback (before the first
+            # backtest cycle completes) let unfiltered signals fire
+            # live — exactly the kind of surprising gap MSNR's own
+            # msnr_compute_live_universe() history already established
+            # should be closed, not left as a "don't sit idle" trade-
+            # off (v0.99.75-78 explicitly retired MSNR's equivalent
+            # winrate-only fallback after a live report of the exact
+            # same symptom: signals firing for symbols that never
+            # earned it through the actual gate). Given the backtest
+            # cycle itself is fast, there's no real cost to simply NOT
+            # scanning for new signals until mirror_live_universe has
+            # been populated at least once — update_mirror_signal_
+            # outcomes() still runs regardless, so already-open trades
+            # keep getting tracked even while new-signal scanning waits.
             with state_lock:
                 live_universe = list(STATE.get("mirror_live_universe", []))
-            if not live_universe:
-                live_universe = mirror_build_universe()
-            with ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe) or 1)) as ex:
-                list(ex.map(mirror_scan_symbol_live, live_universe))
+            if live_universe:
+                with ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe))) as ex:
+                    list(ex.map(mirror_scan_symbol_live, live_universe))
             update_mirror_signal_outcomes()
         except Exception as e:
             log_error(f"mirror_live_loop: {e}")
@@ -23985,7 +24027,7 @@ async function refreshMirror() {
   }).join(' · ');
   const buildTxt = status.last_backtest_finished
     ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · в живом скане: ${(status.live_universe||[]).length}/${(status.top||[]).length} монет (винрейт > ${cfg.live_min_winrate}%)`
-    : 'бэктест ещё не завершился';
+    : 'бэктест ещё не завершился — живой скан новых сигналов на паузе, чтобы не стрелять неотфильтрованными монетами';
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
       «Зеркальный уровень» — пробитый уровень поддержки/сопротивления при возврате цены меняет роль на противоположную; вход на одном из 4 разворотных паттернов на уровне. Стоп по каждой монете дополнительно фильтруется по ширине (см. таблицу ниже — «до» и «после» фильтра).<br>
