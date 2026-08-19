@@ -8528,6 +8528,40 @@ v0.99.87 - Direct user request: "По умолчанию индикатор msnr
          route/def integrity check (still 56 routes — markup-only
          change), and node --check on the correctly-last <script>
          block.
+
+v0.99.88 - Direct user follow-up: "По умолчанию стал ема а не msnr" —
+         v0.99.87's own tab reorder hadn't actually fixed the default
+         tab after all. Root cause: refreshStatus()'s vpModeChecked
+         fallback (v0.99.85's own "redirect to 'ema' instead of the
+         deleted 'divergence' tab") — this existed from back when
+         Volume/'signals' WAS the default active tab, specifically to
+         avoid landing on a broken empty Volume tab when volume_
+         profile_enabled is false. It unconditionally called .click()
+         on the 'ema' tab the first time refreshStatus() ran (i.e. on
+         every page load) whenever that setting was off — completely
+         independent of which tab the MARKUP actually marked as
+         default. Once MSNR became the default tab (v0.99.87), this
+         redirect kept firing on load and immediately overriding it —
+         exactly matching the user's own report from the previous
+         message (Volume Profile scanner setting appears to be off on
+         their instance, which is what triggers this path) landing on
+         both symptoms from the same root cause.
+         Fixed by removing the whole redirect block, not just changing
+         its target tab: now that MSNR (not Volume) is the default,
+         the ORIGINAL problem this redirect solved doesn't exist
+         anymore — MSNR doesn't depend on volume_profile_enabled at
+         all, so there's no "broken empty default tab" scenario left
+         to redirect away from. Also removed the now-fully-unused
+         vpModeChecked variable declaration (its only other reference
+         was inside the block just deleted) rather than leaving a dead
+         flag nothing reads or sets — activeTab is already correctly
+         initialized to 'msnr' as its own separate variable, so no
+         replacement redirect/flag was needed.
+         Verified with py_compile, an actual runtime start, a grep
+         confirming zero remaining references to vpModeChecked outside
+         historical changelog text, node --check on the correctly-last
+         <script> block, and the Flask route/def integrity check
+         (still 56 routes — markup/JS-only change).
 """
 
 import os
@@ -8547,7 +8581,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.87"
+APP_VERSION = "0.99.88"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21158,7 +21192,6 @@ const fmtTime = (t) => t ? new Date(t*1000).toLocaleTimeString('ru-RU', {hour:'2
 const fmtDateTime = (t) => t ? new Date(t*1000).toLocaleString('ru-RU', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'}) : '-';  // date+time, not just time — Session's own open time is the SAME 10:00 every day by design, so time-only gives no way to tell which day's session a row belongs to
 
 let activeTab = 'msnr';
-let vpModeChecked = false;
 document.querySelectorAll('.tab').forEach(el => {
   el.onclick = () => {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -21245,16 +21278,6 @@ async function refreshStatus() {
     const s = await (await fetch('/api/status')).json();
     const vpTabs = ['signals'].map(t => document.querySelector(`.tab[data-tab="${t}"]`));
     vpTabs.forEach(el => { el.style.display = s.volume_profile_enabled === false ? 'none' : ''; });
-    if (!vpModeChecked) {
-      vpModeChecked = true;
-      if (s.volume_profile_enabled === false) {
-        // v0.99.85 — was 'divergence' (the next tab over), removed along
-        // with the whole module; redirects to 'ema' (now the next
-        // surviving tab in that position) instead so this fallback
-        // still lands somewhere real rather than silently no-oping.
-        document.querySelector('.tab[data-tab="ema"]').click();
-      }
-    }
     const el = document.getElementById('status');
     const fetchErrTxt = s.excluded_fetch_error ? `, ${s.excluded_fetch_error} сетевых сбоев` : '';
     const scanTxt = s.last_scan_finished ? `скан ${s.last_scan_duration}s, ${s.universe_size} пар (искл. ${s.excluded_low_quality||0} неликвид${fetchErrTxt})` : 'сканирование...';
