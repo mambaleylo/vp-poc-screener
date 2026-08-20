@@ -8938,6 +8938,58 @@ v0.99.95 - Direct user request continued: "Продолжи нашу работ�
          correctly-last <script> block, and the Flask route/def
          integrity check (still 60 routes — no routes touched in this
          frontend-only pass).
+
+v0.99.96 - Direct user request continued: "Продолжи." EMA removal (3rd
+         of 6) finished — backend phase, completing v0.99.95's frontend-
+         only checkpoint. Surgically removed the 3 if EMA_ENABLED:
+         blocks from the SHARED scan_loop() (same discipline as
+         Divergence's own removal — Volume/Scalp/Session untouched).
+         Deleted has_open_ema_signal/scan_symbol_ema/close_ema_signal/
+         update_ema_outcomes/compute_ema_stats, the risk_autotune_pass()
+         EMA block, all 3 API routes (status/signals/chart) plus api_
+         reset_ema, all 4 setters, _ema_cooldowns/_lock, and every EMA_*
+         constant EXCEPT compute_ema() itself — confirmed at the start
+         of v0.99.95 to be genuinely shared infra (FT5's own compute_
+         macd() and XAU LG's own xau_lg_detect_signals() both still call
+         it) and left fully untouched throughout both passes.
+         Applied every hard-won lesson from this session's earlier
+         module removals proactively: fixed has_open_signal_any_module()
+         and _relink_sim_trade()'s own module_lists dict (the same
+         eager-dict-literal-KeyError class of bug found for VGI and
+         Divergence) BEFORE anything else, verified live via direct
+         calls with mode="ema" — confirmed clean immediately, not
+         discovered as a follow-up fix like the earlier two modules.
+         Two things pyflakes caught that a plain py_compile pass alone
+         would have missed entirely: (1) a stray f-string in load_
+         state()'s own startup print() still referencing the just-
+         deleted `ema_signals` local; (2) three whole EMA-only functions
+         living OUTSIDE the main EMA constants/logic block entirely —
+         _ema_signal_diagnostics(), detect_ema_signal(), and compute_
+         ema_tp_sl() — each in a different, unrelated part of the file
+         (near session/scalp code), missed in the first sweep and only
+         surfaced once their own constants were deleted and pyflakes
+         flagged the resulting undefined names.
+         The EMA_* constant block itself required SURGICAL (not whole-
+         range) deletion for the same reason the Divergence pass needed
+         it for SNAPSHOT_MODULE_KEYS-style dicts: SESSION_INVERT_
+         SIGNALS/SESSION_SL_MULT/SESSION_REVERSE_RR (a different
+         module, staying) were physically interleaved inside the same
+         constants section — split the deletion into two ranges around
+         those three lines rather than one block delete, then verified
+         directly that all three Session constants survived untouched.
+         Verified with py_compile after every single edit, an actual
+         runtime start (direct calls confirming compute_ema()/compute_
+         macd() still produce correct output, and _relink_sim_trade()
+         raises no KeyError for mode="ema"), pyflakes (clean — this is
+         what actually caught the two gaps above; a bare py_compile
+         pass would have shipped both), node --check on the correctly-
+         last <script> block, the Flask route/def integrity check (56
+         routes — down from 60, exactly the 4 EMA endpoints removed),
+         an AST walk confirming zero ema_* functions remain at module
+         level besides the intentionally-kept compute_ema() (no
+         duplicates introduced), and a final grep confirming zero live
+         EMA_* constant references remain anywhere in the file (only
+         historical changelog text).
 """
 
 import os
@@ -8957,7 +9009,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.95"
+APP_VERSION = "0.99.96"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9123,108 +9175,9 @@ MFE_TRACK_SEC = int(os.environ.get("VP_MFE_TRACK_SEC", 24 * 3600))  # keep measu
 BREAKOUT_BREAKEVEN_TRIGGER_R = float(os.environ.get("VP_BREAKOUT_BREAKEVEN_TRIGGER_R", 0.8))
 BREAKOUT_BREAKEVEN_BUFFER_PCT = float(os.environ.get("VP_BREAKOUT_BREAKEVEN_BUFFER_PCT", 0.001))  # 0.1% beyond pure entry, in the trade's favor — so a dead-even wick still covers fees/slippage instead of landing exactly on entry
 
-# ----------------------------------------------------------------------------
-# EMA 7/14/28 signal indicator — ported from a user-supplied Pine Script
-# ("EMA 7,14,28 + Сигналы"). A third, fully separate signal source: own
-# scan, own history/stats, own chart, own Telegram category. Three
-# possible crossover definitions (price/EMA7, EMA7/EMA14, or both
-# combined), optionally filtered by trend (price vs EMA28) — exactly
-# mirroring the Pine Script's own input options.
-# ----------------------------------------------------------------------------
-EMA_ENABLED = os.environ.get("VP_EMA_ENABLED", "1") == "1"
-EMA_INTERVAL = os.environ.get("VP_EMA_INTERVAL", "1h")  # kept for backward-compat single-interval env overrides
-# the script's own developer runs it on the weekly chart — scanning both
-# alongside the existing 1h lets stats be compared later rather than
-# guessing which is better upfront
-EMA_INTERVALS = [x.strip() for x in os.environ.get("VP_EMA_INTERVALS", EMA_INTERVAL).split(",") if x.strip()]  # was f"{EMA_INTERVAL},1w" — weekly removed per user request (accumulated almost no signals, wasn't worth the ongoing comparison)
-EMA_FETCH_LIMIT = int(os.environ.get("VP_EMA_FETCH_LIMIT", 200))
-EMA_LEN_7 = int(os.environ.get("VP_EMA_LEN_7", 7))
-EMA_LEN_14 = int(os.environ.get("VP_EMA_LEN_14", 14))
-EMA_LEN_28 = int(os.environ.get("VP_EMA_LEN_28", 28))
-# "price_ema7" = Pine's "Пересечение цены и EMA7"; "ema7_ema14" = "Пересечение
-# EMA7 и EMA14"; "combined" = "Комбинированный" (price crosses EMA7 AND EMA7
-# is already on the trade's side of EMA14)
-EMA_SIGNAL_TYPE = os.environ.get("VP_EMA_SIGNAL_TYPE", "combined")
-EMA_TREND_FILTER = os.environ.get("VP_EMA_TREND_FILTER", "1") == "1"  # only BUY above EMA28 / SELL below it, same as the script's "Фильтровать по тренду"
-EMA_INVERT_SIGNALS = os.environ.get("VP_EMA_INVERT_SIGNALS", "0") == "1"  # user hypothesis: this indicator's config has been systematically wrong more often than right (22.4% win rate at RR=2) — worth testing whether trading the OPPOSITE of what it says works, with its own (smaller, asymmetric) TP/SL rather than reusing the original's
 SESSION_INVERT_SIGNALS = os.environ.get("VP_SESSION_INVERT_SIGNALS", "0") == "1"  # per direct user request after live session winrate looked bad (~11%) — mirrors DIV_INVERT_SIGNALS/EMA_INVERT_SIGNALS, but with its OWN sizing rather than just flipping direction and reusing the original sl/tp: the ORIGINAL sl distance (sweep_extreme + SESSION_SL_BUFFER_PCT, i.e. the same risk a non-inverted trade would have taken) becomes the inverted trade's own SL distance too, applied on the opposite side of entry — TP is fixed at 2x that same risk (RR=2), not the original TP (opposite side of the consolidation range, an arbitrary distance tied to range width rather than to risk). Implemented inside detect_session_manipulation() itself (not as a separate post-processing step) so both live scanning AND the historical backtest ranking see the same inverted direction/sizing consistently — avoids the kind of sign mismatch found and fixed for divergence's pivot-stability stat, where the live/backtest paths could disagree about which direction was "the one actually traded."
 SESSION_SL_MULT = float(os.environ.get("VP_SESSION_SL_MULT", 1.5))  # per direct user request after a live example (CYS_USDT) hit its SL — multiplies the base risk distance (sweep_extreme + SESSION_SL_BUFFER_PCT vs entry) before it's used for the inverted trade's SL AND its RR=2 TP, so both scale together and RR stays exactly 2 at the new, wider stop. Only affects SESSION_INVERT_SIGNALS's own sizing (see its comment above) — the non-inverted trade still uses its original sl/tp (sweep-based stop, opposite-range-edge take), untouched by this.
 SESSION_REVERSE_RR = float(os.environ.get("VP_SESSION_REVERSE_RR", 2.0))  # v0.98.4 — was a literal "2" hardcoded directly in the tp = entry +/- risk*2 formula, per direct user request to have risk-autotune manage this instead of it being a permanently fixed ratio. Only used inside SESSION_INVERT_SIGNALS's own sizing branch, same scope as SESSION_SL_MULT right above.
-EMA_COOLDOWN_SEC = int(os.environ.get("VP_EMA_COOLDOWN", 3600))
-EMA_SIGNAL_HISTORY = 200
-# the Pine Script only plots BUY/SELL labels, no TP/SL of its own — added
-# a fixed-% TP (mirroring the divergence signals) purely so this fits the
-# same win-rate/MFE/MAE tracking as everything else in the app.
-# Round 1 retune (0.015/2.0 -> 0.0075/1.5) was for the reverse-signal
-# hypothesis before it had any of its own data. That hypothesis has since
-# been CONFIRMED live: n=86 closed at 54.7% win rate vs. RR=1.5's 40%
-# breakeven, +0.37R/trade — a real, validated edge, not a guess.
-# Round 2 retune, off THAT reversed data's own at-close stats: WIN MFE
-# sat at median 2.065R/avg 3.842R (R=0.5% then) — well above the old
-# RR=1.5, meaning the TP was cutting winners short — so TP moved up to
-# ~1.0% (roughly the median, capturing most of the current win
-# population fully). WIN MAE sat at median 0/avg 0.214R/p75 0.356R —
-# winners barely dipped toward the stop at all — so SL tightened to
-# ~0.4% (comfortable buffer above p75, well below the old 0.5%).
-# RR=2.5. If reverting to the non-inverted signal, these should
-# probably go back to something re-derived for that direction instead —
-# neither retune round was validated for it.
-EMA_TP_PCT = float(os.environ.get("VP_EMA_TP_PCT", 0.015))  # kept at round 3's value — user only wanted the stop reverted, not the take
-EMA_RR = float(os.environ.get("VP_EMA_RR", 3.75))  # SL reverted to round 2's 0.4% while keeping TP at round 3's 1.5% (RR = 1.5/0.4 = 3.75) — round 3's SL=0.3%/RR=5.0 dropped the win rate to 35.5% (11W/20L); even though that was still profitable on paper (breakeven ~16.7% at RR=5), the user wants the wider round-2 stop back, just not a smaller take. NOW ONLY a fallback (see EMA_SL_MODE below) for when ATR isn't available — not the primary SL basis anymore.
-# ATR-based SL, v0.65.0 — per direct user request, after the fixed-%
-# stop's own MFE/MAE-at-close numbers exposed the real problem: WIN MFE
-# at close averaged 7.17R against a nominal RR of 3.75, and LOSS MAE at
-# close averaged 2.187R against a nominal risk of 1R — both roughly 2x
-# their nominal levels, meaning a single 1h candle routinely blows
-# through both the fixed 0.4% SL and the 1.5% TP by a wide margin. That
-# isn't noise, it's the stop being sized far too tight for what a 1h
-# candle on these symbols actually moves — a fixed % can't adapt
-# per-symbol, ATR can.
-EMA_SL_MODE = os.environ.get("VP_EMA_SL_MODE", "atr")  # "atr" or "fixed_pct" — fixed_pct reproduces the old EMA_RR-derived behavior exactly, for comparison/rollback
-EMA_SL_ATR_MULT = float(os.environ.get("VP_EMA_SL_ATR_MULT", 1.5))  # SL = ATR(EMA_DIAG_ATR_PERIOD) * this, in price units
-EMA_MIN_RR = float(os.environ.get("VP_EMA_MIN_RR", 0.7))  # was 0.3 — raised per direct user request after live stats showed a real gap between the average RR (0.923, EV≈+0.075R at 55.9% winrate) and the median RR (0.717, EV≈-0.040R at the same winrate) — the "typical" trade was already sub-breakeven even though the average looked fine, and 0.3 (picked only to clear one extreme outlier, UB_USDT at RR≈0.094) was nowhere near catching that. Breakeven RR at the live 55.9% winrate works out to ≈0.789 (from winrate*RR = 1-winrate); 0.7 sits just under that on purpose — cuts sub-breakeven trades without also cutting ones sitting right at the margin, which could still be fine as winrate estimate itself has noise. TIMEOUT closes told the same story from another angle: avg realized R was +0.142 but median was -0.142 — opposite signs, meaning a few large positive outliers were carrying the average while the typical timeout was already a small loss.
-# ADX regime filter, v0.72.0 — per direct user request to research and
-# propose an actual filter for EMA's whipsaw problem (rather than the
-# home-grown recent_crossover_count proxy from v0.62.0). ADX (Wilder,
-# 1978) is the standard, decades-old answer to exactly this: it measures
-# trend STRENGTH directly, and the near-universal finding across
-# sources is that raw EMA crossovers run ~35-40% win rate in choppy/
-# range-bound conditions, while requiring ADX above ~20-25 before
-# trading a crossover is the standard fix. Enabled by default (unlike
-# EMA_MIN_RR/EMA_MIN_GAP_PCT below) because this is a well-established,
-# literature-backed threshold, not a guess needing our own data first.
-EMA_ADX_FILTER_ENABLED = os.environ.get("VP_EMA_ADX_FILTER_ENABLED", "1") == "1"
-EMA_ADX_MIN = float(os.environ.get("VP_EMA_ADX_MIN", 20))  # Wilder's own "trending" cutoff is 25; 20 is the more commonly cited "at least not dead flat" floor — starting here since it's the least aggressive cut, easy to raise toward 25 later if 20 doesn't do enough
-# Minimum EMA7/EMA14 separation at signal time — the "buffer zone
-# before confirming a cross" idea several sources also recommend,
-# using the ema_gap_pct diagnostic we already log (v0.62.0). Off by
-# default (unlike ADX above): there's no established universal
-# threshold for this the way there is for ADX, and it needs to be
-# calibrated against ema_gap_pct's own win/loss breakdown once enough
-# adx-filtered data has accumulated, not guessed at.
-EMA_MIN_GAP_PCT = float(os.environ.get("VP_EMA_MIN_GAP_PCT", 0))  # 0 = disabled, in the same % units as ema_gap_pct
-# TP stays a fixed % of entry (EMA_TP_PCT) — only the STOP moves to ATR.
-# Consequence: RR is no longer one constant, it varies signal to signal
-# (tp_pct-distance / atr-based-risk) depending on each symbol's own
-# volatility at signal time. Every signal now carries its own "rr" field
-# instead of relying on a single global; compute_ema_stats() exposes
-# rr_avg/rr_median across closed signals for the header display that
-# used to just show the old constant.
-# Round 3 retune, off n=70 closed live reversed-signal data (screenshot):
-# at-close WIN MAE sat at median 0/p75 0.269R (R=0.4% under round 2) —
-# winners essentially never dipped toward the stop — while the FULL 24h
-# window's WIN MFE sat at median 7.725R/p25 4.471R, several times past
-# the round-2 TP (2.5R) that was actually captured. Anchored the new TP
-# to the full window's p25 (4.471R * 0.4% ≈ 1.8%) rather than the
-# median/avg (7.725R/10.843R) to avoid overfitting to outlier moves,
-# then rounded down slightly to 1.5% as a more measured step given
-# widening TP typically also lowers the realized win rate somewhat —
-# unknown by how much until live data comes in at the new levels. SL
-# tightened 0.4%->0.3%, still well above the at-close p75 MAE reference
-# point. New RR=5.0 vs round 2's 2.5 — breakeven win rate needed drops
-# to ~16.7%, a wide margin below the round-2 50% actually observed, even
-# allowing for a real winrate decline post-retune.
-
 # ----------------------------------------------------------------------------
 # Scalp volatility statistics ("Скальпинг" tab) — a pure exploratory/stats
 # tool, no signals, no auto-trading yet. For a universe of the most
@@ -9870,14 +9823,12 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "ema_enabled", "ema_invert_signals", "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "mirror_enabled", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_ema", "telegram_alerts_hourly", "telegram_alerts_session", "telegram_alerts_session_ny", "telegram_alerts_xau_lg", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_ema", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror",
+                  "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "mirror_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_session", "telegram_alerts_session_ny", "telegram_alerts_xau_lg", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror",
                   "autotrade_size_mode", "autotrade_size_value",
                   "scalp_size_mode", "scalp_size_value",
-                  "ema_min_rr",
-                  "ema_adx_filter_enabled", "ema_adx_min", "ema_min_gap_pct",
-                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_ema", "autotrade_leverage_session", "autotrade_leverage_session_ny", "autotrade_leverage_xau_lg", "autotrade_leverage_ft5", "autotrade_leverage_msnr", "autotrade_leverage_mirror",
+                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_session", "autotrade_leverage_session_ny", "autotrade_leverage_xau_lg", "autotrade_leverage_ft5", "autotrade_leverage_msnr", "autotrade_leverage_mirror",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
@@ -9887,9 +9838,8 @@ SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
                   # (if minor) pre-existing gap: before this, these three were
                   # plain module constants with NO persistence at all, so any
                   # manual env-var override would silently revert on restart
-                  # too — now they follow the same rules as ema_min_rr etc.
-                  "scalp_min_rr", "scalp_sl_buffer_mult", "session_sl_mult", "session_reverse_rr", "ema_sl_atr_mult", "msnr_max_rr",
-                  "ema_tp_pct",
+                  # too — now they follow the same rules as other autotune targets.
+                  "scalp_min_rr", "scalp_sl_buffer_mult", "session_sl_mult", "session_reverse_rr", "msnr_max_rr",
                   # v0.99.64 — xau_lg_invert_signals/xau_lg_sl_buffer_mult/
                   # xau_lg_rr: added to apply_settings()/get_settings() as
                   # groundwork for bringing XAU LG to feature parity with
@@ -9909,8 +9859,6 @@ def get_settings():
         "volume_profile_enabled": VOLUME_PROFILE_ENABLED,
         "bounce_enabled": BOUNCE_ENABLED,
         "breakout_enabled": BREAKOUT_ENABLED,
-        "ema_enabled": EMA_ENABLED,
-        "ema_invert_signals": EMA_INVERT_SIGNALS,
         "scalp_enabled": SCALP_ENABLED,
         "scalp_signals_enabled": SCALP_SIGNALS_ENABLED,
         "session_enabled": SESSION_ENABLED,
@@ -9958,11 +9906,6 @@ def get_settings():
         "scalp_size_value": SCALP_SIZE_VALUE,
         "autotrade_leverage_bounce": AUTOTRADE_LEVERAGE_BOUNCE,
         "autotrade_leverage_breakout": AUTOTRADE_LEVERAGE_BREAKOUT,
-        "autotrade_leverage_ema": AUTOTRADE_LEVERAGE_EMA,
-        "ema_min_rr": EMA_MIN_RR,
-        "ema_adx_filter_enabled": EMA_ADX_FILTER_ENABLED,
-        "ema_adx_min": EMA_ADX_MIN,
-        "ema_min_gap_pct": EMA_MIN_GAP_PCT,
         "autotrade_leverage_session": AUTOTRADE_LEVERAGE_SESSION,
         "autotrade_leverage_session_ny": AUTOTRADE_LEVERAGE_SESSION_NY,
         "autotrade_leverage_xau_lg": AUTOTRADE_LEVERAGE_XAU_LG,
@@ -9973,8 +9916,6 @@ def get_settings():
         "scalp_sl_buffer_mult": SCALP_SL_BUFFER_MULT,
         "session_sl_mult": SESSION_SL_MULT,
         "session_reverse_rr": SESSION_REVERSE_RR,
-        "ema_sl_atr_mult": EMA_SL_ATR_MULT,
-        "ema_tp_pct": EMA_TP_PCT,
     }
 
 
@@ -9984,28 +9925,20 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, EMA_ENABLED, EMA_INVERT_SIGNALS, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, XAU_LG_INVERT_SIGNALS, XAU_LG_SL_BUFFER_MULT, XAU_LG_RR, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, XAU_LG_INVERT_SIGNALS, XAU_LG_SL_BUFFER_MULT, XAU_LG_RR, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT
-    global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_EMA, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
+    global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
     global TELEGRAM_ALERTS_SESSION_NY, TELEGRAM_ALERTS_XAU_LG, TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_EMA, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR
     global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
     global SCALP_SIZE_MODE, SCALP_SIZE_VALUE
-    global EMA_MIN_RR
-    global EMA_ADX_FILTER_ENABLED, EMA_ADX_MIN, EMA_MIN_GAP_PCT
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT, SESSION_SL_MULT, SESSION_REVERSE_RR
-    global EMA_SL_ATR_MULT
-    global EMA_TP_PCT
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
     if "bounce_enabled" in updates:
         BOUNCE_ENABLED = bool(updates["bounce_enabled"])
     if "breakout_enabled" in updates:
         BREAKOUT_ENABLED = bool(updates["breakout_enabled"])
-    if "ema_enabled" in updates:
-        EMA_ENABLED = bool(updates["ema_enabled"])
-    if "ema_invert_signals" in updates:
-        EMA_INVERT_SIGNALS = bool(updates["ema_invert_signals"])
     if "scalp_enabled" in updates:
         SCALP_ENABLED = bool(updates["scalp_enabled"])
     if "scalp_signals_enabled" in updates:
@@ -10078,8 +10011,6 @@ def apply_settings(updates):
         TELEGRAM_ENABLED = bool(updates["telegram_enabled"])
     if "telegram_alerts_vp" in updates:
         TELEGRAM_ALERTS_VP = bool(updates["telegram_alerts_vp"])
-    if "telegram_alerts_ema" in updates:
-        TELEGRAM_ALERTS_EMA = bool(updates["telegram_alerts_ema"])
     if "telegram_alerts_session" in updates:
         TELEGRAM_ALERTS_SESSION = bool(updates["telegram_alerts_session"])
     if "telegram_alerts_session_ny" in updates:
@@ -10098,8 +10029,6 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_BOUNCE = bool(updates["autotrade_bounce"])
     if "autotrade_breakout" in updates:
         AUTOTRADE_ENABLED_BREAKOUT = bool(updates["autotrade_breakout"])
-    if "autotrade_ema" in updates:
-        AUTOTRADE_ENABLED_EMA = bool(updates["autotrade_ema"])
     if "autotrade_scalp" in updates:
         AUTOTRADE_ENABLED_SCALP = bool(updates["autotrade_scalp"])
     if "autotrade_session" in updates:
@@ -10132,33 +10061,9 @@ def apply_settings(updates):
                 SCALP_SIZE_VALUE = v
         except (TypeError, ValueError):
             pass
-    if "ema_min_rr" in updates:
-        try:
-            v = float(updates["ema_min_rr"])
-            if v >= 0:  # 0 is a valid value here (disables the filter), unlike the size fields above
-                EMA_MIN_RR = v
-        except (TypeError, ValueError):
-            pass
-    if "ema_adx_filter_enabled" in updates:
-        EMA_ADX_FILTER_ENABLED = bool(updates["ema_adx_filter_enabled"])
-    if "ema_adx_min" in updates:
-        try:
-            v = float(updates["ema_adx_min"])
-            if v >= 0:
-                EMA_ADX_MIN = v
-        except (TypeError, ValueError):
-            pass
-    if "ema_min_gap_pct" in updates:
-        try:
-            v = float(updates["ema_min_gap_pct"])
-            if v >= 0:  # 0 disables the filter, same convention as ema_min_rr
-                EMA_MIN_GAP_PCT = v
-        except (TypeError, ValueError):
-            pass
     for key, glob_name in (
         ("autotrade_leverage_bounce", "AUTOTRADE_LEVERAGE_BOUNCE"),
         ("autotrade_leverage_breakout", "AUTOTRADE_LEVERAGE_BREAKOUT"),
-        ("autotrade_leverage_ema", "AUTOTRADE_LEVERAGE_EMA"),
         ("autotrade_leverage_session", "AUTOTRADE_LEVERAGE_SESSION"),
         ("autotrade_leverage_session_ny", "AUTOTRADE_LEVERAGE_SESSION_NY"),
         ("autotrade_leverage_xau_lg", "AUTOTRADE_LEVERAGE_XAU_LG"),
@@ -10201,20 +10106,6 @@ def apply_settings(updates):
             v = float(updates["session_reverse_rr"])
             if v > 0:
                 SESSION_REVERSE_RR = v
-        except (TypeError, ValueError):
-            pass
-    if "ema_sl_atr_mult" in updates:
-        try:
-            v = float(updates["ema_sl_atr_mult"])
-            if v > 0:
-                EMA_SL_ATR_MULT = v
-        except (TypeError, ValueError):
-            pass
-    if "ema_tp_pct" in updates:
-        try:
-            v = float(updates["ema_tp_pct"])
-            if v > 0:
-                EMA_TP_PCT = v
         except (TypeError, ValueError):
             pass
 
@@ -10342,10 +10233,6 @@ STATE = {
     "last_scan_finished": None,
     "last_scan_duration": None,
     "errors": deque(maxlen=30),
-    # EMA 7/14/28 signal indicator — same "own page" treatment as divergence
-    "ema_signals": deque(maxlen=EMA_SIGNAL_HISTORY),
-    "ema_last_scan_finished": None,
-    "ema_last_scan_duration": None,
     # Скальпинг — pure stats, not a signal source: universe + per-symbol
     # excursion data + the computed recommendation for each, refreshed on
     # its own slow SCALP_REFRESH_SEC cadence, separate from the main loop.
@@ -10450,8 +10337,6 @@ STATE = {
 }
 _cooldowns = {}  # (symbol, zone_key) -> last_alert_ts
 _cooldowns_lock = threading.Lock()
-_ema_cooldowns = {}  # symbol -> last_alert_ts
-_ema_cooldowns_lock = threading.Lock()
 _scalp_signal_cooldowns = {}  # (symbol, interval) -> last_signal_ts
 _scalp_signal_cooldowns_lock = threading.Lock()
 _session_signal_cooldowns = {}  # (symbol, session_open_ts) -> True, once fired
@@ -10496,7 +10381,7 @@ def has_open_signal_any_module(symbol, exclude=None):
     for clarity (their own already-called check makes it a no-op)."""
     lists = {
         "signals": STATE["signals"],
-        "ema_signals": STATE["ema_signals"], "scalp_signals": STATE["scalp_signals"],
+        "scalp_signals": STATE["scalp_signals"],
         "session_signals": STATE["session_signals"], "session_ny_signals": STATE["session_ny_signals"],
         "xau_lg_signals": STATE["xau_lg_signals"], "ft5_signals": STATE["ft5_signals"],
         "msnr_signals": STATE["msnr_signals"],
@@ -11314,102 +11199,6 @@ def compute_ft5_signal_stats():
             "mfe_r_losses_at_close": agg("mfe_r_at_close", loss_set), "mae_r_losses_at_close": agg("mae_r_at_close", loss_set)}
 
 
-# EMA diagnostics — v0.62.0, per direct user request to understand the
-# EMA module's low win rate before touching its filters/SL. NONE of
-# these affect whether a signal fires or its TP/SL; they're attached to
-# each signal purely so compute_ema_stats()'s win/loss breakdown (and
-# /api/ema/status) can show whether losses cluster on high-ATR bars,
-# weak/flat EMA28 slope, marginal EMA7/14 separation, or choppy
-# recent-crossover conditions — actual evidence to decide a real filter
-# on, instead of guessing.
-EMA_DIAG_ATR_PERIOD = int(os.environ.get("VP_EMA_DIAG_ATR_PERIOD", 14))
-EMA_DIAG_SLOPE_LOOKBACK = int(os.environ.get("VP_EMA_DIAG_SLOPE_LOOKBACK", 5))  # bars back for the EMA28 slope measurement
-EMA_DIAG_CHOP_LOOKBACK = int(os.environ.get("VP_EMA_DIAG_CHOP_LOOKBACK", 20))  # bars back to count EMA7/EMA14 crossovers in
-EMA_ADX_PERIOD = int(os.environ.get("VP_EMA_ADX_PERIOD", 14))  # Wilder's standard period — see compute_adx()
-
-
-def _ema_signal_diagnostics(closes, ema7, ema14, ema28, i, direction, candles):
-    """Computes the diagnostic-only fields described above for the
-    signal at bar i. candles (with high/low) is needed for ATR/ADX — if
-    not given, those are left None rather than guessed at from closes
-    alone."""
-    diag = {"atr_pct": None, "ema_slope_pct": None, "ema_gap_pct": None, "recent_crossover_count": None, "adx": None}
-    price = closes[i]
-    if price:
-        diag["ema_gap_pct"] = round((ema7[i] - ema14[i]) / price * 100, 4)
-
-    lb = EMA_DIAG_SLOPE_LOOKBACK
-    if i - lb >= 0 and ema28[i - lb]:
-        raw_slope_pct = (ema28[i] - ema28[i - lb]) / ema28[i - lb] * 100
-        # Signed so positive always means "EMA28 is moving WITH this
-        # trade's direction" regardless of LONG/SHORT — lets win/loss
-        # aggregation compare apples to apples across both directions.
-        diag["ema_slope_pct"] = round(raw_slope_pct if direction == "LONG" else -raw_slope_pct, 4)
-
-    chop_lb = EMA_DIAG_CHOP_LOOKBACK
-    start = max(1, i - chop_lb + 1)
-    count = 0
-    for j in range(start, i + 1):
-        if _crossover(ema7, ema14, j) or _crossunder(ema7, ema14, j):
-            count += 1
-    diag["recent_crossover_count"] = count
-
-    if candles is not None and len(candles) == len(closes):
-        tr = _true_range_series(candles)
-        atr = _atr_series(tr, EMA_DIAG_ATR_PERIOD)
-        if atr[i] and price:
-            diag["atr_pct"] = round(atr[i] / price * 100, 4)
-        _plus_di, _minus_di, adx = compute_adx(candles, EMA_ADX_PERIOD)
-        if adx[i] is not None:
-            diag["adx"] = round(adx[i], 3)
-
-    return diag
-
-
-def detect_ema_signal(closes, len7=EMA_LEN_7, len14=EMA_LEN_14, len28=EMA_LEN_28,
-                       signal_type=EMA_SIGNAL_TYPE, trend_filter=EMA_TREND_FILTER, candles=None):
-    """Same three signal definitions as the Pine Script's "Тип сигнала"
-    input: price/EMA7 cross, EMA7/EMA14 cross, or "combined" (price
-    crosses EMA7 while EMA7 is already positioned on the trade's side of
-    EMA14) — plus the optional EMA28 trend filter. Only looks at the
-    latest bar, mirroring how the indicator plots live on a chart.
-    candles (optional, with high/low) enables the ATR diagnostic field;
-    omitting it just leaves atr_pct as None, no other behavior changes."""
-    n = len(closes)
-    if signal_type == "disabled" or n < max(len7, len14, len28) + 2:
-        return None
-    ema7 = compute_ema(closes, len7)
-    ema14 = compute_ema(closes, len14)
-    ema28 = compute_ema(closes, len28)
-    i = n - 1
-
-    cross_buy = _crossover(closes, ema7, i)
-    cross_sell = _crossunder(closes, ema7, i)
-
-    if signal_type == "price_ema7":
-        buy, sell = cross_buy, cross_sell
-    elif signal_type == "ema7_ema14":
-        buy, sell = _crossover(ema7, ema14, i), _crossunder(ema7, ema14, i)
-    elif signal_type == "combined":
-        buy = cross_buy and ema7[i] > ema14[i]
-        sell = cross_sell and ema7[i] < ema14[i]
-    else:
-        buy, sell = False, False
-
-    if trend_filter:
-        buy = buy and closes[i] > ema28[i]
-        sell = sell and closes[i] < ema28[i]
-
-    if EMA_INVERT_SIGNALS:
-        buy, sell = sell, buy  # trade the opposite of whatever the indicator (including its trend filter) says
-
-    if buy or sell:
-        direction = "LONG" if buy else "SHORT"
-        result = {"direction": direction, "ema7": ema7[i], "ema14": ema14[i], "ema28": ema28[i]}
-        result.update(_ema_signal_diagnostics(closes, ema7, ema14, ema28, i, direction, candles))
-        return result
-    return None
-
 
 
 def session_open_utc_ts(ref_ts):
@@ -12065,61 +11854,6 @@ def compute_session_ny_signal_stats():
             "open": open_n, "winrate": winrate}
 
 
-def compute_ema_tp_sl(direction, entry, atr=None, tp_pct=None, atr_mult=None, fallback_rr=None):
-    """TP is always a fixed % of entry (tp_pct) — the source Pine Script
-    only plots BUY/SELL labels, no TP/SL, so this was always synthetic.
-    SL depends on EMA_SL_MODE:
-      - "atr" (default): SL = atr * atr_mult in price units, on the
-        losing side of entry. Needs atr (price units, not %) — pass
-        None or 0 to force the fixed_rr fallback for this call even in
-        atr mode (e.g. ATR unavailable for this candle set).
-      - "fixed_pct" or ATR unavailable: reproduces the old behavior —
-        risk = tp_distance / fallback_rr (EMA_RR), same math as before
-        this function grew ATR support.
-    Returns (sl, tp, risk, rr) — rr is now always computed FROM the
-    actual sl/tp distances rather than assumed, since ATR mode makes it
-    vary signal to signal instead of being one fixed constant.
-    v0.95.7: tp_pct/atr_mult/fallback_rr now default to None and get
-    resolved to the CURRENT EMA_TP_PCT/EMA_SL_ATR_MULT/EMA_RR globals
-    inside the function body — NOT bound as literal default parameter
-    values in the signature. Python evaluates a default parameter value
-    ONCE, at function-definition time (module load), not on each call —
-    so `tp_pct=EMA_TP_PCT` froze whatever EMA_TP_PCT happened to be at
-    startup into this function's own __defaults__ forever. Every actual
-    call site (scan_symbol_ema) calls this with only direction/entry/atr,
-    relying entirely on that default — meaning every risk_autotune_pass()
-    adjustment to EMA_TP_PCT or EMA_SL_ATR_MULT since process start was
-    successfully logged and persisted to settings.json, but had ZERO
-    effect on real signals: they kept computing SL/TP off the ORIGINAL
-    startup value. Found via direct audit ("найди все проблемы"), not a
-    live symptom someone noticed — this could have been silently
-    inert for the rest of this session otherwise."""
-    if tp_pct is None:
-        tp_pct = EMA_TP_PCT
-    if atr_mult is None:
-        atr_mult = EMA_SL_ATR_MULT
-    if fallback_rr is None:
-        fallback_rr = EMA_RR
-    if direction == "SHORT":
-        tp = entry * (1 - tp_pct)
-        tp_dist = entry - tp
-        if EMA_SL_MODE == "atr" and atr:
-            risk = atr * atr_mult
-        else:
-            risk = tp_dist / fallback_rr
-        sl = entry + risk
-    else:
-        tp = entry * (1 + tp_pct)
-        tp_dist = tp - entry
-        if EMA_SL_MODE == "atr" and atr:
-            risk = atr * atr_mult
-        else:
-            risk = tp_dist / fallback_rr
-        sl = entry - risk
-    rr = round(tp_dist / risk, 3) if risk else None
-    return sl, tp, risk, rr
-
-
 # ----------------------------------------------------------------------------
 # Scalp volatility statistics — see SCALP_ENABLED comment above for the
 # design summary. This is a stats/exploration tool, not a signal source:
@@ -12236,201 +11970,8 @@ def compute_scalp_leverage_for_target(target_pct, account_usd=SCALP_ACCOUNT_USD,
     return required_notional / account_usd
 
 
-def has_open_ema_signal(symbol, interval):
-    with state_lock:
-        return any(s["symbol"] == symbol and s.get("interval") == interval and s.get("status") == "OPEN" for s in STATE["ema_signals"])
-
-
-def scan_symbol_ema(symbol, interval=EMA_INTERVAL, candles=None):
-    if not EMA_ENABLED:
-        return
-    try:
-        if candles is None:
-            candles = get_candles(symbol, interval=interval, limit=EMA_FETCH_LIMIT)
-        min_needed = max(EMA_LEN_7, EMA_LEN_14, EMA_LEN_28) + 20
-        if len(candles) < min_needed:
-            return
-        ok, _reason = data_quality_check(candles[-min(len(candles), 100):])
-        if not ok:
-            return
-        closes = [c["close"] for c in candles]
-        sig = detect_ema_signal(closes, EMA_LEN_7, EMA_LEN_14, EMA_LEN_28, EMA_SIGNAL_TYPE, EMA_TREND_FILTER, candles=candles)
-        if not sig:
-            return
-        if has_open_ema_signal(symbol, interval) or has_open_signal_any_module(symbol, exclude="ema_signals"):
-            return
-
-        if EMA_ADX_FILTER_ENABLED:
-            adx_val = sig.get("adx")
-            if adx_val is not None and adx_val < EMA_ADX_MIN:
-                with state_lock:
-                    STATE["filtered_by_adx"] += 1
-                return  # weak/no trend (Wilder's regime filter) — the crossover is more likely chop than a real signal here
-        if EMA_MIN_GAP_PCT > 0:
-            gap_val = sig.get("ema_gap_pct")
-            if gap_val is not None and abs(gap_val) < EMA_MIN_GAP_PCT:
-                with state_lock:
-                    STATE["filtered_by_min_gap"] += 1
-                return  # EMA7/EMA14 barely separated — marginal cross, not a decisive one
-
-        entry = candles[-1]["close"]
-        atr_pct = sig.get("atr_pct")
-        atr_price = (atr_pct / 100 * entry) if atr_pct else None
-        sl, tp, risk, rr = compute_ema_tp_sl(sig["direction"], entry, atr=atr_price)
-        if EMA_MIN_RR > 0 and rr is not None and rr < EMA_MIN_RR:
-            with state_lock:
-                STATE["filtered_by_min_rr"] += 1
-            return  # ATR-based stop came out too wide relative to the fixed TP — checked BEFORE the cooldown below so a filtered signal doesn't block a later, better one on the same (symbol, interval)
-
-        now = time.time()
-        cooldown_key = (symbol, interval)
-        with _ema_cooldowns_lock:
-            last_ts = _ema_cooldowns.get(cooldown_key, 0)
-            allowed = now - last_ts >= EMA_COOLDOWN_SEC
-            if allowed:
-                _ema_cooldowns[cooldown_key] = now
-        if not allowed:
-            return
-
-        record = {
-            "symbol": symbol,
-            "interval": interval,
-            "direction": sig["direction"],
-            "entry": entry,
-            "sl": sl,
-            "tp": tp,
-            "risk": risk,
-            "rr": rr,  # varies per signal in ATR mode — see EMA_SL_MODE / compute_ema_tp_sl
-            "ema7": sig["ema7"], "ema14": sig["ema14"], "ema28": sig["ema28"],
-            # Diagnostic-only (v0.62.0) — see _ema_signal_diagnostics().
-            # Not used by any live logic, purely for compute_ema_stats()'s
-            # win/loss breakdown to ground a future filter decision.
-            "atr_pct": sig.get("atr_pct"),
-            "ema_slope_pct": sig.get("ema_slope_pct"),
-            "ema_gap_pct": sig.get("ema_gap_pct"),
-            "recent_crossover_count": sig.get("recent_crossover_count"),
-            "adx": sig.get("adx"),
-            "time": candles[-1]["time"],
-            "detected_at": now,
-            "status": "OPEN",
-            "result": None,
-            "closed_at": None,
-            "exit_price": None,
-            "exit_time": None,
-            "exit_candle": None,
-            "app_version": APP_VERSION,
-            "mfe_r": 0.0,
-            "mae_r": 0.0,
-            "mfe_price": None,
-            "mae_price": None,
-            "mfe_tracking_until": now + MFE_TRACK_SEC,
-        }
-        with state_lock:
-            STATE["ema_signals"].appendleft(record)
-        if AUTOTRADE_ENABLED_EMA:
-            execute_autotrade("ema", symbol, sig["direction"], entry, sl, tp,
-                               AUTOTRADE_LEVERAGE_EMA, extra={"interval": interval})
-            sim_execute_trade("ema", symbol, sig["direction"], entry, sl, tp,
-                               AUTOTRADE_LEVERAGE_EMA, record)
-        arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
-        rr_txt = f"{rr:g}" if rr is not None else "?"
-        send_telegram(
-            f"{arrow} {symbol} (EMA {EMA_SIGNAL_TYPE}, {interval})\n"
-            f"entry: {entry:.6g}\n"
-            f"SL: {sl:.6g}  TP: {tp:.6g}  (RR {rr_txt})",
-            category="ema",
-        )
-    except Exception as e:
-        log_error(f"ema {symbol}: {e}")
-
-
-def close_ema_signal(sig, result, exit_price, exit_candle=None):
-    with state_lock:
-        sig["status"] = "CLOSED"
-        sig["result"] = result
-        sig["exit_price"] = exit_price
-        sig["closed_at"] = time.time()
-        sig["mfe_r_at_close"] = sig["mfe_r"]
-        sig["mae_r_at_close"] = sig["mae_r"]
-        # Realized R at whatever price actually closed the trade — for
-        # WIN/LOSS this is redundant with the R implied by hitting TP/SL,
-        # but for TIMEOUT it's the only place this ever gets computed.
-        # TIMEOUT closes at "last_price" (see update_ema_outcomes), not
-        # at breakeven or any fixed value — a batch of timeouts closing
-        # slightly negative on average is real money leaving the account
-        # that the plain WIN/LOSS winrate never shows, since TIMEOUT sits
-        # outside that count entirely.
-        risk = sig.get("risk")
-        if risk and exit_price is not None and sig.get("entry") is not None:
-            raw = exit_price - sig["entry"] if sig["direction"] == "LONG" else sig["entry"] - exit_price
-            sig["exit_r"] = round(raw / risk, 4)
-        if exit_candle:
-            sig["exit_time"] = exit_candle["time"]
-            sig["exit_candle"] = {
-                "open": exit_candle["open"], "high": exit_candle["high"],
-                "low": exit_candle["low"], "close": exit_candle["close"],
-            }
-    if result in ("WIN", "LOSS"):
-        arrow = "\u2705" if result == "WIN" else "\u274c"
-        send_telegram(f"{arrow} {sig['symbol']} EMA {sig['direction']} closed: {result} @ {exit_price:.6g}", category="ema")
-
-
-def update_ema_outcomes():
-    now = time.time()
-    with state_lock:
-        active = [
-            s for s in STATE["ema_signals"]
-            if s.get("status") == "OPEN" or now < s.get("mfe_tracking_until", 0)
-        ]
-    all_candles = fetch_candles_concurrent([(s["symbol"], s.get("interval", EMA_INTERVAL), 300) for s in active])
-    for sig, candles in zip(active, all_candles):
-        try:
-            if candles is None:
-                continue
-            ema_interval_sec = INTERVAL_SECONDS.get(sig.get("interval", EMA_INTERVAL), 3600)
-            candles = [c for c in candles if c["time"] + ema_interval_sec <= now]  # v0.98.8: drop still-forming candle
-            relevant = [c for c in candles if c["time"] > sig["time"]]
-            direction = sig["direction"]
-            entry = sig["entry"]
-            risk = sig.get("risk") or abs(entry - sig["sl"]) or 1e-9
-
-            for c in relevant:
-                if direction == "LONG":
-                    fav, adv = c["high"] - entry, entry - c["low"]
-                else:
-                    fav, adv = entry - c["low"], c["high"] - entry
-                fav_r, adv_r = fav / risk, adv / risk
-                if fav_r > sig["mfe_r"] or adv_r > sig["mae_r"]:
-                    with state_lock:
-                        if fav_r > sig["mfe_r"]:
-                            sig["mfe_r"] = round(fav_r, 3)
-                            sig["mfe_price"] = c["high"] if direction == "LONG" else c["low"]
-                        if adv_r > sig["mae_r"]:
-                            sig["mae_r"] = round(adv_r, 3)
-                            sig["mae_price"] = c["low"] if direction == "LONG" else c["high"]
-
-                if sig["status"] == "OPEN":
-                    if direction == "LONG":
-                        if c["low"] <= sig["sl"]:
-                            close_ema_signal(sig, "LOSS", sig["sl"], exit_candle=c)
-                        elif c["high"] >= sig["tp"]:
-                            close_ema_signal(sig, "WIN", sig["tp"], exit_candle=c)
-                    else:
-                        if c["high"] >= sig["sl"]:
-                            close_ema_signal(sig, "LOSS", sig["sl"], exit_candle=c)
-                        elif c["low"] <= sig["tp"]:
-                            close_ema_signal(sig, "WIN", sig["tp"], exit_candle=c)
-
-            # Timeout removed per direct request — see the same removal in
-            # update_divergence_outcomes()'s comment right above for the
-            # full reasoning (applied consistently across every module).
-        except Exception as e:
-            log_error(f"update_ema_outcomes {sig.get('symbol')}: {e}")
-
-
 SNAPSHOT_MODULE_KEYS = {
     "volume": "signals",
-    "ema": "ema_signals",
     "scalp": "scalp_signals",
     "session": "session_signals",
     "session_ny": "session_ny_signals",
@@ -12551,76 +12092,6 @@ def replay_signal_snapshot(snap_id, filters):
         "rr_all": agg("rr", survivors), "rr_wins": agg("rr", win_set), "rr_losses": agg("rr", loss_set),
         "mfe_r_wins_at_close": agg("mfe_r_at_close", win_set), "mae_r_wins_at_close": agg("mae_r_at_close", win_set),
         "mfe_r_losses_at_close": agg("mfe_r_at_close", loss_set), "mae_r_losses_at_close": agg("mae_r_at_close", loss_set),
-    }
-
-
-def compute_ema_stats(interval=None):
-    with state_lock:
-        signals = list(STATE["ema_signals"])
-    if interval is not None:
-        signals = [s for s in signals if s.get("interval") == interval]
-    closed = [s for s in signals if s.get("status") == "CLOSED" and s.get("result") in ("WIN", "LOSS")]
-    wins = sum(1 for s in closed if s["result"] == "WIN")
-    losses = sum(1 for s in closed if s["result"] == "LOSS")
-    total = wins + losses
-    timeouts = sum(1 for s in signals if s.get("result") == "TIMEOUT")
-    open_count = sum(1 for s in signals if s.get("status") == "OPEN")
-    winrate = round(wins / total * 100, 1) if total else None
-
-    dataset = [s for s in signals if s.get("mfe_price") is not None]
-
-    def agg(key, subset):
-        vals = [s[key] for s in subset if s.get(key) is not None]
-        if not vals:
-            return None
-        vals_sorted = sorted(vals)
-        n = len(vals_sorted)
-        return {
-            "avg": round(sum(vals) / n, 3),
-            "median": round(vals_sorted[n // 2], 3),
-            "p25": round(vals_sorted[int(n * 0.25)], 3),
-            "p75": round(vals_sorted[min(int(n * 0.75), n - 1)], 3),
-            "n": n,
-        }
-
-    win_set = [s for s in dataset if s.get("result") == "WIN"]
-    loss_set = [s for s in dataset if s.get("result") == "LOSS"]
-    open_set = [s for s in dataset if s.get("status") == "OPEN"]
-    timeout_set = [s for s in dataset if s.get("result") == "TIMEOUT"]
-
-    return {
-        "open": open_count, "wins": wins, "losses": losses,
-        "timeouts": timeouts, "winrate": winrate, "closed_total": total,
-        "mfe_r_all": agg("mfe_r", dataset), "mae_r_all": agg("mae_r", dataset),
-        "mfe_r_wins": agg("mfe_r", win_set), "mae_r_wins": agg("mae_r", win_set),
-        "mfe_r_losses": agg("mfe_r", loss_set), "mae_r_losses": agg("mae_r", loss_set),
-        "mfe_r_open": agg("mfe_r", open_set), "mae_r_open": agg("mae_r", open_set),
-        "mfe_r_wins_at_close": agg("mfe_r_at_close", win_set), "mae_r_wins_at_close": agg("mae_r_at_close", win_set),
-        "mfe_r_losses_at_close": agg("mfe_r_at_close", loss_set), "mae_r_losses_at_close": agg("mae_r_at_close", loss_set),
-        # Realized R for TIMEOUT closes specifically — see close_ema_
-        # signal()'s comment: this is the only place TIMEOUT's actual $
-        # impact is visible, since the plain winrate excludes it
-        # entirely. If this comes out net negative, timeouts are a real
-        # (if quiet) drag on the account that the headline winrate
-        # can't show.
-        "exit_r_timeouts": agg("exit_r", timeout_set),
-        "dataset_count": len(dataset),
-        # Diagnostic breakdown (v0.62.0) — win vs loss comparison for the
-        # fields _ema_signal_diagnostics() attaches at signal time. None
-        # of these were used to decide whether a signal fired; this is
-        # purely to see whether losses cluster on high ATR, weak/flat
-        # EMA28 slope, marginal EMA7/14 separation, or choppy recent-
-        # crossover conditions, before committing to any actual filter.
-        "atr_pct_wins": agg("atr_pct", win_set), "atr_pct_losses": agg("atr_pct", loss_set),
-        "ema_slope_pct_wins": agg("ema_slope_pct", win_set), "ema_slope_pct_losses": agg("ema_slope_pct", loss_set),
-        "ema_gap_pct_wins": agg("ema_gap_pct", win_set), "ema_gap_pct_losses": agg("ema_gap_pct", loss_set),
-        "recent_crossover_count_wins": agg("recent_crossover_count", win_set),
-        "recent_crossover_count_losses": agg("recent_crossover_count", loss_set),
-        "adx_wins": agg("adx", win_set), "adx_losses": agg("adx", loss_set),
-        # rr is per-signal now (v0.65.0, ATR-based SL) instead of one
-        # global constant — this is what the header display shows in
-        # place of the old fixed EMA_RR value.
-        "rr_all": agg("rr", dataset), "rr_wins": agg("rr", win_set), "rr_losses": agg("rr", loss_set),
     }
 
 
@@ -14601,7 +14072,6 @@ def save_state():
             data = {
                 "overrides": SYMBOL_OVERRIDES,
                 "signals": list(STATE["signals"]),
-                "ema_signals": list(STATE["ema_signals"]),
                 "scalp_signals": list(STATE["scalp_signals"]),
                 "session_signals": list(STATE["session_signals"]),
                 "session_ny_signals": list(STATE["session_ny_signals"]),
@@ -14657,7 +14127,6 @@ def _relink_sim_trade(trade):
     (e.g. that signal itself fell out of its own history maxlen)."""
     module_lists = {
         "bounce": STATE["signals"], "breakout": STATE["signals"],
-        "ema": STATE["ema_signals"],
         "scalp": STATE["scalp_signals"], "session": STATE["session_signals"],
         "session_ny": STATE["session_ny_signals"],
         "xau_lg": STATE["xau_lg_signals"],
@@ -14716,7 +14185,6 @@ def load_state():
             data = json.load(f)
         SYMBOL_OVERRIDES.update(data.get("overrides", {}))
         signals = data.get("signals", [])
-        ema_signals = data.get("ema_signals", [])
         scalp_signals = data.get("scalp_signals", [])
         session_signals = data.get("session_signals", [])
         session_ny_signals = data.get("session_ny_signals", [])
@@ -14735,7 +14203,6 @@ def load_state():
         risk_autotune_last_change = data.get("risk_autotune_last_change", {})
         with state_lock:
             STATE["signals"] = deque(_backfill_mfe_mae(signals), maxlen=SIGNAL_HISTORY)
-            STATE["ema_signals"] = deque(_backfill_mfe_mae(ema_signals), maxlen=EMA_SIGNAL_HISTORY)
             STATE["scalp_signals"] = deque(scalp_signals, maxlen=SCALP_SIGNAL_HISTORY)
             STATE["session_signals"] = deque(_backfill_mfe_mae(session_signals), maxlen=SESSION_SIGNAL_HISTORY)
             STATE["session_ny_signals"] = deque(session_ny_signals, maxlen=SESSION_NY_SIGNAL_HISTORY)
@@ -14764,7 +14231,7 @@ def load_state():
                     t["_signal_ref"] = match
                 restored_trades.append(t)
             STATE["sim_trades"] = deque(restored_trades, maxlen=AUTOTRADE_SIM_TRADE_HISTORY)
-        print(f"Loaded persisted state: {len(SYMBOL_OVERRIDES)} overrides, {len(signals)} signals, {len(ema_signals)} EMA signals, {len(scalp_signals)} scalp signals, {len(session_signals)} session signals, {len(autotrade_log)} autotrade log entries, {len(restored_trades)} sim trades ({dropped_pending} pending trades couldn't be re-linked and were dropped)")
+        print(f"Loaded persisted state: {len(SYMBOL_OVERRIDES)} overrides, {len(signals)} signals, {len(scalp_signals)} scalp signals, {len(session_signals)} session signals, {len(autotrade_log)} autotrade log entries, {len(restored_trades)} sim trades ({dropped_pending} pending trades couldn't be re-linked and were dropped)")
     except Exception as e:
         log_error(f"load_state: {e}")
 
@@ -14949,8 +14416,6 @@ def send_telegram(text, category=None):
     if not TELEGRAM_ENABLED or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
     if category == "vp" and not TELEGRAM_ALERTS_VP:
-        return
-    if category == "ema" and not TELEGRAM_ALERTS_EMA:
         return
     if category == "hourly" and not TELEGRAM_ALERTS_HOURLY:
         return
@@ -15505,9 +14970,6 @@ def scan_loop():
             # is harmless, fewer would be (which is why scan_symbol()
             # above still falls back to its own fetch on a length miss).
             shared_interval_limits = {}
-            if EMA_ENABLED:
-                for interval in EMA_INTERVALS:
-                    shared_interval_limits[interval] = max(shared_interval_limits.get(interval, 0), EMA_FETCH_LIMIT)
 
             candle_cache = {}
             if shared_interval_limits:
@@ -15520,8 +14982,6 @@ def scan_loop():
                 futs = []
                 if VOLUME_PROFILE_ENABLED:
                     futs += [ex.submit(scan_symbol, s) for s in universe]
-                if EMA_ENABLED:
-                    futs += [ex.submit(scan_symbol_ema, s, interval, candle_cache.get((s, interval))) for s in universe for interval in EMA_INTERVALS]
                 if SCALP_SIGNALS_ENABLED:
                     with state_lock:
                         scalp_recs_snapshot = dict(STATE["scalp_recommendations"])
@@ -15540,8 +15000,6 @@ def scan_loop():
             if VOLUME_PROFILE_ENABLED:
                 update_signal_outcomes()
                 auto_tune_cycle(universe)
-            if EMA_ENABLED:
-                update_ema_outcomes()
             if SCALP_SIGNALS_ENABLED:
                 update_scalp_signal_outcomes()
             if SESSION_ENABLED:
@@ -15552,8 +15010,6 @@ def scan_loop():
             with state_lock:
                 STATE["last_scan_finished"] = t1
                 STATE["last_scan_duration"] = round(t1 - t0, 1)
-                STATE["ema_last_scan_finished"] = t1
-                STATE["ema_last_scan_duration"] = round(t1 - t0, 1)
         except Exception as e:
             log_error(f"scan_loop: {e}\n{traceback.format_exc()}")
         time.sleep(max(5, SCAN_INTERVAL_SEC))
@@ -15561,7 +15017,6 @@ def scan_loop():
 
 def build_hourly_stats_report():
     vp_s = compute_signal_stats()
-    ema_s = compute_ema_stats()
     scalp_s = compute_scalp_signal_stats()
 
     def wr(x):
@@ -15573,13 +15028,10 @@ def build_hourly_stats_report():
     vp_line = (f"<b>Volume</b>: {wr(vp_s['winrate'])} ({vp_s['wins']}W/{vp_s['losses']}L) · "
                f"открытых {vp_s['open']} · bounce {wr(bounce.get('winrate'))}/breakout {wr(breakout.get('winrate'))}")
 
-    ema_tag = " [РЕВЕРС]" if EMA_INVERT_SIGNALS else ""
-    ema_line = f"<b>EMA</b>{ema_tag}: {wr(ema_s['winrate'])} ({ema_s['wins']}W/{ema_s['losses']}L) · открытых {ema_s['open']}"
-
     scalp_line = (f"<b>Скальпинг</b>: {wr(scalp_s['win_rate'])} ({scalp_s['wins']}W/{scalp_s['losses']}L/{scalp_s['timeouts']}TIMEOUT) · "
                   f"открытых {scalp_s['open']}") if SCALP_SIGNALS_ENABLED else None
 
-    lines = [f"📊 Часовая статистика (v{APP_VERSION})", vp_line, ema_line]
+    lines = [f"📊 Часовая статистика (v{APP_VERSION})", vp_line]
     if scalp_line:
         lines.append(scalp_line)
     return "\n".join(lines)
@@ -16137,30 +15589,6 @@ def _risk_autotune_tp_extend(module, param_key, current_tp_pct, win_mfe_r, curre
 # --- setters: each applies the change AND persists it via save_settings(),
 # same pattern the settings API endpoint itself already uses ---
 
-def _set_ema_min_rr(v):
-    global EMA_MIN_RR
-    EMA_MIN_RR = v
-    save_settings()
-
-
-def _set_ema_sl_atr_mult(v):
-    global EMA_SL_ATR_MULT
-    EMA_SL_ATR_MULT = v
-    save_settings()
-
-
-def _set_ema_tp_pct(v):
-    global EMA_TP_PCT
-    EMA_TP_PCT = v
-    save_settings()
-
-
-def _set_ema_invert(v):
-    global EMA_INVERT_SIGNALS
-    EMA_INVERT_SIGNALS = v
-    save_settings()
-
-
 def _set_scalp_min_rr(v):
     global SCALP_MIN_RR
     SCALP_MIN_RR = v
@@ -16266,26 +15694,6 @@ def _scalp_loss_mae_avg_r():
 def risk_autotune_pass():
     """One tuning pass across all four modules. Each module's checks are
     wrapped separately so one module's bad data doesn't block the rest."""
-    try:
-        s = compute_ema_stats()
-        rr_all = s.get("rr_all")
-        winrate = s.get("winrate")
-        closed_n = s.get("closed_total", 0) or 0
-        loss_mae = s.get("mae_r_losses_at_close")
-        if rr_all:
-            _risk_autotune_min_rr("ema", "ema_min_rr", EMA_MIN_RR, rr_all["median"], winrate, closed_n, _set_ema_min_rr,
-                                   avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
-        if loss_mae:
-            _risk_autotune_sl_mult("ema", "ema_sl_atr_mult", EMA_SL_ATR_MULT, loss_mae["avg"], s.get("losses", 0) or 0, _set_ema_sl_atr_mult)
-        if rr_all:
-            _risk_autotune_reverse("ema", "ema_invert_signals", EMA_INVERT_SIGNALS, winrate, rr_all["avg"], closed_n, _set_ema_invert,
-                                    avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
-        win_mfe = s.get("mfe_r_wins_at_close")
-        if win_mfe and rr_all:
-            _risk_autotune_tp_extend("ema", "ema_tp_pct", EMA_TP_PCT, win_mfe["median"], rr_all["median"], closed_n, _set_ema_tp_pct)
-    except Exception as e:
-        log_error(f"risk_autotune ema: {e}")
-
     try:
         median_rr, rr_n = _scalp_closed_rr_stats()
         scalp_stats = compute_scalp_signal_stats()
@@ -20260,14 +19668,11 @@ def api_overview():
     header — one call instead of hitting four separate endpoints on
     every poll regardless of which tab is open."""
     vp = compute_signal_stats()
-    ema = compute_ema_stats()
     scalp = compute_scalp_signal_stats()
     session = compute_session_signal_stats()
     return jsonify({
         "volume": {"winrate": vp["winrate"], "wins": vp["wins"], "losses": vp["losses"], "open": vp["open"],
                     "enabled": VOLUME_PROFILE_ENABLED},
-        "ema": {"winrate": ema["winrate"], "wins": ema["wins"], "losses": ema["losses"], "open": ema["open"],
-                 "enabled": EMA_ENABLED, "invert": EMA_INVERT_SIGNALS},
         "scalp": {"winrate": scalp["win_rate"], "wins": scalp["wins"], "losses": scalp["losses"], "timeouts": scalp["timeouts"], "open": scalp["open"],
                    "enabled": SCALP_SIGNALS_ENABLED},
         "session": {"winrate": session["winrate"], "wins": session["wins"], "losses": session["losses"], "open": session["open"],
@@ -20452,57 +19857,6 @@ def api_optimize(symbol):
 @app.route("/api/overrides")
 def api_overrides():
     return jsonify(SYMBOL_OVERRIDES)
-
-
-@app.route("/api/ema/status")
-def api_ema_status():
-    stats = compute_ema_stats()
-    by_interval = {interval: compute_ema_stats(interval) for interval in EMA_INTERVALS}
-    with state_lock:
-        return jsonify({
-            "version": APP_VERSION,
-            "enabled": EMA_ENABLED,
-            "interval": EMA_INTERVAL,
-            "intervals": EMA_INTERVALS,
-            "last_scan_finished": STATE["ema_last_scan_finished"],
-            "last_scan_duration": STATE["ema_last_scan_duration"],
-            "stats": stats,
-            "stats_by_interval": by_interval,
-            "config": {
-                "sl_mode": EMA_SL_MODE, "sl_atr_mult": EMA_SL_ATR_MULT, "rr_fallback": EMA_RR, "tp_pct": EMA_TP_PCT,
-                "min_rr": EMA_MIN_RR,
-                "adx_filter_enabled": EMA_ADX_FILTER_ENABLED, "adx_min": EMA_ADX_MIN, "adx_period": EMA_ADX_PERIOD,
-                "min_gap_pct": EMA_MIN_GAP_PCT,
-                "len7": EMA_LEN_7, "len14": EMA_LEN_14, "len28": EMA_LEN_28,
-                "signal_type": EMA_SIGNAL_TYPE, "trend_filter": EMA_TREND_FILTER, "invert_signals": EMA_INVERT_SIGNALS,
-                "cooldown": EMA_COOLDOWN_SEC,
-            },
-            "filtered_by_min_rr": STATE["filtered_by_min_rr"],
-            "filtered_by_adx": STATE["filtered_by_adx"],
-            "filtered_by_min_gap": STATE["filtered_by_min_gap"],
-        })
-
-
-@app.route("/api/ema/signals")
-def api_ema_signals():
-    with state_lock:
-        return jsonify(list(STATE["ema_signals"]))
-
-
-@app.route("/api/ema/chart/<symbol>")
-def api_ema_chart(symbol):
-    try:
-        interval = request.args.get("interval", EMA_INTERVAL)
-        candles = get_candles(symbol, interval=interval, limit=EMA_FETCH_LIMIT)
-        closes = [c["close"] for c in candles]
-        ema7 = compute_ema(closes, EMA_LEN_7)
-        ema14 = compute_ema(closes, EMA_LEN_14)
-        ema28 = compute_ema(closes, EMA_LEN_28)
-        return jsonify({"symbol": symbol, "interval": interval, "candles": candles,
-                         "ema7": ema7, "ema14": ema14, "ema28": ema28})
-    except Exception as e:
-        log_error(f"api_ema_chart {symbol}: {e}")
-        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/scalp/status")
@@ -21604,10 +20958,6 @@ def api_reset_risk_autotune():
     several more cooldown-gated passes (6-24h apart) instead of
     restarting clean immediately after a fix like that."""
     try:
-        _set_ema_min_rr(0.7)
-        _set_ema_sl_atr_mult(1.5)
-        _set_ema_invert(False)
-        _set_ema_tp_pct(0.015)
         _set_scalp_min_rr(0.5)
         _set_scalp_sl_buffer_mult(0.25)
         _set_session_invert(False)
@@ -21622,20 +20972,6 @@ def api_reset_risk_autotune():
         return jsonify({"ok": True})
     except Exception as e:
         log_error(f"api_reset_risk_autotune: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/api/reset/ema", methods=["POST"])
-def api_reset_ema():
-    try:
-        with state_lock:
-            STATE["ema_signals"].clear()
-        with _ema_cooldowns_lock:
-            _ema_cooldowns.clear()
-        save_state()
-        return jsonify({"ok": True})
-    except Exception as e:
-        log_error(f"api_reset_ema: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
