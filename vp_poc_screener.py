@@ -8894,6 +8894,50 @@ v0.99.94 - CRITICAL FIX, direct user report: "монета делает 3000% п
          top rank purely off an absurd income figure — pyflakes
          (clean), the Flask route/def integrity check (still 60 routes
          — no endpoints touched, this is a pure ranking-math fix).
+
+v0.99.95 - Direct user request continued: "Продолжи нашу работу по
+         удалению индикаторов, в первую очередь убери вкладки и
+         настройки." 3rd of 6 modules — EMA — removal begun, frontend
+         phase only (tab + settings), per explicit instruction to do
+         those first. Backend logic (scan_symbol_ema, the scan_loop()
+         if EMA_ENABLED: integration, risk_autotune wiring, all EMA_*
+         constants except compute_ema() itself, get/apply_settings,
+         SETTINGS_KEYS, STATE keys, API routes) is UNTOUCHED and still
+         fully functional in this version — EMA keeps running in the
+         background exactly as before, just with no UI to see or
+         control it until the backend removal follows in a later
+         version. A safe, valid, non-broken intermediate checkpoint,
+         not a partial/broken state.
+         Checked compute_ema() itself for shared usage BEFORE removing
+         anything, per the lesson from Divergence's own removal (compute_
+         rsi() turned out to be FT5 infrastructure) — confirmed compute_
+         ema() is used by THREE things: EMA's own module (being
+         removed), compute_macd() (FT5's own indicator stack — staying),
+         and xau_lg_detect_signals() (XAU LG — also on the removal list,
+         but not this pass). compute_ema() itself is therefore permanent
+         shared infrastructure and was never touched.
+         Removed: the tab, the signals table + stats panel, the reset
+         button + its wireResetButton() call + CSS selector, both
+         activeTab==='ema' panel-visibility/refresh call sites, both
+         modeLabels dict entries, the settings-modal "EMA" group (scan
+         toggle + invert), 4 rows in the autotrade/leverage settings
+         group (leverage, min RR, ADX filter, min EMA7/14 gap), the
+         Telegram-alerts checkbox, the risk-autotune log's own EMA
+         param-label entries, and all 11 corresponding entries in the
+         JS settings-mapping object (ema_enabled/ema_invert_signals/
+         ema_adx_filter_enabled/autotrade_ema/ema_min_rr/ema_adx_min/
+         ema_min_gap_pct/autotrade_leverage_ema, found and removed one
+         at a time as each subsequent one shifted into view).
+         Verified with py_compile after every single edit (not batched
+         — this session's own established discipline for large multi-
+         step removals), pyflakes (clean — confirms no orphaned frontend
+         JS references were left dangling, though pyflakes itself only
+         checks the Python half; a manual grep for any remaining "setEma"/
+         '"ema_' hits confirmed every survivor is backend Python code,
+         zero live frontend references left), node --check on the
+         correctly-last <script> block, and the Flask route/def
+         integrity check (still 60 routes — no routes touched in this
+         frontend-only pass).
 """
 
 import os
@@ -8913,7 +8957,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.94"
+APP_VERSION = "0.99.95"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21792,7 +21836,7 @@ INDEX_HTML = """<!doctype html>
   body { margin:0; background:#0b0e14; color:#d7dee8; font-family: -apple-system, Roboto, Segoe UI, sans-serif; }
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
   #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  #resetVolumeBtn, #resetEmaBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetXauLgBtn, #resetMsnrBtn, #resetFt5Btn, #resetMirrorBtn, #resetRiskAutotuneBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #resetVolumeBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetXauLgBtn, #resetMsnrBtn, #resetFt5Btn, #resetMirrorBtn, #resetRiskAutotuneBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #settingsModal.open { display:flex; flex-direction:column; }
@@ -21999,7 +22043,6 @@ INDEX_HTML = """<!doctype html>
     <div style="display:flex;gap:8px;flex-wrap:wrap;">
       <button id="settingsBtn">⚙️ Настройки</button>
       <button id="resetVolumeBtn">Очистить объём</button>
-      <button id="resetEmaBtn">Очистить индикатор</button>
       <button id="resetScalpBtn">Очистить скальпинг</button>
       <button id="resetSessionBtn">Очистить сессию</button>
       <button id="resetSessionNyBtn">Очистить сессию NY</button>
@@ -22022,7 +22065,6 @@ INDEX_HTML = """<!doctype html>
 <div class="tabs">
   <div class="tab active" data-tab="msnr">MSNR</div>
   <div class="tab" data-tab="signals">Volume</div>
-  <div class="tab" data-tab="ema">EMA</div>
   <div class="tab" data-tab="scalp">Скальпинг</div>
   <div class="tab" data-tab="session">Сессия</div>
   <div class="tab" data-tab="session_ny">Сессия NY</div>
@@ -22037,13 +22079,6 @@ INDEX_HTML = """<!doctype html>
   <div style="overflow-x:auto;">
   <table id="signalsTable" style="display:none">
     <thead><tr><th>Symbol</th><th>Dir</th><th>Reason</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
-    <tbody></tbody>
-  </table>
-  </div>
-  <div id="emaStatsPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
-  <div style="overflow-x:auto;">
-  <table id="emaTable" style="display:none">
-    <thead><tr><th>Symbol</th><th>Dir</th><th>TF</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>ADX</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
     <tbody></tbody>
   </table>
   </div>
@@ -22167,24 +22202,6 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">пробой после консолидации</div>
         </div>
         <label class="switch"><input type="checkbox" id="setBreakout"><span class="switchSlider"></span></label>
-      </div>
-    </div>
-
-    <div class="settingsGroup">
-      <div class="settingsGroupTitle">EMA</div>
-      <div class="settingRow">
-        <div>
-          <div class="label">EMA 7/14/28</div>
-          <div class="sub">пересечения, свой скан, вкладка "EMA"</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setEma"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Реверс сигналов</div>
-          <div class="sub">торговать в обратную сторону от того, что говорит индикатор</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setEmaInvert"><span class="switchSlider"></span></label>
       </div>
     </div>
 
@@ -22318,13 +22335,6 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Алерты EMA</div>
-          <div class="sub">EMA-сигналы и их закрытие</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramEma"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
           <div class="label">↳ Алерты сессии</div>
           <div class="sub">живые сигналы манипуляции на открытии</div>
         </div>
@@ -22432,40 +22442,6 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ EMA</div>
-          <div class="sub">плечо, если включено</div>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <input type="number" id="setAutotradeLevEma" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
-          <label class="switch"><input type="checkbox" id="setAutotradeEma"><span class="switchSlider"></span></label>
-        </div>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ EMA мин. RR</div>
-          <div class="sub">0 = выключено. Сигнал пропускается, если ATR-стоп даёт RR ниже этого</div>
-        </div>
-        <input type="number" id="setEmaMinRr" step="0.1" min="0" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;width:100px;">
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ EMA фильтр ADX</div>
-          <div class="sub">не торговать кроссовер, если тренд слишком слабый (Уайлдер, стандартный порог)</div>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <input type="number" id="setEmaAdxMin" step="1" min="0" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
-          <label class="switch"><input type="checkbox" id="setEmaAdxFilterEnabled"><span class="switchSlider"></span></label>
-        </div>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ EMA мин. зазор EMA7/14 (%)</div>
-          <div class="sub">0 = выключено. Отсекает пограничные, почти незаметные пересечения</div>
-        </div>
-        <input type="number" id="setEmaMinGapPct" step="0.01" min="0" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;width:100px;">
-      </div>
-      <div class="settingRow">
-        <div>
           <div class="label">↳ Скальпинг</div>
           <div class="sub">плечо берётся из самого сигнала, не отсюда</div>
         </div>
@@ -22540,8 +22516,6 @@ document.querySelectorAll('.tab').forEach(el => {
     activeTab = el.dataset.tab;
     document.getElementById('signalsTable').style.display = activeTab === 'signals' ? 'table' : 'none';
     document.getElementById('tuningPanel').style.display = activeTab === 'signals' ? 'block' : 'none';
-    document.getElementById('emaTable').style.display = activeTab === 'ema' ? 'table' : 'none';
-    document.getElementById('emaStatsPanel').style.display = activeTab === 'ema' ? 'block' : 'none';
     document.getElementById('scalpPanel').style.display = activeTab === 'scalp' ? 'block' : 'none';
     document.getElementById('sessionPanel').style.display = activeTab === 'session' ? 'block' : 'none';
     document.getElementById('sessionNyPanel').style.display = activeTab === 'session_ny' ? 'block' : 'none';
@@ -22552,7 +22526,6 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
     document.getElementById('simulatorPanel').style.display = activeTab === 'simulator' ? 'block' : 'none';
     if (activeTab === 'signals') refreshTuning();
-    if (activeTab === 'ema') refreshEma();
     if (activeTab === 'scalp') refreshScalp();
     if (activeTab === 'session') refreshSession();
     if (activeTab === 'session_ny') refreshSessionNy();
@@ -22629,8 +22602,7 @@ async function refreshStatus() {
     const raBox = document.getElementById('riskAutotuneBox');
     if (ra && ra.log && ra.log.length) {
       raBox.style.display = 'block';
-      const paramLabels = {ema_min_rr: 'EMA мин.RR', ema_sl_atr_mult: 'EMA ATR-мульт.', ema_invert_signals: 'EMA реверс',
-        scalp_min_rr: 'Скальп мин.RR', scalp_sl_buffer_mult: 'Скальп SL-буфер',
+      const paramLabels = {scalp_min_rr: 'Скальп мин.RR', scalp_sl_buffer_mult: 'Скальп SL-буфер',
         session_invert_signals: 'Сессия реверс'};
       raBox.querySelector('summary').textContent = `Авто-тюнинг риска (${ra.enabled ? 'вкл' : 'выкл'}, последних: ${ra.log.length})`;
       document.getElementById('riskAutotuneLog').innerHTML = ra.log.map(e => {
@@ -24199,7 +24171,7 @@ async function refreshAutotrade() {
     (await fetch('/api/autotrade/log')).json(),
   ]);
   const panel = document.getElementById('autotradePanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5', mirror: 'Зеркало'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5', mirror: 'Зеркало'};
   const enabledTxt = Object.entries(status.enabled)
     .map(([k, v]) => `<span class="${v ? 'win' : 'dim'}">${modeLabels[k]}: ${v ? 'вкл' : 'выкл'}</span>`)
     .join(' &nbsp;·&nbsp; ');
@@ -24259,7 +24231,7 @@ async function refreshSimulator() {
     (await fetch('/api/autotrade/status')).json(),
   ]);
   const panel = document.getElementById('simulatorPanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', ema: 'EMA', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5', mirror: 'Зеркало'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5', mirror: 'Зеркало'};
 
   const pnlClass = status.pnl_total >= 0 ? 'win' : 'loss';
   const sizeTxt = status.size_mode === 'percent' ? `${status.size_value}% от баланса` : `фикс. $${status.size_value}`;
@@ -24323,7 +24295,6 @@ async function refreshAll() {
   await refreshAutotradeBanner();
   await refreshSignals();
   if (activeTab === 'signals') await refreshTuning();
-  if (activeTab === 'ema') await refreshEma();
   if (activeTab === 'scalp') await refreshScalp();
   if (activeTab === 'session') await refreshSession();
   if (activeTab === 'session_ny') await refreshSessionNy();
@@ -24361,9 +24332,6 @@ function wireResetButton(btnId, endpoint, confirmMsg, idleLabel) {
 wireResetButton('resetVolumeBtn', '/api/reset/volume',
   'Удалить статистику и подобранные параметры Volume Profile (Сигналы/Watchlist/Тюнинг)? Это необратимо.',
   'Очистить объём');
-wireResetButton('resetEmaBtn', '/api/reset/ema',
-  'Удалить статистику EMA-индикатора? Остальное не тронет. Это необратимо.',
-  'Очистить индикатор');
 wireResetButton('resetScalpBtn', '/api/reset/scalp',
   'Удалить накопленную статистику скальпинга (вселенная, данные по монетам, рекомендации)? Остальное не тронет. Это необратимо.',
   'Очистить скальпинг');
@@ -24399,9 +24367,6 @@ const setInputs = {
   bounce_enabled: document.getElementById('setBounce'),
   breakout_enabled: document.getElementById('setBreakout'),
   session_invert_signals: document.getElementById('setSessionInvert'),
-  ema_enabled: document.getElementById('setEma'),
-  ema_invert_signals: document.getElementById('setEmaInvert'),
-  ema_adx_filter_enabled: document.getElementById('setEmaAdxFilterEnabled'),
   scalp_enabled: document.getElementById('setScalp'),
   scalp_signals_enabled: document.getElementById('setScalpSignals'),
   session_enabled: document.getElementById('setSession'),
@@ -24425,7 +24390,6 @@ const setInputs = {
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
   autotrade_bounce: document.getElementById('setAutotradeBounce'),
   autotrade_breakout: document.getElementById('setAutotradeBreakout'),
-  autotrade_ema: document.getElementById('setAutotradeEma'),
   autotrade_scalp: document.getElementById('setAutotradeScalp'),
   autotrade_session: document.getElementById('setAutotradeSession'),
   // v0.99.18: autotrade_msnr checkbox removed from settings (replaced by
@@ -24441,12 +24405,8 @@ const setValueInputs = {
   autotrade_size_value: document.getElementById('setAutotradeSizeValue'),
   scalp_size_mode: document.getElementById('setScalpSizeMode'),
   scalp_size_value: document.getElementById('setScalpSizeValue'),
-  ema_min_rr: document.getElementById('setEmaMinRr'),
-  ema_adx_min: document.getElementById('setEmaAdxMin'),
-  ema_min_gap_pct: document.getElementById('setEmaMinGapPct'),
   autotrade_leverage_bounce: document.getElementById('setAutotradeLevBounce'),
   autotrade_leverage_breakout: document.getElementById('setAutotradeLevBreakout'),
-  autotrade_leverage_ema: document.getElementById('setAutotradeLevEma'),
   autotrade_leverage_session: document.getElementById('setAutotradeLevSession'),
   autotrade_leverage_msnr: document.getElementById('setAutotradeLevMsnr'),
   autotrade_leverage_session_ny: document.getElementById('setAutotradeLevSessionNy'),
