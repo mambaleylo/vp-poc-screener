@@ -9035,6 +9035,83 @@ v0.99.97 - CRITICAL FIX, live crash reports with screenshots: repeated
          the geometric-mean composite) without bumping APP_VERSION
          past 0.99.96; verified py_compile/pyflakes/routes clean on
          the downloaded copy before adopting it as this session's base.
+
+v0.99.98 - MIRROR statistical-hygiene batch, source: code review by
+         another AI (external prompt provided by the user, "код-ревью
+         другого ИИ, батч 1 из 2" — 6 cheap/high-confidence fixes,
+         explicitly scoped to defer a larger batch 2 — volume filter,
+         ATR tolerance, SL buffer, BE move — until real numbers from
+         this batch are visible).
+         (1) Min-sample gate on live eligibility: mirror_backtest_loop()
+         previously gated live-universe entry on winrate alone — a 2/2
+         or 3/3 symbol read as "100%" and qualified identically to a
+         genuinely-tested 40+ trade symbol. Added closed_n >=
+         MIRROR_SYMBOL_SKIP_MIN_SAMPLE alongside the existing winrate
+         check (reusing the same constant every other MIRROR filter's
+         significance bar already uses).
+         (2) TIMEOUT parity — investigated, NOT implemented as proposed.
+         The review's premise (mirror_track_outcome()'s own backtest-
+         side max_wait_bars=200 has no live-side counterpart, so a live
+         signal stays OPEN forever) is factually correct, but its
+         suggested fix (add a timeout, modeled on XAU LG) contradicts an
+         established, DELIBERATE, repeatedly-applied convention: XAU
+         LG's own live tracker (and Session's, Divergence's, and
+         others') had TIMEOUT explicitly REMOVED per direct user
+         request, specifically so "a signal waits as long as it takes,
+         never expiring into an ambiguous TIMEOUT result." Flagged this
+         conflict directly rather than silently picking a side; user
+         said to continue, so kept MIRROR consistent with every other
+         module (no timeout added) — documented the reasoning inline in
+         update_mirror_signal_outcomes() so a future pass doesn't
+         rediscover the same tension.
+         (3) MIRROR_BACKTEST_DAYS 40 -> 90 (env-overridable, matching
+         every other MIRROR_* constant's own pattern) — 40 days produced
+         too few trades per symbol (5-20) to trust winrate even with
+         fix #1's new sample floor.
+         (4) bars_since_break tracking: mirror_detect_signals() now
+         records how many bars passed between a level's own break and
+         the confirming touch, threaded through into mirror_backtest_
+         symbol()'s raw_results and mirror_scan_symbol_live()'s live
+         record. Pure data collection, no filter yet — deferred to
+         batch 2 once the real distribution is visible.
+         (5) by_direction breakdown: mirror_summarize_backtest() now
+         reports LONG/SHORT separately (n/wins/losses/win_rate each),
+         same shape as compute_mirror_signal_stats()'s existing
+         by_pattern. Informational only, no gate.
+         (6) Auto-gate by pattern: new mirror_symbol_pattern_skip() —
+         same significance bar and breakeven test as mirror_symbol_
+         sl_skip_min(), but deliberately WITHOUT a granularity cascade:
+         unlike SL width (a continuous scale with natural coarser
+         bucketings to fall back to), pattern is a fixed 4-category
+         field with nothing to merge into — each pattern either clears
+         MIRROR_SYMBOL_SKIP_MIN_SAMPLE on its own or doesn't. Wired into
+         mirror_backtest_symbol() as a third filter stage (raw ->
+         sl_filter -> pattern_filter, derived off whatever survived the
+         SL filter, not raw again — same evidence-ordering discipline
+         as every other filter chain in this file), stored as
+         meta["skip_pattern"], and checked again in mirror_scan_
+         symbol_live() before firing (would need STATE["mirror_symbol_
+         overrides"] wiring matching skip_sl_pct_min's own live check —
+         confirmed present).
+         API/UI: api_mirror_status()'s existing dict-spread already
+         surfaces by_direction (from summary) and skip_pattern (from
+         overrides) with zero route changes needed — verified via a
+         live test_client() round-trip. refreshMirror() updated to
+         render both, plus the before/after checkpoint summary now
+         correctly points at the FINAL chain stage (pattern_filter, not
+         the now-intermediate sl_filter) so "после" reflects both
+         filters, not just the first one.
+         Verified with py_compile after every edit, an actual runtime
+         start (mirror_symbol_pattern_skip() tested against a synthetic
+         set confirming a genuinely-failing, sufficiently-sampled
+         pattern gets skipped while an equally-bad but under-sampled one
+         doesn't; mirror_summarize_backtest()'s by_direction verified
+         against a mixed LONG/SHORT/TIMEOUT set; a live test_client()
+         call against /api/mirror/status confirming backtest_days=90 and
+         the full config surface correctly), pyflakes (clean throughout),
+         node --check on the correctly-last <script> block, and the
+         Flask route/def integrity check (still 56 routes — no new
+         endpoints, existing ones extended).
 """
 
 import os
@@ -9054,7 +9131,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.97"
+APP_VERSION = "0.99.98"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9718,7 +9795,7 @@ MIRROR_PATTERN_TOLERANCE_PCT = float(os.environ.get("VP_MIRROR_PATTERN_TOLERANCE
 MIRROR_RR = float(os.environ.get("VP_MIRROR_RR", 3.0))  # fixed RR target — see mirror_detect_signals()'s own docstring for why a mechanical pipeline needs one despite the source trader's own discretionary exits
 MIRROR_MAX_BARS_TO_RETURN = int(os.environ.get("VP_MIRROR_MAX_BARS_TO_RETURN", 60))  # a level broken this many bars ago without price returning to it goes stale and stops being watched
 MIRROR_SIGNAL_HISTORY = 300
-MIRROR_BACKTEST_DAYS = 40
+MIRROR_BACKTEST_DAYS = int(os.environ.get("VP_MIRROR_BACKTEST_DAYS", 90))  # v0.99.98, per external code review batch 1 ("Окно бэктеста 40→90 дней"): 40 days produced too few trades per symbol (5-20) to trust winrate even with the min-sample gate above — widened to gather more evidence per symbol, same env-var-overridable pattern every other MIRROR_* constant already uses
 MIRROR_REFRESH_SEC = int(os.environ.get("VP_MIRROR_REFRESH_SEC", 3600))
 MIRROR_SCAN_INTERVAL_SEC = int(os.environ.get("VP_MIRROR_SCAN_INTERVAL_SEC", 300))
 AUTOTRADE_ENABLED_MIRROR = os.environ.get("VP_AUTOTRADE_MIRROR", "0") == "1"
@@ -19302,6 +19379,15 @@ def mirror_detect_signals(candles, pivot_left=None, pivot_right=None,
                 "direction": direction, "entry": entry, "sl": sl, "tp": tp, "rr": rr,
                 "pattern": matched_pattern, "level_price": price, "level_type": lvl["type"],
                 "entry_idx": i, "entry_time": c["time"],
+                # v0.99.98, per external code review batch 1 ("Трекать
+                # свежесть возврата к уровню"): how many bars passed
+                # between the level's own break and this signal's
+                # confirming touch — pure data collection for now (no
+                # filter applied yet), to judge on real distribution
+                # data in a later pass whether stale returns (broken
+                # long ago, touched only after many bars) perform worse
+                # than fresh ones.
+                "bars_since_break": i - lvl["break_idx"],
             })
         broken = still_broken
 
@@ -19369,6 +19455,36 @@ def mirror_symbol_sl_skip_min(trades, rr=None):
         if failing_edges:
             return min(failing_edges)
     return None
+
+
+def mirror_symbol_pattern_skip(trades, rr=None):
+    """v0.99.98, per external code review batch 1 ("Авто-гейт по
+    паттерну"): this symbol's own set of statistically-failing
+    confirmation patterns — a live signal whose OWN pattern is in this
+    set gets skipped, same "trust this symbol's own bucket evidence"
+    reasoning mirror_symbol_sl_skip_min() already applies to SL width.
+    Same significance bar (MIRROR_SYMBOL_SKIP_MIN_SAMPLE) and breakeven
+    threshold (100/(1+rr)) as that function — but deliberately NO
+    granularity cascade here: unlike SL width (a continuous scale that
+    can be coarsened into wider bins when a fine one lacks sample),
+    pattern is a fixed 4-category field with no natural "coarser"
+    grouping to fall back to — each of the 4 patterns either clears the
+    sample bar on its own or it doesn't; there's nothing to merge it
+    into. Returns a set of pattern names (possibly empty) — a symbol
+    can end up with 0 to 4 patterns skipped depending on what its own
+    history actually shows for each."""
+    rr = rr if rr is not None else MIRROR_RR
+    breakeven = 100.0 / (1.0 + rr) if rr > 0 else 100.0
+    skip = set()
+    for pattern in ("inside_bar", "tweezers", "rails", "engulfing_doji"):
+        p_trades = [t for t in trades if t.get("pattern") == pattern and t.get("result") in ("WIN", "LOSS")]
+        n = len(p_trades)
+        if n < MIRROR_SYMBOL_SKIP_MIN_SAMPLE:
+            continue
+        wins = sum(1 for t in p_trades if t["result"] == "WIN")
+        if wins / n * 100 < breakeven:
+            skip.add(pattern)
+    return skip
 
 
 def _mirror_checkpoint(results, rr=None):
@@ -19444,16 +19560,19 @@ def mirror_backtest_symbol(symbol, days=MIRROR_BACKTEST_DAYS):
     symbol's own SL-width filter (mirror_symbol_sl_skip_min(), derived
     from the RAW unfiltered results — filtering first would shrink the
     very bucket evidence the threshold is judged from, same ordering
-    MSNR's own filters always use). Returns (filtered_results, meta)
-    where meta = {"skip_sl_pct_min", "checkpoints"} — checkpoints is a
-    2-entry before/after chain ("raw" -> "sl_filter"), per direct user
-    request ("по статистике обязательно показывать до после как в
-    msnr")."""
+    MSNR's own filters always use), then this symbol's own pattern
+    filter (mirror_symbol_pattern_skip(), v0.99.98 — derived off
+    whatever survived the SL filter, extending the same evidence chain
+    rather than starting over from raw). Returns (filtered_results,
+    meta) where meta = {"skip_sl_pct_min", "skip_pattern", "checkpoints"}
+    — checkpoints is a 3-entry before/after chain ("raw" -> "sl_filter"
+    -> "pattern_filter"), per direct user request ("по статистике
+    обязательно показывать до после как в msnr")."""
     now = time.time()
     fetch_start = now - days * 86400
     candles = get_candles_range(symbol, MIRROR_INTERVAL, fetch_start, now)
     if len(candles) < MIRROR_PIVOT_LEFT + MIRROR_PIVOT_RIGHT + 20:
-        return [], {"skip_sl_pct_min": None, "checkpoints": []}
+        return [], {"skip_sl_pct_min": None, "skip_pattern": [], "checkpoints": []}
     sigs = mirror_detect_signals(candles)
     raw_results = []
     for sig in sigs:
@@ -19463,6 +19582,7 @@ def mirror_backtest_symbol(symbol, days=MIRROR_BACKTEST_DAYS):
             "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
             "rr": sig.get("rr"), "pattern": sig.get("pattern"),
             "level_price": sig.get("level_price"), "level_type": sig.get("level_type"),
+            "bars_since_break": sig.get("bars_since_break"),
             "result": result, "exit_time": exit_time,
         })
     checkpoints = [{"stage": "raw", **_mirror_checkpoint(raw_results)}]
@@ -19474,19 +19594,49 @@ def mirror_backtest_symbol(symbol, days=MIRROR_BACKTEST_DAYS):
     else:
         filtered = raw_results
     checkpoints.append({"stage": "sl_filter", **_mirror_checkpoint(filtered)})
-    return filtered, {"skip_sl_pct_min": skip_sl_min, "checkpoints": checkpoints}
+    # v0.99.98, per external code review batch 1 ("Авто-гейт по
+    # паттерну"): same ordering reasoning as the SL-width filter above
+    # — derive skip_pattern off whatever survived the SL filter (not
+    # raw_results again), so a pattern's own winrate is judged on the
+    # same evidence the symbol's final reported stats are, then apply
+    # it as its own checkpoint stage, extending the raw -> sl_filter ->
+    # pattern_filter chain.
+    skip_pattern = mirror_symbol_pattern_skip(filtered)
+    if skip_pattern:
+        filtered = [r for r in filtered if r.get("pattern") not in skip_pattern]
+    checkpoints.append({"stage": "pattern_filter", **_mirror_checkpoint(filtered)})
+    return filtered, {"skip_sl_pct_min": skip_sl_min, "skip_pattern": sorted(skip_pattern), "checkpoints": checkpoints}
 
 
 def mirror_summarize_backtest(results):
     total = len(results)
     if not total:
-        return {"n": 0, "win_rate": None, "wins": 0, "losses": 0, "timeouts": 0}
+        return {"n": 0, "win_rate": None, "wins": 0, "losses": 0, "timeouts": 0,
+                "by_direction": {"LONG": {"n": 0, "wins": 0, "losses": 0, "win_rate": None},
+                                  "SHORT": {"n": 0, "wins": 0, "losses": 0, "win_rate": None}}}
     wins = sum(1 for r in results if r["result"] == "WIN")
     losses = sum(1 for r in results if r["result"] == "LOSS")
     timeouts = sum(1 for r in results if r["result"] == "TIMEOUT")
     closed = wins + losses
     win_rate = round(wins / closed * 100, 1) if closed else None
-    return {"n": total, "win_rate": win_rate, "wins": wins, "losses": losses, "timeouts": timeouts}
+    # v0.99.98, per external code review batch 1 ("Разбивка статистики
+    # по направлению"): LONG and SHORT come from structurally different
+    # setups (broken support flipping to resistance vs broken resistance
+    # flipping to support) — pooling them into one winrate could hide a
+    # real asymmetry between the two. Same shape as compute_mirror_
+    # signal_stats()'s own by_pattern, purely informational for now (no
+    # gate applied), same batch-1 "collect, don't filter yet" scope as
+    # bars_since_break above.
+    by_direction = {}
+    for d in ("LONG", "SHORT"):
+        d_results = [r for r in results if r.get("direction") == d and r["result"] in ("WIN", "LOSS")]
+        d_wins = sum(1 for r in d_results if r["result"] == "WIN")
+        by_direction[d] = {
+            "n": len(d_results), "wins": d_wins, "losses": len(d_results) - d_wins,
+            "win_rate": round(d_wins / len(d_results) * 100, 1) if d_results else None,
+        }
+    return {"n": total, "win_rate": win_rate, "wins": wins, "losses": losses, "timeouts": timeouts,
+            "by_direction": by_direction}
 
 
 _mirror_signal_cooldowns = {}  # symbol -> last-signaled entry_time
@@ -19535,6 +19685,7 @@ def mirror_scan_symbol_live(symbol):
             "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"], "rr": sig.get("rr"),
             "pattern": sig.get("pattern"), "level_price": sig.get("level_price"),
             "level_type": sig.get("level_type"), "time": sig["entry_time"],
+            "bars_since_break": sig.get("bars_since_break"),
             "detected_at": time.time(), "status": "OPEN", "result": None,
             "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
             "mfe_r": 0.0, "mae_r": 0.0, "mfe_price": None, "mae_price": None,
@@ -19561,7 +19712,24 @@ def mirror_scan_symbol_live(symbol):
 
 
 def update_mirror_signal_outcomes():
-    """Same MFE/MAE-tracking shape as update_xau_lg_signal_outcomes()."""
+    """Same MFE/MAE-tracking shape as update_xau_lg_signal_outcomes().
+    v0.99.98, per external code review batch 1 ("Паритет TIMEOUT между
+    backtest и live"): the review correctly noted this function has no
+    TIMEOUT-closing branch at all — unlike mirror_track_outcome()'s own
+    backtest-side max_wait_bars=200 cutoff, a live signal here stays
+    OPEN indefinitely until it actually touches TP or SL, however long
+    that takes. Investigated before changing anything: this asymmetry
+    is NOT an oversight — every other module's own live outcome tracker
+    (XAU LG, Session, Divergence, and others) had a TIMEOUT branch
+    explicitly and DELIBERATELY removed, per repeated direct user
+    request, specifically because "a signal now waits as long as it
+    takes to hit either target or stop, never expiring into an
+    ambiguous TIMEOUT result." Left AS-IS to match that same explicit,
+    repeatedly-applied convention — MIRROR's live tracker was already
+    correct, not missing anything; adding a timeout here would have
+    made MIRROR the ONE module that behaves differently from everything
+    else, diverging FROM the established pattern rather than matching
+    it. Flagged to the user before touching this; no timeout added."""
     now = time.time()
     with state_lock:
         open_signals = [s for s in STATE["mirror_signals"] if s["status"] == "OPEN"]
@@ -19673,7 +19841,20 @@ def mirror_backtest_loop():
                         # scanner should trust a symbol only to the
                         # same extent its own backtest, filters
                         # included, actually earned that trust.
-                        if summary["win_rate"] is not None and summary["win_rate"] > MIRROR_LIVE_MIN_WINRATE:
+                        # v0.99.98, per external code review batch 1
+                        # ("Мин. выборка на live-гейте"): winrate alone
+                        # let a 2/2 or 3/3 symbol read as "100%" and
+                        # qualify exactly like a genuinely-tested 40+
+                        # trade symbol — added the same minimum-sample
+                        # bar MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE-style
+                        # filters already require per-bucket, reused
+                        # here as a whole-symbol floor (same constant,
+                        # same "don't trust a thin sample" reasoning,
+                        # just applied to the symbol total instead of
+                        # one RR/SL bucket within it).
+                        closed_n = summary["wins"] + summary["losses"]
+                        if (summary["win_rate"] is not None and summary["win_rate"] > MIRROR_LIVE_MIN_WINRATE
+                                and closed_n >= MIRROR_SYMBOL_SKIP_MIN_SAMPLE):
                             live_universe.append(symbol)
                     except Exception as e:
                         log_error(f"mirror_backtest {symbol}: {e}")
@@ -23525,18 +23706,31 @@ async function refreshMirror() {
     const liveDot = r.live ? ' <span style="color:#3ddc97;" title="в живом скане">●</span>' : '';
     const skipTxt = (r.skip_sl_pct_min !== null && r.skip_sl_pct_min !== undefined)
       ? `<span class="loss">skip SL≥${r.skip_sl_pct_min}%</span>` : '<span class="dim">-</span>';
+    // v0.99.98, per external code review batch 1 ("Авто-гейт по
+    // паттерну"): shows which of the 4 confirmation patterns this
+    // symbol's own history says fail breakeven — same skip mechanism
+    // as the SL-width one above, just per-pattern instead of per-width.
+    const skipPatternTxt = (r.skip_pattern && r.skip_pattern.length)
+      ? `<span class="loss">skip: ${r.skip_pattern.map(p => patternLabels[p] || p).join(', ')}</span>` : '<span class="dim">-</span>';
     // v0.99.92, per direct user request ("по статистике обязательно
     // показывать до после как в msnr"): "до" — raw checkpoint (перед
-    // фильтром по ширине стопа), "после" — sl_filter checkpoint
-    // (после). Оба сохранены в r.checkpoints по mirror_backtest_
-    // symbol() — see that function's own docstring.
+    // любым фильтром), "после" — итоговая стадия ПОСЛЕ обоих фильтров
+    // (ширина стопа + паттерн, v0.99.98). Оба сохранены в r.checkpoints
+    // по mirror_backtest_symbol() — see that function's own docstring.
     const cps = r.checkpoints || [];
     const before = cps.find(c => c.stage === 'raw') || {};
-    const after = cps.find(c => c.stage === 'sl_filter') || {};
+    const after = cps.length ? cps[cps.length - 1] : {};
     const fmtWr = v => (v === null || v === undefined) ? '?' : `${v}%`;
     const fmtExp = v => (v === null || v === undefined) ? '?' : `${v > 0 ? '+' : ''}${v}R`;
     const beforeAfterTxt = cps.length
-      ? `<span class="dim" title="винрейт/ожидание до фильтра по ширине стопа → после">${before.n||0}→${after.n||0} · WR ${fmtWr(before.winrate)}→${fmtWr(after.winrate)} · ${fmtExp(before.expectancy_r)}→${fmtExp(after.expectancy_r)}</span>`
+      ? `<span class="dim" title="винрейт/ожидание до всех фильтров → после">${before.n||0}→${after.n||0} · WR ${fmtWr(before.winrate)}→${fmtWr(after.winrate)} · ${fmtExp(before.expectancy_r)}→${fmtExp(after.expectancy_r)}</span>`
+      : '<span class="dim">-</span>';
+    // v0.99.98, per external code review batch 1 ("Разбивка статистики
+    // по направлению"): LONG/SHORT breakdown, informational only for
+    // now (batch 2 decides whether/how to gate on it).
+    const bd = r.by_direction || {};
+    const byDirTxt = (bd.LONG || bd.SHORT)
+      ? `<span class="dim" title="винрейт по направлению">L: ${fmtWr(bd.LONG && bd.LONG.win_rate)} (n=${bd.LONG ? bd.LONG.n : 0}) · S: ${fmtWr(bd.SHORT && bd.SHORT.win_rate)} (n=${bd.SHORT ? bd.SHORT.n : 0})</span>`
       : '<span class="dim">-</span>';
     return `<tr>
       <td>${r.symbol}${liveDot}</td>
@@ -23546,14 +23740,16 @@ async function refreshMirror() {
       <td class="loss">${r.losses}L</td>
       <td class="dim">${r.timeouts}T</td>
       <td>${skipTxt}</td>
+      <td>${skipPatternTxt}</td>
+      <td>${byDirTxt}</td>
       <td>${beforeAfterTxt}</td>
     </tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
-    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории) — итоговый винрейт/n уже ПОСЛЕ фильтра по ширине стопа:</div>
+    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории) — итоговый винрейт/n уже ПОСЛЕ обоих фильтров (ширина стопа + паттерн):</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>Фильтр</th><th>До → После</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>Фильтр SL</th><th>Фильтр паттерна</th><th>По направлению</th><th>До → После</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
