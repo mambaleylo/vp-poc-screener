@@ -9112,6 +9112,51 @@ v0.99.98 - MIRROR statistical-hygiene batch, source: code review by
          node --check on the correctly-last <script> block, and the
          Flask route/def integrity check (still 56 routes — no new
          endpoints, existing ones extended).
+
+v0.99.99 - Direct user follow-up: "продолжи, тайм аут тоже добавь но
+         надо знать как закрылась сделка по таймауту в плюс или минус."
+         Reverses v0.99.98's own declined-with-explanation decision on
+         this exact point — that version investigated the same request
+         (from an external code review) and left MIRROR's live tracker
+         without a TIMEOUT branch specifically because every other
+         module's own live tracker had TIMEOUT deliberately removed;
+         this direct follow-up is the user's explicit, informed choice
+         to diverge MIRROR from that convention on purpose, with a
+         concrete added requirement (know the sign of the outcome) the
+         original review's own proposal hadn't specified.
+         New shared MIRROR_MAX_WAIT_BARS=200 constant (env-overridable)
+         — mirror_track_outcome()'s own backtest-side cutoff (previously
+         a hardcoded default) and update_mirror_signal_outcomes()'s new
+         live-side one now both read from the same source, genuine
+         parity in HOW LONG a signal gets before timing out, not just
+         that both sides eventually have SOME cutoff.
+         update_mirror_signal_outcomes() now closes a signal as TIMEOUT
+         once MIRROR_MAX_WAIT_BARS bars have passed since entry with no
+         TP/SL touch — using the bar's own REAL close as exit_price
+         (not None, unlike the original review's own suggestion), plus
+         a new timeout_pnl_r field (the signed R-multiple at that exact
+         moment) so the frontend doesn't need to re-derive direction
+         logic from a raw price comparison. compute_mirror_signal_
+         stats()'s own winrate calculation already only counted WIN/LOSS
+         (built that way from the start, even though TIMEOUT never
+         actually fired before this version) — confirmed TIMEOUT closes
+         still can't silently skew winrate now that they're real.
+         Frontend: TIMEOUT rows in the live-signals table now color/sign
+         the same way WIN/LOSS already do (win-green if timeout_pnl_r
+         >= 0, loss-red if negative) with the R value and exit price
+         shown inline, instead of a flat neutral "TIMEOUT" label
+         carrying no P&L information.
+         Verified with py_compile after every edit, an actual runtime
+         start (constructed two synthetic open signals — one LONG
+         drifting slowly favorable, one SHORT drifting slowly adverse,
+         neither ever touching its own TP/SL — confirmed both correctly
+         time out at exactly bar 200 (not earlier, not the full 250-bar
+         window), with exit_price a real drifted price and timeout_pnl_r
+         signed correctly in each direction: positive for the LONG that
+         drifted up, negative for the SHORT that drifted against it),
+         pyflakes (clean), node --check on the correctly-last <script>
+         block, and the Flask route/def integrity check (still 56
+         routes — no new endpoints).
 """
 
 import os
@@ -9131,7 +9176,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.98"
+APP_VERSION = "0.99.99"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9794,6 +9839,7 @@ MIRROR_TOUCH_TOLERANCE_PCT = float(os.environ.get("VP_MIRROR_TOUCH_TOLERANCE_PCT
 MIRROR_PATTERN_TOLERANCE_PCT = float(os.environ.get("VP_MIRROR_PATTERN_TOLERANCE_PCT", 30.0))  # tweezers/rails matching-wick/body tolerance, as % of the larger of the two compared values
 MIRROR_RR = float(os.environ.get("VP_MIRROR_RR", 3.0))  # fixed RR target — see mirror_detect_signals()'s own docstring for why a mechanical pipeline needs one despite the source trader's own discretionary exits
 MIRROR_MAX_BARS_TO_RETURN = int(os.environ.get("VP_MIRROR_MAX_BARS_TO_RETURN", 60))  # a level broken this many bars ago without price returning to it goes stale and stops being watched
+MIRROR_MAX_WAIT_BARS = int(os.environ.get("VP_MIRROR_MAX_WAIT_BARS", 200))  # v0.99.99, per direct user follow-up ("тайм аут тоже добавь"): shared by mirror_track_outcome() (backtest) and update_mirror_signal_outcomes() (live) so both sides use the SAME cutoff — was a hardcoded 200 in the backtest function only, with no live counterpart at all
 MIRROR_SIGNAL_HISTORY = 300
 MIRROR_BACKTEST_DAYS = int(os.environ.get("VP_MIRROR_BACKTEST_DAYS", 90))  # v0.99.98, per external code review batch 1 ("Окно бэктеста 40→90 дней"): 40 days produced too few trades per symbol (5-20) to trust winrate even with the min-sample gate above — widened to gather more evidence per symbol, same env-var-overridable pattern every other MIRROR_* constant already uses
 MIRROR_REFRESH_SEC = int(os.environ.get("VP_MIRROR_REFRESH_SEC", 3600))
@@ -19534,7 +19580,7 @@ def mirror_build_universe():
     return [s[0] for s in ranked[:MIRROR_UNIVERSE_SIZE]]
 
 
-def mirror_track_outcome(candles, sig, max_wait_bars=200):
+def mirror_track_outcome(candles, sig, max_wait_bars=MIRROR_MAX_WAIT_BARS):
     """Walks forward from sig['entry_idx']+1 looking for TP/SL touch —
     SL checked first on any bar covering both, same conservative
     convention as xau_lg_track_outcome()."""
@@ -19689,7 +19735,7 @@ def mirror_scan_symbol_live(symbol):
             "detected_at": time.time(), "status": "OPEN", "result": None,
             "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
             "mfe_r": 0.0, "mae_r": 0.0, "mfe_price": None, "mae_price": None,
-            "mfe_r_at_close": None, "mae_r_at_close": None,
+            "mfe_r_at_close": None, "mae_r_at_close": None, "timeout_pnl_r": None,
         }
         with state_lock:
             STATE["mirror_signals"].appendleft(record)
@@ -19713,23 +19759,26 @@ def mirror_scan_symbol_live(symbol):
 
 def update_mirror_signal_outcomes():
     """Same MFE/MAE-tracking shape as update_xau_lg_signal_outcomes().
-    v0.99.98, per external code review batch 1 ("Паритет TIMEOUT между
-    backtest и live"): the review correctly noted this function has no
-    TIMEOUT-closing branch at all — unlike mirror_track_outcome()'s own
-    backtest-side max_wait_bars=200 cutoff, a live signal here stays
-    OPEN indefinitely until it actually touches TP or SL, however long
-    that takes. Investigated before changing anything: this asymmetry
-    is NOT an oversight — every other module's own live outcome tracker
-    (XAU LG, Session, Divergence, and others) had a TIMEOUT branch
-    explicitly and DELIBERATELY removed, per repeated direct user
-    request, specifically because "a signal now waits as long as it
-    takes to hit either target or stop, never expiring into an
-    ambiguous TIMEOUT result." Left AS-IS to match that same explicit,
-    repeatedly-applied convention — MIRROR's live tracker was already
-    correct, not missing anything; adding a timeout here would have
-    made MIRROR the ONE module that behaves differently from everything
-    else, diverging FROM the established pattern rather than matching
-    it. Flagged to the user before touching this; no timeout added."""
+    v0.99.99, per direct user follow-up ("тайм аут тоже добавь но надо
+    знать как закрылась сделка по таймауту в плюс или минус"): adds the
+    TIMEOUT-closing branch after all, reversing v0.99.98's own decision
+    to leave MIRROR without one (that version investigated the same
+    request from an external code review and declined it specifically
+    because every other module's live tracker had TIMEOUT deliberately
+    REMOVED — flagged the conflict, and this direct follow-up is the
+    user's explicit choice to diverge MIRROR from that convention on
+    purpose, not an oversight being corrected). Closes with a REAL
+    exit_price (the last known candle's own close, not None) so a
+    timed-out trade's own plus/minus outcome is actually visible — the
+    same profit/loss math WIN/LOSS already use (exit_price vs entry,
+    direction-aware), just measured at a price that isn't the TP/SL
+    level itself. Also stores timeout_pnl_r — the signed R-multiple at
+    that exact moment — so the frontend can color/label it directly
+    without re-deriving direction logic from a raw price comparison.
+    Uses the SAME MIRROR_MAX_WAIT_BARS cutoff mirror_track_outcome()'s
+    own backtest-side timeout already uses (now a shared constant, was
+    a hardcoded 200 in that function alone) for genuine backtest/live
+    parity in how long a signal gets before timing out."""
     now = time.time()
     with state_lock:
         open_signals = [s for s in STATE["mirror_signals"] if s["status"] == "OPEN"]
@@ -19747,7 +19796,9 @@ def update_mirror_signal_outcomes():
             result = None
             exit_price = None
             exit_time = None
+            bars_seen = 0
             for c in future:
+                bars_seen += 1
                 if direction == "LONG":
                     fav, adv = c["high"] - entry, entry - c["low"]
                 else:
@@ -19775,6 +19826,16 @@ def update_mirror_signal_outcomes():
                     if c["low"] <= sig["tp"]:
                         result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
                         break
+                if bars_seen >= MIRROR_MAX_WAIT_BARS:
+                    # v0.99.99 — timed out without touching TP/SL this
+                    # whole window: close on THIS bar's own close price
+                    # (a real, honest number, not None) so the sign of
+                    # the outcome is visible, not just an ambiguous
+                    # "TIMEOUT" label with no P&L attached to it.
+                    result = "TIMEOUT"
+                    exit_price = c["close"]
+                    exit_time = c["time"]
+                    break
             with state_lock:
                 if result:
                     sig["status"] = "CLOSED"
@@ -19783,6 +19844,9 @@ def update_mirror_signal_outcomes():
                     sig["exit_time"] = exit_time
                     sig["mfe_r_at_close"] = sig["mfe_r"]
                     sig["mae_r_at_close"] = sig["mae_r"]
+                    if result == "TIMEOUT" and exit_price is not None:
+                        pnl_r = (exit_price - entry) / risk if direction == "LONG" else (entry - exit_price) / risk
+                        sig["timeout_pnl_r"] = round(pnl_r, 3)
         except Exception as e:
             log_error(f"mirror_outcome {sig['symbol']}: {e}")
 
@@ -23685,7 +23749,17 @@ async function refreshMirror() {
     if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
     else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
     else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
-    else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
+    else if (s.result === 'TIMEOUT') {
+      // v0.99.99, per direct user follow-up ("тайм аут тоже добавь но
+      // надо знать как закрылась сделка по таймауту в плюс или минус"):
+      // timeout_pnl_r is the signed R at the moment of timeout — color
+      // and sign it the same way WIN/LOSS already are, instead of a
+      // flat neutral label with no P&L information.
+      const r = s.timeout_pnl_r;
+      const rCls = (r === null || r === undefined) ? 'status-timeout' : (r >= 0 ? 'win' : 'loss');
+      const rTxt = (r === null || r === undefined) ? '' : ` (${r > 0 ? '+' : ''}${r}R)`;
+      statusHtml = `<span class="${rCls}">TIMEOUT @ ${fmt(s.exit_price)}${rTxt}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
+    } else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
     const dirClass = s.direction === 'SHORT' ? 'short' : 'long';
     return `<tr data-symbol="${s.symbol}" data-time="${s.time}" style="cursor:pointer;">
       <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td>
