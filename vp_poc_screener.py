@@ -8990,6 +8990,51 @@ v0.99.96 - Direct user request continued: "Продолжи." EMA removal (3rd
          duplicates introduced), and a final grep confirming zero live
          EMA_* constant references remain anywhere in the file (only
          historical changelog text).
+
+v0.99.97 - CRITICAL FIX, live crash reports with screenshots: repeated
+         "msnr_backtest MRNA_USDT: not enough values to unpack (expected
+         3, got 2)" — same for this symbol across multiple backtest
+         cycles, not a one-off. Root cause: msnr_optimize_symbol()'s own
+         early-exit path (fires when a symbol's fetched candle history
+         is too thin to even attempt the 27-combo grid search — e.g. a
+         newly-listed contract without much history yet) had drifted
+         out of sync with the function's own documented contract
+         ("Returns (override_dict, trades_list, raw_trades_list)" — a
+         3-tuple) and was returning only 2 values: `{"error": "not
+         enough history"}, []`. The sole caller, _msnr_backtest_one_
+         symbol(), always unpacks assuming 3 (`override, results, raw_
+         results = msnr_optimize_symbol(symbol)`) — any symbol landing
+         on this path crashed that unpacking on EVERY single backtest
+         cycle it was included in, not intermittently. Fixed to match
+         the documented contract: `{"error": "not enough history"}, [],
+         []` — both trade lists empty, since there's genuinely no
+         backtest to report for a symbol that never had enough history.
+         Also investigated the screenshots' OTHER recurring error
+         ("NameResolutionError... Failed to resolve 'api.gateio.ws'")
+         — NOT a new bug: this exact error class was already found,
+         explained, and mitigated back in v0.69.0 (a transient mobile-
+         network DNS blip, with get_candles() already retrying on
+         ConnectionError before giving up) — a sustained cluster of
+         these simply means the retry window was shorter than the
+         actual outage, which is correct/expected behavior, not
+         something to chase further unless it becomes a SUSTAINED
+         pattern rather than an occasional cluster.
+         Verified with py_compile, an actual runtime start (mocked
+         get_candles_range() to force the exact insufficient-history
+         path, confirmed msnr_optimize_symbol() now unpacks cleanly
+         into 3 values instead of raising ValueError, then confirmed
+         the FULL call chain through _msnr_backtest_one_symbol() — the
+         actual crashing caller — also completes cleanly end to end),
+         pyflakes (clean), node --check on the correctly-last <script>
+         block, and the Flask route/def integrity check (still 56
+         routes — a pure return-value fix, no routes touched).
+         Also synced this session's own local copy from GitHub before
+         starting (per direct user instruction) — another session had
+         pushed a real, unrelated MSNR ranking change (pure sort by
+         compound_return_pct with a hard winrate>=45% gate, replacing
+         the geometric-mean composite) without bumping APP_VERSION
+         past 0.99.96; verified py_compile/pyflakes/routes clean on
+         the downloaded copy before adopting it as this session's base.
 """
 
 import os
@@ -9009,7 +9054,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.96"
+APP_VERSION = "0.99.97"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16701,7 +16746,19 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
     entry_start = now - days * 86400
     entry_candles = get_candles_range(symbol, MSNR_ENTRY_TF, entry_start, now)
     if len(structure_candles) < MSNR_ATR_PERIOD + 10 or len(entry_candles) < 10:
-        return {"error": "not enough history"}, []
+        # v0.99.97, live crash report ("not enough values to unpack
+        # (expected 3, got 2)"), repeated for MRNA_USDT specifically:
+        # this early-exit path (insufficient candle history to even
+        # attempt the grid search — e.g. a newly-listed contract with
+        # too little historical data yet) had drifted out of sync with
+        # this function's own documented 3-tuple contract (override,
+        # trades_list, raw_trades_list), returning only 2 values. The
+        # sole caller, msnr_backtest_symbol(), always unpacks assuming
+        # 3 — a symbol landing here crashed that unpacking on every
+        # single backtest cycle, not a transient issue. Fixed to match
+        # the documented contract: both trade lists are empty (there's
+        # no backtest to report), not just the override.
+        return {"error": "not enough history"}, [], []
     best = None
     best_score = None
     best_results = []
