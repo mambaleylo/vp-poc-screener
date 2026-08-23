@@ -9295,6 +9295,89 @@ v0.99.101 - Continued module removal (4th/5th/6th of 6): Session,
          integrity check (56 routes — backend routes deliberately
          untouched this pass), and an AST walk for duplicate top-level
          defs (none introduced).
+
+v0.99.102 - Manual leverage/position-size selection removed entirely,
+         per a multi-turn direct user request clarified via several
+         rounds of Q&A before touching any code (this is real-money
+         position sizing — worth getting exactly right, not guessing):
+         "выбор плеча убери для всех индикаторов, это всегда будет
+         расчет по принципу стоп 2% от баланса" -> "надо чтобы размер
+         позиции только можно было выбрать" -> "размер позиции может
+         тоже автоматом определять, брать минимально возможный процент
+         депозита но чтобы плечо позволяло ставить стоп до ликвидации,
+         но было большим достаточно для стопа в 2%" -> "available +
+         position_margin (без плавающего PnL, только подтверждённый
+         капитал)" as the risk base. Every module now sizes identically
+         and fully automatically:
+         (1) get_futures_total_equity() — NEW, fetches available +
+         position_margin (confirmed capital, deliberately excluding
+         unrealised_pnl per the user's own explicit choice — a new
+         trade's own risk shouldn't be inflated/deflated by floating,
+         not-yet-realized gains/losses on OTHER open positions). This
+         also fixes the original bug report: get_futures_wallet_
+         balance()'s own "available" alone shrinks the moment another
+         position locks margin away, corrupting risk sizing — "Если
+         сделка уже открыта какая-то, то баланс становится меньше...
+         а надо смотреть все равно на всю сумму денег на счету."
+         (2) compute_max_safe_leverage() — NEW, finds the LARGEST
+         leverage (up to the contract's own exchange leverage_max)
+         whose liquidation buffer still clears this signal's own SL
+         distance, by reusing compute_scalp_liquidation_move_pct()'s
+         own formula via a plain integer sweep rather than inverting
+         its min()/direction-dependent branches analytically (a likely
+         source of a sign or edge-case bug on math this consequential).
+         (3) compute_risk_based_position() — NEW, given that max safe
+         leverage, derives the MINIMUM margin needed to still risk
+         exactly AUTOTRADE_RISK_PCT_OF_BALANCE=2% of confirmed capital.
+         Margin and leverage are inversely related for a fixed risk
+         target and SL distance — using the highest SAFE leverage
+         minimizes capital tied up per trade while keeping dollar risk
+         exactly fixed, rather than a flat per-module leverage constant
+         with no relationship to any given signal's actual SL width.
+         execute_autotrade() itself: leverage/size_mode/size_value
+         parameters removed from its signature entirely — computed
+         internally now for every caller. compute_position_size() split
+         into compute_margin_usd() + compute_contracts_from_margin()
+         (the latter reused by the new risk-based path); the old
+         function itself kept but no longer called by execute_
+         autotrade() (a smaller future cleanup, not blocking this pass).
+         All 7 real call sites (bounce/breakout, scalp, session, session
+         ny, xau_lg, msnr, mirror) updated to the new 6-arg signature —
+         confirmed via an AST walk that every one now passes exactly
+         6 positional args. sim_execute_trade() (the separate paper-
+         trading simulator) deliberately left untouched — it still
+         takes its own leverage/size_mode/size_value, so the underlying
+         AUTOTRADE_LEVERAGE_*/AUTOTRADE_SIZE_MODE/VALUE/SCALP_SIZE_MODE/
+         VALUE constants stay defined (still feed the simulator) — they
+         were removed from SETTINGS_KEYS/apply_settings()/get_settings()
+         and their own UI rows only, not deleted as constants.
+         Found and left alone (not part of this pass, will need its own
+         separate pass): AUTOTRADE_ENABLED_MSNR has apparently never had
+         a settings-modal checkbox at all — MSNR's own real autotrade
+         is controlled per-symbol on its own tab instead, confirmed via
+         a direct grep (no "setAutotradeMsnr" element exists anywhere) —
+         a pre-existing gap, not something this pass introduced.
+         Verified with py_compile after every edit (constants, the new
+         functions, execute_autotrade()'s own restructuring, every call
+         site, the settings pipeline, the HTML/JS removal), an actual
+         runtime start throughout — compute_risk_based_position() tested
+         directly confirming the SL-hit loss comes out to EXACTLY 2% of
+         total_equity regardless of SL width (0.5% SL -> 77x/$519 margin,
+         2.5% SL -> 23x/$348 margin, both losing exactly $200 on a
+         $10,000 balance), LONG and SHORT directions both correct, a
+         genuinely-unsafe SL distance correctly skipped with a clear
+         reason, a full execute_autotrade() dry-run producing a
+         consistent end-to-end record, and a live test_client() /api/
+         settings round-trip confirming a direct POST of autotrade_
+         leverage_bounce/autotrade_size_mode/scalp_size_value no longer
+         changes anything and none of those keys appear in the response
+         anymore — pyflakes (clean throughout), a full getElementById
+         audit (93 calls, zero dangling — down from 101), a real jsdom
+         page execution (zero runtime errors), node --check on the
+         correctly-last <script> block, the Flask route/def integrity
+         check (56 routes — a pure sizing-logic and settings-UI change,
+         no routes touched), and an AST walk for duplicate top-level
+         defs (none introduced).
 """
 
 import os
@@ -9314,7 +9397,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.101"
+APP_VERSION = "0.99.102"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -10054,6 +10137,7 @@ AUTOTRADE_ENABLED_SESSION = os.environ.get("VP_AUTOTRADE_SESSION", "0") == "1"
 AUTOTRADE_ENABLED_SESSION_NY = os.environ.get("VP_AUTOTRADE_SESSION_NY", "0") == "1"
 AUTOTRADE_SIZE_MODE = os.environ.get("VP_AUTOTRADE_SIZE_MODE", "percent")  # "percent" or "fixed" — the single size value below is interpreted according to this
 AUTOTRADE_SIZE_VALUE = float(os.environ.get("VP_AUTOTRADE_SIZE_VALUE", 2.0))  # percent: % of futures wallet balance; fixed: raw USD margin, leverage-independent either way
+AUTOTRADE_RISK_PCT_OF_BALANCE = float(os.environ.get("VP_AUTOTRADE_RISK_PCT", 2.0))  # v0.99.102, per direct user request ("надо чтобы размер позиции только можно было выбрать"): % of TOTAL account equity risked per trade if SL hits — drives the now-auto-computed leverage, replacing every module's own fixed leverage constant. The user picks position SIZE (margin, via AUTOTRADE_SIZE_MODE/VALUE above, unchanged); leverage is derived per-trade from this risk target, this signal's own SL distance, and the chosen margin — no longer a manual choice at all
 # Scalp gets its OWN size config, separate from the shared one above — per
 # direct user request, by analogy with how leverage is already per-mode for
 # bounce/breakout/divergence/ema/session. Defaults mirror AUTOTRADE_SIZE_MODE/
@@ -10132,9 +10216,6 @@ SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "mirror_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror",
-                  "autotrade_size_mode", "autotrade_size_value",
-                  "scalp_size_mode", "scalp_size_value",
-                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_ft5", "autotrade_leverage_msnr", "autotrade_leverage_mirror",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
@@ -10178,15 +10259,6 @@ def get_settings():
         "autotrade_ft5": AUTOTRADE_ENABLED_FT5,
         "autotrade_msnr": AUTOTRADE_ENABLED_MSNR,
         "autotrade_mirror": AUTOTRADE_ENABLED_MIRROR,
-        "autotrade_size_mode": AUTOTRADE_SIZE_MODE,
-        "autotrade_size_value": AUTOTRADE_SIZE_VALUE,
-        "scalp_size_mode": SCALP_SIZE_MODE,
-        "scalp_size_value": SCALP_SIZE_VALUE,
-        "autotrade_leverage_bounce": AUTOTRADE_LEVERAGE_BOUNCE,
-        "autotrade_leverage_breakout": AUTOTRADE_LEVERAGE_BREAKOUT,
-        "autotrade_leverage_ft5": AUTOTRADE_LEVERAGE_FT5,
-        "autotrade_leverage_msnr": AUTOTRADE_LEVERAGE_MSNR,
-        "autotrade_leverage_mirror": AUTOTRADE_LEVERAGE_MIRROR,
         "scalp_min_rr": SCALP_MIN_RR,
         "scalp_sl_buffer_mult": SCALP_SL_BUFFER_MULT,
         "session_sl_mult": SESSION_SL_MULT,
@@ -10205,8 +10277,6 @@ def apply_settings(updates):
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR
-    global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
-    global SCALP_SIZE_MODE, SCALP_SIZE_VALUE
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT, SESSION_SL_MULT, SESSION_REVERSE_RR
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
@@ -10280,38 +10350,6 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_MSNR = bool(updates["autotrade_msnr"])
     if "autotrade_mirror" in updates:
         AUTOTRADE_ENABLED_MIRROR = bool(updates["autotrade_mirror"])
-    if "autotrade_size_mode" in updates and updates["autotrade_size_mode"] in ("percent", "fixed"):
-        AUTOTRADE_SIZE_MODE = updates["autotrade_size_mode"]
-    if "autotrade_size_value" in updates:
-        try:
-            v = float(updates["autotrade_size_value"])
-            if v > 0:
-                AUTOTRADE_SIZE_VALUE = v
-        except (TypeError, ValueError):
-            pass
-    if "scalp_size_mode" in updates and updates["scalp_size_mode"] in ("percent", "fixed"):
-        SCALP_SIZE_MODE = updates["scalp_size_mode"]
-    if "scalp_size_value" in updates:
-        try:
-            v = float(updates["scalp_size_value"])
-            if v > 0:
-                SCALP_SIZE_VALUE = v
-        except (TypeError, ValueError):
-            pass
-    for key, glob_name in (
-        ("autotrade_leverage_bounce", "AUTOTRADE_LEVERAGE_BOUNCE"),
-        ("autotrade_leverage_breakout", "AUTOTRADE_LEVERAGE_BREAKOUT"),
-        ("autotrade_leverage_ft5", "AUTOTRADE_LEVERAGE_FT5"),
-        ("autotrade_leverage_msnr", "AUTOTRADE_LEVERAGE_MSNR"),
-        ("autotrade_leverage_mirror", "AUTOTRADE_LEVERAGE_MIRROR"),
-    ):
-        if key in updates:
-            try:
-                lev = int(updates[key])
-                if 1 <= lev <= 125:
-                    globals()[glob_name] = lev
-            except (TypeError, ValueError):
-                pass
     if "telegram_alerts_hourly" in updates:
         TELEGRAM_ALERTS_HOURLY = bool(updates["telegram_alerts_hourly"])
     if "scalp_min_rr" in updates:
@@ -11849,7 +11887,7 @@ def scan_symbol_session_live(symbol, session_open_ts):
             STATE["session_signals"].appendleft(record)
         if AUTOTRADE_ENABLED_SESSION:
             execute_autotrade("session", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
-                               AUTOTRADE_LEVERAGE_SESSION, extra={"session_open": session_open_ts})
+                               extra={"session_open": session_open_ts})
             sim_execute_trade("session", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                AUTOTRADE_LEVERAGE_SESSION, record)
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
@@ -11901,7 +11939,7 @@ def scan_symbol_session_ny_live(symbol, session_open_ts):
             STATE["session_ny_signals"].appendleft(record)
         if AUTOTRADE_ENABLED_SESSION_NY:
             execute_autotrade("session_ny", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
-                               AUTOTRADE_LEVERAGE_SESSION_NY, extra={"session_open": session_open_ts})
+                               extra={"session_open": session_open_ts})
             sim_execute_trade("session_ny", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                AUTOTRADE_LEVERAGE_SESSION_NY, record)
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
@@ -12823,11 +12861,120 @@ def set_leverage(symbol, leverage):
     )
 
 
-def compute_position_size(symbol, entry_price, size_mode, size_value, leverage, wallet_balance=None):
-    """Turns the configured sizing (percent-of-wallet or flat $ margin) into
-    a contract count. margin * leverage = notional; notional / (quanto_
-    multiplier * price) = raw contract count, then snapped to the
-    contract's own lot step (order_size_min).
+def compute_margin_usd(size_mode, size_value, wallet_balance=None):
+    """Extracted from compute_position_size() (v0.99.102) so the same
+    margin-sizing logic is reusable by both that function AND the new
+    risk-based leverage derivation in execute_autotrade() — under the
+    new model, margin has to be known FIRST (leverage is now DERIVED
+    from margin + this signal's own SL distance + the risk target, not
+    chosen independently as a fixed constant anymore). Uses AVAILABLE
+    balance (not total equity) deliberately — this is an affordability
+    check, and you can't allocate margin the account doesn't actually
+    have free right now, regardless of what's tied up in other open
+    positions. Returns (margin_usd, skip_reason) — skip_reason is None
+    on success."""
+    if size_mode == "percent":
+        if wallet_balance is None:
+            return 0, "wallet balance unavailable for percent-based sizing"
+        margin_usd = wallet_balance * (size_value / 100.0)
+    else:
+        margin_usd = size_value
+    if margin_usd <= 0:
+        return 0, f"computed margin is {margin_usd} — check sizing config/wallet balance"
+    # Fixed mode has no built-in relationship to the account balance, so it
+    # never naturally scales down — with several positions already open
+    # consuming margin, a flat $X request can easily exceed what's actually
+    # free, and every attempt fails the same way (INSUFFICIENT_AVAILABLE)
+    # until something closes. Check against real availability regardless of
+    # mode rather than letting Gate reject it after the fact every time.
+    if wallet_balance is not None and margin_usd > wallet_balance * 0.98:
+        return 0, (f"computed margin ${margin_usd:.2f} exceeds available balance "
+                    f"${wallet_balance:.2f} (with a 2% safety margin) — skipping rather than sending a doomed order")
+    return margin_usd, None
+
+
+def compute_max_safe_leverage(direction, sl_distance_pct, mmr_pct, leverage_cap,
+                               safety_margin=None, taker_fee_pct=SCALP_TAKER_FEE_PCT):
+    """v0.99.102, per direct user follow-up ("размер позиции может тоже
+    автоматом определять, брать минимально возможный процент депозита
+    но чтобы плечо позволяло ставить стоп до ликвидации"): finds the
+    LARGEST leverage (up to leverage_cap, the contract's own exchange-
+    side leverage_max) whose own liquidation buffer still clears
+    sl_distance_pct * safety_margin — reusing compute_scalp_
+    liquidation_move_pct()'s own formula so this stays consistent with
+    the existing liquidation-safety check in execute_autotrade() by
+    construction, rather than risking a subtly different reimplemen-
+    tation of the same math. That function's own buffer is
+    monotonically decreasing in leverage (higher leverage always
+    brings liquidation closer, never further), so a plain integer
+    sweep from leverage_cap down to 1 finds the answer directly — no
+    inversion of the underlying formula's own min()/direction-
+    dependent branches needed, which would be a likely source of a
+    sign or edge-case bug on math this consequential.
+    Returns None if even leverage=1 isn't safe for this SL distance
+    (pathological — an extremely wide SL combined with unusually high
+    MMR — but the caller must treat it as "skip this trade", not
+    silently fall back to something unsafe)."""
+    safety_margin = SCALP_SAFETY_MARGIN if safety_margin is None else safety_margin
+    if sl_distance_pct is None or sl_distance_pct <= 0:
+        return None
+    required = sl_distance_pct * safety_margin
+    lev_cap = int(leverage_cap) if leverage_cap else 125
+    for lev in range(max(lev_cap, 1), 0, -1):
+        buf = compute_scalp_liquidation_move_pct(direction, lev, mmr_pct, taker_fee_pct)
+        if buf is not None and buf >= required:
+            return lev
+    return None
+
+
+def compute_risk_based_position(direction, entry, sl, leverage_cap, mmr_pct, total_equity, risk_pct=None):
+    """v0.99.102 — the new, fully-automatic replacement for both manual
+    leverage AND manual position-size selection, per direct user
+    confirmation ("максимально безопасное плечо → минимальный margin
+    под 2% риска, всё автоматически"): finds this signal's own maximum
+    SAFE leverage (compute_max_safe_leverage() above), then derives the
+    MINIMUM margin needed to still risk exactly risk_pct% of total_
+    equity at that leverage.
+        risk_amount = total_equity * risk_pct/100
+        loss_at_sl  = margin_usd * leverage * sl_distance_pct/100
+        => margin_usd = risk_amount / (leverage * sl_distance_pct/100)
+    margin and leverage are inversely related for a fixed risk target
+    and SL distance — using the highest SAFE leverage available (not
+    an arbitrary lower one) minimizes how much capital gets tied up in
+    any single trade while keeping the dollar risk exactly fixed,
+    rather than the old model where leverage was a flat per-module
+    constant with no relationship to the actual SL width of a given
+    signal at all.
+    Returns (margin_usd, leverage, skip_reason) — skip_reason is None
+    on success, otherwise a human-readable string with margin_usd=0,
+    leverage=0, matching compute_position_size()'s own convention."""
+    risk_pct = AUTOTRADE_RISK_PCT_OF_BALANCE if risk_pct is None else risk_pct
+    if not entry or entry <= 0:
+        return 0, 0, "invalid entry price"
+    sl_distance_pct = abs(entry - sl) / entry * 100
+    if sl_distance_pct <= 0:
+        return 0, 0, "invalid SL distance (zero or negative) — can't size a position against it"
+    leverage = compute_max_safe_leverage(direction, sl_distance_pct, mmr_pct, leverage_cap)
+    if leverage is None:
+        return 0, 0, (f"no leverage (even 1x) keeps this SL distance ({sl_distance_pct:.3f}%) safely "
+                       f"inside the liquidation buffer — skipping rather than placing an SL that "
+                       f"could never actually trigger")
+    if not total_equity or total_equity <= 0:
+        return 0, 0, "account equity unavailable for risk-based sizing"
+    risk_amount = total_equity * risk_pct / 100.0
+    margin_usd = risk_amount / (leverage * sl_distance_pct / 100.0)
+    return margin_usd, leverage, None
+
+
+def compute_contracts_from_margin(symbol, entry_price, margin_usd, leverage):
+    """Extracted from compute_position_size() (v0.99.102) — the shared
+    "given a margin amount and leverage, how many contracts" logic
+    (lot-size snapping, the near-minimum-lot oversizing guard), reused
+    by both compute_position_size() (legacy size_mode/value path,
+    kept for now but no longer called by execute_autotrade()) and the
+    new risk-based automatic sizing in execute_autotrade() — margin
+    and leverage are computed together there (compute_risk_based_
+    position()) before this shared "turn it into contracts" step runs.
 
     A real lesson from the EMA-screener project: on an expensive contract
     (large quanto_multiplier), the raw count can round to less than one
@@ -12841,23 +12988,8 @@ def compute_position_size(symbol, entry_price, size_mode, size_value, leverage, 
     Returns (contracts, notional_usd, margin_usd, skip_reason). skip_reason
     is None on success, otherwise a human-readable string and contracts=0."""
     spec = get_contract_spec(symbol)
-    if size_mode == "percent":
-        if wallet_balance is None:
-            return 0, 0, 0, "wallet balance unavailable for percent-based sizing"
-        margin_usd = wallet_balance * (size_value / 100.0)
-    else:
-        margin_usd = size_value
-    if margin_usd <= 0:
-        return 0, 0, 0, f"computed margin is {margin_usd} — check sizing config/wallet balance"
-    # Fixed mode has no built-in relationship to the account balance, so it
-    # never naturally scales down — with several positions already open
-    # consuming margin, a flat $X request can easily exceed what's actually
-    # free, and every attempt fails the same way (INSUFFICIENT_AVAILABLE)
-    # until something closes. Check against real availability regardless of
-    # mode rather than letting Gate reject it after the fact every time.
-    if wallet_balance is not None and margin_usd > wallet_balance * 0.98:
-        return 0, 0, 0, (f"computed margin ${margin_usd:.2f} exceeds available balance "
-                          f"${wallet_balance:.2f} (with a 2% safety margin) — skipping rather than sending a doomed order")
+    if margin_usd is None or margin_usd <= 0 or not leverage or leverage <= 0:
+        return 0, 0, 0, f"invalid margin ({margin_usd}) or leverage ({leverage})"
     notional_usd = margin_usd * leverage
     multiplier = spec["quanto_multiplier"]
     if multiplier <= 0 or entry_price <= 0:
@@ -12875,6 +13007,26 @@ def compute_position_size(symbol, entry_price, size_mode, size_value, leverage, 
         contracts = math.floor(raw_contracts / min_size) * min_size
     actual_notional = contracts * multiplier * entry_price
     return contracts, actual_notional, actual_notional / leverage, None
+
+
+def compute_position_size(symbol, entry_price, size_mode, size_value, leverage, wallet_balance=None):
+    """Turns the configured sizing (percent-of-wallet or flat $ margin) into
+    a contract count. margin * leverage = notional; notional / (quanto_
+    multiplier * price) = raw contract count, then snapped to the
+    contract's own lot step (order_size_min).
+
+    Legacy path (v0.99.102) — no longer called by execute_autotrade(),
+    which now uses compute_risk_based_position() + compute_contracts_
+    from_margin() directly. Kept defined (not yet deleted) purely as a
+    smaller, later cleanup step, matching this session's own established
+    "don't necessarily delete everything in one sweep" discipline.
+
+    Returns (contracts, notional_usd, margin_usd, skip_reason). skip_reason
+    is None on success, otherwise a human-readable string and contracts=0."""
+    margin_usd, skip_reason = compute_margin_usd(size_mode, size_value, wallet_balance)
+    if skip_reason:
+        return 0, 0, 0, skip_reason
+    return compute_contracts_from_margin(symbol, entry_price, margin_usd, leverage)
 
 
 def place_market_order(symbol, direction, contracts, reduce_only=False):
@@ -12981,9 +13133,43 @@ def move_stop_to_breakeven(symbol, direction, sl_order_id, entry, tick, buffer_p
 
 def get_futures_wallet_balance():
     """GET /futures/usdt/accounts — returns the USDT futures wallet's
-    available balance, used for percent-of-deposit position sizing."""
+    available balance, used for percent-of-deposit position sizing
+    AND for the "can we actually afford this margin" affordability
+    check — both genuinely need the FREE/available figure, not total
+    equity (you can't allocate margin the account doesn't actually
+    have free right now, regardless of what's tied up in other open
+    positions)."""
     data = gate_signed_request("GET", "/futures/usdt/accounts")
     return float(data.get("available", 0) or 0)
+
+
+def get_futures_total_equity():
+    """GET /futures/usdt/accounts — CONFIRMED (realized-basis) account
+    capital, used specifically for risk-based leverage/margin sizing
+    in execute_autotrade(). Deliberately NOT the same figure as
+    get_futures_wallet_balance()'s own "available" — that shrinks the
+    moment another position locks margin away, which is exactly the
+    bug the user reported: "Если сделка уже открыта какая-то, то
+    баланс становится меньше, из-за этого некорректно может
+    определяться плечо... а надо смотреть все равно на всю сумму
+    денег на счету."
+    v0.99.102 — computed as available + position_margin (free capital
+    PLUS whatever's currently locked as margin in open positions), per
+    direct user follow-up choosing this over total+unrealised_pnl:
+    "available + position_margin (без плавающего PnL, только
+    подтверждённый капитал)" — deliberately EXCLUDES unrealised_pnl
+    (floating, not-yet-realized gains/losses on open positions), so a
+    NEW trade's own risk sizing isn't inflated or deflated by paper
+    profit/loss on trades that haven't closed yet. order_margin
+    (margin reserved for pending, not-yet-filled orders) is
+    deliberately left out too — that capital isn't "in a position"
+    yet, and this app's own autotrade flow doesn't leave working
+    limit orders sitting around (market entries, price-triggered
+    TP/SL) that would tie up order_margin for any meaningful stretch."""
+    data = gate_signed_request("GET", "/futures/usdt/accounts")
+    available = float(data.get("available", 0) or 0)
+    position_margin = float(data.get("position_margin", 0) or 0)
+    return available + position_margin
 
 
 _dual_mode_cache = {"value": None, "fetched_at": 0}
@@ -13091,74 +13277,71 @@ def reconcile_positions_and_orders():
     return unprotected, cancelled
 
 
-def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=None, size_mode=None, size_value=None):
+def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None):
     """The single entry point every signal source calls to (maybe) fire a
-    real trade. `mode` is a short label (e.g. "bounce", "ema", "scalp") used
-    for the auto-trade-enabled toggle lookup and the log. `extra` is any
-    signal-specific context worth keeping in the log (reason, interval,
+    real trade. `mode` is a short label (e.g. "bounce", "msnr", "scalp")
+    used for the auto-trade-enabled toggle lookup and the log. `extra` is
+    any signal-specific context worth keeping in the log (reason, interval,
     etc.) — purely informational, not used for trading logic.
-    size_mode/size_value override the shared AUTOTRADE_SIZE_MODE/VALUE for
-    this call only — used by scalp to trade its own configured amount
-    (SCALP_SIZE_MODE/VALUE) instead of the one shared by every other mode.
-    Left as None (the default), which is what every OTHER mode's call site
-    still does, this behaves exactly as before.
+
+    v0.99.102, per direct user request ("надо чтобы размер позиции
+    только можно было выбрать" -> then "размер позиции может тоже
+    автоматом определять... максимально безопасное плечо -> минимальный
+    margin под 2% риска"): leverage and position size are no longer
+    caller-supplied at all — both are computed HERE, automatically, for
+    EVERY module, via compute_risk_based_position(): the maximum SAFE
+    leverage for this specific signal's own SL distance (bounded by
+    both the contract's own exchange-side leverage_max and the
+    liquidation-safety buffer), then the minimum margin needed to still
+    risk exactly AUTOTRADE_RISK_PCT_OF_BALANCE% of confirmed account
+    capital (get_futures_total_equity()) at that leverage. This
+    entirely replaces the old per-module fixed leverage constants AND
+    the shared/scalp-specific AUTOTRADE_SIZE_MODE/VALUE and SCALP_
+    SIZE_MODE/VALUE sizing mechanisms — every module now sizes
+    identically, driven only by its own SL width, with no manual
+    leverage or size choice left anywhere.
 
     Always writes exactly one entry to STATE["autotrade_log"], whether it
     trades, skips, or dry-runs, so the log is a complete record of every
     signal that was even considered, not just the ones that fired."""
-    size_mode = AUTOTRADE_SIZE_MODE if size_mode is None else size_mode
-    size_value = AUTOTRADE_SIZE_VALUE if size_value is None else size_value
     record = {
         "time": time.time(), "mode": mode, "symbol": symbol, "direction": direction,
-        "entry": entry, "sl": sl, "tp": tp, "leverage": leverage,
+        "entry": entry, "sl": sl, "tp": tp, "leverage": None,
         "dry_run": AUTOTRADE_DRY_RUN, "extra": extra or {},
         "status": None, "detail": None, "contracts": None, "order_id": None,
     }
     try:
-        wallet_balance = None
+        # total_equity drives the RISK TARGET (2% of confirmed capital,
+        # deliberately NOT shrunk by other open positions' locked
+        # margin — see get_futures_total_equity()'s own docstring for
+        # the full reasoning). wallet_balance (available) is fetched
+        # separately, further below, purely as an AFFORDABILITY check
+        # once the risk math has already decided on a margin amount —
+        # you can't allocate margin the account doesn't actually have
+        # free right now, regardless of what total_equity says.
+        total_equity = None
         if not AUTOTRADE_DRY_RUN:
-            wallet_balance = get_futures_wallet_balance()
-        elif size_mode == "percent":
-            # dry-run with percent sizing still needs a balance to show a
-            # realistic contract count in the log, but shouldn't require
-            # live credentials just to preview — fall back to a nominal
-            # $1000 for the estimate and say so.
+            total_equity = get_futures_total_equity()
+        else:
+            # dry-run still needs a balance figure to show a realistic
+            # size/leverage in the log, but shouldn't require live
+            # credentials just to preview.
             if GATE_API_KEY and GATE_API_SECRET:
                 try:
-                    wallet_balance = get_futures_wallet_balance()
+                    total_equity = get_futures_total_equity()
                 except Exception:
-                    wallet_balance = 1000.0
+                    total_equity = 1000.0
                     record["extra"]["balance_note"] = "fetch failed, used nominal $1000 for dry-run estimate"
             else:
-                wallet_balance = 1000.0
+                total_equity = 1000.0
                 record["extra"]["balance_note"] = "no credentials configured, used nominal $1000 for dry-run estimate"
 
         try:
-            leverage_max = get_contract_spec(symbol).get("leverage_max")
-            if leverage_max and leverage > leverage_max:
-                record["extra"]["leverage_requested"] = leverage
-                leverage = leverage_max
+            leverage_cap = get_contract_spec(symbol).get("leverage_max") or 125
         except Exception as e:
-            log_error(f"execute_autotrade {symbol}: couldn't fetch leverage_max ({e}), using requested leverage as-is")
+            leverage_cap = 125
+            log_error(f"execute_autotrade {symbol}: couldn't fetch leverage_max ({e}), using {leverage_cap}x as a conservative cap")
 
-        # Liquidation-safety check, v0.70.0 — previously only the scalp
-        # module ever compared its SL distance against the liquidation
-        # buffer at the chosen leverage; every other mode (bounce/
-        # breakout/divergence/ema/session) placed its SL with no such
-        # check at all. That was always a latent risk, but harmless in
-        # practice while EMA's SL was a tight fixed 0.4% — nowhere near
-        # a typical liquidation distance. It stopped being harmless the
-        # moment EMA's SL became ATR-based (v0.65.0) and started coming
-        # out WIDER than before on volatile symbols: user directly
-        # reported live cases where the computed SL sat further from
-        # entry than the exchange's own liquidation price — meaning
-        # Gate would forcibly liquidate the position before that SL
-        # order could ever trigger, turning a bounded, intended loss
-        # into an uncontrolled one at whatever the liquidation engine's
-        # own (worse) price ends up being.
-        # Reuses compute_scalp_liquidation_move_pct() — despite the
-        # name, its math (Gate's isolated-margin liquidation formula)
-        # isn't scalp-specific, just first written for that module.
         # mmr_pct comes from the same STATE["scalp_mmr_map"] the scalp
         # module already refreshes every SCALP_REFRESH_SEC — MMR is a
         # property of the Gate contract itself, not of which module is
@@ -13166,32 +13349,51 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, leverage, extra=No
         # correct, not a shortcut. Falls back to SCALP_DEFAULT_MMR_PCT
         # (a deliberately conservative default) for a symbol the scalp
         # universe hasn't covered yet.
-        try:
-            with state_lock:
-                mmr_map = STATE.get("scalp_mmr_map", {})
-            mmr_pct = mmr_map.get(symbol, SCALP_DEFAULT_MMR_PCT)
-            liq_buffer_pct = compute_scalp_liquidation_move_pct(direction, leverage, mmr_pct)
-            sl_distance_pct = abs(entry - sl) / entry * 100 if entry else None
-            if liq_buffer_pct is not None and sl_distance_pct is not None:
-                if liq_buffer_pct < sl_distance_pct * SCALP_SAFETY_MARGIN:
-                    record["status"] = "SKIPPED"
-                    record["detail"] = (
-                        f"SL distance {sl_distance_pct:.3f}% at {leverage}x leverage doesn't clear the "
-                        f"liquidation buffer ({liq_buffer_pct:.3f}%, needs >= {SCALP_SAFETY_MARGIN}x margin) — "
-                        f"skipping rather than placing an SL that could never actually trigger"
-                    )
-                    with state_lock:
-                        STATE["autotrade_log"].appendleft(record)
-                    return record
-        except Exception as e:
-            log_error(f"execute_autotrade {symbol}: liquidation-safety check failed ({e}), proceeding without it — this is exactly the gap this check exists to close, so treat any recurrence of this log line as worth investigating")
+        with state_lock:
+            mmr_map = STATE.get("scalp_mmr_map", {})
+        mmr_pct = mmr_map.get(symbol, SCALP_DEFAULT_MMR_PCT)
 
-        contracts, notional, margin, skip_reason = compute_position_size(
-            symbol, entry, size_mode, size_value, leverage, wallet_balance)
-        record["leverage"] = leverage  # reflect the (possibly clamped) value actually used, not the originally requested one
+        margin, leverage, skip_reason = compute_risk_based_position(
+            direction, entry, sl, leverage_cap, mmr_pct, total_equity)
+        record["leverage"] = leverage
+
+        if skip_reason:
+            record["status"] = "SKIPPED"
+            record["detail"] = skip_reason
+            with state_lock:
+                STATE["autotrade_log"].appendleft(record)
+            return record
+
+        # Affordability check — the derived margin, however "minimal"
+        # by the risk math above, still has to fit inside what's
+        # actually FREE right now (not locked in other open positions).
+        # total_equity deliberately doesn't shrink from other open
+        # positions (the whole point of this redesign), but real order
+        # placement obviously still needs real free margin to draw
+        # from — this is the same "computed margin exceeds available
+        # balance" guard the old sizing path always had, just moved
+        # here since margin is no longer computed inside compute_
+        # position_size() for this call path.
+        wallet_balance = None
+        if not AUTOTRADE_DRY_RUN:
+            wallet_balance = get_futures_wallet_balance()
+        elif GATE_API_KEY and GATE_API_SECRET:
+            try:
+                wallet_balance = get_futures_wallet_balance()
+            except Exception:
+                pass
+        if wallet_balance is not None and margin > wallet_balance * 0.98:
+            record["status"] = "SKIPPED"
+            record["detail"] = (f"computed margin ${margin:.2f} exceeds available balance "
+                                 f"${wallet_balance:.2f} (with a 2% safety margin) — skipping rather than sending a doomed order")
+            with state_lock:
+                STATE["autotrade_log"].appendleft(record)
+            return record
+
+        contracts, notional, actual_margin, skip_reason = compute_contracts_from_margin(symbol, entry, margin, leverage)
         record["contracts"] = contracts
         record["notional_usd"] = round(notional, 2) if notional else notional
-        record["margin_usd"] = round(margin, 2) if margin else margin
+        record["margin_usd"] = round(actual_margin, 2) if actual_margin else actual_margin
 
         if skip_reason:
             record["status"] = "SKIPPED"
@@ -13721,8 +13923,7 @@ def scan_symbol_scalp_signal(symbol, rec):
             STATE["scalp_signals"].appendleft(record)
         if AUTOTRADE_ENABLED_SCALP:
             execute_autotrade("scalp", symbol, direction, entry, sl_price, target_price,
-                               rec["leverage"], extra={"interval": interval, "score": rec["score"]},
-                               size_mode=SCALP_SIZE_MODE, size_value=SCALP_SIZE_VALUE)
+                               extra={"interval": interval, "score": rec["score"]})
             sim_execute_trade("scalp", symbol, direction, entry, sl_price, target_price,
                                rec["leverage"], record,
                                size_mode=SCALP_SIZE_MODE, size_value=SCALP_SIZE_VALUE)
@@ -14908,7 +15109,7 @@ def scan_symbol(symbol, candles=None):
                 autotrade_leverage = AUTOTRADE_LEVERAGE_BOUNCE if sig["reason"] == "bounce" else AUTOTRADE_LEVERAGE_BREAKOUT
                 if autotrade_enabled:
                     autotrade_result = execute_autotrade(sig["reason"], symbol, sig["direction"], sig["price"], sl, tp,
-                                       autotrade_leverage, extra={"reason": sig["reason"]})
+                                       extra={"reason": sig["reason"]})
                     if autotrade_result and autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED"):
                         with state_lock:
                             record["sl_order_id"] = autotrade_result.get("sl_order_id")
@@ -16332,8 +16533,7 @@ def xau_lg_scan_symbol_live(symbol):
         with state_lock:
             STATE["xau_lg_signals"].appendleft(record)
         if AUTOTRADE_ENABLED_XAU_LG:
-            execute_autotrade("xau_lg", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
-                               AUTOTRADE_LEVERAGE_XAU_LG)
+            execute_autotrade("xau_lg", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
             sim_execute_trade("xau_lg", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                AUTOTRADE_LEVERAGE_XAU_LG, record)
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
@@ -18440,7 +18640,7 @@ def msnr_scan_symbol_live(symbol):
             # orders had trouble — the risk is real either way) now
             # count as fired.
             autotrade_result = execute_autotrade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"],
-                                                  sig["tp"], live_leverage, size_mode="fixed", size_value=live_size)
+                                                  sig["tp"])
             order_opened = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
             # v0.99.34, per direct user follow-up ("как добавить сигналы
             # по msnr в симулятор"): sim_execute_trade() already gets
@@ -19806,8 +20006,7 @@ def mirror_scan_symbol_live(symbol):
         with state_lock:
             STATE["mirror_signals"].appendleft(record)
         if AUTOTRADE_ENABLED_MIRROR:
-            execute_autotrade("mirror", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
-                               AUTOTRADE_LEVERAGE_MIRROR)
+            execute_autotrade("mirror", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
             sim_execute_trade("mirror", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                AUTOTRADE_LEVERAGE_MIRROR, record)
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
@@ -22034,73 +22233,27 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">Размер позиции</div>
-          <div class="sub">режим и значение — либо % от баланса фьючерсного кошелька, либо фикс. $ маржи (плечо не влияет на это число)</div>
-        </div>
-      </div>
-      <div class="settingRow" style="gap:8px;">
-        <select id="setAutotradeSizeMode" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;">
-          <option value="percent">% от депозита</option>
-          <option value="fixed">Фикс. $</option>
-        </select>
-        <input type="number" id="setAutotradeSizeValue" step="0.1" min="0.1" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;width:100px;">
-      </div>
-      <div class="settingRow">
-        <div>
           <div class="label">↳ Bounce</div>
-          <div class="sub">плечо, если включено</div>
         </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <input type="number" id="setAutotradeLevBounce" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
-          <label class="switch"><input type="checkbox" id="setAutotradeBounce"><span class="switchSlider"></span></label>
-        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeBounce"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
           <div class="label">↳ Breakout</div>
-          <div class="sub">плечо, если включено</div>
         </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <input type="number" id="setAutotradeLevBreakout" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
-          <label class="switch"><input type="checkbox" id="setAutotradeBreakout"><span class="switchSlider"></span></label>
-        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeBreakout"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
           <div class="label">↳ Скальпинг</div>
-          <div class="sub">плечо берётся из самого сигнала, не отсюда</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeScalp"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow" style="gap:8px;">
-        <div>
-          <div class="label">↳ Сумма скальпинга</div>
-          <div class="sub">своя, отдельно от общего размера позиции выше</div>
-        </div>
-        <select id="setScalpSizeMode" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;">
-          <option value="percent">% от депозита</option>
-          <option value="fixed">Фикс. $</option>
-        </select>
-        <input type="number" id="setScalpSizeValue" step="0.1" min="0.1" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;width:100px;">
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ MSNR ⚠️</div>
-          <div class="sub">плечо (общее на все монеты) — сам переключатель теперь индивидуальный на каждую монету, см. таблицу автотюнинга на вкладке MSNR (6 полей: золото + текущий топ-3 по винрейту)</div>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <input type="number" id="setAutotradeLevMsnr" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
-        </div>
       </div>
       <div class="settingRow">
         <div>
           <div class="label">↳ Зеркало</div>
-          <div class="sub">плечо, если включено</div>
         </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <input type="number" id="setAutotradeLevMirror" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
-          <label class="switch"><input type="checkbox" id="setAutotradeMirror"><span class="switchSlider"></span></label>
-        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeMirror"><span class="switchSlider"></span></label>
       </div>
     </div>
 
@@ -23595,14 +23748,6 @@ const setInputs = {
 };
 
 const setValueInputs = {
-  autotrade_size_mode: document.getElementById('setAutotradeSizeMode'),
-  autotrade_size_value: document.getElementById('setAutotradeSizeValue'),
-  scalp_size_mode: document.getElementById('setScalpSizeMode'),
-  scalp_size_value: document.getElementById('setScalpSizeValue'),
-  autotrade_leverage_bounce: document.getElementById('setAutotradeLevBounce'),
-  autotrade_leverage_breakout: document.getElementById('setAutotradeLevBreakout'),
-  autotrade_leverage_msnr: document.getElementById('setAutotradeLevMsnr'),
-  autotrade_leverage_mirror: document.getElementById('setAutotradeLevMirror'),
   mirror_rr: document.getElementById('setMirrorRR'),
 };
 
