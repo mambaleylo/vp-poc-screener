@@ -9477,6 +9477,49 @@ v0.99.104 - MSNR CRITICAL FIX, live report: "часто выбивает сто�
          (clean), the Flask route/def integrity check (56 routes — a
          pure signal-generation formula change, no routes/UI touched),
          and an AST walk for duplicate top-level defs (none introduced).
+
+v0.99.105 - MSNR autotrade master switch restored, live screenshot
+         report: the general "Автоторговля" settings group lists
+         Bounce/Breakout/Скальпинг/Зеркало each with their own on/off
+         row — MSNR conspicuously absent, and the user (reasonably)
+         couldn't find any equivalent for it anywhere. Investigated
+         thoroughly before touching anything (the exact symptom the
+         v0.99.32 "checkbox does nothing" bug already warns about in
+         this same file's own comments): AUTOTRADE_ENABLED_MSNR was
+         NEVER actually deleted — still fully wired through get_
+         settings()/apply_settings()/SETTINGS_KEYS since v0.99.18 — but
+         v0.99.18 ALSO removed the only place that ever CHECKED it
+         (msnr_scan_symbol_live()'s own firing decision), replacing it
+         entirely with 6 individually-toggleable per-symbol checkboxes
+         on the MSNR tab itself. So the constant was genuinely settable
+         and persisted, just silently inert — exactly a decorative
+         checkbox would have been if I'd simply added the missing UI
+         row without checking this first.
+         Fixed properly rather than papering over it: added `AUTOTRADE_
+         ENABLED_MSNR and` back into msnr_scan_symbol_live()'s own
+         firing condition, alongside (not replacing) the existing per-
+         symbol autotrade_symbols.get(symbol) check — a genuine MASTER
+         switch layered on top of the per-symbol ones, matching what
+         every other module's own single on/off already does: turning
+         it off now pauses every symbol's own MSNR autotrade at once,
+         without having to un-toggle each one individually. Added the
+         matching "↳ MSNR ⚠️" settings-modal row (with an explanatory
+         sub-line making the master/per-symbol relationship explicit,
+         since it's genuinely different from every sibling row) and its
+         own setInputs mapping entry — this key had a stale v0.99.18
+         comment explaining why it was deliberately NOT mapped, now
+         corrected since the underlying reason (nothing checked the
+         constant) no longer holds.
+         Verified with py_compile after every edit, an actual runtime
+         start (a live test_client() /api/settings POST/GET round-trip
+         confirming autotrade_msnr actually persists and reads back
+         correctly, not just accepted silently), pyflakes (clean), a
+         full getElementById audit (94 calls, zero dangling), a real
+         jsdom page execution (zero runtime errors), node --check on
+         the correctly-last <script> block, the Flask route/def
+         integrity check (56 routes — no new endpoints, existing
+         settings pipeline extended), and an AST walk for duplicate
+         top-level defs (none introduced).
 """
 
 import os
@@ -9496,7 +9539,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.104"
+APP_VERSION = "0.99.105"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -18712,7 +18755,23 @@ def msnr_scan_symbol_live(symbol):
         # non-top-10 symbol's checkbox silently inert, exactly the
         # v0.99.32 bug pattern this session already fixed once for a
         # different mismatch.
-        if autotrade_symbols.get(symbol) and symbol in msnr_manual_toggle_allowed_symbols(overrides_snapshot):
+        # v0.99.105, per direct user report — screenshot showed the
+        # general "Автоторговля" settings group listing Bounce/Breakout/
+        # Скальпинг/Зеркало each with their own on/off row, MSNR
+        # conspicuously absent: AUTOTRADE_ENABLED_MSNR itself was never
+        # actually deleted (still fully wired through get_settings()/
+        # apply_settings()/SETTINGS_KEYS since v0.99.18), just never
+        # CHECKED anywhere in the real firing decision — so adding a
+        # matching UI row alone, without this AND clause, would have
+        # been a decorative checkbox that changes nothing, exactly the
+        # "checkbox does nothing" bug class v0.99.32 already fixed once
+        # for a different mismatch (see the v0.99.49 comment just
+        # above). Now a genuine MASTER switch layered ON TOP of the
+        # per-symbol toggles (not a replacement for them) — turning it
+        # off pauses every symbol's own autotrade at once without
+        # having to un-toggle each one individually, matching what
+        # every other module's own single on/off switch already does.
+        if AUTOTRADE_ENABLED_MSNR and autotrade_symbols.get(symbol) and symbol in msnr_manual_toggle_allowed_symbols(overrides_snapshot):
             # v0.99.33, per direct user request: real order sizing now
             # compounds off THIS symbol's own live trade history — $40
             # on the very first autotrade-fired trade, then the whole
@@ -22367,6 +22426,13 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="label">↳ MSNR ⚠️</div>
+          <div class="sub">общий рубильник поверх переключателей по каждой монете (вкладка MSNR, колонка «Авто») — выключен здесь, значит не торгует НИКТО, даже если у монеты своя галочка стоит</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeMsnr"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Зеркало</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeMirror"><span class="switchSlider"></span></label>
@@ -23856,10 +23922,14 @@ const setInputs = {
   autotrade_bounce: document.getElementById('setAutotradeBounce'),
   autotrade_breakout: document.getElementById('setAutotradeBreakout'),
   autotrade_scalp: document.getElementById('setAutotradeScalp'),
-  // v0.99.18: autotrade_msnr checkbox removed from settings (replaced by
-  // 6 individual per-symbol toggles in the MSNR panel itself) — no
-  // longer mapped here, since setInputs[key].checked on a null element
-  // (the DOM node no longer exists) would throw every time settings load
+  // v0.99.105 — see this same key's own note in Python's apply_settings():
+  // AUTOTRADE_ENABLED_MSNR is a genuine master switch layered ON TOP of the
+  // 6 individual per-symbol toggles in the MSNR panel itself, not a
+  // replacement for them (v0.99.18 removed the checkbox HERE specifically
+  // because the constant wasn't checked anywhere in the real firing
+  // decision back then — now it is, so the checkbox is back and genuinely
+  // functional, not decorative).
+  autotrade_msnr: document.getElementById('setAutotradeMsnr'),
   autotrade_mirror: document.getElementById('setAutotradeMirror'),
 };
 
