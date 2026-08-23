@@ -9412,6 +9412,71 @@ v0.99.103 - MIRROR chart now draws the underlying support/resistance
          break rendering for chart types that never pass level_price),
          and the Flask route/def integrity check (56 routes — no new
          endpoints, existing one extended).
+
+v0.99.104 - MSNR CRITICAL FIX, live report: "часто выбивает стоп и идёт
+         куда надо цена" (stop frequently gets knocked out, then price
+         moves the intended direction anyway — the textbook symptom of
+         a stop sitting too close to normal price noise/re-testing).
+         Investigated whether this traced to the recent leverage
+         redesign (v0.99.102) first, since it landed right before this
+         report — confirmed it doesn't: place_tp_sl_orders() places the
+         SL at exactly the signal's own sl price (rounded to tick),
+         completely independent of leverage/margin, which only affect
+         position SIZE. Also flagged, but deliberately NOT reverted
+         without being asked: another (non-this) session's own v0.99.95
+         MSNR ranking change (pure sort by compound_return_pct with a
+         winrate>=45% floor, replacing the earlier winrate/sample/доход
+         composite) could plausibly be promoting noisier, less stable
+         symbols into live trading — a live candidate worth revisiting,
+         but a genuinely separate question from the SL-width issue this
+         version actually fixes.
+         Root cause found by comparing MSNR's own SL formula against
+         XAU LG's already-working one in this same file: MSNR's sl =
+         sweep_extreme * (1 ± MSNR_SL_BUFFER_PCT=0.15%) barely widens
+         the stop past the sweep's own extreme AT ALL, regardless of
+         how far that sweep actually moved — a fixed, tiny % nudge on
+         top of the bare extreme price, not a real buffer. XAU_LG_SL_
+         BUFFER_MULT instead multiplies the RAW entry-to-extreme
+         distance (an existing, real, price-action-derived risk
+         measure) — a stop that scales with how far the move already
+         went, not a nudge that's nearly identical regardless of the
+         setup's own scale.
+         Fixed by adopting XAU LG's own formula shape for MSNR: new
+         MSNR_SL_BUFFER_MULT=1.3 (env-overridable), sl = entry ±
+         (raw_risk * 1.3) instead of extreme * (1 ± tiny_pct), in both
+         the SHORT (A-shape) and LONG (V-shape) branches of msnr_
+         detect_signals(). Verified directly: on a synthetic sweep
+         (entry 99.8, sweep extreme 100.6), the buffer beyond the raw
+         sweep extreme grew from $0.15 (old formula) to $0.24 (new,
+         ~60% wider) — total risk grew from 0.953% to 1.042% of entry.
+         Deliberately NOT wired into the global risk_autotune_pass()
+         SL-multiplier nudge system XAU_LG/SESSION/EMA/DIV use for
+         their own — caught and corrected an overclaim in this
+         constant's own first-draft comment before shipping: MSNR's
+         participation in that global system was already disabled back
+         in v0.99.52 in favor of its own, different tuning philosophy
+         (msnr_symbol_sl_skip_min() and friends — per-symbol
+         statistical significance tests, not a single global average-
+         MAE nudge) — reintroducing the older global mechanism just for
+         this one constant would have been inconsistent with that
+         already-established design, not a genuine improvement.
+         MSNR_SL_BUFFER_PCT itself left fully defined (not deleted) —
+         vestigial now, nothing in signal generation reads it anymore,
+         same "leave the old constant in case of future reintroduction"
+         treatment already applied to MSNR_MAX_RR.
+         Also confirmed msnr_detect_signals()'s own **params call sites
+         (msnr_backtest_symbol, the live-scan chart-relink helper, and
+         both risk-autotune-adjacent grid-search call sites) never
+         build a params dict containing the old "sl_buffer_pct" key —
+         a direct grep confirmed zero matches — so the parameter rename
+         (sl_buffer_pct -> sl_buffer_mult) can't silently break any of
+         them with an unexpected-keyword TypeError.
+         Verified with py_compile after every edit, an actual runtime
+         start (inspect.signature() confirming the renamed parameter;
+         the exact arithmetic comparison above run directly), pyflakes
+         (clean), the Flask route/def integrity check (56 routes — a
+         pure signal-generation formula change, no routes/UI touched),
+         and an AST walk for duplicate top-level defs (none introduced).
 """
 
 import os
@@ -9431,7 +9496,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.103"
+APP_VERSION = "0.99.104"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9906,6 +9971,7 @@ MSNR_QM_ZONE_PCT = float(os.environ.get("VP_MSNR_QM_ZONE_PCT", 0.006))  # how cl
 MSNR_QM_LOOKBACK_BARS = int(os.environ.get("VP_MSNR_QM_LOOKBACK_BARS", 6))  # entry-TF bar cluster width the sweep and the close-back-inside confirmation are allowed to span, same idea as SESSION_MAX_THRUST_BARS
 MSNR_VOLUME_LOOKBACK_BARS = int(os.environ.get("VP_MSNR_VOLUME_LOOKBACK_BARS", 20))  # v0.99.59, per direct user request ("второй фильтр" — the volume-confirmation candidate discussed alongside the time-of-day one, v0.99.56): how many entry-TF bars BEFORE the sweep/QM candle set that candle's own volume baseline (mean of that trailing window, excluding the signal candle itself). The QM/SNR pattern's whole premise is that a sweep-and-reclaim reflects REAL institutional order flow — a sweep on genuinely low relative volume is a plausible tell that it doesn't, same reasoning already used for the time-of-day filter. Separate constant from FT5_VOLUME_AVG_PERIOD (70) rather than reusing it — that's tuned for FT5's own strategy/timeframe, no reason to assume the same window suits MSNR's typically-shorter MSNR_ENTRY_TF.
 MSNR_SL_BUFFER_PCT = float(os.environ.get("VP_MSNR_SL_BUFFER_PCT", 0.0015))
+MSNR_SL_BUFFER_MULT = float(os.environ.get("VP_MSNR_SL_BUFFER_MULT", 1.3))  # v0.99.104, per direct user report ("часто выбивает стоп и идёт куда надо цена"): the OLD sl_buffer_pct approach (extreme * (1 ± 0.15%)) barely widens the stop past the sweep's own extreme at all, regardless of how far that sweep actually moved — a live report of frequent premature stop-outs followed by the intended move happening anyway is the textbook symptom of a stop sitting too close to normal price noise/re-testing. Mirrors XAU_LG_SL_BUFFER_MULT's own SHAPE (see that constant's own comment): multiplies the RAW entry-to-sweep-extreme distance (already a real, price-action-derived risk measure) rather than adding a tiny fixed % on top of the bare extreme price — a stop that scales with how far the sweep itself moved, not a nudge that's nearly the same regardless. 1.3 is a starting default (30% wider than the raw sweep distance) — deliberately NOT wired into the global risk_autotune_pass() nudge system XAU_LG/SESSION/EMA/DIV use for their own SL multipliers: MSNR's own participation in that global system was disabled back in v0.99.52 in favor of its OWN, different tuning philosophy (msnr_symbol_sl_skip_min() and friends — per-symbol statistical significance tests, not a single global average-MAE nudge), and this stays consistent with that existing design rather than reintroducing the older mechanism just for this one constant. A static default, adjustable via the VP_MSNR_SL_BUFFER_MULT env var if real data suggests a different multiplier fits better.
 MSNR_FALLBACK_RR = float(os.environ.get("VP_MSNR_FALLBACK_RR", 4.0))  # used only when the opposite OCL level isn't confirmed yet (Storyline has just one side so far) — a placeholder TP, not the normal path
 MSNR_MAX_RR = float(os.environ.get("VP_MSNR_MAX_RR", 8.0))  # v0.99.11 — per direct user observation (SPCX: trades with rr>6 consistently hit stop, never TP) that a genuine opposite-level TP can sit SO far away the trade is structurally unlikely to ever reach it before reversing. When the real opposite level would produce rr > this cap, msnr_detect_signals() used to fall back to fallback_rr's fixed target instead. v0.99.52, per direct user question ("а проверка... таблица... что-то даёт вообще?" -> "уберём не работу"): the pooled-RR-bucket autotune this comment used to describe (risk_autotune_pass() calling _risk_autotune_msnr_max_rr() off msnr_rr_bucket_stats()) was DISABLED (commented out, not deleted) — this value stopped changing on its own. v0.99.68, per direct user request ("в оригинале... эта стратегия ловит движения с очень большим rr, даже если winrate около 20-30, у нас так не получается"): the cap ITSELF was removed from msnr_detect_signals() — it was silently substituting MSNR_FALLBACK_RR=4.0 for any genuinely-far opposite level, preventing exactly the large-RR/low-winrate trades the strategy is designed around, and keeping msnr_symbol_rr_skip_min()'s own per-symbol statistical filter blind to that entire RR range. This constant is now fully vestigial — nothing in signal generation reads it — left defined (still wired through settings/UI) only in case a future session wants to reintroduce a cap deliberately. The rr_buckets table itself still displays in the UI, informational only.
 MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE = int(os.environ.get("VP_MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE", 15))  # v0.99.22 — per direct user request: MSNR_MAX_RR above is a single GLOBAL cap tuned off trades pooled across every symbol, which was a deliberate compromise (a single symbol's own sample is usually too small to bucket reliably) but leaves no way to catch a symbol whose OWN rr-vs-outcome pattern is bad even though the pooled average looks fine. This is the min closed-trade count a single symbol's OWN rr bucket (see msnr_rr_bucket_stats()) needs before msnr_symbol_rr_skip_min() trusts it enough to skip live signals in that range for that symbol specifically — see msnr_optimize_symbol()'s own "skip_rr_min" field and msnr_scan_symbol_live().
@@ -16816,7 +16882,7 @@ def msnr_build_pivots(structure_candles, pivot_left=MSNR_PIVOT_LEFT, pivot_right
 def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_LEFT, pivot_right=MSNR_PIVOT_RIGHT,
                          min_leg_atr=MSNR_MIN_LEG_ATR, atr_period=MSNR_ATR_PERIOD,
                          qm_zone_pct=MSNR_QM_ZONE_PCT, qm_lookback=MSNR_QM_LOOKBACK_BARS,
-                         sl_buffer_pct=MSNR_SL_BUFFER_PCT, fallback_rr=MSNR_FALLBACK_RR):
+                         sl_buffer_mult=MSNR_SL_BUFFER_MULT, fallback_rr=MSNR_FALLBACK_RR):
     """Combined walk-forward pass, no lookahead — mirrors detect_session_
     manipulation()/xau_lg_detect_signals() in spirit. Builds confirmed A-
     shape/V-shape OCL pivots off structure_candles as it goes (via
@@ -16905,8 +16971,17 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
                 sweep_extreme = max(swept)
                 if level > 0 and (sweep_extreme - level) / level <= qm_zone_pct:
                     entry = c["close"]
-                    sl = sweep_extreme * (1 + sl_buffer_pct)
-                    risk = sl - entry
+                    # v0.99.104 — see MSNR_SL_BUFFER_MULT's own comment for
+                    # the full "why" (frequent premature stop-outs, the old
+                    # extreme*(1±tiny_pct) formula barely widened the stop
+                    # past the sweep's own extreme at all). raw_risk is the
+                    # sweep's OWN natural entry-to-extreme distance; the
+                    # actual risk/SL scales with how far that sweep already
+                    # moved, same "multiply the real risk distance" design
+                    # XAU_LG_SL_BUFFER_MULT already uses.
+                    raw_risk = sweep_extreme - entry
+                    risk = raw_risk * sl_buffer_mult
+                    sl = entry + risk
                     if risk > 0:
                         # TP is the paired V-shape ONLY if it's actually still
                         # ahead of price (below entry, for a SHORT) — a
@@ -16965,8 +17040,11 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
                 sweep_extreme = min(swept)
                 if level > 0 and (level - sweep_extreme) / level <= qm_zone_pct:
                     entry = c["close"]
-                    sl = sweep_extreme * (1 - sl_buffer_pct)
-                    risk = entry - sl
+                    # v0.99.104 — mirrors the SHORT branch above, see its
+                    # own comment for the full reasoning.
+                    raw_risk = entry - sweep_extreme
+                    risk = raw_risk * sl_buffer_mult
+                    sl = entry - risk
                     if risk > 0:
                         # v0.99.68 — same removal as the SHORT branch above
                         # (see its own comment for the full reasoning): no
