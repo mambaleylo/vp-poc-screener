@@ -9378,6 +9378,40 @@ v0.99.102 - Manual leverage/position-size selection removed entirely,
          check (56 routes — a pure sizing-logic and settings-UI change,
          no routes touched), and an AST walk for duplicate top-level
          defs (none introduced).
+
+v0.99.103 - MIRROR chart now draws the underlying support/resistance
+         level itself, per direct user request ("для зеркала сделай
+         отрисовку уровней, как строится сам сигнал, где зеркало
+         само"). api_mirror_chart() was already storing level_price/
+         level_type on every signal record (needed for the module's own
+         SL-width/pattern statistics) but had never actually included
+         them in its own JSON response to the frontend — added both
+         fields (plus pattern) to the response for both the live-signal
+         and backtest-trade lookup branches.
+         Frontend: drawVgiChart() (the SHARED chart-drawing function
+         Scalp/XAU LG/MSNR/FT5/MIRROR all reuse) gained one new
+         conditional call to its own existing drawLevelLine() helper —
+         the exact same dashed-line-with-label primitive already used
+         for ENTRY/SL/TP, so the new level line is visually consistent
+         by construction rather than a separate one-off drawing
+         routine, and harmlessly never draws for every other chart
+         type (they simply never have a level_price field to trigger
+         it). Labeled by level_type: "low" (a broken support price has
+         returned to from below, now acting as resistance — a SHORT
+         setup) vs "high" (broken resistance now acting as support — a
+         LONG setup), matching the terminology already used on the
+         Зеркало tab and in the earlier explanatory diagram. Also added
+         the pattern name (own RU labels, matching the tab's existing
+         ones) to the chart modal's own info line.
+         Verified with py_compile, an actual runtime start (a live
+         test_client() round-trip against /api/mirror/chart/<symbol>
+         confirming level_price/level_type/pattern all come through
+         correctly), pyflakes (clean), node --check on the correctly-
+         last <script> block, a real jsdom page execution (zero runtime
+         errors — confirms the new conditional level-line logic doesn't
+         break rendering for chart types that never pass level_price),
+         and the Flask route/def integrity check (56 routes — no new
+         endpoints, existing one extended).
 """
 
 import os
@@ -9397,7 +9431,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.102"
+APP_VERSION = "0.99.103"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -20950,7 +20984,8 @@ def api_mirror_chart(symbol):
             if live_match:
                 found_sig = {"time": live_match["time"], "direction": live_match["direction"],
                               "entry": live_match["entry"], "sl": live_match["sl"], "tp": live_match["tp"],
-                              "pattern": live_match.get("pattern"), "rr": live_match.get("rr")}
+                              "pattern": live_match.get("pattern"), "rr": live_match.get("rr"),
+                              "level_price": live_match.get("level_price"), "level_type": live_match.get("level_type")}
                 found_result = live_match.get("result")
                 found_exit_time = live_match.get("exit_time")
                 found_exit_price = live_match.get("exit_price")
@@ -20959,7 +20994,8 @@ def api_mirror_chart(symbol):
                 if bt_match:
                     found_sig = {"time": bt_match["time"], "direction": bt_match["direction"],
                                   "entry": bt_match["entry"], "sl": bt_match["sl"], "tp": bt_match["tp"],
-                                  "pattern": bt_match.get("pattern"), "rr": bt_match.get("rr")}
+                                  "pattern": bt_match.get("pattern"), "rr": bt_match.get("rr"),
+                                  "level_price": bt_match.get("level_price"), "level_type": bt_match.get("level_type")}
                     found_result = bt_match.get("result")
                     found_exit_time = bt_match.get("exit_time")
                     if found_result == "WIN":
@@ -20976,6 +21012,8 @@ def api_mirror_chart(symbol):
             "symbol": symbol, "candles": candles[-250:], "time": found_sig["time"],
             "direction": found_sig["direction"], "entry": found_sig["entry"],
             "sl": found_sig["sl"], "tp": found_sig["tp"], "rr": found_sig.get("rr"),
+            "pattern": found_sig.get("pattern"),
+            "level_price": found_sig.get("level_price"), "level_type": found_sig.get("level_type"),
             "result": found_result, "exit_time": found_exit_time, "exit_price": found_exit_price,
         })
     except Exception as e:
@@ -24274,8 +24312,13 @@ async function openVgiChart(symbol, sigTime, endpoint, extraQuery = '') {
     const data = await (await fetch(`${endpoint}/${symbol}?time=${sigTime}${extraQuery}`)).json();
     if (data.error) { document.getElementById('vgiModalParams').textContent = data.error; return; }
     const resTxt = data.result ? ` · ${data.result}${data.exit_price !== null && data.exit_price !== undefined ? ' @ '+fmtNum(data.exit_price) : ''}` : ' · OPEN';
+    // v0.99.103 — pattern name, MIRROR-only field (harmlessly absent
+    // for every other chart type this same function draws), matching
+    // the RU labels already used on the Зеркало tab itself.
+    const mirrorPatternLabels = {inside_bar: 'внутренний бар', tweezers: 'пинцет', rails: 'рельсы', engulfing_doji: 'поглощение на дожи'};
+    const patternTxt = data.pattern ? ` · ${mirrorPatternLabels[data.pattern] || data.pattern}` : '';
     document.getElementById('vgiModalParams').textContent =
-      `${fmtDateTime(sigTime)} · ${data.direction} · entry ${fmtNum(data.entry)} · SL ${fmtNum(data.sl)} · TP ${fmtNum(data.tp)} · RR ${data.rr}${resTxt}`;
+      `${fmtDateTime(sigTime)} · ${data.direction} · entry ${fmtNum(data.entry)} · SL ${fmtNum(data.sl)} · TP ${fmtNum(data.tp)} · RR ${data.rr}${patternTxt}${resTxt}`;
     drawVgiChart(data);
   } catch (e) {
     document.getElementById('vgiModalParams').textContent = `ошибка загрузки: ${e}`;
@@ -24363,6 +24406,20 @@ function drawVgiChart(data) {
   drawLevelLine(entry, '#5a9fff', 'ENTRY');
   drawLevelLine(sl, '#ff6b6b', 'SL');
   drawLevelLine(tp, '#3ddc97', 'TP');
+  // v0.99.103, per direct user request ("для зеркала сделай отрисовку
+  // уровней, как строится сам сигнал, где зеркало само"): MIRROR-only
+  // field, harmlessly absent/undefined for every other chart type this
+  // SAME shared function draws (Scalp/XAU LG/MSNR/FT5) — reuses the
+  // exact same drawLevelLine() primitive already used for entry/SL/TP
+  // above, just one more dashed line, so it's visually consistent by
+  // construction rather than a separate one-off drawing routine.
+  // level_type "low" means a broken SUPPORT that price has returned to
+  // from below — it now acts as RESISTANCE (a SHORT setup); "high"
+  // means a broken RESISTANCE now acting as SUPPORT (a LONG setup).
+  if (data.level_price !== undefined && data.level_price !== null) {
+    const isLow = data.level_type === 'low';
+    drawLevelLine(data.level_price, '#c792ea', isLow ? 'ЗЕРКАЛО (быв. подд. → сопр.)' : 'ЗЕРКАЛО (быв. сопр. → подд.)');
+  }
 
   const sigIdx = candles.findIndex(c => c.time === data.time);
   if (sigIdx >= 0) {
