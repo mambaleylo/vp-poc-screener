@@ -9157,6 +9157,84 @@ v0.99.99 - Direct user follow-up: "продолжи, тайм аут тоже д
          pyflakes (clean), node --check on the correctly-last <script>
          block, and the Flask route/def integrity check (still 56
          routes — no new endpoints).
+
+v0.99.100 - CRITICAL FIX, live report: "После последних правок сломались
+         настройки, не применяются галочки и значения. Не приходят
+         уведомления msnr... Продолжи, а еще не открываются графики по
+         нажатию на сигнал." Backend checked first and found clean (a
+         live test_client() round-trip against /api/settings correctly
+         saved/returned msnr_max_rr and telegram_alerts_msnr; send_
+         telegram()'s own "msnr" category check intact; no duplicate
+         functions or object keys anywhere; py_compile/pyflakes/node
+         --check all clean) — ruled out a backend cause and, given the
+         user confirmed the displayed version already matched, also
+         ruled out the stale-deployment theory that explained an
+         earlier, similar-sounding confusion this session.
+         Actually reproduced the failure by installing jsdom and
+         running the REAL page (not just static analysis) — node --check
+         only validates syntax, never catches a runtime TypeError.
+         Found it: setInputs (the settings-checkbox DOM-mapping object)
+         still had a stray telegram_alerts_ema entry pointing at
+         document.getElementById('setTelegramEma') — an element removed
+         from the HTML back during EMA's own settings-group removal, one
+         single mapping entry missed in that pass. for (const key in
+         setInputs) { setInputs[key].onchange = ... } — the very loop
+         that wires up EVERY settings checkbox on page load — threw
+         `TypeError: Cannot set properties of null (setting 'onchange')`
+         the moment it reached this key, with no try/catch, killing ALL
+         further top-level script execution for that tick: every
+         setInputs key that would have been wired AFTER this one in
+         object-iteration order never got its onchange handler at all,
+         which is exactly "checkboxes/values don't apply" — and since
+         MSNR's own telegram_alerts_msnr checkbox is a later key,
+         toggling it visually never actually reached the backend either,
+         explaining the missing notifications as a symptom of the SAME
+         root cause, not a separate bug. ("Charts don't open" wasn't
+         independently reproduced under jsdom, but sits downstream of
+         the same halted-script-execution mechanism and is covered by
+         the same fix.) Removed the one stray entry; reran under jsdom
+         — the TypeError is gone.
+         While chasing this down, two false trails worth recording so a
+         future pass doesn't repeat them: (1) a naive `<div`/`</div>`
+         line-count "imbalance" turned out to be regex matches INSIDE
+         a CSS comment quoting old HTML as prose, and inside the
+         changelog docstring's own past-tense description of an HTML
+         fix — same class of false-positive as matching text in a
+         Python comment, just one layer removed (a comment inside the
+         real <style> block this time); (2) `src.index('</script>')`
+         (search from the start) found a docstring's own mention of
+         that literal string rather than the real closing tag —
+         needed `rindex()` (search from the end), matching the
+         discipline already used for the opening <script> tag.
+         Also found, while jsdom's error trace pointed at the settings-
+         wiring loop specifically: refreshEma()/openEmaChart()/
+         drawEmaChart() (EMA's own frontend removal, v0.99.95) and
+         openDivergenceChart()/drawDivergenceChart() (Divergence's own
+         removal, v0.99.85 — much earlier this session) had each left
+         their own whole rendering functions behind uncalled — genuine
+         dead code, confirmed via reference-counting each function name
+         (zero external callers beyond their own declaration and each
+         other) before removing anything. Cleaned these up along with
+         their own now-dead divModal/emaModal HTML shells and JS
+         variables (currentDivRow/currentDivData/currentEmaRow/
+         currentEmaData) and the window resize handler's own by-name
+         references to drawDivergenceChart()/drawEmaChart() — deleting
+         those two draw functions WITHOUT first removing the resize
+         handler's own calls to them would have reintroduced the exact
+         same class of bug (a function deleted while something else
+         still references it by name) that this whole version exists to
+         fix. windowParamsForInterval() (EMA-only, confirmed via
+         reference count) removed too; windowAroundTime()/
+         computeYRangeSimple() confirmed genuinely shared (live callers
+         outside the removed functions) and left untouched.
+         Verified with py_compile after every edit, pyflakes (clean),
+         a full jsdom-based real page execution (not just static
+         analysis) confirming zero runtime errors on load, a systematic
+         getElementById audit (130 calls across the whole script, zero
+         referencing a non-existent id — down from exactly 1 before this
+         fix), node --check on the correctly-last <script> block, and
+         the Flask route/def integrity check (still 56 routes — a pure
+         frontend fix, no routes touched).
 """
 
 import os
@@ -9176,7 +9254,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.99"
+APP_VERSION = "0.99.100"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21766,28 +21844,6 @@ INDEX_HTML = """<!doctype html>
   <div id="chartWrap"><canvas id="chartCanvas"></canvas></div>
 </div>
 
-<div id="divModal">
-  <div id="divModalHeader">
-    <div>
-      <h2 id="divModalTitle">-</h2>
-      <div id="divModalParams" class="dim" style="font-size:11px;margin-top:2px;"></div>
-    </div>
-    <button id="divCloseBtn">Закрыть</button>
-  </div>
-  <div id="divChartWrap"><canvas id="divChartCanvas"></canvas></div>
-</div>
-
-<div id="emaModal">
-  <div id="emaModalHeader">
-    <div>
-      <h2 id="emaModalTitle">-</h2>
-      <div id="emaModalParams" class="dim" style="font-size:11px;margin-top:2px;"></div>
-    </div>
-    <button id="emaCloseBtn">Закрыть</button>
-  </div>
-  <div id="emaChartWrap"><canvas id="emaChartCanvas"></canvas></div>
-</div>
-
 <div id="sessionModal">
   <div id="sessionModalHeader">
     <div>
@@ -22436,90 +22492,6 @@ async function refreshTuning() {
         <span class="status-open">OPEN: ${fmtStat(t.mae_r_open)}</span>
       </div>
     </details>`;
-}
-
-async function refreshEma() {
-  const status = await (await fetch('/api/ema/status')).json();
-  const rows = await (await fetch('/api/ema/signals')).json();
-
-  const tbody = document.querySelector('#emaTable tbody');
-  tbody.innerHTML = '';
-  document.getElementById('emptyMsg').style.display = (activeTab==='ema' && rows.length===0) ? 'block' : 'none';
-  for (const r of rows) {
-    const tr = document.createElement('tr');
-    let statusHtml;
-    const exitTitle = r.exit_time
-      ? `title="свеча закрытия: ${fmtTime(r.exit_time)} · O ${fmt(r.exit_candle?.open)} H ${fmt(r.exit_candle?.high)} L ${fmt(r.exit_candle?.low)} C ${fmt(r.exit_candle?.close)}"`
-      : '';
-    if (r.status === 'OPEN') {
-      statusHtml = `<span class="status-open">OPEN</span>`;
-    } else if (r.result === 'WIN') {
-      statusHtml = `<span class="win" ${exitTitle}>WIN @ ${fmt(r.exit_price)}${r.exit_time ? ' ('+fmtTime(r.exit_time)+')' : ''}</span>`;
-    } else if (r.result === 'LOSS') {
-      statusHtml = `<span class="loss" ${exitTitle}>LOSS @ ${fmt(r.exit_price)}${r.exit_time ? ' ('+fmtTime(r.exit_time)+')' : ''}</span>`;
-    } else {
-      statusHtml = `<span class="status-timeout">TIMEOUT</span>`;
-    }
-    tr.innerHTML = `<td>${r.symbol}</td>
-      <td class="${r.direction==='LONG'?'long':'short'}">${r.direction}</td>
-      <td class="dim">${r.interval || '-'}</td>
-      <td>${fmt(r.entry)}</td>
-      <td class="dim">${fmt(r.sl)}</td>
-      <td class="dim">${fmt(r.tp)}</td>
-      <td class="dim">${r.rr !== null && r.rr !== undefined ? r.rr : '-'}</td>
-      <td class="dim">${r.adx !== null && r.adx !== undefined ? r.adx : '-'}</td>
-      <td class="dim" title="на закрытии → полное окно 24ч">${fmtMfeMae(r, 'mfe_r')}</td>
-      <td class="dim" title="на закрытии → полное окно 24ч">${fmtMfeMae(r, 'mae_r')}</td>
-      <td>${statusHtml}</td>
-      <td class="dim">${fmtTime(r.time)}</td>`;
-    tr.onclick = () => openEmaChart(r);
-    tbody.appendChild(tr);
-  }
-
-  const s = status.stats || {};
-  const wr = s.winrate !== null && s.winrate !== undefined ? `${s.winrate}%` : '-';
-  const panel = document.getElementById('emaStatsPanel');
-  const cfg = status.config || {};
-  const mfeBlock = s.dataset_count ? `
-    <div style="margin-bottom:8px;"><b>MFE/MAE (R) на момент закрытия сделки</b> — сколько реально было хода в плюс/минус, пока сделка была ещё жива:<br>
-      <span class="win">WIN MFE: ${fmtStat(s.mfe_r_wins_at_close)}</span><br>
-      <span class="win">WIN MAE: ${fmtStat(s.mae_r_wins_at_close)}</span><br>
-      <span class="loss">LOSS MFE: ${fmtStat(s.mfe_r_losses_at_close)}</span><br>
-      <span class="loss">LOSS MAE: ${fmtStat(s.mae_r_losses_at_close)}</span><br>
-      <span class="dim">TIMEOUT реализованный R (не входит в винрейт, но реально двигает баланс): ${fmtStat(s.exit_r_timeouts)}</span>
-    </div>
-    <details style="margin-top:6px;">
-      <summary class="dim" style="cursor:pointer;font-size:12px;">Полное окно (24ч после сигнала, включая то, что было уже после закрытия — для оценки общего запаса, не для оценки конкретной сделки)</summary>
-      <div style="margin-top:8px;"><b>MFE (R):</b><br>
-        <span class="dim">все: ${fmtStat(s.mfe_r_all)}</span><br>
-        <span class="win">WIN: ${fmtStat(s.mfe_r_wins)}</span><br>
-        <span class="loss">LOSS: ${fmtStat(s.mfe_r_losses)}</span><br>
-        <span class="status-open">OPEN: ${fmtStat(s.mfe_r_open)}</span>
-      </div>
-      <div style="margin-top:6px;"><b>MAE (R):</b><br>
-        <span class="dim">все: ${fmtStat(s.mae_r_all)}</span><br>
-        <span class="win">WIN: ${fmtStat(s.mae_r_wins)}</span><br>
-        <span class="loss">LOSS: ${fmtStat(s.mae_r_losses)}</span><br>
-        <span class="status-open">OPEN: ${fmtStat(s.mae_r_open)}</span>
-      </div>
-    </details>` : '<div class="dim">Пока недостаточно закрытых сигналов для MFE/MAE.</div>';
-  const byInterval = status.stats_by_interval || {};
-  const intervalRows = (status.intervals || []).map(iv => {
-    const st = byInterval[iv] || {};
-    const ivWr = st.winrate !== null && st.winrate !== undefined ? `${st.winrate}%` : '-';
-    return `${iv}: <b>${ivWr}</b> (${st.wins||0}W/${st.losses||0}L, timeout ${st.timeouts||0}) · открытых: ${st.open||0}`;
-  }).join('<br>');
-  panel.innerHTML = `
-    <div class="dim" style="margin-bottom:10px;">
-      EMA ${cfg.len7}/${cfg.len14}/${cfg.len28} (${cfg.signal_type}${cfg.trend_filter ? ', с фильтром тренда' : ''})${cfg.invert_signals ? ' <span style="color:#ffcc55;font-weight:bold;">· РЕВЕРС ВКЛЮЧЁН</span>' : ''} · сканируются ТФ: ${(status.intervals||[]).join(', ')} ·
-      скан ${status.last_scan_duration!==null && status.last_scan_duration!==undefined ? status.last_scan_duration+'s' : '...'} ·
-      Винрейт (всё вместе): ${wr} (${s.wins||0}W / ${s.losses||0}L, timeout ${s.timeouts||0}) · открытых: ${s.open||0} · RR ср. ${s.rr_all ? s.rr_all.avg : '?'} (медиана ${s.rr_all ? s.rr_all.median : '?'}) · SL: ${cfg.sl_mode === 'atr' ? `ATR×${cfg.sl_atr_mult}` : `фикс. RR ${cfg.rr_fallback}`}${cfg.min_rr > 0 ? ` · мин. RR ${cfg.min_rr} (отсеяно: ${status.filtered_by_min_rr||0})` : ''}${cfg.adx_filter_enabled ? ` · ADX ≥ ${cfg.adx_min} (отсеяно: ${status.filtered_by_adx||0})` : ''}${cfg.min_gap_pct > 0 ? ` · мин. зазор ${cfg.min_gap_pct}% (отсеяно: ${status.filtered_by_min_gap||0})` : ''}
-    </div>
-    <div style="margin-bottom:10px;padding-top:6px;border-top:1px solid #1c2433;">
-      <b>По таймфреймам (для сравнения):</b><br>
-      <span style="font-size:13px;">${intervalRows}</span>
-    </div>
-    ${mfeBlock}`;
 }
 
 let scalpExpanded = null;
@@ -24062,7 +24034,6 @@ const setInputs = {
   mirror_enabled: document.getElementById('setMirror'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
-  telegram_alerts_ema: document.getElementById('setTelegramEma'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
   telegram_alerts_session: document.getElementById('setTelegramSession'),
   telegram_alerts_session_ny: document.getElementById('setTelegramSessionNy'),
@@ -24447,198 +24418,6 @@ function fmtNum(n) {
   return Number(n).toPrecision(6).replace(/\\.?0+$/,'').replace(/\\.$/, '');
 }
 
-// ---------------- Divergence chart modal ----------------
-const divModal = document.getElementById('divModal');
-document.getElementById('divCloseBtn').onclick = () => divModal.classList.remove('open');
-let currentDivRow = null;
-let currentDivData = null;
-
-async function openDivergenceChart(row) {
-  currentDivRow = row;
-  document.getElementById('divModalTitle').textContent = row.symbol;
-  document.getElementById('divModalParams').textContent = 'загрузка...';
-  divModal.classList.add('open');
-  try {
-    const data = await (await fetch(`/api/divergence/chart/${row.symbol}`)).json();
-    currentDivData = data;
-    document.getElementById('divModalParams').textContent =
-      `RSI дивергенция (${row.kind}) · ${row.direction} · entry ${fmt(row.entry)} · SL ${fmt(row.sl)} · TP ${fmt(row.tp)}`;
-    drawDivergenceChart(data, row);
-  } catch (e) {
-    console.error(e);
-  }
-}
-
-function drawDivergenceChart(data, row) {
-  const canvas = document.getElementById('divChartCanvas');
-  const wrap = document.getElementById('divChartWrap');
-  const dpr = window.devicePixelRatio || 1;
-  const W = wrap.clientWidth, H = wrap.clientHeight;
-  canvas.width = W * dpr; canvas.height = H * dpr;
-  const ctx = canvas.getContext('2d');
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, W, H);
-
-  const allCandles = data.candles || [];
-  const allRsi = data.rsi || [];
-  if (!allCandles.length) return;
-  // wider before-margin than other charts: pivots can sit up to left+right+rsi_window
-  // bars before the signal's own bar, not just a handful
-  const { start: winStart, end: winEnd } = windowAroundTime(allCandles, row && row.time, 30, 80);
-  const candles = allCandles.slice(winStart, winEnd);
-  const rsi = allRsi.slice(winStart, winEnd);
-  if (!candles.length) return;
-
-  const priceH = H * 0.62;
-  const rsiTop = priceH + 14;
-  const rsiH = H - rsiTop - 4;
-  const padRight = 54;
-  const chartW = W - padRight;
-
-  const n = candles.length;
-  const slot = chartW / n;
-  const bodyW = Math.max(1, slot * 0.6);
-  const xAt = (i) => i * slot + slot / 2;
-  const findIdx = (t) => candles.findIndex(c => c.time === t);
-
-  // ---- price panel ----
-  const { hi, lo } = computeYRangeSimple(candles, row && row.entry, row && row.sl, row && row.tp);
-  const range = hi - lo || 1;
-  const yP = (price) => (hi - price) / range * priceH;
-
-  candles.forEach((c, i) => {
-    const cx = xAt(i);
-    const up = c.close >= c.open;
-    ctx.strokeStyle = ctx.fillStyle = up ? '#3ddc97' : '#ff6b6b';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(cx, yP(c.high));
-    ctx.lineTo(cx, yP(c.low));
-    ctx.stroke();
-    const top = yP(Math.max(c.open, c.close));
-    const h = Math.max(1, Math.abs(yP(c.open) - yP(c.close)));
-    ctx.fillRect(cx - bodyW / 2, top, bodyW, h);
-  });
-
-  ctx.fillStyle = '#6b7688';
-  ctx.font = '10px sans-serif';
-  for (let i = 0; i <= 3; i++) {
-    const p = hi - (range * i / 3);
-    const yy = yP(p);
-    ctx.fillText(fmtNum(p), chartW + 4, yy + 3);
-    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
-    ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(chartW, yy); ctx.stroke();
-  }
-
-  // price pivot trendline — connects the two swing points the divergence was read from
-  let pi1 = -1, pi2 = -1;
-  const pivotType = row && row.kind === 'bearish' ? 'HIGH' : 'LOW';
-  if (row && row.time_p1 !== undefined && row.time_p2 !== undefined) {
-    pi1 = findIdx(row.time_p1);
-    pi2 = findIdx(row.time_p2);
-    if (pi1 >= 0 && pi2 >= 0) {
-      const x1 = xAt(pi1), x2 = xAt(pi2), y1 = yP(row.price_p1), y2 = yP(row.price_p2);
-      ctx.strokeStyle = '#ffcc55';
-      ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
-      ctx.fillStyle = '#ffcc55';
-      [[x1, y1], [x2, y2]].forEach(([x, y]) => { ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill(); });
-      ctx.font = 'bold 9px sans-serif';
-      ctx.fillText(`P1 ${pivotType} ${fmtNum(row.price_p1)}`, x1 + 5, y1 - 6);
-      ctx.fillText(`P2 ${pivotType} ${fmtNum(row.price_p2)}`, x2 + 5, y2 - 6);
-    }
-  }
-
-  // prominent banner — what our own code decided, directly on the image so
-  // it never depends on the (scrollable/croppable) header text above the canvas
-  if (row) {
-    const bannerColor = row.direction === 'SHORT' ? '#ff6b6b' : '#3ddc97';
-    ctx.fillStyle = 'rgba(5,7,12,0.75)';
-    ctx.fillRect(4, 4, 210, 18);
-    ctx.fillStyle = bannerColor;
-    ctx.font = 'bold 11px sans-serif';
-    ctx.fillText(`${(row.kind||'').toUpperCase()} DIVERGENCE -> ${row.direction}`, 8, 17);
-  }
-
-  if (row) {
-    drawLevelLine(ctx, yP(row.entry), chartW, '#5aa8ff', 'ENTRY ' + fmtNum(row.entry));
-    drawLevelLine(ctx, yP(row.sl), chartW, '#ff6b6b', 'SL ' + fmtNum(row.sl));
-    drawLevelLine(ctx, yP(row.tp), chartW, '#3ddc97', 'TP ' + fmtNum(row.tp));
-    const entryIdx = findCandleIndex(candles, row.time);
-    if (entryIdx >= 0) {
-      drawEntryMarker(ctx, entryIdx * slot + slot / 2, yP(row.entry), '#5aa8ff');
-    }
-  }
-
-  // ---- RSI panel ----
-  ctx.fillStyle = '#8b98ab';
-  ctx.font = '10px sans-serif';
-  ctx.fillText('RSI', 4, rsiTop + 10);
-
-  const yR = (v) => rsiTop + (100 - v) / 100 * rsiH;
-  ctx.setLineDash([3, 3]);
-  [30, 50, 70].forEach(v => {
-    ctx.strokeStyle = 'rgba(255,255,255,0.08)';
-    ctx.beginPath(); ctx.moveTo(0, yR(v)); ctx.lineTo(chartW, yR(v)); ctx.stroke();
-    ctx.fillStyle = '#555f70'; ctx.font = '9px sans-serif';
-    ctx.fillText(String(v), chartW + 4, yR(v) + 3);
-  });
-  ctx.setLineDash([]);
-
-  ctx.strokeStyle = '#c58cff';
-  ctx.lineWidth = 1.5;
-  ctx.beginPath();
-  let started = false;
-  rsi.forEach((v, i) => {
-    if (v === null || v === undefined) return;
-    const cx = xAt(i), cy = yR(v);
-    if (!started) { ctx.moveTo(cx, cy); started = true; } else { ctx.lineTo(cx, cy); }
-  });
-  ctx.stroke();
-
-  // RSI pivot trendline — RSI's OWN local extreme near each price pivot,
-  // not necessarily the same bar as the price pivot (rsi_time_p1/p2),
-  // falling back to the price pivot's own bar for older stored signals
-  // that predate this field.
-  if (row && row.rsi_p1 !== undefined && row.rsi_p2 !== undefined) {
-    const ri1 = row.rsi_time_p1 !== undefined ? findIdx(row.rsi_time_p1) : pi1;
-    const ri2 = row.rsi_time_p2 !== undefined ? findIdx(row.rsi_time_p2) : pi2;
-    if (ri1 >= 0 && ri2 >= 0) {
-      const x1 = xAt(ri1), x2 = xAt(ri2), y1 = yR(row.rsi_p1), y2 = yR(row.rsi_p2);
-      ctx.strokeStyle = '#ffcc55';
-      ctx.lineWidth = 2;
-      ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke();
-      ctx.fillStyle = '#ffcc55';
-      [[x1, y1], [x2, y2]].forEach(([x, y]) => { ctx.beginPath(); ctx.arc(x, y, 3, 0, Math.PI * 2); ctx.fill(); });
-      ctx.font = 'bold 9px sans-serif';
-      ctx.fillText(`RSI ${row.rsi_p1.toFixed(1)}`, x1 + 5, y1 - 6);
-      ctx.fillText(`RSI ${row.rsi_p2.toFixed(1)}`, x2 + 5, y2 - 6);
-    }
-  }
-}
-
-// ---------------- EMA chart modal ----------------
-const emaModal = document.getElementById('emaModal');
-document.getElementById('emaCloseBtn').onclick = () => emaModal.classList.remove('open');
-let currentEmaRow = null;
-let currentEmaData = null;
-
-async function openEmaChart(row) {
-  currentEmaRow = row;
-  document.getElementById('emaModalTitle').textContent = row.symbol;
-  document.getElementById('emaModalParams').textContent = 'загрузка...';
-  emaModal.classList.add('open');
-  try {
-    const data = await (await fetch(`/api/ema/chart/${row.symbol}?interval=${encodeURIComponent(row.interval || '')}`)).json();
-    currentEmaData = data;
-    document.getElementById('emaModalParams').textContent =
-      `EMA 7/14/28 · ${row.interval || ''} · ${row.direction} · entry ${fmt(row.entry)} · SL ${fmt(row.sl)} · TP ${fmt(row.tp)}`;
-    drawEmaChart(data, row);
-  } catch (e) {
-    console.error(e);
-  }
-}
-
 function windowAroundTime(candles, targetTime, beforeBars, totalBars) {
   let idx = candles.length - 1;
   if (targetTime !== undefined) {
@@ -24649,15 +24428,6 @@ function windowAroundTime(candles, targetTime, beforeBars, totalBars) {
   let end = Math.min(candles.length, start + totalBars);
   if (end - start < totalBars) start = Math.max(0, end - totalBars);
   return { start, end };
-}
-
-function windowParamsForInterval(interval) {
-  // a weekly bar covers ~52x more time than an hourly one — the same bar
-  // COUNT would span over a year, way more than needed to see the setup
-  if (interval === '1w') return { before: 6, total: 20 };
-  if (interval === '3d') return { before: 8, total: 25 };
-  if (interval === '1d') return { before: 10, total: 35 };
-  return { before: 15, total: 60 };
 }
 
 function computeYRangeSimple(candles, entry, sl, tp) {
@@ -24674,94 +24444,6 @@ function computeYRangeSimple(candles, entry, sl, tp) {
   const range = (hi - lo) || (hi * 0.02) || 1;
   const pad = range * 0.05;
   return { hi: hi + pad, lo: lo - pad };
-}
-
-function drawEmaChart(data, row) {
-  const canvas = document.getElementById('emaChartCanvas');
-  const wrap = document.getElementById('emaChartWrap');
-  const dpr = window.devicePixelRatio || 1;
-  const W = wrap.clientWidth, H = wrap.clientHeight;
-  canvas.width = W * dpr; canvas.height = H * dpr;
-  const ctx = canvas.getContext('2d');
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, W, H);
-
-  const allCandles = data.candles || [];
-  if (!allCandles.length) return;
-  const { before: emaBefore, total: emaTotal } = windowParamsForInterval(row && row.interval);
-  const { start: winStart, end: winEnd } = windowAroundTime(allCandles, row && row.time, emaBefore, emaTotal);
-  const candles = allCandles.slice(winStart, winEnd);
-  const ema7Full = data.ema7 || [], ema14Full = data.ema14 || [], ema28Full = data.ema28 || [];
-  const ema7 = ema7Full.slice(winStart, winEnd);
-  const ema14 = ema14Full.slice(winStart, winEnd);
-  const ema28 = ema28Full.slice(winStart, winEnd);
-  const padRight = 54;
-  const chartW = W - padRight;
-  const n = candles.length;
-  const slot = chartW / n;
-  const bodyW = Math.max(1, slot * 0.6);
-  const xAt = (i) => i * slot + slot / 2;
-
-  const { hi, lo } = computeYRangeSimple(candles, row && row.entry, row && row.sl, row && row.tp);
-  const range = hi - lo || 1;
-  const yP = (price) => (hi - price) / range * H;
-
-  candles.forEach((c, i) => {
-    const cx = xAt(i);
-    const up = c.close >= c.open;
-    ctx.strokeStyle = ctx.fillStyle = up ? '#3ddc97' : '#ff6b6b';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(cx, yP(c.high));
-    ctx.lineTo(cx, yP(c.low));
-    ctx.stroke();
-    const top = yP(Math.max(c.open, c.close));
-    const h = Math.max(1, Math.abs(yP(c.open) - yP(c.close)));
-    ctx.fillRect(cx - bodyW / 2, top, bodyW, h);
-  });
-
-  ctx.fillStyle = '#6b7688';
-  ctx.font = '10px sans-serif';
-  for (let i = 0; i <= 3; i++) {
-    const p = hi - (range * i / 3);
-    const yy = yP(p);
-    ctx.fillText(fmtNum(p), chartW + 4, yy + 3);
-    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
-    ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(chartW, yy); ctx.stroke();
-  }
-
-  const drawEmaLine = (values, color) => {
-    ctx.strokeStyle = color;
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    let started = false;
-    values.forEach((v, i) => {
-      if (v === null || v === undefined) return;
-      const cx = xAt(i), cy = yP(v);
-      if (!started) { ctx.moveTo(cx, cy); started = true; } else { ctx.lineTo(cx, cy); }
-    });
-    ctx.stroke();
-  };
-  drawEmaLine(ema7, '#2962FF');
-  drawEmaLine(ema14, '#FF6D00');
-  drawEmaLine(ema28, '#E53935');
-
-  ctx.fillStyle = 'rgba(5,7,12,0.75)';
-  ctx.fillRect(4, 4, 150, 40);
-  ctx.font = 'bold 10px sans-serif';
-  ctx.fillStyle = '#2962FF'; ctx.fillText('EMA 7', 8, 16);
-  ctx.fillStyle = '#FF6D00'; ctx.fillText('EMA 14', 8, 28);
-  ctx.fillStyle = '#E53935'; ctx.fillText('EMA 28', 8, 40);
-
-  if (row) {
-    drawLevelLine(ctx, yP(row.entry), chartW, '#5aa8ff', 'ENTRY ' + fmtNum(row.entry));
-    drawLevelLine(ctx, yP(row.sl), chartW, '#ff6b6b', 'SL ' + fmtNum(row.sl));
-    drawLevelLine(ctx, yP(row.tp), chartW, '#3ddc97', 'TP ' + fmtNum(row.tp));
-    const entryIdx = findCandleIndex(candles, row.time);
-    if (entryIdx >= 0) {
-      drawEntryMarker(ctx, entryIdx * slot + slot / 2, yP(row.entry), '#5aa8ff');
-    }
-  }
 }
 
 // ---------------- Session chart modal ----------------
@@ -25148,12 +24830,6 @@ function drawSessionChart(data) {
 window.addEventListener('resize', () => {
   if (modal.classList.contains('open') && currentData) {
     drawChart(currentData, currentRow);
-  }
-  if (divModal.classList.contains('open') && currentDivData) {
-    drawDivergenceChart(currentDivData, currentDivRow);
-  }
-  if (emaModal.classList.contains('open') && currentEmaData) {
-    drawEmaChart(currentEmaData, currentEmaRow);
   }
   if (sessionModal.classList.contains('open') && currentSessionData) {
     drawSessionChart(currentSessionData);
