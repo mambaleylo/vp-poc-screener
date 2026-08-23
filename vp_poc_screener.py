@@ -9235,6 +9235,66 @@ v0.99.100 - CRITICAL FIX, live report: "После последних право
          fix), node --check on the correctly-last <script> block, and
          the Flask route/def integrity check (still 56 routes — a pure
          frontend fix, no routes touched).
+
+v0.99.101 - Continued module removal (4th/5th/6th of 6): Session,
+         Session NY, XAU LG — frontend + settings phase, per direct
+         user request ("Пока удали из настроек и вкладки, а прогон
+         принудительно останови, хоть через слои кода"). Backend
+         functions/routes/STATE deliberately left in place for a later
+         pass (matching the established EMA precedent — settings/tabs
+         first, backend cleanup separately).
+         "Force-stop, even through code layers": SESSION_ENABLED/
+         SESSION_NY_ENABLED/XAU_LG_ENABLED hardcoded to False directly
+         at their own definition (no longer env-var-overridable) — all
+         6 of their own background loops (session_loop, session_live_
+         loop, session_ny_loop, session_ny_live_loop, xau_lg_backtest_
+         loop, xau_lg_live_loop) already gate on these flags at the top
+         of every iteration, confirmed by direct inspection. Caught a
+         real gap before it shipped: hardcoding the constant alone
+         wasn't enough — apply_settings() could still flip it back to
+         True via a plain API POST (verified live: posting session_
+         enabled=true actually re-enabled it). Removed session/session_
+         ny/xau_lg entirely from apply_settings() (all if-blocks,
+         global declarations), SETTINGS_KEYS, and get_settings() — the
+         only way to re-enable any of the three now is editing the
+         source itself, not any settings path.
+         While touching this exact area, found and removed two more
+         live-but-orphaned leftovers from EMA's own earlier removal
+         that had slipped through every previous pass: AUTOTRADE_
+         LEVERAGE_EMA (constant, never referenced by any live code) and
+         two get_settings() entries (telegram_alerts_ema, autotrade_ema)
+         pointing at still-defined-but-dead TELEGRAM_ALERTS_EMA/
+         AUTOTRADE_ENABLED_EMA constants.
+         Frontend: removed all 3 tabs, panels, reset buttons + their
+         wireResetButton() calls + CSS selector, 3 settings groups in
+         the modal, autotrade/leverage rows, Telegram-alert checkboxes,
+         panel-visibility switching + refresh calls (both call sites),
+         then — applying the exact lesson from v0.99.100's own critical
+         fix — the now-dead refreshSession()/refreshSessionNy()/
+         refreshXauLg() and their own helper chain (fmtSessionRow/
+         wireSessionRowClicks/openSessionDetail and Session NY's
+         equivalents), the openSessionChart/openSessionNyChart/
+         drawSessionChart trio (openXauLgChart separately — it wraps
+         the shared openVgiChart, confirmed via inspection, so removing
+         it needed no resize-handler change), and the resize handler's
+         own by-name reference to drawSessionChart/sessionModal/
+         currentSessionData (would have reintroduced the identical
+         class of bug fixed in v0.99.100 if skipped). Finished with the
+         SAME getElementById-audit discipline that caught that bug
+         originally: found the count at 15 dangling refs immediately
+         after the dead-function removal (all inside setInputs/
+         setValueInputs — the exact object that broke last time),
+         worked through each remaining entry across 3 separate edits,
+         and reran the audit after each one until it hit zero.
+         Verified with py_compile after every single edit, pyflakes
+         (clean), a live apply_settings() POST test proving session_
+         enabled/etc. can no longer be re-enabled via API, a full
+         getElementById audit (101 calls, zero dangling — down from
+         113 before this pass began), a real jsdom page execution
+         (zero runtime errors), node --check, the Flask route/def
+         integrity check (56 routes — backend routes deliberately
+         untouched this pass), and an AST walk for duplicate top-level
+         defs (none introduced).
 """
 
 import os
@@ -9254,7 +9314,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.100"
+APP_VERSION = "0.99.101"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9558,7 +9618,7 @@ HOURLY_STATS_INTERVAL_SEC = int(os.environ.get("VP_HOURLY_STATS_INTERVAL_SEC", 3
 # inside the range — trade the reversal, targeting the opposite side. Same
 # detection function is used for live scanning and historical backtesting.
 # ----------------------------------------------------------------------------
-SESSION_ENABLED = os.environ.get("VP_SESSION_ENABLED", "1") == "1"
+SESSION_ENABLED = False  # v0.99.101, per direct user request ("прогон принудительно останови, хоть через слои кода") — hardcoded, no longer env-var-overridable, so no stale persisted setting or forgotten env var can silently re-enable this while its own removal (settings/tabs first, backend later) is in progress
 SESSION_UTC_OFFSET_HOURS = float(os.environ.get("VP_SESSION_UTC_OFFSET_HOURS", 3))  # Moscow, fixed since 2014 (no DST) — deliberately not Europe/Kyiv+zoneinfo, see session_open_utc_ts() docstring for why
 SESSION_OPEN_HOUR_LOCAL = int(os.environ.get("VP_SESSION_OPEN_HOUR_LOCAL", 10))  # 10:00 at SESSION_UTC_OFFSET_HOURS ahead of UTC
 SESSION_RANGE_TF = os.environ.get("VP_SESSION_RANGE_TF", "5m")
@@ -9594,7 +9654,7 @@ SESSION_REFRESH_SEC = int(os.environ.get("VP_SESSION_REFRESH_SEC", 24 * 3600))  
 # session_ny_open_utc_ts() needs its own minute-aware implementation; the
 # original session_open_utc_ts() hardcodes minute=0.
 # ----------------------------------------------------------------------------
-SESSION_NY_ENABLED = os.environ.get("VP_SESSION_NY_ENABLED", "1") == "1"
+SESSION_NY_ENABLED = False  # v0.99.101, same hardcoded force-stop as SESSION_ENABLED above
 SESSION_NY_UTC_OFFSET_HOURS = float(os.environ.get("VP_SESSION_NY_UTC_OFFSET_HOURS", 3))  # same Moscow reference as the original — no DST, fixed UTC+3
 SESSION_NY_OPEN_HOUR_LOCAL = int(os.environ.get("VP_SESSION_NY_OPEN_HOUR_LOCAL", 16))  # 16:30 Moscow = New York open
 SESSION_NY_OPEN_MINUTE_LOCAL = int(os.environ.get("VP_SESSION_NY_OPEN_MINUTE_LOCAL", 30))
@@ -9649,7 +9709,7 @@ SESSION_NY_SIGNAL_HISTORY = 200
 # stay where they were, right before the API section; see that location's
 # own short pointer comment.
 # ============================================================================
-XAU_LG_ENABLED = os.environ.get("VP_XAU_LG_ENABLED", "1") == "1"
+XAU_LG_ENABLED = False  # v0.99.101, same hardcoded force-stop as SESSION_ENABLED above
 XAU_LG_SYMBOLS = [s.strip() for s in os.environ.get("VP_XAU_LG_SYMBOLS", "XAU_USDT,XAUT_USDT,PAXG_USDT").split(",") if s.strip()]
 XAU_LG_TF = os.environ.get("VP_XAU_LG_TF", "15m")
 XAU_LG_EMA_PERIOD = int(os.environ.get("VP_XAU_LG_EMA_PERIOD", 30))
@@ -10069,12 +10129,12 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "session_enabled", "session_invert_signals", "session_ny_enabled", "session_ny_invert_signals", "xau_lg_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "mirror_enabled", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_session", "telegram_alerts_session_ny", "telegram_alerts_xau_lg", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "autotrade_session", "autotrade_session_ny", "autotrade_xau_lg", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "mirror_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror",
                   "autotrade_size_mode", "autotrade_size_value",
                   "scalp_size_mode", "scalp_size_value",
-                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_session", "autotrade_leverage_session_ny", "autotrade_leverage_xau_lg", "autotrade_leverage_ft5", "autotrade_leverage_msnr", "autotrade_leverage_mirror",
+                  "autotrade_leverage_bounce", "autotrade_leverage_breakout", "autotrade_leverage_ft5", "autotrade_leverage_msnr", "autotrade_leverage_mirror",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
@@ -10085,19 +10145,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
                   # plain module constants with NO persistence at all, so any
                   # manual env-var override would silently revert on restart
                   # too — now they follow the same rules as other autotune targets.
-                  "scalp_min_rr", "scalp_sl_buffer_mult", "session_sl_mult", "session_reverse_rr", "msnr_max_rr",
-                  # v0.99.64 — xau_lg_invert_signals/xau_lg_sl_buffer_mult/
-                  # xau_lg_rr: added to apply_settings()/get_settings() as
-                  # groundwork for bringing XAU LG to feature parity with
-                  # the other modules (chart display, invert mode, auto-
-                  # tuned SL/TP — per direct user request, in progress).
-                  # Listed here too so a manual settings change or a future
-                  # auto-tune adjustment to any of the three actually
-                  # persists across a restart, same as every other tunable
-                  # value above — leaving them out of SETTINGS_KEYS while
-                  # apply_settings() already accepts them would be a real
-                  # gap (settable, but silently reverting on reload).
-                  "xau_lg_invert_signals", "xau_lg_sl_buffer_mult", "xau_lg_rr")
+                  "scalp_min_rr", "scalp_sl_buffer_mult", "msnr_max_rr")
 
 
 def get_settings():
@@ -10107,14 +10155,6 @@ def get_settings():
         "breakout_enabled": BREAKOUT_ENABLED,
         "scalp_enabled": SCALP_ENABLED,
         "scalp_signals_enabled": SCALP_SIGNALS_ENABLED,
-        "session_enabled": SESSION_ENABLED,
-        "session_invert_signals": SESSION_INVERT_SIGNALS,
-        "session_ny_enabled": SESSION_NY_ENABLED,
-        "session_ny_invert_signals": SESSION_NY_INVERT_SIGNALS,
-        "xau_lg_enabled": XAU_LG_ENABLED,
-        "xau_lg_invert_signals": XAU_LG_INVERT_SIGNALS,
-        "xau_lg_sl_buffer_mult": XAU_LG_SL_BUFFER_MULT,
-        "xau_lg_rr": XAU_LG_RR,
         "ft5_enabled": FT5_ENABLED,
         "ft5_invert_signals": FT5_INVERT_SIGNALS,
         "mirror_enabled": MIRROR_ENABLED,
@@ -10126,11 +10166,7 @@ def get_settings():
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
         "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
-        "telegram_alerts_ema": TELEGRAM_ALERTS_EMA,
         "telegram_alerts_hourly": TELEGRAM_ALERTS_HOURLY,
-        "telegram_alerts_session": TELEGRAM_ALERTS_SESSION,
-        "telegram_alerts_session_ny": TELEGRAM_ALERTS_SESSION_NY,
-        "telegram_alerts_xau_lg": TELEGRAM_ALERTS_XAU_LG,
         "telegram_alerts_ft5": TELEGRAM_ALERTS_FT5,
         "telegram_alerts_msnr": TELEGRAM_ALERTS_MSNR,
         "telegram_alerts_mirror": TELEGRAM_ALERTS_MIRROR,
@@ -10138,11 +10174,7 @@ def get_settings():
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
         "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
         "autotrade_breakout": AUTOTRADE_ENABLED_BREAKOUT,
-        "autotrade_ema": AUTOTRADE_ENABLED_EMA,
         "autotrade_scalp": AUTOTRADE_ENABLED_SCALP,
-        "autotrade_session": AUTOTRADE_ENABLED_SESSION,
-        "autotrade_session_ny": AUTOTRADE_ENABLED_SESSION_NY,
-        "autotrade_xau_lg": AUTOTRADE_ENABLED_XAU_LG,
         "autotrade_ft5": AUTOTRADE_ENABLED_FT5,
         "autotrade_msnr": AUTOTRADE_ENABLED_MSNR,
         "autotrade_mirror": AUTOTRADE_ENABLED_MIRROR,
@@ -10152,9 +10184,6 @@ def get_settings():
         "scalp_size_value": SCALP_SIZE_VALUE,
         "autotrade_leverage_bounce": AUTOTRADE_LEVERAGE_BOUNCE,
         "autotrade_leverage_breakout": AUTOTRADE_LEVERAGE_BREAKOUT,
-        "autotrade_leverage_session": AUTOTRADE_LEVERAGE_SESSION,
-        "autotrade_leverage_session_ny": AUTOTRADE_LEVERAGE_SESSION_NY,
-        "autotrade_leverage_xau_lg": AUTOTRADE_LEVERAGE_XAU_LG,
         "autotrade_leverage_ft5": AUTOTRADE_LEVERAGE_FT5,
         "autotrade_leverage_msnr": AUTOTRADE_LEVERAGE_MSNR,
         "autotrade_leverage_mirror": AUTOTRADE_LEVERAGE_MIRROR,
@@ -10171,11 +10200,11 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, SESSION_ENABLED, SESSION_INVERT_SIGNALS, SESSION_NY_ENABLED, SESSION_NY_INVERT_SIGNALS, XAU_LG_ENABLED, XAU_LG_INVERT_SIGNALS, XAU_LG_SL_BUFFER_MULT, XAU_LG_RR, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT
-    global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY, TELEGRAM_ALERTS_SESSION
-    global TELEGRAM_ALERTS_SESSION_NY, TELEGRAM_ALERTS_XAU_LG, TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_SESSION, AUTOTRADE_ENABLED_SESSION_NY, AUTOTRADE_ENABLED_XAU_LG, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR
+    global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
+    global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR
     global AUTOTRADE_SIZE_MODE, AUTOTRADE_SIZE_VALUE
     global SCALP_SIZE_MODE, SCALP_SIZE_VALUE
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT, SESSION_SL_MULT, SESSION_REVERSE_RR
@@ -10189,32 +10218,6 @@ def apply_settings(updates):
         SCALP_ENABLED = bool(updates["scalp_enabled"])
     if "scalp_signals_enabled" in updates:
         SCALP_SIGNALS_ENABLED = bool(updates["scalp_signals_enabled"])
-    if "session_enabled" in updates:
-        SESSION_ENABLED = bool(updates["session_enabled"])
-    if "session_invert_signals" in updates:
-        SESSION_INVERT_SIGNALS = bool(updates["session_invert_signals"])
-    if "session_ny_enabled" in updates:
-        SESSION_NY_ENABLED = bool(updates["session_ny_enabled"])
-    if "session_ny_invert_signals" in updates:
-        SESSION_NY_INVERT_SIGNALS = bool(updates["session_ny_invert_signals"])
-    if "xau_lg_enabled" in updates:
-        XAU_LG_ENABLED = bool(updates["xau_lg_enabled"])
-    if "xau_lg_invert_signals" in updates:
-        XAU_LG_INVERT_SIGNALS = bool(updates["xau_lg_invert_signals"])
-    if "xau_lg_sl_buffer_mult" in updates:
-        try:
-            v = float(updates["xau_lg_sl_buffer_mult"])
-            if v > 0:
-                XAU_LG_SL_BUFFER_MULT = v
-        except (TypeError, ValueError):
-            pass
-    if "xau_lg_rr" in updates:
-        try:
-            v = float(updates["xau_lg_rr"])
-            if v > 0:
-                XAU_LG_RR = v
-        except (TypeError, ValueError):
-            pass
     if "ft5_enabled" in updates:
         FT5_ENABLED = bool(updates["ft5_enabled"])
     if "ft5_invert_signals" in updates:
@@ -10257,12 +10260,6 @@ def apply_settings(updates):
         TELEGRAM_ENABLED = bool(updates["telegram_enabled"])
     if "telegram_alerts_vp" in updates:
         TELEGRAM_ALERTS_VP = bool(updates["telegram_alerts_vp"])
-    if "telegram_alerts_session" in updates:
-        TELEGRAM_ALERTS_SESSION = bool(updates["telegram_alerts_session"])
-    if "telegram_alerts_session_ny" in updates:
-        TELEGRAM_ALERTS_SESSION_NY = bool(updates["telegram_alerts_session_ny"])
-    if "telegram_alerts_xau_lg" in updates:
-        TELEGRAM_ALERTS_XAU_LG = bool(updates["telegram_alerts_xau_lg"])
     if "telegram_alerts_ft5" in updates:
         TELEGRAM_ALERTS_FT5 = bool(updates["telegram_alerts_ft5"])
     if "telegram_alerts_msnr" in updates:
@@ -10277,12 +10274,6 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_BREAKOUT = bool(updates["autotrade_breakout"])
     if "autotrade_scalp" in updates:
         AUTOTRADE_ENABLED_SCALP = bool(updates["autotrade_scalp"])
-    if "autotrade_session" in updates:
-        AUTOTRADE_ENABLED_SESSION = bool(updates["autotrade_session"])
-    if "autotrade_session_ny" in updates:
-        AUTOTRADE_ENABLED_SESSION_NY = bool(updates["autotrade_session_ny"])
-    if "autotrade_xau_lg" in updates:
-        AUTOTRADE_ENABLED_XAU_LG = bool(updates["autotrade_xau_lg"])
     if "autotrade_ft5" in updates:
         AUTOTRADE_ENABLED_FT5 = bool(updates["autotrade_ft5"])
     if "autotrade_msnr" in updates:
@@ -10310,9 +10301,6 @@ def apply_settings(updates):
     for key, glob_name in (
         ("autotrade_leverage_bounce", "AUTOTRADE_LEVERAGE_BOUNCE"),
         ("autotrade_leverage_breakout", "AUTOTRADE_LEVERAGE_BREAKOUT"),
-        ("autotrade_leverage_session", "AUTOTRADE_LEVERAGE_SESSION"),
-        ("autotrade_leverage_session_ny", "AUTOTRADE_LEVERAGE_SESSION_NY"),
-        ("autotrade_leverage_xau_lg", "AUTOTRADE_LEVERAGE_XAU_LG"),
         ("autotrade_leverage_ft5", "AUTOTRADE_LEVERAGE_FT5"),
         ("autotrade_leverage_msnr", "AUTOTRADE_LEVERAGE_MSNR"),
         ("autotrade_leverage_mirror", "AUTOTRADE_LEVERAGE_MIRROR"),
@@ -21572,7 +21560,7 @@ INDEX_HTML = """<!doctype html>
   body { margin:0; background:#0b0e14; color:#d7dee8; font-family: -apple-system, Roboto, Segoe UI, sans-serif; }
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
   #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  #resetVolumeBtn, #resetScalpBtn, #resetSessionBtn, #resetSessionNyBtn, #resetXauLgBtn, #resetMsnrBtn, #resetFt5Btn, #resetMirrorBtn, #resetRiskAutotuneBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #resetVolumeBtn, #resetScalpBtn, #resetMsnrBtn, #resetFt5Btn, #resetMirrorBtn, #resetRiskAutotuneBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #settingsModal.open { display:flex; flex-direction:column; }
@@ -21780,9 +21768,6 @@ INDEX_HTML = """<!doctype html>
       <button id="settingsBtn">⚙️ Настройки</button>
       <button id="resetVolumeBtn">Очистить объём</button>
       <button id="resetScalpBtn">Очистить скальпинг</button>
-      <button id="resetSessionBtn">Очистить сессию</button>
-      <button id="resetSessionNyBtn">Очистить сессию NY</button>
-      <button id="resetXauLgBtn">Очистить XAU LG</button>
       <button id="resetMsnrBtn">Очистить MSNR</button>
       <button id="resetFt5Btn">Очистить FT5</button>
       <button id="resetMirrorBtn">Очистить Зеркало</button>
@@ -21802,9 +21787,6 @@ INDEX_HTML = """<!doctype html>
   <div class="tab active" data-tab="msnr">MSNR</div>
   <div class="tab" data-tab="signals">Volume</div>
   <div class="tab" data-tab="scalp">Скальпинг</div>
-  <div class="tab" data-tab="session">Сессия</div>
-  <div class="tab" data-tab="session_ny">Сессия NY</div>
-  <div class="tab" data-tab="xau_lg" style="color:#e0a030;">XAU LG ⚠️</div>
   <div class="tab" data-tab="ft5" style="color:#e0a030;">FT5 ⚠️</div>
   <div class="tab" data-tab="mirror">Зеркало</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
@@ -21819,9 +21801,6 @@ INDEX_HTML = """<!doctype html>
   </table>
   </div>
   <div id="scalpPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
-  <div id="sessionPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
-  <div id="sessionNyPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
-  <div id="xauLgPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="msnrPanel" style="display:block;padding:8px 4px;font-size:12px;"></div>
   <div id="ft5Panel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="mirrorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
@@ -21938,53 +21917,6 @@ INDEX_HTML = """<!doctype html>
     </div>
 
     <div class="settingsGroup">
-      <div class="settingsGroupTitle">Сессия</div>
-      <div class="settingRow">
-        <div>
-          <div class="label">Манипуляция на открытии</div>
-          <div class="sub">бэктест раз в сутки + живой скан в окне открытия Лондона</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setSession"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Реверс сигналов</div>
-          <div class="sub">торговать в обратную сторону; риск как у обычного стопа, тейк = RR×риска — сам RR и множитель стопа теперь управляются авто-тюнингом, см. вкладку Сессия</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setSessionInvert"><span class="switchSlider"></span></label>
-      </div>
-    </div>
-
-    <div class="settingsGroup">
-      <div class="settingsGroupTitle">Сессия NY</div>
-      <div class="settingRow">
-        <div>
-          <div class="label">Манипуляция на открытии (Нью-Йорк)</div>
-          <div class="sub">та же логика, что и обычная Сессия, но на открытии Нью-Йорка (16:30 Москва) — полностью независимый модуль, не влияет на Сессию выше</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setSessionNy"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Реверс сигналов (RR 2)</div>
-          <div class="sub">торговать в обратную сторону; риск как у обычного стопа, тейк = 2×риска</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setSessionNyInvert"><span class="switchSlider"></span></label>
-      </div>
-    </div>
-
-    <div class="settingsGroup">
-      <div class="settingsGroupTitle" style="color:#e0a030;">XAU Liquidity Grab ⚠️ Экспериментально</div>
-      <div class="settingRow">
-        <div>
-          <div class="label">Сканирование (только золото)</div>
-          <div class="sub">идея из непроверенного источника — см. предупреждение на вкладке. Автоторговля ниже выключена по умолчанию.</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setXauLg"><span class="switchSlider"></span></label>
-      </div>
-    </div>
-
-    <div class="settingsGroup">
       <div class="settingsGroupTitle" style="color:#e0a030;">MSNR ⚠️ Экспериментально</div>
       <div class="settingRow">
         <div>
@@ -22046,27 +21978,6 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">bounce/breakout сигналы и их закрытие</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramVp"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Алерты сессии</div>
-          <div class="sub">живые сигналы манипуляции на открытии</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramSession"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Алерты сессии NY</div>
-          <div class="sub">живые сигналы манипуляции на открытии Нью-Йорка</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramSessionNy"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Алерты XAU LG ⚠️</div>
-          <div class="sub">экспериментально — живые сигналы liquidity grab по золоту</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramXauLg"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -22174,31 +22085,11 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Сессия</div>
-          <div class="sub">плечо, если включено</div>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <input type="number" id="setAutotradeLevSession" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
-          <label class="switch"><input type="checkbox" id="setAutotradeSession"><span class="switchSlider"></span></label>
-        </div>
-      </div>
-      <div class="settingRow">
-        <div>
           <div class="label">↳ MSNR ⚠️</div>
           <div class="sub">плечо (общее на все монеты) — сам переключатель теперь индивидуальный на каждую монету, см. таблицу автотюнинга на вкладке MSNR (6 полей: золото + текущий топ-3 по винрейту)</div>
         </div>
         <div style="display:flex;align-items:center;gap:8px;">
           <input type="number" id="setAutotradeLevMsnr" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
-        </div>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Сессия NY</div>
-          <div class="sub">плечо, если включено</div>
-        </div>
-        <div style="display:flex;align-items:center;gap:8px;">
-          <input type="number" id="setAutotradeLevSessionNy" min="1" max="125" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
-          <label class="switch"><input type="checkbox" id="setAutotradeSessionNy"><span class="switchSlider"></span></label>
         </div>
       </div>
       <div class="settingRow">
@@ -22231,9 +22122,6 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('signalsTable').style.display = activeTab === 'signals' ? 'table' : 'none';
     document.getElementById('tuningPanel').style.display = activeTab === 'signals' ? 'block' : 'none';
     document.getElementById('scalpPanel').style.display = activeTab === 'scalp' ? 'block' : 'none';
-    document.getElementById('sessionPanel').style.display = activeTab === 'session' ? 'block' : 'none';
-    document.getElementById('sessionNyPanel').style.display = activeTab === 'session_ny' ? 'block' : 'none';
-    document.getElementById('xauLgPanel').style.display = activeTab === 'xau_lg' ? 'block' : 'none';
     document.getElementById('msnrPanel').style.display = activeTab === 'msnr' ? 'block' : 'none';
     document.getElementById('ft5Panel').style.display = activeTab === 'ft5' ? 'block' : 'none';
     document.getElementById('mirrorPanel').style.display = activeTab === 'mirror' ? 'block' : 'none';
@@ -22241,9 +22129,6 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('simulatorPanel').style.display = activeTab === 'simulator' ? 'block' : 'none';
     if (activeTab === 'signals') refreshTuning();
     if (activeTab === 'scalp') refreshScalp();
-    if (activeTab === 'session') refreshSession();
-    if (activeTab === 'session_ny') refreshSessionNy();
-    if (activeTab === 'xau_lg') refreshXauLg();
     if (activeTab === 'msnr') refreshMsnr();
     if (activeTab === 'ft5') refreshFt5();
     if (activeTab === 'mirror') refreshMirror();
@@ -22627,329 +22512,6 @@ async function openScalpDetail(symbol) {
   } catch (e) {
     detail.innerHTML = `<div class="dim">ошибка загрузки: ${e}</div>`;
   }
-}
-
-let sessionExpanded = null;
-
-function fmtSessionRow(r, rank) {
-  const wrClass = (r.win_rate === null || r.win_rate === undefined) ? 'dim' : (r.win_rate >= 50 ? 'win' : 'loss');
-  const sampleTag = r.meets_min_sample ? '' : '<span title="Меньше минимальной выборки — ненадёжно" style="color:#e0a030;">~</span>';
-  return `<tr data-symbol="${r.symbol}" style="cursor:pointer;">
-    <td class="dim">${rank}</td>
-    <td>${r.symbol}</td>
-    <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}${sampleTag}</td>
-    <td class="dim">n=${r.n}</td>
-    <td class="win">${r.wins}W</td>
-    <td class="loss">${r.losses}L</td>
-    <td class="status-timeout">${r.timeouts}T</td>
-  </tr>`;
-}
-
-async function refreshSession() {
-  const status = await (await fetch('/api/session/status')).json();
-  const signals = await (await fetch('/api/session/signals')).json();
-  const panel = document.getElementById('sessionPanel');
-  const cfg = status.config || {};
-  const ss = status.signals_stats || {};
-  const buildTxt = status.last_backtest_finished
-    ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · монет обработано: ${status.symbols_done}/${status.universe_size}`
-    : `первый бэктест ещё не завершился (${status.symbols_done}/${status.universe_size || '?'})`;
-  const nextOpenTxt = status.next_open_ts ? `следующее открытие сессии: ${fmtTime(status.next_open_ts)}` : '';
-  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
-  const watchTxt = Object.entries(status.watch_symbols || {}).map(([sym, w]) => {
-    const label = {ranked: 'в рейтинге', zero_manipulations_found: 'манипуляций не найдено', not_yet_processed: 'ещё считается', not_in_universe: 'не в вселенной'}[w.status] || w.status;
-    return `${sym}: ${label}${w.n !== null && w.n !== undefined ? ' (n='+w.n+')' : ''}`;
-  }).join(' · ');
-  const mfeMaeHtml = (ss.wins || ss.losses) ? `
-    <div style="margin-bottom:8px;"><b>MFE/MAE (R, R = риск конкретной сделки) на закрытии</b> — сколько реально было хода в плюс/минус к моменту исхода (${ss.wins||0}W/${ss.losses||0}L):<br>
-      <span class="win">WIN MFE: ${fmtStat(ss.mfe_r_wins_at_close)}</span><br>
-      <span class="win">WIN MAE: ${fmtStat(ss.mae_r_wins_at_close)}</span><br>
-      <span class="loss">LOSS MFE: ${fmtStat(ss.mfe_r_losses_at_close)}</span><br>
-      <span class="loss">LOSS MAE: ${fmtStat(ss.mae_r_losses_at_close)}</span><br>
-      <span class="dim" style="font-size:11px;">Только для реверс-режима (RR риск/тейк-based) — в обычном режиме тейк это край диапазона, R там не единая величина. Эти цифры теперь и питают авто-тюнинг SESSION_SL_MULT/RR.</span>
-    </div>` : '<div class="dim" style="margin-bottom:8px;">MFE/MAE статистика пока копится — нужны закрытые сделки.</div>';
-  const headerHtml = `
-    <div class="dim" style="margin-bottom:8px;">
-      Открытие сессии: ${cfg.open_hour_local}:00 (UTC+${cfg.utc_offset_hours}, фикс.) · диапазон проторговки: с ${cfg.range_start_utc_hour}:00 UTC до открытия, ТФ ${cfg.range_tf} ·
-      окно манипуляции: первые ${cfg.manipulation_window_min} мин после открытия · мин. выборка для ранжирования: ${cfg.min_sample}${cfg.invert_signals ? ` · <span style="color:#ffcc55;font-weight:bold;">РЕВЕРС ВКЛЮЧЁН (RR ${cfg.reverse_rr}, множитель стопа ${cfg.sl_mult})</span>` : ''}<br>
-      ${buildTxt} · ${nextOpenTxt}<br>
-      Монет в рейтинге: ${(status.top||[]).length} · манипуляций не найдено: ${status.zero_manipulation_count||0} · ещё не обработано: ${status.not_yet_processed_count||0}<br>
-      ${watchTxt}<br>
-      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
-      <span style="font-size:11px;">~ рядом с винрейтом = меньше минимальной выборки (${cfg.min_sample}) — цифра пока ненадёжна<br>
-      "манипуляций не найдено" = монета прошла отбор по ликвидности и была проверена, просто ни разу не дала подходящий паттерн — не исключена как неликвидная</span>
-    </div>
-    ${mfeMaeHtml}`;
-  const signalsRows = signals.map(s => {
-    const dirClass = s.direction === 'LONG' ? 'long' : 'short';
-    let statusHtml;
-    if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
-    else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
-    else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
-    else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
-    return `<tr data-symbol="${s.symbol}" data-session-open="${s.session_open}" style="cursor:pointer;">
-      <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td>
-      <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.sl)}</td><td class="dim">${fmt(s.tp)}</td>
-      <td>${statusHtml}</td><td class="dim">${fmtDateTime(s.session_open)}</td>
-    </tr>`;
-  }).join('');
-  const signalsTableHtml = signals.length ? `
-    <div style="overflow-x:auto;margin-bottom:14px;">
-    <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>Status</th><th>Открытие</th></tr></thead>
-      <tbody>${signalsRows}</tbody>
-    </table>
-    </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
-  if (!status.top || status.top.length === 0) {
-    setPanelHtml(panel, headerHtml + signalsTableHtml + '<div class="dim">Пока нет результатов бэктеста — либо ещё считается, либо ни у одной монеты не нашлось манипуляций.</div>');
-    wireSessionRowClicks();
-    return;
-  }
-  const rows = status.top.map((r, i) => fmtSessionRow(r, i + 1)).join('');
-  setPanelHtml(panel, headerHtml + signalsTableHtml + `
-    <div id="sessionDetail" style="margin-bottom:12px;"></div>
-    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (сортировка: сначала прошедшие мин. выборку, потом по винрейту):</div>
-    <div style="overflow-x:auto;">
-    <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>#</th><th>Symbol</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th><th>T</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    </div>`);
-  wireSessionRowClicks();
-}
-
-function wireSessionRowClicks() {
-  document.querySelectorAll('#sessionPanel tbody tr[data-session-open]').forEach(tr => {
-    tr.onclick = () => openSessionChart(tr.dataset.symbol, tr.dataset.sessionOpen);
-  });
-  document.querySelectorAll('#sessionPanel tbody tr[data-symbol]:not([data-session-open])').forEach(tr => {
-    tr.onclick = () => openSessionDetail(tr.dataset.symbol);
-  });
-}
-
-async function openSessionDetail(symbol) {
-  const detail = document.getElementById('sessionDetail');
-  if (sessionExpanded === symbol) {
-    detail.innerHTML = '';
-    sessionExpanded = null;
-    return;
-  }
-  sessionExpanded = symbol;
-  detail.innerHTML = '<div class="dim">загрузка...</div>';
-  try {
-    const j = await (await fetch(`/api/session/symbol/${symbol}`)).json();
-    if (j.error) { detail.innerHTML = `<div class="dim">${j.error}</div>`; return; }
-    const rows = (j.results || []).map(r => {
-      const dirClass = r.direction === 'LONG' ? 'long' : 'short';
-      const resClass = r.result === 'WIN' ? 'win' : (r.result === 'LOSS' ? 'loss' : 'status-timeout');
-      return `<span class="sessionDayLink" data-symbol="${symbol}" data-session-open="${r.session_open}" style="cursor:pointer;text-decoration:underline dotted;">${fmtDateTime(r.session_open)}: <span class="${dirClass}">${r.direction}</span> <span class="${resClass}">${r.result}</span></span>`;
-    }).join(' · ');
-    detail.innerHTML = `<div style="border-top:1px solid #1c2433;padding-top:8px;"><b>${symbol}</b> — история по дням (клик открывает график):<br>
-      <span style="font-size:11px;">${rows || 'нет данных'}</span></div>`;
-    detail.querySelectorAll('.sessionDayLink').forEach(el => {
-      el.onclick = () => openSessionChart(el.dataset.symbol, el.dataset.sessionOpen);
-    });
-  } catch (e) {
-    detail.innerHTML = `<div class="dim">ошибка загрузки: ${e}</div>`;
-  }
-}
-
-// ---------------- Session NY (New York open, v0.94.0) ----------------
-// Full duplicate of the block above, own STATE var/functions/endpoints
-// throughout — reuses only the already-generic formatters (fmt, fmtTime,
-// fmtDateTime) shared by the whole page, same as the Python side reuses
-// only pure helpers like get_candles_range/get_tickers.
-let sessionNyExpanded = null;
-
-function fmtSessionNyRow(r, rank) {
-  const wrClass = (r.win_rate === null || r.win_rate === undefined) ? 'dim' : (r.win_rate >= 50 ? 'win' : 'loss');
-  const sampleTag = r.meets_min_sample ? '' : '<span title="Меньше минимальной выборки — ненадёжно" style="color:#e0a030;">~</span>';
-  return `<tr data-symbol="${r.symbol}" style="cursor:pointer;">
-    <td class="dim">${rank}</td>
-    <td>${r.symbol}</td>
-    <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}${sampleTag}</td>
-    <td class="dim">n=${r.n}</td>
-    <td class="win">${r.wins}W</td>
-    <td class="loss">${r.losses}L</td>
-    <td class="status-timeout">${r.timeouts}T</td>
-  </tr>`;
-}
-
-async function refreshSessionNy() {
-  const status = await (await fetch('/api/session_ny/status')).json();
-  const signals = await (await fetch('/api/session_ny/signals')).json();
-  const panel = document.getElementById('sessionNyPanel');
-  const cfg = status.config || {};
-  const ss = status.signals_stats || {};
-  const buildTxt = status.last_backtest_finished
-    ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · монет обработано: ${status.symbols_done}/${status.universe_size}`
-    : `первый бэктест ещё не завершился (${status.symbols_done}/${status.universe_size || '?'})`;
-  const nextOpenTxt = status.next_open_ts ? `следующее открытие Нью-Йорка: ${fmtTime(status.next_open_ts)}` : '';
-  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
-  const watchTxt = Object.entries(status.watch_symbols || {}).map(([sym, w]) => {
-    const label = {ranked: 'в рейтинге', zero_manipulations_found: 'манипуляций не найдено', not_yet_processed: 'ещё считается', not_in_universe: 'не в вселенной'}[w.status] || w.status;
-    return `${sym}: ${label}${w.n !== null && w.n !== undefined ? ' (n='+w.n+')' : ''}`;
-  }).join(' · ');
-  const openMinTxt = String(cfg.open_minute_local || 0).padStart(2, '0');
-  const headerHtml = `
-    <div class="dim" style="margin-bottom:8px;">
-      Открытие Нью-Йорка: ${cfg.open_hour_local}:${openMinTxt} (UTC+${cfg.utc_offset_hours}, фикс.) · диапазон проторговки: с ${cfg.range_start_utc_hour}:00 UTC до открытия, ТФ ${cfg.range_tf} ·
-      окно манипуляции: первые ${cfg.manipulation_window_min} мин после открытия · мин. выборка для ранжирования: ${cfg.min_sample}${cfg.invert_signals ? ' · <span style="color:#ffcc55;font-weight:bold;">РЕВЕРС ВКЛЮЧЁН (RR 2)</span>' : ''}<br>
-      ${buildTxt} · ${nextOpenTxt}<br>
-      Монет в рейтинге: ${(status.top||[]).length} · манипуляций не найдено: ${status.zero_manipulation_count||0} · ещё не обработано: ${status.not_yet_processed_count||0}<br>
-      ${watchTxt}<br>
-      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
-      <span style="font-size:11px;">~ рядом с винрейтом = меньше минимальной выборки (${cfg.min_sample}) — цифра пока ненадёжна<br>
-      "манипуляций не найдено" = монета прошла отбор по ликвидности и была проверена, просто ни разу не дала подходящий паттерн — не исключена как неликвидная</span>
-    </div>`;
-  const signalsRows = signals.map(s => {
-    const dirClass = s.direction === 'LONG' ? 'long' : 'short';
-    let statusHtml;
-    if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
-    else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
-    else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
-    else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
-    return `<tr data-symbol="${s.symbol}" data-session-open="${s.session_open}" style="cursor:pointer;">
-      <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td>
-      <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.sl)}</td><td class="dim">${fmt(s.tp)}</td>
-      <td>${statusHtml}</td><td class="dim">${fmtDateTime(s.session_open)}</td>
-    </tr>`;
-  }).join('');
-  const signalsTableHtml = signals.length ? `
-    <div style="overflow-x:auto;margin-bottom:14px;">
-    <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>Status</th><th>Открытие</th></tr></thead>
-      <tbody>${signalsRows}</tbody>
-    </table>
-    </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
-  if (!status.top || status.top.length === 0) {
-    setPanelHtml(panel, headerHtml + signalsTableHtml + '<div class="dim">Пока нет результатов бэктеста — либо ещё считается, либо ни у одной монеты не нашлось манипуляций.</div>');
-    wireSessionNyRowClicks();
-    return;
-  }
-  const rows = status.top.map((r, i) => fmtSessionNyRow(r, i + 1)).join('');
-  setPanelHtml(panel, headerHtml + signalsTableHtml + `
-    <div id="sessionNyDetail" style="margin-bottom:12px;"></div>
-    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (сортировка: сначала прошедшие мин. выборку, потом по винрейту):</div>
-    <div style="overflow-x:auto;">
-    <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>#</th><th>Symbol</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th><th>T</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table>
-    </div>`);
-  wireSessionNyRowClicks();
-}
-
-function wireSessionNyRowClicks() {
-  document.querySelectorAll('#sessionNyPanel tbody tr[data-session-open]').forEach(tr => {
-    tr.onclick = () => openSessionNyChart(tr.dataset.symbol, tr.dataset.sessionOpen);
-  });
-  document.querySelectorAll('#sessionNyPanel tbody tr[data-symbol]:not([data-session-open])').forEach(tr => {
-    tr.onclick = () => openSessionNyDetail(tr.dataset.symbol);
-  });
-}
-
-async function openSessionNyDetail(symbol) {
-  const detail = document.getElementById('sessionNyDetail');
-  if (sessionNyExpanded === symbol) {
-    detail.innerHTML = '';
-    sessionNyExpanded = null;
-    return;
-  }
-  sessionNyExpanded = symbol;
-  detail.innerHTML = '<div class="dim">загрузка...</div>';
-  try {
-    const j = await (await fetch(`/api/session_ny/symbol/${symbol}`)).json();
-    if (j.error) { detail.innerHTML = `<div class="dim">${j.error}</div>`; return; }
-    const rows = (j.results || []).map(r => {
-      const dirClass = r.direction === 'LONG' ? 'long' : 'short';
-      const resClass = r.result === 'WIN' ? 'win' : (r.result === 'LOSS' ? 'loss' : 'status-timeout');
-      return `<span class="sessionNyDayLink" data-symbol="${symbol}" data-session-open="${r.session_open}" style="cursor:pointer;text-decoration:underline dotted;">${fmtDateTime(r.session_open)}: <span class="${dirClass}">${r.direction}</span> <span class="${resClass}">${r.result}</span></span>`;
-    }).join(' · ');
-    detail.innerHTML = `<div style="border-top:1px solid #1c2433;padding-top:8px;"><b>${symbol}</b> — история по дням (клик открывает график):<br>
-      <span style="font-size:11px;">${rows || 'нет данных'}</span></div>`;
-    detail.querySelectorAll('.sessionNyDayLink').forEach(el => {
-      el.onclick = () => openSessionNyChart(el.dataset.symbol, el.dataset.sessionOpen);
-    });
-  } catch (e) {
-    detail.innerHTML = `<div class="dim">ошибка загрузки: ${e}</div>`;
-  }
-}
-
-// ---------------- XAU Liquidity Grab (EXPERIMENTAL, v0.95.0) ----------------
-// Deliberately simpler than Session/Session NY — no per-symbol day-history
-// modal, no chart viewer. This is a provisional module built to test an
-// unverified Instagram-sourced strategy idea, not a polished feature; kept
-// minimal on purpose so it stays easy to find and delete if it doesn't
-// hold up (see the Python module's own header comment for the full
-// reasoning and source skepticism).
-async function refreshXauLg() {
-  const status = await (await fetch('/api/xau_lg/status')).json();
-  const signals = await (await fetch('/api/xau_lg/signals')).json();
-  const panel = document.getElementById('xauLgPanel');
-  const cfg = status.config || {};
-  const ss = status.signals_stats || {};
-  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
-  const buildTxt = status.last_backtest_finished
-    ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s)`
-    : 'бэктест ещё не завершился';
-  const warnHtml = `
-    <div style="background:#2a1f0e;border:1px solid #e0a030;border-radius:10px;padding:10px 14px;margin-bottom:12px;">
-      <b style="color:#e0a030;">⚠️ Экспериментально</b><br>
-      <span style="font-size:12px;color:#d9c08a;">Идея взята из поста в Instagram (заявлено 76% winrate / &lt;2% просадка) — источник непроверяемый, доверять цифрам со скриншота нельзя. Здесь — честный бэктест по нашим собственным данным без заглядывания вперёд. Автоторговля выключена по умолчанию.</span>
-    </div>`;
-  const headerHtml = `
-    <div class="dim" style="margin-bottom:8px;">
-      Символы: ${(status.symbols||[]).join(', ')} · ТФ ${cfg.tf} · EMA(${cfg.ema_period}) фильтр тренда · пивоты L${cfg.pivot_left}/R${cfg.pivot_right} · RR ${cfg.rr}${cfg.invert_signals ? ' · <span style="color:#e0a030;">РЕВЕРС ВКЛЮЧЁН</span>' : ''}${cfg.sl_buffer_mult && cfg.sl_buffer_mult !== 1 ? ` · SL×${cfg.sl_buffer_mult}` : ''}<br>
-      ${buildTxt}<br>
-      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0} · клик по строке — график
-    </div>`;
-  const signalsRows = signals.map(s => {
-    const dirClass = s.direction === 'LONG' ? 'long' : 'short';
-    let statusHtml;
-    if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
-    else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
-    else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
-    else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
-    return `<tr data-symbol="${s.symbol}" data-time="${s.time}" style="cursor:pointer;">
-      <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td>
-      <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.sl)}</td><td class="dim">${fmt(s.tp)}</td>
-      <td>${statusHtml}</td><td class="dim">${fmtDateTime(s.time)}</td>
-    </tr>`;
-  }).join('');
-  const signalsTableHtml = signals.length ? `
-    <div style="overflow-x:auto;margin-bottom:14px;">
-    <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>Status</th><th>Время</th></tr></thead>
-      <tbody>${signalsRows}</tbody>
-    </table>
-    </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
-  const btRows = (status.top || []).map(r => {
-    const wrClass = (r.win_rate === null || r.win_rate === undefined) ? 'dim' : (r.win_rate >= 50 ? 'win' : 'loss');
-    return `<tr>
-      <td>${r.symbol}</td>
-      <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
-      <td class="dim">n=${r.n}</td>
-      <td class="win">${r.wins}W</td>
-      <td class="loss">${r.losses}L</td>
-      <td class="status-timeout">${r.timeouts}T</td>
-    </tr>`;
-  }).join('');
-  const btTableHtml = (status.top || []).length ? `
-    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории, без заглядывания вперёд):</div>
-    <div style="overflow-x:auto;">
-    <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th><th>T</th></tr></thead>
-      <tbody>${btRows}</tbody>
-    </table>
-    </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
-  setPanelHtml(panel, warnHtml + headerHtml + signalsTableHtml + btTableHtml);
-  // v0.99.66, per direct user request ("графическое отображение
-  // графиков как везде"): same data-symbol/data-time + post-render
-  // wiring pattern refreshVgi() already uses.
-  panel.querySelectorAll('tbody tr[data-time]').forEach(tr => {
-    tr.onclick = () => openXauLgChart(tr.dataset.symbol, tr.dataset.time);
-  });
 }
 
 // ---------------- MSNR — Malaysian SNR / Storyline gold strategy (EXPERIMENTAL, v0.99.0) ----------------
@@ -23826,7 +23388,7 @@ async function refreshAutotrade() {
     (await fetch('/api/autotrade/log')).json(),
   ]);
   const panel = document.getElementById('autotradePanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5', mirror: 'Зеркало'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', ft5: 'FT5', mirror: 'Зеркало'};
   const enabledTxt = Object.entries(status.enabled)
     .map(([k, v]) => `<span class="${v ? 'win' : 'dim'}">${modeLabels[k]}: ${v ? 'вкл' : 'выкл'}</span>`)
     .join(' &nbsp;·&nbsp; ');
@@ -23886,7 +23448,7 @@ async function refreshSimulator() {
     (await fetch('/api/autotrade/status')).json(),
   ]);
   const panel = document.getElementById('simulatorPanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', session: 'Сессия', session_ny: 'Сессия NY', xau_lg: 'XAU LG', ft5: 'FT5', mirror: 'Зеркало'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', ft5: 'FT5', mirror: 'Зеркало'};
 
   const pnlClass = status.pnl_total >= 0 ? 'win' : 'loss';
   const sizeTxt = status.size_mode === 'percent' ? `${status.size_value}% от баланса` : `фикс. $${status.size_value}`;
@@ -23951,9 +23513,6 @@ async function refreshAll() {
   await refreshSignals();
   if (activeTab === 'signals') await refreshTuning();
   if (activeTab === 'scalp') await refreshScalp();
-  if (activeTab === 'session') await refreshSession();
-  if (activeTab === 'session_ny') await refreshSessionNy();
-  if (activeTab === 'xau_lg') await refreshXauLg();
   if (activeTab === 'msnr') await refreshMsnr();
   if (activeTab === 'ft5') await refreshFt5();
   if (activeTab === 'mirror') await refreshMirror();
@@ -23990,15 +23549,6 @@ wireResetButton('resetVolumeBtn', '/api/reset/volume',
 wireResetButton('resetScalpBtn', '/api/reset/scalp',
   'Удалить накопленную статистику скальпинга (вселенная, данные по монетам, рекомендации)? Остальное не тронет. Это необратимо.',
   'Очистить скальпинг');
-wireResetButton('resetSessionBtn', '/api/reset/session',
-  'Удалить накопленный бэктест и сигналы по манипуляции на открытии сессии? Остальное не тронет. Это необратимо.',
-  'Очистить сессию');
-wireResetButton('resetSessionNyBtn', '/api/reset/session_ny',
-  'Удалить накопленный бэктест и сигналы по манипуляции на открытии Нью-Йорка? Остальное (включая обычную Сессию) не тронет. Это необратимо.',
-  'Очистить сессию NY');
-wireResetButton('resetXauLgBtn', '/api/reset/xau_lg',
-  'Удалить накопленный бэктест и сигналы экспериментального XAU Liquidity Grab? Остальное не тронет. Это необратимо.',
-  'Очистить XAU LG');
 wireResetButton('resetMsnrBtn', '/api/reset/msnr',
   'Удалить накопленный бэктест и сигналы MSNR? Остальное не тронет. Это необратимо.',
   'Очистить MSNR');
@@ -24021,13 +23571,8 @@ const setInputs = {
   volume_profile_enabled: document.getElementById('setVolumeProfile'),
   bounce_enabled: document.getElementById('setBounce'),
   breakout_enabled: document.getElementById('setBreakout'),
-  session_invert_signals: document.getElementById('setSessionInvert'),
   scalp_enabled: document.getElementById('setScalp'),
   scalp_signals_enabled: document.getElementById('setScalpSignals'),
-  session_enabled: document.getElementById('setSession'),
-  session_ny_enabled: document.getElementById('setSessionNy'),
-  session_ny_invert_signals: document.getElementById('setSessionNyInvert'),
-  xau_lg_enabled: document.getElementById('setXauLg'),
   msnr_enabled: document.getElementById('setMsnr'),
   ft5_enabled: document.getElementById('setFt5'),
   ft5_invert_signals: document.getElementById('setFt5Invert'),
@@ -24035,9 +23580,6 @@ const setInputs = {
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
-  telegram_alerts_session: document.getElementById('setTelegramSession'),
-  telegram_alerts_session_ny: document.getElementById('setTelegramSessionNy'),
-  telegram_alerts_xau_lg: document.getElementById('setTelegramXauLg'),
   telegram_alerts_msnr: document.getElementById('setTelegramMsnr'),
   telegram_alerts_ft5: document.getElementById('setTelegramFt5'),
   telegram_alerts_mirror: document.getElementById('setTelegramMirror'),
@@ -24045,12 +23587,10 @@ const setInputs = {
   autotrade_bounce: document.getElementById('setAutotradeBounce'),
   autotrade_breakout: document.getElementById('setAutotradeBreakout'),
   autotrade_scalp: document.getElementById('setAutotradeScalp'),
-  autotrade_session: document.getElementById('setAutotradeSession'),
   // v0.99.18: autotrade_msnr checkbox removed from settings (replaced by
   // 6 individual per-symbol toggles in the MSNR panel itself) — no
   // longer mapped here, since setInputs[key].checked on a null element
   // (the DOM node no longer exists) would throw every time settings load
-  autotrade_session_ny: document.getElementById('setAutotradeSessionNy'),
   autotrade_mirror: document.getElementById('setAutotradeMirror'),
 };
 
@@ -24061,9 +23601,7 @@ const setValueInputs = {
   scalp_size_value: document.getElementById('setScalpSizeValue'),
   autotrade_leverage_bounce: document.getElementById('setAutotradeLevBounce'),
   autotrade_leverage_breakout: document.getElementById('setAutotradeLevBreakout'),
-  autotrade_leverage_session: document.getElementById('setAutotradeLevSession'),
   autotrade_leverage_msnr: document.getElementById('setAutotradeLevMsnr'),
-  autotrade_leverage_session_ny: document.getElementById('setAutotradeLevSessionNy'),
   autotrade_leverage_mirror: document.getElementById('setAutotradeLevMirror'),
   mirror_rr: document.getElementById('setMirrorRR'),
 };
@@ -24446,11 +23984,6 @@ function computeYRangeSimple(candles, entry, sl, tp) {
   return { hi: hi + pad, lo: lo - pad };
 }
 
-// ---------------- Session chart modal ----------------
-const sessionModal = document.getElementById('sessionModal');
-document.getElementById('sessionCloseBtn').onclick = () => sessionModal.classList.remove('open');
-let currentSessionData = null;
-
 // ---------------- MSNR chart modal ----------------
 const msnrModal = document.getElementById('msnrModal');
 document.getElementById('msnrCloseBtn').onclick = () => msnrModal.classList.remove('open');
@@ -24614,16 +24147,6 @@ function openScalpChart(symbol, interval, sigTime) {
   return openVgiChart(symbol, sigTime, '/api/scalp/chart', `&interval=${interval}`);
 }
 
-function openXauLgChart(symbol, sigTime) {
-  // v0.99.66, per direct user request ("графическое отображение
-  // графиков как везде"). Thin wrapper, not a duplicate — XAU LG's
-  // signal shape (fixed entry/sl/tp/direction/rr per signal) is
-  // structurally identical to VGI's, same reuse judgment already
-  // applied to Scalp/Session NY above rather than duplicating the
-  // canvas drawing code a third time.
-  return openVgiChart(symbol, sigTime, '/api/xau_lg/chart', '');
-}
-
 function openMirrorChart(symbol, sigTime) {
   // Same reuse judgment as openScalpChart/openXauLgChart above —
   // MIRROR's own signal shape (fixed entry/sl/tp/direction/rr) is
@@ -24712,127 +24235,9 @@ function drawVgiChart(data) {
   }
 }
 
-function openSessionNyChart(symbol, sessionOpen) {
-  // Thin wrapper, not a duplicate — reuses the exact same modal/canvas
-  // (openSessionChart/drawSessionChart) since this is pure chart-display
-  // code with zero effect on trading behavior, unlike the detection/
-  // execution logic above which IS fully duplicated per the user's
-  // explicit request. The optional 3rd param only changes which API
-  // endpoint gets fetched.
-  return openSessionChart(symbol, sessionOpen, '/api/session_ny/chart');
-}
-
-async function openSessionChart(symbol, sessionOpen, endpoint = '/api/session/chart') {
-  document.getElementById('sessionModalTitle').textContent = symbol;
-  document.getElementById('sessionModalParams').textContent = 'загрузка...';
-  sessionModal.classList.add('open');
-  try {
-    const data = await (await fetch(`${endpoint}/${symbol}?session_open=${sessionOpen}`)).json();
-    if (data.error) { document.getElementById('sessionModalParams').textContent = data.error; return; }
-    currentSessionData = data;
-    const sig = data.signal;
-    if (!sig) {
-      document.getElementById('sessionModalParams').textContent = `${fmtTime(sessionOpen)} · манипуляции в этот день не было`;
-    } else {
-      const resTxt = data.result ? ` · ${data.result}${data.exit_price ? ' @ '+fmtNum(data.exit_price) : ''}` : '';
-      document.getElementById('sessionModalParams').textContent =
-        `${fmtTime(sessionOpen)} · ${sig.direction} · entry ${fmtNum(sig.entry)} · SL ${fmtNum(sig.sl)} · TP ${fmtNum(sig.tp)}${resTxt}`;
-    }
-    drawSessionChart(data);
-  } catch (e) {
-    console.error(e);
-  }
-}
-
-function drawSessionChart(data) {
-  const canvas = document.getElementById('sessionChartCanvas');
-  const wrap = document.getElementById('sessionChartWrap');
-  const dpr = window.devicePixelRatio || 1;
-  const W = wrap.clientWidth, H = wrap.clientHeight;
-  canvas.width = W * dpr; canvas.height = H * dpr;
-  const ctx = canvas.getContext('2d');
-  ctx.scale(dpr, dpr);
-  ctx.clearRect(0, 0, W, H);
-
-  const candles = data.candles || [];
-  if (!candles.length) return;
-  const sig = data.signal;
-
-  const padRight = 54;
-  const chartW = W - padRight;
-  const n = candles.length;
-  const slot = chartW / n;
-  const bodyW = Math.max(1, slot * 0.6);
-  const xAt = (i) => i * slot + slot / 2;
-
-  const entry = sig ? sig.entry : undefined;
-  const sl = sig ? sig.sl : undefined;
-  const tp = sig ? sig.tp : undefined;
-  const { hi, lo } = computeYRangeSimple(candles, entry, sl, tp);
-  const range = hi - lo || 1;
-  const yP = (price) => (hi - price) / range * H;
-
-  if (sig) {
-    ctx.fillStyle = 'rgba(80,160,255,0.08)';
-    const topY = yP(sig.range_high), botY = yP(sig.range_low);
-    ctx.fillRect(0, Math.min(topY, botY), chartW, Math.abs(botY - topY));
-  }
-
-  candles.forEach((c, i) => {
-    const cx = xAt(i);
-    const up = c.close >= c.open;
-    ctx.strokeStyle = ctx.fillStyle = up ? '#3ddc97' : '#ff6b6b';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(cx, yP(c.high));
-    ctx.lineTo(cx, yP(c.low));
-    ctx.stroke();
-    const top = yP(Math.max(c.open, c.close));
-    const h = Math.max(1, Math.abs(yP(c.open) - yP(c.close)));
-    ctx.fillRect(cx - bodyW / 2, top, bodyW, h);
-  });
-
-  ctx.fillStyle = '#6b7688';
-  ctx.font = '10px sans-serif';
-  for (let i = 0; i <= 3; i++) {
-    const p = hi - (range * i / 3);
-    const yy = yP(p);
-    ctx.fillText(fmtNum(p), chartW + 4, yy + 3);
-    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
-    ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(chartW, yy); ctx.stroke();
-  }
-
-  const openIdx = candles.findIndex(c => c.time === data.session_open);
-  if (openIdx >= 0) {
-    const ox = xAt(openIdx);
-    ctx.strokeStyle = 'rgba(255,255,255,0.35)';
-    ctx.setLineDash([4, 3]);
-    ctx.beginPath(); ctx.moveTo(ox, 0); ctx.lineTo(ox, H); ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.fillStyle = '#ffffff';
-    ctx.font = 'bold 10px sans-serif';
-    ctx.fillText('OPEN', ox + 3, 12);
-  }
-
-  if (sig) {
-    drawLevelLine(ctx, yP(sig.range_high), chartW, '#5aa8ff', 'RANGE HIGH ' + fmtNum(sig.range_high));
-    drawLevelLine(ctx, yP(sig.range_low), chartW, '#5aa8ff', 'RANGE LOW ' + fmtNum(sig.range_low));
-    drawLevelLine(ctx, yP(sig.entry), chartW, '#e8b93d', 'ENTRY ' + fmtNum(sig.entry));
-    drawLevelLine(ctx, yP(sig.sl), chartW, '#ff6b6b', 'SL ' + fmtNum(sig.sl));
-    drawLevelLine(ctx, yP(sig.tp), chartW, '#3ddc97', 'TP ' + fmtNum(sig.tp));
-    const entryIdx = findCandleIndex(candles, sig.confirm_time);
-    if (entryIdx >= 0) {
-      drawEntryMarker(ctx, entryIdx * slot + slot / 2, yP(sig.entry), '#e8b93d');
-    }
-  }
-}
-
 window.addEventListener('resize', () => {
   if (modal.classList.contains('open') && currentData) {
     drawChart(currentData, currentRow);
-  }
-  if (sessionModal.classList.contains('open') && currentSessionData) {
-    drawSessionChart(currentSessionData);
   }
   if (msnrModal.classList.contains('open') && currentMsnrData) {
     drawMsnrChart(currentMsnrData);
