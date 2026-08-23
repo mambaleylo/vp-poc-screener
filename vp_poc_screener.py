@@ -9520,6 +9520,49 @@ v0.99.105 - MSNR autotrade master switch restored, live screenshot
          integrity check (56 routes — no new endpoints, existing
          settings pipeline extended), and an AST walk for duplicate
          top-level defs (none introduced).
+
+v0.99.106 - get_futures_total_equity() CRITICAL FIX, live report:
+         "у меня открыта уже сделка почти на весь баланс, из 80
+         долларов свободно 1.7, и получается весь баланс не увидел
+         индикатор" — a new trade sized as if total equity were only
+         the ~$1.7 still free, not the real ~$80 (available + the
+         other position's own locked margin). The user's own diagnosis
+         was exactly right, worked out from the numbers alone before
+         any code was even looked at.
+         Root cause: the account endpoint's own "position_margin"
+         field — what v0.99.102's own formula relied on for "margin
+         locked in open positions" — is marked DEPRECATED in Gate's
+         own official API changelog (confirmed directly against their
+         docs, not assumed: "position_margin marked as deprecated"
+         alongside "total field... only applicable to classic futures
+         accounts"). On an account using Gate's newer unified/
+         portfolio-margin structure (which Gate has been migrating
+         users toward), that field can silently read 0 or stale
+         regardless of how much margin is genuinely locked in a real
+         open position — exactly the reported symptom.
+         Fixed by switching to a source that isn't deprecated: summing
+         each individual open position's OWN "margin" field via the
+         already-existing get_open_positions() (GET /futures/usdt/
+         positions, already used elsewhere in this file, already
+         correctly filters to non-zero-size positions) instead of the
+         account-level aggregate. Same available+locked-margin shape
+         as before (still deliberately excludes unrealised_pnl and
+         order_margin — see this function's own v0.99.102 reasoning,
+         unchanged), just sourced from a field that stays accurate
+         regardless of which account structure Gate has the user on.
+         Verified with py_compile, an actual runtime start — mocked
+         gate_signed_request() to simulate exactly the reported
+         scenario (available=$1.70, the deprecated account-level
+         position_margin returning $0 as it apparently did live, one
+         real open position with its own margin=$78.30) and confirmed
+         get_futures_total_equity() now correctly returns $80.00, not
+         $1.70; a second test with multiple simultaneous positions
+         (one already-closed, size=0, correctly excluded) confirmed
+         the summation itself is correct, not a single-position
+         coincidence — pyflakes (clean), the Flask route/def integrity
+         check (56 routes — a pure balance-calculation fix, no routes/
+         UI touched), and an AST walk for duplicate top-level defs
+         (none introduced).
 """
 
 import os
@@ -9539,7 +9582,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.105"
+APP_VERSION = "0.99.106"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13287,14 +13330,14 @@ def get_futures_wallet_balance():
 
 
 def get_futures_total_equity():
-    """GET /futures/usdt/accounts — CONFIRMED (realized-basis) account
-    capital, used specifically for risk-based leverage/margin sizing
-    in execute_autotrade(). Deliberately NOT the same figure as
-    get_futures_wallet_balance()'s own "available" — that shrinks the
-    moment another position locks margin away, which is exactly the
-    bug the user reported: "Если сделка уже открыта какая-то, то
-    баланс становится меньше, из-за этого некорректно может
-    определяться плечо... а надо смотреть все равно на всю сумму
+    """GET /futures/usdt/accounts + /futures/usdt/positions — CONFIRMED
+    (realized-basis) account capital, used specifically for risk-based
+    leverage/margin sizing in execute_autotrade(). Deliberately NOT the
+    same figure as get_futures_wallet_balance()'s own "available" —
+    that shrinks the moment another position locks margin away, which
+    is exactly the bug the user reported: "Если сделка уже открыта
+    какая-то, то баланс становится меньше, из-за этого некорректно
+    может определяться плечо... а надо смотреть все равно на всю сумму
     денег на счету."
     v0.99.102 — computed as available + position_margin (free capital
     PLUS whatever's currently locked as margin in open positions), per
@@ -13308,10 +13351,24 @@ def get_futures_total_equity():
     deliberately left out too — that capital isn't "in a position"
     yet, and this app's own autotrade flow doesn't leave working
     limit orders sitting around (market entries, price-triggered
-    TP/SL) that would tie up order_margin for any meaningful stretch."""
+    TP/SL) that would tie up order_margin for any meaningful stretch.
+    v0.99.106 — CRITICAL FIX, live report: a $80 account with one open
+    position (using most of the margin) showed a new trade sized as if
+    total equity were only the ~$1.7 still free, not ~$80. Root cause:
+    the account endpoint's own "position_margin" field is marked
+    DEPRECATED in Gate's own official API changelog (confirmed via
+    their own docs: "position_margin marked as deprecated" alongside
+    "total field... only applicable to classic futures accounts") —
+    on an account using Gate's newer unified/portfolio-margin structure
+    (which Gate has been migrating users to), that field can silently
+    read 0 or stale regardless of real open-position margin. Switched
+    to summing each open position's OWN "margin" field via get_open_
+    positions() (GET /futures/usdt/positions) instead — a per-position
+    figure, not a deprecated account-level aggregate, so it stays
+    correct across both classic and newer account structures."""
     data = gate_signed_request("GET", "/futures/usdt/accounts")
     available = float(data.get("available", 0) or 0)
-    position_margin = float(data.get("position_margin", 0) or 0)
+    position_margin = sum(float(p.get("margin", 0) or 0) for p in get_open_positions())
     return available + position_margin
 
 
