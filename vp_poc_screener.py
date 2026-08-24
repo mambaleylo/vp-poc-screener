@@ -9823,6 +9823,67 @@ v0.99.111 - MIRROR live-eligibility minimum sample raised from 15 to
          integrity check (55 routes — a pure threshold/constant change,
          no new endpoints), and an AST walk for duplicate top-level defs
          (none introduced).
+
+v0.99.112 - CRITICAL FIX, live report (screenshot): a real LONG
+         autotrade attempt ending in bare ERROR, detail "HTTPSConnection
+         Pool(host='api.gateio.ws', port=443): Read timed out. (read
+         timeout=15)" — 9 such errors logged. Root cause: gate_signed_
+         request() had NO retry logic at all; a single transient
+         timeout anywhere in execute_autotrade()'s own multi-call flow
+         (balance fetch, leverage fetch, position check, the order
+         itself) aborted the whole thing straight to ERROR, potentially
+         wasting a genuinely good signal — or worse, if the timeout hit
+         AFTER order placement, silently abandoning a real, unprotected
+         position with no TP/SL.
+         Added gate_signed_request(..., retry_on_timeout=False) — an
+         opt-in flag, defaulting False so every existing caller's
+         behavior is unchanged. Each retry attempt regenerates the
+         timestamp/signature from scratch (not resending the same
+         signed payload) — Gate's own signature scheme has a timestamp
+         tolerance window, and reusing one from a request that already
+         waited out a full 15s timeout risked the retry itself being
+         rejected as stale. Opted in ONLY genuinely read-only or
+         idempotent calls: get_futures_total_equity(), get_futures_
+         wallet_balance(), get_open_positions() (all read-only GETs),
+         set_leverage() (idempotent — setting the same value twice has
+         no side effect). get_contract_spec() uses a separate, unsigned
+         public endpoint (no gate_signed_request() involved at all) —
+         gained its own equivalent small retry loop directly.
+         Deliberately did NOT add retry to place_market_order() itself
+         — if a timeout happens AFTER Gate's server already processed
+         the order but BEFORE the response reached this client, blindly
+         resending would place a SECOND, duplicate order, a materially
+         worse outcome than one wasted signal. Instead, execute_
+         autotrade()'s own call site now catches a timeout specifically
+         on that ONE call and checks the exchange directly (get_open_
+         positions(), the same ground-truth query the existing
+         duplicate-position guard already uses) — if the position
+         genuinely did open despite the timeout, synthesizes an order
+         record from the real position and continues to TP/SL
+         placement (protecting what would otherwise be a real,
+         unprotected position); if the position genuinely never landed,
+         re-raises and reports ERROR as before, with no duplicate risk
+         either way since nothing was opened.
+         Verified with py_compile after every edit, an actual runtime
+         start throughout: gate_signed_request() tested directly with a
+         mocked requests.request() forcing 2 timeouts then a success on
+         the 3rd attempt (confirmed exactly 3 attempts, 3 DIFFERENT
+         timestamps — proving each retry re-signs rather than resending
+         a stale signature) and, separately, confirmed retry_on_
+         timeout=False (every existing caller's own unaffected default)
+         still makes exactly 1 attempt before raising, identical to the
+         old behavior; get_contract_spec()'s own new retry loop tested
+         the same way (1 timeout then success, 2 total attempts); and —
+         the highest-stakes case — a full execute_autotrade() run with
+         place_market_order() mocked to always raise Timeout, tested
+         against BOTH branches: the exchange confirming a real position
+         despite the timeout (correctly reaches OPENED, not ERROR, with
+         an order_timeout_note explaining what happened) and the
+         exchange confirming NO position exists (correctly still
+         reaches ERROR, exactly as before this fix) — pyflakes (clean),
+         the Flask route/def integrity check (55 routes — a pure
+         reliability fix, no routes/UI touched), and an AST walk for
+         duplicate top-level defs (none introduced).
 """
 
 import os
@@ -9842,7 +9903,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.111"
+APP_VERSION = "0.99.112"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -10896,7 +10957,7 @@ def load_credentials():
         log_error(f"load_credentials: {e}")
 
 
-def gate_signed_request(method, url_path, query_string="", body=None, timeout=HTTP_TIMEOUT):
+def gate_signed_request(method, url_path, query_string="", body=None, timeout=HTTP_TIMEOUT, retry_on_timeout=False):
     """One request to Gate's authenticated futures API. url_path is the path
     only (e.g. "/futures/usdt/orders"), no host/prefix. body, if given, is
     the dict that will become the JSON payload — signed over its exact
@@ -10910,28 +10971,57 @@ def gate_signed_request(method, url_path, query_string="", body=None, timeout=HT
         raise RuntimeError("Gate.io API credentials not configured")
     payload_str = json.dumps(body) if body is not None else ""
     hashed_payload = hashlib.sha512(payload_str.encode("utf-8")).hexdigest()
-    ts = str(time.time())
     full_url_path = "/api/v4" + url_path
-    sign_string = f"{method}\n{full_url_path}\n{query_string}\n{hashed_payload}\n{ts}"
-    sign = hmac.new(GATE_API_SECRET.encode("utf-8"), sign_string.encode("utf-8"), hashlib.sha512).hexdigest()
-    headers = {
-        "KEY": GATE_API_KEY, "Timestamp": ts, "SIGN": sign,
-        "Accept": "application/json", "Content-Type": "application/json",
-    }
     url = f"{GATE_BASE_HOST}{full_url_path}"
     if query_string:
         url += f"?{query_string}"
-    r = requests.request(method, url, headers=headers, data=payload_str if body is not None else None, timeout=timeout)
-    if not r.ok:
-        # Gate's error responses carry a JSON body ({"label":..., "message":...})
-        # that raise_for_status()'s generic "400 Client Error" text throws away —
-        # exactly the detail needed to diagnose a rejected order without guessing.
+    # v0.99.112, per direct user report (screenshot: "HTTPSConnectionPool
+    # (host='api.gateio.ws', port=443): Read timed out. (read timeout=15)"
+    # during a real LONG autotrade attempt, 9 such errors in the log) —
+    # this function previously had NO retry at all; a single transient
+    # timeout anywhere in execute_autotrade()'s own multi-call flow
+    # aborted the whole thing straight to a bare ERROR, wasting a
+    # genuinely good signal. retry_on_timeout defaults to False (keeps
+    # every existing caller's behavior unchanged) — only READ-ONLY or
+    # genuinely IDEMPOTENT calls should ever opt into it. Deliberately
+    # NOT applied to order placement: if a timeout happens AFTER Gate's
+    # server already processed the order but BEFORE the response
+    # reached this client, blindly resending would place a SECOND,
+    # duplicate order — a much worse outcome than one wasted signal.
+    # Each retry attempt regenerates the timestamp/signature from
+    # scratch (not just resending the same signed payload) — Gate's own
+    # signature scheme has a timestamp tolerance window, and reusing a
+    # timestamp from a request that already waited out a full timeout
+    # once risks the retry itself being rejected as stale.
+    attempts = 3 if retry_on_timeout else 1
+    last_timeout_error = None
+    for attempt in range(attempts):
+        ts = str(time.time())
+        sign_string = f"{method}\n{full_url_path}\n{query_string}\n{hashed_payload}\n{ts}"
+        sign = hmac.new(GATE_API_SECRET.encode("utf-8"), sign_string.encode("utf-8"), hashlib.sha512).hexdigest()
+        headers = {
+            "KEY": GATE_API_KEY, "Timestamp": ts, "SIGN": sign,
+            "Accept": "application/json", "Content-Type": "application/json",
+        }
         try:
-            detail = r.json()
-        except Exception:
-            detail = r.text
-        raise requests.exceptions.HTTPError(f"{r.status_code} error for {method} {url_path}: {detail}", response=r)
-    return r.json() if r.text else None
+            r = requests.request(method, url, headers=headers, data=payload_str if body is not None else None, timeout=timeout)
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_timeout_error = e
+            if attempt < attempts - 1:
+                time.sleep(1)
+                continue
+            raise
+        if not r.ok:
+            # Gate's error responses carry a JSON body ({"label":..., "message":...})
+            # that raise_for_status()'s generic "400 Client Error" text throws away —
+            # exactly the detail needed to diagnose a rejected order without guessing.
+            try:
+                detail = r.json()
+            except Exception:
+                detail = r.text
+            raise requests.exceptions.HTTPError(f"{r.status_code} error for {method} {url_path}: {detail}", response=r)
+        return r.json() if r.text else None
+    raise last_timeout_error
 
 
 # ----------------------------------------------------------------------------
@@ -13284,9 +13374,23 @@ def get_contract_spec(symbol):
         cached = _contract_spec_cache.get(symbol)
         if cached and time.time() - cached["fetched_at"] < CONTRACT_SPEC_CACHE_TTL_SEC:
             return cached["spec"]
-    r = requests.get(f"{GATE_BASE}/futures/usdt/contracts/{symbol}", timeout=HTTP_TIMEOUT)
-    r.raise_for_status()
-    data = r.json()
+    # v0.99.112 — this is a public, unsigned endpoint (no gate_signed_
+    # request(), no timestamp/signature to regenerate), so a plain
+    # retry-on-timeout loop is enough — read-only, safe to retry.
+    last_timeout_error = None
+    data = None
+    for attempt in range(3):
+        try:
+            r = requests.get(f"{GATE_BASE}/futures/usdt/contracts/{symbol}", timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            data = r.json()
+            break
+        except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+            last_timeout_error = e
+            if attempt < 2:
+                time.sleep(1)
+    if data is None:
+        raise last_timeout_error
     spec = {
         "quanto_multiplier": float(data.get("quanto_multiplier", 0) or 0),
         "order_size_min": float(data.get("order_size_min", 1) or 1),
@@ -13338,10 +13442,14 @@ def set_leverage(symbol, leverage):
     """POST /futures/usdt/positions/{contract}/leverage — must be set
     before placing an order at that leverage; Gate doesn't take leverage as
     an order-placement parameter itself, it's a standing per-contract
-    position setting. Takes `leverage` as a query-string value."""
+    position setting. Takes `leverage` as a query-string value.
+    v0.99.112 — retry_on_timeout=True: setting leverage to the same
+    value repeatedly is idempotent (no side-effect risk from a retry,
+    unlike order placement), safe to opt into gate_signed_request()'s
+    own new retry mechanism."""
     return gate_signed_request(
         "POST", f"/futures/usdt/positions/{symbol}/leverage",
-        query_string=f"leverage={leverage}",
+        query_string=f"leverage={leverage}", retry_on_timeout=True,
     )
 
 
@@ -13622,8 +13730,12 @@ def get_futures_wallet_balance():
     check — both genuinely need the FREE/available figure, not total
     equity (you can't allocate margin the account doesn't actually
     have free right now, regardless of what's tied up in other open
-    positions)."""
-    data = gate_signed_request("GET", "/futures/usdt/accounts")
+    positions).
+    v0.99.112 — retry_on_timeout=True: a read-only GET, safe to retry
+    (no side effects), opts into gate_signed_request()'s own new retry
+    mechanism to survive a transient timeout without wasting an
+    otherwise-good signal upstream in execute_autotrade()."""
+    data = gate_signed_request("GET", "/futures/usdt/accounts", retry_on_timeout=True)
     return float(data.get("available", 0) or 0)
 
 
@@ -13663,8 +13775,12 @@ def get_futures_total_equity():
     to summing each open position's OWN "margin" field via get_open_
     positions() (GET /futures/usdt/positions) instead — a per-position
     figure, not a deprecated account-level aggregate, so it stays
-    correct across both classic and newer account structures."""
-    data = gate_signed_request("GET", "/futures/usdt/accounts")
+    correct across both classic and newer account structures.
+    v0.99.112 — retry_on_timeout=True: a read-only GET, safe to retry
+    (no side effects), opts into gate_signed_request()'s own new retry
+    mechanism to survive a transient timeout without wasting an
+    otherwise-good signal upstream in execute_autotrade()."""
+    data = gate_signed_request("GET", "/futures/usdt/accounts", retry_on_timeout=True)
     available = float(data.get("available", 0) or 0)
     position_margin = sum(float(p.get("margin", 0) or 0) for p in get_open_positions())
     return available + position_margin
@@ -13697,8 +13813,9 @@ def get_dual_mode():
 
 def get_open_positions():
     """GET /futures/usdt/positions — all positions, filtered to non-zero
-    size (Gate returns every contract ever touched, most with size=0)."""
-    data = gate_signed_request("GET", "/futures/usdt/positions")
+    size (Gate returns every contract ever touched, most with size=0).
+    v0.99.112 — retry_on_timeout=True: read-only, safe to retry."""
+    data = gate_signed_request("GET", "/futures/usdt/positions", retry_on_timeout=True)
     return [p for p in data if float(p.get("size", 0) or 0) != 0]
 
 
@@ -13958,7 +14075,39 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
                 log_error(f"execute_autotrade {symbol}: reconcile before open failed: {e}")
 
             set_leverage(symbol, leverage)
-            order = place_market_order(symbol, direction, contracts)
+            # v0.99.112, per direct user report (screenshot: a real LONG
+            # autotrade attempt ending in bare ERROR with "Read timed
+            # out" — 9 such errors logged): place_market_order() itself
+            # deliberately does NOT retry on timeout (see gate_signed_
+            # request()'s own docstring for why — a retry after a
+            # timeout that actually succeeded server-side would place a
+            # SECOND, duplicate order). But a bare timeout here still
+            # left real ambiguity: did the order land or not? Rather
+            # than assume failure and silently waste what might have
+            # been a genuinely opened, unprotected position, check the
+            # exchange directly — the same ground-truth query the
+            # duplicate-position guard above already uses.
+            try:
+                order = place_market_order(symbol, direction, contracts)
+            except (requests.exceptions.Timeout, requests.exceptions.ConnectionError) as e:
+                positions_after = get_open_positions()
+                matched = next((p for p in positions_after if p.get("contract") == symbol), None)
+                if matched:
+                    # It DID land — the timeout was purely on the response,
+                    # not the order itself. Synthesize an order record from
+                    # the real position so the rest of this flow (TP/SL
+                    # placement) proceeds normally instead of leaving a
+                    # real, unprotected position with no stop-loss.
+                    order = {"id": None, "fill_price": matched.get("entry_price")}
+                    record["extra"]["order_timeout_note"] = (
+                        f"place_market_order() itself timed out ({e}), but the exchange confirms "
+                        f"the position DID open — continuing to TP/SL placement rather than "
+                        f"abandoning an unprotected real position")
+                    log_error(f"execute_autotrade {symbol}: order placement timed out but position confirmed open on exchange — continuing")
+                else:
+                    # Genuinely never landed — safe to treat as a real failure,
+                    # nothing was opened, no risk of a phantom duplicate.
+                    raise
             record["order_id"] = order.get("id") if isinstance(order, dict) else None
             fill_price = None
             if isinstance(order, dict):
