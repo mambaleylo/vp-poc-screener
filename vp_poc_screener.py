@@ -9563,6 +9563,67 @@ v0.99.106 - get_futures_total_equity() CRITICAL FIX, live report:
          check (56 routes — a pure balance-calculation fix, no routes/
          UI touched), and an AST walk for duplicate top-level defs
          (none introduced).
+
+v0.99.107 - Two live reports handled in the same pass.
+         (1) CRITICAL FIX — duplicate positions on the same symbol,
+         seen at least in Scalp, possibly Mirror too ("увидел
+         одновременно несколько позиций активных по 1 монете с
+         разными а бывает и одинаковыми тейками/стопами"). Root cause:
+         a genuine TOCTOU race. execute_autotrade()'s own exchange-
+         position check (v0.99.53) and has_open_signal_any_module()
+         are both point-in-time checks, not atomic with the order
+         placement that follows — two near-simultaneous signals for
+         the SAME symbol (e.g. Scalp evaluating multiple intervals for
+         one coin in the same scan pass) could both see "no open
+         position yet" and both place real orders before either one's
+         own order became visible to the other's check.
+         Fixed with a new per-symbol lock (_get_symbol_trade_lock — a
+         dict of threading.Lock() keyed by symbol, not one global lock,
+         so different symbols still trade fully concurrently) wrapping
+         execute_autotrade()'s entire critical section (from the
+         exchange-position check through order placement) — the second
+         near-simultaneous call for the same symbol now blocks until
+         the first has fully committed, at which point its own exchange
+         check correctly finds the now-real position and skips.
+         Verified with a genuine multi-threaded test: two threads
+         calling execute_autotrade() for the same symbol at once, with
+         a mocked place_market_order() that appends to a shared fake-
+         positions list after a deliberate delay (widening the race
+         window that would expose the bug without the fix) — confirmed
+         exactly one real order placed (not two), one thread got
+         OPENED, the other correctly got SKIPPED. Separately confirmed
+         locks for different symbols are different objects (no
+         accidental global serialization dragging down unrelated
+         trades).
+         (2) MIRROR direction auto-gate, per direct user request (a
+         live example given: LONG winrate 11% vs SHORT 45% on the same
+         symbol — "если какая-то сторона подходит под авто торговлю то
+         в ней ещё можно брать сторону, которая лучше по винрейту, а
+         меньшую не торговать"). New mirror_symbol_direction_skip(),
+         same shape as the existing mirror_symbol_pattern_skip() (same
+         MIRROR_SYMBOL_SKIP_MIN_SAMPLE significance bar, same breakeven
+         threshold, no cascade needed — only 2 categories). Wired into
+         mirror_backtest_symbol() as a 4th filter stage (raw ->
+         sl_filter -> pattern_filter -> direction_filter, derived off
+         whatever survived the pattern filter) and into mirror_scan_
+         symbol_live()'s own firing check (a live signal whose
+         direction is in the symbol's own skip_direction set doesn't
+         fire, even though the symbol overall qualified for live
+         trading on the strength of its other side).
+         Verified directly against the user's own numbers: 18 LONG
+         trades at 11% winrate + 20 SHORT at 45% (RR=3, breakeven 25%)
+         — mirror_symbol_direction_skip() correctly returns {"LONG"}
+         only. Confirmed a thin sample doesn't false-trigger (5 LONG
+         trades with a bad winrate stayed unskipped, below the sample
+         floor). Full mirror_backtest_symbol() run with patterns evenly
+         mixed across both directions (isolating the direction filter
+         from the pattern filter) confirmed the 4-stage checkpoint
+         chain correctly shows n going 38->20 and winrate climbing
+         28.9%->45.0% once LONG gets filtered out.
+         Verified with py_compile after every edit, pyflakes (clean),
+         the Flask route/def integrity check (56 routes — pure backend
+         logic changes, no routes/UI touched), and an AST walk for
+         duplicate top-level defs (none introduced).
 """
 
 import os
@@ -9582,7 +9643,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.106"
+APP_VERSION = "0.99.107"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -10812,6 +10873,36 @@ def has_open_signal(symbol):
     running, regardless of which exact zone/direction produced it."""
     with state_lock:
         return any(s["symbol"] == symbol and s.get("status") == "OPEN" for s in STATE["signals"])
+
+
+_symbol_trade_locks = {}
+_symbol_trade_locks_meta_lock = threading.Lock()
+
+
+def _get_symbol_trade_lock(symbol):
+    """v0.99.107, per direct user report ("увидел одновременно несколько
+    позиций активных по 1 монете с разными а бывает и одинаковыми
+    тейками/стопами" — seen at least in Scalp, possibly Mirror too):
+    a per-symbol lock serializing execute_autotrade() calls for the
+    SAME symbol across every module. Closes a genuine TOCTOU race
+    execute_autotrade()'s own exchange-position check (v0.99.53) and
+    has_open_signal_any_module() above couldn't catch on their own:
+    both are simple point-in-time checks, not atomic with the order
+    placement that follows — if two near-simultaneous signals for the
+    SAME symbol (e.g. Scalp evaluating multiple intervals for one coin
+    in the same scan pass) both reach execute_autotrade() close enough
+    together, BOTH can see "no open position yet" and BOTH place real
+    orders before either one's own order becomes visible to the other's
+    check — exactly the reported duplicate-position, sometimes-
+    identical-TP/SL symptom. A dict of per-symbol locks (not one global
+    lock across all trading) so trades on DIFFERENT symbols still run
+    fully concurrently — only same-symbol calls actually serialize,
+    the second one blocking until the first has fully committed (order
+    placed, now visible on the exchange) or decided to skip."""
+    with _symbol_trade_locks_meta_lock:
+        if symbol not in _symbol_trade_locks:
+            _symbol_trade_locks[symbol] = threading.Lock()
+        return _symbol_trade_locks[symbol]
 
 
 def has_open_signal_any_module(symbol, exclude=None):
@@ -13510,186 +13601,188 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None):
         "dry_run": AUTOTRADE_DRY_RUN, "extra": extra or {},
         "status": None, "detail": None, "contracts": None, "order_id": None,
     }
-    try:
-        # total_equity drives the RISK TARGET (2% of confirmed capital,
-        # deliberately NOT shrunk by other open positions' locked
-        # margin — see get_futures_total_equity()'s own docstring for
-        # the full reasoning). wallet_balance (available) is fetched
-        # separately, further below, purely as an AFFORDABILITY check
-        # once the risk math has already decided on a margin amount —
-        # you can't allocate margin the account doesn't actually have
-        # free right now, regardless of what total_equity says.
-        total_equity = None
-        if not AUTOTRADE_DRY_RUN:
-            total_equity = get_futures_total_equity()
-        else:
-            # dry-run still needs a balance figure to show a realistic
-            # size/leverage in the log, but shouldn't require live
-            # credentials just to preview.
-            if GATE_API_KEY and GATE_API_SECRET:
-                try:
-                    total_equity = get_futures_total_equity()
-                except Exception:
-                    total_equity = 1000.0
-                    record["extra"]["balance_note"] = "fetch failed, used nominal $1000 for dry-run estimate"
+    lock = _get_symbol_trade_lock(symbol)
+    with lock:
+        try:
+            # total_equity drives the RISK TARGET (2% of confirmed capital,
+            # deliberately NOT shrunk by other open positions' locked
+            # margin — see get_futures_total_equity()'s own docstring for
+            # the full reasoning). wallet_balance (available) is fetched
+            # separately, further below, purely as an AFFORDABILITY check
+            # once the risk math has already decided on a margin amount —
+            # you can't allocate margin the account doesn't actually have
+            # free right now, regardless of what total_equity says.
+            total_equity = None
+            if not AUTOTRADE_DRY_RUN:
+                total_equity = get_futures_total_equity()
             else:
-                total_equity = 1000.0
-                record["extra"]["balance_note"] = "no credentials configured, used nominal $1000 for dry-run estimate"
+                # dry-run still needs a balance figure to show a realistic
+                # size/leverage in the log, but shouldn't require live
+                # credentials just to preview.
+                if GATE_API_KEY and GATE_API_SECRET:
+                    try:
+                        total_equity = get_futures_total_equity()
+                    except Exception:
+                        total_equity = 1000.0
+                        record["extra"]["balance_note"] = "fetch failed, used nominal $1000 for dry-run estimate"
+                else:
+                    total_equity = 1000.0
+                    record["extra"]["balance_note"] = "no credentials configured, used nominal $1000 for dry-run estimate"
 
-        try:
-            leverage_cap = get_contract_spec(symbol).get("leverage_max") or 125
-        except Exception as e:
-            leverage_cap = 125
-            log_error(f"execute_autotrade {symbol}: couldn't fetch leverage_max ({e}), using {leverage_cap}x as a conservative cap")
-
-        # mmr_pct comes from the same STATE["scalp_mmr_map"] the scalp
-        # module already refreshes every SCALP_REFRESH_SEC — MMR is a
-        # property of the Gate contract itself, not of which module is
-        # trading it, so reusing that cache instead of a fresh fetch is
-        # correct, not a shortcut. Falls back to SCALP_DEFAULT_MMR_PCT
-        # (a deliberately conservative default) for a symbol the scalp
-        # universe hasn't covered yet.
-        with state_lock:
-            mmr_map = STATE.get("scalp_mmr_map", {})
-        mmr_pct = mmr_map.get(symbol, SCALP_DEFAULT_MMR_PCT)
-
-        margin, leverage, skip_reason = compute_risk_based_position(
-            direction, entry, sl, leverage_cap, mmr_pct, total_equity)
-        record["leverage"] = leverage
-
-        if skip_reason:
-            record["status"] = "SKIPPED"
-            record["detail"] = skip_reason
-            with state_lock:
-                STATE["autotrade_log"].appendleft(record)
-            return record
-
-        # Affordability check — the derived margin, however "minimal"
-        # by the risk math above, still has to fit inside what's
-        # actually FREE right now (not locked in other open positions).
-        # total_equity deliberately doesn't shrink from other open
-        # positions (the whole point of this redesign), but real order
-        # placement obviously still needs real free margin to draw
-        # from — this is the same "computed margin exceeds available
-        # balance" guard the old sizing path always had, just moved
-        # here since margin is no longer computed inside compute_
-        # position_size() for this call path.
-        wallet_balance = None
-        if not AUTOTRADE_DRY_RUN:
-            wallet_balance = get_futures_wallet_balance()
-        elif GATE_API_KEY and GATE_API_SECRET:
             try:
-                wallet_balance = get_futures_wallet_balance()
-            except Exception:
-                pass
-        if wallet_balance is not None and margin > wallet_balance * 0.98:
-            record["status"] = "SKIPPED"
-            record["detail"] = (f"computed margin ${margin:.2f} exceeds available balance "
-                                 f"${wallet_balance:.2f} (with a 2% safety margin) — skipping rather than sending a doomed order")
+                leverage_cap = get_contract_spec(symbol).get("leverage_max") or 125
+            except Exception as e:
+                leverage_cap = 125
+                log_error(f"execute_autotrade {symbol}: couldn't fetch leverage_max ({e}), using {leverage_cap}x as a conservative cap")
+
+            # mmr_pct comes from the same STATE["scalp_mmr_map"] the scalp
+            # module already refreshes every SCALP_REFRESH_SEC — MMR is a
+            # property of the Gate contract itself, not of which module is
+            # trading it, so reusing that cache instead of a fresh fetch is
+            # correct, not a shortcut. Falls back to SCALP_DEFAULT_MMR_PCT
+            # (a deliberately conservative default) for a symbol the scalp
+            # universe hasn't covered yet.
             with state_lock:
-                STATE["autotrade_log"].appendleft(record)
-            return record
+                mmr_map = STATE.get("scalp_mmr_map", {})
+            mmr_pct = mmr_map.get(symbol, SCALP_DEFAULT_MMR_PCT)
 
-        contracts, notional, actual_margin, skip_reason = compute_contracts_from_margin(symbol, entry, margin, leverage)
-        record["contracts"] = contracts
-        record["notional_usd"] = round(notional, 2) if notional else notional
-        record["margin_usd"] = round(actual_margin, 2) if actual_margin else actual_margin
+            margin, leverage, skip_reason = compute_risk_based_position(
+                direction, entry, sl, leverage_cap, mmr_pct, total_equity)
+            record["leverage"] = leverage
 
-        if skip_reason:
-            record["status"] = "SKIPPED"
-            record["detail"] = skip_reason
-            with state_lock:
-                STATE["autotrade_log"].appendleft(record)
-            return record
-
-        if AUTOTRADE_DRY_RUN:
-            record["status"] = "DRY_RUN"
-            record["detail"] = f"would open {direction} {contracts} contracts on {symbol} @ {leverage}x, TP {tp} / SL {sl}"
-            with state_lock:
-                STATE["autotrade_log"].appendleft(record)
-            return record
-
-        # v0.99.53, per direct user question ("а проверка на уже
-        # открытую сделку на бирже есть?"): until now, every duplicate-
-        # position guard in this app (has_open_signal_any_module(), and
-        # MSNR's own v0.99.50 fix) only checked this app's OWN internal
-        # STATE — never the actual exchange. If STATE ever drifts from
-        # reality (a position closed on Gate before this app's own
-        # outcome-tracking loop caught up, a manual close via the Gate
-        # app itself, STATE getting reset/corrupted while a real
-        # position stayed open, two app instances sharing one Gate
-        # account, etc.) every one of those STATE-only checks would
-        # wave a genuinely duplicate order straight through with no way
-        # to catch it. This queries the exchange directly, right before
-        # placing a new order — the actual ground truth, not this app's
-        # belief about it. Placed AFTER the DRY_RUN branch above (a
-        # dry-run never touches the real account, nothing to check
-        # against) and BEFORE reconcile_positions_and_orders() below
-        # (no reason to run that cleanup pass first if this is about to
-        # skip anyway). Same fail-open defensive shape as the
-        # liquidation-safety check above it: if the exchange query
-        # itself fails, log it and proceed rather than blocking every
-        # future trade on one flaky API call — this check is additive
-        # insurance on top of the existing STATE-based guards, not
-        # their replacement, so losing it for one cycle isn't fatal the
-        # way losing the STATE-based checks entirely would be.
-        try:
-            existing_positions = get_open_positions()
-            if any(p.get("contract") == symbol for p in existing_positions):
+            if skip_reason:
                 record["status"] = "SKIPPED"
-                record["detail"] = f"{symbol} already has an open position on the exchange — skipping to avoid stacking a duplicate"
+                record["detail"] = skip_reason
                 with state_lock:
                     STATE["autotrade_log"].appendleft(record)
                 return record
-        except Exception as e:
-            log_error(f"execute_autotrade {symbol}: exchange position check failed ({e}), proceeding without it — this is exactly the kind of STATE/exchange desync this check exists to catch, so treat any recurrence as worth investigating")
 
-        try:
-            reconcile_positions_and_orders()
-        except Exception as e:
-            log_error(f"execute_autotrade {symbol}: reconcile before open failed: {e}")
-
-        set_leverage(symbol, leverage)
-        order = place_market_order(symbol, direction, contracts)
-        record["order_id"] = order.get("id") if isinstance(order, dict) else None
-        fill_price = None
-        if isinstance(order, dict):
-            fp = order.get("fill_price")
-            if fp:
+            # Affordability check — the derived margin, however "minimal"
+            # by the risk math above, still has to fit inside what's
+            # actually FREE right now (not locked in other open positions).
+            # total_equity deliberately doesn't shrink from other open
+            # positions (the whole point of this redesign), but real order
+            # placement obviously still needs real free margin to draw
+            # from — this is the same "computed margin exceeds available
+            # balance" guard the old sizing path always had, just moved
+            # here since margin is no longer computed inside compute_
+            # position_size() for this call path.
+            wallet_balance = None
+            if not AUTOTRADE_DRY_RUN:
+                wallet_balance = get_futures_wallet_balance()
+            elif GATE_API_KEY and GATE_API_SECRET:
                 try:
-                    fill_price = float(fp)
-                except (TypeError, ValueError):
-                    fill_price = None
-        record["fill_price"] = fill_price
+                    wallet_balance = get_futures_wallet_balance()
+                except Exception:
+                    pass
+            if wallet_balance is not None and margin > wallet_balance * 0.98:
+                record["status"] = "SKIPPED"
+                record["detail"] = (f"computed margin ${margin:.2f} exceeds available balance "
+                                     f"${wallet_balance:.2f} (with a 2% safety margin) — skipping rather than sending a doomed order")
+                with state_lock:
+                    STATE["autotrade_log"].appendleft(record)
+                return record
 
-        try:
-            tick = get_contract_spec(symbol).get("order_price_round")
-        except Exception:
-            tick = None
-        tp_rounded = round_to_tick(tp, tick)
-        sl_rounded = round_to_tick(sl, tick)
-        record["tp_rounded"] = tp_rounded
-        record["sl_rounded"] = sl_rounded
-        tp_order, sl_order, tp_sl_errors = place_tp_sl_orders(symbol, direction, tp_rounded, sl_rounded, tick=tick)
-        record["tick"] = tick
-        record["tp_order_id"] = tp_order.get("id") if isinstance(tp_order, dict) else None
-        record["sl_order_id"] = sl_order.get("id") if isinstance(sl_order, dict) else None
-        if tp_sl_errors:
-            record["status"] = "OPENED_TP_SL_FAILED"
-            record["detail"] = f"position opened but TP/SL placement had errors: {tp_sl_errors} — check the position manually"
-        else:
-            record["status"] = "OPENED"
-            record["detail"] = f"opened {direction} {contracts} contracts on {symbol} @ {leverage}x"
-        with state_lock:
-            STATE["autotrade_log"].appendleft(record)
-        return record
-    except Exception as e:
-        record["status"] = "ERROR"
-        record["detail"] = str(e)
-        log_error(f"execute_autotrade {mode} {symbol}: {e}")
-        with state_lock:
-            STATE["autotrade_log"].appendleft(record)
-        return record
+            contracts, notional, actual_margin, skip_reason = compute_contracts_from_margin(symbol, entry, margin, leverage)
+            record["contracts"] = contracts
+            record["notional_usd"] = round(notional, 2) if notional else notional
+            record["margin_usd"] = round(actual_margin, 2) if actual_margin else actual_margin
+
+            if skip_reason:
+                record["status"] = "SKIPPED"
+                record["detail"] = skip_reason
+                with state_lock:
+                    STATE["autotrade_log"].appendleft(record)
+                return record
+
+            if AUTOTRADE_DRY_RUN:
+                record["status"] = "DRY_RUN"
+                record["detail"] = f"would open {direction} {contracts} contracts on {symbol} @ {leverage}x, TP {tp} / SL {sl}"
+                with state_lock:
+                    STATE["autotrade_log"].appendleft(record)
+                return record
+
+            # v0.99.53, per direct user question ("а проверка на уже
+            # открытую сделку на бирже есть?"): until now, every duplicate-
+            # position guard in this app (has_open_signal_any_module(), and
+            # MSNR's own v0.99.50 fix) only checked this app's OWN internal
+            # STATE — never the actual exchange. If STATE ever drifts from
+            # reality (a position closed on Gate before this app's own
+            # outcome-tracking loop caught up, a manual close via the Gate
+            # app itself, STATE getting reset/corrupted while a real
+            # position stayed open, two app instances sharing one Gate
+            # account, etc.) every one of those STATE-only checks would
+            # wave a genuinely duplicate order straight through with no way
+            # to catch it. This queries the exchange directly, right before
+            # placing a new order — the actual ground truth, not this app's
+            # belief about it. Placed AFTER the DRY_RUN branch above (a
+            # dry-run never touches the real account, nothing to check
+            # against) and BEFORE reconcile_positions_and_orders() below
+            # (no reason to run that cleanup pass first if this is about to
+            # skip anyway). Same fail-open defensive shape as the
+            # liquidation-safety check above it: if the exchange query
+            # itself fails, log it and proceed rather than blocking every
+            # future trade on one flaky API call — this check is additive
+            # insurance on top of the existing STATE-based guards, not
+            # their replacement, so losing it for one cycle isn't fatal the
+            # way losing the STATE-based checks entirely would be.
+            try:
+                existing_positions = get_open_positions()
+                if any(p.get("contract") == symbol for p in existing_positions):
+                    record["status"] = "SKIPPED"
+                    record["detail"] = f"{symbol} already has an open position on the exchange — skipping to avoid stacking a duplicate"
+                    with state_lock:
+                        STATE["autotrade_log"].appendleft(record)
+                    return record
+            except Exception as e:
+                log_error(f"execute_autotrade {symbol}: exchange position check failed ({e}), proceeding without it — this is exactly the kind of STATE/exchange desync this check exists to catch, so treat any recurrence as worth investigating")
+
+            try:
+                reconcile_positions_and_orders()
+            except Exception as e:
+                log_error(f"execute_autotrade {symbol}: reconcile before open failed: {e}")
+
+            set_leverage(symbol, leverage)
+            order = place_market_order(symbol, direction, contracts)
+            record["order_id"] = order.get("id") if isinstance(order, dict) else None
+            fill_price = None
+            if isinstance(order, dict):
+                fp = order.get("fill_price")
+                if fp:
+                    try:
+                        fill_price = float(fp)
+                    except (TypeError, ValueError):
+                        fill_price = None
+            record["fill_price"] = fill_price
+
+            try:
+                tick = get_contract_spec(symbol).get("order_price_round")
+            except Exception:
+                tick = None
+            tp_rounded = round_to_tick(tp, tick)
+            sl_rounded = round_to_tick(sl, tick)
+            record["tp_rounded"] = tp_rounded
+            record["sl_rounded"] = sl_rounded
+            tp_order, sl_order, tp_sl_errors = place_tp_sl_orders(symbol, direction, tp_rounded, sl_rounded, tick=tick)
+            record["tick"] = tick
+            record["tp_order_id"] = tp_order.get("id") if isinstance(tp_order, dict) else None
+            record["sl_order_id"] = sl_order.get("id") if isinstance(sl_order, dict) else None
+            if tp_sl_errors:
+                record["status"] = "OPENED_TP_SL_FAILED"
+                record["detail"] = f"position opened but TP/SL placement had errors: {tp_sl_errors} — check the position manually"
+            else:
+                record["status"] = "OPENED"
+                record["detail"] = f"opened {direction} {contracts} contracts on {symbol} @ {leverage}x"
+            with state_lock:
+                STATE["autotrade_log"].appendleft(record)
+            return record
+        except Exception as e:
+            record["status"] = "ERROR"
+            record["detail"] = str(e)
+            log_error(f"execute_autotrade {mode} {symbol}: {e}")
+            with state_lock:
+                STATE["autotrade_log"].appendleft(record)
+            return record
 
 
 def sim_execute_trade(mode, symbol, direction, entry, sl, tp, leverage, signal_record, size_mode=None, size_value=None):
@@ -20094,6 +20187,36 @@ def mirror_track_outcome(candles, sig, max_wait_bars=MIRROR_MAX_WAIT_BARS):
     return "TIMEOUT", None
 
 
+def mirror_symbol_direction_skip(trades, rr=None):
+    """v0.99.107, per direct user request ("если какая-то сторона
+    подходит под авто торговлю то в ней ещё можно брать сторону,
+    которая лучше по винрейту, а меньшую не торговать" — a live example
+    given: LONG winrate 11% vs SHORT 45% on the same symbol): this
+    symbol's own set of statistically-failing DIRECTIONS. Same
+    significance bar (MIRROR_SYMBOL_SKIP_MIN_SAMPLE) and breakeven
+    threshold (100/(1+rr)) as mirror_symbol_pattern_skip()'s own per-
+    category check, same "no cascade" reasoning too — only 2
+    categories (LONG/SHORT), nothing to coarsen into if one lacks
+    sample. Returns a set containing 0, 1, or both of {"LONG", "SHORT"}
+    — in practice a symbol failing on BOTH sides shouldn't be live-
+    traded at all, which the overall winrate>MIRROR_LIVE_MIN_WINRATE
+    gate in mirror_backtest_loop() already handles separately; this
+    filter's own useful case is exactly the reported one — one side
+    clearly working, the other clearly not."""
+    rr = rr if rr is not None else MIRROR_RR
+    breakeven = 100.0 / (1.0 + rr) if rr > 0 else 100.0
+    skip = set()
+    for direction in ("LONG", "SHORT"):
+        d_trades = [t for t in trades if t.get("direction") == direction and t.get("result") in ("WIN", "LOSS")]
+        n = len(d_trades)
+        if n < MIRROR_SYMBOL_SKIP_MIN_SAMPLE:
+            continue
+        wins = sum(1 for t in d_trades if t["result"] == "WIN")
+        if wins / n * 100 < breakeven:
+            skip.add(direction)
+    return skip
+
+
 def mirror_backtest_symbol(symbol, days=MIRROR_BACKTEST_DAYS):
     """Fetches MIRROR_BACKTEST_DAYS of MIRROR_INTERVAL history, runs the
     detector + outcome tracker over the whole window, then applies this
@@ -20103,16 +20226,19 @@ def mirror_backtest_symbol(symbol, days=MIRROR_BACKTEST_DAYS):
     MSNR's own filters always use), then this symbol's own pattern
     filter (mirror_symbol_pattern_skip(), v0.99.98 — derived off
     whatever survived the SL filter, extending the same evidence chain
-    rather than starting over from raw). Returns (filtered_results,
-    meta) where meta = {"skip_sl_pct_min", "skip_pattern", "checkpoints"}
-    — checkpoints is a 3-entry before/after chain ("raw" -> "sl_filter"
-    -> "pattern_filter"), per direct user request ("по статистике
-    обязательно показывать до после как в msnr")."""
+    rather than starting over from raw), then this symbol's own
+    direction filter (mirror_symbol_direction_skip(), v0.99.107 —
+    derived off whatever survived the pattern filter, same evidence-
+    chain discipline). Returns (filtered_results, meta) where meta =
+    {"skip_sl_pct_min", "skip_pattern", "skip_direction", "checkpoints"}
+    — checkpoints is a 4-entry before/after chain ("raw" -> "sl_filter"
+    -> "pattern_filter" -> "direction_filter"), per direct user request
+    ("по статистике обязательно показывать до после как в msnr")."""
     now = time.time()
     fetch_start = now - days * 86400
     candles = get_candles_range(symbol, MIRROR_INTERVAL, fetch_start, now)
     if len(candles) < MIRROR_PIVOT_LEFT + MIRROR_PIVOT_RIGHT + 20:
-        return [], {"skip_sl_pct_min": None, "skip_pattern": [], "checkpoints": []}
+        return [], {"skip_sl_pct_min": None, "skip_pattern": [], "skip_direction": [], "checkpoints": []}
     sigs = mirror_detect_signals(candles)
     raw_results = []
     for sig in sigs:
@@ -20145,7 +20271,17 @@ def mirror_backtest_symbol(symbol, days=MIRROR_BACKTEST_DAYS):
     if skip_pattern:
         filtered = [r for r in filtered if r.get("pattern") not in skip_pattern]
     checkpoints.append({"stage": "pattern_filter", **_mirror_checkpoint(filtered)})
-    return filtered, {"skip_sl_pct_min": skip_sl_min, "skip_pattern": sorted(skip_pattern), "checkpoints": checkpoints}
+    # v0.99.107, per direct user report of a stark LONG/SHORT asymmetry
+    # (11% vs 45% winrate on the same symbol): same ordering discipline
+    # as the two filters above — derive off whatever survived the
+    # pattern filter, extending the chain rather than restarting from
+    # raw or from post-SL-only evidence.
+    skip_direction = mirror_symbol_direction_skip(filtered)
+    if skip_direction:
+        filtered = [r for r in filtered if r.get("direction") not in skip_direction]
+    checkpoints.append({"stage": "direction_filter", **_mirror_checkpoint(filtered)})
+    return filtered, {"skip_sl_pct_min": skip_sl_min, "skip_pattern": sorted(skip_pattern),
+                       "skip_direction": sorted(skip_direction), "checkpoints": checkpoints}
 
 
 def mirror_summarize_backtest(results):
@@ -20192,7 +20328,12 @@ def mirror_scan_symbol_live(symbol):
     a live signal whose own SL distance lands in the same statistically-
     bad-width zone the backtest found for this symbol gets skipped,
     same "trust this symbol's own bucket evidence" reasoning MSNR's own
-    skip_rr_min/skip_sl_pct_min live-firing checks already use."""
+    skip_rr_min/skip_sl_pct_min live-firing checks already use.
+    v0.99.107 — same reasoning extended to direction: a live signal
+    whose own direction (LONG/SHORT) is the one this symbol's backtest
+    found to be statistically failing gets skipped too, even if the
+    OTHER direction is genuinely strong enough for the symbol overall
+    to have qualified for live trading."""
     if not MIRROR_ENABLED:
         return
     try:
@@ -20209,11 +20350,15 @@ def mirror_scan_symbol_live(symbol):
         if sig["entry_idx"] != len(candles) - 1:
             return  # most recent signal isn't off the latest closed candle — already stale/handled
         with state_lock:
-            skip_sl_min = (STATE["mirror_symbol_overrides"].get(symbol) or {}).get("skip_sl_pct_min")
+            overrides = STATE["mirror_symbol_overrides"].get(symbol) or {}
+            skip_sl_min = overrides.get("skip_sl_pct_min")
+            skip_direction = set(overrides.get("skip_direction") or [])
         if skip_sl_min is not None and sig["entry"]:
             sig_sl_pct = abs(sig["entry"] - sig["sl"]) / sig["entry"] * 100
             if sig_sl_pct >= skip_sl_min:
                 return  # this symbol's own backtest says SL this wide fails here — skip, don't fire
+        if sig["direction"] in skip_direction:
+            return  # v0.99.107 — this symbol's own backtest says THIS direction fails here (the other side is fine) — skip, don't fire
         with _mirror_signal_cooldowns_lock:
             if _mirror_signal_cooldowns.get(symbol) == sig["entry_time"]:
                 return
