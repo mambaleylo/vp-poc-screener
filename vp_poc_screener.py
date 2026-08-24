@@ -9918,6 +9918,58 @@ v0.99.113 - MIRROR_LIVE_MIN_WINRATE raised 35->40, per direct user
          integrity check (55 routes — a pure constant change, no new
          endpoints), and an AST walk for duplicate top-level defs (none
          introduced).
+
+v0.99.114 - MIRROR filter-blocked-signal shadow tracking, per direct
+         user follow-up to v0.99.113's own explanation ("может без
+         применения фильтра было лучше, а после него стало хуже") — a
+         fair, pointed critique: every "this filter helps" claim so far
+         rested purely on the backtest's own retrospective self-
+         consistency (the filter was derived FROM, then judged AGAINST,
+         the exact same historical data), exactly the kind of circular
+         validation vulnerable to in-sample overfitting, especially
+         with a modest per-bucket sample (MIRROR_SYMBOL_SKIP_MIN_
+         SAMPLE=15) and a chained filter where each stage narrows what
+         the next one judges.
+         Rather than argue this abstractly, a signal the SL-width or
+         direction filter blocks from firing now gets recorded (new
+         STATE["mirror_filtered_signals"]) and tracked through the
+         EXACT same WIN/LOSS/TIMEOUT outcome logic as a real signal —
+         just never fired via execute_autotrade()/sim_execute_trade(),
+         no Telegram alert. Refactored the shared tracking body out of
+         update_mirror_signal_outcomes() into a new _mirror_track_
+         signal_outcomes(signal_key) so both pools (real and filtered)
+         run through the IDENTICAL logic, not a second, potentially-
+         drifting reimplementation. New compute_mirror_filtered_signal_
+         stats() (n/wins/losses/win_rate, plus a by_reason split
+         between sl_width- and direction-blocked signals — a filter
+         that's net harmful might only be so for one of the two, not
+         both) exposed via api_mirror_status()'s own new filtered_
+         signals_stats field. Persisted via save_state()/load_state()
+         so this pool survives a restart. Frontend: refreshMirror()
+         shows this pool right alongside the real "Живые сигналы" line
+         — real forward comparison the person can watch accumulate over
+         the coming weeks, not a one-time argument.
+         The mechanism itself makes no claim either way about whether
+         the filter is currently helping or hurting — that's exactly
+         the point: it turns an unresolvable backtest-vs-backtest
+         argument into something genuinely testable going forward, with
+         real, out-of-sample data.
+         Verified with py_compile after every edit, an actual runtime
+         start (mirror_scan_symbol_live() tested directly with a
+         synthetic signal deliberately built to trip the SL-width
+         filter — confirmed it lands in the filtered pool with the
+         correct filter_reason="sl_width" and does NOT reach the real
+         signals pool; manually closed it as WIN and confirmed compute_
+         mirror_filtered_signal_stats() correctly computes n=1, win_
+         rate=100.0, and the right by_reason breakdown; a live test_
+         client() /api/mirror/status round-trip confirming filtered_
+         signals_stats reaches the response), pyflakes (clean), a full
+         getElementById audit (95 calls, zero dangling), a real jsdom
+         page execution (zero runtime errors), node --check on the
+         correctly-last <script> block, the Flask route/def integrity
+         check (55 routes — no new endpoints, existing one extended),
+         and an AST walk for duplicate top-level defs (none
+         introduced).
 """
 
 import os
@@ -9937,7 +9989,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.113"
+APP_VERSION = "0.99.114"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -11181,6 +11233,7 @@ STATE = {
     "mirror_last_backtest_finished": None,
     "mirror_last_backtest_duration": None,
     "mirror_signals": deque(maxlen=MIRROR_SIGNAL_HISTORY),
+    "mirror_filtered_signals": deque(maxlen=MIRROR_SIGNAL_HISTORY),  # v0.99.114, per direct user question ("может без применения фильтра было лучше, а после него стало хуже"): signals the SL-width/direction filters would have blocked from firing, tracked through the exact same outcome logic (WIN/LOSS/TIMEOUT) as real live signals, but never actually traded — the only honest way to answer "does this filter actually help" with real forward data instead of assuming the backtest's own retrospective self-consistency proves it. See mirror_scan_symbol_live()'s own comment for the full reasoning.
     "autotrade_log": deque(maxlen=AUTOTRADE_TRADE_HISTORY),  # every attempted auto-trade, dry-run or real, with its outcome
     "sim_balance": AUTOTRADE_SIM_START_BALANCE,
     "sim_trades": deque(maxlen=AUTOTRADE_SIM_TRADE_HISTORY),  # pending + settled paper trades
@@ -15275,6 +15328,7 @@ def save_state():
                 "ft5_signals": list(STATE["ft5_signals"]),
                 "ft5_symbol_overrides": STATE["ft5_symbol_overrides"],
                 "mirror_signals": list(STATE["mirror_signals"]),
+                "mirror_filtered_signals": list(STATE["mirror_filtered_signals"]),
                 "mirror_symbol_overrides": STATE["mirror_symbol_overrides"],
                 "mirror_live_universe": STATE["mirror_live_universe"],
                 "autotrade_log": list(STATE["autotrade_log"]),
@@ -15389,6 +15443,7 @@ def load_state():
         ft5_signals = data.get("ft5_signals", [])
         ft5_symbol_overrides = data.get("ft5_symbol_overrides", {})
         mirror_signals = data.get("mirror_signals", [])
+        mirror_filtered_signals = data.get("mirror_filtered_signals", [])
         mirror_symbol_overrides = data.get("mirror_symbol_overrides", {})
         mirror_live_universe = data.get("mirror_live_universe", [])
         autotrade_log = data.get("autotrade_log", [])
@@ -15408,6 +15463,7 @@ def load_state():
             STATE["ft5_signals"] = deque(_backfill_mfe_mae(ft5_signals), maxlen=FT5_SIGNAL_HISTORY)
             STATE["ft5_symbol_overrides"] = ft5_symbol_overrides
             STATE["mirror_signals"] = deque(_backfill_mfe_mae(mirror_signals), maxlen=MIRROR_SIGNAL_HISTORY)
+            STATE["mirror_filtered_signals"] = deque(_backfill_mfe_mae(mirror_filtered_signals), maxlen=MIRROR_SIGNAL_HISTORY)
             STATE["mirror_symbol_overrides"] = mirror_symbol_overrides
             STATE["mirror_live_universe"] = mirror_live_universe
             STATE["autotrade_log"] = deque(autotrade_log, maxlen=AUTOTRADE_TRADE_HISTORY)
@@ -20784,6 +20840,8 @@ def mirror_summarize_backtest(results):
 
 _mirror_signal_cooldowns = {}  # symbol -> last-signaled entry_time
 _mirror_signal_cooldowns_lock = threading.Lock()
+_mirror_filtered_signal_cooldowns = {}  # v0.99.114 — same dedup shape as _mirror_signal_cooldowns above, kept SEPARATE so a filtered-out signal's own cooldown never interferes with a real signal's (they're mutually exclusive per-scan anyway, but keeping them apart avoids any future confusion about which dict a given entry_time belongs to)
+_mirror_filtered_signal_cooldowns_lock = threading.Lock()
 
 
 def mirror_scan_symbol_live(symbol):
@@ -20800,7 +20858,26 @@ def mirror_scan_symbol_live(symbol):
     whose own direction (LONG/SHORT) is the one this symbol's backtest
     found to be statistically failing gets skipped too, even if the
     OTHER direction is genuinely strong enough for the symbol overall
-    to have qualified for live trading."""
+    to have qualified for live trading.
+    v0.99.114, per direct user question ("может без применения фильтра
+    было лучше, а после него стало хуже"): a fair, pointed critique —
+    every "does this filter help" claim so far rested purely on the
+    backtest's own retrospective self-consistency (the filter was
+    DERIVED from, then judged against, the exact same historical data),
+    which is exactly the kind of circular validation that's vulnerable
+    to in-sample overfitting, especially with a modest per-bucket
+    sample (MIRROR_SYMBOL_SKIP_MIN_SAMPLE=15) and a 3-stage chain where
+    each filter narrows what the next one judges. Rather than argue
+    this abstractly, a filtered-out signal now gets recorded (STATE
+    ["mirror_filtered_signals"]) and tracked through the exact same
+    WIN/LOSS/TIMEOUT outcome logic as a real signal — just never fired
+    via execute_autotrade()/sim_execute_trade(), no Telegram alert.
+    Real forward data, not backtest hindsight: over time, compare this
+    pool's own winrate against the real, filter-approved signals' own
+    winrate — if the filter is doing its job, the filtered-out pool
+    should trade meaningfully worse; if it doesn't, that's genuine
+    evidence the filter is net harmful and too aggressive, not just a
+    hunch."""
     if not MIRROR_ENABLED:
         return
     try:
@@ -20820,12 +20897,32 @@ def mirror_scan_symbol_live(symbol):
             overrides = STATE["mirror_symbol_overrides"].get(symbol) or {}
             skip_sl_min = overrides.get("skip_sl_pct_min")
             skip_direction = set(overrides.get("skip_direction") or [])
+        filter_reason = None
         if skip_sl_min is not None and sig["entry"]:
             sig_sl_pct = abs(sig["entry"] - sig["sl"]) / sig["entry"] * 100
             if sig_sl_pct >= skip_sl_min:
-                return  # this symbol's own backtest says SL this wide fails here — skip, don't fire
-        if sig["direction"] in skip_direction:
-            return  # v0.99.107 — this symbol's own backtest says THIS direction fails here (the other side is fine) — skip, don't fire
+                filter_reason = "sl_width"  # this symbol's own backtest says SL this wide fails here
+        if filter_reason is None and sig["direction"] in skip_direction:
+            filter_reason = "direction"  # this symbol's own backtest says THIS direction fails here
+        if filter_reason is not None:
+            with _mirror_filtered_signal_cooldowns_lock:
+                if _mirror_filtered_signal_cooldowns.get(symbol) == sig["entry_time"]:
+                    return
+                _mirror_filtered_signal_cooldowns[symbol] = sig["entry_time"]
+            filtered_record = {
+                "symbol": symbol, "direction": sig["direction"],
+                "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"], "rr": sig.get("rr"),
+                "pattern": sig.get("pattern"), "level_price": sig.get("level_price"),
+                "level_type": sig.get("level_type"), "time": sig["entry_time"],
+                "bars_since_break": sig.get("bars_since_break"), "filter_reason": filter_reason,
+                "detected_at": time.time(), "status": "OPEN", "result": None,
+                "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
+                "mfe_r": 0.0, "mae_r": 0.0, "mfe_price": None, "mae_price": None,
+                "mfe_r_at_close": None, "mae_r_at_close": None, "timeout_pnl_r": None,
+            }
+            with state_lock:
+                STATE["mirror_filtered_signals"].appendleft(filtered_record)
+            return
         with _mirror_signal_cooldowns_lock:
             if _mirror_signal_cooldowns.get(symbol) == sig["entry_time"]:
                 return
@@ -20862,31 +20959,20 @@ def mirror_scan_symbol_live(symbol):
         log_error(f"mirror_live {symbol}: {e}")
 
 
-def update_mirror_signal_outcomes():
-    """Same MFE/MAE-tracking shape as update_xau_lg_signal_outcomes().
-    v0.99.99, per direct user follow-up ("тайм аут тоже добавь но надо
-    знать как закрылась сделка по таймауту в плюс или минус"): adds the
-    TIMEOUT-closing branch after all, reversing v0.99.98's own decision
-    to leave MIRROR without one (that version investigated the same
-    request from an external code review and declined it specifically
-    because every other module's live tracker had TIMEOUT deliberately
-    REMOVED — flagged the conflict, and this direct follow-up is the
-    user's explicit choice to diverge MIRROR from that convention on
-    purpose, not an oversight being corrected). Closes with a REAL
-    exit_price (the last known candle's own close, not None) so a
-    timed-out trade's own plus/minus outcome is actually visible — the
-    same profit/loss math WIN/LOSS already use (exit_price vs entry,
-    direction-aware), just measured at a price that isn't the TP/SL
-    level itself. Also stores timeout_pnl_r — the signed R-multiple at
-    that exact moment — so the frontend can color/label it directly
-    without re-deriving direction logic from a raw price comparison.
-    Uses the SAME MIRROR_MAX_WAIT_BARS cutoff mirror_track_outcome()'s
-    own backtest-side timeout already uses (now a shared constant, was
-    a hardcoded 200 in that function alone) for genuine backtest/live
-    parity in how long a signal gets before timing out."""
+def _mirror_track_signal_outcomes(signal_key):
+    """v0.99.114 — the shared MFE/MAE/WIN/LOSS/TIMEOUT tracking body,
+    extracted from update_mirror_signal_outcomes() so the EXACT same
+    logic runs for both STATE["mirror_signals"] (real, fired signals)
+    and STATE["mirror_filtered_signals"] (signals the SL-width/direction
+    filters blocked — see mirror_scan_symbol_live()'s own comment for
+    why these are tracked at all). The only difference between the two
+    pools is whether execute_autotrade()/sim_execute_trade()/Telegram
+    fired at creation time — how each signal's own eventual outcome
+    gets measured afterward is identical either way, so this one body
+    serves both rather than duplicating it."""
     now = time.time()
     with state_lock:
-        open_signals = [s for s in STATE["mirror_signals"] if s["status"] == "OPEN"]
+        open_signals = [s for s in STATE[signal_key] if s["status"] == "OPEN"]
     all_candles = fetch_candles_concurrent([(s["symbol"], MIRROR_INTERVAL, 300) for s in open_signals])
     mirror_interval_sec = INTERVAL_SECONDS.get(MIRROR_INTERVAL, 3600)
     for sig, candles in zip(open_signals, all_candles):
@@ -20954,6 +21040,66 @@ def update_mirror_signal_outcomes():
                         sig["timeout_pnl_r"] = round(pnl_r, 3)
         except Exception as e:
             log_error(f"mirror_outcome {sig['symbol']}: {e}")
+
+
+def update_mirror_signal_outcomes():
+    """Same MFE/MAE-tracking shape as update_xau_lg_signal_outcomes().
+    v0.99.99, per direct user follow-up ("тайм аут тоже добавь но надо
+    знать как закрылась сделка по таймауту в плюс или минус"): adds the
+    TIMEOUT-closing branch after all, reversing v0.99.98's own decision
+    to leave MIRROR without one (that version investigated the same
+    request from an external code review and declined it specifically
+    because every other module's live tracker had TIMEOUT deliberately
+    REMOVED — flagged the conflict, and this direct follow-up is the
+    user's explicit choice to diverge MIRROR from that convention on
+    purpose, not an oversight being corrected). Closes with a REAL
+    exit_price (the last known candle's own close, not None) so a
+    timed-out trade's own plus/minus outcome is actually visible — the
+    same profit/loss math WIN/LOSS already use (exit_price vs entry,
+    direction-aware), just measured at a price that isn't the TP/SL
+    level itself. Also stores timeout_pnl_r — the signed R-multiple at
+    that exact moment — so the frontend can color/label it directly
+    without re-deriving direction logic from a raw price comparison.
+    Uses the SAME MIRROR_MAX_WAIT_BARS cutoff mirror_track_outcome()'s
+    own backtest-side timeout already uses (now a shared constant, was
+    a hardcoded 200 in that function alone) for genuine backtest/live
+    parity in how long a signal gets before timing out.
+    v0.99.114 — now also tracks STATE["mirror_filtered_signals"] (the
+    filter-blocked pool) through _mirror_track_signal_outcomes(), the
+    exact same logic extracted into its own function so both pools are
+    tracked identically."""
+    _mirror_track_signal_outcomes("mirror_signals")
+    _mirror_track_signal_outcomes("mirror_filtered_signals")
+
+
+def compute_mirror_filtered_signal_stats():
+    """v0.99.114 — aggregate WIN/LOSS stats for STATE["mirror_filtered_
+    signals"] (the pool the SL-width/direction filters blocked from
+    ever firing), same basic n/wins/losses/win_rate shape as compute_
+    mirror_signal_stats(), for direct comparison against the real,
+    filter-approved signals' own winrate — see mirror_scan_symbol_
+    live()'s own comment for the full reasoning behind tracking this
+    pool at all. by_reason splits by WHICH filter blocked the signal
+    (sl_width vs direction), since a filter that's net harmful might
+    only be so for one of the two reasons, not both."""
+    with state_lock:
+        signals = list(STATE["mirror_filtered_signals"])
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+    wins = sum(1 for s in closed if s["result"] == "WIN")
+    losses = len(closed) - wins
+    open_n = sum(1 for s in signals if s["status"] == "OPEN")
+    total_closed = len(closed)
+    winrate = round(wins / total_closed * 100, 1) if total_closed else None
+    by_reason = {}
+    for reason in ("sl_width", "direction"):
+        r_closed = [s for s in closed if s.get("filter_reason") == reason]
+        r_wins = sum(1 for s in r_closed if s["result"] == "WIN")
+        by_reason[reason] = {
+            "n": len(r_closed), "wins": r_wins, "losses": len(r_closed) - r_wins,
+            "win_rate": round(r_wins / len(r_closed) * 100, 1) if r_closed else None,
+        }
+    return {"n": total_closed, "wins": wins, "losses": losses, "open": open_n,
+            "win_rate": winrate, "by_reason": by_reason}
 
 
 def compute_mirror_signal_stats():
@@ -21760,6 +21906,7 @@ def api_mirror_status():
         "last_backtest_finished": last_backtest_finished,
         "last_backtest_duration": last_backtest_duration,
         "signals_stats": compute_mirror_signal_stats(),
+        "filtered_signals_stats": compute_mirror_filtered_signal_stats(),
         "live_universe": live_universe,
         "config": {
             "interval": MIRROR_INTERVAL, "pivot_left": MIRROR_PIVOT_LEFT, "pivot_right": MIRROR_PIVOT_RIGHT,
@@ -24232,6 +24379,18 @@ async function refreshMirror() {
   const cfg = status.config || {};
   const ss = status.signals_stats || {};
   const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
+  // v0.99.114, per direct user question ("может без применения фильтра
+  // было лучше, а после него стало хуже"): the filter-blocked pool,
+  // tracked through the SAME outcome logic as real signals but never
+  // actually traded — direct, real forward-data comparison against
+  // ssWr above, not a backtest's own retrospective self-consistency.
+  const fss = status.filtered_signals_stats || {};
+  const fssWr = fss.win_rate !== null && fss.win_rate !== undefined ? `${fss.win_rate}%` : '-';
+  const filterReasonLabels = {sl_width: 'широкий стоп', direction: 'слабое направление'};
+  const byReasonTxt = Object.entries(fss.by_reason || {}).map(([reason, s]) => {
+    const wr = s.win_rate !== null && s.win_rate !== undefined ? `${s.win_rate}%` : '-';
+    return `${filterReasonLabels[reason] || reason}: ${wr} (n=${s.n})`;
+  }).join(' · ');
   const patternLabels = {inside_bar: 'внутренний бар', tweezers: 'пинцет', rails: 'рельсы', engulfing_doji: 'поглощение+дожи'};
   const byPatternTxt = Object.entries(ss.by_pattern || {}).map(([p, s]) => {
     const wr = s.winrate !== null && s.winrate !== undefined ? `${s.winrate}%` : '-';
@@ -24246,6 +24405,8 @@ async function refreshMirror() {
       ТФ ${cfg.interval} · RR ${cfg.rr} · допуск касания ${cfg.touch_tolerance_pct}% · допуск паттерна ${cfg.pattern_tolerance_pct}% · ${buildTxt}<br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
       ${byPatternTxt ? `<span style="font-size:11px;">По паттернам: ${byPatternTxt}</span><br>` : ''}
+      <b>Отсеянные фильтром</b> <span class="dim" style="font-size:11px;">(не торговались, только для проверки — стоило ли их пропускать)</span>: ${fssWr} (${fss.wins||0}W/${fss.losses||0}L) · открытых: ${fss.open||0} · всего: ${fss.n||0}<br>
+      ${byReasonTxt ? `<span style="font-size:11px;">По причине отсева: ${byReasonTxt}</span><br>` : ''}
       <span style="font-size:11px;">Зелёная точка — монета сейчас в живом скане. Клик по строке сигнала открывает график входа/выхода.</span>
     </div>`;
   const signalsRows = signals.map(s => {
