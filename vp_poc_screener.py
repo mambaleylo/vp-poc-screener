@@ -9884,6 +9884,40 @@ v0.99.112 - CRITICAL FIX, live report (screenshot): a real LONG
          the Flask route/def integrity check (55 routes — a pure
          reliability fix, no routes/UI touched), and an AST walk for
          duplicate top-level defs (none introduced).
+
+v0.99.113 - MIRROR_LIVE_MIN_WINRATE raised 35->40, per direct user
+         request ("сделай минимальный винрейт для авто торговли 40%")
+         alongside a live report/question: many symbols in the
+         backtest table show n=0 (no post-filter trades at all,
+         displayed as "?" and "skip SL≥0%") despite a substantial raw
+         signal count, with the user's own hypothesis being "типа
+         фильтрами может все режет так, что сделок не остаётся" —
+         confirmed correct, not a bug, via a direct reproduction:
+         for a symbol whose raw MIRROR trades cluster at a similar SL
+         width with a poor overall winrate (e.g. the reported ETH_USDT
+         at 358 raw -> 0 final, WR 19%, well below the RR=3 breakeven
+         of 25%), mirror_symbol_sl_skip_min() alone can find that
+         literally every SL-width bucket fails — meaning the SL filter
+         eliminates 100% of the raw trades before the later pattern/
+         direction filters ever get anything to work with. The "skip
+         SL≥0%" seen for these symbols is a real, correctly-computed
+         threshold (the very first, narrowest bucket already fails),
+         not a formatting bug or an empty-input artifact — directly
+         verified both by reproducing the exact cascade on synthetic
+         data matching the reported numbers and by confirming mirror_
+         symbol_sl_skip_min([]) itself returns None (not 0) on genuinely
+         empty input, ruling out that alternate explanation. This is
+         the intended, correct behavior of a rigorous chained filter —
+         a symbol that's unprofitable across virtually every SL width
+         genuinely shouldn't be live-traded via MIRROR at all, and
+         total elimination (rather than forcing SOME trades through) is
+         the right outcome, not something to loosen.
+         Verified with py_compile, pyflakes (clean), a live test_client()
+         /api/mirror/status round-trip confirming the new 40.0 value
+         reaches the response's own config, the Flask route/def
+         integrity check (55 routes — a pure constant change, no new
+         endpoints), and an AST walk for duplicate top-level defs (none
+         introduced).
 """
 
 import os
@@ -9903,7 +9937,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.112"
+APP_VERSION = "0.99.113"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -10587,7 +10621,7 @@ MIRROR_SL_PCT_BUCKET_SCHEMES = [
     [(0, 2), (2, 5), (5, float("inf"))],
     [(0, 3), (3, float("inf"))],
 ]  # finest -> coarsest cascade, same MSNR v0.99.89 lesson applied from the start here rather than shipping a fixed-only version first
-MIRROR_LIVE_MIN_WINRATE = float(os.environ.get("VP_MIRROR_LIVE_MIN_WINRATE", 35.0))  # a symbol's OWN post-filter backtest winrate must clear this to be live-scanned at all
+MIRROR_LIVE_MIN_WINRATE = float(os.environ.get("VP_MIRROR_LIVE_MIN_WINRATE", 40.0))  # a symbol's OWN post-filter backtest winrate must clear this to be live-scanned at all — raised 35->40 (v0.99.113) per direct user request, alongside investigating (and confirming, not a bug) why many symbols show n=0 despite hundreds of raw signals: the SL-width/pattern/direction filter chain can legitimately eliminate 100% of a symbol's trades when its raw winrate is bad across virtually every SL-width bucket — the SL filter alone catches everything, leaving nothing for the later filters to work with
 FT5_MIN_BACKTEST_TRADES = int(os.environ.get("VP_FT5_MIN_BACKTEST_TRADES", 5))  # a combo with fewer trades than this in the backtest window isn't a confident pick — same bar Volume's optimizer uses (MIN_BACKTEST_TRADES)
 FT5_RANK_PRIOR_TARGET = int(os.environ.get("VP_FT5_RANK_PRIOR_TARGET", 1))  # v0.98.8 — ft5_ranking_score() blends in max(0, TARGET - losses_count) pseudo-trades at the known -FT5_STOPLOSS_PCT level, so a small loss-free sample can't look artificially low-risk just because it hasn't hit its (structurally always-possible) stop yet. Tapered by ACTUAL real losses (not a flat count on every combo) — a flat prior tested worse, disproportionately hurting smaller-but-still-real samples. See ft5_ranking_score()'s own docstring for the full reasoning, including why TARGET=1 specifically. Replaces FT5_RANK_Z (v0.98.7), which is no longer referenced — the confidence multiplier is now t_critical(n-1), not a fixed Z.
 
