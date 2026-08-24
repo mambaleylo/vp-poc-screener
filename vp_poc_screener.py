@@ -9739,6 +9739,54 @@ v0.99.109 - NEW FEATURE: Scalp Martingale, per direct user request
          integrity check (55 routes — no new endpoints, existing
          settings pipeline extended), and an AST walk for duplicate
          top-level defs (none introduced).
+
+v0.99.110 - mirror_symbol_direction_skip() changed from "skip only the
+         losing side" to "always trade only the strictly better side,"
+         per a conversational back-and-forth explaining the v0.99.107
+         filter's own exact mechanics ("а зачем вообще торговать
+         например Лонг с 25% а не только шорт с 60 по одной монете при
+         хорошей выборке и там и там, просто брать хорошую сторону и
+         все"). The old logic only skipped a direction that was
+         outright UNPROFITABLE in isolation (below breakeven) — meaning
+         a symbol with LONG at a modest-but-technically-profitable 28%
+         and SHORT at a strong 60% (RR=3, breakeven 25%, both with
+         sufficient sample) would trade BOTH sides, diluting risk onto
+         the comparatively weak LONG edge for no real benefit given the
+         much stronger SHORT alternative right there.
+         New two-stage logic: (1) same absolute breakeven test as
+         before, but now `<=` instead of `<` — a side sitting EXACTLY
+         at breakeven is genuinely break-even, not profit, and letting
+         it through was a real boundary bug, found and fixed while
+         explaining the original mechanics (a direct side effect of
+         this whole conversation, not something separately reported);
+         (2) NEW — among whatever survives stage 1 (individually
+         profitable directions), if BOTH survived, drop the weaker of
+         the two. Per direct, explicit user choice ("да, всегда берём
+         строго лучшую сторону, даже если разница маленькая") this
+         comparison has deliberately NO minimum-gap requirement, unlike
+         every other significance-bar filter in this file — even a
+         1-point difference (e.g. 44% vs 46%) picks a winner. A symbol
+         failing stage 1 on BOTH sides is left alone (not force-traded
+         on "the less-bad loser") — that case is already handled
+         separately by the overall winrate>MIRROR_LIVE_MIN_WINRATE gate
+         in mirror_backtest_loop().
+         Verified directly against 4 scenarios covering every branch:
+         a side exactly at breakeven (25.0% @ RR=3) now correctly
+         skipped, the motivating case (LONG 28%/SHORT 60%, both
+         profitable, both good sample) correctly keeps only SHORT, both
+         sides below breakeven (LONG 15%/SHORT 18%) correctly skips
+         BOTH rather than force-trading SHORT, and a narrow gap (LONG
+         44%/SHORT 46%) still picks the strictly better side per the
+         user's own explicit no-minimum-gap choice. Also re-verified
+         the original v0.99.107 motivating example (LONG 11%/SHORT 45%)
+         and the thin-sample non-trigger case both still behave
+         identically to before this change — this pass only ADDS the
+         new comparative stage, doesn't alter the absolute-test
+         behavior for cases where only one side has sufficient sample.
+         Verified with py_compile, pyflakes (clean), the Flask route/
+         def integrity check (55 routes — a pure filter-logic change,
+         no routes/UI touched), and an AST walk for duplicate top-level
+         defs (none introduced).
 """
 
 import os
@@ -9758,7 +9806,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.109"
+APP_VERSION = "0.99.110"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -20374,23 +20422,45 @@ def mirror_symbol_direction_skip(trades, rr=None):
     threshold (100/(1+rr)) as mirror_symbol_pattern_skip()'s own per-
     category check, same "no cascade" reasoning too — only 2
     categories (LONG/SHORT), nothing to coarsen into if one lacks
-    sample. Returns a set containing 0, 1, or both of {"LONG", "SHORT"}
-    — in practice a symbol failing on BOTH sides shouldn't be live-
-    traded at all, which the overall winrate>MIRROR_LIVE_MIN_WINRATE
-    gate in mirror_backtest_loop() already handles separately; this
-    filter's own useful case is exactly the reported one — one side
-    clearly working, the other clearly not."""
+    sample. Returns a set containing 0, 1, or both of {"LONG", "SHORT"}.
+
+    v0.99.110, per direct user follow-up ("а зачем вообще торговать
+    например Лонг с 25% а не только шорт с 60 по одной монете при
+    хорошей выборке и там и там, просто брать хорошую сторону и все"):
+    a symbol failing on BOTH sides already gets caught by the overall
+    winrate>MIRROR_LIVE_MIN_WINRATE gate in mirror_backtest_loop()
+    separately — this function's own new, additional job is: even when
+    BOTH directions individually clear breakeven (both "profitable" in
+    isolation, with sufficient sample), only the STRICTLY BETTER one
+    survives — concentrating risk on the stronger edge instead of
+    diluting it across a comparatively weak side just because that
+    side isn't outright losing money. Per direct, explicit user choice
+    ("да, всегда берём строго лучшую сторону, даже если разница
+    маленькая") this comparison has NO minimum-gap requirement — even
+    a 1-point difference picks a winner, unlike every other significance-
+    bar filter in this app. Two-stage logic: (1) the original absolute
+    breakeven test, now `<=` instead of `<` — a side sitting EXACTLY at
+    breakeven is genuinely break-even, not profit, and skipping it is
+    the correct call (found as a live boundary bug while explaining
+    this function's own mechanics, fixed in the same pass); (2) only
+    among whatever SURVIVED stage 1 (i.e. is individually profitable),
+    if BOTH directions survived, drop the weaker of the two — a symbol
+    failing stage 1 on both sides is left to the overall winrate gate
+    mentioned above, not force-traded on "the less-bad loser"."""
     rr = rr if rr is not None else MIRROR_RR
     breakeven = 100.0 / (1.0 + rr) if rr > 0 else 100.0
-    skip = set()
+    winrates = {}
     for direction in ("LONG", "SHORT"):
         d_trades = [t for t in trades if t.get("direction") == direction and t.get("result") in ("WIN", "LOSS")]
         n = len(d_trades)
         if n < MIRROR_SYMBOL_SKIP_MIN_SAMPLE:
             continue
         wins = sum(1 for t in d_trades if t["result"] == "WIN")
-        if wins / n * 100 < breakeven:
-            skip.add(direction)
+        winrates[direction] = wins / n * 100
+    skip = {d for d, wr in winrates.items() if wr <= breakeven}
+    survivors = [d for d in winrates if d not in skip]
+    if len(survivors) == 2:
+        skip.add(min(survivors, key=lambda d: winrates[d]))
     return skip
 
 
