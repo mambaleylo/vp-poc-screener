@@ -9624,6 +9624,62 @@ v0.99.107 - Two live reports handled in the same pass.
          the Flask route/def integrity check (56 routes — pure backend
          logic changes, no routes/UI touched), and an AST walk for
          duplicate top-level defs (none introduced).
+
+v0.99.108 - MSNR autotrade fully automated, per direct user request:
+         "монеты попавшие в топ список и винрейт больше 50 помечаются
+         галочкой авто торговли, если потом такая монета вылетела из
+         топа то галочку автоматом снимать" -> then, once informed the
+         checkbox had actually never been auto-set at all (only manual
+         clicks ever changed it): "Ручное управление можно убрать."
+         Two-part change.
+         (1) msnr_backtest_loop() now auto-manages STATE["msnr_
+         autotrade_symbols"] each cycle: auto-ON any symbol newly
+         qualifying (in the eligible top-N AND win_rate > 50%), auto-
+         OFF any symbol that stops qualifying (either condition) —
+         symmetric with the entry condition rather than only reacting
+         to ranking changes. New STATE["msnr_autotrade_top_set"] tracks
+         the top-N pool from the PREVIOUS cycle so auto-off only ever
+         touches symbols that were themselves part of the auto-managed
+         pool (a real design concern before part 2 below made it moot
+         — at the time, msnr_manual_toggle_allowed_symbols()'s own
+         "вне топ-10, на свой страх и риск" feature let a person
+         manually enable a non-top-10 symbol, and a naive "not in top-N
+         -> turn off" rule would have silently clobbered that deliberate
+         choice). Verified directly: symbol entering top with WR=60%
+         auto-turns-on; a previously-auto-managed symbol falling out of
+         top correctly auto-turns-off; a manually-enabled non-top-10
+         symbol stays untouched across cycles.
+         (2) Per the direct follow-up, manual toggling removed entirely
+         — the checkbox is now a read-only indicator (✓/—, not
+         clickable), the /api/msnr/autotrade_toggle route is gone, and
+         both functions that existed solely to support it (_set_msnr_
+         autotrade_symbol(), msnr_manual_toggle_allowed_symbols()) are
+         deleted as genuinely dead code — this session's own established
+         discipline of not leaving orphaned functions behind (learned
+         the hard way, repeatedly, with EMA/Divergence leftovers earlier
+         this session). Also fixed a real correctness gap this
+         simplification exposed: msnr_scan_symbol_live()'s own live-
+         firing gate and msnr_effective_live_universe() (the scanning-
+         universe builder) both used to check against the BROADER
+         manual-toggle-allowed set (any valid, non-stress_test_failed
+         backtest) — now that the toggle is ONLY ever set by auto-
+         management, checking the broader set left a genuine gap: a
+         symbol that just fell out of top-N moments ago, before the
+         NEXT backtest cycle's own auto-off catches up, would still
+         pass that broader check and could still fire. Both now check
+         the NARROWER msnr_autotrade_eligible_symbols() (top-N) instead,
+         closing that gap.
+         Verified with py_compile after every edit, an actual runtime
+         start (a live test_client() round-trip confirming GET /api/
+         msnr/status still returns 200 while POST /api/msnr/
+         autotrade_toggle now correctly 404s), pyflakes (clean), a full
+         getElementById audit (94 calls, zero dangling), a real jsdom
+         page execution (zero runtime errors), node --check on the
+         correctly-last <script> block, the Flask route/def integrity
+         check (55 routes — down from 56, exactly the one removed
+         endpoint), and an AST walk for duplicate top-level defs (none
+         introduced) — 305 total top-level defs, down from 308 (three
+         genuinely dead functions removed).
 """
 
 import os
@@ -9643,7 +9699,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.107"
+APP_VERSION = "0.99.108"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -10825,7 +10881,8 @@ STATE = {
     "msnr_symbol_overrides": {},  # symbol -> {min_leg_atr, qm_zone_pct, qm_lookback_bars, trades, wins, losses, timeouts, winrate, avg_rr, expectancy_r, score, optimized_at, raw_closed_n, skip_rr_min, rr_filtered_count, skip_sl_pct_min, sl_filtered_count, skip_hours, hours_filtered_count, skip_volume_below, volume_filtered_count, effective_leverage, leverage_ceiling, optimal_leverage, liquidation_filtered_count, compound_final_balance, compound_return_pct, compound_blown_at, stress_test_failed}
     "msnr_backtest_universe": [],  # v0.99.9 — MSNR_SYMBOLS union'd with the top-liquid backtest-only exploration set, see msnr_build_backtest_universe()
     "msnr_live_universe": [],  # v0.99.17 — MSNR_SYMBOLS union'd with any backtest-qualifying symbol (win-rate/sample threshold), see msnr_compute_live_universe(); msnr_live_loop() scans THIS, not the static MSNR_SYMBOLS constant directly, so it stays empty (falls back to MSNR_SYMBOLS at the call site) until the first backtest cycle populates it
-    "msnr_autotrade_symbols": {},  # v0.99.18 — per-symbol autotrade toggle, {symbol: bool}. Replaces the old single AUTOTRADE_ENABLED_MSNR gate — per direct user request for individually-toggleable fields (3 gold, always eligible + the current top MSNR_AUTOTRADE_TOP_N non-gold by msnr_rank_by_winrate_sample(), which despite its name ranks by `avg_rr` (score before v0.99.39) — see that function's own docstring). A symbol missing from this dict is treated as off (same "off unless explicitly on" default every other autotrade toggle in this app already uses). See msnr_autotrade_eligible_symbols() for which symbols can currently be toggled, and _set_msnr_autotrade_symbol()'s own docstring for what happens to a saved toggle when its symbol falls out of that set.
+    "msnr_autotrade_symbols": {},  # v0.99.18 — per-symbol autotrade toggle, {symbol: bool}. Originally per direct user request for individually-toggleable fields, manually clickable. v0.99.108, per direct user request ("Ручное управление можно убрать"): now FULLY AUTOMATIC — msnr_backtest_loop() sets this True for a symbol currently in the top MSNR_AUTOTRADE_TOP_N AND win_rate > 50%, False the moment either condition stops holding (scoped to the auto-managed pool via msnr_autotrade_top_set below, see that key's own comment). A symbol missing from this dict is treated as off (same "off unless explicitly on" default every other autotrade toggle in this app already uses). See msnr_autotrade_eligible_symbols() for the top-N set and msnr_backtest_loop()'s own comment for the full auto-on/auto-off logic.
+    "msnr_autotrade_top_set": [],  # v0.99.108 — the top-N eligible set (msnr_autotrade_eligible_symbols()) as of the LAST backtest cycle, used to scope msnr_backtest_loop()'s own auto-on/auto-off toggle management to symbols that were actually part of the auto-managed pool. See msnr_backtest_loop()'s own comment for the full reasoning.
     "msnr_live_balance": {},  # v0.99.33 — symbol -> current REAL compounding margin in USD for that symbol's live autotrade sizing. Missing = never traded yet, defaults to MSNR_COMPOUND_START_BALANCE ($40) on the first fire — see msnr_live_balance_for_symbol(). Updated by update_msnr_signal_outcomes() off each autotrade-fired signal's own WIN/LOSS result, same price-move-%-times-leverage math msnr_compound_trail() already uses for the backtest simulation, capped at MSNR_LIVE_BALANCE_MAX. In-memory only, same as every other STATE dict here — resets to empty (so every symbol restarts at $40) on app restart, which is the correct "start with 40" behavior, not a gap to fix.
     "msnr_backtest_total": 0,  # v0.99.15 — progress tracking for the CURRENT (or most recent) backtest cycle, per direct user request for visibility during a long-running cycle
     "msnr_backtest_done": 0,
@@ -14807,6 +14864,7 @@ def save_state():
                 "msnr_signals": list(STATE["msnr_signals"]),
                 "msnr_symbol_overrides": STATE["msnr_symbol_overrides"],
                 "msnr_autotrade_symbols": STATE["msnr_autotrade_symbols"],
+                "msnr_autotrade_top_set": STATE["msnr_autotrade_top_set"],
                 "ft5_signals": list(STATE["ft5_signals"]),
                 "ft5_symbol_overrides": STATE["ft5_symbol_overrides"],
                 "mirror_signals": list(STATE["mirror_signals"]),
@@ -14920,6 +14978,7 @@ def load_state():
         msnr_signals = data.get("msnr_signals", [])
         msnr_symbol_overrides = data.get("msnr_symbol_overrides", {})
         msnr_autotrade_symbols = data.get("msnr_autotrade_symbols", {})
+        msnr_autotrade_top_set = data.get("msnr_autotrade_top_set", [])
         ft5_signals = data.get("ft5_signals", [])
         ft5_symbol_overrides = data.get("ft5_symbol_overrides", {})
         mirror_signals = data.get("mirror_signals", [])
@@ -14938,6 +14997,7 @@ def load_state():
             STATE["msnr_signals"] = deque(msnr_signals, maxlen=MSNR_SIGNAL_HISTORY)
             STATE["msnr_symbol_overrides"] = msnr_symbol_overrides
             STATE["msnr_autotrade_symbols"] = msnr_autotrade_symbols
+            STATE["msnr_autotrade_top_set"] = msnr_autotrade_top_set
             STATE["ft5_signals"] = deque(_backfill_mfe_mae(ft5_signals), maxlen=FT5_SIGNAL_HISTORY)
             STATE["ft5_symbol_overrides"] = ft5_symbol_overrides
             STATE["mirror_signals"] = deque(_backfill_mfe_mae(mirror_signals), maxlen=MIRROR_SIGNAL_HISTORY)
@@ -16375,24 +16435,6 @@ def _set_msnr_max_rr(v):
     global MSNR_MAX_RR
     MSNR_MAX_RR = v
     save_settings()
-
-
-def _set_msnr_autotrade_symbol(symbol, enabled):
-    """Sets one symbol's individual autotrade toggle. Deliberately does
-    NOT validate that `symbol` is currently in msnr_autotrade_eligible_
-    symbols() — the eligible set can shift between backtest cycles as
-    rankings change, and a symbol that WAS in the top 3 (toggled on),
-    then falls out, then comes BACK in a later cycle should reasonably
-    resume whatever state the user last set for it rather than silently
-    forgetting it. The actual GATING check (in msnr_scan_symbol_live())
-    requires BOTH this toggle AND current eligibility — so a toggle for
-    a currently-ineligible symbol is simply inert, not deleted, until/
-    unless that symbol re-qualifies. Persisted via save_state() (this is
-    a STATE dict entry, not a fixed named setting) rather than
-    save_settings()."""
-    with state_lock:
-        STATE["msnr_autotrade_symbols"][symbol] = bool(enabled)
-    save_state()
 
 
 def _scalp_closed_rr_stats():
@@ -18889,39 +18931,29 @@ def msnr_scan_symbol_live(symbol):
         # with a per-symbol toggle, per direct user request for exactly
         # 6 individually-toggleable fields (3 gold + current top 3 non-
         # gold by msnr_rank_by_winrate_sample()). Re-checks CURRENT
-        # allowed-ness here, not just the saved toggle — a symbol that
-        # was toggled on while allowed, then later stopped being (e.g.
-        # its backtest started erroring, or it flipped to stress_test_
-        # failed), should NOT keep autotrading just because its old
-        # toggle value is still True; see _set_msnr_autotrade_symbol()'s
-        # own docstring for why the toggle itself isn't deleted in that
-        # case (so it resumes if the symbol re-qualifies later).
-        # v0.99.49, per direct user request ("хочу иметь возможность
-        # автоторговли и не по топ-10, на свой страх и риск"): checks
-        # against msnr_manual_toggle_allowed_symbols() — every symbol
-        # with valid, non-stress_test_failed backtest data — not the
-        # narrower msnr_autotrade_eligible_symbols() (top-N by score).
-        # Using the narrower set here would make a manually-toggled
-        # non-top-10 symbol's checkbox silently inert, exactly the
-        # v0.99.32 bug pattern this session already fixed once for a
-        # different mismatch.
-        # v0.99.105, per direct user report — screenshot showed the
-        # general "Автоторговля" settings group listing Bounce/Breakout/
-        # Скальпинг/Зеркало each with their own on/off row, MSNR
-        # conspicuously absent: AUTOTRADE_ENABLED_MSNR itself was never
-        # actually deleted (still fully wired through get_settings()/
-        # apply_settings()/SETTINGS_KEYS since v0.99.18), just never
-        # CHECKED anywhere in the real firing decision — so adding a
-        # matching UI row alone, without this AND clause, would have
-        # been a decorative checkbox that changes nothing, exactly the
-        # "checkbox does nothing" bug class v0.99.32 already fixed once
-        # for a different mismatch (see the v0.99.49 comment just
-        # above). Now a genuine MASTER switch layered ON TOP of the
-        # per-symbol toggles (not a replacement for them) — turning it
-        # off pauses every symbol's own autotrade at once without
-        # having to un-toggle each one individually, matching what
-        # every other module's own single on/off switch already does.
-        if AUTOTRADE_ENABLED_MSNR and autotrade_symbols.get(symbol) and symbol in msnr_manual_toggle_allowed_symbols(overrides_snapshot):
+        # eligibility here, not just the saved toggle — a symbol that
+        # was toggled on while eligible, then later fell out of the
+        # top-N (or its backtest started erroring, or it flipped to
+        # stress_test_failed), should NOT keep autotrading just because
+        # its old toggle value is still True — this is the safety net
+        # for the GAP between backtest cycles: msnr_backtest_loop()'s
+        # own auto-off logic (v0.99.108) only runs once per cycle, so a
+        # symbol that just fell out of top-N moments ago could still
+        # have a stale True toggle sitting in STATE until the next
+        # cycle catches up and flips it off.
+        # v0.99.108, per direct user request ("Ручное управление можно
+        # убрать"): now checks against the NARROWER msnr_autotrade_
+        # eligible_symbols() (top-N by score) — the broader msnr_
+        # manual_toggle_allowed_symbols() (any valid, non-stress_test_
+        # failed backtest) existed specifically to let a manually-
+        # toggled non-top-10 symbol fire; with manual toggling removed
+        # entirely (the toggle is now ONLY ever set by auto-management,
+        # which only ever turns it on for genuine top-N members), using
+        # the broader set here would leave exactly the gap the user
+        # asked to close: a symbol that fell out of top-N between
+        # backtest cycles would still pass this broader check and could
+        # still fire.
+        if AUTOTRADE_ENABLED_MSNR and autotrade_symbols.get(symbol) and symbol in msnr_autotrade_eligible_symbols(overrides_snapshot):
             # v0.99.33, per direct user request: real order sizing now
             # compounds off THIS symbol's own live trade history — $40
             # on the very first autotrade-fired trade, then the whole
@@ -19166,9 +19198,10 @@ def msnr_compute_live_universe(overrides, bounds=None):
     that function's own docstring for the winrate/sample/доход
     geometric-mean ranking). A symbol earns the live-scan dot ONLY by
     landing in the top 10, or via msnr_effective_live_universe()'s own
-    SEPARATE manual-toggle union (msnr_manual_toggle_allowed_symbols())
-    — exactly the two paths the original request described, nothing
-    else. `bounds` (from msnr_compute_rank_bounds()) is passed through
+    SEPARATE toggled-on union (v0.99.108 — auto-managed toggles only,
+    manual toggling of non-top-10 symbols removed entirely) — exactly
+    the two paths the original request described, nothing else.
+    `bounds` (from msnr_compute_rank_bounds()) is passed through
     unchanged so this stays consistent with whatever else in the same
     request/cycle is using the same ranking — see msnr_compute_rank_
     bounds()'s own docstring for why sharing it matters."""
@@ -19423,36 +19456,6 @@ def msnr_autotrade_eligible_symbols(overrides, bounds=None):
     return [sym for sym, _ov in ranked[:MSNR_AUTOTRADE_TOP_N]]
 
 
-def msnr_manual_toggle_allowed_symbols(overrides):
-    """v0.99.49, per direct user request ("хочу иметь возможность
-    автоторговли и [не по топ-10] ... на свой страх и риск как
-    эксперимент"): the BROADER set of symbols a person can manually
-    flip autotrade ON for from the full backtest table — every symbol
-    with completed backtest data (not errored), EXCLUDING only
-    stress_test_failed ones. A losing $ compound simulation stays a
-    hard block even for a manual override — that gate is a much more
-    fundamental "this literally lost money in its own history" signal
-    (see msnr_optimize_symbol()'s own docstring) than "didn't make the
-    top 10 by score," which is specifically what this request is
-    asking to bypass — a symbol excluded from the ranked top-10 purely
-    by small sample size (MSNR_AUTOTRADE_TOP_MIN_SAMPLE) despite a
-    genuinely strong compound_return_pct is exactly the case this
-    exists for.
-    Deliberately NOT msnr_autotrade_eligible_symbols() (top-N by score,
-    minimum sample) — that ranking still drives the AUTOMATIC top-10
-    set, its own sort/display grouping, and the checkbox styling that
-    marks a row as "auto-ranked" vs "manual." This is a second, wider
-    set used ONLY for validating/gating a manual toggle — see api_
-    msnr_autotrade_toggle() (write-time validation) and msnr_scan_
-    symbol_live()/msnr_effective_live_universe() (the actual firing/
-    scanning gate, which MUST use this same broader set — a manually-
-    toggled symbol that this function allows but those checks reject
-    would be exactly the "checkbox does nothing" bug already found and
-    fixed once before, v0.99.32, for a different narrower-set
-    mismatch)."""
-    return [sym for sym, ov in overrides.items() if ov and not ov.get("error") and not ov.get("stress_test_failed")]
-
-
 def _msnr_backtest_one_symbol(symbol):
     """Fetch + optimize + summarize for a single symbol — factored out
     so msnr_backtest_loop() can run it concurrently across the whole
@@ -19576,6 +19579,41 @@ def msnr_backtest_loop():
                     # consistent across callers.
                     msnr_rank_bounds = msnr_compute_rank_bounds(merged_overrides)
                     STATE["msnr_live_universe"] = msnr_compute_live_universe(merged_overrides, bounds=msnr_rank_bounds)
+                    # v0.99.108, per direct user request ("монеты попавшие
+                    # в топ список и винрейт больше 50 помечаются галочкой
+                    # авто торговли, если потом такая монета вылетела из
+                    # топа то галочку автоматом снимать"): auto-manages
+                    # the per-symbol autotrade toggle for the top-N pool —
+                    # auto-ON any symbol newly qualifying (in the eligible
+                    # top-N AND win_rate > 50), auto-OFF any symbol that
+                    # stops qualifying (either condition), but ONLY among
+                    # symbols that were themselves part of the auto-
+                    # managed pool as of the LAST cycle (msnr_autotrade_
+                    # top_set) — critically, this scoping means a symbol
+                    # the user manually toggled ON via msnr_manual_toggle_
+                    # allowed_symbols()'s own broader "вне топ-10, на свой
+                    # страх и риск" feature is NEVER touched by this auto-
+                    # off logic, since it never enters msnr_autotrade_
+                    # top_set unless it also separately earns a genuine
+                    # top-N spot. Symmetric with the entry condition
+                    # (falling below EITHER top-N membership or the >50%
+                    # winrate bar turns it off, matching how it turned on)
+                    # rather than only reacting to ranking changes.
+                    eligible_now = set(msnr_autotrade_eligible_symbols(merged_overrides, bounds=msnr_rank_bounds))
+                    prev_top_set = set(STATE.get("msnr_autotrade_top_set") or [])
+                    autotrade_symbols = STATE["msnr_autotrade_symbols"]
+                    for sym in eligible_now:
+                        wr = (merged_summary.get(sym) or {}).get("win_rate")
+                        if wr is not None and wr > 50 and not autotrade_symbols.get(sym):
+                            autotrade_symbols[sym] = True
+                    for sym in prev_top_set:
+                        if not autotrade_symbols.get(sym):
+                            continue
+                        wr = (merged_summary.get(sym) or {}).get("win_rate")
+                        still_qualifies = sym in eligible_now and wr is not None and wr > 50
+                        if not still_qualifies:
+                            autotrade_symbols[sym] = False
+                    STATE["msnr_autotrade_top_set"] = sorted(eligible_now)
                     STATE["msnr_last_backtest_finished"] = time.time()
                     STATE["msnr_last_backtest_duration"] = round(time.time() - t0, 1)
             finally:
@@ -21389,21 +21427,22 @@ def msnr_effective_live_universe(live_universe, overrides, autotrade_symbols):
     were actually trading: the REAL set msnr_live_loop() scans is
     msnr_compute_live_universe()'s own promoted set (gold + winrate>
     MSNR_LIVE_PROMOTE_MIN_WINRATE with sample>MSNR_LIVE_PROMOTE_MIN_
-    SAMPLE) UNION'd with whatever's toggled autotrade-ON and manually
-    allowed (v0.99.49 — was "and currently eligible, top-N by score"
-    until this same class of mismatch showed up again: a manually-
-    toggled symbol outside the top 10 needs the SAME broader set here
-    as api_msnr_autotrade_toggle() validates writes against and msnr_
-    scan_symbol_live() gates firing on — msnr_manual_toggle_allowed_
-    symbols(), not msnr_autotrade_eligible_symbols() — or the toggle
-    would silently do nothing for exactly the symbols this feature
-    exists for). v0.99.32 built the underlying union, but built it
-    INLINE inside msnr_live_loop() itself rather than as a reusable
-    function, so api_msnr_status()'s own "live" flag (the dot the
-    person actually sees) kept reading the narrower msnr_live_universe
-    alone. Pulled out into its own function so both call sites share
-    one definition and can't drift apart on this again."""
-    allowed_now = msnr_manual_toggle_allowed_symbols(overrides)
+    SAMPLE) UNION'd with whatever's toggled autotrade-ON. v0.99.32
+    built the underlying union, but built it INLINE inside msnr_live_
+    loop() itself rather than as a reusable function, so api_msnr_
+    status()'s own "live" flag (the dot the person actually sees) kept
+    reading the narrower msnr_live_universe alone. Pulled out into its
+    own function so both call sites share one definition and can't
+    drift apart on this again.
+    v0.99.108, per direct user request ("Ручное управление можно
+    убрать"): now unions against msnr_autotrade_eligible_symbols() (the
+    NARROWER top-N set), not the old msnr_manual_toggle_allowed_symbols()
+    — the toggle is now ONLY ever set by msnr_backtest_loop()'s own
+    auto-management (top-N + win_rate>50), so it can never legitimately
+    be True for a symbol outside the top-N in the first place; the
+    broader set existed purely to support manual toggling of non-top-10
+    symbols, which no longer exists."""
+    allowed_now = msnr_autotrade_eligible_symbols(overrides)
     toggled_on_allowed = [sym for sym, on in autotrade_symbols.items() if on and sym in allowed_now]
     return list(dict.fromkeys(list(live_universe) + toggled_on_allowed))
 
@@ -21445,12 +21484,6 @@ def api_msnr_status():
     autotrade_eligible = msnr_autotrade_eligible_symbols(overrides, bounds=msnr_rank_bounds)
     # v0.99.49, per direct user request ("хочу иметь возможность
     # автоторговли и не по топ-10, на свой страх и риск"): a SEPARATE,
-    # wider flag — every symbol with valid, non-stress_test_failed
-    # backtest data can now show a checkbox, not just the ranked top-10.
-    # autotrade_eligible above still marks the "auto-ranked" ones (used
-    # for sort grouping and the checkbox's own visual styling); this
-    # marks which OTHER rows are still toggleable manually.
-    manual_toggle_allowed = msnr_manual_toggle_allowed_symbols(overrides)
     # v0.99.35 — the dot shown per row now uses the SAME effective set
     # msnr_live_loop() actually scans (msnr_effective_live_universe()),
     # not the narrower promoted-only live_universe — see that function's
@@ -21458,7 +21491,6 @@ def api_msnr_status():
     effective_live_universe = msnr_effective_live_universe(live_universe, overrides, autotrade_symbols)
     ranked = [dict(v, symbol=sym, live=(sym in effective_live_universe),
                    autotrade_eligible=(sym in autotrade_eligible),
-                   manual_toggle_allowed=(sym in manual_toggle_allowed),
                    autotrade_on=bool(autotrade_symbols.get(sym)))
               for sym, v in overrides.items() if v and not v.get("error")]
     # v0.99.75/76, per direct user request ("плавное убывание в топ 10
@@ -21730,45 +21762,6 @@ def api_reset_msnr():
         return jsonify({"ok": True})
     except Exception as e:
         log_error(f"api_reset_msnr: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/api/msnr/autotrade_toggle", methods=["POST"])
-def api_msnr_autotrade_toggle():
-    """Toggles ONE symbol's individual MSNR autotrade state. Originally
-    per direct user request for exactly 6 individually-toggleable
-    fields (3 gold + current top 3 non-gold by msnr_rank_by_winrate_
-    sample()) — replaced the old single AUTOTRADE_ENABLED_MSNR
-    checkbox.
-    v0.99.49, per direct user follow-up ("хочу иметь возможность
-    автоторговли и не по топ-10, на свой страх и риск как эксперимент
-    — вижу там сумасшедшие результаты, которые в топ не попадают из-за
-    выборки"): validates against the BROADER msnr_manual_toggle_
-    allowed_symbols() (every symbol with valid, non-stress_test_failed
-    backtest data) instead of the narrower msnr_autotrade_eligible_
-    symbols() (top-N by score, minimum sample) — a symbol excluded from
-    the ranked top-10 purely by small sample size, despite a genuinely
-    strong compound_return_pct, is exactly the case this widening
-    exists for. Still rejects a symbol whose own backtest errored or
-    is stress_test_failed (a losing $ compound simulation) — those stay
-    a hard block even for a manual, at-your-own-risk toggle; see msnr_
-    manual_toggle_allowed_symbols()'s own docstring for why that
-    particular gate doesn't get bypassed here."""
-    try:
-        data = request.get_json(force=True) or {}
-        symbol = data.get("symbol")
-        enabled = bool(data.get("enabled"))
-        if not symbol:
-            return jsonify({"ok": False, "error": "symbol required"}), 400
-        with state_lock:
-            overrides_snapshot = dict(STATE["msnr_symbol_overrides"])
-        allowed = msnr_manual_toggle_allowed_symbols(overrides_snapshot)
-        if symbol not in allowed:
-            return jsonify({"ok": False, "error": f"{symbol} has no valid backtest data or failed its own $ simulation"}), 400
-        _set_msnr_autotrade_symbol(symbol, enabled)
-        return jsonify({"ok": True, "symbol": symbol, "enabled": enabled})
-    except Exception as e:
-        log_error(f"api_msnr_autotrade_toggle: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
@@ -23076,27 +23069,6 @@ function msnrSortBy(key) {
   refreshMsnr();
 }
 
-async function msnrToggleAutotrade(symbol, enabled, checkboxEl) {
-  try {
-    const resp = await fetch('/api/msnr/autotrade_toggle', {
-      method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({symbol, enabled}),
-    });
-    const data = await resp.json();
-    if (!data.ok) {
-      // v0.99.18: the eligible-6 set can shift between page load and
-      // click (a new backtest cycle finished in between) — the server
-      // is the source of truth, so on rejection revert the checkbox
-      // rather than leave it showing a state that didn't actually take.
-      if (checkboxEl) checkboxEl.checked = !enabled;
-      alert(`Не удалось изменить автоторговлю для ${symbol}: ${data.error || 'неизвестная ошибка'}`);
-    }
-  } catch (e) {
-    if (checkboxEl) checkboxEl.checked = !enabled;
-    console.error('msnrToggleAutotrade', e);
-  }
-}
-
 async function refreshMsnr() {
   const status = await (await fetch('/api/msnr/status')).json();
   const signals = await (await fetch('/api/msnr/signals')).json();
@@ -23382,8 +23354,17 @@ async function refreshMsnr() {
     // stress_test_failed rows still get no checkbox at all (excluded
     // from manual_toggle_allowed too — see that function's own
     // docstring for why that particular gate isn't bypassable here).
-    const autotradeCell = r.manual_toggle_allowed
-      ? `<input type="checkbox" ${r.autotrade_on ? 'checked' : ''} onclick="event.stopPropagation(); msnrToggleAutotrade('${r.symbol}', this.checked, this)"${r.autotrade_eligible ? '' : ' style="outline:1px solid #d99;" title="вручную, вне топ-10 — на свой страх и риск"'}>`
+    // v0.99.108, per direct user request ("Ручное управление можно
+    // убрать"): now purely a read-only indicator, not a clickable
+    // control — autotrade state for the top-N pool is fully automatic
+    // (msnr_backtest_loop() auto-toggles based on top-N membership +
+    // win_rate > 50, see that loop's own comment). The old "manual,
+    // outside top-10, на свой страх и риск" feature is gone entirely
+    // along with the click handler — a symbol either currently
+    // qualifies (shown checked/green) or it doesn't (shown unchecked/
+    // dim), nothing left to click.
+    const autotradeCell = r.autotrade_eligible
+      ? `<span class="${r.autotrade_on ? 'win' : 'dim'}" style="font-size:14px;" title="${r.autotrade_on ? 'авто-включено: в топе и WR>50%' : 'в топе, но WR не выше 50% — авто-выключено'}">${r.autotrade_on ? '\u2713' : '\u2014'}</span>`
       : '<span class="dim" style="font-size:10px;">\u2014</span>';
     // v0.99.19: a visible separator row exactly at the eligible/rest
     // boundary — the sort above already groups eligible rows first,
