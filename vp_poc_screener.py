@@ -9787,6 +9787,42 @@ v0.99.110 - mirror_symbol_direction_skip() changed from "skip only the
          def integrity check (55 routes — a pure filter-logic change,
          no routes/UI touched), and an AST walk for duplicate top-level
          defs (none introduced).
+
+v0.99.111 - MIRROR live-eligibility minimum sample raised from 15 to
+         80, live report: "у virtual n 15 всего, но она торгуется в
+         топе. Хотя бы от 80 сделать." Root cause: mirror_backtest_
+         loop()'s own live-eligibility gate (added v0.99.98, "Мин.
+         выборка на live-гейте") reused MIRROR_SYMBOL_SKIP_MIN_SAMPLE
+         (=15) as a whole-symbol floor — but that constant's own actual
+         purpose is judging whether ONE bucket/pattern/direction slice
+         within a symbol's data is reliable (the SL-width/pattern/
+         direction filters), a genuinely different, much lower bar than
+         "is this symbol's OVERALL history long enough to trust for
+         live money at all." A symbol clearing barely 15 total trades
+         could read as, say, 90% winrate purely from a small, lucky
+         sample and still get promoted to live trading exactly like a
+         genuinely-tested 80+ trade symbol.
+         New dedicated MIRROR_LIVE_MIN_SAMPLE=80 (env-overridable via
+         VP_MIRROR_LIVE_MIN_SAMPLE) replaces MIRROR_SYMBOL_SKIP_MIN_
+         SAMPLE at this ONE call site only — the per-filter significance
+         bar (SL-width/pattern/direction skip logic) stays at 15,
+         unchanged, since the user's report was specifically about
+         live-trading eligibility, not those other filters. Also
+         exposed in api_mirror_status()'s own config dict (live_min_
+         sample, alongside the existing live_min_winrate) for
+         transparency.
+         Verified directly against the exact reported case: a symbol at
+         n=15 with a strong 90% winrate now correctly fails the gate
+         (previously would have passed); n=80 exactly clears it; n=79
+         (one short) still correctly fails; a genuinely well-tested
+         n=150 symbol at a modest 40% winrate still correctly passes —
+         confirming the fix targets sample size specifically, not
+         winrate. Also confirmed the new config field reaches a live
+         /api/mirror/status response.
+         Verified with py_compile, pyflakes (clean), the Flask route/def
+         integrity check (55 routes — a pure threshold/constant change,
+         no new endpoints), and an AST walk for duplicate top-level defs
+         (none introduced).
 """
 
 import os
@@ -9806,7 +9842,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.110"
+APP_VERSION = "0.99.111"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -10483,6 +10519,7 @@ TELEGRAM_ALERTS_MIRROR = os.environ.get("VP_TG_ALERTS_MIRROR", "1") == "1"
 # msnr... В живых сигналах использовать только бэктестовые монеты с
 # винрейтом более 35%"):
 MIRROR_SYMBOL_SKIP_MIN_SAMPLE = 15  # same per-bucket significance bar MSNR's own filters use
+MIRROR_LIVE_MIN_SAMPLE = int(os.environ.get("VP_MIRROR_LIVE_MIN_SAMPLE", 80))  # v0.99.111, per direct user report ("у virtual n 15 всего, но она торгуется в топе. Хотя бы от 80 сделать"): a SEPARATE, higher bar than MIRROR_SYMBOL_SKIP_MIN_SAMPLE above — that constant answers "is this one bucket/pattern/direction within a symbol's own backtest reliable enough to judge," this one answers a different question entirely: "is the symbol's OVERALL post-filter history long enough to trust for live trading at all." The two were conflated before this version (mirror_backtest_loop()'s own live-eligibility gate reused the 15-trade per-bucket bar as a whole-symbol floor too) — a symbol clearing just 15 total closed trades could read as, say, 100% winrate purely from a small, lucky sample and still get promoted to live trading exactly like a genuinely-tested 80+ trade symbol.
 MIRROR_SL_PCT_BUCKETS = [(0, 1), (1, 2), (2, 4), (4, 7), (7, float("inf"))]
 MIRROR_SL_PCT_BUCKET_SCHEMES = [
     MIRROR_SL_PCT_BUCKETS,
@@ -20794,16 +20831,22 @@ def mirror_backtest_loop():
                         # ("Мин. выборка на live-гейте"): winrate alone
                         # let a 2/2 or 3/3 symbol read as "100%" and
                         # qualify exactly like a genuinely-tested 40+
-                        # trade symbol — added the same minimum-sample
-                        # bar MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE-style
-                        # filters already require per-bucket, reused
-                        # here as a whole-symbol floor (same constant,
-                        # same "don't trust a thin sample" reasoning,
-                        # just applied to the symbol total instead of
-                        # one RR/SL bucket within it).
+                        # trade symbol.
+                        # v0.99.111, per direct user report ("у virtual
+                        # n 15 всего, но она торгуется в топе"): the
+                        # original fix above reused MIRROR_SYMBOL_SKIP_
+                        # MIN_SAMPLE (a per-bucket significance bar
+                        # meant for judging one SL-width/pattern/
+                        # direction slice within a symbol's own data)
+                        # as this whole-symbol floor too — 15 total
+                        # trades is nowhere near enough to trust for
+                        # live money regardless of winrate. Now uses
+                        # the dedicated, higher MIRROR_LIVE_MIN_SAMPLE
+                        # (see that constant's own comment for the full
+                        # reasoning on why it's a separate bar).
                         closed_n = summary["wins"] + summary["losses"]
                         if (summary["win_rate"] is not None and summary["win_rate"] > MIRROR_LIVE_MIN_WINRATE
-                                and closed_n >= MIRROR_SYMBOL_SKIP_MIN_SAMPLE):
+                                and closed_n >= MIRROR_LIVE_MIN_SAMPLE):
                             live_universe.append(symbol)
                     except Exception as e:
                         log_error(f"mirror_backtest {symbol}: {e}")
@@ -21540,7 +21583,7 @@ def api_mirror_status():
             "touch_tolerance_pct": MIRROR_TOUCH_TOLERANCE_PCT, "pattern_tolerance_pct": MIRROR_PATTERN_TOLERANCE_PCT,
             "rr": MIRROR_RR, "max_bars_to_return": MIRROR_MAX_BARS_TO_RETURN,
             "backtest_days": MIRROR_BACKTEST_DAYS, "universe_size": MIRROR_UNIVERSE_SIZE,
-            "live_min_winrate": MIRROR_LIVE_MIN_WINRATE,
+            "live_min_winrate": MIRROR_LIVE_MIN_WINRATE, "live_min_sample": MIRROR_LIVE_MIN_SAMPLE,
         },
         "top": ranked,
     })
