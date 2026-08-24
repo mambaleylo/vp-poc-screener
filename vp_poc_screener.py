@@ -9680,6 +9680,65 @@ v0.99.108 - MSNR autotrade fully automated, per direct user request:
          endpoint), and an AST walk for duplicate top-level defs (none
          introduced) — 305 total top-level defs, down from 308 (three
          genuinely dead functions removed).
+
+v0.99.109 - NEW FEATURE: Scalp Martingale, per direct user request
+         ("реализовать удвоение после стоплосса... классический
+         мартингейл... 2%→4%→8%→16%") clarified via several rounds of
+         Q&A before touching code given the real financial stakes (a
+         Martingale system's exponential escalation on a losing streak
+         is a mathematically well-understood risk, not a bug, and this
+         account has been reported as small — worth confirming exact
+         mechanics rather than guessing). Confirmed: classic doubling
+         from the CURRENT level on each consecutive loss (not a flat
+         2x every time), reset to base on a win, capped at SCALP_
+         MARTINGALE_MAX_DOUBLINGS=3 consecutive doublings (2%→4%→8%,
+         holds at 8x rather than continuing to grow) — user's own
+         choice of a streak-count cap over a direct max-%-risk cap —
+         and a SEPARATE multiplier per symbol (a loss on one coin
+         doesn't escalate risk on an unrelated coin's next signal).
+         New SCALP_MARTINGALE_ENABLED (defaults OFF — a deliberate
+         opt-in, not something that should silently activate for an
+         existing account) and SCALP_MARTINGALE_MAX_DOUBLINGS
+         constants. New STATE["scalp_martingale"] = {symbol: {"streak",
+         "multiplier"}}, new scalp_martingale_multiplier_for_symbol().
+         execute_autotrade() gained an optional risk_pct_override
+         param (every other module's own call site passes nothing,
+         unaffected) — Scalp's own call site computes the current
+         multiplier BEFORE firing and passes AUTOTRADE_RISK_PCT_OF_
+         BALANCE * multiplier through to compute_risk_based_position(),
+         which already accepted an override risk_pct from the v0.99.102
+         redesign. update_scalp_signal_outcomes() updates the streak on
+         a real WIN/LOSS — but ONLY when the closing signal's own
+         autotrade_fired flag (new, set at signal creation only when
+         execute_autotrade() actually reached OPENED/OPENED_TP_SL_
+         FAILED) is true, so a purely informational signal (autotrade
+         off, dry-run, skipped, or errored) — no real money at risk —
+         never escalates risk on the NEXT real trade.
+         UI: new settings row ("↳↳ Мартингейл после стопа ⚠️", with an
+         explicit risk warning in its own sub-text) under Scalp's own
+         autotrade row. Live signals table shows a "×N" badge next to
+         a signal's own direction whenever it traded above base risk —
+         the multiplier is frozen on the signal record at creation
+         time (martingale_multiplier field), not a live-updating value,
+         so a past signal's own badge never changes retroactively as
+         later trades on other symbols resolve.
+         Verified with py_compile after every edit, an actual runtime
+         start throughout: a synthetic 4-consecutive-loss sequence
+         confirming 1x->2x->4x->8x->(caps at 8x, doesn't reach 16x),
+         then a win correctly resetting to 1x, and a different symbol
+         confirmed completely unaffected; a live execute_autotrade()
+         call with risk_pct_override=8.0 (4x base) confirmed the
+         resulting margin came out ~4x the base-risk margin end to end;
+         a live test_client() /api/settings round-trip confirming
+         scalp_martingale_enabled persists and reads back correctly;
+         a live /api/scalp/signals round-trip confirming martingale_
+         multiplier reaches the frontend unmodified — pyflakes (clean),
+         a full getElementById audit (95 calls, zero dangling), a real
+         jsdom page execution (zero runtime errors), node --check on
+         the correctly-last <script> block, the Flask route/def
+         integrity check (55 routes — no new endpoints, existing
+         settings pipeline extended), and an AST walk for duplicate
+         top-level defs (none introduced).
 """
 
 import os
@@ -9699,7 +9758,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.108"
+APP_VERSION = "0.99.109"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -10441,6 +10500,8 @@ AUTOTRADE_ENABLED_SESSION_NY = os.environ.get("VP_AUTOTRADE_SESSION_NY", "0") ==
 AUTOTRADE_SIZE_MODE = os.environ.get("VP_AUTOTRADE_SIZE_MODE", "percent")  # "percent" or "fixed" — the single size value below is interpreted according to this
 AUTOTRADE_SIZE_VALUE = float(os.environ.get("VP_AUTOTRADE_SIZE_VALUE", 2.0))  # percent: % of futures wallet balance; fixed: raw USD margin, leverage-independent either way
 AUTOTRADE_RISK_PCT_OF_BALANCE = float(os.environ.get("VP_AUTOTRADE_RISK_PCT", 2.0))  # v0.99.102, per direct user request ("надо чтобы размер позиции только можно было выбрать"): % of TOTAL account equity risked per trade if SL hits — drives the now-auto-computed leverage, replacing every module's own fixed leverage constant. The user picks position SIZE (margin, via AUTOTRADE_SIZE_MODE/VALUE above, unchanged); leverage is derived per-trade from this risk target, this signal's own SL distance, and the chosen margin — no longer a manual choice at all
+SCALP_MARTINGALE_ENABLED = os.environ.get("VP_SCALP_MARTINGALE_ENABLED", "0") == "1"  # v0.99.109, per direct user request ("удвоение после стоплосса... классический мартингейл"): defaults OFF — a deliberate opt-in given the real, well-understood risk of exponentially escalating position size on a losing streak (a mathematically inevitable property of Martingale-style sizing, not a bug), not something that should silently activate for an existing account. See scalp_martingale_multiplier_for_symbol()'s own docstring for the full mechanics.
+SCALP_MARTINGALE_MAX_DOUBLINGS = int(os.environ.get("VP_SCALP_MARTINGALE_MAX_DOUBLINGS", 3))  # v0.99.109 — the safety cap: after this many consecutive losses on a symbol, the risk multiplier (2^streak) stops growing and holds at 2^this value — per direct user choice of a count-based cap over a direct max-%-risk cap. Default 3 -> caps at 2^3=8x base risk (16% of balance at the default 2% base), a starting value, adjustable via the env var.
 # Scalp gets its OWN size config, separate from the shared one above — per
 # direct user request, by analogy with how leverage is already per-mode for
 # bounce/breakout/divergence/ema/session. Defaults mirror AUTOTRADE_SIZE_MODE/
@@ -10518,7 +10579,7 @@ CREDENTIALS_FILE = os.environ.get(
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "mirror_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
@@ -10559,6 +10620,7 @@ def get_settings():
         "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
         "autotrade_breakout": AUTOTRADE_ENABLED_BREAKOUT,
         "autotrade_scalp": AUTOTRADE_ENABLED_SCALP,
+        "scalp_martingale_enabled": SCALP_MARTINGALE_ENABLED,
         "autotrade_ft5": AUTOTRADE_ENABLED_FT5,
         "autotrade_msnr": AUTOTRADE_ENABLED_MSNR,
         "autotrade_mirror": AUTOTRADE_ENABLED_MIRROR,
@@ -10579,7 +10641,7 @@ def apply_settings(updates):
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, SCALP_MARTINGALE_ENABLED
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT, SESSION_SL_MULT, SESSION_REVERSE_RR
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
@@ -10647,6 +10709,8 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_BREAKOUT = bool(updates["autotrade_breakout"])
     if "autotrade_scalp" in updates:
         AUTOTRADE_ENABLED_SCALP = bool(updates["autotrade_scalp"])
+    if "scalp_martingale_enabled" in updates:
+        SCALP_MARTINGALE_ENABLED = bool(updates["scalp_martingale_enabled"])
     if "autotrade_ft5" in updates:
         AUTOTRADE_ENABLED_FT5 = bool(updates["autotrade_ft5"])
     if "autotrade_msnr" in updates:
@@ -10841,6 +10905,7 @@ STATE = {
     "scalp_last_build_duration": None,
     "scalp_symbols_done": 0,
     "scalp_signals": deque(maxlen=SCALP_SIGNAL_HISTORY),
+    "scalp_martingale": {},  # v0.99.109 — {symbol: {"streak": int, "multiplier": float}}. Missing symbol = never lost yet (streak 0, multiplier 1.0, base risk). See scalp_martingale_multiplier_for_symbol()'s own docstring for the full mechanics.
     # Session-open manipulation — backtest results/summary per symbol,
     # plus live signals fired during each day's manipulation window.
     "session_universe": [],
@@ -13625,7 +13690,7 @@ def reconcile_positions_and_orders():
     return unprotected, cancelled
 
 
-def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None):
+def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_pct_override=None):
     """The single entry point every signal source calls to (maybe) fire a
     real trade. `mode` is a short label (e.g. "bounce", "msnr", "scalp")
     used for the auto-trade-enabled toggle lookup and the log. `extra` is
@@ -13648,6 +13713,13 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None):
     SIZE_MODE/VALUE sizing mechanisms — every module now sizes
     identically, driven only by its own SL width, with no manual
     leverage or size choice left anywhere.
+
+    risk_pct_override, v0.99.109: when given, replaces AUTOTRADE_RISK_
+    PCT_OF_BALANCE for THIS call only — used by Scalp's own Martingale
+    feature (scalp_martingale_multiplier_for_symbol()) to risk a
+    multiple of the base % after a losing streak on that symbol,
+    resetting to base on a win. None (the default) for every other
+    module's own call site — unaffected, still risks the plain base %.
 
     Always writes exactly one entry to STATE["autotrade_log"], whether it
     trades, skips, or dry-runs, so the log is a complete record of every
@@ -13704,8 +13776,9 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None):
             mmr_pct = mmr_map.get(symbol, SCALP_DEFAULT_MMR_PCT)
 
             margin, leverage, skip_reason = compute_risk_based_position(
-                direction, entry, sl, leverage_cap, mmr_pct, total_equity)
+                direction, entry, sl, leverage_cap, mmr_pct, total_equity, risk_pct=risk_pct_override)
             record["leverage"] = leverage
+            record["risk_pct"] = round(risk_pct_override if risk_pct_override is not None else AUTOTRADE_RISK_PCT_OF_BALANCE, 4)
 
             if skip_reason:
                 record["status"] = "SKIPPED"
@@ -14255,6 +14328,13 @@ def scan_symbol_scalp_signal(symbol, rec):
         # something to rely on for a value that gets saved via save_state().
         timeout_sec = 10 ** 12  # ~31,700 years — never actually reached, just avoids inf
 
+        # v0.99.109, per direct user request ("удвоение после
+        # стоплосса... классический мартингейл"): the multiplier this
+        # SPECIFIC signal actually traded at, frozen here at creation
+        # time — a live-updating value would make past signals'
+        # displayed multiplier confusingly change as later trades
+        # resolve. 1.0 (no change) whenever the feature is off.
+        martingale_multiplier = scalp_martingale_multiplier_for_symbol(symbol)
         record = {
             "symbol": symbol, "interval": interval, "direction": direction,
             "entry": entry, "target_price": target_price, "target_pct": target_pct,
@@ -14268,12 +14348,22 @@ def scan_symbol_scalp_signal(symbol, rec):
             "app_version": APP_VERSION,
             "mfe_price": entry, "mae_price": entry,  # best-favorable / worst-adverse price reached while OPEN
             "mfe_r_at_close": None, "mae_r_at_close": None,  # R-multiples (R = sl_pct), frozen once the trade resolves
+            "martingale_multiplier": martingale_multiplier, "autotrade_fired": False,
         }
         with state_lock:
             STATE["scalp_signals"].appendleft(record)
         if AUTOTRADE_ENABLED_SCALP:
-            execute_autotrade("scalp", symbol, direction, entry, sl_price, target_price,
-                               extra={"interval": interval, "score": rec["score"]})
+            autotrade_result = execute_autotrade("scalp", symbol, direction, entry, sl_price, target_price,
+                               extra={"interval": interval, "score": rec["score"]},
+                               risk_pct_override=AUTOTRADE_RISK_PCT_OF_BALANCE * martingale_multiplier)
+            # v0.99.109 — only a GENUINELY fired real order (not a dry-
+            # run preview, a skip, or an error) counts toward the
+            # martingale streak in update_scalp_signal_outcomes() below
+            # — a signal with no real money at risk shouldn't escalate
+            # risk on the NEXT real trade.
+            if autotrade_result and autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED"):
+                with state_lock:
+                    record["autotrade_fired"] = True
             sim_execute_trade("scalp", symbol, direction, entry, sl_price, target_price,
                                rec["leverage"], record,
                                size_mode=SCALP_SIZE_MODE, size_value=SCALP_SIZE_VALUE)
@@ -14292,6 +14382,34 @@ def compute_scalp_signal_stats():
     total_closed = len(closed)
     win_rate = round(wins / total_closed * 100, 1) if total_closed else None
     return {"total": len(signals), "wins": wins, "losses": losses, "timeouts": timeouts, "open": open_n, "win_rate": win_rate}
+
+
+def scalp_martingale_multiplier_for_symbol(symbol):
+    """v0.99.109, per direct user request ("удвоение после стоплосса...
+    классический мартингейл... если снова стоп, то опять удваивает"):
+    the CURRENT risk multiplier for this symbol's NEXT Scalp trade,
+    derived from that symbol's own current consecutive-loss streak
+    (STATE["scalp_martingale"]) — classic Martingale: 1x base after a
+    win or no history, 2x after 1 loss, 4x after 2, 8x after 3, doubling
+    again each additional consecutive loss up to SCALP_MARTINGALE_
+    MAX_DOUBLINGS, after which it holds at 2^that cap rather than
+    continuing to grow (the safety cap, per direct user choice of a
+    streak-count cap over a direct max-%-risk cap).
+    Deliberately per-SYMBOL, not one shared multiplier across all of
+    Scalp — per direct user choice: "отдельный множитель на каждую
+    монету (удваивается только следующая сделка по той же монете)" —
+    a loss on one coin shouldn't escalate risk on a completely
+    unrelated coin's next signal.
+    Returns 1.0 (base, no change) if SCALP_MARTINGALE_ENABLED is off —
+    every caller can unconditionally multiply by this function's return
+    value without its own separate enabled-check."""
+    if not SCALP_MARTINGALE_ENABLED:
+        return 1.0
+    with state_lock:
+        mg = STATE["scalp_martingale"].get(symbol)
+    if not mg:
+        return 1.0
+    return float(mg.get("multiplier", 1.0))
 
 
 def update_scalp_signal_outcomes():
@@ -14361,6 +14479,27 @@ def update_scalp_signal_outcomes():
                     sig["exit_time"] = exit_time
                     sig["mfe_r_at_close"] = r_multiple(mfe_price)
                     sig["mae_r_at_close"] = r_multiple(mae_price)
+                    # v0.99.109, per direct user request ("удвоение
+                    # после стоплосса... классический мартингейл"):
+                    # only a genuinely-fired real trade (see the
+                    # autotrade_fired flag set at signal creation)
+                    # updates the streak — a purely informational
+                    # signal (autotrade off, dry-run, or the order got
+                    # skipped/errored) never had real money at risk, so
+                    # its own WIN/LOSS shouldn't escalate risk on the
+                    # NEXT real trade. result == "WIN" resets to base;
+                    # result == "LOSS" advances the streak (capped at
+                    # SCALP_MARTINGALE_MAX_DOUBLINGS) and doubles the
+                    # multiplier again from wherever it currently sits.
+                    if SCALP_MARTINGALE_ENABLED and sig.get("autotrade_fired") and result in ("WIN", "LOSS"):
+                        mg = STATE["scalp_martingale"].setdefault(sig["symbol"], {"streak": 0, "multiplier": 1.0})
+                        if result == "LOSS":
+                            if mg["streak"] < SCALP_MARTINGALE_MAX_DOUBLINGS:
+                                mg["streak"] += 1
+                            mg["multiplier"] = 2.0 ** mg["streak"]
+                        else:
+                            mg["streak"] = 0
+                            mg["multiplier"] = 1.0
                 elif now >= sig["timeout_at"]:
                     sig["status"] = "CLOSED"
                     sig["result"] = "TIMEOUT"
@@ -22621,6 +22760,13 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="label">↳↳ Мартингейл после стопа ⚠️</div>
+          <div class="sub">после стопа следующая сделка по ТОЙ ЖЕ монете риском ×2, снова стоп — ×4, ×8 (потолок, дальше не растёт) — победа сбрасывает обратно к базовому риску. Реальный риск потери денег растёт экспоненциально при серии стопов подряд</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setScalpMartingaleEnabled"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ MSNR ⚠️</div>
           <div class="sub">общий рубильник поверх переключателей по каждой монете (вкладка MSNR, колонка «Авто») — выключен здесь, значит не торгует НИКТО, даже если у монеты своя галочка стоит</div>
         </div>
@@ -22969,8 +23115,18 @@ async function refreshScalp() {
     else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
     else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
     else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
+    // v0.99.109, per direct user request ("нужны пометки рядом с живым
+    // сигналом"): shows the Martingale multiplier this SPECIFIC signal
+    // actually traded at (frozen at creation time, not a live-updating
+    // value — a past signal's own badge should never change after the
+    // fact as later trades on other symbols resolve). Only shown when
+    // above base (1x) — a base-risk signal has nothing to flag.
+    const mult = s.martingale_multiplier;
+    const martingaleTag = (mult && mult > 1)
+      ? ` <span class="loss" title="Мартингейл после стопа: риск ×${mult} от базового">×${mult}</span>`
+      : '';
     return `<tr data-signal-symbol="${s.symbol}" data-signal-interval="${s.interval}" data-signal-time="${s.time}" style="cursor:pointer;">
-      <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td><td class="dim">${s.interval}</td>
+      <td>${s.symbol}</td><td class="${dirClass}">${s.direction}${martingaleTag}</td><td class="dim">${s.interval}</td>
       <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.target_price)} (${s.target_pct}%)</td>
       <td class="dim">${s.sl_price !== undefined ? fmt(s.sl_price)+' ('+s.sl_pct+'%)' : '-'}</td>
       <td class="dim">${s.leverage}x</td><td>${statusHtml}</td><td class="dim">${fmtTime(s.time)}</td>
@@ -24105,6 +24261,7 @@ const setInputs = {
   autotrade_bounce: document.getElementById('setAutotradeBounce'),
   autotrade_breakout: document.getElementById('setAutotradeBreakout'),
   autotrade_scalp: document.getElementById('setAutotradeScalp'),
+  scalp_martingale_enabled: document.getElementById('setScalpMartingaleEnabled'),
   // v0.99.105 — see this same key's own note in Python's apply_settings():
   // AUTOTRADE_ENABLED_MSNR is a genuine master switch layered ON TOP of the
   // 6 individual per-symbol toggles in the MSNR panel itself, not a
