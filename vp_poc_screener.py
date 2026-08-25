@@ -10413,6 +10413,77 @@ v0.99.121 - Two fixes + one strategy addition, both per direct user
          gets recorded (with a sane margin) even when STATE["sim_
          balance"] is set negative, whereas the pre-fix code would have
          silently returned None.
+
+v0.99.122 - LSW's remaining two rules from the reference "AMD + FVG"
+         note, per direct "Продолжи" follow-up to v0.99.121's own
+         changelog entry (which had explicitly deferred these).
+         Rule #4 ("торгуем не выше структурного максимума"):
+         lsw_filter_signals_by_structural_cap() — a LONG only survives
+         if its own entry sits BELOW the nearest significant structural
+         high confirmed within LSW_STRUCTURAL_CAP_LOOKBACK bars (found
+         via lsw_find_pivots() with a deliberately WIDER left/right —
+         LSW_STRUCTURAL_CAP_PIVOT_LEFT/RIGHT, 10/10 — than the 3/3 used
+         for equal-highs/lows grouping itself, since a "structural"
+         swing is meant to be a bigger, more significant move); a SHORT
+         mirrors this against the nearest structural low. A signal with
+         no qualifying structural pivot in its own window is KEPT —
+         nothing to cap against isn't a reason to block the trade.
+         Rule #3 (5-minute entry confirmation via инверсия/BOS/
+         поглощение): lsw_scan_5m_confirmation() scans LSW_ENTRY_
+         CONFIRM_INTERVAL (5m) candles starting at the 1h sweep
+         candle's own close, for up to LSW_ENTRY_CONFIRM_MAX_BARS (12 x
+         5m = 1h) bars, for the FIRST of: BOS (a 5m close breaking the
+         most recent 5m swing point in the trade's own direction),
+         поглощение/absorption (a 5m candle whose rejection wick against
+         the trade direction covers >= LSW_ENTRY_CONFIRM_WICK_RATIO of
+         its own range, closing in the favorable part of it), or
+         инверсия/inversion (a mini version of the same liquidity-sweep
+         idea at 5m resolution — wicking past the last few bars' own
+         extreme against the trade direction, closing back beyond it in
+         the trade's favor). Whichever fires on the earliest bar wins.
+         lsw_apply_entry_confirmation() then REPLACES the signal's own
+         entry/sl with the confirmed values (tighter than the original
+         1h-wick-based stop in every case tested) and recomputes tp at
+         the same rr — or drops the signal entirely if nothing confirms
+         within the window, since the reference note treats these as
+         required entry triggers, not optional refinements.
+         Both wired into lsw_backtest_symbol() (structural cap runs
+         directly against the already-fetched 1h candles, no extra
+         fetch; entry confirmation fetches LSW_ENTRY_CONFIRM_INTERVAL
+         history over the same backtest window) and lsw_scan_symbol_
+         live() (structural cap checked inline; entry confirmation
+         fetches recent 5m candles and confirms/drops that bar's own
+         signal before it's ever recorded). Filter order in both:
+         HTF trend -> structural cap -> 5m confirmation — cheapest
+         checks first, so the comparatively expensive 5m fetch/scan
+         only runs on signals that already passed the other two.
+         Known simplification, noted directly in lsw_apply_entry_
+         confirmation()'s own docstring: outcome tracking still walks
+         the ORIGINAL 1h candles from the sweep's own entry_idx
+         afterward (lsw_track_outcome() isn't 5m-aware) rather than
+         starting from the confirmed 5m entry precisely — acceptable
+         since confirmation only ever happens within at most 1h of the
+         sweep candle's own close, so the very next 1h bar already
+         covers that window in almost every case.
+         Both off by default (setLswStructuralCap, setLswEntryConfirm
+         checkboxes in the Sweep settings group), same convention as
+         every toggle in this file — barely any real forward data
+         exists yet to judge whether either genuinely helps.
+         Verified: py_compile, pyflakes clean, a real runtime start
+         confirming api_lsw_status()'s new config fields (structural_
+         cap_enabled, entry_confirm_enabled, entry_confirm_interval)
+         all appear correctly, node --check on the correctly-last
+         <script> block, the Flask route/def integrity check (still 44
+         routes), a getElementById audit on the 2 new IDs (each defined
+         once, referenced once), and unit tests: structural cap
+         correctly keeping a LONG entry below a hand-built structural
+         high and dropping one above it; lsw_scan_5m_confirmation()
+         correctly detecting a hand-built BOS break and a hand-built
+         absorption wick on synthetic 5m data; the full lsw_apply_
+         entry_confirmation() pipeline producing a tighter SL and a
+         correctly-recomputed TP at the same rr; and confirming a
+         signal is correctly DROPPED (empty result) when scanned
+         against flat 5m data with no confirmation pattern at all.
 """
 
 import os
@@ -10431,7 +10502,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.121"
+APP_VERSION = "0.99.122"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -11055,6 +11126,21 @@ LSW_HTF_FILTER_ENABLED = os.environ.get("VP_LSW_HTF_FILTER", "0") == "1"
 LSW_HTF_INTERVAL = os.environ.get("VP_LSW_HTF_INTERVAL", "4h")
 LSW_HTF_EMA_PERIOD = int(os.environ.get("VP_LSW_HTF_EMA_PERIOD", 50))
 LSW_HTF_TREND_BUFFER_PCT = float(os.environ.get("VP_LSW_HTF_TREND_BUFFER_PCT", 0.1))  # close must clear the EMA by this % to count as UP/DOWN rather than NEUTRAL — avoids flip-flopping right at the line
+# v0.99.122 — the reference note's remaining two rules, per direct
+# "Продолжи" follow-up to v0.99.121's own changelog entry (which had
+# explicitly left these for later): rule #4 ("торгуем не выше
+# структурного максимума") and rule #3 (5-minute entry confirmation
+# via инверсия/BOS/поглощение). Both off by default, same convention.
+LSW_STRUCTURAL_CAP_ENABLED = os.environ.get("VP_LSW_STRUCTURAL_CAP", "0") == "1"
+LSW_STRUCTURAL_CAP_LOOKBACK = int(os.environ.get("VP_LSW_STRUCTURAL_CAP_LOOKBACK", 100))  # bars of LSW_INTERVAL history searched for the nearest significant structural pivot
+LSW_STRUCTURAL_CAP_PIVOT_LEFT = int(os.environ.get("VP_LSW_STRUCTURAL_CAP_PIVOT_LEFT", 10))  # deliberately wider than LSW_PIVOT_LEFT/RIGHT (3/3) — a "structural" high/low is a bigger, more significant swing than the small pivots equal-highs/lows grouping uses
+LSW_STRUCTURAL_CAP_PIVOT_RIGHT = int(os.environ.get("VP_LSW_STRUCTURAL_CAP_PIVOT_RIGHT", 10))
+LSW_ENTRY_CONFIRM_ENABLED = os.environ.get("VP_LSW_ENTRY_CONFIRM", "0") == "1"
+LSW_ENTRY_CONFIRM_INTERVAL = os.environ.get("VP_LSW_ENTRY_CONFIRM_INTERVAL", "5m")
+LSW_ENTRY_CONFIRM_MAX_BARS = int(os.environ.get("VP_LSW_ENTRY_CONFIRM_MAX_BARS", 12))  # 12x5m = 1h — how long after the 1h sweep candle's own close to keep waiting for a 5m confirmation before giving up on the signal entirely
+LSW_ENTRY_CONFIRM_PIVOT_LEFT = int(os.environ.get("VP_LSW_ENTRY_CONFIRM_PIVOT_LEFT", 2))
+LSW_ENTRY_CONFIRM_PIVOT_RIGHT = int(os.environ.get("VP_LSW_ENTRY_CONFIRM_PIVOT_RIGHT", 2))
+LSW_ENTRY_CONFIRM_WICK_RATIO = float(os.environ.get("VP_LSW_ENTRY_CONFIRM_WICK_RATIO", 0.6))  # how much of a 5m candle's own range its rejection wick + favorable close must cover to count as "поглощение" (absorption)
 FT5_MIN_BACKTEST_TRADES = int(os.environ.get("VP_FT5_MIN_BACKTEST_TRADES", 5))  # a combo with fewer trades than this in the backtest window isn't a confident pick — same bar Volume's optimizer uses (MIN_BACKTEST_TRADES)
 FT5_RANK_PRIOR_TARGET = int(os.environ.get("VP_FT5_RANK_PRIOR_TARGET", 1))  # v0.98.8 — ft5_ranking_score() blends in max(0, TARGET - losses_count) pseudo-trades at the known -FT5_STOPLOSS_PCT level, so a small loss-free sample can't look artificially low-risk just because it hasn't hit its (structurally always-possible) stop yet. Tapered by ACTUAL real losses (not a flat count on every combo) — a flat prior tested worse, disproportionately hurting smaller-but-still-real samples. See ft5_ranking_score()'s own docstring for the full reasoning, including why TARGET=1 specifically. Replaces FT5_RANK_Z (v0.98.7), which is no longer referenced — the confidence multiplier is now t_critical(n-1), not a fixed Z.
 
@@ -11177,7 +11263,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "mirror_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "mirror_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_entry_confirm_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
@@ -11211,6 +11297,8 @@ def get_settings():
         "lsw_rr": LSW_RR,
         "lsw_equal_tolerance_pct": LSW_EQUAL_TOLERANCE_PCT,
         "lsw_htf_filter_enabled": LSW_HTF_FILTER_ENABLED,
+        "lsw_structural_cap_enabled": LSW_STRUCTURAL_CAP_ENABLED,
+        "lsw_entry_confirm_enabled": LSW_ENTRY_CONFIRM_ENABLED,
         "msnr_max_rr": MSNR_MAX_RR,
         "msnr_enabled": MSNR_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
@@ -11245,6 +11333,7 @@ def apply_settings(updates):
     global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT
     global LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
+    global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, SCALP_MARTINGALE_ENABLED
@@ -11304,6 +11393,10 @@ def apply_settings(updates):
             pass
     if "lsw_htf_filter_enabled" in updates:
         LSW_HTF_FILTER_ENABLED = bool(updates["lsw_htf_filter_enabled"])
+    if "lsw_structural_cap_enabled" in updates:
+        LSW_STRUCTURAL_CAP_ENABLED = bool(updates["lsw_structural_cap_enabled"])
+    if "lsw_entry_confirm_enabled" in updates:
+        LSW_ENTRY_CONFIRM_ENABLED = bool(updates["lsw_entry_confirm_enabled"])
     if "msnr_enabled" in updates:
         MSNR_ENABLED = bool(updates["msnr_enabled"])
     if "msnr_max_rr" in updates:
@@ -20202,6 +20295,163 @@ def lsw_find_pivots(candles, left=None, right=None):
     return pivots
 
 
+def lsw_filter_signals_by_structural_cap(signals, candles, lookback=None, pivot_left=None, pivot_right=None):
+    """Rule #4 of the reference "AMD + FVG" note ("торгуем не выше
+    структурного максимума"): a LONG only survives if its own entry
+    price sits BELOW the nearest significant structural high confirmed
+    within `lookback` bars before it — i.e. there's still real room to
+    run before hitting the last major resistance, not already chasing
+    price past it. A SHORT mirrors this: entry must sit ABOVE the
+    nearest significant structural low. Uses lsw_find_pivots() with a
+    deliberately WIDER left/right (LSW_STRUCTURAL_CAP_PIVOT_LEFT/RIGHT,
+    10/10 by default vs the 3/3 used for equal-highs/lows grouping) —
+    a "structural" swing is a bigger, more significant move than the
+    small pivots the sweep detector itself watches. A signal with no
+    qualifying structural pivot in its own lookback window is KEPT
+    (nothing to cap against, not a reason to block the trade)."""
+    lookback = lookback if lookback is not None else LSW_STRUCTURAL_CAP_LOOKBACK
+    pivot_left = pivot_left if pivot_left is not None else LSW_STRUCTURAL_CAP_PIVOT_LEFT
+    pivot_right = pivot_right if pivot_right is not None else LSW_STRUCTURAL_CAP_PIVOT_RIGHT
+    kept = []
+    for sig in signals:
+        idx = sig["entry_idx"]
+        window_start = max(0, idx - lookback)
+        window = candles[window_start:idx + 1]
+        if len(window) < pivot_left + pivot_right + 1:
+            kept.append(sig)
+            continue
+        pivots = lsw_find_pivots(window, pivot_left, pivot_right)
+        if sig["direction"] == "LONG":
+            highs = [p["price"] for p in pivots if p["type"] == "high"]
+            if highs and sig["entry"] >= max(highs):
+                continue  # already at/above the last major structural high — capped out
+        else:
+            lows = [p["price"] for p in pivots if p["type"] == "low"]
+            if lows and sig["entry"] <= min(lows):
+                continue  # already at/below the last major structural low — capped out
+        kept.append(sig)
+    return kept
+
+
+def lsw_scan_5m_confirmation(candles_ltf, from_time, direction, max_bars=None,
+                              pivot_left=None, pivot_right=None, wick_ratio=None):
+    """Rule #3 of the reference note ("модели входа (5минутка):
+    инверсия / BOS (слом структуры) / поглощение"). Scans `candles_ltf`
+    (expected to be LSW_ENTRY_CONFIRM_INTERVAL, i.e. 5m, candles)
+    starting at the first bar at/after `from_time` (the 1h sweep
+    candle's own close) for up to `max_bars`, looking for the FIRST of:
+    - BOS: a 5m close breaks the most recent 5m swing point (high for
+      LONG, low for SHORT) confirmed before the scan window started —
+      a genuine slom structury in the trade's own direction.
+    - Поглощение (absorption): a 5m candle whose rejection wick against
+      the trade direction covers at least `wick_ratio` of its own
+      range, closing in the favorable part of that range — a rejection
+      candle.
+    - Инверсия (inversion): a mini version of the same liquidity-sweep
+      idea at 5m resolution — a bar wicks past the recent few bars'
+      own extreme (against the trade direction) but closes back beyond
+      it in the trade's favor.
+    Whichever fires on the EARLIEST bar wins. Returns
+    {"method", "confirm_time", "entry", "sl_ref"} or None if nothing
+    confirmed within the window — in which case the signal is dropped
+    entirely (no confirmation, no trade), per the reference note
+    treating these as required entry TRIGGERS, not optional extras."""
+    max_bars = max_bars if max_bars is not None else LSW_ENTRY_CONFIRM_MAX_BARS
+    pivot_left = pivot_left if pivot_left is not None else LSW_ENTRY_CONFIRM_PIVOT_LEFT
+    pivot_right = pivot_right if pivot_right is not None else LSW_ENTRY_CONFIRM_PIVOT_RIGHT
+    wick_ratio = wick_ratio if wick_ratio is not None else LSW_ENTRY_CONFIRM_WICK_RATIO
+
+    start_idx = None
+    for i, c in enumerate(candles_ltf):
+        if c["time"] >= from_time:
+            start_idx = i
+            break
+    if start_idx is None:
+        return None
+    window_end = min(len(candles_ltf), start_idx + max_bars)
+
+    ref_price = None
+    if start_idx >= pivot_left + pivot_right + 1:
+        pivots = lsw_find_pivots(candles_ltf[:start_idx + 1], pivot_left, pivot_right)
+        ref_type = "high" if direction == "LONG" else "low"
+        ref_pivots = [p["price"] for p in pivots if p["type"] == ref_type]
+        if ref_pivots:
+            ref_price = ref_pivots[-1]
+
+    for i in range(start_idx, window_end):
+        c = candles_ltf[i]
+        rng = c["high"] - c["low"]
+        if rng <= 0:
+            continue
+        # BOS — slom structury in the trade's own direction
+        if ref_price is not None:
+            if direction == "LONG" and c["close"] > ref_price:
+                sl_ref = min(cc["low"] for cc in candles_ltf[max(start_idx, i - pivot_left - pivot_right):i + 1])
+                return {"method": "BOS", "confirm_time": c["time"], "entry": c["close"], "sl_ref": sl_ref}
+            if direction == "SHORT" and c["close"] < ref_price:
+                sl_ref = max(cc["high"] for cc in candles_ltf[max(start_idx, i - pivot_left - pivot_right):i + 1])
+                return {"method": "BOS", "confirm_time": c["time"], "entry": c["close"], "sl_ref": sl_ref}
+        # Поглощение — a rejection candle
+        body_low, body_high = min(c["open"], c["close"]), max(c["open"], c["close"])
+        lower_wick = body_low - c["low"]
+        upper_wick = c["high"] - body_high
+        if direction == "LONG" and lower_wick >= wick_ratio * rng and c["close"] >= c["low"] + wick_ratio * rng:
+            return {"method": "ABSORPTION", "confirm_time": c["time"], "entry": c["close"], "sl_ref": c["low"]}
+        if direction == "SHORT" and upper_wick >= wick_ratio * rng and c["close"] <= c["high"] - wick_ratio * rng:
+            return {"method": "ABSORPTION", "confirm_time": c["time"], "entry": c["close"], "sl_ref": c["high"]}
+        # Инверсия — a mini sweep of the last few bars' own extreme
+        if i > start_idx:
+            recent = candles_ltf[max(i - 3, start_idx):i]
+            if not recent:
+                continue
+            if direction == "LONG":
+                prev_extreme = min(cc["low"] for cc in recent)
+                if c["low"] < prev_extreme and c["close"] > prev_extreme:
+                    return {"method": "INVERSION", "confirm_time": c["time"], "entry": c["close"], "sl_ref": c["low"]}
+            else:
+                prev_extreme = max(cc["high"] for cc in recent)
+                if c["high"] > prev_extreme and c["close"] < prev_extreme:
+                    return {"method": "INVERSION", "confirm_time": c["time"], "entry": c["close"], "sl_ref": c["high"]}
+    return None
+
+
+def lsw_apply_entry_confirmation(signals, candles_ltf, max_bars=None, pivot_left=None,
+                                  pivot_right=None, wick_ratio=None, sl_buffer_pct=None):
+    """Runs lsw_scan_5m_confirmation() for every signal and replaces
+    its entry/sl/tp with the confirmed values (recomputing tp at the
+    SAME rr the signal already had) — drops the signal entirely if
+    nothing confirmed within the window. Outcome tracking still walks
+    the ORIGINAL 1h candles from the signal's own entry_idx afterward
+    (lsw_track_outcome() isn't 5m-aware) — a deliberate simplification
+    since confirmation only ever happens within LSW_ENTRY_CONFIRM_
+    MAX_BARS x 5m (1h by default) of the sweep candle's own close, so
+    the 1h bar immediately after it already covers the confirmation
+    window in almost every case."""
+    max_bars = max_bars if max_bars is not None else LSW_ENTRY_CONFIRM_MAX_BARS
+    sl_buffer_pct = sl_buffer_pct if sl_buffer_pct is not None else LSW_SL_BUFFER_PCT
+    result = []
+    for sig in signals:
+        conf = lsw_scan_5m_confirmation(candles_ltf, sig["entry_time"], sig["direction"],
+                                         max_bars, pivot_left, pivot_right, wick_ratio)
+        if conf is None:
+            continue
+        entry = conf["entry"]
+        if sig["direction"] == "LONG":
+            sl = conf["sl_ref"] * (1 - sl_buffer_pct / 100.0)
+        else:
+            sl = conf["sl_ref"] * (1 + sl_buffer_pct / 100.0)
+        risk = abs(entry - sl)
+        if risk <= 0:
+            continue
+        rr = sig.get("rr") or LSW_RR
+        tp = entry + risk * rr if sig["direction"] == "LONG" else entry - risk * rr
+        new_sig = dict(sig)
+        new_sig.update({"entry": entry, "sl": sl, "tp": tp, "confirm_method": conf["method"],
+                         "confirm_time": conf["confirm_time"]})
+        result.append(new_sig)
+    return result
+
+
 def lsw_detect_signals(candles, pivot_left=None, pivot_right=None, equal_tolerance_pct=None,
                         sl_buffer_pct=None, rr=None, max_bars_to_sweep=None):
     """Single walk-forward pass over `candles` (oldest first), no
@@ -20343,9 +20593,19 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
     LSW_HTF_FILTER_ENABLED, also fetches LSW_HTF_INTERVAL history over
     the SAME window and runs lsw_filter_signals_by_htf_trend() before
     tracking outcomes, so the backtest numbers reflect the filter
-    exactly as live trading would apply it. No other filter chain yet
-    in this first version (see this module's own header comment) —
-    returns the raw results list directly, same shape ft5_run_backtest's
+    exactly as live trading would apply it. v0.99.122 adds two more,
+    same "reflect exactly what live would do" principle: when LSW_
+    STRUCTURAL_CAP_ENABLED, lsw_filter_signals_by_structural_cap() runs
+    directly against the already-fetched LSW_INTERVAL candles (no extra
+    fetch needed — it's a single-timeframe check); when LSW_ENTRY_
+    CONFIRM_ENABLED, fetches LSW_ENTRY_CONFIRM_INTERVAL (5m) history
+    over the same window and runs lsw_apply_entry_confirmation(), which
+    replaces each surviving signal's own entry/sl/tp or drops it if no
+    5m confirmation ever fired. Filter order: HTF trend -> structural
+    cap -> 5m entry confirmation — cheapest/coarsest checks first, so
+    the (comparatively expensive) 5m confirmation only ever runs on
+    signals that already passed the other two.
+    Returns the raw results list directly, same shape ft5_run_backtest's
     own trades list uses."""
     now = time.time()
     fetch_start = now - days * 86400
@@ -20362,6 +20622,14 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
             sigs = lsw_filter_signals_by_htf_trend(sigs, bias_series, htf_interval_sec)
         else:
             sigs = []  # not enough HTF history to judge trend at all — conservative: no signals rather than unfiltered ones
+    if LSW_STRUCTURAL_CAP_ENABLED and sigs:
+        sigs = lsw_filter_signals_by_structural_cap(sigs, candles)
+    if LSW_ENTRY_CONFIRM_ENABLED and sigs:
+        confirm_candles = get_candles_range(symbol, LSW_ENTRY_CONFIRM_INTERVAL, fetch_start, now)
+        if confirm_candles:
+            sigs = lsw_apply_entry_confirmation(sigs, confirm_candles)
+        else:
+            sigs = []  # no 5m history at all to confirm against
     results = []
     for sig in sigs:
         result, exit_time = lsw_track_outcome(candles, sig)
@@ -20369,7 +20637,7 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
             "time": sig["entry_time"], "direction": sig["direction"],
             "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"], "rr": sig.get("rr"),
             "level_price": sig.get("level_price"), "level_type": sig.get("level_type"),
-            "level_touches": sig.get("level_touches"),
+            "level_touches": sig.get("level_touches"), "confirm_method": sig.get("confirm_method"),
             "result": result, "exit_time": exit_time,
         })
     return results
@@ -20443,6 +20711,10 @@ def lsw_scan_symbol_live(symbol):
             sigs = lsw_filter_signals_by_htf_trend(sigs, bias_series, htf_interval_sec)
             if not sigs:
                 return
+        if LSW_STRUCTURAL_CAP_ENABLED:
+            sigs = lsw_filter_signals_by_structural_cap(sigs, candles)
+            if not sigs:
+                return
         sig = sigs[-1]
         if sig["entry_idx"] != len(candles) - 1:
             return  # most recent signal isn't off the latest closed candle — already stale/handled
@@ -20457,11 +20729,29 @@ def lsw_scan_symbol_live(symbol):
         # same symbol at once.
         if has_open_signal_any_module(symbol, exclude="lsw_signals"):
             return
+        if LSW_ENTRY_CONFIRM_ENABLED:
+            # v0.99.122 — rule #3 of the reference note: entry itself
+            # is gated on a 5m confirmation trigger (BOS/поглощение/
+            # инверсия), not fired straight off the 1h sweep candle's
+            # own close. The cooldown above is already set at this
+            # point (keyed on the 1h sweep's own entry_time) even if
+            # confirmation never arrives, so a sweep that fails to
+            # confirm isn't re-attempted on every subsequent scan pass.
+            confirm_candles = get_candles(symbol, interval=LSW_ENTRY_CONFIRM_INTERVAL,
+                                           limit=LSW_ENTRY_CONFIRM_MAX_BARS + 30)
+            confirm_now = time.time()
+            confirm_interval_sec = INTERVAL_SECONDS.get(LSW_ENTRY_CONFIRM_INTERVAL, 300)
+            confirm_candles = [c for c in confirm_candles if c["time"] + confirm_interval_sec <= confirm_now]
+            confirmed = lsw_apply_entry_confirmation([sig], confirm_candles)
+            if not confirmed:
+                return  # no BOS/поглощение/инверсия within the window yet — no trade
+            sig = confirmed[0]
         record = {
             "symbol": symbol, "direction": sig["direction"],
             "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"], "rr": sig.get("rr"),
             "level_price": sig.get("level_price"), "level_type": sig.get("level_type"),
             "level_touches": sig.get("level_touches"), "time": sig["entry_time"],
+            "confirm_method": sig.get("confirm_method"),
             "detected_at": time.time(), "status": "OPEN", "result": None,
             "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
             "mfe_r": 0.0, "mae_r": 0.0, "mfe_price": None, "mae_price": None,
@@ -21062,6 +21352,8 @@ def api_lsw_status():
             "backtest_days": LSW_BACKTEST_DAYS, "universe_size": LSW_UNIVERSE_SIZE,
             "live_min_winrate": LSW_LIVE_MIN_WINRATE, "live_min_sample": LSW_LIVE_MIN_SAMPLE,
             "htf_filter_enabled": LSW_HTF_FILTER_ENABLED, "htf_interval": LSW_HTF_INTERVAL,
+            "structural_cap_enabled": LSW_STRUCTURAL_CAP_ENABLED,
+            "entry_confirm_enabled": LSW_ENTRY_CONFIRM_ENABLED, "entry_confirm_interval": LSW_ENTRY_CONFIRM_INTERVAL,
         },
         "top": ranked,
     })
@@ -22268,6 +22560,20 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">снятие равных лоу → LONG только если тренд на 4ч вверх/нейтральный; снятие равных хаёв → SHORT только если вниз/нейтральный. Отсекает сделки против старшего тренда</div>
         </div>
         <label class="switch"><input type="checkbox" id="setLswHtfFilter"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Структурный кэп</div>
+          <div class="sub">не входить LONG выше последнего значимого структурного максимума / SHORT ниже структурного минимума — не гнаться за ценой, когда некуда бежать</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setLswStructuralCap"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Подтверждение входа (5м)</div>
+          <div class="sub">вход не сразу по закрытию часовой свечи снятия, а только после подтверждения на 5м: слом структуры (BOS), поглощение или мини-снятие (инверсия) в течение часа. Если подтверждения нет — сделка не открывается</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setLswEntryConfirm"><span class="switchSlider"></span></label>
       </div>
     </div>
 
@@ -23698,7 +24004,9 @@ async function refreshLsw() {
     <div class="dim" style="margin-bottom:8px;">
       <b>Liquidity Sweep</b> — снятие ликвидности с равных хаёв/лоу (2+ близких максимума/минимума считаются одним уровнем); сигнал — когда свеча фитилём пробивает уровень, но закрывается обратно внутри (не пробой, а именно снятие стопов). Автоторговля и её риск настраиваются в общей вкладке «Автоторговля».<br>
       ТФ ${cfg.interval} · RR ${cfg.rr} · допуск равенства уровней ${cfg.equal_tolerance_pct}% · буфер стопа ${cfg.sl_buffer_pct}% · ${buildTxt}<br>
-      Фильтр по тренду (${cfg.htf_interval}): <span class="${cfg.htf_filter_enabled ? 'win' : 'dim'}">${cfg.htf_filter_enabled ? 'включён' : 'выключен'}</span><br>
+      Фильтр по тренду (${cfg.htf_interval}): <span class="${cfg.htf_filter_enabled ? 'win' : 'dim'}">${cfg.htf_filter_enabled ? 'включён' : 'выключен'}</span> ·
+      Структурный кэп: <span class="${cfg.structural_cap_enabled ? 'win' : 'dim'}">${cfg.structural_cap_enabled ? 'включён' : 'выключен'}</span> ·
+      Подтверждение (${cfg.entry_confirm_interval}): <span class="${cfg.entry_confirm_enabled ? 'win' : 'dim'}">${cfg.entry_confirm_enabled ? 'включено' : 'выключено'}</span><br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
       ${byLevelTxt ? `<span style="font-size:11px;">По типу уровня: ${byLevelTxt}</span><br>` : ''}
       <span style="font-size:11px;">Зелёная точка — монета сейчас в живом скане. Клик по строке сигнала открывает график входа/выхода.</span>
@@ -23715,9 +24023,12 @@ async function refreshLsw() {
       statusHtml = `<span class="${rCls}">TIMEOUT @ ${fmt(s.exit_price)}${rTxt}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
     } else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
     const dirClass = s.direction === 'SHORT' ? 'short' : 'long';
+    const confirmLabels = {BOS: 'BOS', ABSORPTION: 'поглощение', INVERSION: 'инверсия'};
+    const confirmTxt = s.confirm_method ? (confirmLabels[s.confirm_method] || s.confirm_method) : '-';
     return `<tr data-symbol="${s.symbol}" data-time="${s.time}" style="cursor:pointer;">
       <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td>
       <td class="dim">${levelTypeLabels[s.level_type] || s.level_type} (x${s.level_touches||'?'})</td>
+      <td class="dim">${confirmTxt}</td>
       <td>${fmt(s.entry)}</td><td>${fmt(s.sl)}</td><td>${fmt(s.tp)}</td>
       <td>${s.rr}</td><td>${statusHtml}</td><td class="dim">${fmtDateTime(s.time)}</td>
     </tr>`;
@@ -23725,7 +24036,7 @@ async function refreshLsw() {
   const signalsTableHtml = signals.length ? `
     <div style="overflow-x:auto;margin-bottom:14px;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Dir</th><th>Уровень</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Status</th><th>Время</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Dir</th><th>Уровень</th><th>Модель входа</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Status</th><th>Время</th></tr></thead>
       <tbody>${signalsRows}</tbody>
     </table>
     </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
@@ -23977,6 +24288,8 @@ const setInputs = {
   mirror_enabled: document.getElementById('setMirror'),
   lsw_enabled: document.getElementById('setLsw'),
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
+  lsw_structural_cap_enabled: document.getElementById('setLswStructuralCap'),
+  lsw_entry_confirm_enabled: document.getElementById('setLswEntryConfirm'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
