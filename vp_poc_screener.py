@@ -10160,6 +10160,51 @@ v0.99.117 - Dead-code sweep continued: extended the same AST-based
          removed was route-connected), and an AST walk for duplicate
          top-level defs (none introduced, unchanged at 250 — this pass
          touched constants/STATE only, no functions).
+
+v0.99.118 - Dead-code sweep, frontend side: extended the same "count
+         every name's own occurrences" methodology to the CSS #id
+         selector layer, checking each against both the HTML's own
+         id="..." attributes and every JS getElementById() call.
+         Found and removed 12 fully orphaned rules — the #divModal/
+         #divCloseBtn/#divChartWrap (Divergence) and #emaModal/
+         #emaCloseBtn/#emaChartWrap (EMA) modal chrome, both sets a
+         complete 6-rule shape (base/.open/Header/Header h2/CloseBtn/
+         ChartWrap). A historical comment elsewhere in the file (from
+         whenever Divergence/EMA's own HTML shells were removed)
+         already confirmed those elements were "now-dead ... HTML
+         shells" — the matching CSS rules were simply the one piece
+         left behind at the time.
+         Corrects an inaccuracy in this file's OWN v0.99.115 changelog
+         entry, which claimed "#emaModalHeader/#emaCloseBtn/
+         #emaChartWrap CSS rules — all genuinely dead, all removed" —
+         what that pass actually removed was a duplicate SECOND
+         occurrence of those same three EMA lines (found sitting right
+         above Session's own CSS block being deleted at the time); the
+         original, first copy of those rules — plus the matching
+         #emaModal/#emaModal.open base rules never mentioned at all —
+         survived untouched until this pass. Worth remembering: a
+         changelog claim of "removed" deserves the same re-verification
+         as any other assumption, not just trust in what a past version
+         of this same file already said about itself.
+         Also swept the frontend more broadly for the OTHER bug class
+         v0.99.115 found once already (a live JS reference to a field
+         a now-simplified backend response no longer sends, like the
+         old o.divergence.enabled crash): checked every remaining
+         top-level JS function for zero-caller orphans (none — the
+         frontend was already clean from the getElementById-audit
+         discipline maintained throughout every module removal this
+         session) and specifically re-grepped for any live code
+         (not comments) still referencing xau_lg/session/session_ny/
+         divergence/ema/vgi as an object property — found none; the
+         only remaining textual matches are inside this same file's
+         own comments describing past incidents, not executable code.
+         Verified with py_compile, pyflakes (clean), node --check on
+         the correctly-last <script> block, a full getElementById
+         audit (95 calls, zero dangling — unchanged, confirming the
+         removed CSS was never paired with a live JS reference either),
+         a real jsdom page execution (zero runtime errors), and the
+         Flask route/def integrity check (41 routes unchanged — a pure
+         CSS change, nothing route-connected).
 """
 
 import os
@@ -10178,7 +10223,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.117"
+APP_VERSION = "0.99.118"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -20877,18 +20922,6 @@ INDEX_HTML = """<!doctype html>
   #optimizeBtn:disabled { opacity:.5; }
   #chartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
   canvas { width:100%; height:100%; display:block; background:#0d1017; border-radius:8px; }
-  #divModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
-  #divModal.open { display:flex; flex-direction:column; }
-  #divModalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
-  #divModalHeader h2 { font-size:15px; margin:0; }
-  #divCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
-  #divChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
-  #emaModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
-  #emaModal.open { display:flex; flex-direction:column; }
-  #emaModalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
-  #emaModalHeader h2 { font-size:15px; margin:0; }
-  #emaCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
-  #emaChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
   #msnrModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #msnrModal.open { display:flex; flex-direction:column; }
   #msnrModalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
