@@ -10283,6 +10283,58 @@ v0.99.119 - NEW MODULE: LSW ("Liquidity Sweep") — equal-highs/equal-
          fires a SHORT signal with SL above the sweep wick and TP at
          the expected RR distance — and the mirror LONG case off two
          equal lows.
+
+v0.99.120 - LSW autotrade wired in, per direct follow-up user request
+         ("надо живые сигналы сделать и авто торговлю как и везде,
+         тоже с риском 2%") — v0.99.119 shipped LSW paper-only; this
+         version makes lsw_scan_symbol_live() fire real trades the
+         exact same way every other module does: execute_autotrade(
+         "lsw", ...) when the new AUTOTRADE_ENABLED_LSW toggle is on
+         (same automatic risk-based leverage/sizing every module
+         already shares — 2% of confirmed equity per trade via the
+         shared AUTOTRADE_RISK_PCT_OF_BALANCE, no per-module override
+         needed or added), plus sim_execute_trade() for the separate
+         paper-balance simulator (its own AUTOTRADE_LEVERAGE_LSW
+         constant, same "deliberately kept on its own old leverage
+         system" pattern every other module's sim call already uses),
+         plus a Telegram alert gated on a new TELEGRAM_ALERTS_LSW flag.
+         Off by default, same as every other module's own autotrade
+         toggle — opt-in via Settings > Автоторговля > Sweep.
+         Also added has_open_signal_any_module()'s own lsw_signals
+         entry — LSW's live signals weren't in that cross-module guard
+         before since paper-only signals had no real-position conflict
+         to protect against; now that a real order can fire, the same
+         guard MIRROR's own real-signal branch uses applies here too
+         (lsw_scan_symbol_live() switched from an LSW-only "already
+         open" check to the shared cross-module one).
+         Also closed a small pre-existing gap while adding this rather
+         than copy it forward: send_telegram()'s own category param
+         checks "vp"/"hourly"/"ft5"/"msnr" against their own TELEGRAM_
+         ALERTS_* flag but — found while wiring the analogous "lsw"
+         check — never actually checks "mirror" against TELEGRAM_
+         ALERTS_MIRROR (that flag is fully wired everywhere else —
+         settings, UI checkbox — just never read here), the same class
+         of dead-control bug v0.99.72's own changelog entry already
+         found and fixed once for MSNR. Left MIRROR's own gap alone
+         (out of scope for this change, and a working example already
+         exists to fix it from later if asked) but built LSW's own
+         "lsw" check correctly from the start rather than reproducing
+         the same bug class a third time.
+         Frontend: removed every "⚠️ paper-only" / "Paper-сигналы"
+         label from the Sweep tab and settings modal (headerHtml, empty-
+         state text, reset-button confirm text) since they're no longer
+         accurate; added a "↳ Sweep" toggle to the Автоторговля settings
+         group (with an inline note about the shared 2% risk) and a
+         "↳ Алерты Sweep" toggle to the Telegram group; modeLabels (used
+         by both the autotrade log table and its own summary line) now
+         includes lsw: 'Sweep' in both of its two identical occurrences.
+         Verified: py_compile, pyflakes clean, node --check on the
+         correctly-last <script> block, a real runtime start, the Flask
+         route/def integrity check (still 45 routes — this version adds
+         no new routes, only wires existing ones together differently),
+         and a getElementById audit confirming the 2 new settings IDs
+         (setAutotradeLsw, setTelegramLsw) are each defined exactly once
+         and referenced exactly once, no dangling references either way.
 """
 
 import os
@@ -10301,7 +10353,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.119"
+APP_VERSION = "0.99.120"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -10872,18 +10924,19 @@ MIRROR_SL_PCT_BUCKET_SCHEMES = [
 MIRROR_LIVE_MIN_WINRATE = float(os.environ.get("VP_MIRROR_LIVE_MIN_WINRATE", 40.0))  # a symbol's OWN post-filter backtest winrate must clear this to be live-scanned at all — raised 35->40 (v0.99.113) per direct user request, alongside investigating (and confirming, not a bug) why many symbols show n=0 despite hundreds of raw signals: the SL-width/pattern/direction filter chain can legitimately eliminate 100% of a symbol's trades when its raw winrate is bad across virtually every SL-width bucket — the SL filter alone catches everything, leaving nothing for the later filters to work with
 
 # LSW ("Liquidity Sweep") — equal-highs/equal-lows liquidity-grab
-# reversal module, v0.99.119. Constants live here for the same reason
-# every other module's own constants do (STATE's own construction
-# below needs LSW_SIGNAL_HISTORY already defined). Prefixed lsw_/LSW_
-# rather than sweep_/SWEEP_ deliberately — sweep_sim_trades() already
-# exists in this file for an unrelated purpose (settling pending paper
-# trades), so reusing that name would collide.
-# Deliberately PAPER-ONLY for now, per direct user request ("Сначала
-# paper-симуляция, автоторговлю добавим потом") — lsw_scan_symbol_live()
-# never calls execute_autotrade()/sim_execute_trade() at all; there is
-# no AUTOTRADE_ENABLED_LSW anywhere in this app. Live signals are
-# tracked through the same WIN/LOSS/TIMEOUT forward logic every other
-# module uses (see _lsw_track_signal_outcomes()), just never fired.
+# reversal module. Constants live here for the same reason every other
+# module's own constants do (STATE's own construction below needs
+# LSW_SIGNAL_HISTORY already defined). Prefixed lsw_/LSW_ rather than
+# sweep_/SWEEP_ deliberately — sweep_sim_trades() already exists in
+# this file for an unrelated purpose (settling pending paper trades),
+# so reusing that name would collide.
+# v0.99.119 shipped this PAPER-ONLY, per direct user request at the
+# time ("Сначала paper-симуляция, автоторговлю добавим потом").
+# v0.99.120 wired real autotrade in (AUTOTRADE_ENABLED_LSW below), per
+# direct follow-up request ("надо живые сигналы сделать и авто
+# торговлю как и везде, тоже с риском 2%") — same execute_autotrade()/
+# sim_execute_trade() pattern, same 2% base risk (AUTOTRADE_RISK_PCT_
+# OF_BALANCE), every other module already uses. Off by default either way.
 LSW_ENABLED = os.environ.get("VP_LSW_ENABLED", "0") == "1"  # off by default, same reasoning as every other new module here — user opts in after seeing real backtest numbers
 LSW_INTERVAL = os.environ.get("VP_LSW_INTERVAL", "1h")
 LSW_PIVOT_LEFT = int(os.environ.get("VP_LSW_PIVOT_LEFT", 3))
@@ -10899,8 +10952,11 @@ LSW_SIGNAL_HISTORY = 300
 LSW_BACKTEST_DAYS = int(os.environ.get("VP_LSW_BACKTEST_DAYS", 90))
 LSW_REFRESH_SEC = int(os.environ.get("VP_LSW_REFRESH_SEC", 3600))
 LSW_SCAN_INTERVAL_SEC = int(os.environ.get("VP_LSW_SCAN_INTERVAL_SEC", 300))
-LSW_LIVE_MIN_SAMPLE = int(os.environ.get("VP_LSW_LIVE_MIN_SAMPLE", 30))  # a symbol needs at least this many CLOSED backtest trades before its live signals are trusted — deliberately lower than MIRROR_LIVE_MIN_SAMPLE (80) since this is a brand-new, paper-only module and the priority right now is gathering real forward data broadly, not a final live-trading gate
+LSW_LIVE_MIN_SAMPLE = int(os.environ.get("VP_LSW_LIVE_MIN_SAMPLE", 30))  # a symbol needs at least this many CLOSED backtest trades before its live signals are trusted — deliberately lower than MIRROR_LIVE_MIN_SAMPLE (80) since this is a brand-new module with far less accumulated real-world validation than MIRROR had by the time IT got autotrade wired; kept at 30 rather than raised to 80 on v0.99.120's autotrade wiring since the user didn't ask for that specific change — worth revisiting once real forward data accumulates
 LSW_LIVE_MIN_WINRATE = float(os.environ.get("VP_LSW_LIVE_MIN_WINRATE", 35.0))
+AUTOTRADE_ENABLED_LSW = os.environ.get("VP_AUTOTRADE_LSW", "0") == "1"  # v0.99.120, per direct user request ("надо живые сигналы сделать и авто торговлю как и везде, тоже с риском 2%") — off by default like every other module's own autotrade toggle, opt-in via settings
+AUTOTRADE_LEVERAGE_LSW = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_LSW", 10))  # only used by sim_execute_trade()'s own separate paper-balance simulator (deliberately left on its own old leverage/size system, same as every other module) — execute_autotrade() itself computes real leverage automatically per-trade, same risk-based sizing every module shares (see execute_autotrade()'s own docstring)
+TELEGRAM_ALERTS_LSW = os.environ.get("VP_TG_ALERTS_LSW", "1") == "1"
 FT5_MIN_BACKTEST_TRADES = int(os.environ.get("VP_FT5_MIN_BACKTEST_TRADES", 5))  # a combo with fewer trades than this in the backtest window isn't a confident pick — same bar Volume's optimizer uses (MIN_BACKTEST_TRADES)
 FT5_RANK_PRIOR_TARGET = int(os.environ.get("VP_FT5_RANK_PRIOR_TARGET", 1))  # v0.98.8 — ft5_ranking_score() blends in max(0, TARGET - losses_count) pseudo-trades at the known -FT5_STOPLOSS_PCT level, so a small loss-free sample can't look artificially low-risk just because it hasn't hit its (structurally always-possible) stop yet. Tapered by ACTUAL real losses (not a flat count on every combo) — a flat prior tested worse, disproportionately hurting smaller-but-still-real samples. See ft5_ranking_score()'s own docstring for the full reasoning, including why TARGET=1 specifically. Replaces FT5_RANK_Z (v0.98.7), which is no longer referenced — the confidence multiplier is now t_critical(n-1), not a fixed Z.
 
@@ -11024,8 +11080,8 @@ CREDENTIALS_FILE = os.environ.get(
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "mirror_enabled", "lsw_enabled", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror",
+                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   "lsw_rr", "lsw_equal_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
@@ -11065,6 +11121,7 @@ def get_settings():
         "telegram_alerts_ft5": TELEGRAM_ALERTS_FT5,
         "telegram_alerts_msnr": TELEGRAM_ALERTS_MSNR,
         "telegram_alerts_mirror": TELEGRAM_ALERTS_MIRROR,
+        "telegram_alerts_lsw": TELEGRAM_ALERTS_LSW,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
         "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
@@ -11074,6 +11131,7 @@ def get_settings():
         "autotrade_ft5": AUTOTRADE_ENABLED_FT5,
         "autotrade_msnr": AUTOTRADE_ENABLED_MSNR,
         "autotrade_mirror": AUTOTRADE_ENABLED_MIRROR,
+        "autotrade_lsw": AUTOTRADE_ENABLED_LSW,
         "scalp_min_rr": SCALP_MIN_RR,
         "scalp_sl_buffer_mult": SCALP_SL_BUFFER_MULT,
     }
@@ -11089,8 +11147,8 @@ def apply_settings(updates):
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT
     global LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
-    global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, SCALP_MARTINGALE_ENABLED
+    global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, SCALP_MARTINGALE_ENABLED
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
@@ -11166,6 +11224,8 @@ def apply_settings(updates):
         TELEGRAM_ALERTS_MSNR = bool(updates["telegram_alerts_msnr"])
     if "telegram_alerts_mirror" in updates:
         TELEGRAM_ALERTS_MIRROR = bool(updates["telegram_alerts_mirror"])
+    if "telegram_alerts_lsw" in updates:
+        TELEGRAM_ALERTS_LSW = bool(updates["telegram_alerts_lsw"])
     if "autotrade_dry_run" in updates:
         AUTOTRADE_DRY_RUN = bool(updates["autotrade_dry_run"])
     if "autotrade_bounce" in updates:
@@ -11182,6 +11242,8 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_MSNR = bool(updates["autotrade_msnr"])
     if "autotrade_mirror" in updates:
         AUTOTRADE_ENABLED_MIRROR = bool(updates["autotrade_mirror"])
+    if "autotrade_lsw" in updates:
+        AUTOTRADE_ENABLED_LSW = bool(updates["autotrade_lsw"])
     if "telegram_alerts_hourly" in updates:
         TELEGRAM_ALERTS_HOURLY = bool(updates["telegram_alerts_hourly"])
     if "scalp_min_rr" in updates:
@@ -11413,8 +11475,9 @@ STATE = {
     "mirror_signals": deque(maxlen=MIRROR_SIGNAL_HISTORY),
     "mirror_filtered_signals": deque(maxlen=MIRROR_SIGNAL_HISTORY),  # v0.99.114, per direct user question ("может без применения фильтра было лучше, а после него стало хуже"): signals the SL-width/direction filters would have blocked from firing, tracked through the exact same outcome logic (WIN/LOSS/TIMEOUT) as real live signals, but never actually traded — the only honest way to answer "does this filter actually help" with real forward data instead of assuming the backtest's own retrospective self-consistency proves it. See mirror_scan_symbol_live()'s own comment for the full reasoning.
     # LSW ("Liquidity Sweep") — equal-highs/equal-lows liquidity-grab
-    # reversal module, v0.99.119, PAPER-ONLY (see LSW_ENABLED's own
-    # comment). All keys prefixed lsw_.
+    # reversal module. All keys prefixed lsw_. Shipped paper-only in
+    # v0.99.119; v0.99.120 wired real autotrade in (see LSW_ENABLED's
+    # own comment).
     "lsw_signals": deque(maxlen=LSW_SIGNAL_HISTORY),
     "lsw_backtest_results": {},
     "lsw_backtest_summary": {},
@@ -11497,6 +11560,7 @@ def has_open_signal_any_module(symbol, exclude=None):
         "ft5_signals": STATE["ft5_signals"],
         "msnr_signals": STATE["msnr_signals"],
         "mirror_signals": STATE["mirror_signals"],
+        "lsw_signals": STATE["lsw_signals"],  # v0.99.120 — added when LSW got real autotrade wired in; before that LSW was paper-only so its own open signals had no real-position conflict to guard against
     }
     with state_lock:
         for name, lst in lists.items():
@@ -15080,6 +15144,8 @@ def send_telegram(text, category=None):
     # process-kill issue this app's own MSNR staleness warning already
     # flags separately.
     if category == "msnr" and not TELEGRAM_ALERTS_MSNR:
+        return
+    if category == "lsw" and not TELEGRAM_ALERTS_LSW:
         return
 
     def _do_send():
@@ -19899,8 +19965,7 @@ def mirror_live_loop():
 
 
 # ============================================================================
-# LSW ("Liquidity Sweep") — v0.99.119, PAPER-ONLY (see LSW_ENABLED's own
-# comment at the top of this file). Equal-highs/equal-lows liquidity-grab
+# LSW ("Liquidity Sweep") — equal-highs/equal-lows liquidity-grab
 # reversal: >=2 swing highs (or lows) clustering within LSW_EQUAL_
 # TOLERANCE_PCT of each other are treated as one resting-liquidity level
 # (the "equal highs/lows" stop cluster this style targets). A signal
@@ -19915,10 +19980,12 @@ def mirror_live_loop():
 # take-profit is a fixed RR off that risk (LSW_RR) — same "mechanical
 # pipeline needs a fixed target even though real discretionary SMC traders
 # often don't use one" reasoning as MIRROR_RR's own docstring.
-# Deliberately simpler than MIRROR for this first version — no SL-width/
-# pattern/direction filter chain yet (MIRROR only grew that after real
-# backtest data justified it); this ships with just detection + backtest
-# + paper-tracked live signals, same scope MIRROR itself started at.
+# Deliberately simpler than MIRROR — no SL-width/pattern/direction filter
+# chain yet (MIRROR only grew that after real backtest data justified it);
+# this ships with just detection + backtest + live signals, same scope
+# MIRROR itself started at.
+# Shipped paper-only in v0.99.119; v0.99.120 wired real autotrade in (see
+# AUTOTRADE_ENABLED_LSW's own comment at the top of this file).
 # ============================================================================
 def lsw_find_pivots(candles, left=None, right=None):
     """Same fractal swing-high/low pivot detector as mirror_find_pivots()
@@ -20131,10 +20198,19 @@ def lsw_scan_symbol_live(symbol):
     """Live counterpart to lsw_backtest_symbol() — fetches recent
     history, runs the SAME detector, and records a signal only if the
     LAST candle produced a brand-new one not already seen for this
-    symbol. PAPER-ONLY: appends to STATE["lsw_signals"] as OPEN and
-    stops there — never calls execute_autotrade()/sim_execute_trade(),
-    no Telegram alert, no real or simulated-balance order of any kind.
-    See this module's own header comment for why."""
+    symbol.
+    v0.99.120, per direct user request ("надо живые сигналы сделать и
+    авто торговлю как и везде, тоже с риском 2%"): now fires real
+    autotrade the exact same way every other module does — execute_
+    autotrade("lsw", ...) when AUTOTRADE_ENABLED_LSW is on (same
+    automatic risk-based leverage/sizing every module shares, 2% of
+    confirmed equity per trade via AUTOTRADE_RISK_PCT_OF_BALANCE, no
+    override here) plus sim_execute_trade() for the separate paper-
+    balance simulator, plus a Telegram alert. v0.99.119 shipped this
+    paper-only; that mode is what happens automatically whenever
+    AUTOTRADE_ENABLED_LSW itself is off (still records to STATE[
+    "lsw_signals"] and tracks WIN/LOSS/TIMEOUT either way — the toggle
+    only controls whether a real/simulated order actually fires)."""
     if not LSW_ENABLED:
         return
     try:
@@ -20154,9 +20230,12 @@ def lsw_scan_symbol_live(symbol):
             if _lsw_signal_cooldowns.get(symbol) == sig["entry_time"]:
                 return
             _lsw_signal_cooldowns[symbol] = sig["entry_time"]
-        with state_lock:
-            already_open = any(s["symbol"] == symbol and s["status"] == "OPEN" for s in STATE["lsw_signals"])
-        if already_open:
+        # v0.99.120 — switched from an LSW-only "already open" check to
+        # has_open_signal_any_module(), same guard MIRROR's own real-
+        # signal branch uses, now that a real order can actually fire:
+        # avoids two modules opening conflicting real positions on the
+        # same symbol at once.
+        if has_open_signal_any_module(symbol, exclude="lsw_signals"):
             return
         record = {
             "symbol": symbol, "direction": sig["direction"],
@@ -20170,16 +20249,29 @@ def lsw_scan_symbol_live(symbol):
         }
         with state_lock:
             STATE["lsw_signals"].appendleft(record)
+        if AUTOTRADE_ENABLED_LSW:
+            execute_autotrade("lsw", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
+            sim_execute_trade("lsw", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                               AUTOTRADE_LEVERAGE_LSW, record)
+        arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
+        level_labels = {"high": "снятие хаёв", "low": "снятие лоу"}
+        send_telegram(
+            f"{arrow} {symbol} ({level_labels.get(sig['level_type'], sig['level_type'])}, "
+            f"x{sig.get('level_touches')} касания)\n"
+            f"entry: {sig['entry']:.6g}\n"
+            f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}",
+            category="lsw",
+        )
     except Exception as e:
         log_error(f"lsw_scan_symbol_live {symbol}: {e}")
 
 
 def _lsw_track_signal_outcomes():
     """Same shared MFE/MAE/WIN/LOSS/TIMEOUT tracking shape as
-    _mirror_track_signal_outcomes() — the only difference is this pool
-    was never fired via execute_autotrade()/sim_execute_trade() to
-    begin with (see this module's own header comment), so there's only
-    ever the one pool to track, unlike MIRROR's real+filtered pair."""
+    _mirror_track_signal_outcomes() — LSW has just the one signal pool
+    (no separate filtered/shadow pool like MIRROR's), whether or not
+    AUTOTRADE_ENABLED_LSW actually fired a real order for any given
+    signal; the outcome tracking itself is identical either way."""
     now = time.time()
     with state_lock:
         open_signals = [s for s in STATE["lsw_signals"] if s["status"] == "OPEN"]
@@ -21936,8 +22028,8 @@ INDEX_HTML = """<!doctype html>
       <div class="settingsGroupTitle">Sweep (Liquidity Sweep)</div>
       <div class="settingRow">
         <div>
-          <div class="label">Сканирование <span style="color:#e0a030;">⚠️ paper-only</span></div>
-          <div class="sub">снятие ликвидности с равных хаёв/лоу (2+ близких свинга) — вход на развороте после того, как фитиль пробил уровень, а закрытие вернулось обратно. Реальные и симулированные сделки НЕ открываются, только отслеживание сигналов на бумаге</div>
+          <div class="label">Сканирование</div>
+          <div class="sub">снятие ликвидности с равных хаёв/лоу (2+ близких свинга) — вход на развороте после того, как фитиль пробил уровень, а закрытие вернулось обратно. Автоторговля включается отдельным переключателем ниже (группа «Автоторговля»)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setLsw"><span class="switchSlider"></span></label>
       </div>
@@ -21986,6 +22078,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">открытие и закрытие сигналов</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramMirror"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Алерты Sweep</div>
+          <div class="sub">открытие и закрытие сигналов</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramLsw"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -22056,6 +22155,13 @@ INDEX_HTML = """<!doctype html>
           <div class="label">↳ Зеркало</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeMirror"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Sweep</div>
+          <div class="sub">риск 2% от баланса на сделку, тот же автоматический расчёт плеча/размера позиции, что и у остальных режимов</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeLsw"><span class="switchSlider"></span></label>
       </div>
     </div>
 
@@ -23361,10 +23467,9 @@ async function refreshLsw() {
     : 'бэктест ещё не завершился — живой скан новых сигналов на паузе, чтобы не показывать неотфильтрованные монеты';
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
-      <b>Liquidity Sweep</b> — ⚠️ только paper-режим, реальные и симулированные ордера НЕ отправляются, только отслеживание сигналов на бумаге.<br>
-      «Снятие ликвидности» — 2+ близких максимума/минимума считаются одним уровнем (равные хаи/лоу); сигнал — когда свеча фитилём пробивает уровень, но закрывается обратно внутри (не пробой, а именно снятие стопов).<br>
+      <b>Liquidity Sweep</b> — снятие ликвидности с равных хаёв/лоу (2+ близких максимума/минимума считаются одним уровнем); сигнал — когда свеча фитилём пробивает уровень, но закрывается обратно внутри (не пробой, а именно снятие стопов). Автоторговля и её риск настраиваются в общей вкладке «Автоторговля».<br>
       ТФ ${cfg.interval} · RR ${cfg.rr} · допуск равенства уровней ${cfg.equal_tolerance_pct}% · буфер стопа ${cfg.sl_buffer_pct}% · ${buildTxt}<br>
-      <b>Paper-сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
+      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
       ${byLevelTxt ? `<span style="font-size:11px;">По типу уровня: ${byLevelTxt}</span><br>` : ''}
       <span style="font-size:11px;">Зелёная точка — монета сейчас в живом скане. Клик по строке сигнала открывает график входа/выхода.</span>
     </div>`;
@@ -23393,7 +23498,7 @@ async function refreshLsw() {
       <thead><tr><th>Symbol</th><th>Dir</th><th>Уровень</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Status</th><th>Время</th></tr></thead>
       <tbody>${signalsRows}</tbody>
     </table>
-    </div>` : '<div class="dim" style="margin-bottom:14px;">Paper-сигналов пока нет.</div>';
+    </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
   const btRows = (status.top || []).map(r => {
     const wrClass = (r.win_rate || 0) >= 50 ? 'win' : 'loss';
     const liveDot = r.live ? ' <span style="color:#3ddc97;" title="в живом скане">●</span>' : '';
@@ -23447,7 +23552,7 @@ async function refreshAutotrade() {
     (await fetch('/api/autotrade/log')).json(),
   ]);
   const panel = document.getElementById('autotradePanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', ft5: 'FT5', mirror: 'Зеркало'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', ft5: 'FT5', mirror: 'Зеркало', lsw: 'Sweep'};
   const enabledTxt = Object.entries(status.enabled)
     .map(([k, v]) => `<span class="${v ? 'win' : 'dim'}">${modeLabels[k]}: ${v ? 'вкл' : 'выкл'}</span>`)
     .join(' &nbsp;·&nbsp; ');
@@ -23507,7 +23612,7 @@ async function refreshSimulator() {
     (await fetch('/api/autotrade/status')).json(),
   ]);
   const panel = document.getElementById('simulatorPanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', ft5: 'FT5', mirror: 'Зеркало'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', ft5: 'FT5', mirror: 'Зеркало', lsw: 'Sweep'};
 
   const pnlClass = status.pnl_total >= 0 ? 'win' : 'loss';
   const sizeTxt = status.size_mode === 'percent' ? `${status.size_value}% от баланса` : `фикс. $${status.size_value}`;
@@ -23619,7 +23724,7 @@ wireResetButton('resetMirrorBtn', '/api/reset/mirror',
   'Удалить накопленный бэктест и сигналы Зеркала? Остальное не тронет. Это необратимо.',
   'Очистить Зеркало');
 wireResetButton('resetLswBtn', '/api/reset/lsw',
-  'Удалить накопленный бэктест и paper-сигналы Liquidity Sweep? Остальное не тронет. Это необратимо.',
+  'Удалить накопленный бэктест и сигналы Sweep? Остальное не тронет. Это необратимо.',
   'Очистить Sweep');
 wireResetButton('resetRiskAutotuneBtn', '/api/reset/risk_autotune',
   'Сбросить все параметры авто-тюнинга риска (EMA/Скальпинг/Сессия) к значениям по умолчанию из кода, очистить лог и cooldown? Сами сигналы и статистику не тронет. Это необратимо.',
@@ -23647,6 +23752,7 @@ const setInputs = {
   telegram_alerts_msnr: document.getElementById('setTelegramMsnr'),
   telegram_alerts_ft5: document.getElementById('setTelegramFt5'),
   telegram_alerts_mirror: document.getElementById('setTelegramMirror'),
+  telegram_alerts_lsw: document.getElementById('setTelegramLsw'),
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
   autotrade_bounce: document.getElementById('setAutotradeBounce'),
   autotrade_breakout: document.getElementById('setAutotradeBreakout'),
@@ -23661,6 +23767,7 @@ const setInputs = {
   // functional, not decorative).
   autotrade_msnr: document.getElementById('setAutotradeMsnr'),
   autotrade_mirror: document.getElementById('setAutotradeMirror'),
+  autotrade_lsw: document.getElementById('setAutotradeLsw'),
 };
 
 const setValueInputs = {
