@@ -10116,6 +10116,50 @@ v0.99.116 - Dead-code sweep, per direct user request ("продолжи
          none of the removed code was ever route-connected), and an
          AST walk for duplicate top-level defs (none introduced) — 250
          total top-level defs, down from 257.
+
+v0.99.117 - Dead-code sweep continued: extended the same AST-based
+         methodology from v0.99.116 (count every name's own literal
+         occurrences across the source) to module-level CONSTANTS and
+         STATE dict keys, not just functions.
+         Constants: scanned all 259 ALL_CAPS module-level assignments,
+         found 3 with zero real references beyond their own definition
+         line, each individually verified before removal: (1) SCALP_
+         SIGNAL_COOLDOWN_SEC — the actual live dedup mechanism (checked
+         directly) compares exact last-candle timestamps via _scalp_
+         signal_cooldowns, not a time-window constant at all; superseded
+         by a cleaner mechanism and never cleaned up; (2) AUTOTRADE_
+         LEVERAGE_FT5 — confirmed FT5 has no sim_execute_trade() call
+         site at all (grepped every real call site: scalp/bounce-
+         breakout/msnr/mirror only), so this constant was never
+         reachable by anything; (3) RISK_AUTOTUNE_SESSION_RR_BOUNDS —
+         a leftover from v0.99.115's own Session removal, missed at the
+         time since its only consumer (Session's own risk_autotune_
+         pass() block) had already been deleted earlier in that same
+         pass, making this bounds constant orphaned from that point on.
+         STATE keys: parsed the actual `STATE = {...}` dict literal via
+         AST (not text search, to get the real top-level key list
+         precisely — 65 keys) and checked each for real STATE["key"]
+         usage beyond its own initialization. Found 3: filtered_by_
+         min_rr/filtered_by_adx/filtered_by_min_gap — confirmed via a
+         historical comment (still describing a genuinely bygone
+         incident, left untouched) that these were EMA's own panel
+         counters; EMA's removal correctly deleted whatever incremented
+         them, but the STATE initialization itself survived, sitting at
+         a permanent 0 forever after. The sibling filtered_by_trend/
+         volume/oi/staleness keys were correctly NOT flagged — still
+         genuinely used by Volume Profile's own live filtering.
+         Verified with py_compile after every removal, pyflakes (clean
+         at every step), re-ran BOTH scans afterward confirming zero
+         remaining orphaned constants and zero remaining orphaned
+         top-level STATE keys, an actual runtime start (save_state()/
+         load_state() both actually executed successfully; a live
+         test_client() round-trip confirming every real endpoint still
+         200s), a real jsdom page execution (zero runtime errors),
+         node --check on the correctly-last <script> block, the Flask
+         route/def integrity check (41 routes unchanged — nothing
+         removed was route-connected), and an AST walk for duplicate
+         top-level defs (none introduced, unchanged at 250 — this pass
+         touched constants/STATE only, no functions).
 """
 
 import os
@@ -10134,7 +10178,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.116"
+APP_VERSION = "0.99.117"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -10338,7 +10382,6 @@ SCALP_TARGET_PROFIT_USD = float(os.environ.get("VP_SCALP_TARGET_PROFIT_USD", 7.0
 # the window), there is no LOSS state for this module.
 SCALP_SIGNALS_ENABLED = os.environ.get("VP_SCALP_SIGNALS_ENABLED", "1") == "1"
 SCALP_SIGNAL_HISTORY = 200
-SCALP_SIGNAL_COOLDOWN_SEC = int(os.environ.get("VP_SCALP_SIGNAL_COOLDOWN_SEC", 3600))  # per (symbol, interval) — avoid re-firing every 45s scan tick for the same still-fresh candle
 SCALP_SIGNAL_TIMEOUT_MULT = float(os.environ.get("VP_SCALP_SIGNAL_TIMEOUT_MULT", 4.0))  # timeout = this many times the recommendation's own median time-to-hit
 SCALP_SL_BUFFER_MULT = float(os.environ.get("VP_SCALP_SL_BUFFER_MULT", 0.25))  # SL = p90_adverse_pct * (1 + this) — raised back up from 0.05, per direct user request after live LOSS MAE data (now n=26, a real sample — the earlier 0.05 cut was explicitly made cautious because it was based on n=1 loss) showed avg -1.167R / median -1.065R: losses were overshooting the nominal -1.0R stop by ~17% on average, meaning the 0.05 buffer wasn't actually covering real adverse excursion including slippage/wicks. Back-of-envelope from that overshoot: current_sl_pct = p90_adverse*1.05, and avg realized loss = -1.167*current_sl_pct ≈ p90_adverse*1.225 — so the true P90 estimate itself was being undershot by roughly that much once real execution is factored in. 0.25 targets bringing the stop back in line with what real losses actually reach, rather than picking an arbitrary round number; still needs verifying against the NEXT batch of live losses once they accumulate under the new buffer, same as the original 0.2->0.05 decision was based on watching real data rather than theory alone.
 SCALP_SIGNAL_TOP_N = int(os.environ.get("VP_SCALP_SIGNAL_TOP_N", 1))  # only fire a live signal for the top-N ranked symbols by score each cycle, not every qualifying one
@@ -10772,7 +10815,6 @@ MSNR_COMPOUND_START_BALANCE = float(os.environ.get("VP_MSNR_COMPOUND_START_BALAN
 MSNR_LIVE_BALANCE_MAX = float(os.environ.get("VP_MSNR_LIVE_BALANCE_MAX", 500.0))  # v0.99.33 — per direct user request: hard ceiling on the REAL per-symbol compounding margin (see msnr_live_balance_for_symbol()) — a symbol's live-trading balance still starts at MSNR_COMPOUND_START_BALANCE and reinvests its own result every closed trade exactly like the backtest simulation, but never sizes a real order above this cap regardless of how far the compounding would otherwise have grown it.
 MSNR_TARGET_STOP_LOSS_PCT = float(os.environ.get("VP_MSNR_TARGET_STOP_LOSS_PCT", 10.0))  # v0.99.46 — per direct user request, after a live SKHYNIX_USDT example: at the flat AUTOTRADE_LEVERAGE_MSNR (10x) on a tight sub-1%-wide stop, hitting SL barely dents the account (well under this %), wasting most of the position's real risk budget on a trade that can't move the needle either way. This is the target fraction of margin a stop-out should cost — msnr_leverage_for_stop() scales leverage UP (never down) from AUTOTRADE_LEVERAGE_MSNR for a signal whose own stop is narrower than what this target implies, capped by the contract's own exchange leverage_max and by the liquidation-safety margin.
 AUTOTRADE_ENABLED_FT5 = os.environ.get("VP_AUTOTRADE_FT5", "0") == "1"  # off by default — same reasoning as XAU_LG: unverified source, and the freqtrade backtest table this was ported from is a near-certain overfitting example (20-day 2018 window)
-AUTOTRADE_LEVERAGE_FT5 = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_FT5", 10))
 AUTOTRADE_TRADE_HISTORY = 300
 
 # ----------------------------------------------------------------------------
@@ -11128,9 +11170,6 @@ STATE = {
     "filtered_by_volume": 0,
     "filtered_by_oi": 0,
     "filtered_by_staleness": 0,
-    "filtered_by_min_rr": 0,
-    "filtered_by_adx": 0,
-    "filtered_by_min_gap": 0,
     "last_scan_started": None,
     "last_scan_finished": None,
     "last_scan_duration": None,
@@ -15565,7 +15604,6 @@ RISK_AUTOTUNE_REVERSE_EV_THRESHOLD = -0.03  # only flip a direction flag if the 
 RISK_AUTOTUNE_TP_TOLERANCE_RATIO = 0.15  # ignore if WIN MFE is within 15% of the current RR — avoid chasing noise
 RISK_AUTOTUNE_TP_STEP_RATIO = 0.1  # max 10% change to TP_PCT per pass — same bounded-step philosophy as the RR/SL-mult nudges
 RISK_AUTOTUNE_TP_PCT_BOUNDS = (0.003, 0.05)  # 0.3%-5% — sane range; below is barely worth the fees, above is an unrealistic single fixed target
-RISK_AUTOTUNE_SESSION_RR_BOUNDS = (0.5, 5.0)  # v0.98.4 — Session's SESSION_REVERSE_RR is an RR multiple, not a %-of-price like EMA/DIV's TP_PCT, so it needs its own bounds on a completely different scale when reusing _risk_autotune_tp_extend for it
 
 RISK_AUTOTUNE_MSNR_MAX_RR_BOUNDS = (5.5, 15.0)  # v0.99.11 — lower bound deliberately kept above MSNR_FALLBACK_RR (4.0): caught via behavioral testing that a cap set BELOW fallback_rr is self-defeating (the fallback trade it falls through to would itself exceed the "cap" it was supposed to enforce). Upper bound just gives room to relax the cap if the data doesn't actually support tightening it.
 
