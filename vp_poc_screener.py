@@ -10335,6 +10335,84 @@ v0.99.120 - LSW autotrade wired in, per direct follow-up user request
          and a getElementById audit confirming the 2 new settings IDs
          (setAutotradeLsw, setTelegramLsw) are each defined exactly once
          and referenced exactly once, no dangling references either way.
+
+v0.99.121 - Two fixes + one strategy addition, both per direct user
+         messages in the same session.
+         FIX 1: /api/autotrade/status's own "enabled" dict never
+         included "lsw" — found while investigating the report below,
+         this meant Sweep's autotrade toggle state silently never
+         showed up in the Автоторговля tab or the Simulator header's
+         own "Режимы:" line (both read from this same endpoint).
+         FIX 2 (the real cause of the report — "Все что торгуется в
+         реальности должно и в симуляторе показываться и считать
+         депозит, а пока я не вижу там многих сигналов"): sim_execute_
+         trade() used to silently return None — recording NOTHING —
+         the moment the paper balance hit zero or went negative
+         (percent-of-balance sizing degenerates to a 0 margin at a
+         non-positive balance, and the old code bailed before ever
+         building the trade record). That meant real trades from ANY
+         module could keep firing indefinitely while the simulator
+         quietly stopped recording all of them, with zero error or
+         indication anything had gone dark — directly contradicting
+         the simulator's own stated purpose of mirroring real trading.
+         Fixed: sizing now falls back to AUTOTRADE_SIM_START_BALANCE as
+         the basis whenever the CURRENT balance isn't positive, so
+         percent-mode sizing stays meaningful instead of collapsing to
+         zero — every real trade always gets a paper trade recorded,
+         and the balance itself is left free to go negative, same as a
+         real wiped-out account actually would.
+         STRATEGY ADDITION, per a second direct message pointing at a
+         real ICT-style "Setup №1: AMD + FVG" reference note and asking
+         to study it and refine LSW against it: that note's rule #1 is
+         "только по тренду, дневка вверх и часовик восходящий
+         моментум" (trade only WITH the higher-timeframe trend) — our
+         detector already implements its rule #2/#5 (the liquidity
+         sweep IS the entry trigger) but had no trend gate at all. Added
+         one: lsw_htf_bias_series() computes UP/DOWN/NEUTRAL per HTF bar
+         (LSW_HTF_INTERVAL=4h by default) from an EMA(LSW_HTF_EMA_
+         PERIOD=50) with a small dead-zone buffer (LSW_HTF_TREND_
+         BUFFER_PCT) to avoid flip-flopping right at the line;
+         lsw_htf_bias_at() looks up the bias as of a given LTF signal's
+         own entry_time using only HTF bars that had ALREADY closed by
+         then (no lookahead — a still-forming HTF bar's close isn't
+         known yet); lsw_filter_signals_by_htf_trend() drops a LONG
+         (sweep of equal lows) unless HTF bias is UP/NEUTRAL, drops a
+         SHORT (sweep of equal highs) unless it's DOWN/NEUTRAL, and
+         drops anything with no closed HTF bar yet at all (conservative
+         by design). Wired into both lsw_backtest_symbol() (fetches
+         LSW_HTF_INTERVAL history over the same window, so backtest
+         numbers reflect the filter exactly as live would apply it) and
+         lsw_scan_symbol_live() (fetches recent HTF candles, applies the
+         same filter to that bar's own signal before it's ever recorded
+         or traded). Gated behind a new LSW_HTF_FILTER_ENABLED toggle
+         (setLswHtfFilter checkbox, "↳ Фильтр по тренду (4ч)" in the
+         Sweep settings group) — off by default, same "opt-in until the
+         person has seen it work" convention as every other toggle in
+         this file; the sample size to judge "did this filter actually
+         help" barely exists yet for a module this new.
+         The reference note's other rules — 5-minute entry confirmation
+         via инверсия/BOS/поглощение (rule #3) and a structural-high
+         entry cap (rule #4) — are NOT implemented yet; they need a
+         second, lower timeframe wired in for confirmation and were out
+         of scope for this pass. Left for a follow-up.
+         Verified: py_compile, pyflakes clean, a real runtime start
+         confirming both api_lsw_status()'s config.htf_filter_enabled/
+         htf_interval and api_autotrade_status()'s enabled.lsw now
+         appear correctly, node --check on the correctly-last <script>
+         block, the Flask route/def integrity check (still 44 routes —
+         no new routes, only existing ones' logic changed), a
+         getElementById audit on the one new ID (setLswHtfFilter,
+         defined once, referenced once), and unit tests: EMA seeding
+         against a hand-computed value, bias-series correctness on
+         synthetic monotonic up/down candle sequences, a no-lookahead
+         check on lsw_htf_bias_at() at exactly a HTF bar's own close
+         boundary, lsw_filter_signals_by_htf_trend() correctly keeping
+         only the trend-aligned direction in both an uptrend and a
+         downtrend and dropping a signal with no closed HTF data yet,
+         and a direct sim_execute_trade() test confirming a trade now
+         gets recorded (with a sane margin) even when STATE["sim_
+         balance"] is set negative, whereas the pre-fix code would have
+         silently returned None.
 """
 
 import os
@@ -10353,7 +10431,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.120"
+APP_VERSION = "0.99.121"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -10957,6 +11035,26 @@ LSW_LIVE_MIN_WINRATE = float(os.environ.get("VP_LSW_LIVE_MIN_WINRATE", 35.0))
 AUTOTRADE_ENABLED_LSW = os.environ.get("VP_AUTOTRADE_LSW", "0") == "1"  # v0.99.120, per direct user request ("надо живые сигналы сделать и авто торговлю как и везде, тоже с риском 2%") — off by default like every other module's own autotrade toggle, opt-in via settings
 AUTOTRADE_LEVERAGE_LSW = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_LSW", 10))  # only used by sim_execute_trade()'s own separate paper-balance simulator (deliberately left on its own old leverage/size system, same as every other module) — execute_autotrade() itself computes real leverage automatically per-trade, same risk-based sizing every module shares (see execute_autotrade()'s own docstring)
 TELEGRAM_ALERTS_LSW = os.environ.get("VP_TG_ALERTS_LSW", "1") == "1"
+# v0.99.121 — higher-timeframe trend filter, per direct user request
+# ("ещё пример того как должен торговаться sweep... сравни с нашей
+# стратегией и доработай") pointing at a real ICT-style "AMD + FVG"
+# setup note whose rule #1 is "только по тренду, дневка вверх и часовик
+# восходящий моментум" (trade only WITH the higher-timeframe trend).
+# Our detector already implements that note's rule #2/#5 (liquidity
+# sweep = the entry trigger itself) — this adds the missing trend
+# gate: a sweep of equal LOWS (-> LONG) only fires when the HTF trend
+# is UP or NEUTRAL, a sweep of equal HIGHS (-> SHORT) only fires when
+# it's DOWN or NEUTRAL — filtering out counter-trend fades, which this
+# style of setup treats as materially lower-quality. Off by default,
+# same "opt-in until the person has seen it work" convention as every
+# other toggle in this file — the sample sizes for "did the filter
+# actually help" barely exist yet for a module this new (see MIRROR's
+# own v0.99.114 filtered-signal shadow-tracking precedent for why that
+# question needs real data, not just intuition, before trusting it).
+LSW_HTF_FILTER_ENABLED = os.environ.get("VP_LSW_HTF_FILTER", "0") == "1"
+LSW_HTF_INTERVAL = os.environ.get("VP_LSW_HTF_INTERVAL", "4h")
+LSW_HTF_EMA_PERIOD = int(os.environ.get("VP_LSW_HTF_EMA_PERIOD", 50))
+LSW_HTF_TREND_BUFFER_PCT = float(os.environ.get("VP_LSW_HTF_TREND_BUFFER_PCT", 0.1))  # close must clear the EMA by this % to count as UP/DOWN rather than NEUTRAL — avoids flip-flopping right at the line
 FT5_MIN_BACKTEST_TRADES = int(os.environ.get("VP_FT5_MIN_BACKTEST_TRADES", 5))  # a combo with fewer trades than this in the backtest window isn't a confident pick — same bar Volume's optimizer uses (MIN_BACKTEST_TRADES)
 FT5_RANK_PRIOR_TARGET = int(os.environ.get("VP_FT5_RANK_PRIOR_TARGET", 1))  # v0.98.8 — ft5_ranking_score() blends in max(0, TARGET - losses_count) pseudo-trades at the known -FT5_STOPLOSS_PCT level, so a small loss-free sample can't look artificially low-risk just because it hasn't hit its (structurally always-possible) stop yet. Tapered by ACTUAL real losses (not a flat count on every combo) — a flat prior tested worse, disproportionately hurting smaller-but-still-real samples. See ft5_ranking_score()'s own docstring for the full reasoning, including why TARGET=1 specifically. Replaces FT5_RANK_Z (v0.98.7), which is no longer referenced — the confidence multiplier is now t_critical(n-1), not a fixed Z.
 
@@ -11079,7 +11177,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "mirror_enabled", "lsw_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "mirror_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
@@ -11112,6 +11210,7 @@ def get_settings():
         "lsw_enabled": LSW_ENABLED,
         "lsw_rr": LSW_RR,
         "lsw_equal_tolerance_pct": LSW_EQUAL_TOLERANCE_PCT,
+        "lsw_htf_filter_enabled": LSW_HTF_FILTER_ENABLED,
         "msnr_max_rr": MSNR_MAX_RR,
         "msnr_enabled": MSNR_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
@@ -11145,7 +11244,7 @@ def apply_settings(updates):
     scan cycle / next alert, no restart needed."""
     global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT
-    global LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT
+    global LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, SCALP_MARTINGALE_ENABLED
@@ -11203,6 +11302,8 @@ def apply_settings(updates):
                 LSW_EQUAL_TOLERANCE_PCT = v
         except (TypeError, ValueError):
             pass
+    if "lsw_htf_filter_enabled" in updates:
+        LSW_HTF_FILTER_ENABLED = bool(updates["lsw_htf_filter_enabled"])
     if "msnr_enabled" in updates:
         MSNR_ENABLED = bool(updates["msnr_enabled"])
     if "msnr_max_rr" in updates:
@@ -13706,20 +13807,31 @@ def sim_execute_trade(mode, symbol, direction, entry, sl, tp, leverage, signal_r
     Keeps a direct reference to signal_record so sweep_sim_trades() can
     read its real eventual outcome later — that record gets mutated in
     place by the module's own outcome-tracking function when it resolves,
-    so no separate lookup is needed, just checking the same dict again."""
+    so no separate lookup is needed, just checking the same dict again.
+    v0.99.121, per direct user request ("Все что торгуется в реальности
+    должно и в симуляторе показываться и считать депозит") — this used
+    to silently stop recording ANY new trade, from ANY module, the
+    moment the paper balance hit zero or went negative (percent-of-
+    balance sizing degenerates to 0 margin at a non-positive balance,
+    and the old code returned None before ever building the trade
+    record). That meant a real trade could keep firing for months while
+    the simulator quietly went dark on all of them, with no error or
+    indication anything had stopped. Sizing now falls back to
+    AUTOTRADE_SIM_START_BALANCE as the basis whenever the CURRENT
+    balance isn't positive, so percent-mode sizing stays meaningful
+    instead of collapsing to zero — every real trade always gets a
+    paper trade recorded, and the balance itself is left free to go
+    negative, same as a real account that got wiped out actually would."""
     size_mode = AUTOTRADE_SIZE_MODE if size_mode is None else size_mode
     size_value = AUTOTRADE_SIZE_VALUE if size_value is None else size_value
     with state_lock:
         balance = STATE["sim_balance"]
-    if balance <= 0:
-        return None  # busted — stop opening new paper trades until manually reset
+    sizing_basis = balance if balance > 0 else AUTOTRADE_SIM_START_BALANCE
     if size_mode == "percent":
-        margin = balance * (size_value / 100.0)
+        margin = sizing_basis * (size_value / 100.0)
     else:
         margin = size_value
-    margin = min(margin, balance)  # can't risk more than the paper account actually has
-    if margin <= 0:
-        return None
+    margin = max(margin, 0.01)  # never a zero/negative-size trade — that would be invisible in all practical terms
     notional = margin * leverage
     entry_fee = notional * AUTOTRADE_SIM_FEE_PCT
     trade = {
@@ -19987,6 +20099,89 @@ def mirror_live_loop():
 # Shipped paper-only in v0.99.119; v0.99.120 wired real autotrade in (see
 # AUTOTRADE_ENABLED_LSW's own comment at the top of this file).
 # ============================================================================
+def lsw_compute_ema(values, period):
+    """Standard EMA, seeded with an SMA of the first `period` values —
+    same seeding convention compute_rsi() and every other indicator in
+    this file already use. Returns a list the same length as `values`,
+    with None for indices before the EMA is defined."""
+    n = len(values)
+    if n < period:
+        return [None] * n
+    ema = [None] * (period - 1)
+    sma = sum(values[:period]) / period
+    ema.append(sma)
+    k = 2.0 / (period + 1)
+    prev = sma
+    for v in values[period:]:
+        prev = v * k + prev * (1 - k)
+        ema.append(prev)
+    return ema
+
+
+def lsw_htf_bias_series(htf_candles, period=None, buffer_pct=None):
+    """Turns a higher-timeframe candle list into a (time, bias) series,
+    oldest first — bias is "UP" if that HTF bar's close cleared its own
+    EMA by buffer_pct, "DOWN" if it sat that far below, else "NEUTRAL".
+    `time` is each bar's own OPEN time, same convention every candle
+    dict in this file already uses — lsw_htf_bias_at() is what accounts
+    for a bar not actually being CLOSED (and therefore not a safe trend
+    read) until its own open time + the HTF interval has passed."""
+    period = period if period is not None else LSW_HTF_EMA_PERIOD
+    buffer_pct = buffer_pct if buffer_pct is not None else LSW_HTF_TREND_BUFFER_PCT
+    closes = [c["close"] for c in htf_candles]
+    ema = lsw_compute_ema(closes, period)
+    series = []
+    for c, e in zip(htf_candles, ema):
+        if e is None or e == 0:
+            series.append((c["time"], None))
+            continue
+        dev_pct = (c["close"] - e) / e * 100.0
+        if dev_pct > buffer_pct:
+            bias = "UP"
+        elif dev_pct < -buffer_pct:
+            bias = "DOWN"
+        else:
+            bias = "NEUTRAL"
+        series.append((c["time"], bias))
+    return series
+
+
+def lsw_htf_bias_at(bias_series, t, htf_interval_sec):
+    """The bias of the most recent HTF bar that had ALREADY CLOSED by
+    LTF time `t` — no lookahead: a still-forming HTF bar's own close
+    isn't known yet at `t`, so it's excluded (bar_time + interval must
+    be <= t). Returns None if no HTF bar had closed yet at all."""
+    result = None
+    for bar_time, bias in bias_series:
+        if bar_time + htf_interval_sec <= t:
+            result = bias
+        else:
+            break
+    return result
+
+
+def lsw_filter_signals_by_htf_trend(signals, bias_series, htf_interval_sec):
+    """Rule #1 of the reference ICT "AMD + FVG" setup ("только по
+    тренду, дневка вверх и часовик восходящий моментум"): a LONG
+    (sweep of equal lows) only survives if the HTF bias at that
+    signal's own entry_time is UP or NEUTRAL; a SHORT only survives if
+    it's DOWN or NEUTRAL. A signal whose HTF bar hasn't closed yet
+    (bias is None) is dropped too — no basis to judge trend alignment
+    at all, and this is deliberately a conservative filter, not a
+    permissive one."""
+    kept = []
+    for sig in signals:
+        bias = lsw_htf_bias_at(bias_series, sig["entry_time"], htf_interval_sec)
+        if bias is None:
+            continue
+        if sig["direction"] == "LONG" and bias == "DOWN":
+            continue
+        if sig["direction"] == "SHORT" and bias == "UP":
+            continue
+        kept.append(sig)
+    return kept
+
+
 def lsw_find_pivots(candles, left=None, right=None):
     """Same fractal swing-high/low pivot detector as mirror_find_pivots()
     — kept as its own copy (not a shared call) so LSW's own pivot_left/
@@ -20144,8 +20339,12 @@ def lsw_build_universe():
 
 def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
     """Fetches LSW_BACKTEST_DAYS of LSW_INTERVAL history, runs the
-    detector + outcome tracker over the whole window. No filter chain
-    yet in this first version (see this module's own header comment) —
+    detector + outcome tracker over the whole window. v0.99.121: when
+    LSW_HTF_FILTER_ENABLED, also fetches LSW_HTF_INTERVAL history over
+    the SAME window and runs lsw_filter_signals_by_htf_trend() before
+    tracking outcomes, so the backtest numbers reflect the filter
+    exactly as live trading would apply it. No other filter chain yet
+    in this first version (see this module's own header comment) —
     returns the raw results list directly, same shape ft5_run_backtest's
     own trades list uses."""
     now = time.time()
@@ -20154,6 +20353,15 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
     if len(candles) < LSW_PIVOT_LEFT + LSW_PIVOT_RIGHT + 20:
         return []
     sigs = lsw_detect_signals(candles)
+    if LSW_HTF_FILTER_ENABLED and sigs:
+        htf_interval_sec = INTERVAL_SECONDS.get(LSW_HTF_INTERVAL, 14400)
+        htf_fetch_start = fetch_start - LSW_HTF_EMA_PERIOD * htf_interval_sec
+        htf_candles = get_candles_range(symbol, LSW_HTF_INTERVAL, htf_fetch_start, now)
+        if len(htf_candles) >= LSW_HTF_EMA_PERIOD:
+            bias_series = lsw_htf_bias_series(htf_candles)
+            sigs = lsw_filter_signals_by_htf_trend(sigs, bias_series, htf_interval_sec)
+        else:
+            sigs = []  # not enough HTF history to judge trend at all — conservative: no signals rather than unfiltered ones
     results = []
     for sig in sigs:
         result, exit_time = lsw_track_outcome(candles, sig)
@@ -20223,6 +20431,18 @@ def lsw_scan_symbol_live(symbol):
         sigs = lsw_detect_signals(candles)
         if not sigs:
             return
+        if LSW_HTF_FILTER_ENABLED:
+            htf_interval_sec = INTERVAL_SECONDS.get(LSW_HTF_INTERVAL, 14400)
+            htf_candles = get_candles(symbol, interval=LSW_HTF_INTERVAL,
+                                       limit=LSW_HTF_EMA_PERIOD + 10)
+            htf_now = time.time()
+            htf_candles = [c for c in htf_candles if c["time"] + htf_interval_sec <= htf_now]
+            if len(htf_candles) < LSW_HTF_EMA_PERIOD:
+                return  # not enough HTF history to judge trend — conservative: skip rather than fire unfiltered
+            bias_series = lsw_htf_bias_series(htf_candles)
+            sigs = lsw_filter_signals_by_htf_trend(sigs, bias_series, htf_interval_sec)
+            if not sigs:
+                return
         sig = sigs[-1]
         if sig["entry_idx"] != len(candles) - 1:
             return  # most recent signal isn't off the latest closed candle — already stale/handled
@@ -20841,6 +21061,7 @@ def api_lsw_status():
             "rr": LSW_RR, "max_bars_to_sweep": LSW_MAX_BARS_TO_SWEEP,
             "backtest_days": LSW_BACKTEST_DAYS, "universe_size": LSW_UNIVERSE_SIZE,
             "live_min_winrate": LSW_LIVE_MIN_WINRATE, "live_min_sample": LSW_LIVE_MIN_SAMPLE,
+            "htf_filter_enabled": LSW_HTF_FILTER_ENABLED, "htf_interval": LSW_HTF_INTERVAL,
         },
         "top": ranked,
     })
@@ -21527,6 +21748,7 @@ def api_autotrade_status():
             "ft5": AUTOTRADE_ENABLED_FT5,
             "msnr": AUTOTRADE_ENABLED_MSNR,
             "mirror": AUTOTRADE_ENABLED_MIRROR,
+            "lsw": AUTOTRADE_ENABLED_LSW,
         },
     })
 
@@ -22039,6 +22261,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">фиксированное соотношение тейк:стоп от стопа за экстремумом свипа</div>
         </div>
         <input type="number" id="setLswRR" min="0.5" max="20" step="0.5" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Фильтр по тренду (4ч)</div>
+          <div class="sub">снятие равных лоу → LONG только если тренд на 4ч вверх/нейтральный; снятие равных хаёв → SHORT только если вниз/нейтральный. Отсекает сделки против старшего тренда</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setLswHtfFilter"><span class="switchSlider"></span></label>
       </div>
     </div>
 
@@ -23469,6 +23698,7 @@ async function refreshLsw() {
     <div class="dim" style="margin-bottom:8px;">
       <b>Liquidity Sweep</b> — снятие ликвидности с равных хаёв/лоу (2+ близких максимума/минимума считаются одним уровнем); сигнал — когда свеча фитилём пробивает уровень, но закрывается обратно внутри (не пробой, а именно снятие стопов). Автоторговля и её риск настраиваются в общей вкладке «Автоторговля».<br>
       ТФ ${cfg.interval} · RR ${cfg.rr} · допуск равенства уровней ${cfg.equal_tolerance_pct}% · буфер стопа ${cfg.sl_buffer_pct}% · ${buildTxt}<br>
+      Фильтр по тренду (${cfg.htf_interval}): <span class="${cfg.htf_filter_enabled ? 'win' : 'dim'}">${cfg.htf_filter_enabled ? 'включён' : 'выключен'}</span><br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
       ${byLevelTxt ? `<span style="font-size:11px;">По типу уровня: ${byLevelTxt}</span><br>` : ''}
       <span style="font-size:11px;">Зелёная точка — монета сейчас в живом скане. Клик по строке сигнала открывает график входа/выхода.</span>
@@ -23746,6 +23976,7 @@ const setInputs = {
   ft5_invert_signals: document.getElementById('setFt5Invert'),
   mirror_enabled: document.getElementById('setMirror'),
   lsw_enabled: document.getElementById('setLsw'),
+  lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
