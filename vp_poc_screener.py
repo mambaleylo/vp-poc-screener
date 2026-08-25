@@ -10059,6 +10059,63 @@ v0.99.115 - Module removal: XAU Liquidity Grab, Session, and Session NY
          endpoints: 4 XAU LG + 10 Session/Session NY), and an AST walk
          for duplicate top-level defs (none introduced) — 257 total
          top-level defs, down from 306.
+
+v0.99.116 - Dead-code sweep, per direct user request ("продолжи
+         очистку мусора, проверки на баги... может что-то можно
+         оптимизировать значительно сократив код"). Ran a systematic
+         AST-based scan across the WHOLE file (not just recently-
+         removed modules) — collected every top-level function name,
+         then counted its own literal occurrences anywhere in the
+         source. A name appearing only once (its own `def` line) has
+         zero real callers. The scan flagged 21 candidates; all but 4
+         turned out to be Flask route handlers (api_status, api_scalp_
+         signals, etc.) — legitimate, working code that's never
+         referenced BY NAME anywhere else since Flask's own url_map
+         dispatches to them via their @app.route(...) decorator, not a
+         Python call site (confirmed several of these already respond
+         200 via existing test_client() checks). Correctly left alone.
+         The 4 genuine finds, each individually verified (not just
+         trusted from the count) before removal:
+         (1) A real BUG, not just cruft: msnr_detect_signals() called
+         msnr_build_pivots() twice in a row with identical arguments —
+         found and flagged in passing during an earlier session, fixed
+         now. Confirmed the function is pure (no mutation, no external
+         state) before treating the duplicate as safe to drop — a
+         pure-performance fix, zero behavior change, verified directly
+         with a synthetic candle series before/after.
+         (2) _crossover()/_crossunder() — Pine-Script-style TA helpers,
+         leftover from EMA/Divergence (both long since removed, both
+         the kind of module that used crossover-based detection).
+         (3) msnr_volume_bucket_stats() — its OWN docstring called it
+         "display-only... purely for showing" a distribution, but
+         nothing anywhere ever calls it; the actual filter logic
+         (msnr_symbol_volume_skip_below()) explicitly does its own
+         separate computation instead, per that function's own
+         docstring.
+         (4) The ENTIRE "signal snapshot" feature — save_signal_
+         snapshot()/list_signal_snapshots()/replay_signal_snapshot()/
+         _signal_passes_replay_filters(), SNAPSHOT_MODULE_KEYS, _
+         SNAPSHOT_REPLAY_OPS, and STATE["signal_snapshots"] — a
+         coherent, complete, "per user request" (per its own comment)
+         capability that was apparently built but never actually wired
+         to any API route or UI trigger: verified EVERY function in
+         the chain individually has zero real callers, and confirmed
+         its own STATE key was never even included in save_state()'s
+         own persisted-keys list despite its own comment claiming it
+         was — a second, independent signal this was left half-
+         finished rather than actively used and just recently orphaned.
+         Verified with py_compile after every removal, pyflakes (clean
+         at every step), an actual runtime start (msnr_detect_signals()
+         run on a synthetic candle series post-fix, producing sane
+         output; save_state()/load_state() both actually executed
+         successfully post-removal, not just statically checked; a
+         live test_client() round-trip confirming every real endpoint
+         still 200s), a real jsdom page execution (zero runtime
+         errors), node --check on the correctly-last <script> block,
+         the Flask route/def integrity check (41 routes unchanged —
+         none of the removed code was ever route-connected), and an
+         AST walk for duplicate top-level defs (none introduced) — 250
+         total top-level defs, down from 257.
 """
 
 import os
@@ -10077,7 +10134,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.115"
+APP_VERSION = "0.99.116"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -11084,15 +11141,6 @@ STATE = {
     "scalp_universe": [],
     "scalp_universe_scores": {},
     "scalp_mmr_map": {},
-    # Signal snapshots (v0.73.0) — a frozen copy of a module's CLOSED
-    # signal list, with all its diagnostic fields, saved on demand so a
-    # candidate filter threshold can be tested against it instantly
-    # (recomputing win/loss/winrate offline) instead of waiting for new
-    # live signals to accumulate under the new threshold. Keyed by an
-    # opaque snapshot id; see save_signal_snapshot()/replay_signal_
-    # snapshot(). Persisted via save_state()/load_state() like
-    # everything else in STATE.
-    "signal_snapshots": {},
     # Risk auto-tune (v0.93.0) — NOT the same system as auto_tune_cycle()/
     # AUTO_TUNE_ENABLED above (that one searches Volume Profile detection
     # parameters per symbol). This is a separate system that periodically
@@ -11288,16 +11336,6 @@ def compute_ema(values, period):
     for i in range(1, n):
         ema[i] = alpha * values[i] + (1 - alpha) * ema[i - 1]
     return ema
-
-
-def _crossover(a, b, i):
-    """a crosses above b at bar i (Pine's ta.crossover)."""
-    return a[i - 1] <= b[i - 1] and a[i] > b[i]
-
-
-def _crossunder(a, b, i):
-    """a crosses below b at bar i (Pine's ta.crossunder)."""
-    return a[i - 1] >= b[i - 1] and a[i] < b[i]
 
 
 def _true_range_series(candles):
@@ -12159,127 +12197,6 @@ def compute_scalp_leverage_for_target(target_pct, account_usd=SCALP_ACCOUNT_USD,
     return required_notional / account_usd
 
 
-SNAPSHOT_MODULE_KEYS = {
-    "volume": "signals",
-    "scalp": "scalp_signals",
-    "mirror": "mirror_signals",
-}
-
-
-def save_signal_snapshot(module, limit=100, name=None):
-    """Freezes up to `limit` of the module's most recent CLOSED signals
-    (every field they carry, diagnostics included — adx/rr/ema_gap_pct/
-    atr_pct/etc. for EMA, whatever the module tracks) under a new
-    snapshot id. Only CLOSED signals are kept — a replay recomputes
-    win/loss stats, which needs a resolved result; an OPEN one would
-    just be dead weight. STATE[<list>] is stored newest-first
-    (appendleft on creation), so signals[:limit] is already "most
-    recent N", no sorting needed. Returns the snapshot's metadata, or
-    None if the module name isn't recognized or there's nothing closed
-    yet to save."""
-    state_key = SNAPSHOT_MODULE_KEYS.get(module)
-    if state_key is None:
-        return None
-    with state_lock:
-        signals = list(STATE.get(state_key, []))
-    closed = [s for s in signals if s.get("status") == "CLOSED" and s.get("result") in ("WIN", "LOSS", "TIMEOUT", "BREAKEVEN")]
-    closed = closed[:limit]
-    if not closed:
-        return None
-    snap_id = f"{module}-{int(time.time())}"
-    snapshot = {
-        "id": snap_id, "module": module, "name": name or snap_id,
-        "saved_at": time.time(), "signals": closed, "count": len(closed),
-    }
-    with state_lock:
-        STATE["signal_snapshots"][snap_id] = snapshot
-    save_state()
-    return {"id": snap_id, "module": module, "name": snapshot["name"], "saved_at": snapshot["saved_at"], "count": snapshot["count"]}
-
-
-def list_signal_snapshots(module=None):
-    with state_lock:
-        snaps = list(STATE["signal_snapshots"].values())
-    if module:
-        snaps = [s for s in snaps if s["module"] == module]
-    snaps.sort(key=lambda s: -s["saved_at"])
-    return [{"id": s["id"], "module": s["module"], "name": s["name"], "saved_at": s["saved_at"], "count": s["count"]} for s in snaps]
-
-
-_SNAPSHOT_REPLAY_OPS = {
-    "gte": lambda v, threshold: v >= threshold,
-    "lte": lambda v, threshold: v <= threshold,
-    "abs_gte": lambda v, threshold: abs(v) >= threshold,
-    "abs_lte": lambda v, threshold: abs(v) <= threshold,
-}
-
-
-def _signal_passes_replay_filters(sig, filters):
-    """filters: list of {"field": str, "op": one of _SNAPSHOT_REPLAY_OPS,
-    "value": number}. A signal passes only if EVERY condition holds; a
-    condition on a field the signal doesn't have (None — e.g. an old
-    signal saved before that diagnostic existed) fails CLOSED, treated
-    as not passing rather than silently skipped, matching how a live
-    filter would treat missing data (see EMA_MIN_RR's own `rr is not
-    None and rr < threshold` guard — same "missing means can't confirm
-    it clears the bar" logic, not "missing means let it through")."""
-    for f in filters:
-        val = sig.get(f["field"])
-        if val is None:
-            return False
-        op = _SNAPSHOT_REPLAY_OPS.get(f["op"])
-        if op is None or not op(val, f["value"]):
-            return False
-    return True
-
-
-def replay_signal_snapshot(snap_id, filters):
-    """Recomputes win/loss/winrate and an MFE/MAE-at-close breakdown
-    (same agg() shape compute_ema_stats() etc. already use) against a
-    saved snapshot, keeping only signals that pass `filters`. Entirely
-    offline against already-stored data — no live scanning, no network
-    calls, no waiting for new signals. This can only ever narrow what a
-    snapshot already contains: a signal that a filter active AT SAVE
-    TIME already rejected was never created in the first place, so it
-    isn't in the snapshot to test a looser threshold against — replay
-    can simulate a STRICTER version of an existing filter, not recover
-    what an even-stricter one back then would have thrown away, and
-    obviously can't simulate an entirely new detection rule that never
-    ran. Returns None if the snapshot id doesn't exist."""
-    with state_lock:
-        snapshot = STATE["signal_snapshots"].get(snap_id)
-    if snapshot is None:
-        return None
-    survivors = [s for s in snapshot["signals"] if _signal_passes_replay_filters(s, filters)]
-    wins = sum(1 for s in survivors if s.get("result") == "WIN")
-    losses = sum(1 for s in survivors if s.get("result") == "LOSS")
-    timeouts = sum(1 for s in survivors if s.get("result") == "TIMEOUT")
-    breakevens = sum(1 for s in survivors if s.get("result") == "BREAKEVEN")
-    total = wins + losses
-    winrate = round(wins / total * 100, 1) if total else None
-
-    def agg(key, subset):
-        vals = [s[key] for s in subset if s.get(key) is not None]
-        if not vals:
-            return None
-        vals_sorted = sorted(vals)
-        n = len(vals_sorted)
-        return {
-            "avg": round(sum(vals) / n, 3), "median": round(vals_sorted[n // 2], 3),
-            "p25": round(vals_sorted[int(n * 0.25)], 3),
-            "p75": round(vals_sorted[min(int(n * 0.75), n - 1)], 3), "n": n,
-        }
-
-    win_set = [s for s in survivors if s.get("result") == "WIN"]
-    loss_set = [s for s in survivors if s.get("result") == "LOSS"]
-    return {
-        "snapshot_id": snap_id, "original_count": snapshot["count"], "surviving_count": len(survivors),
-        "wins": wins, "losses": losses, "timeouts": timeouts, "breakevens": breakevens,
-        "total": total, "winrate": winrate,
-        "rr_all": agg("rr", survivors), "rr_wins": agg("rr", win_set), "rr_losses": agg("rr", loss_set),
-        "mfe_r_wins_at_close": agg("mfe_r_at_close", win_set), "mae_r_wins_at_close": agg("mae_r_at_close", win_set),
-        "mfe_r_losses_at_close": agg("mfe_r_at_close", loss_set), "mae_r_losses_at_close": agg("mae_r_at_close", loss_set),
-    }
 
 
 def data_quality_check(candles):
@@ -16160,7 +16077,6 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
     Returns (signals, pivots). signals: list of dicts with index (into
     entry_candles), time, direction, entry, sl, tp, level, level_type."""
     pivots = msnr_build_pivots(structure_candles, pivot_left, pivot_right, min_leg_atr, atr_period)
-    pivots = msnr_build_pivots(structure_candles, pivot_left, pivot_right, min_leg_atr, atr_period)
     signals = []
     if not entry_candles:
         return signals, pivots
@@ -17184,20 +17100,6 @@ def msnr_volume_quantile_buckets(trades, k):
                          "winrate": round(wins / cnt * 100, 1), "avg_rr": avg_rr,
                          "hi": subset[-1]["volume_ratio"]})
     return buckets
-
-
-def msnr_volume_bucket_stats(trades):
-    """v0.99.60 — display-only counterpart to msnr_volume_quantile_
-    buckets(): the FINEST quantile split (MSNR_VOLUME_QUANTILE_GROUPS[0]
-    groups) this symbol's own trade count actually supports, purely for
-    showing "what does this symbol's volume-ratio distribution look
-    like" — msnr_symbol_volume_skip_below() does its own independent
-    multi-k search over the full candidate list and doesn't call this."""
-    for k in MSNR_VOLUME_QUANTILE_GROUPS:
-        buckets = msnr_volume_quantile_buckets(trades, k)
-        if buckets:
-            return buckets
-    return []
 
 
 def msnr_symbol_volume_skip_below(trades):
