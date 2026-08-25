@@ -10205,6 +10205,84 @@ v0.99.118 - Dead-code sweep, frontend side: extended the same "count
          a real jsdom page execution (zero runtime errors), and the
          Flask route/def integrity check (41 routes unchanged — a pure
          CSS change, nothing route-connected).
+
+v0.99.119 - NEW MODULE: LSW ("Liquidity Sweep") — equal-highs/equal-
+         lows liquidity-grab reversal, per direct user request ("Order
+         flow, вход на выбивании чужих столпов" -> "В VP poc как
+         отдельная вкладка надо добавить как новый индикатор"). >=2
+         swing pivots (fractal, same left/right shape as MIRROR's own
+         pivot detector) clustering within LSW_EQUAL_TOLERANCE_PCT of
+         each other are treated as one resting-liquidity level. A
+         signal fires when a later candle's wick pokes beyond that
+         level but its CLOSE comes back inside — a genuine sweep,
+         deliberately distinct from a breakout (which closes through
+         and is NOT treated as a signal) — same definition used by
+         every public SMC/liquidity-sweep implementation checked before
+         building this (rafalsza/joshyattridge's smartmoneyconcepts
+         package's own smc.liquidity() docstring: "Swept = the index of
+         the candle that swept the liquidity"). Direction is the
+         reversal AWAY from the swept side (sweeping equal highs ->
+         SHORT, equal lows -> LONG); stop-loss sits just beyond the
+         sweep candle's own wick extreme (LSW_SL_BUFFER_PCT buffer);
+         take-profit is a fixed RR off that risk (LSW_RR) — same
+         "mechanical pipeline needs one fixed target" reasoning as
+         MIRROR_RR's own docstring.
+         Deliberately PAPER-ONLY per direct, explicit user choice
+         ("Сначала paper-симуляция, автоторговлю добавим потом"):
+         lsw_scan_symbol_live() never calls execute_autotrade()/
+         sim_execute_trade() — there is no AUTOTRADE_ENABLED_LSW
+         anywhere in this app, no autotrade settings key, no Telegram
+         alert wiring. Live signals are still tracked through the same
+         real WIN/LOSS/TIMEOUT forward-data logic every other module
+         uses (_lsw_track_signal_outcomes(), MFE/MAE included) — same
+         shape as MIRROR's own filtered-signal shadow-tracking pool
+         (v0.99.114), just as the ONLY pool here rather than a second
+         one alongside real trades.
+         Named lsw_/LSW_, NOT sweep_/SWEEP_ — sweep_sim_trades()
+         already exists in this file for an unrelated purpose (settling
+         PENDING paper trades from the shared sim_trades system), so
+         reusing that name would have collided.
+         Deliberately simpler than MIRROR for this first version — no
+         SL-width/pattern/direction filter chain yet (MIRROR only grew
+         that after real backtest data justified it, several versions
+         in); this ships with just detection + backtest + paper-tracked
+         live signals, the same scope MIRROR itself started at in
+         v0.99.91. A live-eligibility gate still exists (LSW_LIVE_MIN_
+         WINRATE=35%, LSW_LIVE_MIN_SAMPLE=30 closed backtest trades)
+         so the live scanner only watches symbols with SOME supporting
+         backtest evidence, same principle as every other module here,
+         just a lower sample bar than MIRROR's (80) since the priority
+         right now is gathering broad real forward data on a brand-new
+         detector, not a final live-trading gate.
+         Full vertical slice: constants, STATE (lsw_signals/
+         lsw_backtest_results/lsw_backtest_summary/lsw_live_universe),
+         settings (lsw_enabled/lsw_rr/lsw_equal_tolerance_pct — get_
+         settings/apply_settings/SETTINGS_KEYS), detection (lsw_find_
+         pivots/lsw_detect_signals), backtest (lsw_track_outcome/lsw_
+         build_universe/lsw_backtest_symbol/lsw_summarize_backtest/
+         lsw_backtest_loop), live scan (lsw_scan_symbol_live/_lsw_
+         track_signal_outcomes/update_lsw_signal_outcomes/lsw_live_
+         loop), stats (compute_lsw_signal_stats), 4 new API routes
+         (/api/lsw/status, /api/lsw/chart/<symbol>, /api/lsw/signals,
+         /api/reset/lsw), save_state()/load_state() persistence for
+         lsw_signals, frontend (new "Sweep" tab, lswPanel, refreshLsw(),
+         openLswChart() thin wrapper around openVgiChart() — same reuse
+         judgment as openMirrorChart's own, since LSW's signal shape is
+         structurally identical — resetLswBtn, settings modal group with
+         an explicit "⚠️ paper-only" label so the UI itself doesn't let
+         this read as a real-money module), 2 new background threads
+         (lsw_backtest_loop, lsw_live_loop) started alongside every
+         other module's own at the bottom of the file.
+         Verified: py_compile, pyflakes clean, node --check on the
+         correctly-last <script> block, a real runtime start, Flask
+         route/def integrity check (45 routes, up from 41 — exactly the
+         4 new LSW routes, nothing else changed), and a synthetic-candle
+         unit test of lsw_detect_signals() confirming a hand-built
+         equal-highs sweep (two matching swing highs, then a third
+         candle wicking above both and closing back below) correctly
+         fires a SHORT signal with SL above the sweep wick and TP at
+         the expected RR distance — and the mirror LONG case off two
+         equal lows.
 """
 
 import os
@@ -10223,7 +10301,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.118"
+APP_VERSION = "0.99.119"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -10792,6 +10870,37 @@ MIRROR_SL_PCT_BUCKET_SCHEMES = [
     [(0, 3), (3, float("inf"))],
 ]  # finest -> coarsest cascade, same MSNR v0.99.89 lesson applied from the start here rather than shipping a fixed-only version first
 MIRROR_LIVE_MIN_WINRATE = float(os.environ.get("VP_MIRROR_LIVE_MIN_WINRATE", 40.0))  # a symbol's OWN post-filter backtest winrate must clear this to be live-scanned at all — raised 35->40 (v0.99.113) per direct user request, alongside investigating (and confirming, not a bug) why many symbols show n=0 despite hundreds of raw signals: the SL-width/pattern/direction filter chain can legitimately eliminate 100% of a symbol's trades when its raw winrate is bad across virtually every SL-width bucket — the SL filter alone catches everything, leaving nothing for the later filters to work with
+
+# LSW ("Liquidity Sweep") — equal-highs/equal-lows liquidity-grab
+# reversal module, v0.99.119. Constants live here for the same reason
+# every other module's own constants do (STATE's own construction
+# below needs LSW_SIGNAL_HISTORY already defined). Prefixed lsw_/LSW_
+# rather than sweep_/SWEEP_ deliberately — sweep_sim_trades() already
+# exists in this file for an unrelated purpose (settling pending paper
+# trades), so reusing that name would collide.
+# Deliberately PAPER-ONLY for now, per direct user request ("Сначала
+# paper-симуляция, автоторговлю добавим потом") — lsw_scan_symbol_live()
+# never calls execute_autotrade()/sim_execute_trade() at all; there is
+# no AUTOTRADE_ENABLED_LSW anywhere in this app. Live signals are
+# tracked through the same WIN/LOSS/TIMEOUT forward logic every other
+# module uses (see _lsw_track_signal_outcomes()), just never fired.
+LSW_ENABLED = os.environ.get("VP_LSW_ENABLED", "0") == "1"  # off by default, same reasoning as every other new module here — user opts in after seeing real backtest numbers
+LSW_INTERVAL = os.environ.get("VP_LSW_INTERVAL", "1h")
+LSW_PIVOT_LEFT = int(os.environ.get("VP_LSW_PIVOT_LEFT", 3))
+LSW_PIVOT_RIGHT = int(os.environ.get("VP_LSW_PIVOT_RIGHT", 3))
+LSW_LOOKBACK = int(os.environ.get("VP_LSW_LOOKBACK", 150))  # bars of history considered per live-scan pass
+LSW_UNIVERSE_SIZE = int(os.environ.get("VP_LSW_UNIVERSE_SIZE", 60))
+LSW_EQUAL_TOLERANCE_PCT = float(os.environ.get("VP_LSW_EQUAL_TOLERANCE_PCT", 0.12))  # how close two swing highs (or two swing lows) must sit to count as the SAME resting-liquidity level, as % of price — this is what makes a level "equal highs/lows" rather than just one isolated swing
+LSW_SL_BUFFER_PCT = float(os.environ.get("VP_LSW_SL_BUFFER_PCT", 0.15))  # stop placed this far BEYOND the sweep candle's own wick extreme, as % of price — a small buffer so the stop isn't sitting exactly on the exact wick tip
+LSW_RR = float(os.environ.get("VP_LSW_RR", 2.5))  # fixed RR target — mechanical pipeline needs one, same reasoning as MIRROR_RR's own docstring
+LSW_MAX_BARS_TO_SWEEP = int(os.environ.get("VP_LSW_MAX_BARS_TO_SWEEP", 150))  # a confirmed equal-highs/lows level not swept within this many bars goes stale and stops being watched
+LSW_MAX_WAIT_BARS = int(os.environ.get("VP_LSW_MAX_WAIT_BARS", 200))  # same shared backtest/live TIMEOUT cutoff shape as MIRROR_MAX_WAIT_BARS
+LSW_SIGNAL_HISTORY = 300
+LSW_BACKTEST_DAYS = int(os.environ.get("VP_LSW_BACKTEST_DAYS", 90))
+LSW_REFRESH_SEC = int(os.environ.get("VP_LSW_REFRESH_SEC", 3600))
+LSW_SCAN_INTERVAL_SEC = int(os.environ.get("VP_LSW_SCAN_INTERVAL_SEC", 300))
+LSW_LIVE_MIN_SAMPLE = int(os.environ.get("VP_LSW_LIVE_MIN_SAMPLE", 30))  # a symbol needs at least this many CLOSED backtest trades before its live signals are trusted — deliberately lower than MIRROR_LIVE_MIN_SAMPLE (80) since this is a brand-new, paper-only module and the priority right now is gathering real forward data broadly, not a final live-trading gate
+LSW_LIVE_MIN_WINRATE = float(os.environ.get("VP_LSW_LIVE_MIN_WINRATE", 35.0))
 FT5_MIN_BACKTEST_TRADES = int(os.environ.get("VP_FT5_MIN_BACKTEST_TRADES", 5))  # a combo with fewer trades than this in the backtest window isn't a confident pick — same bar Volume's optimizer uses (MIN_BACKTEST_TRADES)
 FT5_RANK_PRIOR_TARGET = int(os.environ.get("VP_FT5_RANK_PRIOR_TARGET", 1))  # v0.98.8 — ft5_ranking_score() blends in max(0, TARGET - losses_count) pseudo-trades at the known -FT5_STOPLOSS_PCT level, so a small loss-free sample can't look artificially low-risk just because it hasn't hit its (structurally always-possible) stop yet. Tapered by ACTUAL real losses (not a flat count on every combo) — a flat prior tested worse, disproportionately hurting smaller-but-still-real samples. See ft5_ranking_score()'s own docstring for the full reasoning, including why TARGET=1 specifically. Replaces FT5_RANK_Z (v0.98.7), which is no longer referenced — the confidence multiplier is now t_critical(n-1), not a fixed Z.
 
@@ -10914,10 +11023,11 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "mirror_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "mirror_enabled", "lsw_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
+                  "lsw_rr", "lsw_equal_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
                   # same save_settings() path everything else already uses,
@@ -10943,6 +11053,9 @@ def get_settings():
         "mirror_rr": MIRROR_RR,
         "mirror_touch_tolerance_pct": MIRROR_TOUCH_TOLERANCE_PCT,
         "mirror_pattern_tolerance_pct": MIRROR_PATTERN_TOLERANCE_PCT,
+        "lsw_enabled": LSW_ENABLED,
+        "lsw_rr": LSW_RR,
+        "lsw_equal_tolerance_pct": LSW_EQUAL_TOLERANCE_PCT,
         "msnr_max_rr": MSNR_MAX_RR,
         "msnr_enabled": MSNR_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
@@ -10974,6 +11087,7 @@ def apply_settings(updates):
     scan cycle / next alert, no restart needed."""
     global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT
+    global LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, SCALP_MARTINGALE_ENABLED
@@ -11013,6 +11127,22 @@ def apply_settings(updates):
             v = float(updates["mirror_pattern_tolerance_pct"])
             if v >= 0:
                 MIRROR_PATTERN_TOLERANCE_PCT = v
+        except (TypeError, ValueError):
+            pass
+    if "lsw_enabled" in updates:
+        LSW_ENABLED = bool(updates["lsw_enabled"])
+    if "lsw_rr" in updates:
+        try:
+            v = float(updates["lsw_rr"])
+            if v > 0:
+                LSW_RR = v
+        except (TypeError, ValueError):
+            pass
+    if "lsw_equal_tolerance_pct" in updates:
+        try:
+            v = float(updates["lsw_equal_tolerance_pct"])
+            if v >= 0:
+                LSW_EQUAL_TOLERANCE_PCT = v
         except (TypeError, ValueError):
             pass
     if "msnr_enabled" in updates:
@@ -11282,6 +11412,15 @@ STATE = {
     "mirror_last_backtest_duration": None,
     "mirror_signals": deque(maxlen=MIRROR_SIGNAL_HISTORY),
     "mirror_filtered_signals": deque(maxlen=MIRROR_SIGNAL_HISTORY),  # v0.99.114, per direct user question ("может без применения фильтра было лучше, а после него стало хуже"): signals the SL-width/direction filters would have blocked from firing, tracked through the exact same outcome logic (WIN/LOSS/TIMEOUT) as real live signals, but never actually traded — the only honest way to answer "does this filter actually help" with real forward data instead of assuming the backtest's own retrospective self-consistency proves it. See mirror_scan_symbol_live()'s own comment for the full reasoning.
+    # LSW ("Liquidity Sweep") — equal-highs/equal-lows liquidity-grab
+    # reversal module, v0.99.119, PAPER-ONLY (see LSW_ENABLED's own
+    # comment). All keys prefixed lsw_.
+    "lsw_signals": deque(maxlen=LSW_SIGNAL_HISTORY),
+    "lsw_backtest_results": {},
+    "lsw_backtest_summary": {},
+    "lsw_live_universe": [],
+    "lsw_last_backtest_finished": None,
+    "lsw_last_backtest_duration": None,
     "autotrade_log": deque(maxlen=AUTOTRADE_TRADE_HISTORY),  # every attempted auto-trade, dry-run or real, with its outcome
     "sim_balance": AUTOTRADE_SIM_START_BALANCE,
     "sim_trades": deque(maxlen=AUTOTRADE_SIM_TRADE_HISTORY),  # pending + settled paper trades
@@ -14583,6 +14722,7 @@ def save_state():
                 "mirror_filtered_signals": list(STATE["mirror_filtered_signals"]),
                 "mirror_symbol_overrides": STATE["mirror_symbol_overrides"],
                 "mirror_live_universe": STATE["mirror_live_universe"],
+                "lsw_signals": list(STATE["lsw_signals"]),
                 "autotrade_log": list(STATE["autotrade_log"]),
                 "sim_balance": STATE["sim_balance"],
                 # Both PENDING and SETTLED now (previously PENDING was
@@ -14693,6 +14833,7 @@ def load_state():
         mirror_filtered_signals = data.get("mirror_filtered_signals", [])
         mirror_symbol_overrides = data.get("mirror_symbol_overrides", {})
         mirror_live_universe = data.get("mirror_live_universe", [])
+        lsw_signals = data.get("lsw_signals", [])
         autotrade_log = data.get("autotrade_log", [])
         sim_trades = data.get("sim_trades", [])
         risk_autotune_log = data.get("risk_autotune_log", [])
@@ -14710,6 +14851,7 @@ def load_state():
             STATE["mirror_filtered_signals"] = deque(_backfill_mfe_mae(mirror_filtered_signals), maxlen=MIRROR_SIGNAL_HISTORY)
             STATE["mirror_symbol_overrides"] = mirror_symbol_overrides
             STATE["mirror_live_universe"] = mirror_live_universe
+            STATE["lsw_signals"] = deque(_backfill_mfe_mae(lsw_signals), maxlen=LSW_SIGNAL_HISTORY)
             STATE["autotrade_log"] = deque(autotrade_log, maxlen=AUTOTRADE_TRADE_HISTORY)
             STATE["risk_autotune_log"] = deque(risk_autotune_log, maxlen=200)
             STATE["risk_autotune_last_change"] = risk_autotune_last_change
@@ -19756,6 +19898,438 @@ def mirror_live_loop():
 # ============================================================================
 
 
+# ============================================================================
+# LSW ("Liquidity Sweep") — v0.99.119, PAPER-ONLY (see LSW_ENABLED's own
+# comment at the top of this file). Equal-highs/equal-lows liquidity-grab
+# reversal: >=2 swing highs (or lows) clustering within LSW_EQUAL_
+# TOLERANCE_PCT of each other are treated as one resting-liquidity level
+# (the "equal highs/lows" stop cluster this style targets). A signal
+# fires when a later candle's WICK pokes beyond that level but its CLOSE
+# comes back inside it — a sweep, distinct from a genuine breakout (which
+# closes through) — same "wick beyond, close back" definition used by
+# every public SMC implementation reviewed before building this (see
+# rafalsza/joshyattridge's smartmoneyconcepts package's own smc.liquidity()
+# docstring). Direction is the reversal AWAY from the swept side: sweeping
+# equal highs implies SHORT, sweeping equal lows implies LONG. Stop-loss
+# sits just beyond the sweep candle's own wick extreme (LSW_SL_BUFFER_PCT);
+# take-profit is a fixed RR off that risk (LSW_RR) — same "mechanical
+# pipeline needs a fixed target even though real discretionary SMC traders
+# often don't use one" reasoning as MIRROR_RR's own docstring.
+# Deliberately simpler than MIRROR for this first version — no SL-width/
+# pattern/direction filter chain yet (MIRROR only grew that after real
+# backtest data justified it); this ships with just detection + backtest
+# + paper-tracked live signals, same scope MIRROR itself started at.
+# ============================================================================
+def lsw_find_pivots(candles, left=None, right=None):
+    """Same fractal swing-high/low pivot detector as mirror_find_pivots()
+    — kept as its own copy (not a shared call) so LSW's own pivot_left/
+    pivot_right can diverge from MIRROR's without any cross-module
+    coupling, same "each module owns its own copy" pattern FT5/MSNR/
+    MIRROR's own pivot-style detectors already use independently."""
+    left = left if left is not None else LSW_PIVOT_LEFT
+    right = right if right is not None else LSW_PIVOT_RIGHT
+    n = len(candles)
+    pivots = []
+    for i in range(left, n - right):
+        window_highs = [candles[j]["high"] for j in range(i - left, i + right + 1)]
+        window_lows = [candles[j]["low"] for j in range(i - left, i + right + 1)]
+        if candles[i]["high"] == max(window_highs) and window_highs.count(candles[i]["high"]) == 1:
+            pivots.append({"type": "high", "price": candles[i]["high"], "idx": i, "confirm_idx": i + right})
+        if candles[i]["low"] == min(window_lows) and window_lows.count(candles[i]["low"]) == 1:
+            pivots.append({"type": "low", "price": candles[i]["low"], "idx": i, "confirm_idx": i + right})
+    return pivots
+
+
+def lsw_detect_signals(candles, pivot_left=None, pivot_right=None, equal_tolerance_pct=None,
+                        sl_buffer_pct=None, rr=None, max_bars_to_sweep=None):
+    """Single walk-forward pass over `candles` (oldest first), no
+    lookahead — a pivot only becomes a watchable level at its own
+    confirm_idx, same discipline as mirror_detect_signals().
+    1. lsw_find_pivots() finds every confirmed swing high/low.
+    2. Each newly-confirmed pivot either MERGES into an existing
+       same-type level within equal_tolerance_pct of its price (bumping
+       that level's touch count), or starts a new candidate level.
+    3. A level only becomes "watched" for a sweep once it has >=2
+       touches — a single isolated swing isn't "equal highs/lows,"
+       there's no real resting-stop cluster there yet.
+    4. On each subsequent bar, a watched level fires the moment the
+       bar's own WICK pokes beyond it but the CLOSE comes back inside
+       (bar["high"] > level for a high-side level with close back below
+       it; bar["low"] < level for a low-side level with close back
+       above it) — a genuine sweep, not a breakout (which closes
+       through and is deliberately NOT treated as a signal here).
+       Fires once, then stops being watched. A level not swept within
+       max_bars_to_sweep bars of its last touch goes stale and is
+       dropped, same "watched levels expire" convention MIRROR's own
+       broken-level tracking already uses.
+    Entry = the sweep candle's own close. Stop-loss = the sweep
+    candle's own wick extreme + a small buffer. Take-profit = entry ±
+    risk × rr. Returns a list of signal dicts (oldest first):
+    {"direction", "entry", "sl", "tp", "rr", "level_price",
+    "level_type", "level_touches", "entry_idx", "entry_time"}."""
+    pivot_left = pivot_left if pivot_left is not None else LSW_PIVOT_LEFT
+    pivot_right = pivot_right if pivot_right is not None else LSW_PIVOT_RIGHT
+    equal_tolerance_pct = equal_tolerance_pct if equal_tolerance_pct is not None else LSW_EQUAL_TOLERANCE_PCT
+    sl_buffer_pct = sl_buffer_pct if sl_buffer_pct is not None else LSW_SL_BUFFER_PCT
+    rr = rr if rr is not None else LSW_RR
+    max_bars_to_sweep = max_bars_to_sweep if max_bars_to_sweep is not None else LSW_MAX_BARS_TO_SWEEP
+
+    pivots = lsw_find_pivots(candles, pivot_left, pivot_right)
+    by_confirm_idx = {}
+    for p in pivots:
+        by_confirm_idx.setdefault(p["confirm_idx"], []).append(p)
+
+    levels = {"high": [], "low": []}  # each: {price, count, last_idx}
+    signals = []
+    n = len(candles)
+
+    for i in range(n):
+        for p in by_confirm_idx.get(i, []):
+            typ = p["type"]
+            tol = p["price"] * equal_tolerance_pct / 100.0
+            merged = False
+            for lvl in levels[typ]:
+                if abs(lvl["price"] - p["price"]) <= tol:
+                    lvl["count"] += 1
+                    lvl["last_idx"] = i
+                    merged = True
+                    break
+            if not merged:
+                levels[typ].append({"price": p["price"], "count": 1, "last_idx": i})
+
+        c = candles[i]
+        for typ in ("high", "low"):
+            still = []
+            for lvl in levels[typ]:
+                if i - lvl["last_idx"] > max_bars_to_sweep:
+                    continue  # gone stale, drop it silently
+                if lvl["count"] < 2:
+                    still.append(lvl)  # not yet an "equal" level — keep accumulating touches
+                    continue
+                price = lvl["price"]
+                swept = (c["high"] > price and c["close"] < price) if typ == "high" \
+                    else (c["low"] < price and c["close"] > price)
+                if not swept:
+                    still.append(lvl)
+                    continue
+                direction = "SHORT" if typ == "high" else "LONG"
+                extreme = c["high"] if typ == "high" else c["low"]
+                sl = extreme * (1 + sl_buffer_pct / 100.0) if typ == "high" else extreme * (1 - sl_buffer_pct / 100.0)
+                entry = c["close"]
+                risk = abs(entry - sl)
+                if risk > 0:
+                    tp = entry - risk * rr if direction == "SHORT" else entry + risk * rr
+                    signals.append({
+                        "direction": direction, "entry": entry, "sl": sl, "tp": tp, "rr": rr,
+                        "level_price": price, "level_type": typ, "level_touches": lvl["count"],
+                        "entry_idx": i, "entry_time": c["time"],
+                    })
+                # level fires once, then stops being watched — dropped either way (degenerate zero-risk case too)
+            levels[typ] = still
+
+    return signals
+
+
+def lsw_track_outcome(candles, sig, max_wait_bars=LSW_MAX_WAIT_BARS):
+    """Walks forward from sig['entry_idx']+1 looking for TP/SL touch —
+    SL checked first on any bar covering both, same conservative
+    convention mirror_track_outcome()/msnr_track_outcome() already use."""
+    n = len(candles)
+    for k in range(sig["entry_idx"] + 1, min(n, sig["entry_idx"] + 1 + max_wait_bars)):
+        c = candles[k]
+        if sig["direction"] == "LONG":
+            if c["low"] <= sig["sl"]:
+                return "LOSS", c["time"]
+            if c["high"] >= sig["tp"]:
+                return "WIN", c["time"]
+        else:
+            if c["high"] >= sig["sl"]:
+                return "LOSS", c["time"]
+            if c["low"] <= sig["tp"]:
+                return "WIN", c["time"]
+    return "TIMEOUT", None
+
+
+def lsw_build_universe():
+    """Liquid-symbol pool, same top-by-24h-volume source/shape as
+    ft5_build_universe()/mirror_build_universe() — capped to
+    LSW_UNIVERSE_SIZE. A liquidity sweep is a general price-action
+    concept, not tied to one symbol, so this scans a broad universe
+    like FT5/MIRROR/MSNR do."""
+    tickers = get_tickers()
+    seen_vol = {}
+    for t in tickers:
+        name = t.get("contract", "")
+        if not name.endswith("_USDT"):
+            continue
+        vol = t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0
+        try:
+            vol = float(vol)
+        except (TypeError, ValueError):
+            vol = 0.0
+        if vol < MIN_VOL_USD:
+            continue
+        if name not in seen_vol or vol > seen_vol[name]:
+            seen_vol[name] = vol
+    ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
+    return [s[0] for s in ranked[:LSW_UNIVERSE_SIZE]]
+
+
+def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
+    """Fetches LSW_BACKTEST_DAYS of LSW_INTERVAL history, runs the
+    detector + outcome tracker over the whole window. No filter chain
+    yet in this first version (see this module's own header comment) —
+    returns the raw results list directly, same shape ft5_run_backtest's
+    own trades list uses."""
+    now = time.time()
+    fetch_start = now - days * 86400
+    candles = get_candles_range(symbol, LSW_INTERVAL, fetch_start, now)
+    if len(candles) < LSW_PIVOT_LEFT + LSW_PIVOT_RIGHT + 20:
+        return []
+    sigs = lsw_detect_signals(candles)
+    results = []
+    for sig in sigs:
+        result, exit_time = lsw_track_outcome(candles, sig)
+        results.append({
+            "time": sig["entry_time"], "direction": sig["direction"],
+            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"], "rr": sig.get("rr"),
+            "level_price": sig.get("level_price"), "level_type": sig.get("level_type"),
+            "level_touches": sig.get("level_touches"),
+            "result": result, "exit_time": exit_time,
+        })
+    return results
+
+
+def lsw_summarize_backtest(results):
+    total = len(results)
+    if not total:
+        return {"n": 0, "win_rate": None, "wins": 0, "losses": 0, "timeouts": 0,
+                "by_direction": {"LONG": {"n": 0, "wins": 0, "losses": 0, "win_rate": None},
+                                  "SHORT": {"n": 0, "wins": 0, "losses": 0, "win_rate": None}}}
+    wins = sum(1 for r in results if r["result"] == "WIN")
+    losses = sum(1 for r in results if r["result"] == "LOSS")
+    timeouts = sum(1 for r in results if r["result"] == "TIMEOUT")
+    closed = wins + losses
+    win_rate = round(wins / closed * 100, 1) if closed else None
+    by_direction = {}
+    for d in ("LONG", "SHORT"):
+        d_results = [r for r in results if r.get("direction") == d and r["result"] in ("WIN", "LOSS")]
+        d_wins = sum(1 for r in d_results if r["result"] == "WIN")
+        by_direction[d] = {
+            "n": len(d_results), "wins": d_wins, "losses": len(d_results) - d_wins,
+            "win_rate": round(d_wins / len(d_results) * 100, 1) if d_results else None,
+        }
+    return {"n": total, "win_rate": win_rate, "wins": wins, "losses": losses, "timeouts": timeouts,
+            "by_direction": by_direction}
+
+
+_lsw_signal_cooldowns = {}  # symbol -> last-signaled entry_time
+_lsw_signal_cooldowns_lock = threading.Lock()
+
+
+def lsw_scan_symbol_live(symbol):
+    """Live counterpart to lsw_backtest_symbol() — fetches recent
+    history, runs the SAME detector, and records a signal only if the
+    LAST candle produced a brand-new one not already seen for this
+    symbol. PAPER-ONLY: appends to STATE["lsw_signals"] as OPEN and
+    stops there — never calls execute_autotrade()/sim_execute_trade(),
+    no Telegram alert, no real or simulated-balance order of any kind.
+    See this module's own header comment for why."""
+    if not LSW_ENABLED:
+        return
+    try:
+        candles = get_candles(symbol, interval=LSW_INTERVAL, limit=LSW_LOOKBACK)
+        interval_sec = INTERVAL_SECONDS.get(LSW_INTERVAL, 3600)
+        now = time.time()
+        candles = [c for c in candles if c["time"] + interval_sec <= now]  # drop still-forming candle
+        if len(candles) < LSW_PIVOT_LEFT + LSW_PIVOT_RIGHT + 20:
+            return
+        sigs = lsw_detect_signals(candles)
+        if not sigs:
+            return
+        sig = sigs[-1]
+        if sig["entry_idx"] != len(candles) - 1:
+            return  # most recent signal isn't off the latest closed candle — already stale/handled
+        with _lsw_signal_cooldowns_lock:
+            if _lsw_signal_cooldowns.get(symbol) == sig["entry_time"]:
+                return
+            _lsw_signal_cooldowns[symbol] = sig["entry_time"]
+        with state_lock:
+            already_open = any(s["symbol"] == symbol and s["status"] == "OPEN" for s in STATE["lsw_signals"])
+        if already_open:
+            return
+        record = {
+            "symbol": symbol, "direction": sig["direction"],
+            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"], "rr": sig.get("rr"),
+            "level_price": sig.get("level_price"), "level_type": sig.get("level_type"),
+            "level_touches": sig.get("level_touches"), "time": sig["entry_time"],
+            "detected_at": time.time(), "status": "OPEN", "result": None,
+            "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
+            "mfe_r": 0.0, "mae_r": 0.0, "mfe_price": None, "mae_price": None,
+            "mfe_r_at_close": None, "mae_r_at_close": None, "timeout_pnl_r": None,
+        }
+        with state_lock:
+            STATE["lsw_signals"].appendleft(record)
+    except Exception as e:
+        log_error(f"lsw_scan_symbol_live {symbol}: {e}")
+
+
+def _lsw_track_signal_outcomes():
+    """Same shared MFE/MAE/WIN/LOSS/TIMEOUT tracking shape as
+    _mirror_track_signal_outcomes() — the only difference is this pool
+    was never fired via execute_autotrade()/sim_execute_trade() to
+    begin with (see this module's own header comment), so there's only
+    ever the one pool to track, unlike MIRROR's real+filtered pair."""
+    now = time.time()
+    with state_lock:
+        open_signals = [s for s in STATE["lsw_signals"] if s["status"] == "OPEN"]
+    all_candles = fetch_candles_concurrent([(s["symbol"], LSW_INTERVAL, 300) for s in open_signals])
+    interval_sec = INTERVAL_SECONDS.get(LSW_INTERVAL, 3600)
+    for sig, candles in zip(open_signals, all_candles):
+        try:
+            if candles is None:
+                continue
+            candles = [c for c in candles if c["time"] + interval_sec <= now]
+            future = [c for c in candles if c["time"] > sig["time"]]
+            direction = sig["direction"]
+            entry = sig["entry"]
+            risk = abs(entry - sig["sl"]) or 1e-9
+            result = None
+            exit_price = None
+            exit_time = None
+            bars_seen = 0
+            for c in future:
+                bars_seen += 1
+                if direction == "LONG":
+                    fav, adv = c["high"] - entry, entry - c["low"]
+                else:
+                    fav, adv = entry - c["low"], c["high"] - entry
+                fav_r, adv_r = fav / risk, adv / risk
+                with state_lock:
+                    if fav_r > sig["mfe_r"]:
+                        sig["mfe_r"] = round(fav_r, 3)
+                        sig["mfe_price"] = c["high"] if direction == "LONG" else c["low"]
+                    if adv_r > sig["mae_r"]:
+                        sig["mae_r"] = round(adv_r, 3)
+                        sig["mae_price"] = c["low"] if direction == "LONG" else c["high"]
+                if direction == "LONG":
+                    if c["low"] <= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["high"] >= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+                else:
+                    if c["high"] >= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["low"] <= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+                if bars_seen >= LSW_MAX_WAIT_BARS:
+                    result = "TIMEOUT"
+                    exit_price = c["close"]
+                    exit_time = c["time"]
+                    break
+            with state_lock:
+                if result:
+                    sig["status"] = "CLOSED"
+                    sig["result"] = result
+                    sig["exit_price"] = exit_price
+                    sig["exit_time"] = exit_time
+                    sig["mfe_r_at_close"] = sig["mfe_r"]
+                    sig["mae_r_at_close"] = sig["mae_r"]
+                    if result == "TIMEOUT" and exit_price is not None:
+                        pnl_r = (exit_price - entry) / risk if direction == "LONG" else (entry - exit_price) / risk
+                        sig["timeout_pnl_r"] = round(pnl_r, 3)
+        except Exception as e:
+            log_error(f"lsw_outcome {sig['symbol']}: {e}")
+
+
+def update_lsw_signal_outcomes():
+    _lsw_track_signal_outcomes()
+
+
+def compute_lsw_signal_stats():
+    with state_lock:
+        signals = list(STATE["lsw_signals"])
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+    wins = sum(1 for s in closed if s["result"] == "WIN")
+    losses = sum(1 for s in closed if s["result"] == "LOSS")
+    open_n = sum(1 for s in signals if s["status"] == "OPEN")
+    total_closed = len(closed)
+    winrate = round(wins / total_closed * 100, 1) if total_closed else None
+    by_level_type = {}
+    for lt in ("high", "low"):
+        lt_closed = [s for s in closed if s.get("level_type") == lt]
+        lt_wins = sum(1 for s in lt_closed if s["result"] == "WIN")
+        by_level_type[lt] = {
+            "n": len(lt_closed), "wins": lt_wins, "losses": len(lt_closed) - lt_wins,
+            "winrate": round(lt_wins / len(lt_closed) * 100, 1) if lt_closed else None,
+        }
+    return {"total": len(signals), "wins": wins, "losses": losses,
+            "open": open_n, "winrate": winrate, "by_level_type": by_level_type}
+
+
+def lsw_backtest_loop():
+    while True:
+        try:
+            if not LSW_ENABLED:
+                time.sleep(60)
+                continue
+            t0 = time.time()
+            universe = lsw_build_universe()
+            results_by_symbol = {}
+            summary_by_symbol = {}
+            live_universe = []
+            with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
+                futs = {ex.submit(lsw_backtest_symbol, s): s for s in universe}
+                for fut in as_completed(futs):
+                    symbol = futs[fut]
+                    try:
+                        results = fut.result()
+                        results_by_symbol[symbol] = results
+                        summary = lsw_summarize_backtest(results)
+                        summary_by_symbol[symbol] = summary
+                        closed_n = summary["wins"] + summary["losses"]
+                        if (summary["win_rate"] is not None and summary["win_rate"] > LSW_LIVE_MIN_WINRATE
+                                and closed_n >= LSW_LIVE_MIN_SAMPLE):
+                            live_universe.append(symbol)
+                    except Exception as e:
+                        log_error(f"lsw_backtest {symbol}: {e}")
+            with state_lock:
+                STATE["lsw_backtest_results"] = results_by_symbol
+                STATE["lsw_backtest_summary"] = summary_by_symbol
+                STATE["lsw_live_universe"] = live_universe
+                STATE["lsw_last_backtest_finished"] = time.time()
+                STATE["lsw_last_backtest_duration"] = round(time.time() - t0, 1)
+        except Exception as e:
+            log_error(f"lsw_backtest_loop: {e}")
+        time.sleep(max(300, LSW_REFRESH_SEC))
+
+
+def lsw_live_loop():
+    while True:
+        try:
+            if not LSW_ENABLED:
+                time.sleep(60)
+                continue
+            with state_lock:
+                live_universe = list(STATE.get("lsw_live_universe", []))
+            if live_universe:
+                with ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe))) as ex:
+                    list(ex.map(lsw_scan_symbol_live, live_universe))
+            update_lsw_signal_outcomes()
+        except Exception as e:
+            log_error(f"lsw_live_loop: {e}")
+        time.sleep(max(60, LSW_SCAN_INTERVAL_SEC))
+
+
+# ============================================================================
+# END LSW
+# ============================================================================
+
+
 # ----------------------------------------------------------------------------
 # API
 # ----------------------------------------------------------------------------
@@ -20151,6 +20725,114 @@ def api_mirror_chart(symbol):
 def api_mirror_signals():
     with state_lock:
         return jsonify(list(STATE["mirror_signals"]))
+
+
+@app.route("/api/lsw/status")
+def api_lsw_status():
+    """See the LSW module's own header comment (near lsw_find_pivots())."""
+    with state_lock:
+        summary = dict(STATE["lsw_backtest_summary"])
+        live_universe = list(STATE["lsw_live_universe"])
+        last_backtest_finished = STATE["lsw_last_backtest_finished"]
+        last_backtest_duration = STATE["lsw_last_backtest_duration"]
+    ranked = [dict(s, symbol=sym, live=(sym in live_universe)) for sym, s in summary.items()]
+    ranked.sort(key=lambda r: (r["win_rate"] or 0, r["n"]), reverse=True)
+    return jsonify({
+        "enabled": LSW_ENABLED,
+        "last_backtest_finished": last_backtest_finished,
+        "last_backtest_duration": last_backtest_duration,
+        "signals_stats": compute_lsw_signal_stats(),
+        "live_universe": live_universe,
+        "config": {
+            "interval": LSW_INTERVAL, "pivot_left": LSW_PIVOT_LEFT, "pivot_right": LSW_PIVOT_RIGHT,
+            "equal_tolerance_pct": LSW_EQUAL_TOLERANCE_PCT, "sl_buffer_pct": LSW_SL_BUFFER_PCT,
+            "rr": LSW_RR, "max_bars_to_sweep": LSW_MAX_BARS_TO_SWEEP,
+            "backtest_days": LSW_BACKTEST_DAYS, "universe_size": LSW_UNIVERSE_SIZE,
+            "live_min_winrate": LSW_LIVE_MIN_WINRATE, "live_min_sample": LSW_LIVE_MIN_SAMPLE,
+        },
+        "top": ranked,
+    })
+
+
+@app.route("/api/lsw/chart/<symbol>")
+def api_lsw_chart(symbol):
+    """Same "look up the signal's own already-recorded entry/sl/tp,
+    don't re-derive with CURRENT live params" fix already applied to
+    api_mirror_chart()/api_msnr_chart() — LSW_RR/LSW_EQUAL_TOLERANCE_PCT
+    could drift between when a trade fired and when its chart is later
+    opened."""
+    try:
+        sig_time = request.args.get("time")
+        found_sig = None
+        found_result = None
+        found_exit_time = None
+        found_exit_price = None
+        if sig_time:
+            target = float(sig_time)
+            interval_sec = INTERVAL_SECONDS.get(LSW_INTERVAL, 3600)
+            with state_lock:
+                live_match = next((s for s in STATE["lsw_signals"]
+                                    if s["symbol"] == symbol and abs(s["time"] - target) < interval_sec), None)
+                bt_trades = list(STATE["lsw_backtest_results"].get(symbol, []))
+            if live_match:
+                found_sig = {"time": live_match["time"], "direction": live_match["direction"],
+                              "entry": live_match["entry"], "sl": live_match["sl"], "tp": live_match["tp"],
+                              "rr": live_match.get("rr"),
+                              "level_price": live_match.get("level_price"), "level_type": live_match.get("level_type")}
+                found_result = live_match.get("result")
+                found_exit_time = live_match.get("exit_time")
+                found_exit_price = live_match.get("exit_price")
+            else:
+                bt_match = next((t for t in bt_trades if abs(t["time"] - target) < interval_sec), None)
+                if bt_match:
+                    found_sig = {"time": bt_match["time"], "direction": bt_match["direction"],
+                                  "entry": bt_match["entry"], "sl": bt_match["sl"], "tp": bt_match["tp"],
+                                  "rr": bt_match.get("rr"),
+                                  "level_price": bt_match.get("level_price"), "level_type": bt_match.get("level_type")}
+                    found_result = bt_match.get("result")
+                    found_exit_time = bt_match.get("exit_time")
+                    if found_result == "WIN":
+                        found_exit_price = bt_match["tp"]
+                    elif found_result == "LOSS":
+                        found_exit_price = bt_match["sl"]
+        if found_sig is None:
+            return jsonify({"error": "сигнал не найден"}), 404
+        interval_sec = INTERVAL_SECONDS.get(LSW_INTERVAL, 3600)
+        fetch_start = found_sig["time"] - (LSW_LOOKBACK + LSW_PIVOT_LEFT + LSW_PIVOT_RIGHT) * interval_sec
+        fetch_end = (found_exit_time + 6 * interval_sec) if found_exit_time else (found_sig["time"] + 200 * interval_sec)
+        candles = get_candles_range(symbol, LSW_INTERVAL, fetch_start, fetch_end)
+        return jsonify({
+            "symbol": symbol, "candles": candles[-250:], "time": found_sig["time"],
+            "direction": found_sig["direction"], "entry": found_sig["entry"],
+            "sl": found_sig["sl"], "tp": found_sig["tp"], "rr": found_sig.get("rr"),
+            "level_price": found_sig.get("level_price"), "level_type": found_sig.get("level_type"),
+            "result": found_result, "exit_time": found_exit_time, "exit_price": found_exit_price,
+        })
+    except Exception as e:
+        log_error(f"api_lsw_chart {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/lsw/signals")
+def api_lsw_signals():
+    with state_lock:
+        return jsonify(list(STATE["lsw_signals"]))
+
+
+@app.route("/api/reset/lsw", methods=["POST"])
+def api_reset_lsw():
+    try:
+        with state_lock:
+            STATE["lsw_backtest_results"] = {}
+            STATE["lsw_backtest_summary"] = {}
+            STATE["lsw_live_universe"] = []
+            STATE["lsw_last_backtest_finished"] = None
+            STATE["lsw_last_backtest_duration"] = None
+            STATE["lsw_signals"].clear()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset_lsw: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/reset/mirror", methods=["POST"])
@@ -21066,6 +21748,7 @@ INDEX_HTML = """<!doctype html>
       <button id="resetMsnrBtn">Очистить MSNR</button>
       <button id="resetFt5Btn">Очистить FT5</button>
       <button id="resetMirrorBtn">Очистить Зеркало</button>
+      <button id="resetLswBtn">Очистить Sweep</button>
       <button id="resetSimulatorBtn">Сбросить симулятор</button>
       <button id="resetRiskAutotuneBtn">Сбросить авто-тюнинг</button>
     </div>
@@ -21084,6 +21767,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="scalp">Скальпинг</div>
   <div class="tab" data-tab="ft5" style="color:#e0a030;">FT5 ⚠️</div>
   <div class="tab" data-tab="mirror">Зеркало</div>
+  <div class="tab" data-tab="lsw">Sweep</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
 </div>
@@ -21099,6 +21783,7 @@ INDEX_HTML = """<!doctype html>
   <div id="msnrPanel" style="display:block;padding:8px 4px;font-size:12px;"></div>
   <div id="ft5Panel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="mirrorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
+  <div id="lswPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="simulatorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
@@ -21248,6 +21933,24 @@ INDEX_HTML = """<!doctype html>
     </div>
 
     <div class="settingsGroup">
+      <div class="settingsGroupTitle">Sweep (Liquidity Sweep)</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Сканирование <span style="color:#e0a030;">⚠️ paper-only</span></div>
+          <div class="sub">снятие ликвидности с равных хаёв/лоу (2+ близких свинга) — вход на развороте после того, как фитиль пробил уровень, а закрытие вернулось обратно. Реальные и симулированные сделки НЕ открываются, только отслеживание сигналов на бумаге</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setLsw"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ RR (тейк-профит)</div>
+          <div class="sub">фиксированное соотношение тейк:стоп от стопа за экстремумом свипа</div>
+        </div>
+        <input type="number" id="setLswRR" min="0.5" max="20" step="0.5" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+      </div>
+    </div>
+
+    <div class="settingsGroup">
       <div class="settingsGroupTitle">Telegram</div>
       <div class="settingRow">
         <div>
@@ -21377,6 +22080,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('msnrPanel').style.display = activeTab === 'msnr' ? 'block' : 'none';
     document.getElementById('ft5Panel').style.display = activeTab === 'ft5' ? 'block' : 'none';
     document.getElementById('mirrorPanel').style.display = activeTab === 'mirror' ? 'block' : 'none';
+    document.getElementById('lswPanel').style.display = activeTab === 'lsw' ? 'block' : 'none';
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
     document.getElementById('simulatorPanel').style.display = activeTab === 'simulator' ? 'block' : 'none';
     if (activeTab === 'signals') refreshTuning();
@@ -21384,6 +22088,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'msnr') refreshMsnr();
     if (activeTab === 'ft5') refreshFt5();
     if (activeTab === 'mirror') refreshMirror();
+    if (activeTab === 'lsw') refreshLsw();
     if (activeTab === 'autotrade') refreshAutotrade();
     if (activeTab === 'simulator') refreshSimulator();
   };
@@ -22639,6 +23344,88 @@ async function refreshMirror() {
   });
 }
 
+async function refreshLsw() {
+  const status = await (await fetch('/api/lsw/status')).json();
+  const signals = await (await fetch('/api/lsw/signals')).json();
+  const panel = document.getElementById('lswPanel');
+  const cfg = status.config || {};
+  const ss = status.signals_stats || {};
+  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
+  const levelTypeLabels = {high: 'снятие хаёв', low: 'снятие лоу'};
+  const byLevelTxt = Object.entries(ss.by_level_type || {}).map(([lt, s]) => {
+    const wr = s.winrate !== null && s.winrate !== undefined ? `${s.winrate}%` : '-';
+    return `${levelTypeLabels[lt] || lt}: ${wr} (n=${s.n})`;
+  }).join(' · ');
+  const buildTxt = status.last_backtest_finished
+    ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · в живом скане: ${(status.live_universe||[]).length}/${(status.top||[]).length} монет (винрейт > ${cfg.live_min_winrate}%)`
+    : 'бэктест ещё не завершился — живой скан новых сигналов на паузе, чтобы не показывать неотфильтрованные монеты';
+  const headerHtml = `
+    <div class="dim" style="margin-bottom:8px;">
+      <b>Liquidity Sweep</b> — ⚠️ только paper-режим, реальные и симулированные ордера НЕ отправляются, только отслеживание сигналов на бумаге.<br>
+      «Снятие ликвидности» — 2+ близких максимума/минимума считаются одним уровнем (равные хаи/лоу); сигнал — когда свеча фитилём пробивает уровень, но закрывается обратно внутри (не пробой, а именно снятие стопов).<br>
+      ТФ ${cfg.interval} · RR ${cfg.rr} · допуск равенства уровней ${cfg.equal_tolerance_pct}% · буфер стопа ${cfg.sl_buffer_pct}% · ${buildTxt}<br>
+      <b>Paper-сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
+      ${byLevelTxt ? `<span style="font-size:11px;">По типу уровня: ${byLevelTxt}</span><br>` : ''}
+      <span style="font-size:11px;">Зелёная точка — монета сейчас в живом скане. Клик по строке сигнала открывает график входа/выхода.</span>
+    </div>`;
+  const signalsRows = signals.map(s => {
+    let statusHtml;
+    if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
+    else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
+    else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
+    else if (s.result === 'TIMEOUT') {
+      const r = s.timeout_pnl_r;
+      const rCls = (r === null || r === undefined) ? 'status-timeout' : (r >= 0 ? 'win' : 'loss');
+      const rTxt = (r === null || r === undefined) ? '' : ` (${r > 0 ? '+' : ''}${r}R)`;
+      statusHtml = `<span class="${rCls}">TIMEOUT @ ${fmt(s.exit_price)}${rTxt}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
+    } else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
+    const dirClass = s.direction === 'SHORT' ? 'short' : 'long';
+    return `<tr data-symbol="${s.symbol}" data-time="${s.time}" style="cursor:pointer;">
+      <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td>
+      <td class="dim">${levelTypeLabels[s.level_type] || s.level_type} (x${s.level_touches||'?'})</td>
+      <td>${fmt(s.entry)}</td><td>${fmt(s.sl)}</td><td>${fmt(s.tp)}</td>
+      <td>${s.rr}</td><td>${statusHtml}</td><td class="dim">${fmtDateTime(s.time)}</td>
+    </tr>`;
+  }).join('');
+  const signalsTableHtml = signals.length ? `
+    <div style="overflow-x:auto;margin-bottom:14px;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>Symbol</th><th>Dir</th><th>Уровень</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Status</th><th>Время</th></tr></thead>
+      <tbody>${signalsRows}</tbody>
+    </table>
+    </div>` : '<div class="dim" style="margin-bottom:14px;">Paper-сигналов пока нет.</div>';
+  const btRows = (status.top || []).map(r => {
+    const wrClass = (r.win_rate || 0) >= 50 ? 'win' : 'loss';
+    const liveDot = r.live ? ' <span style="color:#3ddc97;" title="в живом скане">●</span>' : '';
+    const bd = r.by_direction || {};
+    const fmtWr = v => (v === null || v === undefined) ? '?' : `${v}%`;
+    const byDirTxt = (bd.LONG || bd.SHORT)
+      ? `<span class="dim" title="винрейт по направлению">L: ${fmtWr(bd.LONG && bd.LONG.win_rate)} (n=${bd.LONG ? bd.LONG.n : 0}) · S: ${fmtWr(bd.SHORT && bd.SHORT.win_rate)} (n=${bd.SHORT ? bd.SHORT.n : 0})</span>`
+      : '<span class="dim">-</span>';
+    return `<tr>
+      <td>${r.symbol}${liveDot}</td>
+      <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
+      <td class="dim">n=${r.n}</td>
+      <td class="win">${r.wins}W</td>
+      <td class="loss">${r.losses}L</td>
+      <td class="dim">${r.timeouts}T</td>
+      <td>${byDirTxt}</td>
+    </tr>`;
+  }).join('');
+  const btTableHtml = (status.top || []).length ? `
+    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории):</div>
+    <div style="overflow-x:auto;">
+    <table style="font-size:11px;white-space:nowrap;">
+      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th></tr></thead>
+      <tbody>${btRows}</tbody>
+    </table>
+    </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
+  setPanelHtml(panel, headerHtml + signalsTableHtml + btTableHtml);
+  panel.querySelectorAll('tbody tr[data-time]').forEach(tr => {
+    tr.onclick = () => openLswChart(tr.dataset.symbol, tr.dataset.time);
+  });
+}
+
 async function refreshAutotradeBanner() {
   try {
     const s = await (await fetch('/api/autotrade/status')).json();
@@ -22788,6 +23575,7 @@ async function refreshAll() {
   if (activeTab === 'msnr') await refreshMsnr();
   if (activeTab === 'ft5') await refreshFt5();
   if (activeTab === 'mirror') await refreshMirror();
+  if (activeTab === 'lsw') await refreshLsw();
   if (activeTab === 'autotrade') await refreshAutotrade();
   if (activeTab === 'simulator') await refreshSimulator();
 }
@@ -22830,6 +23618,9 @@ wireResetButton('resetFt5Btn', '/api/reset/ft5',
 wireResetButton('resetMirrorBtn', '/api/reset/mirror',
   'Удалить накопленный бэктест и сигналы Зеркала? Остальное не тронет. Это необратимо.',
   'Очистить Зеркало');
+wireResetButton('resetLswBtn', '/api/reset/lsw',
+  'Удалить накопленный бэктест и paper-сигналы Liquidity Sweep? Остальное не тронет. Это необратимо.',
+  'Очистить Sweep');
 wireResetButton('resetRiskAutotuneBtn', '/api/reset/risk_autotune',
   'Сбросить все параметры авто-тюнинга риска (EMA/Скальпинг/Сессия) к значениям по умолчанию из кода, очистить лог и cooldown? Сами сигналы и статистику не тронет. Это необратимо.',
   'Сбросить авто-тюнинг');
@@ -22849,6 +23640,7 @@ const setInputs = {
   ft5_enabled: document.getElementById('setFt5'),
   ft5_invert_signals: document.getElementById('setFt5Invert'),
   mirror_enabled: document.getElementById('setMirror'),
+  lsw_enabled: document.getElementById('setLsw'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
@@ -22873,6 +23665,7 @@ const setInputs = {
 
 const setValueInputs = {
   mirror_rr: document.getElementById('setMirrorRR'),
+  lsw_rr: document.getElementById('setLswRR'),
 };
 
 function applySettingsToInputs(s) {
@@ -23428,6 +24221,12 @@ function openMirrorChart(symbol, sigTime) {
   return openVgiChart(symbol, sigTime, '/api/mirror/chart', '');
 }
 
+function openLswChart(symbol, sigTime) {
+  // Same reuse judgment as openMirrorChart above — LSW's own signal
+  // shape (fixed entry/sl/tp/direction/rr) is structurally identical too.
+  return openVgiChart(symbol, sigTime, '/api/lsw/chart', '');
+}
+
 function drawVgiChart(data) {
   const canvas = document.getElementById('vgiChartCanvas');
   const wrap = document.getElementById('vgiChartWrap');
@@ -23561,6 +24360,8 @@ if __name__ == "__main__":
     threading.Thread(target=ft5_live_loop, daemon=True).start()
     threading.Thread(target=mirror_backtest_loop, daemon=True).start()
     threading.Thread(target=mirror_live_loop, daemon=True).start()
+    threading.Thread(target=lsw_backtest_loop, daemon=True).start()
+    threading.Thread(target=lsw_live_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     threading.Thread(target=risk_autotune_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
