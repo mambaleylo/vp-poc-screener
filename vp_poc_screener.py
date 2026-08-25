@@ -9970,6 +9970,95 @@ v0.99.114 - MIRROR filter-blocked-signal shadow tracking, per direct
          check (55 routes — no new endpoints, existing one extended),
          and an AST walk for duplicate top-level defs (none
          introduced).
+
+v0.99.115 - Module removal: XAU Liquidity Grab, Session, and Session NY
+         backend fully deleted, per direct user request ("продолжи
+         работу по удалению не нужных индикаторов и всего с ними
+         связано, перепроверяй все чтобы не сломать ничего"). All
+         three had their frontend (tabs, settings) removed back in
+         v0.99.101 with backend deliberately left for a later pass —
+         this is that pass, done across several turns given the scope.
+         XAU LG: all 10 functions (detect/track/backtest/summarize/
+         scan_live/update_outcomes/compute_stats/both daemon loops),
+         4 API routes, its own risk_autotune_pass() block, 13 XAU_LG_*
+         constants, TELEGRAM_ALERTS_XAU_LG, RISK_AUTOTUNE_XAU_LG_RR_
+         BOUNDS, all STATE keys, 3 orphaned setters, all string-keyed
+         dict entries (module_lists, Telegram category check, enabled
+         status) — the exact bug class pyflakes can't catch, checked
+         for proactively this time rather than found live after the
+         fact.
+         Session/Session NY: structurally harder — the two modules'
+         definitions were interleaved in the file (not one clean block
+         like XAU LG), so removed function-by-function/block-by-block
+         rather than one contiguous deletion. All 17 core functions,
+         4 daemon loops, 10 API routes, Session's own risk_autotune_
+         pass() block, ~30 SESSION_*/SESSION_NY_* constants, both
+         TELEGRAM_ALERTS_SESSION* constants, all STATE keys, 3 orphaned
+         setters, the sessionModal HTML+CSS (confirmed via grep the JS
+         side was already cleaned in v0.99.101, only markup/styles were
+         left), two `if SESSION_ENABLED:` blocks still living inside
+         the shared scan_loop() referencing now-deleted functions, and
+         every string-keyed dict entry across SNAPSHOT_MODULE_KEYS/
+         module_lists/Telegram category/autotrade enabled status.
+         Found and fixed along the way, all confirmed via direct
+         grep/testing rather than left to a future session:
+         (1) two more EMA leftovers missed by every prior EMA removal
+         pass (v0.99.96) — "ema": AUTOTRADE_ENABLED_EMA in the
+         autotrade status dict, TELEGRAM_ALERTS_EMA, AUTOTRADE_
+         LEVERAGE_EMA, and the #emaModalHeader/#emaCloseBtn/
+         #emaChartWrap CSS rules — all genuinely dead, all removed;
+         (2) session_sl_mult/session_reverse_rr had survived v0.99.101's
+         own settings-removal pass despite session_invert_signals/
+         session_enabled being correctly removed at the time — closed
+         the gap;
+         (3) CRITICAL, independently pre-existing bug (not introduced
+         by this pass, but exposed and fixed while removing "session"
+         from api_overview()'s response): refreshOverview() referenced
+         o.divergence.enabled as its very FIRST line, before scalp or
+         anything else — divergence/ema were removed well before this
+         session, so this had been silently, completely broken (the
+         surrounding try/catch swallowed the TypeError every single
+         time) since at least whichever removal came first. The
+         overview bar likely never rendered correctly for a long
+         stretch. Directly reproduced with a live jsdom test: the OLD
+         code throws "Cannot read properties of undefined (reading
+         'enabled')" on the exact data api_overview() now actually
+         returns; the NEW code (matching that real response — volume
+         and scalp only) renders correctly with the same test data.
+         (4) A dict string key ("xau_lg": STATE[...]) and interleaved-
+         module structural gotcha both explicitly checked for
+         proactively this pass, per this session's own established
+         "check for these two specific bug classes on every removal"
+         discipline — no new instances of either found this time.
+         Comments updated to stop referencing deleted functions as if
+         still callable (mirror_track_outcome, msnr_build_pivots,
+         update_mirror_signal_outcomes, and one duplicated paragraph
+         introduced then caught and fixed while editing msnr_build_
+         pivots()'s own docstring) — historical changelog entries left
+         untouched throughout, only live docstrings/comments describing
+         CURRENT behavior were corrected. GLOBAL_HTTP_SEMAPHORE's own
+         "14 separate ThreadPoolExecutors" comment updated to the
+         directly-counted current figure (13) rather than left stale
+         after removing 4 of the original loops (also updated a second,
+         separate mention of the same stale count elsewhere).
+         Verified with py_compile after every single edit throughout
+         (dozens of edits across this multi-turn pass), pyflakes
+         (clean at every step, not just the end), an actual runtime
+         start repeatedly (live test_client() round-trips confirming
+         every real endpoint still 200s and every removed endpoint now
+         correctly 404s; save_state()/load_state() both actually
+         executed successfully, not just statically checked, since
+         removed STATE keys accessed via string literals are exactly
+         what pyflakes cannot catch), a full getElementById audit (95
+         calls, zero dangling), a real jsdom page execution (zero
+         runtime errors) AND a separate, targeted jsdom test of the
+         refreshOverview() fix specifically (reproducing the old bug
+         first, then confirming the fix), node --check on the
+         correctly-last <script> block, the Flask route/def integrity
+         check (41 routes — down from 55, exactly the 14 removed
+         endpoints: 4 XAU LG + 10 Session/Session NY), and an AST walk
+         for duplicate top-level defs (none introduced) — 257 total
+         top-level defs, down from 306.
 """
 
 import os
@@ -9979,7 +10068,6 @@ import math
 import threading
 import traceback
 import queue
-import datetime
 import hmac
 import hashlib
 from decimal import Decimal
@@ -9989,7 +10077,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.114"
+APP_VERSION = "0.99.115"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -10063,8 +10151,10 @@ SCAN_INTERVAL_SEC = int(os.environ.get("VP_SCAN_INTERVAL", 45))
 COOLDOWN_SEC = int(os.environ.get("VP_COOLDOWN", 900))    # per-symbol re-alert cooldown, applied after a signal on that symbol closes
 WORKERS = int(os.environ.get("VP_WORKERS", 8))  # was 12 (before that, 8) — lowered back per direct user request after live error logs showed repeated "network error after 2 retries" on read timeouts even WITH the v0.73.0/v0.75.0 retry logic in place, suggesting 12 concurrent requests was routinely saturating the actual available mobile bandwidth rather than any single request being unlucky
 # v0.99.37 - CRITICAL FIX: WORKERS only ever capped concurrency WITHIN a
-# single ThreadPoolExecutor — there are 14 separate ones across this app
-# (scan, session, session_ny, msnr backtest+live, xau_lg, ft5, vgi...),
+# single ThreadPoolExecutor — there are 13 separate ones across this app
+# (scan, scalp, hourly stats, msnr backtest+live, ft5 backtest+live,
+# mirror backtest+live, reconcile, risk autotune, telegram sender — was
+# 14 including session/session_ny/xau_lg/vgi, all since removed),
 # each running inside its OWN daemon-thread loop, with no shared budget
 # between them. A live error-log screenshot showed 500 Internal Server
 # Error from api.gateio.ws hitting every module at once across dozens of
@@ -10098,8 +10188,8 @@ GLOBAL_HTTP_SEMAPHORE = threading.Semaphore(GLOBAL_MAX_CONCURRENT_REQUESTS)
 # they fire back-to-back — 10 workers each immediately re-firing the
 # instant their previous request completes can still sustain a high
 # request RATE (potentially dozens/sec) even though concurrency never
-# exceeds 10. Several of the 14 independent loops (session, msnr_
-# backtest, xau_lg_backtest, etc.) having their intervals line up
+# exceeds 10. Several of the 13 independent loops (msnr_backtest,
+# ft5_backtest, mirror_backtest, etc.) having their intervals line up
 # produces exactly this: a burst of rapid-fire requests, which is what a
 # live error-log screenshot showed starting abruptly (a clean run of
 # local /api/* calls, then a sudden run of Gate.io 500s the moment
@@ -10155,9 +10245,6 @@ MFE_TRACK_SEC = int(os.environ.get("VP_MFE_TRACK_SEC", 24 * 3600))  # keep measu
 BREAKOUT_BREAKEVEN_TRIGGER_R = float(os.environ.get("VP_BREAKOUT_BREAKEVEN_TRIGGER_R", 0.8))
 BREAKOUT_BREAKEVEN_BUFFER_PCT = float(os.environ.get("VP_BREAKOUT_BREAKEVEN_BUFFER_PCT", 0.001))  # 0.1% beyond pure entry, in the trade's favor — so a dead-even wick still covers fees/slippage instead of landing exactly on entry
 
-SESSION_INVERT_SIGNALS = os.environ.get("VP_SESSION_INVERT_SIGNALS", "0") == "1"  # per direct user request after live session winrate looked bad (~11%) — mirrors DIV_INVERT_SIGNALS/EMA_INVERT_SIGNALS, but with its OWN sizing rather than just flipping direction and reusing the original sl/tp: the ORIGINAL sl distance (sweep_extreme + SESSION_SL_BUFFER_PCT, i.e. the same risk a non-inverted trade would have taken) becomes the inverted trade's own SL distance too, applied on the opposite side of entry — TP is fixed at 2x that same risk (RR=2), not the original TP (opposite side of the consolidation range, an arbitrary distance tied to range width rather than to risk). Implemented inside detect_session_manipulation() itself (not as a separate post-processing step) so both live scanning AND the historical backtest ranking see the same inverted direction/sizing consistently — avoids the kind of sign mismatch found and fixed for divergence's pivot-stability stat, where the live/backtest paths could disagree about which direction was "the one actually traded."
-SESSION_SL_MULT = float(os.environ.get("VP_SESSION_SL_MULT", 1.5))  # per direct user request after a live example (CYS_USDT) hit its SL — multiplies the base risk distance (sweep_extreme + SESSION_SL_BUFFER_PCT vs entry) before it's used for the inverted trade's SL AND its RR=2 TP, so both scale together and RR stays exactly 2 at the new, wider stop. Only affects SESSION_INVERT_SIGNALS's own sizing (see its comment above) — the non-inverted trade still uses its original sl/tp (sweep-based stop, opposite-range-edge take), untouched by this.
-SESSION_REVERSE_RR = float(os.environ.get("VP_SESSION_REVERSE_RR", 2.0))  # v0.98.4 — was a literal "2" hardcoded directly in the tp = entry +/- risk*2 formula, per direct user request to have risk-autotune manage this instead of it being a permanently fixed ratio. Only used inside SESSION_INVERT_SIGNALS's own sizing branch, same scope as SESSION_SL_MULT right above.
 # ----------------------------------------------------------------------------
 # Scalp volatility statistics ("Скальпинг" tab) — a pure exploratory/stats
 # tool, no signals, no auto-trading yet. For a universe of the most
@@ -10276,127 +10363,13 @@ TELEGRAM_ENABLED = os.environ.get("VP_TG_ENABLED", "1") == "1"  # separate from 
 # above — lets someone mute just one signal source without losing alerts
 # from the other.
 TELEGRAM_ALERTS_VP = os.environ.get("VP_TG_ALERTS_VP", "1") == "1"
-TELEGRAM_ALERTS_EMA = os.environ.get("VP_TG_ALERTS_EMA", "1") == "1"
 TELEGRAM_ALERTS_HOURLY = os.environ.get("VP_TG_ALERTS_HOURLY", "1") == "1"
-TELEGRAM_ALERTS_SESSION = os.environ.get("VP_TG_ALERTS_SESSION", "1") == "1"
-TELEGRAM_ALERTS_SESSION_NY = os.environ.get("VP_TG_ALERTS_SESSION_NY", "1") == "1"
 TELEGRAM_ALERTS_MSNR = os.environ.get("VP_TG_ALERTS_MSNR", "1") == "1"
-TELEGRAM_ALERTS_XAU_LG = os.environ.get("VP_TG_ALERTS_XAU_LG", "1") == "1"
 TELEGRAM_ALERTS_FT5 = os.environ.get("VP_TG_ALERTS_FT5", "1") == "1"
 HOURLY_STATS_ENABLED = os.environ.get("VP_HOURLY_STATS_ENABLED", "1") == "1"
 HOURLY_STATS_INTERVAL_SEC = int(os.environ.get("VP_HOURLY_STATS_INTERVAL_SEC", 3600))
 
-# ----------------------------------------------------------------------------
-# Session-open manipulation ("Сессия" tab) — London-session liquidity sweep:
-# price consolidates into a range, the session open sweeps one side of that
-# range (grabbing stops / trapping breakout traders), then closes back
-# inside the range — trade the reversal, targeting the opposite side. Same
-# detection function is used for live scanning and historical backtesting.
-# ----------------------------------------------------------------------------
-SESSION_ENABLED = False  # v0.99.101, per direct user request ("прогон принудительно останови, хоть через слои кода") — hardcoded, no longer env-var-overridable, so no stale persisted setting or forgotten env var can silently re-enable this while its own removal (settings/tabs first, backend later) is in progress
-SESSION_UTC_OFFSET_HOURS = float(os.environ.get("VP_SESSION_UTC_OFFSET_HOURS", 3))  # Moscow, fixed since 2014 (no DST) — deliberately not Europe/Kyiv+zoneinfo, see session_open_utc_ts() docstring for why
-SESSION_OPEN_HOUR_LOCAL = int(os.environ.get("VP_SESSION_OPEN_HOUR_LOCAL", 10))  # 10:00 at SESSION_UTC_OFFSET_HOURS ahead of UTC
-SESSION_RANGE_TF = os.environ.get("VP_SESSION_RANGE_TF", "5m")
-SESSION_RANGE_START_UTC_HOUR = int(os.environ.get("VP_SESSION_RANGE_START_UTC_HOUR", 0))  # consolidation range spans [this UTC hour, session open) — i.e. the prior (Asian) session, not a fixed lookback window
-SESSION_MANIPULATION_WINDOW_MIN = int(os.environ.get("VP_SESSION_MANIPULATION_WINDOW_MIN", 30))  # how long after open to watch for the sweep+reversal
-SESSION_SL_BUFFER_PCT = float(os.environ.get("VP_SESSION_SL_BUFFER_PCT", 0.005))  # was 0.1% — a live example showed price continuing well past that tight a buffer (a shallow bounce confirmed the pattern before the real, deeper low was actually reached) before reversing hard toward TP; 0.5% gives room for that kind of double-dip without redesigning the confirmation window itself
-SESSION_MIN_RANGE_PCT = float(os.environ.get("VP_SESSION_MIN_RANGE_PCT", 0.003))  # 0.3% — skip symbols whose 4h range is too tiny to be a meaningful consolidation
-SESSION_MAX_TREND_RATIO = float(os.environ.get("VP_SESSION_MAX_TREND_RATIO", 0.5))  # net directional drift across the range, as a fraction of range height — reject if the "consolidation" is really still trending in one direction rather than choppy/flat (per user's annotated screenshot: the zone before the session should be flat, no clear trend)
-SESSION_MAX_THRUST_BARS = int(os.environ.get("VP_SESSION_MAX_THRUST_BARS", 3))  # the sweep and the close-back-inside confirmation can be up to this many bars apart — a short thrust, not strictly the same candle, per the reference chart (2-3 candle burst, not a single bar)
-SESSION_BACKTEST_DAYS = int(os.environ.get("VP_SESSION_BACKTEST_DAYS", 30))  # was 60 — Gate enforces a hard "from" floor of ~10000 candles back from now (added without notice ~Feb 2026); for 5m candles that's ~34.7 days, so 30 leaves margin
-SESSION_UNIVERSE_SIZE = int(os.environ.get("VP_SESSION_UNIVERSE_SIZE", 50))  # reduced from 100 — user wants the most liquid coins specifically, not a broad tail; already sorted by 24h volume descending, this just cuts deeper into that ranking
-SESSION_MIN_SAMPLE = int(os.environ.get("VP_SESSION_MIN_SAMPLE", 8))  # don't rank a symbol's backtest as meaningful with fewer closed sessions than this
-SESSION_SIGNAL_HISTORY = 200
-SESSION_REFRESH_SEC = int(os.environ.get("VP_SESSION_REFRESH_SEC", 24 * 3600))  # batch backtest job — once a day is plenty, one new day of data per cycle anyway
 
-# ----------------------------------------------------------------------------
-# Session-open manipulation, New York variant (v0.94.0) — per direct user
-# request after the original (London/Frankfurt, 10:00 Moscow) session module
-# showed a promising live streak. Explicitly a FULL, INDEPENDENT duplicate,
-# not a generalization of the original into a multi-session system — the
-# user was specific that the original must stay completely untouched (zero
-# refactor risk to something already working), even at the cost of code
-# duplication across this whole section. Every constant, function, STATE
-# key, thread, and API endpoint below has its own SESSION_NY_ name; nothing
-# here is imported or reused from the original except pure, already-generic
-# helpers that don't know or care which session they're serving (get_candles_
-# range, get_tickers, INTERVAL_SECONDS, fetch_candles_concurrent, has_open_
-# signal_any_module — which DOES get a new "session_ny_signals" entry added
-# to its own lists dict, the one deliberate touch to shared code, since
-# skipping that would let this module stack a position on a symbol another
-# module already has open, defeating the whole point of that check).
-# New York open: 16:30 Moscow time (13:30 UTC) — the half-hour offset is why
-# session_ny_open_utc_ts() needs its own minute-aware implementation; the
-# original session_open_utc_ts() hardcodes minute=0.
-# ----------------------------------------------------------------------------
-SESSION_NY_ENABLED = False  # v0.99.101, same hardcoded force-stop as SESSION_ENABLED above
-SESSION_NY_UTC_OFFSET_HOURS = float(os.environ.get("VP_SESSION_NY_UTC_OFFSET_HOURS", 3))  # same Moscow reference as the original — no DST, fixed UTC+3
-SESSION_NY_OPEN_HOUR_LOCAL = int(os.environ.get("VP_SESSION_NY_OPEN_HOUR_LOCAL", 16))  # 16:30 Moscow = New York open
-SESSION_NY_OPEN_MINUTE_LOCAL = int(os.environ.get("VP_SESSION_NY_OPEN_MINUTE_LOCAL", 30))
-SESSION_NY_RANGE_TF = os.environ.get("VP_SESSION_NY_RANGE_TF", "5m")
-SESSION_NY_RANGE_START_UTC_HOUR = int(os.environ.get("VP_SESSION_NY_RANGE_START_UTC_HOUR", 7))  # consolidation range spans [this UTC hour, NY open) — starts at the ORIGINAL session's own open (07:00 UTC = 10:00 Moscow), i.e. the London/Frankfurt session itself, mirroring how the original range starts at the PRIOR (Asian) session's boundary
-SESSION_NY_MANIPULATION_WINDOW_MIN = int(os.environ.get("VP_SESSION_NY_MANIPULATION_WINDOW_MIN", 30))
-SESSION_NY_SL_BUFFER_PCT = float(os.environ.get("VP_SESSION_NY_SL_BUFFER_PCT", 0.005))
-SESSION_NY_MIN_RANGE_PCT = float(os.environ.get("VP_SESSION_NY_MIN_RANGE_PCT", 0.003))
-SESSION_NY_MAX_TREND_RATIO = float(os.environ.get("VP_SESSION_NY_MAX_TREND_RATIO", 0.5))
-SESSION_NY_MAX_THRUST_BARS = int(os.environ.get("VP_SESSION_NY_MAX_THRUST_BARS", 3))
-SESSION_NY_BACKTEST_DAYS = int(os.environ.get("VP_SESSION_NY_BACKTEST_DAYS", 30))
-SESSION_NY_UNIVERSE_SIZE = int(os.environ.get("VP_SESSION_NY_UNIVERSE_SIZE", 50))
-SESSION_NY_MIN_SAMPLE = int(os.environ.get("VP_SESSION_NY_MIN_SAMPLE", 8))
-SESSION_NY_SIGNAL_HISTORY = 200
-
-# ============================================================================
-# EXPERIMENTAL: XAU Liquidity Grab (v0.95.0) — constants
-# ----------------------------------------------------------------------------
-# Every name in this module is prefixed XAU_LG_ / xau_lg_ specifically so the
-# WHOLE module can be found and deleted later with one search, per direct
-# user request ("делай так, чтобы потом удалить можно было") — this reflects
-# genuine uncertainty about whether the underlying idea holds up, not just
-# code hygiene. Source: an Instagram post (trendwisdom/pranamghagare)
-# claiming 76% win rate / <2% drawdown on a XAU/USD strategy — treated with
-# real skepticism, not taken at face value: the claim is an unverifiable
-# screenshot over a ~1-month window, with a "comment for the full report in
-# DMs" / "comment for a free prop-firm guide" structure, i.e. a lead-
-# generation funnel, not a published, checkable result. Implemented anyway
-# because the underlying PATTERN (sweep a level, close back inside, trade
-# the reversal with a trend filter) is a real, testable idea structurally
-# similar to what Session/Session NY already do — worth actually
-# backtesting on this app's own data rather than trusting the screenshot.
-# Strategy as described across the 8 slides:
-#   1. EMA(30) trend filter: close > EMA -> longs only, close < EMA -> shorts
-#   2. Support/resistance from swing pivots, LEFT=1/RIGHT=1 bars (LuxAlgo's
-#      "Support and Resistance Levels with Breaks" indicator at its default-
-#      minus-14 sensitivity — deliberately tight/noisy, not a generalized
-#      pivot config elsewhere in this app)
-#   3. On a 15m candle: wick below support but CLOSE back above it (or wick
-#      above resistance but close back below) = confirmed "liquidity grab"
-#   4. Entry at the top of that candle (its high) for a long, stop at the
-#      candle's low, fixed 1:1 risk:reward — mirrored for shorts
-# Universe restricted to actual gold-tracking symbols only, per the user's
-# own framing ("индикатор ПО ЗОЛОТУ") rather than the app's usual full
-# 150-200 symbol universe — this was never claimed to generalize beyond
-# gold, and diluting it across everything would just be testing a different,
-# unstated hypothesis.
-# Constants are placed HERE (not next to the module's functions further
-# down) specifically because STATE (constructed shortly after this point)
-# references XAU_LG_SIGNAL_HISTORY at construction time — Python executes
-# top-to-bottom, so the constant must exist before STATE does. Functions
-# stay where they were, right before the API section; see that location's
-# own short pointer comment.
-# ============================================================================
-XAU_LG_ENABLED = False  # v0.99.101, same hardcoded force-stop as SESSION_ENABLED above
-XAU_LG_SYMBOLS = [s.strip() for s in os.environ.get("VP_XAU_LG_SYMBOLS", "XAU_USDT,XAUT_USDT,PAXG_USDT").split(",") if s.strip()]
-XAU_LG_TF = os.environ.get("VP_XAU_LG_TF", "15m")
-XAU_LG_EMA_PERIOD = int(os.environ.get("VP_XAU_LG_EMA_PERIOD", 30))
-XAU_LG_PIVOT_LEFT = int(os.environ.get("VP_XAU_LG_PIVOT_LEFT", 1))
-XAU_LG_PIVOT_RIGHT = int(os.environ.get("VP_XAU_LG_PIVOT_RIGHT", 1))
-XAU_LG_RR = float(os.environ.get("VP_XAU_LG_RR", 1.0))  # v0.99.64 — started at fixed 1:1 per the source's own stated rule, "deliberately excluded" from auto-tuning since this module was provisional; per direct user request ("автотюнинг... автоматически как везде") it's now tuned by risk_autotune_pass() (_risk_autotune_tp_extend, same mechanism EMA_TP_PCT/DIV_TP_PCT/SESSION_REVERSE_RR already use) toward the R-multiple wins actually reach before closing, same as everywhere else
-XAU_LG_BACKTEST_DAYS = int(os.environ.get("VP_XAU_LG_BACKTEST_DAYS", 30))
-XAU_LG_INVERT_SIGNALS = os.environ.get("VP_XAU_LG_INVERT_SIGNALS", "0") == "1"  # v0.99.64, per direct user request ("инверсию... как везде") — mirrors DIV_INVERT_SIGNALS/EMA_INVERT_SIGNALS/SESSION_INVERT_SIGNALS. Implemented inside xau_lg_detect_signals() itself (not a post-processing flip) so live scanning AND the historical backtest see the same inverted direction/sizing consistently. Unlike Session (whose non-inverted TP sits at an arbitrary range-width distance, needing special inverted-mode sizing), XAU LG's TP is ALREADY risk*XAU_LG_RR in both modes — inverting here just swaps which side of the signal candle is entry vs stop and flips direction, reusing the exact same risk distance and RR formula pointed the other way; see xau_lg_detect_signals()'s own docstring for the precise "подгонка стопа и тейка" this produces.
-XAU_LG_SL_BUFFER_MULT = float(os.environ.get("VP_XAU_LG_SL_BUFFER_MULT", 1.0))  # v0.99.64, per direct user request ("подгонки стопа") — multiplies the raw signal candle's own risk distance (entry-to-extreme) before it becomes the actual SL, same "widen/tighten a stop multiplier off real adverse excursion" idea SESSION_SL_MULT/EMA_SL_ATR_MULT/DIV_SL_ATR_MULT already apply for their own modules, auto-tuned the same way (_risk_autotune_sl_mult) once enough closed trades exist.
-XAU_LG_SIGNAL_HISTORY = 200
-XAU_LG_REFRESH_SEC = int(os.environ.get("VP_XAU_LG_REFRESH_SEC", 3600))  # hourly backtest refresh — small fixed symbol list, cheap compared to Session's 50-symbol universe scan
-XAU_LG_SCAN_INTERVAL_SEC = int(os.environ.get("VP_XAU_LG_SCAN_INTERVAL_SEC", 300))  # live scan cadence — 15m candles, checking every 5 min is plenty
 
 # ============================================================================
 # EXPERIMENTAL: MSNR — Malaysian SNR / "Storyline" gold strategy (v0.99.0)
@@ -10704,10 +10677,6 @@ FT5_PARAM_GRID_BUY_RSI = [20, 26, 32, 40]
 FT5_PARAM_GRID_BUY_FISHER = [5, 15, 30]
 FT5_PARAM_GRID_SELL_RSI = [65, 74, 82]
 
-SESSION_NY_REFRESH_SEC = int(os.environ.get("VP_SESSION_NY_REFRESH_SEC", 24 * 3600))
-SESSION_NY_INVERT_SIGNALS = os.environ.get("VP_SESSION_NY_INVERT_SIGNALS", "0") == "1"
-SESSION_NY_SL_MULT = float(os.environ.get("VP_SESSION_NY_SL_MULT", 1.5))
-
 
 # ----------------------------------------------------------------------------
 # Auto-trading — places real orders on Gate.io futures off the signals the
@@ -10725,10 +10694,7 @@ SESSION_NY_SL_MULT = float(os.environ.get("VP_SESSION_NY_SL_MULT", 1.5))
 AUTOTRADE_DRY_RUN = os.environ.get("VP_AUTOTRADE_DRY_RUN", "1") == "1"  # default ON — log what WOULD happen, no real orders, until explicitly turned off
 AUTOTRADE_ENABLED_BOUNCE = os.environ.get("VP_AUTOTRADE_BOUNCE", "0") == "1"
 AUTOTRADE_ENABLED_BREAKOUT = os.environ.get("VP_AUTOTRADE_BREAKOUT", "0") == "1"
-AUTOTRADE_ENABLED_EMA = os.environ.get("VP_AUTOTRADE_EMA", "0") == "1"
 AUTOTRADE_ENABLED_SCALP = os.environ.get("VP_AUTOTRADE_SCALP", "0") == "1"
-AUTOTRADE_ENABLED_SESSION = os.environ.get("VP_AUTOTRADE_SESSION", "0") == "1"
-AUTOTRADE_ENABLED_SESSION_NY = os.environ.get("VP_AUTOTRADE_SESSION_NY", "0") == "1"
 AUTOTRADE_SIZE_MODE = os.environ.get("VP_AUTOTRADE_SIZE_MODE", "percent")  # "percent" or "fixed" — the single size value below is interpreted according to this
 AUTOTRADE_SIZE_VALUE = float(os.environ.get("VP_AUTOTRADE_SIZE_VALUE", 2.0))  # percent: % of futures wallet balance; fixed: raw USD margin, leverage-independent either way
 AUTOTRADE_RISK_PCT_OF_BALANCE = float(os.environ.get("VP_AUTOTRADE_RISK_PCT", 2.0))  # v0.99.102, per direct user request ("надо чтобы размер позиции только можно было выбрать"): % of TOTAL account equity risked per trade if SL hits — drives the now-auto-computed leverage, replacing every module's own fixed leverage constant. The user picks position SIZE (margin, via AUTOTRADE_SIZE_MODE/VALUE above, unchanged); leverage is derived per-trade from this risk target, this signal's own SL distance, and the chosen margin — no longer a manual choice at all
@@ -10743,11 +10709,6 @@ SCALP_SIZE_MODE = os.environ.get("VP_SCALP_SIZE_MODE", AUTOTRADE_SIZE_MODE)
 SCALP_SIZE_VALUE = float(os.environ.get("VP_SCALP_SIZE_VALUE", AUTOTRADE_SIZE_VALUE))
 AUTOTRADE_LEVERAGE_BOUNCE = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_BOUNCE", 10))
 AUTOTRADE_LEVERAGE_BREAKOUT = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_BREAKOUT", 10))
-AUTOTRADE_LEVERAGE_EMA = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_EMA", 10))
-AUTOTRADE_LEVERAGE_SESSION = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SESSION", 10))
-AUTOTRADE_LEVERAGE_SESSION_NY = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SESSION_NY", 10))
-AUTOTRADE_ENABLED_XAU_LG = os.environ.get("VP_AUTOTRADE_XAU_LG", "0") == "1"  # off by default — see the XAU_LG module's own header comment on why this strategy is treated as unverified
-AUTOTRADE_LEVERAGE_XAU_LG = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_XAU_LG", 10))
 AUTOTRADE_ENABLED_MSNR = os.environ.get("VP_AUTOTRADE_MSNR", "0") == "1"  # off by default — same "unverified source" treatment as XAU_LG/FT5
 AUTOTRADE_LEVERAGE_MSNR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_MSNR", 10))
 MSNR_COMPOUND_START_BALANCE = float(os.environ.get("VP_MSNR_COMPOUND_START_BALANCE", 40.0))  # v0.99.24 — per direct user request: $ margin the backtest's compounding simulation starts with on the first closed trade. Leverage for this simulation deliberately reuses AUTOTRADE_LEVERAGE_MSNR above (not a separate constant) so the simulated compounding always matches whatever leverage this symbol would actually be traded at live — see msnr_compound_return().
@@ -10858,8 +10819,6 @@ def get_settings():
         "autotrade_mirror": AUTOTRADE_ENABLED_MIRROR,
         "scalp_min_rr": SCALP_MIN_RR,
         "scalp_sl_buffer_mult": SCALP_SL_BUFFER_MULT,
-        "session_sl_mult": SESSION_SL_MULT,
-        "session_reverse_rr": SESSION_REVERSE_RR,
     }
 
 
@@ -10874,7 +10833,7 @@ def apply_settings(updates):
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, SCALP_MARTINGALE_ENABLED
-    global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT, SESSION_SL_MULT, SESSION_REVERSE_RR
+    global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
     if "bounce_enabled" in updates:
@@ -10963,20 +10922,6 @@ def apply_settings(updates):
             v = float(updates["scalp_sl_buffer_mult"])
             if v >= 0:
                 SCALP_SL_BUFFER_MULT = v
-        except (TypeError, ValueError):
-            pass
-    if "session_sl_mult" in updates:
-        try:
-            v = float(updates["session_sl_mult"])
-            if v > 0:
-                SESSION_SL_MULT = v
-        except (TypeError, ValueError):
-            pass
-    if "session_reverse_rr" in updates:
-        try:
-            v = float(updates["session_reverse_rr"])
-            if v > 0:
-                SESSION_REVERSE_RR = v
         except (TypeError, ValueError):
             pass
 
@@ -11167,35 +11112,6 @@ STATE = {
     "scalp_symbols_done": 0,
     "scalp_signals": deque(maxlen=SCALP_SIGNAL_HISTORY),
     "scalp_martingale": {},  # v0.99.109 — {symbol: {"streak": int, "multiplier": float}}. Missing symbol = never lost yet (streak 0, multiplier 1.0, base risk). See scalp_martingale_multiplier_for_symbol()'s own docstring for the full mechanics.
-    # Session-open manipulation — backtest results/summary per symbol,
-    # plus live signals fired during each day's manipulation window.
-    "session_universe": [],
-    "session_backtest_results": {},
-    "session_backtest_summary": {},
-    "session_last_backtest_started": None,
-    "session_last_backtest_finished": None,
-    "session_last_backtest_duration": None,
-    "session_symbols_done": 0,
-    "session_signals": deque(maxlen=SESSION_SIGNAL_HISTORY),
-    "session_next_open_ts": None,
-    # New York session variant (v0.94.0) — fully independent STATE, mirrors
-    # every key above with its own "session_ny_" prefix.
-    "session_ny_universe": [],
-    "session_ny_backtest_results": {},
-    "session_ny_backtest_summary": {},
-    "session_ny_last_backtest_started": None,
-    "session_ny_last_backtest_finished": None,
-    "session_ny_last_backtest_duration": None,
-    "session_ny_symbols_done": 0,
-    "session_ny_signals": deque(maxlen=SESSION_NY_SIGNAL_HISTORY),
-    "session_ny_next_open_ts": None,
-    # EXPERIMENTAL XAU Liquidity Grab (v0.95.0) — see that module's own
-    # header comment. All keys prefixed xau_lg_ for easy removal.
-    "xau_lg_signals": deque(maxlen=XAU_LG_SIGNAL_HISTORY),
-    "xau_lg_backtest_results": {},
-    "xau_lg_backtest_summary": {},
-    "xau_lg_last_backtest_finished": None,
-    "xau_lg_last_backtest_duration": None,
     # EXPERIMENTAL MSNR (Malaysian SNR / Storyline gold strategy, v0.99.0) —
     # see that module's own header comment. All keys prefixed msnr_.
     "msnr_signals": deque(maxlen=MSNR_SIGNAL_HISTORY),
@@ -11242,12 +11158,6 @@ _cooldowns = {}  # (symbol, zone_key) -> last_alert_ts
 _cooldowns_lock = threading.Lock()
 _scalp_signal_cooldowns = {}  # (symbol, interval) -> last_signal_ts
 _scalp_signal_cooldowns_lock = threading.Lock()
-_session_signal_cooldowns = {}  # (symbol, session_open_ts) -> True, once fired
-_session_signal_cooldowns_lock = threading.Lock()
-_session_signal_cooldowns = {}  # symbol -> last session_open_ts signaled
-_session_signal_cooldowns_lock = threading.Lock()
-_session_ny_signal_cooldowns = {}  # same purpose, fully separate — New York variant
-_session_ny_signal_cooldowns_lock = threading.Lock()
 
 
 def has_open_signal(symbol):
@@ -11290,33 +11200,30 @@ def _get_symbol_trade_lock(symbol):
 
 
 def has_open_signal_any_module(symbol, exclude=None):
-    """True if ANY module (Volume/Divergence/EMA/Scalp/Session) already
-    has an OPEN signal on this symbol. Each module previously only
-    checked its OWN signal list before firing — real gap found live:
-    EMA opened MMT_USDT SHORT, and 43 minutes later Breakout opened
-    MMT_USDT LONG, completely independently, each placing its own
-    market order + TP + SL. Multiplied across five modules all watching
-    the same universe, a single popular/volatile symbol accumulates a
-    pile of orders from different sources with no coordination between
-    them (the reported case: 13 open orders on one symbol on Gate,
-    nothing in any single module's own log looking obviously wrong,
-    because no module's log ever saw the whole picture).
+    """True if ANY module already has an OPEN signal on this symbol.
+    Each module previously only checked its OWN signal list before
+    firing — real gap found live, back when EMA and Divergence (both
+    since removed) still existed: EMA opened MMT_USDT SHORT, and 43
+    minutes later Breakout opened MMT_USDT LONG, completely
+    independently, each placing its own market order + TP + SL.
+    Multiplied across several modules all watching the same universe, a
+    single popular/volatile symbol accumulates a pile of orders from
+    different sources with no coordination between them (the reported
+    case: 13 open orders on one symbol on Gate, nothing in any single
+    module's own log looking obviously wrong, because no module's log
+    ever saw the whole picture).
     Called in ADDITION to each module's existing own-list check, not
     instead of it — this only adds a cross-module veto, it doesn't
     change any module's internal per-symbol/interval dedup logic.
-    exclude: STATE key name to skip (e.g. "ema_signals") — EMA
-    deliberately allows multiple simultaneously-open signals on the same
-    symbol across DIFFERENT intervals (its own has_open_ema_signal is
-    interval-aware and already handles that within-module case), so its
-    call here excludes ema_signals to avoid vetoing itself; the other
-    four modules only ever want at most one open signal per symbol
-    regardless of interval, so they pass their own list name too, purely
-    for clarity (their own already-called check makes it a no-op)."""
+    exclude: the caller's own STATE key name (e.g. "scalp_signals"),
+    skipped so a module never vetoes its own already-pending signal —
+    every current caller passes its own list name for exactly this
+    reason, purely for clarity (their own already-called check already
+    makes it a no-op in practice)."""
     lists = {
         "signals": STATE["signals"],
         "scalp_signals": STATE["scalp_signals"],
-        "session_signals": STATE["session_signals"], "session_ny_signals": STATE["session_ny_signals"],
-        "xau_lg_signals": STATE["xau_lg_signals"], "ft5_signals": STATE["ft5_signals"],
+        "ft5_signals": STATE["ft5_signals"],
         "msnr_signals": STATE["msnr_signals"],
         "mirror_signals": STATE["mirror_signals"],
     }
@@ -12134,657 +12041,6 @@ def compute_ft5_signal_stats():
 
 
 
-def session_open_utc_ts(ref_ts):
-    """Given any UTC epoch timestamp, returns the UTC epoch timestamp of
-    that SAME calendar day's session open (SESSION_OPEN_HOUR_LOCAL,
-    SESSION_UTC_OFFSET_HOURS ahead of UTC). Pure arithmetic, no zoneinfo/
-    tzdata dependency at all — this was originally DST-aware via
-    Europe/Kyiv + zoneinfo, but Termux/Android environments proved
-    unreliable for getting a working tzdata install (pip itself was
-    broken on the user's device, unrelated to this app). Switched the
-    reference to Moscow, which has used a fixed UTC+3 with no DST since
-    2014 — "10:00 Moscow" is always exactly 07:00 UTC, so this can be
-    plain arithmetic and never depend on a timezone database again. The
-    tradeoff: this drifts by 1h from true Kyiv-local time during the EU
-    winter half of the year (Kyiv is UTC+2 then) — accepted per direct
-    user request rather than fighting the broken tzdata install
-    further."""
-    dt_utc = datetime.datetime.fromtimestamp(ref_ts, tz=datetime.timezone.utc)
-    local_shifted = dt_utc + datetime.timedelta(hours=SESSION_UTC_OFFSET_HOURS)
-    open_shifted = local_shifted.replace(hour=SESSION_OPEN_HOUR_LOCAL, minute=0, second=0, microsecond=0)
-    open_utc = open_shifted - datetime.timedelta(hours=SESSION_UTC_OFFSET_HOURS)
-    return open_utc.timestamp()
-
-
-def session_ny_open_utc_ts(ref_ts):
-    """New York counterpart of session_open_utc_ts() — same Moscow-fixed-
-    offset arithmetic, but with minute precision (SESSION_NY_OPEN_MINUTE_
-    LOCAL) since 16:30 Moscow isn't a whole hour, unlike the original's
-    10:00. Fully independent function, not a generalization of the
-    original — see this section's own header comment for why."""
-    dt_utc = datetime.datetime.fromtimestamp(ref_ts, tz=datetime.timezone.utc)
-    local_shifted = dt_utc + datetime.timedelta(hours=SESSION_NY_UTC_OFFSET_HOURS)
-    open_shifted = local_shifted.replace(hour=SESSION_NY_OPEN_HOUR_LOCAL, minute=SESSION_NY_OPEN_MINUTE_LOCAL, second=0, microsecond=0)
-    open_utc = open_shifted - datetime.timedelta(hours=SESSION_NY_UTC_OFFSET_HOURS)
-    return open_utc.timestamp()
-
-
-def detect_session_manipulation(candles, session_open_ts):
-    """Core pattern detector, shared by live scanning and historical
-    backtesting. candles must be 5m (or whatever SESSION_RANGE_TF is)
-    and cover at least [that UTC day's SESSION_RANGE_START_UTC_HOUR,
-    session_open_ts + SESSION_MANIPULATION_WINDOW_MIN]. Returns a dict
-    with direction/entry/range/sl/tp, or None if no confirmed
-    manipulation happened around this particular session open.
-    The consolidation range is the PRIOR (Asian) session, not a fixed
-    lookback window — spans from SESSION_RANGE_START_UTC_HOUR (UTC,
-    default midnight) up to the session open itself. Since v0.42.0's
-    fixed-Moscow-offset session_open_utc_ts(), the open is always
-    exactly 07:00 UTC, so this range is now always exactly 7h — it
-    used to vary 7-8h under the earlier DST-aware Kyiv version, no
-    longer applicable.
-    Since v0.55.0, the range must also be flat/choppy rather than
-    still trending in one direction (SESSION_MAX_TREND_RATIO) — a
-    range can pass SESSION_MIN_RANGE_PCT just by being the tail end
-    of a directional move, which isn't a real consolidation.
-    Since v0.80.0, SESSION_INVERT_SIGNALS flips direction AND uses its
-    own RR=2 sizing (same risk distance as the non-inverted stop, TP at
-    2x that) instead of reusing the original tp (opposite side of the
-    range) — see that constant's own comment for the reasoning."""
-    open_dt = datetime.datetime.fromtimestamp(session_open_ts, tz=datetime.timezone.utc)
-    range_start_dt = open_dt.replace(hour=SESSION_RANGE_START_UTC_HOUR, minute=0, second=0, microsecond=0)
-    range_start = range_start_dt.timestamp()
-    range_duration_sec = session_open_ts - range_start
-    range_candles = [c for c in candles if range_start <= c["time"] < session_open_ts]
-    expected_bars = range_duration_sec / INTERVAL_SECONDS.get(SESSION_RANGE_TF, 300)
-    if expected_bars <= 0 or len(range_candles) < expected_bars * 0.6:  # tolerate some gaps, but not a mostly-missing range
-        return None
-    range_high = max(c["high"] for c in range_candles)
-    range_low = min(c["low"] for c in range_candles)
-    if range_low <= 0:
-        return None
-    range_pct = (range_high - range_low) / range_low
-    if range_pct < SESSION_MIN_RANGE_PCT:
-        return None  # too flat to be a meaningful consolidation
-
-    range_height = range_high - range_low
-    net_move = abs(range_candles[-1]["close"] - range_candles[0]["open"])
-    trend_ratio = net_move / range_height
-    if trend_ratio > SESSION_MAX_TREND_RATIO:
-        return None  # range is still trending directionally, not a genuine flat consolidation
-
-    window_end = session_open_ts + SESSION_MANIPULATION_WINDOW_MIN * 60
-    window_candles = [c for c in candles if session_open_ts <= c["time"] < window_end]
-
-    for i, c in enumerate(window_candles):
-        closed_back_inside = range_low <= c["close"] <= range_high
-        if not closed_back_inside:
-            continue  # this candle didn't reject back into the range on its own close — not a confirmation point, keep looking
-        cluster = window_candles[max(0, i - (SESSION_MAX_THRUST_BARS - 1)):i + 1]
-        cluster_highs_above = [cc["high"] for cc in cluster if cc["high"] > range_high]
-        cluster_lows_below = [cc["low"] for cc in cluster if cc["low"] < range_low]
-        if cluster_highs_above and cluster_lows_below:
-            continue  # both sides swept within this short cluster — too chaotic to call cleanly, keep looking
-        if cluster_highs_above:
-            entry = c["close"]
-            sweep_extreme = max(cluster_highs_above)
-            orig_sl = sweep_extreme * (1 + SESSION_SL_BUFFER_PCT)
-            risk = abs(entry - orig_sl)
-            if SESSION_INVERT_SIGNALS:
-                risk *= SESSION_SL_MULT
-                direction, sl, tp = "LONG", entry - risk, entry + risk * SESSION_REVERSE_RR
-            else:
-                direction, sl, tp = "SHORT", orig_sl, range_low
-            return {"direction": direction, "entry": entry, "sl": sl, "tp": tp,
-                    "range_high": range_high, "range_low": range_low,
-                    "sweep_extreme": sweep_extreme, "confirm_time": c["time"]}
-        if cluster_lows_below:
-            entry = c["close"]
-            sweep_extreme = min(cluster_lows_below)
-            orig_sl = sweep_extreme * (1 - SESSION_SL_BUFFER_PCT)
-            risk = abs(entry - orig_sl)
-            if SESSION_INVERT_SIGNALS:
-                risk *= SESSION_SL_MULT
-                direction, sl, tp = "SHORT", entry + risk, entry - risk * SESSION_REVERSE_RR
-            else:
-                direction, sl, tp = "LONG", orig_sl, range_high
-            return {"direction": direction, "entry": entry, "sl": sl, "tp": tp,
-                    "range_high": range_high, "range_low": range_low,
-                    "sweep_extreme": sweep_extreme, "confirm_time": c["time"]}
-    return None
-
-
-def detect_session_ny_manipulation(candles, session_open_ts):
-    """New York counterpart of detect_session_manipulation() — identical
-    pattern logic (consolidation range -> sweep beyond it within the
-    manipulation window -> close back inside = confirmed manipulation),
-    just reading the SESSION_NY_* constants instead of SESSION_*. See
-    that function's own docstring for the pattern rationale; not
-    repeated here beyond what differs. Kept as a fully separate function
-    rather than parameterizing the original, per the user's explicit
-    request that the original stay untouched."""
-    open_dt = datetime.datetime.fromtimestamp(session_open_ts, tz=datetime.timezone.utc)
-    range_start_dt = open_dt.replace(hour=SESSION_NY_RANGE_START_UTC_HOUR, minute=0, second=0, microsecond=0)
-    range_start = range_start_dt.timestamp()
-    range_duration_sec = session_open_ts - range_start
-    range_candles = [c for c in candles if range_start <= c["time"] < session_open_ts]
-    expected_bars = range_duration_sec / INTERVAL_SECONDS.get(SESSION_NY_RANGE_TF, 300)
-    if expected_bars <= 0 or len(range_candles) < expected_bars * 0.6:
-        return None
-    range_high = max(c["high"] for c in range_candles)
-    range_low = min(c["low"] for c in range_candles)
-    if range_low <= 0:
-        return None
-    range_pct = (range_high - range_low) / range_low
-    if range_pct < SESSION_NY_MIN_RANGE_PCT:
-        return None
-
-    range_height = range_high - range_low
-    net_move = abs(range_candles[-1]["close"] - range_candles[0]["open"])
-    trend_ratio = net_move / range_height
-    if trend_ratio > SESSION_NY_MAX_TREND_RATIO:
-        return None
-
-    window_end = session_open_ts + SESSION_NY_MANIPULATION_WINDOW_MIN * 60
-    window_candles = [c for c in candles if session_open_ts <= c["time"] < window_end]
-
-    for i, c in enumerate(window_candles):
-        closed_back_inside = range_low <= c["close"] <= range_high
-        if not closed_back_inside:
-            continue
-        cluster = window_candles[max(0, i - (SESSION_NY_MAX_THRUST_BARS - 1)):i + 1]
-        cluster_highs_above = [cc["high"] for cc in cluster if cc["high"] > range_high]
-        cluster_lows_below = [cc["low"] for cc in cluster if cc["low"] < range_low]
-        if cluster_highs_above and cluster_lows_below:
-            continue
-        if cluster_highs_above:
-            entry = c["close"]
-            sweep_extreme = max(cluster_highs_above)
-            orig_sl = sweep_extreme * (1 + SESSION_NY_SL_BUFFER_PCT)
-            risk = abs(entry - orig_sl)
-            if SESSION_NY_INVERT_SIGNALS:
-                risk *= SESSION_NY_SL_MULT
-                direction, sl, tp = "LONG", entry - risk, entry + risk * 2
-            else:
-                direction, sl, tp = "SHORT", orig_sl, range_low
-            return {"direction": direction, "entry": entry, "sl": sl, "tp": tp,
-                    "range_high": range_high, "range_low": range_low,
-                    "sweep_extreme": sweep_extreme, "confirm_time": c["time"]}
-        if cluster_lows_below:
-            entry = c["close"]
-            sweep_extreme = min(cluster_lows_below)
-            orig_sl = sweep_extreme * (1 - SESSION_NY_SL_BUFFER_PCT)
-            risk = abs(entry - orig_sl)
-            if SESSION_NY_INVERT_SIGNALS:
-                risk *= SESSION_NY_SL_MULT
-                direction, sl, tp = "SHORT", entry + risk, entry - risk * 2
-            else:
-                direction, sl, tp = "LONG", orig_sl, range_high
-            return {"direction": direction, "entry": entry, "sl": sl, "tp": tp,
-                    "range_high": range_high, "range_low": range_low,
-                    "sweep_extreme": sweep_extreme, "confirm_time": c["time"]}
-    return None
-
-
-def track_session_outcome(candles, sig, max_wait_sec=24 * 3600):
-    """Walks forward from the signal's confirm_time looking for TP or SL
-    touch. If a single candle's range covers both (can't tell from OHLC
-    alone which came first), SL is checked first — the conservative
-    assumption, consistent with how a real position would behave if
-    price is volatile enough to touch both in one bar.
-    v0.98.6: strictly > confirm_time, not >= — entry is the confirm
-    candle's own CLOSE, so its own high/low (formed before that close)
-    can't have triggered SL/TP; we weren't in the trade yet. Found via
-    a live user report of a VGI trade appearing to hit SL on a candle
-    the position couldn't have been open for — same bug pattern,
-    checked and fixed everywhere else it also existed."""
-    future = [c for c in candles if c["time"] > sig["confirm_time"]]
-    for c in future:
-        if c["time"] - sig["confirm_time"] > max_wait_sec:
-            return "TIMEOUT", None
-        if sig["direction"] == "SHORT":
-            if c["high"] >= sig["sl"]:
-                return "LOSS", c["time"]
-            if c["low"] <= sig["tp"]:
-                return "WIN", c["time"]
-        else:
-            if c["low"] <= sig["sl"]:
-                return "LOSS", c["time"]
-            if c["high"] >= sig["tp"]:
-                return "WIN", c["time"]
-    return "TIMEOUT", None
-
-
-def track_session_ny_outcome(candles, sig, max_wait_sec=24 * 3600):
-    """New York counterpart of track_session_outcome() — identical
-    walk-forward logic (same v0.98.6 entry-candle-exclusion fix)."""
-    future = [c for c in candles if c["time"] > sig["confirm_time"]]
-    for c in future:
-        if c["time"] - sig["confirm_time"] > max_wait_sec:
-            return "TIMEOUT", None
-        if sig["direction"] == "SHORT":
-            if c["high"] >= sig["sl"]:
-                return "LOSS", c["time"]
-            if c["low"] <= sig["tp"]:
-                return "WIN", c["time"]
-        else:
-            if c["low"] <= sig["sl"]:
-                return "LOSS", c["time"]
-            if c["high"] >= sig["tp"]:
-                return "WIN", c["time"]
-    return "TIMEOUT", None
-
-
-def backtest_session_symbol(symbol, days=SESSION_BACKTEST_DAYS):
-    """Walks the last `days` calendar days for one symbol, running
-    detect_session_manipulation() at each day's own DST-correct session
-    open, and tracking the outcome of any signal found. Returns a list
-    of per-day results — the aggregate stats (win rate etc.) are
-    computed separately so this stays a single-purpose data collector,
-    same split as the scalp module's analyze_excursions/summarize."""
-    now = time.time()
-    fetch_start = now - days * 86400 - 25 * 3600  # generous buffer: covers a full day before the first session's range starts
-    candles = get_candles_range(symbol, SESSION_RANGE_TF, fetch_start, now)
-    if len(candles) < 50:
-        return []
-
-    results = []
-    cur = session_open_utc_ts(fetch_start) + 86400  # first full day inside the fetched window
-    cutoff = now - SESSION_MANIPULATION_WINDOW_MIN * 60  # need the full manipulation window to have elapsed
-    seen_days = 0
-    while cur < cutoff and seen_days < days:
-        sig = detect_session_manipulation(candles, cur)
-        if sig:
-            result, exit_time = track_session_outcome(candles, sig)
-            results.append({
-                "session_open": cur, "direction": sig["direction"],
-                "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
-                "range_high": sig["range_high"], "range_low": sig["range_low"],
-                "result": result, "exit_time": exit_time,
-            })
-        # re-derive from the calendar date rather than a flat +86400 stride —
-        # a fixed-seconds increment would drift by 1h for every day past a
-        # DST transition, since the local 10:00 offset from UTC changes but
-        # a raw +86400 doesn't know that
-        cur = session_open_utc_ts(cur + 86400)
-        seen_days += 1
-    return results
-
-
-def backtest_session_ny_symbol(symbol, days=SESSION_NY_BACKTEST_DAYS):
-    """New York counterpart of backtest_session_symbol() — identical
-    walk-forward-by-calendar-day logic, reading SESSION_NY_* constants
-    and calling detect_session_ny_manipulation()/track_session_ny_
-    outcome()/session_ny_open_utc_ts() throughout."""
-    now = time.time()
-    fetch_start = now - days * 86400 - 25 * 3600
-    candles = get_candles_range(symbol, SESSION_NY_RANGE_TF, fetch_start, now)
-    if len(candles) < 50:
-        return []
-
-    results = []
-    cur = session_ny_open_utc_ts(fetch_start) + 86400
-    cutoff = now - SESSION_NY_MANIPULATION_WINDOW_MIN * 60
-    seen_days = 0
-    while cur < cutoff and seen_days < days:
-        sig = detect_session_ny_manipulation(candles, cur)
-        if sig:
-            result, exit_time = track_session_ny_outcome(candles, sig)
-            results.append({
-                "session_open": cur, "direction": sig["direction"],
-                "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
-                "range_high": sig["range_high"], "range_low": sig["range_low"],
-                "result": result, "exit_time": exit_time,
-            })
-        cur = session_ny_open_utc_ts(cur + 86400)
-        seen_days += 1
-    return results
-
-
-def summarize_session_backtest(results):
-    total = len(results)
-    if not total:
-        return {"n": 0, "win_rate": None, "wins": 0, "losses": 0, "timeouts": 0}
-    wins = sum(1 for r in results if r["result"] == "WIN")
-    losses = sum(1 for r in results if r["result"] == "LOSS")
-    timeouts = sum(1 for r in results if r["result"] == "TIMEOUT")
-    closed = wins + losses
-    win_rate = round(wins / closed * 100, 1) if closed else None
-    return {"n": total, "win_rate": win_rate, "wins": wins, "losses": losses, "timeouts": timeouts}
-
-
-def build_session_universe():
-    """Liquid-symbol pool, same source as build_scalp_universe (tickers'
-    24h volume), capped to SESSION_UNIVERSE_SIZE since backtesting
-    SESSION_BACKTEST_DAYS of 5m history per symbol (paginated fetch) is
-    the expensive part here — no separate volatility ranking pass, the
-    backtest results themselves are the ranking."""
-    tickers = get_tickers()
-    seen_vol = {}
-    for t in tickers:
-        name = t.get("contract", "")
-        if not name.endswith("_USDT"):
-            continue
-        vol = t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0
-        try:
-            vol = float(vol)
-        except (TypeError, ValueError):
-            vol = 0.0
-        if vol < MIN_VOL_USD:
-            continue
-        if name not in seen_vol or vol > seen_vol[name]:
-            seen_vol[name] = vol
-    ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
-    return [s[0] for s in ranked[:SESSION_UNIVERSE_SIZE]]
-
-
-def build_session_ny_universe():
-    """New York counterpart of build_session_universe() — identical
-    ticker-volume ranking, capped to SESSION_NY_UNIVERSE_SIZE."""
-    tickers = get_tickers()
-    seen_vol = {}
-    for t in tickers:
-        name = t.get("contract", "")
-        if not name.endswith("_USDT"):
-            continue
-        vol = t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0
-        try:
-            vol = float(vol)
-        except (TypeError, ValueError):
-            vol = 0.0
-        if vol < MIN_VOL_USD:
-            continue
-        if name not in seen_vol or vol > seen_vol[name]:
-            seen_vol[name] = vol
-    ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
-    return [s[0] for s in ranked[:SESSION_NY_UNIVERSE_SIZE]]
-
-
-def scan_symbol_session_live(symbol, session_open_ts):
-    """Live counterpart to backtest_session_symbol — only called for
-    TODAY's session_open_ts, and only while we're inside the
-    manipulation window (checked by the caller). Fires at most once per
-    (symbol, session_open_ts): a confirmed manipulation doesn't change
-    once found, so re-scanning the same session after a signal exists
-    would just rediscover it."""
-    if not SESSION_ENABLED:
-        return
-    with _session_signal_cooldowns_lock:
-        if _session_signal_cooldowns.get(symbol) == session_open_ts:
-            return
-    try:
-        range_start_dt = datetime.datetime.fromtimestamp(session_open_ts, tz=datetime.timezone.utc).replace(
-            hour=SESSION_RANGE_START_UTC_HOUR, minute=0, second=0, microsecond=0)
-        candles = get_candles_range(symbol, SESSION_RANGE_TF, range_start_dt.timestamp(), time.time())
-        # Exclude the currently-forming candle — its OHLC is still changing
-        # until it actually closes, so evaluating it mid-formation risks
-        # firing on a transient wick+close-back-inside that won't hold up
-        # once the candle finalizes (confirmed as the cause of a live
-        # signal that later showed no manipulation on the chart, since the
-        # chart re-derives from the now-finalized candle).
-        interval_sec = INTERVAL_SECONDS.get(SESSION_RANGE_TF, 300)
-        now = time.time()
-        candles = [c for c in candles if c["time"] + interval_sec <= now]
-        sig = detect_session_manipulation(candles, session_open_ts)
-        if not sig:
-            return
-        if has_open_signal_any_module(symbol, exclude="session_signals"):
-            return  # another module already has an open position on this symbol — see has_open_signal_any_module's docstring for why this check exists
-        with _session_signal_cooldowns_lock:
-            if _session_signal_cooldowns.get(symbol) == session_open_ts:
-                return  # another thread found it first this same cycle
-            _session_signal_cooldowns[symbol] = session_open_ts
-        record = {
-            "symbol": symbol, "direction": sig["direction"],
-            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
-            "range_high": sig["range_high"], "range_low": sig["range_low"],
-            "session_open": session_open_ts, "confirm_time": sig["confirm_time"],
-            "detected_at": time.time(), "status": "OPEN", "result": None,
-            "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
-            "mfe_r": 0.0, "mae_r": 0.0, "mfe_price": None, "mae_price": None,
-            "mfe_r_at_close": None, "mae_r_at_close": None,
-        }
-        with state_lock:
-            STATE["session_signals"].appendleft(record)
-        if AUTOTRADE_ENABLED_SESSION:
-            execute_autotrade("session", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
-                               extra={"session_open": session_open_ts})
-            sim_execute_trade("session", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
-                               AUTOTRADE_LEVERAGE_SESSION, record)
-        arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
-        send_telegram(
-            f"{arrow} {symbol} (открытие сессии — манипуляция)\n"
-            f"entry: {sig['entry']:.6g}\n"
-            f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}",
-            category="session",
-        )
-    except Exception as e:
-        log_error(f"session_live {symbol}: {e}")
-
-
-def scan_symbol_session_ny_live(symbol, session_open_ts):
-    """New York counterpart of scan_symbol_session_live() — identical
-    logic, own STATE list/cooldowns/constants, and its own autotrade
-    "session_ny" mode string so autotrade_log/simulator entries are
-    distinguishable from the original session's."""
-    if not SESSION_NY_ENABLED:
-        return
-    with _session_ny_signal_cooldowns_lock:
-        if _session_ny_signal_cooldowns.get(symbol) == session_open_ts:
-            return
-    try:
-        range_start_dt = datetime.datetime.fromtimestamp(session_open_ts, tz=datetime.timezone.utc).replace(
-            hour=SESSION_NY_RANGE_START_UTC_HOUR, minute=0, second=0, microsecond=0)
-        candles = get_candles_range(symbol, SESSION_NY_RANGE_TF, range_start_dt.timestamp(), time.time())
-        interval_sec = INTERVAL_SECONDS.get(SESSION_NY_RANGE_TF, 300)
-        now = time.time()
-        candles = [c for c in candles if c["time"] + interval_sec <= now]
-        sig = detect_session_ny_manipulation(candles, session_open_ts)
-        if not sig:
-            return
-        if has_open_signal_any_module(symbol, exclude="session_ny_signals"):
-            return
-        with _session_ny_signal_cooldowns_lock:
-            if _session_ny_signal_cooldowns.get(symbol) == session_open_ts:
-                return
-            _session_ny_signal_cooldowns[symbol] = session_open_ts
-        record = {
-            "symbol": symbol, "direction": sig["direction"],
-            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
-            "range_high": sig["range_high"], "range_low": sig["range_low"],
-            "session_open": session_open_ts, "confirm_time": sig["confirm_time"],
-            "detected_at": time.time(), "status": "OPEN", "result": None,
-            "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
-        }
-        with state_lock:
-            STATE["session_ny_signals"].appendleft(record)
-        if AUTOTRADE_ENABLED_SESSION_NY:
-            execute_autotrade("session_ny", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
-                               extra={"session_open": session_open_ts})
-            sim_execute_trade("session_ny", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
-                               AUTOTRADE_LEVERAGE_SESSION_NY, record)
-        arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
-        send_telegram(
-            f"{arrow} {symbol} (открытие Нью-Йорка — манипуляция)\n"
-            f"entry: {sig['entry']:.6g}\n"
-            f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}",
-            category="session_ny",
-        )
-    except Exception as e:
-        log_error(f"session_ny_live {symbol}: {e}")
-
-
-def update_session_signal_outcomes():
-    """v0.98.4: also tracks mfe_r/mae_r (R = abs(entry-sl), the actual
-    risk used at signal creation — this naturally covers both non-
-    inverted trades, whose sl is the sweep-based stop, and inverted
-    trades, whose sl is risk*SESSION_SL_MULT wider, since sl was already
-    set correctly per-mode when the record was created) as it walks
-    forward, freezing mfe_r_at_close/mae_r_at_close once a trade
-    resolves — same shape as update_divergence_outcomes()'s live
-    tracking, minus the post-close continued-tracking window (mfe_
-    tracking_until), kept simpler since risk_autotune_pass() only ever
-    needs the at-close values, not what happened after. Added
-    specifically so SESSION_SL_MULT and SESSION_REVERSE_RR (previously
-    a hardcoded "2") can be driven by risk-autotune the same
-    overshoot/target-extend way EMA/Divergence/Scalp already are,
-    instead of only ever being changed by hand."""
-    now = time.time()
-    with state_lock:
-        open_signals = [s for s in STATE["session_signals"] if s["status"] == "OPEN"]
-    all_candles = fetch_candles_concurrent([(s["symbol"], SESSION_RANGE_TF, 300) for s in open_signals])
-    session_interval_sec = INTERVAL_SECONDS.get(SESSION_RANGE_TF, 3600)
-    for sig, candles in zip(open_signals, all_candles):
-        try:
-            if candles is None:
-                continue
-            candles = [c for c in candles if c["time"] + session_interval_sec <= now]  # v0.98.8: drop still-forming candle — same filter every live scanner already has, missing here
-            future = [c for c in candles if c["time"] > sig["confirm_time"]]
-            direction = sig["direction"]
-            entry = sig["entry"]
-            risk = abs(entry - sig["sl"]) or 1e-9
-            result = None
-            exit_price = None
-            exit_time = None
-            for c in future:
-                if direction == "LONG":
-                    fav, adv = c["high"] - entry, entry - c["low"]
-                else:
-                    fav, adv = entry - c["low"], c["high"] - entry
-                fav_r, adv_r = fav / risk, adv / risk
-                if fav_r > sig["mfe_r"] or adv_r > sig["mae_r"]:
-                    with state_lock:
-                        if fav_r > sig["mfe_r"]:
-                            sig["mfe_r"] = round(fav_r, 3)
-                            sig["mfe_price"] = c["high"] if direction == "LONG" else c["low"]
-                        if adv_r > sig["mae_r"]:
-                            sig["mae_r"] = round(adv_r, 3)
-                            sig["mae_price"] = c["low"] if direction == "LONG" else c["high"]
-                if direction == "SHORT":
-                    if c["high"] >= sig["sl"]:
-                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
-                        break
-                    if c["low"] <= sig["tp"]:
-                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
-                        break
-                else:
-                    if c["low"] <= sig["sl"]:
-                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
-                        break
-                    if c["high"] >= sig["tp"]:
-                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
-                        break
-            timed_out = (now - sig["detected_at"]) > 24 * 3600
-            with state_lock:
-                if result:
-                    sig["status"] = "CLOSED"
-                    sig["result"] = result
-                    sig["exit_price"] = exit_price
-                    sig["exit_time"] = exit_time
-                    sig["mfe_r_at_close"] = sig["mfe_r"]
-                    sig["mae_r_at_close"] = sig["mae_r"]
-                elif timed_out:
-                    sig["status"] = "CLOSED"
-                    sig["result"] = "TIMEOUT"
-                    sig["exit_price"] = candles[-1]["close"] if candles else None
-                    sig["exit_time"] = candles[-1]["time"] if candles else None
-                    sig["mfe_r_at_close"] = sig["mfe_r"]
-                    sig["mae_r_at_close"] = sig["mae_r"]
-        except Exception as e:
-            log_error(f"session_outcome {sig['symbol']}: {e}")
-
-
-def compute_session_signal_stats():
-    with state_lock:
-        signals = list(STATE["session_signals"])
-    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
-    wins = sum(1 for s in closed if s["result"] == "WIN")
-    losses = sum(1 for s in closed if s["result"] == "LOSS")
-    timeouts = sum(1 for s in signals if s.get("result") == "TIMEOUT")
-    open_n = sum(1 for s in signals if s["status"] == "OPEN")
-    total_closed = len(closed)
-    winrate = round(wins / total_closed * 100, 1) if total_closed else None
-
-    def agg(key, subset):
-        vals = [s[key] for s in subset if s.get(key) is not None]
-        if not vals:
-            return None
-        vals_sorted = sorted(vals)
-        n = len(vals_sorted)
-        return {
-            "avg": round(sum(vals) / n, 3), "median": round(vals_sorted[n // 2], 3),
-            "p25": round(vals_sorted[int(n * 0.25)], 3),
-            "p75": round(vals_sorted[min(int(n * 0.75), n - 1)], 3), "n": n,
-        }
-
-    win_set = [s for s in closed if s["result"] == "WIN"]
-    loss_set = [s for s in closed if s["result"] == "LOSS"]
-    return {"total": len(signals), "wins": wins, "losses": losses, "timeouts": timeouts,
-            "open": open_n, "winrate": winrate,
-            "mfe_r_wins_at_close": agg("mfe_r_at_close", win_set), "mae_r_wins_at_close": agg("mae_r_at_close", win_set),
-            "mfe_r_losses_at_close": agg("mfe_r_at_close", loss_set), "mae_r_losses_at_close": agg("mae_r_at_close", loss_set)}
-
-
-def update_session_ny_signal_outcomes():
-    """New York counterpart of update_session_signal_outcomes() — same
-    walk-forward SL/TP check and 24h timeout, own STATE list/constants."""
-    now = time.time()
-    with state_lock:
-        open_signals = [s for s in STATE["session_ny_signals"] if s["status"] == "OPEN"]
-    all_candles = fetch_candles_concurrent([(s["symbol"], SESSION_NY_RANGE_TF, 300) for s in open_signals])
-    session_ny_interval_sec = INTERVAL_SECONDS.get(SESSION_NY_RANGE_TF, 3600)
-    for sig, candles in zip(open_signals, all_candles):
-        try:
-            if candles is None:
-                continue
-            candles = [c for c in candles if c["time"] + session_ny_interval_sec <= now]  # v0.98.8: drop still-forming candle
-            future = [c for c in candles if c["time"] > sig["confirm_time"]]
-            result = None
-            exit_price = None
-            exit_time = None
-            for c in future:
-                if sig["direction"] == "SHORT":
-                    if c["high"] >= sig["sl"]:
-                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
-                        break
-                    if c["low"] <= sig["tp"]:
-                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
-                        break
-                else:
-                    if c["low"] <= sig["sl"]:
-                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
-                        break
-                    if c["high"] >= sig["tp"]:
-                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
-                        break
-            timed_out = (now - sig["detected_at"]) > 24 * 3600
-            with state_lock:
-                if result:
-                    sig["status"] = "CLOSED"
-                    sig["result"] = result
-                    sig["exit_price"] = exit_price
-                    sig["exit_time"] = exit_time
-                elif timed_out:
-                    sig["status"] = "CLOSED"
-                    sig["result"] = "TIMEOUT"
-                    sig["exit_price"] = candles[-1]["close"] if candles else None
-                    sig["exit_time"] = candles[-1]["time"] if candles else None
-        except Exception as e:
-            log_error(f"session_ny_outcome {sig['symbol']}: {e}")
-
-
-def compute_session_ny_signal_stats():
-    with state_lock:
-        signals = list(STATE["session_ny_signals"])
-    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
-    wins = sum(1 for s in closed if s["result"] == "WIN")
-    losses = sum(1 for s in closed if s["result"] == "LOSS")
-    timeouts = sum(1 for s in signals if s.get("result") == "TIMEOUT")
-    open_n = sum(1 for s in signals if s["status"] == "OPEN")
-    total_closed = len(closed)
-    winrate = round(wins / total_closed * 100, 1) if total_closed else None
-    return {"total": len(signals), "wins": wins, "losses": losses, "timeouts": timeouts,
-            "open": open_n, "winrate": winrate}
 
 
 # ----------------------------------------------------------------------------
@@ -12906,8 +12162,6 @@ def compute_scalp_leverage_for_target(target_pct, account_usd=SCALP_ACCOUNT_USD,
 SNAPSHOT_MODULE_KEYS = {
     "volume": "signals",
     "scalp": "scalp_signals",
-    "session": "session_signals",
-    "session_ny": "session_ny_signals",
     "mirror": "mirror_signals",
 }
 
@@ -15318,9 +14572,6 @@ def save_state():
                 "overrides": SYMBOL_OVERRIDES,
                 "signals": list(STATE["signals"]),
                 "scalp_signals": list(STATE["scalp_signals"]),
-                "session_signals": list(STATE["session_signals"]),
-                "session_ny_signals": list(STATE["session_ny_signals"]),
-                "xau_lg_signals": list(STATE["xau_lg_signals"]),
                 "msnr_signals": list(STATE["msnr_signals"]),
                 "msnr_symbol_overrides": STATE["msnr_symbol_overrides"],
                 "msnr_autotrade_symbols": STATE["msnr_autotrade_symbols"],
@@ -15374,9 +14625,7 @@ def _relink_sim_trade(trade):
     (e.g. that signal itself fell out of its own history maxlen)."""
     module_lists = {
         "bounce": STATE["signals"], "breakout": STATE["signals"],
-        "scalp": STATE["scalp_signals"], "session": STATE["session_signals"],
-        "session_ny": STATE["session_ny_signals"],
-        "xau_lg": STATE["xau_lg_signals"],
+        "scalp": STATE["scalp_signals"],
         "msnr": STATE["msnr_signals"],
         "mirror": STATE["mirror_signals"],
     }
@@ -15433,9 +14682,6 @@ def load_state():
         SYMBOL_OVERRIDES.update(data.get("overrides", {}))
         signals = data.get("signals", [])
         scalp_signals = data.get("scalp_signals", [])
-        session_signals = data.get("session_signals", [])
-        session_ny_signals = data.get("session_ny_signals", [])
-        xau_lg_signals = data.get("xau_lg_signals", [])
         msnr_signals = data.get("msnr_signals", [])
         msnr_symbol_overrides = data.get("msnr_symbol_overrides", {})
         msnr_autotrade_symbols = data.get("msnr_autotrade_symbols", {})
@@ -15453,9 +14699,6 @@ def load_state():
         with state_lock:
             STATE["signals"] = deque(_backfill_mfe_mae(signals), maxlen=SIGNAL_HISTORY)
             STATE["scalp_signals"] = deque(scalp_signals, maxlen=SCALP_SIGNAL_HISTORY)
-            STATE["session_signals"] = deque(_backfill_mfe_mae(session_signals), maxlen=SESSION_SIGNAL_HISTORY)
-            STATE["session_ny_signals"] = deque(session_ny_signals, maxlen=SESSION_NY_SIGNAL_HISTORY)
-            STATE["xau_lg_signals"] = deque(xau_lg_signals, maxlen=XAU_LG_SIGNAL_HISTORY)
             STATE["msnr_signals"] = deque(msnr_signals, maxlen=MSNR_SIGNAL_HISTORY)
             STATE["msnr_symbol_overrides"] = msnr_symbol_overrides
             STATE["msnr_autotrade_symbols"] = msnr_autotrade_symbols
@@ -15482,7 +14725,7 @@ def load_state():
                     t["_signal_ref"] = match
                 restored_trades.append(t)
             STATE["sim_trades"] = deque(restored_trades, maxlen=AUTOTRADE_SIM_TRADE_HISTORY)
-        print(f"Loaded persisted state: {len(SYMBOL_OVERRIDES)} overrides, {len(signals)} signals, {len(scalp_signals)} scalp signals, {len(session_signals)} session signals, {len(autotrade_log)} autotrade log entries, {len(restored_trades)} sim trades ({dropped_pending} pending trades couldn't be re-linked and were dropped)")
+        print(f"Loaded persisted state: {len(SYMBOL_OVERRIDES)} overrides, {len(signals)} signals, {len(scalp_signals)} scalp signals, {len(autotrade_log)} autotrade log entries, {len(restored_trades)} sim trades ({dropped_pending} pending trades couldn't be re-linked and were dropped)")
     except Exception as e:
         log_error(f"load_state: {e}")
 
@@ -15669,12 +14912,6 @@ def send_telegram(text, category=None):
     if category == "vp" and not TELEGRAM_ALERTS_VP:
         return
     if category == "hourly" and not TELEGRAM_ALERTS_HOURLY:
-        return
-    if category == "session" and not TELEGRAM_ALERTS_SESSION:
-        return
-    if category == "session_ny" and not TELEGRAM_ALERTS_SESSION_NY:
-        return
-    if category == "xau_lg" and not TELEGRAM_ALERTS_XAU_LG:
         return
     if category == "ft5" and not TELEGRAM_ALERTS_FT5:
         return
@@ -16241,11 +15478,6 @@ def scan_loop():
                         key=lambda x: -x[1]["score"]
                     )[:SCALP_SIGNAL_TOP_N]
                     futs += [ex.submit(scan_symbol_scalp_signal, sym, rec) for sym, rec in top_recs]
-                if SESSION_ENABLED:
-                    now_ts = time.time()
-                    todays_open = session_open_utc_ts(now_ts)
-                    if todays_open <= now_ts < todays_open + SESSION_MANIPULATION_WINDOW_MIN * 60:
-                        futs += [ex.submit(scan_symbol_session_live, s, todays_open) for s in universe]
                 for _ in as_completed(futs):
                     pass
             if VOLUME_PROFILE_ENABLED:
@@ -16253,8 +15485,6 @@ def scan_loop():
                 auto_tune_cycle(universe)
             if SCALP_SIGNALS_ENABLED:
                 update_scalp_signal_outcomes()
-            if SESSION_ENABLED:
-                update_session_signal_outcomes()
             sweep_sim_trades()
             save_state()
             t1 = time.time()
@@ -16353,182 +15583,6 @@ def scalp_loop():
         time.sleep(max(60, SCALP_REFRESH_SEC))
 
 
-def session_loop():
-    """Own daily-ish cadence — batch-backtests the whole universe for the
-    session-open manipulation pattern, one day of history at a time in
-    steady state. Separate thread from both the fast scan_loop and the
-    slower scalp_loop."""
-    while True:
-        try:
-            if not SESSION_ENABLED:
-                time.sleep(60)
-                continue
-            t0 = time.time()
-            with state_lock:
-                STATE["session_last_backtest_started"] = t0
-                STATE["session_symbols_done"] = 0
-
-            universe = build_session_universe()
-            with state_lock:
-                STATE["session_universe"] = universe
-                # purge symbols that dropped out of this cycle's universe
-                STATE["session_backtest_results"] = {}
-                STATE["session_backtest_summary"] = {}
-
-            def process_one(symbol):
-                try:
-                    results = backtest_session_symbol(symbol)
-                    summary = summarize_session_backtest(results)
-                    with state_lock:
-                        STATE["session_backtest_results"][symbol] = results
-                        STATE["session_backtest_summary"][symbol] = summary
-                        STATE["session_symbols_done"] += 1
-                except Exception as e:
-                    log_error(f"session process_one {symbol}: {e}")
-
-            with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-                futs = [ex.submit(process_one, s) for s in universe]
-                for _ in as_completed(futs):
-                    pass
-
-            t1 = time.time()
-            with state_lock:
-                STATE["session_last_backtest_finished"] = t1
-                STATE["session_last_backtest_duration"] = round(t1 - t0, 1)
-        except Exception as e:
-            log_error(f"session_loop: {e}")
-        time.sleep(max(60, SESSION_REFRESH_SEC))
-
-
-def session_live_loop():
-    """Handles the daily live-signal window: sleeps until shortly before
-    the next session open, then polls the backtested universe (ranked by
-    win rate) during the SESSION_MANIPULATION_WINDOW_MIN window looking
-    for a live manipulation. Separate from session_loop's slow backtest
-    refresh entirely — this one wakes up precisely once a day."""
-    while True:
-        try:
-            if not SESSION_ENABLED:
-                time.sleep(60)
-                continue
-            now = time.time()
-            next_open = session_open_utc_ts(now)
-            if next_open <= now:
-                next_open = session_open_utc_ts(now + 86400)
-            with state_lock:
-                STATE["session_next_open_ts"] = next_open
-
-            # sleep in bounded chunks toward this SAME fixed target — do
-            # NOT recompute next_open mid-wait, or sleeping past it would
-            # make the recompute see "today's open is in the past" and
-            # jump straight to tomorrow, skipping today's window entirely
-            while True:
-                remaining = next_open - time.time()
-                if remaining <= 0:
-                    break
-                time.sleep(min(remaining, 1800))
-
-            with state_lock:
-                summaries = dict(STATE["session_backtest_summary"])
-                universe = list(STATE["session_universe"]) or list(summaries.keys())
-            candidates = [s for s in universe
-                          if summaries.get(s, {}).get("n", 0) >= SESSION_MIN_SAMPLE
-                          and (summaries.get(s, {}).get("win_rate") or 0) >= 50]
-            window_end = next_open + SESSION_MANIPULATION_WINDOW_MIN * 60
-            while time.time() < window_end:
-                with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-                    futs = [ex.submit(scan_symbol_session_live, s, next_open) for s in candidates]
-                    for _ in as_completed(futs):
-                        pass
-                time.sleep(60)
-        except Exception as e:
-            log_error(f"session_live_loop: {e}")
-            time.sleep(60)
-
-
-def session_ny_loop():
-    """New York counterpart of session_loop() — same daily batch-backtest
-    cadence, own STATE/constants throughout."""
-    while True:
-        try:
-            if not SESSION_NY_ENABLED:
-                time.sleep(60)
-                continue
-            t0 = time.time()
-            with state_lock:
-                STATE["session_ny_last_backtest_started"] = t0
-                STATE["session_ny_symbols_done"] = 0
-
-            universe = build_session_ny_universe()
-            with state_lock:
-                STATE["session_ny_universe"] = universe
-                STATE["session_ny_backtest_results"] = {}
-                STATE["session_ny_backtest_summary"] = {}
-
-            def process_one(symbol):
-                try:
-                    results = backtest_session_ny_symbol(symbol)
-                    summary = summarize_session_backtest(results)
-                    with state_lock:
-                        STATE["session_ny_backtest_results"][symbol] = results
-                        STATE["session_ny_backtest_summary"][symbol] = summary
-                        STATE["session_ny_symbols_done"] += 1
-                except Exception as e:
-                    log_error(f"session_ny process_one {symbol}: {e}")
-
-            with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-                futs = [ex.submit(process_one, s) for s in universe]
-                for _ in as_completed(futs):
-                    pass
-
-            t1 = time.time()
-            with state_lock:
-                STATE["session_ny_last_backtest_finished"] = t1
-                STATE["session_ny_last_backtest_duration"] = round(t1 - t0, 1)
-        except Exception as e:
-            log_error(f"session_ny_loop: {e}")
-        time.sleep(max(60, SESSION_NY_REFRESH_SEC))
-
-
-def session_ny_live_loop():
-    """New York counterpart of session_live_loop() — same sleep-until-
-    next-open, scan-during-window pattern, own STATE/constants."""
-    while True:
-        try:
-            if not SESSION_NY_ENABLED:
-                time.sleep(60)
-                continue
-            now = time.time()
-            next_open = session_ny_open_utc_ts(now)
-            if next_open <= now:
-                next_open = session_ny_open_utc_ts(now + 86400)
-            with state_lock:
-                STATE["session_ny_next_open_ts"] = next_open
-
-            while True:
-                remaining = next_open - time.time()
-                if remaining <= 0:
-                    break
-                time.sleep(min(remaining, 1800))
-
-            with state_lock:
-                summaries = dict(STATE["session_ny_backtest_summary"])
-                universe = list(STATE["session_ny_universe"]) or list(summaries.keys())
-            candidates = [s for s in universe
-                          if summaries.get(s, {}).get("n", 0) >= SESSION_NY_MIN_SAMPLE
-                          and (summaries.get(s, {}).get("win_rate") or 0) >= 50]
-            window_end = next_open + SESSION_NY_MANIPULATION_WINDOW_MIN * 60
-            while time.time() < window_end:
-                with ThreadPoolExecutor(max_workers=WORKERS) as ex:
-                    futs = [ex.submit(scan_symbol_session_ny_live, s, next_open) for s in candidates]
-                    for _ in as_completed(futs):
-                        pass
-                time.sleep(60)
-        except Exception as e:
-            log_error(f"session_ny_live_loop: {e}")
-            time.sleep(60)
-
-
 RECONCILE_INTERVAL_SEC = int(os.environ.get("VP_RECONCILE_INTERVAL_SEC", 120))  # 2 min, per direct user request — reconcile_positions_and_orders() was previously only called opportunistically (right before a new trade opens), so orphaned orders sat uncleaned for as long as the market stayed quiet with nothing new to piggyback the cleanup on; a live example showed 16 open orders against only 2 open positions after such a lull
 
 
@@ -16595,7 +15649,6 @@ RISK_AUTOTUNE_TP_TOLERANCE_RATIO = 0.15  # ignore if WIN MFE is within 15% of th
 RISK_AUTOTUNE_TP_STEP_RATIO = 0.1  # max 10% change to TP_PCT per pass — same bounded-step philosophy as the RR/SL-mult nudges
 RISK_AUTOTUNE_TP_PCT_BOUNDS = (0.003, 0.05)  # 0.3%-5% — sane range; below is barely worth the fees, above is an unrealistic single fixed target
 RISK_AUTOTUNE_SESSION_RR_BOUNDS = (0.5, 5.0)  # v0.98.4 — Session's SESSION_REVERSE_RR is an RR multiple, not a %-of-price like EMA/DIV's TP_PCT, so it needs its own bounds on a completely different scale when reusing _risk_autotune_tp_extend for it
-RISK_AUTOTUNE_XAU_LG_RR_BOUNDS = (0.5, 5.0)  # v0.99.64 — same reasoning/range as Session's own RR bounds above: XAU_LG_RR is a direct RR multiple, not a %-of-price
 
 RISK_AUTOTUNE_MSNR_MAX_RR_BOUNDS = (5.5, 15.0)  # v0.99.11 — lower bound deliberately kept above MSNR_FALLBACK_RR (4.0): caught via behavioral testing that a cap set BELOW fallback_rr is self-defeating (the fallback trade it falls through to would itself exceed the "cap" it was supposed to enforce). Upper bound just gives room to relax the cap if the data doesn't actually support tightening it.
 
@@ -16852,42 +15905,6 @@ def _set_scalp_sl_buffer_mult(v):
     save_settings()
 
 
-def _set_session_invert(v):
-    global SESSION_INVERT_SIGNALS
-    SESSION_INVERT_SIGNALS = v
-    save_settings()
-
-
-def _set_session_sl_mult(v):
-    global SESSION_SL_MULT
-    SESSION_SL_MULT = v
-    save_settings()
-
-
-def _set_session_reverse_rr(v):
-    global SESSION_REVERSE_RR
-    SESSION_REVERSE_RR = v
-    save_settings()
-
-
-def _set_xau_lg_invert(v):
-    global XAU_LG_INVERT_SIGNALS
-    XAU_LG_INVERT_SIGNALS = v
-    save_settings()
-
-
-def _set_xau_lg_sl_buffer_mult(v):
-    global XAU_LG_SL_BUFFER_MULT
-    XAU_LG_SL_BUFFER_MULT = v
-    save_settings()
-
-
-def _set_xau_lg_rr(v):
-    global XAU_LG_RR
-    XAU_LG_RR = v
-    save_settings()
-
-
 def _set_ft5_invert(v):
     global FT5_INVERT_SIGNALS
     FT5_INVERT_SIGNALS = v
@@ -16944,96 +15961,6 @@ def risk_autotune_pass():
     except Exception as e:
         log_error(f"risk_autotune scalp: {e}")
 
-    try:
-        s = compute_session_signal_stats()
-        winrate = s.get("winrate")
-        closed_n = (s.get("wins", 0) or 0) + (s.get("losses", 0) or 0)
-        loss_mae = s.get("mae_r_losses_at_close")
-        win_mfe = s.get("mfe_r_wins_at_close")
-        # v0.99.6: CRITICAL FIX — the reverse-flag rule was nested inside
-        # `if SESSION_INVERT_SIGNALS:` below, meaning it could only ever
-        # run once reverse was ALREADY on: a chicken-and-egg bug that
-        # made it structurally impossible for auto-tune to ever turn
-        # reverse ON from the OFF state in the first place, no matter
-        # how negative normal-mode's own EV was. Found from a direct
-        # user report: Session sitting at 17.1% winrate (7W/34L) across
-        # 30 auto-tune passes, reverse never triggered. Confirmed by
-        # comparing against EMA's own block, which correctly runs its
-        # reverse rule unconditionally (only gated on data availability,
-        # not on EMA_INVERT_SIGNALS's current value) — Session's SL-mult
-        # and RR-extend rules genuinely DO need the invert-mode gate
-        # (they tune the INVERTED sizing specifically, meaningless data
-        # otherwise), but the reverse decision itself must not be gated
-        # by the very flag it's deciding whether to flip.
-        # rr passed to the reverse check depends on which mode is
-        # CURRENTLY active, since that's whose real performance is being
-        # evaluated: when inverted, SESSION_REVERSE_RR is the exact,
-        # fixed reward-per-risk (guaranteed by construction); when not
-        # inverted, there's no single fixed RR — the TP sits at the
-        # opposite range edge, a variable distance — so win_mfe_r's own
-        # average (already expressed in R-multiples via risk=abs(entry-
-        # sl), see update_session_signal_outcomes()) serves as the best
-        # available empirical stand-in for "typical reward when this
-        # side wins," the same real data already computed for the
-        # tp_extend rule below.
-        rr_for_reverse = SESSION_REVERSE_RR if SESSION_INVERT_SIGNALS else (win_mfe["avg"] if win_mfe else None)
-        if winrate is not None and closed_n and rr_for_reverse:
-            _risk_autotune_reverse("session", "session_invert_signals", SESSION_INVERT_SIGNALS, winrate, rr_for_reverse, closed_n, _set_session_invert,
-                                    avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
-        # SESSION_SL_MULT and SESSION_REVERSE_RR themselves only apply
-        # to the inverted trade's own sizing (see detect_session_
-        # manipulation()) — the non-inverted TP sits at the opposite
-        # range edge, an arbitrary distance unrelated to risk, so
-        # there's no consistent "R" to tune for that side. This app's
-        # records don't currently distinguish which mode a CLOSED trade
-        # was opened under, so — same level of rigor the rest of this
-        # already-approximate system uses — this reacts to the most
-        # recent aggregate stats under the assumption the reverse flag
-        # hasn't flipped recently (its own 24h cooldown makes that
-        # usually true), not a per-trade-exact reconstruction.
-        if SESSION_INVERT_SIGNALS:
-            if loss_mae:
-                _risk_autotune_sl_mult("session", "session_sl_mult", SESSION_SL_MULT, loss_mae["avg"], s.get("losses", 0) or 0, _set_session_sl_mult)
-            if win_mfe:
-                _risk_autotune_tp_extend("session", "session_reverse_rr", SESSION_REVERSE_RR, win_mfe["median"], SESSION_REVERSE_RR, closed_n, _set_session_reverse_rr,
-                                          bounds=RISK_AUTOTUNE_SESSION_RR_BOUNDS)
-    except Exception as e:
-        log_error(f"risk_autotune session: {e}")
-
-
-    try:
-        # v0.99.66, per direct user request ("инверсию с подгонкой
-        # стопа и тейка и расчетом rr. Автоматически как везде,
-        # автотюнинг"): unlike VGI (fixed right before this block —
-        # see that block's own docstring), XAU LG's R (risk = abs(
-        # entry-sl), set at signal time by _xau_lg_signal_dict()) is
-        # NOT defined in terms of XAU_LG_RR — risk comes from the raw
-        # candle's own entry-to-extreme distance (times XAU_LG_SL_
-        # BUFFER_MULT), completely independent of the RR multiplier
-        # used to derive TP. Same safe shape Session/EMA/DIV already
-        # use (R independent of the target being tuned), NOT VGI's
-        # self-referential trap (R defined VIA the tuned parameter) —
-        # confirmed by re-reading _xau_lg_signal_dict()'s own formula
-        # specifically to avoid repeating that exact mistake here.
-        # Both nudges apply unconditionally regardless of XAU_LG_
-        # INVERT_SIGNALS — see _xau_lg_signal_dict()'s own docstring:
-        # the same risk/TP formula is used in both directions, unlike
-        # Session's own invert-only sizing that needed a gate.
-        s = compute_xau_lg_signal_stats()
-        winrate = s.get("winrate")
-        closed_n = (s.get("wins", 0) or 0) + (s.get("losses", 0) or 0)
-        loss_mae = s.get("mae_r_losses_at_close")
-        win_mfe = s.get("mfe_r_wins_at_close")
-        if winrate is not None and closed_n:
-            _risk_autotune_reverse("xau_lg", "xau_lg_invert_signals", XAU_LG_INVERT_SIGNALS, winrate, XAU_LG_RR, closed_n, _set_xau_lg_invert,
-                                    avg_loss_mae_r=loss_mae["avg"] if loss_mae else None)
-        if loss_mae:
-            _risk_autotune_sl_mult("xau_lg", "xau_lg_sl_buffer_mult", XAU_LG_SL_BUFFER_MULT, loss_mae["avg"], s.get("losses", 0) or 0, _set_xau_lg_sl_buffer_mult)
-        if win_mfe:
-            _risk_autotune_tp_extend("xau_lg", "xau_lg_rr", XAU_LG_RR, win_mfe["median"], XAU_LG_RR, closed_n, _set_xau_lg_rr,
-                                      bounds=RISK_AUTOTUNE_XAU_LG_RR_BOUNDS)
-    except Exception as e:
-        log_error(f"risk_autotune xau_lg: {e}")
 
     try:
         # v0.98.10: per the same direct user request as VGI's block above.
@@ -17117,386 +16044,6 @@ def risk_autotune_loop():
 
 
 # ============================================================================
-# EXPERIMENTAL: XAU Liquidity Grab (v0.95.0) — functions
-# ----------------------------------------------------------------------------
-# Constants (XAU_LG_ENABLED, XAU_LG_SYMBOLS, etc.) are defined much earlier
-# in the file, right after the SESSION_NY_* constants — moved there in
-# v0.95.1 after a live NameError: the STATE dict (which references
-# XAU_LG_SIGNAL_HISTORY at construction time) is built long before this
-# point in the file's top-to-bottom execution order, so the constant has to
-# exist before STATE does, not just before these functions do. py_compile
-# only checks syntax, not execution order, so this class of bug doesn't
-# show up until the script actually runs — caught here from a live Termux
-# traceback, not from compiling locally beforehand.
-# ============================================================================
-
-
-def _xau_lg_signal_dict(i, c, direction, entry, extreme, level):
-    """v0.99.66 — shared signal-construction helper, used by both the
-    normal and inverted branches of xau_lg_detect_signals() below (was
-    inlined twice before this, now once): risk is XAU_LG_SL_BUFFER_MULT
-    times the raw candle's own entry-to-extreme distance (at the
-    default 1.0, identical to the old un-buffered behavior — this
-    multiplier is new, per direct user request ("подгонки стопа"),
-    auto-tuned the same way SESSION_SL_MULT/EMA_SL_ATR_MULT/DIV_SL_
-    ATR_MULT already are), TP is entry ± risk*XAU_LG_RR (also now
-    auto-tunable, was fixed 1:1 and "deliberately excluded"). Returns
-    None for a degenerate zero/negative-risk candle (same skip
-    condition the old inline `if risk > 0:` checks already had)."""
-    risk = abs(entry - extreme) * XAU_LG_SL_BUFFER_MULT
-    if risk <= 0:
-        return None
-    if direction == "LONG":
-        sl = entry - risk
-        tp = entry + risk * XAU_LG_RR
-    else:
-        sl = entry + risk
-        tp = entry - risk * XAU_LG_RR
-    return {"index": i, "time": c["time"], "direction": direction,
-            "entry": entry, "sl": sl, "tp": tp, "level": level, "rr": XAU_LG_RR}
-
-
-def xau_lg_detect_signals(candles, ema_period=XAU_LG_EMA_PERIOD, pivot_left=XAU_LG_PIVOT_LEFT, pivot_right=XAU_LG_PIVOT_RIGHT):
-    """Single walk-forward pass over `candles` (must be XAU_LG_TF, oldest
-    first) — maintains the nearest active (unbroken) pivot support/
-    resistance level as it goes, exactly like a live indicator would, and
-    returns every confirmed liquidity-grab signal found. No lookahead: a
-    pivot at bar j only becomes "active" once bar j+pivot_right has been
-    seen (the same confirmation delay real pivot indicators have — you
-    can't know bar j was a local extreme until pivot_right bars later
-    confirm nothing higher/lower followed), and each signal only uses the
-    close/EMA of its own trigger bar.
-    A level is "consumed" (retired) either by triggering a grab signal off
-    it, or by price closing cleanly through it without wicking back — in
-    both cases the next-confirmed pivot becomes the new active level.
-    Used identically for backtesting (feed the whole history) and live
-    scanning (feed recent history, check whether the LAST bar produced a
-    new signal) — same principle as detect_session_manipulation() serving
-    both callers.
-    v0.99.66, per direct user request ("инверсию с подгонкой стопа и
-    тейка и расчетом rr... автоматически как везде"): when XAU_LG_
-    INVERT_SIGNALS is on, each event fires the OPPOSITE-direction trade
-    instead — same reasoning as SESSION_INVERT_SIGNALS (see its own
-    docstring): the ORIGINAL risk distance (this candle's own entry-to-
-    extreme range, times XAU_LG_SL_BUFFER_MULT) becomes the inverted
-    trade's own risk too, just applied on the opposite side of a
-    swapped entry, with TP re-derived via the same risk*XAU_LG_RR
-    formula — never just flipping direction while keeping the original
-    (now directionally meaningless) TP/SL. Unlike Session, this needed
-    no special-casing for the inverted branch's OWN sizing rule: XAU
-    LG's TP was ALREADY risk-based in both modes from the start, so
-    inverting here is just entry/extreme swapping into _xau_lg_signal_
-    dict() with the flipped direction — see that helper's own
-    docstring for the exact risk/TP construction both branches share."""
-    n = len(candles)
-    if n < ema_period + pivot_left + pivot_right + 2:
-        return []
-    closes = [c["close"] for c in candles]
-    ema = compute_ema(closes, ema_period)
-    signals = []
-    active_support = None
-    active_resistance = None
-    for i in range(n):
-        confirm_idx = i - pivot_right
-        if confirm_idx - pivot_left >= 0:
-            cc = candles[confirm_idx]
-            is_high = (all(cc["high"] >= candles[confirm_idx - j]["high"] for j in range(1, pivot_left + 1)) and
-                       all(cc["high"] >= candles[confirm_idx + j]["high"] for j in range(1, pivot_right + 1)))
-            if is_high:
-                active_resistance = cc["high"]
-            is_low = (all(cc["low"] <= candles[confirm_idx - j]["low"] for j in range(1, pivot_left + 1)) and
-                      all(cc["low"] <= candles[confirm_idx + j]["low"] for j in range(1, pivot_right + 1)))
-            if is_low:
-                active_support = cc["low"]
-        c = candles[i]
-        if active_support is not None:
-            if c["low"] < active_support <= c["close"]:
-                if c["close"] > ema[i]:
-                    if not XAU_LG_INVERT_SIGNALS:
-                        sig = _xau_lg_signal_dict(i, c, "LONG", c["high"], c["low"], active_support)
-                    else:
-                        sig = _xau_lg_signal_dict(i, c, "SHORT", c["low"], c["high"], active_support)
-                    if sig:
-                        signals.append(sig)
-                active_support = None
-            elif c["close"] < active_support:
-                active_support = None
-        if active_resistance is not None:
-            if c["high"] > active_resistance >= c["close"]:
-                if c["close"] < ema[i]:
-                    if not XAU_LG_INVERT_SIGNALS:
-                        sig = _xau_lg_signal_dict(i, c, "SHORT", c["low"], c["high"], active_resistance)
-                    else:
-                        sig = _xau_lg_signal_dict(i, c, "LONG", c["high"], c["low"], active_resistance)
-                    if sig:
-                        signals.append(sig)
-                active_resistance = None
-            elif c["close"] > active_resistance:
-                active_resistance = None
-    return signals
-
-
-def xau_lg_track_outcome(candles, sig, max_wait_bars=200):
-    """Walks forward from sig['index']+1 looking for TP/SL touch — SL
-    checked first on any bar covering both, same conservative convention
-    as track_session_outcome()."""
-    n = len(candles)
-    for k in range(sig["index"] + 1, min(n, sig["index"] + 1 + max_wait_bars)):
-        c = candles[k]
-        if sig["direction"] == "LONG":
-            if c["low"] <= sig["sl"]:
-                return "LOSS", c["time"]
-            if c["high"] >= sig["tp"]:
-                return "WIN", c["time"]
-        else:
-            if c["high"] >= sig["sl"]:
-                return "LOSS", c["time"]
-            if c["low"] <= sig["tp"]:
-                return "WIN", c["time"]
-    return "TIMEOUT", None
-
-
-def xau_lg_backtest_symbol(symbol, days=XAU_LG_BACKTEST_DAYS):
-    """Fetches XAU_LG_BACKTEST_DAYS of XAU_LG_TF history and runs the
-    detector + outcome tracker over the WHOLE window in one pass — much
-    cheaper than Session's per-day walk since this pattern isn't anchored
-    to a specific time of day, just scanned continuously."""
-    now = time.time()
-    fetch_start = now - days * 86400
-    candles = get_candles_range(symbol, XAU_LG_TF, fetch_start, now)
-    if len(candles) < XAU_LG_EMA_PERIOD + 10:
-        return []
-    sigs = xau_lg_detect_signals(candles)
-    results = []
-    for sig in sigs:
-        result, exit_time = xau_lg_track_outcome(candles, sig)
-        results.append({
-            "time": sig["time"], "direction": sig["direction"],
-            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
-            "result": result, "exit_time": exit_time, "rr": sig.get("rr"),
-        })
-    return results
-
-
-def xau_lg_summarize_backtest(results):
-    total = len(results)
-    if not total:
-        return {"n": 0, "win_rate": None, "wins": 0, "losses": 0, "timeouts": 0}
-    wins = sum(1 for r in results if r["result"] == "WIN")
-    losses = sum(1 for r in results if r["result"] == "LOSS")
-    timeouts = sum(1 for r in results if r["result"] == "TIMEOUT")
-    closed = wins + losses
-    win_rate = round(wins / closed * 100, 1) if closed else None
-    return {"n": total, "win_rate": win_rate, "wins": wins, "losses": losses, "timeouts": timeouts}
-
-
-_xau_lg_signal_cooldowns = {}  # symbol -> last signaled bar time
-_xau_lg_signal_cooldowns_lock = threading.Lock()
-
-
-def xau_lg_scan_symbol_live(symbol):
-    """Live counterpart to xau_lg_backtest_symbol() — fetches recent
-    history, runs the SAME detector, and fires only if the LAST candle
-    produced a brand-new signal not already seen for this symbol."""
-    if not XAU_LG_ENABLED:
-        return
-    try:
-        candles = get_candles(symbol, interval=XAU_LG_TF, limit=XAU_LG_EMA_PERIOD + 80)
-        interval_sec = INTERVAL_SECONDS.get(XAU_LG_TF, 900)
-        now = time.time()
-        candles = [c for c in candles if c["time"] + interval_sec <= now]  # drop still-forming candle, same reasoning as scan_symbol_session_live
-        if len(candles) < XAU_LG_EMA_PERIOD + 10:
-            return
-        sigs = xau_lg_detect_signals(candles)
-        if not sigs:
-            return
-        sig = sigs[-1]
-        if sig["index"] != len(candles) - 1:
-            return  # most recent signal isn't off the latest closed candle — already stale/handled
-        with _xau_lg_signal_cooldowns_lock:
-            if _xau_lg_signal_cooldowns.get(symbol) == sig["time"]:
-                return
-            _xau_lg_signal_cooldowns[symbol] = sig["time"]
-        if has_open_signal_any_module(symbol, exclude="xau_lg_signals"):
-            return
-        record = {
-            "symbol": symbol, "direction": sig["direction"],
-            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
-            "level": sig["level"], "time": sig["time"], "rr": sig.get("rr"),
-            "detected_at": time.time(), "status": "OPEN", "result": None,
-            "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
-            "mfe_r": 0.0, "mae_r": 0.0, "mfe_price": None, "mae_price": None,
-            "mfe_r_at_close": None, "mae_r_at_close": None,
-        }
-        with state_lock:
-            STATE["xau_lg_signals"].appendleft(record)
-        if AUTOTRADE_ENABLED_XAU_LG:
-            execute_autotrade("xau_lg", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
-            sim_execute_trade("xau_lg", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
-                               AUTOTRADE_LEVERAGE_XAU_LG, record)
-        arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
-        send_telegram(
-            f"{arrow} {symbol} (XAU liquidity grab — ЭКСПЕРИМЕНТАЛЬНО)\n"
-            f"entry: {sig['entry']:.6g}\n"
-            f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}",
-            category="xau_lg",
-        )
-    except Exception as e:
-        log_error(f"xau_lg_live {symbol}: {e}")
-
-
-def update_xau_lg_signal_outcomes():
-    """v0.99.66, per direct user request ("автотюнинг... автоматически
-    как везде"): now also tracks mfe_r/mae_r (R = abs(entry-sl), this
-    trade's own actual risk — set once by _xau_lg_signal_dict()/
-    xau_lg_scan_symbol_live() at signal creation, so it naturally
-    reflects whatever XAU_LG_SL_BUFFER_MULT was in effect at the time)
-    as it walks forward, freezing mfe_r_at_close/mae_r_at_close once a
-    trade resolves — same shape as update_session_signal_outcomes()."""
-    now = time.time()
-    with state_lock:
-        open_signals = [s for s in STATE["xau_lg_signals"] if s["status"] == "OPEN"]
-    all_candles = fetch_candles_concurrent([(s["symbol"], XAU_LG_TF, 300) for s in open_signals])
-    xau_lg_interval_sec = INTERVAL_SECONDS.get(XAU_LG_TF, 900)
-    for sig, candles in zip(open_signals, all_candles):
-        try:
-            if candles is None:
-                continue
-            candles = [c for c in candles if c["time"] + xau_lg_interval_sec <= now]  # v0.98.8: drop still-forming candle
-            future = [c for c in candles if c["time"] > sig["time"]]
-            direction = sig["direction"]
-            entry = sig["entry"]
-            risk = abs(entry - sig["sl"]) or 1e-9
-            result = None
-            exit_price = None
-            exit_time = None
-            for c in future:
-                if direction == "LONG":
-                    fav, adv = c["high"] - entry, entry - c["low"]
-                else:
-                    fav, adv = entry - c["low"], c["high"] - entry
-                fav_r, adv_r = fav / risk, adv / risk
-                if fav_r > sig["mfe_r"] or adv_r > sig["mae_r"]:
-                    with state_lock:
-                        if fav_r > sig["mfe_r"]:
-                            sig["mfe_r"] = round(fav_r, 3)
-                            sig["mfe_price"] = c["high"] if direction == "LONG" else c["low"]
-                        if adv_r > sig["mae_r"]:
-                            sig["mae_r"] = round(adv_r, 3)
-                            sig["mae_price"] = c["low"] if direction == "LONG" else c["high"]
-                if direction == "LONG":
-                    if c["low"] <= sig["sl"]:
-                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
-                        break
-                    if c["high"] >= sig["tp"]:
-                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
-                        break
-                else:
-                    if c["high"] >= sig["sl"]:
-                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
-                        break
-                    if c["low"] <= sig["tp"]:
-                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
-                        break
-            # Timeout removed per direct request — see the same removal in
-            # update_divergence_outcomes()'s comment for the full reasoning
-            # (applied consistently across every module that had one,
-            # including this one — found on a second pass, since this
-            # timeout was an inline literal (24 * 3600) rather than a
-            # named constant, so it didn't show up in the first search
-            # for other modules' timeout constants).
-            with state_lock:
-                if result:
-                    sig["status"] = "CLOSED"
-                    sig["result"] = result
-                    sig["exit_price"] = exit_price
-                    sig["exit_time"] = exit_time
-                    sig["mfe_r_at_close"] = sig["mfe_r"]
-                    sig["mae_r_at_close"] = sig["mae_r"]
-        except Exception as e:
-            log_error(f"xau_lg_outcome {sig['symbol']}: {e}")
-
-
-def compute_xau_lg_signal_stats():
-    with state_lock:
-        signals = list(STATE["xau_lg_signals"])
-    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
-    wins = sum(1 for s in closed if s["result"] == "WIN")
-    losses = sum(1 for s in closed if s["result"] == "LOSS")
-    timeouts = sum(1 for s in signals if s.get("result") == "TIMEOUT")
-    open_n = sum(1 for s in signals if s["status"] == "OPEN")
-    total_closed = len(closed)
-    winrate = round(wins / total_closed * 100, 1) if total_closed else None
-
-    # v0.99.66, per direct user request ("автотюнинг... автоматически
-    # как везде"): same agg() shape compute_session_signal_stats()
-    # already uses — feeds risk_autotune_pass()'s new xau_lg block
-    # (reverse-flip, SL-buffer nudge, RR/TP-extend nudge).
-    def agg(key, subset):
-        vals = [s[key] for s in subset if s.get(key) is not None]
-        if not vals:
-            return None
-        vals_sorted = sorted(vals)
-        n = len(vals_sorted)
-        return {
-            "avg": round(sum(vals) / n, 3), "median": round(vals_sorted[n // 2], 3),
-            "p25": round(vals_sorted[int(n * 0.25)], 3),
-            "p75": round(vals_sorted[min(int(n * 0.75), n - 1)], 3), "n": n,
-        }
-
-    win_set = [s for s in closed if s["result"] == "WIN"]
-    loss_set = [s for s in closed if s["result"] == "LOSS"]
-    return {"total": len(signals), "wins": wins, "losses": losses, "timeouts": timeouts,
-            "open": open_n, "winrate": winrate,
-            "mfe_r_wins_at_close": agg("mfe_r_at_close", win_set), "mae_r_wins_at_close": agg("mae_r_at_close", win_set),
-            "mfe_r_losses_at_close": agg("mfe_r_at_close", loss_set), "mae_r_losses_at_close": agg("mae_r_at_close", loss_set)}
-
-
-def xau_lg_backtest_loop():
-    while True:
-        try:
-            if not XAU_LG_ENABLED:
-                time.sleep(60)
-                continue
-            t0 = time.time()
-            results_by_symbol = {}
-            summary_by_symbol = {}
-            for symbol in XAU_LG_SYMBOLS:
-                try:
-                    results = xau_lg_backtest_symbol(symbol)
-                    results_by_symbol[symbol] = results
-                    summary_by_symbol[symbol] = xau_lg_summarize_backtest(results)
-                except Exception as e:
-                    log_error(f"xau_lg_backtest {symbol}: {e}")
-            with state_lock:
-                STATE["xau_lg_backtest_results"] = results_by_symbol
-                STATE["xau_lg_backtest_summary"] = summary_by_symbol
-                STATE["xau_lg_last_backtest_finished"] = time.time()
-                STATE["xau_lg_last_backtest_duration"] = round(time.time() - t0, 1)
-        except Exception as e:
-            log_error(f"xau_lg_backtest_loop: {e}")
-        time.sleep(max(300, XAU_LG_REFRESH_SEC))
-
-
-def xau_lg_live_loop():
-    while True:
-        try:
-            if not XAU_LG_ENABLED:
-                time.sleep(60)
-                continue
-            with ThreadPoolExecutor(max_workers=min(WORKERS, len(XAU_LG_SYMBOLS) or 1)) as ex:
-                futs = [ex.submit(xau_lg_scan_symbol_live, s) for s in XAU_LG_SYMBOLS]
-                for _ in as_completed(futs):
-                    pass
-            update_xau_lg_signal_outcomes()
-        except Exception as e:
-            log_error(f"xau_lg_live_loop: {e}")
-        time.sleep(max(60, XAU_LG_SCAN_INTERVAL_SEC))
-
-
-# ============================================================================
-# END EXPERIMENTAL: XAU Liquidity Grab
-# ============================================================================
 
 
 # ============================================================================
@@ -17510,8 +16057,8 @@ def msnr_build_pivots(structure_candles, pivot_left=MSNR_PIVOT_LEFT, pivot_right
     oldest first) building confirmed OCL pivots off the CLOSE line — never
     high/low, per the source's "Open-Close Level" definition. A close-pivot
     at bar j only becomes confirmed once bar j+pivot_right has been seen
-    (same no-lookahead confirmation delay as xau_lg_detect_signals()'s
-    high/low pivots). Alternates strictly A/V (a new A-shape can't follow
+    (same no-lookahead confirmation delay every other pivot-based
+    detector in this file uses). Alternates strictly A/V (a new A-shape can't follow
     another A-shape — the intervening V is what makes it a genuine
     impulsive leg) and only keeps a pivot whose distance from the
     previous opposite pivot is >= min_leg_atr x ATR(atr_period) at that
@@ -17529,12 +16076,7 @@ def msnr_build_pivots(structure_candles, pivot_left=MSNR_PIVOT_LEFT, pivot_right
     avg-RR on trades that used information not really available yet)
     and in live scanning (msnr_scan_symbol_live() runs this exact same
     function), a real lookahead bug this function's own docstring
-    claimed not to have. Reference: xau_lg_detect_signals() (single-
-    timeframe, so it can just use loop index i = confirm_idx+pivot_right
-    directly) activates its own pivot at the CLOSE of the confirming
-    bar, not the pivot bar itself — same principle, just needing an
-    explicit timestamp here since structure_candles (1h) and
-    entry_candles (15m) are different series. Fixed to the close time
+    claimed not to have. Fixed to the close time
     of the actual confirming bar: structure_candles[confirm_idx +
     pivot_right]["time"] + <structure interval seconds> — matches the
     exact "has this bar closed yet" convention msnr_scan_symbol_live()
@@ -17582,7 +16124,7 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
                          qm_zone_pct=MSNR_QM_ZONE_PCT, qm_lookback=MSNR_QM_LOOKBACK_BARS,
                          sl_buffer_mult=MSNR_SL_BUFFER_MULT, fallback_rr=MSNR_FALLBACK_RR):
     """Combined walk-forward pass, no lookahead — mirrors detect_session_
-    manipulation()/xau_lg_detect_signals() in spirit. Builds confirmed A-
+    manipulation() in spirit. Builds confirmed A-
     shape/V-shape OCL pivots off structure_candles as it goes (via
     msnr_build_pivots(), pre-computed since it doesn't depend on
     entry_candles at all), then walks entry_candles watching for a QM
@@ -17613,8 +16155,7 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
     Trusting that per-symbol filter fully now instead of a blanket
     global ceiling that couldn't tell a genuinely unreachable target
     from a genuinely rare-but-profitable one.
-    A level only fires once per "reign" (consumed on signal, same as
-    xau_lg's active_support=None pattern) — replaced by the next
+    A level only fires once per "reign" (consumed on signal) — replaced by the next
     confirmed pivot of that type resets it.
     Returns (signals, pivots). signals: list of dicts with index (into
     entry_candles), time, direction, entry, sl, tp, level, level_type."""
@@ -17768,7 +16309,7 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
 def msnr_track_outcome(entry_candles, sig, max_wait_bars=300):
     """Walks forward from sig['index']+1 looking for TP/SL touch — SL
     checked first on any bar covering both, same conservative convention
-    as track_session_outcome()/xau_lg_track_outcome()."""
+    as track_session_outcome()."""
     n = len(entry_candles)
     for k in range(sig["index"] + 1, min(n, sig["index"] + 1 + max_wait_bars)):
         c = entry_candles[k]
@@ -20671,7 +19212,7 @@ def mirror_build_universe():
 def mirror_track_outcome(candles, sig, max_wait_bars=MIRROR_MAX_WAIT_BARS):
     """Walks forward from sig['entry_idx']+1 looking for TP/SL touch —
     SL checked first on any bar covering both, same conservative
-    convention as xau_lg_track_outcome()."""
+    convention track_session_outcome() and msnr_track_outcome() already use."""
     n = len(candles)
     for k in range(sig["entry_idx"] + 1, min(n, sig["entry_idx"] + 1 + max_wait_bars)):
         c = candles[k]
@@ -21043,7 +19584,7 @@ def _mirror_track_signal_outcomes(signal_key):
 
 
 def update_mirror_signal_outcomes():
-    """Same MFE/MAE-tracking shape as update_xau_lg_signal_outcomes().
+    """Same MFE/MAE-tracking shape as update_scalp_signal_outcomes().
     v0.99.99, per direct user follow-up ("тайм аут тоже добавь но надо
     знать как закрылась сделка по таймауту в плюс или минус"): adds the
     TIMEOUT-closing branch after all, reversing v0.99.98's own decision
@@ -21235,19 +19776,16 @@ def mirror_live_loop():
 # ----------------------------------------------------------------------------
 @app.route("/api/overview")
 def api_overview():
-    """Compact win-rate summary across all four modes, for the persistent
-    header — one call instead of hitting four separate endpoints on
+    """Compact win-rate summary across Volume Profile and Scalp, for the
+    persistent header — one call instead of hitting separate endpoints on
     every poll regardless of which tab is open."""
     vp = compute_signal_stats()
     scalp = compute_scalp_signal_stats()
-    session = compute_session_signal_stats()
     return jsonify({
         "volume": {"winrate": vp["winrate"], "wins": vp["wins"], "losses": vp["losses"], "open": vp["open"],
                     "enabled": VOLUME_PROFILE_ENABLED},
         "scalp": {"winrate": scalp["win_rate"], "wins": scalp["wins"], "losses": scalp["losses"], "timeouts": scalp["timeouts"], "open": scalp["open"],
                    "enabled": SCALP_SIGNALS_ENABLED},
-        "session": {"winrate": session["winrate"], "wins": session["wins"], "losses": session["losses"], "open": session["open"],
-                     "enabled": SESSION_ENABLED},
     })
 
 
@@ -21523,364 +20061,8 @@ def api_reset_scalp():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-@app.route("/api/session/status")
-def api_session_status():
-    with state_lock:
-        universe = list(STATE["session_universe"])
-        summaries = dict(STATE["session_backtest_summary"])
-        last_backtest_finished = STATE["session_last_backtest_finished"]
-        last_backtest_duration = STATE["session_last_backtest_duration"]
-        symbols_done = STATE["session_symbols_done"]
-        next_open_ts = STATE["session_next_open_ts"]
-    ranked = []
-    zero_manipulation_count = 0
-    not_yet_processed_count = 0
-    for symbol in universe:
-        s = summaries.get(symbol)
-        if s is None:
-            not_yet_processed_count += 1
-            continue
-        if not s.get("n"):
-            zero_manipulation_count += 1  # in the universe (passed the liquidity filter), backtested, just never showed a qualifying manipulation — NOT excluded for being illiquid
-            continue
-        row = dict(s)
-        row["symbol"] = symbol
-        row["meets_min_sample"] = s["n"] >= SESSION_MIN_SAMPLE
-        ranked.append(row)
-    ranked.sort(key=lambda r: (-1 if r["meets_min_sample"] else 0, r["win_rate"] or 0, r["n"]), reverse=True)
-    watch_symbols = {}
-    for sym in ("BTC_USDT", "ETH_USDT"):
-        in_universe = sym in universe
-        s = summaries.get(sym)
-        watch_symbols[sym] = {
-            "in_universe": in_universe,
-            "n": s.get("n") if s else None,
-            "status": ("not_in_universe" if not in_universe else
-                       "not_yet_processed" if s is None else
-                       "zero_manipulations_found" if not s.get("n") else "ranked"),
-        }
-    return jsonify({
-        "enabled": SESSION_ENABLED,
-        "universe_size": len(universe),
-        "symbols_done": symbols_done,
-        "zero_manipulation_count": zero_manipulation_count,
-        "not_yet_processed_count": not_yet_processed_count,
-        "watch_symbols": watch_symbols,
-        "last_backtest_finished": last_backtest_finished,
-        "last_backtest_duration": last_backtest_duration,
-        "next_open_ts": next_open_ts,
-        "signals_stats": compute_session_signal_stats(),
-        "config": {
-            "utc_offset_hours": SESSION_UTC_OFFSET_HOURS, "open_hour_local": SESSION_OPEN_HOUR_LOCAL,
-            "range_tf": SESSION_RANGE_TF, "range_start_utc_hour": SESSION_RANGE_START_UTC_HOUR,
-            "manipulation_window_min": SESSION_MANIPULATION_WINDOW_MIN,
-            "min_sample": SESSION_MIN_SAMPLE, "backtest_days": SESSION_BACKTEST_DAYS,
-            "invert_signals": SESSION_INVERT_SIGNALS,
-            "sl_mult": SESSION_SL_MULT, "reverse_rr": SESSION_REVERSE_RR,
-        },
-        "top": ranked,
-    })
 
 
-@app.route("/api/session/signals")
-def api_session_signals():
-    with state_lock:
-        return jsonify(list(STATE["session_signals"]))
-
-
-@app.route("/api/session/symbol/<symbol>")
-def api_session_symbol(symbol):
-    with state_lock:
-        results = STATE["session_backtest_results"].get(symbol)
-        summary = STATE["session_backtest_summary"].get(symbol)
-    if results is None:
-        return jsonify({"error": "no data for this symbol yet"}), 404
-    return jsonify({"symbol": symbol, "summary": summary, "results": results})
-
-
-@app.route("/api/session/chart/<symbol>")
-def api_session_chart(symbol):
-    """Re-derives the manipulation for one specific session open by
-    re-running detect_session_manipulation() on freshly fetched candles
-    — works identically for a past backtest day or a live signal, since
-    both are just (symbol, session_open) and the detection is fully
-    deterministic from the candle data alone, no need to look anything
-    up from stored records."""
-    try:
-        session_open = float(request.args.get("session_open"))
-        range_start_dt = datetime.datetime.fromtimestamp(session_open, tz=datetime.timezone.utc).replace(
-            hour=SESSION_RANGE_START_UTC_HOUR, minute=0, second=0, microsecond=0)
-        fetch_start = range_start_dt.timestamp() - 2 * 3600
-        fetch_end = session_open + SESSION_MANIPULATION_WINDOW_MIN * 60 + 8 * 3600
-        candles = get_candles_range(symbol, SESSION_RANGE_TF, fetch_start, fetch_end)
-        sig = detect_session_manipulation(candles, session_open)
-        result = None
-        exit_time = None
-        exit_price = None
-        if sig:
-            result, exit_time = track_session_outcome(candles, sig)
-            if result == "WIN":
-                exit_price = sig["tp"]
-            elif result == "LOSS":
-                exit_price = sig["sl"]
-        return jsonify({
-            "symbol": symbol, "candles": candles, "session_open": session_open,
-            "signal": sig, "result": result, "exit_time": exit_time, "exit_price": exit_price,
-        })
-    except Exception as e:
-        log_error(f"api_session_chart {symbol}: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/reset/session", methods=["POST"])
-def api_reset_session():
-    try:
-        with state_lock:
-            STATE["session_universe"] = []
-            STATE["session_backtest_results"] = {}
-            STATE["session_backtest_summary"] = {}
-            STATE["session_last_backtest_started"] = None
-            STATE["session_last_backtest_finished"] = None
-            STATE["session_last_backtest_duration"] = None
-            STATE["session_symbols_done"] = 0
-            STATE["session_signals"].clear()
-        return jsonify({"ok": True})
-    except Exception as e:
-        log_error(f"api_reset_session: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/api/session_ny/status")
-def api_session_ny_status():
-    """New York counterpart of api_session_status() — identical shape,
-    own STATE/constants throughout."""
-    with state_lock:
-        universe = list(STATE["session_ny_universe"])
-        summaries = dict(STATE["session_ny_backtest_summary"])
-        last_backtest_finished = STATE["session_ny_last_backtest_finished"]
-        last_backtest_duration = STATE["session_ny_last_backtest_duration"]
-        symbols_done = STATE["session_ny_symbols_done"]
-        next_open_ts = STATE["session_ny_next_open_ts"]
-    ranked = []
-    zero_manipulation_count = 0
-    not_yet_processed_count = 0
-    for symbol in universe:
-        s = summaries.get(symbol)
-        if s is None:
-            not_yet_processed_count += 1
-            continue
-        if not s.get("n"):
-            zero_manipulation_count += 1
-            continue
-        row = dict(s)
-        row["symbol"] = symbol
-        row["meets_min_sample"] = s["n"] >= SESSION_NY_MIN_SAMPLE
-        ranked.append(row)
-    ranked.sort(key=lambda r: (-1 if r["meets_min_sample"] else 0, r["win_rate"] or 0, r["n"]), reverse=True)
-    watch_symbols = {}
-    for sym in ("BTC_USDT", "ETH_USDT"):
-        in_universe = sym in universe
-        s = summaries.get(sym)
-        watch_symbols[sym] = {
-            "in_universe": in_universe,
-            "n": s.get("n") if s else None,
-            "status": ("not_in_universe" if not in_universe else
-                       "not_yet_processed" if s is None else
-                       "zero_manipulations_found" if not s.get("n") else "ranked"),
-        }
-    return jsonify({
-        "enabled": SESSION_NY_ENABLED,
-        "universe_size": len(universe),
-        "symbols_done": symbols_done,
-        "zero_manipulation_count": zero_manipulation_count,
-        "not_yet_processed_count": not_yet_processed_count,
-        "watch_symbols": watch_symbols,
-        "last_backtest_finished": last_backtest_finished,
-        "last_backtest_duration": last_backtest_duration,
-        "next_open_ts": next_open_ts,
-        "signals_stats": compute_session_ny_signal_stats(),
-        "config": {
-            "utc_offset_hours": SESSION_NY_UTC_OFFSET_HOURS, "open_hour_local": SESSION_NY_OPEN_HOUR_LOCAL,
-            "open_minute_local": SESSION_NY_OPEN_MINUTE_LOCAL,
-            "range_tf": SESSION_NY_RANGE_TF, "range_start_utc_hour": SESSION_NY_RANGE_START_UTC_HOUR,
-            "manipulation_window_min": SESSION_NY_MANIPULATION_WINDOW_MIN,
-            "min_sample": SESSION_NY_MIN_SAMPLE, "backtest_days": SESSION_NY_BACKTEST_DAYS,
-            "invert_signals": SESSION_NY_INVERT_SIGNALS,
-        },
-        "top": ranked,
-    })
-
-
-@app.route("/api/session_ny/signals")
-def api_session_ny_signals():
-    with state_lock:
-        return jsonify(list(STATE["session_ny_signals"]))
-
-
-@app.route("/api/session_ny/symbol/<symbol>")
-def api_session_ny_symbol(symbol):
-    with state_lock:
-        results = STATE["session_ny_backtest_results"].get(symbol)
-        summary = STATE["session_ny_backtest_summary"].get(symbol)
-    if results is None:
-        return jsonify({"error": "no data for this symbol yet"}), 404
-    return jsonify({"symbol": symbol, "summary": summary, "results": results})
-
-
-@app.route("/api/session_ny/chart/<symbol>")
-def api_session_ny_chart(symbol):
-    """New York counterpart of api_session_chart() — same re-derive-from-
-    fresh-candles approach, own detection/outcome functions."""
-    try:
-        session_open = float(request.args.get("session_open"))
-        range_start_dt = datetime.datetime.fromtimestamp(session_open, tz=datetime.timezone.utc).replace(
-            hour=SESSION_NY_RANGE_START_UTC_HOUR, minute=0, second=0, microsecond=0)
-        fetch_start = range_start_dt.timestamp() - 2 * 3600
-        fetch_end = session_open + SESSION_NY_MANIPULATION_WINDOW_MIN * 60 + 8 * 3600
-        candles = get_candles_range(symbol, SESSION_NY_RANGE_TF, fetch_start, fetch_end)
-        sig = detect_session_ny_manipulation(candles, session_open)
-        result = None
-        exit_time = None
-        exit_price = None
-        if sig:
-            result, exit_time = track_session_ny_outcome(candles, sig)
-            if result == "WIN":
-                exit_price = sig["tp"]
-            elif result == "LOSS":
-                exit_price = sig["sl"]
-        return jsonify({
-            "symbol": symbol, "candles": candles, "session_open": session_open,
-            "signal": sig, "result": result, "exit_time": exit_time, "exit_price": exit_price,
-        })
-    except Exception as e:
-        log_error(f"api_session_ny_chart {symbol}: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/reset/session_ny", methods=["POST"])
-def api_reset_session_ny():
-    try:
-        with state_lock:
-            STATE["session_ny_universe"] = []
-            STATE["session_ny_backtest_results"] = {}
-            STATE["session_ny_backtest_summary"] = {}
-            STATE["session_ny_last_backtest_started"] = None
-            STATE["session_ny_last_backtest_finished"] = None
-            STATE["session_ny_last_backtest_duration"] = None
-            STATE["session_ny_symbols_done"] = 0
-            STATE["session_ny_signals"].clear()
-        return jsonify({"ok": True})
-    except Exception as e:
-        log_error(f"api_reset_session_ny: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/api/xau_lg/status")
-def api_xau_lg_status():
-    """EXPERIMENTAL — see the XAU_LG module's own header comment."""
-    with state_lock:
-        summary = dict(STATE["xau_lg_backtest_summary"])
-        last_backtest_finished = STATE["xau_lg_last_backtest_finished"]
-        last_backtest_duration = STATE["xau_lg_last_backtest_duration"]
-    ranked = [dict(s, symbol=sym) for sym, s in summary.items()]
-    ranked.sort(key=lambda r: (r["win_rate"] or 0, r["n"]), reverse=True)
-    return jsonify({
-        "enabled": XAU_LG_ENABLED,
-        "symbols": XAU_LG_SYMBOLS,
-        "last_backtest_finished": last_backtest_finished,
-        "last_backtest_duration": last_backtest_duration,
-        "signals_stats": compute_xau_lg_signal_stats(),
-        "config": {
-            "tf": XAU_LG_TF, "ema_period": XAU_LG_EMA_PERIOD,
-            "pivot_left": XAU_LG_PIVOT_LEFT, "pivot_right": XAU_LG_PIVOT_RIGHT,
-            "rr": XAU_LG_RR, "backtest_days": XAU_LG_BACKTEST_DAYS,
-            "invert_signals": XAU_LG_INVERT_SIGNALS, "sl_buffer_mult": XAU_LG_SL_BUFFER_MULT,
-        },
-        "top": ranked,
-    })
-
-
-@app.route("/api/xau_lg/chart/<symbol>")
-def api_xau_lg_chart(symbol):
-    """v0.99.66, per direct user request ("графическое отображение
-    графиков как везде"). Looks up the signal's OWN already-recorded
-    entry/sl/tp/direction/rr from stored data — live STATE["xau_lg_
-    signals"] first, then this symbol's own backtest results — rather
-    than re-deriving via a fresh xau_lg_detect_signals() call with
-    CURRENT live params. Same fix already applied to api_msnr_chart()
-    (see that route's own docstring for the full incident): XAU_LG_RR/
-    XAU_LG_SL_BUFFER_MULT/XAU_LG_INVERT_SIGNALS are now all auto-tuned
-    and can drift between when a trade was found and when its chart is
-    later opened — re-deriving with today's params could silently fail
-    to reproduce yesterday's signal, or reproduce a different one."""
-    try:
-        sig_time = request.args.get("time")
-        found_sig = None
-        found_result = None
-        found_exit_time = None
-        found_exit_price = None
-        if sig_time:
-            target = float(sig_time)
-            interval_sec = INTERVAL_SECONDS.get(XAU_LG_TF, 900)
-            with state_lock:
-                live_match = next((s for s in STATE["xau_lg_signals"]
-                                    if s["symbol"] == symbol and abs(s["time"] - target) < interval_sec), None)
-                bt_trades = list(STATE["xau_lg_backtest_results"].get(symbol, []))
-            if live_match:
-                found_sig = {"time": live_match["time"], "direction": live_match["direction"],
-                              "entry": live_match["entry"], "sl": live_match["sl"], "tp": live_match["tp"],
-                              "level": live_match.get("level"), "rr": live_match.get("rr")}
-                found_result = live_match.get("result")
-                found_exit_time = live_match.get("exit_time")
-                found_exit_price = live_match.get("exit_price")
-            else:
-                bt_match = next((t for t in bt_trades if abs(t["time"] - target) < interval_sec), None)
-                if bt_match:
-                    found_sig = {"time": bt_match["time"], "direction": bt_match["direction"],
-                                  "entry": bt_match["entry"], "sl": bt_match["sl"], "tp": bt_match["tp"],
-                                  "level": bt_match.get("level"), "rr": bt_match.get("rr")}
-                    found_result = bt_match.get("result")
-                    found_exit_time = bt_match.get("exit_time")
-                    if found_result == "WIN":
-                        found_exit_price = bt_match["tp"]
-                    elif found_result == "LOSS":
-                        found_exit_price = bt_match["sl"]
-        if found_sig is None:
-            return jsonify({"error": "сигнал не найден"}), 404
-        interval_sec = INTERVAL_SECONDS.get(XAU_LG_TF, 900)
-        fetch_start = found_sig["time"] - (XAU_LG_EMA_PERIOD + XAU_LG_PIVOT_LEFT + XAU_LG_PIVOT_RIGHT + 30) * interval_sec
-        fetch_end = (found_exit_time + 6 * interval_sec) if found_exit_time else (found_sig["time"] + 200 * interval_sec)
-        candles = get_candles_range(symbol, XAU_LG_TF, fetch_start, fetch_end)
-        return jsonify({
-            "symbol": symbol, "candles": candles[-250:], "time": found_sig["time"],
-            "direction": found_sig["direction"], "entry": found_sig["entry"],
-            "sl": found_sig["sl"], "tp": found_sig["tp"], "rr": found_sig.get("rr"),
-            "result": found_result, "exit_time": found_exit_time, "exit_price": found_exit_price,
-        })
-    except Exception as e:
-        log_error(f"api_xau_lg_chart {symbol}: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/xau_lg/signals")
-def api_xau_lg_signals():
-    with state_lock:
-        return jsonify(list(STATE["xau_lg_signals"]))
-
-
-@app.route("/api/reset/xau_lg", methods=["POST"])
-def api_reset_xau_lg():
-    try:
-        with state_lock:
-            STATE["xau_lg_backtest_results"] = {}
-            STATE["xau_lg_backtest_summary"] = {}
-            STATE["xau_lg_last_backtest_finished"] = None
-            STATE["xau_lg_last_backtest_duration"] = None
-            STATE["xau_lg_signals"].clear()
-        return jsonify({"ok": True})
-    except Exception as e:
-        log_error(f"api_reset_xau_lg: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/mirror/status")
@@ -21923,7 +20105,7 @@ def api_mirror_status():
 def api_mirror_chart(symbol):
     """Same "look up the signal's own already-recorded entry/sl/tp,
     don't re-derive with CURRENT live params" fix already applied to
-    api_msnr_chart()/api_xau_lg_chart() (see either's own docstring for
+    api_msnr_chart() (see its own docstring for
     the full incident this avoids) — MIRROR_RR/MIRROR_TOUCH_TOLERANCE_
     PCT/MIRROR_PATTERN_TOLERANCE_PCT could all drift between when a
     trade fired and when its chart is later opened."""
@@ -22499,9 +20681,6 @@ def api_reset_risk_autotune():
     try:
         _set_scalp_min_rr(0.5)
         _set_scalp_sl_buffer_mult(0.25)
-        _set_session_invert(False)
-        _set_session_sl_mult(1.5)
-        _set_session_reverse_rr(2.0)
         _set_ft5_invert(False)
         _set_msnr_max_rr(8.0)
         with state_lock:
@@ -22585,9 +20764,7 @@ def api_autotrade_status():
         "skipped": skipped, "errors": errors,
         "enabled": {
             "bounce": AUTOTRADE_ENABLED_BOUNCE, "breakout": AUTOTRADE_ENABLED_BREAKOUT,
-            "ema": AUTOTRADE_ENABLED_EMA,
-            "scalp": AUTOTRADE_ENABLED_SCALP, "session": AUTOTRADE_ENABLED_SESSION,
-            "session_ny": AUTOTRADE_ENABLED_SESSION_NY, "xau_lg": AUTOTRADE_ENABLED_XAU_LG,
+            "scalp": AUTOTRADE_ENABLED_SCALP,
             "ft5": AUTOTRADE_ENABLED_FT5,
             "msnr": AUTOTRADE_ENABLED_MSNR,
             "mirror": AUTOTRADE_ENABLED_MIRROR,
@@ -22772,12 +20949,6 @@ INDEX_HTML = """<!doctype html>
   #emaModalHeader h2 { font-size:15px; margin:0; }
   #emaCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
   #emaChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
-  #sessionModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
-  #sessionModal.open { display:flex; flex-direction:column; }
-  #sessionModalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
-  #sessionModalHeader h2 { font-size:15px; margin:0; }
-  #sessionCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
-  #sessionChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
   #msnrModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #msnrModal.open { display:flex; flex-direction:column; }
   #msnrModalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
@@ -22972,17 +21143,6 @@ INDEX_HTML = """<!doctype html>
     </div>
   </div>
   <div id="chartWrap"><canvas id="chartCanvas"></canvas></div>
-</div>
-
-<div id="sessionModal">
-  <div id="sessionModalHeader">
-    <div>
-      <h2 id="sessionModalTitle">-</h2>
-      <div id="sessionModalParams" class="dim" style="font-size:11px;margin-top:2px;"></div>
-    </div>
-    <button id="sessionCloseBtn">Закрыть</button>
-  </div>
-  <div id="sessionChartWrap"><canvas id="sessionChartCanvas"></canvas></div>
 </div>
 
 <div id="msnrModal">
@@ -23343,15 +21503,23 @@ async function refreshOverview() {
     const wl = (w, l) => `<span class="win">${w}W</span>/<span class="loss">${l}L</span>`;
     const openTxt = (n) => `<span class="status-open">откр.${n}</span>`;
     const parts = [];
+    // v0.99.115, per broader module-removal cleanup: this function was
+    // silently, completely broken — o.divergence/o.ema/o.session are
+    // ALL undefined now that api_overview() only returns volume/scalp
+    // (divergence/ema removed well before this session, session removed
+    // in this same pass), and `if (o.divergence.enabled)` threw on the
+    // very FIRST reference, right at the top, before scalp or anything
+    // else ever ran. The surrounding try/catch swallowed the error every
+    // single time, so the overview bar simply never updated at all — no
+    // visible crash, just permanently stale/blank, since at least
+    // whenever divergence/ema were removed. Now matches api_overview()'s
+    // own actual current response exactly: volume and scalp only.
     if (o.volume.enabled) parts.push(`<b>Volume</b> ${wr(o.volume)} (${wl(o.volume.wins, o.volume.losses)}) ${openTxt(o.volume.open)}`);
-    if (o.divergence.enabled) parts.push(`<b>Див</b>${o.divergence.invert?'[Р]':''} ${wr(o.divergence)} (${wl(o.divergence.wins, o.divergence.losses)}) ${openTxt(o.divergence.open)}`);
-    if (o.ema.enabled) parts.push(`<b>EMA</b>${o.ema.invert?'[Р]':''} ${wr(o.ema)} (${wl(o.ema.wins, o.ema.losses)}) ${openTxt(o.ema.open)}`);
     if (o.scalp.enabled) {
       const scalpWrClass = (o.scalp.winrate === null || o.scalp.winrate === undefined) ? 'dim' : (o.scalp.winrate >= 50 ? 'win' : 'loss');
       const scalpWr = `<span class="${scalpWrClass}">${o.scalp.winrate !== null && o.scalp.winrate !== undefined ? o.scalp.winrate+'%' : '-'}</span>`;
       parts.push(`<b>Скальп</b> ${scalpWr} (<span class="win">${o.scalp.wins}W</span>/<span class="loss">${o.scalp.losses}L</span>/<span class="status-timeout">${o.scalp.timeouts}T</span>) ${openTxt(o.scalp.open)}`);
     }
-    if (o.session.enabled) parts.push(`<b>Сессия</b> ${wr(o.session)} (${wl(o.session.wins, o.session.losses)}) ${openTxt(o.session.open)}`);
     document.getElementById('overview').innerHTML = parts.join(' &nbsp;·&nbsp; ');
   } catch(e) {}
 }
@@ -25413,12 +23581,6 @@ if __name__ == "__main__":
     t.start()
     threading.Thread(target=scalp_loop, daemon=True).start()
     threading.Thread(target=hourly_stats_loop, daemon=True).start()
-    threading.Thread(target=session_loop, daemon=True).start()
-    threading.Thread(target=session_live_loop, daemon=True).start()
-    threading.Thread(target=session_ny_loop, daemon=True).start()
-    threading.Thread(target=session_ny_live_loop, daemon=True).start()
-    threading.Thread(target=xau_lg_backtest_loop, daemon=True).start()
-    threading.Thread(target=xau_lg_live_loop, daemon=True).start()
     threading.Thread(target=msnr_backtest_loop, daemon=True).start()
     threading.Thread(target=msnr_live_loop, daemon=True).start()
     threading.Thread(target=msnr_backtest_watchdog, daemon=True).start()
