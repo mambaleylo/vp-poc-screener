@@ -10809,3 +10809,41 @@ v0.99.128 - Telegram alert on sustained network instability, per direct
          the threshold and fires exactly one, further errors within the
          cooldown window produce no second alert, and an unrelated
          non-network error is never counted or alerted on at all.
+
+v0.99.129 - Russian-language prefix on the error log, per direct user
+         request ("Давай теперь код ошибки оставим в сами логи ошибок
+         писать на русском, чтобы мне сразу понятно было"). Rewriting
+         every one of this file's own ~100+ log_error() call sites by
+         hand to speak Russian natively would be a huge, error-prone
+         undertaking for something a single shared choke point can
+         already handle — log_error() itself now recognizes the common,
+         recurring SHAPES of error this app actually produces (network/
+         timeout, HTTP 403/401/429/5xx, Gate's own named error codes
+         like AUTO_TRIGGER_PRICE_LESS_LAST or INSUFFICIENT_AVAILABLE,
+         malformed JSON responses, a missing expected field) via a new
+         _ERROR_TRANSLATIONS ordered list (more specific patterns
+         checked before generic ones that could also appear inside a
+         more specific message) and prepends a short Russian
+         explanation — WITHOUT touching or translating the original
+         technical text (exception class, exchange error code, stack
+         detail), which stays fully intact right after the prefix, per
+         "код ошибки оставим" — the original stays searchable and
+         precise, only a plain-language label gets added in front.
+         An error matching no recognized pattern is stored completely
+         unchanged rather than getting a guessed, possibly-misleading
+         translation.
+         Verified: py_compile, pyflakes clean, the Flask route/def
+         integrity check (still 44 routes — a pure log_error() internal
+         change, nothing route-connected), a real runtime start
+         (confirmed live 403 errors from this sandbox's own network
+         restrictions correctly got the "🔒 Нет доступа к бирже (403)"
+         prefix immediately), and a unit test replaying 9 real error
+         messages — 8 taken directly from or modeled on error text seen
+         in this exact conversation's own earlier screenshots (Read
+         timed out, IncompleteRead/ChunkedEncodingError, 403 Forbidden,
+         the AUTO_TRIGGER_PRICE_LESS_LAST incident from v0.99.124,
+         INSUFFICIENT_AVAILABLE, an invalid-signature 401, a 429 rate
+         limit, a bare KeyError) each confirming the correct Russian
+         prefix and the original text still present verbatim, plus one
+         deliberately unrecognized message confirming it's stored
+         completely unchanged rather than mistranslated.
