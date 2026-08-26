@@ -33,7 +33,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.122"
+APP_VERSION = "0.99.123"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -672,6 +672,21 @@ LSW_ENTRY_CONFIRM_MAX_BARS = int(os.environ.get("VP_LSW_ENTRY_CONFIRM_MAX_BARS",
 LSW_ENTRY_CONFIRM_PIVOT_LEFT = int(os.environ.get("VP_LSW_ENTRY_CONFIRM_PIVOT_LEFT", 2))
 LSW_ENTRY_CONFIRM_PIVOT_RIGHT = int(os.environ.get("VP_LSW_ENTRY_CONFIRM_PIVOT_RIGHT", 2))
 LSW_ENTRY_CONFIRM_WICK_RATIO = float(os.environ.get("VP_LSW_ENTRY_CONFIRM_WICK_RATIO", 0.6))  # how much of a 5m candle's own range its rejection wick + favorable close must cover to count as "поглощение" (absorption)
+# v0.99.123 — per-direction live gating, per direct user question
+# ("может при перевесе на бэктесте явно одной стороны... торговать
+# только одно направление... или так неправильно делать и это
+# подгон?"). Deliberately NOT "pick whichever side backtested better
+# per symbol" — that's closer to overfitting on a small, noisy sample
+# (the by_direction split roughly halves an already-small n). Instead:
+# the SAME LSW_LIVE_MIN_WINRATE threshold already used for the overall
+# per-symbol gate is applied to EACH direction independently, with its
+# own (necessarily smaller) minimum sample — a uniform rule applied
+# to every symbol/direction alike, not a per-symbol post-hoc pick.
+# Off by default; when on, a symbol can end up LONG-only, SHORT-only,
+# both, or excluded entirely, purely from whether each side clears the
+# same bar everything else in this app already has to clear.
+LSW_DIRECTION_FILTER_ENABLED = os.environ.get("VP_LSW_DIRECTION_FILTER", "0") == "1"
+LSW_DIRECTION_MIN_SAMPLE = int(os.environ.get("VP_LSW_DIRECTION_MIN_SAMPLE", 20))  # smaller than LSW_LIVE_MIN_SAMPLE (30) since a per-direction split naturally has roughly half the sample of the combined count
 FT5_MIN_BACKTEST_TRADES = int(os.environ.get("VP_FT5_MIN_BACKTEST_TRADES", 5))  # a combo with fewer trades than this in the backtest window isn't a confident pick — same bar Volume's optimizer uses (MIN_BACKTEST_TRADES)
 FT5_RANK_PRIOR_TARGET = int(os.environ.get("VP_FT5_RANK_PRIOR_TARGET", 1))  # v0.98.8 — ft5_ranking_score() blends in max(0, TARGET - losses_count) pseudo-trades at the known -FT5_STOPLOSS_PCT level, so a small loss-free sample can't look artificially low-risk just because it hasn't hit its (structurally always-possible) stop yet. Tapered by ACTUAL real losses (not a flat count on every combo) — a flat prior tested worse, disproportionately hurting smaller-but-still-real samples. See ft5_ranking_score()'s own docstring for the full reasoning, including why TARGET=1 specifically. Replaces FT5_RANK_Z (v0.98.7), which is no longer referenced — the confidence multiplier is now t_critical(n-1), not a fixed Z.
 
@@ -794,7 +809,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "mirror_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_entry_confirm_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "mirror_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
@@ -830,6 +845,7 @@ def get_settings():
         "lsw_htf_filter_enabled": LSW_HTF_FILTER_ENABLED,
         "lsw_structural_cap_enabled": LSW_STRUCTURAL_CAP_ENABLED,
         "lsw_entry_confirm_enabled": LSW_ENTRY_CONFIRM_ENABLED,
+        "lsw_direction_filter_enabled": LSW_DIRECTION_FILTER_ENABLED,
         "msnr_max_rr": MSNR_MAX_RR,
         "msnr_enabled": MSNR_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
@@ -864,7 +880,7 @@ def apply_settings(updates):
     global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT
     global LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
-    global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED
+    global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, SCALP_MARTINGALE_ENABLED
@@ -928,6 +944,8 @@ def apply_settings(updates):
         LSW_STRUCTURAL_CAP_ENABLED = bool(updates["lsw_structural_cap_enabled"])
     if "lsw_entry_confirm_enabled" in updates:
         LSW_ENTRY_CONFIRM_ENABLED = bool(updates["lsw_entry_confirm_enabled"])
+    if "lsw_direction_filter_enabled" in updates:
+        LSW_DIRECTION_FILTER_ENABLED = bool(updates["lsw_direction_filter_enabled"])
     if "msnr_enabled" in updates:
         MSNR_ENABLED = bool(updates["msnr_enabled"])
     if "msnr_max_rr" in updates:
@@ -1207,6 +1225,7 @@ STATE = {
     "lsw_backtest_results": {},
     "lsw_backtest_summary": {},
     "lsw_live_universe": [],
+    "lsw_live_directions": {},  # symbol -> list of directions allowed to fire live, e.g. ["LONG"] — only populated/consulted when LSW_DIRECTION_FILTER_ENABLED
     "lsw_last_backtest_finished": None,
     "lsw_last_backtest_duration": None,
     "autotrade_log": deque(maxlen=AUTOTRADE_TRADE_HISTORY),  # every attempted auto-trade, dry-run or real, with its outcome
@@ -10246,6 +10265,13 @@ def lsw_scan_symbol_live(symbol):
             sigs = lsw_filter_signals_by_structural_cap(sigs, candles)
             if not sigs:
                 return
+        if LSW_DIRECTION_FILTER_ENABLED:
+            with state_lock:
+                allowed_dirs = STATE["lsw_live_directions"].get(symbol)
+            if allowed_dirs is not None:  # None = no per-direction data yet (fresh symbol) — don't block on that alone
+                sigs = [s for s in sigs if s["direction"] in allowed_dirs]
+                if not sigs:
+                    return
         sig = sigs[-1]
         if sig["entry_idx"] != len(candles) - 1:
             return  # most recent signal isn't off the latest closed candle — already stale/handled
@@ -10415,6 +10441,7 @@ def lsw_backtest_loop():
             results_by_symbol = {}
             summary_by_symbol = {}
             live_universe = []
+            live_directions = {}
             with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
                 futs = {ex.submit(lsw_backtest_symbol, s): s for s in universe}
                 for fut in as_completed(futs):
@@ -10425,15 +10452,33 @@ def lsw_backtest_loop():
                         summary = lsw_summarize_backtest(results)
                         summary_by_symbol[symbol] = summary
                         closed_n = summary["wins"] + summary["losses"]
-                        if (summary["win_rate"] is not None and summary["win_rate"] > LSW_LIVE_MIN_WINRATE
+                        if not (summary["win_rate"] is not None and summary["win_rate"] > LSW_LIVE_MIN_WINRATE
                                 and closed_n >= LSW_LIVE_MIN_SAMPLE):
-                            live_universe.append(symbol)
+                            continue
+                        live_universe.append(symbol)
+                        if LSW_DIRECTION_FILTER_ENABLED:
+                            # v0.99.123 — same threshold as the overall
+                            # gate above, applied per-direction with its
+                            # own smaller sample floor, NOT a per-symbol
+                            # "pick the winning side" choice — see this
+                            # constant's own comment for why that
+                            # distinction matters.
+                            allowed = []
+                            bd = summary.get("by_direction") or {}
+                            for d in ("LONG", "SHORT"):
+                                dd = bd.get(d) or {}
+                                if (dd.get("n", 0) >= LSW_DIRECTION_MIN_SAMPLE
+                                        and dd.get("win_rate") is not None
+                                        and dd["win_rate"] > LSW_LIVE_MIN_WINRATE):
+                                    allowed.append(d)
+                            live_directions[symbol] = allowed
                     except Exception as e:
                         log_error(f"lsw_backtest {symbol}: {e}")
             with state_lock:
                 STATE["lsw_backtest_results"] = results_by_symbol
                 STATE["lsw_backtest_summary"] = summary_by_symbol
                 STATE["lsw_live_universe"] = live_universe
+                STATE["lsw_live_directions"] = live_directions
                 STATE["lsw_last_backtest_finished"] = time.time()
                 STATE["lsw_last_backtest_duration"] = round(time.time() - t0, 1)
         except Exception as e:
@@ -10866,9 +10911,11 @@ def api_lsw_status():
     with state_lock:
         summary = dict(STATE["lsw_backtest_summary"])
         live_universe = list(STATE["lsw_live_universe"])
+        live_directions = dict(STATE["lsw_live_directions"])
         last_backtest_finished = STATE["lsw_last_backtest_finished"]
         last_backtest_duration = STATE["lsw_last_backtest_duration"]
-    ranked = [dict(s, symbol=sym, live=(sym in live_universe)) for sym, s in summary.items()]
+    ranked = [dict(s, symbol=sym, live=(sym in live_universe),
+                   live_directions=live_directions.get(sym)) for sym, s in summary.items()]
     ranked.sort(key=lambda r: (r["win_rate"] or 0, r["n"]), reverse=True)
     return jsonify({
         "enabled": LSW_ENABLED,
@@ -10885,6 +10932,7 @@ def api_lsw_status():
             "htf_filter_enabled": LSW_HTF_FILTER_ENABLED, "htf_interval": LSW_HTF_INTERVAL,
             "structural_cap_enabled": LSW_STRUCTURAL_CAP_ENABLED,
             "entry_confirm_enabled": LSW_ENTRY_CONFIRM_ENABLED, "entry_confirm_interval": LSW_ENTRY_CONFIRM_INTERVAL,
+            "direction_filter_enabled": LSW_DIRECTION_FILTER_ENABLED,
         },
         "top": ranked,
     })
@@ -12105,6 +12153,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">вход не сразу по закрытию часовой свечи снятия, а только после подтверждения на 5м: слом структуры (BOS), поглощение или мини-снятие (инверсия) в течение часа. Если подтверждения нет — сделка не открывается</div>
         </div>
         <label class="switch"><input type="checkbox" id="setLswEntryConfirm"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Фильтр по направлению</div>
+          <div class="sub">⚠️ мягкий подгон под прошлые данные — риск переоценить случайную разницу на малой выборке. Тот же порог винрейта, что и у общего допуска, применяется к LONG и SHORT каждой монеты отдельно; если сторона не набрала нужный винрейт и объём сделок — она не торгуется живьём (не выбор "победившей" стороны задним числом, а единый порог для всех)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setLswDirectionFilter"><span class="switchSlider"></span></label>
       </div>
     </div>
 
@@ -13537,7 +13592,8 @@ async function refreshLsw() {
       ТФ ${cfg.interval} · RR ${cfg.rr} · допуск равенства уровней ${cfg.equal_tolerance_pct}% · буфер стопа ${cfg.sl_buffer_pct}% · ${buildTxt}<br>
       Фильтр по тренду (${cfg.htf_interval}): <span class="${cfg.htf_filter_enabled ? 'win' : 'dim'}">${cfg.htf_filter_enabled ? 'включён' : 'выключен'}</span> ·
       Структурный кэп: <span class="${cfg.structural_cap_enabled ? 'win' : 'dim'}">${cfg.structural_cap_enabled ? 'включён' : 'выключен'}</span> ·
-      Подтверждение (${cfg.entry_confirm_interval}): <span class="${cfg.entry_confirm_enabled ? 'win' : 'dim'}">${cfg.entry_confirm_enabled ? 'включено' : 'выключено'}</span><br>
+      Подтверждение (${cfg.entry_confirm_interval}): <span class="${cfg.entry_confirm_enabled ? 'win' : 'dim'}">${cfg.entry_confirm_enabled ? 'включено' : 'выключено'}</span> ·
+      Фильтр по направлению: <span class="${cfg.direction_filter_enabled ? 'win' : 'dim'}">${cfg.direction_filter_enabled ? 'включён' : 'выключен'}</span><br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
       ${byLevelTxt ? `<span style="font-size:11px;">По типу уровня: ${byLevelTxt}</span><br>` : ''}
       <span style="font-size:11px;">Зелёная точка — монета сейчас в живом скане. Клик по строке сигнала открывает график входа/выхода.</span>
@@ -13579,8 +13635,15 @@ async function refreshLsw() {
     const byDirTxt = (bd.LONG || bd.SHORT)
       ? `<span class="dim" title="винрейт по направлению">L: ${fmtWr(bd.LONG && bd.LONG.win_rate)} (n=${bd.LONG ? bd.LONG.n : 0}) · S: ${fmtWr(bd.SHORT && bd.SHORT.win_rate)} (n=${bd.SHORT ? bd.SHORT.n : 0})</span>`
       : '<span class="dim">-</span>';
+    let dirFilterTxt = '';
+    if (cfg.direction_filter_enabled && r.live_directions) {
+      const labels = {LONG: 'только LONG', SHORT: 'только SHORT'};
+      dirFilterTxt = r.live_directions.length === 2 ? ' <span class="dim">(обе стороны)</span>'
+        : r.live_directions.length === 1 ? ` <span class="win">(${labels[r.live_directions[0]]})</span>`
+        : ' <span class="loss">(ни одна сторона)</span>';
+    }
     return `<tr>
-      <td>${r.symbol}${liveDot}</td>
+      <td>${r.symbol}${liveDot}${dirFilterTxt}</td>
       <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
       <td class="dim">n=${r.n}</td>
       <td class="win">${r.wins}W</td>
@@ -13821,6 +13884,7 @@ const setInputs = {
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
   lsw_structural_cap_enabled: document.getElementById('setLswStructuralCap'),
   lsw_entry_confirm_enabled: document.getElementById('setLswEntryConfirm'),
+  lsw_direction_filter_enabled: document.getElementById('setLswDirectionFilter'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
