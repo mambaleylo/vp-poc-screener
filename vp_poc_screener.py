@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.127"
+APP_VERSION = "0.99.128"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -337,6 +337,23 @@ TELEGRAM_ENABLED = os.environ.get("VP_TG_ENABLED", "1") == "1"  # separate from 
 # above — lets someone mute just one signal source without losing alerts
 # from the other.
 TELEGRAM_ALERTS_VP = os.environ.get("VP_TG_ALERTS_VP", "1") == "1"
+# v0.99.128 — network-instability alert, per direct user request
+# ("Давай слать в телеграм увед при такой ошибке, когда сеть плохая и
+# read time out") prompted by a real screenshot showing a sustained
+# multi-hour patch of "Read timed out"/ConnectionError entries across
+# many different functions (lsw_backtest, mirror_live, mirror_backtest,
+# magnified profile, msnr_backtest_loop) — a genuinely different
+# situation from one isolated blip (which every fetch function here
+# already retries through on its own without needing an alert at all).
+# This fires ONCE per sustained bad patch (NETWORK_ALERT_THRESHOLD
+# network-flavored log_error() calls within NETWORK_ALERT_WINDOW_SEC),
+# not per individual timeout — a single retried-through blip stays
+# silent, only a real sustained patch (the kind that outlasts every
+# function's own built-in retry budget) triggers this.
+TELEGRAM_ALERTS_NETWORK = os.environ.get("VP_TG_ALERTS_NETWORK", "1") == "1"
+NETWORK_ALERT_WINDOW_SEC = int(os.environ.get("VP_NETWORK_ALERT_WINDOW_SEC", 600))  # 10 min rolling window
+NETWORK_ALERT_THRESHOLD = int(os.environ.get("VP_NETWORK_ALERT_THRESHOLD", 5))  # this many network-flavored errors inside the window before alerting
+NETWORK_ALERT_COOLDOWN_SEC = int(os.environ.get("VP_NETWORK_ALERT_COOLDOWN_SEC", 1800))  # 30 min — don't re-alert more often than this even if the bad patch continues
 TELEGRAM_ALERTS_HOURLY = os.environ.get("VP_TG_ALERTS_HOURLY", "1") == "1"
 TELEGRAM_ALERTS_MSNR = os.environ.get("VP_TG_ALERTS_MSNR", "1") == "1"
 TELEGRAM_ALERTS_FT5 = os.environ.get("VP_TG_ALERTS_FT5", "1") == "1"
@@ -856,7 +873,7 @@ CREDENTIALS_FILE = os.environ.get(
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "msnr_addon_enabled", "mirror_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw",
+                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   "lsw_rr", "lsw_equal_tolerance_pct",
@@ -903,6 +920,7 @@ def get_settings():
         "telegram_alerts_msnr": TELEGRAM_ALERTS_MSNR,
         "telegram_alerts_mirror": TELEGRAM_ALERTS_MIRROR,
         "telegram_alerts_lsw": TELEGRAM_ALERTS_LSW,
+        "telegram_alerts_network": TELEGRAM_ALERTS_NETWORK,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
         "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
@@ -929,7 +947,7 @@ def apply_settings(updates):
     global LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
-    global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW
+    global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_NETWORK
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, SCALP_MARTINGALE_ENABLED
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT
     if "volume_profile_enabled" in updates:
@@ -1018,6 +1036,8 @@ def apply_settings(updates):
         TELEGRAM_ALERTS_MIRROR = bool(updates["telegram_alerts_mirror"])
     if "telegram_alerts_lsw" in updates:
         TELEGRAM_ALERTS_LSW = bool(updates["telegram_alerts_lsw"])
+    if "telegram_alerts_network" in updates:
+        TELEGRAM_ALERTS_NETWORK = bool(updates["telegram_alerts_network"])
     if "autotrade_dry_run" in updates:
         AUTOTRADE_DRY_RUN = bool(updates["autotrade_dry_run"])
     if "autotrade_bounce" in updates:
@@ -2347,10 +2367,40 @@ def data_quality_check(candles):
     return True, None
 
 
+_NETWORK_ERROR_MARKERS = ("Read timed out", "ConnectionError", "Connection broken",
+                           "Failed to establish a new connection", "Max retries exceeded",
+                           "Connection aborted", "Connection reset")
+_network_error_timestamps = []  # sliding window of recent network-flavored log_error() calls
+_network_error_lock = threading.Lock()
+_network_alert_last_sent = 0.0
+
+
 def log_error(msg):
     print("[ERR]", msg)
+    text = str(msg)[:500]
     with state_lock:
-        STATE["errors"].append({"t": time.time(), "msg": str(msg)[:500]})
+        STATE["errors"].append({"t": time.time(), "msg": text})
+    if any(marker in text for marker in _NETWORK_ERROR_MARKERS):
+        now = time.time()
+        with _network_error_lock:
+            _network_error_timestamps.append(now)
+            cutoff = now - NETWORK_ALERT_WINDOW_SEC
+            while _network_error_timestamps and _network_error_timestamps[0] < cutoff:
+                _network_error_timestamps.pop(0)
+            count = len(_network_error_timestamps)
+            global _network_alert_last_sent
+            should_alert = (count >= NETWORK_ALERT_THRESHOLD
+                             and now - _network_alert_last_sent >= NETWORK_ALERT_COOLDOWN_SEC)
+            if should_alert:
+                _network_alert_last_sent = now
+        if should_alert:
+            window_min = NETWORK_ALERT_WINDOW_SEC // 60
+            send_telegram(
+                f"⚠️ Сеть нестабильна: {count} сетевых ошибок (Read timed out / ConnectionError) "
+                f"за последние {window_min} мин. Сбор данных и бэктесты могут отставать — "
+                f"открытые позиции и стопы это не затрагивает.",
+                category="network",
+            )
 
 
 # ----------------------------------------------------------------------------
@@ -5116,6 +5166,8 @@ def send_telegram(text, category=None):
     if category == "msnr" and not TELEGRAM_ALERTS_MSNR:
         return
     if category == "lsw" and not TELEGRAM_ALERTS_LSW:
+        return
+    if category == "network" and not TELEGRAM_ALERTS_NETWORK:
         return
 
     def _do_send():
@@ -12663,6 +12715,13 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="label">↳ Нестабильность сети</div>
+          <div class="sub">разово, когда за 10 минут накопилось 5+ сетевых ошибок (Read timed out / ConnectionError) — не про открытые позиции, только про сбор данных</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramNetwork"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Часовая статистика</div>
           <div class="sub">сводка винрейта по всем режимам, раз в час</div>
         </div>
@@ -14347,6 +14406,7 @@ const setInputs = {
   telegram_alerts_ft5: document.getElementById('setTelegramFt5'),
   telegram_alerts_mirror: document.getElementById('setTelegramMirror'),
   telegram_alerts_lsw: document.getElementById('setTelegramLsw'),
+  telegram_alerts_network: document.getElementById('setTelegramNetwork'),
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
   autotrade_bounce: document.getElementById('setAutotradeBounce'),
   autotrade_breakout: document.getElementById('setAutotradeBreakout'),
