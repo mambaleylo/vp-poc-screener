@@ -31,9 +31,28 @@ from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import requests
+
+# v0.99.125, per direct user report (screenshot: "magnified profile
+# FARTCOIN_USDT: ('Connection broken: IncompleteRead(...)')" in the
+# error log, from build_profile_for_symbol()'s own fallback path) —
+# every retry-on-network-error except clause in this file only caught
+# (requests.exceptions.ConnectionError, requests.exceptions.Timeout).
+# CONFIRMED via requests' own exception hierarchy: ChunkedEncodingError
+# — what "Connection broken: IncompleteRead" actually is, a response
+# that got cut off mid-stream — is a SIBLING of ConnectionError under
+# RequestException, NOT a subclass of it, so `except (ConnectionError,
+# Timeout)` never catches it at all; it always propagated immediately
+# with zero retries, unlike a plain dropped connection or a timeout,
+# which already got GET_CANDLES_RETRIES attempts. A single shared tuple
+# here (used at every one of this file's own retry-on-network-error
+# call sites) closes that gap everywhere at once and keeps it closed if
+# a new call site is added later using the same name rather than
+# re-typing the pair by hand again.
+RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                                 requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.124"
+APP_VERSION = "0.99.125"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2407,7 +2426,7 @@ def get_candles(symbol, interval=INTERVAL, limit=LOOKBACK + 5):
             r.raise_for_status()
             # Gate.io returns oldest->newest already; fields: t,v,c,h,l,o,sum (varies by version)
             return _parse_candles(r.json())
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+        except RETRYABLE_NETWORK_EXCEPTIONS:
             if conn_attempt < GET_CANDLES_RETRIES:
                 conn_attempt += 1
                 time.sleep(GET_CANDLES_RETRY_DELAY)
@@ -2561,7 +2580,7 @@ def get_candles_range(symbol, interval, start_ts, end_ts):
                     chunk_points = chunk_points // 2  # server rejected this size — shrink, and keep it shrunk for later chunks too
                     continue
                 raise
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+            except RETRYABLE_NETWORK_EXCEPTIONS:
                 # Same retry policy as get_candles()/get_tickers() — a
                 # multi-chunk range fetch (used by "magnified profile"
                 # and session backtests) has many more individual
@@ -2633,7 +2652,7 @@ def get_tickers():
                 continue
             r.raise_for_status()
             return r.json()
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+        except RETRYABLE_NETWORK_EXCEPTIONS:
             if conn_attempt < GET_CANDLES_RETRIES:
                 conn_attempt += 1
                 time.sleep(GET_CANDLES_RETRY_DELAY)
@@ -3722,7 +3741,7 @@ def get_futures_risk_limit_tiers():
                                       params={"limit": limit, "offset": offset}, timeout=HTTP_TIMEOUT)
                     r.raise_for_status()
                     break
-                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
+                except RETRYABLE_NETWORK_EXCEPTIONS:
                     # Same retry policy as get_candles()/get_tickers()/
                     # get_candles_range() — this runs infrequently
                     # (SCALP_REFRESH_SEC, hours apart), but a network
@@ -5055,7 +5074,7 @@ def send_telegram(text, category=None):
                 if r.ok:
                     return
                 log_error(f"telegram HTTP {r.status_code} (attempt {attempt}/3)")
-            except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+            except RETRYABLE_NETWORK_EXCEPTIONS as e:
                 log_error(f"telegram network (attempt {attempt}/3): {e}")
             except Exception as e:
                 log_error(f"telegram send: {e} — not retrying (non-network error)")
@@ -5282,7 +5301,7 @@ def scan_symbol(symbol, candles=None):
                     f"HVN zone: {sig['zone']['bottom']:.6g} - {sig['zone']['top']:.6g}",
                     category="vp",
                 )
-    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as e:
+    except RETRYABLE_NETWORK_EXCEPTIONS as e:
         with state_lock:
             STATE["excluded_fetch_error"] += 1
         log_error(f"{symbol}: network error after {GET_CANDLES_RETRIES} retries — {e}")
