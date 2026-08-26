@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.125"
+APP_VERSION = "0.99.126"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -402,7 +402,7 @@ HOURLY_STATS_INTERVAL_SEC = int(os.environ.get("VP_HOURLY_STATS_INTERVAL_SEC", 3
 MSNR_ENABLED = os.environ.get("VP_MSNR_ENABLED", "1") == "1"
 MSNR_SYMBOLS = [s.strip() for s in os.environ.get("VP_MSNR_SYMBOLS", "XAU_USDT,XAUT_USDT,PAXG_USDT").split(",") if s.strip()]
 MSNR_STRUCTURE_TF = os.environ.get("VP_MSNR_STRUCTURE_TF", "1h")  # timeframe the OCL / A-shape / V-shape "Storyline" levels are built on
-MSNR_ENTRY_TF = os.environ.get("VP_MSNR_ENTRY_TF", "15m")  # faster timeframe the QM sweep+rejection trigger is watched on
+MSNR_ENTRY_TF = os.environ.get("VP_MSNR_ENTRY_TF", "1m")  # v0.99.126 — was "15m", changed per direct user-forwarded screenshot of a real trade from the strategy's own author ("h1/m30 SBR > m1 QM + m30 fresh (добір) > Target h1 V-shape"): the QM sweep+rejection trigger is watched on M1 in the source material, not M15. NOTE: at 1m, get_candles_range()'s own confirmed ~10000-candle recency floor (see its own docstring) caps how far back entry-TF history can reach to ~6.9 days — MSNR_BACKTEST_DAYS=40 still fetches structure-TF (1h) candles that far back for the OCL/A-V levels, but the entry-TF (QM trigger) side of any backtest is now effectively capped near a week regardless of MSNR_BACKTEST_DAYS's own value; get_candles_range() already clamps forward gracefully rather than erroring, so this doesn't break anything, it just means less entry-TF history per backtest than before.
 MSNR_PIVOT_LEFT = int(os.environ.get("VP_MSNR_PIVOT_LEFT", 2))
 MSNR_PIVOT_RIGHT = int(os.environ.get("VP_MSNR_PIVOT_RIGHT", 2))
 MSNR_ATR_PERIOD = int(os.environ.get("VP_MSNR_ATR_PERIOD", 14))
@@ -413,6 +413,33 @@ MSNR_VOLUME_LOOKBACK_BARS = int(os.environ.get("VP_MSNR_VOLUME_LOOKBACK_BARS", 2
 MSNR_SL_BUFFER_PCT = float(os.environ.get("VP_MSNR_SL_BUFFER_PCT", 0.0015))
 MSNR_SL_BUFFER_MULT = float(os.environ.get("VP_MSNR_SL_BUFFER_MULT", 1.3))  # v0.99.104, per direct user report ("часто выбивает стоп и идёт куда надо цена"): the OLD sl_buffer_pct approach (extreme * (1 ± 0.15%)) barely widens the stop past the sweep's own extreme at all, regardless of how far that sweep actually moved — a live report of frequent premature stop-outs followed by the intended move happening anyway is the textbook symptom of a stop sitting too close to normal price noise/re-testing. Mirrors XAU_LG_SL_BUFFER_MULT's own SHAPE (see that constant's own comment): multiplies the RAW entry-to-sweep-extreme distance (already a real, price-action-derived risk measure) rather than adding a tiny fixed % on top of the bare extreme price — a stop that scales with how far the sweep itself moved, not a nudge that's nearly the same regardless. 1.3 is a starting default (30% wider than the raw sweep distance) — deliberately NOT wired into the global risk_autotune_pass() nudge system XAU_LG/SESSION/EMA/DIV use for their own SL multipliers: MSNR's own participation in that global system was disabled back in v0.99.52 in favor of its OWN, different tuning philosophy (msnr_symbol_sl_skip_min() and friends — per-symbol statistical significance tests, not a single global average-MAE nudge), and this stays consistent with that existing design rather than reintroducing the older mechanism just for this one constant. A static default, adjustable via the VP_MSNR_SL_BUFFER_MULT env var if real data suggests a different multiplier fits better.
 MSNR_FALLBACK_RR = float(os.environ.get("VP_MSNR_FALLBACK_RR", 4.0))  # used only when the opposite OCL level isn't confirmed yet (Storyline has just one side so far) — a placeholder TP, not the normal path
+# v0.99.126 — "add-on" (добір) second position, per the same direct
+# user-forwarded trade screenshot as MSNR_ENTRY_TF's own comment above:
+# "m1 QM + m30 fresh (добір)" — the source takes a SECOND position on
+# the same idea when a fresh QM sweep+reject reappears on M30 against
+# the SAME still-active level, sharing the primary trade's own target
+# (the opposite h1 V/A-shape). This is genuinely "Две позиции по одной
+# идее" (two positions on one idea) from a second forwarded post's own
+# caption on a different trade, not a one-off.
+# IMPORTANT — real autotrade wired in from the start, per direct user
+# follow-up ("да нет, сразу делай с автоторговлей") after this app
+# flagged the conflict with its own duplicate-position guard: Gate has
+# no concept of two independent stacked positions on one contract in
+# the same direction — a second same-direction order just MERGES into
+# the existing position (blended average entry, combined size).
+# execute_autotrade() gained a new allow_stack param specifically for
+# this: proceeds past the duplicate-position check when the existing
+# position is the SAME direction (a deliberate stack, not a
+# conflicting duplicate) — see that param's own docstring. Which SL
+# governs the merged position afterward (the primary's own already-
+# live one, or the add-on's fresh one) had no answer in the source
+# material either — per direct user decision when asked, the MORE
+# CONSERVATIVE of the two (further from price) governs; see msnr_
+# scan_addon_live()'s own docstring for the full mechanics (cancel-
+# and-replace the primary's old SL trigger, TP left as a harmless
+# duplicate at the same shared target price).
+MSNR_ADDON_ENABLED = os.environ.get("VP_MSNR_ADDON_ENABLED", "0") == "1"  # off by default, same "opt-in once the person has seen it work" convention as every other toggle in this file — nothing about wiring real autotrade in changes that default
+MSNR_ADDON_TF = os.environ.get("VP_MSNR_ADDON_TF", "30m")
 MSNR_MAX_RR = float(os.environ.get("VP_MSNR_MAX_RR", 8.0))  # v0.99.11 — per direct user observation (SPCX: trades with rr>6 consistently hit stop, never TP) that a genuine opposite-level TP can sit SO far away the trade is structurally unlikely to ever reach it before reversing. When the real opposite level would produce rr > this cap, msnr_detect_signals() used to fall back to fallback_rr's fixed target instead. v0.99.52, per direct user question ("а проверка... таблица... что-то даёт вообще?" -> "уберём не работу"): the pooled-RR-bucket autotune this comment used to describe (risk_autotune_pass() calling _risk_autotune_msnr_max_rr() off msnr_rr_bucket_stats()) was DISABLED (commented out, not deleted) — this value stopped changing on its own. v0.99.68, per direct user request ("в оригинале... эта стратегия ловит движения с очень большим rr, даже если winrate около 20-30, у нас так не получается"): the cap ITSELF was removed from msnr_detect_signals() — it was silently substituting MSNR_FALLBACK_RR=4.0 for any genuinely-far opposite level, preventing exactly the large-RR/low-winrate trades the strategy is designed around, and keeping msnr_symbol_rr_skip_min()'s own per-symbol statistical filter blind to that entire RR range. This constant is now fully vestigial — nothing in signal generation reads it — left defined (still wired through settings/UI) only in case a future session wants to reintroduce a cap deliberately. The rr_buckets table itself still displays in the UI, informational only.
 MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE = int(os.environ.get("VP_MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE", 15))  # v0.99.22 — per direct user request: MSNR_MAX_RR above is a single GLOBAL cap tuned off trades pooled across every symbol, which was a deliberate compromise (a single symbol's own sample is usually too small to bucket reliably) but leaves no way to catch a symbol whose OWN rr-vs-outcome pattern is bad even though the pooled average looks fine. This is the min closed-trade count a single symbol's OWN rr bucket (see msnr_rr_bucket_stats()) needs before msnr_symbol_rr_skip_min() trusts it enough to skip live signals in that range for that symbol specifically — see msnr_optimize_symbol()'s own "skip_rr_min" field and msnr_scan_symbol_live().
 MSNR_BACKTEST_DAYS = int(os.environ.get("VP_MSNR_BACKTEST_DAYS", 40))  # v0.99.41 — was 30, raised per direct user request. Confirmed feasible against Gate's own ~10000-candle recency floor (get_candles_range()'s own docstring): at interval=15m that floor is ~102 days back, so 40 days (3840 candles) sits well inside it with room to spare — get_candles_range() already paginates in ~900-point/~9.4-day chunks regardless of the total span requested, so this just means ~5 chunks per symbol instead of ~4, not a new code path.
@@ -828,7 +855,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "mirror_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "msnr_addon_enabled", "mirror_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
@@ -867,6 +894,7 @@ def get_settings():
         "lsw_direction_filter_enabled": LSW_DIRECTION_FILTER_ENABLED,
         "msnr_max_rr": MSNR_MAX_RR,
         "msnr_enabled": MSNR_ENABLED,
+        "msnr_addon_enabled": MSNR_ADDON_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
         "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
@@ -896,7 +924,7 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT
     global LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED
@@ -967,6 +995,8 @@ def apply_settings(updates):
         LSW_DIRECTION_FILTER_ENABLED = bool(updates["lsw_direction_filter_enabled"])
     if "msnr_enabled" in updates:
         MSNR_ENABLED = bool(updates["msnr_enabled"])
+    if "msnr_addon_enabled" in updates:
+        MSNR_ADDON_ENABLED = bool(updates["msnr_addon_enabled"])
     if "msnr_max_rr" in updates:
         try:
             v = float(updates["msnr_max_rr"])
@@ -3336,7 +3366,7 @@ def reconcile_positions_and_orders():
     return unprotected, cancelled
 
 
-def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_pct_override=None):
+def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_pct_override=None, allow_stack=False):
     """The single entry point every signal source calls to (maybe) fire a
     real trade. `mode` is a short label (e.g. "bounce", "msnr", "scalp")
     used for the auto-trade-enabled toggle lookup and the log. `extra` is
@@ -3366,6 +3396,18 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
     multiple of the base % after a losing streak on that symbol,
     resetting to base on a win. None (the default) for every other
     module's own call site — unaffected, still risks the plain base %.
+
+    allow_stack, v0.99.126: when True, the exchange-side duplicate-
+    position guard below permits this order through even though the
+    symbol already has an open position, PROVIDED that existing
+    position is in the SAME direction as this call's own `direction`
+    (a deliberate stack, not a conflicting duplicate) — used ONLY by
+    MSNR's own add-on ("добір") second position, per direct user
+    request ("да нет, сразу делай с автоторговлей"). An OPPOSITE-
+    direction existing position still blocks regardless of allow_
+    stack — that's a genuine conflict this guard exists to catch, not
+    something any caller should be able to wave through. False (the
+    default) for every other call site — completely unaffected.
 
     Always writes exactly one entry to STATE["autotrade_log"], whether it
     trades, skips, or dry-runs, so the log is a complete record of every
@@ -3504,12 +3546,25 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
             # way losing the STATE-based checks entirely would be.
             try:
                 existing_positions = get_open_positions()
-                if any(p.get("contract") == symbol for p in existing_positions):
-                    record["status"] = "SKIPPED"
-                    record["detail"] = f"{symbol} already has an open position on the exchange — skipping to avoid stacking a duplicate"
-                    with state_lock:
-                        STATE["autotrade_log"].appendleft(record)
-                    return record
+                conflicting = next((p for p in existing_positions if p.get("contract") == symbol), None)
+                if conflicting:
+                    existing_direction = "LONG" if float(conflicting.get("size", 0) or 0) > 0 else "SHORT"
+                    if not (allow_stack and existing_direction == direction):
+                        record["status"] = "SKIPPED"
+                        record["detail"] = f"{symbol} already has an open position on the exchange — skipping to avoid stacking a duplicate"
+                        with state_lock:
+                            STATE["autotrade_log"].appendleft(record)
+                        return record
+                    # v0.99.126 — deliberate same-direction stack (MSNR
+                    # add-on), not a conflicting duplicate. Gate merges a
+                    # second same-direction market order into the existing
+                    # position (blended average entry, combined size) —
+                    # there's no such thing as two independent stacked
+                    # positions on one contract, so this proceeds to place
+                    # a real order that adds to what's already open rather
+                    # than opening a second, separately-tracked position.
+                    record["extra"]["stacked_onto_existing"] = True
+                    log_error(f"execute_autotrade {symbol}: stacking {direction} onto existing {existing_direction} position (allow_stack=True, mode={mode})")
             except Exception as e:
                 log_error(f"execute_autotrade {symbol}: exchange position check failed ({e}), proceeding without it — this is exactly the kind of STATE/exchange desync this check exists to catch, so treat any recurrence as worth investigating")
 
@@ -6448,6 +6503,71 @@ def msnr_track_outcome(entry_candles, sig, max_wait_bars=300):
     return "TIMEOUT", None
 
 
+def msnr_detect_addon_signals(addon_candles, primary_signals, qm_zone_pct=MSNR_QM_ZONE_PCT,
+                               qm_lookback=MSNR_QM_LOOKBACK_BARS, sl_buffer_mult=MSNR_SL_BUFFER_MULT):
+    """v0.99.126 — the "добір" (add-on) second position, per direct
+    user-forwarded trade screenshot from the strategy's own author (see
+    MSNR_ADDON_ENABLED's own comment for the full context and the
+    DETECTION/BACKTEST-ONLY caveat).
+    For each already-fired primary signal (from msnr_detect_signals(),
+    on MSNR_ENTRY_TF), scans addon_candles (coarser, MSNR_ADDON_TF) for
+    the FIRST fresh QM sweep+reject against the SAME level, occurring
+    strictly AFTER the primary signal's own time — same sweep-then-
+    close-back-inside logic as the primary detector's own A-shape/
+    V-shape branches, just replayed on the add-on timeframe and
+    restricted to one level instead of walking a live pivot stream.
+    Shares the primary signal's own tp (same Storyline target, per the
+    source's own "> Target h1 V-shape" for both positions) — only
+    entry/sl differ, from wherever the add-on's own fresh sweep
+    occurred. At most ONE add-on per primary signal (first fresh M30
+    QM found after it) — the source's own examples show exactly two
+    positions per idea, not an unbounded add-on chain.
+    Returns a list of signal dicts in the SAME shape msnr_detect_
+    signals() itself returns, plus "is_addon": True and "primary_time"
+    linking back to the primary signal it's attached to."""
+    addon_signals = []
+    for psig in primary_signals:
+        level = psig["level"]
+        level_type = psig["level_type"]
+        direction = psig["direction"]
+        after_time = psig["time"]
+        for i, c in enumerate(addon_candles):
+            if c["time"] <= after_time:
+                continue
+            cluster = addon_candles[max(0, i - qm_lookback + 1): i + 1]
+            if level_type == "A":  # SHORT add-on, mirrors msnr_detect_signals()'s own A-shape branch
+                swept = [cc["high"] for cc in cluster if cc["high"] > level]
+                if not (swept and c["close"] < level):
+                    continue
+                sweep_extreme = max(swept)
+                if not (level > 0 and (sweep_extreme - level) / level <= qm_zone_pct):
+                    continue
+                entry = c["close"]
+                risk = (sweep_extreme - entry) * sl_buffer_mult
+                sl = entry + risk
+            else:  # LONG add-on, mirrors the V-shape branch
+                swept = [cc["low"] for cc in cluster if cc["low"] < level]
+                if not (swept and c["close"] > level):
+                    continue
+                sweep_extreme = min(swept)
+                if not (level > 0 and (level - sweep_extreme) / level <= qm_zone_pct):
+                    continue
+                entry = c["close"]
+                risk = (entry - sweep_extreme) * sl_buffer_mult
+                sl = entry - risk
+            if risk <= 0:
+                continue
+            addon_signals.append({
+                "index": i, "time": c["time"], "direction": direction,
+                "entry": entry, "sl": sl, "tp": psig["tp"],
+                "level": level, "level_type": level_type,
+                "opposite_level": psig.get("opposite_level"),
+                "is_addon": True, "primary_time": after_time,
+            })
+            break  # one add-on per primary signal, first fresh M30 QM found
+    return addon_signals
+
+
 def msnr_run_backtest(structure_candles, entry_candles, **params):
     """Runs msnr_detect_signals(**params) + msnr_track_outcome() over the
     result and returns the full per-trade list (time/direction/entry/sl/
@@ -6482,7 +6602,10 @@ def msnr_backtest_symbol(symbol, days=MSNR_BACKTEST_DAYS, **params):
     have a real A/V pair to test against. Accepts the same param
     overrides as msnr_detect_signals — used both for a plain module-
     defaults backtest and, via msnr_optimize_symbol(), a specific
-    symbol's autotuned params."""
+    symbol's autotuned params. Deliberately left untouched by the
+    v0.99.126 add-on feature (see msnr_addon_backtest_symbol() instead)
+    — this stays the primary-only path msnr_optimize_symbol()'s own
+    grid search depends on."""
     now = time.time()
     structure_start = now - (days + 20) * 86400
     structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, now)
@@ -6491,6 +6614,59 @@ def msnr_backtest_symbol(symbol, days=MSNR_BACKTEST_DAYS, **params):
     if len(structure_candles) < MSNR_ATR_PERIOD + 10 or len(entry_candles) < 10:
         return []
     return msnr_run_backtest(structure_candles, entry_candles, **params)
+
+
+def msnr_addon_backtest_symbol(symbol, days=MSNR_BACKTEST_DAYS):
+    """v0.99.126 — separate from msnr_backtest_symbol() deliberately
+    (see that function's own docstring): fetches structure/entry/add-on
+    (MSNR_STRUCTURE_TF/MSNR_ENTRY_TF/MSNR_ADDON_TF) history over the
+    same window, runs msnr_detect_signals() for the primary trades, then
+    msnr_detect_addon_signals() for the add-on ("добір") second position
+    on each — tracking each pool's outcome on its OWN candle series
+    (primary on entry_candles, add-on on addon_candles, since an add-on
+    signal's own "index" refers into addon_candles). Returns (primary_
+    results, addon_results), same per-trade dict shape as msnr_run_
+    backtest()'s own results, each with "is_addon" already set."""
+    now = time.time()
+    structure_start = now - (days + 20) * 86400
+    structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, now)
+    entry_start = now - days * 86400
+    entry_candles = get_candles_range(symbol, MSNR_ENTRY_TF, entry_start, now)
+    addon_candles = get_candles_range(symbol, MSNR_ADDON_TF, entry_start, now)
+    if len(structure_candles) < MSNR_ATR_PERIOD + 10 or len(entry_candles) < 10:
+        return [], []
+    sigs, _pivots = msnr_detect_signals(structure_candles, entry_candles)
+    primary_results = []
+    for sig in sigs:
+        result, exit_time = msnr_track_outcome(entry_candles, sig)
+        risk = abs(sig["entry"] - sig["sl"])
+        reward = abs(sig["tp"] - sig["entry"])
+        rr = round(reward / risk, 2) if risk > 0 else None
+        primary_results.append({
+            "time": sig["time"], "direction": sig["direction"],
+            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
+            "level": sig["level"], "level_type": sig["level_type"],
+            "opposite_level": sig.get("opposite_level"),
+            "result": result, "exit_time": exit_time, "rr": rr,
+            "is_addon": False,
+        })
+    addon_results = []
+    if MSNR_ADDON_ENABLED and addon_candles and sigs:
+        addon_sigs = msnr_detect_addon_signals(addon_candles, sigs)
+        for asig in addon_sigs:
+            result, exit_time = msnr_track_outcome(addon_candles, asig)
+            risk = abs(asig["entry"] - asig["sl"])
+            reward = abs(asig["tp"] - asig["entry"])
+            rr = round(reward / risk, 2) if risk > 0 else None
+            addon_results.append({
+                "time": asig["time"], "direction": asig["direction"],
+                "entry": asig["entry"], "sl": asig["sl"], "tp": asig["tp"],
+                "level": asig["level"], "level_type": asig["level_type"],
+                "opposite_level": asig.get("opposite_level"),
+                "result": result, "exit_time": exit_time, "rr": rr,
+                "is_addon": True, "primary_time": asig["primary_time"],
+            })
+    return primary_results, addon_results
 
 
 def msnr_ranking_score(r_values, losses_count, z=None):
@@ -7633,6 +7809,7 @@ def msnr_trade_beyond_liquidation(symbol, direction, entry, sl, leverage=None):
 
 _msnr_signal_cooldowns = {}  # symbol -> last signaled entry-candle time
 _msnr_signal_cooldowns_lock = threading.Lock()
+_msnr_addon_cooldowns = {}  # v0.99.126 — symbol -> last add-on signaled candle time, same dedup shape
 
 
 def msnr_symbol_params(symbol):
@@ -8034,6 +8211,13 @@ def msnr_scan_symbol_live(symbol):
             # has no real P&L to compound with, so it must NOT move the
             # balance just because the price happened to hit TP/SL.
             "autotrade_fired": False, "live_size_usd": None, "leverage_used": None,
+            # v0.99.126 — sl_order_id needed so msnr_scan_addon_live()
+            # can cancel THIS order once an add-on stacks onto the same
+            # position and a new combined SL is placed (see that
+            # function's own docstring). addon_fired stops a second
+            # add-on ever firing on top of the first — the source's own
+            # examples show exactly two positions per idea, not a chain.
+            "sl_order_id": None, "addon_fired": False,
         }
         with state_lock:
             STATE["msnr_signals"].appendleft(record)
@@ -8130,6 +8314,7 @@ def msnr_scan_symbol_live(symbol):
                 record["autotrade_fired"] = True
                 record["live_size_usd"] = live_size
                 record["leverage_used"] = live_leverage
+                record["sl_order_id"] = autotrade_result.get("sl_order_id")
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         level_txt = "A-shape (resist)" if sig["level_type"] == "A" else "V-shape (support)"
         # v0.99.74, per direct user request ("мне не нужны уведомления
@@ -8160,6 +8345,95 @@ def msnr_scan_symbol_live(symbol):
             )
     except Exception as e:
         log_error(f"msnr_live {symbol}: {e}")
+
+
+def msnr_scan_addon_live(symbol):
+    """v0.99.126 — the "добір" (add-on) second position, per direct
+    user-forwarded trade screenshot and direct follow-up request ("да
+    нет, сразу делай с автоторговлей"). Fires a REAL stacking order —
+    see MSNR_ADDON_ENABLED's own comment and execute_autotrade()'s own
+    allow_stack docstring for the full context.
+    Only runs if this symbol currently has an OPEN, autotrade-fired
+    primary MSNR signal with no add-on yet. Scans MSNR_ADDON_TF (30m)
+    candles for a fresh QM sweep+reject against that SAME level (via
+    msnr_detect_addon_signals()) — if the latest closed add-on-TF
+    candle produced one, stacks a real order onto the already-open
+    position (execute_autotrade(..., allow_stack=True) — Gate merges
+    same-direction orders on one contract into a single blended
+    position, there's no such thing as two independently-tracked
+    positions on one symbol there).
+    SL handling: per direct user decision when the reference material
+    didn't specify this (the strategy's own author manages "two
+    positions" mentally/on paper, not through an exchange that merges
+    them, so this mechanical question genuinely has no answer in the
+    source) — the MORE CONSERVATIVE of the primary's own already-live
+    SL and the add-on's own fresh SL governs the WHOLE merged position
+    (further from price = wider stop), consistent with this exact
+    module's own MSNR_SL_BUFFER_MULT lesson (v0.99.104: premature
+    stop-outs on stops sitting too close to normal price noise). The
+    primary's OLD SL trigger order is cancelled and replaced by a new
+    one at the chosen final_sl — otherwise the narrower of the two
+    could still fire first regardless of which one is meant to govern.
+    TP is left untouched: primary and add-on share the exact same
+    target (both aim at the same opposite Storyline level), so
+    execute_autotrade() placing a second TP trigger at the same price
+    is a harmless duplicate — whichever fires first closes the whole
+    position, and reconcile_positions_and_orders() cleans up the
+    orphaned remainder either way, same as any other TP/SL pair."""
+    if not (MSNR_ENABLED and MSNR_ADDON_ENABLED and AUTOTRADE_ENABLED_MSNR):
+        return
+    try:
+        with state_lock:
+            primary = next((s for s in STATE["msnr_signals"]
+                             if s["symbol"] == symbol and s.get("status") == "OPEN"
+                             and s.get("autotrade_fired") and not s.get("addon_fired")), None)
+        if primary is None:
+            return
+        addon_candles = get_candles(symbol, interval=MSNR_ADDON_TF, limit=MSNR_QM_LOOKBACK_BARS + 100)
+        now = time.time()
+        addon_interval_sec = INTERVAL_SECONDS.get(MSNR_ADDON_TF, 1800)
+        addon_candles = [c for c in addon_candles if c["time"] + addon_interval_sec <= now]
+        if len(addon_candles) < 10:
+            return
+        addon_sigs = msnr_detect_addon_signals(addon_candles, [primary])
+        if not addon_sigs:
+            return
+        asig = addon_sigs[-1]
+        if asig["index"] != len(addon_candles) - 1:
+            return  # not off the latest closed add-on-TF candle — stale
+        with _msnr_signal_cooldowns_lock:  # reusing the same lock, tiny bit of shared state
+            if _msnr_addon_cooldowns.get(symbol) == asig["time"]:
+                return
+            _msnr_addon_cooldowns[symbol] = asig["time"]
+        direction = primary["direction"]
+        final_sl = min(primary["sl"], asig["sl"]) if direction == "LONG" else max(primary["sl"], asig["sl"])
+        autotrade_result = execute_autotrade("msnr", symbol, direction, asig["entry"], final_sl, asig["tp"],
+                                              extra={"is_addon": True, "primary_time": primary["time"]},
+                                              allow_stack=True)
+        order_opened = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
+        if not order_opened:
+            return
+        with state_lock:
+            primary["addon_fired"] = True
+        old_sl_order_id = primary.get("sl_order_id")
+        new_sl_order_id = autotrade_result.get("sl_order_id")
+        if old_sl_order_id and old_sl_order_id != new_sl_order_id:
+            try:
+                cancel_price_order(old_sl_order_id)
+            except Exception as e:
+                log_error(f"msnr_scan_addon_live {symbol}: failed to cancel primary's old SL {old_sl_order_id} after add-on stacked — position may have TWO live SL orders now, check manually: {e}")
+        with state_lock:
+            primary["sl_order_id"] = new_sl_order_id
+            primary["sl"] = final_sl  # this record now describes the WHOLE merged position's own governing stop
+        arrow = "\u2b06\ufe0f LONG" if direction == "LONG" else "\u2b07\ufe0f SHORT"
+        send_telegram(
+            f"{arrow} {symbol} (MSNR ДОБІР — доложились к открытой позиции)\n"
+            f"entry (add-on): {asig['entry']:.6g}\n"
+            f"итоговый SL (на всю позицию): {final_sl:.6g}  TP: {asig['tp']:.6g}",
+            category="msnr",
+        )
+    except Exception as e:
+        log_error(f"msnr_scan_addon_live {symbol}: {e}")
 
 
 def update_msnr_signal_outcomes():
@@ -8846,6 +9120,19 @@ def msnr_live_loop():
                 futs = [ex.submit(msnr_scan_symbol_live, s) for s in live_universe]
                 for _ in as_completed(futs):
                     pass
+            # v0.99.126 — add-on ("добір") scan, AFTER the primary scan
+            # above so a primary signal that just fired this exact cycle
+            # is already in STATE["msnr_signals"] for msnr_scan_addon_
+            # live() to find. Runs over the SAME live_universe — an
+            # add-on can only ever fire for a symbol that already has an
+            # open, autotrade-fired primary (checked inside the function
+            # itself), so scanning symbols with no open primary is just
+            # a cheap no-op there, not wasted real risk.
+            if MSNR_ADDON_ENABLED:
+                with ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe) or 1)) as ex:
+                    futs = [ex.submit(msnr_scan_addon_live, s) for s in live_universe]
+                    for _ in as_completed(futs):
+                        pass
             update_msnr_signal_outcomes()
         except Exception as e:
             log_error(f"msnr_live_loop: {e}")
@@ -12239,6 +12526,13 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setMsnr"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Добор (add-on) <span style="color:#e0a030;">⚠️ реальный ордер</span></div>
+          <div class="sub">вторая доливка к уже открытой позиции при свежем QM на M30 по тому же уровню (h1/m30 SBR &gt; m1 QM + m30 добір). На Gate это сливается в одну позицию с усреднённой ценой — итоговый стоп берётся более консервативный (дальше от цены) из старого и нового</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setMsnrAddon"><span class="switchSlider"></span></label>
+      </div>
     </div>
 
     <div class="settingsGroup">
@@ -14037,6 +14331,7 @@ const setInputs = {
   scalp_enabled: document.getElementById('setScalp'),
   scalp_signals_enabled: document.getElementById('setScalpSignals'),
   msnr_enabled: document.getElementById('setMsnr'),
+  msnr_addon_enabled: document.getElementById('setMsnrAddon'),
   ft5_enabled: document.getElementById('setFt5'),
   ft5_invert_signals: document.getElementById('setFt5Invert'),
   mirror_enabled: document.getElementById('setMirror'),
