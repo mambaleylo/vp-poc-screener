@@ -10598,3 +10598,66 @@ v0.99.124 - CRITICAL FIX: a real open position could end up with a TP
          unchanged, and find_open_signal_sl() correctly recovering a
          planted OPEN LSW signal's own direction/sl and returning None
          for a symbol with no matching record.
+
+v0.99.125 - Fixed the root cause behind one class of error-log entry,
+         per direct user report (screenshot of the error log: "magnified
+         profile FARTCOIN_USDT: ('Connection broken: IncompleteRead(12105
+         bytes read, 78550 more expected)'...)" plus several unrelated
+         "Read timed out" entries — "исправь причины ошибок").
+         CONFIRMED root cause via requests' own exception hierarchy:
+         "Connection broken: IncompleteRead" is requests.exceptions.
+         ChunkedEncodingError's own message (a response that got cut off
+         mid-stream) — and ChunkedEncodingError is a SIBLING of
+         ConnectionError under RequestException, NOT a subclass of it.
+         Every retry-on-network-error except clause in this file only
+         ever caught (requests.exceptions.ConnectionError, requests.
+         exceptions.Timeout) — meaning a ChunkedEncodingError always
+         propagated on the very first occurrence with ZERO retries,
+         unlike a plain dropped connection or timeout, which already got
+         GET_CANDLES_RETRIES attempts. Confirmed live in the report: this
+         specific error surfaced through build_profile_for_symbol()'s own
+         already-graceful fallback (falls back to the same-timeframe
+         approximate profile rather than failing the whole symbol), so
+         it wasn't actually breaking anything that cycle — but it WAS a
+         real, silent retry gap that would fail outright on any endpoint
+         without such a fallback.
+         Fix: a single new module-level RETRYABLE_NETWORK_EXCEPTIONS =
+         (ConnectionError, Timeout, ChunkedEncodingError) tuple, and all
+         6 of this file's own "except (ConnectionError, Timeout)" call
+         sites — get_candles(), get_candles_range()'s own chunked-fetch
+         loop, get_tickers(), the risk-limit-tiers pagination loop, the
+         Telegram sender's own retry loop, and Volume's own network-error
+         categorization branch — switched to catch this shared tuple
+         instead of re-typing the pair by hand at each site (and missing
+         ChunkedEncodingError at every single one of them, which is
+         exactly what happened here). Any future call site that reuses
+         this same name inherits the fix automatically instead of being
+         able to reintroduce the same gap by hand-typing the pair again.
+         The separate "Read timed out" entries in the same screenshot
+         (NVDAX/BTR/DASH/ENA_USDT, all within about a minute) are read
+         timeouts that DID already retry internally (get_candles() already
+         gives every failing symbol GET_CANDLES_RETRIES=2 extra attempts,
+         each with its own HTTP_TIMEOUT=15s) and still failed after
+         exhausting that budget — consistent with a real, transient mobile-
+         network congestion patch (the same reasoning WORKERS/GLOBAL_
+         HTTP_SEMAPHORE/GLOBAL_MIN_REQUEST_INTERVAL were already tuned
+         against in earlier versions), not a code gap; nothing further
+         changed for that category, since it was already working as
+         designed. Also confirmed the "reconcile_positions_and_orders:
+         cancelled 1 orphaned trigger order(s)" entries in the same
+         screenshot are NOT errors at all — they're reconcile_positions_
+         and_orders()'s own normal, working-as-intended cleanup (see its
+         own docstring's part (2)) logged via log_error() purely for
+         visibility, which is why they show up in the same "Последние
+         ошибки" list even though nothing is actually wrong.
+         Verified: py_compile, pyflakes clean, a real runtime start, the
+         Flask route/def integrity check (still 44 routes — no routes
+         touched), and unit tests: confirmed requests.exceptions.
+         ChunkedEncodingError is genuinely NOT a subclass of ConnectionError
+         (the actual root cause, verified directly against the installed
+         requests library, not assumed), then mocked requests.get() to
+         raise ChunkedEncodingError on its first call and succeed on its
+         second for both get_candles() and get_tickers(), confirming each
+         now retries exactly once and returns the successful result
+         instead of raising immediately — the exact behavior the pre-fix
+         code was missing.
