@@ -10748,3 +10748,22 @@ v0.99.126 - MSNR: two fixes from the strategy's own author's real trade
          final-SL selection logic confirmed picking the wider/further
          option in both directions; and the full allow_stack truth
          table described above.
+
+v0.99.127 - Colorized the "Живые сигналы: X%" winrate figure in every
+         module's own stats line, per direct user request ("Винрейт в
+         тексте статистики живых сигналов выдели цветом, а то каждый
+         раз искать приходится"). It was plain, unstyled text in 7
+         places (Volume's own top summary and per-symbol "Винрейт:",
+         FT5/MSNR/Mirror/LSW's own "Живые сигналы:" lines, and Mirror's
+         separate "Отсеянные фильтром" shadow-tracked line) even though
+         the SAME win/loss/dim color convention already existed
+         elsewhere in this file (backtest-table winrate cells, per-
+         symbol ranking rows) — just never applied to this particular
+         top-line summary figure, which is what people actually glance
+         at first and therefore the one most worth not having to hunt
+         for. Now wrapped in the same win (>=50%) / loss (<50%) / dim
+         (no data yet) span classes everywhere.
+         Verified: py_compile, pyflakes clean, node --check on the
+         correctly-last <script> block, a real runtime start, and the
+         Flask route/def integrity check (still 44 routes — a pure
+         frontend text-styling change, nothing route-connected).
