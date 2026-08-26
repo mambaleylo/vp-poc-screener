@@ -10479,3 +10479,56 @@ v0.99.122 - LSW's remaining two rules from the reference "AMD + FVG"
          correctly-recomputed TP at the same rr; and confirming a
          signal is correctly DROPPED (empty result) when scanned
          against flat 5m data with no confirmation pattern at all.
+
+v0.99.123 - Optional per-direction live gating for LSW, per a direct
+         user question prompted by their own screenshot of ETH_USDT's
+         backtest split (L: 18.8% n=16 · S: 73.7% n=19) — asking
+         whether trading only the stronger side per symbol was already
+         implemented, and separately whether picking the winning side
+         from the same backtest counts as overfitting.
+         Answer given in-conversation (not just code): picking
+         "whichever side backtested better" per symbol IS a mild form
+         of overfitting at small n — by_direction naturally splits an
+         already-modest sample roughly in half, so a gap like 18.8% vs
+         73.7% at n=16/n=19 can easily be noise rather than a durable
+         edge, unlike the HTF trend filter (v0.99.121), which has a
+         causal reason for its direction bias independent of backtest
+         outcome. Implemented as the more principled middle ground the
+         user themselves suggested (a uniform winrate threshold applied
+         per direction, not a post-hoc per-symbol pick): a symbol's
+         LONG and SHORT are gated INDEPENDENTLY using the SAME LSW_
+         LIVE_MIN_WINRATE threshold the overall per-symbol gate already
+         uses, each requiring its own LSW_DIRECTION_MIN_SAMPLE (20,
+         intentionally lower than the overall LSW_LIVE_MIN_SAMPLE=30
+         since a per-direction split roughly halves the count). A
+         symbol can end up LONG-only, SHORT-only, both, or (new,
+         previously impossible) excluded from live trading entirely
+         even though its COMBINED winrate passed the overall gate.
+         Ran the exact numbers from the user's own screenshot through
+         the new logic as a check: at the default 20-trade floor,
+         ETH_USDT's n=16/n=19 split doesn't clear the sample bar on
+         EITHER side yet — the filter would exclude ETH from live
+         trading entirely (not silently trade the "winning" 73.7%
+         side), which is the conservative behavior intended.
+         Off by default (setLswDirectionFilter checkbox, labeled inline
+         with an explicit "⚠️ мягкий подгон под прошлые данные" warning
+         rather than presented as a strict improvement) — wired into
+         lsw_backtest_loop() (computes STATE["lsw_live_directions"]
+         per symbol only when the toggle is on) and lsw_scan_symbol_
+         live() (filters that symbol's own signals down to only its
+         allowed directions before picking the latest one). UI: the
+         Sweep tab's backtest table now shows "(только LONG)" /
+         "(только SHORT)" / "(обе стороны)" / "(ни одна сторона)" next
+         to each live symbol when the filter is on, and /api/lsw/status
+         exposes live_directions per symbol plus a new config.
+         direction_filter_enabled field.
+         Verified: py_compile, pyflakes clean, a real runtime start,
+         node --check on the correctly-last <script> block, the Flask
+         route/def integrity check (still 44 routes), a getElementById
+         audit on the one new ID (setLswDirectionFilter, defined once,
+         referenced once), and a unit test replaying the user's own
+         ETH_USDT numbers (16 LONG trades/3 wins, 19 SHORT trades/14
+         wins) through the actual gating logic, confirming both sides
+         are correctly excluded at the default 20-trade floor, then
+         confirming SHORT alone passes once its own sample is bumped
+         past that floor with the same winrate.
