@@ -10767,3 +10767,45 @@ v0.99.127 - Colorized the "Живые сигналы: X%" winrate figure in ever
          correctly-last <script> block, a real runtime start, and the
          Flask route/def integrity check (still 44 routes — a pure
          frontend text-styling change, nothing route-connected).
+
+v0.99.128 - Telegram alert on sustained network instability, per direct
+         user request ("Давай слать в телеграм увед при такой ошибке,
+         когда сеть плохая и read time out") prompted by a real
+         screenshot showing a multi-hour patch of "Read timed out"/
+         ConnectionError entries across many different functions
+         (lsw_backtest, mirror_live, mirror_backtest, magnified
+         profile, msnr_backtest_loop) — reviewed and confirmed nothing
+         critical (no open positions/stops affected, just data
+         collection lagging), but genuinely worth knowing about without
+         having to go digging through the error log by hand.
+         log_error() now recognizes network-flavored messages (matching
+         any of "Read timed out", "ConnectionError", "Connection
+         broken", "Failed to establish a new connection", "Max retries
+         exceeded", "Connection aborted", "Connection reset" —
+         deliberately NOT matching ordinary HTTP error responses like
+         "403 Client Error", which aren't a network problem at all) and
+         tracks them in a sliding NETWORK_ALERT_WINDOW_SEC (10 min)
+         window. Once NETWORK_ALERT_THRESHOLD (5) network-flavored
+         errors land inside that window, ONE Telegram alert fires — not
+         per individual timeout, which every fetch function here
+         already retries through on its own without needing anyone
+         alerted; this only fires for a real sustained patch that
+         outlasts every function's own built-in retry budget, exactly
+         what the screenshot showed. NETWORK_ALERT_COOLDOWN_SEC (30 min)
+         keeps a continuing bad patch from re-alerting on every
+         5th error — one alert per bad patch, not a flood.
+         Gated behind a new TELEGRAM_ALERTS_NETWORK toggle (on by
+         default, same as every other alert category's own default) —
+         "↳ Нестабильность сети" checkbox in the Telegram settings
+         group.
+         Verified: py_compile, pyflakes clean, a real runtime start
+         (confirmed ordinary 403 errors from this sandbox's own network
+         restrictions correctly do NOT trigger the alert — they don't
+         match any network marker), the Flask route/def integrity check
+         (still 44 routes), a getElementById audit on the one new ID
+         (setTelegramNetwork, defined once, referenced once), and a
+         unit test replaying the exact scenario from the user's own
+         screenshot: 4 network errors produce no alert, the 5th crosses
+         the threshold and fires exactly one, further errors within the
+         cooldown window produce no second alert, and an unrelated
+         non-network error is never counted or alerted on at all.
