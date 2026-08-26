@@ -10532,3 +10532,69 @@ v0.99.123 - Optional per-direction live gating for LSW, per a direct
          are correctly excluded at the default 20-trade floor, then
          confirming SHORT alone passes once its own sample is bumped
          past that floor with the same winrate.
+
+v0.99.124 - CRITICAL FIX: a real open position could end up with a TP
+         but genuinely NO stop-loss, per direct user report (screenshot:
+         a real LSW LONG on CYS_USDT, autotrade_log showing status
+         OPENED_TP_SL_FAILED — error 1029 AUTO_TRIGGER_PRICE_LESS_LAST,
+         "Trigger.Price must < last_price" — on the SL leg specifically;
+         the TP leg had succeeded).
+         ROOT CAUSE: Gate's price_orders endpoint enforces trigger <
+         last_price for a rule=2 order (LONG's own SL) and trigger >
+         last_price for a rule=1 order (SHORT's own SL) AT THE EXACT
+         MOMENT OF PLACEMENT. round_to_tick() rounds to the NEAREST
+         tick — which can push a raw SL price that was correctly on the
+         valid side of current price to the WRONG side by up to half a
+         tick. On a coin with a wide tick size relative to price and a
+         narrow stop distance (CYS_USDT, compounded by LSW's own
+         deliberately tight LSW_SL_BUFFER_PCT, tighter still after 5m
+         entry confirmation — see LSW_ENTRY_CONFIRM_ENABLED), that's
+         enough to flip a valid SL into a rejected one.
+         FIX 1: round_to_tick_directional(price, tick_size, round_up) —
+         always rounds ONE direction (ceil or floor), never nearest.
+         execute_autotrade() now rounds a LONG's TP up / SL down, a
+         SHORT's TP down / SL up — the SL side is what actually matters
+         for staying on the valid side of Gate's own constraint; the
+         extra sub-tick distance this adds is a rounding artifact, not
+         a real risk change, and is trivial next to the alternative (a
+         real position left with no stop-loss at all). Also applied to
+         move_stop_to_breakeven() — that function was passing its own
+         breakeven_price completely UNROUNDED before this fix (tick was
+         only ever used for decimal string FORMATTING there, never
+         actually snapped to a tick multiple), the same latent bug,
+         just never hit in practice yet.
+         FIX 2, arguably the more important one: reconcile_positions_
+         and_orders()'s own existing safety net — which alerts on a
+         position with NO trigger orders at all — completely MISSED
+         this exact incident, because CYS_USDT DID have an order (its
+         TP), so it never counted as "unprotected" by that check's own
+         definition. Added a second check: for each open position, look
+         at its own trigger orders and its own direction, and flag one
+         that has orders but NONE of them is actually acting as a stop-
+         loss (rule=2 for a LONG, rule=1 for a SHORT). Unlike the first
+         check, this doesn't just alert — find_open_signal_sl() recovers
+         the position's own originally-intended SL price from whichever
+         module's own OPEN signal record still has it (same signal-list
+         set has_open_signal_any_module() already checks across), and a
+         fresh placement is attempted immediately with the SAME
+         directional-rounding fix from FIX 1. Telegram-alerts either way
+         (✅ auto-healed / ⚠️ still failed, check manually), deduped the
+         same way the existing unprotected-position alert already is.
+         This runs on every reconcile pass — both the opportunistic one
+         before each new trade AND the periodic one (RECONCILE_INTERVAL_
+         SEC) — so an existing already-unprotected position (like the
+         CYS_USDT one that prompted this) gets picked up and auto-healed
+         on the very next cycle, not just future trades.
+         Verified: py_compile, pyflakes clean (a full re-check after an
+         accidental deletion of cancel_price_order() during editing was
+         caught and fixed before this passed), a real runtime start, the
+         Flask route/def integrity check (still 44 routes — no routes
+         touched), and unit tests: round_to_tick_directional() against a
+         hand-picked price/tick pair that reproduces the EXACT failure
+         mode (plain round_to_tick() rounds a LONG's raw SL of 1.23455 UP
+         to 1.235, which is >= a last_price of 1.2346 — Gate would reject
+         that; the new directional round-down keeps it at 1.234, correctly
+         below), confirming the fallback behavior with no tick_size is
+         unchanged, and find_open_signal_sl() correctly recovering a
+         planted OPEN LSW signal's own direction/sl and returning None
+         for a symbol with no matching record.
