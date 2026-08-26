@@ -10661,3 +10661,90 @@ v0.99.125 - Fixed the root cause behind one class of error-log entry,
          now retries exactly once and returns the successful result
          instead of raising immediately — the exact behavior the pre-fix
          code was missing.
+
+v0.99.126 - MSNR: two fixes from the strategy's own author's real trade
+         examples, forwarded directly by the user ("по поводу mnsr,
+         скрины от разраба, может даст понимание что исправить" plus a
+         second post with explicit text: "Шорт по золоту, згідно
+         торгової стратегії MSNR: h1/m30 SBR > m1 QM + m30 fresh
+         (добір) > Target h1 V-shape, 8 + 3.5RR").
+         FIX 1: MSNR_ENTRY_TF default changed 15m -> 1m — the source's
+         own QM sweep+rejection trigger is watched on M1, not M15.
+         NOTE: at 1m, get_candles_range()'s own confirmed ~10000-candle
+         recency floor caps entry-TF backtest history to ~6.9 days
+         regardless of MSNR_BACKTEST_DAYS (still 40, still governing
+         the coarser structure-TF/OCL side) — get_candles_range()
+         already clamps forward gracefully, so nothing breaks, entry-TF
+         backtests are just shallower than before.
+         FIX 2: the "добір" (add-on) second position — a genuinely
+         missing mechanic, not a parameter tweak. The source takes a
+         SECOND position on the same idea when a fresh QM sweep+reject
+         reappears on M30 against the SAME still-active level, sharing
+         the primary trade's own target. msnr_detect_addon_signals()
+         replays the exact same sweep-then-close-back logic as the
+         primary detector's own A-shape/V-shape branches on MSNR_
+         ADDON_TF (30m default), restricted to bars after the primary's
+         own time, one add-on per primary. msnr_addon_backtest_symbol()
+         wires it into a SEPARATE backtest path (deliberately NOT
+         merged into msnr_backtest_symbol() — that stays untouched,
+         still what msnr_optimize_symbol()'s own grid search depends
+         on) returning (primary_results, addon_results) so the two
+         pools can be compared independently.
+         REAL AUTOTRADE, per direct user follow-up ("да нет, сразу
+         делай с автоторговлей") after this app flagged a genuine
+         conflict: Gate has no concept of two independently-stacked
+         positions on one contract in the same direction — a second
+         same-direction market order just MERGES into the existing
+         position (blended average entry, combined size). execute_
+         autotrade() gained a new allow_stack param: the exchange-side
+         duplicate-position guard now permits an order through when
+         allow_stack=True AND the existing position is the SAME
+         direction (a deliberate stack) — an OPPOSITE-direction
+         existing position still blocks regardless, a genuine conflict
+         this guard exists to catch. Verified via a full truth table
+         (5 cases: no-override same/opposite direction, override
+         same/opposite direction, override same direction LONG) — the
+         opposite-direction case correctly still blocks even WITH
+         allow_stack=True.
+         Which SL should govern the merged position had no answer in
+         either forwarded screenshot — asked directly, and when told
+         "а по скринам не понятно это?", the honest answer is that the
+         source material genuinely doesn't specify this (its own author
+         trades two positions mentally/on paper, never hits an exchange
+         that merges same-direction orders, so the question wouldn't
+         even occur to them) — so per direct user decision, the MORE
+         CONSERVATIVE of the primary's own already-live SL and the
+         add-on's own fresh SL now governs the whole merged position
+         (further from price = wider stop), consistent with this exact
+         module's own v0.99.104 lesson (MSNR_SL_BUFFER_MULT: premature
+         stop-outs from stops sitting too close to normal price noise).
+         msnr_scan_addon_live() cancels the primary's OLD SL trigger
+         order (now tracked via a new "sl_order_id" field on the
+         primary's own STATE["msnr_signals"] record, previously never
+         saved) and lets execute_autotrade() place a fresh one at the
+         chosen final_sl — otherwise the narrower of the two could
+         still fire first regardless of which is meant to govern. TP is
+         left as a harmless duplicate at the same shared target price
+         (reconcile_positions_and_orders() cleans up whichever one is
+         orphaned once the position closes, same as any other pair). A
+         new "addon_fired" flag on the primary record stops a second
+         add-on ever firing on top of the first — the source's own
+         examples show exactly two positions per idea, not a chain.
+         Wired into msnr_live_loop() as a second pass over the same
+         live_universe, AFTER the primary scan (so a primary that just
+         fired this exact cycle is already visible to it), gated
+         entirely behind a new MSNR_ADDON_ENABLED toggle (off by
+         default, same convention as every toggle in this file) and a
+         "↳ Добор (add-on) ⚠️ реальный ордер" checkbox in the MSNR
+         settings group.
+         Verified: py_compile, pyflakes clean, a real runtime start,
+         the Flask route/def integrity check (still 44 routes — no new
+         routes, only existing autotrade/live-loop logic extended), a
+         getElementById audit on the one new ID (setMsnrAddon, defined
+         once, referenced once), and unit tests: msnr_detect_addon_
+         signals() correctly detecting a hand-built fresh M30 sweep on
+         both a SHORT (A-shape level) and LONG (V-shape level) case and
+         correctly returning nothing against flat add-on data; the
+         final-SL selection logic confirmed picking the wider/further
+         option in both directions; and the full allow_stack truth
+         table described above.
