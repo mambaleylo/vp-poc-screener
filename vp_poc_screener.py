@@ -33,7 +33,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.123"
+APP_VERSION = "0.99.124"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2701,6 +2701,40 @@ def round_to_tick(price, tick_size):
     return round(round(price / tick_size) * tick_size, 12)
 
 
+def round_to_tick_directional(price, tick_size, round_up):
+    """Same tick-snapping as round_to_tick(), but ALWAYS rounds in one
+    direction instead of to the nearest tick — round_up=True always
+    rounds UP (ceil), round_up=False always rounds DOWN (floor).
+    v0.99.124, per direct user report (screenshot: a real LSW LONG
+    trade on CYS_USDT opened fine but its own SL leg came back
+    OPENED_TP_SL_FAILED — error 1029 AUTO_TRIGGER_PRICE_LESS_LAST,
+    "Trigger.Price must < last_price" — leaving the position with a TP
+    but genuinely NO stop-loss at all): Gate's price_orders endpoint
+    enforces trigger < last_price for a rule=2 order and trigger >
+    last_price for a rule=1 order AT THE EXACT MOMENT OF PLACEMENT.
+    Plain round-to-nearest (round_to_tick()) can push a price that was
+    correctly on the valid side of current price to the WRONG side by
+    up to half a tick — and on a coin with a wide tick size relative to
+    price and a tight stop distance (CYS_USDT, plus LSW's own
+    deliberately narrow LSW_SL_BUFFER_PCT, especially after 5m entry
+    confirmation tightens it further — see LSW_ENTRY_CONFIRM_ENABLED's
+    own docstring), that's enough to flip a valid SL into a rejected
+    one. Rounding a LONG's SL DOWN (away from current price) and a
+    SHORT's SL UP (same direction) keeps the trigger unambiguously on
+    the valid side of last_price no matter how close the raw value
+    sat to a tick boundary — the tiny (at most one tick) extra distance
+    this adds to the stop is a rounding error, not a real risk change,
+    and is a trivial cost next to the alternative (a real position left
+    with no stop-loss at all, which is what actually happened here).
+    Falls back to the raw price unchanged if tick_size is missing/zero,
+    same as round_to_tick()."""
+    if not tick_size or tick_size <= 0:
+        return price
+    n = price / tick_size
+    n = math.ceil(n) if round_up else math.floor(n)
+    return round(n * tick_size, 12)
+
+
 def format_price_str(price, tick_size=None):
     """Converts a price float to a plain fixed-point decimal string, never
     scientific notation. Python's str()/repr() silently switches to
@@ -3004,6 +3038,14 @@ def move_stop_to_breakeven(symbol, direction, sl_order_id, entry, tick, buffer_p
         return None
     breakeven_price = entry * (1 + buffer_pct) if direction == "LONG" else entry * (1 - buffer_pct)
     sl_rule = 2 if direction == "LONG" else 1
+    # v0.99.124 — this call previously passed the raw, un-tick-rounded
+    # breakeven_price straight through (place_close_trigger_order()'s
+    # own `tick` param only controls decimal FORMATTING there, not
+    # snapping to a tick multiple at all) — the exact same failure
+    # mode as execute_autotrade()'s own SL placement (see round_to_
+    # tick_directional()'s own docstring), just never actually hit
+    # before now since a breakeven move is rarer than a fresh open.
+    breakeven_price = round_to_tick_directional(breakeven_price, tick, round_up=(direction == "SHORT"))
     try:
         new_sl = place_close_trigger_order(symbol, direction, breakeven_price, sl_rule, tick)
     except Exception as e:
@@ -3115,12 +3157,36 @@ def get_open_price_orders():
 
 
 _unprotected_alerted = set()  # contracts already flagged — avoids re-alerting on every single new trade while the same position stays unprotected
+_missing_sl_alerted = set()  # v0.99.124 — same dedup, for the separate "has orders but none of them is a stop-loss" case
 
 
 def cancel_price_order(order_id):
     """DELETE /futures/usdt/price_orders/{order_id} — cancels one still-
     pending trigger order."""
     return gate_signed_request("DELETE", f"/futures/usdt/price_orders/{order_id}")
+
+
+def find_open_signal_sl(symbol):
+    """Searches every module's own OPEN-signal list (same set has_open_
+    signal_any_module() already checks) for one on this symbol, and
+    returns (direction, sl) from whichever it finds first — used by
+    reconcile_positions_and_orders() to recover a stop-loss price for
+    an open position whose own SL placement failed at open time, so it
+    can be automatically retried rather than just alerted about. None
+    if no module has a matching OPEN record (shouldn't normally happen
+    for a real open position, but the caller treats that as "nothing to
+    retry with" rather than assuming one)."""
+    lists = {
+        "signals": STATE["signals"], "scalp_signals": STATE["scalp_signals"],
+        "ft5_signals": STATE["ft5_signals"], "msnr_signals": STATE["msnr_signals"],
+        "mirror_signals": STATE["mirror_signals"], "lsw_signals": STATE["lsw_signals"],
+    }
+    with state_lock:
+        for lst in lists.values():
+            for s in lst:
+                if s.get("symbol") == symbol and s.get("status") == "OPEN" and s.get("sl") is not None:
+                    return s.get("direction"), s.get("sl")
+    return None
 
 
 def reconcile_positions_and_orders():
@@ -3130,6 +3196,23 @@ def reconcile_positions_and_orders():
     (1) positions with NO attached trigger order at all — alerted via
         Telegram, deduped so the same still-unprotected contract doesn't
         re-alert on every subsequent trade.
+    (1b) v0.99.124, per direct user report (screenshot: a real LSW LONG
+        on CYS_USDT had its SL leg rejected by Gate at open time —
+        AUTO_TRIGGER_PRICE_LESS_LAST, see round_to_tick_directional()'s
+        own docstring for the root cause — leaving a position with a TP
+        but genuinely no stop-loss): check (1) alone MISSED this case
+        entirely, because it only asks "does this contract have ANY
+        trigger order," and CYS_USDT did (its TP). This second check
+        looks at each contract's OWN trigger orders and its OWN position
+        direction (LONG needs a rule=2 order, SHORT needs rule=1) and
+        flags a contract that has orders but none of them is actually a
+        stop-loss. Unlike (1), this doesn't just alert — it tries to
+        AUTO-HEAL: find_open_signal_sl() recovers the original SL price
+        from whichever module's own signal record still has it, and a
+        fresh placement is attempted with the SAME directional-rounding
+        fix that caused the original failure to (hopefully) not recur.
+        Success or failure either way is Telegram-alerted, deduped the
+        same way as (1) so a still-failing retry doesn't spam.
     (2) trigger orders whose position has ALREADY closed — Gate has no
         native OCO, so when TP fires and closes a position, the paired
         SL order (or vice versa) just sits there as a live trigger with
@@ -3164,6 +3247,59 @@ def reconcile_positions_and_orders():
             f"⚠️ Незащищённые позиции без TP/SL: {', '.join(new_ones)} — проверь вручную на бирже",
             category=None,
         )
+
+    # (1b) — has orders, but none of them is actually a stop-loss for this position's own direction
+    triggers_by_contract = {}
+    for t in triggers:
+        c = t.get("initial", {}).get("contract")
+        if c:
+            triggers_by_contract.setdefault(c, []).append(t)
+    missing_sl_healed = []
+    missing_sl_still_failed = []
+    for p in positions:
+        contract = p.get("contract")
+        if not contract or contract in unprotected:
+            continue  # already covered by the "no orders at all" case above
+        size = float(p.get("size", 0) or 0)
+        direction = "LONG" if size > 0 else "SHORT"
+        expected_sl_rule = 2 if direction == "LONG" else 1
+        contract_triggers = triggers_by_contract.get(contract, [])
+        has_sl = any((t.get("trigger", {}) or {}).get("rule") == expected_sl_rule for t in contract_triggers)
+        if has_sl:
+            continue
+        found = find_open_signal_sl(contract)
+        if not found:
+            if contract not in _missing_sl_alerted:
+                _missing_sl_alerted.add(contract)
+                send_telegram(
+                    f"⚠️ {contract}: есть ордер(а), но среди них нет стоп-лосса, и не нашлось "
+                    f"записи сигнала, чтобы восстановить его автоматически — проверь вручную на бирже",
+                    category=None,
+                )
+            missing_sl_still_failed.append(contract)
+            continue
+        sig_direction, sig_sl = found
+        try:
+            tick = get_contract_spec(contract).get("order_price_round")
+        except Exception:
+            tick = None
+        sl_rounded = round_to_tick_directional(sig_sl, tick, round_up=(sig_direction == "SHORT"))
+        try:
+            place_close_trigger_order(contract, sig_direction, sl_rounded, expected_sl_rule, tick)
+            missing_sl_healed.append(contract)
+            _missing_sl_alerted.discard(contract)
+            send_telegram(f"✅ {contract}: автоматически восстановлен отсутствовавший стоп-лосс @ {sl_rounded}", category=None)
+        except Exception as e:
+            log_error(f"reconcile_positions_and_orders: {contract} missing SL, auto-heal retry failed: {e}")
+            if contract not in _missing_sl_alerted:
+                _missing_sl_alerted.add(contract)
+                send_telegram(
+                    f"⚠️ {contract}: стоп-лосс отсутствует, автовосстановление тоже не удалось ({e}) — проверь вручную на бирже",
+                    category=None,
+                )
+            missing_sl_still_failed.append(contract)
+    if missing_sl_healed:
+        log_error(f"reconcile_positions_and_orders: auto-healed missing SL for {len(missing_sl_healed)} contract(s): {missing_sl_healed}")
 
     cancelled = []
     for t in triggers:
@@ -3412,8 +3548,13 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
                 tick = get_contract_spec(symbol).get("order_price_round")
             except Exception:
                 tick = None
-            tp_rounded = round_to_tick(tp, tick)
-            sl_rounded = round_to_tick(sl, tick)
+            # v0.99.124 — directional rounding, not round_to_tick()'s
+            # round-to-nearest: see round_to_tick_directional()'s own
+            # docstring for why nearest-rounding can flip a valid SL
+            # trigger to the wrong side of last_price and get it
+            # rejected by Gate, leaving a real position unprotected.
+            tp_rounded = round_to_tick_directional(tp, tick, round_up=(direction == "LONG"))
+            sl_rounded = round_to_tick_directional(sl, tick, round_up=(direction == "SHORT"))
             record["tp_rounded"] = tp_rounded
             record["sl_rounded"] = sl_rounded
             tp_order, sl_order, tp_sl_errors = place_tp_sl_orders(symbol, direction, tp_rounded, sl_rounded, tick=tick)
