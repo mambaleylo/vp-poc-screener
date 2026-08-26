@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.128"
+APP_VERSION = "0.99.129"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2374,12 +2374,48 @@ _network_error_timestamps = []  # sliding window of recent network-flavored log_
 _network_error_lock = threading.Lock()
 _network_alert_last_sent = 0.0
 
+# v0.99.129 — Russian prefix for the error log, per direct user request
+# ("код ошибки оставим... писать на русском, чтобы мне сразу понятно
+# было"): rewriting every one of this file's own ~100+ log_error()
+# call sites by hand to speak Russian natively would be a huge, error-
+# prone undertaking for something this file already has a working
+# pattern for (see the network-alert marker matching just above) —
+# instead, log_error() itself now recognizes the common, recurring
+# SHAPES of error this app actually produces and prepends a short
+# Russian explanation, WITHOUT touching or translating the original
+# technical text itself (exception class, exchange error code/label,
+# stack detail) — "код ошибки оставим" means exactly that: the
+# original stays intact and searchable, only a plain-language label
+# gets added in front of it. Order matters — first matching entry
+# wins, so more specific patterns (an exchange's own named error code)
+# are listed before generic ones (a bare HTTP status) that could also
+# appear inside a more specific message.
+_ERROR_TRANSLATIONS = (
+    (("AUTO_TRIGGER_PRICE_LESS_LAST", "AUTO_TRIGGER"), "📉 Биржа отклонила цену стоп/тейк-триггера: "),
+    (("INSUFFICIENT_AVAILABLE", "insufficient", "not enough balance", "not enough margin"), "💰 Недостаточно средств на бирже: "),
+    (("invalid signature", "INVALID_KEY", "auth failed", "Unauthorized", "401 Client Error"), "🔑 Проблема с API-ключом: "),
+    (("Too Many Requests", "RATE_LIMIT", "429 Client Error"), "⏳ Биржа ограничила частоту запросов: "),
+    (_NETWORK_ERROR_MARKERS, "🌐 Проблема с сетью (соединение/таймаут): "),
+    (("403 Client Error",), "🔒 Нет доступа к бирже (403) — возможно, гео- или сетевое ограничение: "),
+    (("500 Server Error", "502 ", "503 ", "504 ", "Bad Gateway", "Service Unavailable"), "🛠 Сбой на стороне биржи: "),
+    (("JSONDecodeError", "Expecting value"), "📄 Биржа вернула некорректный (не JSON) ответ: "),
+    (("KeyError",), "🔑 В ответе биржи не хватает ожидаемого поля: "),
+)
+
+
+def _russian_error_prefix(text):
+    for markers, prefix in _ERROR_TRANSLATIONS:
+        if any(marker in text for marker in markers):
+            return prefix
+    return ""  # no recognized pattern — left as-is rather than guessing a misleading translation
+
 
 def log_error(msg):
-    print("[ERR]", msg)
     text = str(msg)[:500]
+    text = _russian_error_prefix(text) + text
+    print("[ERR]", text)
     with state_lock:
-        STATE["errors"].append({"t": time.time(), "msg": text})
+        STATE["errors"].append({"t": time.time(), "msg": text[:550]})
     if any(marker in text for marker in _NETWORK_ERROR_MARKERS):
         now = time.time()
         with _network_error_lock:
