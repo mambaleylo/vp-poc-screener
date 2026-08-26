@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.126"
+APP_VERSION = "0.99.127"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12943,7 +12943,7 @@ async function refreshTuning() {
   ]);
   const el = document.getElementById('tuningPanel');
   const st = s.stats || {};
-  const wr = st.winrate !== null && st.winrate !== undefined ? `${st.winrate}%` : '-';
+  const wr = st.winrate !== null && st.winrate !== undefined ? `<span class="${st.winrate >= 50 ? 'win' : 'loss'}">${st.winrate}%</span>` : '<span class="dim">-</span>';
   const at = s.auto_tune || {};
   const atTxt = at.enabled
     ? `автотюнинг: ${at.tuned_symbols}/${s.universe_size} монет уже подобрано (обновление каждые ${at.refresh_hours}ч, +${at.per_cycle}/скан)`
@@ -13057,7 +13057,7 @@ async function refreshScalp() {
   const buildTxt = status.last_build_finished
     ? `последнее построение: ${fmtTime(status.last_build_finished)} (${status.last_build_duration}s) · монет обработано: ${status.symbols_done}/${status.universe_size}`
     : `первое построение ещё не завершилось (${status.symbols_done}/${status.universe_size || '?'})`;
-  const ssWr = ss.win_rate !== null && ss.win_rate !== undefined ? `${ss.win_rate}%` : '-';
+  const ssWr = ss.win_rate !== null && ss.win_rate !== undefined ? `<span class="${ss.win_rate >= 50 ? 'win' : 'loss'}">${ss.win_rate}%</span>` : '<span class="dim">-</span>';
   const ts = status.tuning_stats || {};
   const mfeMaeHtml = ts.count ? `
     <div style="margin-bottom:8px;"><b>MFE/MAE (R, R = свой SL% каждой сделки) на закрытии</b> — сколько реально было хода в плюс/минус к моменту исхода (n=${ts.count}: ${ts.wins_n}W/${ts.losses_n}L):<br>
@@ -13201,7 +13201,7 @@ async function refreshMsnr() {
   const panel = document.getElementById('msnrPanel');
   const cfg = status.config || {};
   const ss = status.signals_stats || {};
-  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
+  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `<span class="${ss.winrate >= 50 ? 'win' : 'loss'}">${ss.winrate}%</span>` : '<span class="dim">-</span>';
   const buildTxt = status.backtest_running
     ? `бэктест выполняется: ${status.backtest_done||0}/${status.backtest_total||'?'} монет${status.backtest_started_at ? ' · идёт ' + Math.round((Date.now()/1000 - status.backtest_started_at)) + 'с' : ''}`
     : (status.last_backtest_finished
@@ -13807,7 +13807,7 @@ async function refreshFt5() {
   const panel = document.getElementById('ft5Panel');
   const cfg = status.config || {};
   const ss = status.signals_stats || {};
-  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
+  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `<span class="${ss.winrate >= 50 ? 'win' : 'loss'}">${ss.winrate}%</span>` : '<span class="dim">-</span>';
   const avgPnlTxt = ss.avg_pnl_pct !== null && ss.avg_pnl_pct !== undefined ? `${ss.avg_pnl_pct > 0 ? '+' : ''}${ss.avg_pnl_pct}%` : '-';
   const rrTxt = ss.rr_avg !== null && ss.rr_avg !== undefined
     ? `реализ. RR ср. ${ss.rr_avg>0?'+':''}${ss.rr_avg} (медиана ${ss.rr_median>0?'+':''}${ss.rr_median})`
@@ -13905,14 +13905,14 @@ async function refreshMirror() {
   const panel = document.getElementById('mirrorPanel');
   const cfg = status.config || {};
   const ss = status.signals_stats || {};
-  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
+  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `<span class="${ss.winrate >= 50 ? 'win' : 'loss'}">${ss.winrate}%</span>` : '<span class="dim">-</span>';
   // v0.99.114, per direct user question ("может без применения фильтра
   // было лучше, а после него стало хуже"): the filter-blocked pool,
   // tracked through the SAME outcome logic as real signals but never
   // actually traded — direct, real forward-data comparison against
   // ssWr above, not a backtest's own retrospective self-consistency.
   const fss = status.filtered_signals_stats || {};
-  const fssWr = fss.win_rate !== null && fss.win_rate !== undefined ? `${fss.win_rate}%` : '-';
+  const fssWr = fss.win_rate !== null && fss.win_rate !== undefined ? `<span class="${fss.win_rate >= 50 ? 'win' : 'loss'}">${fss.win_rate}%</span>` : '<span class="dim">-</span>';
   const filterReasonLabels = {sl_width: 'широкий стоп', direction: 'слабое направление'};
   const byReasonTxt = Object.entries(fss.by_reason || {}).map(([reason, s]) => {
     const wr = s.win_rate !== null && s.win_rate !== undefined ? `${s.win_rate}%` : '-';
@@ -14031,7 +14031,7 @@ async function refreshLsw() {
   const panel = document.getElementById('lswPanel');
   const cfg = status.config || {};
   const ss = status.signals_stats || {};
-  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `${ss.winrate}%` : '-';
+  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `<span class="${ss.winrate >= 50 ? 'win' : 'loss'}">${ss.winrate}%</span>` : '<span class="dim">-</span>';
   const levelTypeLabels = {high: 'снятие хаёв', low: 'снятие лоу'};
   const byLevelTxt = Object.entries(ss.by_level_type || {}).map(([lt, s]) => {
     const wr = s.winrate !== null && s.winrate !== undefined ? `${s.winrate}%` : '-';
