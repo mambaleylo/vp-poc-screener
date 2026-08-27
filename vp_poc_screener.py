@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.133"
+APP_VERSION = "0.99.134"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -8446,6 +8446,14 @@ def msnr_scan_symbol_live(symbol):
             autotrade_result = execute_autotrade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"],
                                                   sig["tp"])
             order_opened = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
+            # v0.99.134 — same cooldown-release-on-ERROR fix as LSW's own
+            # (see that module's own call site comment for the full
+            # incident): a bare network ERROR shouldn't permanently burn
+            # this signal's one-and-only chance to fire.
+            if autotrade_result.get("status") == "ERROR":
+                with _msnr_signal_cooldowns_lock:
+                    if _msnr_signal_cooldowns.get(symbol) == sig["time"]:
+                        del _msnr_signal_cooldowns[symbol]
             # v0.99.34, per direct user follow-up ("как добавить сигналы
             # по msnr в симулятор"): sim_execute_trade() already gets
             # called for every autotrade-fired MSNR signal (same design
@@ -8567,6 +8575,14 @@ def msnr_scan_addon_live(symbol):
                                               allow_stack=True)
         order_opened = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
         if not order_opened:
+            # v0.99.134 — same cooldown-release-on-ERROR fix as every
+            # other module's own real-order call site (see LSW's own
+            # for the full incident): a bare network ERROR shouldn't
+            # permanently burn this add-on's one-and-only chance.
+            if autotrade_result.get("status") == "ERROR":
+                with _msnr_signal_cooldowns_lock:
+                    if _msnr_addon_cooldowns.get(symbol) == asig["time"]:
+                        del _msnr_addon_cooldowns[symbol]
             return
         with state_lock:
             primary["addon_fired"] = True
@@ -10133,9 +10149,17 @@ def mirror_scan_symbol_live(symbol):
         with state_lock:
             STATE["mirror_signals"].appendleft(record)
         if AUTOTRADE_ENABLED_MIRROR:
-            execute_autotrade("mirror", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
+            autotrade_result = execute_autotrade("mirror", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
             sim_execute_trade("mirror", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                AUTOTRADE_LEVERAGE_MIRROR, record)
+            # v0.99.134 — same cooldown-release-on-ERROR fix as LSW's own
+            # (see that call site's own comment for the full incident):
+            # a bare network ERROR shouldn't permanently burn this
+            # level's one-and-only signal.
+            if autotrade_result and autotrade_result.get("status") == "ERROR":
+                with _mirror_signal_cooldowns_lock:
+                    if _mirror_signal_cooldowns.get(symbol) == sig["entry_time"]:
+                        del _mirror_signal_cooldowns[symbol]
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         pattern_labels = {"inside_bar": "внутренний бар", "tweezers": "пинцет",
                            "rails": "рельсы", "engulfing_doji": "поглощение на дожи"}
@@ -11038,9 +11062,28 @@ def lsw_scan_symbol_live(symbol):
         with state_lock:
             STATE["lsw_signals"].appendleft(record)
         if AUTOTRADE_ENABLED_LSW:
-            execute_autotrade("lsw", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
+            autotrade_result = execute_autotrade("lsw", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
             sim_execute_trade("lsw", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                AUTOTRADE_LEVERAGE_LSW, record)
+            # v0.99.134 — BUG FOUND (per direct user report: a real
+            # order attempt failed with status ERROR — "HTTPSConnection
+            # Pool... Read timed out" — and the trade never opened even
+            # after the network recovered): the cooldown above is set
+            # BEFORE this call, purely to stop the SAME signal firing
+            # twice across scan cycles once it's genuinely handled — but
+            # "handled" included a bare network ERROR, permanently
+            # burning the one shot this signal ever gets (a level fires
+            # once, then stops being watched — see mirror_/lsw_detect_
+            # signals()'s own docstring) on nothing but a transient
+            # connectivity blip. A real SKIP (already has a position) or
+            # a real OPENED both still keep the cooldown — only ERROR
+            # releases it, so the NEXT scan pass (LSW_SCAN_INTERVAL_SEC
+            # later) gets a genuine second attempt while this exact
+            # signal is still the latest one on the latest candle.
+            if autotrade_result and autotrade_result.get("status") == "ERROR":
+                with _lsw_signal_cooldowns_lock:
+                    if _lsw_signal_cooldowns.get(symbol) == sig["entry_time"]:
+                        del _lsw_signal_cooldowns[symbol]
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         level_labels = {"high": "снятие хаёв", "low": "снятие лоу"}
         send_telegram(
