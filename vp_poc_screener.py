@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.130"
+APP_VERSION = "0.99.131"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -685,14 +685,29 @@ TELEGRAM_ALERTS_MIRROR = os.environ.get("VP_TG_ALERTS_MIRROR", "1") == "1"
 # msnr... В живых сигналах использовать только бэктестовые монеты с
 # винрейтом более 35%"):
 MIRROR_SYMBOL_SKIP_MIN_SAMPLE = 15  # same per-bucket significance bar MSNR's own filters use
-MIRROR_LIVE_MIN_SAMPLE = int(os.environ.get("VP_MIRROR_LIVE_MIN_SAMPLE", 80))  # v0.99.111, per direct user report ("у virtual n 15 всего, но она торгуется в топе. Хотя бы от 80 сделать"): a SEPARATE, higher bar than MIRROR_SYMBOL_SKIP_MIN_SAMPLE above — that constant answers "is this one bucket/pattern/direction within a symbol's own backtest reliable enough to judge," this one answers a different question entirely: "is the symbol's OVERALL post-filter history long enough to trust for live trading at all." The two were conflated before this version (mirror_backtest_loop()'s own live-eligibility gate reused the 15-trade per-bucket bar as a whole-symbol floor too) — a symbol clearing just 15 total closed trades could read as, say, 100% winrate purely from a small, lucky sample and still get promoted to live trading exactly like a genuinely-tested 80+ trade symbol.
+MIRROR_LIVE_MIN_SAMPLE = int(os.environ.get("VP_MIRROR_LIVE_MIN_SAMPLE", 25))  # v0.99.111, per direct user report ("у virtual n 15 всего, но она торгуется в топе. Хотя бы от 80 сделать"): a SEPARATE, higher bar than MIRROR_SYMBOL_SKIP_MIN_SAMPLE above — that constant answers "is this one bucket/pattern/direction within a symbol's own backtest reliable enough to judge," this one answers a different question entirely: "is the symbol's OVERALL post-filter history long enough to trust for live trading at all." The two were conflated before this version (mirror_backtest_loop()'s own live-eligibility gate reused the 15-trade per-bucket bar as a whole-symbol floor too) — a symbol clearing just 15 total closed trades could read as, say, 100% winrate purely from a small, lucky sample and still get promoted to live trading exactly like a genuinely-tested 80+ trade symbol.
+# v0.99.131 — lowered 80->25, per direct user request ("минималку по
+# выборке убери совсем... до фильтров и так огромная выборка") and a
+# follow-up compromise after this app pushed back: raw pre-filter
+# sample size (~300 signals) doesn't make a small POST-filter sample
+# more trustworthy — confidence comes from the final n actually being
+# judged, not the size of the funnel it survived; if anything, a small
+# survivor count out of a large raw pool is a bigger overfitting flag
+# (the filter chain had more chances to land on a lucky-looking
+# subset), not a smaller one. Asked directly whether to remove the
+# floor entirely (n=1-2 could then qualify) or keep a small non-zero
+# one — chose the latter (~20-30 range) specifically so a genuinely
+# accidental 1-2 trade sample still can't reach live trading, while
+# meaningfully loosening the previous 80-trade bar that was leaving
+# every symbol shut out at once (v0.99.111's own original problem —
+# n=15 mistakenly promoted — is still avoided at 25).
 MIRROR_SL_PCT_BUCKETS = [(0, 1), (1, 2), (2, 4), (4, 7), (7, float("inf"))]
 MIRROR_SL_PCT_BUCKET_SCHEMES = [
     MIRROR_SL_PCT_BUCKETS,
     [(0, 2), (2, 5), (5, float("inf"))],
     [(0, 3), (3, float("inf"))],
 ]  # finest -> coarsest cascade, same MSNR v0.99.89 lesson applied from the start here rather than shipping a fixed-only version first
-MIRROR_LIVE_MIN_WINRATE = float(os.environ.get("VP_MIRROR_LIVE_MIN_WINRATE", 40.0))  # a symbol's OWN post-filter backtest winrate must clear this to be live-scanned at all — raised 35->40 (v0.99.113) per direct user request, alongside investigating (and confirming, not a bug) why many symbols show n=0 despite hundreds of raw signals: the SL-width/pattern/direction filter chain can legitimately eliminate 100% of a symbol's trades when its raw winrate is bad across virtually every SL-width bucket — the SL filter alone catches everything, leaving nothing for the later filters to work with
+MIRROR_LIVE_MIN_WINRATE = float(os.environ.get("VP_MIRROR_LIVE_MIN_WINRATE", 38.0))  # a symbol's OWN post-filter backtest winrate must clear this to be live-scanned at all — raised 35->40 (v0.99.113) per direct user request, then lowered 40->38 (v0.99.131), also per direct user request, alongside investigating (and confirming, not a bug) why many symbols show n=0 despite hundreds of raw signals: the SL-width/pattern/direction filter chain can legitimately eliminate 100% of a symbol's trades when its raw winrate is bad across virtually every SL-width bucket — the SL filter alone catches everything, leaving nothing for the later filters to work with
 
 # LSW ("Liquidity Sweep") — equal-highs/equal-lows liquidity-grab
 # reversal module. Constants live here for the same reason every other
