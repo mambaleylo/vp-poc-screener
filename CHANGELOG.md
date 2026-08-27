@@ -10847,3 +10847,71 @@ v0.99.129 - Russian-language prefix on the error log, per direct user
          prefix and the original text still present verbatim, plus one
          deliberately unrecognized message confirming it's stored
          completely unchanged rather than mistranslated.
+
+v0.99.130 - Optional per-symbol autotuning of MIRROR_TOUCH_TOLERANCE_
+         PCT/MIRROR_PATTERN_TOLERANCE_PCT, per direct user question
+         ("Может допуск касания и допуск паттерна можно менять?...
+         или это уже дикая подгонка прям будет?") prompted by a real
+         report that Mirror's live scan had ZERO eligible symbols —
+         diagnosed as correct, not a bug (XAU_USDT's own 38.8% winrate
+         fell just short of MIRROR_LIVE_MIN_WINRATE=40%, and no visible
+         symbol cleared BOTH that bar and MIRROR_LIVE_MIN_SAMPLE=80 at
+         once) — followed by this direct question about whether tuning
+         the detector's own tolerances could help without it being
+         overfitting.
+         Answered in-conversation first: unlike picking a winning
+         direction post-hoc (the earlier LSW discussion), touch/pattern
+         tolerance are DEFINITIONAL parameters of the pattern detector
+         itself, not a post-hoc pick from an already-observed outcome —
+         but Mirror already carries a heavy per-symbol-tuned filter
+         chain (SL-width/pattern/direction skip rules, all derived
+         in-sample from the same window they're judged against), and
+         adding a 2-dimensional grid search on top meaningfully raises
+         the overfitting surface (more combinations x more symbols =
+         more chances one wins purely by luck on a finite sample).
+         Implemented with the safeguard the user agreed to: mirror_
+         autotune_tolerances() runs a coarse grid (MIRROR_AUTOTUNE_
+         TOUCH_GRID x MIRROR_AUTOTUNE_PATTERN_GRID, 4x3=12 combos, not
+         a fine continuous search) with genuine walk-forward validation
+         — MIRROR_AUTOTUNE_TRAIN_FRACTION (70%) of the backtest window,
+         the OLDER portion, used to find candidates clearing MIRROR_
+         AUTOTUNE_MIN_WINRATE (35%) with MIRROR_AUTOTUNE_MIN_TRAIN_
+         SAMPLE (25) trades; only THEN checked against the NEWER, held-
+         out 30% (MIRROR_AUTOTUNE_MIN_TEST_SAMPLE=12), never touched
+         during candidate selection. Among combos clearing BOTH
+         independently, picks the highest TEST winrate (the honest,
+         out-of-sample estimate — ranking by train winrate would
+         reintroduce the same in-sample bias the split exists to
+         avoid). A symbol with no combo clearing both slices keeps the
+         plain module-wide defaults, exactly as if autotuning were off
+         for it — this only ever narrows toward a validated combo, never
+         forces one through. The existing MIRROR_LIVE_MIN_WINRATE/
+         MIRROR_LIVE_MIN_SAMPLE live gate still applies afterward on
+         the combined result regardless, unchanged.
+         Wired into mirror_backtest_loop() (autotunes before running
+         each symbol's own real backtest, so the reported summary
+         already reflects whichever tolerances actually got used —
+         stored in a new STATE["mirror_tuned_tolerances"]) and mirror_
+         scan_symbol_live() (looks up and applies the same per-symbol
+         tuned combo, if any, when detecting live signals). Off by
+         default (setMirrorAutotuneTolerance checkbox, "↳ Автотюнинг
+         допусков" in the Mirror settings group, with the train/test
+         mechanics spelled out inline). The backtest table's own new
+         "Допуски" column shows either "общие" (plain defaults) or the
+         validated combo with its train→test winrate on hover, per
+         symbol.
+         Verified: py_compile, pyflakes clean, a real runtime start
+         (confirmed api_mirror_status()'s new config.autotune_
+         tolerance_enabled field appears correctly), node --check on
+         the correctly-last <script> block, the Flask route/def
+         integrity check (still 44 routes — no new routes, only
+         mirror_backtest_symbol()/mirror_scan_symbol_live() extended
+         with optional override params), a getElementById audit on the
+         one new ID (setMirrorAutotuneTolerance, defined once,
+         referenced once), and unit tests: insufficient history
+         correctly returns None, the 70/30 split index computed
+         correctly, and — with mirror_detect_signals()/mirror_track_
+         outcome() mocked to make exactly one grid combo profitable —
+         mirror_autotune_tolerances() correctly identifies that combo
+         and confirms both its train and test winrates clear MIRROR_
+         AUTOTUNE_MIN_WINRATE independently.
