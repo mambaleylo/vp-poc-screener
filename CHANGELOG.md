@@ -10946,3 +10946,35 @@ v0.99.131 - Mirror live-eligibility gate loosened, per direct user
          values immediately, and the Flask route/def integrity check
          (still 44 routes — a pure constant-default change, nothing
          route-connected).
+
+v0.99.132 - CRITICAL FIX: MSNR's add-on ("добір") second position never
+         called sim_execute_trade(), per direct user report ("Не всё
+         что открывается на бирже у меня по автоторговле отображается
+         в симуляторе, только часть сделок").
+         Audited EVERY execute_autotrade() call site in the file
+         (scalp, bounce/breakout, MSNR primary, MSNR add-on, Mirror,
+         LSW) specifically checking each one is paired with a matching
+         sim_execute_trade() call — confirmed every one of them IS,
+         except msnr_scan_addon_live() (v0.99.126): it calls execute_
+         autotrade(..., allow_stack=True) to stack a real order onto an
+         already-open position, checks order_opened, updates the
+         primary signal's own sl_order_id/sl — and simply never had a
+         sim_execute_trade() call at all. A real add-on stack opened
+         correctly on the exchange (confirmed by this exact fix — MSNR
+         primary entries were always showing up fine in the simulator,
+         only add-ons were the affected "часть сделок") but was
+         completely invisible to the paper simulator.
+         Fixed: reuses `primary` (the STATE["msnr_signals"] record,
+         which already represents the WHOLE merged position from the
+         moment an add-on fires — see this function's own docstring)
+         as the signal_record, with the same leverage/size derivation
+         (msnr_symbol_optimal_leverage(), msnr_live_balance_for_symbol())
+         the primary open itself already uses, so the simulator's own
+         math stays consistent with what a real second stack actually
+         looks like size-wise.
+         Verified: py_compile, pyflakes clean, a real runtime start,
+         the Flask route/def integrity check (still 44 routes — no
+         routes touched), and a unit test with execute_autotrade()/
+         sim_execute_trade()/get_candles() mocked, confirming a real
+         add-on fire now calls sim_execute_trade() exactly once with
+         the correct mode/symbol/direction/size_mode/size_value.
