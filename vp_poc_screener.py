@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.132"
+APP_VERSION = "0.99.133"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4936,6 +4936,26 @@ def _relink_sim_trade(trade):
         "scalp": STATE["scalp_signals"],
         "msnr": STATE["msnr_signals"],
         "mirror": STATE["mirror_signals"],
+        # v0.99.133 — BUG FOUND (per direct user report, "остальные
+        # сделки тоже далеко не все попадают в симулятор"): this dict
+        # was never updated when LSW got real autotrade wired in
+        # (v0.99.120) — every PENDING (still-open) LSW sim trade alive
+        # at the moment of a server restart hit `candidates = module_
+        # lists.get("lsw")` -> None -> instant "no match" -> silently
+        # DROPPED from restored_trades in load_state() below, forever.
+        # A real LSW position stayed open on the exchange the whole
+        # time; only its paper counterpart vanished. Given how often
+        # this app gets restarted during active development, this was
+        # a systematic, ongoing loss, not a rare edge case — matches
+        # "далеко не все" far better than the add-on gap alone (that
+        # one, v0.99.132, only affected the add-on's own OWN entries;
+        # this one silently erases ANY still-open LSW trade on every
+        # single restart, regardless of module). "ft5" added too for
+        # the same completeness, even though FT5 currently never fires
+        # real orders at all (see AUTOTRADE_ENABLED_FT5's own comment)
+        # — costs nothing now and closes the same gap in advance if
+        # that ever changes.
+        "lsw": STATE["lsw_signals"], "ft5": STATE["ft5_signals"],
     }
     candidates = module_lists.get(trade.get("mode"))
     if not candidates:
@@ -14418,7 +14438,7 @@ async function refreshAutotrade() {
     (await fetch('/api/autotrade/log')).json(),
   ]);
   const panel = document.getElementById('autotradePanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', ft5: 'FT5', mirror: 'Зеркало', lsw: 'Sweep'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', ft5: 'FT5', msnr: 'MSNR', mirror: 'Зеркало', lsw: 'Sweep'};
   const enabledTxt = Object.entries(status.enabled)
     .map(([k, v]) => `<span class="${v ? 'win' : 'dim'}">${modeLabels[k]}: ${v ? 'вкл' : 'выкл'}</span>`)
     .join(' &nbsp;·&nbsp; ');
@@ -14478,7 +14498,7 @@ async function refreshSimulator() {
     (await fetch('/api/autotrade/status')).json(),
   ]);
   const panel = document.getElementById('simulatorPanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', ft5: 'FT5', mirror: 'Зеркало', lsw: 'Sweep'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', ft5: 'FT5', msnr: 'MSNR', mirror: 'Зеркало', lsw: 'Sweep'};
 
   const pnlClass = status.pnl_total >= 0 ? 'win' : 'loss';
   const sizeTxt = status.size_mode === 'percent' ? `${status.size_value}% от баланса` : `фикс. $${status.size_value}`;
