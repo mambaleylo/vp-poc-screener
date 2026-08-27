@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.131"
+APP_VERSION = "0.99.132"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -8550,6 +8550,23 @@ def msnr_scan_addon_live(symbol):
             return
         with state_lock:
             primary["addon_fired"] = True
+        # v0.99.132 — BUG FOUND (per direct user report, "Не всё что
+        # открывается на бирже у меня по автоторговле отображается в
+        # симуляторе, только часть сделок"): every OTHER real-order call
+        # site in this file pairs execute_autotrade() with a matching
+        # sim_execute_trade() call, but this one — the MSNR add-on,
+        # v0.99.126 — never had one at all. A real add-on stack opened
+        # correctly on the exchange but was completely invisible to the
+        # paper simulator. Reuses `primary` as the signal_record (it
+        # already represents the WHOLE merged position from here on —
+        # see this function's own docstring), and the same leverage/
+        # size derivation the primary open itself uses, so the
+        # simulator's own math stays consistent with what a real second
+        # stack actually looks like size-wise.
+        addon_leverage = msnr_symbol_optimal_leverage(symbol)
+        addon_size = msnr_live_balance_for_symbol(symbol)
+        sim_execute_trade("msnr", symbol, direction, asig["entry"], final_sl, asig["tp"],
+                           addon_leverage, primary, size_mode="fixed", size_value=addon_size)
         old_sl_order_id = primary.get("sl_order_id")
         new_sl_order_id = autotrade_result.get("sl_order_id")
         if old_sl_order_id and old_sl_order_id != new_sl_order_id:
