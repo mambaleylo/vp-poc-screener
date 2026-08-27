@@ -11016,3 +11016,43 @@ v0.99.133 - CRITICAL FIX: the real cause of "остальные сделки т�
          confirming the trade survives with status still PENDING and a
          correctly re-attached live signal reference, where before this
          fix it would have been silently and permanently dropped.
+
+v0.99.134 - CRITICAL FIX: a real trade that failed to open due to a
+         transient network error never got a second chance, even after
+         the network recovered, per direct user report (screenshot: an
+         autotrade_log entry with status ERROR — "HTTPSConnectionPool
+         (host='api.gateio.ws', port=443): Read timed out. (read
+         timeout=15)" — followed by confirmation the trade never opened
+         afterward, unrelated to a different OPENED entry visible below
+         it in the same log).
+         ROOT CAUSE: every module's own live-scan function (LSW, Mirror,
+         MSNR primary, MSNR add-on) sets a per-symbol cooldown key
+         BEFORE calling execute_autotrade(), purely to stop the exact
+         SAME signal firing twice across scan cycles once it's genuinely
+         been handled. But "handled" included a bare network ERROR —
+         Gate's own order-placement call timing out is exactly the kind
+         of transient failure gate_signed_request() already retries for
+         SAFE, idempotent GET requests, but deliberately does NOT retry
+         for order placement itself (see its own v0.99.112 comment: a
+         timeout that hit AFTER the order actually went through would
+         double-fire a real order if blindly resent). That's the right
+         call for the SAME attempt — but nothing upstream ever gave the
+         signal a genuine SECOND attempt on the NEXT scan cycle either,
+         because the cooldown was already permanently set. A level/
+         pattern/sweep fires its signal exactly ONCE ever (by design —
+         see each detector's own docstring), so burning that one shot on
+         nothing but a connectivity blip meant the opportunity was lost
+         forever, even once the network was fine moments later.
+         Fixed identically in all 4 real-order call sites: after
+         execute_autotrade() returns, if (and only if) its own status is
+         exactly "ERROR" (a real SKIP or successful OPENED both still
+         keep the cooldown, unchanged), the cooldown entry is deleted —
+         so the NEXT scan pass gets a genuine retry while this exact
+         signal is still the latest one on the latest candle.
+         Verified: py_compile, pyflakes clean, a real runtime start, the
+         Flask route/def integrity check (still 44 routes — no routes
+         touched), and a unit test confirming the cooldown is correctly
+         deleted after a mocked ERROR-status execute_autotrade() call,
+         while a second check confirms a genuine OPENED status correctly
+         leaves the cooldown untouched (no over-fix retrying already-
+         successful trades).
