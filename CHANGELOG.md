@@ -10978,3 +10978,41 @@ v0.99.132 - CRITICAL FIX: MSNR's add-on ("добір") second position never
          sim_execute_trade()/get_candles() mocked, confirming a real
          add-on fire now calls sim_execute_trade() exactly once with
          the correct mode/symbol/direction/size_mode/size_value.
+
+v0.99.133 - CRITICAL FIX: the real cause of "остальные сделки тоже
+         далеко не все попадают в симулятор" (per direct user follow-up
+         to v0.99.132's own add-on fix — this was broader and more
+         systematic than just the add-on gap).
+         ROOT CAUSE: _relink_sim_trade()'s own module_lists dict — used
+         by load_state() on every server restart to re-attach a still-
+         PENDING (not yet closed) sim trade to its own live signal
+         object, so later WIN/LOSS/TIMEOUT mutations stay visible —
+         never got "lsw" added when LSW got real autotrade wired in
+         (v0.99.120). Every still-OPEN LSW position at the moment of a
+         restart hit `module_lists.get("lsw")` -> None -> instant "no
+         match" -> load_state() silently DROPPED that trade from
+         restored_trades forever (dropped_pending += 1, logged only as
+         a bare count, easy to miss). The real position stayed open on
+         Gate the whole time; only its paper counterpart vanished. This
+         app gets restarted often during active development, so this
+         was an ONGOING, repeated loss across every restart with an
+         open Sweep trade — not a rare edge case, and a much bigger
+         source of "missing from sim" than the single add-on gap fixed
+         in v0.99.132. "ft5" added too for completeness, even though
+         FT5 currently never fires real orders at all.
+         SEPARATELY, per the same screenshot: two identical modeLabels
+         objects (the Автоторговля tab's own "Режимы:" line and the
+         Simulator tab's own copy) were both missing an "msnr" entry —
+         showing literally "undefined: вкл/выкл" in the mode list ever
+         since MSNR's own real autotrade toggle was added. Both fixed.
+         Verified: py_compile, pyflakes clean, node --check on the
+         correctly-last <script> block, a real runtime start, the Flask
+         route/def integrity check (still 44 routes — no routes
+         touched), and two tests: a direct _relink_sim_trade() call
+         confirming a pending LSW trade now correctly matches its own
+         open signal (previously returned None unconditionally for any
+         "lsw"-mode trade), plus a full save-then-load round trip
+         (simulating an actual restart) with a real open LSW position —
+         confirming the trade survives with status still PENDING and a
+         correctly re-attached live signal reference, where before this
+         fix it would have been silently and permanently dropped.
