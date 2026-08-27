@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.129"
+APP_VERSION = "0.99.130"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -642,6 +642,34 @@ MIRROR_LOOKBACK = int(os.environ.get("VP_MIRROR_LOOKBACK", 150))  # bars of hist
 MIRROR_UNIVERSE_SIZE = int(os.environ.get("VP_MIRROR_UNIVERSE_SIZE", 60))  # capped, same reasoning as FT5's own — the per-symbol backtest cost adds up across a wide universe
 MIRROR_TOUCH_TOLERANCE_PCT = float(os.environ.get("VP_MIRROR_TOUCH_TOLERANCE_PCT", 0.15))  # how close price must return to a broken level to count as "touching" it (as % of price)
 MIRROR_PATTERN_TOLERANCE_PCT = float(os.environ.get("VP_MIRROR_PATTERN_TOLERANCE_PCT", 30.0))  # tweezers/rails matching-wick/body tolerance, as % of the larger of the two compared values
+# v0.99.130 — per-symbol autotuning of the two tolerances above, per
+# direct user question ("Может допуск касания и допуск паттерна можно
+# менять?... или это уже дикая подгонка прям будет?") and follow-up
+# decision to do it with real overfitting safeguards rather than a
+# blind in-sample grid search. Deliberately NOT the same shape as
+# mirror_symbol_sl_skip_min()/pattern_skip()/direction_skip() above —
+# those already derive their own threshold straight from the SAME
+# window they're then judged against (acceptable there because they're
+# each a single, simple bucket-exclusion rule with a decent minimum
+# sample of their own — see MIRROR_SYMBOL_SKIP_MIN_SAMPLE). A 2-
+# dimensional grid search over the detector's own pattern-matching
+# tolerance is a meaningfully bigger overfitting surface (more
+# candidate combinations x more symbols = more chances one wins purely
+# by luck on a finite sample), so this one is held to a stricter
+# standard: mirror_autotune_tolerances() only ever picks a combo that
+# clears its own minimum bar on an EARLIER slice of history AND, held
+# out and never touched during selection, a LATER slice too (true
+# walk-forward, not in-sample-only) — see that function's own
+# docstring for the full split/validation mechanics. A symbol with no
+# combo clearing BOTH slices keeps the plain module-wide defaults
+# above, exactly as if autotuning were off for that symbol.
+MIRROR_AUTOTUNE_TOLERANCE_ENABLED = os.environ.get("VP_MIRROR_AUTOTUNE_TOLERANCE", "0") == "1"
+MIRROR_AUTOTUNE_TOUCH_GRID = tuple(float(x) for x in os.environ.get("VP_MIRROR_AUTOTUNE_TOUCH_GRID", "0.1,0.15,0.2,0.3").split(","))
+MIRROR_AUTOTUNE_PATTERN_GRID = tuple(float(x) for x in os.environ.get("VP_MIRROR_AUTOTUNE_PATTERN_GRID", "20,30,40").split(","))
+MIRROR_AUTOTUNE_TRAIN_FRACTION = float(os.environ.get("VP_MIRROR_AUTOTUNE_TRAIN_FRACTION", 0.7))  # earlier 70% of the backtest window used to pick candidates, later 30% used only to confirm — never the reverse, since the later slice is the one closer to "what live trading will actually see next"
+MIRROR_AUTOTUNE_MIN_WINRATE = float(os.environ.get("VP_MIRROR_AUTOTUNE_MIN_WINRATE", 35.0))  # a combo must clear this on BOTH slices independently — deliberately below MIRROR_LIVE_MIN_WINRATE itself, since the real, stricter live gate still applies afterward on the combined result; this is just "is this combo worth using at all," not the final word
+MIRROR_AUTOTUNE_MIN_TRAIN_SAMPLE = int(os.environ.get("VP_MIRROR_AUTOTUNE_MIN_TRAIN_SAMPLE", 25))
+MIRROR_AUTOTUNE_MIN_TEST_SAMPLE = int(os.environ.get("VP_MIRROR_AUTOTUNE_MIN_TEST_SAMPLE", 12))
 MIRROR_RR = float(os.environ.get("VP_MIRROR_RR", 3.0))  # fixed RR target — see mirror_detect_signals()'s own docstring for why a mechanical pipeline needs one despite the source trader's own discretionary exits
 MIRROR_MAX_BARS_TO_RETURN = int(os.environ.get("VP_MIRROR_MAX_BARS_TO_RETURN", 60))  # a level broken this many bars ago without price returning to it goes stale and stops being watched
 MIRROR_MAX_WAIT_BARS = int(os.environ.get("VP_MIRROR_MAX_WAIT_BARS", 200))  # v0.99.99, per direct user follow-up ("тайм аут тоже добавь"): shared by mirror_track_outcome() (backtest) and update_mirror_signal_outcomes() (live) so both sides use the SAME cutoff — was a hardcoded 200 in the backtest function only, with no live counterpart at all
@@ -872,7 +900,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "msnr_addon_enabled", "mirror_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "msnr_addon_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
@@ -902,6 +930,7 @@ def get_settings():
         "mirror_rr": MIRROR_RR,
         "mirror_touch_tolerance_pct": MIRROR_TOUCH_TOLERANCE_PCT,
         "mirror_pattern_tolerance_pct": MIRROR_PATTERN_TOLERANCE_PCT,
+        "mirror_autotune_tolerance_enabled": MIRROR_AUTOTUNE_TOLERANCE_ENABLED,
         "lsw_enabled": LSW_ENABLED,
         "lsw_rr": LSW_RR,
         "lsw_equal_tolerance_pct": LSW_EQUAL_TOLERANCE_PCT,
@@ -943,7 +972,7 @@ def apply_settings(updates):
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
     global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, HOURLY_STATS_ENABLED
-    global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT
+    global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT, MIRROR_AUTOTUNE_TOLERANCE_ENABLED
     global LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
@@ -987,6 +1016,8 @@ def apply_settings(updates):
                 MIRROR_PATTERN_TOLERANCE_PCT = v
         except (TypeError, ValueError):
             pass
+    if "mirror_autotune_tolerance_enabled" in updates:
+        MIRROR_AUTOTUNE_TOLERANCE_ENABLED = bool(updates["mirror_autotune_tolerance_enabled"])
     if "lsw_enabled" in updates:
         LSW_ENABLED = bool(updates["lsw_enabled"])
     if "lsw_rr" in updates:
@@ -1282,6 +1313,7 @@ STATE = {
     "mirror_backtest_summary": {},
     "mirror_symbol_overrides": {},  # symbol -> {skip_sl_pct_min, checkpoints}, see mirror_backtest_symbol()
     "mirror_live_universe": [],  # symbols whose post-filter backtest winrate cleared MIRROR_LIVE_MIN_WINRATE, see mirror_backtest_loop()
+    "mirror_tuned_tolerances": {},  # v0.99.130 — symbol -> {"touch_tolerance_pct","pattern_tolerance_pct","train_winrate","train_n","test_winrate","test_n"} for symbols where mirror_autotune_tolerances() found a validated combo; absent symbols use the plain module-wide defaults
     "mirror_last_backtest_finished": None,
     "mirror_last_backtest_duration": None,
     "mirror_signals": deque(maxlen=MIRROR_SIGNAL_HISTORY),
@@ -9764,7 +9796,83 @@ def mirror_symbol_direction_skip(trades, rr=None):
     return skip
 
 
-def mirror_backtest_symbol(symbol, days=MIRROR_BACKTEST_DAYS):
+def mirror_autotune_tolerances(symbol, days=MIRROR_BACKTEST_DAYS):
+    """v0.99.130 — per-symbol autotuning of MIRROR_TOUCH_TOLERANCE_PCT/
+    MIRROR_PATTERN_TOLERANCE_PCT with a real walk-forward safeguard, per
+    direct user question about whether this would be "дикая подгонка."
+    Fetches the full MIRROR_BACKTEST_DAYS window ONCE, splits it by time
+    into an earlier TRAIN slice (MIRROR_AUTOTUNE_TRAIN_FRACTION, default
+    70%) and a later, held-out TEST slice (the remaining 30%) — the
+    split direction matters: train is always the OLDER portion, test
+    the NEWER, since the newer slice is the one closer to what live
+    trading will actually see next.
+    For each (touch, pattern) combo in the small MIRROR_AUTOTUNE_
+    TOUCH_GRID x MIRROR_AUTOTUNE_PATTERN_GRID grid (deliberately coarse
+    — 4x3=12 combos, not a fine continuous search, to limit how many
+    chances there are for one to win purely by luck):
+    1. Run mirror_detect_signals() + mirror_track_outcome() on the TRAIN
+       slice alone. Skip the combo entirely if train sample < MIRROR_
+       AUTOTUNE_MIN_TRAIN_SAMPLE or train winrate <= MIRROR_AUTOTUNE_
+       MIN_WINRATE — not worth even checking against test.
+    2. Only THEN run the same combo on the TEST slice (never touched
+       during train-side selection). Skip if test sample < MIRROR_
+       AUTOTUNE_MIN_TEST_SAMPLE or test winrate <= MIRROR_AUTOTUNE_
+       MIN_WINRATE.
+    Among combos that clear BOTH slices independently, picks the one
+    with the highest TEST winrate (the honest, held-out estimate —
+    ranking by train winrate here would just reintroduce the same in-
+    sample bias this whole split exists to avoid), breaking ties by
+    higher combined train+test sample. Returns None (use the plain
+    module-wide defaults) if no combo clears both — same as if
+    autotuning were off for that symbol.
+    Returns {"touch_tolerance_pct", "pattern_tolerance_pct",
+    "train_winrate", "train_n", "test_winrate", "test_n"} or None."""
+    now = time.time()
+    fetch_start = now - days * 86400
+    candles = get_candles_range(symbol, MIRROR_INTERVAL, fetch_start, now)
+    min_len = MIRROR_PIVOT_LEFT + MIRROR_PIVOT_RIGHT + 20
+    if len(candles) < min_len * 2:
+        return None  # not enough history to split into two independently-usable slices at all
+    split_idx = int(len(candles) * MIRROR_AUTOTUNE_TRAIN_FRACTION)
+    train_candles = candles[:split_idx]
+    test_candles = candles[split_idx:]
+    if len(train_candles) < min_len or len(test_candles) < min_len:
+        return None
+
+    def _winrate_and_n(cands, touch, pattern):
+        sigs = mirror_detect_signals(cands, touch_tolerance_pct=touch, pattern_tolerance_pct=pattern)
+        wins = losses = 0
+        for sig in sigs:
+            result, _exit_time = mirror_track_outcome(cands, sig)
+            if result == "WIN":
+                wins += 1
+            elif result == "LOSS":
+                losses += 1
+        n = wins + losses
+        wr = (wins / n * 100.0) if n else None
+        return wr, n
+
+    validated = []
+    for touch in MIRROR_AUTOTUNE_TOUCH_GRID:
+        for pattern in MIRROR_AUTOTUNE_PATTERN_GRID:
+            train_wr, train_n = _winrate_and_n(train_candles, touch, pattern)
+            if train_n < MIRROR_AUTOTUNE_MIN_TRAIN_SAMPLE or train_wr is None or train_wr <= MIRROR_AUTOTUNE_MIN_WINRATE:
+                continue
+            test_wr, test_n = _winrate_and_n(test_candles, touch, pattern)
+            if test_n < MIRROR_AUTOTUNE_MIN_TEST_SAMPLE or test_wr is None or test_wr <= MIRROR_AUTOTUNE_MIN_WINRATE:
+                continue
+            validated.append({
+                "touch_tolerance_pct": touch, "pattern_tolerance_pct": pattern,
+                "train_winrate": round(train_wr, 1), "train_n": train_n,
+                "test_winrate": round(test_wr, 1), "test_n": test_n,
+            })
+    if not validated:
+        return None
+    validated.sort(key=lambda c: (c["test_winrate"], c["train_n"] + c["test_n"]), reverse=True)
+    return validated[0]
+
+
+def mirror_backtest_symbol(symbol, days=MIRROR_BACKTEST_DAYS, touch_tolerance_pct=None, pattern_tolerance_pct=None):
     """Fetches MIRROR_BACKTEST_DAYS of MIRROR_INTERVAL history, runs the
     detector + outcome tracker over the whole window, then applies this
     symbol's own SL-width filter (mirror_symbol_sl_skip_min(), derived
@@ -9786,7 +9894,7 @@ def mirror_backtest_symbol(symbol, days=MIRROR_BACKTEST_DAYS):
     candles = get_candles_range(symbol, MIRROR_INTERVAL, fetch_start, now)
     if len(candles) < MIRROR_PIVOT_LEFT + MIRROR_PIVOT_RIGHT + 20:
         return [], {"skip_sl_pct_min": None, "skip_pattern": [], "skip_direction": [], "checkpoints": []}
-    sigs = mirror_detect_signals(candles)
+    sigs = mirror_detect_signals(candles, touch_tolerance_pct=touch_tolerance_pct, pattern_tolerance_pct=pattern_tolerance_pct)
     raw_results = []
     for sig in sigs:
         result, exit_time = mirror_track_outcome(candles, sig)
@@ -9911,7 +10019,13 @@ def mirror_scan_symbol_live(symbol):
         candles = [c for c in candles if c["time"] + interval_sec <= now]  # drop still-forming candle
         if len(candles) < MIRROR_PIVOT_LEFT + MIRROR_PIVOT_RIGHT + 20:
             return
-        sigs = mirror_detect_signals(candles)
+        with state_lock:
+            tuned = STATE["mirror_tuned_tolerances"].get(symbol)
+        sigs = mirror_detect_signals(
+            candles,
+            touch_tolerance_pct=tuned["touch_tolerance_pct"] if tuned else None,
+            pattern_tolerance_pct=tuned["pattern_tolerance_pct"] if tuned else None,
+        )
         if not sigs:
             return
         sig = sigs[-1]
@@ -10161,17 +10275,36 @@ def mirror_backtest_loop():
             results_by_symbol = {}
             summary_by_symbol = {}
             overrides_by_symbol = {}
+            tuned_tolerances = {}
             live_universe = []
+
+            def _backtest_one(s):
+                # v0.99.130 — autotune (if enabled) BEFORE the real
+                # backtest, so the symbol's own reported results/summary
+                # already reflect whichever tolerances actually got used
+                # for it, not the plain defaults followed by a separate,
+                # inconsistent "what-if" run.
+                tuned = mirror_autotune_tolerances(s) if MIRROR_AUTOTUNE_TOLERANCE_ENABLED else None
+                if tuned:
+                    results, meta = mirror_backtest_symbol(
+                        s, touch_tolerance_pct=tuned["touch_tolerance_pct"],
+                        pattern_tolerance_pct=tuned["pattern_tolerance_pct"])
+                else:
+                    results, meta = mirror_backtest_symbol(s)
+                return results, meta, tuned
+
             with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
-                futs = {ex.submit(mirror_backtest_symbol, s): s for s in universe}
+                futs = {ex.submit(_backtest_one, s): s for s in universe}
                 for fut in as_completed(futs):
                     symbol = futs[fut]
                     try:
-                        results, meta = fut.result()
+                        results, meta, tuned = fut.result()
                         results_by_symbol[symbol] = results
                         summary = mirror_summarize_backtest(results)
                         summary_by_symbol[symbol] = summary
                         overrides_by_symbol[symbol] = meta
+                        if tuned:
+                            tuned_tolerances[symbol] = tuned
                         # v0.99.92, per direct user request ("В живых
                         # сигналах использовать только бэктестовые
                         # монеты с винрейтом более 35%"): gated on the
@@ -10207,6 +10340,7 @@ def mirror_backtest_loop():
                 STATE["mirror_backtest_results"] = results_by_symbol
                 STATE["mirror_backtest_summary"] = summary_by_symbol
                 STATE["mirror_symbol_overrides"] = overrides_by_symbol
+                STATE["mirror_tuned_tolerances"] = tuned_tolerances
                 STATE["mirror_live_universe"] = live_universe
                 STATE["mirror_last_backtest_finished"] = time.time()
                 STATE["mirror_last_backtest_duration"] = round(time.time() - t0, 1)
@@ -11344,6 +11478,7 @@ def api_mirror_status():
     with state_lock:
         summary = dict(STATE["mirror_backtest_summary"])
         overrides = dict(STATE["mirror_symbol_overrides"])
+        tuned_tolerances = dict(STATE["mirror_tuned_tolerances"])
         live_universe = list(STATE["mirror_live_universe"])
         last_backtest_finished = STATE["mirror_last_backtest_finished"]
         last_backtest_duration = STATE["mirror_last_backtest_duration"]
@@ -11351,8 +11486,10 @@ def api_mirror_status():
     # (skip_sl_pct_min, filter checkpoints) so the UI can render the
     # before/after picture per direct user request ("по статистике
     # обязательно показывать до после как в msnr") without a second
-    # round-trip.
-    ranked = [dict(s, symbol=sym, live=(sym in live_universe), **(overrides.get(sym) or {}))
+    # round-trip. v0.99.130 adds each symbol's own autotuned tolerance
+    # combo (if any) the same way.
+    ranked = [dict(s, symbol=sym, live=(sym in live_universe),
+                   tuned_tolerance=tuned_tolerances.get(sym), **(overrides.get(sym) or {}))
               for sym, s in summary.items()]
     ranked.sort(key=lambda r: (r["win_rate"] or 0, r["n"]), reverse=True)
     return jsonify({
@@ -11368,6 +11505,7 @@ def api_mirror_status():
             "rr": MIRROR_RR, "max_bars_to_return": MIRROR_MAX_BARS_TO_RETURN,
             "backtest_days": MIRROR_BACKTEST_DAYS, "universe_size": MIRROR_UNIVERSE_SIZE,
             "live_min_winrate": MIRROR_LIVE_MIN_WINRATE, "live_min_sample": MIRROR_LIVE_MIN_SAMPLE,
+            "autotune_tolerance_enabled": MIRROR_AUTOTUNE_TOLERANCE_ENABLED,
         },
         "top": ranked,
     })
@@ -12656,6 +12794,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">фиксированное соотношение тейк:стоп от найденного стопа паттерна</div>
         </div>
         <input type="number" id="setMirrorRR" min="0.5" max="20" step="0.5" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Автотюнинг допусков</div>
+          <div class="sub">подбирает допуск касания и допуск паттерна отдельно для каждой монеты — только если комбинация проходит проверку на ДВУХ независимых кусках истории (сначала подбор на первых 70% данных, потом обязательная проверка на отложенных последних 30%, которые в подборе не участвовали). Если ни одна комбинация не прошла обе проверки — монета торгуется с обычными общими допусками</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setMirrorAutotuneTolerance"><span class="switchSlider"></span></label>
       </div>
     </div>
 
@@ -14093,6 +14238,10 @@ async function refreshMirror() {
     const byDirTxt = (bd.LONG || bd.SHORT)
       ? `<span class="dim" title="винрейт по направлению">L: ${fmtWr(bd.LONG && bd.LONG.win_rate)} (n=${bd.LONG ? bd.LONG.n : 0}) · S: ${fmtWr(bd.SHORT && bd.SHORT.win_rate)} (n=${bd.SHORT ? bd.SHORT.n : 0})</span>`
       : '<span class="dim">-</span>';
+    const tt = r.tuned_tolerance;
+    const tunedTxt = tt
+      ? `<span class="win" title="подобрано: train ${tt.train_winrate}% (n=${tt.train_n}) → test ${tt.test_winrate}% (n=${tt.test_n})">касание ${tt.touch_tolerance_pct}% / паттерн ${tt.pattern_tolerance_pct}%</span>`
+      : '<span class="dim">общие</span>';
     return `<tr>
       <td>${r.symbol}${liveDot}</td>
       <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
@@ -14104,13 +14253,14 @@ async function refreshMirror() {
       <td>${skipPatternTxt}</td>
       <td>${byDirTxt}</td>
       <td>${beforeAfterTxt}</td>
+      <td>${tunedTxt}</td>
     </tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
-    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории) — итоговый винрейт/n уже ПОСЛЕ обоих фильтров (ширина стопа + паттерн):</div>
+    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории) — итоговый винрейт/n уже ПОСЛЕ обоих фильтров (ширина стопа + паттерн)${cfg.autotune_tolerance_enabled ? ', допуски автотюнинга — по колонке справа' : ''}:</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>Фильтр SL</th><th>Фильтр паттерна</th><th>По направлению</th><th>До → После</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>Фильтр SL</th><th>Фильтр паттерна</th><th>По направлению</th><th>До → После</th><th>Допуски</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
@@ -14430,6 +14580,7 @@ const setInputs = {
   ft5_enabled: document.getElementById('setFt5'),
   ft5_invert_signals: document.getElementById('setFt5Invert'),
   mirror_enabled: document.getElementById('setMirror'),
+  mirror_autotune_tolerance_enabled: document.getElementById('setMirrorAutotuneTolerance'),
   lsw_enabled: document.getElementById('setLsw'),
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
   lsw_structural_cap_enabled: document.getElementById('setLswStructuralCap'),
