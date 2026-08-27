@@ -10915,3 +10915,34 @@ v0.99.130 - Optional per-symbol autotuning of MIRROR_TOUCH_TOLERANCE_
          mirror_autotune_tolerances() correctly identifies that combo
          and confirms both its train and test winrates clear MIRROR_
          AUTOTUNE_MIN_WINRATE independently.
+
+v0.99.131 - Mirror live-eligibility gate loosened, per direct user
+         request ("Для зеркала сделай винрейт минимальный 38%, а
+         минималка по выборке убери совсем, до фильтров и так огромная
+         выборка") prompted by the live scan sitting at zero eligible
+         symbols even though XAU_USDT's own 38.8% post-filter winrate
+         (n=154) was close to clearing the old 40% bar.
+         MIRROR_LIVE_MIN_WINRATE: 40% -> 38%, no pushback needed —
+         straightforward.
+         MIRROR_LIVE_MIN_SAMPLE: pushed back on removing this one
+         entirely before implementing, since the user's own stated
+         reasoning ("если даже 10 сигналов, то они остались после
+         фильтра первоначальных 300") doesn't actually hold up
+         statistically — confidence in a winrate estimate comes from
+         the FINAL sample size being judged, not from how large the
+         pre-filter pool was; if anything, a small survivor count out
+         of a large raw pool is a bigger overfitting flag (more chances
+         for the filter chain to land on a lucky-looking subset), not a
+         smaller one. Also directly reverses v0.99.111's own original
+         fix (added at this same user's own prior request, after a
+         real n=15 symbol got mistakenly promoted to live trading).
+         Given the choice directly, the user chose a middle ground:
+         lower the bar meaningfully but keep a small non-zero floor —
+         changed 80 -> 25 (was going to allow n=1-2 if "remove
+         entirely" had been chosen instead).
+         Verified: py_compile, pyflakes clean, a real runtime start
+         confirming api_mirror_status()'s own config.live_min_winrate
+         (38.0) and config.live_min_sample (25) both reflect the new
+         values immediately, and the Flask route/def integrity check
+         (still 44 routes — a pure constant-default change, nothing
+         route-connected).
