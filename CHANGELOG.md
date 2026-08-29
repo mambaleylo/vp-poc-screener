@@ -11090,3 +11090,49 @@ v0.99.135 - Fixed a race condition in reconcile_positions_and_orders()'s
          detected 60 seconds ago in the same zero-orders state is still
          correctly flagged as genuinely unprotected — confirming the fix
          closes the race without blinding the underlying safety check.
+
+v0.99.136 - Sweep's backtest table now shows what each of the 3 optional
+         filter toggles (HTF trend, structural cap, entry confirmation)
+         does ON ITS OWN, per direct user request ("хочу чтобы в sweep
+         индикаторе каждая из галочек настроек показывала в таблице
+         что стало после этого фильтра чтобы была оценка необходимости,
+         вдруг она сделала хуже").
+         lsw_backtest_symbol() now ALSO computes, independently of
+         which toggles are actually on right now, what each filter
+         would do ALONE against the raw signal pool — not chained
+         through the other two, so each filter's own individual
+         contribution is visible without interaction effects muddying
+         it (e.g. entry confirmation's own marginal effect isn't
+         conflated with whatever the HTF filter already removed first).
+         This means LSW_HTF_INTERVAL and LSW_ENTRY_CONFIRM_INTERVAL
+         history now gets fetched every backtest pass regardless of
+         toggle state — a real added cost (two more fetches and up to
+         three more outcome-tracking passes per symbol) — accepted
+         since the whole point is judging a filter BEFORE deciding to
+         enable it, not just after. Reuses _mirror_checkpoint() (same
+         {n, winrate, expectancy_r} shape, same fixed-RR assumption
+         LSW's own signals already share) rather than inventing a
+         parallel helper.
+         Returns (results, meta) now instead of just results — meta.
+         checkpoints = {"raw", "htf_filter", "structural_cap",
+         "entry_confirm"}, stored per-symbol in a new STATE["lsw_
+         filter_checkpoints"] and exposed via /api/lsw/status as each
+         ranked symbol's own "filter_checkpoints". The Sweep tab's
+         backtest table gained 3 new columns, each showing that
+         filter's own solo winrate/n plus its delta against the raw
+         (unfiltered) baseline — colored win/loss — and a "[выкл]" tag
+         when that filter isn't actually the one governing real/live
+         trades right now, so a bad-looking solo number doesn't get
+         mistaken for something already affecting real trading.
+         Verified: py_compile, pyflakes clean, node --check on the
+         correctly-last <script> block, a real runtime start, the Flask
+         route/def integrity check (still 44 routes — no new routes,
+         lsw_backtest_symbol()'s own return shape changed but has
+         exactly one call site, already updated), and a unit test with
+         detection/filtering mocked to make the HTF filter keep only a
+         WIN and entry confirmation keep only a LOSS from the same 2
+         raw signals — confirming each solo checkpoint reports exactly
+         that isolated outcome (100%/n=1 and 0%/n=1 respectively) while
+         the structural cap (a no-op in the test) correctly matches the
+         raw baseline, and the ACTUAL result (all toggles off by
+         default) correctly equals the unfiltered raw signal count.
