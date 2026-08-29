@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.135"
+APP_VERSION = "0.99.136"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1340,6 +1340,7 @@ STATE = {
     "lsw_signals": deque(maxlen=LSW_SIGNAL_HISTORY),
     "lsw_backtest_results": {},
     "lsw_backtest_summary": {},
+    "lsw_filter_checkpoints": {},  # v0.99.136 — symbol -> {"raw","htf_filter","structural_cap","entry_confirm"}, each filter's own SOLO before/after (not chained), so a toggle's own contribution is visible before deciding whether to enable it
     "lsw_live_universe": [],
     "lsw_live_directions": {},  # symbol -> list of directions allowed to fire live, e.g. ["LONG"] — only populated/consulted when LSW_DIRECTION_FILTER_ENABLED
     "lsw_last_backtest_finished": None,
@@ -10943,22 +10944,79 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
     CONFIRM_ENABLED, fetches LSW_ENTRY_CONFIRM_INTERVAL (5m) history
     over the same window and runs lsw_apply_entry_confirmation(), which
     replaces each surviving signal's own entry/sl/tp or drops it if no
-    5m confirmation ever fired. Filter order: HTF trend -> structural
-    cap -> 5m entry confirmation — cheapest/coarsest checks first, so
-    the (comparatively expensive) 5m confirmation only ever runs on
-    signals that already passed the other two.
-    Returns the raw results list directly, same shape ft5_run_backtest's
-    own trades list uses."""
+    5m confirmation ever fired. Filter order for the ACTUAL result:
+    HTF trend -> structural cap -> 5m entry confirmation — cheapest/
+    coarsest checks first, so the (comparatively expensive) 5m
+    confirmation only ever runs on signals that already passed the
+    other two.
+    v0.99.136, per direct user request ("хочу чтобы в sweep индикаторе
+    каждая из галочек настроек показывала в таблице что стало после
+    этого фильтра чтобы была оценка необходимости, вдруг она сделала
+    хуже"): ALSO computes, independently of which toggles are currently
+    on, what each filter would do ALONE against the raw signal pool —
+    not chained through the other two, so each filter's own individual
+    contribution is visible without interaction effects from the
+    others. This means LSW_HTF_INTERVAL and LSW_ENTRY_CONFIRM_INTERVAL
+    history now gets fetched every backtest pass regardless of whether
+    those toggles are actually on — a real added cost (two more fetches
+    and up to three more outcome-tracking passes per symbol), accepted
+    because the whole point is to let the person judge a filter BEFORE
+    deciding to enable it, not just after.
+    Returns (results, meta) — results is the raw trades list using
+    whichever filters are ACTUALLY enabled right now (unchanged
+    behavior, still what live-eligibility/ranking is computed from);
+    meta = {"checkpoints": {"raw", "htf_filter", "structural_cap",
+    "entry_confirm"}}, each a _mirror_checkpoint()-shaped {n, winrate,
+    expectancy_r} dict (reusing that exact helper — LSW shares the same
+    fixed-RR-per-trade shape MIRROR's own checkpoint math already
+    assumes) or None where there wasn't enough history to judge that
+    filter at all."""
     now = time.time()
     fetch_start = now - days * 86400
     candles = get_candles_range(symbol, LSW_INTERVAL, fetch_start, now)
     if len(candles) < LSW_PIVOT_LEFT + LSW_PIVOT_RIGHT + 20:
-        return []
-    sigs = lsw_detect_signals(candles)
+        return [], {"checkpoints": {"raw": None, "htf_filter": None, "structural_cap": None, "entry_confirm": None}}
+    raw_sigs = lsw_detect_signals(candles)
+
+    htf_interval_sec = INTERVAL_SECONDS.get(LSW_HTF_INTERVAL, 14400)
+    htf_fetch_start = fetch_start - LSW_HTF_EMA_PERIOD * htf_interval_sec
+    htf_candles = get_candles_range(symbol, LSW_HTF_INTERVAL, htf_fetch_start, now)
+    confirm_candles = get_candles_range(symbol, LSW_ENTRY_CONFIRM_INTERVAL, fetch_start, now)
+
+    def _track_all(sigs_list):
+        out = []
+        for sig in sigs_list:
+            result, exit_time = lsw_track_outcome(candles, sig)
+            out.append({
+                "time": sig["entry_time"], "direction": sig["direction"],
+                "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"], "rr": sig.get("rr"),
+                "level_price": sig.get("level_price"), "level_type": sig.get("level_type"),
+                "level_touches": sig.get("level_touches"), "confirm_method": sig.get("confirm_method"),
+                "result": result, "exit_time": exit_time,
+            })
+        return out
+
+    checkpoints = {"raw": _mirror_checkpoint(_track_all(raw_sigs), rr=LSW_RR)}
+
+    if len(htf_candles) >= LSW_HTF_EMA_PERIOD:
+        bias_series = lsw_htf_bias_series(htf_candles)
+        htf_solo_sigs = lsw_filter_signals_by_htf_trend(raw_sigs, bias_series, htf_interval_sec)
+        checkpoints["htf_filter"] = _mirror_checkpoint(_track_all(htf_solo_sigs), rr=LSW_RR)
+    else:
+        checkpoints["htf_filter"] = None  # not enough HTF history to judge this filter at all yet
+
+    structural_solo_sigs = lsw_filter_signals_by_structural_cap(raw_sigs, candles)
+    checkpoints["structural_cap"] = _mirror_checkpoint(_track_all(structural_solo_sigs), rr=LSW_RR)
+
+    if confirm_candles:
+        confirm_solo_sigs = lsw_apply_entry_confirmation(raw_sigs, confirm_candles)
+        checkpoints["entry_confirm"] = _mirror_checkpoint(_track_all(confirm_solo_sigs), rr=LSW_RR)
+    else:
+        checkpoints["entry_confirm"] = None
+
+    # The ACTUAL result, using whichever filters are really toggled on right now — unchanged from before, chained in the same order.
+    sigs = raw_sigs
     if LSW_HTF_FILTER_ENABLED and sigs:
-        htf_interval_sec = INTERVAL_SECONDS.get(LSW_HTF_INTERVAL, 14400)
-        htf_fetch_start = fetch_start - LSW_HTF_EMA_PERIOD * htf_interval_sec
-        htf_candles = get_candles_range(symbol, LSW_HTF_INTERVAL, htf_fetch_start, now)
         if len(htf_candles) >= LSW_HTF_EMA_PERIOD:
             bias_series = lsw_htf_bias_series(htf_candles)
             sigs = lsw_filter_signals_by_htf_trend(sigs, bias_series, htf_interval_sec)
@@ -10967,22 +11025,12 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
     if LSW_STRUCTURAL_CAP_ENABLED and sigs:
         sigs = lsw_filter_signals_by_structural_cap(sigs, candles)
     if LSW_ENTRY_CONFIRM_ENABLED and sigs:
-        confirm_candles = get_candles_range(symbol, LSW_ENTRY_CONFIRM_INTERVAL, fetch_start, now)
         if confirm_candles:
             sigs = lsw_apply_entry_confirmation(sigs, confirm_candles)
         else:
             sigs = []  # no 5m history at all to confirm against
-    results = []
-    for sig in sigs:
-        result, exit_time = lsw_track_outcome(candles, sig)
-        results.append({
-            "time": sig["entry_time"], "direction": sig["direction"],
-            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"], "rr": sig.get("rr"),
-            "level_price": sig.get("level_price"), "level_type": sig.get("level_type"),
-            "level_touches": sig.get("level_touches"), "confirm_method": sig.get("confirm_method"),
-            "result": result, "exit_time": exit_time,
-        })
-    return results
+    results = _track_all(sigs)
+    return results, {"checkpoints": checkpoints}
 
 
 def lsw_summarize_backtest(results):
@@ -11251,6 +11299,7 @@ def lsw_backtest_loop():
             universe = lsw_build_universe()
             results_by_symbol = {}
             summary_by_symbol = {}
+            checkpoints_by_symbol = {}
             live_universe = []
             live_directions = {}
             with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
@@ -11258,8 +11307,9 @@ def lsw_backtest_loop():
                 for fut in as_completed(futs):
                     symbol = futs[fut]
                     try:
-                        results = fut.result()
+                        results, meta = fut.result()
                         results_by_symbol[symbol] = results
+                        checkpoints_by_symbol[symbol] = meta.get("checkpoints", {})
                         summary = lsw_summarize_backtest(results)
                         summary_by_symbol[symbol] = summary
                         closed_n = summary["wins"] + summary["losses"]
@@ -11288,6 +11338,7 @@ def lsw_backtest_loop():
             with state_lock:
                 STATE["lsw_backtest_results"] = results_by_symbol
                 STATE["lsw_backtest_summary"] = summary_by_symbol
+                STATE["lsw_filter_checkpoints"] = checkpoints_by_symbol
                 STATE["lsw_live_universe"] = live_universe
                 STATE["lsw_live_directions"] = live_directions
                 STATE["lsw_last_backtest_finished"] = time.time()
@@ -11727,10 +11778,12 @@ def api_lsw_status():
         summary = dict(STATE["lsw_backtest_summary"])
         live_universe = list(STATE["lsw_live_universe"])
         live_directions = dict(STATE["lsw_live_directions"])
+        checkpoints = dict(STATE["lsw_filter_checkpoints"])
         last_backtest_finished = STATE["lsw_last_backtest_finished"]
         last_backtest_duration = STATE["lsw_last_backtest_duration"]
     ranked = [dict(s, symbol=sym, live=(sym in live_universe),
-                   live_directions=live_directions.get(sym)) for sym, s in summary.items()]
+                   live_directions=live_directions.get(sym),
+                   filter_checkpoints=checkpoints.get(sym)) for sym, s in summary.items()]
     ranked.sort(key=lambda r: (r["win_rate"] or 0, r["n"]), reverse=True)
     return jsonify({
         "enabled": LSW_ENABLED,
@@ -14483,6 +14536,24 @@ async function refreshLsw() {
         : r.live_directions.length === 1 ? ` <span class="win">(${labels[r.live_directions[0]]})</span>`
         : ' <span class="loss">(ни одна сторона)</span>';
     }
+    const fc = r.filter_checkpoints || {};
+    const fmtCheckpoint = (cp, filterEnabled) => {
+      if (!cp || cp.n === 0 || cp.winrate === null || cp.winrate === undefined) {
+        return '<span class="dim">нет данных</span>';
+      }
+      const raw = fc.raw;
+      let deltaTxt = '';
+      if (raw && raw.winrate !== null && raw.winrate !== undefined) {
+        const delta = Math.round((cp.winrate - raw.winrate) * 10) / 10;
+        const deltaCls = delta > 0 ? 'win' : (delta < 0 ? 'loss' : 'dim');
+        deltaTxt = ` <span class="${deltaCls}">(${delta > 0 ? '+' : ''}${delta}%)</span>`;
+      }
+      const onOff = filterEnabled ? '' : ' <span class="dim">[выкл]</span>';
+      return `<span class="dim" title="если применить ТОЛЬКО этот фильтр к сырым сигналам, без остальных">${cp.winrate}% (n=${cp.n})${deltaTxt}${onOff}</span>`;
+    };
+    const htfTxt = fmtCheckpoint(fc.htf_filter, cfg.htf_filter_enabled);
+    const capTxt = fmtCheckpoint(fc.structural_cap, cfg.structural_cap_enabled);
+    const confirmTxt2 = fmtCheckpoint(fc.entry_confirm, cfg.entry_confirm_enabled);
     return `<tr>
       <td>${r.symbol}${liveDot}${dirFilterTxt}</td>
       <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
@@ -14491,13 +14562,16 @@ async function refreshLsw() {
       <td class="loss">${r.losses}L</td>
       <td class="dim">${r.timeouts}T</td>
       <td>${byDirTxt}</td>
+      <td>${htfTxt}</td>
+      <td>${capTxt}</td>
+      <td>${confirmTxt2}</td>
     </tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
-    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории):</div>
+    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории). Последние 3 колонки показывают, что даёт КАЖДЫЙ фильтр САМ ПО СЕБЕ на сырых (нефильтрованных) сигналах монеты — не в связке с остальными фильтрами. В скобках — разница с винрейтом на тех же сырых сигналах без единого фильтра (это не то же самое, что колонка WR слева, там уже применены реально включённые фильтры). Пометка [выкл] — фильтр сейчас не участвует в реальной торговле, это просто оценка "а что если включить":</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th><th>Тренд-фильтр (соло)</th><th>Структ. кэп (соло)</th><th>Подтверждение (соло)</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
