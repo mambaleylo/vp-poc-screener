@@ -11136,3 +11136,43 @@ v0.99.136 - Sweep's backtest table now shows what each of the 3 optional
          the structural cap (a no-op in the test) correctly matches the
          raw baseline, and the ACTUAL result (all toggles off by
          default) correctly equals the unfiltered raw signal count.
+
+v0.99.137 - Two LSW fixes, per direct user question ("Я нажал очистить
+         sweep, новый бэктест сразу начнется? Хочу видеть процесс
+         бэктеста тут так же, как уже мы делали полоской, в начале
+         которой время старта").
+         FIX 1: "Очистить Sweep" didn't actually restart the backtest —
+         it only cleared STATE, while lsw_backtest_loop() slept via a
+         plain time.sleep(max(300, LSW_REFRESH_SEC)) (up to 1h) with no
+         way to wake it early. Exact same bug MSNR had and fixed in
+         v0.99.40 ("жму очистить msnr и заново бэктэст не запускается,
+         час ждать что-ли") — LSW simply never got the same fix when it
+         was built. Added LSW_BACKTEST_TRIGGER (a threading.Event, same
+         pattern as MSNR_BACKTEST_TRIGGER exactly): the loop now waits
+         on it instead of sleeping blindly, and api_reset_lsw() calls
+         .set() to wake it immediately — "Очистить Sweep" now means
+         "clear AND re-run now".
+         FIX 2: LSW never had the progress-visibility fields MSNR's own
+         panel already shows during a long backtest cycle (v0.99.15) —
+         a new _lsw_backtest_one() wrapper marks each symbol "in
+         flight" in STATE for the duration of its own work (same
+         pattern as _msnr_backtest_one()), and lsw_backtest_loop() now
+         tracks total/done/running/started_at the identical way MSNR's
+         own loop does. Exposed via /api/lsw/status (backtest_running/
+         backtest_total/backtest_done/backtest_in_flight/backtest_
+         started_at). The Sweep tab now shows the same progress bar
+         MSNR's own panel uses (percent-filled bar + up to 6 currently-
+         in-flight symbols) plus, per the user's own explicit ask, the
+         actual clock time the cycle started at ("начат ЧЧ:ММ:СС") and
+         elapsed seconds since — reusing the exact bar markup rather
+         than inventing a second visual style for the same concept.
+         Verified: py_compile, pyflakes clean, node --check on the
+         correctly-last <script> block, a real runtime start, the Flask
+         route/def integrity check (still 44 routes — no new routes,
+         only api_reset_lsw()/api_lsw_status()/lsw_backtest_loop()
+         extended), and two tests: a direct call confirming api_reset_
+         lsw() actually sets LSW_BACKTEST_TRIGGER (proving the wake-up
+         fix works, run inside a real Flask app context after the first
+         attempt surfaced a genuine "outside application context" error
+         needing one), and a state check confirming all 5 new progress
+         fields exist with sane defaults before any backtest has run.
