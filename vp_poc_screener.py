@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.136"
+APP_VERSION = "0.99.137"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -580,6 +580,7 @@ MSNR_RANK_INCOME_WINSORIZE_PCT = float(os.environ.get("VP_MSNR_RANK_INCOME_WINSO
 # wake it immediately, and the loop clears the event right after so the
 # next natural cycle goes back to waiting the full interval as before.
 MSNR_BACKTEST_TRIGGER = threading.Event()
+LSW_BACKTEST_TRIGGER = threading.Event()  # v0.99.137 — same "Очистить X doesn't wake the sleeping loop" fix as MSNR_BACKTEST_TRIGGER's own comment, applied to LSW ("Очистить Sweep"), per direct user report of the identical symptom
 MSNR_AUTOTRADE_TOP_N = int(os.environ.get("VP_MSNR_AUTOTRADE_TOP_N", 10))  # v0.99.19 — how many non-gold symbols (by msnr_rank_by_winrate_sample()) get an individual autotrade toggle, on top of the always-eligible 3 gold ones. Raised 3->10 per direct follow-up request.
 
 # ============================================================================
@@ -1341,6 +1342,11 @@ STATE = {
     "lsw_backtest_results": {},
     "lsw_backtest_summary": {},
     "lsw_filter_checkpoints": {},  # v0.99.136 — symbol -> {"raw","htf_filter","structural_cap","entry_confirm"}, each filter's own SOLO before/after (not chained), so a toggle's own contribution is visible before deciding whether to enable it
+    "lsw_backtest_total": 0,  # v0.99.137 — same progress-tracking fields as MSNR's own (msnr_backtest_total/done/in_flight/running/started_at), per direct user request for the same visibility during a long-running LSW cycle
+    "lsw_backtest_done": 0,
+    "lsw_backtest_in_flight": [],
+    "lsw_backtest_running": False,
+    "lsw_backtest_started_at": None,
     "lsw_live_universe": [],
     "lsw_live_directions": {},  # symbol -> list of directions allowed to fire live, e.g. ["LONG"] — only populated/consulted when LSW_DIRECTION_FILTER_ENABLED
     "lsw_last_backtest_finished": None,
@@ -11289,6 +11295,25 @@ def compute_lsw_signal_stats():
             "open": open_n, "winrate": winrate, "by_level_type": by_level_type}
 
 
+def _lsw_backtest_one(symbol):
+    """Same in-flight/done tracking as _msnr_backtest_one()'s own
+    (v0.99.15) — marks itself in-flight in STATE for the duration of
+    its own work, so the panel's progress bar can show which symbols
+    are currently being backtested right now, not just a done/total
+    count. v0.99.137, per direct user request for the same visibility
+    LSW never had ("хочу видеть процесс бэктеста тут так же, как уже
+    мы делали полоской")."""
+    with state_lock:
+        STATE["lsw_backtest_in_flight"].append(symbol)
+    try:
+        return symbol, lsw_backtest_symbol(symbol)
+    finally:
+        with state_lock:
+            if symbol in STATE["lsw_backtest_in_flight"]:
+                STATE["lsw_backtest_in_flight"].remove(symbol)
+            STATE["lsw_backtest_done"] += 1
+
+
 def lsw_backtest_loop():
     while True:
         try:
@@ -11302,50 +11327,74 @@ def lsw_backtest_loop():
             checkpoints_by_symbol = {}
             live_universe = []
             live_directions = {}
-            with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
-                futs = {ex.submit(lsw_backtest_symbol, s): s for s in universe}
-                for fut in as_completed(futs):
-                    symbol = futs[fut]
-                    try:
-                        results, meta = fut.result()
-                        results_by_symbol[symbol] = results
-                        checkpoints_by_symbol[symbol] = meta.get("checkpoints", {})
-                        summary = lsw_summarize_backtest(results)
-                        summary_by_symbol[symbol] = summary
-                        closed_n = summary["wins"] + summary["losses"]
-                        if not (summary["win_rate"] is not None and summary["win_rate"] > LSW_LIVE_MIN_WINRATE
-                                and closed_n >= LSW_LIVE_MIN_SAMPLE):
-                            continue
-                        live_universe.append(symbol)
-                        if LSW_DIRECTION_FILTER_ENABLED:
-                            # v0.99.123 — same threshold as the overall
-                            # gate above, applied per-direction with its
-                            # own smaller sample floor, NOT a per-symbol
-                            # "pick the winning side" choice — see this
-                            # constant's own comment for why that
-                            # distinction matters.
-                            allowed = []
-                            bd = summary.get("by_direction") or {}
-                            for d in ("LONG", "SHORT"):
-                                dd = bd.get(d) or {}
-                                if (dd.get("n", 0) >= LSW_DIRECTION_MIN_SAMPLE
-                                        and dd.get("win_rate") is not None
-                                        and dd["win_rate"] > LSW_LIVE_MIN_WINRATE):
-                                    allowed.append(d)
-                            live_directions[symbol] = allowed
-                    except Exception as e:
-                        log_error(f"lsw_backtest {symbol}: {e}")
             with state_lock:
-                STATE["lsw_backtest_results"] = results_by_symbol
-                STATE["lsw_backtest_summary"] = summary_by_symbol
-                STATE["lsw_filter_checkpoints"] = checkpoints_by_symbol
-                STATE["lsw_live_universe"] = live_universe
-                STATE["lsw_live_directions"] = live_directions
-                STATE["lsw_last_backtest_finished"] = time.time()
-                STATE["lsw_last_backtest_duration"] = round(time.time() - t0, 1)
+                STATE["lsw_backtest_total"] = len(universe)
+                STATE["lsw_backtest_done"] = 0
+                STATE["lsw_backtest_in_flight"] = []
+                STATE["lsw_backtest_running"] = True
+                STATE["lsw_backtest_started_at"] = t0
+            try:
+                with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
+                    futs = {ex.submit(_lsw_backtest_one, s): s for s in universe}
+                    for fut in as_completed(futs):
+                        symbol = futs[fut]
+                        try:
+                            _sym, (results, meta) = fut.result()
+                            results_by_symbol[symbol] = results
+                            checkpoints_by_symbol[symbol] = meta.get("checkpoints", {})
+                            summary = lsw_summarize_backtest(results)
+                            summary_by_symbol[symbol] = summary
+                            closed_n = summary["wins"] + summary["losses"]
+                            if not (summary["win_rate"] is not None and summary["win_rate"] > LSW_LIVE_MIN_WINRATE
+                                    and closed_n >= LSW_LIVE_MIN_SAMPLE):
+                                continue
+                            live_universe.append(symbol)
+                            if LSW_DIRECTION_FILTER_ENABLED:
+                                # v0.99.123 — same threshold as the overall
+                                # gate above, applied per-direction with its
+                                # own smaller sample floor, NOT a per-symbol
+                                # "pick the winning side" choice — see this
+                                # constant's own comment for why that
+                                # distinction matters.
+                                allowed = []
+                                bd = summary.get("by_direction") or {}
+                                for d in ("LONG", "SHORT"):
+                                    dd = bd.get(d) or {}
+                                    if (dd.get("n", 0) >= LSW_DIRECTION_MIN_SAMPLE
+                                            and dd.get("win_rate") is not None
+                                            and dd["win_rate"] > LSW_LIVE_MIN_WINRATE):
+                                        allowed.append(d)
+                                live_directions[symbol] = allowed
+                        except Exception as e:
+                            log_error(f"lsw_backtest {symbol}: {e}")
+                with state_lock:
+                    STATE["lsw_backtest_results"] = results_by_symbol
+                    STATE["lsw_backtest_summary"] = summary_by_symbol
+                    STATE["lsw_filter_checkpoints"] = checkpoints_by_symbol
+                    STATE["lsw_live_universe"] = live_universe
+                    STATE["lsw_live_directions"] = live_directions
+                    STATE["lsw_last_backtest_finished"] = time.time()
+                    STATE["lsw_last_backtest_duration"] = round(time.time() - t0, 1)
+            finally:
+                # v0.99.137 — always clears "running" even if the cycle
+                # above raised partway through, same reasoning as MSNR's
+                # own identical finally block: a stale "running" flag
+                # left on after a genuine failure would show 100%
+                # confident progress on a cycle that already died.
+                with state_lock:
+                    STATE["lsw_backtest_running"] = False
+                    STATE["lsw_backtest_in_flight"] = []
         except Exception as e:
             log_error(f"lsw_backtest_loop: {e}")
-        time.sleep(max(300, LSW_REFRESH_SEC))
+        # v0.99.137 — Event.wait(timeout=...) instead of a plain sleep,
+        # same fix as MSNR's own v0.99.40: api_reset_lsw() can now cut
+        # this short via LSW_BACKTEST_TRIGGER.set() instead of "Очистить
+        # Sweep" doing nothing but wipe the display until the full
+        # LSW_REFRESH_SEC (up to 1h) elapses on its own. Cleared right
+        # after so the NEXT cycle's own wait isn't pre-satisfied by a
+        # stale set() from this one.
+        LSW_BACKTEST_TRIGGER.wait(timeout=max(300, LSW_REFRESH_SEC))
+        LSW_BACKTEST_TRIGGER.clear()
 
 
 def lsw_live_loop():
@@ -11781,6 +11830,11 @@ def api_lsw_status():
         checkpoints = dict(STATE["lsw_filter_checkpoints"])
         last_backtest_finished = STATE["lsw_last_backtest_finished"]
         last_backtest_duration = STATE["lsw_last_backtest_duration"]
+        backtest_total = STATE["lsw_backtest_total"]
+        backtest_done = STATE["lsw_backtest_done"]
+        backtest_in_flight = list(STATE["lsw_backtest_in_flight"])
+        backtest_running = STATE["lsw_backtest_running"]
+        backtest_started_at = STATE["lsw_backtest_started_at"]
     ranked = [dict(s, symbol=sym, live=(sym in live_universe),
                    live_directions=live_directions.get(sym),
                    filter_checkpoints=checkpoints.get(sym)) for sym, s in summary.items()]
@@ -11789,6 +11843,11 @@ def api_lsw_status():
         "enabled": LSW_ENABLED,
         "last_backtest_finished": last_backtest_finished,
         "last_backtest_duration": last_backtest_duration,
+        "backtest_running": backtest_running,
+        "backtest_total": backtest_total,
+        "backtest_done": backtest_done,
+        "backtest_in_flight": backtest_in_flight,
+        "backtest_started_at": backtest_started_at,
         "signals_stats": compute_lsw_signal_stats(),
         "live_universe": live_universe,
         "config": {
@@ -11881,6 +11940,11 @@ def api_reset_lsw():
             STATE["lsw_last_backtest_finished"] = None
             STATE["lsw_last_backtest_duration"] = None
             STATE["lsw_signals"].clear()
+        # v0.99.137 — per direct user report ("нажал очистить sweep,
+        # новый бэктест сразу начнется?"), same fix as api_reset_msnr()'s
+        # own v0.99.40: wakes lsw_backtest_loop() immediately instead of
+        # leaving it asleep for up to LSW_REFRESH_SEC (up to 1h default).
+        LSW_BACKTEST_TRIGGER.set()
         return jsonify({"ok": True})
     except Exception as e:
         log_error(f"api_reset_lsw: {e}")
@@ -14477,13 +14541,26 @@ async function refreshLsw() {
     const wr = s.winrate !== null && s.winrate !== undefined ? `${s.winrate}%` : '-';
     return `${levelTypeLabels[lt] || lt}: ${wr} (n=${s.n})`;
   }).join(' · ');
-  const buildTxt = status.last_backtest_finished
+  const buildTxt = status.backtest_running
+    ? `бэктест выполняется (начат ${status.backtest_started_at ? fmtTime(status.backtest_started_at) : '?'}): ${status.backtest_done||0}/${status.backtest_total||'?'} монет${status.backtest_started_at ? ' · идёт ' + Math.round((Date.now()/1000 - status.backtest_started_at)) + 'с' : ''}`
+    : status.last_backtest_finished
     ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · в живом скане: ${(status.live_universe||[]).length}/${(status.top||[]).length} монет (винрейт > ${cfg.live_min_winrate}%)`
     : 'бэктест ещё не завершился — живой скан новых сигналов на паузе, чтобы не показывать неотфильтрованные монеты';
+  const progressPct = status.backtest_total ? Math.round((status.backtest_done||0) / status.backtest_total * 100) : 0;
+  const progressBarHtml = status.backtest_running ? `
+    <div style="margin:6px 0 8px;">
+      <div style="background:#1c2433;border-radius:6px;height:8px;overflow:hidden;">
+        <div style="background:#3ddc97;height:100%;width:${progressPct}%;transition:width 0.4s;"></div>
+      </div>
+      <div class="dim" style="font-size:11px;margin-top:3px;">
+        ${progressPct}% · сейчас: ${(status.backtest_in_flight||[]).slice(0,6).join(', ') || '—'}${(status.backtest_in_flight||[]).length > 6 ? ` +${status.backtest_in_flight.length-6}` : ''}
+      </div>
+    </div>` : '';
   const headerHtml = `
     <div class="dim" style="margin-bottom:8px;">
       <b>Liquidity Sweep</b> — снятие ликвидности с равных хаёв/лоу (2+ близких максимума/минимума считаются одним уровнем); сигнал — когда свеча фитилём пробивает уровень, но закрывается обратно внутри (не пробой, а именно снятие стопов). Автоторговля и её риск настраиваются в общей вкладке «Автоторговля».<br>
       ТФ ${cfg.interval} · RR ${cfg.rr} · допуск равенства уровней ${cfg.equal_tolerance_pct}% · буфер стопа ${cfg.sl_buffer_pct}% · ${buildTxt}<br>
+      ${progressBarHtml}
       Фильтр по тренду (${cfg.htf_interval}): <span class="${cfg.htf_filter_enabled ? 'win' : 'dim'}">${cfg.htf_filter_enabled ? 'включён' : 'выключен'}</span> ·
       Структурный кэп: <span class="${cfg.structural_cap_enabled ? 'win' : 'dim'}">${cfg.structural_cap_enabled ? 'включён' : 'выключен'}</span> ·
       Подтверждение (${cfg.entry_confirm_interval}): <span class="${cfg.entry_confirm_enabled ? 'win' : 'dim'}">${cfg.entry_confirm_enabled ? 'включено' : 'выключено'}</span> ·
