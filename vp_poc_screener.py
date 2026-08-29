@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.134"
+APP_VERSION = "0.99.135"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3351,13 +3351,15 @@ def cancel_price_order(order_id):
 def find_open_signal_sl(symbol):
     """Searches every module's own OPEN-signal list (same set has_open_
     signal_any_module() already checks) for one on this symbol, and
-    returns (direction, sl) from whichever it finds first — used by
-    reconcile_positions_and_orders() to recover a stop-loss price for
-    an open position whose own SL placement failed at open time, so it
-    can be automatically retried rather than just alerted about. None
-    if no module has a matching OPEN record (shouldn't normally happen
-    for a real open position, but the caller treats that as "nothing to
-    retry with" rather than assuming one)."""
+    returns (direction, sl, detected_at) from whichever it finds first
+    — used by reconcile_positions_and_orders() to recover a stop-loss
+    price for an open position whose own SL placement failed at open
+    time, so it can be automatically retried rather than just alerted
+    about; detected_at feeds that same function's own grace-period
+    check (see RECONCILE_GRACE_SEC's own comment). None if no module
+    has a matching OPEN record (shouldn't normally happen for a real
+    open position, but the caller treats that as "nothing to retry
+    with" rather than assuming one)."""
     lists = {
         "signals": STATE["signals"], "scalp_signals": STATE["scalp_signals"],
         "ft5_signals": STATE["ft5_signals"], "msnr_signals": STATE["msnr_signals"],
@@ -3367,8 +3369,31 @@ def find_open_signal_sl(symbol):
         for lst in lists.values():
             for s in lst:
                 if s.get("symbol") == symbol and s.get("status") == "OPEN" and s.get("sl") is not None:
-                    return s.get("direction"), s.get("sl")
+                    return s.get("direction"), s.get("sl"), s.get("detected_at")
     return None
+
+
+def _newest_open_signal_detected_at(symbol):
+    """Same module-list scan as find_open_signal_sl(), but returns just
+    the MOST RECENT detected_at across every OPEN signal on this symbol
+    (regardless of whether it has an sl recorded) — used by reconcile_
+    positions_and_orders() to tell a genuinely-missing TP/SL apart from
+    one that simply hasn't landed on Gate's own side yet (see
+    RECONCILE_GRACE_SEC's own comment). None if no OPEN signal at all."""
+    lists = (STATE["signals"], STATE["scalp_signals"], STATE["ft5_signals"],
+             STATE["msnr_signals"], STATE["mirror_signals"], STATE["lsw_signals"])
+    newest = None
+    with state_lock:
+        for lst in lists:
+            for s in lst:
+                if s.get("symbol") == symbol and s.get("status") == "OPEN":
+                    dt = s.get("detected_at")
+                    if dt is not None and (newest is None or dt > newest):
+                        newest = dt
+    return newest
+
+
+RECONCILE_GRACE_SEC = int(os.environ.get("VP_RECONCILE_GRACE_SEC", 15))  # v0.99.135, per direct user report (screenshot: an auto-heal "восстановлен отсутствовавший стоп-лосс" alert fired on a position whose REAL SL had actually already been placed by execute_autotrade — just hadn't propagated into Gate's own GET /price_orders response yet — leaving TWO live SL orders on one position): execute_autotrade() places the market order, THEN the TP/SL trigger orders, as separate sequential API calls, and reconcile_positions_and_orders() can run (opportunistically, right before the NEXT trade) within that same window before Gate's own read-side reflects the write that already happened. A contract with an OPEN signal detected less than this many seconds ago is given a pass on BOTH checks below (no orders at all, missing SL specifically) for this cycle — genuinely missing protection surfaces on the VERY NEXT reconcile pass regardless, so nothing real goes unprotected for longer than one extra cycle, but a same-second placement race no longer gets treated as a real gap.
 
 
 def reconcile_positions_and_orders():
@@ -3395,6 +3420,16 @@ def reconcile_positions_and_orders():
         fix that caused the original failure to (hopefully) not recur.
         Success or failure either way is Telegram-alerted, deduped the
         same way as (1) so a still-failing retry doesn't spam.
+    v0.99.135, per direct user report (a "восстановлен отсутствовавший
+        стоп-лосс" alert fired and left TWO live SL orders on one
+        position): both (1) and (1b) now give a contract a pass for
+        RECONCILE_GRACE_SEC seconds after its own OPEN signal was first
+        detected — execute_autotrade() places TP/SL as separate calls
+        right after the market order, and this function can run (the
+        opportunistic call happens right before the NEXT trade) inside
+        that same narrow window, before Gate's own GET /price_orders
+        reflects a placement that already genuinely succeeded. See that
+        constant's own comment for the full mechanics.
     (2) trigger orders whose position has ALREADY closed — Gate has no
         native OCO, so when TP fires and closes a position, the paired
         SL order (or vice versa) just sits there as a live trigger with
@@ -3420,6 +3455,16 @@ def reconcile_positions_and_orders():
     triggered_contracts = {t.get("initial", {}).get("contract") for t in triggers if t.get("initial", {}).get("contract")}
 
     unprotected = [c for c in open_contracts if c not in triggered_contracts]
+    # v0.99.135 — grace period: a contract whose own OPEN signal was
+    # detected within the last RECONCILE_GRACE_SEC seconds gets a pass
+    # here even with zero trigger orders yet — execute_autotrade()
+    # places TP/SL as separate calls right after the market order, and
+    # this check can otherwise run in that same narrow window before
+    # they land. See RECONCILE_GRACE_SEC's own comment for the full
+    # incident and the "surfaces next cycle regardless" reasoning.
+    now = time.time()
+    unprotected = [c for c in unprotected
+                   if (_newest_open_signal_detected_at(c) or 0) < now - RECONCILE_GRACE_SEC]
     with _scalp_signal_cooldowns_lock:  # reusing an existing lock for this tiny bit of shared state rather than adding a new one
         new_ones = [c for c in unprotected if c not in _unprotected_alerted]
         _unprotected_alerted.intersection_update(unprotected)
@@ -3449,6 +3494,8 @@ def reconcile_positions_and_orders():
         has_sl = any((t.get("trigger", {}) or {}).get("rule") == expected_sl_rule for t in contract_triggers)
         if has_sl:
             continue
+        if (_newest_open_signal_detected_at(contract) or 0) >= now - RECONCILE_GRACE_SEC:
+            continue  # too soon to tell — its own SL may simply not have landed on Gate's side yet, see RECONCILE_GRACE_SEC's own comment
         found = find_open_signal_sl(contract)
         if not found:
             if contract not in _missing_sl_alerted:
@@ -3460,7 +3507,7 @@ def reconcile_positions_and_orders():
                 )
             missing_sl_still_failed.append(contract)
             continue
-        sig_direction, sig_sl = found
+        sig_direction, sig_sl, _sig_detected_at = found
         try:
             tick = get_contract_spec(contract).get("order_price_round")
         except Exception:
