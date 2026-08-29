@@ -11056,3 +11056,37 @@ v0.99.134 - CRITICAL FIX: a real trade that failed to open due to a
          while a second check confirms a genuine OPENED status correctly
          leaves the cooldown untouched (no over-fix retrying already-
          successful trades).
+
+v0.99.135 - Fixed a race condition in reconcile_positions_and_orders()'s
+         own v0.99.124 auto-heal, per direct user report: an "auto-
+         healed missing stop-loss" Telegram alert fired on a position
+         whose real SL had ALREADY been placed by execute_autotrade() —
+         just hadn't propagated into Gate's own GET /price_orders
+         response yet — leaving TWO live SL orders on one position.
+         execute_autotrade() places the market order, then the TP/SL
+         trigger orders, as separate sequential API calls; reconcile_
+         positions_and_orders() runs opportunistically right before the
+         NEXT trade, which can land inside that same narrow window
+         before Gate's own read side reflects a write that already
+         genuinely succeeded.
+         Fixed with a grace period, not a blind delay: a new _newest_
+         open_signal_detected_at() helper (same module-list scan as
+         find_open_signal_sl(), reused rather than duplicated) finds
+         the most recent detected_at across all of a symbol's own OPEN
+         signals. Both existing checks — (1) no trigger orders at all,
+         (1b) has orders but none is a stop-loss — now skip a contract
+         entirely for RECONCILE_GRACE_SEC (15s) after its own signal was
+         first detected, instead of treating "not there yet" as "really
+         missing." A genuinely missing SL still surfaces on the very
+         next reconcile pass regardless, so nothing real goes
+         unprotected for longer than one extra cycle — this only closes
+         the specific same-second placement race, not the actual safety
+         net.
+         Verified: py_compile, pyflakes clean, a real runtime start, the
+         Flask route/def integrity check (still 44 routes — no routes
+         touched), and two tests: a position detected 2 seconds ago with
+         zero trigger orders correctly produces NO alert and NO auto-
+         heal attempt (within the grace window), while a position
+         detected 60 seconds ago in the same zero-orders state is still
+         correctly flagged as genuinely unprotected — confirming the fix
+         closes the race without blinding the underlying safety check.
