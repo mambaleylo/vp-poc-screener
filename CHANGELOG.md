@@ -11186,3 +11186,46 @@ v0.99.138 - LSW_LIVE_MIN_WINRATE raised 35% -> 50%, per direct user
          Verified: py_compile, pyflakes clean, a real runtime start
          confirming api_lsw_status()'s own config.live_min_winrate
          reflects 50.0 immediately.
+
+v0.99.139 - New optional 4th LSW filter: volume, per direct user
+         request ("структурный кэп, тренд фильтр можно убрать, заменить
+         другим новым фильтром... фильтр по объёму может?"). Real-world
+         rationale: a genuine liquidity sweep (a real stop cascade
+         getting absorbed) should show elevated volume on the sweep
+         candle itself relative to recent bars — a low-volume wick that
+         merely pokes past a level without real participation behind
+         it is a weaker signal. lsw_filter_signals_by_volume() keeps a
+         signal only if its own sweep candle's volume is at least
+         LSW_VOLUME_FILTER_MULT (1.5x default) times the average volume
+         of the preceding LSW_VOLUME_FILTER_LOOKBACK (20) bars — cheap,
+         single-timeframe, no extra fetch needed, same shape as
+         structural cap. Off by default, wired into the real chain
+         (after structural cap, before entry confirmation) and into
+         lsw_scan_symbol_live() for live signals.
+         Per direct follow-up ("убери из отображения в столбцах пока
+         тогда хотя бы, чтобы не мазолил глаза") — asked first whether
+         to delete the HTF trend/structural cap filters' code entirely
+         or just de-emphasize them, given they cost nothing while off
+         and deleting working, already-tuned code for zero functional
+         gain seemed like unnecessary risk; the user chose the middle
+         ground: keep both toggles and their detection code fully
+         intact and usable, just stop computing/showing their own solo-
+         checkpoint columns in the Sweep tab's backtest table. This
+         also recoups some of v0.99.136's own added cost (an extra
+         outcome-tracking pass per symbol for each of the two dropped
+         columns, though the HTF candle fetch itself still happens
+         since that toggle can still be turned on for real trading).
+         The table's last 2 columns are now "Подтверждение (соло)" and
+         "Фильтр объёма (соло)" instead of 3; a note in the table's own
+         caption explains the other two filters are still available in
+         Settings, just no longer shown here.
+         Verified: py_compile, pyflakes clean, node --check on the
+         correctly-last <script> block, a real runtime start confirming
+         api_lsw_status()'s new config.volume_filter_enabled field, the
+         Flask route/def integrity check (still 44 routes — no new
+         routes), a getElementById audit on the one new ID
+         (setLswVolumeFilter, defined once, referenced once), and unit
+         tests: a hand-built 2x-average-volume sweep candle correctly
+         passes the filter, a same-as-average-volume one correctly gets
+         dropped, and a signal with insufficient preceding history is
+         correctly kept by default (nothing to judge it against).
