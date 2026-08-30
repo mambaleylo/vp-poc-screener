@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.140"
+APP_VERSION = "0.99.141"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -427,6 +427,25 @@ MSNR_MIN_LEG_ATR = float(os.environ.get("VP_MSNR_MIN_LEG_ATR", 2.5))  # min impu
 MSNR_QM_ZONE_PCT = float(os.environ.get("VP_MSNR_QM_ZONE_PCT", 0.006))  # how close (as % of price) the sweep extreme must land to the OCL level to count as testing THAT level
 MSNR_QM_LOOKBACK_BARS = int(os.environ.get("VP_MSNR_QM_LOOKBACK_BARS", 6))  # entry-TF bar cluster width the sweep and the close-back-inside confirmation are allowed to span, same idea as SESSION_MAX_THRUST_BARS
 MSNR_VOLUME_LOOKBACK_BARS = int(os.environ.get("VP_MSNR_VOLUME_LOOKBACK_BARS", 20))  # v0.99.59, per direct user request ("второй фильтр" — the volume-confirmation candidate discussed alongside the time-of-day one, v0.99.56): how many entry-TF bars BEFORE the sweep/QM candle set that candle's own volume baseline (mean of that trailing window, excluding the signal candle itself). The QM/SNR pattern's whole premise is that a sweep-and-reclaim reflects REAL institutional order flow — a sweep on genuinely low relative volume is a plausible tell that it doesn't, same reasoning already used for the time-of-day filter. Separate constant from FT5_VOLUME_AVG_PERIOD (70) rather than reusing it — that's tuned for FT5's own strategy/timeframe, no reason to assume the same window suits MSNR's typically-shorter MSNR_ENTRY_TF.
+# v0.99.141 — 2 new GLOBAL (uniform-threshold, manually toggled)
+# filters, per direct user request after voicing a real concern about
+# every existing MSNR filter above being auto-derived PER SYMBOL
+# ("Просто под каждую монету как сейчас попахивает притянутостью,
+# когда фильтр работает на всех монетах, тогда он хорош" — a filter
+# that only "works" because it's individually re-tuned per coin proves
+# less than one that holds up applied identically everywhere). Both
+# off by default, same convention as every toggle in this file, and —
+# unlike the per-symbol filters above — their own solo checkpoint is
+# ALWAYS computed and appended to msnr_optimize_symbol()'s own
+# filter_checkpoints chain regardless of whether the toggle is on, so
+# the person can judge "what would this do" before enabling it, same
+# principle Sweep's own optional filters already use.
+MSNR_MIN_RR_FILTER_ENABLED = os.environ.get("VP_MSNR_MIN_RR_FILTER", "0") == "1"
+MSNR_MIN_RR_FILTER = float(os.environ.get("VP_MSNR_MIN_RR_FILTER", 2.0))  # "a 1:2 minimum risk-to-reward filter is standard" — a UNIFORM floor, deliberately separate from msnr_symbol_rr_skip_min/max above (those derive a DIFFERENT per-symbol threshold from where THIS symbol's own trades statistically stop paying off, not a fixed global minimum)
+MSNR_HTF_FILTER_ENABLED = os.environ.get("VP_MSNR_HTF_FILTER", "0") == "1"
+MSNR_HTF_INTERVAL = os.environ.get("VP_MSNR_HTF_INTERVAL", "4h")
+MSNR_HTF_EMA_PERIOD = int(os.environ.get("VP_MSNR_HTF_EMA_PERIOD", 50))
+MSNR_HTF_TREND_BUFFER_PCT = float(os.environ.get("VP_MSNR_HTF_TREND_BUFFER_PCT", 0.1))
 MSNR_SL_BUFFER_PCT = float(os.environ.get("VP_MSNR_SL_BUFFER_PCT", 0.0015))
 MSNR_SL_BUFFER_MULT = float(os.environ.get("VP_MSNR_SL_BUFFER_MULT", 1.3))  # v0.99.104, per direct user report ("часто выбивает стоп и идёт куда надо цена"): the OLD sl_buffer_pct approach (extreme * (1 ± 0.15%)) barely widens the stop past the sweep's own extreme at all, regardless of how far that sweep actually moved — a live report of frequent premature stop-outs followed by the intended move happening anyway is the textbook symptom of a stop sitting too close to normal price noise/re-testing. Mirrors XAU_LG_SL_BUFFER_MULT's own SHAPE (see that constant's own comment): multiplies the RAW entry-to-sweep-extreme distance (already a real, price-action-derived risk measure) rather than adding a tiny fixed % on top of the bare extreme price — a stop that scales with how far the sweep itself moved, not a nudge that's nearly the same regardless. 1.3 is a starting default (30% wider than the raw sweep distance) — deliberately NOT wired into the global risk_autotune_pass() nudge system XAU_LG/SESSION/EMA/DIV use for their own SL multipliers: MSNR's own participation in that global system was disabled back in v0.99.52 in favor of its OWN, different tuning philosophy (msnr_symbol_sl_skip_min() and friends — per-symbol statistical significance tests, not a single global average-MAE nudge), and this stays consistent with that existing design rather than reintroducing the older mechanism just for this one constant. A static default, adjustable via the VP_MSNR_SL_BUFFER_MULT env var if real data suggests a different multiplier fits better.
 MSNR_FALLBACK_RR = float(os.environ.get("VP_MSNR_FALLBACK_RR", 4.0))  # used only when the opposite OCL level isn't confirmed yet (Storyline has just one side so far) — a placeholder TP, not the normal path
@@ -944,7 +963,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "msnr_addon_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
@@ -989,6 +1008,8 @@ def get_settings():
         "msnr_max_rr": MSNR_MAX_RR,
         "msnr_enabled": MSNR_ENABLED,
         "msnr_addon_enabled": MSNR_ADDON_ENABLED,
+        "msnr_min_rr_filter_enabled": MSNR_MIN_RR_FILTER_ENABLED,
+        "msnr_htf_filter_enabled": MSNR_HTF_FILTER_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
         "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
@@ -1019,7 +1040,7 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, MSNR_MIN_RR_FILTER_ENABLED, MSNR_HTF_FILTER_ENABLED, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT, MIRROR_AUTOTUNE_TOLERANCE_ENABLED
     global LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
@@ -1103,6 +1124,10 @@ def apply_settings(updates):
         MSNR_ENABLED = bool(updates["msnr_enabled"])
     if "msnr_addon_enabled" in updates:
         MSNR_ADDON_ENABLED = bool(updates["msnr_addon_enabled"])
+    if "msnr_min_rr_filter_enabled" in updates:
+        MSNR_MIN_RR_FILTER_ENABLED = bool(updates["msnr_min_rr_filter_enabled"])
+    if "msnr_htf_filter_enabled" in updates:
+        MSNR_HTF_FILTER_ENABLED = bool(updates["msnr_htf_filter_enabled"])
     if "msnr_max_rr" in updates:
         try:
             v = float(updates["msnr_max_rr"])
@@ -6983,6 +7008,44 @@ def _msnr_filter_checkpoint(trades, symbol, leverage_ceiling):
     }
 
 
+def msnr_filter_by_min_rr(trades, min_rr=None):
+    """v0.99.141 — "a 1:2 minimum risk-to-reward filter is standard"
+    (repeated across independent sources researched for Sweep's own
+    filters, applies just as well here): a UNIFORM floor applied the
+    SAME way to every symbol, deliberately separate from msnr_symbol_
+    rr_skip_min/max above (those derive a per-symbol threshold from
+    where THIS symbol's own trades statistically stop paying off — a
+    different question from "is a 1:2 floor a good idea everywhere").
+    A trade with no computed rr (shouldn't normally happen) is kept —
+    nothing to judge isn't a reason to drop it."""
+    min_rr = min_rr if min_rr is not None else MSNR_MIN_RR_FILTER
+    return [t for t in trades if t.get("rr") is None or t["rr"] >= min_rr]
+
+
+def msnr_filter_by_htf_trend(trades, bias_series, htf_interval_sec):
+    """v0.99.141 — same higher-timeframe trend concept as LSW's own
+    lsw_filter_signals_by_htf_trend() (v0.99.121), reused here via the
+    shared lsw_htf_bias_at() lookup rather than duplicating that logic:
+    a LONG only survives if the HTF bias at its own entry time is UP or
+    NEUTRAL, a SHORT only survives if it's DOWN or NEUTRAL. A trade
+    whose own HTF bar hadn't closed yet (bias is None) is dropped too —
+    conservative, matching LSW's own version. Reads "time" (not
+    "entry_time" — MSNR's own trade dicts use a different key than
+    LSW's signal dicts) and "direction", both already present on every
+    MSNR trade dict."""
+    kept = []
+    for t in trades:
+        bias = lsw_htf_bias_at(bias_series, t["time"], htf_interval_sec)
+        if bias is None:
+            continue
+        if t["direction"] == "LONG" and bias == "DOWN":
+            continue
+        if t["direction"] == "SHORT" and bias == "UP":
+            continue
+        kept.append(t)
+    return kept
+
+
 def _msnr_recompute_summary_score(best, best_results):
     """v0.99.26 — shared recompute step reused by every post-hoc filter
     in msnr_optimize_symbol() (skip_rr_min, liquidation, skip_sl_pct_
@@ -7227,6 +7290,42 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
             _msnr_recompute_summary_score(best, best_results)
         best["volume_filtered_count"] = before_volume - len(best_results)
         checkpoints.append({"stage": "volume", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
+        # v0.99.141 — 2 new GLOBAL (not per-symbol-tuned, unlike every
+        # filter above) optional stages. Their own solo checkpoint is
+        # ALWAYS computed and appended (what this filter would do if
+        # applied on top of everything above), even while its own
+        # toggle is off — see MSNR_MIN_RR_FILTER_ENABLED's own comment
+        # for the full reasoning — but best_results is only actually
+        # narrowed when the toggle is genuinely on.
+        min_rr_candidates = msnr_filter_by_min_rr(best_results)
+        if MSNR_MIN_RR_FILTER_ENABLED:
+            before_min_rr = len(best_results)
+            best_results = min_rr_candidates
+            best["min_rr_filtered_count"] = before_min_rr - len(best_results)
+            _msnr_recompute_summary_score(best, best_results)
+            checkpoints.append({"stage": "min_rr", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
+        else:
+            checkpoints.append({"stage": "min_rr", **_msnr_filter_checkpoint(min_rr_candidates, symbol, best["leverage_ceiling"])})
+        htf_candles = None
+        try:
+            htf_interval_sec = INTERVAL_SECONDS.get(MSNR_HTF_INTERVAL, 14400)
+            htf_fetch_start = now - (days + 20) * 86400
+            htf_candles = get_candles_range(symbol, MSNR_HTF_INTERVAL, htf_fetch_start, now)
+        except Exception as e:
+            log_error(f"msnr_optimize_symbol {symbol}: HTF fetch for trend filter failed: {e}")
+        if htf_candles and len(htf_candles) >= MSNR_HTF_EMA_PERIOD:
+            bias_series = lsw_htf_bias_series(htf_candles, period=MSNR_HTF_EMA_PERIOD, buffer_pct=MSNR_HTF_TREND_BUFFER_PCT)
+            htf_candidates = msnr_filter_by_htf_trend(best_results, bias_series, htf_interval_sec)
+        else:
+            htf_candidates = best_results  # not enough HTF history to judge — same "nothing to judge, keep" convention as LSW's own version, just non-conservative here since this is only a solo/optional preview when not enough data exists
+        if MSNR_HTF_FILTER_ENABLED:
+            before_htf = len(best_results)
+            best_results = htf_candidates if (htf_candles and len(htf_candles) >= MSNR_HTF_EMA_PERIOD) else []
+            best["htf_filtered_count"] = before_htf - len(best_results)
+            _msnr_recompute_summary_score(best, best_results)
+            checkpoints.append({"stage": "htf_trend", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
+        else:
+            checkpoints.append({"stage": "htf_trend", **_msnr_filter_checkpoint(htf_candidates, symbol, best["leverage_ceiling"])})
         # v0.99.86 — the full chain, one entry per stage transition;
         # api_msnr_status() surfaces this so the UI can show, per
         # filter, exactly what its own before->after did to n/winrate/
@@ -12287,6 +12386,8 @@ def api_msnr_status():
             "grid_qm_lookback": MSNR_PARAM_GRID_QM_LOOKBACK,
             "compound_start_balance": MSNR_COMPOUND_START_BALANCE, "compound_leverage": AUTOTRADE_LEVERAGE_MSNR,
             "refresh_sec": MSNR_REFRESH_SEC,
+            "min_rr_filter_enabled": MSNR_MIN_RR_FILTER_ENABLED, "min_rr_filter": MSNR_MIN_RR_FILTER,
+            "htf_filter_enabled": MSNR_HTF_FILTER_ENABLED, "htf_interval": MSNR_HTF_INTERVAL,
         },
         "top": ranked,
     })
@@ -13191,6 +13292,20 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">вторая доливка к уже открытой позиции при свежем QM на M30 по тому же уровню (h1/m30 SBR &gt; m1 QM + m30 добір). На Gate это сливается в одну позицию с усреднённой ценой — итоговый стоп берётся более консервативный (дальше от цены) из старого и нового</div>
         </div>
         <label class="switch"><input type="checkbox" id="setMsnrAddon"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Минимальный RR (глобальный)</div>
+          <div class="sub">единый порог 1:2 для всех монет одинаково — не подбирается индивидуально под каждую (в отличие от остальных фильтров выше), поэтому результат честнее проверяет саму идею, а не удачную подгонку под конкретную монету</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setMsnrMinRrFilter"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Фильтр по тренду (4ч, глобальный)</div>
+          <div class="sub">LONG только если тренд на 4ч вверх/нейтральный, SHORT только если вниз/нейтральный — та же логика, что у Sweep, единая для всех монет</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setMsnrHtfFilter"><span class="switchSlider"></span></label>
       </div>
     </div>
 
@@ -14201,7 +14316,7 @@ async function refreshMsnr() {
     // past this line, just not auto-ranked; a checkbox still renders
     // for any manual_toggle_allowed row below it.
     const separatorHtml = (idx > 0 && arr[idx - 1].autotrade_eligible && !r.autotrade_eligible)
-      ? `<tr><td colspan="9" class="dim" style="font-size:10px;padding:4px 0;border-top:1px solid #1c2433;">\u2014 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 (\u0432\u043d\u0435 \u0442\u043e\u043f-10, \u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u0432\u0440\u0443\u0447\u043d\u0443\u044e \u2014 \u043d\u0430 \u0441\u0432\u043e\u0439 \u0440\u0438\u0441\u043a) \u2014</td></tr>`
+      ? `<tr><td colspan="11" class="dim" style="font-size:10px;padding:4px 0;border-top:1px solid #1c2433;">\u2014 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 (\u0432\u043d\u0435 \u0442\u043e\u043f-10, \u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u0432\u0440\u0443\u0447\u043d\u0443\u044e \u2014 \u043d\u0430 \u0441\u0432\u043e\u0439 \u0440\u0438\u0441\u043a) \u2014</td></tr>`
       : '';
     // v0.99.27, per direct user request: same idea, one tier lower —
     // a visible separator exactly where stress_test_failed rows begin
@@ -14210,8 +14325,30 @@ async function refreshMsnr() {
     // own $ compounding simulation and is excluded from ranking/
     // autotrade entirely, not just scored lower.
     const stressSeparatorHtml = (idx > 0 && !arr[idx - 1].stress_test_failed && r.stress_test_failed)
-      ? `<tr><td colspan="9" class="loss" style="font-size:10px;padding:4px 0;border-top:1px solid #1c2433;">\u2014 \u043f\u0440\u043e\u0432\u0430\u043b\u0438\u043b\u0438 $-\u0441\u0438\u043c\u0443\u043b\u044f\u0446\u0438\u044e \u0434\u0435\u043f\u043e\u0437\u0438\u0442\u0430 (\u0434\u043e\u0445\u043e\u0434 \u2264 0%), \u0438\u0441\u043a\u043b\u044e\u0447\u0435\u043d\u044b \u0438\u0437 \u0442\u043e\u043f\u0430/\u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u0438 \u2014</td></tr>`
+      ? `<tr><td colspan="11" class="loss" style="font-size:10px;padding:4px 0;border-top:1px solid #1c2433;">\u2014 \u043f\u0440\u043e\u0432\u0430\u043b\u0438\u043b\u0438 $-\u0441\u0438\u043c\u0443\u043b\u044f\u0446\u0438\u044e \u0434\u0435\u043f\u043e\u0437\u0438\u0442\u0430 (\u0434\u043e\u0445\u043e\u0434 \u2264 0%), \u0438\u0441\u043a\u043b\u044e\u0447\u0435\u043d\u044b \u0438\u0437 \u0442\u043e\u043f\u0430/\u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u0438 \u2014</td></tr>`
       : '';
+    // v0.99.141 — solo-checkpoint columns for the 2 new GLOBAL filters
+    // (see MSNR_MIN_RR_FILTER_ENABLED's own comment), reading them by
+    // "stage" name out of the SAME filter_checkpoints chain the compact
+    // filterImpactTxt summary above already draws from — matching
+    // Sweep's own fmtCheckpoint style (isolated solo result + delta vs
+    // the "raw" pre-filter checkpoint, not vs the final chained result).
+    const fcList = r.filter_checkpoints || [];
+    const rawCp = fcList.find(c => c.stage === 'raw');
+    const fmtMsnrSolo = (stage, enabled) => {
+      const cp = fcList.find(c => c.stage === stage);
+      if (!cp || !cp.n) return '<span class="dim">нет данных</span>';
+      let deltaTxt = '';
+      if (rawCp && rawCp.winrate !== null && rawCp.winrate !== undefined && cp.winrate !== null && cp.winrate !== undefined) {
+        const delta = Math.round((cp.winrate - rawCp.winrate) * 10) / 10;
+        const deltaCls = delta > 0 ? 'win' : (delta < 0 ? 'loss' : 'dim');
+        deltaTxt = ` <span class="${deltaCls}">(${delta > 0 ? '+' : ''}${delta}%)</span>`;
+      }
+      const onOff = enabled ? '' : ' <span class="dim">[выкл]</span>';
+      return `<span class="dim" title="если применить ТОЛЬКО этот фильтр поверх остальных, без него">${cp.winrate}% (n=${cp.n})${deltaTxt}${onOff}</span>`;
+    };
+    const minRrSoloTxt = fmtMsnrSolo('min_rr', cfg.min_rr_filter_enabled);
+    const htfSoloTxt = fmtMsnrSolo('htf_trend', cfg.htf_filter_enabled);
     return separatorHtml + stressSeparatorHtml + `<tr onclick="toggleMsnrBacktestTrades('${r.symbol}')" style="cursor:pointer;">
       <td>${_msnrExpanded.has(r.symbol) ? '\u25be' : '\u25b8'} ${r.symbol}${r.live ? ' <span style="color:#3ddc97;" title="торгуется вживую">\u25cf</span>' : ' <span class="dim" title="только бэктест, не торгуется">\u25cb</span>'}</td>
       <td onclick="event.stopPropagation();">${autotradeCell}</td>
@@ -14221,15 +14358,17 @@ async function refreshMsnr() {
       <td class="dim" title="med ${r.median_rr ?? '-'}R">avg ${r.avg_rr ?? '-'}R</td>
       <td class="${expClass}">${r.expectancy_r !== null && r.expectancy_r !== undefined ? (r.expectancy_r > 0 ? '+' : '') + r.expectancy_r + 'R' : '-'}</td>
       <td class="dim">${r.score !== null && r.score !== undefined ? r.score : '-'}</td>
+      <td>${minRrSoloTxt}</td>
+      <td>${htfSoloTxt}</td>
       <td class="dim" style="white-space:normal;min-width:220px;">${paramsTxt}${noteTxt}</td>
     </tr>
-    <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="9" style="padding:0;"><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0430...</div></td></tr>`;
+    <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="11" style="padding:0;"><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0430...</div></td></tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
     <div class="dim" style="margin-bottom:6px;"><b>\u0410\u0432\u0442\u043e\u0442\u044e\u043d\u0438\u043d\u0433 \u043f\u043e \u043c\u043e\u043d\u0435\u0442\u0430\u043c</b> (${cfg.backtest_days} \u0434\u043d\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438, \u043f\u0435\u0440\u0435\u0431\u043e\u0440 ${cfg.grid_min_leg_atr.length}\u00d7${cfg.grid_qm_zone_pct.length}\u00d7${cfg.grid_qm_lookback.length}=${cfg.grid_min_leg_atr.length*cfg.grid_qm_zone_pct.length*cfg.grid_qm_lookback.length} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432 \u043d\u0430 \u0441\u0438\u043c\u0432\u043e\u043b \u2014 \u043c\u0438\u043d. \u0438\u043c\u043f\u0443\u043b\u044c\u0441 (\u00d7ATR) / QM-\u0437\u043e\u043d\u0430 (%) / \u043e\u043a\u043d\u043e QM (\u0431\u0430\u0440\u044b), \u0442\u0430\u0431\u043b\u0438\u0446\u0430 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u0443\u0436\u0435 \u043b\u0443\u0447\u0448\u0438\u0439 \u043d\u0430\u0439\u0434\u0435\u043d\u043d\u044b\u0439 \u043a\u043e\u043c\u0431\u043e \u043f\u043e \u043a\u0430\u0436\u0434\u043e\u043c\u0443 \u0441\u0438\u043c\u0432\u043e\u043b\u0443) \u00b7 <b>score</b> \u2014 \u043d\u0438\u0436\u043d\u044f\u044f \u0434\u043e\u0432\u0435\u0440\u0438\u0442\u0435\u043b\u044c\u043d\u0430\u044f \u0433\u0440\u0430\u043d\u0438\u0446\u0430 \u0441\u0440\u0435\u0434\u043d\u0435\u0433\u043e R (\u043f\u043e \u043d\u0435\u0439 \u0438 \u0432\u044b\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044f \u043b\u0443\u0447\u0448\u0438\u0439 \u043a\u043e\u043c\u0431\u043e, \u0430 \u043d\u0435 \u043f\u043e \u0441\u044b\u0440\u043e\u043c\u0443 expectancy \u2014 \u0447\u0442\u043e\u0431\u044b \u043c\u0430\u043b\u0435\u043d\u044c\u043a\u0430\u044f \u0432\u044b\u0431\u043e\u0440\u043a\u0430 \u0441 \u0432\u0435\u0437\u0435\u043d\u0438\u0435\u043c \u043d\u0435 \u043f\u043e\u0431\u0435\u0436\u0434\u0430\u043b\u0430 \u0431\u043e\u043b\u044c\u0448\u0443\u044e \u0441\u0442\u0430\u0431\u0438\u043b\u044c\u043d\u0443\u044e) \u00b7 \u043a\u043b\u0438\u043a \u043f\u043e \u0441\u0442\u0440\u043e\u043a\u0435 \u2014 \u0440\u0430\u0441\u043a\u0440\u044b\u0442\u044c \u0441\u0434\u0435\u043b\u043a\u0438:</div>
     <div style="overflow-x:auto;">
     <table class="msnr-bt-table" style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Авто</th><th style="cursor:pointer;" onclick="msnrSortBy('winrate')">WR${_msnrSortKey==='winrate' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th style="cursor:pointer;" onclick="msnrSortBy('trades')">n${_msnrSortKey==='trades' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th>W/L/T</th><th>RR</th><th>Exp</th><th>Score</th><th>\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Авто</th><th style="cursor:pointer;" onclick="msnrSortBy('winrate')">WR${_msnrSortKey==='winrate' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th style="cursor:pointer;" onclick="msnrSortBy('trades')">n${_msnrSortKey==='trades' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th>W/L/T</th><th>RR</th><th>Exp</th><th>Score</th><th>Мин.RR≥${cfg.min_rr_filter} (соло)</th><th>Тренд 4ч (соло)</th><th>\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">\u0411\u044d\u043a\u0442\u0435\u0441\u0442 \u0435\u0449\u0451 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432.</div>';
@@ -15080,6 +15219,8 @@ const setInputs = {
   scalp_signals_enabled: document.getElementById('setScalpSignals'),
   msnr_enabled: document.getElementById('setMsnr'),
   msnr_addon_enabled: document.getElementById('setMsnrAddon'),
+  msnr_min_rr_filter_enabled: document.getElementById('setMsnrMinRrFilter'),
+  msnr_htf_filter_enabled: document.getElementById('setMsnrHtfFilter'),
   ft5_enabled: document.getElementById('setFt5'),
   ft5_invert_signals: document.getElementById('setFt5Invert'),
   mirror_enabled: document.getElementById('setMirror'),
