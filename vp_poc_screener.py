@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.137"
+APP_VERSION = "0.99.138"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -740,7 +740,7 @@ LSW_BACKTEST_DAYS = int(os.environ.get("VP_LSW_BACKTEST_DAYS", 90))
 LSW_REFRESH_SEC = int(os.environ.get("VP_LSW_REFRESH_SEC", 3600))
 LSW_SCAN_INTERVAL_SEC = int(os.environ.get("VP_LSW_SCAN_INTERVAL_SEC", 300))
 LSW_LIVE_MIN_SAMPLE = int(os.environ.get("VP_LSW_LIVE_MIN_SAMPLE", 30))  # a symbol needs at least this many CLOSED backtest trades before its live signals are trusted — deliberately lower than MIRROR_LIVE_MIN_SAMPLE (80) since this is a brand-new module with far less accumulated real-world validation than MIRROR had by the time IT got autotrade wired; kept at 30 rather than raised to 80 on v0.99.120's autotrade wiring since the user didn't ask for that specific change — worth revisiting once real forward data accumulates
-LSW_LIVE_MIN_WINRATE = float(os.environ.get("VP_LSW_LIVE_MIN_WINRATE", 35.0))
+LSW_LIVE_MIN_WINRATE = float(os.environ.get("VP_LSW_LIVE_MIN_WINRATE", 50.0))  # raised 35->50, v0.99.138, per direct user request ("Подними порог для авто торговли 50% для монеты")
 AUTOTRADE_ENABLED_LSW = os.environ.get("VP_AUTOTRADE_LSW", "0") == "1"  # v0.99.120, per direct user request ("надо живые сигналы сделать и авто торговлю как и везде, тоже с риском 2%") — off by default like every other module's own autotrade toggle, opt-in via settings
 AUTOTRADE_LEVERAGE_LSW = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_LSW", 10))  # only used by sim_execute_trade()'s own separate paper-balance simulator (deliberately left on its own old leverage/size system, same as every other module) — execute_autotrade() itself computes real leverage automatically per-trade, same risk-based sizing every module shares (see execute_autotrade()'s own docstring)
 TELEGRAM_ALERTS_LSW = os.environ.get("VP_TG_ALERTS_LSW", "1") == "1"
