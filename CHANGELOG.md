@@ -11336,3 +11336,52 @@ v0.99.141 - 2 new GLOBAL (uniform-threshold) MSNR filters, per direct
          trades (plus a no-rr trade kept by default), and msnr_filter_
          by_htf_trend() correctly keeping only the LONG trade against a
          hand-built uptrend HTF bias series and dropping the SHORT one.
+
+v0.99.142 - 2 new GLOBAL (uniform-threshold) Mirror filters, per direct
+         user request ("Давай переделаем тогда зеркало, придумай топ 2
+         фильтра и реализуем как в sweep") — same architecture and
+         reasoning as MSNR's own v0.99.141 pair (Mirror's existing SL-
+         width/pattern/direction filters are ALL per-symbol auto-
+         derived, same "смотрится притянутостью" concern the user
+         raised for MSNR applies here identically):
+         Volume filter (mirror_filter_by_volume, MIRROR_VOLUME_FILTER_
+         MULT=1.5) — same "genuine reversal should show real
+         participation" reasoning as LSW's own volume filter (v0.99.139).
+         Deliberately not another per-symbol threshold — a UNIFORM
+         multiplier applied identically to every symbol. Mirror's own
+         result dicts carry "time" but no candle index, so this builds
+         a time->index lookup against the same candles array the
+         signal was detected from.
+         HTF trend filter (mirror_filter_by_htf_trend, MIRROR_HTF_
+         INTERVAL=4h) — same concept as LSW's (v0.99.121) and MSNR's
+         (v0.99.141) own versions, reusing the shared lsw_htf_bias_at()/
+         lsw_htf_bias_series() helpers directly rather than a third
+         copy of the EMA/bias logic.
+         Both wired into mirror_backtest_symbol()'s EXISTING checkpoint
+         chain as two new stages after "direction_filter" — same "always
+         compute a solo preview even while off, only actually narrow
+         when the toggle is genuinely on" principle as MSNR's own pair,
+         so the person can judge each filter before enabling it. Also
+         wired into mirror_scan_symbol_live() via the SAME shadow-
+         tracking "filtered signal" pool the existing SL-width/direction
+         checks already use (own filter_reason tags "volume"/
+         "htf_trend") — unlike the backtest's always-on preview, live
+         checks only run (and only pay the extra HTF fetch) when their
+         own toggle is actually on.
+         Settings: 2 new toggles ("↳ Фильтр по объёму (глобальный)", "↳
+         Фильтр по тренду (4ч, глобальный)") in the Mirror group,
+         explicitly labeled "глобальный" to distinguish them from the
+         auto-derived filters above. UI: 2 new solo-checkpoint columns
+         in Mirror's backtest table ("Объём (соло)", "Тренд 4ч (соло)"),
+         read from the same checkpoints chain the existing before→after
+         summary already draws from, styled the same win/loss/dim +
+         delta-vs-raw way as Sweep/MSNR's own solo columns.
+         Verified: py_compile, pyflakes clean, node --check on the
+         correctly-last <script> block, a real runtime start confirming
+         both new api_mirror_status() config fields, the Flask route/def
+         integrity check (still 44 routes), a getElementById audit on
+         the 2 new IDs (each defined once, referenced once), and unit
+         tests: mirror_filter_by_volume() correctly keeping a 2.5x-
+         average-volume signal and dropping a flat-volume one, and
+         mirror_filter_by_htf_trend() correctly keeping only the LONG
+         trade against a hand-built uptrend HTF bias series.
