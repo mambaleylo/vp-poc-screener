@@ -11493,3 +11493,23 @@ v0.99.144 - CRITICAL FIX: two real duplicate-signal bugs, per direct
          in STATE; LSW correctly refuses to open a second (opposite-
          direction, independently-detected) signal on BTC_USDT while a
          LONG is already OPEN there.
+
+v0.99.145 - AUTOTRADE_RISK_PCT_OF_BALANCE default raised 2.0% -> 5.0%
+         and made settings-editable, per direct user request ("Риск на
+         сделку сделай 5% с выбором в настройках"). This is the global
+         % of total account equity risked per trade (drives the auto-
+         computed leverage for every module with real autotrade —
+         MSNR, Mirror, Sweep, Scalp), previously only changeable via
+         the VP_AUTOTRADE_RISK_PCT environment variable with no UI
+         path at all. New "Риск на сделку" number input in the
+         Автоторговля settings group, right above the per-module
+         enable toggles, applying live via the same generic settings
+         mechanism every other numeric setting (mirror_rr, lsw_rr) uses
+         — no new plumbing needed beyond registering the key.
+         Verified: py_compile, pyflakes clean, node --check on the
+         correctly-last <script> block, the Flask route/def integrity
+         check (still 44 routes), a getElementById audit on the one new
+         ID (setAutotradeRiskPct, defined once, referenced once), and a
+         real runtime start confirming both the new 5.0 default via
+         GET /api/settings and a live change to 7.5 taking effect
+         immediately via POST /api/settings.
