@@ -11281,3 +11281,58 @@ v0.99.140 - 3 more optional LSW filters, per direct user request after
          dropped by the session filter's own default window, and the
          min-touches filter correctly keeping only signals at or above
          the configured threshold.
+
+v0.99.141 - 2 new GLOBAL (uniform-threshold) MSNR filters, per direct
+         user request after asking to redo MSNR the same way as Sweep
+         ("Давай переделаем тогда зеркало, придумай топ 2 фильтра и
+         реализуем как в sweep. Тоже самое для msnr и ft5" -> "msnr
+         первым") and, when it turned out MSNR's own volume/RR/SL/hours
+         filters are ALL already auto-derived per-symbol (not manual
+         toggles like Sweep's), voicing a real methodological concern:
+         "Просто под каждую монету как сейчас попахивает притянутостью,
+         когда фильтр работает на всех монетах, тогда он хорош" — a
+         filter that only "works" because it's individually re-tuned
+         per coin proves less than one that holds up applied
+         identically everywhere.
+         Rather than convert the EXISTING per-symbol filters (a much
+         bigger, riskier redesign of live-money infrastructure not
+         asked for) or duplicate volume/hours (already covered, just in
+         per-symbol form), added 2 genuinely NEW filters as manual
+         global toggles, both off by default:
+         Minimum RR (msnr_filter_by_min_rr, MSNR_MIN_RR_FILTER=2.0) —
+         "a 1:2 minimum risk-to-reward filter is standard" (the same
+         research finding behind Sweep's own filter design). Uniform
+         floor applied identically to every symbol — deliberately
+         separate from msnr_symbol_rr_skip_min/max, which derive a
+         DIFFERENT, per-symbol threshold from where that symbol's own
+         trades statistically stop paying off.
+         HTF trend filter (msnr_filter_by_htf_trend, MSNR_HTF_INTERVAL=
+         4h) — same concept as LSW's own v0.99.121 filter, reusing its
+         shared lsw_htf_bias_at()/lsw_htf_bias_series() helpers directly
+         rather than duplicating the EMA/bias logic a third time.
+         Both wired into msnr_optimize_symbol()'s EXISTING filter_
+         checkpoints chain as two new stages after "volume" — but
+         unlike every stage before them (which only ever run once,
+         auto-applied), these two are ALWAYS computed as a solo preview
+         (what this filter would do on top of everything above) even
+         while their own toggle is off, and only actually narrow the
+         trade set when genuinely enabled — same "let the person judge
+         before enabling" principle Sweep's own filters already use.
+         Settings: 2 new toggles ("↳ Минимальный RR (глобальный)", "↳
+         Фильтр по тренду (4ч, глобальный)") in the MSNR group, each
+         explicitly labeled as uniform/global to distinguish them from
+         the auto-derived filters above. UI: 2 new solo-checkpoint
+         columns in the MSNR backtest table ("Мин.RR (соло)", "Тренд 4ч
+         (соло)"), read from the same filter_checkpoints chain the
+         existing compact before→after summary already draws from,
+         styled the same win/loss/dim + delta-vs-raw way as Sweep's own
+         fmtCheckpoint columns.
+         Verified: py_compile, pyflakes clean, node --check on the
+         correctly-last <script> block, a real runtime start confirming
+         both new api_msnr_status() config fields, the Flask route/def
+         integrity check (still 44 routes), a getElementById audit on
+         the 2 new IDs (each defined once, referenced once), and unit
+         tests: msnr_filter_by_min_rr() correctly keeping only rr>=2.0
+         trades (plus a no-rr trade kept by default), and msnr_filter_
+         by_htf_trend() correctly keeping only the LONG trade against a
+         hand-built uptrend HTF bias series and dropping the SHORT one.
