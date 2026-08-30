@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.141"
+APP_VERSION = "0.99.142"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -690,6 +690,20 @@ MIRROR_AUTOTUNE_TRAIN_FRACTION = float(os.environ.get("VP_MIRROR_AUTOTUNE_TRAIN_
 MIRROR_AUTOTUNE_MIN_WINRATE = float(os.environ.get("VP_MIRROR_AUTOTUNE_MIN_WINRATE", 35.0))  # a combo must clear this on BOTH slices independently — deliberately below MIRROR_LIVE_MIN_WINRATE itself, since the real, stricter live gate still applies afterward on the combined result; this is just "is this combo worth using at all," not the final word
 MIRROR_AUTOTUNE_MIN_TRAIN_SAMPLE = int(os.environ.get("VP_MIRROR_AUTOTUNE_MIN_TRAIN_SAMPLE", 25))
 MIRROR_AUTOTUNE_MIN_TEST_SAMPLE = int(os.environ.get("VP_MIRROR_AUTOTUNE_MIN_TEST_SAMPLE", 12))
+# v0.99.142 — 2 new GLOBAL (uniform-threshold, manually toggled) Mirror
+# filters, per direct user request ("Давай переделаем тогда зеркало,
+# придумай топ 2 фильтра и реализуем как в sweep") — same "works
+# identically for every symbol" philosophy the MSNR ones (v0.99.141)
+# already use, deliberately NOT another per-symbol auto-derived
+# threshold like mirror_symbol_sl_skip_min/pattern_skip/direction_skip
+# above. Both off by default.
+MIRROR_VOLUME_FILTER_ENABLED = os.environ.get("VP_MIRROR_VOLUME_FILTER", "0") == "1"
+MIRROR_VOLUME_FILTER_LOOKBACK = int(os.environ.get("VP_MIRROR_VOLUME_FILTER_LOOKBACK", 20))
+MIRROR_VOLUME_FILTER_MULT = float(os.environ.get("VP_MIRROR_VOLUME_FILTER_MULT", 1.5))  # the pattern's own signal candle must show at least this many times the preceding-bars average volume — same "genuine reversal should show real participation" reasoning as LSW's own volume filter (v0.99.139)
+MIRROR_HTF_FILTER_ENABLED = os.environ.get("VP_MIRROR_HTF_FILTER", "0") == "1"
+MIRROR_HTF_INTERVAL = os.environ.get("VP_MIRROR_HTF_INTERVAL", "4h")
+MIRROR_HTF_EMA_PERIOD = int(os.environ.get("VP_MIRROR_HTF_EMA_PERIOD", 50))
+MIRROR_HTF_TREND_BUFFER_PCT = float(os.environ.get("VP_MIRROR_HTF_TREND_BUFFER_PCT", 0.1))
 MIRROR_RR = float(os.environ.get("VP_MIRROR_RR", 3.0))  # fixed RR target — see mirror_detect_signals()'s own docstring for why a mechanical pipeline needs one despite the source trader's own discretionary exits
 MIRROR_MAX_BARS_TO_RETURN = int(os.environ.get("VP_MIRROR_MAX_BARS_TO_RETURN", 60))  # a level broken this many bars ago without price returning to it goes stale and stops being watched
 MIRROR_MAX_WAIT_BARS = int(os.environ.get("VP_MIRROR_MAX_WAIT_BARS", 200))  # v0.99.99, per direct user follow-up ("тайм аут тоже добавь"): shared by mirror_track_outcome() (backtest) and update_mirror_signal_outcomes() (live) so both sides use the SAME cutoff — was a hardcoded 200 in the backtest function only, with no live counterpart at all
@@ -963,7 +977,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
@@ -994,6 +1008,8 @@ def get_settings():
         "mirror_touch_tolerance_pct": MIRROR_TOUCH_TOLERANCE_PCT,
         "mirror_pattern_tolerance_pct": MIRROR_PATTERN_TOLERANCE_PCT,
         "mirror_autotune_tolerance_enabled": MIRROR_AUTOTUNE_TOLERANCE_ENABLED,
+        "mirror_volume_filter_enabled": MIRROR_VOLUME_FILTER_ENABLED,
+        "mirror_htf_filter_enabled": MIRROR_HTF_FILTER_ENABLED,
         "lsw_enabled": LSW_ENABLED,
         "lsw_rr": LSW_RR,
         "lsw_equal_tolerance_pct": LSW_EQUAL_TOLERANCE_PCT,
@@ -1042,6 +1058,7 @@ def apply_settings(updates):
     scan cycle / next alert, no restart needed."""
     global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, MSNR_MIN_RR_FILTER_ENABLED, MSNR_HTF_FILTER_ENABLED, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT, MIRROR_AUTOTUNE_TOLERANCE_ENABLED
+    global MIRROR_VOLUME_FILTER_ENABLED, MIRROR_HTF_FILTER_ENABLED
     global LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED
@@ -1088,6 +1105,10 @@ def apply_settings(updates):
             pass
     if "mirror_autotune_tolerance_enabled" in updates:
         MIRROR_AUTOTUNE_TOLERANCE_ENABLED = bool(updates["mirror_autotune_tolerance_enabled"])
+    if "mirror_volume_filter_enabled" in updates:
+        MIRROR_VOLUME_FILTER_ENABLED = bool(updates["mirror_volume_filter_enabled"])
+    if "mirror_htf_filter_enabled" in updates:
+        MIRROR_HTF_FILTER_ENABLED = bool(updates["mirror_htf_filter_enabled"])
     if "lsw_enabled" in updates:
         LSW_ENABLED = bool(updates["lsw_enabled"])
     if "lsw_rr" in updates:
@@ -10058,6 +10079,60 @@ def mirror_symbol_direction_skip(trades, rr=None):
     return skip
 
 
+def mirror_filter_by_volume(results, candles, lookback=None, mult=None):
+    """v0.99.142 — same "genuine reversal should show real participation"
+    reasoning as LSW's own volume filter (v0.99.139), adapted for
+    Mirror: a UNIFORM threshold applied identically to every symbol
+    (deliberately NOT another per-symbol auto-derived one like mirror_
+    symbol_sl_skip_min/pattern_skip/direction_skip above). Mirror's own
+    result dicts carry "time" but not a candle index, so this builds a
+    time->index lookup against the SAME candles array the signal was
+    detected from, then checks that candle's own volume against the
+    average of the `lookback` bars before it (excluding itself). A
+    result whose own time can't be matched, or with too little
+    preceding history, is KEPT — nothing to judge isn't a reason to
+    drop it, same convention as every other filter in this file."""
+    lookback = lookback if lookback is not None else MIRROR_VOLUME_FILTER_LOOKBACK
+    mult = mult if mult is not None else MIRROR_VOLUME_FILTER_MULT
+    time_to_idx = {c["time"]: i for i, c in enumerate(candles)}
+    kept = []
+    for r in results:
+        idx = time_to_idx.get(r["time"])
+        if idx is None:
+            kept.append(r)
+            continue
+        window = candles[max(0, idx - lookback):idx]
+        if len(window) < max(3, lookback // 2):
+            kept.append(r)
+            continue
+        avg_vol = sum(c["volume"] for c in window) / len(window)
+        sig_vol = candles[idx]["volume"]
+        if avg_vol <= 0 or sig_vol >= mult * avg_vol:
+            kept.append(r)
+    return kept
+
+
+def mirror_filter_by_htf_trend(results, bias_series, htf_interval_sec):
+    """v0.99.142 — same higher-timeframe trend concept as LSW's own
+    (v0.99.121) and MSNR's own (v0.99.141), reused here via the shared
+    lsw_htf_bias_at() lookup rather than a third copy of the EMA/bias
+    logic: a LONG only survives if the HTF bias at its own entry time
+    is UP or NEUTRAL, a SHORT only survives if it's DOWN or NEUTRAL. A
+    result whose own HTF bar hadn't closed yet (bias is None) is
+    dropped too — conservative, matching both other modules' versions."""
+    kept = []
+    for r in results:
+        bias = lsw_htf_bias_at(bias_series, r["time"], htf_interval_sec)
+        if bias is None:
+            continue
+        if r["direction"] == "LONG" and bias == "DOWN":
+            continue
+        if r["direction"] == "SHORT" and bias == "UP":
+            continue
+        kept.append(r)
+    return kept
+
+
 def mirror_autotune_tolerances(symbol, days=MIRROR_BACKTEST_DAYS):
     """v0.99.130 — per-symbol autotuning of MIRROR_TOUCH_TOLERANCE_PCT/
     MIRROR_PATTERN_TOLERANCE_PCT with a real walk-forward safeguard, per
@@ -10197,6 +10272,36 @@ def mirror_backtest_symbol(symbol, days=MIRROR_BACKTEST_DAYS, touch_tolerance_pc
     if skip_direction:
         filtered = [r for r in filtered if r.get("direction") not in skip_direction]
     checkpoints.append({"stage": "direction_filter", **_mirror_checkpoint(filtered)})
+    # v0.99.142 — 2 new GLOBAL (not per-symbol-tuned, unlike every
+    # filter above) optional stages. Their own solo checkpoint is
+    # ALWAYS computed and appended (what this filter would do on top
+    # of everything above), even while its own toggle is off — same
+    # "let the person judge before enabling" principle as Sweep/MSNR's
+    # own optional filters — but `filtered` is only actually narrowed
+    # when the toggle is genuinely on.
+    volume_candidates = mirror_filter_by_volume(filtered, candles)
+    if MIRROR_VOLUME_FILTER_ENABLED:
+        filtered = volume_candidates
+        checkpoints.append({"stage": "volume_filter", **_mirror_checkpoint(filtered)})
+    else:
+        checkpoints.append({"stage": "volume_filter", **_mirror_checkpoint(volume_candidates)})
+    htf_candles = None
+    try:
+        htf_interval_sec = INTERVAL_SECONDS.get(MIRROR_HTF_INTERVAL, 14400)
+        htf_fetch_start = fetch_start - MIRROR_HTF_EMA_PERIOD * htf_interval_sec
+        htf_candles = get_candles_range(symbol, MIRROR_HTF_INTERVAL, htf_fetch_start, now)
+    except Exception as e:
+        log_error(f"mirror_backtest_symbol {symbol}: HTF fetch for trend filter failed: {e}")
+    if htf_candles and len(htf_candles) >= MIRROR_HTF_EMA_PERIOD:
+        bias_series = lsw_htf_bias_series(htf_candles, period=MIRROR_HTF_EMA_PERIOD, buffer_pct=MIRROR_HTF_TREND_BUFFER_PCT)
+        htf_candidates = mirror_filter_by_htf_trend(filtered, bias_series, htf_interval_sec)
+    else:
+        htf_candidates = filtered  # not enough HTF history to judge — informational preview only, matches "nothing to judge, keep" convention
+    if MIRROR_HTF_FILTER_ENABLED:
+        filtered = htf_candidates if (htf_candles and len(htf_candles) >= MIRROR_HTF_EMA_PERIOD) else []
+        checkpoints.append({"stage": "htf_filter", **_mirror_checkpoint(filtered)})
+    else:
+        checkpoints.append({"stage": "htf_filter", **_mirror_checkpoint(htf_candidates)})
     return filtered, {"skip_sl_pct_min": skip_sl_min, "skip_pattern": sorted(skip_pattern),
                        "skip_direction": sorted(skip_direction), "checkpoints": checkpoints}
 
@@ -10304,6 +10409,33 @@ def mirror_scan_symbol_live(symbol):
                 filter_reason = "sl_width"  # this symbol's own backtest says SL this wide fails here
         if filter_reason is None and sig["direction"] in skip_direction:
             filter_reason = "direction"  # this symbol's own backtest says THIS direction fails here
+        # v0.99.142 — 2 new GLOBAL (not per-symbol) checks, only run if
+        # their own toggle is actually on (unlike the backtest's own
+        # "always preview" solo checkpoints — a live scan shouldn't pay
+        # an extra HTF fetch for a toggle that's off). Routed through
+        # the SAME shadow-tracking "filtered signal" pool as the two
+        # per-symbol checks above, just with their own filter_reason.
+        if filter_reason is None and MIRROR_VOLUME_FILTER_ENABLED:
+            idx = sig["entry_idx"]
+            window = candles[max(0, idx - MIRROR_VOLUME_FILTER_LOOKBACK):idx]
+            if len(window) >= max(3, MIRROR_VOLUME_FILTER_LOOKBACK // 2):
+                avg_vol = sum(c["volume"] for c in window) / len(window)
+                sig_vol = candles[idx]["volume"]
+                if avg_vol > 0 and sig_vol < MIRROR_VOLUME_FILTER_MULT * avg_vol:
+                    filter_reason = "volume"
+        if filter_reason is None and MIRROR_HTF_FILTER_ENABLED:
+            htf_interval_sec = INTERVAL_SECONDS.get(MIRROR_HTF_INTERVAL, 14400)
+            htf_candles = get_candles(symbol, interval=MIRROR_HTF_INTERVAL, limit=MIRROR_HTF_EMA_PERIOD + 10)
+            htf_now = time.time()
+            htf_candles = [c for c in htf_candles if c["time"] + htf_interval_sec <= htf_now]
+            if len(htf_candles) >= MIRROR_HTF_EMA_PERIOD:
+                bias_series = lsw_htf_bias_series(htf_candles, period=MIRROR_HTF_EMA_PERIOD, buffer_pct=MIRROR_HTF_TREND_BUFFER_PCT)
+                bias = lsw_htf_bias_at(bias_series, sig["entry_time"], htf_interval_sec)
+                if bias is not None:
+                    if sig["direction"] == "LONG" and bias == "DOWN":
+                        filter_reason = "htf_trend"
+                    elif sig["direction"] == "SHORT" and bias == "UP":
+                        filter_reason = "htf_trend"
         if filter_reason is not None:
             with _mirror_filtered_signal_cooldowns_lock:
                 if _mirror_filtered_signal_cooldowns.get(symbol) == sig["entry_time"]:
@@ -12017,6 +12149,8 @@ def api_mirror_status():
             "backtest_days": MIRROR_BACKTEST_DAYS, "universe_size": MIRROR_UNIVERSE_SIZE,
             "live_min_winrate": MIRROR_LIVE_MIN_WINRATE, "live_min_sample": MIRROR_LIVE_MIN_SAMPLE,
             "autotune_tolerance_enabled": MIRROR_AUTOTUNE_TOLERANCE_ENABLED,
+            "volume_filter_enabled": MIRROR_VOLUME_FILTER_ENABLED,
+            "htf_filter_enabled": MIRROR_HTF_FILTER_ENABLED, "htf_interval": MIRROR_HTF_INTERVAL,
         },
         "top": ranked,
     })
@@ -13349,6 +13483,20 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">подбирает допуск касания и допуск паттерна отдельно для каждой монеты — только если комбинация проходит проверку на ДВУХ независимых кусках истории (сначала подбор на первых 70% данных, потом обязательная проверка на отложенных последних 30%, которые в подборе не участвовали). Если ни одна комбинация не прошла обе проверки — монета торгуется с обычными общими допусками</div>
         </div>
         <label class="switch"><input type="checkbox" id="setMirrorAutotuneTolerance"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Фильтр по объёму (глобальный)</div>
+          <div class="sub">единый порог 1.5× среднего объёма для всех монет — свеча паттерна должна показать реальное участие толпы, а не быть тихим фитилём</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setMirrorVolumeFilter"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Фильтр по тренду (4ч, глобальный)</div>
+          <div class="sub">LONG только если тренд на 4ч вверх/нейтральный, SHORT только если вниз/нейтральный — единый для всех монет, как у Sweep и MSNR</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setMirrorHtfFilter"><span class="switchSlider"></span></label>
       </div>
     </div>
 
@@ -14842,6 +14990,25 @@ async function refreshMirror() {
     const tunedTxt = tt
       ? `<span class="win" title="подобрано: train ${tt.train_winrate}% (n=${tt.train_n}) → test ${tt.test_winrate}% (n=${tt.test_n})">касание ${tt.touch_tolerance_pct}% / паттерн ${tt.pattern_tolerance_pct}%</span>`
       : '<span class="dim">общие</span>';
+    // v0.99.142 — solo-checkpoint columns for the 2 new GLOBAL filters,
+    // reading them by "stage" out of the SAME checkpoints chain
+    // beforeAfterTxt above already draws from — matching Sweep/MSNR's
+    // own fmtCheckpoint style (isolated solo result + delta vs "raw").
+    const rawCp = cps.find(c => c.stage === 'raw');
+    const fmtMirrorSolo = (stage, enabled) => {
+      const cp = cps.find(c => c.stage === stage);
+      if (!cp || !cp.n) return '<span class="dim">нет данных</span>';
+      let deltaTxt = '';
+      if (rawCp && rawCp.winrate !== null && rawCp.winrate !== undefined && cp.winrate !== null && cp.winrate !== undefined) {
+        const delta = Math.round((cp.winrate - rawCp.winrate) * 10) / 10;
+        const deltaCls = delta > 0 ? 'win' : (delta < 0 ? 'loss' : 'dim');
+        deltaTxt = ` <span class="${deltaCls}">(${delta > 0 ? '+' : ''}${delta}%)</span>`;
+      }
+      const onOff = enabled ? '' : ' <span class="dim">[выкл]</span>';
+      return `<span class="dim" title="если применить ТОЛЬКО этот фильтр поверх остальных, без него">${cp.winrate}% (n=${cp.n})${deltaTxt}${onOff}</span>`;
+    };
+    const volumeSoloTxt = fmtMirrorSolo('volume_filter', cfg.volume_filter_enabled);
+    const htfSoloTxt = fmtMirrorSolo('htf_filter', cfg.htf_filter_enabled);
     return `<tr>
       <td>${r.symbol}${liveDot}</td>
       <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
@@ -14854,13 +15021,15 @@ async function refreshMirror() {
       <td>${byDirTxt}</td>
       <td>${beforeAfterTxt}</td>
       <td>${tunedTxt}</td>
+      <td>${volumeSoloTxt}</td>
+      <td>${htfSoloTxt}</td>
     </tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
-    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории) — итоговый винрейт/n уже ПОСЛЕ обоих фильтров (ширина стопа + паттерн)${cfg.autotune_tolerance_enabled ? ', допуски автотюнинга — по колонке справа' : ''}:</div>
+    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории) — итоговый винрейт/n уже ПОСЛЕ обоих фильтров (ширина стопа + паттерн)${cfg.autotune_tolerance_enabled ? ', допуски автотюнинга — по колонке справа' : ''}. Последние 2 колонки — что даёт КАЖДЫЙ новый глобальный фильтр САМ ПО СЕБЕ, поверх остальных (не в связке с ними чем нибудь ещё):</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>Фильтр SL</th><th>Фильтр паттерна</th><th>По направлению</th><th>До → После</th><th>Допуски</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>Фильтр SL</th><th>Фильтр паттерна</th><th>По направлению</th><th>До → После</th><th>Допуски</th><th>Объём (соло)</th><th>Тренд 4ч (соло)</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
@@ -15225,6 +15394,8 @@ const setInputs = {
   ft5_invert_signals: document.getElementById('setFt5Invert'),
   mirror_enabled: document.getElementById('setMirror'),
   mirror_autotune_tolerance_enabled: document.getElementById('setMirrorAutotuneTolerance'),
+  mirror_volume_filter_enabled: document.getElementById('setMirrorVolumeFilter'),
+  mirror_htf_filter_enabled: document.getElementById('setMirrorHtfFilter'),
   lsw_enabled: document.getElementById('setLsw'),
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
   lsw_structural_cap_enabled: document.getElementById('setLswStructuralCap'),
