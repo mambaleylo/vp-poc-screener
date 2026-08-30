@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.145"
+APP_VERSION = "0.99.146"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -928,6 +928,7 @@ AUTOTRADE_ENABLED_SCALP = os.environ.get("VP_AUTOTRADE_SCALP", "0") == "1"
 AUTOTRADE_SIZE_MODE = os.environ.get("VP_AUTOTRADE_SIZE_MODE", "percent")  # "percent" or "fixed" — the single size value below is interpreted according to this
 AUTOTRADE_SIZE_VALUE = float(os.environ.get("VP_AUTOTRADE_SIZE_VALUE", 2.0))  # percent: % of futures wallet balance; fixed: raw USD margin, leverage-independent either way
 AUTOTRADE_RISK_PCT_OF_BALANCE = float(os.environ.get("VP_AUTOTRADE_RISK_PCT", 5.0))  # v0.99.102, per direct user request ("надо чтобы размер позиции только можно было выбрать"): % of TOTAL account equity risked per trade if SL hits — drives the now-auto-computed leverage, replacing every module's own fixed leverage constant. The user picks position SIZE (margin, via AUTOTRADE_SIZE_MODE/VALUE above, unchanged); leverage is derived per-trade from this risk target, this signal's own SL distance, and the chosen margin — no longer a manual choice at all. v0.99.145 — default raised 2.0->5.0 and made settings-editable, per direct user request ("Риск на сделку сделай 5% с выбором в настройках")
+AUTOTRADE_EMERGENCY_SL_BUFFER_PCT = float(os.environ.get("VP_AUTOTRADE_EMERGENCY_SL_BUFFER_PCT", 0.3))  # v0.99.146, per direct user report (a signal fired after price had already moved past its own sl, opened anyway, the stop then failed to place, leaving a real position with nothing but liquidation as its actual stop) — when the SL leg of place_tp_sl_orders() fails on an already-open real position, ONE emergency retry is attempted at this % away from a freshly-fetched current price (not the original, now-invalid sl), per the user's own direct choice ("выставить маленький стоп если да" — a small protective stop, not an immediate market close)
 SCALP_MARTINGALE_ENABLED = os.environ.get("VP_SCALP_MARTINGALE_ENABLED", "0") == "1"  # v0.99.109, per direct user request ("удвоение после стоплосса... классический мартингейл"): defaults OFF — a deliberate opt-in given the real, well-understood risk of exponentially escalating position size on a losing streak (a mathematically inevitable property of Martingale-style sizing, not a bug), not something that should silently activate for an existing account. See scalp_martingale_multiplier_for_symbol()'s own docstring for the full mechanics.
 SCALP_MARTINGALE_MAX_DOUBLINGS = int(os.environ.get("VP_SCALP_MARTINGALE_MAX_DOUBLINGS", 3))  # v0.99.109 — the safety cap: after this many consecutive losses on a symbol, the risk multiplier (2^streak) stops growing and holds at 2^this value — per direct user choice of a count-based cap over a direct max-%-risk cap. Default 3 -> caps at 2^3=8x base risk (16% of balance at the default 2% base), a starting value, adjustable via the env var.
 # Scalp gets its OWN size config, separate from the shared one above — per
@@ -3047,6 +3048,35 @@ def get_tickers():
             raise
 
 
+def get_last_price(symbol):
+    """v0.99.146 — a genuinely FRESH single-symbol quote, deliberately
+    NOT get_contract_spec()'s own cached response (up to CONTRACT_SPEC_
+    CACHE_TTL_SEC=3600s stale) and NOT a candle close (up to one whole
+    candle-interval stale) — used right before opening a real trade to
+    catch a signal that's gone stale since detection, and again as the
+    basis for an emergency stop if the original one turns out to
+    already be invalid. Public, unsigned GET (Gate's own tickers
+    endpoint supports filtering to one contract via the query param),
+    read-only so safe to retry on the same network exceptions every
+    other public endpoint here retries on."""
+    for attempt in range(3):
+        try:
+            with GLOBAL_HTTP_SEMAPHORE:
+                _global_rate_gate()
+                r = requests.get(f"{GATE_BASE}/futures/usdt/tickers", params={"contract": symbol}, timeout=HTTP_TIMEOUT)
+            r.raise_for_status()
+            data = r.json()
+            if data:
+                return float(data[0]["last"])
+            return None
+        except RETRYABLE_NETWORK_EXCEPTIONS:
+            if attempt < 2:
+                time.sleep(GET_CANDLES_RETRY_DELAY)
+                continue
+            raise
+    return None
+
+
 _contract_spec_cache = {}
 _contract_spec_cache_lock = threading.Lock()
 CONTRACT_SPEC_CACHE_TTL_SEC = 3600  # contract specs (multiplier, min size, max leverage) change rarely — an hour-old value is fine
@@ -3972,6 +4002,47 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
             except Exception as e:
                 log_error(f"execute_autotrade {symbol}: exchange position check failed ({e}), proceeding without it — this is exactly the kind of STATE/exchange desync this check exists to catch, so treat any recurrence as worth investigating")
 
+            # v0.99.146 — BUG FOUND (per direct user report: a signal
+            # fired, price had already moved past its own sl by the
+            # time this function ran, the trade opened anyway, and the
+            # sl leg then failed to place — leaving a real position
+            # with nothing but liquidation as its actual stop). A
+            # signal's own sl is decided at DETECTION time, from candle
+            # data that can be seconds to minutes old by the time this
+            # function actually executes (network delay, scan queue,
+            # retry backoff). Checked here, right before the market
+            # order, using a genuinely FRESH single-symbol quote
+            # (get_last_price() — NOT get_contract_spec()'s own cached
+            # response, up to CONTRACT_SPEC_CACHE_TTL_SEC=3600s stale,
+            # and NOT a candle close, up to one whole candle-interval
+            # stale). Per the user's own direct choice ("если цена ушла
+            # за стоп то не открывать") — this is the FIRST line of
+            # defense; the emergency-stop fallback further below covers
+            # the much narrower race where price crosses the sl in the
+            # brief window AFTER this check but before the market order
+            # actually fills.
+            try:
+                current_price = get_last_price(symbol)
+            except Exception as e:
+                current_price = None
+                log_error(f"execute_autotrade {symbol}: couldn't fetch a fresh price for the pre-open stale-signal check ({e}) — proceeding without it")
+            if current_price is not None:
+                price_already_past_sl = ((direction == "LONG" and current_price <= sl)
+                                          or (direction == "SHORT" and current_price >= sl))
+                if price_already_past_sl:
+                    record["status"] = "SKIPPED"
+                    record["detail"] = (f"price already moved past this signal's own SL by the time of execution "
+                                         f"(current {current_price}, sl {sl}, direction {direction}) — skipping "
+                                         f"rather than opening an already-invalid trade")
+                    send_telegram(
+                        f"⚠️ {symbol} ({mode}): сигнал устарел — цена ({current_price}) уже прошла "
+                        f"уровень стопа ({sl}) ещё до открытия. Сделка НЕ открыта.",
+                        category=None,
+                    )
+                    with state_lock:
+                        STATE["autotrade_log"].appendleft(record)
+                    return record
+
             try:
                 reconcile_positions_and_orders()
             except Exception as e:
@@ -4039,6 +4110,55 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
             record["tick"] = tick
             record["tp_order_id"] = tp_order.get("id") if isinstance(tp_order, dict) else None
             record["sl_order_id"] = sl_order.get("id") if isinstance(sl_order, dict) else None
+            sl_failed = any(which == "sl" for which, _msg in tp_sl_errors)
+            if sl_failed:
+                # v0.99.146 — safety net for the narrow race between the
+                # pre-open price check above and the market order
+                # actually filling: if price crossed sl in that window,
+                # the ORIGINAL sl is now invalid and re-trying it (what
+                # reconcile_positions_and_orders()'s own v0.99.124 auto-
+                # heal would otherwise do on its next cycle) would just
+                # fail again for the same reason. Per the user's own
+                # direct choice ("выставить маленький стоп если да" — a
+                # small protective stop, not an immediate market close):
+                # ONE emergency attempt at AUTOTRADE_EMERGENCY_SL_
+                # BUFFER_PCT away from a freshly-fetched current price,
+                # so the position gets SOME real stop rather than riding
+                # to liquidation unprotected.
+                try:
+                    emergency_price = get_last_price(symbol)
+                except Exception as e:
+                    emergency_price = None
+                    log_error(f"execute_autotrade {symbol}: emergency-SL price fetch failed ({e})")
+                emergency_sl_placed = False
+                if emergency_price is not None:
+                    if direction == "LONG":
+                        emergency_sl = emergency_price * (1 - AUTOTRADE_EMERGENCY_SL_BUFFER_PCT / 100)
+                    else:
+                        emergency_sl = emergency_price * (1 + AUTOTRADE_EMERGENCY_SL_BUFFER_PCT / 100)
+                    emergency_sl = round_to_tick_directional(emergency_sl, tick, round_up=(direction == "SHORT"))
+                    sl_rule = 2 if direction == "LONG" else 1
+                    try:
+                        emergency_sl_order = place_close_trigger_order(symbol, direction, emergency_sl, sl_rule, tick)
+                        record["sl_order_id"] = emergency_sl_order.get("id") if isinstance(emergency_sl_order, dict) else None
+                        record["emergency_sl"] = emergency_sl
+                        tp_sl_errors = [pair for pair in tp_sl_errors if pair[0] != "sl"]
+                        emergency_sl_placed = True
+                        send_telegram(
+                            f"⚠️ {symbol} ({mode}): цена ушла за расчётный стоп в момент открытия — "
+                            f"выставлен АВАРИЙНЫЙ минимальный стоп у {emergency_sl}. Риск по сделке может "
+                            f"быть выше обычного {AUTOTRADE_RISK_PCT_OF_BALANCE}% — стоит проверить вручную.",
+                            category=None,
+                        )
+                    except Exception as e:
+                        log_error(f"execute_autotrade {symbol}: emergency SL placement ALSO failed ({e}) — position genuinely unprotected")
+                if not emergency_sl_placed:
+                    send_telegram(
+                        f"🔴 {symbol} ({mode}): КРИТИЧНО — позиция открыта, обычный стоп не встал, "
+                        f"аварийный стоп ТОЖЕ не встал. Единственная защита сейчас — ликвидация. "
+                        f"Проверь вручную немедленно.",
+                        category=None,
+                    )
             if tp_sl_errors:
                 record["status"] = "OPENED_TP_SL_FAILED"
                 record["detail"] = f"position opened but TP/SL placement had errors: {tp_sl_errors} — check the position manually"
