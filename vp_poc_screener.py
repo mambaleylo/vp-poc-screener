@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.147"
+APP_VERSION = "0.99.148"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12497,6 +12497,7 @@ def api_mirror_chart(symbol):
             "pattern": found_sig.get("pattern"),
             "level_price": found_sig.get("level_price"), "level_type": found_sig.get("level_type"),
             "result": found_result, "exit_time": found_exit_time, "exit_price": found_exit_price,
+            "chart_source": "mirror",
         })
     except Exception as e:
         log_error(f"api_mirror_chart {symbol}: {e}")
@@ -12611,6 +12612,7 @@ def api_lsw_chart(symbol):
             "sl": found_sig["sl"], "tp": found_sig["tp"], "rr": found_sig.get("rr"),
             "level_price": found_sig.get("level_price"), "level_type": found_sig.get("level_type"),
             "result": found_result, "exit_time": found_exit_time, "exit_price": found_exit_price,
+            "chart_source": "lsw",
         })
     except Exception as e:
         log_error(f"api_lsw_chart {symbol}: {e}")
@@ -12943,7 +12945,7 @@ def api_msnr_chart(symbol):
             return jsonify({
                 "symbol": symbol, "candles": entry_candles, "pivots": visible_pivots,
                 "signal": found_sig, "result": found_result, "exit_time": found_exit_time,
-                "exit_price": found_exit_price,
+                "exit_price": found_exit_price, "chart_source": "msnr",
             })
 
         # Fallback: no stored signal/trade matched `time` (or none was
@@ -12974,6 +12976,7 @@ def api_msnr_chart(symbol):
         return jsonify({
             "symbol": symbol, "candles": entry_candles, "pivots": visible_pivots,
             "signal": sig, "result": result, "exit_time": exit_time, "exit_price": exit_price,
+            "chart_source": "msnr",
         })
     except Exception as e:
         log_error(f"api_msnr_chart {symbol}: {e}")
@@ -13135,6 +13138,7 @@ def api_scalp_chart(symbol):
             "tp": sig["target_price"], "sl": sig["sl_price"],
             "result": sig.get("result"), "exit_time": sig.get("exit_time"), "exit_price": sig.get("exit_price"),
             "rr": rr,
+            "chart_source": "scalp",
         })
     except Exception as e:
         log_error(f"api_scalp_chart {symbol}: {e}")
@@ -16297,8 +16301,17 @@ async function openVgiChart(symbol, sigTime, endpoint, extraQuery = '') {
     // the RU labels already used on the Зеркало tab itself.
     const mirrorPatternLabels = {inside_bar: 'внутренний бар', tweezers: 'пинцет', rails: 'рельсы', engulfing_doji: 'поглощение на дожи'};
     const patternTxt = data.pattern ? ` · ${mirrorPatternLabels[data.pattern] || data.pattern}` : '';
+    // v0.99.148 — source-specific context in the params line
+    let sourceTxt = '';
+    if (data.chart_source === 'mirror' && data.level_price) {
+      const isLow = data.level_type === 'low';
+      sourceTxt = ` · уровень зеркала ${fmtNum(data.level_price)} (${isLow ? 'быв.подд.→сопр.' : 'быв.сопр.→подд.'})`;
+    } else if (data.chart_source === 'lsw' && data.level_price) {
+      const isHigh = data.level_type === 'high';
+      sourceTxt = ` · уровень снятия ${fmtNum(data.level_price)} (${isHigh ? 'равные хаи' : 'равные лоу'}${data.level_touches ? ', ' + data.level_touches + ' кас.' : ''})`;
+    }
     document.getElementById('vgiModalParams').textContent =
-      `${fmtDateTime(sigTime)} · ${data.direction} · entry ${fmtNum(data.entry)} · SL ${fmtNum(data.sl)} · TP ${fmtNum(data.tp)} · RR ${data.rr}${patternTxt}${resTxt}`;
+      `${fmtDateTime(sigTime)} · ${data.direction} · entry ${fmtNum(data.entry)} · SL ${fmtNum(data.sl)} · TP ${fmtNum(data.tp)} · RR ${data.rr}${patternTxt}${sourceTxt}${resTxt}`;
     drawVgiChart(data);
   } catch (e) {
     document.getElementById('vgiModalParams').textContent = `ошибка загрузки: ${e}`;
@@ -16392,19 +16405,25 @@ function drawVgiChart(data) {
   drawLevelLine(entry, '#5a9fff', 'ENTRY');
   drawLevelLine(sl, '#ff6b6b', 'SL');
   drawLevelLine(tp, '#3ddc97', 'TP');
-  // v0.99.103, per direct user request ("для зеркала сделай отрисовку
-  // уровней, как строится сам сигнал, где зеркало само"): MIRROR-only
-  // field, harmlessly absent/undefined for every other chart type this
-  // SAME shared function draws (Scalp/XAU LG/MSNR/FT5) — reuses the
-  // exact same drawLevelLine() primitive already used for entry/SL/TP
-  // above, just one more dashed line, so it's visually consistent by
-  // construction rather than a separate one-off drawing routine.
-  // level_type "low" means a broken SUPPORT that price has returned to
-  // from below — it now acts as RESISTANCE (a SHORT setup); "high"
-  // means a broken RESISTANCE now acting as SUPPORT (a LONG setup).
+  // v0.99.148 — chart_source-aware extra level line: each module
+  // draws its own meaningful context line instead of every chart always
+  // showing "ЗЕРКАЛО", per direct user report ("на всех графиках линия
+  // зеркала всегда видна, то есть на всех индикаторах"). Mirror: the
+  // broken support/resistance level the price is returning to (same as
+  // before, just now gated on chart_source). LSW: the equal-highs/lows
+  // level that was swept. Scalp, MSNR: no extra level (MSNR has its
+  // own separate pivot rendering path; Scalp doesn't carry one).
+  const src = data.chart_source;
   if (data.level_price !== undefined && data.level_price !== null) {
-    const isLow = data.level_type === 'low';
-    drawLevelLine(data.level_price, '#c792ea', isLow ? 'ЗЕРКАЛО (быв. подд. → сопр.)' : 'ЗЕРКАЛО (быв. сопр. → подд.)');
+    if (src === 'mirror') {
+      const isLow = data.level_type === 'low';
+      drawLevelLine(data.level_price, '#c792ea', isLow ? 'ЗЕРКАЛО (быв. подд. → сопр.)' : 'ЗЕРКАЛО (быв. сопр. → подд.)');
+    } else if (src === 'lsw') {
+      const isHigh = data.level_type === 'high';
+      drawLevelLine(data.level_price, '#f0a030', isHigh ? 'УРОВЕНЬ (равные хаи → снятие)' : 'УРОВЕНЬ (равные лоу → снятие)');
+    }
+    // scalp / msnr / unknown: no extra level line — MSNR has its own
+    // pivot rendering path; scalp doesn't carry a named level at all
   }
 
   const sigIdx = candles.findIndex(c => c.time === data.time);
