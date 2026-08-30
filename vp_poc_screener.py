@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.139"
+APP_VERSION = "0.99.140"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -809,6 +809,19 @@ LSW_DIRECTION_MIN_SAMPLE = int(os.environ.get("VP_LSW_DIRECTION_MIN_SAMPLE", 20)
 LSW_VOLUME_FILTER_ENABLED = os.environ.get("VP_LSW_VOLUME_FILTER", "0") == "1"
 LSW_VOLUME_FILTER_LOOKBACK = int(os.environ.get("VP_LSW_VOLUME_FILTER_LOOKBACK", 20))  # bars of preceding volume averaged as the baseline
 LSW_VOLUME_FILTER_MULT = float(os.environ.get("VP_LSW_VOLUME_FILTER_MULT", 1.5))  # the sweep candle's own volume must be at least this many times the preceding-bars average to count as a genuine, well-participated sweep
+# v0.99.140 — 3 more optional filters, per direct user request after
+# researching common liquidity-sweep confluence ideas ("Какой фильтр
+# ещё придумать для sweep? Поищи в интернете мастхэвные варианты"):
+# FVG (fair value gap) confirmation, a session/time-of-day filter, and
+# a minimum equal-highs/lows touch count — all showed up repeatedly
+# across independent sources searched, not just one blog's own opinion.
+# All off by default, same convention as every toggle here.
+LSW_FVG_FILTER_ENABLED = os.environ.get("VP_LSW_FVG_FILTER", "0") == "1"  # "always layer fair value gaps" / "wait for a pullback into the displacement candle's fair value gap" — repeated across multiple sources as the single most common confluence add-on for a bare liquidity sweep
+LSW_SESSION_FILTER_ENABLED = os.environ.get("VP_LSW_SESSION_FILTER", "0") == "1"  # "skip sweeps in dead sessions; focus high-probability ones with volatility"
+LSW_SESSION_START_HOUR_UTC = int(os.environ.get("VP_LSW_SESSION_START_HOUR_UTC", 7))  # ~European session open
+LSW_SESSION_END_HOUR_UTC = int(os.environ.get("VP_LSW_SESSION_END_HOUR_UTC", 21))  # ~US session close — 07:00-21:00 UTC covers the European+US overlap, crypto's own usual higher-volume window, though this varies per symbol and is exactly why it's backtestable/toggleable rather than hardcoded
+LSW_MIN_TOUCHES_ENABLED = os.environ.get("VP_LSW_MIN_TOUCHES_FILTER", "0") == "1"  # "the more touches, the higher the chance of a sweep" — the base detector already requires >=2 touches to call something an "equal highs/lows" level at all; this raises that bar further for symbols where more touches turns out to matter
+LSW_MIN_TOUCHES = int(os.environ.get("VP_LSW_MIN_TOUCHES", 3))
 FT5_MIN_BACKTEST_TRADES = int(os.environ.get("VP_FT5_MIN_BACKTEST_TRADES", 5))  # a combo with fewer trades than this in the backtest window isn't a confident pick — same bar Volume's optimizer uses (MIN_BACKTEST_TRADES)
 FT5_RANK_PRIOR_TARGET = int(os.environ.get("VP_FT5_RANK_PRIOR_TARGET", 1))  # v0.98.8 — ft5_ranking_score() blends in max(0, TARGET - losses_count) pseudo-trades at the known -FT5_STOPLOSS_PCT level, so a small loss-free sample can't look artificially low-risk just because it hasn't hit its (structurally always-possible) stop yet. Tapered by ACTUAL real losses (not a flat count on every combo) — a flat prior tested worse, disproportionately hurting smaller-but-still-real samples. See ft5_ranking_score()'s own docstring for the full reasoning, including why TARGET=1 specifically. Replaces FT5_RANK_Z (v0.98.7), which is no longer referenced — the confidence multiplier is now t_critical(n-1), not a fixed Z.
 
@@ -931,7 +944,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "msnr_addon_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "msnr_addon_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
@@ -968,6 +981,9 @@ def get_settings():
         "lsw_htf_filter_enabled": LSW_HTF_FILTER_ENABLED,
         "lsw_structural_cap_enabled": LSW_STRUCTURAL_CAP_ENABLED,
         "lsw_volume_filter_enabled": LSW_VOLUME_FILTER_ENABLED,
+        "lsw_fvg_filter_enabled": LSW_FVG_FILTER_ENABLED,
+        "lsw_session_filter_enabled": LSW_SESSION_FILTER_ENABLED,
+        "lsw_min_touches_enabled": LSW_MIN_TOUCHES_ENABLED,
         "lsw_entry_confirm_enabled": LSW_ENTRY_CONFIRM_ENABLED,
         "lsw_direction_filter_enabled": LSW_DIRECTION_FILTER_ENABLED,
         "msnr_max_rr": MSNR_MAX_RR,
@@ -1007,6 +1023,7 @@ def apply_settings(updates):
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT, MIRROR_AUTOTUNE_TOLERANCE_ENABLED
     global LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
+    global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_NETWORK
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, SCALP_MARTINGALE_ENABLED
@@ -1072,6 +1089,12 @@ def apply_settings(updates):
         LSW_STRUCTURAL_CAP_ENABLED = bool(updates["lsw_structural_cap_enabled"])
     if "lsw_volume_filter_enabled" in updates:
         LSW_VOLUME_FILTER_ENABLED = bool(updates["lsw_volume_filter_enabled"])
+    if "lsw_fvg_filter_enabled" in updates:
+        LSW_FVG_FILTER_ENABLED = bool(updates["lsw_fvg_filter_enabled"])
+    if "lsw_session_filter_enabled" in updates:
+        LSW_SESSION_FILTER_ENABLED = bool(updates["lsw_session_filter_enabled"])
+    if "lsw_min_touches_enabled" in updates:
+        LSW_MIN_TOUCHES_ENABLED = bool(updates["lsw_min_touches_enabled"])
     if "lsw_entry_confirm_enabled" in updates:
         LSW_ENTRY_CONFIRM_ENABLED = bool(updates["lsw_entry_confirm_enabled"])
     if "lsw_direction_filter_enabled" in updates:
@@ -10732,6 +10755,72 @@ def lsw_filter_signals_by_volume(signals, candles, lookback=None, mult=None):
     return kept
 
 
+def lsw_filter_signals_by_fvg(signals, candles):
+    """v0.99.140 — "always layer fair value gaps" / "wait for a
+    pullback into the displacement candle's fair value gap" — the most
+    commonly repeated confluence add-on for a bare liquidity sweep
+    across independent sources searched. A fair value gap (imbalance)
+    is a real, tradeable sign that the reversal candle itself displaced
+    price hard enough to leave a gap behind, not just wiggled through
+    the level. Deliberately checks BACKWARD only (the sweep candle
+    itself vs. 2 bars before it), never forward — the standard 3-candle
+    FVG definition only ever needs bars that have ALREADY closed by the
+    time the sweep candle itself closes, so this stays exactly as
+    usable live (at the moment a signal fires) as it is in backtest;
+    checking for a gap using bars AFTER the sweep would need candles
+    that don't exist yet at signal time. Bullish FVG (supports LONG):
+    the bar 2 before the sweep candle's own high sits below the sweep
+    candle's own low. Bearish FVG (supports SHORT): mirrors it. A
+    signal without 2 prior bars is KEPT (nothing to judge, same
+    convention as this module's other filters)."""
+    kept = []
+    for sig in signals:
+        idx = sig["entry_idx"]
+        if idx < 2:
+            kept.append(sig)
+            continue
+        c_before, c_now = candles[idx - 2], candles[idx]
+        if sig["direction"] == "LONG" and c_before["high"] < c_now["low"]:
+            kept.append(sig)
+        elif sig["direction"] == "SHORT" and c_before["low"] > c_now["high"]:
+            kept.append(sig)
+        # else dropped — no imbalance left behind by the sweep/reversal candle itself
+    return kept
+
+
+def lsw_filter_signals_by_session(signals, start_hour=None, end_hour=None):
+    """v0.99.140 — "skip sweeps in dead sessions; focus high-probability
+    ones with volatility". Keeps a signal only if its own entry_time
+    (UTC hour) falls inside [start_hour, end_hour) — wraps past
+    midnight correctly if start_hour > end_hour (e.g. a session that
+    runs 22:00-04:00 UTC). Defaults (07:00-21:00 UTC) approximate the
+    European+US session overlap, crypto's own usual higher-volume
+    window — but this genuinely varies per symbol, which is exactly why
+    it's backtestable/toggleable here rather than hardcoded assumption."""
+    start_hour = start_hour if start_hour is not None else LSW_SESSION_START_HOUR_UTC
+    end_hour = end_hour if end_hour is not None else LSW_SESSION_END_HOUR_UTC
+    kept = []
+    for sig in signals:
+        hour = time.gmtime(sig["entry_time"]).tm_hour
+        in_session = (start_hour <= hour < end_hour) if start_hour <= end_hour else (hour >= start_hour or hour < end_hour)
+        if in_session:
+            kept.append(sig)
+    return kept
+
+
+def lsw_filter_signals_by_min_touches(signals, min_touches=None):
+    """v0.99.140 — "the more touches, the higher the chance of a
+    sweep": the base detector already requires >=2 touches before
+    calling something an "equal highs/lows" level at all (see lsw_
+    detect_signals()'s own docstring) — this raises that bar further
+    for symbols where more touches turns out to matter more than the
+    base minimum. A signal with no recorded level_touches at all is
+    KEPT (shouldn't normally happen given the base detector's own
+    floor, but nothing to judge isn't a reason to block)."""
+    min_touches = min_touches if min_touches is not None else LSW_MIN_TOUCHES
+    return [s for s in signals if (s.get("level_touches") or 0) >= min_touches or not s.get("level_touches")]
+
+
 def lsw_scan_5m_confirmation(candles_ltf, from_time, direction, max_bars=None,
                               pivot_left=None, pivot_right=None, wick_ratio=None):
     """Rule #3 of the reference note ("модели входа (5минутка):
@@ -11002,11 +11091,15 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
     replaces each surviving signal's own entry/sl/tp or drops it if no
     5m confirmation ever fired. v0.99.139 adds a 4th, lsw_filter_
     signals_by_volume() (LSW_VOLUME_FILTER_ENABLED) — same single-
-    timeframe, no-extra-fetch shape as structural cap. Filter order for
-    the ACTUAL result: HTF trend -> structural cap -> volume ->
-    5m entry confirmation — cheapest/coarsest checks first, so the
+    timeframe, no-extra-fetch shape as structural cap. v0.99.140 adds
+    3 more of the SAME no-extra-fetch shape: lsw_filter_signals_by_fvg()
+    (LSW_FVG_FILTER_ENABLED), lsw_filter_signals_by_session()
+    (LSW_SESSION_FILTER_ENABLED), lsw_filter_signals_by_min_touches()
+    (LSW_MIN_TOUCHES_ENABLED). Filter order for the ACTUAL result: HTF
+    trend -> structural cap -> volume -> min touches -> FVG -> session
+    -> 5m entry confirmation — cheapest/coarsest checks first, so the
     (comparatively expensive) 5m confirmation only ever runs on signals
-    that already passed the others.
+    that already passed everything else.
     v0.99.136, per direct user request ("хочу чтобы в sweep индикаторе
     каждая из галочек настроек показывала в таблице что стало после
     этого фильтра чтобы была оценка необходимости, вдруг она сделала
@@ -11018,14 +11111,13 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
     ещё один"): the HTF trend and structural cap solo checkpoints are
     no longer computed at all (their own toggles and detection code
     stay fully usable in the ACTUAL chain below — only the extra solo-
-    checkpoint work for the no-longer-displayed columns was dropped,
-    recouping some of the added cost); "entry_confirm" and the new
-    "volume_filter" are what's actually computed and shown now.
+    checkpoint work for the no-longer-displayed columns was dropped).
     Returns (results, meta) — results is the raw trades list using
     whichever filters are ACTUALLY enabled right now (unchanged
     behavior, still what live-eligibility/ranking is computed from);
-    meta = {"checkpoints": {"raw", "entry_confirm", "volume_filter"}},
-    each a _mirror_checkpoint()-shaped {n, winrate, expectancy_r} dict
+    meta = {"checkpoints": {"raw", "entry_confirm", "volume_filter",
+    "fvg_filter", "session_filter", "min_touches_filter"}}, each a
+    _mirror_checkpoint()-shaped {n, winrate, expectancy_r} dict
     (reusing that exact helper — LSW shares the same fixed-RR-per-trade
     shape MIRROR's own checkpoint math already assumes) or None where
     there wasn't enough history to judge that filter at all."""
@@ -11033,7 +11125,8 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
     fetch_start = now - days * 86400
     candles = get_candles_range(symbol, LSW_INTERVAL, fetch_start, now)
     if len(candles) < LSW_PIVOT_LEFT + LSW_PIVOT_RIGHT + 20:
-        return [], {"checkpoints": {"raw": None, "entry_confirm": None, "volume_filter": None}}
+        return [], {"checkpoints": {"raw": None, "entry_confirm": None, "volume_filter": None,
+                                     "fvg_filter": None, "session_filter": None, "min_touches_filter": None}}
     raw_sigs = lsw_detect_signals(candles)
 
     htf_interval_sec = INTERVAL_SECONDS.get(LSW_HTF_INTERVAL, 14400)
@@ -11065,6 +11158,15 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
     volume_solo_sigs = lsw_filter_signals_by_volume(raw_sigs, candles)
     checkpoints["volume_filter"] = _mirror_checkpoint(_track_all(volume_solo_sigs), rr=LSW_RR)
 
+    fvg_solo_sigs = lsw_filter_signals_by_fvg(raw_sigs, candles)
+    checkpoints["fvg_filter"] = _mirror_checkpoint(_track_all(fvg_solo_sigs), rr=LSW_RR)
+
+    session_solo_sigs = lsw_filter_signals_by_session(raw_sigs)
+    checkpoints["session_filter"] = _mirror_checkpoint(_track_all(session_solo_sigs), rr=LSW_RR)
+
+    touches_solo_sigs = lsw_filter_signals_by_min_touches(raw_sigs)
+    checkpoints["min_touches_filter"] = _mirror_checkpoint(_track_all(touches_solo_sigs), rr=LSW_RR)
+
     # The ACTUAL result, using whichever filters are really toggled on right now — unchanged from before, chained in the same order.
     sigs = raw_sigs
     if LSW_HTF_FILTER_ENABLED and sigs:
@@ -11077,6 +11179,12 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
         sigs = lsw_filter_signals_by_structural_cap(sigs, candles)
     if LSW_VOLUME_FILTER_ENABLED and sigs:
         sigs = lsw_filter_signals_by_volume(sigs, candles)
+    if LSW_MIN_TOUCHES_ENABLED and sigs:
+        sigs = lsw_filter_signals_by_min_touches(sigs)
+    if LSW_FVG_FILTER_ENABLED and sigs:
+        sigs = lsw_filter_signals_by_fvg(sigs, candles)
+    if LSW_SESSION_FILTER_ENABLED and sigs:
+        sigs = lsw_filter_signals_by_session(sigs)
     if LSW_ENTRY_CONFIRM_ENABLED and sigs:
         if confirm_candles:
             sigs = lsw_apply_entry_confirmation(sigs, confirm_candles)
@@ -11084,7 +11192,6 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
             sigs = []  # no 5m history at all to confirm against
     results = _track_all(sigs)
     return results, {"checkpoints": checkpoints}
-
 
 def lsw_summarize_backtest(results):
     total = len(results)
@@ -11160,6 +11267,18 @@ def lsw_scan_symbol_live(symbol):
                 return
         if LSW_VOLUME_FILTER_ENABLED:
             sigs = lsw_filter_signals_by_volume(sigs, candles)
+            if not sigs:
+                return
+        if LSW_MIN_TOUCHES_ENABLED:
+            sigs = lsw_filter_signals_by_min_touches(sigs)
+            if not sigs:
+                return
+        if LSW_FVG_FILTER_ENABLED:
+            sigs = lsw_filter_signals_by_fvg(sigs, candles)
+            if not sigs:
+                return
+        if LSW_SESSION_FILTER_ENABLED:
+            sigs = lsw_filter_signals_by_session(sigs)
             if not sigs:
                 return
         if LSW_DIRECTION_FILTER_ENABLED:
@@ -11910,6 +12029,9 @@ def api_lsw_status():
             "htf_filter_enabled": LSW_HTF_FILTER_ENABLED, "htf_interval": LSW_HTF_INTERVAL,
             "structural_cap_enabled": LSW_STRUCTURAL_CAP_ENABLED,
             "volume_filter_enabled": LSW_VOLUME_FILTER_ENABLED,
+            "fvg_filter_enabled": LSW_FVG_FILTER_ENABLED,
+            "session_filter_enabled": LSW_SESSION_FILTER_ENABLED,
+            "min_touches_enabled": LSW_MIN_TOUCHES_ENABLED, "min_touches": LSW_MIN_TOUCHES,
             "entry_confirm_enabled": LSW_ENTRY_CONFIRM_ENABLED, "entry_confirm_interval": LSW_ENTRY_CONFIRM_INTERVAL,
             "direction_filter_enabled": LSW_DIRECTION_FILTER_ENABLED,
         },
@@ -13158,6 +13280,27 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">свеча снятия должна показать объём минимум в 1.5× выше среднего за предыдущие 20 баров — отсекает низкообъёмные фитили без реального участия толпы (не настоящий каскад стопов)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setLswVolumeFilter"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Фильтр по FVG</div>
+          <div class="sub">свеча снятия должна оставить за собой ценовой разрыв (fair value gap) — знак, что движение было достаточно резким, а не просто фитиль без импульса</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setLswFvgFilter"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Фильтр по сессии</div>
+          <div class="sub">торговать только в часы 07:00–21:00 UTC (примерно пересечение европейской и американской сессий) — вне этого окна сигналы пропускаются как "мёртвая" сессия</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setLswSessionFilter"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Минимум касаний уровня</div>
+          <div class="sub">торговать только уровни с 3+ касаниями вместо базовых 2 — больше касаний, по опыту, повышают шанс на реальное снятие ликвидности</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setLswMinTouches"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -14624,6 +14767,9 @@ async function refreshLsw() {
       Структурный кэп: <span class="${cfg.structural_cap_enabled ? 'win' : 'dim'}">${cfg.structural_cap_enabled ? 'включён' : 'выключен'}</span> ·
       Подтверждение (${cfg.entry_confirm_interval}): <span class="${cfg.entry_confirm_enabled ? 'win' : 'dim'}">${cfg.entry_confirm_enabled ? 'включено' : 'выключено'}</span> ·
       Фильтр по объёму: <span class="${cfg.volume_filter_enabled ? 'win' : 'dim'}">${cfg.volume_filter_enabled ? 'включён' : 'выключен'}</span> ·
+      FVG: <span class="${cfg.fvg_filter_enabled ? 'win' : 'dim'}">${cfg.fvg_filter_enabled ? 'включён' : 'выключен'}</span> ·
+      Сессия: <span class="${cfg.session_filter_enabled ? 'win' : 'dim'}">${cfg.session_filter_enabled ? 'включена' : 'выключена'}</span> ·
+      Мин. касаний: <span class="${cfg.min_touches_enabled ? 'win' : 'dim'}">${cfg.min_touches_enabled ? 'включён' : 'выключен'}</span> ·
       Фильтр по направлению: <span class="${cfg.direction_filter_enabled ? 'win' : 'dim'}">${cfg.direction_filter_enabled ? 'включён' : 'выключен'}</span><br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
       ${byLevelTxt ? `<span style="font-size:11px;">По типу уровня: ${byLevelTxt}</span><br>` : ''}
@@ -14690,6 +14836,9 @@ async function refreshLsw() {
     };
     const confirmTxt2 = fmtCheckpoint(fc.entry_confirm, cfg.entry_confirm_enabled);
     const volumeTxt = fmtCheckpoint(fc.volume_filter, cfg.volume_filter_enabled);
+    const fvgTxt = fmtCheckpoint(fc.fvg_filter, cfg.fvg_filter_enabled);
+    const sessionTxt = fmtCheckpoint(fc.session_filter, cfg.session_filter_enabled);
+    const touchesTxt = fmtCheckpoint(fc.min_touches_filter, cfg.min_touches_enabled);
     return `<tr>
       <td>${r.symbol}${liveDot}${dirFilterTxt}</td>
       <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
@@ -14700,13 +14849,16 @@ async function refreshLsw() {
       <td>${byDirTxt}</td>
       <td>${confirmTxt2}</td>
       <td>${volumeTxt}</td>
+      <td>${fvgTxt}</td>
+      <td>${sessionTxt}</td>
+      <td>${touchesTxt}</td>
     </tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
-    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории). Последние 2 колонки показывают, что даёт КАЖДЫЙ фильтр САМ ПО СЕБЕ на сырых (нефильтрованных) сигналах монеты — не в связке с остальными фильтрами. В скобках — разница с винрейтом на тех же сырых сигналах без единого фильтра (это не то же самое, что колонка WR слева, там уже применены реально включённые фильтры). Пометка [выкл] — фильтр сейчас не участвует в реальной торговле, это просто оценка "а что если включить". Тренд-фильтр и структурный кэп по-прежнему доступны в настройках, просто убраны отсюда, чтобы не мозолить глаза:</div>
+    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории). Последние 5 колонок показывают, что даёт КАЖДЫЙ фильтр САМ ПО СЕБЕ на сырых (нефильтрованных) сигналах монеты — не в связке с остальными фильтрами. В скобках — разница с винрейтом на тех же сырых сигналах без единого фильтра (это не то же самое, что колонка WR слева, там уже применены реально включённые фильтры). Пометка [выкл] — фильтр сейчас не участвует в реальной торговле, это просто оценка "а что если включить". Тренд-фильтр и структурный кэп по-прежнему доступны в настройках, просто убраны отсюда, чтобы не мозолить глаза:</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th><th>Подтверждение (соло)</th><th>Фильтр объёма (соло)</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th><th>Подтверждение (соло)</th><th>Объём (соло)</th><th>FVG (соло)</th><th>Сессия (соло)</th><th>Касания≥${cfg.min_touches} (соло)</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
@@ -14936,6 +15088,9 @@ const setInputs = {
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
   lsw_structural_cap_enabled: document.getElementById('setLswStructuralCap'),
   lsw_volume_filter_enabled: document.getElementById('setLswVolumeFilter'),
+  lsw_fvg_filter_enabled: document.getElementById('setLswFvgFilter'),
+  lsw_session_filter_enabled: document.getElementById('setLswSessionFilter'),
+  lsw_min_touches_enabled: document.getElementById('setLswMinTouches'),
   lsw_entry_confirm_enabled: document.getElementById('setLswEntryConfirm'),
   lsw_direction_filter_enabled: document.getElementById('setLswDirectionFilter'),
   telegram_enabled: document.getElementById('setTelegram'),
