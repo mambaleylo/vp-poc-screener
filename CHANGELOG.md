@@ -11584,3 +11584,31 @@ v0.99.147 - MSNR_ENTRY_TF reverted 1m -> 15m, per direct user report
          here — noted for future consideration.
          Verified: py_compile, pyflakes clean (still 44 routes — single-
          constant change), confirmed new default "15m" via grep.
+
+v0.99.148 - Chart level lines now show the right label for each module,
+         per direct user report ("на всех графиках линия зеркала всегда
+         видна, то есть на всех индикаторах... давай на каждом графике
+         показывать причины сигнала соответствующие индикатору").
+         Root cause: drawVgiChart() was written for Mirror and always
+         drew "ЗЕРКАЛО" when level_price was present — but since it's
+         the shared chart renderer for Mirror, LSW, Scalp, and MSNR,
+         all of them saw the same "ЗЕРКАЛО" label, even when the
+         level_price in question was a "равные хаи/лоу" sweep level
+         (LSW) or not meaningful at all (Scalp).
+         Fixed by adding "chart_source" to each module's own API
+         chart response ("mirror"/"lsw"/"scalp"/"msnr") and updating
+         drawVgiChart() to dispatch on it: Mirror still draws its
+         purple "ЗЕРКАЛО" line with the support/resistance direction
+         note; LSW now draws an orange "УРОВЕНЬ (равные хаи → снятие)"
+         / "УРОВЕНЬ (равные лоу → снятие)" line; Scalp and MSNR draw
+         no extra level line (MSNR has its own separate pivot rendering
+         path via the "pivots" field; Scalp doesn't carry a named level
+         at all). The chart modal's own params line is also updated to
+         include source-specific context: for Mirror the level_price
+         and direction note, for LSW the level_price, type, and touch
+         count if available.
+         Verified: py_compile, pyflakes clean, node --check on the
+         correctly-last <script> block, a real runtime start, the Flask
+         route/def integrity check (still 44 routes — only the JSON
+         response dicts of the 4 chart endpoints extended with one new
+         field each).
