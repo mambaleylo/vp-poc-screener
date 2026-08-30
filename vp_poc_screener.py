@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.138"
+APP_VERSION = "0.99.139"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -794,6 +794,21 @@ LSW_ENTRY_CONFIRM_WICK_RATIO = float(os.environ.get("VP_LSW_ENTRY_CONFIRM_WICK_R
 # same bar everything else in this app already has to clear.
 LSW_DIRECTION_FILTER_ENABLED = os.environ.get("VP_LSW_DIRECTION_FILTER", "0") == "1"
 LSW_DIRECTION_MIN_SAMPLE = int(os.environ.get("VP_LSW_DIRECTION_MIN_SAMPLE", 20))  # smaller than LSW_LIVE_MIN_SAMPLE (30) since a per-direction split naturally has roughly half the sample of the combined count
+# v0.99.139 — volume filter, per direct user request ("тогда
+# структурный кэп, тренд фильтр можно убрать... давай решим какой,
+# фильтр по объёму может?") replacing HTF trend/structural cap's own
+# spot in the Sweep tab's solo-checkpoint table (their own toggles and
+# detection code stay fully intact and usable — only their table
+# columns are hidden, per the follow-up "убери из отображения в
+# столбцах пока... добавим ещё один"). Real-world rationale: a genuine
+# liquidity sweep (a real stop cascade getting absorbed) should show
+# elevated volume on the sweep candle itself relative to recent bars —
+# a low-volume wick that merely pokes past a level without real
+# participation behind it is a weaker signal. Off by default, same
+# convention as every other toggle here.
+LSW_VOLUME_FILTER_ENABLED = os.environ.get("VP_LSW_VOLUME_FILTER", "0") == "1"
+LSW_VOLUME_FILTER_LOOKBACK = int(os.environ.get("VP_LSW_VOLUME_FILTER_LOOKBACK", 20))  # bars of preceding volume averaged as the baseline
+LSW_VOLUME_FILTER_MULT = float(os.environ.get("VP_LSW_VOLUME_FILTER_MULT", 1.5))  # the sweep candle's own volume must be at least this many times the preceding-bars average to count as a genuine, well-participated sweep
 FT5_MIN_BACKTEST_TRADES = int(os.environ.get("VP_FT5_MIN_BACKTEST_TRADES", 5))  # a combo with fewer trades than this in the backtest window isn't a confident pick — same bar Volume's optimizer uses (MIN_BACKTEST_TRADES)
 FT5_RANK_PRIOR_TARGET = int(os.environ.get("VP_FT5_RANK_PRIOR_TARGET", 1))  # v0.98.8 — ft5_ranking_score() blends in max(0, TARGET - losses_count) pseudo-trades at the known -FT5_STOPLOSS_PCT level, so a small loss-free sample can't look artificially low-risk just because it hasn't hit its (structurally always-possible) stop yet. Tapered by ACTUAL real losses (not a flat count on every combo) — a flat prior tested worse, disproportionately hurting smaller-but-still-real samples. See ft5_ranking_score()'s own docstring for the full reasoning, including why TARGET=1 specifically. Replaces FT5_RANK_Z (v0.98.7), which is no longer referenced — the confidence multiplier is now t_critical(n-1), not a fixed Z.
 
@@ -916,7 +931,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "msnr_addon_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "msnr_addon_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
@@ -952,6 +967,7 @@ def get_settings():
         "lsw_equal_tolerance_pct": LSW_EQUAL_TOLERANCE_PCT,
         "lsw_htf_filter_enabled": LSW_HTF_FILTER_ENABLED,
         "lsw_structural_cap_enabled": LSW_STRUCTURAL_CAP_ENABLED,
+        "lsw_volume_filter_enabled": LSW_VOLUME_FILTER_ENABLED,
         "lsw_entry_confirm_enabled": LSW_ENTRY_CONFIRM_ENABLED,
         "lsw_direction_filter_enabled": LSW_DIRECTION_FILTER_ENABLED,
         "msnr_max_rr": MSNR_MAX_RR,
@@ -990,7 +1006,7 @@ def apply_settings(updates):
     global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT, MIRROR_AUTOTUNE_TOLERANCE_ENABLED
     global LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
-    global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED
+    global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_NETWORK
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, SCALP_MARTINGALE_ENABLED
@@ -1054,6 +1070,8 @@ def apply_settings(updates):
         LSW_HTF_FILTER_ENABLED = bool(updates["lsw_htf_filter_enabled"])
     if "lsw_structural_cap_enabled" in updates:
         LSW_STRUCTURAL_CAP_ENABLED = bool(updates["lsw_structural_cap_enabled"])
+    if "lsw_volume_filter_enabled" in updates:
+        LSW_VOLUME_FILTER_ENABLED = bool(updates["lsw_volume_filter_enabled"])
     if "lsw_entry_confirm_enabled" in updates:
         LSW_ENTRY_CONFIRM_ENABLED = bool(updates["lsw_entry_confirm_enabled"])
     if "lsw_direction_filter_enabled" in updates:
@@ -10682,6 +10700,38 @@ def lsw_filter_signals_by_structural_cap(signals, candles, lookback=None, pivot_
     return kept
 
 
+def lsw_filter_signals_by_volume(signals, candles, lookback=None, mult=None):
+    """v0.99.139 — a genuine liquidity sweep (a real stop cascade
+    getting absorbed) should show elevated volume on the sweep candle
+    itself relative to the bars right before it; a low-volume wick that
+    merely pokes past a level without real participation behind it is
+    a weaker signal. Keeps a signal only if its own sweep candle's
+    volume is at least `mult` times the average volume of the
+    `lookback` bars immediately before it (the sweep candle itself is
+    excluded from that average — comparing it against itself would be
+    circular). A signal with fewer than half of `lookback` preceding
+    bars available, or a zero average (no real trading history to
+    compare against), is KEPT — same "nothing to judge against isn't a
+    reason to block the trade" convention lsw_filter_signals_by_
+    structural_cap() already uses."""
+    lookback = lookback if lookback is not None else LSW_VOLUME_FILTER_LOOKBACK
+    mult = mult if mult is not None else LSW_VOLUME_FILTER_MULT
+    kept = []
+    for sig in signals:
+        idx = sig["entry_idx"]
+        window_start = max(0, idx - lookback)
+        window = candles[window_start:idx]  # preceding bars only — NOT including the sweep candle itself
+        if len(window) < max(3, lookback // 2):
+            kept.append(sig)
+            continue
+        avg_vol = sum(c["volume"] for c in window) / len(window)
+        sweep_vol = candles[idx]["volume"]
+        if avg_vol <= 0 or sweep_vol >= mult * avg_vol:
+            kept.append(sig)
+        # else dropped — the sweep candle didn't show elevated volume, less likely a genuine stop-cascade/absorption event
+    return kept
+
+
 def lsw_scan_5m_confirmation(candles_ltf, from_time, direction, max_bars=None,
                               pivot_left=None, pivot_right=None, wick_ratio=None):
     """Rule #3 of the reference note ("модели входа (5минутка):
@@ -10950,38 +11000,40 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
     CONFIRM_ENABLED, fetches LSW_ENTRY_CONFIRM_INTERVAL (5m) history
     over the same window and runs lsw_apply_entry_confirmation(), which
     replaces each surviving signal's own entry/sl/tp or drops it if no
-    5m confirmation ever fired. Filter order for the ACTUAL result:
-    HTF trend -> structural cap -> 5m entry confirmation — cheapest/
-    coarsest checks first, so the (comparatively expensive) 5m
-    confirmation only ever runs on signals that already passed the
-    other two.
+    5m confirmation ever fired. v0.99.139 adds a 4th, lsw_filter_
+    signals_by_volume() (LSW_VOLUME_FILTER_ENABLED) — same single-
+    timeframe, no-extra-fetch shape as structural cap. Filter order for
+    the ACTUAL result: HTF trend -> structural cap -> volume ->
+    5m entry confirmation — cheapest/coarsest checks first, so the
+    (comparatively expensive) 5m confirmation only ever runs on signals
+    that already passed the others.
     v0.99.136, per direct user request ("хочу чтобы в sweep индикаторе
     каждая из галочек настроек показывала в таблице что стало после
     этого фильтра чтобы была оценка необходимости, вдруг она сделала
     хуже"): ALSO computes, independently of which toggles are currently
     on, what each filter would do ALONE against the raw signal pool —
-    not chained through the other two, so each filter's own individual
-    contribution is visible without interaction effects from the
-    others. This means LSW_HTF_INTERVAL and LSW_ENTRY_CONFIRM_INTERVAL
-    history now gets fetched every backtest pass regardless of whether
-    those toggles are actually on — a real added cost (two more fetches
-    and up to three more outcome-tracking passes per symbol), accepted
-    because the whole point is to let the person judge a filter BEFORE
-    deciding to enable it, not just after.
+    not chained through the others, so each filter's own individual
+    contribution is visible without interaction effects. v0.99.139,
+    per direct follow-up ("убери из отображения в столбцах... добавим
+    ещё один"): the HTF trend and structural cap solo checkpoints are
+    no longer computed at all (their own toggles and detection code
+    stay fully usable in the ACTUAL chain below — only the extra solo-
+    checkpoint work for the no-longer-displayed columns was dropped,
+    recouping some of the added cost); "entry_confirm" and the new
+    "volume_filter" are what's actually computed and shown now.
     Returns (results, meta) — results is the raw trades list using
     whichever filters are ACTUALLY enabled right now (unchanged
     behavior, still what live-eligibility/ranking is computed from);
-    meta = {"checkpoints": {"raw", "htf_filter", "structural_cap",
-    "entry_confirm"}}, each a _mirror_checkpoint()-shaped {n, winrate,
-    expectancy_r} dict (reusing that exact helper — LSW shares the same
-    fixed-RR-per-trade shape MIRROR's own checkpoint math already
-    assumes) or None where there wasn't enough history to judge that
-    filter at all."""
+    meta = {"checkpoints": {"raw", "entry_confirm", "volume_filter"}},
+    each a _mirror_checkpoint()-shaped {n, winrate, expectancy_r} dict
+    (reusing that exact helper — LSW shares the same fixed-RR-per-trade
+    shape MIRROR's own checkpoint math already assumes) or None where
+    there wasn't enough history to judge that filter at all."""
     now = time.time()
     fetch_start = now - days * 86400
     candles = get_candles_range(symbol, LSW_INTERVAL, fetch_start, now)
     if len(candles) < LSW_PIVOT_LEFT + LSW_PIVOT_RIGHT + 20:
-        return [], {"checkpoints": {"raw": None, "htf_filter": None, "structural_cap": None, "entry_confirm": None}}
+        return [], {"checkpoints": {"raw": None, "entry_confirm": None, "volume_filter": None}}
     raw_sigs = lsw_detect_signals(candles)
 
     htf_interval_sec = INTERVAL_SECONDS.get(LSW_HTF_INTERVAL, 14400)
@@ -11004,21 +11056,14 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
 
     checkpoints = {"raw": _mirror_checkpoint(_track_all(raw_sigs), rr=LSW_RR)}
 
-    if len(htf_candles) >= LSW_HTF_EMA_PERIOD:
-        bias_series = lsw_htf_bias_series(htf_candles)
-        htf_solo_sigs = lsw_filter_signals_by_htf_trend(raw_sigs, bias_series, htf_interval_sec)
-        checkpoints["htf_filter"] = _mirror_checkpoint(_track_all(htf_solo_sigs), rr=LSW_RR)
-    else:
-        checkpoints["htf_filter"] = None  # not enough HTF history to judge this filter at all yet
-
-    structural_solo_sigs = lsw_filter_signals_by_structural_cap(raw_sigs, candles)
-    checkpoints["structural_cap"] = _mirror_checkpoint(_track_all(structural_solo_sigs), rr=LSW_RR)
-
     if confirm_candles:
         confirm_solo_sigs = lsw_apply_entry_confirmation(raw_sigs, confirm_candles)
         checkpoints["entry_confirm"] = _mirror_checkpoint(_track_all(confirm_solo_sigs), rr=LSW_RR)
     else:
         checkpoints["entry_confirm"] = None
+
+    volume_solo_sigs = lsw_filter_signals_by_volume(raw_sigs, candles)
+    checkpoints["volume_filter"] = _mirror_checkpoint(_track_all(volume_solo_sigs), rr=LSW_RR)
 
     # The ACTUAL result, using whichever filters are really toggled on right now — unchanged from before, chained in the same order.
     sigs = raw_sigs
@@ -11030,6 +11075,8 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
             sigs = []  # not enough HTF history to judge trend at all — conservative: no signals rather than unfiltered ones
     if LSW_STRUCTURAL_CAP_ENABLED and sigs:
         sigs = lsw_filter_signals_by_structural_cap(sigs, candles)
+    if LSW_VOLUME_FILTER_ENABLED and sigs:
+        sigs = lsw_filter_signals_by_volume(sigs, candles)
     if LSW_ENTRY_CONFIRM_ENABLED and sigs:
         if confirm_candles:
             sigs = lsw_apply_entry_confirmation(sigs, confirm_candles)
@@ -11109,6 +11156,10 @@ def lsw_scan_symbol_live(symbol):
                 return
         if LSW_STRUCTURAL_CAP_ENABLED:
             sigs = lsw_filter_signals_by_structural_cap(sigs, candles)
+            if not sigs:
+                return
+        if LSW_VOLUME_FILTER_ENABLED:
+            sigs = lsw_filter_signals_by_volume(sigs, candles)
             if not sigs:
                 return
         if LSW_DIRECTION_FILTER_ENABLED:
@@ -11858,6 +11909,7 @@ def api_lsw_status():
             "live_min_winrate": LSW_LIVE_MIN_WINRATE, "live_min_sample": LSW_LIVE_MIN_SAMPLE,
             "htf_filter_enabled": LSW_HTF_FILTER_ENABLED, "htf_interval": LSW_HTF_INTERVAL,
             "structural_cap_enabled": LSW_STRUCTURAL_CAP_ENABLED,
+            "volume_filter_enabled": LSW_VOLUME_FILTER_ENABLED,
             "entry_confirm_enabled": LSW_ENTRY_CONFIRM_ENABLED, "entry_confirm_interval": LSW_ENTRY_CONFIRM_INTERVAL,
             "direction_filter_enabled": LSW_DIRECTION_FILTER_ENABLED,
         },
@@ -13099,6 +13151,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">вход не сразу по закрытию часовой свечи снятия, а только после подтверждения на 5м: слом структуры (BOS), поглощение или мини-снятие (инверсия) в течение часа. Если подтверждения нет — сделка не открывается</div>
         </div>
         <label class="switch"><input type="checkbox" id="setLswEntryConfirm"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Фильтр по объёму</div>
+          <div class="sub">свеча снятия должна показать объём минимум в 1.5× выше среднего за предыдущие 20 баров — отсекает низкообъёмные фитили без реального участия толпы (не настоящий каскад стопов)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setLswVolumeFilter"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -14564,6 +14623,7 @@ async function refreshLsw() {
       Фильтр по тренду (${cfg.htf_interval}): <span class="${cfg.htf_filter_enabled ? 'win' : 'dim'}">${cfg.htf_filter_enabled ? 'включён' : 'выключен'}</span> ·
       Структурный кэп: <span class="${cfg.structural_cap_enabled ? 'win' : 'dim'}">${cfg.structural_cap_enabled ? 'включён' : 'выключен'}</span> ·
       Подтверждение (${cfg.entry_confirm_interval}): <span class="${cfg.entry_confirm_enabled ? 'win' : 'dim'}">${cfg.entry_confirm_enabled ? 'включено' : 'выключено'}</span> ·
+      Фильтр по объёму: <span class="${cfg.volume_filter_enabled ? 'win' : 'dim'}">${cfg.volume_filter_enabled ? 'включён' : 'выключен'}</span> ·
       Фильтр по направлению: <span class="${cfg.direction_filter_enabled ? 'win' : 'dim'}">${cfg.direction_filter_enabled ? 'включён' : 'выключен'}</span><br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
       ${byLevelTxt ? `<span style="font-size:11px;">По типу уровня: ${byLevelTxt}</span><br>` : ''}
@@ -14628,9 +14688,8 @@ async function refreshLsw() {
       const onOff = filterEnabled ? '' : ' <span class="dim">[выкл]</span>';
       return `<span class="dim" title="если применить ТОЛЬКО этот фильтр к сырым сигналам, без остальных">${cp.winrate}% (n=${cp.n})${deltaTxt}${onOff}</span>`;
     };
-    const htfTxt = fmtCheckpoint(fc.htf_filter, cfg.htf_filter_enabled);
-    const capTxt = fmtCheckpoint(fc.structural_cap, cfg.structural_cap_enabled);
     const confirmTxt2 = fmtCheckpoint(fc.entry_confirm, cfg.entry_confirm_enabled);
+    const volumeTxt = fmtCheckpoint(fc.volume_filter, cfg.volume_filter_enabled);
     return `<tr>
       <td>${r.symbol}${liveDot}${dirFilterTxt}</td>
       <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
@@ -14639,16 +14698,15 @@ async function refreshLsw() {
       <td class="loss">${r.losses}L</td>
       <td class="dim">${r.timeouts}T</td>
       <td>${byDirTxt}</td>
-      <td>${htfTxt}</td>
-      <td>${capTxt}</td>
       <td>${confirmTxt2}</td>
+      <td>${volumeTxt}</td>
     </tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
-    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории). Последние 3 колонки показывают, что даёт КАЖДЫЙ фильтр САМ ПО СЕБЕ на сырых (нефильтрованных) сигналах монеты — не в связке с остальными фильтрами. В скобках — разница с винрейтом на тех же сырых сигналах без единого фильтра (это не то же самое, что колонка WR слева, там уже применены реально включённые фильтры). Пометка [выкл] — фильтр сейчас не участвует в реальной торговле, это просто оценка "а что если включить":</div>
+    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории). Последние 2 колонки показывают, что даёт КАЖДЫЙ фильтр САМ ПО СЕБЕ на сырых (нефильтрованных) сигналах монеты — не в связке с остальными фильтрами. В скобках — разница с винрейтом на тех же сырых сигналах без единого фильтра (это не то же самое, что колонка WR слева, там уже применены реально включённые фильтры). Пометка [выкл] — фильтр сейчас не участвует в реальной торговле, это просто оценка "а что если включить". Тренд-фильтр и структурный кэп по-прежнему доступны в настройках, просто убраны отсюда, чтобы не мозолить глаза:</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th><th>Тренд-фильтр (соло)</th><th>Структ. кэп (соло)</th><th>Подтверждение (соло)</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th><th>Подтверждение (соло)</th><th>Фильтр объёма (соло)</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
@@ -14877,6 +14935,7 @@ const setInputs = {
   lsw_enabled: document.getElementById('setLsw'),
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
   lsw_structural_cap_enabled: document.getElementById('setLswStructuralCap'),
+  lsw_volume_filter_enabled: document.getElementById('setLswVolumeFilter'),
   lsw_entry_confirm_enabled: document.getElementById('setLswEntryConfirm'),
   lsw_direction_filter_enabled: document.getElementById('setLswDirectionFilter'),
   telegram_enabled: document.getElementById('setTelegram'),
