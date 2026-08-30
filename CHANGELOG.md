@@ -11513,3 +11513,50 @@ v0.99.145 - AUTOTRADE_RISK_PCT_OF_BALANCE default raised 2.0% -> 5.0%
          real runtime start confirming both the new 5.0 default via
          GET /api/settings and a live change to 7.5 taking effect
          immediately via POST /api/settings.
+
+v0.99.146 - CRITICAL FIX: a real, unprotected position headed straight
+         for liquidation, per direct user report ("сигнал пришел, а
+         цена уже за столом [стопом], сделка все равно открылась, стоп
+         не выставился и все, дальше только ликвидация").
+         ROOT CAUSE: a signal's own sl price is decided at DETECTION
+         time, from candle data that can be seconds to minutes old by
+         the time execute_autotrade() actually runs (network delay,
+         scan queue, retry backoff). If price already moved past that
+         sl by execution time, placing a protective stop there is a
+         trigger condition Gate treats as already-true (or rejects
+         outright) — exactly what happened.
+         Per direct user decision, TWO layers now guard against this:
+         LAYER 1 (primary): a new pre-open check, right before the
+         market order, using a genuinely FRESH single-symbol quote (new
+         get_last_price() — deliberately NOT get_contract_spec()'s own
+         cached response, up to 3600s stale, and NOT a candle close, up
+         to one whole candle-interval stale). If price has already
+         moved past the signal's own sl (LONG: current <= sl; SHORT:
+         current >= sl), the trade is SKIPPED entirely — nothing opens
+         — with a dedicated Telegram alert ("сигнал устарел... Сделка
+         НЕ открыта").
+         LAYER 2 (safety net, per direct user choice — "выставить
+         маленький стоп если да", not an immediate close): covers the
+         much narrower race where price crosses the sl in the brief
+         window AFTER layer 1's check but before the market order
+         actually fills. If place_tp_sl_orders()'s own sl leg fails,
+         ONE emergency retry is attempted at a fresh current price ±
+         AUTOTRADE_EMERGENCY_SL_BUFFER_PCT (0.3% default) rather than
+         re-trying the same now-invalid original sl (what reconcile's
+         own v0.99.124 auto-heal would otherwise do on its next cycle,
+         and would just fail again for the identical reason). Success
+         sends a clear "АВАРИЙНЫЙ минимальный стоп" alert noting the
+         real risk may exceed the usual target; if the emergency
+         attempt ALSO fails, a distinct 🔴 "КРИТИЧНО" alert fires so
+         this genuinely rare, genuinely dangerous case is never silent.
+         Verified: py_compile, pyflakes clean, a real runtime start,
+         the Flask route/def integrity check (still 44 routes — only
+         execute_autotrade() extended, no new routes), and 3 unit tests
+         with the exchange calls mocked: (1) price already past sl ->
+         confirmed the market order is never even placed and the
+         correct alert fires; (2) sl leg failing at placement time ->
+         confirmed an emergency stop is correctly computed, placed, and
+         alerted, with the trade's own final status becoming OPENED
+         (protected) rather than OPENED_TP_SL_FAILED; (3) the emergency
+         attempt ALSO failing -> confirmed the critical alert fires and
+         status correctly falls back to OPENED_TP_SL_FAILED.
