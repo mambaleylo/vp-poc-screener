@@ -11560,3 +11560,27 @@ v0.99.146 - CRITICAL FIX: a real, unprotected position headed straight
          (protected) rather than OPENED_TP_SL_FAILED; (3) the emergency
          attempt ALSO failing -> confirmed the critical alert fires and
          status correctly falls back to OPENED_TP_SL_FAILED.
+
+v0.99.147 - MSNR_ENTRY_TF reverted 1m -> 15m, per direct user report
+         that the backtest went from dozens of signals per symbol down
+         to 5-7 ("раньше по msnr было много сигналов в бэктесте,
+         сейчас пара монет с 6-7 сигналами") and direct decision to
+         revert ("верно как было 15 везде").
+         Root cause: v0.99.126 changed MSNR_ENTRY_TF from 15m to 1m
+         per the strategy author's own trade screenshot (the QM trigger
+         is watched on M1 in the source material). At 1m, Gate's own
+         ~10000-candle recency floor silently caps entry-TF history to
+         ~6.9 days regardless of MSNR_BACKTEST_DAYS=40 — the structure-
+         TF (1h) backtest still reached 40 days, but the entry-TF
+         (QM trigger) side was effectively 7 days of data. At 15m
+         the same 10000-candle floor covers ~102 days, so 40 days
+         fits comfortably again — backtest signal counts return to the
+         pre-v0.99.126 level. Live signals are fractionally less
+         precise (15m candle vs 1m) but the existing optimizer and
+         filter chain are all tuned for 15m so nothing else changes.
+         A separate live entry_tf (1m only for the live scan, 15m for
+         the backtest) would be the right long-term fix but would
+         require a more significant backtest/live split than warranted
+         here — noted for future consideration.
+         Verified: py_compile, pyflakes clean (still 44 routes — single-
+         constant change), confirmed new default "15m" via grep.
