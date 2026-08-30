@@ -11438,3 +11438,58 @@ v0.99.143 - 2 new GLOBAL (uniform-threshold) FT5 filters, per direct
          trades with zero adaptation needed, and _ft5_filter_checkpoint()
          correctly computing n/winrate/avg_pnl_pct against a hand-built
          3-trade list.
+
+v0.99.144 - CRITICAL FIX: two real duplicate-signal bugs, per direct
+         user report (screenshot: 3 identical ADA_USDT LONG "пинцет"
+         rows back to back in Mirror; separately, Sweep firing BOTH a
+         LONG and a SHORT on the same symbol at once — "не знаю что в
+         таком случае делать").
+         Both trace to the SAME root cause MSNR was already fixed for
+         in an earlier session (that fix's own comment literally
+         references "TIA_USDT rows reported live" — the identical bug
+         pattern), which never got carried over to Mirror or LSW when
+         they were built/extended afterward:
+         has_open_signal_any_module() deliberately EXCLUDES a module's
+         OWN signal list from its own cross-module check (by design —
+         see that function's own docstring: "each module is expected
+         to check its OWN list itself, this is only the cross-module
+         veto"). Mirror never had that self-check at all. LSW's own
+         v0.99.120 comment ("switched from an LSW-only 'already open'
+         check to has_open_signal_any_module()") undersold what
+         actually happened: it REPLACED the self-check instead of
+         keeping both, so nothing ever stopped LSW opening a SECOND
+         real position (a genuinely independent detection — equal
+         highs vs equal lows, opposite direction) on a symbol that
+         already had one open.
+         SEPARATELY, even where a self-check style existed (the per-
+         symbol cooldown dicts), it's a plain in-memory dict reset to
+         empty on every restart, while STATE["mirror_signals"]/["lsw_
+         signals"] (the actual persisted record of what already fired)
+         survives the restart intact. If the same pattern/level is
+         still the most recent qualifying signal right after a restart
+         (nothing about the market needs to change for that — the
+         detectors have no memory between calls), the freshly-empty
+         cooldown has no record of having already fired it, and it
+         fires again — exactly the 3 identical ADA_USDT rows reported,
+         one extra per restart within that signal's own lifetime.
+         Fixed identically in Mirror and LSW (same pattern MSNR already
+         used): a direct STATE check for an existing OPEN record on
+         that exact symbol, in the module's OWN list, BEFORE the
+         cross-module veto — checking STATE directly (persisted) closes
+         the gap regardless of why the time-based cooldown alone failed
+         to catch it, and correctly blocks a second REAL position (not
+         just an identical duplicate) on a symbol that already has one
+         open in that same module, resolving the LSW LONG+SHORT
+         incident too. Also applied to FT5 for consistency (it never
+         fires real orders, so this only dedupes its own PAPER/
+         informational signal rows, not a real financial risk — but the
+         same structural gap existed there too).
+         Verified: py_compile, pyflakes clean, a real runtime start, the
+         Flask route/def integrity check (still 44 routes — no routes
+         touched), and two tests reproducing the exact reported
+         incidents: Mirror correctly refuses to append a second
+         identical ADA_USDT signal when its own cooldown dict is reset
+         (simulating the restart) while an OPEN record already exists
+         in STATE; LSW correctly refuses to open a second (opposite-
+         direction, independently-detected) signal on BTC_USDT while a
+         LONG is already OPEN there.
