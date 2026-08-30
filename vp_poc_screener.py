@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.148"
+APP_VERSION = "0.99.149"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -855,6 +855,19 @@ LSW_SESSION_START_HOUR_UTC = int(os.environ.get("VP_LSW_SESSION_START_HOUR_UTC",
 LSW_SESSION_END_HOUR_UTC = int(os.environ.get("VP_LSW_SESSION_END_HOUR_UTC", 21))  # ~US session close — 07:00-21:00 UTC covers the European+US overlap, crypto's own usual higher-volume window, though this varies per symbol and is exactly why it's backtestable/toggleable rather than hardcoded
 LSW_MIN_TOUCHES_ENABLED = os.environ.get("VP_LSW_MIN_TOUCHES_FILTER", "0") == "1"  # "the more touches, the higher the chance of a sweep" — the base detector already requires >=2 touches to call something an "equal highs/lows" level at all; this raises that bar further for symbols where more touches turns out to matter
 LSW_MIN_TOUCHES = int(os.environ.get("VP_LSW_MIN_TOUCHES", 3))
+# v0.99.149 — candle structure filter, per direct user request
+# ("давай структуру свечи сделаем" after a discussion of which filters
+# might genuinely help Sweep): a real stop-cascade / liquidity sweep
+# should show a LARGE wick relative to a SMALL body on the sweep
+# candle — a big wick means price was sharply rejected back inside the
+# level, a big body means price actually closed far from the open
+# (more of a trend/impulse move, not a rejection). Both the wick ratio
+# and a minimum absolute wick size (relative to candle total range)
+# are checked to avoid passing microscopic wicks that technically
+# qualify by ratio but have no real structure. Off by default.
+LSW_CANDLE_STRUCTURE_FILTER_ENABLED = os.environ.get("VP_LSW_CANDLE_STRUCTURE_FILTER", "0") == "1"
+LSW_CANDLE_WICK_BODY_RATIO = float(os.environ.get("VP_LSW_CANDLE_WICK_BODY_RATIO", 2.0))  # sweep candle's directional wick must be at least this many times the body size
+LSW_CANDLE_WICK_RANGE_MIN_PCT = float(os.environ.get("VP_LSW_CANDLE_WICK_RANGE_MIN_PCT", 0.3))  # the directional wick must cover at least this fraction of the candle's total high-low range (guards against ratio passing on near-doji candles with no real structure at all)
 FT5_MIN_BACKTEST_TRADES = int(os.environ.get("VP_FT5_MIN_BACKTEST_TRADES", 5))  # a combo with fewer trades than this in the backtest window isn't a confident pick — same bar Volume's optimizer uses (MIN_BACKTEST_TRADES)
 # v0.99.143 — 2 new GLOBAL (uniform-threshold) FT5 filters, per direct
 # user request ("Тоже самое для msnr и ft5" — same architecture as
@@ -1000,7 +1013,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw",
                   "autotrade_risk_pct",
@@ -1045,6 +1058,7 @@ def get_settings():
         "lsw_fvg_filter_enabled": LSW_FVG_FILTER_ENABLED,
         "lsw_session_filter_enabled": LSW_SESSION_FILTER_ENABLED,
         "lsw_min_touches_enabled": LSW_MIN_TOUCHES_ENABLED,
+        "lsw_candle_structure_filter_enabled": LSW_CANDLE_STRUCTURE_FILTER_ENABLED,
         "lsw_entry_confirm_enabled": LSW_ENTRY_CONFIRM_ENABLED,
         "lsw_direction_filter_enabled": LSW_DIRECTION_FILTER_ENABLED,
         "msnr_max_rr": MSNR_MAX_RR,
@@ -1088,7 +1102,7 @@ def apply_settings(updates):
     global MIRROR_VOLUME_FILTER_ENABLED, MIRROR_HTF_FILTER_ENABLED
     global LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
-    global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED
+    global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_NETWORK
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE
@@ -1168,6 +1182,8 @@ def apply_settings(updates):
         LSW_SESSION_FILTER_ENABLED = bool(updates["lsw_session_filter_enabled"])
     if "lsw_min_touches_enabled" in updates:
         LSW_MIN_TOUCHES_ENABLED = bool(updates["lsw_min_touches_enabled"])
+    if "lsw_candle_structure_filter_enabled" in updates:
+        LSW_CANDLE_STRUCTURE_FILTER_ENABLED = bool(updates["lsw_candle_structure_filter_enabled"])
     if "lsw_entry_confirm_enabled" in updates:
         LSW_ENTRY_CONFIRM_ENABLED = bool(updates["lsw_entry_confirm_enabled"])
     if "lsw_direction_filter_enabled" in updates:
@@ -11324,6 +11340,55 @@ def lsw_filter_signals_by_min_touches(signals, min_touches=None):
     return [s for s in signals if (s.get("level_touches") or 0) >= min_touches or not s.get("level_touches")]
 
 
+def lsw_filter_signals_by_candle_structure(signals, candles, wick_body_ratio=None, wick_range_min_pct=None):
+    """v0.99.149 — a genuine liquidity sweep rejection shows a large
+    directional wick (price poked through the level and snapped back
+    hard) against a small body (it CLOSED back inside, far from its
+    open). A large body means price actually committed to moving — more
+    of a breakout or impulse than a rejection. Two checks combined:
+    (1) the directional wick is at least `wick_body_ratio` times the
+    body size — strict ratio alone can pass doji candles with a tiny
+    wick and a tinier body, so:
+    (2) the directional wick covers at least `wick_range_min_pct` of
+    the candle's total high-low range, ensuring some real structural
+    presence.
+    "Directional wick" is defined relative to the signal's own
+    direction: for a LONG (equal-lows sweep), the relevant wick is the
+    LOWER wick (price poked below, snapped back up); for a SHORT
+    (equal-highs sweep), it's the UPPER wick. A signal with no
+    entry_idx or a candle that's genuinely a doji (zero range) is KEPT
+    — nothing to judge isn't a reason to block, same convention as
+    every other filter in this file."""
+    wick_body_ratio = wick_body_ratio if wick_body_ratio is not None else LSW_CANDLE_WICK_BODY_RATIO
+    wick_range_min_pct = wick_range_min_pct if wick_range_min_pct is not None else LSW_CANDLE_WICK_RANGE_MIN_PCT
+    kept = []
+    for sig in signals:
+        idx = sig.get("entry_idx")
+        if idx is None or idx >= len(candles):
+            kept.append(sig)
+            continue
+        c = candles[idx]
+        total_range = c["high"] - c["low"]
+        if total_range <= 0:
+            kept.append(sig)  # doji with zero range — nothing to judge
+            continue
+        body = abs(c["close"] - c["open"])
+        if sig["direction"] == "LONG":
+            wick = min(c["open"], c["close"]) - c["low"]  # lower wick
+        else:
+            wick = c["high"] - max(c["open"], c["close"])  # upper wick
+        if wick <= 0:
+            continue  # no directional wick at all — dropped
+        # Check 1: wick vs body ratio
+        if body > 0 and wick < wick_body_ratio * body:
+            continue
+        # Check 2: wick covers enough of the total candle range
+        if wick / total_range < wick_range_min_pct:
+            continue
+        kept.append(sig)
+    return kept
+
+
 def lsw_scan_5m_confirmation(candles_ltf, from_time, direction, max_bars=None,
                               pivot_left=None, pivot_right=None, wick_ratio=None):
     """Rule #3 of the reference note ("модели входа (5минутка):
@@ -11629,7 +11694,8 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
     candles = get_candles_range(symbol, LSW_INTERVAL, fetch_start, now)
     if len(candles) < LSW_PIVOT_LEFT + LSW_PIVOT_RIGHT + 20:
         return [], {"checkpoints": {"raw": None, "entry_confirm": None, "volume_filter": None,
-                                     "fvg_filter": None, "session_filter": None, "min_touches_filter": None}}
+                                     "fvg_filter": None, "session_filter": None, "min_touches_filter": None,
+                                     "candle_structure": None}}
     raw_sigs = lsw_detect_signals(candles)
 
     htf_interval_sec = INTERVAL_SECONDS.get(LSW_HTF_INTERVAL, 14400)
@@ -11670,6 +11736,9 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
     touches_solo_sigs = lsw_filter_signals_by_min_touches(raw_sigs)
     checkpoints["min_touches_filter"] = _mirror_checkpoint(_track_all(touches_solo_sigs), rr=LSW_RR)
 
+    structure_solo_sigs = lsw_filter_signals_by_candle_structure(raw_sigs, candles)
+    checkpoints["candle_structure"] = _mirror_checkpoint(_track_all(structure_solo_sigs), rr=LSW_RR)
+
     # The ACTUAL result, using whichever filters are really toggled on right now — unchanged from before, chained in the same order.
     sigs = raw_sigs
     if LSW_HTF_FILTER_ENABLED and sigs:
@@ -11688,6 +11757,8 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
         sigs = lsw_filter_signals_by_fvg(sigs, candles)
     if LSW_SESSION_FILTER_ENABLED and sigs:
         sigs = lsw_filter_signals_by_session(sigs)
+    if LSW_CANDLE_STRUCTURE_FILTER_ENABLED and sigs:
+        sigs = lsw_filter_signals_by_candle_structure(sigs, candles)
     if LSW_ENTRY_CONFIRM_ENABLED and sigs:
         if confirm_candles:
             sigs = lsw_apply_entry_confirmation(sigs, confirm_candles)
@@ -11782,6 +11853,10 @@ def lsw_scan_symbol_live(symbol):
                 return
         if LSW_SESSION_FILTER_ENABLED:
             sigs = lsw_filter_signals_by_session(sigs)
+            if not sigs:
+                return
+        if LSW_CANDLE_STRUCTURE_FILTER_ENABLED:
+            sigs = lsw_filter_signals_by_candle_structure(sigs, candles)
             if not sigs:
                 return
         if LSW_DIRECTION_FILTER_ENABLED:
@@ -12552,6 +12627,7 @@ def api_lsw_status():
             "fvg_filter_enabled": LSW_FVG_FILTER_ENABLED,
             "session_filter_enabled": LSW_SESSION_FILTER_ENABLED,
             "min_touches_enabled": LSW_MIN_TOUCHES_ENABLED, "min_touches": LSW_MIN_TOUCHES,
+            "candle_structure_filter_enabled": LSW_CANDLE_STRUCTURE_FILTER_ENABLED,
             "entry_confirm_enabled": LSW_ENTRY_CONFIRM_ENABLED, "entry_confirm_interval": LSW_ENTRY_CONFIRM_INTERVAL,
             "direction_filter_enabled": LSW_DIRECTION_FILTER_ENABLED,
         },
@@ -13870,6 +13946,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">торговать только уровни с 3+ касаниями вместо базовых 2 — больше касаний, по опыту, повышают шанс на реальное снятие ликвидности</div>
         </div>
         <label class="switch"><input type="checkbox" id="setLswMinTouches"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Структура свечи снятия</div>
+          <div class="sub">фитиль свечи снятия должен быть минимум в 2× длиннее тела И покрывать не менее 30% полного диапазона hi-lo — настоящее снятие: большой фитиль (резкий отскок) + маленькое тело (закрылась внутри уровня). Большое тело — это уже импульс, а не снятие</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setLswCandleStructureFilter"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -15482,6 +15565,7 @@ async function refreshLsw() {
     const fvgTxt = fmtCheckpoint(fc.fvg_filter, cfg.fvg_filter_enabled);
     const sessionTxt = fmtCheckpoint(fc.session_filter, cfg.session_filter_enabled);
     const touchesTxt = fmtCheckpoint(fc.min_touches_filter, cfg.min_touches_enabled);
+    const structureTxt = fmtCheckpoint(fc.candle_structure, cfg.candle_structure_filter_enabled);
     return `<tr>
       <td>${r.symbol}${liveDot}${dirFilterTxt}</td>
       <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
@@ -15495,13 +15579,14 @@ async function refreshLsw() {
       <td>${fvgTxt}</td>
       <td>${sessionTxt}</td>
       <td>${touchesTxt}</td>
+      <td>${structureTxt}</td>
     </tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
-    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории). Последние 5 колонок показывают, что даёт КАЖДЫЙ фильтр САМ ПО СЕБЕ на сырых (нефильтрованных) сигналах монеты — не в связке с остальными фильтрами. В скобках — разница с винрейтом на тех же сырых сигналах без единого фильтра (это не то же самое, что колонка WR слева, там уже применены реально включённые фильтры). Пометка [выкл] — фильтр сейчас не участвует в реальной торговле, это просто оценка "а что если включить". Тренд-фильтр и структурный кэп по-прежнему доступны в настройках, просто убраны отсюда, чтобы не мозолить глаза:</div>
+    <div class="dim" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории). Последние 6 колонок показывают, что даёт КАЖДЫЙ фильтр САМ ПО СЕБЕ на сырых (нефильтрованных) сигналах монеты — не в связке с остальными фильтрами. В скобках — разница с винрейтом на тех же сырых сигналах без единого фильтра (это не то же самое, что колонка WR слева, там уже применены реально включённые фильтры). Пометка [выкл] — фильтр сейчас не участвует в реальной торговле, это просто оценка "а что если включить". Тренд-фильтр и структурный кэп по-прежнему доступны в настройках, просто убраны отсюда, чтобы не мозолить глаза:</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th><th>Подтверждение (соло)</th><th>Объём (соло)</th><th>FVG (соло)</th><th>Сессия (соло)</th><th>Касания≥${cfg.min_touches} (соло)</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th><th>Подтверждение (соло)</th><th>Объём (соло)</th><th>FVG (соло)</th><th>Сессия (соло)</th><th>Касания≥${cfg.min_touches} (соло)</th><th>Структура свечи (соло)</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
@@ -15740,6 +15825,7 @@ const setInputs = {
   lsw_fvg_filter_enabled: document.getElementById('setLswFvgFilter'),
   lsw_session_filter_enabled: document.getElementById('setLswSessionFilter'),
   lsw_min_touches_enabled: document.getElementById('setLswMinTouches'),
+  lsw_candle_structure_filter_enabled: document.getElementById('setLswCandleStructureFilter'),
   lsw_entry_confirm_enabled: document.getElementById('setLswEntryConfirm'),
   lsw_direction_filter_enabled: document.getElementById('setLswDirectionFilter'),
   telegram_enabled: document.getElementById('setTelegram'),
