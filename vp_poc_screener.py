@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.143"
+APP_VERSION = "0.99.144"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2276,6 +2276,16 @@ def ft5_scan_symbol_live(symbol):
             if _ft5_signal_cooldowns.get(symbol) == open_position["entry_time"]:
                 return
             _ft5_signal_cooldowns[symbol] = open_position["entry_time"]
+        # v0.99.144 — same own-list persisted-state check added to
+        # every other module (MSNR/Mirror/LSW) for the identical
+        # restart-survives-but-cooldown-doesn't bug — see any of those
+        # own comments for the full mechanics. FT5 never fires a real
+        # order, so this only prevents duplicate PAPER/informational
+        # signal rows, not a real financial risk, but the same gap
+        # exists here for the same reason.
+        with state_lock:
+            if any(s["symbol"] == symbol and s.get("status") == "OPEN" for s in STATE["ft5_signals"]):
+                return
         if has_open_signal_any_module(symbol, exclude="ft5_signals"):
             return
         entry = open_position["entry"]
@@ -10570,6 +10580,28 @@ def mirror_scan_symbol_live(symbol):
             if _mirror_signal_cooldowns.get(symbol) == sig["entry_time"]:
                 return
             _mirror_signal_cooldowns[symbol] = sig["entry_time"]
+        # v0.99.144 — BUG FOUND (per direct user report: 3 identical
+        # ADA_USDT LONG "пинцет" rows back to back): same exact bug
+        # class MSNR was already fixed for (see that function's own
+        # comment above this same check — "TIA_USDT rows reported
+        # live"), never carried over here. _mirror_signal_cooldowns is
+        # a plain in-memory dict, reset to empty on every restart, while
+        # STATE["mirror_signals"] itself (the actual persisted record
+        # of what already fired) survives the restart intact. If the
+        # same pattern is still the most recent qualifying signal right
+        # after a restart, the freshly-empty cooldown has no record of
+        # having already fired it, and it fires again — a genuine
+        # duplicate OPEN record for a symbol that already has one.
+        # has_open_signal_any_module() below doesn't catch this either:
+        # it deliberately EXCLUDES mirror_signals from its own check
+        # (each module is expected to check its own list itself — this
+        # is only the cross-module veto), and Mirror never had that
+        # self-check. Checking STATE directly (persisted) instead of
+        # only the fragile in-memory cooldown closes the gap regardless
+        # of why the time-based cooldown alone failed to catch it.
+        with state_lock:
+            if any(s["symbol"] == symbol and s.get("status") == "OPEN" for s in STATE["mirror_signals"]):
+                return
         if has_open_signal_any_module(symbol, exclude="mirror_signals"):
             return
         record = {
@@ -11637,11 +11669,25 @@ def lsw_scan_symbol_live(symbol):
             if _lsw_signal_cooldowns.get(symbol) == sig["entry_time"]:
                 return
             _lsw_signal_cooldowns[symbol] = sig["entry_time"]
-        # v0.99.120 — switched from an LSW-only "already open" check to
-        # has_open_signal_any_module(), same guard MIRROR's own real-
-        # signal branch uses, now that a real order can actually fire:
-        # avoids two modules opening conflicting real positions on the
-        # same symbol at once.
+        # v0.99.144 — BUG FOUND (per direct user report: LSW fired BOTH
+        # a LONG and a SHORT on the same symbol at once): v0.99.120's
+        # own comment below says this "switched from an LSW-only
+        # 'already open' check to has_open_signal_any_module()" — that
+        # wording undersells what actually happened: it REPLACED the
+        # self-check instead of keeping both, and has_open_signal_any_
+        # module() deliberately EXCLUDES lsw_signals from its own check
+        # (each module is expected to check its own list itself — see
+        # that function's own docstring). LSW never had that self-check
+        # again after this refactor, so nothing ever stopped it from
+        # opening a SECOND real position (a different level, opposite
+        # direction, sweeping equal highs vs equal lows — genuinely
+        # independent detections) on a symbol that already had one
+        # open. Same fix MSNR/Mirror already carry: check STATE
+        # directly (persisted, survives restart too, unlike the
+        # cooldown dict alone) before the cross-module veto below.
+        with state_lock:
+            if any(s["symbol"] == symbol and s.get("status") == "OPEN" for s in STATE["lsw_signals"]):
+                return
         if has_open_signal_any_module(symbol, exclude="lsw_signals"):
             return
         if LSW_ENTRY_CONFIRM_ENABLED:
