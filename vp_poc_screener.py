@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.146"
+APP_VERSION = "0.99.147"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -419,7 +419,7 @@ HOURLY_STATS_INTERVAL_SEC = int(os.environ.get("VP_HOURLY_STATS_INTERVAL_SEC", 3
 MSNR_ENABLED = os.environ.get("VP_MSNR_ENABLED", "1") == "1"
 MSNR_SYMBOLS = [s.strip() for s in os.environ.get("VP_MSNR_SYMBOLS", "XAU_USDT,XAUT_USDT,PAXG_USDT").split(",") if s.strip()]
 MSNR_STRUCTURE_TF = os.environ.get("VP_MSNR_STRUCTURE_TF", "1h")  # timeframe the OCL / A-shape / V-shape "Storyline" levels are built on
-MSNR_ENTRY_TF = os.environ.get("VP_MSNR_ENTRY_TF", "1m")  # v0.99.126 — was "15m", changed per direct user-forwarded screenshot of a real trade from the strategy's own author ("h1/m30 SBR > m1 QM + m30 fresh (добір) > Target h1 V-shape"): the QM sweep+rejection trigger is watched on M1 in the source material, not M15. NOTE: at 1m, get_candles_range()'s own confirmed ~10000-candle recency floor (see its own docstring) caps how far back entry-TF history can reach to ~6.9 days — MSNR_BACKTEST_DAYS=40 still fetches structure-TF (1h) candles that far back for the OCL/A-V levels, but the entry-TF (QM trigger) side of any backtest is now effectively capped near a week regardless of MSNR_BACKTEST_DAYS's own value; get_candles_range() already clamps forward gracefully rather than erroring, so this doesn't break anything, it just means less entry-TF history per backtest than before.
+MSNR_ENTRY_TF = os.environ.get("VP_MSNR_ENTRY_TF", "15m")  # v0.99.126 changed this to "1m" per the strategy author's own trade screenshot (the QM trigger is watched on M1 in the source material). v0.99.147 — reverted back to "15m", per direct user report that 1m caused a dramatic drop in backtest signal count: Gate's ~10000-candle recency floor caps 1m history to ~6.9 days (vs ~102 days at 15m), so MSNR_BACKTEST_DAYS=40 was silently giving only ~7 days of entry-TF history instead of 40, leaving most symbols with 5-7 signals instead of the expected dozens. At 15m the backtest covers the full 40 days again. Live signals are fractionally less precise (15m candle vs 1m) but the author's strategy note remains intact — a future improvement would be a separate live entry_tf, but that's a bigger change than warranted here.
 MSNR_PIVOT_LEFT = int(os.environ.get("VP_MSNR_PIVOT_LEFT", 2))
 MSNR_PIVOT_RIGHT = int(os.environ.get("VP_MSNR_PIVOT_RIGHT", 2))
 MSNR_ATR_PERIOD = int(os.environ.get("VP_MSNR_ATR_PERIOD", 14))
