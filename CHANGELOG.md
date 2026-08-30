@@ -11229,3 +11229,55 @@ v0.99.139 - New optional 4th LSW filter: volume, per direct user
          passes the filter, a same-as-average-volume one correctly gets
          dropped, and a signal with insufficient preceding history is
          correctly kept by default (nothing to judge it against).
+
+v0.99.140 - 3 more optional LSW filters, per direct user request after
+         asking to research common liquidity-sweep confluence ideas
+         ("Все 3 делай, выключены по умолчанию") — found repeated
+         across multiple independent sources, not just one blog's own
+         opinion:
+         FVG (fair value gap) confirmation — "always layer fair value
+         gaps" / "wait for a pullback into the displacement candle's
+         fair value gap" was the single most repeated confluence add-on
+         for a bare liquidity sweep. lsw_filter_signals_by_fvg() checks
+         BACKWARD only (the sweep candle itself vs. 2 bars before it —
+         the standard 3-candle FVG definition), never forward, so it
+         stays exactly as usable live (at the moment a signal fires) as
+         in backtest; a signal without 2 prior bars is kept by default.
+         Session/time-of-day filter — "skip sweeps in dead sessions;
+         focus high-probability ones with volatility". lsw_filter_
+         signals_by_session() keeps a signal only if its own entry_time
+         (UTC hour) falls inside a configurable window (LSW_SESSION_
+         START_HOUR_UTC/LSW_SESSION_END_HOUR_UTC, default 07:00-21:00,
+         approximating the European+US overlap — genuinely varies per
+         symbol, which is why it's backtestable rather than hardcoded).
+         Minimum touch count — "the more touches, the higher the chance
+         of a sweep". lsw_filter_signals_by_min_touches() raises the
+         bar above the base detector's own >=2-touch floor for an
+         "equal highs/lows" level (LSW_MIN_TOUCHES, default 3).
+         All three off by default, wired into both the ACTUAL filter
+         chain (lsw_backtest_symbol()/lsw_scan_symbol_live(), same
+         no-extra-fetch shape as structural cap and volume) and their
+         own SOLO checkpoints in the Sweep tab's backtest table (5
+         solo columns total now: confirmation, volume, FVG, session,
+         min touches) — 3 new settings toggles ("↳ Фильтр по FVG",
+         "↳ Фильтр по сессии", "↳ Минимум касаний уровня").
+         Per the same message's broader question about extending this
+         solo-checkpoint display to other indicators: explained why
+         Mirror already has an equivalent before/after display but in
+         a different (auto-derived per-symbol threshold, not manual
+         toggle) shape that doesn't map onto LSW's isolated-solo style
+         without a larger redesign, and MSNR/FT5 don't currently have
+         any optional toggle-style filters to compare at all — nothing
+         built for those this pass, pending the user naming a specific
+         filter to add there first.
+         Verified: py_compile, pyflakes clean, node --check on the
+         correctly-last <script> block, a real runtime start confirming
+         all 3 new api_lsw_status() config fields, the Flask route/def
+         integrity check (still 44 routes), a getElementById audit on
+         the 3 new IDs (each defined once, referenced once), and unit
+         tests: a hand-built bullish FVG correctly detected and a flat
+         no-gap case correctly dropped (plus insufficient-history kept
+         by default), a 12:00 UTC signal kept and a 02:00 UTC one
+         dropped by the session filter's own default window, and the
+         min-touches filter correctly keeping only signals at or above
+         the configured threshold.
