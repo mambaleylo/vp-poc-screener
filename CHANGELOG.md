@@ -11176,3 +11176,13 @@ v0.99.137 - Two LSW fixes, per direct user question ("Я нажал очисти
          attempt surfaced a genuine "outside application context" error
          needing one), and a state check confirming all 5 new progress
          fields exist with sane defaults before any backtest has run.
+
+v0.99.138 - LSW_LIVE_MIN_WINRATE raised 35% -> 50%, per direct user
+         request ("Подними порог для авто торговли 50% для монеты",
+         confirmed to mean Sweep/LSW specifically). A symbol's own
+         post-filter backtest winrate must now clear 50% (not just 35%)
+         AND the existing LSW_LIVE_MIN_SAMPLE (25 closed trades) to be
+         live-scanned/auto-traded at all.
+         Verified: py_compile, pyflakes clean, a real runtime start
+         confirming api_lsw_status()'s own config.live_min_winrate
+         reflects 50.0 immediately.
