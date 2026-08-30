@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.142"
+APP_VERSION = "0.99.143"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -856,6 +856,28 @@ LSW_SESSION_END_HOUR_UTC = int(os.environ.get("VP_LSW_SESSION_END_HOUR_UTC", 21)
 LSW_MIN_TOUCHES_ENABLED = os.environ.get("VP_LSW_MIN_TOUCHES_FILTER", "0") == "1"  # "the more touches, the higher the chance of a sweep" — the base detector already requires >=2 touches to call something an "equal highs/lows" level at all; this raises that bar further for symbols where more touches turns out to matter
 LSW_MIN_TOUCHES = int(os.environ.get("VP_LSW_MIN_TOUCHES", 3))
 FT5_MIN_BACKTEST_TRADES = int(os.environ.get("VP_FT5_MIN_BACKTEST_TRADES", 5))  # a combo with fewer trades than this in the backtest window isn't a confident pick — same bar Volume's optimizer uses (MIN_BACKTEST_TRADES)
+# v0.99.143 — 2 new GLOBAL (uniform-threshold) FT5 filters, per direct
+# user request ("Тоже самое для msnr и ft5" — same architecture as
+# MSNR/Mirror's own v0.99.141/142 pairs). FT5's own entry trigger
+# already has a volume-spike REQUIREMENT baked directly into it
+# (buy_volume_avg/buy_volume_mult, see ft5_run_backtest()'s own entry
+# condition) — adding a separate volume filter here would be pure
+# redundancy, so these are two DIFFERENT, genuinely new checks instead:
+# an HTF trend filter (same shared lsw_htf_bias_at()/lsw_htf_bias_
+# series() this app's other 3 modules already reuse) and a session/
+# time-of-day filter (reusing lsw_filter_signals_by_session() directly
+# — FT5's own trade dicts already use the same "entry_time" field name
+# that function expects, no adapter needed). "1:2 minimum RR", the
+# other MSNR/Mirror filter, doesn't map onto FT5 at all — it exits via
+# a % stoploss + ROI ladder, not a fixed R-multiple target, so there's
+# no "rr" field on an FT5 trade to filter by.
+FT5_HTF_FILTER_ENABLED = os.environ.get("VP_FT5_HTF_FILTER", "0") == "1"
+FT5_HTF_INTERVAL = os.environ.get("VP_FT5_HTF_INTERVAL", "4h")
+FT5_HTF_EMA_PERIOD = int(os.environ.get("VP_FT5_HTF_EMA_PERIOD", 50))
+FT5_HTF_TREND_BUFFER_PCT = float(os.environ.get("VP_FT5_HTF_TREND_BUFFER_PCT", 0.1))
+FT5_SESSION_FILTER_ENABLED = os.environ.get("VP_FT5_SESSION_FILTER", "0") == "1"
+FT5_SESSION_START_HOUR_UTC = int(os.environ.get("VP_FT5_SESSION_START_HOUR_UTC", 7))
+FT5_SESSION_END_HOUR_UTC = int(os.environ.get("VP_FT5_SESSION_END_HOUR_UTC", 21))
 FT5_RANK_PRIOR_TARGET = int(os.environ.get("VP_FT5_RANK_PRIOR_TARGET", 1))  # v0.98.8 — ft5_ranking_score() blends in max(0, TARGET - losses_count) pseudo-trades at the known -FT5_STOPLOSS_PCT level, so a small loss-free sample can't look artificially low-risk just because it hasn't hit its (structurally always-possible) stop yet. Tapered by ACTUAL real losses (not a flat count on every combo) — a flat prior tested worse, disproportionately hurting smaller-but-still-real samples. See ft5_ranking_score()'s own docstring for the full reasoning, including why TARGET=1 specifically. Replaces FT5_RANK_Z (v0.98.7), which is no longer referenced — the confidence multiplier is now t_critical(n-1), not a fixed Z.
 
 # Fixed structural parameters (not grid-searched — kept at the original's
@@ -977,7 +999,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
@@ -1003,6 +1025,8 @@ def get_settings():
         "scalp_signals_enabled": SCALP_SIGNALS_ENABLED,
         "ft5_enabled": FT5_ENABLED,
         "ft5_invert_signals": FT5_INVERT_SIGNALS,
+        "ft5_htf_filter_enabled": FT5_HTF_FILTER_ENABLED,
+        "ft5_session_filter_enabled": FT5_SESSION_FILTER_ENABLED,
         "mirror_enabled": MIRROR_ENABLED,
         "mirror_rr": MIRROR_RR,
         "mirror_touch_tolerance_pct": MIRROR_TOUCH_TOLERANCE_PCT,
@@ -1056,7 +1080,7 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, MSNR_MIN_RR_FILTER_ENABLED, MSNR_HTF_FILTER_ENABLED, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, FT5_HTF_FILTER_ENABLED, FT5_SESSION_FILTER_ENABLED, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, MSNR_MIN_RR_FILTER_ENABLED, MSNR_HTF_FILTER_ENABLED, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT, MIRROR_AUTOTUNE_TOLERANCE_ENABLED
     global MIRROR_VOLUME_FILTER_ENABLED, MIRROR_HTF_FILTER_ENABLED
     global LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
@@ -1080,6 +1104,10 @@ def apply_settings(updates):
         FT5_ENABLED = bool(updates["ft5_enabled"])
     if "ft5_invert_signals" in updates:
         FT5_INVERT_SIGNALS = bool(updates["ft5_invert_signals"])
+    if "ft5_htf_filter_enabled" in updates:
+        FT5_HTF_FILTER_ENABLED = bool(updates["ft5_htf_filter_enabled"])
+    if "ft5_session_filter_enabled" in updates:
+        FT5_SESSION_FILTER_ENABLED = bool(updates["ft5_session_filter_enabled"])
     if "mirror_enabled" in updates:
         MIRROR_ENABLED = bool(updates["mirror_enabled"])
     if "mirror_rr" in updates:
@@ -1829,6 +1857,43 @@ def t_critical(df):
     return _T_CRITICAL_INF
 
 
+def _ft5_filter_checkpoint(trades):
+    """v0.99.143 — same {n, winrate, avg_pnl_pct} snapshot shape as
+    _mirror_checkpoint()/_msnr_filter_checkpoint(), adapted to FT5's own
+    metric: FT5 has no fixed-R target (it exits via a % stoploss + ROI
+    ladder, not a single R-multiple TP), so "income" here is the plain
+    average pnl_pct across trades rather than an R-expectancy or a
+    compounded %."""
+    if not trades:
+        return {"n": 0, "winrate": None, "avg_pnl_pct": None}
+    wins = sum(1 for t in trades if t.get("result") == "WIN")
+    pnls = [t["pnl_pct"] for t in trades if t.get("pnl_pct") is not None]
+    return {
+        "n": len(trades),
+        "winrate": round(wins / len(trades) * 100, 1),
+        "avg_pnl_pct": round(sum(pnls) / len(pnls), 3) if pnls else None,
+    }
+
+
+def ft5_filter_by_htf_trend(trades, bias_series, htf_interval_sec):
+    """v0.99.143 — same higher-timeframe trend concept as LSW's
+    (v0.99.121), MSNR's (v0.99.141), and Mirror's (v0.99.142) own
+    versions, reusing the shared lsw_htf_bias_at() lookup. Reads
+    "entry_time" (FT5's own trade dicts use that field name, not
+    "time") and "direction"."""
+    kept = []
+    for t in trades:
+        bias = lsw_htf_bias_at(bias_series, t["entry_time"], htf_interval_sec)
+        if bias is None:
+            continue
+        if t["direction"] == "LONG" and bias == "DOWN":
+            continue
+        if t["direction"] == "SHORT" and bias == "UP":
+            continue
+        kept.append(t)
+    return kept
+
+
 def ft5_ranking_score(pnls, losses_count, z=None):
     """Ranking score for FT5 combos/symbols — replaces raw avg_pnl_pct as
     the selection criterion wherever FT5 picks a "best" option (best
@@ -2061,6 +2126,7 @@ def ft5_optimize_symbol(symbol):
         return {"error": "not enough history"}
     best = None
     best_score = None
+    best_trades = []
     tried = []
     for buy_rsi in FT5_PARAM_GRID_BUY_RSI:
         for buy_fisher in FT5_PARAM_GRID_BUY_FISHER:
@@ -2083,6 +2149,11 @@ def ft5_optimize_symbol(symbol):
                         "optimized_at": now, "candles_used": len(candles),
                     }
                     best_score = score
+                    # v0.99.143 — keeps the winning combo's own raw trade
+                    # list around for the new filter-checkpoint chain
+                    # below, instead of re-running ft5_run_backtest() a
+                    # second time just to get it back.
+                    best_trades = trades
     if best is None:
         best = {
             "buy_rsi": FT5_PARAM_GRID_BUY_RSI[len(FT5_PARAM_GRID_BUY_RSI) // 2],
@@ -2092,6 +2163,46 @@ def ft5_optimize_symbol(symbol):
             "optimized_at": now, "candles_used": len(candles),
             "note": f"insufficient trades across all 36 combos tried (max {max(tried) if tried else 0}, need {FT5_MIN_BACKTEST_TRADES}); using middle-of-grid defaults",
         }
+    # v0.99.143 — 2 new GLOBAL (uniform-threshold) optional filters,
+    # same "always compute a solo preview even while off, only actually
+    # narrow when the toggle is genuinely on" principle as MSNR/Mirror's
+    # own pairs (v0.99.141/142) — see FT5_HTF_FILTER_ENABLED's own
+    # comment for why these two (not volume, already baked into the
+    # entry trigger itself; not min-RR, FT5 has no rr field at all).
+    checkpoints = [{"stage": "raw", **_ft5_filter_checkpoint(best_trades)}]
+    htf_candles = None
+    try:
+        htf_interval_sec = INTERVAL_SECONDS.get(FT5_HTF_INTERVAL, 14400)
+        htf_fetch_start = now - FT5_BACKTEST_DAYS * 86400 - FT5_HTF_EMA_PERIOD * htf_interval_sec
+        htf_candles = get_candles_range(symbol, FT5_HTF_INTERVAL, htf_fetch_start, now)
+    except Exception as e:
+        log_error(f"ft5_optimize_symbol {symbol}: HTF fetch for trend filter failed: {e}")
+    if htf_candles and len(htf_candles) >= FT5_HTF_EMA_PERIOD:
+        bias_series = lsw_htf_bias_series(htf_candles, period=FT5_HTF_EMA_PERIOD, buffer_pct=FT5_HTF_TREND_BUFFER_PCT)
+        htf_candidates = ft5_filter_by_htf_trend(best_trades, bias_series, htf_interval_sec)
+    else:
+        htf_candidates = best_trades  # not enough HTF history to judge — informational preview only
+    working_trades = best_trades
+    if FT5_HTF_FILTER_ENABLED:
+        working_trades = htf_candidates if (htf_candles and len(htf_candles) >= FT5_HTF_EMA_PERIOD) else []
+        checkpoints.append({"stage": "htf_trend", **_ft5_filter_checkpoint(working_trades)})
+    else:
+        checkpoints.append({"stage": "htf_trend", **_ft5_filter_checkpoint(htf_candidates)})
+    session_candidates = lsw_filter_signals_by_session(working_trades, FT5_SESSION_START_HOUR_UTC, FT5_SESSION_END_HOUR_UTC)
+    if FT5_SESSION_FILTER_ENABLED:
+        working_trades = session_candidates
+        checkpoints.append({"stage": "session", **_ft5_filter_checkpoint(working_trades)})
+    else:
+        checkpoints.append({"stage": "session", **_ft5_filter_checkpoint(session_candidates)})
+    best["filter_checkpoints"] = checkpoints
+    if working_trades is not best_trades:
+        w_wins = sum(1 for t in working_trades if t["result"] == "WIN")
+        w_pnls = [t["pnl_pct"] for t in working_trades]
+        best["trades"] = len(working_trades)
+        best["wins"] = w_wins
+        best["losses"] = len(working_trades) - w_wins
+        best["winrate"] = round(w_wins / len(working_trades) * 100, 1) if working_trades else None
+        best["avg_pnl_pct"] = round(sum(w_pnls) / len(w_pnls), 3) if w_pnls else None
     return best
 
 
@@ -12749,6 +12860,8 @@ def api_ft5_status():
             "roi_ladder": FT5_ROI_LADDER, "backtest_days": FT5_BACKTEST_DAYS,
             "grid_buy_rsi": FT5_PARAM_GRID_BUY_RSI, "grid_buy_fisher": FT5_PARAM_GRID_BUY_FISHER,
             "grid_sell_rsi": FT5_PARAM_GRID_SELL_RSI, "invert_signals": FT5_INVERT_SIGNALS,
+            "htf_filter_enabled": FT5_HTF_FILTER_ENABLED, "htf_interval": FT5_HTF_INTERVAL,
+            "session_filter_enabled": FT5_SESSION_FILTER_ENABLED,
         },
         "top": ranked,
     })
@@ -13458,6 +13571,20 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">та же точка входа, но SHORT вместо LONG — выход только по стопу/лесенке (сигнальный выход не зеркалится, см. вкладку)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setFt5Invert"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Фильтр по тренду (4ч, глобальный)</div>
+          <div class="sub">LONG только если тренд на 4ч вверх/нейтральный, SHORT только если вниз/нейтральный — единый для всех монет, как у Sweep/MSNR/Зеркала</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setFt5HtfFilter"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Фильтр по сессии (глобальный)</div>
+          <div class="sub">торговать только в часы 07:00–21:00 UTC — вне этого окна сигналы пропускаются как "мёртвая" сессия</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setFt5SessionFilter"><span class="switchSlider"></span></label>
       </div>
     </div>
 
@@ -14862,6 +14989,26 @@ async function refreshFt5() {
     const pnlClass = (r.avg_pnl_pct || 0) >= 0 ? 'win' : 'loss';
     const rr = r.avg_pnl_pct !== null && r.avg_pnl_pct !== undefined && cfg.stoploss_pct ? Math.round((r.avg_pnl_pct / (cfg.stoploss_pct*100)) * 100) / 100 : null;
     const inLive = (status.live_universe || []).includes(r.symbol);
+    // v0.99.143 — solo-checkpoint columns for the 2 new GLOBAL filters,
+    // reading them by "stage" out of filter_checkpoints — same style
+    // as Sweep/MSNR/Mirror's own fmtCheckpoint columns (isolated solo
+    // result + delta vs "raw", not the final chained result).
+    const fcList = r.filter_checkpoints || [];
+    const rawCp = fcList.find(c => c.stage === 'raw');
+    const fmtFt5Solo = (stage, enabled) => {
+      const cp = fcList.find(c => c.stage === stage);
+      if (!cp || !cp.n) return '<span class="dim">нет данных</span>';
+      let deltaTxt = '';
+      if (rawCp && rawCp.winrate !== null && rawCp.winrate !== undefined && cp.winrate !== null && cp.winrate !== undefined) {
+        const delta = Math.round((cp.winrate - rawCp.winrate) * 10) / 10;
+        const deltaCls = delta > 0 ? 'win' : (delta < 0 ? 'loss' : 'dim');
+        deltaTxt = ` <span class="${deltaCls}">(${delta > 0 ? '+' : ''}${delta}%)</span>`;
+      }
+      const onOff = enabled ? '' : ' <span class="dim">[выкл]</span>';
+      return `<span class="dim" title="если применить ТОЛЬКО этот фильтр поверх остального, без него">${cp.winrate}% (n=${cp.n})${deltaTxt}${onOff}</span>`;
+    };
+    const htfSoloTxt = fmtFt5Solo('htf_trend', cfg.htf_filter_enabled);
+    const sessionSoloTxt = fmtFt5Solo('session', cfg.session_filter_enabled);
     return `<tr>
       <td>${r.symbol}${inLive ? ' <span style="color:#3ddc97;" title="в живом скане">●</span>' : ''}</td>
       <td class="dim">rsi${r.buy_rsi}/fish${r.buy_fisher}/sell${r.sell_rsi}</td>
@@ -14871,13 +15018,15 @@ async function refreshFt5() {
       <td class="dim">n=${r.trades}</td>
       <td class="win">${r.wins}W</td>
       <td class="loss">${r.losses}L</td>
+      <td>${htfSoloTxt}</td>
+      <td>${sessionSoloTxt}</td>
     </tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
-    <div class="dim" style="margin-bottom:6px;"><b>Перебор параметров по монетам</b> (${cfg.backtest_days} дней истории, отбор по score — нижней доверительной границе среднего P&L: чем меньше выборка ИЛИ чем больше разброс (частые крупные лоссы вперемешку с выигрышами) — тем сильнее штраф, независимо от n). Зелёная точка — монета сейчас в живом скане (топ-${status.live_top_n}):</div>
+    <div class="dim" style="margin-bottom:6px;"><b>Перебор параметров по монетам</b> (${cfg.backtest_days} дней истории, отбор по score — нижней доверительной границе среднего P&L: чем меньше выборка ИЛИ чем больше разброс (частые крупные лоссы вперемешку с выигрышами) — тем сильнее штраф, независимо от n). Зелёная точка — монета сейчас в живом скане (топ-${status.live_top_n}). Последние 2 колонки — что даёт КАЖДЫЙ новый глобальный фильтр САМ ПО СЕБЕ, поверх остального:</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Параметры</th><th>Avg P&L</th><th>Score</th><th>RR (факт)</th><th>n</th><th>W</th><th>L</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Параметры</th><th>Avg P&L</th><th>Score</th><th>RR (факт)</th><th>n</th><th>W</th><th>L</th><th>Тренд 4ч (соло)</th><th>Сессия (соло)</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Перебор параметров ещё не готов.</div>';
@@ -15392,6 +15541,8 @@ const setInputs = {
   msnr_htf_filter_enabled: document.getElementById('setMsnrHtfFilter'),
   ft5_enabled: document.getElementById('setFt5'),
   ft5_invert_signals: document.getElementById('setFt5Invert'),
+  ft5_htf_filter_enabled: document.getElementById('setFt5HtfFilter'),
+  ft5_session_filter_enabled: document.getElementById('setFt5SessionFilter'),
   mirror_enabled: document.getElementById('setMirror'),
   mirror_autotune_tolerance_enabled: document.getElementById('setMirrorAutotuneTolerance'),
   mirror_volume_filter_enabled: document.getElementById('setMirrorVolumeFilter'),
