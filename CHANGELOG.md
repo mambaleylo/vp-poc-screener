@@ -11612,3 +11612,41 @@ v0.99.148 - Chart level lines now show the right label for each module,
          route/def integrity check (still 44 routes — only the JSON
          response dicts of the 4 chart endpoints extended with one new
          field each).
+
+v0.99.149 - New LSW candle structure filter, per direct user decision
+         after a discussion of what filters might still help Sweep
+         ("давай структуру свечи сделаем"). A genuine liquidity sweep
+         rejection should show a large directional wick (price sharply
+         rejected back inside the level) against a small body (it
+         CLOSED back inside — if the body is large, that's an impulse
+         or breakout, not a rejection). Two checks combined:
+         (1) the directional wick is >= LSW_CANDLE_WICK_BODY_RATIO
+         (2.0x default) times the candle body size;
+         (2) the directional wick covers >= LSW_CANDLE_WICK_RANGE_
+         MIN_PCT (0.3 = 30%) of the candle's total high-low range —
+         this guards against microscopic wicks that technically pass
+         the ratio (e.g. a near-doji with a 0.001 wick and a 0.0004
+         body) but have no real structural significance.
+         "Directional" is defined relative to the signal's direction:
+         for LONG (equal-lows sweep), the lower wick; for SHORT (equal-
+         highs sweep), the upper wick. A signal with no entry_idx or a
+         zero-range candle is KEPT — nothing to judge, same convention
+         as every other filter. Off by default.
+         Wired into: lsw_backtest_symbol() solo checkpoint chain
+         (always computed, new "candle_structure" key, new 6th column
+         "Структура свечи (соло)" in the Sweep backtest table); the
+         ACTUAL filter chain (between session and entry_confirm, as the
+         last cheap/no-extra-fetch check before the expensive 5m
+         confirmation); lsw_scan_symbol_live() (same chain position).
+         Settings: one new toggle ("↳ Структура свечи снятия") in the
+         Sweep group. api_lsw_status() config dict: candle_structure_
+         filter_enabled.
+         Verified: py_compile, pyflakes clean, node --check on the
+         correctly-last <script> block, the Flask route/def integrity
+         check (still 44 routes), a getElementById audit (new ID
+         setLswCandleStructureFilter defined once, referenced once),
+         and unit tests: a genuine-sweep candle (big lower wick, tiny
+         body) correctly passes; a trend-impulse candle (big body,
+         small wick) correctly drops; a SHORT with a large upper wick
+         correctly passes; a signal with no entry_idx correctly kept
+         by default.
