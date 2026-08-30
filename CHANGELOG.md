@@ -11385,3 +11385,56 @@ v0.99.142 - 2 new GLOBAL (uniform-threshold) Mirror filters, per direct
          average-volume signal and dropping a flat-volume one, and
          mirror_filter_by_htf_trend() correctly keeping only the LONG
          trade against a hand-built uptrend HTF bias series.
+
+v0.99.143 - 2 new GLOBAL (uniform-threshold) FT5 filters, per direct
+         user request ("Тоже самое для msnr и ft5" — the last of the 3
+         modules from that original request, after LSW/MSNR/Mirror).
+         FT5's own entry trigger already has a volume-spike REQUIREMENT
+         baked directly into it (buy_volume_avg/buy_volume_mult, part
+         of the ported Strategy005 logic itself) — a separate volume
+         filter here would be pure redundancy. "1:2 minimum RR" (the
+         other MSNR/Mirror filter) doesn't map onto FT5 at all either —
+         it exits via a % stoploss + ROI ladder, not a fixed R-multiple
+         target, so there's no "rr" field on an FT5 trade to filter by.
+         Built the SAME two filters as MSNR/Mirror's own "genuinely new,
+         not already covered" picks instead:
+         HTF trend filter (ft5_filter_by_htf_trend, FT5_HTF_INTERVAL=4h)
+         — same concept as the other 3 modules' own versions, reusing
+         the shared lsw_htf_bias_at()/lsw_htf_bias_series() helpers.
+         Session/time-of-day filter — reuses lsw_filter_signals_by_
+         session() DIRECTLY with no adapter at all: FT5's own trade
+         dicts already use the exact "entry_time" field name that
+         function expects.
+         Unlike MSNR/Mirror (which already had a checkpoint chain to
+         extend), FT5 had NONE — built one from scratch: a new _ft5_
+         filter_checkpoint() helper (same {n, winrate, ...} shape as
+         _mirror_checkpoint()/_msnr_filter_checkpoint(), but "avg_
+         pnl_pct" instead of an R-based expectancy, matching what FT5
+         actually tracks) and modified ft5_optimize_symbol() to keep
+         the winning grid combo's own raw trade list around (previously
+         computed then discarded once its summary stats were extracted)
+         so the new filters have something to run against without a
+         redundant second backtest run. Same "always compute a solo
+         preview even while off, only actually narrow when the toggle
+         is genuinely on" principle as the other 3 modules.
+         Settings: 2 new toggles ("↳ Фильтр по тренду (4ч, глобальный)",
+         "↳ Фильтр по сессии (глобальный)") in the FT5 group. UI: 2 new
+         solo-checkpoint columns in FT5's own parameter-search table
+         ("Тренд 4ч (соло)", "Сессия (соло)"), same win/loss/dim +
+         delta-vs-raw styling as the other 3 modules' own columns.
+         Live wiring not added — FT5 never fires real orders at all
+         (AUTOTRADE_ENABLED_FT5 exists but ft5_scan_symbol_live() never
+         calls execute_autotrade()), so there's no live path for these
+         filters to gate; the backtest table is the only place FT5's
+         own numbers are ever actually used.
+         Verified: py_compile, pyflakes clean, node --check on the
+         correctly-last <script> block, a real runtime start confirming
+         both new api_ft5_status() config fields, the Flask route/def
+         integrity check (still 44 routes), a getElementById audit on
+         the 2 new IDs (each defined once, referenced once), and unit
+         tests: ft5_filter_by_htf_trend() correctly keeping only the
+         LONG trade against a hand-built uptrend HTF bias series,
+         lsw_filter_signals_by_session() correctly filtering FT5's own
+         trades with zero adaptation needed, and _ft5_filter_checkpoint()
+         correctly computing n/winrate/avg_pnl_pct against a hand-built
+         3-trade list.
