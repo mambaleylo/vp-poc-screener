@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.155"
+APP_VERSION = "0.99.156"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3317,17 +3317,16 @@ def compute_risk_based_position(direction, entry, sl, leverage_cap, mmr_pct, tot
     leverage=0, matching compute_position_size()'s own convention."""
     risk_pct = AUTOTRADE_RISK_PCT_OF_BALANCE if risk_pct is None else risk_pct
     if not entry or entry <= 0:
-        return 0, 0, "invalid entry price"
+        return 0, 0, "некорректная цена входа"
     sl_distance_pct = abs(entry - sl) / entry * 100
     if sl_distance_pct <= 0:
-        return 0, 0, "invalid SL distance (zero or negative) — can't size a position against it"
+        return 0, 0, "некорректное расстояние до стопа (ноль или отрицательное)"
     leverage = compute_max_safe_leverage(direction, sl_distance_pct, mmr_pct, leverage_cap)
     if leverage is None:
-        return 0, 0, (f"no leverage (even 1x) keeps this SL distance ({sl_distance_pct:.3f}%) safely "
-                       f"inside the liquidation buffer — skipping rather than placing an SL that "
-                       f"could never actually trigger")
+        return 0, 0, (f"даже плечо 1x не удерживает стоп ({sl_distance_pct:.3f}%) "
+                       f"в безопасной зоне от ликвидации — сделка пропущена")
     if not total_equity or total_equity <= 0:
-        return 0, 0, "account equity unavailable for risk-based sizing"
+        return 0, 0, "не удалось получить баланс счёта для расчёта размера позиции"
     risk_amount = total_equity * risk_pct / 100.0
     margin_usd = risk_amount / (leverage * sl_distance_pct / 100.0)
     return margin_usd, leverage, None
@@ -3356,19 +3355,19 @@ def compute_contracts_from_margin(symbol, entry_price, margin_usd, leverage):
     is None on success, otherwise a human-readable string and contracts=0."""
     spec = get_contract_spec(symbol)
     if margin_usd is None or margin_usd <= 0 or not leverage or leverage <= 0:
-        return 0, 0, 0, f"invalid margin ({margin_usd}) or leverage ({leverage})"
+        return 0, 0, 0, f"некорректная маржа ({margin_usd}) или плечо ({leverage})"
     notional_usd = margin_usd * leverage
     multiplier = spec["quanto_multiplier"]
     if multiplier <= 0 or entry_price <= 0:
-        return 0, 0, 0, f"invalid contract spec (multiplier={multiplier}) or price ({entry_price}) for {symbol}"
+        return 0, 0, 0, f"некорректная спецификация контракта (multiplier={multiplier}) или цена ({entry_price}) для {symbol}"
     min_size = spec["order_size_min"] or 1
     raw_contracts = notional_usd / (multiplier * entry_price)
     if raw_contracts < min_size:
         min_size_notional = min_size * multiplier * entry_price
         if min_size_notional > notional_usd * 1.5:
-            return 0, 0, 0, (f"minimum order size for {symbol} ({min_size} contracts = "
-                              f"${min_size_notional:.2f} notional) is more than 1.5x the intended "
-                              f"${notional_usd:.2f} — skipping rather than oversizing")
+            return 0, 0, 0, (f"минимальный лот {symbol} ({min_size} контр. = "
+                              f"${min_size_notional:.2f}) более чем в 1.5x превышает "
+                              f"расчётный ${notional_usd:.2f} — пропущено, чтобы не завышать риск")
         contracts = min_size  # gap is small enough to accept rounding up to the minimum lot
     else:
         contracts = math.floor(raw_contracts / min_size) * min_size
@@ -3945,8 +3944,8 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
                     pass
             if wallet_balance is not None and margin > wallet_balance * 0.98:
                 record["status"] = "SKIPPED"
-                record["detail"] = (f"computed margin ${margin:.2f} exceeds available balance "
-                                     f"${wallet_balance:.2f} (with a 2% safety margin) — skipping rather than sending a doomed order")
+                record["detail"] = (f"маржа ${margin:.2f} превышает доступный баланс "
+                                     f"${wallet_balance:.2f} (с запасом 2%) — сделка пропущена")
                 with state_lock:
                     STATE["autotrade_log"].appendleft(record)
                 return record
@@ -3965,7 +3964,7 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
 
             if AUTOTRADE_DRY_RUN:
                 record["status"] = "DRY_RUN"
-                record["detail"] = f"would open {direction} {contracts} contracts on {symbol} @ {leverage}x, TP {tp} / SL {sl}"
+                record["detail"] = f"dry-run: открыл бы {direction} {contracts} контр. по {leverage}x плеча, TP {tp} / SL {sl}"
                 with state_lock:
                     STATE["autotrade_log"].appendleft(record)
                 return record
@@ -4001,7 +4000,7 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
                     existing_direction = "LONG" if float(conflicting.get("size", 0) or 0) > 0 else "SHORT"
                     if not (allow_stack and existing_direction == direction):
                         record["status"] = "SKIPPED"
-                        record["detail"] = f"{symbol} already has an open position on the exchange — skipping to avoid stacking a duplicate"
+                        record["detail"] = f"{symbol} уже есть открытая позиция на бирже — дубль пропущен"
                         with state_lock:
                             STATE["autotrade_log"].appendleft(record)
                         return record
@@ -4047,9 +4046,8 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
                                           or (direction == "SHORT" and current_price >= sl))
                 if price_already_past_sl:
                     record["status"] = "SKIPPED"
-                    record["detail"] = (f"price already moved past this signal's own SL by the time of execution "
-                                         f"(current {current_price}, sl {sl}, direction {direction}) — skipping "
-                                         f"rather than opening an already-invalid trade")
+                    record["detail"] = (f"цена ({current_price}) уже за стопом ({sl}) к моменту открытия — "
+                                         f"сделка не открыта")
                     send_telegram(
                         f"⚠️ {symbol} ({mode}): сигнал устарел — цена ({current_price}) уже прошла "
                         f"уровень стопа ({sl}) ещё до открытия. Сделка НЕ открыта.",
@@ -4177,10 +4175,10 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
                     )
             if tp_sl_errors:
                 record["status"] = "OPENED_TP_SL_FAILED"
-                record["detail"] = f"position opened but TP/SL placement had errors: {tp_sl_errors} — check the position manually"
+                record["detail"] = f"позиция открыта, но TP/SL не выставились: {tp_sl_errors} — проверьте вручную"
             else:
                 record["status"] = "OPENED"
-                record["detail"] = f"opened {direction} {contracts} contracts on {symbol} @ {leverage}x"
+                record["detail"] = f"открыта {direction} {contracts} контр. по {leverage}x плеча"
             with state_lock:
                 STATE["autotrade_log"].appendleft(record)
             return record
@@ -15700,13 +15698,20 @@ async function refreshAutotrade() {
       <span class="dim">пропущено: ${status.skipped}</span> · <span class="loss">ошибок: ${status.errors}</span>
     </div>`;
 
+  const statusRu = {
+    OPENED: 'Открыта',
+    OPENED_TP_SL_FAILED: 'Открыта (стоп не встал)',
+    DRY_RUN: 'Dry-run',
+    SKIPPED: 'Пропущена',
+    ERROR: 'Ошибка',
+  };
   const rows = log.map(e => {
     const dirClass = e.direction === 'LONG' ? 'long' : (e.direction === 'SHORT' ? 'short' : 'dim');
     const statusClass = {OPENED: 'win', OPENED_TP_SL_FAILED: 'loss', DRY_RUN: 'status-open', SKIPPED: 'dim', ERROR: 'loss'}[e.status] || 'dim';
     return `<tr>
       <td class="dim">${fmtTime(e.time)}</td><td>${modeLabels[e.mode] || e.mode}</td><td>${e.symbol}</td>
       <td class="${dirClass}">${e.direction || '-'}</td>
-      <td class="${statusClass}">${e.status}</td>
+      <td class="${statusClass}">${statusRu[e.status] || e.status}</td>
       <td class="dim" style="max-width:280px;white-space:normal;">${e.detail || ''}</td>
     </tr>`;
   }).join('');
@@ -15759,8 +15764,8 @@ async function refreshSimulator() {
   const rows = trades.map(t => {
     const dirClass = t.direction === 'LONG' ? 'long' : 'short';
     const statusHtml = t.status === 'PENDING'
-      ? '<span class="status-open">PENDING</span>'
-      : (t.result === 'WIN' ? '<span class="win">WIN</span>' : (t.result === 'LOSS' ? '<span class="loss">LOSS</span>' : '<span class="status-timeout">TIMEOUT</span>'));
+      ? '<span class="status-open">В позиции</span>'
+      : (t.result === 'WIN' ? '<span class="win">Профит</span>' : (t.result === 'LOSS' ? '<span class="loss">Стоп</span>' : '<span class="status-timeout">Таймаут</span>'));
     const pnlTxt = t.pnl !== null && t.pnl !== undefined
       ? `<span class="${t.pnl >= 0 ? 'win' : 'loss'}">${t.pnl >= 0 ? '+' : ''}${t.pnl.toFixed(3)}$</span>`
       : '<span class="dim">-</span>';
