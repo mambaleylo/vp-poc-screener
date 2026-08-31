@@ -11768,3 +11768,13 @@ v0.99.155 - FIX: LSW entry confirmation cooldown was set BEFORE the
          unit tests confirming: confirm OFF sets cooldown immediately;
          confirm ON + no BOS leaves cooldown unset; confirm ON + BOS
          found sets cooldown; third pass with cooldown set is blocked.
+
+v0.99.156 - Autotrade log "Детали" column now fully in Russian, per
+         direct user request ("переведи детали авто торговли на русский
+         язык, зачем мне там не читаемый текст"). All detail strings
+         translated directly in the backend (execute_autotrade(),
+         compute_risk_based_position(), compute_contracts_from_margin())
+         so the text is Russian at the source, not patched in JS.
+         Also: status column labels in JS translated to Russian
+         (Открыта / Открыта (стоп не встал) / Dry-run / Пропущена /
+         Ошибка).
