@@ -11750,3 +11750,21 @@ v0.99.154 - FIX: v0.99.152's candle-boundary sync broke LSW_ENTRY_
          restores the pre-v0.99.152 ~5-minute confirmation check
          cadence while keeping the candle-boundary sync benefit for
          the non-confirm case.
+
+v0.99.155 - FIX: LSW entry confirmation cooldown was set BEFORE the
+         BOS check, permanently blocking retries. When LSW_ENTRY_
+         CONFIRM_ENABLED is on, the old code set the signal cooldown
+         (keyed on entry_time) unconditionally at the start — so the
+         first scan pass that found no BOS yet would block ALL
+         subsequent passes for that signal, even after BOS appeared
+         5-10 minutes later. The BOS would never be acted on.
+         Fix: when confirm is enabled, cooldown is NOT set until AFTER
+         a BOS is actually found and the trade fires. When confirm is
+         OFF, cooldown is still set early (same as before) to prevent
+         duplicates across rapid scan passes. A second cooldown check
+         after confirm succeeds guards against the rare race where two
+         concurrent scan threads both find the same BOS simultaneously.
+         Verified: py_compile, pyflakes clean, 44 routes, and isolated
+         unit tests confirming: confirm OFF sets cooldown immediately;
+         confirm ON + no BOS leaves cooldown unset; confirm ON + BOS
+         found sets cooldown; third pass with cooldown set is blocked.
