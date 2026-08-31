@@ -11736,3 +11736,17 @@ v0.99.153 - Revert v0.99.151 blue dot shift (sigIdx+1 -> sigIdx back).
          v0.99.152 candle-boundary sync for live loops is kept — it
          is still a real improvement (reduces random 0-300s scan delay
          to ~3s), just not the cause of the reported issue.
+
+v0.99.154 - FIX: v0.99.152's candle-boundary sync broke LSW_ENTRY_
+         CONFIRM_ENABLED. When entry confirmation is on, the live loop
+         needs to check for 5m BOS/absorption every 5 minutes — not
+         once per 1h candle boundary. v0.99.152 synced the loop to 1h
+         boundaries, so a BOS appearing at 02:10 after a 02:00 sweep
+         candle was invisible until the 03:00 scan — a full hour later,
+         exactly matching the user's reported symptom. Fix: when
+         LSW_ENTRY_CONFIRM_ENABLED, sync to LSW_ENTRY_CONFIRM_INTERVAL
+         (5m) boundaries instead of LSW_INTERVAL (1h). When confirm is
+         off, keep syncing to 1h for prompt sweep detection. This
+         restores the pre-v0.99.152 ~5-minute confirmation check
+         cadence while keeping the candle-boundary sync benefit for
+         the non-confirm case.
