@@ -11723,3 +11723,16 @@ v0.99.152 - Live scan loops (LSW, Mirror, MSNR) now sync to candle
          routes, and a unit test confirming the sleep math is correct
          across 3 timing scenarios (just-closed, mid-interval, 2s
          before close).
+
+v0.99.153 - Revert v0.99.151 blue dot shift (sigIdx+1 -> sigIdx back).
+         The shift was made based on a misdiagnosis — the "one candle
+         late" entry was not a scan timing issue but LSW_ENTRY_CONFIRM
+         being enabled by the user, which intentionally waits for a
+         5m BOS/absorption/inversion signal before opening, taking
+         15-60 min after the sweep candle closes. The sigIdx+1 dot
+         placement added confusion rather than clarity. Dot is back at
+         the signal candle's own open (sigIdx), matching data.time
+         exactly as before v0.99.151.
+         v0.99.152 candle-boundary sync for live loops is kept — it
+         is still a real improvement (reduces random 0-300s scan delay
+         to ~3s), just not the cause of the reported issue.
