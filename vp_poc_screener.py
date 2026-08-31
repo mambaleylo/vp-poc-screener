@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.151"
+APP_VERSION = "0.99.152"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9805,7 +9805,11 @@ def msnr_live_loop():
             update_msnr_signal_outcomes()
         except Exception as e:
             log_error(f"msnr_live_loop: {e}")
-        time.sleep(max(60, MSNR_SCAN_INTERVAL_SEC))
+        # v0.99.152 — sync to candle close (same fix as lsw_live_loop)
+        interval_sec = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
+        now = time.time()
+        sleep_sec = (interval_sec - now % interval_sec) + 3
+        time.sleep(sleep_sec)
 
 
 # ============================================================================
@@ -11070,7 +11074,11 @@ def mirror_live_loop():
             update_mirror_signal_outcomes()
         except Exception as e:
             log_error(f"mirror_live_loop: {e}")
-        time.sleep(max(60, MIRROR_SCAN_INTERVAL_SEC))
+        # v0.99.152 — sync to candle close (same fix as lsw_live_loop)
+        interval_sec = INTERVAL_SECONDS.get(MIRROR_INTERVAL, 3600)
+        now = time.time()
+        sleep_sec = (interval_sec - now % interval_sec) + 3
+        time.sleep(sleep_sec)
 
 
 # ============================================================================
@@ -12173,7 +12181,21 @@ def lsw_live_loop():
             update_lsw_signal_outcomes()
         except Exception as e:
             log_error(f"lsw_live_loop: {e}")
-        time.sleep(max(60, LSW_SCAN_INTERVAL_SEC))
+        # v0.99.152 — sync to candle close instead of a fixed 300s sleep.
+        # Previously the loop slept a flat 5 min between passes — if a
+        # candle closed at 03:00:01, the next scan might not run until
+        # 03:03-03:04 depending on where in the 300s cycle we were, and
+        # after spending time processing all symbols the order could land
+        # 1-2 minutes into the new candle — visually "one candle late".
+        # Now: sleep until a few seconds AFTER the next LSW_INTERVAL
+        # candle boundary, so every scan fires as close as possible to
+        # the moment a new candle opens (= previous candle just closed).
+        # Buffer of 3s gives Gate time to finalize the last candle.
+        interval_sec = INTERVAL_SECONDS.get(LSW_INTERVAL, 3600)
+        now = time.time()
+        secs_into_interval = now % interval_sec
+        sleep_sec = (interval_sec - secs_into_interval) + 3
+        time.sleep(sleep_sec)
 
 
 # ============================================================================
