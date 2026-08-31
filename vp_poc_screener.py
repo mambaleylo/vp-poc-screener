@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.150"
+APP_VERSION = "0.99.151"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16512,9 +16512,17 @@ function drawVgiChart(data) {
     // pivot rendering path; scalp doesn't carry a named level at all
   }
 
+  // v0.99.150 — blue entry dot: placed at the CLOSE of the signal
+  // candle (right edge), not at its open (left edge). The signal fires
+  // at candle close — that's when the scanner actually processes it and
+  // the order opens. Using sigIdx+1 (the open of the NEXT candle) is
+  // the closest visible proxy for "right edge of candle sigIdx", and
+  // avoids the confusing visual of the dot sitting at 02:00 when the
+  // actual entry happened at 03:00.
   const sigIdx = candles.findIndex(c => c.time === data.time);
   if (sigIdx >= 0) {
-    const sx = xAt(sigIdx);
+    const dotIdx = (sigIdx + 1 < candles.length) ? sigIdx + 1 : sigIdx;
+    const sx = xAt(dotIdx);
     ctx.fillStyle = '#5a9fff';
     ctx.beginPath(); ctx.arc(sx, yP(entry), 4, 0, Math.PI * 2); ctx.fill();
   }
