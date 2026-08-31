@@ -11676,3 +11676,27 @@ v0.99.150 - Signal tables now show detection time (detected_at) instead
          Verified: py_compile, pyflakes clean, node --check on the
          correctly-last <script> block, the Flask route/def integrity
          check (still 44 routes — only JS rendering changed).
+
+v0.99.151 - Chart entry dot now placed at close of signal candle, not
+         at its open. Per direct user report ("сигнал написано 23:00
+         но на бирже вход в 00:02... синяя точка на графике в 02:00
+         а вход в 03:00") — after careful analysis this is not a timing
+         bug but a display issue: LSW signals on a 1h candle that opens
+         at 02:00 are legitimately detected when that candle CLOSES at
+         03:00 (pivot_right=3 means the level only becomes watchable
+         after 3 confirming bars, and the sweep fires on the close of
+         the sweep candle itself — all by design). The blue dot was
+         placed at c.time (candle open = 02:00) making it look like a
+         1-hour-stale entry. Fixed: dot now placed at sigIdx+1 (open of
+         the next candle = 03:00), which is the closest visible proxy
+         for "right edge / close of the signal candle" and aligns with
+         when the real order actually opens. Applies to all modules that
+         use drawVgiChart() (Mirror, LSW, Scalp).
+         NOTE: v0.99.150's detected_at display change was based on a
+         misread of the same report — it was a real improvement
+         (showing when the signal was found vs candle open) but did not
+         address the actual visual confusion which was the chart dot
+         position. Both fixes together now give a consistent picture:
+         the table shows detected_at, the chart dot is at the candle's
+         right edge.
+         Verified: py_compile, pyflakes clean, node --check, 44 routes.
