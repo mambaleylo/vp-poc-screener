@@ -11792,3 +11792,22 @@ v0.99.157 - MSNR-specific "ва-банк" mode, per direct user request
          execute_autotrade() — affects both primary MSNR trades and
          addon (добор) trades. Verified: py_compile, pyflakes clean,
          node --check, 44 routes, ID audit (setMsnrAllIn 1:1).
+
+v0.99.158 - 3 MSNR live signals improvements, per direct user request:
+         1. Hide tracking-only signals (no galochka) from the live
+         signals table — only signals where autotrade_fired=True are
+         shown (plus closed WIN/LOSS/TIMEOUT ones for history). Signals
+         without a checkbox were cluttering the table and confusing.
+         2. Manual open button ("▶ открыть") on OPEN signals that were
+         not auto-traded (autotrade_fired=False, e.g. "insufficient
+         balance") — shown only when MSNR autotrade is globally enabled.
+         Clicking shows a browser confirm dialog with symbol/direction/
+         entry/sl/tp, then calls new /api/msnr/manual_open (POST) which
+         runs execute_autotrade() exactly as the live scanner would,
+         including all-in mode if enabled. Refreshes the signals table
+         after completion.
+         3. Leverage now shown even when autotrade_fired=False (SKIPPED/
+         ERROR signals) — previously showed "—", now shows the leverage
+         that would have been used.
+         Verified: py_compile, pyflakes clean, node --check, 45 routes
+         (1 new: /api/msnr/manual_open).
