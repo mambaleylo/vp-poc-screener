@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.154"
+APP_VERSION = "0.99.155"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -11880,7 +11880,17 @@ def lsw_scan_symbol_live(symbol):
         with _lsw_signal_cooldowns_lock:
             if _lsw_signal_cooldowns.get(symbol) == sig["entry_time"]:
                 return
-            _lsw_signal_cooldowns[symbol] = sig["entry_time"]
+            # v0.99.154 — when entry confirmation is enabled, do NOT set
+            # the cooldown here yet: if BOS hasn't appeared yet this pass,
+            # the next scan (5m later) must be able to retry the same
+            # signal. The old code set cooldown unconditionally here, so a
+            # first "no BOS yet" pass permanently blocked all retries —
+            # the BOS that appeared 10 minutes later was never seen.
+            # Cooldown is now set only when the trade actually opens (or
+            # when confirm is OFF, where setting it here is still correct
+            # to prevent duplicates across back-to-back scan passes).
+            if not LSW_ENTRY_CONFIRM_ENABLED:
+                _lsw_signal_cooldowns[symbol] = sig["entry_time"]
         # v0.99.144 — BUG FOUND (per direct user report: LSW fired BOTH
         # a LONG and a SHORT on the same symbol at once): v0.99.120's
         # own comment below says this "switched from an LSW-only
@@ -11917,8 +11927,16 @@ def lsw_scan_symbol_live(symbol):
             confirm_candles = [c for c in confirm_candles if c["time"] + confirm_interval_sec <= confirm_now]
             confirmed = lsw_apply_entry_confirmation([sig], confirm_candles)
             if not confirmed:
-                return  # no BOS/поглощение/инверсия within the window yet — no trade
+                return  # no BOS/поглощение/инверсия within the window yet — retry next scan pass
             sig = confirmed[0]
+        # v0.99.154 — when confirm is enabled, cooldown is set HERE
+        # (after BOS found) instead of before the confirm check, so
+        # retries work correctly across scan passes until BOS appears.
+        if LSW_ENTRY_CONFIRM_ENABLED:
+            with _lsw_signal_cooldowns_lock:
+                if _lsw_signal_cooldowns.get(symbol) == sig["entry_time"]:
+                    return  # already fired this confirmed signal (race between scan threads)
+                _lsw_signal_cooldowns[symbol] = sig["entry_time"]
         record = {
             "symbol": symbol, "direction": sig["direction"],
             "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"], "rr": sig.get("rr"),
