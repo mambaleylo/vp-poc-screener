@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.157"
+APP_VERSION = "0.99.158"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12954,6 +12954,7 @@ def api_msnr_status():
             "grid_qm_lookback": MSNR_PARAM_GRID_QM_LOOKBACK,
             "compound_start_balance": MSNR_COMPOUND_START_BALANCE, "compound_leverage": AUTOTRADE_LEVERAGE_MSNR,
             "refresh_sec": MSNR_REFRESH_SEC,
+            "autotrade_enabled": AUTOTRADE_ENABLED_MSNR,
             "min_rr_filter_enabled": MSNR_MIN_RR_FILTER_ENABLED, "min_rr_filter": MSNR_MIN_RR_FILTER,
             "htf_filter_enabled": MSNR_HTF_FILTER_ENABLED, "htf_interval": MSNR_HTF_INTERVAL,
         },
@@ -13153,6 +13154,33 @@ def api_reset_msnr():
         return jsonify({"ok": True})
     except Exception as e:
         log_error(f"api_reset_msnr: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/msnr/manual_open", methods=["POST"])
+def api_msnr_manual_open():
+    """v0.99.158 — manual trade open for MSNR signals that were
+    skipped (e.g. insufficient balance) or not auto-traded. Accepts
+    symbol/direction/entry/sl/tp from the frontend confirmation dialog
+    and calls execute_autotrade() exactly as the live scanner would."""
+    try:
+        data = request.get_json(force=True) or {}
+        symbol = data.get("symbol")
+        direction = data.get("direction")
+        entry = float(data.get("entry", 0))
+        sl = float(data.get("sl", 0))
+        tp = float(data.get("tp", 0))
+        if not symbol or not direction or not entry:
+            return jsonify({"ok": False, "error": "symbol/direction/entry обязательны"}), 400
+        if not AUTOTRADE_ENABLED_MSNR:
+            return jsonify({"ok": False, "error": "автоторговля MSNR выключена"}), 400
+        result = execute_autotrade("msnr", symbol, direction, entry, sl, tp,
+                                   extra={"manual": True},
+                                   all_in_margin_pct=MSNR_ALL_IN_MARGIN_PCT if MSNR_ALL_IN_ENABLED else None)
+        ok = result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED", "DRY_RUN")
+        return jsonify({"ok": ok, "status": result.get("status"), "detail": result.get("detail", "")})
+    except Exception as e:
+        log_error(f"api_msnr_manual_open: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
@@ -14732,62 +14760,33 @@ async function refreshMsnr() {
       <tbody>${rrBucketRows}</tbody>
     </table>
     </div>` : '';
-  const signalsRows = signals.map((s, idx) => {
+  const signalsRows = signals
+    .filter(s => s.autotrade_fired || s.status !== 'OPEN')  // v0.99.158: hide OPEN signals without autotrade — they're tracking-only, not real positions
+    .map((s, idx) => {
     const dirClass = s.direction === 'LONG' ? 'long' : 'short';
     let statusHtml;
-    // v0.99.73, per direct live user alarm ("какого фига по ней
-    // открылась сделка?" — TRX_USDT, no autotrade checkbox, green
-    // "in live scan" dot lit): confirmed by re-reading the actual
-    // record-construction code that "OPEN" here NEVER meant a real
-    // position — record["status"]="OPEN" is set unconditionally the
-    // moment ANY signal is detected, before the autotrade-eligibility
-    // check even runs, specifically so a symbol's own track record
-    // keeps accumulating (win-rate/RR/hour/volume stats) whether or
-    // not it's currently toggled for real trading — see the record's
-    // own comment for why msnr_update_live_balance() needs autotrade_
-    // fired=False signals to NOT move real money either. The green dot
-    // means "in the live SCAN universe" (getting checked for signals
-    // at all), never "being traded" — those are different questions,
-    // and the wording alone didn't make that obvious. Now says "OPEN
-    // (сигнал)" instead of a bare "OPEN" specifically when autotrade_
-    // fired is false, so a signal that never risked real money doesn't
-    // read as one that did — s.autotrade_fired itself is untouched,
-    // this is display-only.
-    if (s.status === 'OPEN') statusHtml = s.autotrade_fired ? '<span class="status-open">OPEN</span>' : '<span class="status-open" title="сигнал отслеживается для статистики — реальная сделка не открыта (нет галочки/не в топ-10)">OPEN (сигнал)</span>';
+    if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
     else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
     else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
     else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
     const levelTxt = s.level_type === 'A' ? 'A-shape' : 'V-shape';
-    // v0.99.33, per direct user request: real per-symbol compounding
-    // margin ($40 first trade, then whatever the previous trade's own
-    // result left the balance at, capped at MSNR_LIVE_BALANCE_MAX) —
-    // only shown for signals an actual order was placed for
-    // (autotrade_fired), since a signal nobody traded never had a
-    // real margin behind it at all.
-    // v0.99.69, per direct user report (screenshot: a live OPEN
-    // signal showing "15x" while the backtest table's own "плечо
-    // ... (Kelly-оптимум)" for the same symbol showed 19.5x — looked
-    // like a bug, isn't one): leverage_used is frozen at the moment
-    // THIS signal fired (an already-placed order's leverage can't
-    // retroactively change), while the backtest table's Kelly value
-    // is the CURRENT recommendation — it keeps updating every
-    // backtest cycle, so it can genuinely move between when a still-
-    // open signal fired and now. It can also differ for a second,
-    // separate reason even at the SAME instant: msnr_scan_symbol_
-    // live()'s own liquidation-safety check walks leverage DOWN from
-    // the Kelly value for a trade whose specific SL width would
-    // otherwise breach the buffer — so a live value below the
-    // current Kelly number is expected either way, never a display
-    // bug. Tooltip added so this isn't confusing again without
-    // needing to re-explain it from scratch each time.
+    // v0.99.158: show leverage even when autotrade_fired=false (SKIPPED/ERROR),
+    // so the user can see what leverage would have been used.
+    // Manual open button for SKIPPED/ERROR signals (e.g. insufficient balance at the time)
     const sizeTxt = s.autotrade_fired
       ? `<span title="\u043f\u043b\u0435\u0447\u043e \u043d\u0430 \u043c\u043e\u043c\u0435\u043d\u0442 \u0441\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u043d\u0438\u044f \u044d\u0442\u043e\u0433\u043e \u0441\u0438\u0433\u043d\u0430\u043b\u0430 \u2014 \u043c\u043e\u0433\u043b\u043e \u043e\u0442\u043b\u0438\u0447\u0430\u0442\u044c\u0441\u044f \u043e\u0442 \u0442\u0435\u043a\u0443\u0449\u0435\u0439 Kelly-\u0440\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0438 \u0432 \u0442\u0430\u0431\u043b\u0438\u0446\u0435 \u043d\u0438\u0436\u0435 \u2014 \u043e\u043d\u0430 \u043e\u0431\u043d\u043e\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u043a\u0430\u0436\u0434\u044b\u0439 \u0446\u0438\u043a\u043b, \u0438\u043b\u0438 \u0435\u0451 \u0441\u043f\u0435\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043e\u0436\u0430\u043b\u0438 \u0432\u043d\u0438\u0437 \u0438\u0437-\u0437\u0430 \u0448\u0438\u0440\u0438\u043d\u044b \u0441\u0442\u043e\u043f\u0430 \u044d\u0442\u043e\u0439 \u0441\u0434\u0435\u043b\u043a\u0438">$${s.live_size_usd}${s.leverage_used ? ' @ '+s.leverage_used+'x' : ''}</span>`
-      : '<span class="dim">\u2014</span>';
+      : (s.leverage_used ? `<span class="dim">${s.leverage_used}x</span>` : '<span class="dim">\u2014</span>');
+    // Manual open button — shown for closed/skipped signals where autotrade_fired=false
+    // and autotrade is globally enabled for MSNR
+    const canManualOpen = !s.autotrade_fired && s.status === 'OPEN' && cfg.autotrade_enabled;
+    const manualBtn = canManualOpen
+      ? `<button onclick="event.stopPropagation();msnrManualOpen('${s.symbol}',${s.time},'${s.direction}',${s.entry},${s.sl},${s.tp})" style="font-size:10px;padding:2px 6px;background:#1e3a2f;border:1px solid #3ddc97;color:#3ddc97;border-radius:4px;cursor:pointer;margin-left:4px;" title="Открыть сделку вручную (с подтверждением)">▶ открыть</button>`
+      : '';
     return `<tr onclick="openMsnrChart('${s.symbol}', ${s.time})" style="cursor:pointer;">
       <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td><td class="dim">${levelTxt}</td>
       <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.sl)}</td><td class="dim">${fmt(s.tp)}</td>
       <td class="dim">${sizeTxt}</td>
-      <td>${statusHtml}</td><td class="dim" title="время свечи сигнала: ${fmtDateTime(s.time)}">${s.detected_at ? fmtDateTime(s.detected_at) : fmtDateTime(s.time)}${s.detected_at && Math.abs(s.detected_at - s.time) > 120 ? ` <span style="opacity:0.5;font-size:10px;">(свеча ${fmtTime(s.time)})</span>` : ''}</td>
+      <td>${statusHtml}${manualBtn}</td><td class="dim" title="время свечи сигнала: ${fmtDateTime(s.time)}">${s.detected_at ? fmtDateTime(s.detected_at) : fmtDateTime(s.time)}${s.detected_at && Math.abs(s.detected_at - s.time) > 120 ? ` <span style="opacity:0.5;font-size:10px;">(свеча ${fmtTime(s.time)})</span>` : ''}</td>
     </tr>`;
   }).join('');
   const signalsTableHtml = signals.length ? `
@@ -15099,6 +15098,22 @@ async function loadMsnrTrades(symbol) {
 }
 
 let currentMsnrData = null;
+
+async function msnrManualOpen(symbol, sigTime, direction, entry, sl, tp) {
+  if (!confirm(`Открыть ${direction} по ${symbol}?\nEntry: ${entry}, SL: ${sl}, TP: ${tp}\n\nСделка будет открыта на бирже за реальные деньги.`)) return;
+  const r = await fetch(`/api/msnr/manual_open`, {
+    method: 'POST',
+    headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({symbol, sig_time: sigTime, direction, entry, sl, tp}),
+  });
+  const d = await r.json();
+  if (d.ok) {
+    alert(`✅ Открыто: ${d.detail || 'сделка отправлена'}`);
+  } else {
+    alert(`❌ Ошибка: ${d.error || 'неизвестная ошибка'}`);
+  }
+  await refreshMsnr();
+}
 
 async function openMsnrChart(symbol, sigTime) {
   document.getElementById('msnrModalTitle').textContent = symbol;
