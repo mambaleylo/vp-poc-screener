@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.158"
+APP_VERSION = "0.99.159"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3930,6 +3930,7 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
                 sl_dist_pct = abs(entry - sl) / entry * 100 if entry else 0
                 lev_all_in = compute_max_safe_leverage(direction, sl_dist_pct, mmr_pct, leverage_cap) if sl_dist_pct > 0 else None
                 if lev_all_in:
+                    # use total_equity here as placeholder; will be replaced after wallet_balance fetch below
                     margin = total_equity * all_in_margin_pct / 100.0
                     leverage = lev_all_in
                     record["leverage"] = leverage
@@ -3967,6 +3968,13 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
                 with state_lock:
                     STATE["autotrade_log"].appendleft(record)
                 return record
+
+            # v0.99.159 — for all-in mode, recalculate margin from wallet_balance
+            # (available free funds, excluding locked margin) now that we have it,
+            # instead of total_equity used as placeholder above. Prevents the
+            # "margin $36.22 > available $36.64" error when other positions are open.
+            if all_in_margin_pct is not None and wallet_balance is not None:
+                margin = wallet_balance * all_in_margin_pct / 100.0
 
             contracts, notional, actual_margin, skip_reason = compute_contracts_from_margin(symbol, entry, margin, leverage)
             record["contracts"] = contracts
