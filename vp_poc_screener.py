@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.149"
+APP_VERSION = "0.99.150"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14710,7 +14710,7 @@ async function refreshMsnr() {
       <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td><td class="dim">${levelTxt}</td>
       <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.sl)}</td><td class="dim">${fmt(s.tp)}</td>
       <td class="dim">${sizeTxt}</td>
-      <td>${statusHtml}</td><td class="dim">${fmtDateTime(s.time)}</td>
+      <td>${statusHtml}</td><td class="dim" title="время свечи сигнала: ${fmtDateTime(s.time)}">${s.detected_at ? fmtDateTime(s.detected_at) : fmtDateTime(s.time)}${s.detected_at && Math.abs(s.detected_at - s.time) > 120 ? ` <span style="opacity:0.5;font-size:10px;">(свеча ${fmtTime(s.time)})</span>` : ''}</td>
     </tr>`;
   }).join('');
   const signalsTableHtml = signals.length ? `
@@ -15363,7 +15363,7 @@ async function refreshMirror() {
       <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td>
       <td class="dim">${patternLabels[s.pattern] || s.pattern}</td>
       <td>${fmt(s.entry)}</td><td>${fmt(s.sl)}</td><td>${fmt(s.tp)}</td>
-      <td>${s.rr}</td><td>${statusHtml}</td><td class="dim">${fmtDateTime(s.time)}</td>
+      <td>${s.rr}</td><td>${statusHtml}</td><td class="dim" title="время свечи сигнала: ${fmtDateTime(s.time)}">${s.detected_at ? fmtDateTime(s.detected_at) : fmtDateTime(s.time)}${s.detected_at && Math.abs(s.detected_at - s.time) > 120 ? ` <span style="opacity:0.5;font-size:10px;">(свеча ${fmtTime(s.time)})</span>` : ''}</td>
     </tr>`;
   }).join('');
   const signalsTableHtml = signals.length ? `
@@ -15520,7 +15520,7 @@ async function refreshLsw() {
       <td class="dim">${levelTypeLabels[s.level_type] || s.level_type} (x${s.level_touches||'?'})</td>
       <td class="dim">${confirmTxt}</td>
       <td>${fmt(s.entry)}</td><td>${fmt(s.sl)}</td><td>${fmt(s.tp)}</td>
-      <td>${s.rr}</td><td>${statusHtml}</td><td class="dim">${fmtDateTime(s.time)}</td>
+      <td>${s.rr}</td><td>${statusHtml}</td><td class="dim" title="время свечи сигнала: ${fmtDateTime(s.time)}">${s.detected_at ? fmtDateTime(s.detected_at) : fmtDateTime(s.time)}${s.detected_at && Math.abs(s.detected_at - s.time) > 120 ? ` <span style="opacity:0.5;font-size:10px;">(свеча ${fmtTime(s.time)})</span>` : ''}</td>
     </tr>`;
   }).join('');
   const signalsTableHtml = signals.length ? `
