@@ -11778,3 +11778,17 @@ v0.99.156 - Autotrade log "Детали" column now fully in Russian, per
          Also: status column labels in JS translated to Russian
          (Открыта / Открыта (стоп не встал) / Dry-run / Пропущена /
          Ошибка).
+
+v0.99.157 - MSNR-specific "ва-банк" mode, per direct user request
+         ("хочу выбирать, когда торговать по проценту риска из
+         настроек а когда на весь депозит... только для режима msnr").
+         New toggle "↳ Ва-банк (MSNR)" in MSNR settings group: when
+         enabled, uses MSNR_ALL_IN_MARGIN_PCT (95%) of total equity as
+         MARGIN per trade instead of the risk-% formula. Leverage is
+         still auto-computed from the signal's SL distance (same safe-
+         leverage formula, same liquidation safety — only the margin
+         commitment changes). Log detail shows "ва-банк (95%)" when
+         active. Implemented via all_in_margin_pct parameter on
+         execute_autotrade() — affects both primary MSNR trades and
+         addon (добор) trades. Verified: py_compile, pyflakes clean,
+         node --check, 44 routes, ID audit (setMsnrAllIn 1:1).
