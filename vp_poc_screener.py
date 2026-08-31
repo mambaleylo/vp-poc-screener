@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.159"
+APP_VERSION = "0.99.160"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -10795,7 +10795,7 @@ def mirror_scan_symbol_live(symbol):
         if AUTOTRADE_ENABLED_MIRROR:
             autotrade_result = execute_autotrade("mirror", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
             sim_execute_trade("mirror", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
-                               AUTOTRADE_LEVERAGE_MIRROR, record)
+                               autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_MIRROR, record)
             # v0.99.134 — same cooldown-release-on-ERROR fix as LSW's own
             # (see that call site's own comment for the full incident):
             # a bare network ERROR shouldn't permanently burn this
@@ -11979,7 +11979,7 @@ def lsw_scan_symbol_live(symbol):
         if AUTOTRADE_ENABLED_LSW:
             autotrade_result = execute_autotrade("lsw", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
             sim_execute_trade("lsw", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
-                               AUTOTRADE_LEVERAGE_LSW, record)
+                               autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_LSW, record)
             # v0.99.134 — BUG FOUND (per direct user report: a real
             # order attempt failed with status ERROR — "HTTPSConnection
             # Pool... Read timed out" — and the trade never opened even
