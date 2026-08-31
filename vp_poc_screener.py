@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.156"
+APP_VERSION = "0.99.157"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -942,6 +942,8 @@ AUTOTRADE_SIZE_MODE = os.environ.get("VP_AUTOTRADE_SIZE_MODE", "percent")  # "pe
 AUTOTRADE_SIZE_VALUE = float(os.environ.get("VP_AUTOTRADE_SIZE_VALUE", 2.0))  # percent: % of futures wallet balance; fixed: raw USD margin, leverage-independent either way
 AUTOTRADE_RISK_PCT_OF_BALANCE = float(os.environ.get("VP_AUTOTRADE_RISK_PCT", 5.0))  # v0.99.102, per direct user request ("надо чтобы размер позиции только можно было выбрать"): % of TOTAL account equity risked per trade if SL hits — drives the now-auto-computed leverage, replacing every module's own fixed leverage constant. The user picks position SIZE (margin, via AUTOTRADE_SIZE_MODE/VALUE above, unchanged); leverage is derived per-trade from this risk target, this signal's own SL distance, and the chosen margin — no longer a manual choice at all. v0.99.145 — default raised 2.0->5.0 and made settings-editable, per direct user request ("Риск на сделку сделай 5% с выбором в настройках")
 AUTOTRADE_EMERGENCY_SL_BUFFER_PCT = float(os.environ.get("VP_AUTOTRADE_EMERGENCY_SL_BUFFER_PCT", 0.3))  # v0.99.146, per direct user report (a signal fired after price had already moved past its own sl, opened anyway, the stop then failed to place, leaving a real position with nothing but liquidation as its actual stop) — when the SL leg of place_tp_sl_orders() fails on an already-open real position, ONE emergency retry is attempted at this % away from a freshly-fetched current price (not the original, now-invalid sl), per the user's own direct choice ("выставить маленький стоп если да" — a small protective stop, not an immediate market close)
+MSNR_ALL_IN_ENABLED = os.environ.get("VP_MSNR_ALL_IN", "0") == "1"  # v0.99.157 — MSNR-only "ва-банк" mode: use ~95% of total equity as MARGIN per trade instead of AUTOTRADE_RISK_PCT_OF_BALANCE. Leverage is still auto-computed from the signal's own SL distance (same liquidation safety). Off by default.
+MSNR_ALL_IN_MARGIN_PCT = float(os.environ.get("VP_MSNR_ALL_IN_MARGIN_PCT", 95.0))
 SCALP_MARTINGALE_ENABLED = os.environ.get("VP_SCALP_MARTINGALE_ENABLED", "0") == "1"  # v0.99.109, per direct user request ("удвоение после стоплосса... классический мартингейл"): defaults OFF — a deliberate opt-in given the real, well-understood risk of exponentially escalating position size on a losing streak (a mathematically inevitable property of Martingale-style sizing, not a bug), not something that should silently activate for an existing account. See scalp_martingale_multiplier_for_symbol()'s own docstring for the full mechanics.
 SCALP_MARTINGALE_MAX_DOUBLINGS = int(os.environ.get("VP_SCALP_MARTINGALE_MAX_DOUBLINGS", 3))  # v0.99.109 — the safety cap: after this many consecutive losses on a symbol, the risk multiplier (2^streak) stops growing and holds at 2^this value — per direct user choice of a count-based cap over a direct max-%-risk cap. Default 3 -> caps at 2^3=8x base risk (16% of balance at the default 2% base), a starting value, adjustable via the env var.
 # Scalp gets its OWN size config, separate from the shared one above — per
@@ -1015,7 +1017,7 @@ CREDENTIALS_FILE = os.environ.get(
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_network",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "msnr_all_in_enabled",
                   "autotrade_risk_pct",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   "lsw_rr", "lsw_equal_tolerance_pct",
@@ -1078,6 +1080,7 @@ def get_settings():
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
         "autotrade_risk_pct": AUTOTRADE_RISK_PCT_OF_BALANCE,
+        "msnr_all_in_enabled": MSNR_ALL_IN_ENABLED,
         "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
         "autotrade_breakout": AUTOTRADE_ENABLED_BREAKOUT,
         "autotrade_scalp": AUTOTRADE_ENABLED_SCALP,
@@ -1105,7 +1108,7 @@ def apply_settings(updates):
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_NETWORK
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
@@ -1228,6 +1231,8 @@ def apply_settings(updates):
                 AUTOTRADE_RISK_PCT_OF_BALANCE = v
         except (TypeError, ValueError):
             pass
+    if "msnr_all_in_enabled" in updates:
+        MSNR_ALL_IN_ENABLED = bool(updates["msnr_all_in_enabled"])
     if "autotrade_bounce" in updates:
         AUTOTRADE_ENABLED_BOUNCE = bool(updates["autotrade_bounce"])
     if "autotrade_breakout" in updates:
@@ -3815,7 +3820,7 @@ def reconcile_positions_and_orders():
     return unprotected, cancelled
 
 
-def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_pct_override=None, allow_stack=False):
+def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_pct_override=None, allow_stack=False, all_in_margin_pct=None):
     """The single entry point every signal source calls to (maybe) fire a
     real trade. `mode` is a short label (e.g. "bounce", "msnr", "scalp")
     used for the auto-trade-enabled toggle lookup and the log. `extra` is
@@ -3916,6 +3921,19 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
                 direction, entry, sl, leverage_cap, mmr_pct, total_equity, risk_pct=risk_pct_override)
             record["leverage"] = leverage
             record["risk_pct"] = round(risk_pct_override if risk_pct_override is not None else AUTOTRADE_RISK_PCT_OF_BALANCE, 4)
+
+            # v0.99.157 — MSNR-specific all-in mode: use all_in_margin_pct%
+            # of equity as margin instead of the risk-% formula. Leverage
+            # is still auto-computed from the SL distance (same liquidation
+            # safety), only the margin commitment changes.
+            if all_in_margin_pct is not None and not skip_reason:
+                sl_dist_pct = abs(entry - sl) / entry * 100 if entry else 0
+                lev_all_in = compute_max_safe_leverage(direction, sl_dist_pct, mmr_pct, leverage_cap) if sl_dist_pct > 0 else None
+                if lev_all_in:
+                    margin = total_equity * all_in_margin_pct / 100.0
+                    leverage = lev_all_in
+                    record["leverage"] = leverage
+                    record["risk_pct"] = f"ва-банк ({all_in_margin_pct}%)"
 
             if skip_reason:
                 record["status"] = "SKIPPED"
@@ -8923,7 +8941,8 @@ def msnr_scan_symbol_live(symbol):
             # orders had trouble — the risk is real either way) now
             # count as fired.
             autotrade_result = execute_autotrade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"],
-                                                  sig["tp"])
+                                                  sig["tp"],
+                                                  all_in_margin_pct=MSNR_ALL_IN_MARGIN_PCT if MSNR_ALL_IN_ENABLED else None)
             order_opened = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
             # v0.99.134 — same cooldown-release-on-ERROR fix as LSW's own
             # (see that module's own call site comment for the full
@@ -9051,7 +9070,8 @@ def msnr_scan_addon_live(symbol):
         final_sl = min(primary["sl"], asig["sl"]) if direction == "LONG" else max(primary["sl"], asig["sl"])
         autotrade_result = execute_autotrade("msnr", symbol, direction, asig["entry"], final_sl, asig["tp"],
                                               extra={"is_addon": True, "primary_time": primary["time"]},
-                                              allow_stack=True)
+                                              allow_stack=True,
+                                              all_in_margin_pct=MSNR_ALL_IN_MARGIN_PCT if MSNR_ALL_IN_ENABLED else None)
         order_opened = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
         if not order_opened:
             # v0.99.134 — same cooldown-release-on-ERROR fix as every
@@ -13847,6 +13867,13 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="label">↳ Ва-банк (MSNR)</div>
+          <div class="sub">вместо риска N% от депо — использовать 95% депо как маржу на каждую MSNR-сделку. Плечо по-прежнему подбирается автоматически по стопу — ликвидация не становится ближе, просто в сделку идёт почти весь депозит</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setMsnrAllIn"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Минимальный RR (глобальный)</div>
           <div class="sub">единый порог 1:2 для всех монет одинаково — не подбирается индивидуально под каждую (в отличие от остальных фильтров выше), поэтому результат честнее проверяет саму идею, а не удачную подгонку под конкретную монету</div>
         </div>
@@ -15865,6 +15892,7 @@ const setInputs = {
   scalp_signals_enabled: document.getElementById('setScalpSignals'),
   msnr_enabled: document.getElementById('setMsnr'),
   msnr_addon_enabled: document.getElementById('setMsnrAddon'),
+  msnr_all_in_enabled: document.getElementById('setMsnrAllIn'),
   msnr_min_rr_filter_enabled: document.getElementById('setMsnrMinRrFilter'),
   msnr_htf_filter_enabled: document.getElementById('setMsnrHtfFilter'),
   ft5_enabled: document.getElementById('setFt5'),
