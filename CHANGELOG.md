@@ -11821,3 +11821,15 @@ v0.99.159 - FIX: all-in mode used total_equity instead of wallet_balance
          free funds, already excludes locked margin) fetched right before
          the affordability check — same logic Sweep already uses. Falls
          back to total_equity if wallet_balance fetch failed.
+
+v0.99.160 - Simulator now uses real per-trade leverage from execute_
+         autotrade() for Mirror and LSW, per direct user request
+         ("симулятор должен считать исход учитывая плечо из сделки").
+         MSNR already did this correctly (live_leverage from the real
+         order). Mirror was using the fixed AUTOTRADE_LEVERAGE_MIRROR
+         constant, LSW was using AUTOTRADE_LEVERAGE_LSW — both now use
+         autotrade_result.get("leverage") with the old constant as
+         fallback. Scalp uses rec["leverage"] (from its own optimizer)
+         and Bounce/Breakout uses autotrade_leverage — both already
+         correct, not changed. Verified: py_compile, pyflakes clean,
+         45 routes unchanged.
