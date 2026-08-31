@@ -11700,3 +11700,26 @@ v0.99.151 - Chart entry dot now placed at close of signal candle, not
          the table shows detected_at, the chart dot is at the candle's
          right edge.
          Verified: py_compile, pyflakes clean, node --check, 44 routes.
+
+v0.99.152 - Live scan loops (LSW, Mirror, MSNR) now sync to candle
+         close instead of sleeping a flat 300s between passes, per
+         direct user report with screenshot showing AAVE_USDT entered
+         on the candle AFTER the signal candle (the "green pullback
+         bar") rather than on the signal candle's own close. Root
+         cause: the flat 300s sleep meant the scan could fire at any
+         random point within a candle interval — if a 1h candle closed
+         at 03:00:01 and the loop had just gone to sleep at 02:58:00,
+         the next scan wouldn't run until 03:03:00, by which point the
+         signal candle's open+1 candle was already 3 minutes old and
+         the entry was visually "one candle late". Fix: each loop now
+         sleeps until 3 seconds AFTER the next candle boundary
+         (interval_sec - now % interval_sec + 3), so every scan fires
+         within seconds of a new candle opening — as close as possible
+         to the moment the previous candle closed and the signal became
+         actionable. The 3s buffer gives Gate time to finalize candle
+         data before the fetch. Each module uses its own interval:
+         LSW uses LSW_INTERVAL, Mirror uses MIRROR_INTERVAL, MSNR uses
+         MSNR_ENTRY_TF. Verified: py_compile, pyflakes clean, 44
+         routes, and a unit test confirming the sleep math is correct
+         across 3 timing scenarios (just-closed, mid-interval, 2s
+         before close).
