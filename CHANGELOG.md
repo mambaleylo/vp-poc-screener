@@ -11811,3 +11811,13 @@ v0.99.158 - 3 MSNR live signals improvements, per direct user request:
          that would have been used.
          Verified: py_compile, pyflakes clean, node --check, 45 routes
          (1 new: /api/msnr/manual_open).
+
+v0.99.159 - FIX: all-in mode used total_equity instead of wallet_balance
+         for margin calculation, per direct user report ("маржа $36.22
+         превышает доступный баланс $36.64 — сделка пропущена"). When
+         other positions were open, total_equity included locked margin,
+         so 95% of total_equity could exceed the actually-available free
+         balance. Fixed: all-in margin now uses wallet_balance (available
+         free funds, already excludes locked margin) fetched right before
+         the affordability check — same logic Sweep already uses. Falls
+         back to total_equity if wallet_balance fetch failed.
