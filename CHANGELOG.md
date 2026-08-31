@@ -11650,3 +11650,29 @@ v0.99.149 - New LSW candle structure filter, per direct user decision
          small wick) correctly drops; a SHORT with a large upper wick
          correctly passes; a signal with no entry_idx correctly kept
          by default.
+
+v0.99.150 - Signal tables now show detection time (detected_at) instead
+         of candle open time (time), per direct user report ("в sweep
+         сигналы открываются протухшие, в 3 часа открываются с
+         пометкой 2... сигнал написано 23:00, но на бирже вход в
+         00:02"). After careful re-read: the detector, scan timing, and
+         trade execution were all correct — a signal on the 2:00 candle
+         is legitimately detected when that candle CLOSES at 3:00, and
+         a signal on the 23:00 candle is legitimately detected and
+         executed at ~00:02. The confusion was purely display: every
+         signal table (MSNR, Mirror, LSW) showed s.time (candle open
+         time) in the timestamp column, so a signal detected and traded
+         at 3:00 appeared to have a 2:00 timestamp — looking like a
+         1-hour-stale trade. All three modules already write
+         detected_at = time.time() to each signal record; it just
+         wasn't shown. Fixed: all three time columns now show
+         detected_at when available, with the candle open time shown
+         in a small faded secondary label "(свеча HH:MM)" only when
+         the gap exceeds 2 minutes (the normal expected gap — roughly
+         equal to one candle interval), so the column stays clean
+         for signals processed promptly and only surfaces the secondary
+         label when there's a genuine difference worth seeing. Hovering
+         the cell shows the candle time in a tooltip always.
+         Verified: py_compile, pyflakes clean, node --check on the
+         correctly-last <script> block, the Flask route/def integrity
+         check (still 44 routes — only JS rendering changed).
