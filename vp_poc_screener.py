@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.153"
+APP_VERSION = "0.99.154"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12191,10 +12191,22 @@ def lsw_live_loop():
         # candle boundary, so every scan fires as close as possible to
         # the moment a new candle opens (= previous candle just closed).
         # Buffer of 3s gives Gate time to finalize the last candle.
-        interval_sec = INTERVAL_SECONDS.get(LSW_INTERVAL, 3600)
+        # v0.99.153 — when LSW_ENTRY_CONFIRM_ENABLED, the confirmation
+        # check (5m BOS/absorption/inversion) needs to run more often
+        # than once per 1h candle — otherwise the BOS that appears 10
+        # minutes after the sweep candle is missed until the next 1h
+        # boundary. Use the confirmation interval (5m) instead so the
+        # loop wakes up each time a new 5m candle closes and can detect
+        # the BOS promptly. When confirmation is off, keep syncing to
+        # the main LSW_INTERVAL boundary so new sweep signals are caught
+        # immediately after each candle closes.
+        if LSW_ENTRY_CONFIRM_ENABLED:
+            scan_interval_sec = INTERVAL_SECONDS.get(LSW_ENTRY_CONFIRM_INTERVAL, 300)
+        else:
+            scan_interval_sec = INTERVAL_SECONDS.get(LSW_INTERVAL, 3600)
         now = time.time()
-        secs_into_interval = now % interval_sec
-        sleep_sec = (interval_sec - secs_into_interval) + 3
+        secs_into_interval = now % scan_interval_sec
+        sleep_sec = (scan_interval_sec - secs_into_interval) + 3
         time.sleep(sleep_sec)
 
 
