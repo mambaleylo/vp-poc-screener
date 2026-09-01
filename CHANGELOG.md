@@ -11903,3 +11903,19 @@ v0.99.167 - New MSNR column "За ликвидацией" showing WR/n of exactl
          "После ликвидации" renamed from "Ликвидация (соло)" for
          clarity. Verified: py_compile, pyflakes clean, node --check,
          45 routes unchanged.
+
+v0.99.168 - CRITICAL FIX: backtest loop could hang for hours, per direct
+         user report ("последний бэктест был 2.6ч назад" while a normal
+         cycle takes ~8min). Root cause: as_completed(futs) with no
+         timeout blocks indefinitely if any symbol's HTTP request hangs
+         at the TCP level — when a mobile connection drops mid-request,
+         no data arrives so HTTP_TIMEOUT (15s) never fires; the socket
+         just sits open. One such stuck symbol froze the entire batch.
+         Fix: added timeout to both as_completed() and fut.result() in
+         all 3 backtest loops (MSNR, Mirror, LSW). Per-symbol ceiling
+         = HTTP_TIMEOUT * 3 retries * 3 fetches + 60s margin = 3min.
+         A symbol exceeding it is logged and skipped (same as an
+         exception — keeps its last-known-good data from the previous
+         cycle). Total as_completed timeout = per-symbol * universe size
+         so the outer loop also can't hang if many symbols stall at once.
+         Verified: py_compile, pyflakes clean, 45 routes unchanged.
