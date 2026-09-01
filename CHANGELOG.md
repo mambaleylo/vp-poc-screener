@@ -11839,3 +11839,12 @@ v0.99.161 - Settings now shows last 6 chars of saved API key and secret,
          GET /api/credentials now returns key_suffix and secret_suffix
          (e.g. "…Ab3x9Z"), shown as "key: …Ab3x9Z · secret: …Kf2mNp"
          under the API key field. Verified: py_compile, pyflakes clean.
+
+v0.99.162 - MSNR live signals table now only shows symbols with autotrade
+         checkbox enabled, per direct user report (SKYAI_USDT without
+         checkbox appeared in the live signals list). Fixed at the API
+         level: /api/msnr/signals now filters to autotrade_symbols only,
+         instead of returning all msnr_signals from STATE. The v0.99.158
+         JS-side filter was insufficient because it only hid OPEN signals
+         without autotrade_fired — closed WIN/LOSS/TIMEOUT from non-
+         galochka symbols still showed through.
