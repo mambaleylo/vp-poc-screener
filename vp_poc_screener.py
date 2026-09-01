@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.167"
+APP_VERSION = "0.99.168"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9544,8 +9544,22 @@ def msnr_backtest_loop():
                 # un-tuned backtest run needed.
                 with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
                     futs = [ex.submit(_msnr_backtest_one_symbol, s) for s in universe]
-                    for fut in as_completed(futs):
-                        res = fut.result()
+                    # v0.99.168 — per direct user report (backtest showed
+                    # "2.6ч назад" despite taking only ~8min normally):
+                    # as_completed() with no timeout can block indefinitely
+                    # if a single symbol's HTTP request hangs at the TCP
+                    # level (no data arriving, so HTTP_TIMEOUT never fires).
+                    # Per-future timeout = HTTP_TIMEOUT * 3 retries * 3
+                    # fetches per symbol + margin = 3 min ceiling per symbol.
+                    # A symbol that exceeds it is logged and skipped (same
+                    # outcome as an exception — keeps last-known-good data).
+                    PER_SYMBOL_TIMEOUT = HTTP_TIMEOUT * 3 * 3 + 60
+                    for fut in as_completed(futs, timeout=PER_SYMBOL_TIMEOUT * len(universe)):
+                        try:
+                            res = fut.result(timeout=PER_SYMBOL_TIMEOUT)
+                        except TimeoutError:
+                            log_error(f"msnr_backtest: a symbol timed out after {PER_SYMBOL_TIMEOUT}s — skipping")
+                            continue
                         if res is None:
                             continue
                         symbol, override, results, raw_results, summary = res
@@ -10961,10 +10975,11 @@ def mirror_backtest_loop():
 
             with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
                 futs = {ex.submit(_backtest_one, s): s for s in universe}
-                for fut in as_completed(futs):
+                PER_SYMBOL_TIMEOUT_M = HTTP_TIMEOUT * 3 * 3 + 60
+                for fut in as_completed(futs, timeout=PER_SYMBOL_TIMEOUT_M * len(universe)):
                     symbol = futs[fut]
                     try:
-                        results, meta, tuned = fut.result()
+                        results, meta, tuned = fut.result(timeout=PER_SYMBOL_TIMEOUT_M)
                         results_by_symbol[symbol] = results
                         summary = mirror_summarize_backtest(results)
                         summary_by_symbol[symbol] = summary
@@ -12096,10 +12111,11 @@ def lsw_backtest_loop():
             try:
                 with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
                     futs = {ex.submit(_lsw_backtest_one, s): s for s in universe}
-                    for fut in as_completed(futs):
+                    PER_SYMBOL_TIMEOUT_L = HTTP_TIMEOUT * 3 * 3 + 60
+                    for fut in as_completed(futs, timeout=PER_SYMBOL_TIMEOUT_L * len(universe)):
                         symbol = futs[fut]
                         try:
-                            _sym, (results, meta) = fut.result()
+                            _sym, (results, meta) = fut.result(timeout=PER_SYMBOL_TIMEOUT_L)
                             results_by_symbol[symbol] = results
                             checkpoints_by_symbol[symbol] = meta.get("checkpoints", {})
                             summary = lsw_summarize_backtest(results)
