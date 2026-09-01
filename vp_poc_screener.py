@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.160"
+APP_VERSION = "0.99.161"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13379,7 +13379,12 @@ def api_post_settings():
 
 @app.route("/api/credentials", methods=["GET"])
 def api_get_credentials():
-    return jsonify({"gate_api_configured": bool(GATE_API_KEY and GATE_API_SECRET)})
+    configured = bool(GATE_API_KEY and GATE_API_SECRET)
+    return jsonify({
+        "gate_api_configured": configured,
+        "key_suffix": ("…" + GATE_API_KEY[-6:]) if GATE_API_KEY else None,
+        "secret_suffix": ("…" + GATE_API_SECRET[-6:]) if GATE_API_SECRET else None,
+    })
 
 
 @app.route("/api/credentials", methods=["POST"])
@@ -15983,7 +15988,7 @@ async function refreshGateApiStatus() {
   try {
     const s = await (await fetch('/api/credentials')).json();
     document.getElementById('setGateApiSub').textContent = s.gate_api_configured
-      ? 'ключи сохранены'
+      ? `ключи сохранены · key: ${s.key_suffix} · secret: ${s.secret_suffix}`
       : 'ключи не заданы — реальные ордера невозможны, работает только dry-run';
   } catch (e) {}
 }
