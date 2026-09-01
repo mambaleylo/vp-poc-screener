@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.161"
+APP_VERSION = "0.99.162"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12972,8 +12972,16 @@ def api_msnr_status():
 
 @app.route("/api/msnr/signals")
 def api_msnr_signals():
+    # v0.99.162 — filter to only symbols with autotrade checkbox enabled,
+    # per direct user report: signals from symbols without a checkbox
+    # appeared in the live signals table. The table is for autotrade-
+    # monitored symbols only — tracking-only signals belong to the
+    # backtest table, not here.
     with state_lock:
-        return jsonify(list(STATE["msnr_signals"]))
+        autotrade_symbols = dict(STATE["msnr_autotrade_symbols"])
+        signals = [s for s in STATE["msnr_signals"]
+                   if autotrade_symbols.get(s["symbol"])]
+    return jsonify(signals)
 
 
 @app.route("/api/msnr/backtest/<symbol>")
