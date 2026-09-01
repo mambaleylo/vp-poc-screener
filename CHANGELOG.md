@@ -11848,3 +11848,9 @@ v0.99.162 - MSNR live signals table now only shows symbols with autotrade
          JS-side filter was insufficient because it only hid OPEN signals
          without autotrade_fired — closed WIN/LOSS/TIMEOUT from non-
          galochka symbols still showed through.
+
+v0.99.163 - MSNR autotrade checkbox now enables at winrate >= 50%
+         (inclusive), per direct user report ("надо сделать 50
+         включительно, а то когда 50 ровно не ставится"). Was `> 50`
+         (strict), now `>= 50` in both the auto-on and still_qualifies
+         checks in msnr_backtest_loop().
