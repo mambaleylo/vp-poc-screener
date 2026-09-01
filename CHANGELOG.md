@@ -11874,3 +11874,12 @@ v0.99.164 - MSNR: removed all per-symbol auto-derived filters from
          still carry the volume_ratio/rr fields needed for the solo
          preview columns. Verified: py_compile, pyflakes clean, node
          --check, 45 routes unchanged.
+
+v0.99.165 - Added toggle for rr_range and volume MSNR filters, per
+         direct user clarification (only the red-label filters needed
+         a toggle, not the others). New checkbox "↳ Фильтры по RR-
+         диапазону и объёму" in MSNR settings — off by default (same
+         as v0.99.164). When on, applies both filters to best_results
+         (as before v0.99.164). Solo-preview columns always computed
+         regardless of the toggle. Verified: py_compile, pyflakes,
+         node --check, 45 routes, ID audit 1:1.
