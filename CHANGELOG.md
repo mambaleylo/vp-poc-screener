@@ -11883,3 +11883,14 @@ v0.99.165 - Added toggle for rr_range and volume MSNR filters, per
          (as before v0.99.164). Solo-preview columns always computed
          regardless of the toggle. Verified: py_compile, pyflakes,
          node --check, 45 routes, ID audit 1:1.
+
+v0.99.166 - Restore liquidation filter as ALWAYS-ON (no toggle), per
+         direct user report ("AAVE вход 97, стоп 90, плечо 67x — это
+         за зоной ликвидации"). This filter is deterministic math, not
+         statistical: if SL is past the liquidation price, the exchange
+         force-closes before SL is ever reached, so a "LOSS at SL"
+         backtest outcome was never real. Now always applied after
+         rr/volume previews, before htf_trend. Also added as a solo
+         column "Ликвидация (соло)" in the backtest table showing the
+         WR/n after removing beyond-liquidation trades.
+         Verified: py_compile, pyflakes clean, node --check, 45 routes.
