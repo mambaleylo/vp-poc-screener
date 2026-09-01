@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.163"
+APP_VERSION = "0.99.164"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7489,146 +7489,55 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
         # liquidation filter.
         best["effective_leverage"] = msnr_symbol_effective_leverage(symbol)
         best["leverage_ceiling"] = msnr_symbol_contract_max_leverage(symbol)
-        # v0.99.57, per direct user follow-up ("теперь количество сделок
-        # снизится и монеты могут перестать проходить по выборке"):
-        # captured HERE, before any filter below runs — this symbol's
-        # true closed-trade sample size, independent of how many later
-        # get excluded by any filter. msnr_rank_by_winrate_sample()/
-        # msnr_compute_live_universe() gate eligibility on THIS field,
-        # not wins+losses — a symbol shouldn't lose its shot at ranking
-        # just because filters progressively shrink the DISPLAYED
-        # win/loss count.
         best["raw_closed_n"] = best["wins"] + best["losses"]
         raw_results = best_results
-        # v0.99.86 — the checkpoint chain: one snapshot per stage
-        # transition (not two per filter) — each filter's "before" is
-        # exactly the PREVIOUS filter's "after," so this only costs
-        # ONE fresh leverage-search+compound-sim per filter, not two.
-        # "raw" is the baseline BEFORE any per-symbol filter has run
-        # (the winning grid combo's own unfiltered trade list).
+        # v0.99.164 — simplified to raw + solo previews + htf_trend only.
+        # All per-symbol auto-derived filters (rr_range, liquidation,
+        # sl_pct, hours, volume, min_rr) removed per direct user decision
+        # ("убрать полностью из кода, они не работают") — they were adding
+        # ~6 extra _msnr_filter_checkpoint() calls (each runs a fresh Kelly
+        # leverage search + compound sim) per symbol per backtest cycle for
+        # no benefit. Kept: solo previews for rr_range and volume so the
+        # red label info (skip rr, skip объём) is still visible as separate
+        # columns; htf_trend (the only filter that actually works).
         checkpoints = [{"stage": "raw", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])}]
-        # v0.99.22/v0.99.79/v0.99.86: derive this symbol's own RR range
-        # off the winning combo's own trades (not re-run per grid combo
-        # — needlessly expensive, and the winning combo's own trades
-        # are what's actually traded). v0.99.79 had disabled the old
-        # ONE-SIDED version entirely ("Skip RR>3, давай подобную
-        # проверку тоже уберем, пока важно все RR торговать") — this
-        # re-enables filtering, but as msnr_symbol_rr_range()'s
-        # genuinely TWO-SIDED (floor AND ceiling) replacement, not a
-        # plain revert to the old rule; see that function's own
-        # docstring for why a one-sided cutoff couldn't catch the
-        # reported pattern (large, trustworthy samples with a middling
-        # winrate but near-zero income — a bad low-RR region dragging
-        # the average down just as much as a bad high-RR one).
-        # Deliberately computed off the FULL unfiltered sample before
-        # any filtering — filtering first would shrink the very bucket
-        # evidence the range is judged from.
-        before_rr = len(best_results)
+        # Solo preview: what would rr_range filter do (shown as column, not applied)
         rr_floor, rr_ceiling = msnr_symbol_rr_range(best_results)
         best["skip_rr_min"] = rr_ceiling
-        best["skip_rr_max"] = rr_floor  # v0.99.86 — new field, the floor side; kept named "_max" for symmetry with "_min" meaning "everything past this edge, going the other direction, is skipped"
-        if rr_ceiling is not None or rr_floor is not None:
-            best_results = [t for t in best_results if t["rr"] is None
-                             or ((rr_ceiling is None or t["rr"] < rr_ceiling)
-                                 and (rr_floor is None or t["rr"] >= rr_floor))]
-            _msnr_recompute_summary_score(best, best_results)
-        best["rr_filtered_count"] = before_rr - len(best_results)
-        checkpoints.append({"stage": "rr_range", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
-        # v0.99.26, per direct user request ("иногда стоп будет за
-        # ликвидацией и просто избегать этого"): deterministic filter,
-        # not statistical — a trade whose own SL sits past this
-        # symbol's effective-leverage liquidation buffer gets dropped
-        # unconditionally, sample size doesn't matter here since it's
-        # Gate's own margin math, not a pattern being inferred from
-        # history. Applied AFTER the RR-range filter (on whatever
-        # survived it) and BEFORE the SL-width statistical filter below
-        # — the SL-width bucket stats should reflect only trades that
-        # could have actually played out as scored, not ones that were
-        # never mechanically reachable in the first place.
-        before_liq = len(best_results)
-        best_results = [t for t in best_results
-                         if not msnr_trade_beyond_liquidation(symbol, t["direction"], t["entry"], t["sl"],
-                                                               leverage=best["effective_leverage"])]
-        best["liquidation_filtered_count"] = before_liq - len(best_results)
-        if best["liquidation_filtered_count"]:
-            _msnr_recompute_summary_score(best, best_results)
-        checkpoints.append({"stage": "liquidation", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
-        # v0.99.26, per direct user request ("фильтр по ширине стопа"):
-        # SL-width counterpart to the RR-range block above — same
-        # ordering reasoning (derive the floor off the full surviving
-        # sample first, THEN filter), same "skip entirely" behavior.
-        before_sl = len(best_results)
-        best["skip_sl_pct_min"] = msnr_symbol_sl_skip_min(best_results)
-        if best["skip_sl_pct_min"] is not None:
-            skip_sl = best["skip_sl_pct_min"]
-            best_results = [t for t in best_results
-                             if not t.get("entry") or t["entry"] <= 0 or t.get("sl") is None
-                             or abs(t["entry"] - t["sl"]) / t["entry"] * 100 < skip_sl]
-            _msnr_recompute_summary_score(best, best_results)
-        best["sl_filtered_count"] = before_sl - len(best_results)
-        checkpoints.append({"stage": "sl_pct", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
-        # v0.99.56, per direct user request ("какой фильтр сигналов был
-        # бы самым эффективным для внедрения" -> time-of-day): same
-        # ordering reasoning as every filter above — derive the
-        # bad-hours SET off the full surviving sample first, THEN
-        # filter, so msnr_symbol_skip_hours()'s own sample-size gate
-        # judges against undiminished evidence. Unlike the RR/SL
-        # filters above (a threshold), this drops a SET of specific UTC
-        # hours — see that function's own docstring for why hour-of-day
-        # has no natural "past this point" ordering.
-        before_hours = len(best_results)
-        best["skip_hours"] = msnr_symbol_skip_hours(best_results)
-        if best["skip_hours"]:
-            skip_hour_set = set(best["skip_hours"])
-            best_results = [t for t in best_results
-                             if t.get("time") is None or time.gmtime(t["time"])[3] not in skip_hour_set]
-            _msnr_recompute_summary_score(best, best_results)
-        best["hours_filtered_count"] = before_hours - len(best_results)
-        checkpoints.append({"stage": "hours", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
-        # v0.99.59, per direct user request ("второй фильтр... про n
-        # как в первом не забудь" — volume confirmation on the sweep):
-        # same ordering reasoning as every filter above — derive the
-        # floor off the full surviving sample first, THEN filter. See
-        # msnr_symbol_volume_skip_below()'s own docstring for why this
-        # skips BELOW a ceiling (opposite direction from the RR-range
-        # floor/skip_sl_pct_min, which skip ABOVE a floor).
-        before_volume = len(best_results)
+        best["skip_rr_max"] = rr_floor
+        best["rr_filtered_count"] = 0
+        rr_solo = [t for t in best_results if t["rr"] is None
+                   or ((rr_ceiling is None or t["rr"] < rr_ceiling)
+                       and (rr_floor is None or t["rr"] >= rr_floor))]
+        checkpoints.append({"stage": "rr_range", **_msnr_filter_checkpoint(rr_solo, symbol, best["leverage_ceiling"])})
+        # Solo preview: what would volume filter do (shown as column, not applied)
         best["skip_volume_below"] = msnr_symbol_volume_skip_below(best_results)
+        best["volume_filtered_count"] = 0
+        vol_solo = best_results
         if best["skip_volume_below"] is not None:
             skip_vol = best["skip_volume_below"]
-            best_results = [t for t in best_results
-                             if t.get("volume_ratio") is None or t["volume_ratio"] >= skip_vol]
-            _msnr_recompute_summary_score(best, best_results)
-        best["volume_filtered_count"] = before_volume - len(best_results)
-        checkpoints.append({"stage": "volume", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
-        # v0.99.141 — 2 new GLOBAL (not per-symbol-tuned, unlike every
-        # filter above) optional stages. Their own solo checkpoint is
-        # ALWAYS computed and appended (what this filter would do if
-        # applied on top of everything above), even while its own
-        # toggle is off — see MSNR_MIN_RR_FILTER_ENABLED's own comment
-        # for the full reasoning — but best_results is only actually
-        # narrowed when the toggle is genuinely on.
-        min_rr_candidates = msnr_filter_by_min_rr(best_results)
-        if MSNR_MIN_RR_FILTER_ENABLED:
-            before_min_rr = len(best_results)
-            best_results = min_rr_candidates
-            best["min_rr_filtered_count"] = before_min_rr - len(best_results)
-            _msnr_recompute_summary_score(best, best_results)
-            checkpoints.append({"stage": "min_rr", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
-        else:
-            checkpoints.append({"stage": "min_rr", **_msnr_filter_checkpoint(min_rr_candidates, symbol, best["leverage_ceiling"])})
+            vol_solo = [t for t in best_results if t.get("volume_ratio") is None or t["volume_ratio"] >= skip_vol]
+        checkpoints.append({"stage": "volume", **_msnr_filter_checkpoint(vol_solo, symbol, best["leverage_ceiling"])})
+        # Removed fields (set to None/0 for backward compat with any JS that reads them)
+        best["skip_sl_pct_min"] = None
+        best["liquidation_filtered_count"] = 0
+        best["skip_hours"] = []
+        best["hours_filtered_count"] = 0
+        best["sl_filtered_count"] = 0
+        best["min_rr_filtered_count"] = 0
+        # HTF trend filter — the only filter actually applied to best_results
         htf_candles = None
         try:
             htf_interval_sec = INTERVAL_SECONDS.get(MSNR_HTF_INTERVAL, 14400)
             htf_fetch_start = now - (days + 20) * 86400
             htf_candles = get_candles_range(symbol, MSNR_HTF_INTERVAL, htf_fetch_start, now)
         except Exception as e:
-            log_error(f"msnr_optimize_symbol {symbol}: HTF fetch for trend filter failed: {e}")
+            log_error(f"msnr_optimize_symbol {symbol}: HTF fetch failed: {e}")
         if htf_candles and len(htf_candles) >= MSNR_HTF_EMA_PERIOD:
             bias_series = lsw_htf_bias_series(htf_candles, period=MSNR_HTF_EMA_PERIOD, buffer_pct=MSNR_HTF_TREND_BUFFER_PCT)
             htf_candidates = msnr_filter_by_htf_trend(best_results, bias_series, htf_interval_sec)
         else:
-            htf_candidates = best_results  # not enough HTF history to judge — same "nothing to judge, keep" convention as LSW's own version, just non-conservative here since this is only a solo/optional preview when not enough data exists
+            htf_candidates = best_results
         if MSNR_HTF_FILTER_ENABLED:
             before_htf = len(best_results)
             best_results = htf_candidates if (htf_candles and len(htf_candles) >= MSNR_HTF_EMA_PERIOD) else []
@@ -7637,15 +7546,8 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
             checkpoints.append({"stage": "htf_trend", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
         else:
             checkpoints.append({"stage": "htf_trend", **_msnr_filter_checkpoint(htf_candidates, symbol, best["leverage_ceiling"])})
-        # v0.99.86 — the full chain, one entry per stage transition;
-        # api_msnr_status() surfaces this so the UI can show, per
-        # filter, exactly what its own before->after did to n/winrate/
-        # income — not just a trade count delta, per the direct request
-        # ("чтобы понимать эффективность фильтров и менять их на другие
-        # своевременно"). Each entry's own "stage" names WHICH filter
-        # produced it (i.e. checkpoints[i] is the state AFTER stage
-        # checkpoints[i]["stage"] ran, checkpoints[i-1] is its "before").
         best["filter_checkpoints"] = checkpoints
+
     # v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше не
     # стало, будто даже хуже" -> Kelly/optimal-f search instead of a
     # fixed stop-width target): ONE flat leverage for this symbol,
@@ -14957,7 +14859,7 @@ async function refreshMsnr() {
     // past this line, just not auto-ranked; a checkbox still renders
     // for any manual_toggle_allowed row below it.
     const separatorHtml = (idx > 0 && arr[idx - 1].autotrade_eligible && !r.autotrade_eligible)
-      ? `<tr><td colspan="11" class="dim" style="font-size:10px;padding:4px 0;border-top:1px solid #1c2433;">\u2014 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 (\u0432\u043d\u0435 \u0442\u043e\u043f-10, \u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u0432\u0440\u0443\u0447\u043d\u0443\u044e \u2014 \u043d\u0430 \u0441\u0432\u043e\u0439 \u0440\u0438\u0441\u043a) \u2014</td></tr>`
+      ? `<tr><td colspan="12" class="dim" style="font-size:10px;padding:4px 0;border-top:1px solid #1c2433;">\u2014 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 (\u0432\u043d\u0435 \u0442\u043e\u043f-10, \u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u0432\u0440\u0443\u0447\u043d\u0443\u044e \u2014 \u043d\u0430 \u0441\u0432\u043e\u0439 \u0440\u0438\u0441\u043a) \u2014</td></tr>`
       : '';
     // v0.99.27, per direct user request: same idea, one tier lower —
     // a visible separator exactly where stress_test_failed rows begin
@@ -14966,7 +14868,7 @@ async function refreshMsnr() {
     // own $ compounding simulation and is excluded from ranking/
     // autotrade entirely, not just scored lower.
     const stressSeparatorHtml = (idx > 0 && !arr[idx - 1].stress_test_failed && r.stress_test_failed)
-      ? `<tr><td colspan="11" class="loss" style="font-size:10px;padding:4px 0;border-top:1px solid #1c2433;">\u2014 \u043f\u0440\u043e\u0432\u0430\u043b\u0438\u043b\u0438 $-\u0441\u0438\u043c\u0443\u043b\u044f\u0446\u0438\u044e \u0434\u0435\u043f\u043e\u0437\u0438\u0442\u0430 (\u0434\u043e\u0445\u043e\u0434 \u2264 0%), \u0438\u0441\u043a\u043b\u044e\u0447\u0435\u043d\u044b \u0438\u0437 \u0442\u043e\u043f\u0430/\u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u0438 \u2014</td></tr>`
+      ? `<tr><td colspan="12" class="loss" style="font-size:10px;padding:4px 0;border-top:1px solid #1c2433;">\u2014 \u043f\u0440\u043e\u0432\u0430\u043b\u0438\u043b\u0438 $-\u0441\u0438\u043c\u0443\u043b\u044f\u0446\u0438\u044e \u0434\u0435\u043f\u043e\u0437\u0438\u0442\u0430 (\u0434\u043e\u0445\u043e\u0434 \u2264 0%), \u0438\u0441\u043a\u043b\u044e\u0447\u0435\u043d\u044b \u0438\u0437 \u0442\u043e\u043f\u0430/\u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u0438 \u2014</td></tr>`
       : '';
     // v0.99.141 — solo-checkpoint columns for the 2 new GLOBAL filters
     // (see MSNR_MIN_RR_FILTER_ENABLED's own comment), reading them by
@@ -14976,7 +14878,7 @@ async function refreshMsnr() {
     // the "raw" pre-filter checkpoint, not vs the final chained result).
     const fcList = r.filter_checkpoints || [];
     const rawCp = fcList.find(c => c.stage === 'raw');
-    const fmtMsnrSolo = (stage, enabled) => {
+    const fmtMsnrSolo = (stage, label) => {
       const cp = fcList.find(c => c.stage === stage);
       if (!cp || !cp.n) return '<span class="dim">нет данных</span>';
       let deltaTxt = '';
@@ -14985,11 +14887,11 @@ async function refreshMsnr() {
         const deltaCls = delta > 0 ? 'win' : (delta < 0 ? 'loss' : 'dim');
         deltaTxt = ` <span class="${deltaCls}">(${delta > 0 ? '+' : ''}${delta}%)</span>`;
       }
-      const onOff = enabled ? '' : ' <span class="dim">[выкл]</span>';
-      return `<span class="dim" title="если применить ТОЛЬКО этот фильтр поверх остальных, без него">${cp.winrate}% (n=${cp.n})${deltaTxt}${onOff}</span>`;
+      return `<span class="dim" title="если бы применили ТОЛЬКО этот фильтр к сырым сигналам">${cp.winrate}% (n=${cp.n})${deltaTxt}</span>`;
     };
-    const minRrSoloTxt = fmtMsnrSolo('min_rr', cfg.min_rr_filter_enabled);
-    const htfSoloTxt = fmtMsnrSolo('htf_trend', cfg.htf_filter_enabled);
+    const rrSoloTxt = fmtMsnrSolo('rr_range', 'RR-диапазон');
+    const volSoloTxt = fmtMsnrSolo('volume', 'Объём');
+    const htfSoloTxt = fmtMsnrSolo('htf_trend', 'Тренд 4ч');
     return separatorHtml + stressSeparatorHtml + `<tr onclick="toggleMsnrBacktestTrades('${r.symbol}')" style="cursor:pointer;">
       <td>${_msnrExpanded.has(r.symbol) ? '\u25be' : '\u25b8'} ${r.symbol}${r.live ? ' <span style="color:#3ddc97;" title="торгуется вживую">\u25cf</span>' : ' <span class="dim" title="только бэктест, не торгуется">\u25cb</span>'}</td>
       <td onclick="event.stopPropagation();">${autotradeCell}</td>
@@ -14999,17 +14901,18 @@ async function refreshMsnr() {
       <td class="dim" title="med ${r.median_rr ?? '-'}R">avg ${r.avg_rr ?? '-'}R</td>
       <td class="${expClass}">${r.expectancy_r !== null && r.expectancy_r !== undefined ? (r.expectancy_r > 0 ? '+' : '') + r.expectancy_r + 'R' : '-'}</td>
       <td class="dim">${r.score !== null && r.score !== undefined ? r.score : '-'}</td>
-      <td>${minRrSoloTxt}</td>
+      <td>${rrSoloTxt}</td>
+      <td>${volSoloTxt}</td>
       <td>${htfSoloTxt}</td>
       <td class="dim" style="white-space:normal;min-width:220px;">${paramsTxt}${noteTxt}</td>
     </tr>
-    <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="11" style="padding:0;"><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0430...</div></td></tr>`;
+    <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="12" style="padding:0;"><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0430...</div></td></tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
     <div class="dim" style="margin-bottom:6px;"><b>\u0410\u0432\u0442\u043e\u0442\u044e\u043d\u0438\u043d\u0433 \u043f\u043e \u043c\u043e\u043d\u0435\u0442\u0430\u043c</b> (${cfg.backtest_days} \u0434\u043d\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438, \u043f\u0435\u0440\u0435\u0431\u043e\u0440 ${cfg.grid_min_leg_atr.length}\u00d7${cfg.grid_qm_zone_pct.length}\u00d7${cfg.grid_qm_lookback.length}=${cfg.grid_min_leg_atr.length*cfg.grid_qm_zone_pct.length*cfg.grid_qm_lookback.length} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432 \u043d\u0430 \u0441\u0438\u043c\u0432\u043e\u043b \u2014 \u043c\u0438\u043d. \u0438\u043c\u043f\u0443\u043b\u044c\u0441 (\u00d7ATR) / QM-\u0437\u043e\u043d\u0430 (%) / \u043e\u043a\u043d\u043e QM (\u0431\u0430\u0440\u044b), \u0442\u0430\u0431\u043b\u0438\u0446\u0430 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u0443\u0436\u0435 \u043b\u0443\u0447\u0448\u0438\u0439 \u043d\u0430\u0439\u0434\u0435\u043d\u043d\u044b\u0439 \u043a\u043e\u043c\u0431\u043e \u043f\u043e \u043a\u0430\u0436\u0434\u043e\u043c\u0443 \u0441\u0438\u043c\u0432\u043e\u043b\u0443) \u00b7 <b>score</b> \u2014 \u043d\u0438\u0436\u043d\u044f\u044f \u0434\u043e\u0432\u0435\u0440\u0438\u0442\u0435\u043b\u044c\u043d\u0430\u044f \u0433\u0440\u0430\u043d\u0438\u0446\u0430 \u0441\u0440\u0435\u0434\u043d\u0435\u0433\u043e R (\u043f\u043e \u043d\u0435\u0439 \u0438 \u0432\u044b\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044f \u043b\u0443\u0447\u0448\u0438\u0439 \u043a\u043e\u043c\u0431\u043e, \u0430 \u043d\u0435 \u043f\u043e \u0441\u044b\u0440\u043e\u043c\u0443 expectancy \u2014 \u0447\u0442\u043e\u0431\u044b \u043c\u0430\u043b\u0435\u043d\u044c\u043a\u0430\u044f \u0432\u044b\u0431\u043e\u0440\u043a\u0430 \u0441 \u0432\u0435\u0437\u0435\u043d\u0438\u0435\u043c \u043d\u0435 \u043f\u043e\u0431\u0435\u0436\u0434\u0430\u043b\u0430 \u0431\u043e\u043b\u044c\u0448\u0443\u044e \u0441\u0442\u0430\u0431\u0438\u043b\u044c\u043d\u0443\u044e) \u00b7 \u043a\u043b\u0438\u043a \u043f\u043e \u0441\u0442\u0440\u043e\u043a\u0435 \u2014 \u0440\u0430\u0441\u043a\u0440\u044b\u0442\u044c \u0441\u0434\u0435\u043b\u043a\u0438:</div>
     <div style="overflow-x:auto;">
     <table class="msnr-bt-table" style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Авто</th><th style="cursor:pointer;" onclick="msnrSortBy('winrate')">WR${_msnrSortKey==='winrate' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th style="cursor:pointer;" onclick="msnrSortBy('trades')">n${_msnrSortKey==='trades' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th>W/L/T</th><th>RR</th><th>Exp</th><th>Score</th><th>Мин.RR≥${cfg.min_rr_filter} (соло)</th><th>Тренд 4ч (соло)</th><th>\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Авто</th><th style="cursor:pointer;" onclick="msnrSortBy('winrate')">WR${_msnrSortKey==='winrate' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th style="cursor:pointer;" onclick="msnrSortBy('trades')">n${_msnrSortKey==='trades' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th>W/L/T</th><th>RR</th><th>Exp</th><th>Score</th><th>RR-диапазон (соло)</th><th>Объём (соло)</th><th>Тренд 4ч (соло)</th><th>\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">\u0411\u044d\u043a\u0442\u0435\u0441\u0442 \u0435\u0449\u0451 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432.</div>';
