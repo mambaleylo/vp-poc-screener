@@ -11894,3 +11894,12 @@ v0.99.166 - Restore liquidation filter as ALWAYS-ON (no toggle), per
          column "Ликвидация (соло)" in the backtest table showing the
          WR/n after removing beyond-liquidation trades.
          Verified: py_compile, pyflakes clean, node --check, 45 routes.
+
+v0.99.167 - New MSNR column "За ликвидацией" showing WR/n of exactly
+         the trades REJECTED by the liquidation filter, per direct user
+         idea: if those trades have good WR they may be worth entering
+         with adaptive (SL-based) leverage like Sweep, rather than
+         discarding entirely. Green = WR>=50%, red otherwise. Column
+         "После ликвидации" renamed from "Ликвидация (соло)" for
+         clarity. Verified: py_compile, pyflakes clean, node --check,
+         45 routes unchanged.
