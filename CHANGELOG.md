@@ -11854,3 +11854,23 @@ v0.99.163 - MSNR autotrade checkbox now enables at winrate >= 50%
          включительно, а то когда 50 ровно не ставится"). Was `> 50`
          (strict), now `>= 50` in both the auto-on and still_qualifies
          checks in msnr_backtest_loop().
+
+v0.99.164 - MSNR: removed all per-symbol auto-derived filters from
+         msnr_optimize_symbol(), per direct user decision ("убрать
+         полностью из кода, они не работают"). Removed: rr_range,
+         liquidation, sl_pct, hours, volume, min_rr — all 6 filter
+         stages with their _msnr_filter_checkpoint() calls (each ran a
+         fresh Kelly leverage search + compound sim), saving ~30-40%
+         of backtest time per symbol. Only htf_trend remains as the
+         one filter that actually improves results.
+         rr_range and volume are now computed as SOLO PREVIEWS only
+         (not applied to best_results) — shown as new table columns
+         "RR-диапазон (соло)" and "Объём (соло)" so the red label
+         info (skip rr≥N, skip объём<N) is still visible for reference.
+         "Тренд 4ч (соло)" column kept as 3rd solo column.
+         Removed helper functions for dead filters are left in code
+         (msnr_symbol_rr_range, msnr_symbol_sl_skip_min, etc.) since
+         they cost nothing while unused, and the raw backtest results
+         still carry the volume_ratio/rr fields needed for the solo
+         preview columns. Verified: py_compile, pyflakes clean, node
+         --check, 45 routes unchanged.
