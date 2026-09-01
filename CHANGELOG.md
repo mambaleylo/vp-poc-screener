@@ -11833,3 +11833,9 @@ v0.99.160 - Simulator now uses real per-trade leverage from execute_
          and Bounce/Breakout uses autotrade_leverage — both already
          correct, not changed. Verified: py_compile, pyflakes clean,
          45 routes unchanged.
+
+v0.99.161 - Settings now shows last 6 chars of saved API key and secret,
+         per direct user request ("показывать хотя бы окончания ключей").
+         GET /api/credentials now returns key_suffix and secret_suffix
+         (e.g. "…Ab3x9Z"), shown as "key: …Ab3x9Z · secret: …Kf2mNp"
+         under the API key field. Verified: py_compile, pyflakes clean.
