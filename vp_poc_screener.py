@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.162"
+APP_VERSION = "0.99.163"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9685,13 +9685,13 @@ def msnr_backtest_loop():
                     autotrade_symbols = STATE["msnr_autotrade_symbols"]
                     for sym in eligible_now:
                         wr = (merged_summary.get(sym) or {}).get("win_rate")
-                        if wr is not None and wr > 50 and not autotrade_symbols.get(sym):
+                        if wr is not None and wr >= 50 and not autotrade_symbols.get(sym):
                             autotrade_symbols[sym] = True
                     for sym in prev_top_set:
                         if not autotrade_symbols.get(sym):
                             continue
                         wr = (merged_summary.get(sym) or {}).get("win_rate")
-                        still_qualifies = sym in eligible_now and wr is not None and wr > 50
+                        still_qualifies = sym in eligible_now and wr is not None and wr >= 50
                         if not still_qualifies:
                             autotrade_symbols[sym] = False
                     STATE["msnr_autotrade_top_set"] = sorted(eligible_now)
