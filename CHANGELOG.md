@@ -11930,3 +11930,17 @@ v0.99.169 - Fix v0.99.168's TimeoutError catch: concurrent.futures
          handler which would re-raise it (aborting the whole batch), not
          skip just that symbol. Now all 3 loops correctly skip timed-out
          symbols with a log entry. Verified: py_compile, pyflakes, 45 routes.
+
+v0.99.170 - CRITICAL FIX: MSNR live signals table always shows OPEN
+         positions regardless of autotrade checkbox, per direct user
+         report ("открытых: 1" but "Живых сигналов пока нет"). A real
+         open position became invisible because its symbol's checkbox
+         was auto-removed when it fell out of top-N after the position
+         had already opened. v0.99.162's filter now passes any signal
+         with status=OPEN unconditionally, in addition to signals from
+         symbols with an active checkbox. Verified: py_compile, pyflakes.
+
+v0.99.171 - Remove "открытых: N" field from MSNR live signals summary
+         line, per direct user request. The count was confusing —
+         it tracked open signal records in STATE, not necessarily
+         matching open positions on the exchange.
