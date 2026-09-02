@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.182"
+APP_VERSION = "0.99.183"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16999,12 +16999,8 @@ window.addEventListener('resize', () => {
 });
 // ---- Screensaver ----
 let _ssActive = false;
-let _ssAnimFrame = null;
-let _ssMoveInterval = null;
 let _ssWakeLock = null;
-let _ssPosX = 0, _ssPosY = 0;
-let _ssDirX = 1, _ssDirY = 1;
-const _ssSpeedX = 0.4, _ssSpeedY = 0.3;  // px per frame — slow drift for AMOLED safety
+let _ssMoveTimer = null;
 
 async function toggleScreensaver() {
   const overlay = document.getElementById('screensaverOverlay');
@@ -17012,40 +17008,31 @@ async function toggleScreensaver() {
   document.getElementById('screensaverBtn').style.color = _ssActive ? '#3ddc97' : '#5a6a7a';
   if (_ssActive) {
     overlay.style.display = 'block';
-    // Request wake lock so Chrome doesn't sleep
+    // Fullscreen
+    try { await overlay.requestFullscreen(); } catch(e) {}
+    // Wake lock
     try {
-      if ('wakeLock' in navigator) {
-        _ssWakeLock = await navigator.wakeLock.request('screen');
-      }
+      if ('wakeLock' in navigator) _ssWakeLock = await navigator.wakeLock.request('screen');
     } catch(e) {}
-    // Start position near center
-    _ssPosX = window.innerWidth * 0.3;
-    _ssPosY = window.innerHeight * 0.35;
-    _ssTickClock();
-    _ssMoveClock();
+    _ssTick();
+    _ssMove();
+    _ssMoveTimer = setInterval(_ssMove, 30000);
   } else {
     overlay.style.display = 'none';
-    if (_ssAnimFrame) cancelAnimationFrame(_ssAnimFrame);
-    if (_ssMoveInterval) clearInterval(_ssMoveInterval);
+    clearInterval(_ssMoveTimer);
+    if (document.fullscreenElement) try { document.exitFullscreen(); } catch(e) {}
     if (_ssWakeLock) { try { _ssWakeLock.release(); } catch(e) {} _ssWakeLock = null; }
   }
 }
 
-function _ssTickClock() {
+function _ssTick() {
   if (!_ssActive) return;
   const now = new Date();
   const hh = String(now.getHours()).padStart(2, '0');
   const mm = String(now.getMinutes()).padStart(2, '0');
-  const ss = String(now.getSeconds()).padStart(2, '0');
-  document.getElementById('screensaverTime').textContent = `${hh}:${mm}:${ss}`;
-  const days = ['вс','пн','вт','ср','чт','пт','сб'];
-  const months = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек'];
-  document.getElementById('screensaverDate').textContent =
-    `${days[now.getDay()]}, ${now.getDate()} ${months[now.getMonth()]}`;
-  // Color: green if any open position, white otherwise
+  document.getElementById('screensaverTime').textContent = `${hh}:${mm}`;
   _ssCheckOpenPositions();
-  // Tick every second
-  setTimeout(_ssTickClock, 1000 - now.getMilliseconds());
+  setTimeout(_ssTick, (60 - now.getSeconds()) * 1000 - now.getMilliseconds());
 }
 
 async function _ssCheckOpenPositions() {
@@ -17059,46 +17046,37 @@ async function _ssCheckOpenPositions() {
       (Array.isArray(msnr) ? msnr : []).some(s=>s.status==='OPEN') ||
       (Array.isArray(mirror) ? mirror : []).some(s=>s.status==='OPEN') ||
       (Array.isArray(lsw) ? lsw : []).some(s=>s.status==='OPEN');
-    const color = hasOpen ? '#3ddc97' : '#ffffff';
-    document.getElementById('screensaverClock').style.color = color;
-    const openCount = [msnr, mirror, lsw].flat().filter(s=>s&&s.status==='OPEN').length;
-    document.getElementById('screensaverStatus').textContent =
-      hasOpen ? `● ${openCount} открыт${openCount===1?'а':'о'}` : '';
+    document.getElementById('screensaverClock').style.color = hasOpen ? '#3ddc97' : '#ffffff';
   } catch(e) {}
 }
 
-function _ssMoveClock() {
+function _ssMove() {
   if (!_ssActive) return;
   const clock = document.getElementById('screensaverClock');
-  const cw = clock.offsetWidth || 240;
-  const ch = clock.offsetHeight || 120;
-  const maxX = window.innerWidth - cw - 10;
-  const maxY = window.innerHeight - ch - 10;
-  _ssPosX += _ssDirX * _ssSpeedX;
-  _ssPosY += _ssDirY * _ssSpeedY;
-  if (_ssPosX <= 0)    { _ssPosX = 0;    _ssDirX =  1; }
-  if (_ssPosX >= maxX) { _ssPosX = maxX; _ssDirX = -1; }
-  if (_ssPosY <= 0)    { _ssPosY = 0;    _ssDirY =  1; }
-  if (_ssPosY >= maxY) { _ssPosY = maxY; _ssDirY = -1; }
-  clock.style.left = _ssPosX + 'px';
-  clock.style.top  = _ssPosY + 'px';
-  _ssAnimFrame = requestAnimationFrame(_ssMoveClock);
+  const cw = clock.offsetWidth || 180;
+  const ch = clock.offsetHeight || 80;
+  const maxX = window.innerWidth - cw;
+  const maxY = window.innerHeight - ch;
+  const x = Math.floor(Math.random() * maxX);
+  const y = Math.floor(Math.random() * maxY);
+  clock.style.left = x + 'px';
+  clock.style.top  = y + 'px';
 }
 
-// Re-acquire wake lock if released by system (e.g. tab switch)
 document.addEventListener('visibilitychange', async () => {
   if (_ssActive && document.visibilityState === 'visible' && !_ssWakeLock) {
     try { _ssWakeLock = await navigator.wakeLock.request('screen'); } catch(e) {}
   }
 });
+document.addEventListener('fullscreenchange', () => {
+  if (!document.fullscreenElement && _ssActive) toggleScreensaver();
+});
 
 </script>
 <!-- Screensaver overlay -->
-<div id="screensaverOverlay" style="display:none;position:fixed;inset:0;background:#000;z-index:9999;cursor:pointer;overflow:hidden;" onclick="toggleScreensaver()" title="нажмите чтобы выйти">
-  <div id="screensaverClock" style="position:absolute;font-family:monospace;font-weight:200;user-select:none;transition:color 0.5s;white-space:nowrap;">
-    <div id="screensaverTime" style="font-size:72px;line-height:1;letter-spacing:-2px;"></div>
-    <div id="screensaverDate" style="font-size:18px;opacity:0.6;margin-top:8px;text-align:center;"></div>
-    <div id="screensaverStatus" style="font-size:13px;opacity:0.5;margin-top:6px;text-align:center;"></div>
+<div id="screensaverOverlay" style="display:none;position:fixed;inset:0;background:#000;z-index:9999;cursor:pointer;" onclick="toggleScreensaver()" title="нажмите чтобы выйти">
+  <div id="screensaverClock" style="position:absolute;font-family:monospace;font-weight:100;user-select:none;transition:color 0.5s;">
+    <div id="screensaverTime" style="font-size:48px;line-height:1;letter-spacing:4px;"></div>
   </div>
 </div>
 </body>
