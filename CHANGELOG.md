@@ -11983,3 +11983,13 @@ v0.99.176 - Telegram alert now sent when a trade is skipped due to
          stale-signal alert (price past SL) already had one; this
          closes the gap for the balance case and other technical skips.
          Verified: py_compile, pyflakes, 45 routes unchanged.
+
+v0.99.177 - Extended hint-block coverage to all remaining explanatory
+         text blocks, per direct user report (screenshot showing MSNR
+         description block not being hidden by 💡 button). Added
+         hint-block to: MSNR description header ("MSNR / Malaysian
+         SNR..."), MSNR bullet-point list block, "Винрейт по
+         диапазонам RR" label, Simulator description, Simulator stats
+         summary. Total hint-block count: 20 blocks across all tabs.
+         Also v0.99.176 telegram alert on balance-insufficient skip.
+         Verified: py_compile, pyflakes, node --check, 45 routes.
