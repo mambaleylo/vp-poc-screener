@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.181"
+APP_VERSION = "0.99.182"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14003,6 +14003,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
   <div id="hintsToggleBtn" onclick="toggleHints()" style="margin-left:auto;padding:4px 10px;font-size:11px;color:#5a6a7a;cursor:pointer;user-select:none;align-self:center;" title="скрыть/показать подсказки">💡</div>
+  <div id="screensaverBtn" onclick="toggleScreensaver()" style="padding:4px 10px;font-size:11px;color:#5a6a7a;cursor:pointer;user-select:none;align-self:center;" title="скринсейвер (часы, защита AMOLED)">🕐</div>
 </div>
 <div class="panel">
   <div id="tuningPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
@@ -16996,7 +16997,110 @@ window.addEventListener('resize', () => {
     drawMsnrChart(currentMsnrData);
   }
 });
+// ---- Screensaver ----
+let _ssActive = false;
+let _ssAnimFrame = null;
+let _ssMoveInterval = null;
+let _ssWakeLock = null;
+let _ssPosX = 0, _ssPosY = 0;
+let _ssDirX = 1, _ssDirY = 1;
+const _ssSpeedX = 0.4, _ssSpeedY = 0.3;  // px per frame — slow drift for AMOLED safety
+
+async function toggleScreensaver() {
+  const overlay = document.getElementById('screensaverOverlay');
+  _ssActive = !_ssActive;
+  document.getElementById('screensaverBtn').style.color = _ssActive ? '#3ddc97' : '#5a6a7a';
+  if (_ssActive) {
+    overlay.style.display = 'block';
+    // Request wake lock so Chrome doesn't sleep
+    try {
+      if ('wakeLock' in navigator) {
+        _ssWakeLock = await navigator.wakeLock.request('screen');
+      }
+    } catch(e) {}
+    // Start position near center
+    _ssPosX = window.innerWidth * 0.3;
+    _ssPosY = window.innerHeight * 0.35;
+    _ssTickClock();
+    _ssMoveClock();
+  } else {
+    overlay.style.display = 'none';
+    if (_ssAnimFrame) cancelAnimationFrame(_ssAnimFrame);
+    if (_ssMoveInterval) clearInterval(_ssMoveInterval);
+    if (_ssWakeLock) { try { _ssWakeLock.release(); } catch(e) {} _ssWakeLock = null; }
+  }
+}
+
+function _ssTickClock() {
+  if (!_ssActive) return;
+  const now = new Date();
+  const hh = String(now.getHours()).padStart(2, '0');
+  const mm = String(now.getMinutes()).padStart(2, '0');
+  const ss = String(now.getSeconds()).padStart(2, '0');
+  document.getElementById('screensaverTime').textContent = `${hh}:${mm}:${ss}`;
+  const days = ['вс','пн','вт','ср','чт','пт','сб'];
+  const months = ['янв','фев','мар','апр','май','июн','июл','авг','сен','окт','ноя','дек'];
+  document.getElementById('screensaverDate').textContent =
+    `${days[now.getDay()]}, ${now.getDate()} ${months[now.getMonth()]}`;
+  // Color: green if any open position, white otherwise
+  _ssCheckOpenPositions();
+  // Tick every second
+  setTimeout(_ssTickClock, 1000 - now.getMilliseconds());
+}
+
+async function _ssCheckOpenPositions() {
+  try {
+    const [msnr, mirror, lsw] = await Promise.all([
+      fetch('/api/msnr/signals').then(r=>r.json()).catch(()=>[]),
+      fetch('/api/mirror/signals').then(r=>r.json()).catch(()=>[]),
+      fetch('/api/lsw/signals').then(r=>r.json()).catch(()=>[]),
+    ]);
+    const hasOpen =
+      (Array.isArray(msnr) ? msnr : []).some(s=>s.status==='OPEN') ||
+      (Array.isArray(mirror) ? mirror : []).some(s=>s.status==='OPEN') ||
+      (Array.isArray(lsw) ? lsw : []).some(s=>s.status==='OPEN');
+    const color = hasOpen ? '#3ddc97' : '#ffffff';
+    document.getElementById('screensaverClock').style.color = color;
+    const openCount = [msnr, mirror, lsw].flat().filter(s=>s&&s.status==='OPEN').length;
+    document.getElementById('screensaverStatus').textContent =
+      hasOpen ? `● ${openCount} открыт${openCount===1?'а':'о'}` : '';
+  } catch(e) {}
+}
+
+function _ssMoveClock() {
+  if (!_ssActive) return;
+  const clock = document.getElementById('screensaverClock');
+  const cw = clock.offsetWidth || 240;
+  const ch = clock.offsetHeight || 120;
+  const maxX = window.innerWidth - cw - 10;
+  const maxY = window.innerHeight - ch - 10;
+  _ssPosX += _ssDirX * _ssSpeedX;
+  _ssPosY += _ssDirY * _ssSpeedY;
+  if (_ssPosX <= 0)    { _ssPosX = 0;    _ssDirX =  1; }
+  if (_ssPosX >= maxX) { _ssPosX = maxX; _ssDirX = -1; }
+  if (_ssPosY <= 0)    { _ssPosY = 0;    _ssDirY =  1; }
+  if (_ssPosY >= maxY) { _ssPosY = maxY; _ssDirY = -1; }
+  clock.style.left = _ssPosX + 'px';
+  clock.style.top  = _ssPosY + 'px';
+  _ssAnimFrame = requestAnimationFrame(_ssMoveClock);
+}
+
+// Re-acquire wake lock if released by system (e.g. tab switch)
+document.addEventListener('visibilitychange', async () => {
+  if (_ssActive && document.visibilityState === 'visible' && !_ssWakeLock) {
+    try { _ssWakeLock = await navigator.wakeLock.request('screen'); } catch(e) {}
+  }
+});
+
 </script>
+<!-- Screensaver overlay -->
+<div id="screensaverOverlay" style="display:none;position:fixed;inset:0;background:#000;z-index:9999;cursor:pointer;overflow:hidden;" onclick="toggleScreensaver()" title="нажмите чтобы выйти">
+  <div id="screensaverClock" style="position:absolute;font-family:monospace;font-weight:200;user-select:none;transition:color 0.5s;white-space:nowrap;">
+    <div id="screensaverTime" style="font-size:72px;line-height:1;letter-spacing:-2px;"></div>
+    <div id="screensaverDate" style="font-size:18px;opacity:0.6;margin-top:8px;text-align:center;"></div>
+    <div id="screensaverStatus" style="font-size:13px;opacity:0.5;margin-top:6px;text-align:center;"></div>
+  </div>
+</div>
 </body>
 </html>"""
 
