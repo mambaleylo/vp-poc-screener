@@ -12059,3 +12059,13 @@ v0.99.183 - Screensaver revised: no seconds/date, smaller thinner font
          (48px weight-100), fullscreen on activate, position jumps to
          random spot every 30s (no smooth drift). Exits on click or
          fullscreen dismiss. Wake lock + re-acquire on tab visibility.
+
+v0.99.184 - EMA Bull backtest added. Click any symbol in the screener
+         table to load per-symbol backtest: weekly EMA breakout signal
+         + daily confirmation (2 daily closes above EMA), entry at
+         next day open, SL under broken EMA (-1%), TP at next EMA above
+         (or 3R if EMA200). Shows per-EMA stats (WR/n/W/L/T/avgRR/
+         avgPnL) and last 20 trades table. On-demand via
+         /api/ema_bull/backtest/<symbol> (cached per session).
+         Uses 3 years of daily+weekly candles. 47 routes total.
+         Verified: py_compile, pyflakes, node --check.
