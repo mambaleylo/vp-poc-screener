@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.177"
+APP_VERSION = "0.99.178"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14768,7 +14768,7 @@ async function refreshMsnr() {
       <b>MSNR / Malaysian SNR</b> (@xaubymedovyk): OCL-уровни по закрытиям, A/V-shape пивоты, вход — QM (ложный вынос + возврат), тейк — противоположный уровень (высокий R:R от природы паттерна). Бэктест честный, без заглядывания вперёд.
     </div>`;
   const headerHtml = `
-    <div class="dim hint-block" style="margin-bottom:8px;font-size:12px;">
+    <div class="dim hint-block" style="margin-bottom:4px;font-size:12px;">
       <ul style="margin:0 0 6px 18px;padding:0;">
         <li>Живой скан: квалифицированные монеты (${liveSymbolsTxt || '—'}) — золото больше не форсируется, ранжируется наравне со всеми (эксперимент)</li>
         <li>Квалификация в живой скан: только топ-10 по совместной оценке (винрейт, выборка, доход) или ручная галочка — старое правило «винрейт&gt;50%/выборка&gt;40» убрано</li>
@@ -14778,6 +14778,8 @@ async function refreshMsnr() {
         <li>Автоторговля (если включена в настройках) — по всем монетам живого скана</li>
       </ul>
       <div class="dim hint-block" style="font-size:11px;margin:0 0 6px 0;">Топ-10 и таблица ниже отсортированы одной и той же оценкой — произведением нормализованных винрейта/выборки(до фильтров)/дохода с равными весами: слабость по любому из трёх параметров обнуляет итог, сильные стороны не компенсируют — без разрыва между топ-10 и остальными.</div>
+    </div>
+    <div class="dim" style="margin-bottom:8px;font-size:12px;">
       ${staleWarnHtml}
       ${buildTxt}<br>
       ${progressBarHtml}
@@ -15632,8 +15634,9 @@ async function refreshLsw() {
       </div>
     </div>` : '';
   const headerHtml = `
-    <div class="dim hint-block" style="margin-bottom:8px;">
-      <b>Liquidity Sweep</b> — снятие ликвидности с равных хаёв/лоу (2+ близких максимума/минимума считаются одним уровнем); сигнал — когда свеча фитилём пробивает уровень, но закрывается обратно внутри (не пробой, а именно снятие стопов). Автоторговля и её риск настраиваются в общей вкладке «Автоторговля».<br>
+    <div class="dim hint-block" style="margin-bottom:4px;">
+      <b>Liquidity Sweep</b> — снятие ликвидности с равных хаёв/лоу (2+ близких максимума/минимума считаются одним уровнем); сигнал — когда свеча фитилём пробивает уровень, но закрывается обратно внутри (не пробой, а именно снятие стопов). Автоторговля и её риск настраиваются в общей вкладке «Автоторговля».</div>
+    <div class="dim" style="margin-bottom:8px;">
       ТФ ${cfg.interval} · RR ${cfg.rr} · допуск равенства уровней ${cfg.equal_tolerance_pct}% · буфер стопа ${cfg.sl_buffer_pct}% · ${buildTxt}<br>
       ${progressBarHtml}
       Фильтр по тренду (${cfg.htf_interval}): <span class="${cfg.htf_filter_enabled ? 'win' : 'dim'}">${cfg.htf_filter_enabled ? 'включён' : 'выключен'}</span> ·
