@@ -11993,3 +11993,10 @@ v0.99.177 - Extended hint-block coverage to all remaining explanatory
          summary. Total hint-block count: 20 blocks across all tabs.
          Also v0.99.176 telegram alert on balance-insufficient skip.
          Verified: py_compile, pyflakes, node --check, 45 routes.
+
+v0.99.178 - Progress bars (backtest status) no longer hidden by 💡
+         button, per direct user report. Split headerHtml in MSNR and
+         LSW: explanatory text goes into hint-block div, but progress
+         bar + live signals line + build status stay in a separate
+         always-visible div. Verified: py_compile, pyflakes, node
+         --check, 45 routes unchanged.
