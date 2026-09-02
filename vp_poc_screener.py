@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.173"
+APP_VERSION = "0.99.174"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14984,7 +14984,8 @@ async function refreshMsnr() {
         const deltaCls = delta > 0 ? 'win' : (delta < 0 ? 'loss' : 'dim');
         deltaTxt = ` <span class="${deltaCls}">(${delta > 0 ? '+' : ''}${delta}%)</span>`;
       }
-      return `<span class="dim" title="если бы применили ТОЛЬКО этот фильтр к сырым сигналам">${cp.winrate}% (n=${cp.n})${deltaTxt}</span>`;
+      const nTxt = (rawCp && rawCp.n && rawCp.n !== cp.n) ? `${rawCp.n}→${cp.n}` : `${cp.n}`;
+      return `<span class="dim" title="если бы применили ТОЛЬКО этот фильтр к сырым сигналам">${cp.winrate}% (n=${nTxt})${deltaTxt}</span>`;
     };
     const rrSoloTxt = fmtMsnrSolo('rr_range', 'RR-диапазон');
     const volSoloTxt = fmtMsnrSolo('volume', 'Объём');
@@ -15396,7 +15397,8 @@ async function refreshFt5() {
         deltaTxt = ` <span class="${deltaCls}">(${delta > 0 ? '+' : ''}${delta}%)</span>`;
       }
       const onOff = enabled ? '' : ' <span class="dim">[выкл]</span>';
-      return `<span class="dim" title="если применить ТОЛЬКО этот фильтр поверх остального, без него">${cp.winrate}% (n=${cp.n})${deltaTxt}${onOff}</span>`;
+      const nTxt = (rawCp && rawCp.n && rawCp.n !== cp.n) ? `${rawCp.n}→${cp.n}` : `${cp.n}`;
+      return `<span class="dim" title="если применить ТОЛЬКО этот фильтр поверх остального, без него">${cp.winrate}% (n=${nTxt})${deltaTxt}${onOff}</span>`;
     };
     const htfSoloTxt = fmtFt5Solo('htf_trend', cfg.htf_filter_enabled);
     const sessionSoloTxt = fmtFt5Solo('session', cfg.session_filter_enabled);
@@ -15545,7 +15547,8 @@ async function refreshMirror() {
         deltaTxt = ` <span class="${deltaCls}">(${delta > 0 ? '+' : ''}${delta}%)</span>`;
       }
       const onOff = enabled ? '' : ' <span class="dim">[выкл]</span>';
-      return `<span class="dim" title="если применить ТОЛЬКО этот фильтр поверх остальных, без него">${cp.winrate}% (n=${cp.n})${deltaTxt}${onOff}</span>`;
+      const nTxt = (rawCp && rawCp.n && rawCp.n !== cp.n) ? `${rawCp.n}→${cp.n}` : `${cp.n}`;
+      return `<span class="dim" title="если применить ТОЛЬКО этот фильтр поверх остальных, без него">${cp.winrate}% (n=${nTxt})${deltaTxt}${onOff}</span>`;
     };
     const volumeSoloTxt = fmtMirrorSolo('volume_filter', cfg.volume_filter_enabled);
     const htfSoloTxt = fmtMirrorSolo('htf_filter', cfg.htf_filter_enabled);
@@ -15679,8 +15682,9 @@ async function refreshLsw() {
         const deltaCls = delta > 0 ? 'win' : (delta < 0 ? 'loss' : 'dim');
         deltaTxt = ` <span class="${deltaCls}">(${delta > 0 ? '+' : ''}${delta}%)</span>`;
       }
+      const nTxt = (raw && raw.n && raw.n !== cp.n) ? `${raw.n}→${cp.n}` : `${cp.n}`;
       const onOff = filterEnabled ? '' : ' <span class="dim">[выкл]</span>';
-      return `<span class="dim" title="если применить ТОЛЬКО этот фильтр к сырым сигналам, без остальных">${cp.winrate}% (n=${cp.n})${deltaTxt}${onOff}</span>`;
+      return `<span class="dim" title="если применить ТОЛЬКО этот фильтр к сырым сигналам, без остальных">${cp.winrate}% (n=${nTxt})${deltaTxt}${onOff}</span>`;
     };
     const confirmTxt2 = fmtCheckpoint(fc.entry_confirm, cfg.entry_confirm_enabled);
     const volumeTxt = fmtCheckpoint(fc.volume_filter, cfg.volume_filter_enabled);
