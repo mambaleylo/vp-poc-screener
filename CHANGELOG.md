@@ -11960,3 +11960,11 @@ v0.99.173 - All explanatory/hint text blocks are now collapsible via
          another click shows them again. Preference saved to
          localStorage so it persists across page reloads.
          Verified: py_compile, pyflakes, node --check, 45 routes.
+
+v0.99.174 - Solo checkpoint columns now show n before→after the filter
+         (e.g. "57.9% (n=38→21) (+29.7%)") instead of just n after,
+         per direct user request ("хочу видеть до после"). Applied to
+         all four solo formatters: fmtCheckpoint (Sweep), fmtMsnrSolo
+         (MSNR), fmtFt5Solo (FT5), fmtMirrorSolo (Mirror). When n is
+         unchanged (filter kept all trades), still shows just "n=38".
+         Verified: py_compile, pyflakes, node --check, 45 routes.
