@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.178"
+APP_VERSION = "0.99.179"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -958,7 +958,7 @@ AUTOTRADE_LEVERAGE_BOUNCE = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_BOUNCE", 1
 AUTOTRADE_LEVERAGE_BREAKOUT = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_BREAKOUT", 10))
 AUTOTRADE_ENABLED_MSNR = os.environ.get("VP_AUTOTRADE_MSNR", "0") == "1"  # off by default — same "unverified source" treatment as XAU_LG/FT5
 AUTOTRADE_LEVERAGE_MSNR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_MSNR", 10))
-MSNR_COMPOUND_START_BALANCE = float(os.environ.get("VP_MSNR_COMPOUND_START_BALANCE", 40.0))  # v0.99.24 — per direct user request: $ margin the backtest's compounding simulation starts with on the first closed trade. Leverage for this simulation deliberately reuses AUTOTRADE_LEVERAGE_MSNR above (not a separate constant) so the simulated compounding always matches whatever leverage this symbol would actually be traded at live — see msnr_compound_return().
+MSNR_COMPOUND_START_BALANCE = float(os.environ.get("VP_MSNR_COMPOUND_START_BALANCE", 15.0))  # v0.99.24 — per direct user request: $ margin the backtest's compounding simulation starts with on the first closed trade. v0.99.179 — lowered 40->15 per direct user request ("принять не за 40$ а 15$").
 MSNR_LIVE_BALANCE_MAX = float(os.environ.get("VP_MSNR_LIVE_BALANCE_MAX", 500.0))  # v0.99.33 — per direct user request: hard ceiling on the REAL per-symbol compounding margin (see msnr_live_balance_for_symbol()) — a symbol's live-trading balance still starts at MSNR_COMPOUND_START_BALANCE and reinvests its own result every closed trade exactly like the backtest simulation, but never sizes a real order above this cap regardless of how far the compounding would otherwise have grown it.
 MSNR_TARGET_STOP_LOSS_PCT = float(os.environ.get("VP_MSNR_TARGET_STOP_LOSS_PCT", 10.0))  # v0.99.46 — per direct user request, after a live SKHYNIX_USDT example: at the flat AUTOTRADE_LEVERAGE_MSNR (10x) on a tight sub-1%-wide stop, hitting SL barely dents the account (well under this %), wasting most of the position's real risk budget on a trade that can't move the needle either way. This is the target fraction of margin a stop-out should cost — msnr_leverage_for_stop() scales leverage UP (never down) from AUTOTRADE_LEVERAGE_MSNR for a signal whose own stop is narrower than what this target implies, capped by the contract's own exchange leverage_max and by the liquidation-safety margin.
 AUTOTRADE_ENABLED_FT5 = os.environ.get("VP_AUTOTRADE_FT5", "0") == "1"  # off by default — same reasoning as XAU_LG: unverified source, and the freqtrade backtest table this was ported from is a near-certain overfitting example (20-day 2018 window)
