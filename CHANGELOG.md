@@ -11952,3 +11952,11 @@ v0.99.172 - MSNR signal stats now count only autotrade_fired signals,
          so the summary line only reflects trades that actually fired.
          Reverted the "всего" removal from v0.99.171 since the number
          is now meaningful. Verified: py_compile, pyflakes, 45 routes.
+
+v0.99.173 - All explanatory/hint text blocks are now collapsible via
+         a 💡 button in the tab bar (top right), per direct user
+         request ("сделай весь лишний текст на странице свернутым").
+         One click hides all 15 hint-block divs across all tabs;
+         another click shows them again. Preference saved to
+         localStorage so it persists across page reloads.
+         Verified: py_compile, pyflakes, node --check, 45 routes.
