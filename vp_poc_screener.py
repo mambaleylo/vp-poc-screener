@@ -28,7 +28,7 @@ import hmac
 import hashlib
 from decimal import Decimal
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
 
 import requests
 
@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.168"
+APP_VERSION = "0.99.169"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9557,7 +9557,7 @@ def msnr_backtest_loop():
                     for fut in as_completed(futs, timeout=PER_SYMBOL_TIMEOUT * len(universe)):
                         try:
                             res = fut.result(timeout=PER_SYMBOL_TIMEOUT)
-                        except TimeoutError:
+                        except (TimeoutError, FutureTimeoutError):
                             log_error(f"msnr_backtest: a symbol timed out after {PER_SYMBOL_TIMEOUT}s — skipping")
                             continue
                         if res is None:
@@ -10980,6 +10980,10 @@ def mirror_backtest_loop():
                     symbol = futs[fut]
                     try:
                         results, meta, tuned = fut.result(timeout=PER_SYMBOL_TIMEOUT_M)
+                    except (TimeoutError, FutureTimeoutError):
+                        log_error(f"mirror_backtest: {symbol} timed out after {PER_SYMBOL_TIMEOUT_M}s — skipping")
+                        continue
+                    try:
                         results_by_symbol[symbol] = results
                         summary = mirror_summarize_backtest(results)
                         summary_by_symbol[symbol] = summary
@@ -12116,6 +12120,10 @@ def lsw_backtest_loop():
                         symbol = futs[fut]
                         try:
                             _sym, (results, meta) = fut.result(timeout=PER_SYMBOL_TIMEOUT_L)
+                        except (TimeoutError, FutureTimeoutError):
+                            log_error(f"lsw_backtest: {symbol} timed out after {PER_SYMBOL_TIMEOUT_L}s — skipping")
+                            continue
+                        try:
                             results_by_symbol[symbol] = results
                             checkpoints_by_symbol[symbol] = meta.get("checkpoints", {})
                             summary = lsw_summarize_backtest(results)
