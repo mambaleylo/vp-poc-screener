@@ -11968,3 +11968,9 @@ v0.99.174 - Solo checkpoint columns now show n before→after the filter
          (MSNR), fmtFt5Solo (FT5), fmtMirrorSolo (Mirror). When n is
          unchanged (filter kept all trades), still shows just "n=38".
          Verified: py_compile, pyflakes, node --check, 45 routes.
+
+v0.99.175 - Autotrade log time column now shows date when the entry is
+         not from today (e.g. "01.09, 14:05"), and just time when it
+         is today (e.g. "14:05"), per direct user request. Uses new
+         fmtTimeWithDate() helper. Verified: py_compile, pyflakes,
+         node --check, 45 routes unchanged.
