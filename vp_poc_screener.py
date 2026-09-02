@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.176"
+APP_VERSION = "0.99.177"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14764,11 +14764,11 @@ async function refreshMsnr() {
   const liveSymbols = status.live_universe || status.symbols || [];
   const liveSymbolsTxt = liveSymbols.slice(0, 8).join(', ') + (liveSymbols.length > 8 ? ` +${liveSymbols.length - 8}` : '');
   const warnHtml = `
-    <div class="dim" style="font-size:12px;margin-bottom:10px;">
+    <div class="dim hint-block" style="font-size:12px;margin-bottom:10px;">
       <b>MSNR / Malaysian SNR</b> (@xaubymedovyk): OCL-уровни по закрытиям, A/V-shape пивоты, вход — QM (ложный вынос + возврат), тейк — противоположный уровень (высокий R:R от природы паттерна). Бэктест честный, без заглядывания вперёд.
     </div>`;
   const headerHtml = `
-    <div class="dim" style="margin-bottom:8px;font-size:12px;">
+    <div class="dim hint-block" style="margin-bottom:8px;font-size:12px;">
       <ul style="margin:0 0 6px 18px;padding:0;">
         <li>Живой скан: квалифицированные монеты (${liveSymbolsTxt || '—'}) — золото больше не форсируется, ранжируется наравне со всеми (эксперимент)</li>
         <li>Квалификация в живой скан: только топ-10 по совместной оценке (винрейт, выборка, доход) или ручная галочка — старое правило «винрейт&gt;50%/выборка&gt;40» убрано</li>
@@ -14795,7 +14795,7 @@ async function refreshMsnr() {
     </tr>`;
   }).join('');
   const rrBucketsHtml = rrBuckets.some(b => b.n > 0) ? `
-    <div class="dim" style="margin:8px 0 6px;"><b>Винрейт по диапазонам RR</b> (все монеты вместе, по факту закрытых сделок) — здесь видно, если один диапазон RR систематически проваливается, даже если пул усреднённых цифр этого не показывает:</div>
+    <div class="dim hint-block" style="margin:8px 0 6px;"><b>Винрейт по диапазонам RR</b> (все монеты вместе, по факту закрытых сделок) — здесь видно, если один диапазон RR систематически проваливается, даже если пул усреднённых цифр этого не показывает:</div>
     <div style="overflow-x:auto;margin-bottom:14px;">
     <table style="font-size:11px;white-space:nowrap;">
       <thead><tr><th>RR</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th></tr></thead>
@@ -15841,7 +15841,7 @@ async function refreshSimulator() {
     .join(' &nbsp;·&nbsp; ');
 
   const headerHtml = `
-    <div class="dim" style="margin-bottom:10px;">
+    <div class="dim hint-block" style="margin-bottom:10px;">
       Симулятор повторяет ровно те же сделки, что и автоторговля выше (те же тумблеры режимов, тот же размер/плечо) — показывает, каким был бы баланс на реальных или dry-run сделках. Размер: ${sizeTxt} · комиссия ${(status.fee_pct*100).toFixed(3)}%/сторону.<br>
       Режимы: ${enabledTxt}
     </div>
@@ -15853,7 +15853,7 @@ async function refreshSimulator() {
         от старта $${status.start_balance.toFixed(2)}
       </div>
     </div>
-    <div class="dim" style="margin-bottom:10px;">
+    <div class="dim hint-block" style="margin-bottom:10px;">
       Сделок: ${status.settled} закрыто, ${status.pending} в ожидании ·
       <span class="win">${status.wins}W</span>/<span class="loss">${status.losses}L</span>/<span class="status-timeout">${status.timeouts}T</span> ·
       винрейт: ${status.win_rate !== null ? status.win_rate+'%' : '-'}
