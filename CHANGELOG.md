@@ -12054,3 +12054,8 @@ v0.99.182 - AMOLED screensaver with clock, per direct user request.
          visibility change. Also keeps the JS event loop running which
          may help prevent background process suspension.
          Verified: py_compile, pyflakes, node --check, 46 routes.
+
+v0.99.183 - Screensaver revised: no seconds/date, smaller thinner font
+         (48px weight-100), fullscreen on activate, position jumps to
+         random spot every 30s (no smooth drift). Exits on click or
+         fullscreen dismiss. Wake lock + re-acquire on tab visibility.
