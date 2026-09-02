@@ -11974,3 +11974,12 @@ v0.99.175 - Autotrade log time column now shows date when the entry is
          is today (e.g. "14:05"), per direct user request. Uses new
          fmtTimeWithDate() helper. Verified: py_compile, pyflakes,
          node --check, 45 routes unchanged.
+
+v0.99.176 - Telegram alert now sent when a trade is skipped due to
+         insufficient balance, per direct user request. Also added
+         alerts for other skip_reason cases (invalid SL distance,
+         min lot too large, etc.) — any SKIPPED status now sends
+         "⚠️ symbol (mode): сделка пропущена — reason". The existing
+         stale-signal alert (price past SL) already had one; this
+         closes the gap for the balance case and other technical skips.
+         Verified: py_compile, pyflakes, 45 routes unchanged.
