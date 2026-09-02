@@ -12000,3 +12000,7 @@ v0.99.178 - Progress bars (backtest status) no longer hidden by 💡
          bar + live signals line + build status stay in a separate
          always-visible div. Verified: py_compile, pyflakes, node
          --check, 45 routes unchanged.
+
+v0.99.179 - MSNR compound simulation start balance lowered 40->15,
+         per direct user request. Affects the "$40→$X" column in the
+         MSNR backtest table. Verified: py_compile, pyflakes, 45 routes.
