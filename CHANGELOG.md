@@ -11944,3 +11944,11 @@ v0.99.171 - Remove "открытых: N" field from MSNR live signals summary
          line, per direct user request. The count was confusing —
          it tracked open signal records in STATE, not necessarily
          matching open positions on the exchange.
+
+v0.99.172 - MSNR signal stats now count only autotrade_fired signals,
+         per direct user request ("не проще ли просто туда не относить
+         сигналы не autotraded?"). compute_msnr_signal_stats() now
+         filters to autotrade_fired=True before counting W/L/total/open,
+         so the summary line only reflects trades that actually fired.
+         Reverted the "всего" removal from v0.99.171 since the number
+         is now meaningful. Verified: py_compile, pyflakes, 45 routes.
