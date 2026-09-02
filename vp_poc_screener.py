@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.175"
+APP_VERSION = "0.99.176"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3943,6 +3943,10 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
             if skip_reason:
                 record["status"] = "SKIPPED"
                 record["detail"] = skip_reason
+                send_telegram(
+                    f"\u26a0\ufe0f {symbol} ({mode}): \u0441\u0434\u0435\u043b\u043a\u0430 \u043f\u0440\u043e\u043f\u0443\u0449\u0435\u043d\u0430 \u2014 {skip_reason}",
+                    category=mode,
+                )
                 with state_lock:
                     STATE["autotrade_log"].appendleft(record)
                 return record
@@ -3969,6 +3973,11 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
                 record["status"] = "SKIPPED"
                 record["detail"] = (f"маржа ${margin:.2f} превышает доступный баланс "
                                      f"${wallet_balance:.2f} (с запасом 2%) — сделка пропущена")
+                send_telegram(
+                    f"⚠️ {symbol} ({mode}): сделка не открыта — недостаточно баланса. "
+                    f"Нужно ${margin:.2f}, доступно ${wallet_balance:.2f}.",
+                    category=mode,
+                )
                 with state_lock:
                     STATE["autotrade_log"].appendleft(record)
                 return record
@@ -3988,6 +3997,10 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
             if skip_reason:
                 record["status"] = "SKIPPED"
                 record["detail"] = skip_reason
+                send_telegram(
+                    f"\u26a0\ufe0f {symbol} ({mode}): \u0441\u0434\u0435\u043b\u043a\u0430 \u043f\u0440\u043e\u043f\u0443\u0449\u0435\u043d\u0430 \u2014 {skip_reason}",
+                    category=mode,
+                )
                 with state_lock:
                     STATE["autotrade_log"].appendleft(record)
                 return record
