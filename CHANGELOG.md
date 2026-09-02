@@ -12019,3 +12019,25 @@ v0.99.180 - New "EMA🚀" tab — Multi-EMA Bull Screener for early bull
          New route: /api/ema_bull/status. Thread: ema_bull_loop().
          Verified: py_compile, pyflakes, node --check, 46 routes,
          real runtime start confirming API and config fields correct.
+
+v0.99.181 - EMA Bull telegram alerts + MSNR backtest hang fix:
+         ALERTS: new "Алерты EMA Bull" checkbox in Telegram settings.
+         Sends "🚀 SYMBOL: пробиты EMA21→EMA55 на недельном" when a
+         new signal appears or symbol breaks more EMAs than before.
+         Only fires on changes between scan cycles (not every 4h
+         repeat). Uses category="ema_bull" with proper gate in
+         send_telegram(). TELEGRAM_ALERTS_EMA_BULL constant + settings
+         wiring (settings tuple, get_settings, global decl,
+         apply_settings, UI checkbox setTelegramEmaBull 1:1).
+         BACKTEST HANG FIX (v0.99.181): wrapped the entire MSNR
+         backtest cycle in a 1-hour hard ceiling future. Previously
+         the per-symbol timeouts in ThreadPoolExecutor only protected
+         the parallel phase — a stuck get_tickers() or any other
+         serial call before the executor could hang the loop forever.
+         Refactored msnr_backtest_loop() to dispatch the full cycle
+         as _msnr_run_one_backtest_cycle() via a single-worker
+         executor with timeout=3600s, so the outer loop always wakes
+         up within 1h regardless of what hangs inside.
+         Verified: py_compile, pyflakes, node --check, 46 routes,
+         real runtime start confirming telegram_alerts_ema_bull in
+         GET /api/settings.
