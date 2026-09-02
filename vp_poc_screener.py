@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.180"
+APP_VERSION = "0.99.181"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -778,6 +778,7 @@ LSW_LIVE_MIN_WINRATE = float(os.environ.get("VP_LSW_LIVE_MIN_WINRATE", 50.0))  #
 AUTOTRADE_ENABLED_LSW = os.environ.get("VP_AUTOTRADE_LSW", "0") == "1"  # v0.99.120, per direct user request ("надо живые сигналы сделать и авто торговлю как и везде, тоже с риском 2%") — off by default like every other module's own autotrade toggle, opt-in via settings
 AUTOTRADE_LEVERAGE_LSW = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_LSW", 10))  # only used by sim_execute_trade()'s own separate paper-balance simulator (deliberately left on its own old leverage/size system, same as every other module) — execute_autotrade() itself computes real leverage automatically per-trade, same risk-based sizing every module shares (see execute_autotrade()'s own docstring)
 TELEGRAM_ALERTS_LSW = os.environ.get("VP_TG_ALERTS_LSW", "1") == "1"
+TELEGRAM_ALERTS_EMA_BULL = os.environ.get("VP_TG_ALERTS_EMA_BULL", "1") == "1"
 # v0.99.121 — higher-timeframe trend filter, per direct user request
 # ("ещё пример того как должен торговаться sweep... сравни с нашей
 # стратегией и доработай") pointing at a real ICT-style "AMD + FVG"
@@ -1017,7 +1018,7 @@ CREDENTIALS_FILE = os.environ.get(
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_network",
+                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "msnr_all_in_enabled",
                   "autotrade_risk_pct",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
@@ -1078,6 +1079,7 @@ def get_settings():
         "telegram_alerts_msnr": TELEGRAM_ALERTS_MSNR,
         "telegram_alerts_mirror": TELEGRAM_ALERTS_MIRROR,
         "telegram_alerts_lsw": TELEGRAM_ALERTS_LSW,
+        "telegram_alerts_ema_bull": TELEGRAM_ALERTS_EMA_BULL,
         "telegram_alerts_network": TELEGRAM_ALERTS_NETWORK,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
@@ -1109,7 +1111,7 @@ def apply_settings(updates):
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
-    global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_NETWORK
+    global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_EMA_BULL, TELEGRAM_ALERTS_NETWORK
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT
     if "volume_profile_enabled" in updates:
@@ -1224,6 +1226,8 @@ def apply_settings(updates):
         TELEGRAM_ALERTS_MIRROR = bool(updates["telegram_alerts_mirror"])
     if "telegram_alerts_lsw" in updates:
         TELEGRAM_ALERTS_LSW = bool(updates["telegram_alerts_lsw"])
+    if "telegram_alerts_ema_bull" in updates:
+        TELEGRAM_ALERTS_EMA_BULL = bool(updates["telegram_alerts_ema_bull"])
     if "telegram_alerts_network" in updates:
         TELEGRAM_ALERTS_NETWORK = bool(updates["telegram_alerts_network"])
     if "autotrade_dry_run" in updates:
@@ -5718,6 +5722,8 @@ def send_telegram(text, category=None):
         return
     if category == "lsw" and not TELEGRAM_ALERTS_LSW:
         return
+    if category == "ema_bull" and not TELEGRAM_ALERTS_EMA_BULL:
+        return
     if category == "network" and not TELEGRAM_ALERTS_NETWORK:
         return
 
@@ -9541,161 +9547,170 @@ def msnr_backtest_loop():
                 time.sleep(60)
                 continue
             t0 = time.time()
-            universe = msnr_build_backtest_universe()
-            results_by_symbol = {}
-            raw_results_by_symbol = {}
-            summary_by_symbol = {}
-            overrides_by_symbol = {}
-            with state_lock:
-                STATE["msnr_backtest_total"] = len(universe)
-                STATE["msnr_backtest_done"] = 0
-                STATE["msnr_backtest_in_flight"] = []
-                STATE["msnr_backtest_running"] = True
-                STATE["msnr_backtest_started_at"] = t0
-            try:
-                # Autotune (v0.99.5): grid-search each symbol's own
-                # (min_leg_atr, qm_zone_pct, qm_lookback) instead of always
-                # backtesting the module-default params — see msnr_optimize_
-                # symbol()'s own docstring. The winning combo's trades ARE
-                # the backtest shown/drilled-into in the UI; no separate
-                # un-tuned backtest run needed.
-                with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
-                    futs = [ex.submit(_msnr_backtest_one_symbol, s) for s in universe]
-                    # v0.99.168 — per direct user report (backtest showed
-                    # "2.6ч назад" despite taking only ~8min normally):
-                    # as_completed() with no timeout can block indefinitely
-                    # if a single symbol's HTTP request hangs at the TCP
-                    # level (no data arriving, so HTTP_TIMEOUT never fires).
-                    # Per-future timeout = HTTP_TIMEOUT * 3 retries * 3
-                    # fetches per symbol + margin = 3 min ceiling per symbol.
-                    # A symbol that exceeds it is logged and skipped (same
-                    # outcome as an exception — keeps last-known-good data).
-                    PER_SYMBOL_TIMEOUT = HTTP_TIMEOUT * 3 * 3 + 60
-                    for fut in as_completed(futs, timeout=PER_SYMBOL_TIMEOUT * len(universe)):
-                        try:
-                            res = fut.result(timeout=PER_SYMBOL_TIMEOUT)
-                        except (TimeoutError, FutureTimeoutError):
-                            log_error(f"msnr_backtest: a symbol timed out after {PER_SYMBOL_TIMEOUT}s — skipping")
-                            continue
-                        if res is None:
-                            continue
-                        symbol, override, results, raw_results, summary = res
-                        overrides_by_symbol[symbol] = override
-                        results_by_symbol[symbol] = results
-                        raw_results_by_symbol[symbol] = raw_results
-                        summary_by_symbol[symbol] = summary
-                with state_lock:
-                    # v0.99.36 - CRITICAL FIX: this used to overwrite
-                    # STATE["msnr_backtest_results"]/_raw/_summary/
-                    # _symbol_overrides wholesale with only THIS cycle's
-                    # results_by_symbol etc. _msnr_backtest_one_symbol()
-                    # returns None on any exception (timeout, Gate.io
-                    # 429, transient fetch failure) and such symbols are
-                    # simply skipped when building results_by_symbol —
-                    # they never make it in. Under a 200+ symbol universe
-                    # scanned concurrently, some symbols hitting a
-                    # transient error per cycle is close to guaranteed,
-                    # so every cycle was silently dropping a chunk of
-                    # PREVIOUSLY-successful backtest data (and, via
-                    # msnr_compute_live_universe() being fed that same
-                    # incomplete dict, dropping those symbols out of live
-                    # scanning too) — from the outside this looked
-                    # exactly like "выполнил бэктест, через час бэктест
-                    # прогоняется заново и всё слетает, будто прогона не
-                    # было", per direct user report.
-                    # Fix: merge this cycle's results into the existing
-                    # STATE dicts instead of replacing them, so a symbol
-                    # that failed just THIS cycle keeps its last-known-
-                    # good data. Only symbols no longer in the current
-                    # `universe` (e.g. fell out of the top-liquid ranking)
-                    # are actually dropped, not ones that merely errored.
-                    merged_results = dict(STATE.get("msnr_backtest_results") or {})
-                    merged_raw = dict(STATE.get("msnr_backtest_results_raw") or {})
-                    merged_summary = dict(STATE.get("msnr_backtest_summary") or {})
-                    merged_overrides = dict(STATE.get("msnr_symbol_overrides") or {})
-                    merged_results.update(results_by_symbol)
-                    merged_raw.update(raw_results_by_symbol)
-                    merged_summary.update(summary_by_symbol)
-                    merged_overrides.update(overrides_by_symbol)
-                    universe_set = set(universe)
-                    for d in (merged_results, merged_raw, merged_summary, merged_overrides):
-                        for sym in list(d.keys()):
-                            if sym not in universe_set:
-                                del d[sym]
-                    STATE["msnr_backtest_results"] = merged_results
-                    STATE["msnr_backtest_results_raw"] = merged_raw
-                    STATE["msnr_backtest_summary"] = merged_summary
-                    STATE["msnr_symbol_overrides"] = merged_overrides
-                    STATE["msnr_backtest_universe"] = universe
-                    # v0.99.78 — bounds computed here (once, off the just-
-                    # merged overrides) and threaded through so this
-                    # cycle's live-universe promotion uses the SAME
-                    # ranking reference api_msnr_status() will compute
-                    # fresh for itself moments later — see msnr_compute_
-                    # rank_bounds()'s own docstring for why sharing
-                    # bounds (not just the formula) matters for staying
-                    # consistent across callers.
-                    msnr_rank_bounds = msnr_compute_rank_bounds(merged_overrides)
-                    STATE["msnr_live_universe"] = msnr_compute_live_universe(merged_overrides, bounds=msnr_rank_bounds)
-                    # v0.99.108, per direct user request ("монеты попавшие
-                    # в топ список и винрейт больше 50 помечаются галочкой
-                    # авто торговли, если потом такая монета вылетела из
-                    # топа то галочку автоматом снимать"): auto-manages
-                    # the per-symbol autotrade toggle for the top-N pool —
-                    # auto-ON any symbol newly qualifying (in the eligible
-                    # top-N AND win_rate > 50), auto-OFF any symbol that
-                    # stops qualifying (either condition), but ONLY among
-                    # symbols that were themselves part of the auto-
-                    # managed pool as of the LAST cycle (msnr_autotrade_
-                    # top_set) — critically, this scoping means a symbol
-                    # the user manually toggled ON via msnr_manual_toggle_
-                    # allowed_symbols()'s own broader "вне топ-10, на свой
-                    # страх и риск" feature is NEVER touched by this auto-
-                    # off logic, since it never enters msnr_autotrade_
-                    # top_set unless it also separately earns a genuine
-                    # top-N spot. Symmetric with the entry condition
-                    # (falling below EITHER top-N membership or the >50%
-                    # winrate bar turns it off, matching how it turned on)
-                    # rather than only reacting to ranking changes.
-                    eligible_now = set(msnr_autotrade_eligible_symbols(merged_overrides, bounds=msnr_rank_bounds))
-                    prev_top_set = set(STATE.get("msnr_autotrade_top_set") or [])
-                    autotrade_symbols = STATE["msnr_autotrade_symbols"]
-                    for sym in eligible_now:
-                        wr = (merged_summary.get(sym) or {}).get("win_rate")
-                        if wr is not None and wr >= 50 and not autotrade_symbols.get(sym):
-                            autotrade_symbols[sym] = True
-                    for sym in prev_top_set:
-                        if not autotrade_symbols.get(sym):
-                            continue
-                        wr = (merged_summary.get(sym) or {}).get("win_rate")
-                        still_qualifies = sym in eligible_now and wr is not None and wr >= 50
-                        if not still_qualifies:
-                            autotrade_symbols[sym] = False
-                    STATE["msnr_autotrade_top_set"] = sorted(eligible_now)
-                    STATE["msnr_last_backtest_finished"] = time.time()
-                    STATE["msnr_last_backtest_duration"] = round(time.time() - t0, 1)
-            finally:
-                # v0.99.15 — always clears "running" even if the cycle
-                # above raised partway through (e.g. msnr_build_backtest_
-                # universe() itself failing), per direct user request for
-                # a progress indicator: a stale "running" flag left on
-                # after a genuine failure would be worse than the
-                # original "не завершился, no detail" problem it's meant
-                # to fix — it would show 100% confident progress on a
-                # cycle that already died.
-                with state_lock:
-                    STATE["msnr_backtest_running"] = False
-                    STATE["msnr_backtest_in_flight"] = []
+            # v0.99.181 — wrap the entire backtest cycle in a future with a
+            # hard ceiling so a stuck get_tickers() or any other pre-executor
+            # call can't hang the loop for hours (the per-symbol timeouts in
+            # the executor only protect the parallel phase, not the serial
+            # universe-build phase before it).
+            MAX_CYCLE_SEC = 60 * 60  # 1h hard ceiling for the whole cycle
+            with ThreadPoolExecutor(max_workers=1) as _cycle_ex:
+                _cycle_fut = _cycle_ex.submit(_msnr_run_one_backtest_cycle, t0)
+                try:
+                    _cycle_fut.result(timeout=MAX_CYCLE_SEC)
+                except (TimeoutError, FutureTimeoutError):
+                    log_error(f"msnr_backtest_loop: entire cycle exceeded {MAX_CYCLE_SEC}s — aborting and retrying next interval")
+                    with state_lock:
+                        STATE["msnr_backtest_running"] = False
+                except Exception as e:
+                    log_error(f"msnr_backtest_loop cycle: {e}")
+                    with state_lock:
+                        STATE["msnr_backtest_running"] = False
         except Exception as e:
-            log_error(f"msnr_backtest_loop: {e}")
-        # v0.99.40 — Event.wait(timeout=...) instead of a plain sleep:
-        # blocks for the same max(300, MSNR_REFRESH_SEC) by default, but
-        # api_reset_msnr() can now cut this short via MSNR_BACKTEST_
-        # TRIGGER.set() instead of the loop being unreachable until the
-        # full hour elapses. Cleared right after so the NEXT cycle's own
-        # wait isn't pre-satisfied by a stale set() from this one.
+            log_error(f"msnr_backtest_loop outer: {e}")
         MSNR_BACKTEST_TRIGGER.wait(timeout=max(300, MSNR_REFRESH_SEC))
         MSNR_BACKTEST_TRIGGER.clear()
+
+
+def _msnr_run_one_backtest_cycle(t0):
+    universe = msnr_build_backtest_universe()
+    results_by_symbol = {}
+    raw_results_by_symbol = {}
+    summary_by_symbol = {}
+    overrides_by_symbol = {}
+    with state_lock:
+        STATE["msnr_backtest_total"] = len(universe)
+        STATE["msnr_backtest_done"] = 0
+        STATE["msnr_backtest_in_flight"] = []
+        STATE["msnr_backtest_running"] = True
+        STATE["msnr_backtest_started_at"] = t0
+    try:
+        # Autotune (v0.99.5): grid-search each symbol's own
+        # (min_leg_atr, qm_zone_pct, qm_lookback) instead of always
+        # backtesting the module-default params — see msnr_optimize_
+        # symbol()'s own docstring. The winning combo's trades ARE
+        # the backtest shown/drilled-into in the UI; no separate
+        # un-tuned backtest run needed.
+        with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
+            futs = [ex.submit(_msnr_backtest_one_symbol, s) for s in universe]
+            # v0.99.168 — per direct user report (backtest showed
+            # "2.6ч назад" despite taking only ~8min normally):
+            # as_completed() with no timeout can block indefinitely
+            # if a single symbol's HTTP request hangs at the TCP
+            # level (no data arriving, so HTTP_TIMEOUT never fires).
+            # Per-future timeout = HTTP_TIMEOUT * 3 retries * 3
+            # fetches per symbol + margin = 3 min ceiling per symbol.
+            # A symbol that exceeds it is logged and skipped (same
+            # outcome as an exception — keeps last-known-good data).
+            PER_SYMBOL_TIMEOUT = HTTP_TIMEOUT * 3 * 3 + 60
+            for fut in as_completed(futs, timeout=PER_SYMBOL_TIMEOUT * len(universe)):
+                try:
+                    res = fut.result(timeout=PER_SYMBOL_TIMEOUT)
+                except (TimeoutError, FutureTimeoutError):
+                    log_error(f"msnr_backtest: a symbol timed out after {PER_SYMBOL_TIMEOUT}s — skipping")
+                    continue
+                if res is None:
+                    continue
+                symbol, override, results, raw_results, summary = res
+                overrides_by_symbol[symbol] = override
+                results_by_symbol[symbol] = results
+                raw_results_by_symbol[symbol] = raw_results
+                summary_by_symbol[symbol] = summary
+        with state_lock:
+            # v0.99.36 - CRITICAL FIX: this used to overwrite
+            # STATE["msnr_backtest_results"]/_raw/_summary/
+            # _symbol_overrides wholesale with only THIS cycle's
+            # results_by_symbol etc. _msnr_backtest_one_symbol()
+            # returns None on any exception (timeout, Gate.io
+            # 429, transient fetch failure) and such symbols are
+            # simply skipped when building results_by_symbol —
+            # they never make it in. Under a 200+ symbol universe
+            # scanned concurrently, some symbols hitting a
+            # transient error per cycle is close to guaranteed,
+            # so every cycle was silently dropping a chunk of
+            # PREVIOUSLY-successful backtest data (and, via
+            # msnr_compute_live_universe() being fed that same
+            # incomplete dict, dropping those symbols out of live
+            # scanning too) — from the outside this looked
+            # exactly like "выполнил бэктест, через час бэктест
+            # прогоняется заново и всё слетает, будто прогона не
+            # было", per direct user report.
+            # Fix: merge this cycle's results into the existing
+            # STATE dicts instead of replacing them, so a symbol
+            # that failed just THIS cycle keeps its last-known-
+            # good data. Only symbols no longer in the current
+            # `universe` (e.g. fell out of the top-liquid ranking)
+            # are actually dropped, not ones that merely errored.
+            merged_results = dict(STATE.get("msnr_backtest_results") or {})
+            merged_raw = dict(STATE.get("msnr_backtest_results_raw") or {})
+            merged_summary = dict(STATE.get("msnr_backtest_summary") or {})
+            merged_overrides = dict(STATE.get("msnr_symbol_overrides") or {})
+            merged_results.update(results_by_symbol)
+            merged_raw.update(raw_results_by_symbol)
+            merged_summary.update(summary_by_symbol)
+            merged_overrides.update(overrides_by_symbol)
+            universe_set = set(universe)
+            for d in (merged_results, merged_raw, merged_summary, merged_overrides):
+                for sym in list(d.keys()):
+                    if sym not in universe_set:
+                        del d[sym]
+            STATE["msnr_backtest_results"] = merged_results
+            STATE["msnr_backtest_results_raw"] = merged_raw
+            STATE["msnr_backtest_summary"] = merged_summary
+            STATE["msnr_symbol_overrides"] = merged_overrides
+            STATE["msnr_backtest_universe"] = universe
+            # v0.99.78 — bounds computed here (once, off the just-
+            # merged overrides) and threaded through so this
+            # cycle's live-universe promotion uses the SAME
+            # ranking reference api_msnr_status() will compute
+            # fresh for itself moments later — see msnr_compute_
+            # rank_bounds()'s own docstring for why sharing
+            # bounds (not just the formula) matters for staying
+            # consistent across callers.
+            msnr_rank_bounds = msnr_compute_rank_bounds(merged_overrides)
+            STATE["msnr_live_universe"] = msnr_compute_live_universe(merged_overrides, bounds=msnr_rank_bounds)
+            # v0.99.108, per direct user request ("монеты попавшие
+            # в топ список и винрейт больше 50 помечаются галочкой
+            # авто торговли, если потом такая монета вылетела из
+            # топа то галочку автоматом снимать"): auto-manages
+            # the per-symbol autotrade toggle for the top-N pool —
+            # auto-ON any symbol newly qualifying (in the eligible
+            # top-N AND win_rate > 50), auto-OFF any symbol that
+            # stops qualifying (either condition), but ONLY among
+            # symbols that were themselves part of the auto-
+            # managed pool as of the LAST cycle (msnr_autotrade_
+            # top_set) — critically, this scoping means a symbol
+            # the user manually toggled ON via msnr_manual_toggle_
+            # allowed_symbols()'s own broader "вне топ-10, на свой
+            # страх и риск" feature is NEVER touched by this auto-
+            # off logic, since it never enters msnr_autotrade_
+            # top_set unless it also separately earns a genuine
+            # top-N spot. Symmetric with the entry condition
+            # (falling below EITHER top-N membership or the >50%
+            # winrate bar turns it off, matching how it turned on)
+            # rather than only reacting to ranking changes.
+            eligible_now = set(msnr_autotrade_eligible_symbols(merged_overrides, bounds=msnr_rank_bounds))
+            prev_top_set = set(STATE.get("msnr_autotrade_top_set") or [])
+            autotrade_symbols = STATE["msnr_autotrade_symbols"]
+            for sym in eligible_now:
+                wr = (merged_summary.get(sym) or {}).get("win_rate")
+                if wr is not None and wr >= 50 and not autotrade_symbols.get(sym):
+                    autotrade_symbols[sym] = True
+            for sym in prev_top_set:
+                if not autotrade_symbols.get(sym):
+                    continue
+                wr = (merged_summary.get(sym) or {}).get("win_rate")
+                still_qualifies = sym in eligible_now and wr is not None and wr >= 50
+                if not still_qualifies:
+                    autotrade_symbols[sym] = False
+            STATE["msnr_autotrade_top_set"] = sorted(eligible_now)
+            STATE["msnr_last_backtest_finished"] = time.time()
+            STATE["msnr_last_backtest_duration"] = round(time.time() - t0, 1)
+    finally:
+        # v0.99.15 — always clears "running" even if the cycle
+        # above raised partway through
+        with state_lock:
+            STATE["msnr_backtest_running"] = False
+            STATE["msnr_backtest_in_flight"] = []
 
 
 def msnr_backtest_watchdog():
@@ -12388,9 +12403,11 @@ def ema_bull_scan_universe():
 _ema_bull_results = []
 _ema_bull_results_lock = threading.Lock()
 _ema_bull_last_scan = 0
+_ema_bull_prev_signals = set()  # (symbol, broken_count) seen in previous scan
 
 
 def ema_bull_loop():
+    global _ema_bull_last_scan, _ema_bull_prev_signals
     global _ema_bull_last_scan
     while True:
         try:
@@ -12420,6 +12437,21 @@ def ema_bull_loop():
                 _ema_bull_results.clear()
                 _ema_bull_results.extend(results)
                 _ema_bull_last_scan = int(time.time())
+            # Send telegram for new signals (new symbol or more EMAs broken than before)
+            ema_labels = {21: "EMA21", 55: "EMA55", 100: "EMA100", 200: "EMA200"}
+            for r in results:
+                key = (r["symbol"], r["broken_count"])
+                if key not in _ema_bull_prev_signals:
+                    broken_txt = "→".join(ema_labels.get(p, str(p)) for p in r["broken_emas"])
+                    near_txt = f" · откат {r['pullback_pct']}% от уровня" if r["near_pullback"] else ""
+                    day_txt = " · 1d ✓" if r["daily_confirmed"] else ""
+                    send_telegram(
+                        f"🚀 {r['symbol']}: пробиты {broken_txt} на недельном"
+                        f"\nЛимит: {r['last_broken_ema_val']} (EMA{r['last_broken_ema']})"
+                        f"{near_txt}{day_txt}",
+                        category="ema_bull",
+                    )
+            _ema_bull_prev_signals = {(r["symbol"], r["broken_count"]) for r in results}
         except Exception as e:
             log_error(f"ema_bull_loop: {e}")
         time.sleep(EMA_BULL_REFRESH_SEC)
@@ -14328,6 +14360,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">открытие и закрытие сигналов</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramLsw"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Алерты EMA Bull</div>
+          <div class="sub">новые сигналы пробоя EMA на недельном</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramEmaBull"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -16255,6 +16294,7 @@ const setInputs = {
   telegram_alerts_ft5: document.getElementById('setTelegramFt5'),
   telegram_alerts_mirror: document.getElementById('setTelegramMirror'),
   telegram_alerts_lsw: document.getElementById('setTelegramLsw'),
+  telegram_alerts_ema_bull: document.getElementById('setTelegramEmaBull'),
   telegram_alerts_network: document.getElementById('setTelegramNetwork'),
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
   autotrade_bounce: document.getElementById('setAutotradeBounce'),
