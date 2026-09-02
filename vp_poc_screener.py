@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.174"
+APP_VERSION = "0.99.175"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14219,6 +14219,15 @@ INDEX_HTML = """<!doctype html>
 const fmt = (n, d=6) => n === null || n === undefined ? '-' : Number(n).toPrecision(d).replace(/\\.?0+$/,'').replace(/\\.$/, '');
 const fmtTime = (t) => t ? new Date(t*1000).toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit'}) : '-';
 const fmtDateTime = (t) => t ? new Date(t*1000).toLocaleString('ru-RU', {day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit'}) : '-';  // date+time, not just time — Session's own open time is the SAME 10:00 every day by design, so time-only gives no way to tell which day's session a row belongs to
+const fmtTimeWithDate = (t) => {
+  if (!t) return '-';
+  const d = new Date(t * 1000);
+  const now = new Date();
+  const sameDay = d.getDate() === now.getDate() && d.getMonth() === now.getMonth() && d.getFullYear() === now.getFullYear();
+  const timePart = d.toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'});
+  if (sameDay) return timePart;
+  return d.toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'});
+};
 
 let activeTab = 'msnr';
 
@@ -15785,7 +15794,7 @@ async function refreshAutotrade() {
     const dirClass = e.direction === 'LONG' ? 'long' : (e.direction === 'SHORT' ? 'short' : 'dim');
     const statusClass = {OPENED: 'win', OPENED_TP_SL_FAILED: 'loss', DRY_RUN: 'status-open', SKIPPED: 'dim', ERROR: 'loss'}[e.status] || 'dim';
     return `<tr>
-      <td class="dim">${fmtTime(e.time)}</td><td>${modeLabels[e.mode] || e.mode}</td><td>${e.symbol}</td>
+      <td class="dim">${fmtTimeWithDate(e.time)}</td><td>${modeLabels[e.mode] || e.mode}</td><td>${e.symbol}</td>
       <td class="${dirClass}">${e.direction || '-'}</td>
       <td class="${statusClass}">${statusRu[e.status] || e.status}</td>
       <td class="dim" style="max-width:280px;white-space:normal;">${e.detail || ''}</td>
