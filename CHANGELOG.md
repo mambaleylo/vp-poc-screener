@@ -12041,3 +12041,16 @@ v0.99.181 - EMA Bull telegram alerts + MSNR backtest hang fix:
          Verified: py_compile, pyflakes, node --check, 46 routes,
          real runtime start confirming telegram_alerts_ema_bull in
          GET /api/settings.
+
+v0.99.182 - AMOLED screensaver with clock, per direct user request.
+         Button 🕐 in tab bar toggles fullscreen black overlay with
+         large monospace clock (HH:MM:SS) + date. Clock drifts slowly
+         across the screen using requestAnimationFrame (bounces off
+         edges, ~0.4px/frame) to prevent AMOLED burn-in. Color: green
+         (#3ddc97) when any OPEN position exists (MSNR/Mirror/LSW),
+         white otherwise — checked every second via API. Click anywhere
+         to exit. Requests Screen Wake Lock API (navigator.wakeLock) to
+         prevent Chrome from sleeping — auto re-acquires on tab
+         visibility change. Also keeps the JS event loop running which
+         may help prevent background process suspension.
+         Verified: py_compile, pyflakes, node --check, 46 routes.
