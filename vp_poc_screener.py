@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.169"
+APP_VERSION = "0.99.171"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12942,15 +12942,17 @@ def api_msnr_status():
 
 @app.route("/api/msnr/signals")
 def api_msnr_signals():
-    # v0.99.162 — filter to only symbols with autotrade checkbox enabled,
-    # per direct user report: signals from symbols without a checkbox
-    # appeared in the live signals table. The table is for autotrade-
-    # monitored symbols only — tracking-only signals belong to the
-    # backtest table, not here.
+    # v0.99.162 — filter to autotrade symbols only for tracking-only signals.
+    # v0.99.170 — BUT always show OPEN signals regardless of galochka: a
+    # real position is open on the exchange and must be visible even if the
+    # symbol's checkbox was auto-removed after the position opened (e.g.
+    # symbol fell out of top-N between backtest cycles). Per direct user
+    # report: "открытых: 1" but "Живых сигналов пока нет" — the open
+    # position became invisible because its symbol lost its checkbox.
     with state_lock:
         autotrade_symbols = dict(STATE["msnr_autotrade_symbols"])
         signals = [s for s in STATE["msnr_signals"]
-                   if autotrade_symbols.get(s["symbol"])]
+                   if autotrade_symbols.get(s["symbol"]) or s.get("status") == "OPEN"]
     return jsonify(signals)
 
 
@@ -14737,7 +14739,7 @@ async function refreshMsnr() {
       ${staleWarnHtml}
       ${buildTxt}<br>
       ${progressBarHtml}
-      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · открытых: ${ss.open||0} · всего: ${ss.total||0} · клик по строке — график
+      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · всего: ${ss.total||0} · клик по строке — график
     </div>`;
   const rrBuckets = status.rr_buckets || [];
   const rrBucketRows = rrBuckets.map(b => {
