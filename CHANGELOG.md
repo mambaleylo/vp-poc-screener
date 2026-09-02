@@ -11919,3 +11919,14 @@ v0.99.168 - CRITICAL FIX: backtest loop could hang for hours, per direct
          cycle). Total as_completed timeout = per-symbol * universe size
          so the outer loop also can't hang if many symbols stall at once.
          Verified: py_compile, pyflakes clean, 45 routes unchanged.
+
+v0.99.169 - Fix v0.99.168's TimeoutError catch: concurrent.futures
+         TimeoutError is not always the same as the builtin TimeoutError
+         (only aliased in Python 3.11+). Import FutureTimeoutError from
+         concurrent.futures explicitly and catch both. Also added proper
+         timeout handling (with except) to Mirror and LSW backtest loops
+         which had fut.result(timeout=...) but no except clause —
+         the timeout would have raised silently into the general Exception
+         handler which would re-raise it (aborting the whole batch), not
+         skip just that symbol. Now all 3 loops correctly skip timed-out
+         symbols with a log entry. Verified: py_compile, pyflakes, 45 routes.
