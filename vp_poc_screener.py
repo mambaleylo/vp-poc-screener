@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.171"
+APP_VERSION = "0.99.172"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9128,8 +9128,12 @@ def update_msnr_signal_outcomes():
 
 
 def compute_msnr_signal_stats():
+    # v0.99.172 — filter to autotrade_fired signals only, per direct user
+    # request: "не проще ли просто туда не относить сигналы не autotraded?"
+    # Stats (W/L/total) should only count signals that actually fired a real
+    # trade, not tracking-only signals from symbols without a checkbox.
     with state_lock:
-        signals = list(STATE["msnr_signals"])
+        signals = [s for s in STATE["msnr_signals"] if s.get("autotrade_fired")]
     closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
     wins = sum(1 for s in closed if s["result"] == "WIN")
     losses = sum(1 for s in closed if s["result"] == "LOSS")
