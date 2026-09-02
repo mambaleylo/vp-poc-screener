@@ -12004,3 +12004,18 @@ v0.99.178 - Progress bars (backtest status) no longer hidden by 💡
 v0.99.179 - MSNR compound simulation start balance lowered 40->15,
          per direct user request. Affects the "$40→$X" column in the
          MSNR backtest table. Verified: py_compile, pyflakes, 45 routes.
+
+v0.99.180 - New "EMA🚀" tab — Multi-EMA Bull Screener for early bull
+         market detection, per direct user request ("монеты на старте
+         буллрана, когда монета начинает один за одним пробивать EMA").
+         Logic: scans top-300 liquid futures symbols for sequential
+         weekly EMA breakouts (21→55→100→200). Signal = price closed
+         above N EMAs in order on 1W. Entry level = last broken EMA
+         (limit on pullback). Shows daily confirmation (last 3 daily
+         closes above EMA), volume trend (recent 4W vs prior 4W),
+         distance from current price to EMA (green if ≤5% = near limit).
+         No autotrade — screener only, user decides. Sorted by: most
+         EMAs broken → daily confirmed → near pullback. Runs every 4h.
+         New route: /api/ema_bull/status. Thread: ema_bull_loop().
+         Verified: py_compile, pyflakes, node --check, 46 routes,
+         real runtime start confirming API and config fields correct.
