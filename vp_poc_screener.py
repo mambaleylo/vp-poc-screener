@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.186"
+APP_VERSION = "0.99.187"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -8953,6 +8953,13 @@ def msnr_scan_symbol_live(symbol):
                 record["live_size_usd"] = live_size
                 record["leverage_used"] = live_leverage
                 record["sl_order_id"] = autotrade_result.get("sl_order_id")
+            # v0.99.187 — mark balance_skipped on the MSNR signal record
+            # (not just on the autotrade_log entry) so /api/msnr/signals
+            # shows it and the user can see the params. The signal was
+            # already written to STATE["msnr_signals"] before execute_autotrade
+            # was called, so we update it in-place here.
+            if autotrade_result.get("balance_skipped"):
+                record["balance_skipped"] = True
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         level_txt = "A-shape (resist)" if sig["level_type"] == "A" else "V-shape (support)"
         # v0.99.74, per direct user request ("мне не нужны уведомления
