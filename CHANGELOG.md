@@ -12101,3 +12101,9 @@ v0.99.188 - Leverage in Telegram for Mirror and LSW (was only in MSNR).
          balance_skipped signals now counted in MSNR total stats (W/L/WR
          still only from autotrade_fired). Per user: "монета в целом
          авто торгуется — должна везде учитываться".
+
+v0.99.189 - balance_skipped signals now fully counted in W/L/WR stats,
+         per user: "надо считать все равно, то что не хватило баланса
+         мои проблемы". Outcome tracking (update_msnr_signal_outcomes)
+         already processed them since they have status=OPEN — only the
+         stats aggregation was excluding them.
