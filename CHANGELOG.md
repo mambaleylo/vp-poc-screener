@@ -12088,3 +12088,11 @@ v0.99.186 - Balance-skipped MSNR signals now visible in live signals
          execute_autotrade() SKIPPED record; /api/msnr/signals now
          passes through records with balance_skipped=True so params
          stay visible.
+
+v0.99.187 - FIX: balance_skipped flag now set on the MSNR signal record
+         itself (not just on autotrade_log entry), so the signal appears
+         in /api/msnr/signals live table. Previously the flag was only
+         set on the execute_autotrade return value which was never
+         propagated back to the STATE["msnr_signals"] record. Stats
+         (WR/compound) correctly unaffected since autotrade_fired stays
+         False — the trade was never opened.
