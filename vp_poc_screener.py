@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.188"
+APP_VERSION = "0.99.189"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9158,25 +9158,21 @@ def update_msnr_signal_outcomes():
 
 
 def compute_msnr_signal_stats():
-    # v0.99.172 — filter to autotrade_fired signals only.
-    # v0.99.188 — also include balance_skipped in total (signal was valid,
-    # just couldn't open due to balance). W/L/WR only counts autotrade_fired.
+    # v0.99.189 — count W/L for ALL signals that were intended to trade
+    # (autotrade_fired OR balance_skipped). Per user: "надо считать все
+    # равно, то что не хватило баланса мои проблемы".
     with state_lock:
-        all_sig = list(STATE["msnr_signals"])
-    signals_traded = [s for s in all_sig if s.get("autotrade_fired")]
-    signals_skipped = [s for s in all_sig if s.get("balance_skipped") and not s.get("autotrade_fired")]
-    closed = [s for s in signals_traded if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+        signals = [s for s in STATE["msnr_signals"]
+                   if s.get("autotrade_fired") or s.get("balance_skipped")]
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
     wins = sum(1 for s in closed if s["result"] == "WIN")
     losses = sum(1 for s in closed if s["result"] == "LOSS")
-    timeouts = sum(1 for s in signals_traded if s.get("result") == "TIMEOUT")
-    open_n = sum(1 for s in signals_traded if s["status"] == "OPEN")
+    timeouts = sum(1 for s in signals if s.get("result") == "TIMEOUT")
+    open_n = sum(1 for s in signals if s["status"] == "OPEN")
     total_closed = len(closed)
     winrate = round(wins / total_closed * 100, 1) if total_closed else None
-    return {"total": len(signals_traded) + len(signals_skipped),
-            "wins": wins, "losses": losses, "timeouts": timeouts,
+    return {"total": len(signals), "wins": wins, "losses": losses, "timeouts": timeouts,
             "open": open_n, "winrate": winrate}
-
-
 
 def msnr_build_backtest_universe():
     """Backtest-only universe: MSNR_SYMBOLS (the original gold-only live-
