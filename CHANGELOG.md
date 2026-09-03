@@ -12096,3 +12096,8 @@ v0.99.187 - FIX: balance_skipped flag now set on the MSNR signal record
          propagated back to the STATE["msnr_signals"] record. Stats
          (WR/compound) correctly unaffected since autotrade_fired stays
          False — the trade was never opened.
+
+v0.99.188 - Leverage in Telegram for Mirror and LSW (was only in MSNR).
+         balance_skipped signals now counted in MSNR total stats (W/L/WR
+         still only from autotrade_fired). Per user: "монета в целом
+         авто торгуется — должна везде учитываться".
