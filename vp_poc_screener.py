@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.187"
+APP_VERSION = "0.99.188"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9158,21 +9158,24 @@ def update_msnr_signal_outcomes():
 
 
 def compute_msnr_signal_stats():
-    # v0.99.172 — filter to autotrade_fired signals only, per direct user
-    # request: "не проще ли просто туда не относить сигналы не autotraded?"
-    # Stats (W/L/total) should only count signals that actually fired a real
-    # trade, not tracking-only signals from symbols without a checkbox.
+    # v0.99.172 — filter to autotrade_fired signals only.
+    # v0.99.188 — also include balance_skipped in total (signal was valid,
+    # just couldn't open due to balance). W/L/WR only counts autotrade_fired.
     with state_lock:
-        signals = [s for s in STATE["msnr_signals"] if s.get("autotrade_fired")]
-    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+        all_sig = list(STATE["msnr_signals"])
+    signals_traded = [s for s in all_sig if s.get("autotrade_fired")]
+    signals_skipped = [s for s in all_sig if s.get("balance_skipped") and not s.get("autotrade_fired")]
+    closed = [s for s in signals_traded if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
     wins = sum(1 for s in closed if s["result"] == "WIN")
     losses = sum(1 for s in closed if s["result"] == "LOSS")
-    timeouts = sum(1 for s in signals if s.get("result") == "TIMEOUT")
-    open_n = sum(1 for s in signals if s["status"] == "OPEN")
+    timeouts = sum(1 for s in signals_traded if s.get("result") == "TIMEOUT")
+    open_n = sum(1 for s in signals_traded if s["status"] == "OPEN")
     total_closed = len(closed)
     winrate = round(wins / total_closed * 100, 1) if total_closed else None
-    return {"total": len(signals), "wins": wins, "losses": losses, "timeouts": timeouts,
+    return {"total": len(signals_traded) + len(signals_skipped),
+            "wins": wins, "losses": losses, "timeouts": timeouts,
             "open": open_n, "winrate": winrate}
+
 
 
 def msnr_build_backtest_universe():
@@ -10813,7 +10816,8 @@ def mirror_scan_symbol_live(symbol):
         send_telegram(
             f"{arrow} {symbol} (рождение зеркалки \u2014 {pattern_labels.get(sig['pattern'], sig['pattern'])})\n"
             f"entry: {sig['entry']:.6g}\n"
-            f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}",
+            f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n"
+            f"плечо: {autotrade_result.get('leverage', '?')}x",
             category="mirror",
         )
     except Exception as e:
@@ -12013,7 +12017,8 @@ def lsw_scan_symbol_live(symbol):
             f"{arrow} {symbol} ({level_labels.get(sig['level_type'], sig['level_type'])}, "
             f"x{sig.get('level_touches')} касания)\n"
             f"entry: {sig['entry']:.6g}\n"
-            f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}",
+            f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n"
+            f"плечо: {autotrade_result.get('leverage', '?')}x",
             category="lsw",
         )
     except Exception as e:
