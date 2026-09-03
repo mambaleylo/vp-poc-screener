@@ -12069,3 +12069,22 @@ v0.99.184 - EMA Bull backtest added. Click any symbol in the screener
          /api/ema_bull/backtest/<symbol> (cached per session).
          Uses 3 years of daily+weekly candles. 47 routes total.
          Verified: py_compile, pyflakes, node --check.
+
+v0.99.185 - EMA Touch Screener (replaces EMA Bull): signal = one large
+         impulse candle (1W or 1M) whose HIGH touched EMA28 from below
+         but CLOSE stayed below = SHORT rejection signal. No-noise
+         filter: candle range >= 50% of max prev 3 candles. 1W first,
+         fall back to 1M. Backtest: entry at next bar open, SL = EMA
+         *1.01, TP = 2R, 12-bar max wait. Per-symbol backtest on click
+         (weekly + monthly stats + last 15 trades). API routes unchanged
+         (/api/ema_bull/*). 47 routes. Verified: py_compile, pyflakes,
+         node --check.
+
+v0.99.186 - Balance-skipped MSNR signals now visible in live signals
+         table and TG alert includes entry/SL/TP params, per direct
+         user request ("когда сделка не открылась из-за нехватки денег
+         ее нужно добавлять в список живых сигналов, в тг уведомлении
+         присылать тейк и стоп"). Added balance_skipped=True flag on
+         execute_autotrade() SKIPPED record; /api/msnr/signals now
+         passes through records with balance_skipped=True so params
+         stay visible.
