@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.184"
+APP_VERSION = "0.99.185"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -73,7 +73,7 @@ INTERVAL = os.environ.get("VP_INTERVAL", "15m")           # candle timeframe —
 # symbol per scan.
 INTERVAL_SECONDS = {
     "10s": 10, "1m": 60, "5m": 300, "15m": 900, "30m": 1800,
-    "1h": 3600, "4h": 14400, "8h": 28800, "1d": 86400, "1w": 604800,
+    "1h": 3600, "4h": 14400, "8h": 28800, "1d": 86400, "1w": 604800, "1M": 2592000,
 }
 MAGNIFY_ENABLED = os.environ.get("VP_MAGNIFY", "1") == "1"
 MAGNIFY_TARGET_RATIO = float(os.environ.get("VP_MAGNIFY_RATIO", 16))  # aim for at least this many sub-bars per parent bar, like the original's "~16x lower timeframe"
@@ -3979,9 +3979,13 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
                                      f"${wallet_balance:.2f} (с запасом 2%) — сделка пропущена")
                 send_telegram(
                     f"⚠️ {symbol} ({mode}): сделка не открыта — недостаточно баланса. "
-                    f"Нужно ${margin:.2f}, доступно ${wallet_balance:.2f}.",
+                    f"Нужно ${margin:.2f}, доступно ${wallet_balance:.2f}. "
+                    f"Параметры: entry {entry}, SL {sl}, TP {tp}",
                     category=mode,
                 )
+                # v0.99.186 — mark so MSNR signals API shows it even though
+                # autotrade_fired=False, so entry/SL/TP params are visible
+                record["balance_skipped"] = True
                 with state_lock:
                     STATE["autotrade_log"].appendleft(record)
                 return record
@@ -12268,19 +12272,17 @@ def lsw_live_loop():
 # v0.99.180
 # ============================================================================
 
-EMA_BULL_WEEKLY_EMAS   = [21, 55, 100, 200]
-EMA_BULL_DAILY_CONFIRM_BARS = 3          # days price must stay above broken EMA
-EMA_BULL_PULLBACK_PCT  = float(os.environ.get("VP_EMA_BULL_PULLBACK_PCT", 5.0))  # % from last broken EMA to show as "near limit"
-EMA_BULL_REFRESH_SEC   = int(os.environ.get("VP_EMA_BULL_REFRESH_SEC", 14400))   # scan interval (4h — weekly candle changes slowly)
-EMA_BULL_MIN_EMAS_BROKEN = int(os.environ.get("VP_EMA_BULL_MIN_EMAS_BROKEN", 1)) # min EMA breaches to show in results
-EMA_BULL_BACKTEST_DAYS = int(os.environ.get("VP_EMA_BULL_BACKTEST_DAYS", 365 * 3))  # 3 years history for backtest
-EMA_BULL_DAILY_CONFIRM_N = int(os.environ.get("VP_EMA_BULL_DAILY_CONFIRM_N", 2))  # daily bars above EMA to confirm weekly signal
-EMA_BULL_SL_BUFFER_PCT = float(os.environ.get("VP_EMA_BULL_SL_BUFFER_PCT", 1.0))  # % below broken EMA for SL placement
-EMA_BULL_MAX_WAIT_BARS = int(os.environ.get("VP_EMA_BULL_MAX_WAIT_BARS", 52))  # max weekly bars to wait for TP/SL (1 year)
+EMA_TOUCH_EMA_PERIOD    = 28
+EMA_TOUCH_REFRESH_SEC   = int(os.environ.get("VP_EMA_TOUCH_REFRESH_SEC", 14400))
+EMA_TOUCH_NOISE_BARS    = int(os.environ.get("VP_EMA_TOUCH_NOISE_BARS", 3))
+EMA_TOUCH_NOISE_RATIO   = float(os.environ.get("VP_EMA_TOUCH_NOISE_RATIO", 0.5))
+EMA_TOUCH_BACKTEST_DAYS = int(os.environ.get("VP_EMA_TOUCH_BACKTEST_DAYS", 365 * 4))
+EMA_TOUCH_SL_BUFFER_PCT = float(os.environ.get("VP_EMA_TOUCH_SL_BUFFER_PCT", 1.0))
+EMA_TOUCH_MAX_WAIT_BARS = int(os.environ.get("VP_EMA_TOUCH_MAX_WAIT_BARS", 12))
+
 
 
 def ema_calc(prices, period):
-    """Simple EMA from list of closes."""
     if len(prices) < period:
         return []
     k = 2.0 / (period + 1)
@@ -12290,287 +12292,154 @@ def ema_calc(prices, period):
     return ema
 
 
-def ema_bull_backtest_symbol(symbol):
-    """Backtest EMA breakout signals on weekly candles with daily confirmation.
-    Signal: weekly close crosses above EMA from below.
-    Entry: open of the day after EMA_BULL_DAILY_CONFIRM_N daily closes above EMA.
-    SL: EMA value at signal time * (1 - SL_BUFFER_PCT/100).
-    TP: next higher EMA value at signal time (e.g. EMA21→EMA55→EMA100→EMA200).
-    No TP for EMA200 breakout (no higher EMA) — use fixed 3×SL distance.
-    Returns list of trade dicts."""
+def ema_touch_detect(candles, ema_period=None, noise_bars=None, noise_ratio=None):
+    ema_period = ema_period or EMA_TOUCH_EMA_PERIOD
+    noise_bars  = noise_bars  or EMA_TOUCH_NOISE_BARS
+    noise_ratio = noise_ratio or EMA_TOUCH_NOISE_RATIO
+    if not candles or len(candles) < ema_period + noise_bars + 1:
+        return []
+    closes   = [c["close"] for c in candles]
+    ema_vals = ema_calc(closes, ema_period)
+    pad      = len(closes) - len(ema_vals)
+    ema_full = [None] * pad + ema_vals
+    signals  = []
+    for i in range(noise_bars + 1, len(candles)):
+        ema      = ema_full[i]
+        ema_prev = ema_full[i - 1]
+        if ema is None or ema_prev is None:
+            continue
+        c = candles[i]
+        if candles[i - 1]["close"] >= ema_prev:
+            continue
+        if c["high"] < ema:
+            continue
+        if c["close"] >= ema:
+            continue
+        candle_range = c["high"] - c["low"]
+        prev_ranges  = [candles[j]["high"] - candles[j]["low"] for j in range(i - noise_bars, i)]
+        max_prev     = max(prev_ranges) if prev_ranges else 0
+        if max_prev > 0 and candle_range < noise_ratio * max_prev:
+            continue
+        signals.append({"idx": i, "time": c["time"],
+                        "high": c["high"], "low": c["low"], "close": c["close"],
+                        "ema": round(ema, 8), "candle_range": round(candle_range, 8),
+                        "direction": "SHORT"})
+    return signals
+
+
+def ema_touch_backtest_symbol(symbol, tf="1w"):
     try:
         now = int(time.time())
-        # Fetch weekly candles for EMA computation + signal detection
-        weekly_start = now - (EMA_BULL_BACKTEST_DAYS + 400) * 86400
-        weekly = get_candles_range(symbol, "1w", weekly_start, now)
-        if not weekly or len(weekly) < 210:
+        interval_sec = INTERVAL_SECONDS.get(tf, 604800)
+        start_ts = now - (EMA_TOUCH_BACKTEST_DAYS + EMA_TOUCH_EMA_PERIOD * (interval_sec // 86400 + 1)) * 86400
+        candles  = get_candles_range(symbol, tf, start_ts, now)
+        if not candles or len(candles) < EMA_TOUCH_EMA_PERIOD + 5:
             return []
-
-        closes_w = [c["close"] for c in weekly]
-
-        # Compute all weekly EMAs per bar
-        ema_series = {}
-        for period in EMA_BULL_WEEKLY_EMAS:
-            vals = ema_calc(closes_w, period)
-            if vals:
-                # Align: ema_calc returns len(closes_w) - period + 1 values
-                # pad front with None
-                pad = len(closes_w) - len(vals)
-                ema_series[period] = [None] * pad + vals
-
-        # Fetch daily candles for confirmation
-        daily_start = weekly_start
-        daily = get_candles_range(symbol, "1d", daily_start, now)
-        if not daily:
-            return []
-        daily_sorted = sorted(daily, key=lambda c: c["time"])
-
         trades = []
-        week_interval = 7 * 86400
-
-        for i in range(1, len(weekly)):
-            bar = weekly[i]
-            prev = weekly[i - 1]
-            bar_close = bar["close"]
-            prev_close = prev["close"]
-
-            for period in EMA_BULL_WEEKLY_EMAS:
-                ema_now = ema_series[period][i]
-                ema_prev = ema_series[period][i - 1]
-                if ema_now is None or ema_prev is None:
-                    continue
-
-                # Signal: weekly close crossed above this EMA
-                if not (prev_close <= ema_prev and bar_close > ema_now):
-                    continue
-
-                # Find next EMA above for TP target
-                idx_ema = EMA_BULL_WEEKLY_EMAS.index(period)
-                next_ema_period = EMA_BULL_WEEKLY_EMAS[idx_ema + 1] if idx_ema + 1 < len(EMA_BULL_WEEKLY_EMAS) else None
-                next_ema_val = ema_series.get(next_ema_period, [None] * (i + 1))[i] if next_ema_period else None
-
-                sl = ema_now * (1 - EMA_BULL_SL_BUFFER_PCT / 100)
-                sl_dist = bar_close - sl
-                if sl_dist <= 0:
-                    continue
-                if next_ema_val and next_ema_val > bar_close:
-                    tp = next_ema_val
-                else:
-                    tp = bar_close + sl_dist * 3  # 3R when no higher EMA
-
-                rr = round((tp - bar_close) / sl_dist, 2) if sl_dist > 0 else None
-
-                # Daily confirmation: find EMA_BULL_DAILY_CONFIRM_N daily closes above sl/ema after weekly bar
-                signal_week_end = bar["time"] + week_interval
-                confirm_days = [d for d in daily_sorted if d["time"] >= signal_week_end
-                                and d["close"] > ema_now]
-                if len(confirm_days) < EMA_BULL_DAILY_CONFIRM_N:
-                    # Not enough confirmation — skip
-                    continue
-                entry_day = confirm_days[EMA_BULL_DAILY_CONFIRM_N - 1]
-                entry_time = entry_day["time"]
-                # Entry at open of NEXT daily bar after confirmation
-                next_day_idx = daily_sorted.index(entry_day) + 1 if entry_day in daily_sorted else None
-                if next_day_idx is None or next_day_idx >= len(daily_sorted):
-                    continue
-                entry_candle = daily_sorted[next_day_idx]
-                entry_price = entry_candle["open"]
-
-                # Track outcome on subsequent weekly bars
-                result = "TIMEOUT"
-                exit_price = None
-                exit_time = None
-                for j in range(i + 1, min(i + 1 + EMA_BULL_MAX_WAIT_BARS, len(weekly))):
-                    w = weekly[j]
-                    if w["low"] <= sl:
-                        result = "LOSS"
-                        exit_price = sl
-                        exit_time = w["time"]
-                        break
-                    if w["high"] >= tp:
-                        result = "WIN"
-                        exit_price = tp
-                        exit_time = w["time"]
-                        break
-
-                pnl_r = None
-                if result == "WIN":
-                    pnl_r = round((tp - entry_price) / sl_dist, 2)
-                elif result == "LOSS":
-                    pnl_r = round((sl - entry_price) / sl_dist, 2)
-
-                trades.append({
-                    "symbol": symbol,
-                    "ema_period": period,
-                    "time": bar["time"],
-                    "entry_time": entry_time,
-                    "entry": round(entry_price, 6),
-                    "sl": round(sl, 6),
-                    "tp": round(tp, 6),
-                    "rr": rr,
-                    "result": result,
-                    "exit_price": round(exit_price, 6) if exit_price else None,
-                    "exit_time": exit_time,
-                    "pnl_r": pnl_r,
-                    "ema_val": round(ema_now, 6),
-                })
-
+        for sig in ema_touch_detect(candles):
+            i = sig["idx"]
+            if i + 1 >= len(candles):
+                continue
+            eb    = candles[i + 1]
+            entry = eb["open"]
+            sl    = sig["ema"] * (1 + EMA_TOUCH_SL_BUFFER_PCT / 100)
+            sd    = sl - entry
+            if sd <= 0:
+                continue
+            tp  = entry - sd * 2
+            res = "TIMEOUT"; ep = et = None
+            for j in range(i + 1, min(i + 1 + EMA_TOUCH_MAX_WAIT_BARS, len(candles))):
+                b = candles[j]
+                if b["high"] >= sl:
+                    res, ep, et = "LOSS", sl, b["time"]; break
+                if b["low"] <= tp:
+                    res, ep, et = "WIN",  tp, b["time"]; break
+            pnl_r = None
+            if ep:
+                pnl_r = round((entry - ep) / sd, 2)
+                if res == "LOSS": pnl_r = -abs(pnl_r)
+            trades.append({"symbol": symbol, "tf": tf, "time": sig["time"],
+                           "entry_time": eb["time"], "entry": round(entry, 8),
+                           "sl": round(sl, 8), "tp": round(tp, 8), "ema": sig["ema"],
+                           "rr": 2.0, "direction": "SHORT", "result": res,
+                           "exit_price": round(ep, 8) if ep else None,
+                           "exit_time": et, "pnl_r": pnl_r})
         return trades
     except Exception as e:
-        log_error(f"ema_bull_backtest_symbol {symbol}: {e}")
+        log_error(f"ema_touch_backtest_symbol {symbol}/{tf}: {e}")
         return []
 
 
-def ema_bull_summarize(trades):
-    """Compute per-EMA and overall stats."""
-    summary = {}
-    for period in EMA_BULL_WEEKLY_EMAS:
-        t = [x for x in trades if x["ema_period"] == period]
-        closed = [x for x in t if x["result"] in ("WIN", "LOSS")]
-        wins = sum(1 for x in closed if x["result"] == "WIN")
-        losses = len(closed) - wins
-        avg_rr = round(sum(x["rr"] for x in closed if x["rr"]) / len(closed), 2) if closed else None
-        avg_pnl = round(sum(x["pnl_r"] for x in closed if x["pnl_r"] is not None) / len(closed), 2) if closed else None
-        wr = round(wins / len(closed) * 100, 1) if closed else None
-        summary[period] = {"n": len(closed), "wins": wins, "losses": losses, "winrate": wr,
-                           "avg_rr": avg_rr, "avg_pnl_r": avg_pnl, "timeouts": sum(1 for x in t if x["result"] == "TIMEOUT")}
-    return summary
+def ema_touch_summarize(trades):
+    closed  = [t for t in trades if t["result"] in ("WIN", "LOSS")]
+    wins    = sum(1 for t in closed if t["result"] == "WIN")
+    losses  = len(closed) - wins
+    wr      = round(wins / len(closed) * 100, 1) if closed else None
+    avg_pnl = round(sum(t["pnl_r"] for t in closed if t.get("pnl_r") is not None) / len(closed), 2) if closed else None
+    return {"n": len(closed), "wins": wins, "losses": losses,
+            "timeouts": sum(1 for t in trades if t["result"] == "TIMEOUT"),
+            "winrate": wr, "avg_pnl_r": avg_pnl}
 
 
-_ema_bull_backtest = {}   # symbol -> {trades, summary, computed_at}
-_ema_bull_backtest_lock = threading.Lock()
-
-
-def ema_bull_scan_symbol(symbol):
-    """Scan one symbol for multi-EMA bull breakout pattern.
-    Returns dict with signal info or None if no signal."""
+def ema_touch_scan_symbol(symbol):
     try:
         now = int(time.time())
-        # Fetch weekly candles — need enough for EMA 200 warmup + recent bars
-        weekly_start = now - 400 * 7 * 86400
-        weekly = get_candles_range(symbol, "1w", weekly_start, now)
-        if not weekly or len(weekly) < 210:
-            return None
-
-        closes_w = [c["close"] for c in weekly]
-        # Compute all EMAs on weekly closes
-        ema_values = {}
-        for period in EMA_BULL_WEEKLY_EMAS:
-            vals = ema_calc(closes_w, period)
-            if vals:
-                ema_values[period] = vals[-1]  # current weekly EMA value
-
-        current_price = closes_w[-1]
-        if not ema_values:
-            return None
-
-        # Which EMAs has price broken above on weekly close?
-        broken = [p for p in EMA_BULL_WEEKLY_EMAS if p in ema_values and current_price > ema_values[p]]
-        if len(broken) < EMA_BULL_MIN_EMAS_BROKEN:
-            return None
-
-        # Sequential check: must be broken in order (21 before 55 before 100 before 200)
-        # i.e. all EMAs in broken list must be the FIRST N in the sorted list
-        sorted_all = EMA_BULL_WEEKLY_EMAS
-        broken_set = set(broken)
-        sequential_count = 0
-        for p in sorted_all:
-            if p in broken_set:
-                sequential_count += 1
-            else:
-                break  # gap — not sequential
-
-        if sequential_count < EMA_BULL_MIN_EMAS_BROKEN:
-            return None
-
-        broken = sorted_all[:sequential_count]  # only sequential ones
-
-        # Last broken EMA = potential limit entry level
-        last_broken_ema_period = broken[-1]
-        last_broken_ema_val = ema_values[last_broken_ema_period]
-        next_ema_period = sorted_all[sequential_count] if sequential_count < len(sorted_all) else None
-        next_ema_val = ema_values.get(next_ema_period) if next_ema_period else None
-
-        # Distance from current price to last broken EMA (pullback opportunity)
-        pullback_pct = (current_price - last_broken_ema_val) / last_broken_ema_val * 100
-
-        # Daily confirmation: check last EMA_BULL_DAILY_CONFIRM_BARS daily closes above last broken EMA
-        daily_start = now - 30 * 86400
-        daily = get_candles_range(symbol, "1d", daily_start, now)
-        daily_confirmed = False
-        if daily and len(daily) >= EMA_BULL_DAILY_CONFIRM_BARS:
-            recent_daily = [c["close"] for c in daily[-EMA_BULL_DAILY_CONFIRM_BARS:]]
-            daily_confirmed = all(p > last_broken_ema_val for p in recent_daily)
-
-        # Weekly volume trend: is volume growing? (last 4w vs prior 4w)
-        vol_growing = None
-        if len(weekly) >= 8:
-            recent_vol = sum(c["volume"] for c in weekly[-4:])
-            prior_vol = sum(c["volume"] for c in weekly[-8:-4])
-            if prior_vol > 0:
-                vol_growing = recent_vol > prior_vol
-
-        near_pullback = pullback_pct <= EMA_BULL_PULLBACK_PCT
-
-        return {
-            "symbol": symbol,
-            "price": current_price,
-            "broken_emas": broken,
-            "broken_count": sequential_count,
-            "last_broken_ema": last_broken_ema_period,
-            "last_broken_ema_val": round(last_broken_ema_val, 6),
-            "next_ema": next_ema_period,
-            "next_ema_val": round(next_ema_val, 6) if next_ema_val else None,
-            "pullback_pct": round(pullback_pct, 2),
-            "near_pullback": near_pullback,
-            "daily_confirmed": daily_confirmed,
-            "vol_growing": vol_growing,
-            "scanned_at": now,
-        }
+        for tf in ("1w", "1M"):
+            interval_sec = INTERVAL_SECONDS.get(tf, 604800)
+            candles = get_candles_range(symbol, tf, now - (EMA_TOUCH_EMA_PERIOD + 10) * interval_sec, now)
+            if not candles or len(candles) < EMA_TOUCH_EMA_PERIOD + 3:
+                continue
+            closed_c = [c for c in candles if c["time"] + interval_sec <= now]
+            if not closed_c:
+                continue
+            sigs = ema_touch_detect(closed_c)
+            if not sigs or sigs[-1]["idx"] != len(closed_c) - 1:
+                continue
+            sig      = sigs[-1]
+            ema_now  = sig["ema"]
+            price    = closed_c[-1]["close"]
+            dist_pct = round((ema_now - price) / price * 100, 2)
+            sl       = round(ema_now * (1 + EMA_TOUCH_SL_BUFFER_PCT / 100), 8)
+            tp       = round(price - (sl - price) * 2, 8)
+            return {"symbol": symbol, "tf": tf, "time": sig["time"],
+                    "high": sig["high"], "close": sig["close"],
+                    "ema": ema_now, "dist_pct": dist_pct,
+                    "entry": round(price, 8), "sl": sl, "tp": tp,
+                    "direction": "SHORT", "scanned_at": now}
+        return None
     except Exception as e:
-        log_error(f"ema_bull_scan_symbol {symbol}: {e}")
+        log_error(f"ema_touch_scan_symbol {symbol}: {e}")
         return None
 
 
-def ema_bull_scan_universe():
-    """Scan top liquid symbols for EMA bull breakouts."""
+def ema_touch_scan_universe():
     try:
         tickers = get_tickers()
-        universe = []
-        for t in tickers:
-            name = t.get("contract", "")
-            if not name.endswith("_USDT"):
-                continue
-            vol = 0.0
-            try:
-                vol = float(t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0)
-            except (TypeError, ValueError):
-                pass
-            if vol >= MIN_VOL_USD:
-                universe.append(name)
-        universe = universe[:300]  # cap at top 300 by volume
+        return [t["contract"] for t in tickers
+                if t.get("contract", "").endswith("_USDT") and
+                float(t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0) >= MIN_VOL_USD][:300]
     except Exception as e:
-        log_error(f"ema_bull_scan_universe: {e}")
-        universe = []
-    return universe
+        log_error(f"ema_touch_scan_universe: {e}")
+        return []
 
 
-_ema_bull_results = []
+_ema_bull_results      = []
 _ema_bull_results_lock = threading.Lock()
-_ema_bull_last_scan = 0
-_ema_bull_prev_signals = set()  # (symbol, broken_count) seen in previous scan
+_ema_bull_last_scan    = 0
+_ema_bull_prev_signals = set()
+_ema_bull_backtest     = {}
+_ema_bull_backtest_lock = threading.Lock()
 
 
 def ema_bull_loop():
     global _ema_bull_last_scan, _ema_bull_prev_signals
-    global _ema_bull_last_scan
     while True:
         try:
-            universe = ema_bull_scan_universe()
-            results = []
+            universe = ema_touch_scan_universe()
+            results  = []
             if universe:
                 with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe))) as ex:
-                    futs = [ex.submit(ema_bull_scan_symbol, s) for s in universe]
+                    futs = [ex.submit(ema_touch_scan_symbol, s) for s in universe]
                     PER_SYM_TO = HTTP_TIMEOUT * 3 * 3 + 60
                     for fut in as_completed(futs, timeout=PER_SYM_TO * len(universe)):
                         try:
@@ -12581,35 +12450,25 @@ def ema_bull_loop():
                             continue
                         except Exception:
                             continue
-            # Sort: most EMAs broken first, then daily confirmed, then near pullback
-            results.sort(key=lambda r: (
-                -r["broken_count"],
-                -int(r["daily_confirmed"]),
-                -int(r["near_pullback"]),
-                r["pullback_pct"],
-            ))
+            results.sort(key=lambda r: r["dist_pct"])
             with _ema_bull_results_lock:
                 _ema_bull_results.clear()
                 _ema_bull_results.extend(results)
                 _ema_bull_last_scan = int(time.time())
-            # Send telegram for new signals (new symbol or more EMAs broken than before)
-            ema_labels = {21: "EMA21", 55: "EMA55", 100: "EMA100", 200: "EMA200"}
+            new_keys = {r["symbol"] for r in results}
             for r in results:
-                key = (r["symbol"], r["broken_count"])
-                if key not in _ema_bull_prev_signals:
-                    broken_txt = "→".join(ema_labels.get(p, str(p)) for p in r["broken_emas"])
-                    near_txt = f" · откат {r['pullback_pct']}% от уровня" if r["near_pullback"] else ""
-                    day_txt = " · 1d ✓" if r["daily_confirmed"] else ""
+                if r["symbol"] not in _ema_bull_prev_signals:
                     send_telegram(
-                        f"🚀 {r['symbol']}: пробиты {broken_txt} на недельном"
-                        f"\nЛимит: {r['last_broken_ema_val']} (EMA{r['last_broken_ema']})"
-                        f"{near_txt}{day_txt}",
+                        f"\U0001f4cd {r['symbol']} ({r['tf']}): "
+                        f"\u0438\u043c\u043f\u0443\u043b\u044c\u0441 \u043a EMA{EMA_TOUCH_EMA_PERIOD}"
+                        f"\nHigh {r['high']} EMA {r['ema']}, close {r['close']}"
+                        f"\nSHORT: entry {r['entry']}, SL {r['sl']}, TP {r['tp']}",
                         category="ema_bull",
                     )
-            _ema_bull_prev_signals = {(r["symbol"], r["broken_count"]) for r in results}
+            _ema_bull_prev_signals = new_keys
         except Exception as e:
             log_error(f"ema_bull_loop: {e}")
-        time.sleep(EMA_BULL_REFRESH_SEC)
+        time.sleep(EMA_TOUCH_REFRESH_SEC)
 
 # ----------------------------------------------------------------------------
 # API
@@ -13157,36 +13016,30 @@ def api_ema_bull_status():
     with _ema_bull_results_lock:
         results = list(_ema_bull_results)
         last_scan = _ema_bull_last_scan
-    with _ema_bull_backtest_lock:
-        backtest = dict(_ema_bull_backtest)
     return jsonify({
-        "results": results,
-        "last_scan": last_scan,
-        "backtest": backtest,
+        "results": results, "last_scan": last_scan,
         "config": {
-            "weekly_emas": EMA_BULL_WEEKLY_EMAS,
-            "daily_confirm_bars": EMA_BULL_DAILY_CONFIRM_BARS,
-            "daily_confirm_n": EMA_BULL_DAILY_CONFIRM_N,
-            "pullback_pct": EMA_BULL_PULLBACK_PCT,
-            "sl_buffer_pct": EMA_BULL_SL_BUFFER_PCT,
-            "min_emas_broken": EMA_BULL_MIN_EMAS_BROKEN,
-            "refresh_sec": EMA_BULL_REFRESH_SEC,
-            "backtest_days": EMA_BULL_BACKTEST_DAYS,
+            "ema_period": EMA_TOUCH_EMA_PERIOD, "noise_bars": EMA_TOUCH_NOISE_BARS,
+            "noise_ratio": EMA_TOUCH_NOISE_RATIO, "sl_buffer_pct": EMA_TOUCH_SL_BUFFER_PCT,
+            "refresh_sec": EMA_TOUCH_REFRESH_SEC, "backtest_days": EMA_TOUCH_BACKTEST_DAYS,
         },
     })
 
 
 @app.route("/api/ema_bull/backtest/<symbol>")
 def api_ema_bull_backtest(symbol):
-    """Run or return cached backtest for one symbol."""
     with _ema_bull_backtest_lock:
         cached = _ema_bull_backtest.get(symbol)
-    if cached:
+    if cached and time.time() - cached.get("computed_at", 0) < 3600:
         return jsonify(cached)
-    # Run on demand
-    trades = ema_bull_backtest_symbol(symbol)
-    summary = ema_bull_summarize(trades)
-    result = {"symbol": symbol, "trades": trades, "summary": summary, "computed_at": int(time.time())}
+    result = {
+        "symbol": symbol,
+        "weekly":  {"trades": ema_touch_backtest_symbol(symbol, "1w"),  "summary": None},
+        "monthly": {"trades": ema_touch_backtest_symbol(symbol, "1M"),  "summary": None},
+        "computed_at": int(time.time()),
+    }
+    result["weekly"]["summary"]  = ema_touch_summarize(result["weekly"]["trades"])
+    result["monthly"]["summary"] = ema_touch_summarize(result["monthly"]["trades"])
     with _ema_bull_backtest_lock:
         _ema_bull_backtest[symbol] = result
     return jsonify(result)
@@ -13374,7 +13227,7 @@ def api_msnr_signals():
     with state_lock:
         autotrade_symbols = dict(STATE["msnr_autotrade_symbols"])
         signals = [s for s in STATE["msnr_signals"]
-                   if autotrade_symbols.get(s["symbol"]) or s.get("status") == "OPEN"]
+                   if autotrade_symbols.get(s["symbol"]) or s.get("status") == "OPEN" or s.get("balance_skipped")]
     return jsonify(signals)
 
 
@@ -16179,115 +16032,88 @@ async function refreshAutotradeBanner() {
   } catch(e) {}
 }
 
+
 async function refreshEmaBull() {
   const panel = document.getElementById('emaBullPanel');
   try {
     const data = await (await fetch('/api/ema_bull/status')).json();
-    const cfg = data.config || {};
+    const cfg  = data.config || {};
     const results = data.results || [];
     const lastScan = data.last_scan ? fmtDateTime(data.last_scan) : '—';
-    const emaLabels = {21:'EMA21', 55:'EMA55', 100:'EMA100', 200:'EMA200'};
     const rows = results.map(r => {
-      const brokenTxt = r.broken_emas.map(p => `<span class="win">${emaLabels[p]||p}</span>`).join('→');
-      const nextTxt = r.next_ema ? `<span class="dim">→${emaLabels[r.next_ema]||r.next_ema} @ ${fmtNum(r.next_ema_val)}</span>` : '<span class="dim">всё пробито</span>';
-      const pullTxt = r.near_pullback
-        ? `<span class="win" title="хорошая точка для лимита">+${r.pullback_pct}% ↓ близко</span>`
-        : `<span class="dim">+${r.pullback_pct}%</span>`;
-      const dayTxt = r.daily_confirmed ? '<span class="win">✓ 1d</span>' : '<span class="dim">? 1d</span>';
-      const volTxt = r.vol_growing === true ? '<span class="win">↑ объём</span>'
-                   : r.vol_growing === false ? '<span class="loss">↓ объём</span>'
-                   : '<span class="dim">—</span>';
-      const limitPrice = r.last_broken_ema_val;
-      return `<tr onclick="loadEmaBullBacktest('${r.symbol}')" style="cursor:pointer;" title="нажмите для бэктеста">
-        <td style="font-size:11px;">${r.symbol}</td>
-        <td>${brokenTxt}</td>
-        <td>${nextTxt}</td>
-        <td>${pullTxt}</td>
-        <td style="font-size:10px;">${fmtNum(r.price)}</td>
-        <td style="font-size:10px;color:#3ddc97;" title="уровень лимитного ордера">${fmtNum(limitPrice)}</td>
-        <td>${dayTxt}</td>
-        <td>${volTxt}</td>
+      const tfBadge = r.tf === '1M'
+        ? '<span style="color:#f0a030;">1M</span>'
+        : '<span class="dim">1W</span>';
+      const distCls = r.dist_pct <= 3 ? 'win' : (r.dist_pct <= 8 ? 'status-open' : 'dim');
+      return `<tr onclick="loadEmaBullBacktest('${r.symbol}')" style="cursor:pointer;">
+        <td>${r.symbol}</td><td>${tfBadge}</td>
+        <td class="dim">${fmtNum(r.high)}</td>
+        <td style="color:#c792ea;">${fmtNum(r.ema)}</td>
+        <td class="${distCls}">${r.dist_pct}% от EMA</td>
+        <td class="dim">${fmtNum(r.sl)}</td>
+        <td class="dim">${fmtNum(r.tp)}</td>
+        <td class="dim">${fmtDateTime(r.time)}</td>
       </tr>`;
     }).join('');
-    const tableHtml = results.length ? `
-      <div style="overflow-x:auto;">
-      <table style="font-size:11px;white-space:nowrap;">
-        <thead><tr>
-          <th>Symbol</th><th>Пробиты EMA (1W)</th><th>Следующая</th>
-          <th>Откат от EMA</th><th>Цена</th><th>Лимит</th>
-          <th>Дневная</th><th>Объём 1W</th>
-        </tr></thead>
-        <tbody>${rows}</tbody>
-      </table></div>` : '<div class="dim">Сигналов нет — все монеты ниже пробитых EMA или недостаточно данных.</div>';
+    const tableHtml = results.length
+      ? `<div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;">
+          <thead><tr><th>Symbol</th><th>ТФ</th><th>High</th>
+            <th>EMA${cfg.ema_period||28}</th><th>Расстояние</th>
+            <th>SL</th><th>TP</th><th>Свеча</th></tr></thead>
+          <tbody>${rows}</tbody></table></div>`
+      : '<div class="dim">Нет сигналов.</div>';
     panel.innerHTML = `
       <div class="dim hint-block" style="margin-bottom:8px;">
-        <b>EMA Bull Screener</b> — монеты которые последовательно пробивают EMA 21→55→100→200 на недельном таймфрейме.
-        Сигнал: недельная свеча закрылась выше EMA, затем ${cfg.daily_confirm_n||2} дневных свечи подтверждают.
-        Вход: открытие дня после подтверждения. Стоп: под пробитой EMA (-${cfg.sl_buffer_pct||1}%).
-        Тейк: следующая EMA выше. Нажми монету — покажет бэктест. Сканирование раз в ${Math.round(cfg.refresh_sec/3600)}ч.
+        <b>EMA Touch — SHORT от EMA${cfg.ema_period||28}</b>.
+        Сигнал: одна большая свеча
+        (high&ge;EMA, close&lt;EMA) на 1W/1M.
+        SL=EMA+${cfg.sl_buffer_pct||1}%, TP=2R. Нажми строку — бэктест.
       </div>
-      <div class="dim" style="margin-bottom:8px;">
-        Последнее сканирование: ${lastScan} · найдено монет: ${results.length}
-        · нажмите строку для бэктеста по монете
-      </div>
+      <div class="dim" style="margin-bottom:8px;">Последний скан: ${lastScan} &middot; сигналов: ${results.length}</div>
       ${tableHtml}
       <div id="emaBullBacktestPanel" style="margin-top:16px;"></div>`;
   } catch(e) {
-    panel.innerHTML = `<div class="dim">Ошибка загрузки: ${e}</div>`;
+    panel.innerHTML = `<div class="dim">Ошибка: ${e}</div>`;
   }
 }
 
 async function loadEmaBullBacktest(symbol) {
-  const panel = document.getElementById('emaBullBacktestPanel');
-  if (!panel) return;
-  panel.innerHTML = `<div class="dim">Загружаю бэктест для ${symbol}...</div>`;
+  const bp = document.getElementById('emaBullBacktestPanel');
+  if (!bp) return;
+  bp.innerHTML = `<div class="dim">Загружаю ${symbol}...</div>`;
   try {
     const d = await (await fetch(`/api/ema_bull/backtest/${symbol}`)).json();
-    const summary = d.summary || {};
-    const emaLabels = {21:'EMA21', 55:'EMA55', 100:'EMA100', 200:'EMA200'};
-    const statRows = Object.entries(summary).map(([period, s]) => {
-      if (!s.n) return '';
-      const wrClass = s.winrate >= 50 ? 'win' : 'loss';
-      const pnlClass = (s.avg_pnl_r||0) >= 0 ? 'win' : 'loss';
-      return `<tr>
-        <td>${emaLabels[period]||period}</td>
-        <td class="${wrClass}">${s.winrate??'—'}%</td>
-        <td class="dim">n=${s.n}</td>
-        <td class="win">${s.wins}W</td><td class="loss">${s.losses}L</td><td class="dim">${s.timeouts}T</td>
-        <td class="dim">avg RR: ${s.avg_rr??'—'}</td>
-        <td class="${pnlClass}">avg P&L: ${s.avg_pnl_r??'—'}R</td>
-      </tr>`;
-    }).join('');
-    // Last 20 trades
-    const trades = (d.trades||[]).slice(-20).reverse();
-    const tradeRows = trades.map(t => {
-      const resCls = t.result==='WIN'?'win':t.result==='LOSS'?'loss':'dim';
-      return `<tr>
-        <td class="dim">${fmtDateTime(t.entry_time)}</td>
-        <td>${emaLabels[t.ema_period]||t.ema_period}</td>
-        <td>${fmtNum(t.entry)}</td>
-        <td class="dim">${fmtNum(t.sl)}</td>
-        <td class="dim">${fmtNum(t.tp)}</td>
-        <td class="dim">${t.rr??'—'}R</td>
-        <td class="${resCls}">${t.result}</td>
-        <td class="${resCls}">${t.pnl_r!=null?(t.pnl_r>0?'+':'')+t.pnl_r+'R':'—'}</td>
-      </tr>`;
-    }).join('');
-    panel.innerHTML = `
-      <b style="font-size:12px;">Бэктест ${symbol}</b> <span class="dim" style="font-size:10px;">(${d.trades?.length||0} сигналов за ${Math.round((Date.now()/1000 - (d.trades?.[0]?.time||0)) / 86400 / 365, 1)} лет)</span>
-      <div style="overflow-x:auto;margin:8px 0;">
-      <table style="font-size:11px;white-space:nowrap;">
-        <thead><tr><th>EMA</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>avg RR</th><th>avg P&L</th></tr></thead>
-        <tbody>${statRows||'<tr><td colspan="8" class="dim">нет данных</td></tr>'}</tbody>
-      </table></div>
-      <div class="dim" style="font-size:11px;margin-bottom:4px;">Последние сигналы:</div>
-      <div style="overflow-x:auto;">
-      <table style="font-size:11px;white-space:nowrap;">
-        <thead><tr><th>Вход</th><th>EMA</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Результат</th><th>P&L</th></tr></thead>
-        <tbody>${tradeRows||'<tr><td colspan="8" class="dim">нет</td></tr>'}</tbody>
-      </table></div>`;
+    const renderSec = (label, sec) => {
+      const s = sec.summary || {};
+      const wrC  = (s.winrate||0) >= 50 ? 'win' : 'loss';
+      const pnlC = (s.avg_pnl_r||0) >= 0 ? 'win' : 'loss';
+      const stat = s.n
+        ? `<span class="${wrC}">${s.winrate}% WR</span> &middot; n=${s.n} &middot;
+           <span class="win">${s.wins}W</span>/<span class="loss">${s.losses}L</span>/${s.timeouts}T &middot;
+           avg P&L <span class="${pnlC}">${s.avg_pnl_r}R</span>`
+        : '<span class="dim">нет сигналов</span>';
+      const trades = (sec.trades || []).slice(-15).reverse();
+      const tRows = trades.map(t => {
+        const rc = t.result==='WIN'?'win':t.result==='LOSS'?'loss':'dim';
+        return `<tr><td class="dim">${fmtDateTime(t.entry_time)}</td>
+          <td>${fmtNum(t.entry)}</td><td class="dim">${fmtNum(t.sl)}</td>
+          <td class="dim">${fmtNum(t.tp)}</td>
+          <td class="${rc}">${t.result}</td>
+          <td class="${rc}">${t.pnl_r!=null?(t.pnl_r>0?'+':'')+t.pnl_r+'R':'—'}</td></tr>`;
+      }).join('');
+      return `<div style="margin-bottom:12px;">
+        <b style="font-size:11px;">${label}:</b> ${stat}
+        ${trades.length ? `<div style="overflow-x:auto;margin-top:4px;">
+          <table style="font-size:10px;white-space:nowrap;">
+          <thead><tr><th>Вход</th><th>Entry</th><th>SL</th><th>TP</th><th>Рез-т</th><th>P&L</th></tr></thead>
+          <tbody>${tRows}</tbody></table></div>` : ''}
+      </div>`;
+    };
+    bp.innerHTML = `<b style="font-size:12px;">Бэктест ${symbol} — SHORT от EMA28</b>
+      ${renderSec('1W', d.weekly  || {})}
+      ${renderSec('1M', d.monthly || {})}`;
   } catch(e) {
-    panel.innerHTML = `<div class="dim">Ошибка: ${e}</div>`;
+    bp.innerHTML = `<div class="dim">Ошибка: ${e}</div>`;
   }
 }
 
