@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.189"
+APP_VERSION = "0.99.190"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12354,7 +12354,16 @@ def ema_touch_backtest_symbol(symbol, tf="1w"):
             sd    = sl - entry
             if sd <= 0:
                 continue
-            tp  = entry - sd * 2
+            # TP = nearest swing low in the last 20 bars before signal
+            # (real target, not fixed 2R) — same philosophy as MSNR Storyline.
+            # If no meaningful swing low found, fall back to 2R.
+            lookback_lows = [candles[k]["low"] for k in range(max(0, i - 20), i)]
+            swing_low = min(lookback_lows) if lookback_lows else None
+            if swing_low and swing_low < entry and (entry - swing_low) >= sd * 0.5:
+                tp = swing_low
+            else:
+                tp = entry - sd * 2
+            rr = round((entry - tp) / sd, 2) if sd > 0 else 2.0
             res = "TIMEOUT"; ep = et = None
             for j in range(i + 1, min(i + 1 + EMA_TOUCH_MAX_WAIT_BARS, len(candles))):
                 b = candles[j]
@@ -12369,7 +12378,7 @@ def ema_touch_backtest_symbol(symbol, tf="1w"):
             trades.append({"symbol": symbol, "tf": tf, "time": sig["time"],
                            "entry_time": eb["time"], "entry": round(entry, 8),
                            "sl": round(sl, 8), "tp": round(tp, 8), "ema": sig["ema"],
-                           "rr": 2.0, "direction": "SHORT", "result": res,
+                           "rr": rr, "direction": "SHORT", "result": res,
                            "exit_price": round(ep, 8) if ep else None,
                            "exit_time": et, "pnl_r": pnl_r})
         return trades
@@ -16096,30 +16105,38 @@ async function loadEmaBullBacktest(symbol) {
       const wrC  = (s.winrate||0) >= 50 ? 'win' : 'loss';
       const pnlC = (s.avg_pnl_r||0) >= 0 ? 'win' : 'loss';
       const stat = s.n
-        ? `<span class="${wrC}">${s.winrate}% WR</span> &middot; n=${s.n} &middot;
-           <span class="win">${s.wins}W</span>/<span class="loss">${s.losses}L</span>/${s.timeouts}T &middot;
-           avg P&L <span class="${pnlC}">${s.avg_pnl_r}R</span>`
+        ? `<span class="${wrC}">${s.winrate}% WR</span> &middot; n=${s.n} &middot; <span class="win">${s.wins}W</span>/<span class="loss">${s.losses}L</span>/${s.timeouts}T &middot; avg P&L <span class="${pnlC}">${s.avg_pnl_r}R</span>`
         : '<span class="dim">нет сигналов</span>';
-      const trades = (sec.trades || []).slice(-15).reverse();
+      const trades = (sec.trades || []).slice(-20).reverse();
       const tRows = trades.map(t => {
         const rc = t.result==='WIN'?'win':t.result==='LOSS'?'loss':'dim';
-        return `<tr><td class="dim">${fmtDateTime(t.entry_time)}</td>
-          <td>${fmtNum(t.entry)}</td><td class="dim">${fmtNum(t.sl)}</td>
+        const statusHtml = t.result==='WIN'
+          ? `<span class="win">WIN @ ${fmtNum(t.exit_price)}${t.exit_time?' ('+fmtDateTime(t.exit_time)+')':''}</span>`
+          : t.result==='LOSS'
+          ? `<span class="loss">LOSS @ ${fmtNum(t.exit_price)}${t.exit_time?' ('+fmtDateTime(t.exit_time)+')':''}</span>`
+          : '<span class="dim">TIMEOUT</span>';
+        return `<tr>
+          <td class="dim">${fmtDateTime(t.entry_time)}</td>
+          <td class="short">${t.direction||'SHORT'}</td>
+          <td>${fmtNum(t.entry)}</td>
+          <td class="dim">${fmtNum(t.sl)}</td>
           <td class="dim">${fmtNum(t.tp)}</td>
-          <td class="${rc}">${t.result}</td>
-          <td class="${rc}">${t.pnl_r!=null?(t.pnl_r>0?'+':'')+t.pnl_r+'R':'—'}</td></tr>`;
+          <td class="dim">${t.rr!=null?t.rr+'R':'—'}</td>
+          <td>${statusHtml}</td>
+          <td class="${rc}">${t.pnl_r!=null?(t.pnl_r>0?'+':'')+t.pnl_r+'R':'—'}</td>
+        </tr>`;
       }).join('');
       return `<div style="margin-bottom:12px;">
         <b style="font-size:11px;">${label}:</b> ${stat}
         ${trades.length ? `<div style="overflow-x:auto;margin-top:4px;">
           <table style="font-size:10px;white-space:nowrap;">
-          <thead><tr><th>Вход</th><th>Entry</th><th>SL</th><th>TP</th><th>Рез-т</th><th>P&L</th></tr></thead>
+          <thead><tr><th>Вход</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Статус</th><th>P&L</th></tr></thead>
           <tbody>${tRows}</tbody></table></div>` : ''}
       </div>`;
     };
     bp.innerHTML = `<b style="font-size:12px;">Бэктест ${symbol} — SHORT от EMA28</b>
-      ${renderSec('1W', d.weekly  || {})}
-      ${renderSec('1M', d.monthly || {})}`;
+      ${renderSec('Недельный 1W', d.weekly  || {})}
+      ${renderSec('Месячный 1M',  d.monthly || {})}`;
   } catch(e) {
     bp.innerHTML = `<div class="dim">Ошибка: ${e}</div>`;
   }
