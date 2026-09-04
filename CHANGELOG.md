@@ -12107,3 +12107,7 @@ v0.99.189 - balance_skipped signals now fully counted in W/L/WR stats,
          мои проблемы". Outcome tracking (update_msnr_signal_outcomes)
          already processed them since they have status=OPEN — only the
          stats aggregation was excluding them.
+
+v0.99.190 - EMA Touch backtest: real TP (nearest swing low in last 20
+         bars) instead of fixed 2R. Trades table now shows WIN/LOSS @
+         exit_price + exit_time + real RR, like MSNR. Last 20 trades.
