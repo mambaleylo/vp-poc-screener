@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.190"
+APP_VERSION = "0.99.191"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -11431,14 +11431,46 @@ def lsw_filter_signals_by_candle_structure(signals, candles, wick_body_ratio=Non
     return kept
 
 
+# ATR sweep size filter — added per user request (v0.99.191)
+LSW_ATR_SWEEP_ENABLED = os.environ.get("VP_LSW_ATR_SWEEP", "0") == "1"
+LSW_ATR_SWEEP_PERIOD = int(os.environ.get("VP_LSW_ATR_SWEEP_PERIOD", 14))
+LSW_ATR_SWEEP_MULT = float(os.environ.get("VP_LSW_ATR_SWEEP_MULT", 0.5))  # sweep wick must be >= mult * ATR
+
+
+def lsw_filter_signals_by_atr_sweep(signals, candles, period=None, mult=None):
+    """Keep only signals where the sweep candle's wick (that crossed the level)
+    is >= mult * ATR(period). Filters out tiny, low-conviction sweeps."""
+    period = period or LSW_ATR_SWEEP_PERIOD
+    mult   = mult   or LSW_ATR_SWEEP_MULT
+    kept = []
+    for sig in signals:
+        # Find sweep candle index in candles list
+        sig_time = sig.get("time") or sig.get("entry_time")
+        idx = next((i for i, c in enumerate(candles) if c["time"] == sig_time), None)
+        if idx is None or idx < period:
+            kept.append(sig)  # can't judge — keep
+            continue
+        # ATR over previous period bars
+        atr_bars = candles[idx - period: idx]
+        atr = sum(max(c["high"] - c["low"],
+                      abs(c["high"] - candles[i + idx - period - 1]["close"]) if i > 0 else 0,
+                      abs(c["low"]  - candles[i + idx - period - 1]["close"]) if i > 0 else 0)
+                  for i, c in enumerate(atr_bars)) / period
+        # Sweep wick size
+        c = candles[idx]
+        if sig.get("direction") == "LONG":
+            wick = c["level_price"] - c["low"] if "level_price" in sig else c["high"] - c["low"]
+        else:
+            wick = c["high"] - (sig.get("level_price") or c["low"])
+        if atr > 0 and wick < mult * atr:
+            continue
+        kept.append(sig)
+    return kept
+
+
 def lsw_scan_5m_confirmation(candles_ltf, from_time, direction, max_bars=None,
                               pivot_left=None, pivot_right=None, wick_ratio=None):
     """Rule #3 of the reference note ("модели входа (5минутка):
-    инверсия / BOS (слом структуры) / поглощение"). Scans `candles_ltf`
-    (expected to be LSW_ENTRY_CONFIRM_INTERVAL, i.e. 5m, candles)
-    starting at the first bar at/after `from_time` (the 1h sweep
-    candle's own close) for up to `max_bars`, looking for the FIRST of:
-    - BOS: a 5m close breaks the most recent 5m swing point (high for
       LONG, low for SHORT) confirmed before the scan window started —
       a genuine slom structury in the trade's own direction.
     - Поглощение (absorption): a 5m candle whose rejection wick against
@@ -11737,7 +11769,7 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
     if len(candles) < LSW_PIVOT_LEFT + LSW_PIVOT_RIGHT + 20:
         return [], {"checkpoints": {"raw": None, "entry_confirm": None, "volume_filter": None,
                                      "fvg_filter": None, "session_filter": None, "min_touches_filter": None,
-                                     "candle_structure": None}}
+                                     "candle_structure": None, "atr_sweep": None}}
     raw_sigs = lsw_detect_signals(candles)
 
     htf_interval_sec = INTERVAL_SECONDS.get(LSW_HTF_INTERVAL, 14400)
@@ -11781,6 +11813,9 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
     structure_solo_sigs = lsw_filter_signals_by_candle_structure(raw_sigs, candles)
     checkpoints["candle_structure"] = _mirror_checkpoint(_track_all(structure_solo_sigs), rr=LSW_RR)
 
+    atr_solo_sigs = lsw_filter_signals_by_atr_sweep(raw_sigs, candles)
+    checkpoints["atr_sweep"] = _mirror_checkpoint(_track_all(atr_solo_sigs), rr=LSW_RR)
+
     # The ACTUAL result, using whichever filters are really toggled on right now — unchanged from before, chained in the same order.
     sigs = raw_sigs
     if LSW_HTF_FILTER_ENABLED and sigs:
@@ -11806,6 +11841,25 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
             sigs = lsw_apply_entry_confirmation(sigs, confirm_candles)
         else:
             sigs = []  # no 5m history at all to confirm against
+    # v0.99.191 — no-open-position filter: skip a new signal if the
+    # previous trade on this symbol is still OPEN (timeout not closed).
+    # Prevents piling into the same symbol while a trade is running.
+    open_times = {r["time"] for r in _track_all(raw_sigs) if r["result"] == "TIMEOUT"}
+    if open_times:
+        filtered_sigs = []
+        for sig in sigs:
+            sig_time = sig.get("time") or sig.get("entry_time")
+            # Find the most recent previous trade for this signal
+            prev_opens = [t for t in open_times if t < sig_time]
+            if prev_opens:
+                last_open = max(prev_opens)
+                # Check if that trade would still be open at signal time
+                prev_sig_matches = [r for r in _track_all(raw_sigs)
+                                    if r["time"] == last_open and r["result"] == "TIMEOUT"]
+                if prev_sig_matches:
+                    continue  # skip — previous trade still running
+            filtered_sigs.append(sig)
+        sigs = filtered_sigs
     results = _track_all(sigs)
     return results, {"checkpoints": checkpoints}
 
@@ -16004,6 +16058,7 @@ async function refreshLsw() {
     const sessionTxt = fmtCheckpoint(fc.session_filter, cfg.session_filter_enabled);
     const touchesTxt = fmtCheckpoint(fc.min_touches_filter, cfg.min_touches_enabled);
     const structureTxt = fmtCheckpoint(fc.candle_structure, cfg.candle_structure_filter_enabled);
+    const atrSweepTxt = fmtCheckpoint(fc.atr_sweep, false);
     return `<tr>
       <td>${r.symbol}${liveDot}${dirFilterTxt}</td>
       <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
@@ -16018,13 +16073,14 @@ async function refreshLsw() {
       <td>${sessionTxt}</td>
       <td>${touchesTxt}</td>
       <td>${structureTxt}</td>
+      <td>${atrSweepTxt}</td>
     </tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
     <div class="dim hint-block" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории). Последние 6 колонок показывают, что даёт КАЖДЫЙ фильтр САМ ПО СЕБЕ на сырых (нефильтрованных) сигналах монеты — не в связке с остальными фильтрами. В скобках — разница с винрейтом на тех же сырых сигналах без единого фильтра (это не то же самое, что колонка WR слева, там уже применены реально включённые фильтры). Пометка [выкл] — фильтр сейчас не участвует в реальной торговле, это просто оценка "а что если включить". Тренд-фильтр и структурный кэп по-прежнему доступны в настройках, просто убраны отсюда, чтобы не мозолить глаза:</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th><th>Подтверждение (соло)</th><th>Объём (соло)</th><th>FVG (соло)</th><th>Сессия (соло)</th><th>Касания≥${cfg.min_touches} (соло)</th><th>Структура свечи (соло)</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th><th>Подтверждение (соло)</th><th>Объём (соло)</th><th>FVG (соло)</th><th>Сессия (соло)</th><th>Касания≥${cfg.min_touches} (соло)</th><th>Структура свечи (соло)</th><th>ATR sweep (соло)</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
