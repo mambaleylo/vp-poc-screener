@@ -12111,3 +12111,13 @@ v0.99.189 - balance_skipped signals now fully counted in W/L/WR stats,
 v0.99.190 - EMA Touch backtest: real TP (nearest swing low in last 20
          bars) instead of fixed 2R. Trades table now shows WIN/LOSS @
          exit_price + exit_time + real RR, like MSNR. Last 20 trades.
+
+v0.99.191 - LSW: two new features per user request.
+         1. ATR Sweep Size filter (solo column): sweep wick must be >=
+         LSW_ATR_SWEEP_MULT (0.5) * ATR(LSW_ATR_SWEEP_PERIOD=14).
+         Shown as "ATR sweep (соло)" column in backtest table. Not in
+         real chain unless toggled (LSW_ATR_SWEEP_ENABLED).
+         2. No-open-position filter (real chain, no column): skip new
+         signal if previous trade on this symbol is still TIMEOUT/open.
+         Applied after entry confirmation in the actual chain.
+         Verified: py_compile, pyflakes, 47 routes.
