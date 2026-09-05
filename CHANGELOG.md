@@ -12186,3 +12186,27 @@ v0.99.195 - CRITICAL FIX (deeper than v0.99.194): the SAME "with
          of being silently discarded.
          Verified: py_compile, pyflakes, 49 routes, real runtime start
          confirming /api/lsw/status responds 200.
+
+v0.99.196 - CRITICAL FIX (root cause finally confirmed via direct
+         /api/lsw/status inspection): backtest_done:60, backtest_total:60,
+         backtest_running:false — every single worker genuinely completed
+         — yet last_backtest_finished:null and top:[] (completely empty).
+         All 60 workers finished (backtest_done increments in each
+         worker's own finally, independent of the aggregator), but the
+         aggregator loop collecting their results into local dicts before
+         a SINGLE final STATE write at the very end apparently never
+         reached that write (likely thread scheduling/GIL contention with
+         a dozen other concurrent background loops all competing for CPU
+         on a phone). v0.99.194/195's hard-ceiling fixes prevented
+         infinite hangs but didn't address this "fully done but the
+         one final batch write never happens" failure mode.
+         Real fix: STATE["lsw_backtest_summary"]/_results/_filter_
+         checkpoints/_live_universe/_live_directions are now written
+         PROGRESSIVELY — the moment each symbol's result is ready, not
+         batched into local dicts and flushed once at the end. So 59
+         good symbols are never held hostage by whatever happens to the
+         60th, or by the aggregator loop's own scheduling delays — the
+         UI now shows each symbol's data as soon as it's computed rather
+         than all-or-nothing after the entire universe finishes.
+         Verified: py_compile, pyflakes, 49 routes, real runtime
+         confirming /api/lsw/status still responds correctly.
