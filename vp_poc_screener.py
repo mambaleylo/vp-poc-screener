@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.199"
+APP_VERSION = "0.99.200"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -17121,8 +17121,8 @@ function drawChart(data, signalRow) {
   // chartW gave slots of only ~3-5px — unreadable. Pick as many bars as
   // fit at a legible minimum slot width, keeping the same ~29% "before
   // signal" ratio as the old 20/70 split.
-  const MIN_SLOT_PX = 9;
-  const maxBars = Math.max(15, Math.min(70, Math.floor(chartW / MIN_SLOT_PX)));
+  const MIN_SLOT_PX = 14;
+  const maxBars = Math.max(3, Math.min(70, Math.floor(chartW / MIN_SLOT_PX)));
   const beforeBars = Math.round(maxBars * 20 / 70);
   const { start: winStart, end: winEnd } = windowAroundTime(allCandles, signalRow && signalRow.time, beforeBars, maxBars);
   const candles = allCandles.slice(winStart, winEnd);
@@ -17512,8 +17512,17 @@ function drawVgiChart(data) {
   // unreadably thin slots on a narrow phone screen. Show only as many
   // as fit at a legible minimum width, centered on the signal candle
   // (data.time) so entry/SL/TP stay visible rather than scrolled off.
-  const MIN_SLOT_PX = 9;
-  const maxBars = Math.max(15, Math.min(allCandles.length, Math.floor(chartW / MIN_SLOT_PX)));
+  // v0.99.200 — FIX to v0.99.199's own adaptive-count logic: the lower
+  // bound `Math.max(15, ...)` FORCED at least 15 bars even when the
+  // actual container was narrower than 15*MIN_SLOT_PX, defeating the
+  // entire point of adapting to real screen width — exactly matching
+  // the follow-up report ("свечи все равно крайне узкие"). There should
+  // be NO artificial floor: show as many bars as genuinely fit at a
+  // legible width, even if that's fewer than 15. Also raised MIN_SLOT_PX
+  // from 9 to 14 for genuinely comfortable spacing, not just "not
+  // literally zero".
+  const MIN_SLOT_PX = 14;
+  const maxBars = Math.max(3, Math.min(allCandles.length, Math.floor(chartW / MIN_SLOT_PX)));
   const centerSigIdx = data.time !== undefined
     ? allCandles.findIndex(c => c.time === data.time)
     : allCandles.length - 1;
