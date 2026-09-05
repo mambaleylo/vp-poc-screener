@@ -12131,3 +12131,16 @@ v0.99.192 - CRITICAL FIX: LSW backtest loop hang — same fix as MSNR
          as MSNR: outer loop dispatches the full cycle with 1h hard
          ceiling, always wakes within 1h regardless of what hangs.
          Verified: py_compile, pyflakes, 47 routes, real runtime 200 OK.
+
+v0.99.193 - AMD Cycle screener completed: new "AMD" tab (orange), API
+         routes (/api/amd/status, /api/amd/backtest/<symbol>), amd_loop
+         thread started, HTML panel + full JS (refreshAmd,
+         loadAmdBacktest) matching MSNR-style trade table (WIN/LOSS @
+         exit_price + time, RR, P&L). Logic: A-zone consolidation
+         (range <= 0.6×ATR) → M-phase fake breakout beyond A (>= 0.5×ATR)
+         → D-phase impulsive candle in real direction = signal. Entry
+         next bar open, SL beyond M extreme, TP = RR 2.5. 1h structure,
+         90 days backtest. Telegram alerts via category="amd" +
+         TELEGRAM_ALERTS_AMD toggle + settings wiring.
+         49 routes total. Verified: py_compile, pyflakes, node --check,
+         real runtime confirming /api/amd/status returns correct config.
