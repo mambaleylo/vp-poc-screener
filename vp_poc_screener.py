@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.191"
+APP_VERSION = "0.99.192"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1018,7 +1018,7 @@ CREDENTIALS_FILE = os.environ.get(
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_network",
+                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "msnr_all_in_enabled",
                   "autotrade_risk_pct",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
@@ -1080,6 +1080,7 @@ def get_settings():
         "telegram_alerts_mirror": TELEGRAM_ALERTS_MIRROR,
         "telegram_alerts_lsw": TELEGRAM_ALERTS_LSW,
         "telegram_alerts_ema_bull": TELEGRAM_ALERTS_EMA_BULL,
+        "telegram_alerts_amd": TELEGRAM_ALERTS_AMD,
         "telegram_alerts_network": TELEGRAM_ALERTS_NETWORK,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
@@ -1111,7 +1112,7 @@ def apply_settings(updates):
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
-    global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_EMA_BULL, TELEGRAM_ALERTS_NETWORK
+    global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_EMA_BULL, TELEGRAM_ALERTS_AMD, TELEGRAM_ALERTS_NETWORK
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT
     if "volume_profile_enabled" in updates:
@@ -1228,6 +1229,8 @@ def apply_settings(updates):
         TELEGRAM_ALERTS_LSW = bool(updates["telegram_alerts_lsw"])
     if "telegram_alerts_ema_bull" in updates:
         TELEGRAM_ALERTS_EMA_BULL = bool(updates["telegram_alerts_ema_bull"])
+    if "telegram_alerts_amd" in updates:
+        TELEGRAM_ALERTS_AMD = bool(updates["telegram_alerts_amd"])
     if "telegram_alerts_network" in updates:
         TELEGRAM_ALERTS_NETWORK = bool(updates["telegram_alerts_network"])
     if "autotrade_dry_run" in updates:
@@ -5727,6 +5730,8 @@ def send_telegram(text, category=None):
     if category == "lsw" and not TELEGRAM_ALERTS_LSW:
         return
     if category == "ema_bull" and not TELEGRAM_ALERTS_EMA_BULL:
+        return
+    if category == "amd" and not TELEGRAM_ALERTS_AMD:
         return
     if category == "network" and not TELEGRAM_ALERTS_NETWORK:
         return
@@ -12198,85 +12203,95 @@ def lsw_backtest_loop():
                 time.sleep(60)
                 continue
             t0 = time.time()
-            universe = lsw_build_universe()
-            results_by_symbol = {}
-            summary_by_symbol = {}
-            checkpoints_by_symbol = {}
-            live_universe = []
-            live_directions = {}
-            with state_lock:
-                STATE["lsw_backtest_total"] = len(universe)
-                STATE["lsw_backtest_done"] = 0
-                STATE["lsw_backtest_in_flight"] = []
-                STATE["lsw_backtest_running"] = True
-                STATE["lsw_backtest_started_at"] = t0
-            try:
-                with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
-                    futs = {ex.submit(_lsw_backtest_one, s): s for s in universe}
-                    PER_SYMBOL_TIMEOUT_L = HTTP_TIMEOUT * 3 * 3 + 60
-                    for fut in as_completed(futs, timeout=PER_SYMBOL_TIMEOUT_L * len(universe)):
-                        symbol = futs[fut]
-                        try:
-                            _sym, (results, meta) = fut.result(timeout=PER_SYMBOL_TIMEOUT_L)
-                        except (TimeoutError, FutureTimeoutError):
-                            log_error(f"lsw_backtest: {symbol} timed out after {PER_SYMBOL_TIMEOUT_L}s — skipping")
-                            continue
-                        try:
-                            results_by_symbol[symbol] = results
-                            checkpoints_by_symbol[symbol] = meta.get("checkpoints", {})
-                            summary = lsw_summarize_backtest(results)
-                            summary_by_symbol[symbol] = summary
-                            closed_n = summary["wins"] + summary["losses"]
-                            if not (summary["win_rate"] is not None and summary["win_rate"] > LSW_LIVE_MIN_WINRATE
-                                    and closed_n >= LSW_LIVE_MIN_SAMPLE):
-                                continue
-                            live_universe.append(symbol)
-                            if LSW_DIRECTION_FILTER_ENABLED:
-                                # v0.99.123 — same threshold as the overall
-                                # gate above, applied per-direction with its
-                                # own smaller sample floor, NOT a per-symbol
-                                # "pick the winning side" choice — see this
-                                # constant's own comment for why that
-                                # distinction matters.
-                                allowed = []
-                                bd = summary.get("by_direction") or {}
-                                for d in ("LONG", "SHORT"):
-                                    dd = bd.get(d) or {}
-                                    if (dd.get("n", 0) >= LSW_DIRECTION_MIN_SAMPLE
-                                            and dd.get("win_rate") is not None
-                                            and dd["win_rate"] > LSW_LIVE_MIN_WINRATE):
-                                        allowed.append(d)
-                                live_directions[symbol] = allowed
-                        except Exception as e:
-                            log_error(f"lsw_backtest {symbol}: {e}")
-                with state_lock:
-                    STATE["lsw_backtest_results"] = results_by_symbol
-                    STATE["lsw_backtest_summary"] = summary_by_symbol
-                    STATE["lsw_filter_checkpoints"] = checkpoints_by_symbol
-                    STATE["lsw_live_universe"] = live_universe
-                    STATE["lsw_live_directions"] = live_directions
-                    STATE["lsw_last_backtest_finished"] = time.time()
-                    STATE["lsw_last_backtest_duration"] = round(time.time() - t0, 1)
-            finally:
-                # v0.99.137 — always clears "running" even if the cycle
-                # above raised partway through, same reasoning as MSNR's
-                # own identical finally block: a stale "running" flag
-                # left on after a genuine failure would show 100%
-                # confident progress on a cycle that already died.
-                with state_lock:
-                    STATE["lsw_backtest_running"] = False
-                    STATE["lsw_backtest_in_flight"] = []
+            # v0.99.192 — same 1h hard ceiling as MSNR v0.99.181: wrap the
+            # entire cycle in a single-worker executor so a stuck
+            # lsw_build_universe() or any other serial call before the
+            # ThreadPoolExecutor can't hang the loop forever.
+            MAX_CYCLE_SEC = 60 * 60
+            with ThreadPoolExecutor(max_workers=1) as _cycle_ex:
+                _cycle_fut = _cycle_ex.submit(_lsw_run_one_backtest_cycle, t0)
+                try:
+                    _cycle_fut.result(timeout=MAX_CYCLE_SEC)
+                except (TimeoutError, FutureTimeoutError):
+                    log_error(f"lsw_backtest_loop: entire cycle exceeded {MAX_CYCLE_SEC}s — aborting")
+                    with state_lock:
+                        STATE["lsw_backtest_running"] = False
+                        STATE["lsw_backtest_in_flight"] = []
+                except Exception as e:
+                    log_error(f"lsw_backtest_loop cycle: {e}")
+                    with state_lock:
+                        STATE["lsw_backtest_running"] = False
+                        STATE["lsw_backtest_in_flight"] = []
         except Exception as e:
-            log_error(f"lsw_backtest_loop: {e}")
-        # v0.99.137 — Event.wait(timeout=...) instead of a plain sleep,
-        # same fix as MSNR's own v0.99.40: api_reset_lsw() can now cut
-        # this short via LSW_BACKTEST_TRIGGER.set() instead of "Очистить
-        # Sweep" doing nothing but wipe the display until the full
-        # LSW_REFRESH_SEC (up to 1h) elapses on its own. Cleared right
-        # after so the NEXT cycle's own wait isn't pre-satisfied by a
-        # stale set() from this one.
+            log_error(f"lsw_backtest_loop outer: {e}")
         LSW_BACKTEST_TRIGGER.wait(timeout=max(300, LSW_REFRESH_SEC))
         LSW_BACKTEST_TRIGGER.clear()
+
+
+def _lsw_run_one_backtest_cycle(t0):
+    universe = lsw_build_universe()
+    results_by_symbol = {}
+    summary_by_symbol = {}
+    checkpoints_by_symbol = {}
+    live_universe = []
+    live_directions = {}
+    with state_lock:
+        STATE["lsw_backtest_total"] = len(universe)
+        STATE["lsw_backtest_done"] = 0
+        STATE["lsw_backtest_in_flight"] = []
+        STATE["lsw_backtest_running"] = True
+        STATE["lsw_backtest_started_at"] = t0
+    try:
+        with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
+            futs = {ex.submit(_lsw_backtest_one, s): s for s in universe}
+            PER_SYMBOL_TIMEOUT_L = HTTP_TIMEOUT * 3 * 3 + 60
+            for fut in as_completed(futs, timeout=PER_SYMBOL_TIMEOUT_L * len(universe)):
+                symbol = futs[fut]
+                try:
+                    _sym, (results, meta) = fut.result(timeout=PER_SYMBOL_TIMEOUT_L)
+                except (TimeoutError, FutureTimeoutError):
+                    log_error(f"lsw_backtest: {symbol} timed out after {PER_SYMBOL_TIMEOUT_L}s — skipping")
+                    continue
+                try:
+                    results_by_symbol[symbol] = results
+                    checkpoints_by_symbol[symbol] = meta.get("checkpoints", {})
+                    summary = lsw_summarize_backtest(results)
+                    summary_by_symbol[symbol] = summary
+                    closed_n = summary["wins"] + summary["losses"]
+                    if not (summary["win_rate"] is not None and summary["win_rate"] > LSW_LIVE_MIN_WINRATE
+                            and closed_n >= LSW_LIVE_MIN_SAMPLE):
+                        continue
+                    live_universe.append(symbol)
+                    if LSW_DIRECTION_FILTER_ENABLED:
+                        # v0.99.123 — same threshold as the overall
+                        # gate above, applied per-direction with its
+                        # own smaller sample floor, NOT a per-symbol
+                        # "pick the winning side" choice — see this
+                        # constant's own comment for why that
+                        # distinction matters.
+                        allowed = []
+                        bd = summary.get("by_direction") or {}
+                        for d in ("LONG", "SHORT"):
+                            dd = bd.get(d) or {}
+                            if (dd.get("n", 0) >= LSW_DIRECTION_MIN_SAMPLE
+                                    and dd.get("win_rate") is not None
+                                    and dd["win_rate"] > LSW_LIVE_MIN_WINRATE):
+                                allowed.append(d)
+                        live_directions[symbol] = allowed
+                except Exception as e:
+                    log_error(f"lsw_backtest {symbol}: {e}")
+        with state_lock:
+            STATE["lsw_backtest_results"] = results_by_symbol
+            STATE["lsw_backtest_summary"] = summary_by_symbol
+            STATE["lsw_filter_checkpoints"] = checkpoints_by_symbol
+            STATE["lsw_live_universe"] = live_universe
+            STATE["lsw_live_directions"] = live_directions
+            STATE["lsw_last_backtest_finished"] = time.time()
+            STATE["lsw_last_backtest_duration"] = round(time.time() - t0, 1)
+    finally:
+        with state_lock:
+            STATE["lsw_backtest_running"] = False
+            STATE["lsw_backtest_in_flight"] = []
 
 
 def lsw_live_loop():
@@ -12541,9 +12556,280 @@ def ema_bull_loop():
             log_error(f"ema_bull_loop: {e}")
         time.sleep(EMA_TOUCH_REFRESH_SEC)
 
-# ----------------------------------------------------------------------------
-# API
-# ----------------------------------------------------------------------------
+# ============================================================================
+# AMD Cycle Screener — Accumulation / Manipulation / Distribution
+# TF: 1h structure, 15m entry confirmation. Signal fires at start of D phase.
+# v0.99.192
+# ============================================================================
+
+AMD_STRUCTURE_TF     = os.environ.get("VP_AMD_STRUCTURE_TF", "1h")
+AMD_ENTRY_TF         = os.environ.get("VP_AMD_ENTRY_TF", "15m")
+AMD_REFRESH_SEC      = int(os.environ.get("VP_AMD_REFRESH_SEC", 900))     # scan every 15m
+AMD_BACKTEST_DAYS    = int(os.environ.get("VP_AMD_BACKTEST_DAYS", 90))
+AMD_A_ATR_MULT       = float(os.environ.get("VP_AMD_A_ATR_MULT", 0.6))    # A-zone: range <= mult*ATR
+AMD_A_MIN_BARS       = int(os.environ.get("VP_AMD_A_MIN_BARS", 4))        # A-zone: min consolidation bars
+AMD_A_MAX_BARS       = int(os.environ.get("VP_AMD_A_MAX_BARS", 20))       # A-zone: max bars to search back
+AMD_M_ATR_MULT       = float(os.environ.get("VP_AMD_M_ATR_MULT", 0.5))    # M: sweep must exceed A-zone by >= mult*ATR
+AMD_D_BODY_RATIO     = float(os.environ.get("VP_AMD_D_BODY_RATIO", 0.4))  # D: body >= ratio*range (impulsive)
+AMD_RR               = float(os.environ.get("VP_AMD_RR", 2.5))
+AMD_SL_BUFFER_PCT    = float(os.environ.get("VP_AMD_SL_BUFFER_PCT", 0.3))
+AMD_MAX_WAIT_BARS    = int(os.environ.get("VP_AMD_MAX_WAIT_BARS", 24))    # 24×1h = 1 day
+AMD_UNIVERSE_SIZE    = int(os.environ.get("VP_AMD_UNIVERSE_SIZE", 100))
+AMD_SIGNAL_HISTORY   = 200
+AMD_ATR_PERIOD       = 14
+TELEGRAM_ALERTS_AMD  = os.environ.get("VP_TG_ALERTS_AMD", "1") == "1"
+
+
+def _amd_atr(candles, idx, period=AMD_ATR_PERIOD):
+    """ATR at index idx over previous period bars."""
+    bars = candles[max(0, idx - period): idx]
+    if not bars:
+        return None
+    tr_vals = [b["high"] - b["low"] for b in bars]
+    return sum(tr_vals) / len(tr_vals)
+
+
+def amd_detect_signals(candles):
+    """Detect AMD cycle signals on a list of candles (1h).
+    Returns list of signal dicts with direction, entry, sl, tp, etc."""
+    signals = []
+    n = len(candles)
+    if n < AMD_A_MAX_BARS + AMD_ATR_PERIOD + 3:
+        return signals
+
+    for i in range(AMD_ATR_PERIOD + AMD_A_MAX_BARS, n - 1):
+        c = candles[i]  # potential D candle
+        atr = _amd_atr(candles, i)
+        if not atr or atr <= 0:
+            continue
+
+        # ── Find A-zone: look back for consolidation ────────────────────────
+        a_found = False
+        a_high = a_low = None
+        a_start = a_end = None
+        for a_len in range(AMD_A_MIN_BARS, AMD_A_MAX_BARS + 1):
+            a_bars = candles[i - 1 - a_len: i - 1]
+            if len(a_bars) < AMD_A_MIN_BARS:
+                break
+            ah = max(b["high"] for b in a_bars)
+            al = min(b["low"]  for b in a_bars)
+            if (ah - al) <= AMD_A_ATR_MULT * atr:
+                a_high = ah; a_low = al
+                a_start = a_bars[0]["time"]
+                a_end   = a_bars[-1]["time"]
+                a_found = True
+                break  # use tightest qualifying range
+        if not a_found:
+            continue
+
+        # ── M candle: the bar just before D (i-1) must be a manipulation ───
+        m = candles[i - 1]
+        m_atr = _amd_atr(candles, i - 1)
+        if not m_atr:
+            continue
+
+        # Bullish AMD: M sweeps BELOW A-low (fake breakdown), D closes UP
+        bull_m = m["low"] < a_low - AMD_M_ATR_MULT * m_atr
+        bull_d = c["close"] > c["open"] and (c["close"] - c["open"]) >= AMD_D_BODY_RATIO * (c["high"] - c["low"])
+
+        # Bearish AMD: M sweeps ABOVE A-high (fake breakout), D closes DOWN
+        bear_m = m["high"] > a_high + AMD_M_ATR_MULT * m_atr
+        bear_d = c["close"] < c["open"] and (c["open"] - c["close"]) >= AMD_D_BODY_RATIO * (c["high"] - c["low"])
+
+        if not ((bull_m and bull_d) or (bear_m and bear_d)):
+            continue
+
+        direction = "LONG" if (bull_m and bull_d) else "SHORT"
+
+        # Entry at next bar open, SL beyond M extreme + buffer
+        if direction == "LONG":
+            sl_extreme = m["low"]
+            sl = sl_extreme * (1 - AMD_SL_BUFFER_PCT / 100)
+        else:
+            sl_extreme = m["high"]
+            sl = sl_extreme * (1 + AMD_SL_BUFFER_PCT / 100)
+
+        # Entry = close of D candle (next bar open approximation in backtest)
+        entry = c["close"]
+        sl_dist = abs(entry - sl)
+        if sl_dist <= 0:
+            continue
+
+        if direction == "LONG":
+            tp = entry + sl_dist * AMD_RR
+        else:
+            tp = entry - sl_dist * AMD_RR
+
+        signals.append({
+            "idx": i, "time": c["time"],
+            "direction": direction,
+            "entry": round(entry, 8),
+            "sl": round(sl, 8),
+            "tp": round(tp, 8),
+            "sl_dist": round(sl_dist, 8),
+            "rr": AMD_RR,
+            "a_high": round(a_high, 8), "a_low": round(a_low, 8),
+            "a_start": a_start, "a_end": a_end,
+            "m_extreme": round(sl_extreme, 8),
+        })
+    return signals
+
+
+def amd_backtest_symbol(symbol):
+    """Run AMD backtest on 1h candles. Returns (trades, summary)."""
+    try:
+        now = int(time.time())
+        start_ts = now - (AMD_BACKTEST_DAYS + AMD_ATR_PERIOD + AMD_A_MAX_BARS + 2) * 86400
+        candles = get_candles_range(symbol, AMD_STRUCTURE_TF, start_ts, now)
+        if not candles or len(candles) < AMD_ATR_PERIOD + AMD_A_MAX_BARS + 5:
+            return [], {}
+        signals = amd_detect_signals(candles)
+        trades = []
+        for sig in signals:
+            i = sig["idx"]
+            if i + 1 >= len(candles):
+                continue
+            # Entry at next bar open
+            entry_bar = candles[i + 1]
+            entry = entry_bar["open"]
+            sl_dist = abs(entry - sig["sl"])
+            if sl_dist <= 0:
+                continue
+            sl = entry - sl_dist if sig["direction"] == "LONG" else entry + sl_dist
+            tp = entry + sl_dist * AMD_RR if sig["direction"] == "LONG" else entry - sl_dist * AMD_RR
+
+            result = "TIMEOUT"; exit_price = exit_time = None
+            for j in range(i + 1, min(i + 1 + AMD_MAX_WAIT_BARS, len(candles))):
+                b = candles[j]
+                if sig["direction"] == "LONG":
+                    if b["low"] <= sl:
+                        result, exit_price, exit_time = "LOSS", sl, b["time"]; break
+                    if b["high"] >= tp:
+                        result, exit_price, exit_time = "WIN",  tp, b["time"]; break
+                else:
+                    if b["high"] >= sl:
+                        result, exit_price, exit_time = "LOSS", sl, b["time"]; break
+                    if b["low"] <= tp:
+                        result, exit_price, exit_time = "WIN",  tp, b["time"]; break
+
+            pnl_r = None
+            if exit_price:
+                raw = (exit_price - entry) / sl_dist if sig["direction"] == "LONG" else (entry - exit_price) / sl_dist
+                pnl_r = round(raw, 2)
+                if result == "LOSS": pnl_r = -abs(pnl_r)
+
+            trades.append({
+                "symbol": symbol, "time": sig["time"],
+                "entry_time": entry_bar["time"], "entry": round(entry, 8),
+                "sl": round(sl, 8), "tp": round(tp, 8),
+                "direction": sig["direction"], "rr": AMD_RR,
+                "result": result, "exit_price": round(exit_price, 8) if exit_price else None,
+                "exit_time": exit_time, "pnl_r": pnl_r,
+                "a_high": sig["a_high"], "a_low": sig["a_low"],
+            })
+
+        closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
+        wins   = sum(1 for t in closed if t["result"] == "WIN")
+        losses = len(closed) - wins
+        wr     = round(wins / len(closed) * 100, 1) if closed else None
+        avg_pnl = round(sum(t["pnl_r"] for t in closed if t.get("pnl_r") is not None) / len(closed), 2) if closed else None
+        summary = {"n": len(closed), "wins": wins, "losses": losses,
+                   "timeouts": sum(1 for t in trades if t["result"] == "TIMEOUT"),
+                   "winrate": wr, "avg_pnl_r": avg_pnl, "total": len(trades)}
+
+        return trades, summary
+    except Exception as e:
+        log_error(f"amd_backtest_symbol {symbol}: {e}")
+        return [], {}
+
+
+def amd_scan_universe():
+    try:
+        tickers = get_tickers()
+        return [t["contract"] for t in tickers
+                if t.get("contract", "").endswith("_USDT") and
+                float(t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0) >= MIN_VOL_USD
+                ][:AMD_UNIVERSE_SIZE]
+    except Exception as e:
+        log_error(f"amd_scan_universe: {e}")
+        return []
+
+
+def amd_scan_symbol_live(symbol):
+    """Check if the most recent 1h candle completed an AMD D-phase signal."""
+    try:
+        now = int(time.time())
+        interval_sec = INTERVAL_SECONDS.get(AMD_STRUCTURE_TF, 3600)
+        start_ts = now - (AMD_ATR_PERIOD + AMD_A_MAX_BARS + 5) * interval_sec
+        candles = get_candles_range(symbol, AMD_STRUCTURE_TF, start_ts, now)
+        if not candles or len(candles) < AMD_ATR_PERIOD + AMD_A_MAX_BARS + 3:
+            return None
+        # Only closed candles
+        closed = [c for c in candles if c["time"] + interval_sec <= now]
+        if not closed:
+            return None
+        sigs = amd_detect_signals(closed)
+        if not sigs:
+            return None
+        last = sigs[-1]
+        # Must be on the most recent closed candle
+        if last["idx"] != len(closed) - 1:
+            return None
+        return {**last, "symbol": symbol, "scanned_at": now}
+    except Exception as e:
+        log_error(f"amd_scan_symbol_live {symbol}: {e}")
+        return None
+
+
+_amd_results = []
+_amd_results_lock = threading.Lock()
+_amd_last_scan = 0
+_amd_prev_signals = set()
+_amd_backtest_cache = {}
+_amd_backtest_lock = threading.Lock()
+
+
+def amd_loop():
+    global _amd_last_scan, _amd_prev_signals
+    while True:
+        try:
+            universe = amd_scan_universe()
+            results = []
+            if universe:
+                with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe))) as ex:
+                    futs = [ex.submit(amd_scan_symbol_live, s) for s in universe]
+                    PER = HTTP_TIMEOUT * 3 * 3 + 60
+                    for fut in as_completed(futs, timeout=PER * len(universe)):
+                        try:
+                            r = fut.result(timeout=PER)
+                            if r:
+                                results.append(r)
+                        except (TimeoutError, FutureTimeoutError):
+                            continue
+                        except Exception:
+                            continue
+            # Sort: LONG first, then by symbol
+            results.sort(key=lambda r: (r["direction"] != "LONG", r["symbol"]))
+            with _amd_results_lock:
+                _amd_results.clear()
+                _amd_results.extend(results)
+                _amd_last_scan = int(time.time())
+            new_keys = {r["symbol"] for r in results}
+            for r in results:
+                if r["symbol"] not in _amd_prev_signals:
+                    arrow = "\u2b06\ufe0f" if r["direction"] == "LONG" else "\u2b07\ufe0f"
+                    send_telegram(
+                        f"{arrow} AMD {r['symbol']} ({r['direction']})\n"
+                        f"entry: {r['entry']}, SL: {r['sl']}, TP: {r['tp']}\n"
+                        f"A-\u0437\u043e\u043d\u0430: {r['a_low']}\u2013{r['a_high']}",
+                        category="amd",
+                    )
+            _amd_prev_signals = new_keys
+        except Exception as e:
+            log_error(f"amd_loop: {e}")
+        time.sleep(AMD_REFRESH_SEC)
+
+
 @app.route("/api/overview")
 def api_overview():
     """Compact win-rate summary across Volume Profile and Scalp, for the
