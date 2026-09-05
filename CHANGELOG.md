@@ -12292,3 +12292,17 @@ v0.99.201 - AMD full-universe backtest added, per direct user report
          shows a ranked backtest table even with zero live signals.
          Verified: py_compile, pyflakes, node --check, 49 routes, real
          runtime confirming /api/amd/status returns the new fields.
+
+v0.99.202 - AMD structure TF lowered 1h→15m per direct user request for
+         more frequent signals ("если снизить таймфрейм, может сигналы
+         почаще будут"). Entry TF 15m→5m, scan interval 15m→5m. Bar-count
+         windows (A-zone min/max, max-wait-for-outcome) scaled ×4 so the
+         pattern keeps the SAME real-world duration (A-zone ~4-20h,
+         outcome wait ~1 day) rather than shrinking to 1/4 the market
+         time just from the finer candle granularity. Also fixed
+         amd_backtest_symbol()'s history-fetch buffer, which was
+         incorrectly treating bar counts as days (harmless but wasteful
+         over-fetch at 1h, would have become a huge over-fetch at 15m);
+         now correctly converts bars to seconds via the actual interval.
+         Verified: py_compile, pyflakes, 49 routes, synthetic-data stress
+         test (10 runs) with zero exceptions after the TF change.
