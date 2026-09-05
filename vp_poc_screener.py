@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.200"
+APP_VERSION = "0.99.201"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12843,6 +12843,73 @@ _amd_prev_signals = set()
 _amd_backtest_cache = {}
 _amd_backtest_lock = threading.Lock()
 
+# v0.99.201 — full-universe backtest (was on-demand-per-click only), same
+# shape as MSNR/LSW's own STATE-tracked cycle, per direct user report
+# ("почему по AMD пустое окно вообще, ни бэктеста ничего") — AMD's live
+# scan alone can legitimately stay empty for a long time (the A/M/D
+# pattern is strict/rare), leaving nothing to click into; a background
+# backtest across the whole universe gives the panel something to show
+# even before any live signal has fired.
+AMD_BACKTEST_REFRESH_SEC = int(os.environ.get("VP_AMD_BACKTEST_REFRESH_SEC", 3600))
+_amd_backtest_summary = {}
+_amd_backtest_lock2 = threading.Lock()
+_amd_backtest_running = False
+_amd_backtest_total = 0
+_amd_backtest_done = 0
+_amd_backtest_last_finished = None
+_amd_backtest_last_duration = None
+
+
+def amd_backtest_loop():
+    global _amd_backtest_running, _amd_backtest_total, _amd_backtest_done
+    global _amd_backtest_last_finished, _amd_backtest_last_duration, _amd_backtest_summary
+    while True:
+        try:
+            t0 = time.time()
+            universe = amd_scan_universe()
+            with _amd_backtest_lock2:
+                _amd_backtest_total = len(universe)
+                _amd_backtest_done = 0
+                _amd_backtest_running = True
+            new_summary = {}
+            # Same "no with-block" fix as LSW/MSNR's own v0.99.194/195 —
+            # never let ex.shutdown(wait=True) on a stuck symbol block the
+            # whole cycle forever, and write each symbol's result the
+            # moment it's ready (v0.99.196's own progressive-write fix)
+            # instead of batching everything into one final write.
+            ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1))
+            try:
+                futs = {ex.submit(amd_backtest_symbol, s): s for s in universe}
+                PER = HTTP_TIMEOUT * 3 * 3 + 60
+                try:
+                    for fut in as_completed(futs, timeout=PER * len(universe)):
+                        symbol = futs[fut]
+                        try:
+                            trades, summary = fut.result(timeout=PER)
+                        except (TimeoutError, FutureTimeoutError):
+                            log_error(f"amd_backtest: {symbol} timed out after {PER}s — skipping")
+                        except Exception as e:
+                            log_error(f"amd_backtest {symbol}: {e}")
+                        else:
+                            if summary.get("n"):
+                                new_summary[symbol] = summary
+                        with _amd_backtest_lock2:
+                            _amd_backtest_done += 1
+                except (TimeoutError, FutureTimeoutError):
+                    log_error("amd_backtest: as_completed timed out waiting on a stuck symbol — keeping whatever was already gathered")
+            finally:
+                ex.shutdown(wait=False)
+            with _amd_backtest_lock2:
+                _amd_backtest_summary = new_summary
+                _amd_backtest_running = False
+                _amd_backtest_last_finished = time.time()
+                _amd_backtest_last_duration = round(time.time() - t0, 1)
+        except Exception as e:
+            log_error(f"amd_backtest_loop: {e}")
+            with _amd_backtest_lock2:
+                _amd_backtest_running = False
+        time.sleep(AMD_BACKTEST_REFRESH_SEC)
+
 
 def amd_loop():
     global _amd_last_scan, _amd_prev_signals
@@ -12890,8 +12957,19 @@ def api_amd_status():
     with _amd_results_lock:
         results = list(_amd_results)
         last_scan = _amd_last_scan
+    with _amd_backtest_lock2:
+        top = [dict(s, symbol=sym) for sym, s in _amd_backtest_summary.items()]
+        bt_running = _amd_backtest_running
+        bt_total = _amd_backtest_total
+        bt_done = _amd_backtest_done
+        bt_last_finished = _amd_backtest_last_finished
+        bt_last_duration = _amd_backtest_last_duration
+    top.sort(key=lambda r: (r.get("winrate") or 0, r.get("n") or 0), reverse=True)
     return jsonify({
         "results": results, "last_scan": last_scan,
+        "top": top,
+        "backtest_running": bt_running, "backtest_total": bt_total, "backtest_done": bt_done,
+        "last_backtest_finished": bt_last_finished, "last_backtest_duration": bt_last_duration,
         "config": {
             "structure_tf": AMD_STRUCTURE_TF, "entry_tf": AMD_ENTRY_TF,
             "rr": AMD_RR, "backtest_days": AMD_BACKTEST_DAYS,
@@ -16489,15 +16567,48 @@ async function refreshAmd() {
       ? `<div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;">
           <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>A-\u0437\u043e\u043d\u0430</th><th>D \u0441\u0432\u0435\u0447\u0430</th></tr></thead>
           <tbody>${rows}</tbody></table></div>`
-      : '<div class="dim">\u041d\u0435\u0442 \u0441\u0438\u0433\u043d\u0430\u043b\u043e\u0432.</div>';
+      : '<div class="dim">\u041d\u0435\u0442 \u0436\u0438\u0432\u044b\u0445 \u0441\u0438\u0433\u043d\u0430\u043b\u043e\u0432 \u043f\u0440\u044f\u043c\u043e \u0441\u0435\u0439\u0447\u0430\u0441 \u2014 \u043f\u0430\u0442\u0442\u0435\u0440\u043d \u0440\u0435\u0434\u043a\u0438\u0439. \u0421\u043c\u043e\u0442\u0440\u0438 \u0431\u044d\u043a\u0442\u0435\u0441\u0442 \u043d\u0438\u0436\u0435.</div>';
+    const buildTxt = data.backtest_running
+      ? `\u0431\u044d\u043a\u0442\u0435\u0441\u0442 \u0432\u044b\u043f\u043e\u043b\u043d\u044f\u0435\u0442\u0441\u044f: ${data.backtest_done||0}/${data.backtest_total||'?'} \u043c\u043e\u043d\u0435\u0442`
+      : data.last_backtest_finished
+      ? `\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442: ${fmtDateTime(data.last_backtest_finished)} (${data.last_backtest_duration}s) \u00b7 \u043c\u043e\u043d\u0435\u0442 \u0441 \u0441\u0438\u0433\u043d\u0430\u043b\u0430\u043c\u0438: ${(data.top||[]).length}`
+      : '\u0431\u044d\u043a\u0442\u0435\u0441\u0442 \u0435\u0449\u0451 \u043d\u0435 \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d.';
+    const progressPct = data.backtest_total ? Math.round((data.backtest_done||0) / data.backtest_total * 100) : 0;
+    const progressBarHtml = data.backtest_running ? `
+      <div style="margin:6px 0 8px;">
+        <div style="background:#1c2433;border-radius:6px;height:8px;overflow:hidden;">
+          <div style="background:#3ddc97;height:100%;width:${progressPct}%;transition:width 0.4s;"></div>
+        </div>
+      </div>` : '';
+    const top = data.top || [];
+    const btRows = top.map(r => {
+      const wrCls = (r.winrate||0) >= 50 ? 'win' : 'loss';
+      const pnlCls = (r.avg_pnl_r||0) >= 0 ? 'win' : 'loss';
+      return `<tr onclick="loadAmdBacktest('${r.symbol}')" style="cursor:pointer;">
+        <td>${r.symbol}</td>
+        <td class="${wrCls}">${r.winrate!=null?r.winrate+'%':'-'}</td>
+        <td class="dim">n=${r.n}</td>
+        <td class="win">${r.wins}W</td>
+        <td class="loss">${r.losses}L</td>
+        <td class="dim">${r.timeouts}T</td>
+        <td class="${pnlCls}">${r.avg_pnl_r!=null?r.avg_pnl_r+'R':'-'}</td>
+      </tr>`;
+    }).join('');
+    const btTableHtml = top.length
+      ? `<div class="dim hint-block" style="margin:8px 0 6px;"><b>\u0411\u044d\u043a\u0442\u0435\u0441\u0442 \u043f\u043e \u043c\u043e\u043d\u0435\u0442\u0430\u043c</b> (${cfg.backtest_days} \u0434\u043d\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438). \u041d\u0430\u0436\u043c\u0438 \u043c\u043e\u043d\u0435\u0442\u0443 \u2014 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0441\u0434\u0435\u043b\u043a\u0438.</div>
+        <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;">
+          <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>avg P&L</th></tr></thead>
+          <tbody>${btRows}</tbody></table></div>`
+      : `<div class="dim">${buildTxt}</div>`;
     panel.innerHTML = `
       <div class="dim hint-block" style="margin-bottom:8px;">
         <b>AMD Cycle</b> \u2014 Accumulation/Manipulation/Distribution. A: \u0431\u043e\u043a\u043e\u0432\u0438\u043a \u0432 \u0443\u0437\u043a\u043e\u043c \u0434\u0438\u0430\u043f\u0430\u0437\u043e\u043d\u0435.
         M: \u043b\u043e\u0436\u043d\u044b\u0439 \u043f\u0440\u043e\u0431\u043e\u0439 \u0437\u0430 \u0433\u0440\u0430\u043d\u0438\u0446\u0443 A. D: \u0438\u043c\u043f\u0443\u043b\u044c\u0441\u043d\u0430\u044f \u0441\u0432\u0435\u0447\u0430 \u0432 \u0440\u0435\u0430\u043b\u044c\u043d\u0443\u044e \u0441\u0442\u043e\u0440\u043e\u043d\u0443 \u2014
-        \u044d\u0442\u043e \u0438 \u0435\u0441\u0442\u044c \u0441\u0438\u0433\u043d\u0430\u043b. \u0422\u0424: ${cfg.structure_tf}. TP: RR ${cfg.rr}. \u041d\u0430\u0436\u043c\u0438 \u043c\u043e\u043d\u0435\u0442\u0443 \u2014 \u0431\u044d\u043a\u0442\u0435\u0441\u0442.
-      </div>
-      <div class="dim" style="margin-bottom:8px;">\u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0441\u043a\u0430\u043d: ${lastScan} &middot; \u0441\u0438\u0433\u043d\u0430\u043b\u043e\u0432: ${results.length}</div>
+        \u044d\u0442\u043e \u0438 \u0435\u0441\u0442\u044c \u0441\u0438\u0433\u043d\u0430\u043b. \u0422\u0424: ${cfg.structure_tf}. TP: RR ${cfg.rr}. \u041d\u0430\u0436\u043c\u0438 \u043c\u043e\u043d\u0435\u0442\u0443 \u2014 \u0431\u044d\u043a\u0442\u0435\u0441\u0442.\n      </div>\n      <div class="dim" style="margin-bottom:4px;">${buildTxt}</div>
+      ${progressBarHtml}
+      <div class="dim" style="margin-bottom:8px;">\u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0441\u043a\u0430\u043d: ${lastScan} &middot; \u0436\u0438\u0432\u044b\u0445 \u0441\u0438\u0433\u043d\u0430\u043b\u043e\u0432: ${results.length}</div>
       ${tableHtml}
+      ${btTableHtml}
       <div id="amdBacktestPanel" style="margin-top:16px;"></div>`;
   } catch(e) {
     panel.innerHTML = `<div class="dim">\u041e\u0448\u0438\u0431\u043a\u0430: ${e}</div>`;
@@ -17740,6 +17851,7 @@ if __name__ == "__main__":
     threading.Thread(target=lsw_live_loop, daemon=True).start()
     threading.Thread(target=ema_bull_loop, daemon=True).start()
     threading.Thread(target=amd_loop, daemon=True).start()
+    threading.Thread(target=amd_backtest_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     threading.Thread(target=risk_autotune_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
