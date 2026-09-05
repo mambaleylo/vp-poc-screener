@@ -12254,3 +12254,14 @@ v0.99.198 - Chart candle count now adapts to actual screen width instead
          fit at a minimum 9px slot width (capped 15-70), keeping the
          same ~29% before-signal ratio the old 20/70 split had.
          Verified: py_compile, pyflakes, node --check, 49 routes.
+
+v0.99.199 - FIX: v0.99.198's own fix targeted the WRONG function.
+         Sweep/Mirror/Scalp charts use openVgiChart -> drawVgiChart, a
+         SEPARATE function from the standalone drawChart() I edited —
+         drawVgiChart drew ALL candles the backend sent (up to 250,
+         uncapped) with no adaptive limit, so the user's report ("ничего
+         не изменилось") was correct: their chart never went through my
+         earlier fix at all. Applied the same adaptive-bar-count logic
+         to drawVgiChart(): min 9px/slot, capped at what fits on screen,
+         centered on the signal candle so entry/SL/TP stay visible.
+         Verified: py_compile, pyflakes, node --check, 49 routes.
