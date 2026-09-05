@@ -12265,3 +12265,15 @@ v0.99.199 - FIX: v0.99.198's own fix targeted the WRONG function.
          to drawVgiChart(): min 9px/slot, capped at what fits on screen,
          centered on the signal candle so entry/SL/TP stay visible.
          Verified: py_compile, pyflakes, node --check, 49 routes.
+
+v0.99.200 - REAL FIX: v0.99.198/199's own "adaptive" formula had a bug —
+         `Math.max(15, ...)` FORCED at least 15 bars even when the
+         actual container was narrower than 15*MIN_SLOT_PX, completely
+         defeating the point of adapting to real screen width. Per
+         direct user follow-up ("свечи все равно крайне узкие"). Removed
+         the artificial floor (now Math.max(3, ...) — just enough to
+         keep the chart from being a single sliver, never forcing
+         overcrowding on a small container) and raised MIN_SLOT_PX from
+         9 to 14px for genuinely comfortable spacing. Applied to both
+         drawChart() and drawVgiChart().
+         Verified: py_compile, pyflakes, node --check, 49 routes.
