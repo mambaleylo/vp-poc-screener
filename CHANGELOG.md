@@ -12144,3 +12144,23 @@ v0.99.193 - AMD Cycle screener completed: new "AMD" tab (orange), API
          TELEGRAM_ALERTS_AMD toggle + settings wiring.
          49 routes total. Verified: py_compile, pyflakes, node --check,
          real runtime confirming /api/amd/status returns correct config.
+
+v0.99.194 - CRITICAL FIX to v0.99.181/v0.99.192's own "1h hard ceiling"
+         fix — it didn't actually work. `with ThreadPoolExecutor(...) as
+         ex:` calls ex.shutdown(wait=True) on exit, which BLOCKS until
+         the inner thread truly finishes — even after .result(timeout=)
+         already raised TimeoutError and was caught. If the cycle was
+         genuinely stuck forever (e.g. a network call with no timeout
+         buried deep inside), the "with" block's own __exit__ hung
+         forever too, so the except clause NEVER ran — silently
+         defeating the entire point of the ceiling. Per direct user
+         report: LSW backtest still not done after 24+ hours despite
+         v0.99.192's "fix". Root-caused via a standalone repro proving
+         `with` blocks vs a bare ThreadPoolExecutor + shutdown(wait=False)
+         returns immediately (~1.0s) even with a permanently stuck
+         worker thread. Applied the same corrected pattern to both
+         msnr_backtest_loop() and lsw_backtest_loop(): no "with", explicit
+         shutdown(wait=False) on every exit path so the outer loop always
+         moves on within MAX_CYCLE_SEC regardless of what's stuck inside.
+         Verified: py_compile, pyflakes, 49 routes, standalone repro
+         confirming the fix pattern actually works this time.
