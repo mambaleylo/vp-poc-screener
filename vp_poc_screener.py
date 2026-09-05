@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.197"
+APP_VERSION = "0.99.198"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -17109,13 +17109,23 @@ function drawChart(data, signalRow) {
 
   const allCandles = data.candles || [];
   if (!allCandles.length) return;
-  const { start: winStart, end: winEnd } = windowAroundTime(allCandles, signalRow && signalRow.time, 20, 70);
-  const candles = allCandles.slice(winStart, winEnd);
 
   const profileW = W * 0.22;
   const chartW = W - profileW - 50;
   const padTop = 10, padBottom = 24;
   const chartH = H - padTop - padBottom;
+
+  // v0.99.198 — adaptive candle count instead of a fixed 70 bars, per
+  // direct user report ("очень узкие свечи и все в кашу сливается, не
+  // разобрать"): on a narrow mobile screen, 70 bars squeezed into
+  // chartW gave slots of only ~3-5px — unreadable. Pick as many bars as
+  // fit at a legible minimum slot width, keeping the same ~29% "before
+  // signal" ratio as the old 20/70 split.
+  const MIN_SLOT_PX = 9;
+  const maxBars = Math.max(15, Math.min(70, Math.floor(chartW / MIN_SLOT_PX)));
+  const beforeBars = Math.round(maxBars * 20 / 70);
+  const { start: winStart, end: winEnd } = windowAroundTime(allCandles, signalRow && signalRow.time, beforeBars, maxBars);
+  const candles = allCandles.slice(winStart, winEnd);
 
   const hasTrade = signalRow && signalRow.entry !== undefined && signalRow.sl !== undefined;
   const { hi, lo } = computeYRangeSimple(candles, hasTrade ? signalRow.entry : undefined,
