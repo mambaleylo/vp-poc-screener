@@ -12164,3 +12164,25 @@ v0.99.194 - CRITICAL FIX to v0.99.181/v0.99.192's own "1h hard ceiling"
          moves on within MAX_CYCLE_SEC regardless of what's stuck inside.
          Verified: py_compile, pyflakes, 49 routes, standalone repro
          confirming the fix pattern actually works this time.
+
+v0.99.195 - CRITICAL FIX (deeper than v0.99.194): the SAME "with
+         ThreadPoolExecutor(...) as ex" blocking-shutdown bug existed one
+         level lower, in the per-symbol executor inside LSW and MSNR
+         backtest cycles. If even ONE symbol out of 200+ truly hung
+         (network call bypassing our own timeout config, or a genuine
+         computational stall), the executor's own __exit__ ->
+         shutdown(wait=True) blocked forever waiting for that ONE stuck
+         worker — so results_by_symbol/summary_by_symbol NEVER got
+         written to STATE, even though every other symbol finished
+         cleanly. Progress bar could show ~100% (e.g. 237/238 rounds up)
+         while the panel still said "бэктест ещё не готов" forever — per
+         direct user report matching this exact symptom.
+         Fix (both LSW's _lsw_run_one_backtest_cycle and MSNR's
+         msnr_backtest_loop): no "with" on the per-symbol executor either;
+         explicit shutdown(wait=False) in a finally block; the
+         as_completed() call itself is now also wrapped in try/except so
+         if IT times out waiting on a stuck future, everything gathered
+         from the OTHER 237+ symbols still gets flushed to STATE instead
+         of being silently discarded.
+         Verified: py_compile, pyflakes, 49 routes, real runtime start
+         confirming /api/lsw/status responds 200.
