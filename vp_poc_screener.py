@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.194"
+APP_VERSION = "0.99.195"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9612,7 +9612,12 @@ def _msnr_run_one_backtest_cycle(t0):
         # symbol()'s own docstring. The winning combo's trades ARE
         # the backtest shown/drilled-into in the UI; no separate
         # un-tuned backtest run needed.
-        with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
+        # v0.99.195 — same "with ThreadPoolExecutor(...) as ex" fix as LSW's
+        # own v0.99.195: a single truly-stuck symbol would otherwise block
+        # ex.__exit__ -> shutdown(wait=True) forever, preventing the merge
+        # below from ever running even though every other symbol finished.
+        ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1))
+        try:
             futs = [ex.submit(_msnr_backtest_one_symbol, s) for s in universe]
             # v0.99.168 — per direct user report (backtest showed
             # "2.6ч назад" despite taking only ~8min normally):
@@ -9624,19 +9629,24 @@ def _msnr_run_one_backtest_cycle(t0):
             # A symbol that exceeds it is logged and skipped (same
             # outcome as an exception — keeps last-known-good data).
             PER_SYMBOL_TIMEOUT = HTTP_TIMEOUT * 3 * 3 + 60
-            for fut in as_completed(futs, timeout=PER_SYMBOL_TIMEOUT * len(universe)):
-                try:
-                    res = fut.result(timeout=PER_SYMBOL_TIMEOUT)
-                except (TimeoutError, FutureTimeoutError):
-                    log_error(f"msnr_backtest: a symbol timed out after {PER_SYMBOL_TIMEOUT}s — skipping")
-                    continue
-                if res is None:
-                    continue
-                symbol, override, results, raw_results, summary = res
-                overrides_by_symbol[symbol] = override
-                results_by_symbol[symbol] = results
-                raw_results_by_symbol[symbol] = raw_results
-                summary_by_symbol[symbol] = summary
+            try:
+                for fut in as_completed(futs, timeout=PER_SYMBOL_TIMEOUT * len(universe)):
+                    try:
+                        res = fut.result(timeout=PER_SYMBOL_TIMEOUT)
+                    except (TimeoutError, FutureTimeoutError):
+                        log_error(f"msnr_backtest: a symbol timed out after {PER_SYMBOL_TIMEOUT}s — skipping")
+                        continue
+                    if res is None:
+                        continue
+                    symbol, override, results, raw_results, summary = res
+                    overrides_by_symbol[symbol] = override
+                    results_by_symbol[symbol] = results
+                    raw_results_by_symbol[symbol] = raw_results
+                    summary_by_symbol[symbol] = summary
+            except (TimeoutError, FutureTimeoutError):
+                log_error("msnr_backtest: as_completed timed out waiting on a stuck symbol — flushing partial results")
+        finally:
+            ex.shutdown(wait=False)  # never block on a stuck worker thread
         with state_lock:
             # v0.99.36 - CRITICAL FIX: this used to overwrite
             # STATE["msnr_backtest_results"]/_raw/_summary/
@@ -12262,44 +12272,65 @@ def _lsw_run_one_backtest_cycle(t0):
         STATE["lsw_backtest_running"] = True
         STATE["lsw_backtest_started_at"] = t0
     try:
-        with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
+        # v0.99.195 — CRITICAL FIX: same "with ThreadPoolExecutor(...) as ex"
+        # bug as the outer cycle wrapper (v0.99.194), but one level deeper.
+        # If even ONE symbol's _lsw_backtest_one() truly hangs (network call
+        # bypassing our own timeout, or a genuine computational stall), the
+        # per-symbol executor's own __exit__ -> shutdown(wait=True) blocks
+        # forever waiting for that one stuck worker — and the STATE write
+        # below (results/summary/live_universe) NEVER happens, even though
+        # every other symbol finished cleanly (progress bar can round to
+        # ~100% with e.g. 237/238 done, misleadingly looking "finished").
+        # Per direct user report: progress bar filled, but panel still says
+        # "бэктест ещё не готов" — this is exactly that scenario.
+        # Fix: no "with" here either; write results/summary progressively
+        # as each future completes (not deferred to after the full loop),
+        # and always flush whatever was gathered so far in a finally block
+        # regardless of how the loop exits (normal, as_completed timeout,
+        # or any other exception) — so 237 good symbols are never held
+        # hostage by 1 stuck one.
+        ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1))
+        try:
             futs = {ex.submit(_lsw_backtest_one, s): s for s in universe}
             PER_SYMBOL_TIMEOUT_L = HTTP_TIMEOUT * 3 * 3 + 60
-            for fut in as_completed(futs, timeout=PER_SYMBOL_TIMEOUT_L * len(universe)):
-                symbol = futs[fut]
-                try:
-                    _sym, (results, meta) = fut.result(timeout=PER_SYMBOL_TIMEOUT_L)
-                except (TimeoutError, FutureTimeoutError):
-                    log_error(f"lsw_backtest: {symbol} timed out after {PER_SYMBOL_TIMEOUT_L}s — skipping")
-                    continue
-                try:
-                    results_by_symbol[symbol] = results
-                    checkpoints_by_symbol[symbol] = meta.get("checkpoints", {})
-                    summary = lsw_summarize_backtest(results)
-                    summary_by_symbol[symbol] = summary
-                    closed_n = summary["wins"] + summary["losses"]
-                    if not (summary["win_rate"] is not None and summary["win_rate"] > LSW_LIVE_MIN_WINRATE
-                            and closed_n >= LSW_LIVE_MIN_SAMPLE):
+            try:
+                completed_iter = as_completed(futs, timeout=PER_SYMBOL_TIMEOUT_L * len(universe))
+                for fut in completed_iter:
+                    symbol = futs[fut]
+                    try:
+                        _sym, (results, meta) = fut.result(timeout=PER_SYMBOL_TIMEOUT_L)
+                    except (TimeoutError, FutureTimeoutError):
+                        log_error(f"lsw_backtest: {symbol} timed out after {PER_SYMBOL_TIMEOUT_L}s — skipping")
                         continue
-                    live_universe.append(symbol)
-                    if LSW_DIRECTION_FILTER_ENABLED:
-                        # v0.99.123 — same threshold as the overall
-                        # gate above, applied per-direction with its
-                        # own smaller sample floor, NOT a per-symbol
-                        # "pick the winning side" choice — see this
-                        # constant's own comment for why that
-                        # distinction matters.
-                        allowed = []
-                        bd = summary.get("by_direction") or {}
-                        for d in ("LONG", "SHORT"):
-                            dd = bd.get(d) or {}
-                            if (dd.get("n", 0) >= LSW_DIRECTION_MIN_SAMPLE
-                                    and dd.get("win_rate") is not None
-                                    and dd["win_rate"] > LSW_LIVE_MIN_WINRATE):
-                                allowed.append(d)
-                        live_directions[symbol] = allowed
-                except Exception as e:
-                    log_error(f"lsw_backtest {symbol}: {e}")
+                    try:
+                        results_by_symbol[symbol] = results
+                        checkpoints_by_symbol[symbol] = meta.get("checkpoints", {})
+                        summary = lsw_summarize_backtest(results)
+                        summary_by_symbol[symbol] = summary
+                        closed_n = summary["wins"] + summary["losses"]
+                        if not (summary["win_rate"] is not None and summary["win_rate"] > LSW_LIVE_MIN_WINRATE
+                                and closed_n >= LSW_LIVE_MIN_SAMPLE):
+                            continue
+                        live_universe.append(symbol)
+                        if LSW_DIRECTION_FILTER_ENABLED:
+                            allowed = []
+                            bd = summary.get("by_direction") or {}
+                            for d in ("LONG", "SHORT"):
+                                dd = bd.get(d) or {}
+                                if (dd.get("n", 0) >= LSW_DIRECTION_MIN_SAMPLE
+                                        and dd.get("win_rate") is not None
+                                        and dd["win_rate"] > LSW_LIVE_MIN_WINRATE):
+                                    allowed.append(d)
+                            live_directions[symbol] = allowed
+                    except Exception as e:
+                        log_error(f"lsw_backtest {symbol}: {e}")
+            except (TimeoutError, FutureTimeoutError):
+                # as_completed itself gave up waiting on one or more stuck
+                # futures — but everything collected up to this point is
+                # still good and gets flushed below regardless.
+                log_error("lsw_backtest: as_completed timed out waiting on a stuck symbol — flushing partial results")
+        finally:
+            ex.shutdown(wait=False)  # never block on a stuck worker thread
         with state_lock:
             STATE["lsw_backtest_results"] = results_by_symbol
             STATE["lsw_backtest_summary"] = summary_by_symbol
