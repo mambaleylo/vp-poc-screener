@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.192"
+APP_VERSION = "0.99.193"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12830,6 +12830,36 @@ def amd_loop():
         time.sleep(AMD_REFRESH_SEC)
 
 
+@app.route("/api/amd/status")
+def api_amd_status():
+    with _amd_results_lock:
+        results = list(_amd_results)
+        last_scan = _amd_last_scan
+    return jsonify({
+        "results": results, "last_scan": last_scan,
+        "config": {
+            "structure_tf": AMD_STRUCTURE_TF, "entry_tf": AMD_ENTRY_TF,
+            "rr": AMD_RR, "backtest_days": AMD_BACKTEST_DAYS,
+            "a_atr_mult": AMD_A_ATR_MULT, "m_atr_mult": AMD_M_ATR_MULT,
+            "refresh_sec": AMD_REFRESH_SEC,
+        },
+    })
+
+
+@app.route("/api/amd/backtest/<symbol>")
+def api_amd_backtest(symbol):
+    with _amd_backtest_lock:
+        cached = _amd_backtest_cache.get(symbol)
+    if cached and time.time() - cached.get("computed_at", 0) < 3600:
+        return jsonify(cached)
+    trades, summary = amd_backtest_symbol(symbol)
+    result = {"symbol": symbol, "trades": trades, "summary": summary,
+              "computed_at": int(time.time())}
+    with _amd_backtest_lock:
+        _amd_backtest_cache[symbol] = result
+    return jsonify(result)
+
+
 @app.route("/api/overview")
 def api_overview():
     """Compact win-rate summary across Volume Profile and Scalp, for the
@@ -14387,6 +14417,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="mirror">Зеркало</div>
   <div class="tab" data-tab="lsw">Sweep</div>
   <div class="tab" data-tab="emabull" style="color:#3ddc97;">EMA🚀</div>
+  <div class="tab" data-tab="amd" style="color:#f0a030;">AMD</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
   <div id="hintsToggleBtn" onclick="toggleHints()" style="margin-left:auto;padding:4px 10px;font-size:11px;color:#5a6a7a;cursor:pointer;user-select:none;align-self:center;" title="скрыть/показать подсказки">💡</div>
@@ -14406,6 +14437,7 @@ INDEX_HTML = """<!doctype html>
   <div id="mirrorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="lswPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="emaBullPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
+  <div id="amdPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="simulatorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
@@ -14895,6 +14927,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('mirrorPanel').style.display = activeTab === 'mirror' ? 'block' : 'none';
     document.getElementById('lswPanel').style.display = activeTab === 'lsw' ? 'block' : 'none';
     document.getElementById('emaBullPanel').style.display = activeTab === 'emabull' ? 'block' : 'none';
+    document.getElementById('amdPanel').style.display = activeTab === 'amd' ? 'block' : 'none';
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
     document.getElementById('simulatorPanel').style.display = activeTab === 'simulator' ? 'block' : 'none';
     if (activeTab === 'signals') refreshTuning();
@@ -14904,6 +14937,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'mirror') refreshMirror();
     if (activeTab === 'lsw') refreshLsw();
     if (activeTab === 'emabull') refreshEmaBull();
+    if (activeTab === 'amd') refreshAmd();
     if (activeTab === 'autotrade') refreshAutotrade();
     if (activeTab === 'simulator') refreshSimulator();
   };
@@ -16376,6 +16410,86 @@ async function refreshLsw() {
   });
 }
 
+async function refreshAmd() {
+  const panel = document.getElementById('amdPanel');
+  try {
+    const data = await (await fetch('/api/amd/status')).json();
+    const cfg = data.config || {};
+    const results = data.results || [];
+    const lastScan = data.last_scan ? fmtDateTime(data.last_scan) : '\u2014';
+    const rows = results.map(r => {
+      const dirCls = r.direction === 'LONG' ? 'win' : 'loss';
+      const arrow = r.direction === 'LONG' ? '\u2b06\ufe0f' : '\u2b07\ufe0f';
+      return `<tr onclick="loadAmdBacktest('${r.symbol}')" style="cursor:pointer;">
+        <td>${r.symbol}</td>
+        <td class="${dirCls}">${arrow} ${r.direction}</td>
+        <td class="dim">${fmtNum(r.entry)}</td>
+        <td class="dim">${fmtNum(r.sl)}</td>
+        <td class="dim">${fmtNum(r.tp)}</td>
+        <td class="dim">${fmtNum(r.a_low)}\u2013${fmtNum(r.a_high)}</td>
+        <td class="dim">${fmtDateTime(r.time)}</td>
+      </tr>`;
+    }).join('');
+    const tableHtml = results.length
+      ? `<div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;">
+          <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>A-\u0437\u043e\u043d\u0430</th><th>D \u0441\u0432\u0435\u0447\u0430</th></tr></thead>
+          <tbody>${rows}</tbody></table></div>`
+      : '<div class="dim">\u041d\u0435\u0442 \u0441\u0438\u0433\u043d\u0430\u043b\u043e\u0432.</div>';
+    panel.innerHTML = `
+      <div class="dim hint-block" style="margin-bottom:8px;">
+        <b>AMD Cycle</b> \u2014 Accumulation/Manipulation/Distribution. A: \u0431\u043e\u043a\u043e\u0432\u0438\u043a \u0432 \u0443\u0437\u043a\u043e\u043c \u0434\u0438\u0430\u043f\u0430\u0437\u043e\u043d\u0435.
+        M: \u043b\u043e\u0436\u043d\u044b\u0439 \u043f\u0440\u043e\u0431\u043e\u0439 \u0437\u0430 \u0433\u0440\u0430\u043d\u0438\u0446\u0443 A. D: \u0438\u043c\u043f\u0443\u043b\u044c\u0441\u043d\u0430\u044f \u0441\u0432\u0435\u0447\u0430 \u0432 \u0440\u0435\u0430\u043b\u044c\u043d\u0443\u044e \u0441\u0442\u043e\u0440\u043e\u043d\u0443 \u2014
+        \u044d\u0442\u043e \u0438 \u0435\u0441\u0442\u044c \u0441\u0438\u0433\u043d\u0430\u043b. \u0422\u0424: ${cfg.structure_tf}. TP: RR ${cfg.rr}. \u041d\u0430\u0436\u043c\u0438 \u043c\u043e\u043d\u0435\u0442\u0443 \u2014 \u0431\u044d\u043a\u0442\u0435\u0441\u0442.
+      </div>
+      <div class="dim" style="margin-bottom:8px;">\u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0441\u043a\u0430\u043d: ${lastScan} &middot; \u0441\u0438\u0433\u043d\u0430\u043b\u043e\u0432: ${results.length}</div>
+      ${tableHtml}
+      <div id="amdBacktestPanel" style="margin-top:16px;"></div>`;
+  } catch(e) {
+    panel.innerHTML = `<div class="dim">\u041e\u0448\u0438\u0431\u043a\u0430: ${e}</div>`;
+  }
+}
+
+async function loadAmdBacktest(symbol) {
+  const bp = document.getElementById('amdBacktestPanel');
+  if (!bp) return;
+  bp.innerHTML = `<div class="dim">\u0417\u0430\u0433\u0440\u0443\u0436\u0430\u044e ${symbol}...</div>`;
+  try {
+    const d = await (await fetch(`/api/amd/backtest/${symbol}`)).json();
+    const s = d.summary || {};
+    const wrC = (s.winrate||0) >= 50 ? 'win' : 'loss';
+    const pnlC = (s.avg_pnl_r||0) >= 0 ? 'win' : 'loss';
+    const stat = s.n
+      ? `<span class="${wrC}">${s.winrate}% WR</span> &middot; n=${s.n} &middot; <span class="win">${s.wins}W</span>/<span class="loss">${s.losses}L</span>/${s.timeouts}T &middot; avg P&L <span class="${pnlC}">${s.avg_pnl_r}R</span>`
+      : '<span class="dim">\u043d\u0435\u0442 \u0441\u0438\u0433\u043d\u0430\u043b\u043e\u0432</span>';
+    const trades = (d.trades || []).slice(-20).reverse();
+    const tRows = trades.map(t => {
+      const rc = t.result==='WIN'?'win':t.result==='LOSS'?'loss':'dim';
+      const dirCls = t.direction === 'LONG' ? 'win' : 'loss';
+      const statusHtml = t.result==='WIN'
+        ? `<span class="win">WIN @ ${fmtNum(t.exit_price)}${t.exit_time?' ('+fmtDateTime(t.exit_time)+')':''}</span>`
+        : t.result==='LOSS'
+        ? `<span class="loss">LOSS @ ${fmtNum(t.exit_price)}${t.exit_time?' ('+fmtDateTime(t.exit_time)+')':''}</span>`
+        : '<span class="dim">TIMEOUT</span>';
+      return `<tr>
+        <td class="dim">${fmtDateTime(t.entry_time)}</td>
+        <td class="${dirCls}">${t.direction}</td>
+        <td>${fmtNum(t.entry)}</td>
+        <td class="dim">${fmtNum(t.sl)}</td>
+        <td class="dim">${fmtNum(t.tp)}</td>
+        <td>${statusHtml}</td>
+        <td class="${rc}">${t.pnl_r!=null?(t.pnl_r>0?'+':'')+t.pnl_r+'R':'\u2014'}</td>
+      </tr>`;
+    }).join('');
+    bp.innerHTML = `<b style="font-size:12px;">\u0411\u044d\u043a\u0442\u0435\u0441\u0442 ${symbol}</b> ${stat}
+      ${trades.length ? `<div style="overflow-x:auto;margin-top:6px;">
+        <table style="font-size:10px;white-space:nowrap;">
+        <thead><tr><th>\u0412\u0445\u043e\u0434</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>\u0421\u0442\u0430\u0442\u0443\u0441</th><th>P&L</th></tr></thead>
+        <tbody>${tRows}</tbody></table></div>` : ''}`;
+  } catch(e) {
+    bp.innerHTML = `<div class="dim">\u041e\u0448\u0438\u0431\u043a\u0430: ${e}</div>`;
+  }
+}
+
 async function refreshAutotradeBanner() {
   try {
     const s = await (await fetch('/api/autotrade/status')).json();
@@ -17533,6 +17647,7 @@ if __name__ == "__main__":
     threading.Thread(target=lsw_backtest_loop, daemon=True).start()
     threading.Thread(target=lsw_live_loop, daemon=True).start()
     threading.Thread(target=ema_bull_loop, daemon=True).start()
+    threading.Thread(target=amd_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     threading.Thread(target=risk_autotune_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
