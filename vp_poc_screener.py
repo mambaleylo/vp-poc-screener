@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.196"
+APP_VERSION = "0.99.197"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -11481,7 +11481,7 @@ def lsw_filter_signals_by_atr_sweep(signals, candles, period=None, mult=None):
         # Sweep wick size
         c = candles[idx]
         if sig.get("direction") == "LONG":
-            wick = c["level_price"] - c["low"] if "level_price" in sig else c["high"] - c["low"]
+            wick = sig["level_price"] - c["low"] if "level_price" in sig else c["high"] - c["low"]
         else:
             wick = c["high"] - (sig.get("level_price") or c["low"])
         if atr > 0 and wick < mult * atr:
