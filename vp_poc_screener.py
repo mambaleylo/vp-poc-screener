@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.195"
+APP_VERSION = "0.99.196"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12260,35 +12260,36 @@ def lsw_backtest_loop():
 
 def _lsw_run_one_backtest_cycle(t0):
     universe = lsw_build_universe()
-    results_by_symbol = {}
-    summary_by_symbol = {}
-    checkpoints_by_symbol = {}
-    live_universe = []
-    live_directions = {}
     with state_lock:
         STATE["lsw_backtest_total"] = len(universe)
         STATE["lsw_backtest_done"] = 0
         STATE["lsw_backtest_in_flight"] = []
         STATE["lsw_backtest_running"] = True
         STATE["lsw_backtest_started_at"] = t0
+        # v0.99.196 — CRITICAL FIX: previously all per-symbol results were
+        # accumulated in LOCAL dicts and written to STATE only ONCE, after
+        # the entire as_completed() loop over all symbols finished. Per
+        # direct user report with hard evidence (/api/lsw/status showing
+        # backtest_done:60, backtest_total:60, backtest_running:false —
+        # every single worker genuinely completed — yet last_backtest_
+        # finished:null and top:[] — completely empty): the aggregator
+        # loop itself can apparently stall or never reach its own final
+        # write even after every worker already returned (likely thread
+        # scheduling/GIL contention on a phone running a dozen concurrent
+        # background loops), silently discarding a fully-completed cycle's
+        # worth of work. Fix: write each symbol's result into STATE the
+        # MOMENT it's ready, not batched at the end — so 59 good symbols
+        # are never held hostage by whatever happens to the 60th, or by
+        # the aggregator loop's own scheduling. Start from a clean summary
+        # (not a merge) since a symbol that's no longer in `universe` this
+        # cycle should still disappear from the table, same intent as the
+        # previous wholesale replacement — just written incrementally.
+        STATE["lsw_backtest_results"] = {}
+        STATE["lsw_backtest_summary"] = {}
+        STATE["lsw_filter_checkpoints"] = {}
+        STATE["lsw_live_universe"] = []
+        STATE["lsw_live_directions"] = {}
     try:
-        # v0.99.195 — CRITICAL FIX: same "with ThreadPoolExecutor(...) as ex"
-        # bug as the outer cycle wrapper (v0.99.194), but one level deeper.
-        # If even ONE symbol's _lsw_backtest_one() truly hangs (network call
-        # bypassing our own timeout, or a genuine computational stall), the
-        # per-symbol executor's own __exit__ -> shutdown(wait=True) blocks
-        # forever waiting for that one stuck worker — and the STATE write
-        # below (results/summary/live_universe) NEVER happens, even though
-        # every other symbol finished cleanly (progress bar can round to
-        # ~100% with e.g. 237/238 done, misleadingly looking "finished").
-        # Per direct user report: progress bar filled, but panel still says
-        # "бэктест ещё не готов" — this is exactly that scenario.
-        # Fix: no "with" here either; write results/summary progressively
-        # as each future completes (not deferred to after the full loop),
-        # and always flush whatever was gathered so far in a finally block
-        # regardless of how the loop exits (normal, as_completed timeout,
-        # or any other exception) — so 237 good symbols are never held
-        # hostage by 1 stuck one.
         ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1))
         try:
             futs = {ex.submit(_lsw_backtest_one, s): s for s in universe}
@@ -12303,16 +12304,13 @@ def _lsw_run_one_backtest_cycle(t0):
                         log_error(f"lsw_backtest: {symbol} timed out after {PER_SYMBOL_TIMEOUT_L}s — skipping")
                         continue
                     try:
-                        results_by_symbol[symbol] = results
-                        checkpoints_by_symbol[symbol] = meta.get("checkpoints", {})
+                        checkpoints = meta.get("checkpoints", {})
                         summary = lsw_summarize_backtest(results)
-                        summary_by_symbol[symbol] = summary
                         closed_n = summary["wins"] + summary["losses"]
-                        if not (summary["win_rate"] is not None and summary["win_rate"] > LSW_LIVE_MIN_WINRATE
-                                and closed_n >= LSW_LIVE_MIN_SAMPLE):
-                            continue
-                        live_universe.append(symbol)
-                        if LSW_DIRECTION_FILTER_ENABLED:
+                        is_live = (summary["win_rate"] is not None and summary["win_rate"] > LSW_LIVE_MIN_WINRATE
+                                   and closed_n >= LSW_LIVE_MIN_SAMPLE)
+                        allowed_directions = None
+                        if is_live and LSW_DIRECTION_FILTER_ENABLED:
                             allowed = []
                             bd = summary.get("by_direction") or {}
                             for d in ("LONG", "SHORT"):
@@ -12321,22 +12319,28 @@ def _lsw_run_one_backtest_cycle(t0):
                                         and dd.get("win_rate") is not None
                                         and dd["win_rate"] > LSW_LIVE_MIN_WINRATE):
                                     allowed.append(d)
-                            live_directions[symbol] = allowed
+                            allowed_directions = allowed
+                        # Write THIS symbol's result immediately — never
+                        # wait for the rest of the universe to also finish.
+                        with state_lock:
+                            STATE["lsw_backtest_results"][symbol] = results
+                            STATE["lsw_backtest_summary"][symbol] = summary
+                            STATE["lsw_filter_checkpoints"][symbol] = checkpoints
+                            if is_live and symbol not in STATE["lsw_live_universe"]:
+                                STATE["lsw_live_universe"].append(symbol)
+                            if allowed_directions is not None:
+                                STATE["lsw_live_directions"][symbol] = allowed_directions
                     except Exception as e:
                         log_error(f"lsw_backtest {symbol}: {e}")
             except (TimeoutError, FutureTimeoutError):
                 # as_completed itself gave up waiting on one or more stuck
-                # futures — but everything collected up to this point is
-                # still good and gets flushed below regardless.
-                log_error("lsw_backtest: as_completed timed out waiting on a stuck symbol — flushing partial results")
+                # futures — but every symbol processed so far is already
+                # live in STATE (written above, not batched), so nothing
+                # already-good is lost here.
+                log_error("lsw_backtest: as_completed timed out waiting on a stuck symbol — keeping whatever was already written")
         finally:
             ex.shutdown(wait=False)  # never block on a stuck worker thread
         with state_lock:
-            STATE["lsw_backtest_results"] = results_by_symbol
-            STATE["lsw_backtest_summary"] = summary_by_symbol
-            STATE["lsw_filter_checkpoints"] = checkpoints_by_symbol
-            STATE["lsw_live_universe"] = live_universe
-            STATE["lsw_live_directions"] = live_directions
             STATE["lsw_last_backtest_finished"] = time.time()
             STATE["lsw_last_backtest_duration"] = round(time.time() - t0, 1)
     finally:
