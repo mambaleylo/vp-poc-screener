@@ -12210,3 +12210,39 @@ v0.99.196 - CRITICAL FIX (root cause finally confirmed via direct
          than all-or-nothing after the entire universe finishes.
          Verified: py_compile, pyflakes, 49 routes, real runtime
          confirming /api/lsw/status still responds correctly.
+
+v0.99.197 - THE ACTUAL ROOT CAUSE FOUND (finally): lsw_filter_signals_
+         by_atr_sweep() (v0.99.191's own ATR sweep filter) had a
+         copy-paste bug — `"level_price" in sig` (correctly checks the
+         SIGNAL) but then read `c["level_price"]` (WRONG — indexes the
+         CANDLE, which never has that key) instead of `sig["level_price"]`.
+         This raised KeyError for every LONG signal with a level_price
+         set — and since this checkpoint is computed UNCONDITIONALLY for
+         every symbol's backtest (for the solo-column display, regardless
+         of whether the live filter is even toggled on), it crashed
+         EVERY symbol's entire lsw_backtest_symbol() call with an
+         uncaught KeyError (not a TimeoutError, so none of v0.99.194/195/
+         196's own except clauses caught it) — explaining the exact
+         mystery from direct user reports: backtest_done:60/total:60
+         (every worker's own finally still ran, incrementing the
+         counter, since _lsw_backtest_one() re-raises via the Future
+         regardless), yet top:[] and last_backtest_finished:null forever
+         (the KeyError propagated out through .result() on the very
+         first future processed, breaking the entire aggregator loop
+         before writing even ONE symbol, uncaught by any handler,
+         landing in the outer wrapper's generic Exception catch which
+         only logs and resets running=False).
+         Root-caused via a standalone repro: imported the module
+         directly, monkey-patched get_candles_range() with synthetic
+         candle data, and called lsw_backtest_symbol() — reproduced the
+         exact KeyError('level_price') on the first attempt. Fixed the
+         one-line bug (sig["level_price"], not c["level_price"]),
+         re-ran the repro clean (SUCCESS), then stress-tested 120 runs
+         across 30 random seeds x all filter toggle combinations — zero
+         crashes. v0.99.194/195/196's hard-ceiling and progressive-write
+         fixes were all correct and remain in place as real protections
+         against genuine hangs — but none of them could have caught this
+         specific bug, which needed an actual code fix, not more
+         robustness around timeouts.
+         Verified: py_compile, pyflakes, 49 routes, 120-run synthetic
+         stress test with zero exceptions.
