@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.198"
+APP_VERSION = "0.99.199"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -17499,13 +17499,31 @@ function drawVgiChart(data) {
   ctx.scale(dpr, dpr);
   ctx.clearRect(0, 0, W, H);
 
-  const candles = data.candles || [];
-  if (!candles.length) return;
+  const allCandles = data.candles || [];
+  if (!allCandles.length) return;
   const entry = data.entry, sl = data.sl, tp = data.tp;
   const exitPrice = data.exit_price;
 
   const padRight = 54;
   const chartW = W - padRight;
+
+  // v0.99.199 — same fix as drawChart's own v0.99.198: this function
+  // drew ALL candles the backend sent (up to 250) with no cap, giving
+  // unreadably thin slots on a narrow phone screen. Show only as many
+  // as fit at a legible minimum width, centered on the signal candle
+  // (data.time) so entry/SL/TP stay visible rather than scrolled off.
+  const MIN_SLOT_PX = 9;
+  const maxBars = Math.max(15, Math.min(allCandles.length, Math.floor(chartW / MIN_SLOT_PX)));
+  const centerSigIdx = data.time !== undefined
+    ? allCandles.findIndex(c => c.time === data.time)
+    : allCandles.length - 1;
+  const centerIdx = centerSigIdx >= 0 ? centerSigIdx : allCandles.length - 1;
+  const beforeBars = Math.round(maxBars * 0.35);
+  let start = Math.max(0, centerIdx - beforeBars);
+  let end = Math.min(allCandles.length, start + maxBars);
+  if (end - start < maxBars) start = Math.max(0, end - maxBars);
+  const candles = allCandles.slice(start, end);
+
   const n = candles.length;
   const slot = chartW / n;
   const bodyW = Math.max(1, slot * 0.6);
