@@ -12277,3 +12277,18 @@ v0.99.200 - REAL FIX: v0.99.198/199's own "adaptive" formula had a bug —
          9 to 14px for genuinely comfortable spacing. Applied to both
          drawChart() and drawVgiChart().
          Verified: py_compile, pyflakes, node --check, 49 routes.
+
+v0.99.201 - AMD full-universe backtest added, per direct user report
+         ("почему по AMD пустое окно вообще, ни бэктеста ничего"). AMD
+         previously only had per-click on-demand backtest — if no live
+         signal had fired yet (the A/M/D pattern is strict/rare), there
+         was nothing to click into, leaving the panel genuinely empty.
+         New amd_backtest_loop() scans the whole universe every hour,
+         same progressive-write + no-with-block-hang pattern as LSW's
+         own v0.99.194/195/196 fixes applied from the start this time.
+         /api/amd/status now also returns "top" (per-symbol backtest
+         summary: WR/n/W/L/T/avg P&L), backtest_running/done/total for
+         a progress bar, and last_backtest_finished/duration. Panel now
+         shows a ranked backtest table even with zero live signals.
+         Verified: py_compile, pyflakes, node --check, 49 routes, real
+         runtime confirming /api/amd/status returns the new fields.
