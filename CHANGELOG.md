@@ -12246,3 +12246,11 @@ v0.99.197 - THE ACTUAL ROOT CAUSE FOUND (finally): lsw_filter_signals_
          robustness around timeouts.
          Verified: py_compile, pyflakes, 49 routes, 120-run synthetic
          stress test with zero exceptions.
+
+v0.99.198 - Chart candle count now adapts to actual screen width instead
+         of a fixed 70 bars, per direct user report ("очень узкие свечи
+         и все в кашу сливается, не разобрать"). On narrow mobile
+         screens 70 bars gave ~3-5px slots. Now picks as many bars as
+         fit at a minimum 9px slot width (capped 15-70), keeping the
+         same ~29% before-signal ratio the old 20/70 split had.
+         Verified: py_compile, pyflakes, node --check, 49 routes.
