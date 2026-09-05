@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.193"
+APP_VERSION = "0.99.194"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9562,24 +9562,31 @@ def msnr_backtest_loop():
                 time.sleep(60)
                 continue
             t0 = time.time()
-            # v0.99.181 — wrap the entire backtest cycle in a future with a
-            # hard ceiling so a stuck get_tickers() or any other pre-executor
-            # call can't hang the loop for hours (the per-symbol timeouts in
-            # the executor only protect the parallel phase, not the serial
-            # universe-build phase before it).
+            # v0.99.194 — CRITICAL FIX to v0.99.181's own hard-ceiling fix:
+            # `with ThreadPoolExecutor(...) as ex:` calls ex.shutdown(wait=True)
+            # on exit, which BLOCKS until the inner thread actually finishes —
+            # even after .result(timeout=...) already gave up and raised
+            # TimeoutError. If the cycle is truly stuck forever, the "with"
+            # block's own __exit__ hangs forever too, and the except clause
+            # below never runs — silently defeating the whole point of the
+            # ceiling. Fix: no "with", explicit shutdown(wait=False) so the
+            # outer loop moves on immediately, abandoning the stuck thread.
             MAX_CYCLE_SEC = 60 * 60  # 1h hard ceiling for the whole cycle
-            with ThreadPoolExecutor(max_workers=1) as _cycle_ex:
-                _cycle_fut = _cycle_ex.submit(_msnr_run_one_backtest_cycle, t0)
-                try:
-                    _cycle_fut.result(timeout=MAX_CYCLE_SEC)
-                except (TimeoutError, FutureTimeoutError):
-                    log_error(f"msnr_backtest_loop: entire cycle exceeded {MAX_CYCLE_SEC}s — aborting and retrying next interval")
-                    with state_lock:
-                        STATE["msnr_backtest_running"] = False
-                except Exception as e:
-                    log_error(f"msnr_backtest_loop cycle: {e}")
-                    with state_lock:
-                        STATE["msnr_backtest_running"] = False
+            _cycle_ex = ThreadPoolExecutor(max_workers=1)
+            _cycle_fut = _cycle_ex.submit(_msnr_run_one_backtest_cycle, t0)
+            try:
+                _cycle_fut.result(timeout=MAX_CYCLE_SEC)
+                _cycle_ex.shutdown(wait=False)
+            except (TimeoutError, FutureTimeoutError):
+                log_error(f"msnr_backtest_loop: entire cycle exceeded {MAX_CYCLE_SEC}s — aborting and retrying next interval")
+                with state_lock:
+                    STATE["msnr_backtest_running"] = False
+                _cycle_ex.shutdown(wait=False)
+            except Exception as e:
+                log_error(f"msnr_backtest_loop cycle: {e}")
+                with state_lock:
+                    STATE["msnr_backtest_running"] = False
+                _cycle_ex.shutdown(wait=False)
         except Exception as e:
             log_error(f"msnr_backtest_loop outer: {e}")
         MSNR_BACKTEST_TRIGGER.wait(timeout=max(300, MSNR_REFRESH_SEC))
@@ -12203,25 +12210,38 @@ def lsw_backtest_loop():
                 time.sleep(60)
                 continue
             t0 = time.time()
-            # v0.99.192 — same 1h hard ceiling as MSNR v0.99.181: wrap the
-            # entire cycle in a single-worker executor so a stuck
-            # lsw_build_universe() or any other serial call before the
-            # ThreadPoolExecutor can't hang the loop forever.
+            # v0.99.194 — CRITICAL FIX to v0.99.192's own hard-ceiling fix:
+            # `with ThreadPoolExecutor(...) as ex:` calls ex.shutdown(wait=True)
+            # on exit, which BLOCKS until the inner thread actually finishes —
+            # even after we've already given up via .result(timeout=...) and
+            # caught the TimeoutError. So if _lsw_run_one_backtest_cycle was
+            # truly stuck forever (e.g. a network call with no timeout deep
+            # inside), the "with" block's own __exit__ would hang forever too,
+            # and the except clause below would NEVER run — silently
+            # defeating the entire point of the hard ceiling. Per direct user
+            # report: bэктест still not done after 24+ hours despite v0.99.192.
+            # Fix: create the executor WITHOUT "with", and on timeout call
+            # shutdown(wait=False) so the outer loop can move on immediately,
+            # abandoning the stuck thread (it's a daemon-adjacent one-off —
+            # harmless to leak since the whole process is daemonized anyway).
             MAX_CYCLE_SEC = 60 * 60
-            with ThreadPoolExecutor(max_workers=1) as _cycle_ex:
-                _cycle_fut = _cycle_ex.submit(_lsw_run_one_backtest_cycle, t0)
-                try:
-                    _cycle_fut.result(timeout=MAX_CYCLE_SEC)
-                except (TimeoutError, FutureTimeoutError):
-                    log_error(f"lsw_backtest_loop: entire cycle exceeded {MAX_CYCLE_SEC}s — aborting")
-                    with state_lock:
-                        STATE["lsw_backtest_running"] = False
-                        STATE["lsw_backtest_in_flight"] = []
-                except Exception as e:
-                    log_error(f"lsw_backtest_loop cycle: {e}")
-                    with state_lock:
-                        STATE["lsw_backtest_running"] = False
-                        STATE["lsw_backtest_in_flight"] = []
+            _cycle_ex = ThreadPoolExecutor(max_workers=1)
+            _cycle_fut = _cycle_ex.submit(_lsw_run_one_backtest_cycle, t0)
+            try:
+                _cycle_fut.result(timeout=MAX_CYCLE_SEC)
+                _cycle_ex.shutdown(wait=False)
+            except (TimeoutError, FutureTimeoutError):
+                log_error(f"lsw_backtest_loop: entire cycle exceeded {MAX_CYCLE_SEC}s — aborting, abandoning stuck thread")
+                with state_lock:
+                    STATE["lsw_backtest_running"] = False
+                    STATE["lsw_backtest_in_flight"] = []
+                _cycle_ex.shutdown(wait=False)
+            except Exception as e:
+                log_error(f"lsw_backtest_loop cycle: {e}")
+                with state_lock:
+                    STATE["lsw_backtest_running"] = False
+                    STATE["lsw_backtest_in_flight"] = []
+                _cycle_ex.shutdown(wait=False)
         except Exception as e:
             log_error(f"lsw_backtest_loop outer: {e}")
         LSW_BACKTEST_TRIGGER.wait(timeout=max(300, LSW_REFRESH_SEC))
