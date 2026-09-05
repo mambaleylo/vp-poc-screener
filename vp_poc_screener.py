@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.201"
+APP_VERSION = "0.99.202"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12617,18 +12617,22 @@ def ema_bull_loop():
 # v0.99.192
 # ============================================================================
 
-AMD_STRUCTURE_TF     = os.environ.get("VP_AMD_STRUCTURE_TF", "1h")
-AMD_ENTRY_TF         = os.environ.get("VP_AMD_ENTRY_TF", "15m")
-AMD_REFRESH_SEC      = int(os.environ.get("VP_AMD_REFRESH_SEC", 900))     # scan every 15m
+AMD_STRUCTURE_TF     = os.environ.get("VP_AMD_STRUCTURE_TF", "15m")  # v0.99.202 — lowered from 1h per direct user request for more frequent signals
+AMD_ENTRY_TF         = os.environ.get("VP_AMD_ENTRY_TF", "5m")
+AMD_REFRESH_SEC      = int(os.environ.get("VP_AMD_REFRESH_SEC", 300))     # scan every 5m — structure candle is now 15m, check often enough not to miss one
 AMD_BACKTEST_DAYS    = int(os.environ.get("VP_AMD_BACKTEST_DAYS", 90))
 AMD_A_ATR_MULT       = float(os.environ.get("VP_AMD_A_ATR_MULT", 0.6))    # A-zone: range <= mult*ATR
-AMD_A_MIN_BARS       = int(os.environ.get("VP_AMD_A_MIN_BARS", 4))        # A-zone: min consolidation bars
-AMD_A_MAX_BARS       = int(os.environ.get("VP_AMD_A_MAX_BARS", 20))       # A-zone: max bars to search back
+# v0.99.202 — bar-count windows scaled ×4 (1h→15m is 4x more candles per
+# hour) so the A-zone/wait-for-outcome windows keep the SAME real-world
+# duration as before, rather than the pattern's meaning shrinking to 1/4
+# the market time just because the candle granularity changed.
+AMD_A_MIN_BARS       = int(os.environ.get("VP_AMD_A_MIN_BARS", 16))       # A-zone: min consolidation bars (~4h)
+AMD_A_MAX_BARS       = int(os.environ.get("VP_AMD_A_MAX_BARS", 80))       # A-zone: max bars to search back (~20h)
 AMD_M_ATR_MULT       = float(os.environ.get("VP_AMD_M_ATR_MULT", 0.5))    # M: sweep must exceed A-zone by >= mult*ATR
 AMD_D_BODY_RATIO     = float(os.environ.get("VP_AMD_D_BODY_RATIO", 0.4))  # D: body >= ratio*range (impulsive)
 AMD_RR               = float(os.environ.get("VP_AMD_RR", 2.5))
 AMD_SL_BUFFER_PCT    = float(os.environ.get("VP_AMD_SL_BUFFER_PCT", 0.3))
-AMD_MAX_WAIT_BARS    = int(os.environ.get("VP_AMD_MAX_WAIT_BARS", 24))    # 24×1h = 1 day
+AMD_MAX_WAIT_BARS    = int(os.environ.get("VP_AMD_MAX_WAIT_BARS", 96))    # 96×15m = 1 day (was 24×1h)
 AMD_UNIVERSE_SIZE    = int(os.environ.get("VP_AMD_UNIVERSE_SIZE", 100))
 AMD_SIGNAL_HISTORY   = 200
 AMD_ATR_PERIOD       = 14
@@ -12731,10 +12735,12 @@ def amd_detect_signals(candles):
 
 
 def amd_backtest_symbol(symbol):
-    """Run AMD backtest on 1h candles. Returns (trades, summary)."""
+    """Run AMD backtest on the configured structure TF. Returns (trades, summary)."""
     try:
         now = int(time.time())
-        start_ts = now - (AMD_BACKTEST_DAYS + AMD_ATR_PERIOD + AMD_A_MAX_BARS + 2) * 86400
+        interval_sec = INTERVAL_SECONDS.get(AMD_STRUCTURE_TF, 900)
+        buffer_sec = (AMD_ATR_PERIOD + AMD_A_MAX_BARS + 2) * interval_sec
+        start_ts = now - AMD_BACKTEST_DAYS * 86400 - buffer_sec
         candles = get_candles_range(symbol, AMD_STRUCTURE_TF, start_ts, now)
         if not candles or len(candles) < AMD_ATR_PERIOD + AMD_A_MAX_BARS + 5:
             return [], {}
