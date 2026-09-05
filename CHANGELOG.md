@@ -12121,3 +12121,13 @@ v0.99.191 - LSW: two new features per user request.
          signal if previous trade on this symbol is still TIMEOUT/open.
          Applied after entry confirmation in the actual chain.
          Verified: py_compile, pyflakes, 47 routes.
+
+v0.99.192 - CRITICAL FIX: LSW backtest loop hang — same fix as MSNR
+         v0.99.181. Wrapped entire cycle in _lsw_run_one_backtest_cycle()
+         via single-worker executor with timeout=3600s. Previously a
+         stuck lsw_build_universe() or any serial call before the
+         ThreadPoolExecutor could hang the loop forever (user: "бэктест
+         не запускается, всю ночь прождал"). Refactored to same pattern
+         as MSNR: outer loop dispatches the full cycle with 1h hard
+         ceiling, always wakes within 1h regardless of what hangs.
+         Verified: py_compile, pyflakes, 47 routes, real runtime 200 OK.
