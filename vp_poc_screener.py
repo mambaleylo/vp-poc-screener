@@ -28,6 +28,7 @@ import hmac
 import hashlib
 from decimal import Decimal
 from collections import deque
+from datetime import datetime, timezone
 from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
 
 import requests
@@ -52,7 +53,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.205"
+APP_VERSION = "0.99.206"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1018,7 +1019,7 @@ CREDENTIALS_FILE = os.environ.get(
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_network",
+                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "msnr_all_in_enabled",
                   "autotrade_risk_pct",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
@@ -1081,6 +1082,7 @@ def get_settings():
         "telegram_alerts_lsw": TELEGRAM_ALERTS_LSW,
         "telegram_alerts_ema_bull": TELEGRAM_ALERTS_EMA_BULL,
         "telegram_alerts_amd": TELEGRAM_ALERTS_AMD,
+        "telegram_alerts_neuro": TELEGRAM_ALERTS_NEURO,
         "telegram_alerts_network": TELEGRAM_ALERTS_NETWORK,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
@@ -1112,7 +1114,7 @@ def apply_settings(updates):
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
-    global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_EMA_BULL, TELEGRAM_ALERTS_AMD, TELEGRAM_ALERTS_NETWORK
+    global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_EMA_BULL, TELEGRAM_ALERTS_AMD, TELEGRAM_ALERTS_NEURO, TELEGRAM_ALERTS_NETWORK
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT
     if "volume_profile_enabled" in updates:
@@ -1231,6 +1233,8 @@ def apply_settings(updates):
         TELEGRAM_ALERTS_EMA_BULL = bool(updates["telegram_alerts_ema_bull"])
     if "telegram_alerts_amd" in updates:
         TELEGRAM_ALERTS_AMD = bool(updates["telegram_alerts_amd"])
+    if "telegram_alerts_neuro" in updates:
+        TELEGRAM_ALERTS_NEURO = bool(updates["telegram_alerts_neuro"])
     if "telegram_alerts_network" in updates:
         TELEGRAM_ALERTS_NETWORK = bool(updates["telegram_alerts_network"])
     if "autotrade_dry_run" in updates:
@@ -5732,6 +5736,8 @@ def send_telegram(text, category=None):
     if category == "ema_bull" and not TELEGRAM_ALERTS_EMA_BULL:
         return
     if category == "amd" and not TELEGRAM_ALERTS_AMD:
+        return
+    if category == "neuro" and not TELEGRAM_ALERTS_NEURO:
         return
     if category == "network" and not TELEGRAM_ALERTS_NETWORK:
         return
@@ -12929,18 +12935,28 @@ def amd_loop():
             universe = amd_scan_universe()
             results = []
             if universe:
-                with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe))) as ex:
+                # v0.99.206 — same no-with-block fix as LSW/MSNR/AMD backtest
+                # (v0.99.194/195): AMD_UNIVERSE_SIZE was raised to 300, so a
+                # single stuck symbol here could now block ex.__exit__ ->
+                # shutdown(wait=True) for a much larger scan than before.
+                ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(universe)))
+                try:
                     futs = [ex.submit(amd_scan_symbol_live, s) for s in universe]
                     PER = HTTP_TIMEOUT * 3 * 3 + 60
-                    for fut in as_completed(futs, timeout=PER * len(universe)):
-                        try:
-                            r = fut.result(timeout=PER)
-                            if r:
-                                results.append(r)
-                        except (TimeoutError, FutureTimeoutError):
-                            continue
-                        except Exception:
-                            continue
+                    try:
+                        for fut in as_completed(futs, timeout=PER * len(universe)):
+                            try:
+                                r = fut.result(timeout=PER)
+                                if r:
+                                    results.append(r)
+                            except (TimeoutError, FutureTimeoutError):
+                                continue
+                            except Exception:
+                                continue
+                    except (TimeoutError, FutureTimeoutError):
+                        log_error("amd_loop: as_completed timed out waiting on a stuck symbol — keeping whatever was gathered")
+                finally:
+                    ex.shutdown(wait=False)
             # Sort: LONG first, then by symbol
             results.sort(key=lambda r: (r["direction"] != "LONG", r["symbol"]))
             with _amd_results_lock:
@@ -12961,6 +12977,505 @@ def amd_loop():
         except Exception as e:
             log_error(f"amd_loop: {e}")
         time.sleep(AMD_REFRESH_SEC)
+
+
+# ============================================================================
+# NEURO — self-learning dependency-mining engine (v0.99.206)
+# Fixed top-5 majors, maximum available history, pure-Python statistical
+# pattern discovery across many condition types (calendar, RSI zone, EMA
+# side, volume regime, candle range/body size, streaks, range position),
+# validated with an honest walk-forward train/test split so only patterns
+# that hold up OUT of sample are surfaced or traded — re-mined periodically
+# so it keeps adapting as new data streams in ("self-learning").
+# ============================================================================
+
+NEURO_COINS          = ["BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT"]
+NEURO_TF             = os.environ.get("VP_NEURO_TF", "1h")
+NEURO_FORWARD_BARS   = int(os.environ.get("VP_NEURO_FORWARD_BARS", 12))   # measure forward return over next N bars
+NEURO_MIN_SAMPLE     = int(os.environ.get("VP_NEURO_MIN_SAMPLE", 30))     # min occurrences per bucket to trust it
+NEURO_Z_THRESHOLD    = float(os.environ.get("VP_NEURO_Z_THRESHOLD", 1.8))
+NEURO_TRAIN_FRAC     = float(os.environ.get("VP_NEURO_TRAIN_FRAC", 0.7))  # walk-forward split
+NEURO_HISTORY_DAYS   = int(os.environ.get("VP_NEURO_HISTORY_DAYS", 1500))  # ask for as much as possible; exchange will just return what it has
+NEURO_REFRESH_SEC    = int(os.environ.get("VP_NEURO_REFRESH_SEC", 4 * 3600))  # re-mine every 4h — the "self-learning" refresh
+NEURO_RR             = float(os.environ.get("VP_NEURO_RR", 2.0))
+NEURO_SL_ATR_MULT    = float(os.environ.get("VP_NEURO_SL_ATR_MULT", 1.5))
+NEURO_MAX_WAIT_BARS  = int(os.environ.get("VP_NEURO_MAX_WAIT_BARS", 48))
+NEURO_MIN_AGREE_Z    = float(os.environ.get("VP_NEURO_MIN_AGREE_Z", 2.5))  # combined |z| needed to fire a live signal
+TELEGRAM_ALERTS_NEURO = os.environ.get("VP_TG_ALERTS_NEURO", "1") == "1"
+
+
+def neuro_ema_series(prices, period):
+    if len(prices) < period:
+        return [None] * len(prices)
+    k = 2.0 / (period + 1)
+    out = [None] * (period - 1)
+    ema = sum(prices[:period]) / period
+    out.append(ema)
+    for p in prices[period:]:
+        ema = p * k + ema * (1 - k)
+        out.append(ema)
+    return out
+
+
+def neuro_rsi_series(closes, period=14):
+    if len(closes) < period + 1:
+        return [None] * len(closes)
+    gains, losses = [], []
+    for i in range(1, len(closes)):
+        d = closes[i] - closes[i - 1]
+        gains.append(max(d, 0))
+        losses.append(max(-d, 0))
+    out = [None] * period
+    avg_gain = sum(gains[:period]) / period
+    avg_loss = sum(losses[:period]) / period
+    rs = avg_gain / avg_loss if avg_loss > 0 else float("inf")
+    out.append(100 - 100 / (1 + rs) if avg_loss > 0 else 100)
+    for i in range(period, len(gains)):
+        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+        rs = avg_gain / avg_loss if avg_loss > 0 else float("inf")
+        out.append(100 - 100 / (1 + rs) if avg_loss > 0 else 100)
+    return out
+
+
+def neuro_atr_series(candles, period=14):
+    if len(candles) < 2:
+        return [None] * len(candles)
+    trs = [candles[0]["high"] - candles[0]["low"]]
+    for i in range(1, len(candles)):
+        c = candles[i]
+        tr = max(c["high"] - c["low"], abs(c["high"] - candles[i - 1]["close"]), abs(c["low"] - candles[i - 1]["close"]))
+        trs.append(tr)
+    out = [None] * (period - 1) if len(trs) >= period else [None] * len(trs)
+    if len(trs) >= period:
+        atr = sum(trs[:period]) / period
+        out.append(atr)
+        for tr in trs[period:]:
+            atr = (atr * (period - 1) + tr) / period
+            out.append(atr)
+    return out
+
+
+def neuro_compute_conditions(candles):
+    """One bucket-label dict per bar, across many independent condition types."""
+    closes = [c["close"] for c in candles]
+    ema50 = neuro_ema_series(closes, 50)
+    ema200 = neuro_ema_series(closes, 200)
+    rsi14 = neuro_rsi_series(closes, 14)
+    atr14 = neuro_atr_series(candles, 14)
+    vols = [c["volume"] for c in candles]
+
+    conds = []
+    streak = 0
+    prev_dir = None
+    for i, c in enumerate(candles):
+        bucket = {}
+        dt = datetime.fromtimestamp(c["time"], tz=timezone.utc)
+        bucket["hour"] = dt.hour
+        bucket["dow"] = dt.weekday()
+
+        if rsi14[i] is not None:
+            r = rsi14[i]
+            bucket["rsi_zone"] = "low" if r < 30 else "high" if r > 70 else "mid"
+        if ema50[i] is not None:
+            bucket["ema50_side"] = "above" if c["close"] > ema50[i] else "below"
+        if ema200[i] is not None:
+            bucket["ema200_side"] = "above" if c["close"] > ema200[i] else "below"
+
+        if i >= 20:
+            avg_vol = sum(vols[i - 20:i]) / 20
+            if avg_vol > 0:
+                ratio = c["volume"] / avg_vol
+                bucket["vol_zone"] = ("spike" if ratio >= 2.0 else "high" if ratio >= 1.3
+                                       else "low" if ratio <= 0.5 else "normal")
+
+        if atr14[i] and atr14[i] > 0:
+            rng = c["high"] - c["low"]
+            ratio = rng / atr14[i]
+            bucket["range_zone"] = "big" if ratio >= 1.8 else "small" if ratio <= 0.5 else "normal"
+            body = abs(c["close"] - c["open"])
+            bucket["body_zone"] = "big" if body / atr14[i] >= 1.2 else "small" if body / atr14[i] <= 0.3 else "normal"
+
+        cur_dir = "green" if c["close"] >= c["open"] else "red"
+        if prev_dir == cur_dir:
+            streak = min(streak + 1, 4)
+        else:
+            streak = 1
+        bucket["streak"] = f"{prev_dir or 'na'}{min(streak, 4)}"
+        prev_dir = cur_dir
+
+        if i >= 20:
+            window = candles[i - 20:i + 1]
+            hi = max(w["high"] for w in window)
+            lo = min(w["low"] for w in window)
+            if hi > lo:
+                pos = (c["close"] - lo) / (hi - lo)
+                bucket["range_pos"] = "near_high" if pos >= 0.85 else "near_low" if pos <= 0.15 else "mid"
+
+        conds.append(bucket)
+    return conds
+
+
+def neuro_forward_returns(candles, k):
+    n = len(candles)
+    out = [None] * n
+    for i in range(n - k):
+        c0 = candles[i]["close"]
+        c1 = candles[i + k]["close"]
+        if c0 > 0:
+            out[i] = (c1 - c0) / c0
+    return out
+
+
+def neuro_zscore(mean_a, n_a, mean_all, std_all):
+    if not std_all or n_a < 2:
+        return 0.0
+    se = std_all / math.sqrt(n_a)
+    if se == 0:
+        return 0.0
+    return (mean_a - mean_all) / se
+
+
+NEURO_CONDITION_KEYS = ("hour", "dow", "rsi_zone", "ema50_side", "ema200_side",
+                        "vol_zone", "range_zone", "body_zone", "streak", "range_pos")
+
+
+def neuro_mine(candles, forward_bars=None, min_sample=None, z_threshold=None):
+    forward_bars = forward_bars or NEURO_FORWARD_BARS
+    min_sample = min_sample or NEURO_MIN_SAMPLE
+    z_threshold = z_threshold if z_threshold is not None else NEURO_Z_THRESHOLD
+
+    conds = neuro_compute_conditions(candles)
+    fwd = neuro_forward_returns(candles, forward_bars)
+    valid_idx = [i for i in range(len(candles)) if fwd[i] is not None]
+    all_returns = [fwd[i] for i in valid_idx]
+    if len(all_returns) < min_sample:
+        return []
+    mean_all = sum(all_returns) / len(all_returns)
+    var_all = sum((r - mean_all) ** 2 for r in all_returns) / len(all_returns)
+    std_all = math.sqrt(var_all)
+
+    buckets = {}
+    for i in valid_idx:
+        b = conds[i]
+        for key in NEURO_CONDITION_KEYS:
+            v = b.get(key)
+            if v is None:
+                continue
+            buckets.setdefault((key, v), []).append(fwd[i])
+
+    discovered = []
+    for (ktype, kval), rets in buckets.items():
+        n = len(rets)
+        if n < min_sample:
+            continue
+        mean_r = sum(rets) / n
+        z = neuro_zscore(mean_r, n, mean_all, std_all)
+        if abs(z) >= z_threshold:
+            wins = sum(1 for r in rets if (r > 0) == (mean_r > 0))
+            discovered.append({
+                "type": ktype, "value": kval, "n": n,
+                "mean_fwd_return": round(mean_r, 5), "baseline_mean": round(mean_all, 5),
+                "z": round(z, 2), "direction": "LONG" if mean_r > 0 else "SHORT",
+                "consistency": round(wins / n, 3),
+            })
+    discovered.sort(key=lambda d: -abs(d["z"]))
+    return discovered
+
+
+def neuro_walk_forward(candles, forward_bars=None, min_sample=None, z_threshold=None, train_frac=None):
+    """Mine on the first train_frac of history, confirm only what still points
+    the same direction on the held-out remainder — never trust in-sample-only
+    stats, per the same discipline already applied to MSNR/LSW backtests."""
+    forward_bars = forward_bars or NEURO_FORWARD_BARS
+    min_sample = min_sample or NEURO_MIN_SAMPLE
+    z_threshold = z_threshold if z_threshold is not None else NEURO_Z_THRESHOLD
+    train_frac = train_frac or NEURO_TRAIN_FRAC
+
+    split = int(len(candles) * train_frac)
+    train, test = candles[:split], candles[split:]
+    train_patterns = neuro_mine(train, forward_bars, min_sample, z_threshold)
+    if not train_patterns:
+        return []
+
+    test_conds = neuro_compute_conditions(test)
+    test_fwd = neuro_forward_returns(test, forward_bars)
+    valid_test_idx = [i for i in range(len(test)) if test_fwd[i] is not None]
+
+    confirmed = []
+    for pat in train_patterns:
+        ktype, kval = pat["type"], pat["value"]
+        test_rets = [test_fwd[i] for i in valid_test_idx if test_conds[i].get(ktype) == kval]
+        if len(test_rets) < max(10, min_sample // 3):
+            continue
+        test_mean = sum(test_rets) / len(test_rets)
+        if (test_mean > 0) == (pat["mean_fwd_return"] > 0):
+            confirmed.append({**pat, "test_n": len(test_rets),
+                              "test_mean_fwd_return": round(test_mean, 5), "held_up": True})
+    confirmed.sort(key=lambda d: -abs(d["z"]))
+    return confirmed
+
+
+def neuro_simulate_trades(candles, confirmed_patterns):
+    """Turn confirmed dependencies into an actual trade history: whenever a
+    confirmed condition is true on a bar, enter at that bar's close in the
+    confirmed direction, SL/TP from ATR, track the real outcome. This is the
+    honest track record shown alongside the raw pattern list."""
+    if not confirmed_patterns:
+        return []
+    pattern_lookup = {}
+    for p in confirmed_patterns:
+        pattern_lookup.setdefault(p["type"], {})[p["value"]] = p
+
+    conds = neuro_compute_conditions(candles)
+    atr14 = neuro_atr_series(candles, 14)
+    trades = []
+    last_entry_i = -10**9
+    for i in range(len(candles) - 1):
+        if i - last_entry_i < NEURO_FORWARD_BARS:
+            continue  # avoid overlapping trades from the same/adjacent bars
+        matched = None
+        for ktype, by_val in pattern_lookup.items():
+            v = conds[i].get(ktype)
+            if v in by_val:
+                cand = by_val[v]
+                if matched is None or abs(cand["z"]) > abs(matched["z"]):
+                    matched = cand
+        if not matched or not atr14[i]:
+            continue
+        entry_bar = candles[i + 1]
+        entry = entry_bar["open"]
+        atr = atr14[i]
+        sl_dist = NEURO_SL_ATR_MULT * atr
+        if sl_dist <= 0:
+            continue
+        direction = matched["direction"]
+        sl = entry - sl_dist if direction == "LONG" else entry + sl_dist
+        tp = entry + sl_dist * NEURO_RR if direction == "LONG" else entry - sl_dist * NEURO_RR
+
+        result = "TIMEOUT"; exit_price = exit_time = None
+        for j in range(i + 1, min(i + 1 + NEURO_MAX_WAIT_BARS, len(candles))):
+            b = candles[j]
+            if direction == "LONG":
+                if b["low"] <= sl:
+                    result, exit_price, exit_time = "LOSS", sl, b["time"]; break
+                if b["high"] >= tp:
+                    result, exit_price, exit_time = "WIN", tp, b["time"]; break
+            else:
+                if b["high"] >= sl:
+                    result, exit_price, exit_time = "LOSS", sl, b["time"]; break
+                if b["low"] <= tp:
+                    result, exit_price, exit_time = "WIN", tp, b["time"]; break
+
+        pnl_r = None
+        if exit_price:
+            raw = (exit_price - entry) / sl_dist if direction == "LONG" else (entry - exit_price) / sl_dist
+            pnl_r = round(raw, 2)
+            if result == "LOSS":
+                pnl_r = -abs(pnl_r)
+
+        trades.append({
+            "time": candles[i]["time"], "entry_time": entry_bar["time"],
+            "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8),
+            "direction": direction, "pattern_type": matched["type"], "pattern_value": str(matched["value"]),
+            "z": matched["z"], "result": result,
+            "exit_price": round(exit_price, 8) if exit_price else None,
+            "exit_time": exit_time, "pnl_r": pnl_r,
+        })
+        last_entry_i = i
+    return trades
+
+
+def neuro_backtest_symbol(symbol):
+    """Fetch max available history, mine + walk-forward validate, simulate
+    the resulting trade history. Returns (confirmed_patterns, trades, summary)."""
+    try:
+        now = int(time.time())
+        start_ts = now - NEURO_HISTORY_DAYS * 86400
+        candles = get_candles_range(symbol, NEURO_TF, start_ts, now)
+        if not candles or len(candles) < 500:
+            return [], [], {}
+        confirmed = neuro_walk_forward(candles)
+        trades = neuro_simulate_trades(candles, confirmed)
+        closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
+        wins = sum(1 for t in closed if t["result"] == "WIN")
+        losses = len(closed) - wins
+        wr = round(wins / len(closed) * 100, 1) if closed else None
+        avg_pnl = round(sum(t["pnl_r"] for t in closed if t.get("pnl_r") is not None) / len(closed), 2) if closed else None
+        summary = {"n": len(closed), "wins": wins, "losses": losses,
+                   "timeouts": sum(1 for t in trades if t["result"] == "TIMEOUT"),
+                   "winrate": wr, "avg_pnl_r": avg_pnl, "total": len(trades),
+                   "patterns_confirmed": len(confirmed), "history_bars": len(candles)}
+        return confirmed, trades, summary
+    except Exception as e:
+        log_error(f"neuro_backtest_symbol {symbol}: {e}")
+        return [], [], {}
+
+
+def neuro_scan_live(symbol, confirmed_patterns):
+    """Check the most recently closed bar's conditions against this symbol's
+    confirmed dependencies; combine agreeing ones into a single signal."""
+    try:
+        if not confirmed_patterns:
+            return None
+        now = int(time.time())
+        interval_sec = INTERVAL_SECONDS.get(NEURO_TF, 3600)
+        start_ts = now - 250 * interval_sec
+        candles = get_candles_range(symbol, NEURO_TF, start_ts, now)
+        closed_candles = [c for c in candles if c["time"] + interval_sec <= now]
+        if len(closed_candles) < 30:
+            return None
+        conds = neuro_compute_conditions(closed_candles)
+        atr14 = neuro_atr_series(closed_candles, 14)
+        last = conds[-1]
+        atr = atr14[-1]
+        if not atr:
+            return None
+
+        matched = []
+        for p in confirmed_patterns:
+            if last.get(p["type"]) == p["value"]:
+                matched.append(p)
+        if not matched:
+            return None
+        score = sum(p["z"] if p["direction"] == "LONG" else -p["z"] for p in matched)
+        if abs(score) < NEURO_MIN_AGREE_Z:
+            return None
+        direction = "LONG" if score > 0 else "SHORT"
+        price = closed_candles[-1]["close"]
+        sl_dist = NEURO_SL_ATR_MULT * atr
+        sl = price - sl_dist if direction == "LONG" else price + sl_dist
+        tp = price + sl_dist * NEURO_RR if direction == "LONG" else price - sl_dist * NEURO_RR
+        return {
+            "symbol": symbol, "time": closed_candles[-1]["time"],
+            "direction": direction, "entry": round(price, 8),
+            "sl": round(sl, 8), "tp": round(tp, 8),
+            "score": round(score, 2),
+            "patterns": [{"type": p["type"], "value": str(p["value"]), "z": p["z"]} for p in matched],
+            "scanned_at": now,
+        }
+    except Exception as e:
+        log_error(f"neuro_scan_live {symbol}: {e}")
+        return None
+
+
+_neuro_state_lock = threading.Lock()
+_neuro_patterns = {}     # symbol -> confirmed patterns list
+_neuro_trades = {}       # symbol -> trades list
+_neuro_summary = {}      # symbol -> summary dict
+_neuro_live_signals = {}  # symbol -> latest live signal or None
+_neuro_last_mined = None
+_neuro_mining_running = False
+_neuro_prev_signal_keys = set()
+
+
+def neuro_mining_loop():
+    global _neuro_last_mined, _neuro_mining_running
+    while True:
+        try:
+            with _neuro_state_lock:
+                _neuro_mining_running = True
+            for symbol in NEURO_COINS:
+                try:
+                    confirmed, trades, summary = neuro_backtest_symbol(symbol)
+                    with _neuro_state_lock:
+                        _neuro_patterns[symbol] = confirmed
+                        _neuro_trades[symbol] = trades
+                        _neuro_summary[symbol] = summary
+                except Exception as e:
+                    log_error(f"neuro_mining_loop {symbol}: {e}")
+            with _neuro_state_lock:
+                _neuro_last_mined = int(time.time())
+                _neuro_mining_running = False
+        except Exception as e:
+            log_error(f"neuro_mining_loop: {e}")
+            with _neuro_state_lock:
+                _neuro_mining_running = False
+        time.sleep(NEURO_REFRESH_SEC)
+
+
+def neuro_live_loop():
+    global _neuro_prev_signal_keys
+    while True:
+        try:
+            with _neuro_state_lock:
+                patterns_snapshot = dict(_neuro_patterns)
+            new_signals = {}
+            for symbol in NEURO_COINS:
+                confirmed = patterns_snapshot.get(symbol) or []
+                sig = neuro_scan_live(symbol, confirmed)
+                new_signals[symbol] = sig
+            with _neuro_state_lock:
+                _neuro_live_signals.update(new_signals)
+            new_keys = {s: sig["time"] for s, sig in new_signals.items() if sig}
+            fired = {s: t for s, t in new_keys.items()
+                     if (s, t) not in _neuro_prev_signal_keys}
+            for symbol, sig_time in fired.items():
+                sig = new_signals[symbol]
+                arrow = "\u2b06\ufe0f" if sig["direction"] == "LONG" else "\u2b07\ufe0f"
+                pat_txt = ", ".join(f"{p['type']}={p['value']}(z={p['z']})" for p in sig["patterns"][:3])
+                send_telegram(
+                    f"{arrow} NEURO {symbol} ({sig['direction']}, score {sig['score']})\n"
+                    f"entry: {sig['entry']}, SL: {sig['sl']}, TP: {sig['tp']}\n"
+                    f"\u0441\u043e\u0432\u043f\u0430\u0432\u0448\u0438\u0435\u0441\u044f \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0438: {pat_txt}",
+                    category="neuro",
+                )
+            _neuro_prev_signal_keys = {(s, t) for s, t in new_keys.items()}
+        except Exception as e:
+            log_error(f"neuro_live_loop: {e}")
+        time.sleep(900)  # check every 15m regardless of the (usually 1h) structure TF
+
+
+@app.route("/api/neuro/status")
+def api_neuro_status():
+    with _neuro_state_lock:
+        patterns = dict(_neuro_patterns)
+        summary = dict(_neuro_summary)
+        live_signals = dict(_neuro_live_signals)
+        last_mined = _neuro_last_mined
+        running = _neuro_mining_running
+    coins = []
+    for symbol in NEURO_COINS:
+        coins.append({
+            "symbol": symbol,
+            "summary": summary.get(symbol, {}),
+            "top_patterns": (patterns.get(symbol) or [])[:8],
+            "live_signal": live_signals.get(symbol),
+        })
+    return jsonify({
+        "coins": coins, "last_mined": last_mined, "mining_running": running,
+        "config": {"tf": NEURO_TF, "forward_bars": NEURO_FORWARD_BARS, "rr": NEURO_RR,
+                   "history_days": NEURO_HISTORY_DAYS, "z_threshold": NEURO_Z_THRESHOLD,
+                   "min_agree_z": NEURO_MIN_AGREE_Z, "refresh_sec": NEURO_REFRESH_SEC},
+    })
+
+
+@app.route("/api/neuro/chart/<symbol>")
+def api_neuro_chart(symbol):
+    try:
+        sig_time = request.args.get("time")
+        if not sig_time:
+            return jsonify({"error": "нужен параметр time"}), 400
+        target = float(sig_time)
+        interval_sec = INTERVAL_SECONDS.get(NEURO_TF, 3600)
+        with _neuro_state_lock:
+            trades = list(_neuro_trades.get(symbol, []))
+        match = next((t for t in trades if abs(t["time"] - target) < interval_sec), None)
+        if not match:
+            return jsonify({"error": "\u0441\u0434\u0435\u043b\u043a\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430"}), 404
+        fetch_start = match["time"] - 60 * interval_sec
+        fetch_end = (match["exit_time"] + 10 * interval_sec) if match.get("exit_time") else (match["time"] + 60 * interval_sec)
+        candles = get_candles_range(symbol, NEURO_TF, fetch_start, fetch_end)
+        return jsonify({
+            "symbol": symbol, "candles": candles[-250:], "time": match["time"],
+            "direction": match["direction"], "entry": match["entry"],
+            "sl": match["sl"], "tp": match["tp"],
+            "result": match.get("result"), "exit_time": match.get("exit_time"),
+            "exit_price": match.get("exit_price"), "chart_source": "neuro",
+        })
+    except Exception as e:
+        log_error(f"api_neuro_chart {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/amd/status")
@@ -14612,6 +15127,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="lsw">Sweep</div>
   <div class="tab" data-tab="emabull" style="color:#3ddc97;">EMA🚀</div>
   <div class="tab" data-tab="amd" style="color:#f0a030;">AMD</div>
+  <div class="tab" data-tab="neuro" style="color:#a855f7;">🧠 Neuro</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
   <div id="hintsToggleBtn" onclick="toggleHints()" style="margin-left:auto;padding:4px 10px;font-size:11px;color:#5a6a7a;cursor:pointer;user-select:none;align-self:center;" title="скрыть/показать подсказки">💡</div>
@@ -14632,6 +15148,7 @@ INDEX_HTML = """<!doctype html>
   <div id="lswPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="emaBullPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="amdPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
+  <div id="neuroPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="simulatorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
@@ -15122,6 +15639,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('lswPanel').style.display = activeTab === 'lsw' ? 'block' : 'none';
     document.getElementById('emaBullPanel').style.display = activeTab === 'emabull' ? 'block' : 'none';
     document.getElementById('amdPanel').style.display = activeTab === 'amd' ? 'block' : 'none';
+    document.getElementById('neuroPanel').style.display = activeTab === 'neuro' ? 'block' : 'none';
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
     document.getElementById('simulatorPanel').style.display = activeTab === 'simulator' ? 'block' : 'none';
     if (activeTab === 'signals') refreshTuning();
@@ -15132,6 +15650,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'lsw') refreshLsw();
     if (activeTab === 'emabull') refreshEmaBull();
     if (activeTab === 'amd') refreshAmd();
+    if (activeTab === 'neuro') refreshNeuro();
     if (activeTab === 'autotrade') refreshAutotrade();
     if (activeTab === 'simulator') refreshSimulator();
   };
@@ -16604,6 +17123,180 @@ async function refreshLsw() {
   });
 }
 
+let _neuroCanvasAnimId = null;
+
+async function refreshNeuro() {
+  const panel = document.getElementById('neuroPanel');
+  try {
+    const data = await (await fetch('/api/neuro/status')).json();
+    const cfg = data.config || {};
+    const coins = data.coins || [];
+    const lastMined = data.last_mined ? fmtDateTime(data.last_mined) : '\u2014';
+    const miningTxt = data.mining_running
+      ? '<span class="dim">\u043c\u0430\u0439\u043d\u0438\u043d\u0433 \u0432\u044b\u043f\u043e\u043b\u043d\u044f\u0435\u0442\u0441\u044f\u2026</span>'
+      : `<span class="dim">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u043c\u0430\u0439\u043d\u0438\u043d\u0433: ${lastMined}</span>`;
+
+    const cards = coins.map(c => {
+      const s = c.summary || {};
+      const wrCls = (s.winrate||0) >= 33 ? 'win' : 'loss';
+      const pnlCls = (s.avg_pnl_r||0) >= 0 ? 'win' : 'loss';
+      const statTxt = s.n
+        ? `<span class="${wrCls}">${s.winrate}% WR</span> \u00b7 n=${s.n} \u00b7 <span class="win">${s.wins}W</span>/<span class="loss">${s.losses}L</span>/${s.timeouts}T \u00b7 avg <span class="${pnlCls}">${s.avg_pnl_r}R</span> \u00b7 ${s.patterns_confirmed||0} \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439 \u00b7 ${s.history_bars||0} \u0431\u0430\u0440\u043e\u0432 \u0438\u0441\u0442\u043e\u0440\u0438\u0438`
+        : '<span class="dim">\u043c\u0430\u0439\u043d\u0438\u0442\u0441\u044f\u2026</span>';
+      const liveSig = c.live_signal;
+      const liveTxt = liveSig
+        ? `<div style="margin:6px 0;padding:6px 8px;background:#1a2332;border-radius:6px;border-left:3px solid ${liveSig.direction==='LONG'?'#3ddc97':'#ff6b6b'};">
+             <b class="${liveSig.direction==='LONG'?'win':'loss'}">${liveSig.direction==='LONG'?'\u2b06\ufe0f':'\u2b07\ufe0f'} ${liveSig.direction}</b>
+             \u00b7 score ${liveSig.score} \u00b7 entry ${fmtNum(liveSig.entry)} \u00b7 SL ${fmtNum(liveSig.sl)} \u00b7 TP ${fmtNum(liveSig.tp)}
+           </div>`
+        : '';
+      const patRows = (c.top_patterns||[]).map(p => {
+        const dirCls = p.direction === 'LONG' ? 'win' : 'loss';
+        const testTxt = p.test_mean_fwd_return != null
+          ? `<span class="dim">test: ${(p.test_mean_fwd_return*100).toFixed(2)}% (n=${p.test_n})</span>` : '';
+        return `<tr>
+          <td class="dim">${p.type}</td>
+          <td>${p.value}</td>
+          <td class="${dirCls}">${p.direction}</td>
+          <td class="dim">z=${p.z}</td>
+          <td class="dim">n=${p.n}</td>
+          <td class="dim">${(p.mean_fwd_return*100).toFixed(2)}%</td>
+          <td>${testTxt}</td>
+        </tr>`;
+      }).join('');
+      return `<div style="margin-bottom:16px;padding:10px;background:#12182a;border-radius:10px;border:1px solid #232d45;">
+        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
+          <b style="font-size:13px;color:#c792ea;">${c.symbol}</b>
+        </div>
+        <div class="dim" style="font-size:11px;margin-bottom:6px;">${statTxt}</div>
+        ${liveTxt}
+        ${patRows ? `<div style="overflow-x:auto;"><table style="font-size:10px;white-space:nowrap;">
+          <thead><tr><th>\u0422\u0438\u043f</th><th>\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435</th><th>Dir</th><th>Z</th><th>n</th><th>\u0421\u0440.\u0432\u043e\u0437\u0432\u0440\u0430\u0442</th><th>Out-of-sample</th></tr></thead>
+          <tbody>${patRows}</tbody></table></div>` : '<div class="dim" style="font-size:11px;">\u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0438 \u043f\u043e\u043a\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u044b</div>'}
+      </div>`;
+    }).join('');
+
+    panel.innerHTML = `
+      <div class="dim hint-block" style="margin-bottom:10px;">
+        <b>🧠 Neuro</b> \u2014 \u0441\u0430\u043c\u043e\u043e\u0431\u0443\u0447\u0430\u044e\u0449\u0430\u044f\u0441\u044f \u0441\u0438\u0441\u0442\u0435\u043c\u0430 \u043f\u043e\u0438\u0441\u043a\u0430 \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439. \u0421\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442 5 \u043a\u0440\u0443\u043f\u043d\u0435\u0439\u0448\u0438\u0445 \u043c\u043e\u043d\u0435\u0442 \u043f\u043e \u043c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u043e \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438 (\u0447\u0430\u0441\u043e\u0432\u044b\u0435 \u0441\u0432\u0435\u0447\u0438), \u043f\u0435\u0440\u0435\u0431\u0438\u0440\u0430\u0435\u0442 \u0432\u0441\u0435\u0432\u043e\u0437\u043c\u043e\u0436\u043d\u044b\u0435 \u0443\u0441\u043b\u043e\u0432\u0438\u044f
+        (\u0447\u0430\u0441 \u0434\u043d\u044f, \u0434\u0435\u043d\u044c \u043d\u0435\u0434\u0435\u043b\u0438, RSI, EMA, \u043e\u0431\u044a\u0451\u043c, \u0440\u0430\u0437\u043c\u0435\u0440 \u0441\u0432\u0435\u0447\u0438, \u0441\u0435\u0440\u0438\u0438, \u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435 \u0432 \u0434\u0438\u0430\u043f\u0430\u0437\u043e\u043d\u0435) \u0438 \u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0435\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u0442\u0435,
+        \u0447\u0442\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u044e\u0442\u0441\u044f \u043d\u0430 \u043e\u0442\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0445 \u0434\u0430\u043d\u043d\u044b\u0445 (walk-forward, \u043d\u0435 \u043f\u0435\u0440\u0435\u043e\u0431\u0443\u0447\u0435\u043d\u0438\u0435). \u041f\u0435\u0440\u0435\u043c\u0430\u0439\u043d\u0438\u0432\u0430\u0435\u0442 \u043a\u0430\u0436\u0434\u044b\u0435 ${Math.round((cfg.refresh_sec||14400)/3600)}\u0447.
+      </div>
+      <div style="margin-bottom:12px;">${miningTxt}</div>
+      <div id="neuroCanvasWrap" style="width:100%;height:220px;background:#0a0e1a;border-radius:10px;overflow:hidden;margin-bottom:14px;position:relative;">
+        <canvas id="neuroCanvas" style="width:100%;height:100%;display:block;"></canvas>
+      </div>
+      ${cards}
+    `;
+    _neuroDrawNetwork(coins);
+  } catch(e) {
+    panel.innerHTML = `<div class="dim">\u041e\u0448\u0438\u0431\u043a\u0430: ${e}</div>`;
+  }
+}
+
+function _neuroDrawNetwork(coins) {
+  const wrap = document.getElementById('neuroCanvasWrap');
+  const canvas = document.getElementById('neuroCanvas');
+  if (!wrap || !canvas) return;
+  if (_neuroCanvasAnimId) { cancelAnimationFrame(_neuroCanvasAnimId); _neuroCanvasAnimId = null; }
+  const dpr = window.devicePixelRatio || 1;
+  const W = wrap.clientWidth, H = wrap.clientHeight;
+  canvas.width = W * dpr; canvas.height = H * dpr;
+  canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.scale(dpr, dpr);
+
+  const inputTypes = ['hour','dow','rsi_zone','ema50_side','ema200_side','vol_zone','range_zone','body_zone','streak','range_pos'];
+  const nCoins = coins.length || 1;
+
+  // Build node positions: input layer (condition types) -> coin layer -> output node
+  const inX = W * 0.12, midX = W * 0.52, outX = W * 0.88;
+  const inNodes = inputTypes.map((t, i) => ({
+    x: inX, y: H * (i + 1) / (inputTypes.length + 1), label: t,
+  }));
+  const coinNodes = coins.map((c, i) => ({
+    x: midX, y: H * (i + 1) / (nCoins + 1), symbol: c.symbol,
+    patterns: c.top_patterns || [], live: c.live_signal,
+  }));
+  const outNode = { x: outX, y: H / 2 };
+
+  let t0 = performance.now();
+  function frame(now) {
+    const dt = (now - t0) / 1000;
+    ctx.clearRect(0, 0, W, H);
+
+    // Edges: input type -> coin, weighted/colored by whether that type appears in the coin's confirmed patterns
+    coinNodes.forEach(coin => {
+      const activeTypes = new Set((coin.patterns||[]).map(p => p.type));
+      inNodes.forEach(inp => {
+        const active = activeTypes.has(inp.label);
+        const pat = (coin.patterns||[]).find(p => p.type === inp.label);
+        const z = pat ? Math.abs(pat.z) : 0;
+        const alpha = active ? Math.min(0.15 + z * 0.08, 0.85) : 0.04;
+        const pulse = active ? (Math.sin(dt * 2 + inp.y * 0.05) * 0.15 + 0.85) : 1;
+        const color = pat && pat.direction === 'LONG' ? '61,220,151' : pat && pat.direction === 'SHORT' ? '255,107,107' : '120,130,160';
+        ctx.strokeStyle = `rgba(${color},${alpha * pulse})`;
+        ctx.lineWidth = active ? Math.min(0.5 + z * 0.4, 2.5) : 0.4;
+        ctx.beginPath();
+        ctx.moveTo(inp.x, inp.y);
+        ctx.bezierCurveTo(inp.x + (coin.x-inp.x)*0.5, inp.y, inp.x + (coin.x-inp.x)*0.5, coin.y, coin.x, coin.y);
+        ctx.stroke();
+      });
+      // coin -> output
+      const hasLive = !!coin.live;
+      const outAlpha = hasLive ? 0.9 : 0.15;
+      const outColor = coin.live && coin.live.direction === 'LONG' ? '61,220,151' : coin.live && coin.live.direction === 'SHORT' ? '255,107,107' : '120,130,160';
+      const outPulse = hasLive ? (Math.sin(dt * 3) * 0.3 + 0.7) : 1;
+      ctx.strokeStyle = `rgba(${outColor},${outAlpha * outPulse})`;
+      ctx.lineWidth = hasLive ? 2.5 : 0.5;
+      ctx.beginPath();
+      ctx.moveTo(coin.x, coin.y);
+      ctx.bezierCurveTo(coin.x + (outNode.x-coin.x)*0.5, coin.y, coin.x + (outNode.x-coin.x)*0.5, outNode.y, outNode.x, outNode.y);
+      ctx.stroke();
+    });
+
+    // Input nodes
+    ctx.font = '9px monospace';
+    inNodes.forEach(n => {
+      ctx.beginPath();
+      ctx.arc(n.x, n.y, 3.5, 0, Math.PI*2);
+      ctx.fillStyle = '#4a5570';
+      ctx.fill();
+      ctx.fillStyle = '#5a6a8a';
+      ctx.textAlign = 'right';
+      ctx.fillText(n.label, n.x - 8, n.y + 3);
+    });
+
+    // Coin nodes
+    ctx.font = 'bold 11px monospace';
+    coinNodes.forEach(c => {
+      const glow = c.live ? (Math.sin(dt * 3) * 0.4 + 0.6) : 0.3;
+      const color = c.live && c.live.direction === 'LONG' ? '#3ddc97' : c.live && c.live.direction === 'SHORT' ? '#ff6b6b' : '#a855f7';
+      ctx.beginPath();
+      ctx.arc(c.x, c.y, c.live ? 7 : 5, 0, Math.PI*2);
+      ctx.fillStyle = color;
+      ctx.globalAlpha = glow;
+      ctx.fill();
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = '#e8ecf5';
+      ctx.textAlign = 'left';
+      ctx.fillText(c.symbol.replace('_USDT',''), c.x + 12, c.y + 4);
+    });
+
+    // Output node
+    const outGlow = Math.sin(dt * 2.5) * 0.3 + 0.7;
+    ctx.beginPath();
+    ctx.arc(outNode.x, outNode.y, 9, 0, Math.PI*2);
+    ctx.fillStyle = '#a855f7';
+    ctx.globalAlpha = outGlow;
+    ctx.fill();
+    ctx.globalAlpha = 1;
+
+    _neuroCanvasAnimId = requestAnimationFrame(frame);
+  }
+  _neuroCanvasAnimId = requestAnimationFrame(frame);
+}
+
 async function refreshAmd() {
   const panel = document.getElementById('amdPanel');
   try {
@@ -17918,6 +18611,8 @@ if __name__ == "__main__":
     threading.Thread(target=ema_bull_loop, daemon=True).start()
     threading.Thread(target=amd_loop, daemon=True).start()
     threading.Thread(target=amd_backtest_loop, daemon=True).start()
+    threading.Thread(target=neuro_mining_loop, daemon=True).start()
+    threading.Thread(target=neuro_live_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     threading.Thread(target=risk_autotune_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
