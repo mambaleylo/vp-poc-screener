@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.209"
+APP_VERSION = "0.99.210"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13019,7 +13019,9 @@ NEURO_Z_THRESHOLD    = float(os.environ.get("VP_NEURO_Z_THRESHOLD", 1.8))
 NEURO_TRAIN_FRAC     = float(os.environ.get("VP_NEURO_TRAIN_FRAC", 0.7))  # walk-forward split
 NEURO_HISTORY_DAYS   = int(os.environ.get("VP_NEURO_HISTORY_DAYS", 1500))  # ask for as much as possible; exchange will just return what it has
 NEURO_REFRESH_SEC    = int(os.environ.get("VP_NEURO_REFRESH_SEC", 4 * 3600))  # re-mine every 4h — the "self-learning" refresh
-NEURO_RR             = float(os.environ.get("VP_NEURO_RR", 2.0))
+NEURO_RR             = float(os.environ.get("VP_NEURO_RR", 2.0))  # fallback/default only — see NEURO_RR_CANDIDATES below for the actual per-symbol auto-tuned value
+NEURO_RR_CANDIDATES  = [1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0]  # v0.99.210 — small step (0.25), modest range, per direct user request ("вариативность RR, но не с гигантским шагом"). Best one picked per-symbol from TRAIN-period trades only (same walk-forward discipline as the condition mining itself), then applied to the reported trade history and live signals.
+NEURO_RR_MIN_TRADES  = int(os.environ.get("VP_NEURO_RR_MIN_TRADES", 15))  # don't trust an RR pick based on fewer than this many train-period trades
 NEURO_SL_ATR_MULT    = float(os.environ.get("VP_NEURO_SL_ATR_MULT", 1.5))
 NEURO_MAX_WAIT_BARS  = int(os.environ.get("VP_NEURO_MAX_WAIT_BARS", 48))
 NEURO_MIN_AGREE_Z    = float(os.environ.get("VP_NEURO_MIN_AGREE_Z", 2.5))  # combined |z| needed to fire a live signal
@@ -13537,14 +13539,16 @@ def neuro_walk_forward(candles, forward_bars=None, min_sample=None, z_threshold=
 
 
 def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding_records=None, btc_candles=None,
-                           d1_candles=None, oi_records=None):
+                           d1_candles=None, oi_records=None, rr=None):
     """Turn confirmed dependencies into an actual trade history: whenever a
     confirmed condition (single OR pairwise combo) is true on a bar, enter at
     the NEXT bar's open in the confirmed direction, SL/TP from ATR, track the
     real outcome. This is the honest track record shown alongside the raw
-    pattern list."""
+    pattern list. `rr` defaults to NEURO_RR but callers pass the per-symbol
+    auto-tuned value once neuro_pick_best_rr() has chosen one."""
     if not confirmed_patterns:
         return []
+    rr = rr if rr is not None else NEURO_RR
 
     conds = neuro_compute_conditions(candles, htf_candles, funding_records, btc_candles, d1_candles, oi_records)
     atr14 = neuro_atr_series(candles, 14)
@@ -13574,7 +13578,7 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
             continue
         direction = matched["direction"]
         sl = entry - sl_dist if direction == "LONG" else entry + sl_dist
-        tp = entry + sl_dist * NEURO_RR if direction == "LONG" else entry - sl_dist * NEURO_RR
+        tp = entry + sl_dist * rr if direction == "LONG" else entry - sl_dist * rr
 
         result = "TIMEOUT"; exit_price = exit_time = None
         for j in range(i + 1, min(i + 1 + NEURO_MAX_WAIT_BARS, len(candles))):
@@ -13599,7 +13603,7 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
 
         trades.append({
             "time": candles[i]["time"], "entry_time": entry_bar["time"],
-            "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8),
+            "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8), "rr": rr,
             "direction": direction, "pattern_type": matched["type"], "pattern_value": str(matched["value"]),
             "z": matched["z"], "is_combo": matched.get("is_combo", False), "result": result,
             "exit_price": round(exit_price, 8) if exit_price else None,
@@ -13631,11 +13635,39 @@ def neuro_fetch_funding_rate(symbol, start_ts, end_ts, limit=1000):
         return []
 
 
+def neuro_pick_best_rr(train_candles, confirmed_patterns, htf_candles=None, funding_records=None,
+                        btc_candles=None, d1_candles=None, oi_records=None):
+    """Sweep NEURO_RR_CANDIDATES over the TRAIN-period trade simulation only
+    (same walk-forward discipline as the condition mining itself — never
+    pick RR by peeking at test/live-period results) and return the RR with
+    the best expectancy, plus the full sweep table for transparency. Falls
+    back to NEURO_RR if there aren't enough train-period trades to trust a
+    pick either way."""
+    sweep = []
+    best_rr, best_score = NEURO_RR, None
+    for rr in NEURO_RR_CANDIDATES:
+        trades = neuro_simulate_trades(train_candles, confirmed_patterns, htf_candles=htf_candles,
+                                        funding_records=funding_records, btc_candles=btc_candles,
+                                        d1_candles=d1_candles, oi_records=oi_records, rr=rr)
+        closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
+        if len(closed) < NEURO_RR_MIN_TRADES:
+            sweep.append({"rr": rr, "n": len(closed), "winrate": None, "avg_pnl_r": None})
+            continue
+        wins = sum(1 for t in closed if t["result"] == "WIN")
+        wr = round(wins / len(closed) * 100, 1)
+        avg_pnl = round(sum(t["pnl_r"] for t in closed) / len(closed), 3)
+        sweep.append({"rr": rr, "n": len(closed), "winrate": wr, "avg_pnl_r": avg_pnl})
+        if best_score is None or avg_pnl > best_score:
+            best_score, best_rr = avg_pnl, rr
+    return best_rr, sweep
+
+
 def neuro_backtest_symbol(symbol):
     """Fetch max available history PLUS extra data sources (4h+1d trend,
     funding rate, open interest, BTC correlation), mine + walk-forward
-    validate across many condition types and horizons, simulate the
-    resulting trade history. Returns (confirmed_patterns, trades, summary)."""
+    validate across many condition types and horizons, pick the best RR
+    from train-period trades only, simulate the resulting trade history
+    with that RR. Returns (confirmed_patterns, trades, summary)."""
     try:
         now = int(time.time())
         start_ts = now - NEURO_HISTORY_DAYS * 86400
@@ -13657,8 +13689,25 @@ def neuro_backtest_symbol(symbol):
 
         confirmed = neuro_walk_forward(candles, htf_candles=htf_candles, funding_records=funding_records,
                                         btc_candles=btc_candles, d1_candles=d1_candles, oi_records=oi_records)
+
+        # Pick RR using ONLY the same train slice neuro_walk_forward used
+        # internally for mining — recomputed here since that split isn't
+        # exposed outside the function, but uses the identical boundary
+        # (NEURO_TRAIN_FRAC applied to the same candles list).
+        split = int(len(candles) * NEURO_TRAIN_FRAC)
+        train_candles = candles[:split]
+        boundary_time = candles[split - 1]["time"] if split > 0 else candles[0]["time"]
+
+        def _train_slice(extra):
+            return [c for c in extra if c["time"] <= boundary_time] if extra else extra
+        chosen_rr, rr_sweep = neuro_pick_best_rr(
+            train_candles, confirmed, htf_candles=_train_slice(htf_candles),
+            funding_records=_train_slice(funding_records), btc_candles=_train_slice(btc_candles),
+            d1_candles=_train_slice(d1_candles), oi_records=_train_slice(oi_records))
+
         trades = neuro_simulate_trades(candles, confirmed, htf_candles=htf_candles, funding_records=funding_records,
-                                        btc_candles=btc_candles, d1_candles=d1_candles, oi_records=oi_records)
+                                        btc_candles=btc_candles, d1_candles=d1_candles, oi_records=oi_records,
+                                        rr=chosen_rr)
         closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
         wins = sum(1 for t in closed if t["result"] == "WIN")
         losses = len(closed) - wins
@@ -13668,17 +13717,20 @@ def neuro_backtest_symbol(symbol):
                    "timeouts": sum(1 for t in trades if t["result"] == "TIMEOUT"),
                    "winrate": wr, "avg_pnl_r": avg_pnl, "total": len(trades),
                    "patterns_confirmed": len(confirmed), "history_bars": len(candles),
-                   "combos_confirmed": sum(1 for p in confirmed if p.get("is_combo"))}
+                   "combos_confirmed": sum(1 for p in confirmed if p.get("is_combo")),
+                   "chosen_rr": chosen_rr, "rr_sweep": rr_sweep}
         return confirmed, trades, summary
     except Exception as e:
         log_error(f"neuro_backtest_symbol {symbol}: {e}")
         return [], [], {}
 
 
-def neuro_scan_live(symbol, confirmed_patterns):
+def neuro_scan_live(symbol, confirmed_patterns, rr=None):
     """Check the most recently closed bar's conditions against this symbol's
     confirmed dependencies (single + combo); combine agreeing ones into a
-    single signal."""
+    single signal. `rr` should be this symbol's own auto-tuned value from
+    neuro_pick_best_rr(), falling back to NEURO_RR when not supplied."""
+    rr = rr if rr is not None else NEURO_RR
     try:
         if not confirmed_patterns:
             return None
@@ -13729,11 +13781,11 @@ def neuro_scan_live(symbol, confirmed_patterns):
         price = closed_candles[-1]["close"]
         sl_dist = NEURO_SL_ATR_MULT * atr
         sl = price - sl_dist if direction == "LONG" else price + sl_dist
-        tp = price + sl_dist * NEURO_RR if direction == "LONG" else price - sl_dist * NEURO_RR
+        tp = price + sl_dist * rr if direction == "LONG" else price - sl_dist * rr
         return {
             "symbol": symbol, "time": closed_candles[-1]["time"],
             "direction": direction, "entry": round(price, 8),
-            "sl": round(sl, 8), "tp": round(tp, 8),
+            "sl": round(sl, 8), "tp": round(tp, 8), "rr": rr,
             "score": round(score, 2),
             "patterns": [{"type": p["type"], "value": str(p["value"]), "z": p["z"]} for p in matched],
             "scanned_at": now,
@@ -13784,10 +13836,12 @@ def neuro_live_loop():
         try:
             with _neuro_state_lock:
                 patterns_snapshot = dict(_neuro_patterns)
+                summary_snapshot = dict(_neuro_summary)
             new_signals = {}
             for symbol in NEURO_COINS:
                 confirmed = patterns_snapshot.get(symbol) or []
-                sig = neuro_scan_live(symbol, confirmed)
+                chosen_rr = (summary_snapshot.get(symbol) or {}).get("chosen_rr")
+                sig = neuro_scan_live(symbol, confirmed, rr=chosen_rr)
                 new_signals[symbol] = sig
             with _neuro_state_lock:
                 _neuro_live_signals.update(new_signals)
@@ -17549,8 +17603,8 @@ async function refreshNeuro() {
             <div class="dim" style="font-size:9px;">\u0421\u0420. P&L</div>
           </div>
           <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #232d45;">
-            <div style="font-size:20px;font-weight:700;color:#e8ecf5;">1:${(cfg.rr||2).toFixed(1)}</div>
-            <div class="dim" style="font-size:9px;">RR \u0426\u0415\u041b\u042c</div>
+            <div style="font-size:20px;font-weight:700;color:#e8ecf5;">1:${(s.chosen_rr||cfg.rr||2).toFixed(2)}</div>
+            <div class="dim" style="font-size:9px;">RR (\u043f\u043e\u0434\u043e\u0431\u0440\u0430\u043d)</div>
           </div>
           <div style="flex:1;text-align:center;padding:8px 4px;">
             <div style="font-size:14px;font-weight:700;color:#e8ecf5;">
@@ -17561,7 +17615,19 @@ async function refreshNeuro() {
         </div>
         <div class="dim" style="font-size:10px;margin-bottom:10px;">
           ${s.patterns_confirmed||0} \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043e (\u0438\u0437 \u043d\u0438\u0445 ${s.combos_confirmed||0} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439) \u00b7 ${s.history_bars||0} \u0447\u0430\u0441\u043e\u0432\u044b\u0445 \u0441\u0432\u0435\u0447\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438
-        </div>`
+        </div>
+        ${(s.rr_sweep && s.rr_sweep.length) ? `<details style="margin-bottom:8px;">
+          <summary style="cursor:pointer;font-size:11px;color:#8a97b8;">\u043f\u043e\u0434\u0431\u043e\u0440 RR (\u043d\u0430 train-\u0447\u0430\u0441\u0442\u0438) \u25be</summary>
+          <div style="overflow-x:auto;margin-top:4px;"><table style="font-size:10px;white-space:nowrap;">
+            <thead><tr><th>RR</th><th>n</th><th>WR</th><th>avg P&L</th></tr></thead>
+            <tbody>${s.rr_sweep.map(r => `<tr style="${r.rr===s.chosen_rr?'background:#1a2f24;':''}">
+              <td class="${r.rr===s.chosen_rr?'win':'dim'}">1:${r.rr.toFixed(2)}${r.rr===s.chosen_rr?' \u2605':''}</td>
+              <td class="dim">${r.n}</td>
+              <td class="dim">${r.winrate!=null?r.winrate+'%':'\u2014'}</td>
+              <td class="${(r.avg_pnl_r||0)>=0?'win':'loss'}">${r.avg_pnl_r!=null?(r.avg_pnl_r>0?'+':'')+r.avg_pnl_r+'R':'\u2014'}</td>
+            </tr>`).join('')}</tbody>
+          </table></div>
+        </details>` : ''}`
         : '<div class="dim" style="margin:10px 0;">\u0435\u0449\u0451 \u043c\u0430\u0439\u043d\u0438\u0442\u0441\u044f\u2026 \u0434\u0430\u043d\u043d\u044b\u0445 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442</div>';
 
       // ---- Live signal badge (always visible, clearly separated) ----
