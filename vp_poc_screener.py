@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.212"
+APP_VERSION = "0.99.213"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13391,6 +13391,19 @@ NEURO_COMBO_KEYS = ("dow", "weekend", "session", "rsi_zone", "stoch_zone", "ema2
 NEURO_FORWARD_HORIZONS = [4, 12, 24]  # test several forward-looking windows independently
 NEURO_COMBO_MIN_SAMPLE_MULT = 2.0   # combos need more samples to trust (more hypotheses tested)
 NEURO_COMBO_Z_BONUS = 0.5           # and a higher bar on z, same reasoning
+# v0.99.213 — GREEDY multi-way combo growth, per direct user request ("если
+# 2 дают результат, а добавить фильтр тренда — сразу же улучшится, логично
+# же?"). Rather than blindly testing all C(22,3)=1540 triples (and
+# C(22,4)=7315 quadruples) from scratch — a combinatorial explosion that
+# would dilute sample sizes and multiply false-discovery risk — grow UP
+# from whatever pairs already proved significant: for each of the
+# strongest pairs, try adding ONE more condition on top and keep it only
+# if the resulting 3-way (then 4-way, etc.) bucket still clears an even
+# STRICTER bar. Same idea as apriori itemset mining / forward stepwise
+# feature selection — the hypothesis space grows from validated building
+# blocks, not from a blind full search.
+NEURO_MAX_COMBO_DEPTH = 4        # 2=pairs (existing), 3=triples, 4=quadruples
+NEURO_COMBO_GROW_TOP_N = 30      # only extend the top-N most significant patterns from the previous depth (bounds compute + avoids growing from noise)
 
 
 def _neuro_bucket_stats(buckets, mean_all, std_all, min_sample, z_threshold):
@@ -13410,6 +13423,75 @@ def _neuro_bucket_stats(buckets, mean_all, std_all, min_sample, z_threshold):
                 "consistency": round(wins / n, 3),
             })
     return out
+
+
+def _neuro_pattern_value(pat, cond_bucket):
+    """Return the observed compound value for a pattern (single OR any-depth
+    combo) given one bar's condition bucket, or None if any component key is
+    missing on this bar. Generalizes the old hardcoded 2-key split to any
+    number of stacked conditions."""
+    if not pat.get("is_combo"):
+        return cond_bucket.get(pat["type"])
+    keys = pat["type"].split("+")
+    vals = []
+    for k in keys:
+        v = cond_bucket.get(k)
+        if v is None:
+            return None
+        vals.append(str(v))
+    return "|".join(vals)
+
+
+def _neuro_grow_combos(base_patterns, conds, fwd, valid_idx, mean_all, std_all, depth):
+    """Given significant patterns from depth-1 (pairs, triples, ...), try
+    extending each of the top-N with one more NEURO_COMBO_KEYS dimension.
+    Deduplicates by the CANONICAL (sorted) set of (key, value) pairs, since
+    the same N-way combo can be reached by growing from any of its several
+    (N-1)-way parent subsets — without this, the same real condition would
+    show up multiple times under different key orderings."""
+    min_sample = NEURO_MIN_SAMPLE * NEURO_COMBO_MIN_SAMPLE_MULT * depth
+    z_threshold = NEURO_Z_THRESHOLD + NEURO_COMBO_Z_BONUS * (depth - 1)
+    top_parents = sorted(base_patterns, key=lambda p: -abs(p["z"]))[:NEURO_COMBO_GROW_TOP_N]
+
+    seen_signatures = set()
+    grown = []
+    for parent in top_parents:
+        base_keys = parent["type"].split("+")
+        base_vals = parent["value"].split("|")
+        for extra_key in NEURO_COMBO_KEYS:
+            if extra_key in base_keys:
+                continue
+            buckets = {}
+            for i in valid_idx:
+                b = conds[i]
+                if not all(b.get(k) == v for k, v in zip(base_keys, base_vals)):
+                    continue
+                extra_val = b.get(extra_key)
+                if extra_val is not None:
+                    buckets.setdefault(extra_val, []).append(fwd[i])
+            for val, rets in buckets.items():
+                n = len(rets)
+                if n < min_sample:
+                    continue
+                mean_r = sum(rets) / n
+                z = neuro_zscore(mean_r, n, mean_all, std_all)
+                if abs(z) < z_threshold:
+                    continue
+                all_keys = base_keys + [extra_key]
+                all_vals = base_vals + [str(val)]
+                signature = tuple(sorted(zip(all_keys, all_vals)))
+                if signature in seen_signatures:
+                    continue
+                seen_signatures.add(signature)
+                sorted_keys, sorted_vals = zip(*signature)
+                wins = sum(1 for r in rets if (r > 0) == (mean_r > 0))
+                grown.append({
+                    "type": "+".join(sorted_keys), "value": "|".join(sorted_vals), "n": n,
+                    "mean_fwd_return": round(mean_r, 5), "baseline_mean": round(mean_all, 5),
+                    "z": round(z, 2), "direction": "LONG" if mean_r > 0 else "SHORT",
+                    "consistency": round(wins / n, 3), "is_combo": True, "combo_depth": depth,
+                })
+    return grown
 
 
 def neuro_mine(candles, forward_bars=None, min_sample=None, z_threshold=None,
@@ -13456,13 +13538,30 @@ def neuro_mine(candles, forward_bars=None, min_sample=None, z_threshold=None,
             pat["horizon"] = horizon
             pat["is_combo"] = False
             discovered.append(pat)
+        pairs_this_horizon = []
         if combo_buckets:
             combo_min = min_sample * NEURO_COMBO_MIN_SAMPLE_MULT
             combo_z = z_threshold + NEURO_COMBO_Z_BONUS
             for pat in _neuro_bucket_stats(combo_buckets, mean_all, std_all, combo_min, combo_z):
                 pat["horizon"] = horizon
                 pat["is_combo"] = True
-                discovered.append(pat)
+                pat["combo_depth"] = 2
+                pairs_this_horizon.append(pat)
+            discovered.extend(pairs_this_horizon)
+
+        # v0.99.213 — grow 3-way, then 4-way (etc, up to NEURO_MAX_COMBO_
+        # DEPTH) combos from whatever pairs/triples already proved
+        # significant at THIS horizon, instead of testing every possible
+        # N-tuple from scratch.
+        prev_level = pairs_this_horizon
+        for depth in range(3, NEURO_MAX_COMBO_DEPTH + 1):
+            if not prev_level:
+                break
+            grown = _neuro_grow_combos(prev_level, conds, fwd, valid_idx, mean_all, std_all, depth)
+            for pat in grown:
+                pat["horizon"] = horizon
+            discovered.extend(grown)
+            prev_level = grown
 
     discovered.sort(key=lambda d: -abs(d["z"]))
     return discovered
@@ -13523,14 +13622,10 @@ def neuro_walk_forward(candles, forward_bars=None, min_sample=None, z_threshold=
         test_fwd = neuro_forward_returns(test, horizon)
         valid_test_idx = [i for i in range(len(test)) if test_fwd[i] is not None]
         for pat in pats:
-            ktype, kval = pat["type"], pat["value"]
-            if pat.get("is_combo"):
-                k1, k2 = ktype.split("+")
-                test_rets = [test_fwd[i] for i in valid_test_idx
-                             if f"{test_conds[i].get(k1)}|{test_conds[i].get(k2)}" == kval]
-            else:
-                test_rets = [test_fwd[i] for i in valid_test_idx if test_conds[i].get(ktype) == kval]
-            min_needed = max(10, int(min_sample * (NEURO_COMBO_MIN_SAMPLE_MULT if pat.get("is_combo") else 1) // 3))
+            test_rets = [test_fwd[i] for i in valid_test_idx
+                         if _neuro_pattern_value(pat, test_conds[i]) == pat["value"]]
+            depth = pat.get("combo_depth", 1) if pat.get("is_combo") else 1
+            min_needed = max(10, int(min_sample * (NEURO_COMBO_MIN_SAMPLE_MULT * max(depth - 1, 1) if pat.get("is_combo") else 1) // 3))
             if len(test_rets) < min_needed:
                 continue
             test_mean = sum(test_rets) / len(test_rets)
@@ -13563,12 +13658,8 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
             continue  # avoid overlapping trades from the same/adjacent bars
         matched = None
         for p in confirmed_patterns:
-            if p.get("is_combo"):
-                k1, k2 = p["type"].split("+")
-                cur_val = f"{conds[i].get(k1)}|{conds[i].get(k2)}"
-            else:
-                cur_val = conds[i].get(p["type"])
-            if cur_val == p["value"]:
+            cur_val = _neuro_pattern_value(p, conds[i])
+            if cur_val is not None and cur_val == p["value"]:
                 if matched is None or abs(p["z"]) > abs(matched["z"]):
                     matched = p
         if not matched or not atr14[i]:
@@ -13768,12 +13859,8 @@ def neuro_scan_live(symbol, confirmed_patterns, rr=None):
 
         matched = []
         for p in confirmed_patterns:
-            if p.get("is_combo"):
-                k1, k2 = p["type"].split("+")
-                cur_val = f"{last.get(k1)}|{last.get(k2)}"
-            else:
-                cur_val = last.get(p["type"])
-            if cur_val == p["value"]:
+            cur_val = _neuro_pattern_value(p, last)
+            if cur_val is not None and cur_val == p["value"]:
                 matched.append(p)
         if not matched:
             return None
@@ -17708,7 +17795,7 @@ async function refreshNeuro() {
       const topPats = (c.top_patterns || []).slice(0, 5);
       const patItems = topPats.map(p => {
         const dirCls = p.direction === 'LONG' ? 'win' : 'loss';
-        const comboTag = p.is_combo ? ' <span style="color:#a855f7;">\u043a\u043e\u043c\u0431\u043e</span>' : '';
+        const comboTag = p.is_combo ? ` <span style="color:#a855f7;">\u043a\u043e\u043c\u0431\u043e\u00d7${p.combo_depth||2}</span>` : '';
         return `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1c2433;font-size:11px;">
           <span class="dim">${p.type}=${p.value}${comboTag}</span>
           <span class="${dirCls}">${p.direction} (z=${p.z}, n=${p.n})</span>
