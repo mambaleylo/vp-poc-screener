@@ -12592,3 +12592,39 @@ v0.99.211 - NEURO_COINS expanded 5->10 per direct user request: added
          knowing if it ever needs to run more frequently.
          Verified: py_compile, pyflakes, real runtime confirming all 10
          symbols present in /api/neuro/status, zero surrogate escapes.
+
+v0.99.212 - Neuro hang protection + progress bar + reset button, per
+         direct user request ("бэктест защищены от перезапуска? сделай
+         шкалу статусбар и кнопку очистить в шапке").
+         Hang protection: neuro_mining_loop() processes 10 coins
+         SEQUENTIALLY with no thread pool — without a per-symbol time
+         ceiling, one stuck coin (a network call hanging deep inside
+         get_candles_range/neuro_fetch_funding_rate/get_contract_stats)
+         would block every subsequent coin forever, not just itself.
+         Applied the same "no with-block, bounded time, shutdown(wait=
+         False)" fix as LSW/MSNR's own v0.99.194/195: each symbol now
+         runs in a single-worker executor with a NEURO_PER_SYMBOL_MAX_SEC
+         (300s) ceiling — a stuck symbol is abandoned and the loop moves
+         on to the next coin, never stalling the whole cycle. Verified
+         via a standalone repro (external `timeout` wrapper needed since
+         ThreadPoolExecutor's own atexit handler joins abandoned threads
+         at PROCESS exit — irrelevant for a server that never exits, but
+         it hid the result in a naive test the first time): confirmed
+         the loop moves on within ~1s even with a permanently-stuck
+         worker thread.
+         Progress bar: /api/neuro/status now returns mining_done/
+         mining_total/mining_current_symbol; the Neuro panel shows a
+         live "N/10 — сейчас SYMBOL" line + a purple progress bar while
+         mining is in flight.
+         Reset button: new "Очистить Neuro" button in the header
+         (matching the existing Sweep/MSNR/FT5/etc. pattern exactly),
+         wired to new POST /api/reset/neuro which clears all stored
+         patterns/trades/summaries/live-signals and immediately wakes
+         the mining loop via NEURO_MINING_TRIGGER.set() (same "Event.wait
+         instead of plain sleep" fix as LSW/MSNR's own reset buttons —
+         without it, a reset would just blank the display until the
+         full 4h refresh interval elapsed on its own).
+         Verified: py_compile, pyflakes, node --check, 53 routes, real
+         runtime confirming /api/reset/neuro returns {"ok":true} and the
+         index page + /api/neuro/status both still respond 200
+         afterward, zero surrogate-pair escapes.
