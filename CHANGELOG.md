@@ -12502,3 +12502,47 @@ v0.99.208 - Neuro UI completely restructured per direct user report
          literal UTF-8 characters. Verified clean via a follow-up regex
          scan (0 matches) plus real runtime 200 on both / and
          /api/neuro/status.
+
+v0.99.209 - Neuro condition set broadened significantly, per direct user
+         request ("расширим список, разные ема, сессии, выходные,
+         таймфреймы, много всего разного"):
+         - EMA20, EMA100 sides (in addition to existing EMA50/EMA200)
+         - EMA stack: bull_stack (20>50>100) / bear_stack (20<50<100) / mixed
+         - Stochastic %K(14) zone: low/mid/high
+         - Trading session: asian (0-8 UTC) / london (8-13) /
+           london_ny_overlap (13-16) / ny (16-21) / off_hours (21-24)
+         - Weekend vs weekday (coarser complement to the existing
+           granular "dow")
+         - Daily (1d) HTF trend, alongside the existing 4h one — genuine
+           multi-timeframe alignment now spans 1h/4h/1d
+         - Volatility regime: current ATR vs its own 100-bar average
+           (high_vol/normal_vol/low_vol) — distinct from the existing
+           per-candle range_zone (this bar vs recent ATR)
+         - Open interest trend via new neuro_align_oi_trend() + existing
+           get_contract_stats() (rising/falling/flat vs 20-bar-ago OI)
+         - Wider 100-bar range position (dd_zone) alongside the existing
+           20-bar one (range_pos) — near-high/near-low over two different
+           lookback horizons
+         NEURO_CONDITION_KEYS grew from 17 to 27; NEURO_COMBO_KEYS (the
+         curated subset used for pairwise combinations) grew from 12 to
+         22 — combo pair count grew from 66 to 231 accordingly. "hour"
+         and "streak" still deliberately excluded from combos (too many
+         distinct values, dilutes sample sizes) — "session"/"weekend" are
+         the coarser substitutes that DO combine well.
+         All new sources threaded consistently through mining,
+         walk-forward validation, live trade simulation, backtest, AND
+         live signal scanning.
+         Verified on real ETH 1h data (resampled from the same public
+         klines cache): 556 confirmed patterns (up from 140), 0.76s
+         mining time, WR stayed 41.9% (same underlying market data, more
+         confirmed dependencies found without degrading quality since
+         everything still passes the same out-of-sample gate). Full
+         4-year-scale timing: mining 9.48s + simulation 3.15s = 12.6s
+         total compute (up from 3.3s, matching the ~3.5x growth in combo
+         pair count) — still fast, dominated by network fetch time in
+         practice, not computation.
+         Verified: py_compile, pyflakes, node --check, 52 routes, real
+         runtime confirming / and /api/neuro/status both 200, and a
+         programmatic regex scan confirming zero surrogate-pair escape
+         bugs before push (same category of bug hit twice already this
+         session).
