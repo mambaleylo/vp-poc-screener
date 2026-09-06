@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.202"
+APP_VERSION = "0.99.203"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12626,13 +12626,13 @@ AMD_A_ATR_MULT       = float(os.environ.get("VP_AMD_A_ATR_MULT", 0.6))    # A-zo
 # hour) so the A-zone/wait-for-outcome windows keep the SAME real-world
 # duration as before, rather than the pattern's meaning shrinking to 1/4
 # the market time just because the candle granularity changed.
-AMD_A_MIN_BARS       = int(os.environ.get("VP_AMD_A_MIN_BARS", 16))       # A-zone: min consolidation bars (~4h)
-AMD_A_MAX_BARS       = int(os.environ.get("VP_AMD_A_MAX_BARS", 80))       # A-zone: max bars to search back (~20h)
+AMD_A_MIN_BARS       = int(os.environ.get("VP_AMD_A_MIN_BARS", 4))        # A-zone: min consolidation bars — v0.99.203, reverted the earlier ×4 scaling: it made the condition MUCH stricter (needing 16 consecutive tight bars is a far rarer ask than 4), not just "same real duration" as intended. Per direct user report signals nearly vanished after that change.
+AMD_A_MAX_BARS       = int(os.environ.get("VP_AMD_A_MAX_BARS", 40))       # A-zone: max bars to search back
 AMD_M_ATR_MULT       = float(os.environ.get("VP_AMD_M_ATR_MULT", 0.5))    # M: sweep must exceed A-zone by >= mult*ATR
 AMD_D_BODY_RATIO     = float(os.environ.get("VP_AMD_D_BODY_RATIO", 0.4))  # D: body >= ratio*range (impulsive)
 AMD_RR               = float(os.environ.get("VP_AMD_RR", 2.5))
 AMD_SL_BUFFER_PCT    = float(os.environ.get("VP_AMD_SL_BUFFER_PCT", 0.3))
-AMD_MAX_WAIT_BARS    = int(os.environ.get("VP_AMD_MAX_WAIT_BARS", 96))    # 96×15m = 1 day (was 24×1h)
+AMD_MAX_WAIT_BARS    = int(os.environ.get("VP_AMD_MAX_WAIT_BARS", 48))    # 48×15m = 12h wait for outcome
 AMD_UNIVERSE_SIZE    = int(os.environ.get("VP_AMD_UNIVERSE_SIZE", 100))
 AMD_SIGNAL_HISTORY   = 200
 AMD_ATR_PERIOD       = 14
