@@ -12469,3 +12469,36 @@ v0.99.207 - MSNR: new "Только топ-1 монета" toggle, per direct us
          reflects "what today's best params would have generated", not
          an immutable ledger of what actually fired historically (that
          ledger is the separate, append-only live-signals log).
+
+v0.99.208 - Neuro UI completely restructured per direct user report
+         ("просто набор текста, строк... данные вообще непонятны").
+         Each coin now shows as a card with:
+         - Live signal badge at top (🟢/🔴, always visible, clear
+           entry/SL/TP/score) or a dim "no signal now" placeholder
+         - Big 4-column scorecard: WINRATE / avg P&L (R) / target RR /
+           W-L-T counts — large numbers, not buried in a text sentence
+         - Confirmed dependencies collapsed into a <details> disclosure
+           (top-5, cleaner two-column layout: condition vs direction+z+n)
+         - NEW: last 20 trades table (also collapsible) showing entry
+           time/direction/entry price/WIN-LOSS-TIMEOUT outcome/P&L in R
+         - Trade rows are now clickable → opens the entry/SL/TP/exit
+           chart via new openNeuroChart() wrapper (was completely
+           unwired before — /api/neuro/chart/<symbol> existed but
+           nothing in the UI could reach it)
+         /api/neuro/status now also returns each coin's last 20 trades
+         (previously only aggregate summary + patterns).
+         CRITICAL FIX during build: reintroduced the EXACT same
+         surrogate-pair escape bug as v0.99.206 (🟢/🔴 written as
+         \ud83d\udfe2/\ud83d\udd34, plus the 🧠 brain escape crept back in via
+         copy-paste) — same root cause: JS-style \u surrogate-pair
+         escapes get misinterpreted by PYTHON's own non-raw string
+         literal parser as two invalid lone surrogates, corrupting the
+         page. This time caught it programmatically via a regex scan for
+         \u[dD][89ab][0-9a-f]{2} across the whole file (not just eyeballing)
+         AND via an actual server-start + curl request to the index page
+         (a static text scan alone can't catch this — the corruption only
+         manifests when Python actually PARSES the enclosing string
+         literal at import time). Replaced all three emoji escapes with
+         literal UTF-8 characters. Verified clean via a follow-up regex
+         scan (0 matches) plus real runtime 200 on both / and
+         /api/neuro/status.
