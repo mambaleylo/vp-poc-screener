@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.210"
+APP_VERSION = "0.99.211"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13011,7 +13011,8 @@ def amd_loop():
 # so it keeps adapting as new data streams in ("self-learning").
 # ============================================================================
 
-NEURO_COINS          = ["BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT"]
+NEURO_COINS          = ["BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT",
+                        "BNB_USDT", "ADA_USDT", "AVAX_USDT", "LINK_USDT", "DOT_USDT"]  # v0.99.211 — expanded from 5 to 10 per direct user request
 NEURO_TF             = os.environ.get("VP_NEURO_TF", "1h")
 NEURO_FORWARD_BARS   = int(os.environ.get("VP_NEURO_FORWARD_BARS", 12))   # measure forward return over next N bars
 NEURO_MIN_SAMPLE     = int(os.environ.get("VP_NEURO_MIN_SAMPLE", 30))     # min occurrences per bucket to trust it
