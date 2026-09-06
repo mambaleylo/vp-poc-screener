@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.213"
+APP_VERSION = "0.99.214"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -17871,6 +17871,15 @@ function openNeuroChart(symbol, sigTime) {
 }
 
 
+let _neuroFocusedCoin = null;  // symbol of the currently clicked/focused coin, or null for overview
+
+function _neuroBezierPoint(p0x, p0y, c1x, c1y, c2x, c2y, p3x, p3y, t) {
+  const mt = 1 - t;
+  const x = mt*mt*mt*p0x + 3*mt*mt*t*c1x + 3*mt*t*t*c2x + t*t*t*p3x;
+  const y = mt*mt*mt*p0y + 3*mt*mt*t*c1y + 3*mt*t*t*c2y + t*t*t*p3y;
+  return { x, y };
+}
+
 function _neuroDrawNetwork(coins) {
   const wrap = document.getElementById('neuroCanvasWrap');
   const canvas = document.getElementById('neuroCanvas');
@@ -17883,81 +17892,161 @@ function _neuroDrawNetwork(coins) {
   const ctx = canvas.getContext('2d');
   ctx.scale(dpr, dpr);
 
-  const inputTypes = ['hour','dow','rsi_zone','ema50_side','ema200_side','vol_zone','range_zone','body_zone','streak','range_pos'];
   const nCoins = coins.length || 1;
-
-  // Build node positions: input layer (condition types) -> coin layer -> output node
-  const inX = W * 0.12, midX = W * 0.52, outX = W * 0.88;
-  const inNodes = inputTypes.map((t, i) => ({
-    x: inX, y: H * (i + 1) / (inputTypes.length + 1), label: t,
-  }));
+  const midX = W * 0.5, outX = W * 0.92;
   const coinNodes = coins.map((c, i) => ({
     x: midX, y: H * (i + 1) / (nCoins + 1), symbol: c.symbol,
     patterns: c.top_patterns || [], live: c.live_signal,
   }));
   const outNode = { x: outX, y: H / 2 };
 
+  // If the previously-focused coin no longer exists in this data, clear it.
+  if (_neuroFocusedCoin && !coinNodes.some(c => c.symbol === _neuroFocusedCoin)) {
+    _neuroFocusedCoin = null;
+  }
+  const focused = coinNodes.find(c => c.symbol === _neuroFocusedCoin) || null;
+
+  // Input nodes: ONLY the focused coin's own top patterns (never a fixed
+  // 27-item list crammed onto a narrow screen — that's what clipped labels
+  // off the left edge before). Safe left margin so text can never go
+  // negative regardless of label length.
+  const leftMargin = 84;
+  const inX = Math.min(W * 0.18, leftMargin);
+  const inNodes = focused
+    ? focused.patterns.slice(0, 8).map((p, i, arr) => ({
+        x: inX, y: H * (i + 1) / (arr.length + 1),
+        label: p.is_combo ? `${p.type.split('+')[0]}+${p.combo_depth||2}` : p.type,
+        pattern: p,
+      }))
+    : [];
+
+  canvas.onclick = (ev) => {
+    const rect = canvas.getBoundingClientRect();
+    const cx = ev.clientX - rect.left, cy = ev.clientY - rect.top;
+    let hit = null;
+    coinNodes.forEach(c => {
+      if (Math.hypot(cx - c.x, cy - c.y) < 16) hit = c.symbol;
+    });
+    if (hit) {
+      _neuroFocusedCoin = (_neuroFocusedCoin === hit) ? null : hit;
+    } else if (Math.hypot(cx - outNode.x, cy - outNode.y) < 16) {
+      _neuroFocusedCoin = null;
+    }
+    _neuroDrawNetwork(coins);
+  };
+  canvas.style.cursor = 'pointer';
+
   let t0 = performance.now();
   function frame(now) {
     const dt = (now - t0) / 1000;
     ctx.clearRect(0, 0, W, H);
 
-    // Edges: input type -> coin, weighted/colored by whether that type appears in the coin's confirmed patterns
     coinNodes.forEach(coin => {
-      const activeTypes = new Set((coin.patterns||[]).map(p => p.type));
-      inNodes.forEach(inp => {
-        const active = activeTypes.has(inp.label);
-        const pat = (coin.patterns||[]).find(p => p.type === inp.label);
-        const z = pat ? Math.abs(pat.z) : 0;
-        const alpha = active ? Math.min(0.15 + z * 0.08, 0.85) : 0.04;
-        const pulse = active ? (Math.sin(dt * 2 + inp.y * 0.05) * 0.15 + 0.85) : 1;
-        const color = pat && pat.direction === 'LONG' ? '61,220,151' : pat && pat.direction === 'SHORT' ? '255,107,107' : '120,130,160';
-        ctx.strokeStyle = `rgba(${color},${alpha * pulse})`;
-        ctx.lineWidth = active ? Math.min(0.5 + z * 0.4, 2.5) : 0.4;
+      const isFocused = focused && coin.symbol === focused.symbol;
+      const dimAll = focused && !isFocused;
+
+      if (isFocused) {
+        // Full-brightness edges from each of this coin's own pattern
+        // nodes, WITH flowing particles for a genuine "data" feel.
+        inNodes.forEach(inp => {
+          const p = inp.pattern;
+          const z = Math.abs(p.z);
+          const color = p.direction === 'LONG' ? '61,220,151' : '255,107,107';
+          const alpha = Math.min(0.35 + z * 0.05, 0.9);
+          ctx.strokeStyle = `rgba(${color},${alpha})`;
+          ctx.lineWidth = Math.min(1 + z * 0.3, 3);
+          const c1x = inp.x + (coin.x-inp.x)*0.5, c1y = inp.y;
+          const c2x = inp.x + (coin.x-inp.x)*0.5, c2y = coin.y;
+          ctx.beginPath();
+          ctx.moveTo(inp.x, inp.y);
+          ctx.bezierCurveTo(c1x, c1y, c2x, c2y, coin.x, coin.y);
+          ctx.stroke();
+          // Flowing particle
+          const tt = (dt * 0.4 + inp.y * 0.003) % 1;
+          const pt = _neuroBezierPoint(inp.x, inp.y, c1x, c1y, c2x, c2y, coin.x, coin.y, tt);
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, 2.2, 0, Math.PI*2);
+          ctx.fillStyle = `rgba(${color},0.95)`;
+          ctx.fill();
+        });
+      } else if (!dimAll) {
+        // Overview mode (nothing focused): faint hint of live-signal state only.
+        const hasLive = !!coin.live;
+        const color = coin.live && coin.live.direction === 'LONG' ? '61,220,151' : coin.live && coin.live.direction === 'SHORT' ? '255,107,107' : '120,130,160';
+        const alpha = hasLive ? 0.5 : 0.08;
+        ctx.strokeStyle = `rgba(${color},${alpha})`;
+        ctx.lineWidth = hasLive ? 1.5 : 0.4;
         ctx.beginPath();
-        ctx.moveTo(inp.x, inp.y);
-        ctx.bezierCurveTo(inp.x + (coin.x-inp.x)*0.5, inp.y, inp.x + (coin.x-inp.x)*0.5, coin.y, coin.x, coin.y);
+        ctx.moveTo(coin.x - 30, coin.y);
+        ctx.lineTo(coin.x, coin.y);
         ctx.stroke();
-      });
+      }
+
       // coin -> output
       const hasLive = !!coin.live;
-      const outAlpha = hasLive ? 0.9 : 0.15;
       const outColor = coin.live && coin.live.direction === 'LONG' ? '61,220,151' : coin.live && coin.live.direction === 'SHORT' ? '255,107,107' : '120,130,160';
-      const outPulse = hasLive ? (Math.sin(dt * 3) * 0.3 + 0.7) : 1;
-      ctx.strokeStyle = `rgba(${outColor},${outAlpha * outPulse})`;
-      ctx.lineWidth = hasLive ? 2.5 : 0.5;
+      let outAlpha = hasLive ? 0.85 : 0.12;
+      if (dimAll) outAlpha *= 0.15;
+      if (isFocused) outAlpha = Math.max(outAlpha, 0.6);
+      const c1x = coin.x + (outNode.x-coin.x)*0.5, c1y = coin.y;
+      const c2x = coin.x + (outNode.x-coin.x)*0.5, c2y = outNode.y;
+      ctx.strokeStyle = `rgba(${outColor},${outAlpha})`;
+      ctx.lineWidth = isFocused ? 2.5 : (hasLive ? 1.5 : 0.5);
       ctx.beginPath();
       ctx.moveTo(coin.x, coin.y);
-      ctx.bezierCurveTo(coin.x + (outNode.x-coin.x)*0.5, coin.y, coin.x + (outNode.x-coin.x)*0.5, outNode.y, outNode.x, outNode.y);
+      ctx.bezierCurveTo(c1x, c1y, c2x, c2y, outNode.x, outNode.y);
       ctx.stroke();
+      if (isFocused || hasLive) {
+        const tt2 = (dt * 0.5) % 1;
+        const pt2 = _neuroBezierPoint(coin.x, coin.y, c1x, c1y, c2x, c2y, outNode.x, outNode.y, tt2);
+        ctx.beginPath();
+        ctx.arc(pt2.x, pt2.y, 2.5, 0, Math.PI*2);
+        ctx.fillStyle = `rgba(${outColor},0.95)`;
+        ctx.fill();
+      }
     });
 
-    // Input nodes
-    ctx.font = '9px monospace';
+    // Input nodes (only rendered when a coin is focused — full labels, safe margin)
+    ctx.font = '10px monospace';
     inNodes.forEach(n => {
+      const p = n.pattern;
+      const color = p.direction === 'LONG' ? '#3ddc97' : '#ff6b6b';
       ctx.beginPath();
-      ctx.arc(n.x, n.y, 3.5, 0, Math.PI*2);
-      ctx.fillStyle = '#4a5570';
+      ctx.arc(n.x, n.y, 4, 0, Math.PI*2);
+      ctx.fillStyle = color;
       ctx.fill();
+      ctx.fillStyle = '#c7d0e0';
+      ctx.textAlign = 'left';
+      ctx.fillText(n.label, Math.max(4, n.x - 76), n.y - 6);
       ctx.fillStyle = '#5a6a8a';
-      ctx.textAlign = 'right';
-      ctx.fillText(n.label, n.x - 8, n.y + 3);
+      ctx.font = '8px monospace';
+      ctx.fillText(`z=${p.z}`, Math.max(4, n.x - 76), n.y + 8);
+      ctx.font = '10px monospace';
     });
 
     // Coin nodes
-    ctx.font = 'bold 11px monospace';
+    ctx.font = 'bold 12px monospace';
     coinNodes.forEach(c => {
-      const glow = c.live ? (Math.sin(dt * 3) * 0.4 + 0.6) : 0.3;
+      const isFocused = focused && c.symbol === focused.symbol;
+      const dimAll = focused && !isFocused;
+      const glow = c.live ? (Math.sin(dt * 3) * 0.4 + 0.6) : 0.35;
       const color = c.live && c.live.direction === 'LONG' ? '#3ddc97' : c.live && c.live.direction === 'SHORT' ? '#ff6b6b' : '#a855f7';
       ctx.beginPath();
-      ctx.arc(c.x, c.y, c.live ? 7 : 5, 0, Math.PI*2);
+      ctx.arc(c.x, c.y, isFocused ? 9 : (c.live ? 7 : 5), 0, Math.PI*2);
       ctx.fillStyle = color;
-      ctx.globalAlpha = glow;
+      ctx.globalAlpha = dimAll ? glow * 0.25 : glow;
       ctx.fill();
-      ctx.globalAlpha = 1;
+      if (isFocused) {
+        ctx.lineWidth = 2;
+        ctx.strokeStyle = '#e8ecf5';
+        ctx.globalAlpha = 0.8;
+        ctx.stroke();
+      }
+      ctx.globalAlpha = dimAll ? 0.3 : 1;
       ctx.fillStyle = '#e8ecf5';
       ctx.textAlign = 'left';
-      ctx.fillText(c.symbol.replace('_USDT',''), c.x + 12, c.y + 4);
+      ctx.fillText(c.symbol.replace('_USDT',''), c.x + 14, c.y + 4);
+      ctx.globalAlpha = 1;
     });
 
     // Output node
@@ -17969,10 +18058,20 @@ function _neuroDrawNetwork(coins) {
     ctx.fill();
     ctx.globalAlpha = 1;
 
+    // Hint text when nothing focused
+    if (!focused) {
+      ctx.font = '10px monospace';
+      ctx.fillStyle = '#5a6a8a';
+      ctx.textAlign = 'center';
+      ctx.fillText('\u043d\u0430\u0436\u043c\u0438 \u043d\u0430 \u043c\u043e\u043d\u0435\u0442\u0443 \u2014 \u043f\u043e\u043a\u0430\u0436\u0435\u0442 \u0435\u0451 \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0438', W/2, H - 10);
+      ctx.textAlign = 'left';
+    }
+
     _neuroCanvasAnimId = requestAnimationFrame(frame);
   }
   _neuroCanvasAnimId = requestAnimationFrame(frame);
 }
+
 
 async function refreshAmd() {
   const panel = document.getElementById('amdPanel');
