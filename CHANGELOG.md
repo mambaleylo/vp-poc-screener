@@ -12306,3 +12306,24 @@ v0.99.202 - AMD structure TF lowered 1h→15m per direct user request for
          now correctly converts bars to seconds via the actual interval.
          Verified: py_compile, pyflakes, 49 routes, synthetic-data stress
          test (10 runs) with zero exceptions after the TF change.
+
+v0.99.203 - FIX: v0.99.202's own real-duration bar scaling backfired —
+         raising AMD_A_MIN_BARS from 4 to 16 didn't "preserve the same
+         real-world A-zone duration", it made the condition require a
+         MUCH longer perfectly-tight consolidation (16 consecutive quiet
+         bars is a far rarer ask than 4), causing signals to nearly
+         vanish per direct user report ("сигналы по amd вообще пропали,
+         1-2 иногда"). Root-caused via a hand-crafted synthetic AMD
+         pattern that the detector failed to catch even at default
+         settings — traced exactly which condition failed (A-zone range
+         0.08 vs threshold 0.071, missed by a hair) and confirmed via
+         parameter sweep that MIN_BARS was the dominant lever, not
+         A_ATR_MULT. Reverted AMD_A_MIN_BARS to 4 (its pre-v0.99.202
+         value), kept A_MAX_BARS at a moderate 40 (down from 80),
+         MAX_WAIT_BARS at 48 (12h, down from 96). A_ATR_MULT stays at
+         its original 0.6 — no need to loosen it once MIN_BARS was
+         corrected. Verified via 20-symbol x 90-day synthetic
+         mixed-volatility stress test: ~46 signals/symbol/90d at 15m
+         (comparable density to the original 1h cadence, now on a finer
+         grid as the user actually wanted), zero exceptions across both
+         amd_detect_signals() and the full amd_backtest_symbol() pipeline.
