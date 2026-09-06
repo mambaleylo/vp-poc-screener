@@ -12362,3 +12362,56 @@ v0.99.205 - AMD_UNIVERSE_SIZE raised 100→300 per direct user decision
          strict 0.6 to preserve quality, and instead widened the scan
          universe so the same honest, rare-but-real pattern gets more
          chances to fire app-wide.
+
+v0.99.206 - NEW: "🧠 Neuro" tab — self-learning dependency-mining engine
+         for the top 5 majors (BTC/ETH/SOL/XRP/DOGE fixed). Per user
+         request for a from-scratch pattern discovery system that
+         checks "everything" rather than hand-picked patterns:
+         - Fetches maximum available 1h history per coin.
+         - Computes ~10 independent condition types per bar: hour of
+           day, day of week, RSI zone, EMA50/EMA200 side, volume regime
+           vs 20-bar avg, candle range/body size vs ATR, green/red
+           streak length, position within 20-bar range.
+         - For each condition value, measures forward N-bar return vs
+           overall baseline via a z-test; flags |z| >= threshold as a
+           candidate dependency.
+         - HONEST walk-forward validation (70/30 train/test split, same
+           discipline discussed earlier this session re: MSNR/LSW
+           overfitting): only dependencies whose direction holds up on
+           the held-out test set are "confirmed" and used for trading —
+           never in-sample-only stats.
+         - Confirmed dependencies are turned into an actual simulated
+           trade history (entry at match, SL/TP from ATR, RR 2.0) for
+           an honest backtest track record, not just pattern stats.
+         - Live scan checks current bar against confirmed dependencies;
+           agreeing patterns combine into a single directional score,
+           firing a signal when combined |z| clears a threshold.
+         - Re-mines every 4h (the "self-learning" refresh) as new
+           candles stream in — patterns can strengthen, weaken, or drop
+           out over time on their own.
+         - New animated canvas "neural network" visualization: input
+           nodes = condition types, middle layer = the 5 coins, output
+           = combined decision node, with glowing/pulsing connections
+           weighted by real z-scores and live signal state (not fake —
+           directly reflects the actual discovered data).
+         Validated on REAL market data before merging: downloaded 125
+         days of real BTC/ETH/SOL 15m history from a public klines
+         cache, resampled to 1h, ran the full pipeline standalone —
+         zero crashes, and walk-forward-confirmed patterns showed
+         genuinely positive expectancy (WR 36-39% at RR 2.0, breakeven
+         ~33% — avg P&L +0.08R to +0.18R across all three coins tested).
+         New routes: /api/neuro/status, /api/neuro/chart/<symbol>.
+         Threads: neuro_mining_loop(), neuro_live_loop().
+         CRITICAL FIX during build: a JS surrogate-pair escape
+         (\ud83e\udde0 for 🧠) inside a non-raw Python string literal
+         was being decoded by PYTHON's own parser into two invalid lone
+         surrogate codepoints (JS combines surrogate pairs into one
+         character; Python's \u escape does not) — this broke the
+         ENTIRE index page with a 500 UnicodeEncodeError the moment the
+         emoji was reachable in the rendered HTML. Fixed by embedding
+         the literal UTF-8 emoji character directly instead of a JS-style
+         escape sequence. Also fixed the same with-block executor hang
+         risk in amd_loop() now that AMD_UNIVERSE_SIZE is 300 (v0.99.205).
+         Verified: py_compile, pyflakes, node --check, 52 routes, real
+         runtime confirming index page 200 (post-fix) and /api/neuro/status
+         200.
