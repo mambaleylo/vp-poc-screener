@@ -12345,3 +12345,20 @@ v0.99.204 - AMD chart never existed, per direct user report ("график по
          Verified: py_compile, pyflakes, node --check, 50 routes, real
          runtime confirming the new route responds (404 for a
          non-existent signal, as expected, not a crash).
+
+v0.99.205 - AMD_UNIVERSE_SIZE raised 100→300 per direct user decision
+         after real-market data testing (BTC/ETH/SOL/DOGE/XRP, 125 days
+         of real Binance history via a public static-klines cache, used
+         only for local calibration — production still uses Gate.io).
+         Findings: A_ATR_MULT is the dominant lever for signal count
+         (0.6→1.0 goes 4→141 signals across 5 symbols) but loosening it
+         tanks win rate well below breakeven for RR=2.5 (WR 17-25% vs
+         ~29% needed); M_ATR_MULT/D_BODY_RATIO barely move signal count
+         (4→10 across their full range); A_MAX_BARS (search depth) has
+         ZERO effect since a wider window can only be equally or less
+         tight, never more. Conclusion: the tight-consolidation
+         requirement is a genuine, inherent rarity in real crypto price
+         action, not a miscalibration — kept AMD_A_ATR_MULT at its
+         strict 0.6 to preserve quality, and instead widened the scan
+         universe so the same honest, rare-but-real pattern gets more
+         chances to fire app-wide.
