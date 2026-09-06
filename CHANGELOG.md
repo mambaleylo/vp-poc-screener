@@ -12628,3 +12628,45 @@ v0.99.212 - Neuro hang protection + progress bar + reset button, per
          runtime confirming /api/reset/neuro returns {"ok":true} and the
          index page + /api/neuro/status both still respond 200
          afterward, zero surrogate-pair escapes.
+
+v0.99.213 - Multi-way (3+, up to 4) condition combinations, per direct
+         user request ("если 2 дают результат, добавить фильтр тренда —
+         сразу же улучшится, логично же?"). Confirmed the intuition is
+         right, but implemented as GREEDY growth from already-significant
+         pairs rather than blindly testing all C(22,3)=1540 triples (and
+         C(22,4)=7315 quadruples) from scratch — that would dilute
+         sample sizes and multiply false-discovery risk for no benefit.
+         New _neuro_grow_combos(): for each of the top-30 most
+         significant patterns at depth N, tries extending with one more
+         NEURO_COMBO_KEYS dimension; keeps it only if the resulting
+         (N+1)-way bucket clears an even stricter min_sample (×depth)
+         and z_threshold (+0.5×(depth-1)) bar. Same apriori-itemset-
+         mining/forward-stepwise-selection idea used in real statistics.
+         Deduplicates by the CANONICAL sorted (key,value) signature,
+         since the same final N-way combo can be reached by growing
+         from any of its several (N-1)-way parent subsets — without
+         this, a real 3-way condition would show up 3x under different
+         key orderings (caught during prototyping on real ETH data:
+         "weekend+dd_zone+dom_third" appeared 3 times before the fix).
+         Generalized the pattern-matching logic (previously hardcoded
+         to exactly 2 keys via `k1,k2 = type.split("+")`) into a shared
+         _neuro_pattern_value() helper used consistently across
+         neuro_walk_forward's test-confirmation, neuro_simulate_trades,
+         and neuro_scan_live — now works for any combo depth uniformly.
+         Validated on real ETH 1h data: 0 duplicate signatures after the
+         fix (previously 3x inflation), natural pyramid distribution
+         (33 singles / 474 pairs / 187 triples / 6 quadruples for one
+         symbol), and — matching the user's exact intuition — a 3-way
+         combo ("daily_trend+ema100_side+rsi_zone") ranked #1 by z-score
+         among ALL confirmed patterns (z=9.02), genuinely stronger than
+         its own parent pair. Timing at the REALISTIC ~13-month Gate.io
+         history ceiling (confirmed in an earlier session investigation
+         that Gate.io hard-caps 1h candle history at ~10000 points —
+         NOT the full NEURO_HISTORY_DAYS=1500 setting): ~20s compute per
+         symbol (up from ~12s pairs-only), ~3.4 min for all 10 coins'
+         compute alone — well under the existing NEURO_PER_SYMBOL_MAX_SEC
+         (300s) hang-protection ceiling from v0.99.212.
+         UI: pattern display now shows "комбо×N" (e.g. "комбо×3") instead
+         of a flat "комбо" tag, so combo depth is visible at a glance.
+         Verified: py_compile, pyflakes, node --check, 53 routes, real
+         runtime 200 on / and /api/neuro/status, zero surrogate escapes.
