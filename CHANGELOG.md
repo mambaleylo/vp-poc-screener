@@ -12415,3 +12415,57 @@ v0.99.206 - NEW: "🧠 Neuro" tab — self-learning dependency-mining engine
          Verified: py_compile, pyflakes, node --check, 52 routes, real
          runtime confirming index page 200 (post-fix) and /api/neuro/status
          200.
+
+v0.99.207 - Neuro engine massively extended per direct user request
+         ("добавляй конечно и даже более того что ты написал"):
+         - MACD histogram + bull/bear cross conditions
+         - Bollinger Bands %B position (above/near-upper/mid/near-lower/below)
+         - Multi-timeframe trend filter: price vs EMA50 on 4h aligned to
+           each 1h bar (neuro_align_htf_trend)
+         - Funding rate regime via new neuro_fetch_funding_rate() —
+           GET /futures/usdt/funding_rate, bucketed very_positive/
+           positive/negative/very_negative/neutral
+         - BTC correlation: for the 4 non-BTC coins, whether their own
+           N-bar return agreed or diverged from BTC's over the same window
+         - Day-of-month thirds (early/mid/late) seasonality
+         - PAIRWISE condition combinations (e.g. "dow=5 AND ema50_side=
+           above") across a curated 12-key subset — with a stricter
+           min_sample (×2) and z-threshold (+0.5) than single conditions,
+           since testing hundreds of pairs raises real false-discovery
+           risk (same "don't fool yourself" discipline as everything else
+           in this module)
+         - Multiple forward-return horizons (4/12/24 bars) tested
+           independently instead of one fixed window
+         All of the above threaded through mining, walk-forward
+         validation, live trade simulation, AND live signal scanning
+         consistently. Validated on real BTC/ETH/SOL data (125 days,
+         same public klines cache as before): with combos + 4h trend +
+         BTC correlation, confirmed patterns jumped from ~5 to ~140,
+         and simulated WR improved from ~39% to 41.9% with avg P&L
+         +0.257R (up from +0.18R) — genuine improvement, not just more
+         noise, since everything still passes the same out-of-sample
+         walk-forward gate.
+         Also unit-tested neuro_fetch_funding_rate()'s response parsing
+         against a mocked realistic Gate.io payload shape.
+
+v0.99.207 - MSNR: new "Только топ-1 монета" toggle, per direct user
+         request. When enabled, msnr_backtest_loop()'s auto-management
+         of the eligible autotrade pool collapses down to just the ONE
+         symbol with the highest compound_return_pct (biggest simulated
+         $ profit) among symbols that also clear the winrate>=50 gate —
+         every other symbol in the normal top-N pool is auto-toggled off
+         the same cycle, exactly as if it had fallen out of the top-N.
+         Settings-wired (tuple/get/global/apply/checkbox) same as
+         msnr_all_in_enabled.
+         Also gave an honest explanation (not a code change) for a
+         direct user report about MSNR ZEC_USDT: a live day showed 2
+         trades (WIN+LOSS) but the backtest for that symbol only shows
+         1 — this is because msnr_backtest_loop() re-detects raw signals
+         from scratch every cycle using the LATEST auto-tuned per-symbol
+         params, applied retroactively across all history. If those
+         params shift between two live-fired trades on the same day, one
+         of them can stop matching the CURRENT best params and silently
+         disappear from the backtest's own historical view — the backtest
+         reflects "what today's best params would have generated", not
+         an immutable ledger of what actually fired historically (that
+         ledger is the separate, append-only live-signals log).
