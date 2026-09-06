@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.204"
+APP_VERSION = "0.99.205"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12633,7 +12633,7 @@ AMD_D_BODY_RATIO     = float(os.environ.get("VP_AMD_D_BODY_RATIO", 0.4))  # D: b
 AMD_RR               = float(os.environ.get("VP_AMD_RR", 2.5))
 AMD_SL_BUFFER_PCT    = float(os.environ.get("VP_AMD_SL_BUFFER_PCT", 0.3))
 AMD_MAX_WAIT_BARS    = int(os.environ.get("VP_AMD_MAX_WAIT_BARS", 48))    # 48×15m = 12h wait for outcome
-AMD_UNIVERSE_SIZE    = int(os.environ.get("VP_AMD_UNIVERSE_SIZE", 100))
+AMD_UNIVERSE_SIZE    = int(os.environ.get("VP_AMD_UNIVERSE_SIZE", 300))  # v0.99.205 — raised from 100 per direct user request ("увеличить вселенность сканирования") after real-market testing confirmed the pattern itself is genuinely rare and loosening thresholds only degrades quality — more coins scanned, same strict A-zone, is the honest way to get more signals app-wide
 AMD_SIGNAL_HISTORY   = 200
 AMD_ATR_PERIOD       = 14
 TELEGRAM_ALERTS_AMD  = os.environ.get("VP_TG_ALERTS_AMD", "1") == "1"
