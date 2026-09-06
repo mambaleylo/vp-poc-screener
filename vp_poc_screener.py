@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.207"
+APP_VERSION = "0.99.208"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13710,17 +13710,20 @@ def neuro_live_loop():
 def api_neuro_status():
     with _neuro_state_lock:
         patterns = dict(_neuro_patterns)
+        trades = dict(_neuro_trades)
         summary = dict(_neuro_summary)
         live_signals = dict(_neuro_live_signals)
         last_mined = _neuro_last_mined
         running = _neuro_mining_running
     coins = []
     for symbol in NEURO_COINS:
+        recent_trades = (trades.get(symbol) or [])[-20:][::-1]
         coins.append({
             "symbol": symbol,
             "summary": summary.get(symbol, {}),
             "top_patterns": (patterns.get(symbol) or [])[:8],
             "live_signal": live_signals.get(symbol),
+            "recent_trades": recent_trades,
         })
     return jsonify({
         "coins": coins, "last_mined": last_mined, "mining_running": running,
@@ -17425,51 +17428,112 @@ async function refreshNeuro() {
 
     const cards = coins.map(c => {
       const s = c.summary || {};
-      const wrCls = (s.winrate||0) >= 33 ? 'win' : 'loss';
+      const hasStats = s.n != null && s.n > 0;
+      const wrCls = (s.winrate||0) >= 34 ? 'win' : 'loss';
       const pnlCls = (s.avg_pnl_r||0) >= 0 ? 'win' : 'loss';
-      const statTxt = s.n
-        ? `<span class="${wrCls}">${s.winrate}% WR</span> \u00b7 n=${s.n} \u00b7 <span class="win">${s.wins}W</span>/<span class="loss">${s.losses}L</span>/${s.timeouts}T \u00b7 avg <span class="${pnlCls}">${s.avg_pnl_r}R</span> \u00b7 ${s.patterns_confirmed||0} \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439 \u00b7 ${s.history_bars||0} \u0431\u0430\u0440\u043e\u0432 \u0438\u0441\u0442\u043e\u0440\u0438\u0438`
-        : '<span class="dim">\u043c\u0430\u0439\u043d\u0438\u0442\u0441\u044f\u2026</span>';
       const liveSig = c.live_signal;
-      const liveTxt = liveSig
-        ? `<div style="margin:6px 0;padding:6px 8px;background:#1a2332;border-radius:6px;border-left:3px solid ${liveSig.direction==='LONG'?'#3ddc97':'#ff6b6b'};">
-             <b class="${liveSig.direction==='LONG'?'win':'loss'}">${liveSig.direction==='LONG'?'\u2b06\ufe0f':'\u2b07\ufe0f'} ${liveSig.direction}</b>
-             \u00b7 score ${liveSig.score} \u00b7 entry ${fmtNum(liveSig.entry)} \u00b7 SL ${fmtNum(liveSig.sl)} \u00b7 TP ${fmtNum(liveSig.tp)}
-           </div>`
-        : '';
-      const patRows = (c.top_patterns||[]).map(p => {
+
+      // ---- Big scorecard row ----
+      const bigStats = hasStats ? `
+        <div style="display:flex;gap:0;margin:10px 0;background:#0d1320;border-radius:8px;overflow:hidden;">
+          <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #232d45;">
+            <div style="font-size:20px;font-weight:700;" class="${wrCls}">${s.winrate}%</div>
+            <div class="dim" style="font-size:9px;">WINRATE</div>
+          </div>
+          <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #232d45;">
+            <div style="font-size:20px;font-weight:700;" class="${pnlCls}">${s.avg_pnl_r>0?'+':''}${s.avg_pnl_r}R</div>
+            <div class="dim" style="font-size:9px;">\u0421\u0420. P&L</div>
+          </div>
+          <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #232d45;">
+            <div style="font-size:20px;font-weight:700;color:#e8ecf5;">1:${(cfg.rr||2).toFixed(1)}</div>
+            <div class="dim" style="font-size:9px;">RR \u0426\u0415\u041b\u042c</div>
+          </div>
+          <div style="flex:1;text-align:center;padding:8px 4px;">
+            <div style="font-size:14px;font-weight:700;color:#e8ecf5;">
+              <span class="win">${s.wins}W</span>/<span class="loss">${s.losses}L</span>/<span class="dim">${s.timeouts}T</span>
+            </div>
+            <div class="dim" style="font-size:9px;">n=${s.n} \u0438\u0437 ${s.total}</div>
+          </div>
+        </div>
+        <div class="dim" style="font-size:10px;margin-bottom:10px;">
+          ${s.patterns_confirmed||0} \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043e (\u0438\u0437 \u043d\u0438\u0445 ${s.combos_confirmed||0} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439) \u00b7 ${s.history_bars||0} \u0447\u0430\u0441\u043e\u0432\u044b\u0445 \u0441\u0432\u0435\u0447\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438
+        </div>`
+        : '<div class="dim" style="margin:10px 0;">\u0435\u0449\u0451 \u043c\u0430\u0439\u043d\u0438\u0442\u0441\u044f\u2026 \u0434\u0430\u043d\u043d\u044b\u0445 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442</div>';
+
+      // ---- Live signal badge (always visible, clearly separated) ----
+      const liveBadge = liveSig
+        ? `<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:10px;background:${liveSig.direction==='LONG'?'rgba(61,220,151,0.12)':'rgba(255,107,107,0.12)'};border-radius:8px;border:1px solid ${liveSig.direction==='LONG'?'#3ddc97':'#ff6b6b'};">
+            <div style="font-size:18px;">${liveSig.direction==='LONG'?'🟢':'🔴'}</div>
+            <div style="flex:1;">
+              <div class="${liveSig.direction==='LONG'?'win':'loss'}" style="font-weight:700;font-size:13px;">\u0416\u0418\u0412\u041e\u0419 \u0421\u0418\u0413\u041d\u0410\u041b: ${liveSig.direction}</div>
+              <div class="dim" style="font-size:10px;">entry ${fmtNum(liveSig.entry)} \u00b7 SL ${fmtNum(liveSig.sl)} \u00b7 TP ${fmtNum(liveSig.tp)} \u00b7 score ${liveSig.score}</div>
+            </div>
+          </div>`
+        : `<div style="padding:8px 10px;margin-bottom:10px;background:#0d1320;border-radius:8px;border:1px solid #232d45;">
+            <span class="dim" style="font-size:11px;">\u26aa \u0436\u0438\u0432\u043e\u0433\u043e \u0441\u0438\u0433\u043d\u0430\u043b\u0430 \u0441\u0435\u0439\u0447\u0430\u0441 \u043d\u0435\u0442</span>
+          </div>`;
+
+      // ---- Confirmed dependencies, compact ----
+      const topPats = (c.top_patterns || []).slice(0, 5);
+      const patItems = topPats.map(p => {
         const dirCls = p.direction === 'LONG' ? 'win' : 'loss';
-        const testTxt = p.test_mean_fwd_return != null
-          ? `<span class="dim">test: ${(p.test_mean_fwd_return*100).toFixed(2)}% (n=${p.test_n})</span>` : '';
-        const comboTag = p.is_combo ? '<span style="color:#a855f7;font-size:9px;">[\u043a\u043e\u043c\u0431\u043e]</span>' : '';
-        return `<tr>
-          <td class="dim">${p.type}${comboTag}</td>
-          <td>${p.value}</td>
-          <td class="${dirCls}">${p.direction}</td>
-          <td class="dim">z=${p.z}</td>
-          <td class="dim">n=${p.n}</td>
-          <td class="dim">h=${p.horizon||'-'}</td>
-          <td class="dim">${(p.mean_fwd_return*100).toFixed(2)}%</td>
-          <td>${testTxt}</td>
+        const comboTag = p.is_combo ? ' <span style="color:#a855f7;">\u043a\u043e\u043c\u0431\u043e</span>' : '';
+        return `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1c2433;font-size:11px;">
+          <span class="dim">${p.type}=${p.value}${comboTag}</span>
+          <span class="${dirCls}">${p.direction} (z=${p.z}, n=${p.n})</span>
+        </div>`;
+      }).join('');
+      const patSection = topPats.length
+        ? `<details style="margin-bottom:8px;">
+            <summary style="cursor:pointer;font-size:11px;color:#8a97b8;">\u0442\u043e\u043f-5 \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439 \u25be</summary>
+            <div style="margin-top:4px;">${patItems}</div>
+          </details>`
+        : '';
+
+      // ---- Recent trades table with click-to-chart ----
+      const trades = c.recent_trades || [];
+      const tradeRows = trades.map(t => {
+        const rc = t.result==='WIN'?'win':t.result==='LOSS'?'loss':'dim';
+        const dirCls = t.direction === 'LONG' ? 'win' : 'loss';
+        const statusHtml = t.result==='WIN'
+          ? `<span class="win">WIN @ ${fmtNum(t.exit_price)}</span>`
+          : t.result==='LOSS'
+          ? `<span class="loss">LOSS @ ${fmtNum(t.exit_price)}</span>`
+          : '<span class="dim">TIMEOUT</span>';
+        return `<tr onclick="openNeuroChart('${c.symbol}', ${t.time})" style="cursor:pointer;">
+          <td class="dim">${fmtDateTime(t.entry_time)}</td>
+          <td class="${dirCls}">${t.direction}</td>
+          <td class="dim">${fmtNum(t.entry)}</td>
+          <td>${statusHtml}</td>
+          <td class="${rc}">${t.pnl_r!=null?(t.pnl_r>0?'+':'')+t.pnl_r+'R':'\u2014'}</td>
         </tr>`;
       }).join('');
-      return `<div style="margin-bottom:16px;padding:10px;background:#12182a;border-radius:10px;border:1px solid #232d45;">
-        <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-          <b style="font-size:13px;color:#c792ea;">${c.symbol}</b>
-        </div>
-        <div class="dim" style="font-size:11px;margin-bottom:6px;">${statTxt}</div>
-        ${liveTxt}
-        ${patRows ? `<div style="overflow-x:auto;"><table style="font-size:10px;white-space:nowrap;">
-          <thead><tr><th>\u0422\u0438\u043f</th><th>\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435</th><th>Dir</th><th>Z</th><th>n</th><th>\u0421\u0440.\u0432\u043e\u0437\u0432\u0440\u0430\u0442</th><th>Out-of-sample</th></tr></thead>
-          <tbody>${patRows}</tbody></table></div>` : '<div class="dim" style="font-size:11px;">\u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0438 \u043f\u043e\u043a\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u044b</div>'}
+      const tradesSection = trades.length
+        ? `<details>
+            <summary style="cursor:pointer;font-size:11px;color:#8a97b8;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 ${trades.length} \u0441\u0434\u0435\u043b\u043e\u043a \u25be</summary>
+            <div style="overflow-x:auto;margin-top:6px;">
+              <table style="font-size:10px;white-space:nowrap;">
+                <thead><tr><th>\u0412\u0445\u043e\u0434</th><th>Dir</th><th>Entry</th><th>\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442</th><th>P&L</th></tr></thead>
+                <tbody>${tradeRows}</tbody>
+              </table>
+            </div>
+          </details>`
+        : '';
+
+      return `<div style="margin-bottom:14px;padding:12px;background:#12182a;border-radius:10px;border:1px solid #232d45;">
+        <div style="font-size:15px;font-weight:700;color:#c792ea;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
+        ${liveBadge}
+        ${bigStats}
+        ${patSection}
+        ${tradesSection}
       </div>`;
     }).join('');
 
     panel.innerHTML = `
       <div class="dim hint-block" style="margin-bottom:10px;">
         <b>🧠 Neuro</b> \u2014 \u0441\u0430\u043c\u043e\u043e\u0431\u0443\u0447\u0430\u044e\u0449\u0430\u044f\u0441\u044f \u0441\u0438\u0441\u0442\u0435\u043c\u0430 \u043f\u043e\u0438\u0441\u043a\u0430 \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439. \u0421\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442 5 \u043a\u0440\u0443\u043f\u043d\u0435\u0439\u0448\u0438\u0445 \u043c\u043e\u043d\u0435\u0442 \u043f\u043e \u043c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u043e \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438 (\u0447\u0430\u0441\u043e\u0432\u044b\u0435 \u0441\u0432\u0435\u0447\u0438), \u043f\u0435\u0440\u0435\u0431\u0438\u0440\u0430\u0435\u0442 \u0432\u0441\u0435\u0432\u043e\u0437\u043c\u043e\u0436\u043d\u044b\u0435 \u0443\u0441\u043b\u043e\u0432\u0438\u044f
-        (\u0447\u0430\u0441 \u0434\u043d\u044f, \u0434\u0435\u043d\u044c \u043d\u0435\u0434\u0435\u043b\u0438, RSI, EMA, \u043e\u0431\u044a\u0451\u043c, \u0440\u0430\u0437\u043c\u0435\u0440 \u0441\u0432\u0435\u0447\u0438, \u0441\u0435\u0440\u0438\u0438, \u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435 \u0432 \u0434\u0438\u0430\u043f\u0430\u0437\u043e\u043d\u0435) \u0438 \u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0435\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u0442\u0435,
-        \u0447\u0442\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u044e\u0442\u0441\u044f \u043d\u0430 \u043e\u0442\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0445 \u0434\u0430\u043d\u043d\u044b\u0445 (walk-forward, \u043d\u0435 \u043f\u0435\u0440\u0435\u043e\u0431\u0443\u0447\u0435\u043d\u0438\u0435). \u041f\u0435\u0440\u0435\u043c\u0430\u0439\u043d\u0438\u0432\u0430\u0435\u0442 \u043a\u0430\u0436\u0434\u044b\u0435 ${Math.round((cfg.refresh_sec||14400)/3600)}\u0447.
+        (\u0447\u0430\u0441 \u0434\u043d\u044f, \u0434\u0435\u043d\u044c \u043d\u0435\u0434\u0435\u043b\u0438, RSI, EMA, MACD, Bollinger, \u043e\u0431\u044a\u0451\u043c, funding rate, \u043a\u043e\u0440\u0440\u0435\u043b\u044f\u0446\u0438\u044f \u0441 BTC \u0438 \u0434\u0440.) \u0438 \u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0435\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u0442\u043e,
+        \u0447\u0442\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0435\u0442\u0441\u044f \u043d\u0430 \u043e\u0442\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0445 \u0434\u0430\u043d\u043d\u044b\u0445 (walk-forward). \u041a\u0430\u0440\u0442\u043e\u0447\u043a\u0430 \u043a\u0430\u0436\u0434\u043e\u0439 \u043c\u043e\u043d\u0435\u0442\u044b: \u0436\u0438\u0432\u043e\u0439 \u0441\u0438\u0433\u043d\u0430\u043b \u0441\u0432\u0435\u0440\u0445\u0443, \u0437\u0430\u0442\u0435\u043c WINRATE/P&L/RR/W-L-T, \u043f\u043e\u0442\u043e\u043c \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0438 \u0438 \u0441\u0434\u0435\u043b\u043a\u0438 (\u0440\u0430\u0441\u043a\u0440\u044b\u0432\u0430\u044e\u0442\u0441\u044f). \u041a\u043b\u0438\u043a \u043f\u043e \u0441\u0434\u0435\u043b\u043a\u0435 \u2014 \u0433\u0440\u0430\u0444\u0438\u043a. \u041f\u0435\u0440\u0435\u043c\u0430\u0439\u043d\u0438\u0432\u0430\u0435\u0442 \u043a\u0430\u0436\u0434\u044b\u0435 ${Math.round((cfg.refresh_sec||14400)/3600)}\u0447.
       </div>
       <div style="margin-bottom:12px;">${miningTxt}</div>
       <div id="neuroCanvasWrap" style="width:100%;height:220px;background:#0a0e1a;border-radius:10px;overflow:hidden;margin-bottom:14px;position:relative;">
@@ -17482,6 +17546,11 @@ async function refreshNeuro() {
     panel.innerHTML = `<div class="dim">\u041e\u0448\u0438\u0431\u043a\u0430: ${e}</div>`;
   }
 }
+
+function openNeuroChart(symbol, sigTime) {
+  return openVgiChart(symbol, sigTime, '/api/neuro/chart', '');
+}
+
 
 function _neuroDrawNetwork(coins) {
   const wrap = document.getElementById('neuroCanvasWrap');
