@@ -52,7 +52,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.203"
+APP_VERSION = "0.99.204"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12864,11 +12864,13 @@ _amd_backtest_total = 0
 _amd_backtest_done = 0
 _amd_backtest_last_finished = None
 _amd_backtest_last_duration = None
+_amd_backtest_trades = {}  # symbol -> list of trade dicts, for chart lookup
 
 
 def amd_backtest_loop():
     global _amd_backtest_running, _amd_backtest_total, _amd_backtest_done
     global _amd_backtest_last_finished, _amd_backtest_last_duration, _amd_backtest_summary
+    global _amd_backtest_trades
     while True:
         try:
             t0 = time.time()
@@ -12878,6 +12880,7 @@ def amd_backtest_loop():
                 _amd_backtest_done = 0
                 _amd_backtest_running = True
             new_summary = {}
+            new_trades = {}
             # Same "no with-block" fix as LSW/MSNR's own v0.99.194/195 —
             # never let ex.shutdown(wait=True) on a stuck symbol block the
             # whole cycle forever, and write each symbol's result the
@@ -12899,6 +12902,7 @@ def amd_backtest_loop():
                         else:
                             if summary.get("n"):
                                 new_summary[symbol] = summary
+                                new_trades[symbol] = trades
                         with _amd_backtest_lock2:
                             _amd_backtest_done += 1
                 except (TimeoutError, FutureTimeoutError):
@@ -12907,6 +12911,7 @@ def amd_backtest_loop():
                 ex.shutdown(wait=False)
             with _amd_backtest_lock2:
                 _amd_backtest_summary = new_summary
+                _amd_backtest_trades = new_trades
                 _amd_backtest_running = False
                 _amd_backtest_last_finished = time.time()
                 _amd_backtest_last_duration = round(time.time() - t0, 1)
@@ -12997,6 +13002,56 @@ def api_amd_backtest(symbol):
     with _amd_backtest_lock:
         _amd_backtest_cache[symbol] = result
     return jsonify(result)
+
+
+@app.route("/api/amd/chart/<symbol>")
+def api_amd_chart(symbol):
+    """Same pattern as api_lsw_chart(): look up the signal's own recorded
+    entry/sl/tp (live signal first, then background-backtest trades),
+    never re-derive from current live params which could have drifted."""
+    try:
+        sig_time = request.args.get("time")
+        found = None
+        found_result = None
+        found_exit_time = None
+        found_exit_price = None
+        interval_sec = INTERVAL_SECONDS.get(AMD_STRUCTURE_TF, 900)
+        if sig_time:
+            target = float(sig_time)
+            with _amd_results_lock:
+                live_match = next((s for s in _amd_results
+                                    if s["symbol"] == symbol and abs(s["time"] - target) < interval_sec), None)
+            if live_match:
+                found = {"time": live_match["time"], "direction": live_match["direction"],
+                         "entry": live_match["entry"], "sl": live_match["sl"], "tp": live_match["tp"],
+                         "a_low": live_match.get("a_low"), "a_high": live_match.get("a_high")}
+            else:
+                with _amd_backtest_lock2:
+                    bt_trades = list(_amd_backtest_trades.get(symbol, []))
+                bt_match = next((t for t in bt_trades if abs(t["time"] - target) < interval_sec), None)
+                if bt_match:
+                    found = {"time": bt_match["time"], "direction": bt_match["direction"],
+                             "entry": bt_match["entry"], "sl": bt_match["sl"], "tp": bt_match["tp"],
+                             "a_low": bt_match.get("a_low"), "a_high": bt_match.get("a_high")}
+                    found_result = bt_match.get("result")
+                    found_exit_time = bt_match.get("exit_time")
+                    found_exit_price = bt_match.get("exit_price")
+        if found is None:
+            return jsonify({"error": "сигнал не найден"}), 404
+        fetch_start = found["time"] - (AMD_A_MAX_BARS + AMD_ATR_PERIOD + 10) * interval_sec
+        fetch_end = (found_exit_time + 10 * interval_sec) if found_exit_time else (found["time"] + 60 * interval_sec)
+        candles = get_candles_range(symbol, AMD_STRUCTURE_TF, fetch_start, fetch_end)
+        return jsonify({
+            "symbol": symbol, "candles": candles[-250:], "time": found["time"],
+            "direction": found["direction"], "entry": found["entry"],
+            "sl": found["sl"], "tp": found["tp"],
+            "a_low": found.get("a_low"), "a_high": found.get("a_high"),
+            "result": found_result, "exit_time": found_exit_time, "exit_price": found_exit_price,
+            "chart_source": "amd",
+        })
+    except Exception as e:
+        log_error(f"api_amd_chart {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
 
 
 @app.route("/api/overview")
@@ -16559,7 +16614,7 @@ async function refreshAmd() {
     const rows = results.map(r => {
       const dirCls = r.direction === 'LONG' ? 'win' : 'loss';
       const arrow = r.direction === 'LONG' ? '\u2b06\ufe0f' : '\u2b07\ufe0f';
-      return `<tr onclick="loadAmdBacktest('${r.symbol}')" style="cursor:pointer;">
+      return `<tr onclick="openAmdChart('${r.symbol}', ${r.time})" style="cursor:pointer;">
         <td>${r.symbol}</td>
         <td class="${dirCls}">${arrow} ${r.direction}</td>
         <td class="dim">${fmtNum(r.entry)}</td>
@@ -16642,7 +16697,7 @@ async function loadAmdBacktest(symbol) {
         : t.result==='LOSS'
         ? `<span class="loss">LOSS @ ${fmtNum(t.exit_price)}${t.exit_time?' ('+fmtDateTime(t.exit_time)+')':''}</span>`
         : '<span class="dim">TIMEOUT</span>';
-      return `<tr>
+      return `<tr onclick="openAmdChart('${symbol}', ${t.time})" style="cursor:pointer;">
         <td class="dim">${fmtDateTime(t.entry_time)}</td>
         <td class="${dirCls}">${t.direction}</td>
         <td>${fmtNum(t.entry)}</td>
@@ -17604,6 +17659,11 @@ function openLswChart(symbol, sigTime) {
   // Same reuse judgment as openMirrorChart above — LSW's own signal
   // shape (fixed entry/sl/tp/direction/rr) is structurally identical too.
   return openVgiChart(symbol, sigTime, '/api/lsw/chart', '');
+}
+
+function openAmdChart(symbol, sigTime) {
+  // Same reuse judgment as openLswChart above.
+  return openVgiChart(symbol, sigTime, '/api/amd/chart', '');
 }
 
 function drawVgiChart(data) {
