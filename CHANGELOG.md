@@ -12581,3 +12581,14 @@ v0.99.210 - Neuro RR is now per-symbol auto-tuned instead of a fixed
          runtime 200 on / and /api/neuro/status, zero surrogate-pair
          escapes (programmatic scan before push, same category of bug
          hit twice already this session).
+
+v0.99.211 - NEURO_COINS expanded 5->10 per direct user request: added
+         BNB_USDT, ADA_USDT, AVAX_USDT, LINK_USDT, DOT_USDT alongside
+         the original BTC/ETH/SOL/XRP/DOGE. Note: neuro_mining_loop()
+         processes coins sequentially (not parallelized like MSNR/LSW/
+         AMD's own ThreadPoolExecutor-based backtests), so a full mining
+         cycle now takes roughly 2x as long (~3-6 min instead of ~1.5-3
+         min) — acceptable given the 4h refresh interval, but worth
+         knowing if it ever needs to run more frequently.
+         Verified: py_compile, pyflakes, real runtime confirming all 10
+         symbols present in /api/neuro/status, zero surrogate escapes.
