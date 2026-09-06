@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.211"
+APP_VERSION = "0.99.212"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13020,6 +13020,8 @@ NEURO_Z_THRESHOLD    = float(os.environ.get("VP_NEURO_Z_THRESHOLD", 1.8))
 NEURO_TRAIN_FRAC     = float(os.environ.get("VP_NEURO_TRAIN_FRAC", 0.7))  # walk-forward split
 NEURO_HISTORY_DAYS   = int(os.environ.get("VP_NEURO_HISTORY_DAYS", 1500))  # ask for as much as possible; exchange will just return what it has
 NEURO_REFRESH_SEC    = int(os.environ.get("VP_NEURO_REFRESH_SEC", 4 * 3600))  # re-mine every 4h — the "self-learning" refresh
+NEURO_MINING_TRIGGER = threading.Event()  # v0.99.212 — same "Очистить X doesn't wake the sleeping loop" fix as LSW/MSNR's own trigger events, for the new "Очистить Neuro" button
+NEURO_PER_SYMBOL_MAX_SEC = int(os.environ.get("VP_NEURO_PER_SYMBOL_MAX_SEC", 300))  # v0.99.212 — hard ceiling per symbol so one stuck coin can't block the whole sequential mining cycle forever
 NEURO_RR             = float(os.environ.get("VP_NEURO_RR", 2.0))  # fallback/default only — see NEURO_RR_CANDIDATES below for the actual per-symbol auto-tuned value
 NEURO_RR_CANDIDATES  = [1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0]  # v0.99.210 — small step (0.25), modest range, per direct user request ("вариативность RR, но не с гигантским шагом"). Best one picked per-symbol from TRAIN-period trades only (same walk-forward discipline as the condition mining itself), then applied to the reported trade history and live signals.
 NEURO_RR_MIN_TRADES  = int(os.environ.get("VP_NEURO_RR_MIN_TRADES", 15))  # don't trust an RR pick based on fewer than this many train-period trades
@@ -13803,32 +13805,60 @@ _neuro_summary = {}      # symbol -> summary dict
 _neuro_live_signals = {}  # symbol -> latest live signal or None
 _neuro_last_mined = None
 _neuro_mining_running = False
+_neuro_mining_done = 0
+_neuro_mining_total = 0
+_neuro_mining_current_symbol = None
 _neuro_prev_signal_keys = set()
 
 
 def neuro_mining_loop():
-    global _neuro_last_mined, _neuro_mining_running
+    global _neuro_last_mined, _neuro_mining_running, _neuro_mining_done, _neuro_mining_total, _neuro_mining_current_symbol
     while True:
         try:
             with _neuro_state_lock:
                 _neuro_mining_running = True
+                _neuro_mining_total = len(NEURO_COINS)
+                _neuro_mining_done = 0
             for symbol in NEURO_COINS:
+                with _neuro_state_lock:
+                    _neuro_mining_current_symbol = symbol
+                # v0.99.212 — same "no with-block, bounded per-item time"
+                # fix as LSW/MSNR's own v0.99.194/195: this loop is
+                # SEQUENTIAL (not a thread pool), so without an explicit
+                # per-symbol ceiling, one stuck coin (e.g. a network call
+                # deep inside get_candles_range/neuro_fetch_funding_rate
+                # hanging past its own timeout) would block every
+                # subsequent symbol in the list forever, not just itself.
+                ex = ThreadPoolExecutor(max_workers=1)
                 try:
-                    confirmed, trades, summary = neuro_backtest_symbol(symbol)
-                    with _neuro_state_lock:
-                        _neuro_patterns[symbol] = confirmed
-                        _neuro_trades[symbol] = trades
-                        _neuro_summary[symbol] = summary
-                except Exception as e:
-                    log_error(f"neuro_mining_loop {symbol}: {e}")
+                    fut = ex.submit(neuro_backtest_symbol, symbol)
+                    try:
+                        confirmed, trades, summary = fut.result(timeout=NEURO_PER_SYMBOL_MAX_SEC)
+                        with _neuro_state_lock:
+                            _neuro_patterns[symbol] = confirmed
+                            _neuro_trades[symbol] = trades
+                            _neuro_summary[symbol] = summary
+                    except (TimeoutError, FutureTimeoutError):
+                        log_error(f"neuro_mining_loop: {symbol} exceeded {NEURO_PER_SYMBOL_MAX_SEC}s — skipping, abandoning stuck thread")
+                    except Exception as e:
+                        log_error(f"neuro_mining_loop {symbol}: {e}")
+                finally:
+                    ex.shutdown(wait=False)  # never block on a stuck worker thread
+                with _neuro_state_lock:
+                    _neuro_mining_done += 1
             with _neuro_state_lock:
                 _neuro_last_mined = int(time.time())
                 _neuro_mining_running = False
+                _neuro_mining_current_symbol = None
         except Exception as e:
             log_error(f"neuro_mining_loop: {e}")
             with _neuro_state_lock:
                 _neuro_mining_running = False
-        time.sleep(NEURO_REFRESH_SEC)
+        # v0.99.212 — Event.wait(timeout=...) instead of a plain sleep, same
+        # fix as LSW/MSNR's own "Очистить X doesn't wake the sleeping loop"
+        # — the new "Очистить Neuro" button can cut this short immediately.
+        NEURO_MINING_TRIGGER.wait(timeout=max(300, NEURO_REFRESH_SEC))
+        NEURO_MINING_TRIGGER.clear()
 
 
 def neuro_live_loop():
@@ -13874,6 +13904,9 @@ def api_neuro_status():
         live_signals = dict(_neuro_live_signals)
         last_mined = _neuro_last_mined
         running = _neuro_mining_running
+        mining_done = _neuro_mining_done
+        mining_total = _neuro_mining_total
+        mining_current = _neuro_mining_current_symbol
     coins = []
     for symbol in NEURO_COINS:
         recent_trades = (trades.get(symbol) or [])[-20:][::-1]
@@ -13886,6 +13919,7 @@ def api_neuro_status():
         })
     return jsonify({
         "coins": coins, "last_mined": last_mined, "mining_running": running,
+        "mining_done": mining_done, "mining_total": mining_total, "mining_current_symbol": mining_current,
         "config": {"tf": NEURO_TF, "forward_bars": NEURO_FORWARD_BARS, "rr": NEURO_RR,
                    "history_days": NEURO_HISTORY_DAYS, "z_threshold": NEURO_Z_THRESHOLD,
                    "min_agree_z": NEURO_MIN_AGREE_Z, "refresh_sec": NEURO_REFRESH_SEC},
@@ -15120,6 +15154,24 @@ def api_scalp_chart(symbol):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/reset/neuro", methods=["POST"])
+def api_reset_neuro():
+    try:
+        with _neuro_state_lock:
+            _neuro_patterns.clear()
+            _neuro_trades.clear()
+            _neuro_summary.clear()
+            _neuro_live_signals.clear()
+        # Same fix as api_reset_lsw()/api_reset_msnr() — wakes the mining
+        # loop immediately instead of leaving it asleep for up to
+        # NEURO_REFRESH_SEC (4h default).
+        NEURO_MINING_TRIGGER.set()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset_neuro: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/reset/risk_autotune", methods=["POST"])
 def api_reset_risk_autotune():
     """Resets every parameter risk_autotune_pass() touches back to its
@@ -15548,6 +15600,7 @@ INDEX_HTML = """<!doctype html>
       <button id="resetFt5Btn">Очистить FT5</button>
       <button id="resetMirrorBtn">Очистить Зеркало</button>
       <button id="resetLswBtn">Очистить Sweep</button>
+      <button id="resetNeuroBtn">Очистить Neuro</button>
       <button id="resetSimulatorBtn">Сбросить симулятор</button>
       <button id="resetRiskAutotuneBtn">Сбросить авто-тюнинг</button>
     </div>
@@ -17582,8 +17635,15 @@ async function refreshNeuro() {
     const coins = data.coins || [];
     const lastMined = data.last_mined ? fmtDateTime(data.last_mined) : '\u2014';
     const miningTxt = data.mining_running
-      ? '<span class="dim">\u043c\u0430\u0439\u043d\u0438\u043d\u0433 \u0432\u044b\u043f\u043e\u043b\u043d\u044f\u0435\u0442\u0441\u044f\u2026</span>'
+      ? `<span class="dim">\u043c\u0430\u0439\u043d\u0438\u043d\u0433: ${data.mining_done||0}/${data.mining_total||coins.length||10} \u2014 \u0441\u0435\u0439\u0447\u0430\u0441 ${data.mining_current_symbol||'?'}</span>`
       : `<span class="dim">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u043c\u0430\u0439\u043d\u0438\u043d\u0433: ${lastMined}</span>`;
+    const progressPct = data.mining_total ? Math.round((data.mining_done||0) / data.mining_total * 100) : 0;
+    const progressBarHtml = data.mining_running ? `
+      <div style="margin:6px 0 10px;">
+        <div style="background:#1c2433;border-radius:6px;height:8px;overflow:hidden;">
+          <div style="background:#a855f7;height:100%;width:${progressPct}%;transition:width 0.4s;"></div>
+        </div>
+      </div>` : '';
 
     const cards = coins.map(c => {
       const s = c.summary || {};
@@ -17706,7 +17766,8 @@ async function refreshNeuro() {
         (\u0447\u0430\u0441 \u0434\u043d\u044f, \u0434\u0435\u043d\u044c \u043d\u0435\u0434\u0435\u043b\u0438, RSI, EMA, MACD, Bollinger, \u043e\u0431\u044a\u0451\u043c, funding rate, \u043a\u043e\u0440\u0440\u0435\u043b\u044f\u0446\u0438\u044f \u0441 BTC \u0438 \u0434\u0440.) \u0438 \u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0435\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u0442\u043e,
         \u0447\u0442\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0435\u0442\u0441\u044f \u043d\u0430 \u043e\u0442\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0445 \u0434\u0430\u043d\u043d\u044b\u0445 (walk-forward). \u041a\u0430\u0440\u0442\u043e\u0447\u043a\u0430 \u043a\u0430\u0436\u0434\u043e\u0439 \u043c\u043e\u043d\u0435\u0442\u044b: \u0436\u0438\u0432\u043e\u0439 \u0441\u0438\u0433\u043d\u0430\u043b \u0441\u0432\u0435\u0440\u0445\u0443, \u0437\u0430\u0442\u0435\u043c WINRATE/P&L/RR/W-L-T, \u043f\u043e\u0442\u043e\u043c \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0438 \u0438 \u0441\u0434\u0435\u043b\u043a\u0438 (\u0440\u0430\u0441\u043a\u0440\u044b\u0432\u0430\u044e\u0442\u0441\u044f). \u041a\u043b\u0438\u043a \u043f\u043e \u0441\u0434\u0435\u043b\u043a\u0435 \u2014 \u0433\u0440\u0430\u0444\u0438\u043a. \u041f\u0435\u0440\u0435\u043c\u0430\u0439\u043d\u0438\u0432\u0430\u0435\u0442 \u043a\u0430\u0436\u0434\u044b\u0435 ${Math.round((cfg.refresh_sec||14400)/3600)}\u0447.
       </div>
-      <div style="margin-bottom:12px;">${miningTxt}</div>
+      <div style="margin-bottom:4px;">${miningTxt}</div>
+      ${progressBarHtml}
       <div id="neuroCanvasWrap" style="width:100%;height:220px;background:#0a0e1a;border-radius:10px;overflow:hidden;margin-bottom:14px;position:relative;">
         <canvas id="neuroCanvas" style="width:100%;height:100%;display:block;"></canvas>
       </div>
@@ -18234,6 +18295,9 @@ wireResetButton('resetMirrorBtn', '/api/reset/mirror',
 wireResetButton('resetLswBtn', '/api/reset/lsw',
   'Удалить накопленный бэктест и сигналы Sweep? Остальное не тронет. Это необратимо.',
   'Очистить Sweep');
+wireResetButton('resetNeuroBtn', '/api/reset/neuro',
+  'Удалить накопленные зависимости, сделки и сигналы Neuro по всем 10 монетам и начать заново? Это необратимо.',
+  'Очистить Neuro');
 wireResetButton('resetRiskAutotuneBtn', '/api/reset/risk_autotune',
   'Сбросить все параметры авто-тюнинга риска (EMA/Скальпинг/Сессия) к значениям по умолчанию из кода, очистить лог и cooldown? Сами сигналы и статистику не тронет. Это необратимо.',
   'Сбросить авто-тюнинг');
