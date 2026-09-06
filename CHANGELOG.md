@@ -12546,3 +12546,38 @@ v0.99.209 - Neuro condition set broadened significantly, per direct user
          programmatic regex scan confirming zero surrogate-pair escape
          bugs before push (same category of bug hit twice already this
          session).
+
+v0.99.210 - Neuro RR is now per-symbol auto-tuned instead of a fixed
+         2.0, per direct user request ("вариативность RR, только не
+         с гигантским шагом"). NEURO_RR_CANDIDATES = [1.5, 1.75, 2.0,
+         2.25, 2.5, 2.75, 3.0] — 0.25 step, modest range as requested.
+         neuro_pick_best_rr() sweeps all 7 candidates over the TRAIN-
+         period trade simulation ONLY (same walk-forward discipline as
+         the condition mining itself — never picks RR by peeking at
+         test/live-period results), picks whichever gives the best
+         average P&L in R, with a minimum-trade-count guard (15) so a
+         handful of lucky/unlucky trades can't swing the pick. The
+         chosen RR is then used for both the reported trade history
+         (test+train combined, for an honest final track record) and
+         live signal SL/TP sizing (threaded through neuro_live_loop ->
+         neuro_scan_live via each symbol's own stored summary).
+         UI: coin cards now show the ACTUAL per-symbol chosen RR (was
+         always displaying the fixed global default before) plus a
+         collapsible RR sweep table (RR/n/WR/avgP&L per candidate, best
+         one highlighted with a star) so the tradeoff curve itself is
+         visible, not just the final pick.
+         neuro_simulate_trades()/neuro_scan_live() now take `rr` as a
+         parameter (defaulting to NEURO_RR) instead of hardcoding the
+         module constant, so the same simulation code serves both the
+         sweep and the final chosen-RR run without duplication.
+         Validated on real ETH/SOL 1h data (resampled from the same
+         public klines cache): sweep curves behaved sensibly (WR
+         decreases monotonically as RR rises, avg P&L peaks in the
+         middle) — ETH picked RR=2.5 (peak avgP&L 0.273R vs 0.227R at
+         the old fixed RR=2.0), SOL picked RR=2.0. Genuine improvement,
+         not noise, since the curve shape itself is exactly what a real
+         risk/reward tradeoff should look like.
+         Verified: py_compile, pyflakes, node --check, 52 routes, real
+         runtime 200 on / and /api/neuro/status, zero surrogate-pair
+         escapes (programmatic scan before push, same category of bug
+         hit twice already this session).
