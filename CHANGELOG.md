@@ -12327,3 +12327,21 @@ v0.99.203 - FIX: v0.99.202's own real-duration bar scaling backfired —
          (comparable density to the original 1h cadence, now on a finer
          grid as the user actually wanted), zero exceptions across both
          amd_detect_signals() and the full amd_backtest_symbol() pipeline.
+
+v0.99.204 - AMD chart never existed, per direct user report ("график по
+         монетам в amd не открывается"). AMD had a backtest table and
+         live signals list but NO /api/amd/chart endpoint at all, and
+         no onclick on trade rows to trigger one — clicking a trade row
+         literally did nothing.
+         Added: /api/amd/chart/<symbol> (same pattern as api_lsw_chart —
+         looks up the signal's own recorded entry/sl/tp/time from live
+         signals first, then background-backtest trades, never
+         re-derives from current live params). amd_backtest_loop() now
+         also stores full per-symbol trade lists (_amd_backtest_trades),
+         not just aggregate summaries, so past trades can be looked up
+         for the chart. Added openAmdChart() JS wrapper and wired
+         onclick on both live-signal rows and per-trade backtest rows
+         (the latter had literally no onclick before this fix).
+         Verified: py_compile, pyflakes, node --check, 50 routes, real
+         runtime confirming the new route responds (404 for a
+         non-existent signal, as expected, not a crash).
