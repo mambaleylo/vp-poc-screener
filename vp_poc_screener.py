@@ -26,6 +26,8 @@ import traceback
 import queue
 import hmac
 import hashlib
+import bisect
+import itertools
 from decimal import Decimal
 from collections import deque
 from datetime import datetime, timezone
@@ -53,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.206"
+APP_VERSION = "0.99.207"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -603,6 +605,7 @@ MSNR_RANK_INCOME_WINSORIZE_PCT = float(os.environ.get("VP_MSNR_RANK_INCOME_WINSO
 MSNR_BACKTEST_TRIGGER = threading.Event()
 LSW_BACKTEST_TRIGGER = threading.Event()  # v0.99.137 — same "Очистить X doesn't wake the sleeping loop" fix as MSNR_BACKTEST_TRIGGER's own comment, applied to LSW ("Очистить Sweep"), per direct user report of the identical symptom
 MSNR_AUTOTRADE_TOP_N = int(os.environ.get("VP_MSNR_AUTOTRADE_TOP_N", 10))  # v0.99.19 — how many non-gold symbols (by msnr_rank_by_winrate_sample()) get an individual autotrade toggle, on top of the always-eligible 3 gold ones. Raised 3->10 per direct follow-up request.
+MSNR_SINGLE_BEST_ENABLED = os.environ.get("VP_MSNR_SINGLE_BEST", "0") == "1"  # v0.99.207 — per direct user request: when on, only the ONE symbol with the highest compound_return_pct (biggest simulated $ profit) is allowed to autotrade, overriding the normal top-N pool entirely
 
 # ============================================================================
 # EXPERIMENTAL: FT5 — port of freqtrade-strategies' Strategy005 (v0.96.0)
@@ -1020,7 +1023,7 @@ CREDENTIALS_FILE = os.environ.get(
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_network",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "msnr_all_in_enabled",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "msnr_all_in_enabled", "msnr_single_best_enabled",
                   "autotrade_risk_pct",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   "lsw_rr", "lsw_equal_tolerance_pct",
@@ -1088,6 +1091,7 @@ def get_settings():
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
         "autotrade_risk_pct": AUTOTRADE_RISK_PCT_OF_BALANCE,
         "msnr_all_in_enabled": MSNR_ALL_IN_ENABLED,
+        "msnr_single_best_enabled": MSNR_SINGLE_BEST_ENABLED,
         "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
         "autotrade_breakout": AUTOTRADE_ENABLED_BREAKOUT,
         "autotrade_scalp": AUTOTRADE_ENABLED_SCALP,
@@ -1115,7 +1119,7 @@ def apply_settings(updates):
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_EMA_BULL, TELEGRAM_ALERTS_AMD, TELEGRAM_ALERTS_NEURO, TELEGRAM_ALERTS_NETWORK
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED, MSNR_SINGLE_BEST_ENABLED
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
@@ -1248,6 +1252,8 @@ def apply_settings(updates):
             pass
     if "msnr_all_in_enabled" in updates:
         MSNR_ALL_IN_ENABLED = bool(updates["msnr_all_in_enabled"])
+    if "msnr_single_best_enabled" in updates:
+        MSNR_SINGLE_BEST_ENABLED = bool(updates["msnr_single_best_enabled"])
     if "autotrade_bounce" in updates:
         AUTOTRADE_ENABLED_BOUNCE = bool(updates["autotrade_bounce"])
     if "autotrade_breakout" in updates:
@@ -9727,6 +9733,22 @@ def _msnr_run_one_backtest_cycle(t0):
             # winrate bar turns it off, matching how it turned on)
             # rather than only reacting to ranking changes.
             eligible_now = set(msnr_autotrade_eligible_symbols(merged_overrides, bounds=msnr_rank_bounds))
+            # v0.99.207 — "single best coin" mode, per direct user request:
+            # when enabled, collapse the whole eligible pool down to just the
+            # ONE symbol with the highest compound_return_pct (biggest
+            # simulated $ profit) among symbols that also clear the normal
+            # winrate>=50 bar — everything else is treated as ineligible this
+            # cycle, same as if it had fallen out of the top-N.
+            if MSNR_SINGLE_BEST_ENABLED and eligible_now:
+                candidates = [s for s in eligible_now
+                              if (merged_summary.get(s) or {}).get("win_rate") is not None
+                              and merged_summary[s]["win_rate"] >= 50
+                              and (merged_summary.get(s) or {}).get("compound_return_pct") is not None]
+                if candidates:
+                    best_symbol = max(candidates, key=lambda s: merged_summary[s]["compound_return_pct"])
+                    eligible_now = {best_symbol}
+                else:
+                    eligible_now = set()
             prev_top_set = set(STATE.get("msnr_autotrade_top_set") or [])
             autotrade_symbols = STATE["msnr_autotrade_symbols"]
             for sym in eligible_now:
@@ -13056,14 +13078,129 @@ def neuro_atr_series(candles, period=14):
     return out
 
 
-def neuro_compute_conditions(candles):
-    """One bucket-label dict per bar, across many independent condition types."""
+def neuro_macd_series(closes, fast=12, slow=26, signal=9):
+    ema_fast = neuro_ema_series(closes, fast)
+    ema_slow = neuro_ema_series(closes, slow)
+    macd_line = [None if (a is None or b is None) else a - b for a, b in zip(ema_fast, ema_slow)]
+    valid = [m for m in macd_line if m is not None]
+    if len(valid) < signal:
+        return macd_line, [None] * len(closes), [None] * len(closes)
+    first_valid_idx = next(i for i, m in enumerate(macd_line) if m is not None)
+    sig_series = [None] * first_valid_idx
+    k = 2.0 / (signal + 1)
+    sig = sum(valid[:signal]) / signal
+    sig_series.extend([None] * (signal - 1))
+    sig_series.append(sig)
+    for m in valid[signal:]:
+        sig = m * k + sig * (1 - k)
+        sig_series.append(sig)
+    while len(sig_series) < len(closes):
+        sig_series.append(sig_series[-1] if sig_series else None)
+    sig_series = sig_series[:len(closes)]
+    hist = [None if (m is None or s is None) else m - s for m, s in zip(macd_line, sig_series)]
+    return macd_line, sig_series, hist
+
+
+def neuro_bollinger_pctb(closes, period=20, mult=2.0):
+    out = [None] * len(closes)
+    for i in range(period - 1, len(closes)):
+        window = closes[i - period + 1:i + 1]
+        mean = sum(window) / period
+        var = sum((x - mean) ** 2 for x in window) / period
+        sd = math.sqrt(var)
+        upper, lower = mean + mult * sd, mean - mult * sd
+        if upper > lower:
+            out[i] = (closes[i] - lower) / (upper - lower)
+    return out
+
+
+def neuro_align_htf_trend(candles, htf_candles, htf_ema_period=50):
+    """For each 1h bar, find the most recent CLOSED higher-timeframe candle
+    and label whether price is above/below that HTF's own EMA — a simple
+    multi-timeframe trend filter condition."""
+    if not htf_candles or len(htf_candles) < htf_ema_period + 2:
+        return [None] * len(candles)
+    htf_closes = [c["close"] for c in htf_candles]
+    htf_ema = neuro_ema_series(htf_closes, htf_ema_period)
+    htf_times = [c["time"] for c in htf_candles]
+    out = []
+    j = 0
+    for c in candles:
+        while j + 1 < len(htf_times) and htf_times[j + 1] <= c["time"]:
+            j += 1
+        if htf_ema[j] is None:
+            out.append(None)
+        else:
+            out.append("above" if c["close"] > htf_ema[j] else "below")
+    return out
+
+
+def neuro_align_funding_rate(candles, funding_records):
+    """funding_records: list of {time, rate}. Label each bar by the most
+    recently known funding rate: very_positive / positive / negative /
+    very_negative (extreme funding often precedes mean-reversion)."""
+    if not funding_records:
+        return [None] * len(candles)
+    fr_sorted = sorted(funding_records, key=lambda f: f["time"])
+    fr_times = [f["time"] for f in fr_sorted]
+    fr_rates = [f["rate"] for f in fr_sorted]
+    out = []
+    j = -1
+    for c in candles:
+        while j + 1 < len(fr_times) and fr_times[j + 1] <= c["time"]:
+            j += 1
+        if j < 0:
+            out.append(None)
+        else:
+            r = fr_rates[j]
+            out.append("very_positive" if r >= 0.0005 else "positive" if r > 0.0001
+                       else "very_negative" if r <= -0.0005 else "negative" if r < -0.0001 else "neutral")
+    return out
+
+
+def neuro_align_btc_agreement(candles, btc_candles, lookback=4):
+    """For each bar, was BTC's own return over the last `lookback` bars the
+    SAME sign as this coin's return over the same window? (agree/diverge)"""
+    if not btc_candles or len(btc_candles) < lookback + 2:
+        return [None] * len(candles)
+    btc_times = [c["time"] for c in btc_candles]
+    btc_closes = [c["close"] for c in btc_candles]
+    btc_time_list = btc_times
+    out = []
+    for i, c in enumerate(candles):
+        if i < lookback:
+            out.append(None)
+            continue
+        own_ret = c["close"] - candles[i - lookback]["close"]
+        # find nearest BTC candle at/just-before this bar's time, and lookback bars earlier
+        pos = bisect.bisect_right(btc_time_list, c["time"]) - 1
+        pos_prev = pos - lookback
+        if pos < 0 or pos_prev < 0:
+            out.append(None)
+            continue
+        btc_ret = btc_closes[pos] - btc_closes[pos_prev]
+        if own_ret == 0 or btc_ret == 0:
+            out.append(None)
+        else:
+            out.append("agree" if (own_ret > 0) == (btc_ret > 0) else "diverge")
+    return out
+
+
+def neuro_compute_conditions(candles, htf_candles=None, funding_records=None, btc_candles=None):
+    """One bucket-label dict per bar, across many independent condition types.
+    htf_candles/funding_records/btc_candles are OPTIONAL extra data sources —
+    when not supplied those specific condition types are simply skipped."""
     closes = [c["close"] for c in candles]
     ema50 = neuro_ema_series(closes, 50)
     ema200 = neuro_ema_series(closes, 200)
     rsi14 = neuro_rsi_series(closes, 14)
     atr14 = neuro_atr_series(candles, 14)
     vols = [c["volume"] for c in candles]
+    _, _, macd_hist = neuro_macd_series(closes)
+    bb_pctb = neuro_bollinger_pctb(closes)
+    htf_trend = neuro_align_htf_trend(candles, htf_candles) if htf_candles else [None] * len(candles)
+    funding_zone = neuro_align_funding_rate(candles, funding_records) if funding_records else [None] * len(candles)
+    btc_agree = neuro_align_btc_agreement(candles, btc_candles) if btc_candles else [None] * len(candles)
 
     conds = []
     streak = 0
@@ -13073,6 +13210,7 @@ def neuro_compute_conditions(candles):
         dt = datetime.fromtimestamp(c["time"], tz=timezone.utc)
         bucket["hour"] = dt.hour
         bucket["dow"] = dt.weekday()
+        bucket["dom_third"] = "early" if dt.day <= 10 else "late" if dt.day >= 21 else "mid"
 
         if rsi14[i] is not None:
             r = rsi14[i]
@@ -13081,6 +13219,23 @@ def neuro_compute_conditions(candles):
             bucket["ema50_side"] = "above" if c["close"] > ema50[i] else "below"
         if ema200[i] is not None:
             bucket["ema200_side"] = "above" if c["close"] > ema200[i] else "below"
+        if macd_hist[i] is not None:
+            bucket["macd_hist"] = "positive" if macd_hist[i] > 0 else "negative"
+            if i > 0 and macd_hist[i - 1] is not None:
+                if macd_hist[i - 1] <= 0 < macd_hist[i]:
+                    bucket["macd_cross"] = "bull_cross"
+                elif macd_hist[i - 1] >= 0 > macd_hist[i]:
+                    bucket["macd_cross"] = "bear_cross"
+        if bb_pctb[i] is not None:
+            p = bb_pctb[i]
+            bucket["bb_pctb"] = "above_upper" if p >= 1.0 else "near_upper" if p >= 0.8 \
+                else "below_lower" if p <= 0.0 else "near_lower" if p <= 0.2 else "mid"
+        if htf_trend[i] is not None:
+            bucket["htf_trend"] = htf_trend[i]
+        if funding_zone[i] is not None:
+            bucket["funding_zone"] = funding_zone[i]
+        if btc_agree[i] is not None:
+            bucket["btc_agree"] = btc_agree[i]
 
         if i >= 20:
             avg_vol = sum(vols[i - 20:i]) / 20
@@ -13136,35 +13291,24 @@ def neuro_zscore(mean_a, n_a, mean_all, std_all):
     return (mean_a - mean_all) / se
 
 
-NEURO_CONDITION_KEYS = ("hour", "dow", "rsi_zone", "ema50_side", "ema200_side",
-                        "vol_zone", "range_zone", "body_zone", "streak", "range_pos")
+NEURO_CONDITION_KEYS = ("hour", "dow", "dom_third", "rsi_zone", "ema50_side", "ema200_side",
+                        "macd_hist", "macd_cross", "bb_pctb", "vol_zone", "range_zone",
+                        "body_zone", "streak", "range_pos", "htf_trend", "funding_zone", "btc_agree")
+
+# Curated subset used for PAIRWISE combinations — deliberately excludes "hour"
+# and "streak" (too many distinct values, would dilute sample sizes and
+# explode the hypothesis count). Combos get a stricter min_sample/z_threshold
+# below since testing hundreds of pairs raises real false-discovery risk —
+# same "don't fool yourself" discipline as the single-condition walk-forward.
+NEURO_COMBO_KEYS = ("dow", "rsi_zone", "ema50_side", "ema200_side", "macd_hist", "bb_pctb",
+                    "vol_zone", "range_zone", "htf_trend", "funding_zone", "btc_agree", "dom_third")
+NEURO_FORWARD_HORIZONS = [4, 12, 24]  # test several forward-looking windows independently
+NEURO_COMBO_MIN_SAMPLE_MULT = 2.0   # combos need more samples to trust (more hypotheses tested)
+NEURO_COMBO_Z_BONUS = 0.5           # and a higher bar on z, same reasoning
 
 
-def neuro_mine(candles, forward_bars=None, min_sample=None, z_threshold=None):
-    forward_bars = forward_bars or NEURO_FORWARD_BARS
-    min_sample = min_sample or NEURO_MIN_SAMPLE
-    z_threshold = z_threshold if z_threshold is not None else NEURO_Z_THRESHOLD
-
-    conds = neuro_compute_conditions(candles)
-    fwd = neuro_forward_returns(candles, forward_bars)
-    valid_idx = [i for i in range(len(candles)) if fwd[i] is not None]
-    all_returns = [fwd[i] for i in valid_idx]
-    if len(all_returns) < min_sample:
-        return []
-    mean_all = sum(all_returns) / len(all_returns)
-    var_all = sum((r - mean_all) ** 2 for r in all_returns) / len(all_returns)
-    std_all = math.sqrt(var_all)
-
-    buckets = {}
-    for i in valid_idx:
-        b = conds[i]
-        for key in NEURO_CONDITION_KEYS:
-            v = b.get(key)
-            if v is None:
-                continue
-            buckets.setdefault((key, v), []).append(fwd[i])
-
-    discovered = []
+def _neuro_bucket_stats(buckets, mean_all, std_all, min_sample, z_threshold):
+    out = []
     for (ktype, kval), rets in buckets.items():
         n = len(rets)
         if n < min_sample:
@@ -13173,74 +13317,162 @@ def neuro_mine(candles, forward_bars=None, min_sample=None, z_threshold=None):
         z = neuro_zscore(mean_r, n, mean_all, std_all)
         if abs(z) >= z_threshold:
             wins = sum(1 for r in rets if (r > 0) == (mean_r > 0))
-            discovered.append({
+            out.append({
                 "type": ktype, "value": kval, "n": n,
                 "mean_fwd_return": round(mean_r, 5), "baseline_mean": round(mean_all, 5),
                 "z": round(z, 2), "direction": "LONG" if mean_r > 0 else "SHORT",
                 "consistency": round(wins / n, 3),
             })
+    return out
+
+
+def neuro_mine(candles, forward_bars=None, min_sample=None, z_threshold=None,
+               htf_candles=None, funding_records=None, btc_candles=None, include_combos=True):
+    """Mine both single-condition and pairwise-combination dependencies,
+    across multiple forward-return horizons, from ONE set of pre-computed
+    per-bar condition buckets (computed once, reused for every horizon)."""
+    min_sample = min_sample or NEURO_MIN_SAMPLE
+    z_threshold = z_threshold if z_threshold is not None else NEURO_Z_THRESHOLD
+    horizons = [forward_bars] if forward_bars else NEURO_FORWARD_HORIZONS
+
+    conds = neuro_compute_conditions(candles, htf_candles, funding_records, btc_candles)
+    combo_pairs = list(itertools.combinations(NEURO_COMBO_KEYS, 2)) if include_combos else []
+
+    discovered = []
+    for horizon in horizons:
+        fwd = neuro_forward_returns(candles, horizon)
+        valid_idx = [i for i in range(len(candles)) if fwd[i] is not None]
+        all_returns = [fwd[i] for i in valid_idx]
+        if len(all_returns) < min_sample:
+            continue
+        mean_all = sum(all_returns) / len(all_returns)
+        var_all = sum((r - mean_all) ** 2 for r in all_returns) / len(all_returns)
+        std_all = math.sqrt(var_all)
+
+        single_buckets = {}
+        combo_buckets = {}
+        for i in valid_idx:
+            b = conds[i]
+            for key in NEURO_CONDITION_KEYS:
+                v = b.get(key)
+                if v is not None:
+                    single_buckets.setdefault((key, v), []).append(fwd[i])
+            if combo_pairs:
+                for k1, k2 in combo_pairs:
+                    v1, v2 = b.get(k1), b.get(k2)
+                    if v1 is not None and v2 is not None:
+                        combo_key = f"{k1}+{k2}"
+                        combo_val = f"{v1}|{v2}"
+                        combo_buckets.setdefault((combo_key, combo_val), []).append(fwd[i])
+
+        for pat in _neuro_bucket_stats(single_buckets, mean_all, std_all, min_sample, z_threshold):
+            pat["horizon"] = horizon
+            pat["is_combo"] = False
+            discovered.append(pat)
+        if combo_buckets:
+            combo_min = min_sample * NEURO_COMBO_MIN_SAMPLE_MULT
+            combo_z = z_threshold + NEURO_COMBO_Z_BONUS
+            for pat in _neuro_bucket_stats(combo_buckets, mean_all, std_all, combo_min, combo_z):
+                pat["horizon"] = horizon
+                pat["is_combo"] = True
+                discovered.append(pat)
+
     discovered.sort(key=lambda d: -abs(d["z"]))
     return discovered
 
 
-def neuro_walk_forward(candles, forward_bars=None, min_sample=None, z_threshold=None, train_frac=None):
+def neuro_walk_forward(candles, forward_bars=None, min_sample=None, z_threshold=None, train_frac=None,
+                        htf_candles=None, funding_records=None, btc_candles=None):
     """Mine on the first train_frac of history, confirm only what still points
     the same direction on the held-out remainder — never trust in-sample-only
     stats, per the same discipline already applied to MSNR/LSW backtests."""
-    forward_bars = forward_bars or NEURO_FORWARD_BARS
     min_sample = min_sample or NEURO_MIN_SAMPLE
     z_threshold = z_threshold if z_threshold is not None else NEURO_Z_THRESHOLD
     train_frac = train_frac or NEURO_TRAIN_FRAC
 
     split = int(len(candles) * train_frac)
     train, test = candles[:split], candles[split:]
-    train_patterns = neuro_mine(train, forward_bars, min_sample, z_threshold)
+
+    def _slice_extra(extra, split_idx):
+        if not extra:
+            return None, None
+        # extra candles are on their own timescale; split by TIME at the
+        # train/test boundary instead of by index count
+        boundary_time = candles[split_idx - 1]["time"] if split_idx > 0 else candles[0]["time"]
+        tr = [c for c in extra if c["time"] <= boundary_time]
+        te = [c for c in extra if c["time"] > boundary_time]
+        return tr, te
+
+    htf_train, htf_test = _slice_extra(htf_candles, split)
+    fr_train, fr_test = (None, None)
+    if funding_records:
+        boundary_time = candles[split - 1]["time"] if split > 0 else candles[0]["time"]
+        fr_train = [f for f in funding_records if f["time"] <= boundary_time]
+        fr_test = [f for f in funding_records if f["time"] > boundary_time]
+    btc_train, btc_test = _slice_extra(btc_candles, split)
+
+    train_patterns = neuro_mine(train, None, min_sample, z_threshold,
+                                 htf_candles=htf_train, funding_records=fr_train, btc_candles=btc_train)
     if not train_patterns:
         return []
 
-    test_conds = neuro_compute_conditions(test)
-    test_fwd = neuro_forward_returns(test, forward_bars)
-    valid_test_idx = [i for i in range(len(test)) if test_fwd[i] is not None]
-
+    test_conds = neuro_compute_conditions(test, htf_test, fr_test, btc_test)
     confirmed = []
+    # Group train patterns by horizon so we only compute test forward-returns
+    # once per distinct horizon actually used.
+    by_horizon = {}
     for pat in train_patterns:
-        ktype, kval = pat["type"], pat["value"]
-        test_rets = [test_fwd[i] for i in valid_test_idx if test_conds[i].get(ktype) == kval]
-        if len(test_rets) < max(10, min_sample // 3):
-            continue
-        test_mean = sum(test_rets) / len(test_rets)
-        if (test_mean > 0) == (pat["mean_fwd_return"] > 0):
-            confirmed.append({**pat, "test_n": len(test_rets),
-                              "test_mean_fwd_return": round(test_mean, 5), "held_up": True})
+        by_horizon.setdefault(pat["horizon"], []).append(pat)
+
+    for horizon, pats in by_horizon.items():
+        test_fwd = neuro_forward_returns(test, horizon)
+        valid_test_idx = [i for i in range(len(test)) if test_fwd[i] is not None]
+        for pat in pats:
+            ktype, kval = pat["type"], pat["value"]
+            if pat.get("is_combo"):
+                k1, k2 = ktype.split("+")
+                test_rets = [test_fwd[i] for i in valid_test_idx
+                             if f"{test_conds[i].get(k1)}|{test_conds[i].get(k2)}" == kval]
+            else:
+                test_rets = [test_fwd[i] for i in valid_test_idx if test_conds[i].get(ktype) == kval]
+            min_needed = max(10, int(min_sample * (NEURO_COMBO_MIN_SAMPLE_MULT if pat.get("is_combo") else 1) // 3))
+            if len(test_rets) < min_needed:
+                continue
+            test_mean = sum(test_rets) / len(test_rets)
+            if (test_mean > 0) == (pat["mean_fwd_return"] > 0):
+                confirmed.append({**pat, "test_n": len(test_rets),
+                                  "test_mean_fwd_return": round(test_mean, 5), "held_up": True})
     confirmed.sort(key=lambda d: -abs(d["z"]))
     return confirmed
 
 
-def neuro_simulate_trades(candles, confirmed_patterns):
+def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding_records=None, btc_candles=None):
     """Turn confirmed dependencies into an actual trade history: whenever a
-    confirmed condition is true on a bar, enter at that bar's close in the
-    confirmed direction, SL/TP from ATR, track the real outcome. This is the
-    honest track record shown alongside the raw pattern list."""
+    confirmed condition (single OR pairwise combo) is true on a bar, enter at
+    the NEXT bar's open in the confirmed direction, SL/TP from ATR, track the
+    real outcome. This is the honest track record shown alongside the raw
+    pattern list."""
     if not confirmed_patterns:
         return []
-    pattern_lookup = {}
-    for p in confirmed_patterns:
-        pattern_lookup.setdefault(p["type"], {})[p["value"]] = p
 
-    conds = neuro_compute_conditions(candles)
+    conds = neuro_compute_conditions(candles, htf_candles, funding_records, btc_candles)
     atr14 = neuro_atr_series(candles, 14)
     trades = []
     last_entry_i = -10**9
+    min_gap = min((p.get("horizon") or NEURO_FORWARD_HORIZONS[0]) for p in confirmed_patterns)
     for i in range(len(candles) - 1):
-        if i - last_entry_i < NEURO_FORWARD_BARS:
+        if i - last_entry_i < min_gap:
             continue  # avoid overlapping trades from the same/adjacent bars
         matched = None
-        for ktype, by_val in pattern_lookup.items():
-            v = conds[i].get(ktype)
-            if v in by_val:
-                cand = by_val[v]
-                if matched is None or abs(cand["z"]) > abs(matched["z"]):
-                    matched = cand
+        for p in confirmed_patterns:
+            if p.get("is_combo"):
+                k1, k2 = p["type"].split("+")
+                cur_val = f"{conds[i].get(k1)}|{conds[i].get(k2)}"
+            else:
+                cur_val = conds[i].get(p["type"])
+            if cur_val == p["value"]:
+                if matched is None or abs(p["z"]) > abs(matched["z"]):
+                    matched = p
         if not matched or not atr14[i]:
             continue
         entry_bar = candles[i + 1]
@@ -13278,7 +13510,7 @@ def neuro_simulate_trades(candles, confirmed_patterns):
             "time": candles[i]["time"], "entry_time": entry_bar["time"],
             "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8),
             "direction": direction, "pattern_type": matched["type"], "pattern_value": str(matched["value"]),
-            "z": matched["z"], "result": result,
+            "z": matched["z"], "is_combo": matched.get("is_combo", False), "result": result,
             "exit_price": round(exit_price, 8) if exit_price else None,
             "exit_time": exit_time, "pnl_r": pnl_r,
         })
@@ -13286,17 +13518,50 @@ def neuro_simulate_trades(candles, confirmed_patterns):
     return trades
 
 
+def neuro_fetch_funding_rate(symbol, start_ts, end_ts, limit=1000):
+    """GET /futures/usdt/funding_rate — Gate.io's historical funding rate."""
+    try:
+        r = requests.get(
+            f"{GATE_BASE}/futures/usdt/funding_rate",
+            params={"contract": symbol, "limit": limit, "from": start_ts, "to": end_ts},
+            timeout=HTTP_TIMEOUT,
+        )
+        r.raise_for_status()
+        out = []
+        for row in r.json():
+            try:
+                out.append({"time": int(row.get("t", row.get("time", 0))), "rate": float(row.get("r", row.get("rate", 0)))})
+            except (TypeError, ValueError):
+                continue
+        out.sort(key=lambda x: x["time"])
+        return out
+    except Exception as e:
+        log_error(f"neuro_fetch_funding_rate {symbol}: {e}")
+        return []
+
+
 def neuro_backtest_symbol(symbol):
-    """Fetch max available history, mine + walk-forward validate, simulate
-    the resulting trade history. Returns (confirmed_patterns, trades, summary)."""
+    """Fetch max available history PLUS extra data sources (4h trend, funding
+    rate, BTC correlation), mine + walk-forward validate across many
+    condition types and horizons, simulate the resulting trade history.
+    Returns (confirmed_patterns, trades, summary)."""
     try:
         now = int(time.time())
         start_ts = now - NEURO_HISTORY_DAYS * 86400
         candles = get_candles_range(symbol, NEURO_TF, start_ts, now)
         if not candles or len(candles) < 500:
             return [], [], {}
-        confirmed = neuro_walk_forward(candles)
-        trades = neuro_simulate_trades(candles, confirmed)
+
+        htf_candles = get_candles_range(symbol, "4h", start_ts, now) or []
+        funding_records = neuro_fetch_funding_rate(symbol, start_ts, now)
+        btc_candles = None
+        if symbol != "BTC_USDT":
+            btc_candles = get_candles_range("BTC_USDT", NEURO_TF, start_ts, now) or []
+
+        confirmed = neuro_walk_forward(candles, htf_candles=htf_candles,
+                                        funding_records=funding_records, btc_candles=btc_candles)
+        trades = neuro_simulate_trades(candles, confirmed, htf_candles=htf_candles,
+                                        funding_records=funding_records, btc_candles=btc_candles)
         closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
         wins = sum(1 for t in closed if t["result"] == "WIN")
         losses = len(closed) - wins
@@ -13305,7 +13570,8 @@ def neuro_backtest_symbol(symbol):
         summary = {"n": len(closed), "wins": wins, "losses": losses,
                    "timeouts": sum(1 for t in trades if t["result"] == "TIMEOUT"),
                    "winrate": wr, "avg_pnl_r": avg_pnl, "total": len(trades),
-                   "patterns_confirmed": len(confirmed), "history_bars": len(candles)}
+                   "patterns_confirmed": len(confirmed), "history_bars": len(candles),
+                   "combos_confirmed": sum(1 for p in confirmed if p.get("is_combo"))}
         return confirmed, trades, summary
     except Exception as e:
         log_error(f"neuro_backtest_symbol {symbol}: {e}")
@@ -13314,7 +13580,8 @@ def neuro_backtest_symbol(symbol):
 
 def neuro_scan_live(symbol, confirmed_patterns):
     """Check the most recently closed bar's conditions against this symbol's
-    confirmed dependencies; combine agreeing ones into a single signal."""
+    confirmed dependencies (single + combo); combine agreeing ones into a
+    single signal."""
     try:
         if not confirmed_patterns:
             return None
@@ -13325,7 +13592,15 @@ def neuro_scan_live(symbol, confirmed_patterns):
         closed_candles = [c for c in candles if c["time"] + interval_sec <= now]
         if len(closed_candles) < 30:
             return None
-        conds = neuro_compute_conditions(closed_candles)
+
+        htf_start = now - 60 * INTERVAL_SECONDS.get("4h", 14400)
+        htf_candles = get_candles_range(symbol, "4h", htf_start, now) or []
+        funding_records = neuro_fetch_funding_rate(symbol, now - 30 * 86400, now)
+        btc_candles = None
+        if symbol != "BTC_USDT":
+            btc_candles = get_candles_range("BTC_USDT", NEURO_TF, start_ts, now) or []
+
+        conds = neuro_compute_conditions(closed_candles, htf_candles, funding_records, btc_candles)
         atr14 = neuro_atr_series(closed_candles, 14)
         last = conds[-1]
         atr = atr14[-1]
@@ -13334,7 +13609,12 @@ def neuro_scan_live(symbol, confirmed_patterns):
 
         matched = []
         for p in confirmed_patterns:
-            if last.get(p["type"]) == p["value"]:
+            if p.get("is_combo"):
+                k1, k2 = p["type"].split("+")
+                cur_val = f"{last.get(k1)}|{last.get(k2)}"
+            else:
+                cur_val = last.get(p["type"])
+            if cur_val == p["value"]:
                 matched.append(p)
         if not matched:
             return None
@@ -15275,6 +15555,13 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="label">↳ Только топ-1 монета (MSNR)</div>
+          <div class="sub">торговать только ОДНУ монету — ту у которой сейчас самая большая симулированная $ прибыль (compound_return_pct), при этом винрейт ≥50%. Остальные монеты из топа автоматически выключаются из автоторговли пока включена эта галочка</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setMsnrSingleBest"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Минимальный RR (глобальный)</div>
           <div class="sub">единый порог 1:2 для всех монет одинаково — не подбирается индивидуально под каждую (в отличие от остальных фильтров выше), поэтому результат честнее проверяет саму идею, а не удачную подгонку под конкретную монету</div>
         </div>
@@ -17154,12 +17441,14 @@ async function refreshNeuro() {
         const dirCls = p.direction === 'LONG' ? 'win' : 'loss';
         const testTxt = p.test_mean_fwd_return != null
           ? `<span class="dim">test: ${(p.test_mean_fwd_return*100).toFixed(2)}% (n=${p.test_n})</span>` : '';
+        const comboTag = p.is_combo ? '<span style="color:#a855f7;font-size:9px;">[\u043a\u043e\u043c\u0431\u043e]</span>' : '';
         return `<tr>
-          <td class="dim">${p.type}</td>
+          <td class="dim">${p.type}${comboTag}</td>
           <td>${p.value}</td>
           <td class="${dirCls}">${p.direction}</td>
           <td class="dim">z=${p.z}</td>
           <td class="dim">n=${p.n}</td>
+          <td class="dim">h=${p.horizon||'-'}</td>
           <td class="dim">${(p.mean_fwd_return*100).toFixed(2)}%</td>
           <td>${testTxt}</td>
         </tr>`;
@@ -17723,6 +18012,7 @@ const setInputs = {
   msnr_enabled: document.getElementById('setMsnr'),
   msnr_addon_enabled: document.getElementById('setMsnrAddon'),
   msnr_all_in_enabled: document.getElementById('setMsnrAllIn'),
+  msnr_single_best_enabled: document.getElementById('setMsnrSingleBest'),
   msnr_min_rr_filter_enabled: document.getElementById('setMsnrMinRrFilter'),
   msnr_htf_filter_enabled: document.getElementById('setMsnrHtfFilter'),
   msnr_per_symbol_filters_enabled: document.getElementById('setMsnrPerSymbolFilters'),
