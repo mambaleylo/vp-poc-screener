@@ -12670,3 +12670,39 @@ v0.99.213 - Multi-way (3+, up to 4) condition combinations, per direct
          of a flat "комбо" tag, so combo depth is visible at a glance.
          Verified: py_compile, pyflakes, node --check, 53 routes, real
          runtime 200 on / and /api/neuro/status, zero surrogate escapes.
+
+v0.99.214 - Neuro network diagram redesigned, per direct user report
+         ("визуал будто зависает, подписи обрезаются, хочу красивую
+         визуализацию"). Root-caused the label clipping: text was drawn
+         right-aligned ending at `n.x - 8` with `inX = W*0.12` — on a
+         narrow phone screen this put the START of longer labels (like
+         "ema50_side") at a NEGATIVE x-coordinate, which canvas silently
+         clips, exactly matching the screenshot's truncated "0_side"/
+         "l_zone" labels. Also the old design crammed a fixed 10-item
+         input list connected to ALL 10 coins simultaneously — with most
+         connections barely visible (alpha 0.04 for inactive ones), the
+         diagram looked mostly static/"frozen" since so few lines were
+         ever actually lit up.
+         Redesign, per direct user choices:
+         - Click a coin node to FOCUS it — only that coin's own real top
+           patterns become visible input nodes (up to 8, safe left
+           margin, full un-clipped labels + z-score), full-brightness
+           connections; every other coin fades to near-invisible. Click
+           the same coin (or the purple output node) to unfocus back to
+           overview.
+         - Overview mode (nothing focused) no longer tries to show all
+           27 condition types — just a short stub line per coin hinting
+           at live-signal state, plus a "нажми на монету" prompt.
+         - Flowing particle animation: small glowing dots travel along
+           each active bezier connection (input→coin and coin→output)
+           in a continuous loop via a proper cubic-bezier point formula
+           (_neuroBezierPoint), giving a genuine "data flowing" feel
+           instead of static lines — this was the user's explicit ask
+           for animation.
+         True 3D (WebGL/three.js) was considered but not implemented —
+         a much larger, riskier lift for a hand-rolled canvas widget;
+         this 2D redesign addresses the actual reported problems
+         (clipped text, "frozen" look, all-coins-at-once clutter)
+         directly.
+         Verified: py_compile, pyflakes, node --check, 53 routes, real
+         runtime 200 on / and /api/neuro/status, zero surrogate escapes.
