@@ -12706,3 +12706,64 @@ v0.99.214 - Neuro network diagram redesigned, per direct user report
          directly.
          Verified: py_compile, pyflakes, node --check, 53 routes, real
          runtime 200 on / and /api/neuro/status, zero surrogate escapes.
+
+v0.99.215 - NEURO_COINS expanded 10->20 (added TRX/MATIC/LTC/ATOM/NEAR/
+         APT/ARB/OP/SUI/TON) and 10 new condition types added, per direct
+         user request ("добавь ещё 10 монет и набор новых параметров"):
+         - ADX zone (weak/moderate/strong) — trend STRENGTH, independent
+           of direction (distinct from EMA-side/htf_trend which say
+           which way, not how hard)
+         - Ichimoku cloud position (above/in/below kumo)
+         - VWAP side (rolling 20-bar volume-weighted average)
+         - Williams %R zone — complements RSI/Stochastic with different
+           sensitivity
+         - ATR trend (rising/falling/flat volatility itself — distinct
+           from the existing vol_regime, which measures level not
+           direction)
+         - ROC zone (rate-of-change momentum, an unbounded % measure
+           vs RSI/Stochastic's bounded oscillators)
+         - ETH agreement (generalized the existing BTC-correlation check
+           into neuro_align_agreement(), reused for both)
+         - Wick dominance (upper/lower/balanced — single-candle
+           rejection signature)
+         - Round-number proximity (near/far from a psychological round
+           price level)
+         - 4h RSI zone — genuine multi-timeframe momentum (RSI computed
+           on 4h, aligned to each 1h bar), distinct from the existing 1h
+           rsi_zone
+         NEURO_CONDITION_KEYS grew 27->37; NEURO_COMBO_KEYS grew 22->31.
+         Verified all 10 new indicators produce sensible values on real
+         SOL 1h data, several already surfaced among the STRONGEST
+         confirmed patterns (atr_trend/eth_agree/ichimoku reaching
+         |z|>7-13).
+
+v0.99.216 - CRITICAL FIX for the 8-of-10-coins-hanging report from
+         v0.99.215's own coin/indicator expansion. Root cause: every one
+         of the (now 19) non-BTC symbols was independently re-fetching
+         BTC's OWN full 1h history for its correlation check, and every
+         non-ETH symbol was doing the same for ETH's history (added in
+         v0.99.215) — ~22 fully redundant HTTP requests per mining
+         cycle, on top of each symbol's own ~15-18 requests. This
+         strained the single APP-WIDE GLOBAL_HTTP_SEMAPHORE (10
+         concurrent slots, shared with MSNR/LSW/AMD/etc's own
+         backtest loops) enough that most symbols legitimately couldn't
+         complete their full request chain within NEURO_PER_SYMBOL_
+         MAX_SEC (300s) — not a code hang, but real resource contention
+         from redundant work.
+         Fix: neuro_mining_loop() now fetches BTC's and ETH's own 1h
+         history ONCE per cycle and passes them into every symbol's
+         neuro_backtest_symbol() call via new precomputed_btc_candles/
+         precomputed_eth_candles params (falls back to self-fetching
+         when not supplied, e.g. for a standalone call) — cuts ~22
+         redundant requests down to 2 per cycle. Verified via a mocked
+         test: 0 additional BTC_USDT/ETH_USDT fetches when precomputed
+         candles are supplied, full successful result otherwise (742
+         confirmed patterns, WR 44.3%, avg P&L +0.22R — logic unchanged,
+         just not wastefully re-fetching identical data).
+         Also raised NEURO_PER_SYMBOL_MAX_SEC 300->480s as a secondary
+         safety margin now that 20 coins + 10 more indicators genuinely
+         need more wall-clock time even under normal (non-contended)
+         conditions.
+         Verified: py_compile, pyflakes, node --check, 53 routes, real
+         runtime confirming all 20 symbols present in /api/neuro/status,
+         zero surrogate escapes.
