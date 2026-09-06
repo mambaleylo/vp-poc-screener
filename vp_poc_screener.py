@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.208"
+APP_VERSION = "0.99.209"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13078,6 +13078,17 @@ def neuro_atr_series(candles, period=14):
     return out
 
 
+def neuro_stoch_k_series(candles, period=14):
+    out = [None] * len(candles)
+    for i in range(period - 1, len(candles)):
+        window = candles[i - period + 1:i + 1]
+        hh = max(c["high"] for c in window)
+        ll = min(c["low"] for c in window)
+        if hh > ll:
+            out[i] = (candles[i]["close"] - ll) / (hh - ll) * 100
+    return out
+
+
 def neuro_macd_series(closes, fast=12, slow=26, signal=9):
     ema_fast = neuro_ema_series(closes, fast)
     ema_slow = neuro_ema_series(closes, slow)
@@ -13186,21 +13197,48 @@ def neuro_align_btc_agreement(candles, btc_candles, lookback=4):
     return out
 
 
-def neuro_compute_conditions(candles, htf_candles=None, funding_records=None, btc_candles=None):
+def neuro_align_oi_trend(candles, oi_records, lookback_pct=0.03):
+    """oi_records: list of {time, open_interest}. Label each bar by whether
+    open interest has been rising/falling/flat vs its own value 20 OI-bars
+    ago (a >lookback_pct% change is rising/falling, else flat)."""
+    if not oi_records or len(oi_records) < 25:
+        return [None] * len(candles)
+    oi_sorted = sorted(oi_records, key=lambda o: o["time"])
+    oi_times = [o["time"] for o in oi_sorted]
+    oi_vals = [o["open_interest"] for o in oi_sorted]
+    out = []
+    for c in candles:
+        pos = bisect.bisect_right(oi_times, c["time"]) - 1
+        pos_prev = pos - 20
+        if pos < 0 or pos_prev < 0 or oi_vals[pos_prev] <= 0:
+            out.append(None)
+            continue
+        change = (oi_vals[pos] - oi_vals[pos_prev]) / oi_vals[pos_prev]
+        out.append("rising" if change >= lookback_pct else "falling" if change <= -lookback_pct else "flat")
+    return out
+
+
+def neuro_compute_conditions(candles, htf_candles=None, funding_records=None, btc_candles=None,
+                              d1_candles=None, oi_records=None):
     """One bucket-label dict per bar, across many independent condition types.
-    htf_candles/funding_records/btc_candles are OPTIONAL extra data sources —
-    when not supplied those specific condition types are simply skipped."""
+    All extra-data params are OPTIONAL — when not supplied those specific
+    condition types are simply skipped (bucket key absent for that bar)."""
     closes = [c["close"] for c in candles]
+    ema20 = neuro_ema_series(closes, 20)
     ema50 = neuro_ema_series(closes, 50)
+    ema100 = neuro_ema_series(closes, 100)
     ema200 = neuro_ema_series(closes, 200)
     rsi14 = neuro_rsi_series(closes, 14)
     atr14 = neuro_atr_series(candles, 14)
     vols = [c["volume"] for c in candles]
     _, _, macd_hist = neuro_macd_series(closes)
     bb_pctb = neuro_bollinger_pctb(closes)
+    stoch_k = neuro_stoch_k_series(candles, 14)
     htf_trend = neuro_align_htf_trend(candles, htf_candles) if htf_candles else [None] * len(candles)
+    daily_trend = neuro_align_htf_trend(candles, d1_candles, htf_ema_period=20) if d1_candles else [None] * len(candles)
     funding_zone = neuro_align_funding_rate(candles, funding_records) if funding_records else [None] * len(candles)
     btc_agree = neuro_align_btc_agreement(candles, btc_candles) if btc_candles else [None] * len(candles)
+    oi_trend = neuro_align_oi_trend(candles, oi_records) if oi_records else [None] * len(candles)
 
     conds = []
     streak = 0
@@ -13208,17 +13246,36 @@ def neuro_compute_conditions(candles, htf_candles=None, funding_records=None, bt
     for i, c in enumerate(candles):
         bucket = {}
         dt = datetime.fromtimestamp(c["time"], tz=timezone.utc)
-        bucket["hour"] = dt.hour
+        h = dt.hour
+        bucket["hour"] = h
         bucket["dow"] = dt.weekday()
         bucket["dom_third"] = "early" if dt.day <= 10 else "late" if dt.day >= 21 else "mid"
+        bucket["weekend"] = "weekend" if dt.weekday() >= 5 else "weekday"
+        bucket["session"] = ("asian" if 0 <= h < 8 else "london" if 8 <= h < 13
+                              else "london_ny_overlap" if 13 <= h < 16 else "ny" if 16 <= h < 21
+                              else "off_hours")
 
         if rsi14[i] is not None:
             r = rsi14[i]
             bucket["rsi_zone"] = "low" if r < 30 else "high" if r > 70 else "mid"
+        if stoch_k[i] is not None:
+            s = stoch_k[i]
+            bucket["stoch_zone"] = "low" if s < 20 else "high" if s > 80 else "mid"
+        if ema20[i] is not None:
+            bucket["ema20_side"] = "above" if c["close"] > ema20[i] else "below"
         if ema50[i] is not None:
             bucket["ema50_side"] = "above" if c["close"] > ema50[i] else "below"
+        if ema100[i] is not None:
+            bucket["ema100_side"] = "above" if c["close"] > ema100[i] else "below"
         if ema200[i] is not None:
             bucket["ema200_side"] = "above" if c["close"] > ema200[i] else "below"
+        if ema20[i] is not None and ema50[i] is not None and ema100[i] is not None:
+            if ema20[i] > ema50[i] > ema100[i]:
+                bucket["ema_stack"] = "bull_stack"
+            elif ema20[i] < ema50[i] < ema100[i]:
+                bucket["ema_stack"] = "bear_stack"
+            else:
+                bucket["ema_stack"] = "mixed"
         if macd_hist[i] is not None:
             bucket["macd_hist"] = "positive" if macd_hist[i] > 0 else "negative"
             if i > 0 and macd_hist[i - 1] is not None:
@@ -13232,10 +13289,14 @@ def neuro_compute_conditions(candles, htf_candles=None, funding_records=None, bt
                 else "below_lower" if p <= 0.0 else "near_lower" if p <= 0.2 else "mid"
         if htf_trend[i] is not None:
             bucket["htf_trend"] = htf_trend[i]
+        if daily_trend[i] is not None:
+            bucket["daily_trend"] = daily_trend[i]
         if funding_zone[i] is not None:
             bucket["funding_zone"] = funding_zone[i]
         if btc_agree[i] is not None:
             bucket["btc_agree"] = btc_agree[i]
+        if oi_trend[i] is not None:
+            bucket["oi_trend"] = oi_trend[i]
 
         if i >= 20:
             avg_vol = sum(vols[i - 20:i]) / 20
@@ -13250,6 +13311,13 @@ def neuro_compute_conditions(candles, htf_candles=None, funding_records=None, bt
             bucket["range_zone"] = "big" if ratio >= 1.8 else "small" if ratio <= 0.5 else "normal"
             body = abs(c["close"] - c["open"])
             bucket["body_zone"] = "big" if body / atr14[i] >= 1.2 else "small" if body / atr14[i] <= 0.3 else "normal"
+        if i >= 100 and atr14[i]:
+            recent_atrs = [a for a in atr14[i - 100:i] if a]
+            if recent_atrs:
+                avg_atr = sum(recent_atrs) / len(recent_atrs)
+                if avg_atr > 0:
+                    vr = atr14[i] / avg_atr
+                    bucket["vol_regime"] = "high_vol" if vr >= 1.4 else "low_vol" if vr <= 0.7 else "normal_vol"
 
         cur_dir = "green" if c["close"] >= c["open"] else "red"
         if prev_dir == cur_dir:
@@ -13266,6 +13334,13 @@ def neuro_compute_conditions(candles, htf_candles=None, funding_records=None, bt
             if hi > lo:
                 pos = (c["close"] - lo) / (hi - lo)
                 bucket["range_pos"] = "near_high" if pos >= 0.85 else "near_low" if pos <= 0.15 else "mid"
+        if i >= 100:
+            window = candles[i - 100:i + 1]
+            hi = max(w["high"] for w in window)
+            lo = min(w["low"] for w in window)
+            if hi > lo:
+                pos = (c["close"] - lo) / (hi - lo)
+                bucket["dd_zone"] = "near_high" if pos >= 0.85 else "near_low" if pos <= 0.15 else "mid"
 
         conds.append(bucket)
     return conds
@@ -13291,17 +13366,23 @@ def neuro_zscore(mean_a, n_a, mean_all, std_all):
     return (mean_a - mean_all) / se
 
 
-NEURO_CONDITION_KEYS = ("hour", "dow", "dom_third", "rsi_zone", "ema50_side", "ema200_side",
-                        "macd_hist", "macd_cross", "bb_pctb", "vol_zone", "range_zone",
-                        "body_zone", "streak", "range_pos", "htf_trend", "funding_zone", "btc_agree")
+NEURO_CONDITION_KEYS = ("hour", "dow", "dom_third", "weekend", "session", "rsi_zone", "stoch_zone",
+                        "ema20_side", "ema50_side", "ema100_side", "ema200_side", "ema_stack",
+                        "macd_hist", "macd_cross", "bb_pctb", "vol_zone", "vol_regime", "range_zone",
+                        "body_zone", "streak", "range_pos", "dd_zone", "htf_trend", "daily_trend",
+                        "funding_zone", "btc_agree", "oi_trend")
 
 # Curated subset used for PAIRWISE combinations — deliberately excludes "hour"
 # and "streak" (too many distinct values, would dilute sample sizes and
-# explode the hypothesis count). Combos get a stricter min_sample/z_threshold
-# below since testing hundreds of pairs raises real false-discovery risk —
-# same "don't fool yourself" discipline as the single-condition walk-forward.
-NEURO_COMBO_KEYS = ("dow", "rsi_zone", "ema50_side", "ema200_side", "macd_hist", "bb_pctb",
-                    "vol_zone", "range_zone", "htf_trend", "funding_zone", "btc_agree", "dom_third")
+# explode the hypothesis count); "session"/"weekend" are the coarser
+# time-of-day/day-type substitutes that DO go into combos instead.
+# Combos get a stricter min_sample/z_threshold below since testing hundreds
+# of pairs raises real false-discovery risk — same "don't fool yourself"
+# discipline as the single-condition walk-forward.
+NEURO_COMBO_KEYS = ("dow", "weekend", "session", "rsi_zone", "stoch_zone", "ema20_side", "ema50_side",
+                    "ema100_side", "ema200_side", "ema_stack", "macd_hist", "bb_pctb", "vol_zone",
+                    "vol_regime", "range_zone", "dd_zone", "htf_trend", "daily_trend", "funding_zone",
+                    "btc_agree", "oi_trend", "dom_third")
 NEURO_FORWARD_HORIZONS = [4, 12, 24]  # test several forward-looking windows independently
 NEURO_COMBO_MIN_SAMPLE_MULT = 2.0   # combos need more samples to trust (more hypotheses tested)
 NEURO_COMBO_Z_BONUS = 0.5           # and a higher bar on z, same reasoning
@@ -13327,7 +13408,8 @@ def _neuro_bucket_stats(buckets, mean_all, std_all, min_sample, z_threshold):
 
 
 def neuro_mine(candles, forward_bars=None, min_sample=None, z_threshold=None,
-               htf_candles=None, funding_records=None, btc_candles=None, include_combos=True):
+               htf_candles=None, funding_records=None, btc_candles=None,
+               d1_candles=None, oi_records=None, include_combos=True):
     """Mine both single-condition and pairwise-combination dependencies,
     across multiple forward-return horizons, from ONE set of pre-computed
     per-bar condition buckets (computed once, reused for every horizon)."""
@@ -13335,7 +13417,7 @@ def neuro_mine(candles, forward_bars=None, min_sample=None, z_threshold=None,
     z_threshold = z_threshold if z_threshold is not None else NEURO_Z_THRESHOLD
     horizons = [forward_bars] if forward_bars else NEURO_FORWARD_HORIZONS
 
-    conds = neuro_compute_conditions(candles, htf_candles, funding_records, btc_candles)
+    conds = neuro_compute_conditions(candles, htf_candles, funding_records, btc_candles, d1_candles, oi_records)
     combo_pairs = list(itertools.combinations(NEURO_COMBO_KEYS, 2)) if include_combos else []
 
     discovered = []
@@ -13382,7 +13464,8 @@ def neuro_mine(candles, forward_bars=None, min_sample=None, z_threshold=None,
 
 
 def neuro_walk_forward(candles, forward_bars=None, min_sample=None, z_threshold=None, train_frac=None,
-                        htf_candles=None, funding_records=None, btc_candles=None):
+                        htf_candles=None, funding_records=None, btc_candles=None,
+                        d1_candles=None, oi_records=None):
     """Mine on the first train_frac of history, confirm only what still points
     the same direction on the held-out remainder — never trust in-sample-only
     stats, per the same discipline already applied to MSNR/LSW backtests."""
@@ -13404,19 +13487,26 @@ def neuro_walk_forward(candles, forward_bars=None, min_sample=None, z_threshold=
         return tr, te
 
     htf_train, htf_test = _slice_extra(htf_candles, split)
+    d1_train, d1_test = _slice_extra(d1_candles, split)
     fr_train, fr_test = (None, None)
     if funding_records:
         boundary_time = candles[split - 1]["time"] if split > 0 else candles[0]["time"]
         fr_train = [f for f in funding_records if f["time"] <= boundary_time]
         fr_test = [f for f in funding_records if f["time"] > boundary_time]
+    oi_train, oi_test = (None, None)
+    if oi_records:
+        boundary_time = candles[split - 1]["time"] if split > 0 else candles[0]["time"]
+        oi_train = [o for o in oi_records if o["time"] <= boundary_time]
+        oi_test = [o for o in oi_records if o["time"] > boundary_time]
     btc_train, btc_test = _slice_extra(btc_candles, split)
 
     train_patterns = neuro_mine(train, None, min_sample, z_threshold,
-                                 htf_candles=htf_train, funding_records=fr_train, btc_candles=btc_train)
+                                 htf_candles=htf_train, funding_records=fr_train, btc_candles=btc_train,
+                                 d1_candles=d1_train, oi_records=oi_train)
     if not train_patterns:
         return []
 
-    test_conds = neuro_compute_conditions(test, htf_test, fr_test, btc_test)
+    test_conds = neuro_compute_conditions(test, htf_test, fr_test, btc_test, d1_test, oi_test)
     confirmed = []
     # Group train patterns by horizon so we only compute test forward-returns
     # once per distinct horizon actually used.
@@ -13446,7 +13536,8 @@ def neuro_walk_forward(candles, forward_bars=None, min_sample=None, z_threshold=
     return confirmed
 
 
-def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding_records=None, btc_candles=None):
+def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding_records=None, btc_candles=None,
+                           d1_candles=None, oi_records=None):
     """Turn confirmed dependencies into an actual trade history: whenever a
     confirmed condition (single OR pairwise combo) is true on a bar, enter at
     the NEXT bar's open in the confirmed direction, SL/TP from ATR, track the
@@ -13455,7 +13546,7 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
     if not confirmed_patterns:
         return []
 
-    conds = neuro_compute_conditions(candles, htf_candles, funding_records, btc_candles)
+    conds = neuro_compute_conditions(candles, htf_candles, funding_records, btc_candles, d1_candles, oi_records)
     atr14 = neuro_atr_series(candles, 14)
     trades = []
     last_entry_i = -10**9
@@ -13541,10 +13632,10 @@ def neuro_fetch_funding_rate(symbol, start_ts, end_ts, limit=1000):
 
 
 def neuro_backtest_symbol(symbol):
-    """Fetch max available history PLUS extra data sources (4h trend, funding
-    rate, BTC correlation), mine + walk-forward validate across many
-    condition types and horizons, simulate the resulting trade history.
-    Returns (confirmed_patterns, trades, summary)."""
+    """Fetch max available history PLUS extra data sources (4h+1d trend,
+    funding rate, open interest, BTC correlation), mine + walk-forward
+    validate across many condition types and horizons, simulate the
+    resulting trade history. Returns (confirmed_patterns, trades, summary)."""
     try:
         now = int(time.time())
         start_ts = now - NEURO_HISTORY_DAYS * 86400
@@ -13553,15 +13644,21 @@ def neuro_backtest_symbol(symbol):
             return [], [], {}
 
         htf_candles = get_candles_range(symbol, "4h", start_ts, now) or []
+        d1_candles = get_candles_range(symbol, "1d", start_ts, now) or []
         funding_records = neuro_fetch_funding_rate(symbol, start_ts, now)
+        oi_records = []
+        try:
+            oi_records = get_contract_stats(symbol, interval="1h", limit=999)
+        except Exception as e:
+            log_error(f"neuro_backtest_symbol {symbol} OI: {e}")
         btc_candles = None
         if symbol != "BTC_USDT":
             btc_candles = get_candles_range("BTC_USDT", NEURO_TF, start_ts, now) or []
 
-        confirmed = neuro_walk_forward(candles, htf_candles=htf_candles,
-                                        funding_records=funding_records, btc_candles=btc_candles)
-        trades = neuro_simulate_trades(candles, confirmed, htf_candles=htf_candles,
-                                        funding_records=funding_records, btc_candles=btc_candles)
+        confirmed = neuro_walk_forward(candles, htf_candles=htf_candles, funding_records=funding_records,
+                                        btc_candles=btc_candles, d1_candles=d1_candles, oi_records=oi_records)
+        trades = neuro_simulate_trades(candles, confirmed, htf_candles=htf_candles, funding_records=funding_records,
+                                        btc_candles=btc_candles, d1_candles=d1_candles, oi_records=oi_records)
         closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
         wins = sum(1 for t in closed if t["result"] == "WIN")
         losses = len(closed) - wins
@@ -13595,12 +13692,19 @@ def neuro_scan_live(symbol, confirmed_patterns):
 
         htf_start = now - 60 * INTERVAL_SECONDS.get("4h", 14400)
         htf_candles = get_candles_range(symbol, "4h", htf_start, now) or []
+        d1_start = now - 130 * 86400
+        d1_candles = get_candles_range(symbol, "1d", d1_start, now) or []
         funding_records = neuro_fetch_funding_rate(symbol, now - 30 * 86400, now)
+        oi_records = []
+        try:
+            oi_records = get_contract_stats(symbol, interval="1h", limit=200)
+        except Exception as e:
+            log_error(f"neuro_scan_live {symbol} OI: {e}")
         btc_candles = None
         if symbol != "BTC_USDT":
             btc_candles = get_candles_range("BTC_USDT", NEURO_TF, start_ts, now) or []
 
-        conds = neuro_compute_conditions(closed_candles, htf_candles, funding_records, btc_candles)
+        conds = neuro_compute_conditions(closed_candles, htf_candles, funding_records, btc_candles, d1_candles, oi_records)
         atr14 = neuro_atr_series(closed_candles, 14)
         last = conds[-1]
         atr = atr14[-1]
