@@ -12767,3 +12767,41 @@ v0.99.216 - CRITICAL FIX for the 8-of-10-coins-hanging report from
          Verified: py_compile, pyflakes, node --check, 53 routes, real
          runtime confirming all 20 symbols present in /api/neuro/status,
          zero surrogate escapes.
+
+v0.99.217 - Neuro mining WATCHDOG — per direct user report that mining
+         stayed stuck on one symbol (BNB_USDT, "5/20") for an entire
+         night despite v0.99.212/216's own NEURO_PER_SYMBOL_MAX_SEC
+         (480s) ceiling. Root cause of why that ceiling alone wasn't
+         enough: `Future.result(timeout=X)` only stops the CALLING
+         thread from waiting — it cannot force-kill the submitted
+         worker thread (no clean primitive exists for this in Python's
+         threading model). If the MAIN mining-loop thread itself got
+         stuck BEFORE even reaching that wait — most plausibly
+         contending for the shared app-wide `state_lock` that
+         log_error() and dozens of other loops (MSNR/LSW/AMD/etc) all
+         use — the per-symbol ceiling never gets a chance to fire at
+         all, and the whole loop can stall indefinitely with zero
+         self-recovery.
+         Added neuro_mining_watchdog() as a genuinely INDEPENDENT second
+         line of defense: a separate thread checking every 60s whether
+         _neuro_mining_progress_ts (updated at every real progress point
+         — cycle start, BTC/ETH prefetch, each symbol's current-symbol
+         set, each symbol's done-increment, cycle end) has moved in the
+         last NEURO_WATCHDOG_STUCK_SEC (1080s = 480*2+120, a generous
+         margin beyond the per-symbol ceiling itself). If not, it can't
+         kill the stuck thread (same Python limitation), but it CAN
+         reset the shared progress state and start a completely FRESH
+         mining thread — the old stuck one is abandoned as a zombie
+         (same acceptance already made for single-symbol timeouts), but
+         that's strictly better than permanent zero progress forever.
+         Also extended the progress-timestamp coverage to the BTC/ETH
+         shared prefetch step itself (added in v0.99.216), which had NO
+         bounded-time protection at all before this — if THAT specific
+         call is what actually hangs, the watchdog is now the only
+         thing that would ever catch it.
+         Verified the detection+reset logic directly: simulated a
+         2-hour-stuck state (progress_ts 7200s in the past, well past
+         the 1080s threshold) and confirmed the watchdog condition
+         correctly fires and resets running/current_symbol/progress_ts.
+         Verified: py_compile, pyflakes, 53 routes, real runtime 200 on
+         / and /api/neuro/status, zero surrogate escapes.
