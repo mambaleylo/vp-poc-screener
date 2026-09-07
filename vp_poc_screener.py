@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.220"
+APP_VERSION = "0.99.221"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13029,6 +13029,19 @@ NEURO_RR_CANDIDATES  = [1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0]  # v0.99.210 — s
 NEURO_RR_MIN_TRADES  = int(os.environ.get("VP_NEURO_RR_MIN_TRADES", 15))  # don't trust an RR pick based on fewer than this many train-period trades
 NEURO_DECAY_WINDOW_DAYS = int(os.environ.get("VP_NEURO_DECAY_WINDOW_DAYS", 40))  # v0.99.220 — explicit CALENDAR-time recency window for decay detection, per direct user follow-up ("не только 40%, это не 1 месяц — ещё хотя бы за последние 40 дней"): a percentage-of-occurrences split doesn't map to any fixed real-world timeframe (a rare pattern's last 40% of occurrences could span many months; a frequent one's could be just days) — this checks an ACTUAL calendar window on top of that
 NEURO_DECAY_MIN_RECENT_N = 8  # minimum occurrences in a recency window before trusting a decay verdict from it
+# v0.99.221 — AGGREGATE per-symbol decay check, per direct user report of
+# a genuinely bad recent stretch (16.7% WR over the last ~24 closed BTC
+# trades) that no single pattern's own decay flag caught, because the
+# losing streak was spread across 8 DIFFERENT patterns (each contributing
+# only a handful of trades — none individually hitting its own minimum
+# recency sample). Per-pattern decay is necessary but not sufficient: a
+# shared regime shift can drag down many different patterns' live results
+# a little each, without any ONE of them crossing its own threshold. This
+# checks the actual combined trade OUTCOME for the whole symbol, ignoring
+# which pattern produced each trade.
+NEURO_AGG_DECAY_WINDOW = 30       # look at the last N CLOSED (non-timeout) trades for this symbol
+NEURO_AGG_DECAY_MIN_N = 15        # minimum closed trades in that window before trusting the verdict
+NEURO_AGG_DECAY_MARGIN_PP = 5.0   # flag if recent WR is more than this many percentage points below RR breakeven
 NEURO_SL_ATR_MULT    = float(os.environ.get("VP_NEURO_SL_ATR_MULT", 1.5))
 NEURO_MAX_WAIT_BARS  = int(os.environ.get("VP_NEURO_MAX_WAIT_BARS", 48))
 NEURO_MIN_AGREE_Z    = float(os.environ.get("VP_NEURO_MIN_AGREE_Z", 2.5))  # combined |z| needed to fire a live signal
@@ -14020,6 +14033,25 @@ def neuro_pick_best_rr(train_candles, confirmed_patterns, htf_candles=None, fund
     return best_rr, sweep
 
 
+def neuro_check_aggregate_decay(trades, chosen_rr):
+    """Aggregate, pattern-agnostic recency check: look at the actual
+    combined outcome of the last NEURO_AGG_DECAY_WINDOW closed trades for
+    this symbol, regardless of which specific pattern produced each one.
+    Catches a regime shift that drags down many different patterns a
+    little each — something no single pattern's own decay flag would."""
+    closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
+    recent = closed[-NEURO_AGG_DECAY_WINDOW:]
+    if len(recent) < NEURO_AGG_DECAY_MIN_N:
+        return {"n": len(recent), "wr": None, "avg_pnl_r": None, "underperforming": False}
+    wins = sum(1 for t in recent if t["result"] == "WIN")
+    wr = wins / len(recent) * 100
+    avg_pnl = sum(t["pnl_r"] for t in recent if t.get("pnl_r") is not None) / len(recent)
+    breakeven_wr = 1 / (1 + chosen_rr) * 100
+    underperforming = wr < (breakeven_wr - NEURO_AGG_DECAY_MARGIN_PP)
+    return {"n": len(recent), "wr": round(wr, 1), "avg_pnl_r": round(avg_pnl, 3),
+            "breakeven_wr": round(breakeven_wr, 1), "underperforming": underperforming}
+
+
 def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_candles=None):
     """Fetch max available history PLUS extra data sources (4h+1d trend,
     funding rate, open interest, BTC/ETH correlation), mine + walk-forward
@@ -14099,19 +14131,27 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
                    "patterns_confirmed": len(confirmed), "history_bars": len(candles),
                    "combos_confirmed": sum(1 for p in confirmed if p.get("is_combo")),
                    "decaying_confirmed": sum(1 for p in confirmed if p.get("decaying")),
-                   "chosen_rr": chosen_rr, "rr_sweep": rr_sweep}
+                   "chosen_rr": chosen_rr, "rr_sweep": rr_sweep,
+                   "aggregate_recent": neuro_check_aggregate_decay(trades, chosen_rr)}
         return confirmed, trades, summary
     except Exception as e:
         log_error(f"neuro_backtest_symbol {symbol}: {e}")
         return [], [], {}
 
 
-def neuro_scan_live(symbol, confirmed_patterns, rr=None):
+def neuro_scan_live(symbol, confirmed_patterns, rr=None, aggregate_underperforming=False):
     """Check the most recently closed bar's conditions against this symbol's
     confirmed dependencies (single + combo); combine agreeing ones into a
     single signal. `rr` should be this symbol's own auto-tuned value from
-    neuro_pick_best_rr(), falling back to NEURO_RR when not supplied."""
+    neuro_pick_best_rr(), falling back to NEURO_RR when not supplied.
+    `aggregate_underperforming` (from neuro_check_aggregate_decay()) mutes
+    ALL new signals for this symbol regardless of which pattern would have
+    fired — catches a shared regime shift dragging down many different
+    patterns a little each, which no single pattern's own decay flag
+    would individually catch."""
     rr = rr if rr is not None else NEURO_RR
+    if aggregate_underperforming:
+        return None
     try:
         if not confirmed_patterns:
             return None
@@ -14328,8 +14368,10 @@ def neuro_live_loop():
             new_signals = {}
             for symbol in NEURO_COINS:
                 confirmed = patterns_snapshot.get(symbol) or []
-                chosen_rr = (summary_snapshot.get(symbol) or {}).get("chosen_rr")
-                sig = neuro_scan_live(symbol, confirmed, rr=chosen_rr)
+                sym_summary = summary_snapshot.get(symbol) or {}
+                chosen_rr = sym_summary.get("chosen_rr")
+                agg_underperforming = (sym_summary.get("aggregate_recent") or {}).get("underperforming", False)
+                sig = neuro_scan_live(symbol, confirmed, rr=chosen_rr, aggregate_underperforming=agg_underperforming)
                 new_signals[symbol] = sig
             with _neuro_state_lock:
                 _neuro_live_signals.update(new_signals)
@@ -18149,6 +18191,13 @@ async function refreshNeuro() {
         : '<div class="dim" style="margin:10px 0;">\u0435\u0449\u0451 \u043c\u0430\u0439\u043d\u0438\u0442\u0441\u044f\u2026 \u0434\u0430\u043d\u043d\u044b\u0445 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442</div>';
 
       // ---- Live signal badge (always visible, clearly separated) ----
+      const agg = s.aggregate_recent || {};
+      const underperformBadge = agg.underperforming
+        ? `<div style="padding:8px 10px;margin-bottom:8px;background:rgba(255,167,38,0.12);border-radius:8px;border:1px solid #ffa726;">
+            <div style="color:#ffa726;font-weight:700;font-size:12px;">\u26a0\ufe0f \u043f\u043b\u043e\u0445\u0430\u044f \u0441\u0435\u0440\u0438\u044f \u0441\u0435\u0439\u0447\u0430\u0441 \u2014 \u043d\u043e\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b \u043f\u0440\u0438\u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u044b</div>
+            <div class="dim" style="font-size:10px;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 ${agg.n} \u0441\u0434\u0435\u043b\u043e\u043a: WR ${agg.wr}% (\u043d\u0443\u0436\u043d\u043e \u2265${agg.breakeven_wr}% \u0434\u043b\u044f \u0431\u0435\u0437\u0443\u0431\u044b\u0442\u043a\u0430) \u00b7 avg ${agg.avg_pnl_r>0?'+':''}${agg.avg_pnl_r}R</div>
+          </div>`
+        : '';
       const liveBadge = liveSig
         ? `<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:10px;background:${liveSig.direction==='LONG'?'rgba(61,220,151,0.12)':'rgba(255,107,107,0.12)'};border-radius:8px;border:1px solid ${liveSig.direction==='LONG'?'#3ddc97':'#ff6b6b'};">
             <div style="font-size:18px;">${liveSig.direction==='LONG'?'🟢':'🔴'}</div>
@@ -18158,7 +18207,7 @@ async function refreshNeuro() {
             </div>
           </div>`
         : `<div style="padding:8px 10px;margin-bottom:10px;background:#0d1320;border-radius:8px;border:1px solid #232d45;">
-            <span class="dim" style="font-size:11px;">\u26aa \u0436\u0438\u0432\u043e\u0433\u043e \u0441\u0438\u0433\u043d\u0430\u043b\u0430 \u0441\u0435\u0439\u0447\u0430\u0441 \u043d\u0435\u0442</span>
+            <span class="dim" style="font-size:11px;">\u26aa \u0436\u0438\u0432\u043e\u0433\u043e \u0441\u0438\u0433\u043d\u0430\u043b\u0430 \u0441\u0435\u0439\u0447\u0430\u0441 \u043d\u0435\u0442${agg.underperforming ? ' (\u043f\u0440\u0438\u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u044b \u0438\u0437-\u0437\u0430 \u043f\u043b\u043e\u0445\u043e\u0439 \u0441\u0435\u0440\u0438\u0438)' : ''}</span>
           </div>`;
 
       // ---- Confirmed dependencies, compact ----
@@ -18211,6 +18260,7 @@ async function refreshNeuro() {
 
       return `<div style="margin-bottom:14px;padding:12px;background:#12182a;border-radius:10px;border:1px solid #232d45;">
         <div style="font-size:15px;font-weight:700;color:#c792ea;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
+        ${underperformBadge}
         ${liveBadge}
         ${bigStats}
         ${patSection}
