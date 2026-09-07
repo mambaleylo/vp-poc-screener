@@ -12816,3 +12816,35 @@ v0.99.218 - Neuro trade history 20->40 trades per coin, per direct user
          change needed.
          Verified: py_compile, pyflakes, 53 routes, real runtime 200 on
          / and /api/neuro/status, zero surrogate escapes.
+
+v0.99.219 - Neuro now DETECTS AND ACTS ON recent decay per dependency,
+         per direct user request ("если бы я торговал последнее время,
+         были бы одни стопы — учитывай это"). Previously a pattern that
+         passed the overall train-vs-test confirmation stayed equally
+         trusted forever, even if its edge had since flipped or
+         collapsed within the test window itself.
+         neuro_walk_forward() now splits each confirmed pattern's
+         chronologically-ordered test-period occurrences into the first
+         60% vs last 40%, and flags "decaying": True when the recent
+         40%'s mean forward return either flipped sign vs the pattern's
+         own direction, or collapsed to under 30% of the overall test
+         mean (min 8 recent occurrences to avoid noise-driven flags).
+         neuro_scan_live() now SKIPS decaying patterns entirely when
+         combining matched conditions into a live signal score — they
+         stop contributing to new trade decisions the moment decay is
+         detected. Crucially, neuro_simulate_trades() (the historical
+         trade record) is UNCHANGED — decaying patterns still show their
+         real past trades honestly; only future/live action is affected,
+         never the history.
+         UI: patterns list now shows a "⚠️ ослабевает" badge on flagged
+         dependencies, and the summary line shows how many of the
+         confirmed count are currently decaying (e.g. "742 confirmed,
+         181 decaying").
+         Validated on real SOL 1h data: 181 of 742 confirmed patterns
+         (24%) flagged as decaying, with sensible examples (e.g. a
+         pattern with overall test mean +0.018 but recent test mean
+         -0.016 — a genuine sign flip, exactly the "would've been all
+         stops lately" scenario the user described) — not over- or
+         under-flagging everything.
+         Verified: py_compile, pyflakes, node --check, 53 routes, real
+         runtime 200 on / and /api/neuro/status, zero surrogate escapes.
