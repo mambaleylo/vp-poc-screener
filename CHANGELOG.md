@@ -13058,3 +13058,36 @@ v0.99.225 - EMA Touch (EMA🚀) and AMD Cycle had NO enable/disable toggle
          Verified: py_compile, pyflakes, node --check, 53 routes, real
          runtime 200 on / with correct ema_touch_enabled/amd_enabled in
          /api/settings, zero surrogate escapes.
+
+v0.99.226 - FULL audit of all 63 SETTINGS_KEYS against actual UI
+         controls, per direct user request ("нету тумблера телеги на
+         нейро индикатор, может ещё где-то"). Programmatically cross-
+         checked every settings key for a real JS checkbox map entry
+         (`key: document.getElementById(...)`) — backend/settings-API
+         wiring alone isn't enough, since v0.99.206 already wired
+         telegram_alerts_neuro's backend but nobody added the checkbox.
+         Found 4 genuine gaps (backend fully wired, zero UI control):
+         - telegram_alerts_neuro — user's own reported case
+         - telegram_alerts_amd — same gap, one module over
+         - hourly_stats_enabled — the underlying hourly win-rate stats
+           COLLECTION itself (distinct from telegram_alerts_hourly,
+           which only gates whether an alert gets SENT about it) had no
+           toggle — could only be disabled via env var
+         - autotrade_ft5 — FT5's own individual autotrade toggle was
+           completely missing from the "Автоторговля" settings group;
+           every other mode (Bounce/Breakout/Scalp/MSNR/Mirror/LSW) had
+           one, FT5 did not
+         Added all 4 checkboxes (setTelegramNeuro/setTelegramAmd/
+         setHourlyStats/setAutotradeFt5), wired into the shared JS
+         settings map. The remaining 6 settings keys with no checkbox
+         (mirror_touch_tolerance_pct, mirror_pattern_tolerance_pct,
+         lsw_equal_tolerance_pct, scalp_min_rr, scalp_sl_buffer_mult,
+         msnr_max_rr) are confirmed intentional — these are auto-tuned
+         numeric parameters adjusted by risk_autotune_pass(), displayed
+         read-only in the auto-tuning summary, not meant to be manually
+         toggled.
+         Final verification: re-ran the full audit script after the fix
+         — 0 genuine gaps remain across all 63 settings keys.
+         Verified: py_compile, pyflakes, node --check, 53 routes, real
+         runtime 200 on / with all 4 new keys correctly present in
+         /api/settings, zero surrogate escapes.
