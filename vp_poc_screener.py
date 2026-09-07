@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.224"
+APP_VERSION = "0.99.225"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1033,7 +1033,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "msnr_all_in_enabled", "msnr_single_best_enabled",
                   "autotrade_risk_pct",
@@ -1069,6 +1069,8 @@ def get_settings():
         "mirror_autotune_tolerance_enabled": MIRROR_AUTOTUNE_TOLERANCE_ENABLED,
         "mirror_volume_filter_enabled": MIRROR_VOLUME_FILTER_ENABLED,
         "mirror_htf_filter_enabled": MIRROR_HTF_FILTER_ENABLED,
+        "ema_touch_enabled": EMA_TOUCH_ENABLED,
+        "amd_enabled": AMD_ENABLED,
         "lsw_enabled": LSW_ENABLED,
         "lsw_rr": LSW_RR,
         "lsw_equal_tolerance_pct": LSW_EQUAL_TOLERANCE_PCT,
@@ -1127,7 +1129,7 @@ def apply_settings(updates):
     global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, FT5_HTF_FILTER_ENABLED, FT5_SESSION_FILTER_ENABLED, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, MSNR_MIN_RR_FILTER_ENABLED, MSNR_HTF_FILTER_ENABLED, MSNR_PER_SYMBOL_FILTERS_ENABLED, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT, MIRROR_AUTOTUNE_TOLERANCE_ENABLED
     global MIRROR_VOLUME_FILTER_ENABLED, MIRROR_HTF_FILTER_ENABLED
-    global LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
+    global EMA_TOUCH_ENABLED, AMD_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED, LSW_ATR_SWEEP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
@@ -1181,6 +1183,10 @@ def apply_settings(updates):
         MIRROR_VOLUME_FILTER_ENABLED = bool(updates["mirror_volume_filter_enabled"])
     if "mirror_htf_filter_enabled" in updates:
         MIRROR_HTF_FILTER_ENABLED = bool(updates["mirror_htf_filter_enabled"])
+    if "ema_touch_enabled" in updates:
+        EMA_TOUCH_ENABLED = bool(updates["ema_touch_enabled"])
+    if "amd_enabled" in updates:
+        AMD_ENABLED = bool(updates["amd_enabled"])
     if "lsw_enabled" in updates:
         LSW_ENABLED = bool(updates["lsw_enabled"])
     if "lsw_rr" in updates:
@@ -12516,6 +12522,7 @@ def lsw_live_loop():
 # v0.99.180
 # ============================================================================
 
+EMA_TOUCH_ENABLED      = os.environ.get("VP_EMA_TOUCH_ENABLED", "1") == "1"  # v0.99.225 — master on/off, per direct user report ("не могу отключить индикатор ema... от скана") — this tab had NO enable toggle at all before, unlike every other module (LSW_ENABLED/FT5_ENABLED/MSNR_ENABLED/AMD_ENABLED)
 EMA_TOUCH_EMA_PERIOD    = 28
 EMA_TOUCH_REFRESH_SEC   = int(os.environ.get("VP_EMA_TOUCH_REFRESH_SEC", 14400))
 EMA_TOUCH_NOISE_BARS    = int(os.environ.get("VP_EMA_TOUCH_NOISE_BARS", 3))
@@ -12688,21 +12695,34 @@ def ema_bull_loop():
     global _ema_bull_last_scan, _ema_bull_prev_signals
     while True:
         try:
+            if not EMA_TOUCH_ENABLED:
+                time.sleep(EMA_TOUCH_REFRESH_SEC)
+                continue
             universe = ema_touch_scan_universe()
             results  = []
             if universe:
-                with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe))) as ex:
+                # v0.99.225 — same no-with-block hang fix as LSW/MSNR/AMD's
+                # own v0.99.194/195: a stuck symbol inside the "with...as ex"
+                # block would call shutdown(wait=True) on exit, blocking this
+                # entire loop (and thus every subsequent scan cycle) forever.
+                ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(universe)))
+                try:
                     futs = [ex.submit(ema_touch_scan_symbol, s) for s in universe]
                     PER_SYM_TO = HTTP_TIMEOUT * 3 * 3 + 60
-                    for fut in as_completed(futs, timeout=PER_SYM_TO * len(universe)):
-                        try:
-                            res = fut.result(timeout=PER_SYM_TO)
-                            if res:
-                                results.append(res)
-                        except (TimeoutError, FutureTimeoutError):
-                            continue
-                        except Exception:
-                            continue
+                    try:
+                        for fut in as_completed(futs, timeout=PER_SYM_TO * len(universe)):
+                            try:
+                                res = fut.result(timeout=PER_SYM_TO)
+                                if res:
+                                    results.append(res)
+                            except (TimeoutError, FutureTimeoutError):
+                                continue
+                            except Exception:
+                                continue
+                    except (TimeoutError, FutureTimeoutError):
+                        log_error("ema_bull_loop: as_completed timed out waiting on a stuck symbol — keeping whatever was gathered")
+                finally:
+                    ex.shutdown(wait=False)
             results.sort(key=lambda r: r["dist_pct"])
             with _ema_bull_results_lock:
                 _ema_bull_results.clear()
@@ -12729,6 +12749,7 @@ def ema_bull_loop():
 # v0.99.192
 # ============================================================================
 
+AMD_ENABLED          = os.environ.get("VP_AMD_ENABLED", "1") == "1"  # v0.99.225 — master on/off, same gap as EMA Touch (see EMA_TOUCH_ENABLED's own comment) — this tab also had no enable toggle at all before
 AMD_STRUCTURE_TF     = os.environ.get("VP_AMD_STRUCTURE_TF", "15m")  # v0.99.202 — lowered from 1h per direct user request for more frequent signals
 AMD_ENTRY_TF         = os.environ.get("VP_AMD_ENTRY_TF", "5m")
 AMD_REFRESH_SEC      = int(os.environ.get("VP_AMD_REFRESH_SEC", 300))     # scan every 5m — structure candle is now 15m, check often enough not to miss one
@@ -12985,6 +13006,9 @@ def amd_backtest_loop():
     global _amd_backtest_trades
     while True:
         try:
+            if not AMD_ENABLED:
+                time.sleep(AMD_BACKTEST_REFRESH_SEC)
+                continue
             t0 = time.time()
             universe = amd_scan_universe()
             with _amd_backtest_lock2:
@@ -13038,6 +13062,9 @@ def amd_loop():
     global _amd_last_scan, _amd_prev_signals
     while True:
         try:
+            if not AMD_ENABLED:
+                time.sleep(AMD_REFRESH_SEC)
+                continue
             universe = amd_scan_universe()
             results = []
             if universe:
@@ -16498,6 +16525,22 @@ INDEX_HTML = """<!doctype html>
     </div>
 
     <div class="settingsGroup">
+      <div class="settingsGroupTitle">EMA Touch (EMA🚀)</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Сканирование</div>
+          <div class="sub">крупная импульсная свеча (1W/1M) касается EMA28 фитилём снизу и закрывается ниже неё — сигнал SHORT на отбое</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setEmaTouch"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingsGroupTitle">AMD Cycle</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Сканирование</div>
+          <div class="sub">Accumulation → Manipulation → Distribution — тесная консолидация, ложный пробой за её границу, затем импульсная свеча в реальную сторону</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAmd"><span class="switchSlider"></span></label>
+      </div>
       <div class="settingsGroupTitle">Sweep (Liquidity Sweep)</div>
       <div class="settingRow">
         <div>
@@ -19074,6 +19117,8 @@ const setInputs = {
   mirror_volume_filter_enabled: document.getElementById('setMirrorVolumeFilter'),
   mirror_htf_filter_enabled: document.getElementById('setMirrorHtfFilter'),
   lsw_enabled: document.getElementById('setLsw'),
+  ema_touch_enabled: document.getElementById('setEmaTouch'),
+  amd_enabled: document.getElementById('setAmd'),
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
   lsw_structural_cap_enabled: document.getElementById('setLswStructuralCap'),
   lsw_volume_filter_enabled: document.getElementById('setLswVolumeFilter'),
