@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.226"
+APP_VERSION = "0.99.227"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14388,6 +14388,98 @@ _neuro_mining_current_symbol = None
 _neuro_mining_progress_ts = time.time()  # v0.99.217 — last time real progress happened, for the watchdog below
 _neuro_prev_signal_keys = set()
 
+# v0.99.227 — persistent live-signal LOG with real tracked outcomes, per
+# direct user request ("по нейро есть какая-то статистика живых сигналов?
+# как в sweep список и винрейт, результат"). Previously _neuro_live_signals
+# only ever held the SINGLE latest signal per symbol (overwritten every
+# cycle) — no history, no outcome tracking, no winrate. This mirrors LSW's
+# own STATE["lsw_signals"] pattern (append-only log, OPEN->CLOSED with a
+# tracked WIN/LOSS/TIMEOUT result), scoped separately from the historical
+# backtest simulation (neuro_simulate_trades' own trades list) — this is
+# specifically what ACTUALLY fired live and how it ACTUALLY played out,
+# not a retroactive re-run over history.
+NEURO_SIGNAL_HISTORY = 300
+_neuro_signal_log = deque(maxlen=NEURO_SIGNAL_HISTORY)
+_neuro_signal_log_lock = threading.Lock()
+
+
+def neuro_track_signal_outcomes():
+    """Same shared MFE/MAE/WIN/LOSS/TIMEOUT tracking shape as
+    _lsw_track_signal_outcomes()/_mirror_track_signal_outcomes()."""
+    now = time.time()
+    with _neuro_signal_log_lock:
+        open_signals = [s for s in _neuro_signal_log if s["status"] == "OPEN"]
+    if not open_signals:
+        return
+    interval_sec = INTERVAL_SECONDS.get(NEURO_TF, 3600)
+    all_candles = fetch_candles_concurrent([(s["symbol"], NEURO_TF, 300) for s in open_signals])
+    for sig, candles in zip(open_signals, all_candles):
+        try:
+            if candles is None:
+                continue
+            candles = [c for c in candles if c["time"] + interval_sec <= now]
+            future = [c for c in candles if c["time"] > sig["time"]]
+            direction = sig["direction"]
+            entry = sig["entry"]
+            risk = abs(entry - sig["sl"]) or 1e-9
+            result = exit_price = exit_time = None
+            bars_seen = 0
+            for c in future:
+                bars_seen += 1
+                if direction == "LONG":
+                    if c["low"] <= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["high"] >= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+                else:
+                    if c["high"] >= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["low"] <= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+                if bars_seen >= NEURO_MAX_WAIT_BARS:
+                    result, exit_price, exit_time = "TIMEOUT", c["close"], c["time"]
+                    break
+            if result:
+                pnl_r = None
+                if exit_price is not None:
+                    raw = (exit_price - entry) / risk if direction == "LONG" else (entry - exit_price) / risk
+                    pnl_r = round(raw if result != "LOSS" else -abs(raw), 3)
+                with _neuro_signal_log_lock:
+                    sig["status"] = "CLOSED"
+                    sig["result"] = result
+                    sig["exit_price"] = exit_price
+                    sig["exit_time"] = exit_time
+                    sig["pnl_r"] = pnl_r
+        except Exception as e:
+            log_error(f"neuro_outcome {sig['symbol']}: {e}")
+
+
+def neuro_compute_signal_stats():
+    with _neuro_signal_log_lock:
+        signals = list(_neuro_signal_log)
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+    wins = sum(1 for s in closed if s["result"] == "WIN")
+    losses = len(closed) - wins
+    open_n = sum(1 for s in signals if s["status"] == "OPEN")
+    winrate = round(wins / len(closed) * 100, 1) if closed else None
+    avg_pnl = round(sum(s["pnl_r"] for s in closed if s.get("pnl_r") is not None) / len(closed), 3) if closed else None
+    by_symbol = {}
+    for sym in NEURO_COINS:
+        sym_closed = [s for s in closed if s["symbol"] == sym]
+        sym_wins = sum(1 for s in sym_closed if s["result"] == "WIN")
+        if sym_closed or any(s["symbol"] == sym and s["status"] == "OPEN" for s in signals):
+            by_symbol[sym] = {
+                "n": len(sym_closed), "wins": sym_wins, "losses": len(sym_closed) - sym_wins,
+                "winrate": round(sym_wins / len(sym_closed) * 100, 1) if sym_closed else None,
+                "open": sum(1 for s in signals if s["symbol"] == sym and s["status"] == "OPEN"),
+            }
+    return {"total": len(signals), "wins": wins, "losses": losses, "open": open_n,
+            "winrate": winrate, "avg_pnl_r": avg_pnl, "by_symbol": by_symbol}
+
 # v0.99.217 — WATCHDOG, per direct user report of the mining loop stuck on
 # one symbol (BNB_USDT, "5/20") for an entire night despite the v0.99.212/
 # 216 per-symbol ceiling (NEURO_PER_SYMBOL_MAX_SEC). Future.result(timeout=)
@@ -14539,7 +14631,17 @@ def neuro_live_loop():
                     f"\u0441\u043e\u0432\u043f\u0430\u0432\u0448\u0438\u0435\u0441\u044f \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0438: {pat_txt}",
                     category="neuro",
                 )
+                with _neuro_signal_log_lock:
+                    _neuro_signal_log.appendleft({
+                        "symbol": symbol, "direction": sig["direction"],
+                        "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
+                        "rr": sig.get("rr"), "score": sig.get("score"),
+                        "time": sig_time, "detected_at": time.time(),
+                        "status": "OPEN", "result": None,
+                        "exit_price": None, "exit_time": None, "pnl_r": None,
+                    })
             _neuro_prev_signal_keys = {(s, t) for s, t in new_keys.items()}
+            neuro_track_signal_outcomes()
         except Exception as e:
             log_error(f"neuro_live_loop: {e}")
         time.sleep(900)  # check every 15m regardless of the (usually 1h) structure TF
@@ -14557,19 +14659,26 @@ def api_neuro_status():
         mining_done = _neuro_mining_done
         mining_total = _neuro_mining_total
         mining_current = _neuro_mining_current_symbol
+    with _neuro_signal_log_lock:
+        signal_log = list(_neuro_signal_log)
+    signal_stats = neuro_compute_signal_stats()
     coins = []
     for symbol in NEURO_COINS:
         recent_trades = (trades.get(symbol) or [])[-40:][::-1]
+        recent_live_signals = [s for s in signal_log if s["symbol"] == symbol][:40]
         coins.append({
             "symbol": symbol,
             "summary": summary.get(symbol, {}),
             "top_patterns": (patterns.get(symbol) or [])[:8],
             "live_signal": live_signals.get(symbol),
             "recent_trades": recent_trades,
+            "live_signal_stats": signal_stats["by_symbol"].get(symbol),
+            "recent_live_signals": recent_live_signals,
         })
     return jsonify({
         "coins": coins, "last_mined": last_mined, "mining_running": running,
         "mining_done": mining_done, "mining_total": mining_total, "mining_current_symbol": mining_current,
+        "live_signal_stats": signal_stats,
         "config": {"tf": NEURO_TF, "forward_bars": NEURO_FORWARD_BARS, "rr": NEURO_RR,
                    "history_days": NEURO_HISTORY_DAYS, "z_threshold": NEURO_Z_THRESHOLD,
                    "min_agree_z": NEURO_MIN_AGREE_Z, "refresh_sec": NEURO_REFRESH_SEC},
@@ -18352,6 +18461,28 @@ async function refreshNeuro() {
         </div>
       </div>` : '';
 
+    // ---- Overall LIVE signal stats (actual fired signals, real tracked
+    // outcomes — separate from the historical backtest simulation shown
+    // per coin below) ----
+    const lstats = data.live_signal_stats || {};
+    const lstatsHtml = lstats.total ? `
+      <div style="display:flex;gap:0;margin:10px 0 14px;background:#0d1320;border-radius:8px;overflow:hidden;border:1px solid #232d45;">
+        <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #232d45;">
+          <div style="font-size:18px;font-weight:700;" class="${(lstats.winrate||0)>=33?'win':'loss'}">${lstats.winrate!=null?lstats.winrate+'%':'\u2014'}</div>
+          <div class="dim" style="font-size:9px;">\u0416\u0418\u0412\u041e\u0419 WINRATE</div>
+        </div>
+        <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #232d45;">
+          <div style="font-size:18px;font-weight:700;" class="${(lstats.avg_pnl_r||0)>=0?'win':'loss'}">${lstats.avg_pnl_r!=null?(lstats.avg_pnl_r>0?'+':'')+lstats.avg_pnl_r+'R':'\u2014'}</div>
+          <div class="dim" style="font-size:9px;">\u0421\u0420. P&L</div>
+        </div>
+        <div style="flex:1;text-align:center;padding:8px 4px;">
+          <div style="font-size:13px;font-weight:700;">
+            <span class="win">${lstats.wins}W</span>/<span class="loss">${lstats.losses}L</span>/<span class="dim">${lstats.open}\u0436\u0434\u0451\u0442</span>
+          </div>
+          <div class="dim" style="font-size:9px;">\u0432\u0441\u0435\u0433\u043e ${lstats.total} \u0441\u0438\u0433\u043d\u0430\u043b\u043e\u0432</div>
+        </div>
+      </div>` : `<div class="dim" style="margin:10px 0;font-size:11px;">\u0436\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b \u0435\u0449\u0451 \u043d\u0435 \u0441\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u043b\u0438 \u2014 \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u043d\u0430\u043a\u043e\u043f\u0438\u0442\u0441\u044f \u0441\u043e \u0432\u0440\u0435\u043c\u0435\u043d\u0435\u043c</div>`;
+
     const cards = coins.map(c => {
       const s = c.summary || {};
       const hasStats = s.n != null && s.n > 0;
@@ -18456,11 +18587,45 @@ async function refreshNeuro() {
       }).join('');
       const tradesSection = trades.length
         ? `<details>
-            <summary style="cursor:pointer;font-size:11px;color:#8a97b8;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 ${trades.length} \u0441\u0434\u0435\u043b\u043e\u043a \u25be</summary>
+            <summary style="cursor:pointer;font-size:11px;color:#8a97b8;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 ${trades.length} \u0441\u0434\u0435\u043b\u043e\u043a (\u0431\u044d\u043a\u0442\u0435\u0441\u0442) \u25be</summary>
             <div style="overflow-x:auto;margin-top:6px;">
               <table style="font-size:10px;white-space:nowrap;">
                 <thead><tr><th>\u0412\u0445\u043e\u0434</th><th>Dir</th><th>Entry</th><th>\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442</th><th>P&L</th></tr></thead>
                 <tbody>${tradeRows}</tbody>
+              </table>
+            </div>
+          </details>`
+        : '';
+
+      // ---- LIVE signals with real tracked outcomes (separate from the
+      // backtest simulation above — this is what ACTUALLY fired live) ----
+      const liveSigs = c.recent_live_signals || [];
+      const lsStats = c.live_signal_stats;
+      const liveSigRows = liveSigs.map(sig => {
+        const rc = sig.result==='WIN'?'win':sig.result==='LOSS'?'loss':'dim';
+        const dirCls = sig.direction === 'LONG' ? 'win' : 'loss';
+        const statusHtml = sig.status === 'OPEN'
+          ? '<span class="dim">\u041e\u0422\u041a\u0420\u042b\u0422\u0410</span>'
+          : sig.result==='WIN' ? `<span class="win">WIN @ ${fmtNum(sig.exit_price)}</span>`
+          : sig.result==='LOSS' ? `<span class="loss">LOSS @ ${fmtNum(sig.exit_price)}</span>`
+          : '<span class="dim">TIMEOUT</span>';
+        return `<tr onclick="openNeuroChart('${c.symbol}', ${sig.time})" style="cursor:pointer;">
+          <td class="dim">${fmtDateTime(sig.time)}</td>
+          <td class="${dirCls}">${sig.direction}</td>
+          <td class="dim">${fmtNum(sig.entry)}</td>
+          <td>${statusHtml}</td>
+          <td class="${rc}">${sig.pnl_r!=null?(sig.pnl_r>0?'+':'')+sig.pnl_r+'R':'\u2014'}</td>
+        </tr>`;
+      }).join('');
+      const liveSigSection = liveSigs.length
+        ? `<details style="margin-bottom:8px;">
+            <summary style="cursor:pointer;font-size:11px;color:#8a97b8;">
+              \u0416\u0418\u0412\u042b\u0415 \u0441\u0438\u0433\u043d\u0430\u043b\u044b: ${liveSigs.length}${lsStats && lsStats.n ? ` \u00b7 WR ${lsStats.winrate}% (${lsStats.wins}W/${lsStats.losses}L${lsStats.open?', '+lsStats.open+' \u043e\u0442\u043a\u0440\u044b\u0442\u043e':''})` : lsStats && lsStats.open ? ` \u00b7 ${lsStats.open} \u043e\u0442\u043a\u0440\u044b\u0442\u043e, \u0435\u0449\u0451 \u043d\u0435\u0442 \u0437\u0430\u043a\u0440\u044b\u0442\u044b\u0445` : ''} \u25be
+            </summary>
+            <div style="overflow-x:auto;margin-top:6px;">
+              <table style="font-size:10px;white-space:nowrap;">
+                <thead><tr><th>\u0412\u0445\u043e\u0434</th><th>Dir</th><th>Entry</th><th>\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442</th><th>P&L</th></tr></thead>
+                <tbody>${liveSigRows}</tbody>
               </table>
             </div>
           </details>`
@@ -18472,6 +18637,7 @@ async function refreshNeuro() {
         ${liveBadge}
         ${bigStats}
         ${patSection}
+        ${liveSigSection}
         ${tradesSection}
       </div>`;
     }).join('');
@@ -18487,6 +18653,8 @@ async function refreshNeuro() {
       <div id="neuroCanvasWrap" style="width:100%;height:220px;background:#0a0e1a;border-radius:10px;overflow:hidden;margin-bottom:14px;position:relative;">
         <canvas id="neuroCanvas" style="width:100%;height:100%;display:block;"></canvas>
       </div>
+      <div class="dim" style="font-size:11px;font-weight:700;margin-bottom:2px;">\u0416\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b \u0432\u0441\u0435\u0433\u043e \u043f\u043e\u0441\u0438\u0441\u0442\u0435\u043c\u0435 (\u0440\u0435\u0430\u043b\u044c\u043d\u044b\u0439 \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442, \u043d\u0435 \u0431\u044d\u043a\u0442\u0435\u0441\u0442)</div>
+      ${lstatsHtml}
       ${cards}
     `;
     _neuroDrawNetwork(coins);
