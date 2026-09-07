@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.223"
+APP_VERSION = "0.99.224"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1033,7 +1033,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "msnr_all_in_enabled", "msnr_single_best_enabled",
                   "autotrade_risk_pct",
@@ -1079,6 +1079,7 @@ def get_settings():
         "lsw_session_filter_enabled": LSW_SESSION_FILTER_ENABLED,
         "lsw_min_touches_enabled": LSW_MIN_TOUCHES_ENABLED,
         "lsw_candle_structure_filter_enabled": LSW_CANDLE_STRUCTURE_FILTER_ENABLED,
+        "lsw_atr_sweep_enabled": LSW_ATR_SWEEP_ENABLED,
         "lsw_entry_confirm_enabled": LSW_ENTRY_CONFIRM_ENABLED,
         "lsw_direction_filter_enabled": LSW_DIRECTION_FILTER_ENABLED,
         "msnr_max_rr": MSNR_MAX_RR,
@@ -1128,7 +1129,7 @@ def apply_settings(updates):
     global MIRROR_VOLUME_FILTER_ENABLED, MIRROR_HTF_FILTER_ENABLED
     global LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
-    global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED
+    global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED, LSW_ATR_SWEEP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_EMA_BULL, TELEGRAM_ALERTS_AMD, TELEGRAM_ALERTS_NEURO, TELEGRAM_ALERTS_NETWORK
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED, MSNR_SINGLE_BEST_ENABLED
@@ -1210,6 +1211,8 @@ def apply_settings(updates):
         LSW_MIN_TOUCHES_ENABLED = bool(updates["lsw_min_touches_enabled"])
     if "lsw_candle_structure_filter_enabled" in updates:
         LSW_CANDLE_STRUCTURE_FILTER_ENABLED = bool(updates["lsw_candle_structure_filter_enabled"])
+    if "lsw_atr_sweep_enabled" in updates:
+        LSW_ATR_SWEEP_ENABLED = bool(updates["lsw_atr_sweep_enabled"])
     if "lsw_entry_confirm_enabled" in updates:
         LSW_ENTRY_CONFIRM_ENABLED = bool(updates["lsw_entry_confirm_enabled"])
     if "lsw_direction_filter_enabled" in updates:
@@ -11804,6 +11807,8 @@ def lsw_apply_active_filter_chain(sigs, candles, htf_candles, htf_interval_sec, 
         sigs = lsw_filter_signals_by_session(sigs)
     if LSW_CANDLE_STRUCTURE_FILTER_ENABLED and sigs:
         sigs = lsw_filter_signals_by_candle_structure(sigs, candles)
+    if LSW_ATR_SWEEP_ENABLED and sigs:
+        sigs = lsw_filter_signals_by_atr_sweep(sigs, candles)
     if LSW_ENTRY_CONFIRM_ENABLED and sigs:
         if confirm_candles:
             sigs = lsw_apply_entry_confirmation(sigs, confirm_candles)
@@ -11958,31 +11963,8 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
     atr_solo_sigs = lsw_filter_signals_by_atr_sweep(raw_sigs, candles)
     checkpoints["atr_sweep"] = _mirror_checkpoint(_track_all(atr_solo_sigs), rr=chosen_rr)
 
-    # The ACTUAL result, using whichever filters are really toggled on right now — unchanged from before, chained in the same order.
-    sigs = raw_sigs
-    if LSW_HTF_FILTER_ENABLED and sigs:
-        if len(htf_candles) >= LSW_HTF_EMA_PERIOD:
-            bias_series = lsw_htf_bias_series(htf_candles)
-            sigs = lsw_filter_signals_by_htf_trend(sigs, bias_series, htf_interval_sec)
-        else:
-            sigs = []  # not enough HTF history to judge trend at all — conservative: no signals rather than unfiltered ones
-    if LSW_STRUCTURAL_CAP_ENABLED and sigs:
-        sigs = lsw_filter_signals_by_structural_cap(sigs, candles)
-    if LSW_VOLUME_FILTER_ENABLED and sigs:
-        sigs = lsw_filter_signals_by_volume(sigs, candles)
-    if LSW_MIN_TOUCHES_ENABLED and sigs:
-        sigs = lsw_filter_signals_by_min_touches(sigs)
-    if LSW_FVG_FILTER_ENABLED and sigs:
-        sigs = lsw_filter_signals_by_fvg(sigs, candles)
-    if LSW_SESSION_FILTER_ENABLED and sigs:
-        sigs = lsw_filter_signals_by_session(sigs)
-    if LSW_CANDLE_STRUCTURE_FILTER_ENABLED and sigs:
-        sigs = lsw_filter_signals_by_candle_structure(sigs, candles)
-    if LSW_ENTRY_CONFIRM_ENABLED and sigs:
-        if confirm_candles:
-            sigs = lsw_apply_entry_confirmation(sigs, confirm_candles)
-        else:
-            sigs = []  # no 5m history at all to confirm against
+    # The ACTUAL result, using whichever filters are really toggled on right now — now calls the SAME shared function lsw_pick_best_rr() uses (v0.99.223/224), so the two paths can never silently drift apart.
+    sigs = lsw_apply_active_filter_chain(raw_sigs, candles, htf_candles, htf_interval_sec, confirm_candles)
     # v0.99.191 — no-open-position filter: skip a new signal if the
     # previous trade on this symbol is still OPEN (timeout not closed).
     # Prevents piling into the same symbol while a trade is running.
@@ -12097,6 +12079,10 @@ def lsw_scan_symbol_live(symbol):
                 return
         if LSW_CANDLE_STRUCTURE_FILTER_ENABLED:
             sigs = lsw_filter_signals_by_candle_structure(sigs, candles)
+            if not sigs:
+                return
+        if LSW_ATR_SWEEP_ENABLED:
+            sigs = lsw_filter_signals_by_atr_sweep(sigs, candles)
             if not sigs:
                 return
         if LSW_DIRECTION_FILTER_ENABLED:
@@ -15130,6 +15116,7 @@ def api_lsw_status():
             "session_filter_enabled": LSW_SESSION_FILTER_ENABLED,
             "min_touches_enabled": LSW_MIN_TOUCHES_ENABLED, "min_touches": LSW_MIN_TOUCHES,
             "candle_structure_filter_enabled": LSW_CANDLE_STRUCTURE_FILTER_ENABLED,
+            "atr_sweep_enabled": LSW_ATR_SWEEP_ENABLED,
             "entry_confirm_enabled": LSW_ENTRY_CONFIRM_ENABLED, "entry_confirm_interval": LSW_ENTRY_CONFIRM_INTERVAL,
             "direction_filter_enabled": LSW_DIRECTION_FILTER_ENABLED,
         },
@@ -16574,6 +16561,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">торговать только уровни с 3+ касаниями вместо базовых 2 — больше касаний, по опыту, повышают шанс на реальное снятие ликвидности</div>
         </div>
         <label class="switch"><input type="checkbox" id="setLswMinTouches"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ ATR-фильтр размера свипа</div>
+          <div class="sub">торговать только свипы где фитиль ≥ 0.5×ATR(14) — отсекает мелкие/шумные снятия ликвидности в пользу более выраженных</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setLswAtrSweep"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -18234,7 +18228,7 @@ async function refreshLsw() {
     const sessionTxt = fmtCheckpoint(fc.session_filter, cfg.session_filter_enabled);
     const touchesTxt = fmtCheckpoint(fc.min_touches_filter, cfg.min_touches_enabled);
     const structureTxt = fmtCheckpoint(fc.candle_structure, cfg.candle_structure_filter_enabled);
-    const atrSweepTxt = fmtCheckpoint(fc.atr_sweep, false);
+    const atrSweepTxt = fmtCheckpoint(fc.atr_sweep, cfg.atr_sweep_enabled);
     const rrSweepTitle = (r.rr_sweep || []).map(s => `RR${s.rr}: ${s.winrate!=null?s.winrate+'%':'?'} (n=${s.n}) exp=${s.expectancy_r!=null?s.expectancy_r:'?'}`).join(' | ');
     return `<tr>
       <td>${r.symbol}${liveDot}${dirFilterTxt}</td>
@@ -19086,6 +19080,7 @@ const setInputs = {
   lsw_fvg_filter_enabled: document.getElementById('setLswFvgFilter'),
   lsw_session_filter_enabled: document.getElementById('setLswSessionFilter'),
   lsw_min_touches_enabled: document.getElementById('setLswMinTouches'),
+  lsw_atr_sweep_enabled: document.getElementById('setLswAtrSweep'),
   lsw_candle_structure_filter_enabled: document.getElementById('setLswCandleStructureFilter'),
   lsw_entry_confirm_enabled: document.getElementById('setLswEntryConfirm'),
   lsw_direction_filter_enabled: document.getElementById('setLswDirectionFilter'),
