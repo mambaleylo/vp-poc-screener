@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.227"
+APP_VERSION = "0.99.228"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1033,7 +1033,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "msnr_all_in_enabled", "msnr_single_best_enabled",
                   "autotrade_risk_pct",
@@ -1071,6 +1071,7 @@ def get_settings():
         "mirror_htf_filter_enabled": MIRROR_HTF_FILTER_ENABLED,
         "ema_touch_enabled": EMA_TOUCH_ENABLED,
         "amd_enabled": AMD_ENABLED,
+        "neuro_enabled": NEURO_ENABLED,
         "lsw_enabled": LSW_ENABLED,
         "lsw_rr": LSW_RR,
         "lsw_equal_tolerance_pct": LSW_EQUAL_TOLERANCE_PCT,
@@ -1129,7 +1130,7 @@ def apply_settings(updates):
     global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, FT5_HTF_FILTER_ENABLED, FT5_SESSION_FILTER_ENABLED, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, MSNR_MIN_RR_FILTER_ENABLED, MSNR_HTF_FILTER_ENABLED, MSNR_PER_SYMBOL_FILTERS_ENABLED, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT, MIRROR_AUTOTUNE_TOLERANCE_ENABLED
     global MIRROR_VOLUME_FILTER_ENABLED, MIRROR_HTF_FILTER_ENABLED
-    global EMA_TOUCH_ENABLED, AMD_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
+    global EMA_TOUCH_ENABLED, AMD_ENABLED, NEURO_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED, LSW_ATR_SWEEP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
@@ -1187,6 +1188,8 @@ def apply_settings(updates):
         EMA_TOUCH_ENABLED = bool(updates["ema_touch_enabled"])
     if "amd_enabled" in updates:
         AMD_ENABLED = bool(updates["amd_enabled"])
+    if "neuro_enabled" in updates:
+        NEURO_ENABLED = bool(updates["neuro_enabled"])
     if "lsw_enabled" in updates:
         LSW_ENABLED = bool(updates["lsw_enabled"])
     if "lsw_rr" in updates:
@@ -13122,6 +13125,7 @@ def amd_loop():
 # so it keeps adapting as new data streams in ("self-learning").
 # ============================================================================
 
+NEURO_ENABLED        = os.environ.get("VP_NEURO_ENABLED", "1") == "1"  # v0.99.228 — master on/off, per direct user report ("почему нету тумблера на работу") — same gap EMA Touch/AMD had before v0.99.225, missed here since Neuro was built after that audit
 NEURO_COINS          = ["BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT",
                         "BNB_USDT", "ADA_USDT", "AVAX_USDT", "LINK_USDT", "DOT_USDT",
                         "TRX_USDT", "MATIC_USDT", "LTC_USDT", "ATOM_USDT", "NEAR_USDT",
@@ -14526,6 +14530,9 @@ def neuro_mining_loop():
     global _neuro_mining_current_symbol, _neuro_mining_progress_ts
     while True:
         try:
+            if not NEURO_ENABLED:
+                time.sleep(max(300, NEURO_REFRESH_SEC))
+                continue
             with _neuro_state_lock:
                 _neuro_mining_running = True
                 _neuro_mining_total = len(NEURO_COINS)
@@ -14606,6 +14613,9 @@ def neuro_live_loop():
     global _neuro_prev_signal_keys
     while True:
         try:
+            if not NEURO_ENABLED:
+                time.sleep(900)
+                continue
             with _neuro_state_lock:
                 patterns_snapshot = dict(_neuro_patterns)
                 summary_snapshot = dict(_neuro_summary)
@@ -16649,6 +16659,14 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">Accumulation → Manipulation → Distribution — тесная консолидация, ложный пробой за её границу, затем импульсная свеча в реальную сторону</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAmd"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingsGroupTitle">🧠 Neuro</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (майнинг + живой скан)</div>
+          <div class="sub">самообучающаяся система поиска зависимостей по 20 монетам — выключение здесь останавливает и переобучение, и живой скан сигналов</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setNeuro"><span class="switchSlider"></span></label>
       </div>
       <div class="settingsGroupTitle">Sweep (Liquidity Sweep)</div>
       <div class="settingRow">
@@ -19314,6 +19332,7 @@ const setInputs = {
   lsw_enabled: document.getElementById('setLsw'),
   ema_touch_enabled: document.getElementById('setEmaTouch'),
   amd_enabled: document.getElementById('setAmd'),
+  neuro_enabled: document.getElementById('setNeuro'),
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
   lsw_structural_cap_enabled: document.getElementById('setLswStructuralCap'),
   lsw_volume_filter_enabled: document.getElementById('setLswVolumeFilter'),
