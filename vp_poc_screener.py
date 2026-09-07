@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.221"
+APP_VERSION = "0.99.222"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14052,6 +14052,30 @@ def neuro_check_aggregate_decay(trades, chosen_rr):
             "breakeven_wr": round(breakeven_wr, 1), "underperforming": underperforming}
 
 
+def neuro_find_culprit_patterns(trades, window=None):
+    """Per direct user follow-up ("убирать конкретные зависимости, виновные
+    в плохой серии, из списка подтверждённых целиком, а не просто глушить
+    сигналы"): when the aggregate window is underperforming, identify
+    WHICH specific (pattern_type, pattern_value) combos had a net-losing
+    outcome within that same recent window, so only THOSE get purged from
+    the confirmed list — a surgical fix instead of muting the whole
+    symbol regardless of which pattern would actually fire next. Needs at
+    least 3 of its own trades within the window before judging a pattern
+    (a single bad trade shouldn't condemn it)."""
+    window = window or NEURO_AGG_DECAY_WINDOW
+    closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
+    recent = closed[-window:]
+    by_pattern = {}
+    for t in recent:
+        key = (t["pattern_type"], t["pattern_value"])
+        by_pattern.setdefault(key, []).append(t["pnl_r"])
+    culprits = set()
+    for key, pnls in by_pattern.items():
+        if len(pnls) >= 3 and sum(pnls) < 0:
+            culprits.add(key)
+    return culprits
+
+
 def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_candles=None):
     """Fetch max available history PLUS extra data sources (4h+1d trend,
     funding rate, open interest, BTC/ETH correlation), mine + walk-forward
@@ -14125,6 +14149,26 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
         losses = len(closed) - wins
         wr = round(wins / len(closed) * 100, 1) if closed else None
         avg_pnl = round(sum(t["pnl_r"] for t in closed if t.get("pnl_r") is not None) / len(closed), 2) if closed else None
+
+        # v0.99.222 — per direct user follow-up ("убирать конкретные
+        # зависимости, виновные в плохой серии, из списка подтверждённых
+        # целиком, а не просто глушить сигналы"): when the aggregate
+        # recent window is underperforming, PURGE the specific patterns
+        # that were net-losing within it from `confirmed` — this is what
+        # actually gets used for live signals and shown as "currently
+        # confirmed" going forward. `trades` above (the historical record)
+        # was already generated from the FULL pre-purge confirmed list and
+        # stays exactly as it happened — purging only affects what's
+        # trusted from here on, never rewrites the honest past.
+        aggregate_recent = neuro_check_aggregate_decay(trades, chosen_rr)
+        culprits_removed = 0
+        if aggregate_recent.get("underperforming"):
+            culprits = neuro_find_culprit_patterns(trades)
+            if culprits:
+                before = len(confirmed)
+                confirmed = [p for p in confirmed if (p["type"], p["value"]) not in culprits]
+                culprits_removed = before - len(confirmed)
+
         summary = {"n": len(closed), "wins": wins, "losses": losses,
                    "timeouts": sum(1 for t in trades if t["result"] == "TIMEOUT"),
                    "winrate": wr, "avg_pnl_r": avg_pnl, "total": len(trades),
@@ -14132,26 +14176,23 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
                    "combos_confirmed": sum(1 for p in confirmed if p.get("is_combo")),
                    "decaying_confirmed": sum(1 for p in confirmed if p.get("decaying")),
                    "chosen_rr": chosen_rr, "rr_sweep": rr_sweep,
-                   "aggregate_recent": neuro_check_aggregate_decay(trades, chosen_rr)}
+                   "aggregate_recent": aggregate_recent, "culprits_removed": culprits_removed}
         return confirmed, trades, summary
     except Exception as e:
         log_error(f"neuro_backtest_symbol {symbol}: {e}")
         return [], [], {}
 
 
-def neuro_scan_live(symbol, confirmed_patterns, rr=None, aggregate_underperforming=False):
+def neuro_scan_live(symbol, confirmed_patterns, rr=None):
     """Check the most recently closed bar's conditions against this symbol's
     confirmed dependencies (single + combo); combine agreeing ones into a
     single signal. `rr` should be this symbol's own auto-tuned value from
     neuro_pick_best_rr(), falling back to NEURO_RR when not supplied.
-    `aggregate_underperforming` (from neuro_check_aggregate_decay()) mutes
-    ALL new signals for this symbol regardless of which pattern would have
-    fired — catches a shared regime shift dragging down many different
-    patterns a little each, which no single pattern's own decay flag
-    would individually catch."""
+    Patterns implicated in a recent bad aggregate stretch are already
+    purged from `confirmed_patterns` by neuro_backtest_symbol (see
+    neuro_find_culprit_patterns()) before this is ever called — no
+    separate whole-symbol mute needed here anymore."""
     rr = rr if rr is not None else NEURO_RR
-    if aggregate_underperforming:
-        return None
     try:
         if not confirmed_patterns:
             return None
@@ -14370,8 +14411,7 @@ def neuro_live_loop():
                 confirmed = patterns_snapshot.get(symbol) or []
                 sym_summary = summary_snapshot.get(symbol) or {}
                 chosen_rr = sym_summary.get("chosen_rr")
-                agg_underperforming = (sym_summary.get("aggregate_recent") or {}).get("underperforming", False)
-                sig = neuro_scan_live(symbol, confirmed, rr=chosen_rr, aggregate_underperforming=agg_underperforming)
+                sig = neuro_scan_live(symbol, confirmed, rr=chosen_rr)
                 new_signals[symbol] = sig
             with _neuro_state_lock:
                 _neuro_live_signals.update(new_signals)
@@ -18194,8 +18234,8 @@ async function refreshNeuro() {
       const agg = s.aggregate_recent || {};
       const underperformBadge = agg.underperforming
         ? `<div style="padding:8px 10px;margin-bottom:8px;background:rgba(255,167,38,0.12);border-radius:8px;border:1px solid #ffa726;">
-            <div style="color:#ffa726;font-weight:700;font-size:12px;">\u26a0\ufe0f \u043f\u043b\u043e\u0445\u0430\u044f \u0441\u0435\u0440\u0438\u044f \u0441\u0435\u0439\u0447\u0430\u0441 \u2014 \u043d\u043e\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b \u043f\u0440\u0438\u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u044b</div>
-            <div class="dim" style="font-size:10px;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 ${agg.n} \u0441\u0434\u0435\u043b\u043e\u043a: WR ${agg.wr}% (\u043d\u0443\u0436\u043d\u043e \u2265${agg.breakeven_wr}% \u0434\u043b\u044f \u0431\u0435\u0437\u0443\u0431\u044b\u0442\u043a\u0430) \u00b7 avg ${agg.avg_pnl_r>0?'+':''}${agg.avg_pnl_r}R</div>
+            <div style="color:#ffa726;font-weight:700;font-size:12px;">\u26a0\ufe0f \u0431\u044b\u043b\u0430 \u043f\u043b\u043e\u0445\u0430\u044f \u0441\u0435\u0440\u0438\u044f \u2014 \u0443\u0431\u0440\u0430\u043d\u043e ${s.culprits_removed||0} \u0432\u0438\u043d\u043e\u0432\u043d\u044b\u0445 \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439</div>
+            <div class="dim" style="font-size:10px;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 ${agg.n} \u0441\u0434\u0435\u043b\u043e\u043a: WR ${agg.wr}% (\u043d\u0443\u0436\u043d\u043e \u2265${agg.breakeven_wr}% \u0434\u043b\u044f \u0431\u0435\u0437\u0443\u0431\u044b\u0442\u043a\u0430) \u00b7 avg ${agg.avg_pnl_r>0?'+':''}${agg.avg_pnl_r}R \u00b7 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0438 \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u044e\u0442 \u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c</div>
           </div>`
         : '';
       const liveBadge = liveSig
@@ -18207,7 +18247,7 @@ async function refreshNeuro() {
             </div>
           </div>`
         : `<div style="padding:8px 10px;margin-bottom:10px;background:#0d1320;border-radius:8px;border:1px solid #232d45;">
-            <span class="dim" style="font-size:11px;">\u26aa \u0436\u0438\u0432\u043e\u0433\u043e \u0441\u0438\u0433\u043d\u0430\u043b\u0430 \u0441\u0435\u0439\u0447\u0430\u0441 \u043d\u0435\u0442${agg.underperforming ? ' (\u043f\u0440\u0438\u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u044b \u0438\u0437-\u0437\u0430 \u043f\u043b\u043e\u0445\u043e\u0439 \u0441\u0435\u0440\u0438\u0438)' : ''}</span>
+            <span class="dim" style="font-size:11px;">\u26aa \u0436\u0438\u0432\u043e\u0433\u043e \u0441\u0438\u0433\u043d\u0430\u043b\u0430 \u0441\u0435\u0439\u0447\u0430\u0441 \u043d\u0435\u0442</span>
           </div>`;
 
       // ---- Confirmed dependencies, compact ----
