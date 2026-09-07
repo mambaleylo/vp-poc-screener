@@ -13147,3 +13147,73 @@ v0.99.228 - Neuro had NO master enable/disable toggle at all, per direct
          Verified: py_compile, pyflakes, node --check, 53 routes, real
          runtime 200 on / with neuro_enabled correctly present in
          /api/settings, zero surrogate escapes.
+
+v0.99.229 - NEW: "NQ Model" tab — Previous Day High/Low + daily-candle
+         bias + CISD confirmation, per direct user request based on an
+         uploaded "NQ Motion Model" trading methodology PDF. Instrument:
+         NAS100_USDT on Gate.io — a genuine Nasdaq-100 INDEX perpetual
+         launched by Gate.com on Jan 23, 2026 (confirmed via web search:
+         PANews "Gate.com has officially launched a new index zone...
+         debuted live trading (USDT settlement) of NAS100... 24/7
+         trading"), NOT the real CME NQ futures contract but tracking
+         the same underlying index — and critically, unlike a stock-
+         backed xStock token (which can go quiet when the real NASDAQ
+         market itself is closed), it trades continuously 24/7 like any
+         other Gate.io perpetual. Reuses the EXACT SAME Gate.io candle-
+         fetch infrastructure as every other module (get_candles_range,
+         INTERVAL_SECONDS, etc.) — no new data source needed at all,
+         abandoning the originally-discussed Yahoo Finance plan once
+         this was found.
+         Signal logic — the two concepts from the PDF confirmed genuinely
+         portable to a 24/7 instrument (Key Opens and NWOG were
+         explicitly excluded per direct user discussion as CME-session-
+         specific concepts with no clean analog on continuous markets):
+         1. Previous Day High/Low from daily candles.
+         2. Daily bias: yesterday's candle color — bullish sets bias
+            toward yesterday's HIGH getting swept, bearish toward the
+            LOW (literally the PDF's own rule).
+         3. Wait for an intraday (15m) bar to sweep that level today.
+         4. CISD confirmation: within 8 bars after the sweep, price must
+            close back through the most recent short-term swing point
+            (opposite extreme of the last 8 bars before the sweep) —
+            the PDF's own "price comes back and tests a level quickly"
+            CISD definition.
+         5. Enter in the REVERSAL direction (opposite the sweep) — the
+            PDF's own AMD logic ("manipulated up -> expect down").
+         Per direct user answers: NO daily trade-count cap, NO risk
+         reduction after a loss (both explicitly declined), but a HARD
+         minimum RR of 3.0 — unlike every other module's freely auto-
+         tuned RR, here nq_pick_best_rr()'s walk-forward sweep candidates
+         (NQ_RR_CANDIDATES) never go below 3.0, directly enforcing the
+         PDF's own "1:3, no exceptions" rule structurally rather than
+         just as a suggestion.
+         Full architecture parity with LSW/Neuro: walk-forward RR
+         auto-tuning (train-only pick, applied to full-history report),
+         a persistent live-signal log with real tracked outcomes
+         (nq_compute_signal_stats(), same WIN/LOSS/TIMEOUT replay as
+         LSW/Neuro's own trackers), hang-protected background loops
+         (bounded-time executor, no-with-block pattern), master enable
+         toggle (NQ_ENABLED) + Telegram alert toggle (TELEGRAM_ALERTS_NQ)
+         both fully wired into settings, a reset button, and a UI tab
+         with scorecard/RR-sweep-table/live-signal-log/backtest-trades
+         sections matching Neuro's own established layout.
+         New routes: /api/nq/status, /api/nq/chart, /api/reset/nq.
+         Threads: nq_backtest_loop() (hourly re-mine), nq_live_loop()
+         (15-min live scan + outcome tracking).
+         Validated on synthetic OHLC data (180 days, 15m+daily) end to
+         end: 17 simulated trades with correct RR ratios (verified
+         3.0x SL:TP distance on every trade), bias/direction logic
+         internally consistent (bullish bias -> SHORT entries after PDH
+         sweep, bearish -> LONG after PDL sweep), RR sweep table
+         correctly declining to report stats for candidates below the
+         minimum sample threshold rather than fabricating them.
+         Verified: py_compile, pyflakes, node --check, 56 routes, real
+         runtime 200 on / and /api/nq/status with nq_enabled/telegram_
+         alerts_nq correctly present in /api/settings, zero surrogate
+         escapes. Real NAS100_USDT history is untested here (Gate.io
+         blocked in this sandbox) — will need first-run verification on
+         the user's own device, and given the contract only launched
+         Jan 2026, real history will be much shorter than the
+         NQ_HISTORY_DAYS=365 requested (code already handles whatever
+         comes back gracefully, same as every other module's own
+         "ask for a lot, use what you get" pattern).
