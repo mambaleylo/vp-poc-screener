@@ -13091,3 +13091,39 @@ v0.99.226 - FULL audit of all 63 SETTINGS_KEYS against actual UI
          Verified: py_compile, pyflakes, node --check, 53 routes, real
          runtime 200 on / with all 4 new keys correctly present in
          /api/settings, zero surrogate escapes.
+
+v0.99.227 - Neuro now has a real live-signal statistics log, per direct
+         user request ("по нейро есть какая-то статистика живых
+         сигналов? как в sweep список и винрейт, результат"). Before
+         this, _neuro_live_signals only ever held the SINGLE latest
+         signal per symbol (overwritten every 15-min cycle) — no
+         history, no outcome tracking, no winrate for what actually
+         fired live. This is a genuinely different thing from the
+         per-coin backtest simulation already shown (neuro_simulate_
+         trades' retroactive re-run over history) — the new log is
+         specifically what ACTUALLY got signaled live and how it
+         ACTUALLY played out, mirroring LSW's own STATE["lsw_signals"]
+         pattern exactly (append-only log, OPEN->CLOSED with a tracked
+         WIN/LOSS/TIMEOUT result via price-action replay).
+         New _neuro_signal_log (capped deque, 300 entries) + neuro_
+         track_signal_outcomes() (checks OPEN entries against fresh
+         candles for SL/TP/timeout, same shared shape as LSW/MIRROR's
+         own outcome trackers) + neuro_compute_signal_stats() (overall
+         + per-symbol WR/wins/losses/open/avg P&L). Wired into
+         neuro_live_loop(): every fired signal gets appended to the log,
+         and outcomes get checked every cycle (15 min).
+         /api/neuro/status now returns top-level "live_signal_stats"
+         (whole-system) plus per-coin "live_signal_stats"/"recent_live_
+         signals" (last 40 for that symbol).
+         UI: new overall live-signal scorecard (WINRATE/avg P&L/W-L-T)
+         at the top of the Neuro panel, plus a per-coin collapsible
+         "ЖИВЫЕ сигналы" table (clickable rows -> chart) alongside the
+         existing backtest trades table — clearly labeled so the two
+         don't get confused (backtest = retroactive simulation, live =
+         what actually happened).
+         Verified stats computation on synthetic log entries (1 open,
+         1 win, 1 loss -> WR 50%, avg P&L +0.5R, correct per-symbol
+         breakdown). Verified: py_compile, pyflakes, node --check, 53
+         routes, real runtime 200 confirming live_signal_stats present
+         (empty/zero as expected on a freshly-started server), zero
+         surrogate escapes.
