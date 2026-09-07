@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.230"
+APP_VERSION = "0.99.231"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -767,7 +767,7 @@ LSW_INTERVAL = os.environ.get("VP_LSW_INTERVAL", "1h")
 LSW_PIVOT_LEFT = int(os.environ.get("VP_LSW_PIVOT_LEFT", 3))
 LSW_PIVOT_RIGHT = int(os.environ.get("VP_LSW_PIVOT_RIGHT", 3))
 LSW_LOOKBACK = int(os.environ.get("VP_LSW_LOOKBACK", 150))  # bars of history considered per live-scan pass
-LSW_UNIVERSE_SIZE = int(os.environ.get("VP_LSW_UNIVERSE_SIZE", 60))
+LSW_UNIVERSE_SIZE = int(os.environ.get("VP_LSW_UNIVERSE_SIZE", 100))  # v0.99.231 — raised 60->100 per direct user request, to give Gate.io's newer non-crypto perpetuals (NAS100/SPX500/UK100/XAU/XAG/XPT/XPD — all _USDT, all pass the existing universe filter already) a real chance to rank in by volume, rather than being crowded out by higher-volume crypto majors under the old cap. No other code change needed — lsw_build_universe() already accepts any _USDT contract; this just widens how many get through the volume-rank cutoff.
 LSW_EQUAL_TOLERANCE_PCT = float(os.environ.get("VP_LSW_EQUAL_TOLERANCE_PCT", 0.12))  # how close two swing highs (or two swing lows) must sit to count as the SAME resting-liquidity level, as % of price — this is what makes a level "equal highs/lows" rather than just one isolated swing
 LSW_SL_BUFFER_PCT = float(os.environ.get("VP_LSW_SL_BUFFER_PCT", 0.15))  # stop placed this far BEYOND the sweep candle's own wick extreme, as % of price — a small buffer so the stop isn't sitting exactly on the exact wick tip
 LSW_RR = float(os.environ.get("VP_LSW_RR", 2.5))  # fallback/default only — see LSW_RR_CANDIDATES below for the actual auto-tuned value
@@ -12359,7 +12359,7 @@ def lsw_backtest_loop():
             # shutdown(wait=False) so the outer loop can move on immediately,
             # abandoning the stuck thread (it's a daemon-adjacent one-off —
             # harmless to leak since the whole process is daemonized anyway).
-            MAX_CYCLE_SEC = 60 * 60
+            MAX_CYCLE_SEC = 2 * 60 * 60  # v0.99.231 — raised 1h->2h: universe grew 60->100 (+67%) and each symbol now also runs a 7-candidate RR sweep (v0.99.223), so the old 1h ceiling risked aborting a cycle that was genuinely still making progress, not actually stuck
             _cycle_ex = ThreadPoolExecutor(max_workers=1)
             _cycle_fut = _cycle_ex.submit(_lsw_run_one_backtest_cycle, t0)
             try:
