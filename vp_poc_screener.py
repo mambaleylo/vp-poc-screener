@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.218"
+APP_VERSION = "0.99.219"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13848,8 +13848,33 @@ def neuro_walk_forward(candles, forward_bars=None, min_sample=None, z_threshold=
                 continue
             test_mean = sum(test_rets) / len(test_rets)
             if (test_mean > 0) == (pat["mean_fwd_return"] > 0):
+                # v0.99.219 — RECENCY CHECK, per direct user request ("если
+                # бы я торговал последнее время, были бы одни стопы —
+                # учитывай это"). test_rets is already chronological (built
+                # by iterating increasing bar index over `test`, which is
+                # itself time-ordered) — split into the FIRST 60% vs LAST
+                # 40% of the test-period occurrences and compare. A pattern
+                # can pass the overall train-vs-test confirmation above yet
+                # still be actively decaying RIGHT NOW within the test
+                # window itself; that's exactly what should stop it from
+                # firing new live signals, without rewriting the honest
+                # historical trade record (neuro_simulate_trades still
+                # uses the FULL confirmed list unfiltered — only
+                # neuro_scan_live excludes decaying patterns going forward).
+                split_i = max(1, int(len(test_rets) * 0.6))
+                recent_rets = test_rets[split_i:]
+                decaying = False
+                recent_mean = None
+                if len(recent_rets) >= 8:
+                    recent_mean = sum(recent_rets) / len(recent_rets)
+                    sign_flipped = (recent_mean > 0) != (pat["mean_fwd_return"] > 0)
+                    weakened_badly = abs(test_mean) > 1e-12 and abs(recent_mean) < 0.3 * abs(test_mean)
+                    decaying = sign_flipped or weakened_badly
                 confirmed.append({**pat, "test_n": len(test_rets),
-                                  "test_mean_fwd_return": round(test_mean, 5), "held_up": True})
+                                  "test_mean_fwd_return": round(test_mean, 5), "held_up": True,
+                                  "recent_test_n": len(recent_rets),
+                                  "recent_test_mean_fwd_return": round(recent_mean, 5) if recent_mean is not None else None,
+                                  "decaying": decaying})
     confirmed.sort(key=lambda d: -abs(d["z"]))
     return confirmed
 
@@ -14053,6 +14078,7 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
                    "winrate": wr, "avg_pnl_r": avg_pnl, "total": len(trades),
                    "patterns_confirmed": len(confirmed), "history_bars": len(candles),
                    "combos_confirmed": sum(1 for p in confirmed if p.get("is_combo")),
+                   "decaying_confirmed": sum(1 for p in confirmed if p.get("decaying")),
                    "chosen_rr": chosen_rr, "rr_sweep": rr_sweep}
         return confirmed, trades, summary
     except Exception as e:
@@ -14103,6 +14129,14 @@ def neuro_scan_live(symbol, confirmed_patterns, rr=None):
 
         matched = []
         for p in confirmed_patterns:
+            if p.get("decaying"):
+                continue  # v0.99.219 — a pattern whose recent test-period
+                # performance has flipped sign or collapsed vs its overall
+                # test average doesn't get to fire NEW live signals, even
+                # though it still passed the overall train-vs-test
+                # confirmation gate. Kept in the full patterns list (and in
+                # neuro_simulate_trades' historical record) for transparency
+                # — only excluded from acting on it going forward.
             cur_val = _neuro_pattern_value(p, last)
             if cur_val is not None and cur_val == p["value"]:
                 matched.append(p)
@@ -18078,7 +18112,7 @@ async function refreshNeuro() {
           </div>
         </div>
         <div class="dim" style="font-size:10px;margin-bottom:10px;">
-          ${s.patterns_confirmed||0} \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043e (\u0438\u0437 \u043d\u0438\u0445 ${s.combos_confirmed||0} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439) \u00b7 ${s.history_bars||0} \u0447\u0430\u0441\u043e\u0432\u044b\u0445 \u0441\u0432\u0435\u0447\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438
+          ${s.patterns_confirmed||0} \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043e (\u0438\u0437 \u043d\u0438\u0445 ${s.combos_confirmed||0} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439${s.decaying_confirmed ? `, <span style="color:#ffa726;">${s.decaying_confirmed} \u043e\u0441\u043b\u0430\u0431\u0435\u0432\u0430\u044e\u0442</span>` : ''}) \u00b7 ${s.history_bars||0} \u0447\u0430\u0441\u043e\u0432\u044b\u0445 \u0441\u0432\u0435\u0447\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438
         </div>
         ${(s.rr_sweep && s.rr_sweep.length) ? `<details style="margin-bottom:8px;">
           <summary style="cursor:pointer;font-size:11px;color:#8a97b8;">\u043f\u043e\u0434\u0431\u043e\u0440 RR (\u043d\u0430 train-\u0447\u0430\u0441\u0442\u0438) \u25be</summary>
@@ -18112,8 +18146,9 @@ async function refreshNeuro() {
       const patItems = topPats.map(p => {
         const dirCls = p.direction === 'LONG' ? 'win' : 'loss';
         const comboTag = p.is_combo ? ` <span style="color:#a855f7;">\u043a\u043e\u043c\u0431\u043e\u00d7${p.combo_depth||2}</span>` : '';
+        const decayTag = p.decaying ? ` <span style="color:#ffa726;">\u26a0\ufe0f \u043e\u0441\u043b\u0430\u0431\u0435\u0432\u0430\u0435\u0442</span>` : '';
         return `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1c2433;font-size:11px;">
-          <span class="dim">${p.type}=${p.value}${comboTag}</span>
+          <span class="dim">${p.type}=${p.value}${comboTag}${decayTag}</span>
           <span class="${dirCls}">${p.direction} (z=${p.z}, n=${p.n})</span>
         </div>`;
       }).join('');
