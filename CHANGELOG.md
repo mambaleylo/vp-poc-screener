@@ -12920,3 +12920,43 @@ v0.99.221 - NEW: aggregate per-symbol recency gate, per direct user
          rather than just no pattern matching right now.
          Verified: py_compile, pyflakes, node --check, 53 routes, real
          runtime 200 on / and /api/neuro/status, zero surrogate escapes.
+
+v0.99.222 - Replaced v0.99.221's whole-symbol mute with SURGICAL culprit-
+         pattern removal, per direct user follow-up ("убирать конкретные
+         зависимости, виновные в плохой серии, из списка подтверждённых
+         целиком, а не просто глушить сигналы"). Previously, when the
+         aggregate recent window was underperforming, ALL new signals
+         for that symbol were muted regardless of which specific pattern
+         would have fired — even a currently-healthy pattern got
+         silenced just because OTHER patterns were dragging the recent
+         average down.
+         New neuro_find_culprit_patterns(): within the same recent
+         aggregate window, groups trades by their exact (pattern_type,
+         pattern_value) and identifies which specific ones were net-
+         losing within that window (needs >=3 of its own trades before
+         judging — a single bad trade doesn't condemn a pattern).
+         neuro_backtest_symbol() now PURGES only those specific culprits
+         from `confirmed` when the aggregate check flags underperforming
+         — every other pattern, including ones that happened to also
+         fire during the same bad stretch but were net-positive, stays
+         active. neuro_scan_live() reverted to no longer take a whole-
+         symbol mute flag at all — it just uses whatever `confirmed`
+         it's given, which already excludes purged culprits by
+         construction.
+         Crucially unchanged: `trades` (the historical record) is still
+         generated from the FULL pre-purge confirmed list and reported
+         exactly as it happened — purging only affects what's trusted
+         for NEW live signals and next-cycle reporting, never rewrites
+         the honest past.
+         Verified the exact discrimination logic with a synthetic case:
+         3 different patterns sharing one bad recent window — a clearly
+         net-losing one (5 losses) correctly identified as the sole
+         culprit; a net-POSITIVE one that also fired during the window
+         correctly spared; a pattern with only 2 trades (below the
+         minimum-3 threshold) correctly NOT judged despite both being
+         losses.
+         UI: warning banner reworded from "new signals paused" to
+         "N зависимостей убрано" (with the culprits_removed count),
+         reflecting that other dependencies keep working normally.
+         Verified: py_compile, pyflakes, node --check, 53 routes, real
+         runtime 200 on / and /api/neuro/status, zero surrogate escapes.
