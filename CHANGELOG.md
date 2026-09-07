@@ -12960,3 +12960,36 @@ v0.99.222 - Replaced v0.99.221's whole-symbol mute with SURGICAL culprit-
          reflecting that other dependencies keep working normally.
          Verified: py_compile, pyflakes, node --check, 53 routes, real
          runtime 200 on / and /api/neuro/status, zero surrogate escapes.
+
+v0.99.223 - LSW (Sweep) now has per-symbol RR auto-tuning, same walk-
+         forward discipline as Neuro's own neuro_pick_best_rr(), per
+         direct user request ("хочу в sweep сделать тоже подбор rr, но
+         чтобы не было подгонкой под график"). LSW_RR_CANDIDATES = same
+         [1.5..3.0] step-0.25 sweep. New lsw_pick_best_rr(): splits each
+         symbol's history into the first 70% (train) vs last 30% (test)
+         chronologically, sweeps candidates using ONLY train-period
+         signals through the EXACT same currently-enabled filter chain
+         as the real pipeline (factored into new lsw_apply_active_
+         filter_chain() so the two code paths can never quietly drift
+         out of sync), picks the RR with best train-only expectancy
+         (min 15 closed trades to trust it), then applies that RR to
+         lsw_detect_signals() for the FULL-history result that's
+         actually reported and traded — the held-out test portion never
+         influences the pick, so a candidate that only looked good by
+         fitting noise in the train stretch gets no credit; it'll drag
+         the real (train+test) number back down instead.
+         lsw_scan_symbol_live() now looks up each symbol's own chosen RR
+         from STATE["lsw_chosen_rr"] (populated by the backtest cycle)
+         instead of the old fixed global LSW_RR.
+         New STATE keys: lsw_chosen_rr (symbol -> RR), lsw_rr_sweep
+         (symbol -> full sweep table) — both written progressively per
+         symbol in the same backtest loop pass as before.
+         UI: LSW backtest table gained an "RR" column showing each
+         symbol's own chosen value, with a hover tooltip showing the
+         full train-only sweep curve (WR/n/expectancy per candidate).
+         Validated on real SOL 15m→1h data: sweep behaved sensibly (WR
+         39.9%→29.7% as RR rises 1.5→3.0, expectancy 34 trades total)
+         — same healthy monotonic tradeoff shape already seen in
+         Neuro's own equivalent sweep.
+         Verified: py_compile, pyflakes, node --check, 53 routes, real
+         runtime 200 on / and /api/lsw/status, zero surrogate escapes.
