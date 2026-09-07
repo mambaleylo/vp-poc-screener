@@ -12993,3 +12993,40 @@ v0.99.223 - LSW (Sweep) now has per-symbol RR auto-tuning, same walk-
          Neuro's own equivalent sweep.
          Verified: py_compile, pyflakes, node --check, 53 routes, real
          runtime 200 on / and /api/lsw/status, zero surrogate escapes.
+
+v0.99.224 - Fixed the ONE LSW filter toggle missing from the UI, per
+         direct user report ("не для всех индикаторов есть возможность
+         их галочкой отключить"). Audited all 10 LSW_*_ENABLED flags
+         against the settings tuple/checkbox/JS-map — 9 were already
+         fully wired; only LSW_ATR_SWEEP_ENABLED was missing entirely
+         (no settings tuple entry, no get/apply, no checkbox) — could
+         only be changed via an env var at startup.
+         Also found and fixed a MUCH more serious problem while auditing
+         it: LSW_ATR_SWEEP_ENABLED wasn't just missing from the UI — it
+         was never consumed by the REAL filter chain at all (only used
+         to label the solo-checkpoint display, which itself hardcoded
+         `false` for the "is this filter on" indicator regardless of the
+         actual flag). Toggling it would have done nothing to real
+         trading even after adding the checkbox.
+         Root cause of a second, related bug found in the process:
+         v0.99.223 introduced lsw_apply_active_filter_chain() (factored
+         out so lsw_pick_best_rr()'s RR sweep uses the exact same chain
+         as real trading) but never actually wired lsw_backtest_symbol()
+         itself to CALL it — leaving TWO separate copies of the filter-
+         chain logic (the original inline one still driving real
+         results, and the new factored one only used for RR-picking),
+         exactly the "could quietly drift out of sync" risk that
+         function's own docstring warned against. Fixed by replacing the
+         original inline chain with a call to the shared function.
+         Added the ATR sweep filter call to both lsw_apply_active_
+         filter_chain() (backtest + RR-sweep path) and lsw_scan_symbol_
+         live()'s own early-return-style chain (live path) — same
+         position in the filter order (right after candle structure) in
+         both.
+         Verified end-to-end on real SOL data: toggling the flag off→on
+         changed the real backtest result from 34 to 11 trades (was a
+         complete no-op before this fix, confirming the filter is now
+         genuinely wired into real trading).
+         Verified: py_compile, pyflakes, node --check, 53 routes, real
+         runtime 200 on / and correct lsw_atr_sweep_enabled in
+         /api/settings.
