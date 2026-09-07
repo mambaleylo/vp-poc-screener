@@ -13127,3 +13127,23 @@ v0.99.227 - Neuro now has a real live-signal statistics log, per direct
          routes, real runtime 200 confirming live_signal_stats present
          (empty/zero as expected on a freshly-started server), zero
          surrogate escapes.
+
+v0.99.228 - Neuro had NO master enable/disable toggle at all, per direct
+         user follow-up ("а по нейро почему нету тумблера на работу и
+         уведы?") — same gap EMA Touch/AMD had before v0.99.225's audit,
+         just missed there since Neuro was built afterward and never
+         got the same treatment. Telegram alerts (telegram_alerts_neuro)
+         were already fixed in v0.99.226 and confirmed still present.
+         Added NEURO_ENABLED, fully wired (settings tuple/get/global/
+         apply/checkbox/JS-map, same pattern as every other module) —
+         new "🧠 Neuro" settings group with a "Работа (майнинг + живой
+         скан)" toggle. Both neuro_mining_loop() and neuro_live_loop()
+         now check the flag at the top of each cycle and sleep-and-retry
+         when disabled (neuro_mining_watchdog() needed no change — it
+         only acts when _neuro_mining_running is True, which never gets
+         set while disabled, so it naturally becomes a no-op).
+         Re-ran the full 64-key settings audit (from v0.99.226) after
+         this fix: 0 genuine gaps remain.
+         Verified: py_compile, pyflakes, node --check, 53 routes, real
+         runtime 200 on / with neuro_enabled correctly present in
+         /api/settings, zero surrogate escapes.
