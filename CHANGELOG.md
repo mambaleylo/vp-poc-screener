@@ -12805,3 +12805,14 @@ v0.99.217 - Neuro mining WATCHDOG — per direct user report that mining
          correctly fires and resets running/current_symbol/progress_ts.
          Verified: py_compile, pyflakes, 53 routes, real runtime 200 on
          / and /api/neuro/status, zero surrogate escapes.
+
+v0.99.218 - Neuro trade history 20->40 trades per coin, per direct user
+         request (noticed aggregate stats looked fine but recent trades
+         specifically were mostly losses across several coins — wanted
+         a longer recent window to eyeball this more reliably). Backend:
+         recent_trades slice in api_neuro_status() changed [-20:] ->
+         [-40:]. UI label already reads trades.length dynamically, so
+         it automatically shows "последние 40 сделок" with no separate
+         change needed.
+         Verified: py_compile, pyflakes, 53 routes, real runtime 200 on
+         / and /api/neuro/status, zero surrogate escapes.
