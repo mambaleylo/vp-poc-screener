@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.228"
+APP_VERSION = "0.99.229"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1033,8 +1033,8 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_network",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "msnr_all_in_enabled", "msnr_single_best_enabled",
                   "autotrade_risk_pct",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
@@ -1072,6 +1072,7 @@ def get_settings():
         "ema_touch_enabled": EMA_TOUCH_ENABLED,
         "amd_enabled": AMD_ENABLED,
         "neuro_enabled": NEURO_ENABLED,
+        "nq_enabled": NQ_ENABLED,
         "lsw_enabled": LSW_ENABLED,
         "lsw_rr": LSW_RR,
         "lsw_equal_tolerance_pct": LSW_EQUAL_TOLERANCE_PCT,
@@ -1102,6 +1103,7 @@ def get_settings():
         "telegram_alerts_ema_bull": TELEGRAM_ALERTS_EMA_BULL,
         "telegram_alerts_amd": TELEGRAM_ALERTS_AMD,
         "telegram_alerts_neuro": TELEGRAM_ALERTS_NEURO,
+        "telegram_alerts_nq": TELEGRAM_ALERTS_NQ,
         "telegram_alerts_network": TELEGRAM_ALERTS_NETWORK,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
@@ -1130,11 +1132,11 @@ def apply_settings(updates):
     global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, FT5_HTF_FILTER_ENABLED, FT5_SESSION_FILTER_ENABLED, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, MSNR_MIN_RR_FILTER_ENABLED, MSNR_HTF_FILTER_ENABLED, MSNR_PER_SYMBOL_FILTERS_ENABLED, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT, MIRROR_AUTOTUNE_TOLERANCE_ENABLED
     global MIRROR_VOLUME_FILTER_ENABLED, MIRROR_HTF_FILTER_ENABLED
-    global EMA_TOUCH_ENABLED, AMD_ENABLED, NEURO_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
+    global EMA_TOUCH_ENABLED, AMD_ENABLED, NEURO_ENABLED, NQ_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED, LSW_ATR_SWEEP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
-    global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_EMA_BULL, TELEGRAM_ALERTS_AMD, TELEGRAM_ALERTS_NEURO, TELEGRAM_ALERTS_NETWORK
+    global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_EMA_BULL, TELEGRAM_ALERTS_AMD, TELEGRAM_ALERTS_NEURO, TELEGRAM_ALERTS_NQ, TELEGRAM_ALERTS_NETWORK
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED, MSNR_SINGLE_BEST_ENABLED
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT
     if "volume_profile_enabled" in updates:
@@ -1190,6 +1192,8 @@ def apply_settings(updates):
         AMD_ENABLED = bool(updates["amd_enabled"])
     if "neuro_enabled" in updates:
         NEURO_ENABLED = bool(updates["neuro_enabled"])
+    if "nq_enabled" in updates:
+        NQ_ENABLED = bool(updates["nq_enabled"])
     if "lsw_enabled" in updates:
         LSW_ENABLED = bool(updates["lsw_enabled"])
     if "lsw_rr" in updates:
@@ -1263,6 +1267,8 @@ def apply_settings(updates):
         TELEGRAM_ALERTS_AMD = bool(updates["telegram_alerts_amd"])
     if "telegram_alerts_neuro" in updates:
         TELEGRAM_ALERTS_NEURO = bool(updates["telegram_alerts_neuro"])
+    if "telegram_alerts_nq" in updates:
+        TELEGRAM_ALERTS_NQ = bool(updates["telegram_alerts_nq"])
     if "telegram_alerts_network" in updates:
         TELEGRAM_ALERTS_NETWORK = bool(updates["telegram_alerts_network"])
     if "autotrade_dry_run" in updates:
@@ -5770,6 +5776,8 @@ def send_telegram(text, category=None):
     if category == "amd" and not TELEGRAM_ALERTS_AMD:
         return
     if category == "neuro" and not TELEGRAM_ALERTS_NEURO:
+        return
+    if category == "nq" and not TELEGRAM_ALERTS_NQ:
         return
     if category == "network" and not TELEGRAM_ALERTS_NETWORK:
         return
@@ -14723,6 +14731,442 @@ def api_neuro_chart(symbol):
         return jsonify({"error": str(e)}), 500
 
 
+# ============================================================================
+# NQ MODEL — Previous Day High/Low + daily bias + CISD confirmation, per
+# direct user request based on an uploaded "NQ Motion Model" methodology
+# PDF. Instrument: NAS100_USDT on Gate.io — a genuine Nasdaq-100 INDEX
+# perpetual (launched by Gate.com Jan 2026), USDT-settled, trades 24/7 —
+# NOT the real CME NQ futures contract, but tracks the same underlying
+# index, and unlike a stock-backed xStock token it never pauses when the
+# real NASDAQ market itself is closed. Reuses the exact same Gate.io
+# candle-fetch infrastructure as every other module — no new data source.
+#
+# Signal logic (the two genuinely crypto-portable concepts from the PDF,
+# per direct user choice — Key Opens/NWOG were explicitly excluded as
+# CME-session-specific concepts that don't map onto a 24/7 instrument):
+#   1. Previous Day High/Low: yesterday's high/low from daily candles.
+#   2. Daily bias: yesterday's candle color — bullish (close>open) sets a
+#      bias toward yesterday's HIGH getting swept; bearish sets a bias
+#      toward the LOW getting swept (this is literally the PDF's own
+#      "Bullish daily candle -> expect the high to get taken" rule).
+#   3. Wait for an intraday bar to actually sweep (wick beyond) that
+#      level during THIS day.
+#   4. CISD confirmation: within NQ_CISD_MAX_WAIT_BARS bars after the
+#      sweep, price must close back through the most recent short-term
+#      swing point (the opposite extreme of the last NQ_CISD_LOOKBACK
+#      bars before the sweep) — "price comes back and tests a level
+#      quickly" per the PDF's own CISD definition.
+#   5. Enter in the REVERSAL direction (opposite the sweep) — matches
+#      the PDF's own AMD logic ("manipulated up -> expect down").
+# Per direct user answers: no daily trade-count cap, no risk reduction
+# after a loss (both PDF rules explicitly declined), but a HARD minimum
+# RR of 3.0 (the PDF's own "1:3, no exceptions" — unlike every other
+# module's freely-auto-tuned RR, here the walk-forward RR sweep is
+# restricted to candidates that never go below 3.0).
+# ============================================================================
+
+NQ_ENABLED           = os.environ.get("VP_NQ_ENABLED", "1") == "1"
+NQ_SYMBOL            = os.environ.get("VP_NQ_SYMBOL", "NAS100_USDT")
+NQ_TF                = os.environ.get("VP_NQ_TF", "15m")
+NQ_HISTORY_DAYS      = int(os.environ.get("VP_NQ_HISTORY_DAYS", 365))  # ask for a lot; NAS100_USDT only launched Jan 2026 so real history will be much shorter — code handles whatever comes back
+NQ_CISD_LOOKBACK     = int(os.environ.get("VP_NQ_CISD_LOOKBACK", 8))   # bars before the sweep that define the "recent structure" level for CISD
+NQ_CISD_MAX_WAIT_BARS = int(os.environ.get("VP_NQ_CISD_MAX_WAIT_BARS", 8))  # bars after the sweep to still accept a CISD close-through
+NQ_SL_BUFFER_PCT     = float(os.environ.get("VP_NQ_SL_BUFFER_PCT", 0.05))
+NQ_MAX_WAIT_BARS     = int(os.environ.get("VP_NQ_MAX_WAIT_BARS", 48))  # ~12h at 15m — how long a trade is tracked before TIMEOUT
+NQ_RR                = float(os.environ.get("VP_NQ_RR", 3.0))          # fallback/default only — see NQ_RR_CANDIDATES
+NQ_RR_CANDIDATES     = [3.0, 3.5, 4.0, 4.5, 5.0]  # HARD floor at 3.0 per the PDF's own "min RR 1:3, no exceptions" — unlike every other module, candidates never go below this
+NQ_RR_TRAIN_FRAC     = float(os.environ.get("VP_NQ_RR_TRAIN_FRAC", 0.7))
+NQ_RR_MIN_TRADES     = int(os.environ.get("VP_NQ_RR_MIN_TRADES", 10))  # NAS100_USDT's short real history means fewer trades to work with than crypto majors — lower bar than LSW/Neuro's own 15
+NQ_PER_ITEM_MAX_SEC  = 300
+NQ_SIGNAL_HISTORY    = 200
+TELEGRAM_ALERTS_NQ   = os.environ.get("VP_TG_ALERTS_NQ", "1") == "1"
+
+NQ_BACKTEST_TRIGGER = threading.Event()
+
+
+def nq_daily_bounds(daily_candles):
+    """Sort once, return (sorted_start_times, {start_time: candle}) for fast
+    lookup of 'which UTC day does this intraday bar belong to' and 'what
+    was the PREVIOUS day's own candle'."""
+    by_start = {d["time"]: d for d in daily_candles}
+    starts = sorted(by_start.keys())
+    return starts, by_start
+
+
+def nq_detect_signals(intraday_candles, daily_candles, rr=None):
+    """Core PDH/PDL + daily-bias + CISD detector. Returns a list of signal
+    dicts (time = the CISD-confirming bar's own time, entry at NEXT bar's
+    open — same "don't enter on the same bar that confirmed it" convention
+    as LSW's own entry confirmation)."""
+    rr = rr if rr is not None else NQ_RR
+    starts, by_start = nq_daily_bounds(daily_candles)
+    if len(starts) < 2:
+        return []
+    day_sec = 86400
+    signals = []
+    for i in range(1, len(starts)):
+        prev = by_start[starts[i - 1]]
+        bias = "bullish" if prev["close"] > prev["open"] else "bearish"
+        pdh, pdl = prev["high"], prev["low"]
+        day_start, day_end = starts[i], starts[i] + day_sec
+        today_bars = [b for b in intraday_candles if day_start <= b["time"] < day_end]
+        if not today_bars:
+            continue
+        swept_idx = None
+        for j, b in enumerate(today_bars):
+            if bias == "bullish" and b["high"] > pdh:
+                swept_idx = j
+                break
+            if bias == "bearish" and b["low"] < pdl:
+                swept_idx = j
+                break
+        if swept_idx is None:
+            continue
+        pre_bars = today_bars[max(0, swept_idx - NQ_CISD_LOOKBACK):swept_idx]
+        if not pre_bars:
+            continue
+        structure_lvl = min(b["low"] for b in pre_bars) if bias == "bullish" else max(b["high"] for b in pre_bars)
+        for k in range(swept_idx, min(swept_idx + NQ_CISD_MAX_WAIT_BARS, len(today_bars) - 1)):
+            b = today_bars[k]
+            confirmed = (bias == "bullish" and b["close"] < structure_lvl) or \
+                        (bias == "bearish" and b["close"] > structure_lvl)
+            if not confirmed:
+                continue
+            # Find the NEXT bar in the full intraday series (not just today_bars)
+            next_bar = None
+            for c in intraday_candles:
+                if c["time"] > b["time"]:
+                    next_bar = c
+                    break
+            if next_bar is None:
+                break
+            entry = next_bar["open"]
+            if bias == "bullish":
+                sweep_extreme = max(x["high"] for x in today_bars[swept_idx:k + 1])
+                sl = sweep_extreme * (1 + NQ_SL_BUFFER_PCT / 100)
+                sl_dist = sl - entry
+                if sl_dist <= 0:
+                    break
+                tp = entry - sl_dist * rr
+                direction = "SHORT"
+            else:
+                sweep_extreme = min(x["low"] for x in today_bars[swept_idx:k + 1])
+                sl = sweep_extreme * (1 - NQ_SL_BUFFER_PCT / 100)
+                sl_dist = entry - sl
+                if sl_dist <= 0:
+                    break
+                tp = entry + sl_dist * rr
+                direction = "LONG"
+            signals.append({
+                "time": b["time"], "entry_time": next_bar["time"], "direction": direction,
+                "entry": round(entry, 4), "sl": round(sl, 4), "tp": round(tp, 4), "rr": rr,
+                "bias": bias, "pdh": round(pdh, 4), "pdl": round(pdl, 4),
+                "day_start": day_start,
+            })
+            break
+    return signals
+
+
+def nq_track_outcome(candles, sig, max_wait_bars=None):
+    max_wait_bars = max_wait_bars or NQ_MAX_WAIT_BARS
+    future = [c for c in candles if c["time"] > sig["entry_time"]]
+    direction = sig["direction"]
+    for i, c in enumerate(future):
+        if i >= max_wait_bars:
+            return "TIMEOUT", c["close"], c["time"]
+        if direction == "LONG":
+            if c["low"] <= sig["sl"]:
+                return "LOSS", sig["sl"], c["time"]
+            if c["high"] >= sig["tp"]:
+                return "WIN", sig["tp"], c["time"]
+        else:
+            if c["high"] >= sig["sl"]:
+                return "LOSS", sig["sl"], c["time"]
+            if c["low"] <= sig["tp"]:
+                return "WIN", sig["tp"], c["time"]
+    return "OPEN", None, None
+
+
+def nq_simulate_trades(intraday_candles, daily_candles, rr=None):
+    sigs = nq_detect_signals(intraday_candles, daily_candles, rr=rr)
+    trades = []
+    for sig in sigs:
+        result, exit_price, exit_time = nq_track_outcome(intraday_candles, sig)
+        pnl_r = None
+        if result in ("WIN", "LOSS") and exit_price is not None:
+            sl_dist = abs(sig["entry"] - sig["sl"]) or 1e-9
+            raw = (exit_price - sig["entry"]) / sl_dist if sig["direction"] == "LONG" else (sig["entry"] - exit_price) / sl_dist
+            pnl_r = round(raw if result == "WIN" else -abs(raw), 3)
+        elif result == "TIMEOUT" and exit_price is not None:
+            sl_dist = abs(sig["entry"] - sig["sl"]) or 1e-9
+            raw = (exit_price - sig["entry"]) / sl_dist if sig["direction"] == "LONG" else (sig["entry"] - exit_price) / sl_dist
+            pnl_r = round(raw, 3)
+        trades.append({**sig, "result": result if result != "OPEN" else "TIMEOUT",
+                       "exit_price": exit_price, "exit_time": exit_time, "pnl_r": pnl_r})
+    return trades
+
+
+def nq_pick_best_rr(intraday_candles, daily_candles, train_frac=None):
+    """Same walk-forward discipline as LSW/Neuro's own RR auto-tuning —
+    sweep candidates on the TRAIN portion only (never touches test), but
+    candidates never go below 3.0 per the PDF's own hard RR floor."""
+    train_frac = train_frac if train_frac is not None else NQ_RR_TRAIN_FRAC
+    split_time = daily_candles[int(len(daily_candles) * train_frac)]["time"] if daily_candles else 0
+    train_intraday = [c for c in intraday_candles if c["time"] < split_time]
+    train_daily = [d for d in daily_candles if d["time"] < split_time]
+    sweep = []
+    best_rr, best_score = NQ_RR_CANDIDATES[0], None
+    for rr in NQ_RR_CANDIDATES:
+        trades = nq_simulate_trades(train_intraday, train_daily, rr=rr)
+        closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
+        if len(closed) < NQ_RR_MIN_TRADES:
+            sweep.append({"rr": rr, "n": len(closed), "winrate": None, "expectancy_r": None})
+            continue
+        wins = sum(1 for t in closed if t["result"] == "WIN")
+        wr = wins / len(closed)
+        expectancy = round(wr * rr - (1 - wr), 3)
+        sweep.append({"rr": rr, "n": len(closed), "winrate": round(wr * 100, 1), "expectancy_r": expectancy})
+        if best_score is None or expectancy > best_score:
+            best_score, best_rr = expectancy, rr
+    return best_rr, sweep
+
+
+def nq_backtest():
+    """Fetch max available history for NAS100_USDT, auto-tune RR (train-
+    only), simulate the resulting trade history on the full period.
+    Returns (trades, summary)."""
+    try:
+        now = int(time.time())
+        start_ts = now - NQ_HISTORY_DAYS * 86400
+        intraday = get_candles_range(NQ_SYMBOL, NQ_TF, start_ts, now)
+        daily = get_candles_range(NQ_SYMBOL, "1d", start_ts, now)
+        if not intraday or not daily or len(daily) < 5:
+            return [], {"history_bars": len(intraday or []), "history_days_daily": len(daily or [])}
+        chosen_rr, rr_sweep = nq_pick_best_rr(intraday, daily)
+        trades = nq_simulate_trades(intraday, daily, rr=chosen_rr)
+        closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
+        wins = sum(1 for t in closed if t["result"] == "WIN")
+        losses = len(closed) - wins
+        wr = round(wins / len(closed) * 100, 1) if closed else None
+        avg_pnl = round(sum(t["pnl_r"] for t in closed if t.get("pnl_r") is not None) / len(closed), 3) if closed else None
+        summary = {
+            "n": len(closed), "wins": wins, "losses": losses,
+            "timeouts": sum(1 for t in trades if t["result"] == "TIMEOUT"),
+            "winrate": wr, "avg_pnl_r": avg_pnl, "total": len(trades),
+            "chosen_rr": chosen_rr, "rr_sweep": rr_sweep,
+            "history_bars": len(intraday), "history_days_daily": len(daily),
+        }
+        return trades, summary
+    except Exception as e:
+        log_error(f"nq_backtest: {e}")
+        return [], {}
+
+
+def nq_scan_live(chosen_rr=None):
+    """Check only TODAY's bars (so far) for a fresh sweep+CISD — same
+    detector, just scoped to the most recent 1-2 days of data."""
+    try:
+        rr = chosen_rr if chosen_rr is not None else NQ_RR
+        now = int(time.time())
+        interval_sec = INTERVAL_SECONDS.get(NQ_TF, 900)
+        intraday = get_candles_range(NQ_SYMBOL, NQ_TF, now - 5 * 86400, now)
+        daily = get_candles_range(NQ_SYMBOL, "1d", now - 10 * 86400, now)
+        if not intraday or not daily or len(daily) < 2:
+            return None
+        intraday = [c for c in intraday if c["time"] + interval_sec <= now]
+        sigs = nq_detect_signals(intraday, daily, rr=rr)
+        if not sigs:
+            return None
+        latest = sigs[-1]
+        # Only a genuinely fresh signal (from today's own trading day) counts as "live"
+        today_start = (now // 86400) * 86400
+        if latest["day_start"] < today_start:
+            return None
+        return latest
+    except Exception as e:
+        log_error(f"nq_scan_live: {e}")
+        return None
+
+
+_nq_state_lock = threading.Lock()
+_nq_trades = []
+_nq_summary = {}
+_nq_signal_log = deque(maxlen=NQ_SIGNAL_HISTORY)
+_nq_last_backtest_finished = None
+_nq_backtest_running = False
+_nq_live_signal = None
+_nq_prev_signal_key = None
+
+
+def nq_backtest_loop():
+    global _nq_last_backtest_finished, _nq_backtest_running
+    while True:
+        try:
+            if not NQ_ENABLED:
+                NQ_BACKTEST_TRIGGER.wait(timeout=3600)
+                NQ_BACKTEST_TRIGGER.clear()
+                continue
+            with _nq_state_lock:
+                _nq_backtest_running = True
+            # Same no-with-block, bounded-time pattern as every other
+            # module's own hang protection (LSW/MSNR/AMD v0.99.194/195/etc).
+            ex = ThreadPoolExecutor(max_workers=1)
+            try:
+                fut = ex.submit(nq_backtest)
+                try:
+                    trades, summary = fut.result(timeout=NQ_PER_ITEM_MAX_SEC)
+                    with _nq_state_lock:
+                        _nq_trades[:] = trades
+                        _nq_summary.clear()
+                        _nq_summary.update(summary)
+                except (TimeoutError, FutureTimeoutError):
+                    log_error(f"nq_backtest_loop: exceeded {NQ_PER_ITEM_MAX_SEC}s — skipping this cycle")
+                except Exception as e:
+                    log_error(f"nq_backtest_loop: {e}")
+            finally:
+                ex.shutdown(wait=False)
+            with _nq_state_lock:
+                _nq_backtest_running = False
+                _nq_last_backtest_finished = time.time()
+        except Exception as e:
+            log_error(f"nq_backtest_loop: {e}")
+            with _nq_state_lock:
+                _nq_backtest_running = False
+        NQ_BACKTEST_TRIGGER.wait(timeout=3600)  # re-mine hourly — daily-candle-driven signal, no need for Neuro/LSW-style frequent re-mining
+        NQ_BACKTEST_TRIGGER.clear()
+
+
+def nq_live_loop():
+    global _nq_live_signal, _nq_prev_signal_key
+    while True:
+        try:
+            if not NQ_ENABLED:
+                time.sleep(900)
+                continue
+            with _nq_state_lock:
+                chosen_rr = _nq_summary.get("chosen_rr")
+            sig = nq_scan_live(chosen_rr)
+            with _nq_state_lock:
+                _nq_live_signal = sig
+            key = (sig["time"], sig["direction"]) if sig else None
+            if sig and key != _nq_prev_signal_key:
+                arrow = "\u2b06\ufe0f" if sig["direction"] == "LONG" else "\u2b07\ufe0f"
+                send_telegram(
+                    f"{arrow} NQ MODEL {NQ_SYMBOL} ({sig['direction']}, PDH/PDL + CISD, bias={sig['bias']})\n"
+                    f"entry: {sig['entry']}, SL: {sig['sl']}, TP: {sig['tp']} (RR {sig['rr']})",
+                    category="nq",
+                )
+                with _nq_state_lock:
+                    _nq_signal_log.appendleft({**sig, "status": "OPEN", "result": None,
+                                               "exit_price": None, "exit_time": None, "pnl_r": None,
+                                               "detected_at": time.time()})
+            _nq_prev_signal_key = key
+            # Track outcomes for OPEN entries in the live log
+            with _nq_state_lock:
+                open_entries = [s for s in _nq_signal_log if s["status"] == "OPEN"]
+            if open_entries:
+                now = int(time.time())
+                candles = get_candles_range(NQ_SYMBOL, NQ_TF, now - 5 * 86400, now)
+                interval_sec = INTERVAL_SECONDS.get(NQ_TF, 900)
+                candles = [c for c in candles if c["time"] + interval_sec <= now]
+                for entry in open_entries:
+                    result, exit_price, exit_time = nq_track_outcome(candles, entry)
+                    if result != "OPEN":
+                        sl_dist = abs(entry["entry"] - entry["sl"]) or 1e-9
+                        pnl_r = None
+                        if exit_price is not None:
+                            raw = (exit_price - entry["entry"]) / sl_dist if entry["direction"] == "LONG" else (entry["entry"] - exit_price) / sl_dist
+                            pnl_r = round(-abs(raw), 3) if result == "LOSS" else round(raw, 3)
+                        with _nq_state_lock:
+                            entry["status"] = "CLOSED"
+                            entry["result"] = result
+                            entry["exit_price"] = exit_price
+                            entry["exit_time"] = exit_time
+                            entry["pnl_r"] = pnl_r
+        except Exception as e:
+            log_error(f"nq_live_loop: {e}")
+        time.sleep(900)
+
+
+def nq_compute_signal_stats():
+    with _nq_state_lock:
+        signals = list(_nq_signal_log)
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+    wins = sum(1 for s in closed if s["result"] == "WIN")
+    losses = len(closed) - wins
+    open_n = sum(1 for s in signals if s["status"] == "OPEN")
+    winrate = round(wins / len(closed) * 100, 1) if closed else None
+    avg_pnl = round(sum(s["pnl_r"] for s in closed if s.get("pnl_r") is not None) / len(closed), 3) if closed else None
+    return {"total": len(signals), "wins": wins, "losses": losses, "open": open_n,
+            "winrate": winrate, "avg_pnl_r": avg_pnl}
+
+
+@app.route("/api/nq/status")
+def api_nq_status():
+    with _nq_state_lock:
+        trades = list(_nq_trades)
+        summary = dict(_nq_summary)
+        live_signal = _nq_live_signal
+        running = _nq_backtest_running
+        last_finished = _nq_last_backtest_finished
+        signal_log = list(_nq_signal_log)[:40]
+    return jsonify({
+        "symbol": NQ_SYMBOL, "trades": trades[-40:][::-1], "summary": summary,
+        "live_signal": live_signal, "backtest_running": running,
+        "last_backtest_finished": last_finished,
+        "signal_log": signal_log, "signal_stats": nq_compute_signal_stats(),
+        "config": {"tf": NQ_TF, "history_days": NQ_HISTORY_DAYS, "rr": NQ_RR,
+                   "cisd_lookback": NQ_CISD_LOOKBACK, "cisd_max_wait_bars": NQ_CISD_MAX_WAIT_BARS},
+    })
+
+
+@app.route("/api/nq/chart")
+def api_nq_chart():
+    try:
+        sig_time = request.args.get("time")
+        if not sig_time:
+            return jsonify({"error": "нужен параметр time"}), 400
+        target = float(sig_time)
+        with _nq_state_lock:
+            trades = list(_nq_trades)
+            signal_log = list(_nq_signal_log)
+        match = next((t for t in trades if abs(t["time"] - target) < 60), None) or \
+            next((s for s in signal_log if abs(s["time"] - target) < 60), None)
+        if not match:
+            return jsonify({"error": "\u0441\u0434\u0435\u043b\u043a\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430"}), 404
+        interval_sec = INTERVAL_SECONDS.get(NQ_TF, 900)
+        fetch_start = match["time"] - 60 * interval_sec
+        fetch_end = (match["exit_time"] + 10 * interval_sec) if match.get("exit_time") else (match["time"] + 60 * interval_sec)
+        candles = get_candles_range(NQ_SYMBOL, NQ_TF, fetch_start, fetch_end)
+        return jsonify({
+            "symbol": NQ_SYMBOL, "candles": candles[-250:], "time": match["time"],
+            "direction": match["direction"], "entry": match["entry"],
+            "sl": match["sl"], "tp": match["tp"],
+            "result": match.get("result"), "exit_time": match.get("exit_time"),
+            "exit_price": match.get("exit_price"), "chart_source": "nq",
+        })
+    except Exception as e:
+        log_error(f"api_nq_chart: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/reset/nq", methods=["POST"])
+def api_reset_nq():
+    try:
+        with _nq_state_lock:
+            _nq_trades.clear()
+            _nq_summary.clear()
+            _nq_signal_log.clear()
+            global _nq_live_signal, _nq_prev_signal_key
+            _nq_live_signal = None
+            _nq_prev_signal_key = None
+        NQ_BACKTEST_TRIGGER.set()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset_nq: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/amd/status")
 def api_amd_status():
     with _amd_results_lock:
@@ -16375,6 +16819,7 @@ INDEX_HTML = """<!doctype html>
       <button id="resetMirrorBtn">Очистить Зеркало</button>
       <button id="resetLswBtn">Очистить Sweep</button>
       <button id="resetNeuroBtn">Очистить Neuro</button>
+      <button id="resetNqBtn">Очистить NQ</button>
       <button id="resetSimulatorBtn">Сбросить симулятор</button>
       <button id="resetRiskAutotuneBtn">Сбросить авто-тюнинг</button>
     </div>
@@ -16397,6 +16842,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="emabull" style="color:#3ddc97;">EMA🚀</div>
   <div class="tab" data-tab="amd" style="color:#f0a030;">AMD</div>
   <div class="tab" data-tab="neuro" style="color:#a855f7;">🧠 Neuro</div>
+  <div class="tab" data-tab="nq" style="color:#4fc3f7;">NQ Model</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
   <div id="hintsToggleBtn" onclick="toggleHints()" style="margin-left:auto;padding:4px 10px;font-size:11px;color:#5a6a7a;cursor:pointer;user-select:none;align-self:center;" title="скрыть/показать подсказки">💡</div>
@@ -16418,6 +16864,7 @@ INDEX_HTML = """<!doctype html>
   <div id="emaBullPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="amdPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="neuroPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
+  <div id="nqPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="simulatorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
@@ -16668,6 +17115,14 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setNeuro"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingsGroupTitle">NQ Model (NAS100_USDT)</div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Сканирование</div>
+          <div class="sub">Previous Day High/Low + цвет дневной свечи (бычья → ждём свипа хая, медвежья → лоу) + CISD-подтверждение (быстрый возврат через недавний структурный уровень) — вход в сторону разворота. Жёсткий минимум RR 1:3 (без исключений, по методичке), без ограничения числа сделок в день, без снижения риска после проигрыша</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setNq"><span class="switchSlider"></span></label>
+      </div>
       <div class="settingsGroupTitle">Sweep (Liquidity Sweep)</div>
       <div class="settingRow">
         <div>
@@ -16819,6 +17274,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">новые живые сигналы самообучающейся системы зависимостей (топ-20 монет)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramNeuro"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Алерты NQ Model</div>
+          <div class="sub">новые сигналы Previous Day High/Low + CISD на NAS100_USDT</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramNq"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -16974,6 +17436,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('emaBullPanel').style.display = activeTab === 'emabull' ? 'block' : 'none';
     document.getElementById('amdPanel').style.display = activeTab === 'amd' ? 'block' : 'none';
     document.getElementById('neuroPanel').style.display = activeTab === 'neuro' ? 'block' : 'none';
+    document.getElementById('nqPanel').style.display = activeTab === 'nq' ? 'block' : 'none';
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
     document.getElementById('simulatorPanel').style.display = activeTab === 'simulator' ? 'block' : 'none';
     if (activeTab === 'signals') refreshTuning();
@@ -16985,6 +17448,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'emabull') refreshEmaBull();
     if (activeTab === 'amd') refreshAmd();
     if (activeTab === 'neuro') refreshNeuro();
+    if (activeTab === 'nq') refreshNq();
     if (activeTab === 'autotrade') refreshAutotrade();
     if (activeTab === 'simulator') refreshSimulator();
   };
@@ -18685,6 +19149,140 @@ function openNeuroChart(symbol, sigTime) {
   return openVgiChart(symbol, sigTime, '/api/neuro/chart', '');
 }
 
+function openNqChart(sigTime) {
+  return openVgiChart('NAS100_USDT', sigTime, '/api/nq/chart', '');
+}
+
+async function refreshNq() {
+  const panel = document.getElementById('nqPanel');
+  try {
+    const data = await (await fetch('/api/nq/status')).json();
+    const cfg = data.config || {};
+    const s = data.summary || {};
+    const hasStats = s.n != null && s.n > 0;
+    const wrCls = (s.winrate||0) >= 25 ? 'win' : 'loss';  // breakeven at RR 3.0 is 25%
+    const pnlCls = (s.avg_pnl_r||0) >= 0 ? 'win' : 'loss';
+
+    const bigStats = hasStats ? `
+      <div style="display:flex;gap:0;margin:10px 0;background:#0d1320;border-radius:8px;overflow:hidden;border:1px solid #232d45;">
+        <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #232d45;">
+          <div style="font-size:20px;font-weight:700;" class="${wrCls}">${s.winrate}%</div>
+          <div class="dim" style="font-size:9px;">WINRATE</div>
+        </div>
+        <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #232d45;">
+          <div style="font-size:20px;font-weight:700;" class="${pnlCls}">${s.avg_pnl_r>0?'+':''}${s.avg_pnl_r}R</div>
+          <div class="dim" style="font-size:9px;">\u0421\u0420. P&L</div>
+        </div>
+        <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #232d45;">
+          <div style="font-size:20px;font-weight:700;color:#e8ecf5;">1:${(s.chosen_rr||cfg.rr||3).toFixed(2)}</div>
+          <div class="dim" style="font-size:9px;">RR (\u043f\u043e\u0434\u043e\u0431\u0440\u0430\u043d, \u2265 3.0)</div>
+        </div>
+        <div style="flex:1;text-align:center;padding:8px 4px;">
+          <div style="font-size:14px;font-weight:700;">
+            <span class="win">${s.wins}W</span>/<span class="loss">${s.losses}L</span>/<span class="dim">${s.timeouts}T</span>
+          </div>
+          <div class="dim" style="font-size:9px;">n=${s.n} \u0438\u0437 ${s.total}</div>
+        </div>
+      </div>
+      <div class="dim" style="font-size:10px;margin-bottom:10px;">${s.history_bars||0} \u0431\u0430\u0440\u043e\u0432 (${cfg.tf}) \u00b7 ${s.history_days_daily||0} \u0434\u043d\u0435\u0432\u043d\u044b\u0445 \u0441\u0432\u0435\u0447\u0435\u0439</div>`
+      : '<div class="dim" style="margin:10px 0;">\u0435\u0449\u0451 \u043c\u0430\u0439\u043d\u0438\u0442\u0441\u044f\u2026 \u0434\u0430\u043d\u043d\u044b\u0445 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442 (NAS100_USDT \u2014 \u043d\u043e\u0432\u044b\u0439 \u043a\u043e\u043d\u0442\u0440\u0430\u043a\u0442 \u043d\u0430 Gate.io, \u0437\u0430\u043f\u0443\u0449\u0435\u043d 23.01.2026, \u0440\u0435\u0430\u043b\u044c\u043d\u0430\u044f \u0438\u0441\u0442\u043e\u0440\u0438\u044f \u043c\u043e\u0436\u0435\u0442 \u0431\u044b\u0442\u044c \u043a\u043e\u0440\u043e\u0447\u0435)</div>';
+
+    const rrSweep = s.rr_sweep || [];
+    const rrSweepSection = rrSweep.length ? `
+      <details style="margin-bottom:8px;">
+        <summary style="cursor:pointer;font-size:11px;color:#8a97b8;">\u043f\u043e\u0434\u0431\u043e\u0440 RR (\u043d\u0430 train-\u0447\u0430\u0441\u0442\u0438, \u043c\u0438\u043d\u0438\u043c\u0443\u043c 3.0) \u25be</summary>
+        <div style="overflow-x:auto;margin-top:4px;"><table style="font-size:10px;white-space:nowrap;">
+          <thead><tr><th>RR</th><th>n</th><th>WR</th><th>expectancy</th></tr></thead>
+          <tbody>${rrSweep.map(r => `<tr style="${r.rr===s.chosen_rr?'background:#1a2f24;':''}">
+            <td class="${r.rr===s.chosen_rr?'win':'dim'}">1:${r.rr.toFixed(2)}${r.rr===s.chosen_rr?' \u2605':''}</td>
+            <td class="dim">${r.n}</td>
+            <td class="dim">${r.winrate!=null?r.winrate+'%':'\u2014'}</td>
+            <td class="${(r.expectancy_r||0)>=0?'win':'loss'}">${r.expectancy_r!=null?r.expectancy_r:'\u2014'}</td>
+          </tr>`).join('')}</tbody>
+        </table></div>
+      </details>` : '';
+
+    const liveSig = data.live_signal;
+    const liveBadge = liveSig
+      ? `<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:10px;background:${liveSig.direction==='LONG'?'rgba(61,220,151,0.12)':'rgba(255,107,107,0.12)'};border-radius:8px;border:1px solid ${liveSig.direction==='LONG'?'#3ddc97':'#ff6b6b'};">
+          <div style="font-size:18px;">${liveSig.direction==='LONG'?'🟢':'🔴'}</div>
+          <div style="flex:1;">
+            <div class="${liveSig.direction==='LONG'?'win':'loss'}" style="font-weight:700;font-size:13px;">\u0416\u0418\u0412\u041e\u0419 \u0421\u0418\u0413\u041d\u0410\u041b: ${liveSig.direction}</div>
+            <div class="dim" style="font-size:10px;">entry ${fmtNum(liveSig.entry)} \u00b7 SL ${fmtNum(liveSig.sl)} \u00b7 TP ${fmtNum(liveSig.tp)} \u00b7 bias: ${liveSig.bias}</div>
+          </div>
+        </div>`
+      : `<div style="padding:8px 10px;margin-bottom:10px;background:#0d1320;border-radius:8px;border:1px solid #232d45;">
+          <span class="dim" style="font-size:11px;">\u26aa \u0436\u0438\u0432\u043e\u0433\u043e \u0441\u0438\u0433\u043d\u0430\u043b\u0430 \u0441\u0435\u0439\u0447\u0430\u0441 \u043d\u0435\u0442</span>
+        </div>`;
+
+    const lstats = data.signal_stats || {};
+    const liveSigLog = data.signal_log || [];
+    const liveLogRows = liveSigLog.map(sig => {
+      const rc = sig.result==='WIN'?'win':sig.result==='LOSS'?'loss':'dim';
+      const dirCls = sig.direction === 'LONG' ? 'win' : 'loss';
+      const statusHtml = sig.status === 'OPEN'
+        ? '<span class="dim">\u041e\u0422\u041a\u0420\u042b\u0422\u0410</span>'
+        : sig.result==='WIN' ? `<span class="win">WIN @ ${fmtNum(sig.exit_price)}</span>`
+        : sig.result==='LOSS' ? `<span class="loss">LOSS @ ${fmtNum(sig.exit_price)}</span>`
+        : '<span class="dim">TIMEOUT</span>';
+      return `<tr onclick="openNqChart(${sig.time})" style="cursor:pointer;">
+        <td class="dim">${fmtDateTime(sig.time)}</td>
+        <td class="${dirCls}">${sig.direction}</td>
+        <td class="dim">${fmtNum(sig.entry)}</td>
+        <td>${statusHtml}</td>
+        <td class="${rc}">${sig.pnl_r!=null?(sig.pnl_r>0?'+':'')+sig.pnl_r+'R':'\u2014'}</td>
+      </tr>`;
+    }).join('');
+    const liveLogSection = liveSigLog.length
+      ? `<details style="margin-bottom:8px;">
+          <summary style="cursor:pointer;font-size:11px;color:#8a97b8;">
+            \u0416\u0418\u0412\u042b\u0415 \u0441\u0438\u0433\u043d\u0430\u043b\u044b: ${liveSigLog.length}${lstats.wins||lstats.losses ? ` \u00b7 WR ${lstats.winrate}% (${lstats.wins}W/${lstats.losses}L)` : ''} \u25be
+          </summary>
+          <div style="overflow-x:auto;margin-top:6px;"><table style="font-size:10px;white-space:nowrap;">
+            <thead><tr><th>\u0412\u0445\u043e\u0434</th><th>Dir</th><th>Entry</th><th>\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442</th><th>P&L</th></tr></thead>
+            <tbody>${liveLogRows}</tbody>
+          </table></div>
+        </details>` : '';
+
+    const trades = data.trades || [];
+    const tradeRows = trades.map(t => {
+      const rc = t.result==='WIN'?'win':t.result==='LOSS'?'loss':'dim';
+      const dirCls = t.direction === 'LONG' ? 'win' : 'loss';
+      const statusHtml = t.result==='WIN' ? `<span class="win">WIN @ ${fmtNum(t.exit_price)}</span>`
+        : t.result==='LOSS' ? `<span class="loss">LOSS @ ${fmtNum(t.exit_price)}</span>`
+        : '<span class="dim">TIMEOUT</span>';
+      return `<tr onclick="openNqChart(${t.time})" style="cursor:pointer;">
+        <td class="dim">${fmtDateTime(t.entry_time)}</td>
+        <td class="${dirCls}">${t.direction}</td>
+        <td class="dim">${fmtNum(t.entry)}</td>
+        <td>${statusHtml}</td>
+        <td class="${rc}">${t.pnl_r!=null?(t.pnl_r>0?'+':'')+t.pnl_r+'R':'\u2014'}</td>
+      </tr>`;
+    }).join('');
+    const tradesSection = trades.length
+      ? `<details><summary style="cursor:pointer;font-size:11px;color:#8a97b8;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 ${trades.length} \u0441\u0434\u0435\u043b\u043e\u043a (\u0431\u044d\u043a\u0442\u0435\u0441\u0442) \u25be</summary>
+          <div style="overflow-x:auto;margin-top:6px;"><table style="font-size:10px;white-space:nowrap;">
+            <thead><tr><th>\u0412\u0445\u043e\u0434</th><th>Dir</th><th>Entry</th><th>\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442</th><th>P&L</th></tr></thead>
+            <tbody>${tradeRows}</tbody>
+          </table></div>
+        </details>` : '';
+
+    panel.innerHTML = `
+      <div class="dim hint-block" style="margin-bottom:10px;">
+        <b>NQ Model</b> \u2014 Previous Day High/Low + \u0446\u0432\u0435\u0442 \u0434\u043d\u0435\u0432\u043d\u043e\u0439 \u0441\u0432\u0435\u0447\u0438 + CISD-\u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435, \u043d\u0430 ${data.symbol} (\u0438\u043d\u0434\u0435\u043a\u0441\u043d\u044b\u0439 \u043f\u0435\u0440\u043f\u0435\u0442\u0443\u0430\u043b \u043d\u0430 Nasdaq-100 \u043d\u0430 Gate.io, 24/7). \u0411\u044b\u0447\u044c\u044f \u0434\u043d\u0435\u0432\u043d\u0430\u044f \u0441\u0432\u0435\u0447\u0430 \u2192 \u0436\u0434\u0451\u043c \u0441\u0432\u0438\u043f\u0430 \u0445\u0430\u044f, \u043c\u0435\u0434\u0432\u0435\u0436\u044c\u044f \u2192 \u043b\u043e\u0443, \u0432\u0445\u043e\u0434 \u0432 \u0441\u0442\u043e\u0440\u043e\u043d\u0443 \u0440\u0430\u0437\u0432\u043e\u0440\u043e\u0442\u0430 \u043f\u043e\u0441\u043b\u0435 CISD. \u0416\u0451\u0441\u0442\u043a\u0438\u0439 \u043c\u0438\u043d\u0438\u043c\u0443\u043c RR 1:3, \u0431\u0435\u0437 \u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u0438\u044f \u0447\u0438\u0441\u043b\u0430 \u0441\u0434\u0435\u043b\u043e\u043a \u0432 \u0434\u0435\u043d\u044c.
+      </div>
+      <div class="dim" style="font-size:11px;margin-bottom:4px;">${data.backtest_running ? '\u0431\u044d\u043a\u0442\u0435\u0441\u0442 \u0432\u044b\u043f\u043e\u043b\u043d\u044f\u0435\u0442\u0441\u044f\u2026' : (data.last_backtest_finished ? '\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442: '+fmtDateTime(data.last_backtest_finished) : '\u0431\u044d\u043a\u0442\u0435\u0441\u0442 \u0435\u0449\u0451 \u043d\u0435 \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d')}</div>
+      ${liveBadge}
+      ${bigStats}
+      ${rrSweepSection}
+      ${liveLogSection}
+      ${tradesSection}
+    `;
+  } catch(e) {
+    panel.innerHTML = `<div class="dim">\u041e\u0448\u0438\u0431\u043a\u0430: ${e}</div>`;
+  }
+}
+
 
 let _neuroFocusedCoin = null;  // symbol of the currently clicked/focused coin, or null for overview
 
@@ -19299,6 +19897,9 @@ wireResetButton('resetLswBtn', '/api/reset/lsw',
 wireResetButton('resetNeuroBtn', '/api/reset/neuro',
   'Удалить накопленные зависимости, сделки и сигналы Neuro по всем 10 монетам и начать заново? Это необратимо.',
   'Очистить Neuro');
+wireResetButton('resetNqBtn', '/api/reset/nq',
+  'Удалить накопленный бэктест и сигналы NQ Model? Это необратимо.',
+  'Очистить NQ');
 wireResetButton('resetRiskAutotuneBtn', '/api/reset/risk_autotune',
   'Сбросить все параметры авто-тюнинга риска (EMA/Скальпинг/Сессия) к значениям по умолчанию из кода, очистить лог и cooldown? Сами сигналы и статистику не тронет. Это необратимо.',
   'Сбросить авто-тюнинг');
@@ -19333,6 +19934,7 @@ const setInputs = {
   ema_touch_enabled: document.getElementById('setEmaTouch'),
   amd_enabled: document.getElementById('setAmd'),
   neuro_enabled: document.getElementById('setNeuro'),
+  nq_enabled: document.getElementById('setNq'),
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
   lsw_structural_cap_enabled: document.getElementById('setLswStructuralCap'),
   lsw_volume_filter_enabled: document.getElementById('setLswVolumeFilter'),
@@ -19354,6 +19956,7 @@ const setInputs = {
   telegram_alerts_ema_bull: document.getElementById('setTelegramEmaBull'),
   telegram_alerts_amd: document.getElementById('setTelegramAmd'),
   telegram_alerts_neuro: document.getElementById('setTelegramNeuro'),
+  telegram_alerts_nq: document.getElementById('setTelegramNq'),
   telegram_alerts_network: document.getElementById('setTelegramNetwork'),
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
   autotrade_bounce: document.getElementById('setAutotradeBounce'),
@@ -20216,6 +20819,8 @@ if __name__ == "__main__":
     threading.Thread(target=amd_backtest_loop, daemon=True).start()
     threading.Thread(target=neuro_mining_loop, daemon=True).start()
     threading.Thread(target=neuro_mining_watchdog, daemon=True).start()
+    threading.Thread(target=nq_backtest_loop, daemon=True).start()
+    threading.Thread(target=nq_live_loop, daemon=True).start()
     threading.Thread(target=neuro_live_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     threading.Thread(target=risk_autotune_loop, daemon=True).start()
