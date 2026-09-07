@@ -12848,3 +12848,38 @@ v0.99.219 - Neuro now DETECTS AND ACTS ON recent decay per dependency,
          under-flagging everything.
          Verified: py_compile, pyflakes, node --check, 53 routes, real
          runtime 200 on / and /api/neuro/status, zero surrogate escapes.
+
+v0.99.220 - Decay detection now also checks an explicit CALENDAR-time
+         window, per direct user follow-up ("не только 40%, это не 1
+         месяц — ещё хотя бы за последние 40 дней"). v0.99.219's
+         "last 40% of occurrences by count" doesn't map to any fixed
+         real-world timeframe — a rarely-firing pattern's last 40% could
+         span many months, a frequent one's could be just days.
+         Added a SECOND, independent recency lens: NEURO_DECAY_WINDOW_
+         DAYS (40) — an explicit fixed calendar window measured from the
+         latest bar's own timestamp, regardless of how many occurrences
+         fall inside it. A pattern is now flagged "decaying" if EITHER
+         the 40%-by-count window OR the 40-real-days window shows the
+         same signature (sign flip vs the pattern's own direction, or
+         mean collapsed under 30% of the overall test mean) — each
+         still requires its own minimum 8 occurrences before its
+         verdict is trusted.
+         Validated on a realistic-scale synthetic dataset (~13 months
+         history, ~119-day test period — long enough for the two
+         windows to genuinely diverge, unlike the local 135-day klines-
+         cache sample used earlier where the entire test period was
+         only ~38 days and the calendar window trivially covered nearly
+         all of it): 2063 of 2927 confirmed patterns had meaningfully
+         different sample counts between the two windows, confirming
+         they're independent lenses, not redundant. Injected an
+         artificial regime reversal in the final ~33 days of the
+         synthetic data and confirmed both windows correctly caught it
+         (e.g. one pattern: overall test mean +0.0068, but -0.054 in the
+         last 40% by count AND -0.078 in the last 40 real days — a
+         genuine, consistently-flagged reversal).
+         Response/UI fields renamed for clarity: recent_test_mean_fwd_
+         return/recent_test_n now specifically the count-based window;
+         added parallel recent_days_mean_fwd_return/recent_days_n for
+         the calendar-based one.
+         Verified: py_compile, pyflakes, 53 routes, real runtime 200 on
+         / and /api/neuro/status, zero surrogate escapes.
