@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.217"
+APP_VERSION = "0.99.218"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14312,7 +14312,7 @@ def api_neuro_status():
         mining_current = _neuro_mining_current_symbol
     coins = []
     for symbol in NEURO_COINS:
-        recent_trades = (trades.get(symbol) or [])[-20:][::-1]
+        recent_trades = (trades.get(symbol) or [])[-40:][::-1]
         coins.append({
             "symbol": symbol,
             "summary": summary.get(symbol, {}),
