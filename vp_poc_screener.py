@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.222"
+APP_VERSION = "0.99.223"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -770,7 +770,19 @@ LSW_LOOKBACK = int(os.environ.get("VP_LSW_LOOKBACK", 150))  # bars of history co
 LSW_UNIVERSE_SIZE = int(os.environ.get("VP_LSW_UNIVERSE_SIZE", 60))
 LSW_EQUAL_TOLERANCE_PCT = float(os.environ.get("VP_LSW_EQUAL_TOLERANCE_PCT", 0.12))  # how close two swing highs (or two swing lows) must sit to count as the SAME resting-liquidity level, as % of price — this is what makes a level "equal highs/lows" rather than just one isolated swing
 LSW_SL_BUFFER_PCT = float(os.environ.get("VP_LSW_SL_BUFFER_PCT", 0.15))  # stop placed this far BEYOND the sweep candle's own wick extreme, as % of price — a small buffer so the stop isn't sitting exactly on the exact wick tip
-LSW_RR = float(os.environ.get("VP_LSW_RR", 2.5))  # fixed RR target — mechanical pipeline needs one, same reasoning as MIRROR_RR's own docstring
+LSW_RR = float(os.environ.get("VP_LSW_RR", 2.5))  # fallback/default only — see LSW_RR_CANDIDATES below for the actual auto-tuned value
+# v0.99.223 — per-symbol RR auto-tuning, per direct user request ("хочу
+# в sweep сделать тоже подбор rr как тут [Neuro], но чтобы не было
+# подгонкой под график"). Same walk-forward discipline as Neuro's own
+# neuro_pick_best_rr(): sweep candidates using ONLY the TRAIN portion of
+# history, then apply whichever RR won on train to the FULL history
+# (train+test) for the reported result — if a candidate only looked good
+# because it was fit to noise in that specific stretch, the untouched
+# test portion will drag its real performance back down instead of
+# rewarding the fit.
+LSW_RR_CANDIDATES = [1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0]  # same small 0.25 step as Neuro's own
+LSW_RR_TRAIN_FRAC = float(os.environ.get("VP_LSW_RR_TRAIN_FRAC", 0.7))
+LSW_RR_MIN_TRADES = int(os.environ.get("VP_LSW_RR_MIN_TRADES", 15))  # don't trust an RR pick based on fewer than this many train-period closed trades
 LSW_MAX_BARS_TO_SWEEP = int(os.environ.get("VP_LSW_MAX_BARS_TO_SWEEP", 150))  # a confirmed equal-highs/lows level not swept within this many bars goes stale and stops being watched
 LSW_MAX_WAIT_BARS = int(os.environ.get("VP_LSW_MAX_WAIT_BARS", 200))  # same shared backtest/live TIMEOUT cutoff shape as MIRROR_MAX_WAIT_BARS
 LSW_SIGNAL_HISTORY = 300
@@ -1509,6 +1521,8 @@ STATE = {
     "lsw_backtest_results": {},
     "lsw_backtest_summary": {},
     "lsw_filter_checkpoints": {},  # v0.99.136 — symbol -> {"raw","htf_filter","structural_cap","entry_confirm"}, each filter's own SOLO before/after (not chained), so a toggle's own contribution is visible before deciding whether to enable it
+    "lsw_chosen_rr": {},  # v0.99.223 — symbol -> RR auto-tuned from that symbol's own train-only portion of history
+    "lsw_rr_sweep": {},  # v0.99.223 — symbol -> full RR sweep table (rr/n/winrate/expectancy_r per candidate), for UI transparency
     "lsw_backtest_total": 0,  # v0.99.137 — same progress-tracking fields as MSNR's own (msnr_backtest_total/done/in_flight/running/started_at), per direct user request for the same visibility during a long-running LSW cycle
     "lsw_backtest_done": 0,
     "lsw_backtest_in_flight": [],
@@ -11767,6 +11781,77 @@ def lsw_build_universe():
     return [s[0] for s in ranked[:LSW_UNIVERSE_SIZE]]
 
 
+def lsw_apply_active_filter_chain(sigs, candles, htf_candles, htf_interval_sec, confirm_candles):
+    """Factored out of lsw_backtest_symbol() so lsw_pick_best_rr() can run
+    the EXACT same currently-enabled filter chain on train-only data as
+    the real pipeline uses — same order, same toggles, no duplication of
+    logic that could quietly drift out of sync between the two."""
+    if LSW_HTF_FILTER_ENABLED and sigs:
+        if len(htf_candles) >= LSW_HTF_EMA_PERIOD:
+            bias_series = lsw_htf_bias_series(htf_candles)
+            sigs = lsw_filter_signals_by_htf_trend(sigs, bias_series, htf_interval_sec)
+        else:
+            sigs = []
+    if LSW_STRUCTURAL_CAP_ENABLED and sigs:
+        sigs = lsw_filter_signals_by_structural_cap(sigs, candles)
+    if LSW_VOLUME_FILTER_ENABLED and sigs:
+        sigs = lsw_filter_signals_by_volume(sigs, candles)
+    if LSW_MIN_TOUCHES_ENABLED and sigs:
+        sigs = lsw_filter_signals_by_min_touches(sigs)
+    if LSW_FVG_FILTER_ENABLED and sigs:
+        sigs = lsw_filter_signals_by_fvg(sigs, candles)
+    if LSW_SESSION_FILTER_ENABLED and sigs:
+        sigs = lsw_filter_signals_by_session(sigs)
+    if LSW_CANDLE_STRUCTURE_FILTER_ENABLED and sigs:
+        sigs = lsw_filter_signals_by_candle_structure(sigs, candles)
+    if LSW_ENTRY_CONFIRM_ENABLED and sigs:
+        if confirm_candles:
+            sigs = lsw_apply_entry_confirmation(sigs, confirm_candles)
+        else:
+            sigs = []
+    return sigs
+
+
+def lsw_pick_best_rr(candles, htf_candles, htf_interval_sec, confirm_candles, train_frac=None):
+    """Sweep LSW_RR_CANDIDATES using ONLY the first train_frac of `candles`
+    (chronological — train_frac% is the older portion), applying the SAME
+    currently-enabled filter chain as the real pipeline, and return the RR
+    with the best expectancy on that train-only slice — never touches the
+    held-out remainder, so a candidate that only looks good by fitting
+    noise in that stretch gets no credit for it. Falls back to LSW_RR if
+    there aren't enough train-period closed trades to trust a pick."""
+    train_frac = train_frac if train_frac is not None else LSW_RR_TRAIN_FRAC
+    split = int(len(candles) * train_frac)
+    train_candles = candles[:split]
+    if len(train_candles) < LSW_PIVOT_LEFT + LSW_PIVOT_RIGHT + 20:
+        return LSW_RR, []
+    boundary_time = candles[split - 1]["time"] if split > 0 else candles[0]["time"]
+    htf_train = [c for c in htf_candles if c["time"] <= boundary_time] if htf_candles else htf_candles
+    confirm_train = [c for c in confirm_candles if c["time"] <= boundary_time] if confirm_candles else confirm_candles
+
+    sweep = []
+    best_rr, best_score = LSW_RR, None
+    for rr in LSW_RR_CANDIDATES:
+        raw = lsw_detect_signals(train_candles, rr=rr)
+        sigs = lsw_apply_active_filter_chain(raw, train_candles, htf_train, htf_interval_sec, confirm_train)
+        closed_n = wins = 0
+        for sig in sigs:
+            result, _ = lsw_track_outcome(train_candles, sig)
+            if result in ("WIN", "LOSS"):
+                closed_n += 1
+                if result == "WIN":
+                    wins += 1
+        if closed_n < LSW_RR_MIN_TRADES:
+            sweep.append({"rr": rr, "n": closed_n, "winrate": None, "expectancy_r": None})
+            continue
+        wr = wins / closed_n
+        expectancy = round(wr * rr - (1 - wr) * 1, 3)
+        sweep.append({"rr": rr, "n": closed_n, "winrate": round(wr * 100, 1), "expectancy_r": expectancy})
+        if best_score is None or expectancy > best_score:
+            best_score, best_rr = expectancy, rr
+    return best_rr, sweep
+
+
 def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
     """Fetches LSW_BACKTEST_DAYS of LSW_INTERVAL history, runs the
     detector + outcome tracker over the whole window. v0.99.121: when
@@ -11819,13 +11904,20 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
     if len(candles) < LSW_PIVOT_LEFT + LSW_PIVOT_RIGHT + 20:
         return [], {"checkpoints": {"raw": None, "entry_confirm": None, "volume_filter": None,
                                      "fvg_filter": None, "session_filter": None, "min_touches_filter": None,
-                                     "candle_structure": None, "atr_sweep": None}}
-    raw_sigs = lsw_detect_signals(candles)
+                                     "candle_structure": None, "atr_sweep": None},
+                     "chosen_rr": LSW_RR, "rr_sweep": []}
 
     htf_interval_sec = INTERVAL_SECONDS.get(LSW_HTF_INTERVAL, 14400)
     htf_fetch_start = fetch_start - LSW_HTF_EMA_PERIOD * htf_interval_sec
     htf_candles = get_candles_range(symbol, LSW_HTF_INTERVAL, htf_fetch_start, now)
     confirm_candles = get_candles_range(symbol, LSW_ENTRY_CONFIRM_INTERVAL, fetch_start, now)
+
+    # v0.99.223 — pick RR from the TRAIN portion only, BEFORE detecting the
+    # real signals below, so the chosen RR gets applied consistently to
+    # the full-history result that follows.
+    chosen_rr, rr_sweep = lsw_pick_best_rr(candles, htf_candles, htf_interval_sec, confirm_candles)
+
+    raw_sigs = lsw_detect_signals(candles, rr=chosen_rr)
 
     def _track_all(sigs_list):
         out = []
@@ -11840,31 +11932,31 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
             })
         return out
 
-    checkpoints = {"raw": _mirror_checkpoint(_track_all(raw_sigs), rr=LSW_RR)}
+    checkpoints = {"raw": _mirror_checkpoint(_track_all(raw_sigs), rr=chosen_rr)}
 
     if confirm_candles:
         confirm_solo_sigs = lsw_apply_entry_confirmation(raw_sigs, confirm_candles)
-        checkpoints["entry_confirm"] = _mirror_checkpoint(_track_all(confirm_solo_sigs), rr=LSW_RR)
+        checkpoints["entry_confirm"] = _mirror_checkpoint(_track_all(confirm_solo_sigs), rr=chosen_rr)
     else:
         checkpoints["entry_confirm"] = None
 
     volume_solo_sigs = lsw_filter_signals_by_volume(raw_sigs, candles)
-    checkpoints["volume_filter"] = _mirror_checkpoint(_track_all(volume_solo_sigs), rr=LSW_RR)
+    checkpoints["volume_filter"] = _mirror_checkpoint(_track_all(volume_solo_sigs), rr=chosen_rr)
 
     fvg_solo_sigs = lsw_filter_signals_by_fvg(raw_sigs, candles)
-    checkpoints["fvg_filter"] = _mirror_checkpoint(_track_all(fvg_solo_sigs), rr=LSW_RR)
+    checkpoints["fvg_filter"] = _mirror_checkpoint(_track_all(fvg_solo_sigs), rr=chosen_rr)
 
     session_solo_sigs = lsw_filter_signals_by_session(raw_sigs)
-    checkpoints["session_filter"] = _mirror_checkpoint(_track_all(session_solo_sigs), rr=LSW_RR)
+    checkpoints["session_filter"] = _mirror_checkpoint(_track_all(session_solo_sigs), rr=chosen_rr)
 
     touches_solo_sigs = lsw_filter_signals_by_min_touches(raw_sigs)
-    checkpoints["min_touches_filter"] = _mirror_checkpoint(_track_all(touches_solo_sigs), rr=LSW_RR)
+    checkpoints["min_touches_filter"] = _mirror_checkpoint(_track_all(touches_solo_sigs), rr=chosen_rr)
 
     structure_solo_sigs = lsw_filter_signals_by_candle_structure(raw_sigs, candles)
-    checkpoints["candle_structure"] = _mirror_checkpoint(_track_all(structure_solo_sigs), rr=LSW_RR)
+    checkpoints["candle_structure"] = _mirror_checkpoint(_track_all(structure_solo_sigs), rr=chosen_rr)
 
     atr_solo_sigs = lsw_filter_signals_by_atr_sweep(raw_sigs, candles)
-    checkpoints["atr_sweep"] = _mirror_checkpoint(_track_all(atr_solo_sigs), rr=LSW_RR)
+    checkpoints["atr_sweep"] = _mirror_checkpoint(_track_all(atr_solo_sigs), rr=chosen_rr)
 
     # The ACTUAL result, using whichever filters are really toggled on right now — unchanged from before, chained in the same order.
     sigs = raw_sigs
@@ -11911,7 +12003,7 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
             filtered_sigs.append(sig)
         sigs = filtered_sigs
     results = _track_all(sigs)
-    return results, {"checkpoints": checkpoints}
+    return results, {"checkpoints": checkpoints, "chosen_rr": chosen_rr, "rr_sweep": rr_sweep}
 
 def lsw_summarize_backtest(results):
     total = len(results)
@@ -11966,7 +12058,9 @@ def lsw_scan_symbol_live(symbol):
         candles = [c for c in candles if c["time"] + interval_sec <= now]  # drop still-forming candle
         if len(candles) < LSW_PIVOT_LEFT + LSW_PIVOT_RIGHT + 20:
             return
-        sigs = lsw_detect_signals(candles)
+        with state_lock:
+            symbol_rr = STATE["lsw_chosen_rr"].get(symbol, LSW_RR)
+        sigs = lsw_detect_signals(candles, rr=symbol_rr)
         if not sigs:
             return
         if LSW_HTF_FILTER_ENABLED:
@@ -12315,6 +12409,8 @@ def _lsw_run_one_backtest_cycle(t0):
         STATE["lsw_backtest_results"] = {}
         STATE["lsw_backtest_summary"] = {}
         STATE["lsw_filter_checkpoints"] = {}
+        STATE["lsw_chosen_rr"] = {}
+        STATE["lsw_rr_sweep"] = {}
         STATE["lsw_live_universe"] = []
         STATE["lsw_live_directions"] = {}
     try:
@@ -12354,6 +12450,8 @@ def _lsw_run_one_backtest_cycle(t0):
                             STATE["lsw_backtest_results"][symbol] = results
                             STATE["lsw_backtest_summary"][symbol] = summary
                             STATE["lsw_filter_checkpoints"][symbol] = checkpoints
+                            STATE["lsw_chosen_rr"][symbol] = meta.get("chosen_rr", LSW_RR)
+                            STATE["lsw_rr_sweep"][symbol] = meta.get("rr_sweep", [])
                             if is_live and symbol not in STATE["lsw_live_universe"]:
                                 STATE["lsw_live_universe"].append(symbol)
                             if allowed_directions is not None:
@@ -14993,6 +15091,8 @@ def api_lsw_status():
         live_universe = list(STATE["lsw_live_universe"])
         live_directions = dict(STATE["lsw_live_directions"])
         checkpoints = dict(STATE["lsw_filter_checkpoints"])
+        chosen_rr_map = dict(STATE["lsw_chosen_rr"])
+        rr_sweep_map = dict(STATE["lsw_rr_sweep"])
         last_backtest_finished = STATE["lsw_last_backtest_finished"]
         last_backtest_duration = STATE["lsw_last_backtest_duration"]
         backtest_total = STATE["lsw_backtest_total"]
@@ -15002,7 +15102,9 @@ def api_lsw_status():
         backtest_started_at = STATE["lsw_backtest_started_at"]
     ranked = [dict(s, symbol=sym, live=(sym in live_universe),
                    live_directions=live_directions.get(sym),
-                   filter_checkpoints=checkpoints.get(sym)) for sym, s in summary.items()]
+                   filter_checkpoints=checkpoints.get(sym),
+                   chosen_rr=chosen_rr_map.get(sym, LSW_RR),
+                   rr_sweep=rr_sweep_map.get(sym, [])) for sym, s in summary.items()]
     ranked.sort(key=lambda r: (r["win_rate"] or 0, r["n"]), reverse=True)
     return jsonify({
         "enabled": LSW_ENABLED,
@@ -18133,8 +18235,10 @@ async function refreshLsw() {
     const touchesTxt = fmtCheckpoint(fc.min_touches_filter, cfg.min_touches_enabled);
     const structureTxt = fmtCheckpoint(fc.candle_structure, cfg.candle_structure_filter_enabled);
     const atrSweepTxt = fmtCheckpoint(fc.atr_sweep, false);
+    const rrSweepTitle = (r.rr_sweep || []).map(s => `RR${s.rr}: ${s.winrate!=null?s.winrate+'%':'?'} (n=${s.n}) exp=${s.expectancy_r!=null?s.expectancy_r:'?'}`).join(' | ');
     return `<tr>
       <td>${r.symbol}${liveDot}${dirFilterTxt}</td>
+      <td class="dim" title="\u043f\u043e\u0434\u043e\u0431\u0440\u0430\u043d \u043d\u0430 train-\u0447\u0430\u0441\u0442\u0438 \u0438\u0441\u0442\u043e\u0440\u0438\u0438 &#10;${rrSweepTitle}">1:${(r.chosen_rr||cfg.rr).toFixed(2)}</td>
       <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
       <td class="dim">n=${r.n}</td>
       <td class="win">${r.wins}W</td>
@@ -18151,10 +18255,10 @@ async function refreshLsw() {
     </tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
-    <div class="dim hint-block" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории). Последние 6 колонок показывают, что даёт КАЖДЫЙ фильтр САМ ПО СЕБЕ на сырых (нефильтрованных) сигналах монеты — не в связке с остальными фильтрами. В скобках — разница с винрейтом на тех же сырых сигналах без единого фильтра (это не то же самое, что колонка WR слева, там уже применены реально включённые фильтры). Пометка [выкл] — фильтр сейчас не участвует в реальной торговле, это просто оценка "а что если включить". Тренд-фильтр и структурный кэп по-прежнему доступны в настройках, просто убраны отсюда, чтобы не мозолить глаза:</div>
+    <div class="dim hint-block" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории). Колонка RR — подобран отдельно под каждую монету на первых 70% её истории (train), применён к полной истории — наведи на значение чтобы увидеть всю кривую подбора. Последние 6 колонок показывают, что даёт КАЖДЫЙ фильтр САМ ПО СЕБЕ на сырых (нефильтрованных) сигналах монеты — не в связке с остальными фильтрами. В скобках — разница с винрейтом на тех же сырых сигналах без единого фильтра (это не то же самое, что колонка WR слева, там уже применены реально включённые фильтры). Пометка [выкл] — фильтр сейчас не участвует в реальной торговле, это просто оценка "а что если включить". Тренд-фильтр и структурный кэп по-прежнему доступны в настройках, просто убраны отсюда, чтобы не мозолить глаза:</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th><th>Подтверждение (соло)</th><th>Объём (соло)</th><th>FVG (соло)</th><th>Сессия (соло)</th><th>Касания≥${cfg.min_touches} (соло)</th><th>Структура свечи (соло)</th><th>ATR sweep (соло)</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>RR</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th><th>Подтверждение (соло)</th><th>Объём (соло)</th><th>FVG (соло)</th><th>Сессия (соло)</th><th>Касания≥${cfg.min_touches} (соло)</th><th>Структура свечи (соло)</th><th>ATR sweep (соло)</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
