@@ -12883,3 +12883,40 @@ v0.99.220 - Decay detection now also checks an explicit CALENDAR-time
          the calendar-based one.
          Verified: py_compile, pyflakes, 53 routes, real runtime 200 on
          / and /api/neuro/status, zero surrogate escapes.
+
+v0.99.221 - NEW: aggregate per-symbol recency gate, per direct user
+         report of a genuinely bad recent BTC stretch (16.7% WR over
+         ~24 closed trades, RR 2.0 needing ~33% to break even) that
+         v0.99.219/220's own PER-PATTERN decay detection completely
+         missed. Root-caused via direct inspection: the losing streak
+         was spread across 8 DIFFERENT confirmed patterns, each
+         contributing only 1-7 trades — none individually reaching its
+         own minimum recency sample (8) to trigger its own decay flag,
+         even though the COMBINED symbol-level outcome was clearly
+         underwater. Per-pattern decay is necessary but not sufficient:
+         a shared regime shift can drag down many different patterns'
+         live results a little each without any single one crossing
+         its own threshold.
+         New neuro_check_aggregate_decay(): looks at the actual combined
+         outcome of the last NEURO_AGG_DECAY_WINDOW (30) CLOSED trades
+         for the WHOLE symbol, regardless of which pattern produced each
+         one (min 15 closed trades before trusting the verdict). Flags
+         "underperforming" when recent WR falls more than
+         NEURO_AGG_DECAY_MARGIN_PP (5 percentage points) below the
+         breakeven WR for that symbol's own chosen RR.
+         neuro_scan_live() now takes an aggregate_underperforming flag
+         and mutes ALL new signals for that symbol when true — muting
+         happens BEFORE any pattern-matching logic even runs, so it
+         catches exactly the "many small contributors, no single
+         culprit" case the per-pattern check couldn't.
+         Verified directly against the user's own reported numbers:
+         reconstructed the exact scenario (20 losses, 4 wins, 7
+         timeouts, RR 2.0) and confirmed the check correctly computes
+         WR=16.7% vs breakeven=33.3% and flags underperforming=True.
+         UI: coin cards now show an "⚠️ плохая серия сейчас" warning
+         banner (with the actual recent WR/breakeven/avg P&L numbers)
+         whenever a symbol is in this state, and the "no live signal"
+         placeholder notes when it's specifically due to this mute
+         rather than just no pattern matching right now.
+         Verified: py_compile, pyflakes, node --check, 53 routes, real
+         runtime 200 on / and /api/neuro/status, zero surrogate escapes.
