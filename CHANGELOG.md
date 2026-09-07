@@ -13030,3 +13030,31 @@ v0.99.224 - Fixed the ONE LSW filter toggle missing from the UI, per
          Verified: py_compile, pyflakes, node --check, 53 routes, real
          runtime 200 on / and correct lsw_atr_sweep_enabled in
          /api/settings.
+
+v0.99.225 - EMA Touch (EMA🚀) and AMD Cycle had NO enable/disable toggle
+         at all, per direct user follow-up after v0.99.224's LSW audit
+         ("есть вкладки с индикаторами, ты не все перечислил — вот те
+         что не перечислил и не имеют тумблера"). Unlike every other
+         module (LSW_ENABLED/FT5_ENABLED/MSNR_ENABLED/MIRROR_ENABLED/
+         SCALP_ENABLED), these two tabs' scan loops always ran with no
+         way to turn them off from the UI (or even via settings API) —
+         genuinely couldn't be disabled at all, not just missing a
+         checkbox for an existing flag.
+         Added EMA_TOUCH_ENABLED and AMD_ENABLED master switches, fully
+         wired (settings tuple/get/global/apply/checkbox/JS-map, same
+         pattern as every other module's own enable flag) — new
+         "Сканирование" toggle under new "EMA Touch (EMA🚀)" and
+         "AMD Cycle" settings groups. ema_bull_loop()/amd_loop()/
+         amd_backtest_loop() now check their own flag at the top of each
+         cycle and just sleep-and-retry when disabled, instead of always
+         scanning.
+         Also fixed the same "with ThreadPoolExecutor(...) as ex" hang
+         risk in ema_bull_loop() as LSW/MSNR/AMD's own v0.99.194/195/206
+         fixes — found while touching this code for the enable check: a
+         single stuck symbol would call shutdown(wait=True) on exit,
+         blocking the entire loop (and every subsequent scan cycle)
+         forever. Same no-with-block, bounded-time, shutdown(wait=False)
+         pattern applied.
+         Verified: py_compile, pyflakes, node --check, 53 routes, real
+         runtime 200 on / with correct ema_touch_enabled/amd_enabled in
+         /api/settings, zero surrogate escapes.
