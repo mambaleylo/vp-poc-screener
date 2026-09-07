@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.225"
+APP_VERSION = "0.99.226"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16681,10 +16681,31 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="label">↳ Алерты AMD</div>
+          <div class="sub">новые сигналы AMD Cycle (Accumulation/Manipulation/Distribution)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramAmd"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Алерты Neuro</div>
+          <div class="sub">новые живые сигналы самообучающейся системы зависимостей (топ-20 монет)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramNeuro"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Нестабильность сети</div>
           <div class="sub">разово, когда за 10 минут накопилось 5+ сетевых ошибок (Read timed out / ConnectionError) — не про открытые позиции, только про сбор данных</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramNetwork"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Часовая статистика (сбор)</div>
+          <div class="sub">сам сбор часовой статистики винрейта — выключение здесь остановит и подсчёт, и телеграм-алерт ниже, даже если он включён</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setHourlyStats"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -16749,6 +16770,12 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">после стопа следующая сделка по ТОЙ ЖЕ монете риском ×2, снова стоп — ×4, ×8 (потолок, дальше не растёт) — победа сбрасывает обратно к базовому риску. Реальный риск потери денег растёт экспоненциально при серии стопов подряд</div>
         </div>
         <label class="switch"><input type="checkbox" id="setScalpMartingaleEnabled"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ FT5 ⚠️</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeFt5"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -19132,16 +19159,20 @@ const setInputs = {
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_vp: document.getElementById('setTelegramVp'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
+  hourly_stats_enabled: document.getElementById('setHourlyStats'),
   telegram_alerts_msnr: document.getElementById('setTelegramMsnr'),
   telegram_alerts_ft5: document.getElementById('setTelegramFt5'),
   telegram_alerts_mirror: document.getElementById('setTelegramMirror'),
   telegram_alerts_lsw: document.getElementById('setTelegramLsw'),
   telegram_alerts_ema_bull: document.getElementById('setTelegramEmaBull'),
+  telegram_alerts_amd: document.getElementById('setTelegramAmd'),
+  telegram_alerts_neuro: document.getElementById('setTelegramNeuro'),
   telegram_alerts_network: document.getElementById('setTelegramNetwork'),
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
   autotrade_bounce: document.getElementById('setAutotradeBounce'),
   autotrade_breakout: document.getElementById('setAutotradeBreakout'),
   autotrade_scalp: document.getElementById('setAutotradeScalp'),
+  autotrade_ft5: document.getElementById('setAutotradeFt5'),
   scalp_martingale_enabled: document.getElementById('setScalpMartingaleEnabled'),
   // v0.99.105 — see this same key's own note in Python's apply_settings():
   // AUTOTRADE_ENABLED_MSNR is a genuine master switch layered ON TOP of the
