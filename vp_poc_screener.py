@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.216"
+APP_VERSION = "0.99.217"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14139,17 +14139,60 @@ _neuro_mining_running = False
 _neuro_mining_done = 0
 _neuro_mining_total = 0
 _neuro_mining_current_symbol = None
+_neuro_mining_progress_ts = time.time()  # v0.99.217 — last time real progress happened, for the watchdog below
 _neuro_prev_signal_keys = set()
+
+# v0.99.217 — WATCHDOG, per direct user report of the mining loop stuck on
+# one symbol (BNB_USDT, "5/20") for an entire night despite the v0.99.212/
+# 216 per-symbol ceiling (NEURO_PER_SYMBOL_MAX_SEC). Future.result(timeout=)
+# only stops the CALLING thread from waiting — it cannot force-kill the
+# submitted worker thread (a hard Python/threading limitation, no clean
+# primitive exists for this), so if the ceiling itself somehow didn't fire
+# in time (e.g. the main mining-loop thread got stuck BEFORE even reaching
+# that wait — most plausibly contending for the shared app-wide `state_lock`
+# that log_error() and dozens of other loops all use), the whole loop can
+# stall indefinitely with no self-recovery. This watchdog is a genuinely
+# independent second line of defense: it doesn't try to kill anything (not
+# possible), it just notices "no progress for way too long" and starts a
+# FRESH mining thread so the app keeps moving forward — the old stuck
+# thread is abandoned (a zombie, same as any single-symbol timeout already
+# accepts), but that's strictly better than permanent zero progress.
+NEURO_WATCHDOG_CHECK_SEC = 60
+NEURO_WATCHDOG_STUCK_SEC = NEURO_PER_SYMBOL_MAX_SEC * 2 + 120  # generous margin beyond the per-symbol ceiling itself
+
+
+def neuro_mining_watchdog():
+    global _neuro_mining_running, _neuro_mining_current_symbol, _neuro_mining_progress_ts
+    while True:
+        time.sleep(NEURO_WATCHDOG_CHECK_SEC)
+        try:
+            with _neuro_state_lock:
+                running = _neuro_mining_running
+                last_progress = _neuro_mining_progress_ts
+                current = _neuro_mining_current_symbol
+            if running and (time.time() - last_progress) > NEURO_WATCHDOG_STUCK_SEC:
+                log_error(f"neuro_mining_watchdog: mining loop stuck on {current} for over "
+                          f"{NEURO_WATCHDOG_STUCK_SEC}s despite the per-symbol ceiling — starting a "
+                          f"fresh mining thread (old one abandoned as a zombie, cannot be force-killed)")
+                with _neuro_state_lock:
+                    _neuro_mining_running = False
+                    _neuro_mining_current_symbol = None
+                    _neuro_mining_progress_ts = time.time()
+                threading.Thread(target=neuro_mining_loop, daemon=True).start()
+        except Exception as e:
+            log_error(f"neuro_mining_watchdog: {e}")
 
 
 def neuro_mining_loop():
-    global _neuro_last_mined, _neuro_mining_running, _neuro_mining_done, _neuro_mining_total, _neuro_mining_current_symbol
+    global _neuro_last_mined, _neuro_mining_running, _neuro_mining_done, _neuro_mining_total
+    global _neuro_mining_current_symbol, _neuro_mining_progress_ts
     while True:
         try:
             with _neuro_state_lock:
                 _neuro_mining_running = True
                 _neuro_mining_total = len(NEURO_COINS)
                 _neuro_mining_done = 0
+                _neuro_mining_progress_ts = time.time()
 
             # v0.99.216 — fetch BTC's and ETH's OWN 1h history ONCE per
             # cycle here, instead of every one of the other 18 symbols
@@ -14173,10 +14216,13 @@ def neuro_mining_loop():
                 shared_eth_candles = get_candles_range("ETH_USDT", NEURO_TF, start_ts, now) or []
             except Exception as e:
                 log_error(f"neuro_mining_loop: shared ETH prefetch failed: {e}")
+            with _neuro_state_lock:
+                _neuro_mining_progress_ts = time.time()
 
             for symbol in NEURO_COINS:
                 with _neuro_state_lock:
                     _neuro_mining_current_symbol = symbol
+                    _neuro_mining_progress_ts = time.time()
                 # v0.99.212 — same "no with-block, bounded per-item time"
                 # fix as LSW/MSNR's own v0.99.194/195: this loop is
                 # SEQUENTIAL (not a thread pool), so without an explicit
@@ -14201,10 +14247,12 @@ def neuro_mining_loop():
                     ex.shutdown(wait=False)  # never block on a stuck worker thread
                 with _neuro_state_lock:
                     _neuro_mining_done += 1
+                    _neuro_mining_progress_ts = time.time()
             with _neuro_state_lock:
                 _neuro_last_mined = int(time.time())
                 _neuro_mining_running = False
                 _neuro_mining_current_symbol = None
+                _neuro_mining_progress_ts = time.time()
         except Exception as e:
             log_error(f"neuro_mining_loop: {e}")
             with _neuro_state_lock:
@@ -19660,6 +19708,7 @@ if __name__ == "__main__":
     threading.Thread(target=amd_loop, daemon=True).start()
     threading.Thread(target=amd_backtest_loop, daemon=True).start()
     threading.Thread(target=neuro_mining_loop, daemon=True).start()
+    threading.Thread(target=neuro_mining_watchdog, daemon=True).start()
     threading.Thread(target=neuro_live_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     threading.Thread(target=risk_autotune_loop, daemon=True).start()
