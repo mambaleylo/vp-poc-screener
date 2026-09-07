@@ -13217,3 +13217,44 @@ v0.99.229 - NEW: "NQ Model" tab — Previous Day High/Low + daily-candle
          NQ_HISTORY_DAYS=365 requested (code already handles whatever
          comes back gracefully, same as every other module's own
          "ask for a lot, use what you get" pattern).
+
+v0.99.230 - CRITICAL FIX: NQ Model's CISD confirmation window had an
+         off-by-one bug that silently discarded valid confirmations
+         landing near the end of a trading day, per direct user report
+         of a suspiciously terrible backtest (0% WR, 6L/0W/3T). Root-
+         caused via a hand-crafted "textbook" case built directly from
+         the PDF's own description (clean bullish prior day, intraday
+         PDH sweep, then a clear CISD close back through recent
+         structure) — the detector produced ZERO signals on this
+         deliberately clean case, proving the issue was a real bug, not
+         just a weak underlying edge.
+         The bug: `for k in range(swept_idx, min(swept_idx +
+         NQ_CISD_MAX_WAIT_BARS, len(today_bars) - 1))` — range()'s upper
+         bound is exclusive, and capping at `len(today_bars) - 1` meant
+         index `len(today_bars) - 1` (the day's LAST intraday bar) could
+         NEVER be checked for CISD confirmation. The `-1` was originally
+         there to "leave room for a next bar to enter on", but that's
+         unnecessary — the actual next-bar lookup already searches the
+         FULL intraday candle list (not just today's own bars), so it
+         can find tomorrow's first bar just fine even when the CISD
+         candle is today's very last one. Fixed by removing the `- 1`.
+         Re-ran the same hand-crafted textbook case after the fix:
+         correctly produces the expected SHORT signal with sane
+         entry/SL/TP (RR exactly 3.0).
+         Also worth being honest about even after this fix: a genuinely
+         poor real-money backtest result on a specific instrument/period
+         doesn't necessarily mean the underlying methodology has no
+         edge — it could equally mean (a) the mechanical/binary
+         interpretation coded here (daily-candle-color bias, one fixed
+         CISD lookback/wait window) is a much cruder proxy than what a
+         skilled discretionary trader actually does with the same
+         concepts, (b) trading-education content very commonly shows
+         curated "textbook" examples after the fact rather than a blind
+         rule's real hit rate, and (c) NAS100_USDT is a crypto-native
+         synthetic index tracker, not the real CME NQ futures market —
+         liquidity-sweep/order-flow concepts are fundamentally about
+         real institutional participants' actual order flow, which a
+         synthetic tracker may not faithfully reproduce even though it
+         tracks the same index price.
+         Verified: py_compile, pyflakes, real runtime 200 on / and
+         /api/nq/status.
