@@ -13258,3 +13258,27 @@ v0.99.230 - CRITICAL FIX: NQ Model's CISD confirmation window had an
          tracks the same index price.
          Verified: py_compile, pyflakes, real runtime 200 on / and
          /api/nq/status.
+
+v0.99.231 - LSW (Sweep) universe raised 60->100, per direct user request
+         to give Gate.io's non-crypto perpetuals a real chance to be
+         scanned (NAS100_USDT/SPX500_USDT/UK100_USDT — index zone,
+         launched Jan 23 2026 — and XAU_USDT/XAG_USDT/XPT_USDT/XPD_USDT
+         — precious metals zone, launched Jan 14 2026 — all confirmed
+         via web search as real, live, USDT-settled, 24/7 Gate.io
+         perpetuals). No code change was needed for lsw_build_universe()
+         itself — it already accepts ANY contract ending in "_USDT" and
+         ranks purely by 24h volume, so these newer/lower-volume
+         instruments were already IN SCOPE, just likely crowded out of
+         the old 60-slot cutoff by higher-volume crypto majors. Chose
+         "just widen the universe, let them qualify by volume like
+         everything else" over hardcoding an always-included list, per
+         direct user preference.
+         Also raised LSW_backtest_loop's own MAX_CYCLE_SEC hard ceiling
+         1h->2h: the universe growing 60->100 (+67%) combined with
+         v0.99.223's own per-symbol RR walk-forward sweep (7 candidates,
+         each re-running the full filter chain) meant the old 1h ceiling
+         risked aborting a cycle that was genuinely still making
+         progress, not actually stuck — same reasoning already applied
+         to Neuro's own per-symbol ceiling when ITS universe/compute grew.
+         Verified: py_compile, pyflakes, 56 routes, real runtime 200 on
+         / and /api/lsw/status.
