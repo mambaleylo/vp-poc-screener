@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.219"
+APP_VERSION = "0.99.220"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13027,6 +13027,8 @@ NEURO_PER_SYMBOL_MAX_SEC = int(os.environ.get("VP_NEURO_PER_SYMBOL_MAX_SEC", 480
 NEURO_RR             = float(os.environ.get("VP_NEURO_RR", 2.0))  # fallback/default only — see NEURO_RR_CANDIDATES below for the actual per-symbol auto-tuned value
 NEURO_RR_CANDIDATES  = [1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0]  # v0.99.210 — small step (0.25), modest range, per direct user request ("вариативность RR, но не с гигантским шагом"). Best one picked per-symbol from TRAIN-period trades only (same walk-forward discipline as the condition mining itself), then applied to the reported trade history and live signals.
 NEURO_RR_MIN_TRADES  = int(os.environ.get("VP_NEURO_RR_MIN_TRADES", 15))  # don't trust an RR pick based on fewer than this many train-period trades
+NEURO_DECAY_WINDOW_DAYS = int(os.environ.get("VP_NEURO_DECAY_WINDOW_DAYS", 40))  # v0.99.220 — explicit CALENDAR-time recency window for decay detection, per direct user follow-up ("не только 40%, это не 1 месяц — ещё хотя бы за последние 40 дней"): a percentage-of-occurrences split doesn't map to any fixed real-world timeframe (a rare pattern's last 40% of occurrences could span many months; a frequent one's could be just days) — this checks an ACTUAL calendar window on top of that
+NEURO_DECAY_MIN_RECENT_N = 8  # minimum occurrences in a recency window before trusting a decay verdict from it
 NEURO_SL_ATR_MULT    = float(os.environ.get("VP_NEURO_SL_ATR_MULT", 1.5))
 NEURO_MAX_WAIT_BARS  = int(os.environ.get("VP_NEURO_MAX_WAIT_BARS", 48))
 NEURO_MIN_AGREE_Z    = float(os.environ.get("VP_NEURO_MIN_AGREE_Z", 2.5))  # combined |z| needed to fire a live signal
@@ -13839,41 +13841,59 @@ def neuro_walk_forward(candles, forward_bars=None, min_sample=None, z_threshold=
     for horizon, pats in by_horizon.items():
         test_fwd = neuro_forward_returns(test, horizon)
         valid_test_idx = [i for i in range(len(test)) if test_fwd[i] is not None]
+        latest_test_time = test[valid_test_idx[-1]]["time"] if valid_test_idx else 0
+        day_cutoff = latest_test_time - NEURO_DECAY_WINDOW_DAYS * 86400
         for pat in pats:
-            test_rets = [test_fwd[i] for i in valid_test_idx
-                         if _neuro_pattern_value(pat, test_conds[i]) == pat["value"]]
+            matched_idx = [i for i in valid_test_idx if _neuro_pattern_value(pat, test_conds[i]) == pat["value"]]
+            test_rets = [test_fwd[i] for i in matched_idx]
             depth = pat.get("combo_depth", 1) if pat.get("is_combo") else 1
             min_needed = max(10, int(min_sample * (NEURO_COMBO_MIN_SAMPLE_MULT * max(depth - 1, 1) if pat.get("is_combo") else 1) // 3))
             if len(test_rets) < min_needed:
                 continue
             test_mean = sum(test_rets) / len(test_rets)
             if (test_mean > 0) == (pat["mean_fwd_return"] > 0):
-                # v0.99.219 — RECENCY CHECK, per direct user request ("если
-                # бы я торговал последнее время, были бы одни стопы —
-                # учитывай это"). test_rets is already chronological (built
-                # by iterating increasing bar index over `test`, which is
-                # itself time-ordered) — split into the FIRST 60% vs LAST
-                # 40% of the test-period occurrences and compare. A pattern
-                # can pass the overall train-vs-test confirmation above yet
-                # still be actively decaying RIGHT NOW within the test
-                # window itself; that's exactly what should stop it from
-                # firing new live signals, without rewriting the honest
-                # historical trade record (neuro_simulate_trades still
-                # uses the FULL confirmed list unfiltered — only
-                # neuro_scan_live excludes decaying patterns going forward).
+                # v0.99.219/220 — RECENCY CHECK, per direct user follow-up
+                # ("не только 40%, это не 1 месяц — ещё хотя бы за
+                # последние 40 дней"). test_rets is already chronological
+                # (matched_idx iterates increasing bar index over `test`,
+                # itself time-ordered), but a percentage-of-occurrences
+                # split doesn't map to any fixed real-world timeframe — a
+                # rarely-firing pattern's last 40% could span many months,
+                # a frequent one's could be just days. Two INDEPENDENT
+                # recency lenses, either one sufficient to flag decay:
+                #  (a) last 40% of occurrences BY COUNT (catches drift for
+                #      patterns too rare for a clean calendar window)
+                #  (b) last NEURO_DECAY_WINDOW_DAYS (40) CALENDAR days —
+                #      an explicit, fixed real-world "lately" window,
+                #      independent of how often the pattern happens to fire
+                # A pattern can pass the overall train-vs-test confirmation
+                # above yet still be actively decaying RIGHT NOW; that's
+                # what should stop it firing new live signals, without
+                # rewriting the honest historical trade record
+                # (neuro_simulate_trades still uses the FULL confirmed list
+                # unfiltered — only neuro_scan_live excludes decaying
+                # patterns going forward).
                 split_i = max(1, int(len(test_rets) * 0.6))
-                recent_rets = test_rets[split_i:]
-                decaying = False
-                recent_mean = None
-                if len(recent_rets) >= 8:
-                    recent_mean = sum(recent_rets) / len(recent_rets)
-                    sign_flipped = (recent_mean > 0) != (pat["mean_fwd_return"] > 0)
-                    weakened_badly = abs(test_mean) > 1e-12 and abs(recent_mean) < 0.3 * abs(test_mean)
-                    decaying = sign_flipped or weakened_badly
+                recent_pct_rets = test_rets[split_i:]
+                recent_days_rets = [test_fwd[i] for i in matched_idx if test[i]["time"] >= day_cutoff]
+
+                def _decay_check(rets):
+                    if len(rets) < NEURO_DECAY_MIN_RECENT_N:
+                        return None, False
+                    m = sum(rets) / len(rets)
+                    sign_flipped = (m > 0) != (pat["mean_fwd_return"] > 0)
+                    weakened_badly = abs(test_mean) > 1e-12 and abs(m) < 0.3 * abs(test_mean)
+                    return round(m, 5), (sign_flipped or weakened_badly)
+
+                recent_mean, decay_by_pct = _decay_check(recent_pct_rets)
+                recent_days_mean, decay_by_days = _decay_check(recent_days_rets)
+                decaying = decay_by_pct or decay_by_days
                 confirmed.append({**pat, "test_n": len(test_rets),
                                   "test_mean_fwd_return": round(test_mean, 5), "held_up": True,
-                                  "recent_test_n": len(recent_rets),
-                                  "recent_test_mean_fwd_return": round(recent_mean, 5) if recent_mean is not None else None,
+                                  "recent_test_n": len(recent_pct_rets),
+                                  "recent_test_mean_fwd_return": recent_mean,
+                                  "recent_days_n": len(recent_days_rets),
+                                  "recent_days_mean_fwd_return": recent_days_mean,
                                   "decaying": decaying})
     confirmed.sort(key=lambda d: -abs(d["z"]))
     return confirmed
