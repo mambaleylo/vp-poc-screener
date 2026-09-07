@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.229"
+APP_VERSION = "0.99.230"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14826,7 +14826,7 @@ def nq_detect_signals(intraday_candles, daily_candles, rr=None):
         if not pre_bars:
             continue
         structure_lvl = min(b["low"] for b in pre_bars) if bias == "bullish" else max(b["high"] for b in pre_bars)
-        for k in range(swept_idx, min(swept_idx + NQ_CISD_MAX_WAIT_BARS, len(today_bars) - 1)):
+        for k in range(swept_idx, min(swept_idx + NQ_CISD_MAX_WAIT_BARS, len(today_bars))):
             b = today_bars[k]
             confirmed = (bias == "bullish" and b["close"] < structure_lvl) or \
                         (bias == "bearish" and b["close"] > structure_lvl)
