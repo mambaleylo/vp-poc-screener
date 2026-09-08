@@ -13309,3 +13309,34 @@ v0.99.232 - Trimmed and fixed rounding on Telegram warning messages, per
          chars, 4 lines) — inverted from before the fix — and both use
          identical :.6g rounding (359.56, not 359.55985000000004).
          Verified: py_compile, pyflakes, 56 routes, real runtime 200.
+
+v0.99.233 - "Symbiosis" feature added to Neuro, per direct user request
+         ("можно добавить некий симбиоз наших индикаторов, типа свипа в
+         нейро?"): a new condition, lsw_sweep, that DIRECTLY REUSES
+         LSW's own real liquidity-sweep detector (lsw_detect_signals())
+         on the exact same 1h candles Neuro already has for each of its
+         20 coins — no extra network fetch (LSW_INTERVAL == NEURO_TF ==
+         "1h" already), no reimplemented logic. Confirmed LSW_BACKTEST_
+         DAYS (90, LSW's own module-level fetch window) has zero bearing
+         here — lsw_detect_signals() is a pure function over whatever
+         candles it's given, so it naturally sees Neuro's own much
+         longer ~13-month history instead of being limited to LSW's own
+         90-day window, per direct user concern about history-length
+         mismatch.
+         For each bar, labels whether an LSW sweep signal fired (LONG,
+         SHORT, both, or none) within the last 4 bars — added as both a
+         single condition (NEURO_CONDITION_KEYS) and to the pairwise-
+         combo set (NEURO_COMBO_KEYS), so Neuro's own walk-forward
+         mining can discover whether "recent Sweep signal + <anything
+         else>" combos have genuine out-of-sample edge — LSW's detector
+         becomes just one more feature among 38, not a separate bolted-
+         on module.
+         Validated on real SOL 1h data: lsw_detect_signals() found 113
+         real sweep signals when reused directly (no wrapper/adapter
+         needed), label distribution sane (~15% of bars had a recent
+         sweep). Full walk-forward run: 32 of 774 confirmed dependencies
+         now involve lsw_sweep (e.g. "weekend+lsw_sweep=weekend|none"
+         z=8.17), overall WR/avg-P&L stayed healthy (41.1%, +0.233R) —
+         genuine new signal, not noise dragging quality down.
+         Verified: py_compile, pyflakes, 56 routes, real runtime 200 on
+         / and /api/neuro/status.
