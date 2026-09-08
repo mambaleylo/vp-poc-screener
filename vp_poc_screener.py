@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.231"
+APP_VERSION = "0.99.232"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4023,9 +4023,7 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
                 record["detail"] = (f"маржа ${margin:.2f} превышает доступный баланс "
                                      f"${wallet_balance:.2f} (с запасом 2%) — сделка пропущена")
                 send_telegram(
-                    f"⚠️ {symbol} ({mode}): сделка не открыта — недостаточно баланса. "
-                    f"Нужно ${margin:.2f}, доступно ${wallet_balance:.2f}. "
-                    f"Параметры: entry {entry}, SL {sl}, TP {tp}",
+                    f"⚠️ {symbol} ({mode}): мало баланса — нужно ${margin:.2f}, есть ${wallet_balance:.2f}",
                     category=mode,
                 )
                 # v0.99.186 — mark so MSNR signals API shows it even though
@@ -4145,8 +4143,8 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
                     record["detail"] = (f"цена ({current_price}) уже за стопом ({sl}) к моменту открытия — "
                                          f"сделка не открыта")
                     send_telegram(
-                        f"⚠️ {symbol} ({mode}): сигнал устарел — цена ({current_price}) уже прошла "
-                        f"уровень стопа ({sl}) ещё до открытия. Сделка НЕ открыта.",
+                        f"⚠️ {symbol} ({mode}): сигнал устарел — цена {current_price:.6g} уже прошла "
+                        f"стоп {sl:.6g}, не открыта",
                         category=None,
                     )
                     with state_lock:
@@ -12209,10 +12207,8 @@ def lsw_scan_symbol_live(symbol):
                     if _lsw_signal_cooldowns.get(symbol) == sig["entry_time"]:
                         del _lsw_signal_cooldowns[symbol]
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
-        level_labels = {"high": "снятие хаёв", "low": "снятие лоу"}
         send_telegram(
-            f"{arrow} {symbol} ({level_labels.get(sig['level_type'], sig['level_type'])}, "
-            f"x{sig.get('level_touches')} касания)\n"
+            f"{arrow} {symbol}\n"
             f"entry: {sig['entry']:.6g}\n"
             f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n"
             f"плечо: {autotrade_result.get('leverage', '?')}x",
