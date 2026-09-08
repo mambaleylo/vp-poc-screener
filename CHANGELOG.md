@@ -13370,3 +13370,42 @@ v0.99.234 - Extended the "symbiosis" idea to Mirror, per direct user
          features coexist without degrading quality.
          Verified: py_compile, pyflakes, 56 routes, real runtime 200 on
          / and /api/neuro/status.
+
+v0.99.235 - Confirmed and fixed a real "dead end" in Neuro's combo-growth
+         beam search, per direct user question ("может ли быть тупик в
+         нейро на бэктесте, когда новым вариациям не даётся шанс?").
+         Empirically measured on real SOL data: of 2470 significant
+         pairs found, only ~90 (30 per horizon × 3 horizons — the old
+         NEURO_COMBO_GROW_TOP_N) ever got extended into triples — 96.4%
+         were silently abandoned with zero chance, no matter how
+         promising a specific 3-way combination might have been. Worse,
+         the beam itself was heavily concentrated: h4_rsi_zone alone
+         occupied 25% of growth slots, vol_regime another 15% — genuinely
+         significant patterns built on other conditions (lsw_sweep,
+         adx_zone, etc.) got at most 1 slot each, effectively starved
+         out of ever combining into deeper patterns.
+         Two fixes:
+         1. NEURO_COMBO_GROW_TOP_N raised 30->60 (roughly doubles real
+            coverage of the significant-pair pool).
+         2. New _neuro_select_diverse_beam(): greedy selection by |z|,
+            but capping how many growth slots any SINGLE underlying
+            condition key can occupy (NEURO_COMBO_GROW_MAX_PER_KEY=8) —
+            once a key hits its cap, further candidates involving it are
+            skipped as growth SEEDS (still kept in the overall confirmed-
+            pattern pool if independently significant), making room for
+            genuinely different variations instead of near-duplicate
+            variations of the same 1-2 dominant features.
+         Validated on real SOL data: beam went from one key claiming 25%
+         of slots to 12 different keys evenly capped at 8 each; triples
+         found jumped from 225 to 1826 (8x), quadruples now a real
+         population (959) instead of a thin tail. WR/avg-P&L stayed
+         healthy (40.4%/+0.212R vs 41.1%/+0.233R before — within noise,
+         confirming the added diversity surfaces genuine additional
+         signal rather than diluting quality with noise).
+         Timing at realistic scale (~9500 bars, matching Gate.io's real
+         ~13-month history ceiling): 56.8s/symbol, well under the 480s
+         per-symbol ceiling — ~19 min estimated for all 20 coins'
+         compute alone, an acceptable increase given the material
+         improvement in search coverage.
+         Verified: py_compile, pyflakes, real runtime 200 on / and
+         /api/neuro/status.
