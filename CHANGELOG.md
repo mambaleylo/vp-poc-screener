@@ -13282,3 +13282,30 @@ v0.99.231 - LSW (Sweep) universe raised 60->100, per direct user request
          to Neuro's own per-symbol ceiling when ITS universe/compute grew.
          Verified: py_compile, pyflakes, 56 routes, real runtime 200 on
          / and /api/lsw/status.
+
+v0.99.232 - Trimmed and fixed rounding on Telegram warning messages, per
+         direct user report (the "insufficient balance" warning was
+         LONGER and multi-line versus the compact single-purpose main
+         signal message, and printed raw unrounded floats like
+         "359.55985000000004" instead of the ":.6g"-formatted "359.56"
+         the main signal already uses).
+         Both fixes live in execute_autotrade() — the SHARED function
+         behind every module's autotrade path (MSNR/Mirror/LSW/Scalp/
+         etc, selected via the `mode` param) — so this fixes the same
+         issue everywhere at once, not just LSW:
+         - "недостаточно баланса" warning: dropped the redundant
+           entry/SL/TP listing entirely (the main signal message, sent
+           separately, already has this) and reduced to one line:
+           "⚠️ SYMBOL (mode): мало баланса — нужно $X, есть $Y"
+         - "сигнал устарел" (stale signal, price already past SL)
+           warning: same one-line trim, now using :.6g formatting to
+           match the main signal's own rounding convention.
+         Also removed the "(снятие лоу/хаёв, xN касания)" parenthetical
+         from LSW's own main live-signal Telegram message, per direct
+         user request — now just "⬆️ LONG SYMBOL" instead of "⬆️ LONG
+         SYMBOL (снятие лоу, x2 касания)".
+         Verified message length/formatting directly: warning message
+         (59 chars, 1 line) is now shorter than the main signal (65
+         chars, 4 lines) — inverted from before the fix — and both use
+         identical :.6g rounding (359.56, not 359.55985000000004).
+         Verified: py_compile, pyflakes, 56 routes, real runtime 200.
