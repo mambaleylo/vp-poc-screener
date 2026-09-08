@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.235"
+APP_VERSION = "0.99.236"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13130,17 +13130,31 @@ def amd_loop():
 # ============================================================================
 
 NEURO_ENABLED        = os.environ.get("VP_NEURO_ENABLED", "1") == "1"  # v0.99.228 — master on/off, per direct user report ("почему нету тумблера на работу") — same gap EMA Touch/AMD had before v0.99.225, missed here since Neuro was built after that audit
+# v0.99.236 — DYNAMIC universe, per direct user request ("развяжем руки
+# нейро по количеству монет, пускай сканирует и проверяет всё, после
+# бэктеста останутся только 10 лучших по ср.P&L"). Replaces the fixed
+# 20-coin NEURO_COINS list with a volume-ranked pool (same shape as
+# lsw_build_universe()/ft5_build_universe()) — every liquid _USDT
+# contract gets backtested each cycle, and only the top NEURO_TOP_N by
+# avg P&L (meeting a minimum sample size) survive as the "active" set
+# that live-scans and gets shown. NEURO_COINS is kept as the small
+# ALWAYS-INCLUDED seed list (BTC/ETH for correlation + generally
+# meaningful majors) merged into the dynamic universe, not the sole
+# universe anymore.
 NEURO_COINS          = ["BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_USDT",
                         "BNB_USDT", "ADA_USDT", "AVAX_USDT", "LINK_USDT", "DOT_USDT",
                         "TRX_USDT", "MATIC_USDT", "LTC_USDT", "ATOM_USDT", "NEAR_USDT",
-                        "APT_USDT", "ARB_USDT", "OP_USDT", "SUI_USDT", "TON_USDT"]  # v0.99.215 — expanded 10->20 per direct user request
+                        "APT_USDT", "ARB_USDT", "OP_USDT", "SUI_USDT", "TON_USDT"]  # v0.99.215 — expanded 10->20 per direct user request; now the always-included seed set (see NEURO_UNIVERSE_SIZE above)
+NEURO_UNIVERSE_SIZE  = int(os.environ.get("VP_NEURO_UNIVERSE_SIZE", 120))  # v0.99.236 — wide volume-ranked candidate pool, same scale as LSW's own 100-120
+NEURO_TOP_N          = int(os.environ.get("VP_NEURO_TOP_N", 10))  # how many survive the full-universe backtest, ranked by avg_pnl_r
+NEURO_TOP_N_MIN_TRADES = int(os.environ.get("VP_NEURO_TOP_N_MIN_TRADES", 20))  # per direct user request — don't let a coin with e.g. 3 lucky trades and +5R average beat out one with 50 trades and a solid +0.3R; a coin needs at least this many closed backtest trades to even be RANKED for the top-N cut (coins below this are excluded from the active set entirely, not just ranked low)
 NEURO_TF             = os.environ.get("VP_NEURO_TF", "1h")
 NEURO_FORWARD_BARS   = int(os.environ.get("VP_NEURO_FORWARD_BARS", 12))   # measure forward return over next N bars
 NEURO_MIN_SAMPLE     = int(os.environ.get("VP_NEURO_MIN_SAMPLE", 30))     # min occurrences per bucket to trust it
 NEURO_Z_THRESHOLD    = float(os.environ.get("VP_NEURO_Z_THRESHOLD", 1.8))
 NEURO_TRAIN_FRAC     = float(os.environ.get("VP_NEURO_TRAIN_FRAC", 0.7))  # walk-forward split
 NEURO_HISTORY_DAYS   = int(os.environ.get("VP_NEURO_HISTORY_DAYS", 1500))  # ask for as much as possible; exchange will just return what it has
-NEURO_REFRESH_SEC    = int(os.environ.get("VP_NEURO_REFRESH_SEC", 4 * 3600))  # re-mine every 4h — the "self-learning" refresh
+NEURO_REFRESH_SEC    = int(os.environ.get("VP_NEURO_REFRESH_SEC", 24 * 3600))  # v0.99.236 — raised 4h->24h per direct user request: with the universe now 120 coins instead of a fixed 20, a full cycle takes MUCH longer, and re-mining more than once a day added little value anyway (the underlying ~13-month rolling window barely shifts hour to hour — established during an earlier session discussion)
 NEURO_MINING_TRIGGER = threading.Event()  # v0.99.212 — same "Очистить X doesn't wake the sleeping loop" fix as LSW/MSNR's own trigger events, for the new "Очистить Neuro" button
 NEURO_PER_SYMBOL_MAX_SEC = int(os.environ.get("VP_NEURO_PER_SYMBOL_MAX_SEC", 480))  # v0.99.212, raised 300->480 in v0.99.216 — hard ceiling per symbol so one stuck coin can't block the whole sequential mining cycle forever; raised given 20 coins + more indicators now legitimately need more time even without anything actually stuck
 NEURO_RR             = float(os.environ.get("VP_NEURO_RR", 2.0))  # fallback/default only — see NEURO_RR_CANDIDATES below for the actual per-symbol auto-tuned value
@@ -14293,6 +14307,44 @@ def neuro_find_culprit_patterns(trades, window=None):
     return culprits
 
 
+def neuro_build_universe():
+    """v0.99.236 — dynamic, volume-ranked candidate pool (same shape as
+    lsw_build_universe()), merged with the small always-included
+    NEURO_COINS seed set (so BTC/ETH — needed for correlation regardless
+    of their own ranking — and other established majors are never
+    dropped just because a smaller-cap coin briefly out-volumes them)."""
+    try:
+        tickers = get_tickers()
+        seen_vol = {}
+        for t in tickers:
+            name = t.get("contract", "")
+            if not name.endswith("_USDT"):
+                continue
+            vol = t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0
+            try:
+                vol = float(vol)
+            except (TypeError, ValueError):
+                vol = 0.0
+            if vol < MIN_VOL_USD:
+                continue
+            if name not in seen_vol or vol > seen_vol[name]:
+                seen_vol[name] = vol
+        ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
+        dynamic = [s[0] for s in ranked[:NEURO_UNIVERSE_SIZE]]
+    except Exception as e:
+        log_error(f"neuro_build_universe: {e}")
+        dynamic = []
+    # Merge: seed coins first (guaranteed inclusion), then whatever the
+    # dynamic scan adds that isn't already in the seed set.
+    seen = set(NEURO_COINS)
+    universe = list(NEURO_COINS)
+    for s in dynamic:
+        if s not in seen:
+            universe.append(s)
+            seen.add(s)
+    return universe
+
+
 def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_candles=None):
     """Fetch max available history PLUS extra data sources (4h+1d trend,
     funding rate, open interest, BTC/ETH correlation), mine + walk-forward
@@ -14492,6 +14544,7 @@ _neuro_mining_done = 0
 _neuro_mining_total = 0
 _neuro_mining_current_symbol = None
 _neuro_mining_progress_ts = time.time()  # v0.99.217 — last time real progress happened, for the watchdog below
+_neuro_active_symbols = list(NEURO_COINS[:NEURO_TOP_N])  # v0.99.236 — current top-N survivors of the full-universe backtest; starts as the seed coins until the first cycle completes
 _neuro_prev_signal_keys = set()
 
 # v0.99.227 — persistent live-signal LOG with real tracked outcomes, per
@@ -14564,7 +14617,8 @@ def neuro_track_signal_outcomes():
             log_error(f"neuro_outcome {sig['symbol']}: {e}")
 
 
-def neuro_compute_signal_stats():
+def neuro_compute_signal_stats(active_symbols=None):
+    active_symbols = active_symbols if active_symbols is not None else NEURO_COINS
     with _neuro_signal_log_lock:
         signals = list(_neuro_signal_log)
     closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
@@ -14574,7 +14628,7 @@ def neuro_compute_signal_stats():
     winrate = round(wins / len(closed) * 100, 1) if closed else None
     avg_pnl = round(sum(s["pnl_r"] for s in closed if s.get("pnl_r") is not None) / len(closed), 3) if closed else None
     by_symbol = {}
-    for sym in NEURO_COINS:
+    for sym in active_symbols:
         sym_closed = [s for s in closed if s["symbol"] == sym]
         sym_wins = sum(1 for s in sym_closed if s["result"] == "WIN")
         if sym_closed or any(s["symbol"] == sym and s["status"] == "OPEN" for s in signals):
@@ -14629,29 +14683,31 @@ def neuro_mining_watchdog():
 
 def neuro_mining_loop():
     global _neuro_last_mined, _neuro_mining_running, _neuro_mining_done, _neuro_mining_total
-    global _neuro_mining_current_symbol, _neuro_mining_progress_ts
+    global _neuro_mining_current_symbol, _neuro_mining_progress_ts, _neuro_active_symbols
     while True:
         try:
             if not NEURO_ENABLED:
                 time.sleep(max(300, NEURO_REFRESH_SEC))
                 continue
+            # v0.99.236 — dynamic, volume-ranked universe (up to
+            # NEURO_UNIVERSE_SIZE=120 candidates) instead of the old fixed
+            # 20-coin list, per direct user request ("развяжем руки нейро
+            # по количеству монет, пускай сканирует и проверяет всё").
+            universe = neuro_build_universe()
             with _neuro_state_lock:
                 _neuro_mining_running = True
-                _neuro_mining_total = len(NEURO_COINS)
+                _neuro_mining_total = len(universe)
                 _neuro_mining_done = 0
                 _neuro_mining_progress_ts = time.time()
 
             # v0.99.216 — fetch BTC's and ETH's OWN 1h history ONCE per
-            # cycle here, instead of every one of the other 18 symbols
-            # independently re-fetching the exact same BTC+ETH history
-            # for their own correlation check. That redundancy (~22 extra
-            # requests/cycle) was straining the app-wide shared
-            # GLOBAL_HTTP_SEMAPHORE (10 concurrent, shared with MSNR/LSW/
-            # AMD's own loops) enough to make most symbols time out
-            # against NEURO_PER_SYMBOL_MAX_SEC, per direct user report of
-            # 8-of-10 coins effectively hanging. Best-effort — if this
-            # fails, individual symbols still self-fetch as a fallback
-            # (see neuro_backtest_symbol's own precomputed_* params).
+            # cycle here, instead of every other symbol independently
+            # re-fetching the exact same BTC+ETH history for their own
+            # correlation check. Even more valuable now with up to 120
+            # symbols instead of 20 — this alone avoids ~240 redundant
+            # requests/cycle. Best-effort — if this fails, individual
+            # symbols still self-fetch as a fallback (see neuro_backtest_
+            # symbol's own precomputed_* params).
             now = int(time.time())
             start_ts = now - NEURO_HISTORY_DAYS * 86400
             shared_btc_candles = shared_eth_candles = None
@@ -14666,7 +14722,16 @@ def neuro_mining_loop():
             with _neuro_state_lock:
                 _neuro_mining_progress_ts = time.time()
 
-            for symbol in NEURO_COINS:
+            # v0.99.236 — full-universe results are held in a LOCAL,
+            # transient dict for the duration of this one cycle only (not
+            # written into the persistent _neuro_patterns/_neuro_trades
+            # globals yet) — up to 120 coins' worth of confirmed-pattern
+            # lists is real memory on a phone; only the eventual top-N
+            # survivors' full data gets promoted into persistent state
+            # after ranking, keeping steady-state memory use the same as
+            # the old fixed-20 design regardless of how wide the scan was.
+            all_results = {}
+            for symbol in universe:
                 with _neuro_state_lock:
                     _neuro_mining_current_symbol = symbol
                     _neuro_mining_progress_ts = time.time()
@@ -14682,10 +14747,8 @@ def neuro_mining_loop():
                     fut = ex.submit(neuro_backtest_symbol, symbol, shared_btc_candles, shared_eth_candles)
                     try:
                         confirmed, trades, summary = fut.result(timeout=NEURO_PER_SYMBOL_MAX_SEC)
-                        with _neuro_state_lock:
-                            _neuro_patterns[symbol] = confirmed
-                            _neuro_trades[symbol] = trades
-                            _neuro_summary[symbol] = summary
+                        if summary.get("n"):
+                            all_results[symbol] = (confirmed, trades, summary)
                     except (TimeoutError, FutureTimeoutError):
                         log_error(f"neuro_mining_loop: {symbol} exceeded {NEURO_PER_SYMBOL_MAX_SEC}s — skipping, abandoning stuck thread")
                     except Exception as e:
@@ -14695,11 +14758,50 @@ def neuro_mining_loop():
                 with _neuro_state_lock:
                     _neuro_mining_done += 1
                     _neuro_mining_progress_ts = time.time()
-            with _neuro_state_lock:
-                _neuro_last_mined = int(time.time())
-                _neuro_mining_running = False
-                _neuro_mining_current_symbol = None
-                _neuro_mining_progress_ts = time.time()
+
+            # v0.99.236 — rank by avg_pnl_r, requiring at least NEURO_TOP_N_
+            # MIN_TRADES closed backtest trades before a coin is even
+            # eligible — per direct user request ("минимум выборки сделок
+            # чтобы не попасть монета с 3 сделками и случайным +5R").
+            eligible = [(sym, res) for sym, res in all_results.items()
+                        if (res[2].get("n") or 0) >= NEURO_TOP_N_MIN_TRADES
+                        and res[2].get("avg_pnl_r") is not None]
+            eligible.sort(key=lambda item: -item[1][2]["avg_pnl_r"])
+            top = eligible[:NEURO_TOP_N]
+            new_active = [sym for sym, _ in top]
+
+            if not all_results:
+                # v0.99.236 — safety net: a totally empty all_results (e.g.
+                # a full network outage this cycle) must NOT wipe out
+                # whatever active set/patterns/trades already existed —
+                # keep the previous state and just log it, rather than
+                # silently blanking the whole tab out from under a real
+                # network hiccup.
+                log_error("neuro_mining_loop: universe scan produced zero usable results this cycle — keeping previous active set")
+                with _neuro_state_lock:
+                    _neuro_last_mined = int(time.time())
+                    _neuro_mining_running = False
+                    _neuro_mining_current_symbol = None
+                    _neuro_mining_progress_ts = time.time()
+            else:
+                with _neuro_state_lock:
+                    _neuro_patterns.clear()
+                    _neuro_trades.clear()
+                    _neuro_summary.clear()
+                    for sym, (confirmed, trades, summary) in top:
+                        _neuro_patterns[sym] = confirmed
+                        _neuro_trades[sym] = trades
+                        _neuro_summary[sym] = summary
+                    _neuro_active_symbols = new_active
+                    # Drop live-signal state for any symbol that fell out of
+                    # the active set — its badge shouldn't linger in the UI.
+                    for sym in list(_neuro_live_signals.keys()):
+                        if sym not in new_active:
+                            del _neuro_live_signals[sym]
+                    _neuro_last_mined = int(time.time())
+                    _neuro_mining_running = False
+                    _neuro_mining_current_symbol = None
+                    _neuro_mining_progress_ts = time.time()
         except Exception as e:
             log_error(f"neuro_mining_loop: {e}")
             with _neuro_state_lock:
@@ -14721,8 +14823,9 @@ def neuro_live_loop():
             with _neuro_state_lock:
                 patterns_snapshot = dict(_neuro_patterns)
                 summary_snapshot = dict(_neuro_summary)
+                active_symbols = list(_neuro_active_symbols)
             new_signals = {}
-            for symbol in NEURO_COINS:
+            for symbol in active_symbols:
                 confirmed = patterns_snapshot.get(symbol) or []
                 sym_summary = summary_snapshot.get(symbol) or {}
                 chosen_rr = sym_summary.get("chosen_rr")
@@ -14771,11 +14874,12 @@ def api_neuro_status():
         mining_done = _neuro_mining_done
         mining_total = _neuro_mining_total
         mining_current = _neuro_mining_current_symbol
+        active_symbols = list(_neuro_active_symbols)
     with _neuro_signal_log_lock:
         signal_log = list(_neuro_signal_log)
-    signal_stats = neuro_compute_signal_stats()
+    signal_stats = neuro_compute_signal_stats(active_symbols)
     coins = []
-    for symbol in NEURO_COINS:
+    for symbol in active_symbols:
         recent_trades = (trades.get(symbol) or [])[-40:][::-1]
         recent_live_signals = [s for s in signal_log if s["symbol"] == symbol][:40]
         coins.append({
@@ -14793,7 +14897,9 @@ def api_neuro_status():
         "live_signal_stats": signal_stats,
         "config": {"tf": NEURO_TF, "forward_bars": NEURO_FORWARD_BARS, "rr": NEURO_RR,
                    "history_days": NEURO_HISTORY_DAYS, "z_threshold": NEURO_Z_THRESHOLD,
-                   "min_agree_z": NEURO_MIN_AGREE_Z, "refresh_sec": NEURO_REFRESH_SEC},
+                   "min_agree_z": NEURO_MIN_AGREE_Z, "refresh_sec": NEURO_REFRESH_SEC,
+                   "universe_size": NEURO_UNIVERSE_SIZE, "top_n": NEURO_TOP_N,
+                   "top_n_min_trades": NEURO_TOP_N_MIN_TRADES},
     })
 
 
@@ -16474,9 +16580,11 @@ def api_reset_neuro():
             _neuro_trades.clear()
             _neuro_summary.clear()
             _neuro_live_signals.clear()
+            global _neuro_active_symbols
+            _neuro_active_symbols = list(NEURO_COINS[:NEURO_TOP_N])
         # Same fix as api_reset_lsw()/api_reset_msnr() — wakes the mining
         # loop immediately instead of leaving it asleep for up to
-        # NEURO_REFRESH_SEC (4h default).
+        # NEURO_REFRESH_SEC (24h default).
         NEURO_MINING_TRIGGER.set()
         return jsonify({"ok": True})
     except Exception as e:
@@ -19220,7 +19328,7 @@ async function refreshNeuro() {
 
     panel.innerHTML = `
       <div class="dim hint-block" style="margin-bottom:10px;">
-        <b>🧠 Neuro</b> \u2014 \u0441\u0430\u043c\u043e\u043e\u0431\u0443\u0447\u0430\u044e\u0449\u0430\u044f\u0441\u044f \u0441\u0438\u0441\u0442\u0435\u043c\u0430 \u043f\u043e\u0438\u0441\u043a\u0430 \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439. \u0421\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442 5 \u043a\u0440\u0443\u043f\u043d\u0435\u0439\u0448\u0438\u0445 \u043c\u043e\u043d\u0435\u0442 \u043f\u043e \u043c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u043e \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438 (\u0447\u0430\u0441\u043e\u0432\u044b\u0435 \u0441\u0432\u0435\u0447\u0438), \u043f\u0435\u0440\u0435\u0431\u0438\u0440\u0430\u0435\u0442 \u0432\u0441\u0435\u0432\u043e\u0437\u043c\u043e\u0436\u043d\u044b\u0435 \u0443\u0441\u043b\u043e\u0432\u0438\u044f
+        <b>🧠 Neuro</b> \u2014 \u0441\u0430\u043c\u043e\u043e\u0431\u0443\u0447\u0430\u044e\u0449\u0430\u044f\u0441\u044f \u0441\u0438\u0441\u0442\u0435\u043c\u0430 \u043f\u043e\u0438\u0441\u043a\u0430 \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439. \u041a\u0430\u0436\u0434\u044b\u0439 \u0446\u0438\u043a\u043b \u0441\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442 \u0434\u043e ${cfg.universe_size||120} \u043b\u0438\u043a\u0432\u0438\u0434\u043d\u044b\u0445 \u043c\u043e\u043d\u0435\u0442, \u043f\u0440\u043e\u0433\u043e\u043d\u044f\u0435\u0442 \u043f\u043e\u043b\u043d\u044b\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442 \u043f\u043e \u043a\u0430\u0436\u0434\u043e\u0439, \u0438 \u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0435\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u0442\u043e\u043f-${cfg.top_n||10} \u043f\u043e \u0441\u0440. P&L (\u043c\u0438\u043d\u0438\u043c\u0443\u043c ${cfg.top_n_min_trades||20} \u0441\u0434\u0435\u043b\u043e\u043a \u0447\u0442\u043e\u0431\u044b \u043f\u043e\u043f\u0430\u0441\u0442\u044c \u0432 \u043e\u0442\u0431\u043e\u0440). \u041f\u043e \u043c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u043e \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438 (\u0447\u0430\u0441\u043e\u0432\u044b\u0435 \u0441\u0432\u0435\u0447\u0438), \u043f\u0435\u0440\u0435\u0431\u0438\u0440\u0430\u0435\u0442 \u0432\u0441\u0435\u0432\u043e\u0437\u043c\u043e\u0436\u043d\u044b\u0435 \u0443\u0441\u043b\u043e\u0432\u0438\u044f
         (\u0447\u0430\u0441 \u0434\u043d\u044f, \u0434\u0435\u043d\u044c \u043d\u0435\u0434\u0435\u043b\u0438, RSI, EMA, MACD, Bollinger, \u043e\u0431\u044a\u0451\u043c, funding rate, \u043a\u043e\u0440\u0440\u0435\u043b\u044f\u0446\u0438\u044f \u0441 BTC \u0438 \u0434\u0440.) \u0438 \u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0435\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u0442\u043e,
         \u0447\u0442\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0435\u0442\u0441\u044f \u043d\u0430 \u043e\u0442\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0445 \u0434\u0430\u043d\u043d\u044b\u0445 (walk-forward). \u041a\u0430\u0440\u0442\u043e\u0447\u043a\u0430 \u043a\u0430\u0436\u0434\u043e\u0439 \u043c\u043e\u043d\u0435\u0442\u044b: \u0436\u0438\u0432\u043e\u0439 \u0441\u0438\u0433\u043d\u0430\u043b \u0441\u0432\u0435\u0440\u0445\u0443, \u0437\u0430\u0442\u0435\u043c WINRATE/P&L/RR/W-L-T, \u043f\u043e\u0442\u043e\u043c \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0438 \u0438 \u0441\u0434\u0435\u043b\u043a\u0438 (\u0440\u0430\u0441\u043a\u0440\u044b\u0432\u0430\u044e\u0442\u0441\u044f). \u041a\u043b\u0438\u043a \u043f\u043e \u0441\u0434\u0435\u043b\u043a\u0435 \u2014 \u0433\u0440\u0430\u0444\u0438\u043a. \u041f\u0435\u0440\u0435\u043c\u0430\u0439\u043d\u0438\u0432\u0430\u0435\u0442 \u043a\u0430\u0436\u0434\u044b\u0435 ${Math.round((cfg.refresh_sec||14400)/3600)}\u0447.
       </div>
