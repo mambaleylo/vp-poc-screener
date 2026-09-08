@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.232"
+APP_VERSION = "0.99.233"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13368,6 +13368,46 @@ def neuro_align_agreement(candles, other_candles, lookback=4):
     return out
 
 
+def neuro_align_lsw_sweep(candles, lookback_bars=4):
+    """v0.99.233 — 'symbiosis' condition, per direct user request: reuses
+    LSW's OWN real liquidity-sweep detector directly on the SAME 1h
+    candles Neuro already has (LSW_INTERVAL == NEURO_TF == "1h", so no
+    extra fetch or TF conversion needed) rather than reimplementing
+    anything. For each bar, labels whether an LSW sweep signal fired
+    (in either direction) within the last `lookback_bars` bars — lets
+    Neuro's own walk-forward mining discover whether "a recent Sweep
+    signal + <other condition>" combos have genuine out-of-sample edge,
+    treating LSW's detector as just one more feature among many rather
+    than a separate, disconnected module."""
+    if len(candles) < 30:
+        return [None] * len(candles)
+    try:
+        raw_sigs = lsw_detect_signals(candles)
+    except Exception as e:
+        log_error(f"neuro_align_lsw_sweep: {e}")
+        return [None] * len(candles)
+    times = [c["time"] for c in candles]
+    sig_by_time = {}
+    for sig in raw_sigs:
+        sig_by_time.setdefault(sig["entry_time"], []).append(sig["direction"])
+    out = [None] * len(candles)
+    for i, t in enumerate(times):
+        window_start = candles[max(0, i - lookback_bars)]["time"]
+        directions = set()
+        for st, dirs in sig_by_time.items():
+            if window_start <= st <= t:
+                directions.update(dirs)
+        if not directions:
+            out[i] = "none"
+        elif directions == {"LONG"}:
+            out[i] = "long_recent"
+        elif directions == {"SHORT"}:
+            out[i] = "short_recent"
+        else:
+            out[i] = "both_recent"
+    return out
+
+
 def neuro_align_h4_rsi(candles, h4_candles, period=14):
     """RSI computed on the 4h timeframe, aligned to each 1h bar — a genuine
     multi-timeframe momentum reading distinct from the existing 1h rsi_zone."""
@@ -13546,6 +13586,7 @@ def neuro_compute_conditions(candles, htf_candles=None, funding_records=None, bt
     eth_agree = neuro_align_agreement(candles, eth_candles) if eth_candles else [None] * len(candles)
     oi_trend = neuro_align_oi_trend(candles, oi_records) if oi_records else [None] * len(candles)
     h4_rsi_zone = neuro_align_h4_rsi(candles, htf_candles) if htf_candles else [None] * len(candles)
+    lsw_sweep = neuro_align_lsw_sweep(candles)  # no extra data needed — computed straight from `candles` itself
 
     conds = []
     streak = 0
@@ -13608,6 +13649,8 @@ def neuro_compute_conditions(candles, htf_candles=None, funding_records=None, bt
             bucket["oi_trend"] = oi_trend[i]
         if h4_rsi_zone[i] is not None:
             bucket["h4_rsi_zone"] = h4_rsi_zone[i]
+        if lsw_sweep[i] is not None:
+            bucket["lsw_sweep"] = lsw_sweep[i]
         if williams_r[i] is not None:
             w = williams_r[i]
             bucket["williams_zone"] = "oversold" if w <= -80 else "overbought" if w >= -20 else "mid"
@@ -13725,7 +13768,7 @@ NEURO_CONDITION_KEYS = ("hour", "dow", "dom_third", "weekend", "session", "rsi_z
                         "body_zone", "streak", "range_pos", "dd_zone", "htf_trend", "daily_trend",
                         "funding_zone", "btc_agree", "oi_trend", "eth_agree", "h4_rsi_zone",
                         "williams_zone", "adx_zone", "vwap_side", "ichimoku", "roc_zone",
-                        "wick_dominance", "round_number", "atr_trend")
+                        "wick_dominance", "round_number", "atr_trend", "lsw_sweep")
 
 # Curated subset used for PAIRWISE combinations — deliberately excludes "hour"
 # and "streak" (too many distinct values, would dilute sample sizes and
@@ -13738,7 +13781,8 @@ NEURO_COMBO_KEYS = ("dow", "weekend", "session", "rsi_zone", "stoch_zone", "ema2
                     "ema100_side", "ema200_side", "ema_stack", "macd_hist", "bb_pctb", "vol_zone",
                     "vol_regime", "range_zone", "dd_zone", "htf_trend", "daily_trend", "funding_zone",
                     "btc_agree", "oi_trend", "dom_third", "eth_agree", "h4_rsi_zone", "williams_zone",
-                    "adx_zone", "vwap_side", "ichimoku", "roc_zone", "wick_dominance", "atr_trend")
+                    "adx_zone", "vwap_side", "ichimoku", "roc_zone", "wick_dominance", "atr_trend",
+                    "lsw_sweep")
 NEURO_FORWARD_HORIZONS = [4, 12, 24]  # test several forward-looking windows independently
 NEURO_COMBO_MIN_SAMPLE_MULT = 2.0   # combos need more samples to trust (more hypotheses tested)
 NEURO_COMBO_Z_BONUS = 0.5           # and a higher bar on z, same reasoning
