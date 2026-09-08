@@ -13409,3 +13409,49 @@ v0.99.235 - Confirmed and fixed a real "dead end" in Neuro's combo-growth
          improvement in search coverage.
          Verified: py_compile, pyflakes, real runtime 200 on / and
          /api/neuro/status.
+
+v0.99.236 - Neuro's universe is now DYNAMIC and full-market, per direct
+         user request ("развяжем руки нейро по количеству монет, пускай
+         сканирует и проверяет всё, после бэктеста останутся только 10
+         лучших по ср.P&L"). Per follow-up clarifying answers:
+         - New neuro_build_universe(): volume-ranked pool, same shape as
+           lsw_build_universe() — up to NEURO_UNIVERSE_SIZE=120 liquid
+           _USDT contracts, merged with the small always-included
+           NEURO_COINS seed list (BTC/ETH etc — guaranteed inclusion
+           regardless of their own current volume rank, since BTC/ETH
+           are also needed for every OTHER coin's correlation checks).
+         - Every cycle now backtests the FULL dynamic universe (not a
+           fixed 20), then ranks by avg_pnl_r and keeps only the top
+           NEURO_TOP_N=10 as the "active" set that live-scans and shows
+           in the UI — everything else is discarded after ranking.
+         - NEURO_TOP_N_MIN_TRADES=20: a coin needs at least this many
+           CLOSED backtest trades to even be ranked for the top-10 cut,
+           per direct user request ("минимум выборки сделок чтобы не
+           попасть монета с 3 сделками и случайным +5R") — verified
+           directly with a synthetic case (a coin with 3 trades and
+           +5.0R average correctly excluded despite the huge number,
+           while solid 20-50-trade coins with modest but real averages
+           made the cut).
+         - NEURO_REFRESH_SEC raised 4h->24h (once daily), per direct
+           user request given the much longer full-cycle time now
+           needed for up to 120 coins (previously discussed: re-mining
+           more than once a day added little value anyway since the
+           underlying ~13-month rolling window barely shifts hour to
+           hour).
+         Memory-conscious design: the FULL universe's confirmed-pattern/
+         trade data is held in a LOCAL, transient dict only for the
+         duration of one mining cycle — only the eventual top-10
+         survivors' data gets promoted into the persistent state the UI/
+         live-loop actually read, so steady-state memory use stays the
+         same as the old fixed-20 design regardless of scan width.
+         CRITICAL FIX found during testing: a cycle that produced ZERO
+         usable results (e.g. a total network outage) was silently
+         WIPING the active symbol list down to empty, discarding
+         whatever the previous cycle had built. Added a safety check —
+         if the universe scan comes back completely empty, keep the
+         previous active set/patterns/trades entirely and just log the
+         failure, rather than blanking the tab out from under a
+         transient network hiccup. Verified directly: confirmed the
+         10-coin seed list survives intact through a fully-failed cycle.
+         Verified: py_compile, pyflakes, node --check, 56 routes, real
+         runtime 200 on / and /api/neuro/status, zero surrogate escapes.
