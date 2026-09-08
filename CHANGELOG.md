@@ -13340,3 +13340,33 @@ v0.99.233 - "Symbiosis" feature added to Neuro, per direct user request
          genuine new signal, not noise dragging quality down.
          Verified: py_compile, pyflakes, 56 routes, real runtime 200 on
          / and /api/neuro/status.
+
+v0.99.234 - Extended the "symbiosis" idea to Mirror, per direct user
+         follow-up ("тогда и зеркало можно добавить"). New condition
+         mirror_signal reuses MIRROR's own real detector (mirror_
+         detect_signals()) the exact same way v0.99.233 did for LSW —
+         MIRROR_INTERVAL == NEURO_TF == "1h" already, so again zero
+         extra network fetch, zero reimplemented logic.
+         Refactored the shared "label each bar by whether a signal
+         fired within the last N bars" logic out of neuro_align_lsw_
+         sweep() into a new _neuro_align_recent_signals(candles,
+         raw_sigs, lookback_bars) helper, now used by both
+         neuro_align_lsw_sweep() and the new neuro_align_mirror_signal()
+         — avoids duplicating the same loop twice for what's otherwise
+         an identical pattern (only the underlying detector call
+         differs).
+         MSNR was explicitly DEFERRED per direct user choice — its own
+         msnr_detect_signals() needs a SECOND candle series (a 15m
+         entry-TF alongside the 1h structure-TF Neuro already has),
+         which would mean a genuinely new network fetch per coin per
+         cycle rather than a free reuse; the user chose to hold off on
+         that cost for now and revisit MSNR separately later.
+         Added "mirror_signal" to both NEURO_CONDITION_KEYS and
+         NEURO_COMBO_KEYS. Validated on real SOL 1h data: 33 of 807
+         confirmed dependencies now involve mirror_signal (e.g.
+         "weekend+mirror_signal=weekend|none" z=6.53), overall WR/avg
+         P&L stayed healthy (41.1%, +0.233R) alongside the already-
+         confirmed lsw_sweep-involving ones (32) — both symbiosis
+         features coexist without degrading quality.
+         Verified: py_compile, pyflakes, 56 routes, real runtime 200 on
+         / and /api/neuro/status.
