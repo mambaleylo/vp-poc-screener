@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.234"
+APP_VERSION = "0.99.235"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13823,7 +13823,8 @@ NEURO_COMBO_Z_BONUS = 0.5           # and a higher bar on z, same reasoning
 # feature selection — the hypothesis space grows from validated building
 # blocks, not from a blind full search.
 NEURO_MAX_COMBO_DEPTH = 4        # 2=pairs (existing), 3=triples, 4=quadruples
-NEURO_COMBO_GROW_TOP_N = 30      # only extend the top-N most significant patterns from the previous depth (bounds compute + avoids growing from noise)
+NEURO_COMBO_GROW_TOP_N = 60      # v0.99.235 — raised 30->60: on real SOL data, only ~90 of 2470 significant pairs (3.6%) ever got a chance to grow into triples with the old value; still bounded, but roughly doubles real coverage
+NEURO_COMBO_GROW_MAX_PER_KEY = 8  # v0.99.235 — diversity cap: no single underlying condition key (e.g. h4_rsi_zone, which occupied 25% of the old beam alone) can claim more than this many of the growth slots, so less-dominant-but-still-significant patterns get a real chance instead of the beam being monopolized by variations of 1-2 features
 
 
 def _neuro_bucket_stats(buckets, mean_all, std_all, min_sample, z_threshold):
@@ -13862,6 +13863,34 @@ def _neuro_pattern_value(pat, cond_bucket):
     return "|".join(vals)
 
 
+def _neuro_select_diverse_beam(patterns, top_n, max_per_key=None):
+    """v0.99.235 — per direct user question ('может ли быть тупик в
+    нейро на бэктесте, когда новым вариациям не даётся шанс?'), confirmed
+    empirically: pure top-N-by-|z| let a couple of dominant features
+    (h4_rsi_zone, vol_regime) claim a disproportionate share of growth
+    slots, starving out less-dominant-but-still-genuinely-significant
+    patterns from EVER getting a chance to combine into deeper combos.
+    Greedy selection by |z|, but capping how many slots any single
+    underlying condition key can occupy — once a key hits its cap, further
+    candidates involving it are skipped (not discarded from the overall
+    confirmed-pattern pool, just not used as GROWTH SEEDS), making room
+    for genuinely different variations."""
+    max_per_key = max_per_key if max_per_key is not None else NEURO_COMBO_GROW_MAX_PER_KEY
+    sorted_pats = sorted(patterns, key=lambda p: -abs(p["z"]))
+    key_counts = {}
+    selected = []
+    for p in sorted_pats:
+        if len(selected) >= top_n:
+            break
+        keys = p["type"].split("+")
+        if any(key_counts.get(k, 0) >= max_per_key for k in keys):
+            continue
+        selected.append(p)
+        for k in keys:
+            key_counts[k] = key_counts.get(k, 0) + 1
+    return selected
+
+
 def _neuro_grow_combos(base_patterns, conds, fwd, valid_idx, mean_all, std_all, depth):
     """Given significant patterns from depth-1 (pairs, triples, ...), try
     extending each of the top-N with one more NEURO_COMBO_KEYS dimension.
@@ -13871,7 +13900,7 @@ def _neuro_grow_combos(base_patterns, conds, fwd, valid_idx, mean_all, std_all, 
     show up multiple times under different key orderings."""
     min_sample = NEURO_MIN_SAMPLE * NEURO_COMBO_MIN_SAMPLE_MULT * depth
     z_threshold = NEURO_Z_THRESHOLD + NEURO_COMBO_Z_BONUS * (depth - 1)
-    top_parents = sorted(base_patterns, key=lambda p: -abs(p["z"]))[:NEURO_COMBO_GROW_TOP_N]
+    top_parents = _neuro_select_diverse_beam(base_patterns, NEURO_COMBO_GROW_TOP_N)
 
     seen_signatures = set()
     grown = []
