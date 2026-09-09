@@ -13902,3 +13902,43 @@ v0.99.249 - Simplified the Neuro backtest digest's format, per direct
          corrected format directly on synthetic data.
          Verified: py_compile, pyflakes, node --check, 56 routes, real
          runtime 200, zero surrogate escapes.
+
+v0.99.250 - Neuro's top-5 dependency list now shows in Russian, per
+         direct user request ("хочу видеть зависимости на русском языке
+         для меня в нейро"). Display-only change — the underlying
+         pattern data (type/value strings the mining engine actually
+         produces and mines on) is completely untouched, this only
+         reformats what gets shown in the "топ-5 зависимостей" panel.
+         New translateNeuroCondition(type, value) + two lookup tables
+         (NEURO_KEY_LABELS for all 38 condition keys, NEURO_VALUE_LABELS
+         for ~40 common categorical values shared across keys) plus
+         special-cased dynamic values (dow: 0-6 → Пн..Вс via Python's
+         own dt.weekday() convention verified directly in the backend
+         source; hour: 0-23 → "H:00"; streak: "up3"/"down2"/"na0" →
+         "рост 3бар"/"падение 2бар"/"нет 0бар" via regex). Combo
+         patterns (e.g. "weekend+lsw_sweep"="weekend|none") render as
+         "выходные=выходной + сигнал Sweep=нет" — each key+value pair
+         translated independently, joined with " + ".
+         Verified every categorical value string against the actual
+         backend bucket-assignment code (not guessed) — e.g. confirmed
+         session's exact values (asian/london/london_ny_overlap/ny/
+         off_hours), ema_stack's (bull_stack/bear_stack/mixed),
+         dom_third's (early/mid/late) — to avoid translating a value
+         that doesn't actually occur or missing one that does.
+         CRITICAL FIX found before shipping: two JS regexes (`/^\d+$/`)
+         written with a single backslash inside the giant Python triple-
+         quoted INDEX_HTML string triggered a SyntaxWarning ("invalid
+         escape sequence") — caught by running py_compile with warnings
+         escalated to errors (a stricter check than the project's usual
+         py_compile pass, added specifically after suspecting the tool
+         call's own escaping may have altered the intended backslash
+         count). Rewrote both `\d+` patterns as `[0-9]+` instead,
+         functionally identical in JS but sidesteps the Python string-
+         escaping ambiguity entirely.
+         Verified the full translation function against real pattern
+         examples pulled from earlier in this exact session, e.g.
+         "dow=5" → "день недели=Сб", "weekend+lsw_sweep=weekend|none"
+         → "выходные=выходной + сигнал Sweep=нет".
+         Verified: py_compile (with -W error), pyflakes, node --check,
+         56 routes, real runtime 200 on / and /api/neuro/status, zero
+         surrogate escapes.
