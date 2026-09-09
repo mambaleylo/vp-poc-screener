@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.241"
+APP_VERSION = "0.99.242"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4025,9 +4025,29 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
             # of equity as margin instead of the risk-% formula. Leverage
             # is still auto-computed from the SL distance (same liquidation
             # safety), only the margin commitment changes.
+            # v0.99.242 — CRITICAL FIX, per direct user follow-up ("то есть
+            # проблема исправлена?" prompted a full re-check across every
+            # sizing path): this branch called compute_max_safe_leverage()
+            # with the SAME flat, best-case mmr_pct/leverage_cap that
+            # compute_risk_based_position() above corrects INTERNALLY (via
+            # its own symbol/tiers_by_symbol params) but never exposes back
+            # to the caller — meaning this separate all-in calculation was
+            # still fully exposed to the exact tier bug fixed in v0.99.237
+            # for the normal risk-based path. Since all-in fixes MARGIN
+            # first (not notional), the tier that will actually apply once
+            # margin*leverage is known can't be looked up in one pass the
+            # way compute_risk_based_position() does — falls back to the
+            # same WORST-CASE (highest MMR, lowest max-leverage) approach
+            # already used by msnr_trade_beyond_liquidation() for the same
+            # "can't cheaply know the exact notional in advance" reason.
             if all_in_margin_pct is not None and not skip_reason:
                 sl_dist_pct = abs(entry - sl) / entry * 100 if entry else 0
-                lev_all_in = compute_max_safe_leverage(direction, sl_dist_pct, mmr_pct, leverage_cap) if sl_dist_pct > 0 else None
+                all_in_mmr_pct, all_in_leverage_cap = mmr_pct, leverage_cap
+                tiers = tiers_by_symbol.get(symbol) if tiers_by_symbol else None
+                if tiers:
+                    all_in_mmr_pct = max(t[1] for t in tiers)
+                    all_in_leverage_cap = min(leverage_cap, min(t[2] for t in tiers)) if leverage_cap else min(t[2] for t in tiers)
+                lev_all_in = compute_max_safe_leverage(direction, sl_dist_pct, all_in_mmr_pct, all_in_leverage_cap) if sl_dist_pct > 0 else None
                 if lev_all_in:
                     # use total_equity here as placeholder; will be replaced after wallet_balance fetch below
                     margin = total_equity * all_in_margin_pct / 100.0
