@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.246"
+APP_VERSION = "0.99.247"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1035,7 +1035,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled",
                   "autotrade_risk_pct",
@@ -1074,6 +1074,7 @@ def get_settings():
         "ema_touch_enabled": EMA_TOUCH_ENABLED,
         "amd_enabled": AMD_ENABLED,
         "neuro_enabled": NEURO_ENABLED,
+        "neuro_top_n": NEURO_TOP_N,
         "nq_enabled": NQ_ENABLED,
         "lsw_enabled": LSW_ENABLED,
         "lsw_rr": LSW_RR,
@@ -1135,7 +1136,7 @@ def apply_settings(updates):
     global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, FT5_HTF_FILTER_ENABLED, FT5_SESSION_FILTER_ENABLED, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, MSNR_MIN_RR_FILTER_ENABLED, MSNR_HTF_FILTER_ENABLED, MSNR_PER_SYMBOL_FILTERS_ENABLED, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT, MIRROR_AUTOTUNE_TOLERANCE_ENABLED
     global MIRROR_VOLUME_FILTER_ENABLED, MIRROR_HTF_FILTER_ENABLED
-    global EMA_TOUCH_ENABLED, AMD_ENABLED, NEURO_ENABLED, NQ_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
+    global EMA_TOUCH_ENABLED, AMD_ENABLED, NEURO_ENABLED, NEURO_TOP_N, _neuro_active_symbols, NQ_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED, LSW_ATR_SWEEP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
@@ -1195,6 +1196,48 @@ def apply_settings(updates):
         AMD_ENABLED = bool(updates["amd_enabled"])
     if "neuro_enabled" in updates:
         NEURO_ENABLED = bool(updates["neuro_enabled"])
+    if "neuro_top_n" in updates:
+        try:
+            new_top_n = int(updates["neuro_top_n"])
+        except (TypeError, ValueError):
+            new_top_n = None
+        if new_top_n and new_top_n > 0:
+            NEURO_TOP_N = new_top_n
+            # v0.99.247 — per direct user request ("применение можно
+            # сделать сразу же, ведь список хранится же где-то"): a
+            # DECREASE can be applied immediately, re-ranking the
+            # symbols already sitting in _neuro_summary (their full
+            # backtest data is still in memory) down to the new N — no
+            # need to wait for the next full-universe cycle. An INCREASE
+            # can't be applied instantly the same way: the OTHER
+            # scanned-but-not-selected coins' data is deliberately not
+            # kept in memory after a cycle completes (see v0.99.236's own
+            # memory-conscious design), so growing the active set only
+            # takes effect once the next full mining cycle re-scans
+            # everything.
+            with _neuro_state_lock:
+                current_active = list(_neuro_active_symbols)
+                if len(current_active) > new_top_n:
+                    ranked = sorted(
+                        current_active,
+                        key=lambda s: -(_neuro_summary.get(s, {}).get("avg_pnl_r") or float("-inf")),
+                    )
+                    keep = set(ranked[:new_top_n])
+                    for sym in list(_neuro_patterns.keys()):
+                        if sym not in keep:
+                            del _neuro_patterns[sym]
+                    for sym in list(_neuro_trades.keys()):
+                        if sym not in keep:
+                            del _neuro_trades[sym]
+                    for sym in list(_neuro_summary.keys()):
+                        if sym not in keep:
+                            del _neuro_summary[sym]
+                    for sym in list(_neuro_live_signals.keys()):
+                        if sym not in keep:
+                            del _neuro_live_signals[sym]
+                    _neuro_active_symbols = ranked[:new_top_n]
+            if len(current_active) > new_top_n:
+                save_neuro_state()
     if "nq_enabled" in updates:
         NQ_ENABLED = bool(updates["nq_enabled"])
     if "lsw_enabled" in updates:
@@ -17810,6 +17853,13 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setNeuro"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Сколько монет держать в топе</div>
+          <div class="sub">бэктест всё равно проверяет всю вселенную каждый цикл — здесь только сколько лучших по ср. P&L остаются активными. Уменьшение применяется сразу (пересчёт по уже сохранённым данным), увеличение — только со следующего полного цикла</div>
+        </div>
+        <input type="number" id="setNeuroTopN" min="1" max="50" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+      </div>
       <div class="settingsGroupTitle">NQ Model (NAS100_USDT)</div>
       <div class="settingRow">
         <div>
@@ -20708,6 +20758,7 @@ const setValueInputs = {
   mirror_rr: document.getElementById('setMirrorRR'),
   lsw_rr: document.getElementById('setLswRR'),
   autotrade_risk_pct: document.getElementById('setAutotradeRiskPct'),
+  neuro_top_n: document.getElementById('setNeuroTopN'),
 };
 
 function applySettingsToInputs(s) {
