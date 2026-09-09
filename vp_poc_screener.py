@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.245"
+APP_VERSION = "0.99.246"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13599,7 +13599,7 @@ NEURO_COINS          = ["BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_US
                         "TRX_USDT", "MATIC_USDT", "LTC_USDT", "ATOM_USDT", "NEAR_USDT",
                         "APT_USDT", "ARB_USDT", "OP_USDT", "SUI_USDT", "TON_USDT"]  # v0.99.215 — expanded 10->20 per direct user request; now the always-included seed set (see NEURO_UNIVERSE_SIZE above)
 NEURO_UNIVERSE_SIZE  = int(os.environ.get("VP_NEURO_UNIVERSE_SIZE", 120))  # v0.99.236 — wide volume-ranked candidate pool, same scale as LSW's own 100-120
-NEURO_TOP_N          = int(os.environ.get("VP_NEURO_TOP_N", 10))  # how many survive the full-universe backtest, ranked by avg_pnl_r
+NEURO_TOP_N          = int(os.environ.get("VP_NEURO_TOP_N", 5))  # v0.99.246 — lowered 10->5 per direct user request; how many survive the full-universe backtest, ranked by avg_pnl_r
 NEURO_TOP_N_MIN_TRADES = int(os.environ.get("VP_NEURO_TOP_N_MIN_TRADES", 20))  # per direct user request — don't let a coin with e.g. 3 lucky trades and +5R average beat out one with 50 trades and a solid +0.3R; a coin needs at least this many closed backtest trades to even be RANKED for the top-N cut (coins below this are excluded from the active set entirely, not just ranked low)
 NEURO_TF             = os.environ.get("VP_NEURO_TF", "1h")
 NEURO_FORWARD_BARS   = int(os.environ.get("VP_NEURO_FORWARD_BARS", 12))   # measure forward return over next N bars
