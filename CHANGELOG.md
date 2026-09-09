@@ -13700,3 +13700,39 @@ v0.99.242 - CRITICAL FIX: found a SECOND path still exposed to the exact
          leverage model — not touched, since no real capital is at risk
          there.
          Verified: py_compile, pyflakes, 56 routes, real runtime 200.
+
+v0.99.243 - CRITICAL FIX: realized loss at a hit stop-loss could exceed
+         the configured risk % by a meaningful margin, per direct user
+         follow-up ("сейчас если в настройках стоит 5% риск, то и сделка
+         по стопу закроется на 5%, верно?"). Checked precisely rather
+         than assuming — it did NOT: compute_risk_based_position()'s
+         notional formula only sized the position so the PRICE MOVE to
+         SL costs exactly risk_amount; round-trip trading fees (open +
+         close, ~0.05%/side by default) got added ON TOP once the stop
+         actually fired, never subtracted from the sizing target.
+         Fees scale with NOTIONAL, not with the target risk amount, and
+         notional itself grows the TIGHTER the stop is (notional =
+         risk_amount/sl_distance_pct) — so for a tight-stop, high-
+         leverage trade this isn't a rounding-error footnote. Verified
+         on the user's own real XRP trade numbers (entry 1.4356, SL
+         1.44096, $180 balance, 5% target): the realized loss would
+         have been $11.41 (6.34% of balance) instead of the intended
+         $9.00 (5%) — 27% more than the configured target, purely from
+         un-costed fees.
+         Fix: notional_usd = risk_amount / (sl_distance_pct/100 + 2×
+         SCALP_TAKER_FEE_PCT) instead of just sl_distance_pct/100 —
+         solving for notional now targets (price-move loss + both-sides
+         fees) = risk_amount exactly, rather than just the price-move
+         portion. Also confirmed leverage itself introduces no further
+         imprecision (compute_max_safe_leverage() already sweeps
+         integers only — Gate.io doesn't support fractional leverage
+         anyway, so no rounding gap there); contract-quantity rounding
+         (math.floor to the exchange's own lot size) can still shave a
+         small amount off notional in the OTHER direction, but that's a
+         pre-existing, much smaller, and unavoidable exchange-precision
+         effect — not the systematic ~27% fee-driven bias this fixes.
+         Verified directly: re-ran the same real-trade-shaped scenario
+         after the fix — total realized loss (price move + both-sides
+         fees) now comes to exactly 5.000% of balance, matching the
+         configured target precisely.
+         Verified: py_compile, pyflakes, real runtime 200.
