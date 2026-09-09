@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.247"
+APP_VERSION = "0.99.248"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1036,7 +1036,7 @@ CREDENTIALS_FILE = os.environ.get(
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_nq", "telegram_alerts_network",
+                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled",
                   "autotrade_risk_pct",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
@@ -1106,6 +1106,7 @@ def get_settings():
         "telegram_alerts_ema_bull": TELEGRAM_ALERTS_EMA_BULL,
         "telegram_alerts_amd": TELEGRAM_ALERTS_AMD,
         "telegram_alerts_neuro": TELEGRAM_ALERTS_NEURO,
+        "telegram_alerts_neuro_summary": TELEGRAM_ALERTS_NEURO_SUMMARY,
         "telegram_alerts_nq": TELEGRAM_ALERTS_NQ,
         "telegram_alerts_network": TELEGRAM_ALERTS_NETWORK,
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
@@ -1140,7 +1141,7 @@ def apply_settings(updates):
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED, LSW_ATR_SWEEP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
-    global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_EMA_BULL, TELEGRAM_ALERTS_AMD, TELEGRAM_ALERTS_NEURO, TELEGRAM_ALERTS_NQ, TELEGRAM_ALERTS_NETWORK
+    global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_EMA_BULL, TELEGRAM_ALERTS_AMD, TELEGRAM_ALERTS_NEURO, TELEGRAM_ALERTS_NEURO_SUMMARY, TELEGRAM_ALERTS_NQ, TELEGRAM_ALERTS_NETWORK
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, AUTOTRADE_ENABLED_NEURO, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED, MSNR_SINGLE_BEST_ENABLED
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT
     if "volume_profile_enabled" in updates:
@@ -1313,6 +1314,8 @@ def apply_settings(updates):
         TELEGRAM_ALERTS_AMD = bool(updates["telegram_alerts_amd"])
     if "telegram_alerts_neuro" in updates:
         TELEGRAM_ALERTS_NEURO = bool(updates["telegram_alerts_neuro"])
+    if "telegram_alerts_neuro_summary" in updates:
+        TELEGRAM_ALERTS_NEURO_SUMMARY = bool(updates["telegram_alerts_neuro_summary"])
     if "telegram_alerts_nq" in updates:
         TELEGRAM_ALERTS_NQ = bool(updates["telegram_alerts_nq"])
     if "telegram_alerts_network" in updates:
@@ -13675,6 +13678,7 @@ NEURO_SL_ATR_MULT    = float(os.environ.get("VP_NEURO_SL_ATR_MULT", 1.5))
 NEURO_MAX_WAIT_BARS  = int(os.environ.get("VP_NEURO_MAX_WAIT_BARS", 48))
 NEURO_MIN_AGREE_Z    = float(os.environ.get("VP_NEURO_MIN_AGREE_Z", 2.5))  # combined |z| needed to fire a live signal
 TELEGRAM_ALERTS_NEURO = os.environ.get("VP_TG_ALERTS_NEURO", "1") == "1"
+TELEGRAM_ALERTS_NEURO_SUMMARY = os.environ.get("VP_TG_ALERTS_NEURO_SUMMARY", "0") == "1"  # v0.99.248 — separate toggle, per direct user request ("присылать в кратком формате статистику бэктеста... галочку в настройки на уведомление такого типа") — a compact per-symbol digest at the end of each full mining cycle, distinct from TELEGRAM_ALERTS_NEURO's own live-signal alerts
 
 
 def neuro_ema_series(prices, period):
@@ -15299,6 +15303,22 @@ def neuro_mining_loop():
                     _neuro_mining_current_symbol = None
                     _neuro_mining_progress_ts = time.time()
                 save_neuro_state()  # v0.99.240 — persist the freshly-promoted top-N so a restart doesn't lose potentially hours of full-universe compute
+                if TELEGRAM_ALERTS_NEURO_SUMMARY and top:
+                    # v0.99.248 — per direct user request ("после бэктеста
+                    # присылать в кратком формате статистику... типа BTC
+                    # -47%-RR2. Следующую монету ниже, в столбик"): one
+                    # line per symbol, already in rank order (best avg_pnl_r
+                    # first, same order the top-N cut itself used) —
+                    # SYMBOL, avg P&L as a percentage (×100, so -0.47R
+                    # reads as "-47%"), and the RR that was auto-tuned for
+                    # it this cycle.
+                    lines = []
+                    for sym, (_, _, summary) in top:
+                        pnl_pct = round((summary.get("avg_pnl_r") or 0) * 100)
+                        rr = summary.get("chosen_rr")
+                        rr_txt = f"RR{rr:.0f}" if rr is not None else "RR?"
+                        lines.append(f"{sym.replace('_USDT', '')} {pnl_pct:+d}%-{rr_txt}")
+                    send_telegram("\U0001f9e0 Neuro \u0431\u044d\u043a\u0442\u0435\u0441\u0442:\n" + "\n".join(lines), category="neuro")
         except Exception as e:
             log_error(f"neuro_mining_loop: {e}")
             with _neuro_state_lock:
@@ -18016,9 +18036,16 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">↳ Алерты Neuro</div>
-          <div class="sub">новые живые сигналы самообучающейся системы зависимостей (топ-20 монет)</div>
+          <div class="sub">новые живые сигналы самообучающейся системы зависимостей (топ-N монет, см. настройку выше)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramNeuro"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Сводка бэктеста Neuro</div>
+          <div class="sub">краткая сводка по топ-N монетам после каждого полного цикла бэктеста — по одной строке на монету, например "BTC -47%-RR2" (ср. P&L в % · подобранный RR)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramNeuroSummary"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -20733,6 +20760,7 @@ const setInputs = {
   telegram_alerts_ema_bull: document.getElementById('setTelegramEmaBull'),
   telegram_alerts_amd: document.getElementById('setTelegramAmd'),
   telegram_alerts_neuro: document.getElementById('setTelegramNeuro'),
+  telegram_alerts_neuro_summary: document.getElementById('setTelegramNeuroSummary'),
   telegram_alerts_nq: document.getElementById('setTelegramNq'),
   telegram_alerts_network: document.getElementById('setTelegramNetwork'),
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
