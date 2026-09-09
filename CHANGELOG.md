@@ -13807,3 +13807,21 @@ v0.99.245 - Neuro now has a real autotrade toggle, per direct user
          (defaulting False) in /api/settings, confirmed execute_
          autotrade() is genuinely mode-agnostic (no "neuro"-specific
          branching anywhere in its source), zero surrogate escapes.
+
+v0.99.246 - NEURO_TOP_N lowered 10->5 per direct user request ("вместо
+         топ 10 сделать топ 5 сделок лучших по нейро в отображении" —
+         clarified as: same full-universe backtest scan as before, just
+         a stricter final cut of how many coins survive into the active/
+         traded/displayed set). Single-constant change — every consumer
+         (initial seed slice, mining-loop top-N cut, both reset
+         endpoints' fallback, the API config field the UI reads) already
+         reads NEURO_TOP_N directly, no hardcoded "10" left anywhere
+         else to update.
+         Note for existing installs: a previously-persisted vp_neuro_
+         state.json (v0.99.240's own persistence) may still show more
+         than 5 active coins immediately after upgrading, until the next
+         full mining cycle completes and re-ranks/trims down to the new
+         5 — expected, not a bug, since the persisted list is simply
+         "last known good state" from before this change.
+         Verified: py_compile, pyflakes, 56 routes, real runtime 200
+         confirming /api/neuro/status's config.top_n reads 5.
