@@ -13771,3 +13771,39 @@ v0.99.244 - MSNR chart now visually distinguishes the CAUSAL levels from
          clean 200 on a real server run afterward.
          Verified: py_compile, pyflakes, node --check, 56 routes, real
          runtime 200 on /, zero surrogate escapes.
+
+v0.99.245 - Neuro now has a real autotrade toggle, per direct user
+         request ("на нейро нету галочки авто торговли, надо сделать
+         как в свип, настройки такие же, то есть процент из настроек,
+         расчет до ликвидации и ТП все так же"). Previously Neuro was
+         signal-generation/tracking only — no real order path at all.
+         New AUTOTRADE_ENABLED_NEURO (off by default, same opt-in
+         pattern as every other module) + AUTOTRADE_LEVERAGE_NEURO
+         (paper-simulator-only fallback, matching AUTOTRADE_LEVERAGE_
+         LSW's own role) — fully wired into settings (tuple/get/global/
+         apply/checkbox/JS-map), new "↳ Neuro" row under "Автоторговля".
+         Wired into neuro_live_loop(): when a genuinely NEW signal fires
+         (same fired-signal detection already driving the Telegram
+         alert and signal-log entry), calls execute_autotrade("neuro",
+         ...) — the EXACT SAME shared function every other module's real
+         orders go through. Confirmed directly (not assumed) that this
+         function requires no per-mode special-casing at all, so Neuro
+         automatically inherits everything already built there with
+         zero separate reimplementation: risk-%-of-balance sizing from
+         the shared settings, tier-aware safe leverage (v0.99.237/238/
+         242's liquidation-safety fixes), and fee-aware position sizing
+         so the realized SL loss matches the configured risk % exactly
+         (v0.99.243) — this is precisely what avoids the class of bug
+         a hand-copied, separately-maintained sizing implementation
+         could silently drift out of sync on.
+         Also added the same live_universe-snapshot race guard already
+         applied to LSW/Mirror in v0.99.239: re-checks current
+         _neuro_active_symbols membership right before spending real
+         money, in case a mining cycle rebuilt the active-symbol list
+         while this live pass was still scanning — the signal stays
+         logged either way, only the real trade is skipped.
+         Verified: py_compile, pyflakes, node --check, 56 routes, real
+         runtime 200 on / with autotrade_neuro correctly present
+         (defaulting False) in /api/settings, confirmed execute_
+         autotrade() is genuinely mode-agnostic (no "neuro"-specific
+         branching anywhere in its source), zero surrogate escapes.
