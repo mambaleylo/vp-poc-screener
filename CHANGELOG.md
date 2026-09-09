@@ -13573,3 +13573,46 @@ v0.99.239 - Root-caused the "XRP_USDT fired a real trade but isn't in
          exact race when it's caught.
          Verified: py_compile, pyflakes, 56 routes, real runtime 200 on
          / and /api/lsw/status.
+
+v0.99.240 - Neuro and NQ Model backtest/live-signal state now SURVIVES a
+         restart, per direct user question ("бэктест по нейро не
+         теряется после рестарта?"). It did — _neuro_patterns/_neuro_
+         trades/_neuro_summary/_neuro_active_symbols/_neuro_signal_log
+         (and NQ Model's own equivalents) all lived in module-level
+         globals never touched by the existing save_state()/load_state()
+         at all. With Neuro's now-dynamic 120-coin universe (v0.99.236),
+         one full mining cycle can take HOURS — losing everything on
+         every restart meant an empty tab for possibly hours until the
+         next cycle finished.
+         Deliberately implemented as SEPARATE files (vp_neuro_state.json,
+         vp_nq_state.json) with their own save_neuro_state()/load_neuro_
+         state()/save_nq_state()/load_nq_state() functions — NOT folded
+         into the main, much-more-frequently-called save_state() (~26
+         call sites across the app for unrelated modules), since Neuro's
+         confirmed-pattern lists across up to 10 active symbols can run
+         to several MB; bundling that into every one of those 26
+         unrelated call sites would re-serialize multiple MB of
+         untouched data every time any other module's signal fires.
+         Same atomic tmp-then-os.replace() pattern as the main
+         save_state(), own dedicated locks.
+         Save points (only where each module's own state actually
+         changes): end of neuro_mining_loop()'s successful cycle, end of
+         neuro_live_loop()'s pass (new signal/outcome update), end of
+         nq_backtest_loop()'s cycle, end of nq_live_loop()'s pass. Both
+         reset endpoints (api_reset_neuro/api_reset_nq) now also persist
+         the reset immediately, so a restart right after clicking
+         "Очистить" doesn't resurrect the old cleared data from disk.
+         Bonus fix found while touching api_reset_neuro(): its own
+         confirmation text already claimed to delete "сигналы" (signals)
+         but never actually cleared _neuro_signal_log — now it does.
+         Loaded at startup alongside the existing load_state() call.
+         Verified end-to-end: saved a simulated completed cycle's worth
+         of Neuro+NQ data, loaded it in a FRESH process (simulating a
+         real restart) — patterns/trades/summary/active-symbols/signal-
+         log all came back intact — then confirmed via a real running
+         server that /api/neuro/status correctly reflects the persisted
+         data on startup, even when this cycle's own network scan fails
+         entirely (sandbox network block) — old data isn't wiped just
+         because the current cycle couldn't refresh it.
+         Verified: py_compile, pyflakes, 56 routes, real runtime 200 on
+         / and /api/neuro/status.
