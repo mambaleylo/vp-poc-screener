@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.240"
+APP_VERSION = "0.99.241"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -10184,10 +10184,32 @@ def msnr_live_loop():
             # that function's own docstring) instead of being built
             # inline here a second time.
             live_universe = msnr_effective_live_universe(live_universe, overrides_snapshot, autotrade_symbols)
-            with ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe) or 1)) as ex:
-                futs = [ex.submit(msnr_scan_symbol_live, s) for s in live_universe]
-                for _ in as_completed(futs):
-                    pass
+            # v0.99.241 — same no-with-block hang fix as lsw_live_loop's own
+            # (see that fix's comment for the full mechanism): both this
+            # primary scan and the add-on scan below had NO per-item bound
+            # at all (bare `for _ in as_completed(futs): pass`, not even the
+            # timeout param), on top of the same with-block shutdown(wait=
+            # True) issue — a single stuck symbol could hang this loop
+            # (which runs far more often than msnr_backtest_loop, already
+            # fixed for this exact issue back in v0.99.194/195) forever.
+            if live_universe:
+                PER_SYM_TO = HTTP_TIMEOUT * 3 + 30
+                ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe)))
+                try:
+                    futs = {ex.submit(msnr_scan_symbol_live, s): s for s in live_universe}
+                    try:
+                        for fut in as_completed(futs, timeout=PER_SYM_TO * len(live_universe)):
+                            symbol = futs[fut]
+                            try:
+                                fut.result(timeout=PER_SYM_TO)
+                            except (TimeoutError, FutureTimeoutError):
+                                log_error(f"msnr_live_loop: {symbol} timed out after {PER_SYM_TO}s — skipping")
+                            except Exception as e:
+                                log_error(f"msnr_live_loop {symbol}: {e}")
+                    except (TimeoutError, FutureTimeoutError):
+                        log_error("msnr_live_loop: as_completed timed out waiting on a stuck symbol — keeping whatever was gathered")
+                finally:
+                    ex.shutdown(wait=False)
             # v0.99.126 — add-on ("добір") scan, AFTER the primary scan
             # above so a primary signal that just fired this exact cycle
             # is already in STATE["msnr_signals"] for msnr_scan_addon_
@@ -10196,11 +10218,24 @@ def msnr_live_loop():
             # open, autotrade-fired primary (checked inside the function
             # itself), so scanning symbols with no open primary is just
             # a cheap no-op there, not wasted real risk.
-            if MSNR_ADDON_ENABLED:
-                with ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe) or 1)) as ex:
-                    futs = [ex.submit(msnr_scan_addon_live, s) for s in live_universe]
-                    for _ in as_completed(futs):
-                        pass
+            if MSNR_ADDON_ENABLED and live_universe:
+                PER_SYM_TO = HTTP_TIMEOUT * 3 + 30
+                ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe)))
+                try:
+                    futs = {ex.submit(msnr_scan_addon_live, s): s for s in live_universe}
+                    try:
+                        for fut in as_completed(futs, timeout=PER_SYM_TO * len(live_universe)):
+                            symbol = futs[fut]
+                            try:
+                                fut.result(timeout=PER_SYM_TO)
+                            except (TimeoutError, FutureTimeoutError):
+                                log_error(f"msnr_live_loop addon: {symbol} timed out after {PER_SYM_TO}s — skipping")
+                            except Exception as e:
+                                log_error(f"msnr_live_loop addon {symbol}: {e}")
+                    except (TimeoutError, FutureTimeoutError):
+                        log_error("msnr_live_loop addon: as_completed timed out waiting on a stuck symbol — keeping whatever was gathered")
+                finally:
+                    ex.shutdown(wait=False)
             update_msnr_signal_outcomes()
         except Exception as e:
             log_error(f"msnr_live_loop: {e}")
@@ -11399,54 +11434,68 @@ def mirror_backtest_loop():
                     results, meta = mirror_backtest_symbol(s)
                 return results, meta, tuned
 
-            with ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1)) as ex:
+            # v0.99.241 — same no-with-block hang fix as every other loop's
+            # own v0.99.194/195/241 (see lsw_live_loop's fix comment for the
+            # full mechanism): the existing as_completed(timeout=...) here
+            # only bounds how long this FOR loop waits — if that bound
+            # actually fires (TimeoutError), the exception still propagates
+            # out through the `with` block, whose own __exit__ calls
+            # ex.shutdown(wait=True) and blocks anyway, defeating the point
+            # of the timeout entirely for the exact case it exists to catch.
+            PER_SYMBOL_TIMEOUT_M = HTTP_TIMEOUT * 3 * 3 + 60
+            ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1))
+            try:
                 futs = {ex.submit(_backtest_one, s): s for s in universe}
-                PER_SYMBOL_TIMEOUT_M = HTTP_TIMEOUT * 3 * 3 + 60
-                for fut in as_completed(futs, timeout=PER_SYMBOL_TIMEOUT_M * len(universe)):
-                    symbol = futs[fut]
-                    try:
-                        results, meta, tuned = fut.result(timeout=PER_SYMBOL_TIMEOUT_M)
-                    except (TimeoutError, FutureTimeoutError):
-                        log_error(f"mirror_backtest: {symbol} timed out after {PER_SYMBOL_TIMEOUT_M}s — skipping")
-                        continue
-                    try:
-                        results_by_symbol[symbol] = results
-                        summary = mirror_summarize_backtest(results)
-                        summary_by_symbol[symbol] = summary
-                        overrides_by_symbol[symbol] = meta
-                        if tuned:
-                            tuned_tolerances[symbol] = tuned
-                        # v0.99.92, per direct user request ("В живых
-                        # сигналах использовать только бэктестовые
-                        # монеты с винрейтом более 35%"): gated on the
-                        # POST-filter winrate (summary, from the
-                        # already-SL-filtered results) — the live
-                        # scanner should trust a symbol only to the
-                        # same extent its own backtest, filters
-                        # included, actually earned that trust.
-                        # v0.99.98, per external code review batch 1
-                        # ("Мин. выборка на live-гейте"): winrate alone
-                        # let a 2/2 or 3/3 symbol read as "100%" and
-                        # qualify exactly like a genuinely-tested 40+
-                        # trade symbol.
-                        # v0.99.111, per direct user report ("у virtual
-                        # n 15 всего, но она торгуется в топе"): the
-                        # original fix above reused MIRROR_SYMBOL_SKIP_
-                        # MIN_SAMPLE (a per-bucket significance bar
-                        # meant for judging one SL-width/pattern/
-                        # direction slice within a symbol's own data)
-                        # as this whole-symbol floor too — 15 total
-                        # trades is nowhere near enough to trust for
-                        # live money regardless of winrate. Now uses
-                        # the dedicated, higher MIRROR_LIVE_MIN_SAMPLE
-                        # (see that constant's own comment for the full
-                        # reasoning on why it's a separate bar).
-                        closed_n = summary["wins"] + summary["losses"]
-                        if (summary["win_rate"] is not None and summary["win_rate"] > MIRROR_LIVE_MIN_WINRATE
-                                and closed_n >= MIRROR_LIVE_MIN_SAMPLE):
-                            live_universe.append(symbol)
-                    except Exception as e:
-                        log_error(f"mirror_backtest {symbol}: {e}")
+                try:
+                    for fut in as_completed(futs, timeout=PER_SYMBOL_TIMEOUT_M * len(universe)):
+                        symbol = futs[fut]
+                        try:
+                            results, meta, tuned = fut.result(timeout=PER_SYMBOL_TIMEOUT_M)
+                        except (TimeoutError, FutureTimeoutError):
+                            log_error(f"mirror_backtest: {symbol} timed out after {PER_SYMBOL_TIMEOUT_M}s — skipping")
+                            continue
+                        try:
+                            results_by_symbol[symbol] = results
+                            summary = mirror_summarize_backtest(results)
+                            summary_by_symbol[symbol] = summary
+                            overrides_by_symbol[symbol] = meta
+                            if tuned:
+                                tuned_tolerances[symbol] = tuned
+                            # v0.99.92, per direct user request ("В живых
+                            # сигналах использовать только бэктестовые
+                            # монеты с винрейтом более 35%"): gated on the
+                            # POST-filter winrate (summary, from the
+                            # already-SL-filtered results) — the live
+                            # scanner should trust a symbol only to the
+                            # same extent its own backtest, filters
+                            # included, actually earned that trust.
+                            # v0.99.98, per external code review batch 1
+                            # ("Мин. выборка на live-гейте"): winrate alone
+                            # let a 2/2 or 3/3 symbol read as "100%" and
+                            # qualify exactly like a genuinely-tested 40+
+                            # trade symbol.
+                            # v0.99.111, per direct user report ("у virtual
+                            # n 15 всего, но она торгуется в топе"): the
+                            # original fix above reused MIRROR_SYMBOL_SKIP_
+                            # MIN_SAMPLE (a per-bucket significance bar
+                            # meant for judging one SL-width/pattern/
+                            # direction slice within a symbol's own data)
+                            # as this whole-symbol floor too — 15 total
+                            # trades is nowhere near enough to trust for
+                            # live money regardless of winrate. Now uses
+                            # the dedicated, higher MIRROR_LIVE_MIN_SAMPLE
+                            # (see that constant's own comment for the full
+                            # reasoning on why it's a separate bar).
+                            closed_n = summary["wins"] + summary["losses"]
+                            if (summary["win_rate"] is not None and summary["win_rate"] > MIRROR_LIVE_MIN_WINRATE
+                                    and closed_n >= MIRROR_LIVE_MIN_SAMPLE):
+                                live_universe.append(symbol)
+                        except Exception as e:
+                            log_error(f"mirror_backtest {symbol}: {e}")
+                except (TimeoutError, FutureTimeoutError):
+                    log_error("mirror_backtest_loop: as_completed timed out waiting on a stuck symbol — keeping whatever was gathered")
+            finally:
+                ex.shutdown(wait=False)
             with state_lock:
                 STATE["mirror_backtest_results"] = results_by_symbol
                 STATE["mirror_backtest_summary"] = summary_by_symbol
@@ -11486,8 +11535,25 @@ def mirror_live_loop():
             with state_lock:
                 live_universe = list(STATE.get("mirror_live_universe", []))
             if live_universe:
-                with ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe))) as ex:
-                    list(ex.map(mirror_scan_symbol_live, live_universe))
+                # v0.99.241 — same no-with-block hang fix as lsw_live_loop's
+                # own (see that fix's comment for the full mechanism).
+                PER_SYM_TO = HTTP_TIMEOUT * 3 + 30
+                ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe)))
+                try:
+                    futs = {ex.submit(mirror_scan_symbol_live, s): s for s in live_universe}
+                    try:
+                        for fut in as_completed(futs, timeout=PER_SYM_TO * len(live_universe)):
+                            symbol = futs[fut]
+                            try:
+                                fut.result(timeout=PER_SYM_TO)
+                            except (TimeoutError, FutureTimeoutError):
+                                log_error(f"mirror_live_loop: {symbol} timed out after {PER_SYM_TO}s — skipping")
+                            except Exception as e:
+                                log_error(f"mirror_live_loop {symbol}: {e}")
+                    except (TimeoutError, FutureTimeoutError):
+                        log_error("mirror_live_loop: as_completed timed out waiting on a stuck symbol — keeping whatever was gathered")
+                finally:
+                    ex.shutdown(wait=False)
             update_mirror_signal_outcomes()
         except Exception as e:
             log_error(f"mirror_live_loop: {e}")
@@ -12807,8 +12873,32 @@ def lsw_live_loop():
             with state_lock:
                 live_universe = list(STATE.get("lsw_live_universe", []))
             if live_universe:
-                with ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe))) as ex:
-                    list(ex.map(lsw_scan_symbol_live, live_universe))
+                # v0.99.241 — same no-with-block hang fix as lsw_backtest_
+                # loop's own v0.99.194/195 (see that fix's comment for the
+                # full mechanism): this LIVE scan loop had the identical
+                # `with ThreadPoolExecutor(...) as ex: ex.map(...)` pattern
+                # that was already fixed for the backtest loop, but was
+                # never applied here — meaning a single stuck symbol could
+                # block ex.__exit__ -> shutdown(wait=True) forever, hanging
+                # this loop (which runs far more often than the backtest
+                # cycle) permanently rather than just skipping that symbol.
+                PER_SYM_TO = HTTP_TIMEOUT * 3 + 30
+                ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe)))
+                try:
+                    futs = {ex.submit(lsw_scan_symbol_live, s): s for s in live_universe}
+                    try:
+                        for fut in as_completed(futs, timeout=PER_SYM_TO * len(live_universe)):
+                            symbol = futs[fut]
+                            try:
+                                fut.result(timeout=PER_SYM_TO)
+                            except (TimeoutError, FutureTimeoutError):
+                                log_error(f"lsw_live_loop: {symbol} timed out after {PER_SYM_TO}s — skipping")
+                            except Exception as e:
+                                log_error(f"lsw_live_loop {symbol}: {e}")
+                    except (TimeoutError, FutureTimeoutError):
+                        log_error("lsw_live_loop: as_completed timed out waiting on a stuck symbol — keeping whatever was gathered")
+                finally:
+                    ex.shutdown(wait=False)
             update_lsw_signal_outcomes()
         except Exception as e:
             log_error(f"lsw_live_loop: {e}")
