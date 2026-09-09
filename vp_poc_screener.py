@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.239"
+APP_VERSION = "0.99.240"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5495,9 +5495,127 @@ STATE_FILE = os.environ.get(
     "VP_STATE_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_state.json"),
 )
+# v0.99.240 — per direct user question ("бэктест по нейро не теряется
+# после рестарта?"): it did — Neuro/NQ Model's confirmed patterns, trades,
+# summaries, active-symbol ranking, and live-signal logs all lived in
+# module-level globals never touched by save_state()/load_state() at all.
+# With Neuro's now-dynamic 120-coin universe (v0.99.236), one full mining
+# cycle can take HOURS — losing everything on every restart meant an empty
+# tab for possibly hours until the next cycle finished. Deliberately kept
+# as SEPARATE files (not folded into the main, much-more-frequently-called
+# save_state()/STATE_FILE) since Neuro's confirmed-pattern lists alone can
+# run to several MB across the active symbols — bundling that into the
+# ~26 unrelated call sites that already call save_state() for OTHER
+# reasons would re-serialize multiple MB of unrelated data on every one of
+# them. These files are only written when Neuro's/NQ's own state actually
+# changes (end of a mining cycle, a new live signal, an outcome update).
+NEURO_STATE_FILE = os.environ.get(
+    "VP_NEURO_STATE_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_neuro_state.json"),
+)
+NQ_STATE_FILE = os.environ.get(
+    "VP_NQ_STATE_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_nq_state.json"),
+)
 
 
 _save_state_file_lock = threading.Lock()  # v0.99.90 — see save_state()'s own docstring for the race this fixes
+_save_neuro_state_file_lock = threading.Lock()
+_save_nq_state_file_lock = threading.Lock()
+
+
+def save_neuro_state():
+    """v0.99.240 — same atomic tmp-then-replace pattern as save_state()
+    itself, own dedicated file + own dedicated lock (see NEURO_STATE_FILE's
+    own comment for why this is separate rather than folded into the main
+    state file). Called only from points where Neuro's own state actually
+    changed — end of a mining cycle, a new live signal, or an outcome
+    update — never from unrelated code paths."""
+    try:
+        with _neuro_state_lock:
+            data = {
+                "neuro_patterns": dict(_neuro_patterns),
+                "neuro_trades": dict(_neuro_trades),
+                "neuro_summary": dict(_neuro_summary),
+                "neuro_active_symbols": list(_neuro_active_symbols),
+                "neuro_last_mined": _neuro_last_mined,
+            }
+        with _neuro_signal_log_lock:
+            data["neuro_signal_log"] = list(_neuro_signal_log)
+        data["saved_at"] = time.time()
+        tmp_path = NEURO_STATE_FILE + ".tmp"
+        with _save_neuro_state_file_lock:
+            with open(tmp_path, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp_path, NEURO_STATE_FILE)
+    except Exception as e:
+        log_error(f"save_neuro_state: {e}")
+
+
+def load_neuro_state():
+    if not os.path.exists(NEURO_STATE_FILE):
+        return
+    try:
+        with open(NEURO_STATE_FILE) as f:
+            data = json.load(f)
+        global _neuro_active_symbols, _neuro_last_mined
+        with _neuro_state_lock:
+            _neuro_patterns.clear()
+            _neuro_patterns.update(data.get("neuro_patterns", {}))
+            _neuro_trades.clear()
+            _neuro_trades.update(data.get("neuro_trades", {}))
+            _neuro_summary.clear()
+            _neuro_summary.update(data.get("neuro_summary", {}))
+            restored_active = data.get("neuro_active_symbols")
+            if restored_active:
+                _neuro_active_symbols = restored_active
+            _neuro_last_mined = data.get("neuro_last_mined")
+        with _neuro_signal_log_lock:
+            _neuro_signal_log.clear()
+            _neuro_signal_log.extend(data.get("neuro_signal_log", []))
+        print(f"Loaded persisted Neuro state: {len(_neuro_patterns)} symbols with patterns, "
+              f"{len(_neuro_signal_log)} live signals, active symbols: {_neuro_active_symbols}")
+    except Exception as e:
+        log_error(f"load_neuro_state: {e}")
+
+
+def save_nq_state():
+    """v0.99.240 — same reasoning as save_neuro_state(), own file/lock."""
+    try:
+        with _nq_state_lock:
+            data = {
+                "nq_trades": list(_nq_trades),
+                "nq_summary": dict(_nq_summary),
+                "nq_signal_log": list(_nq_signal_log),
+                "nq_last_backtest_finished": _nq_last_backtest_finished,
+            }
+        data["saved_at"] = time.time()
+        tmp_path = NQ_STATE_FILE + ".tmp"
+        with _save_nq_state_file_lock:
+            with open(tmp_path, "w") as f:
+                json.dump(data, f)
+            os.replace(tmp_path, NQ_STATE_FILE)
+    except Exception as e:
+        log_error(f"save_nq_state: {e}")
+
+
+def load_nq_state():
+    if not os.path.exists(NQ_STATE_FILE):
+        return
+    try:
+        with open(NQ_STATE_FILE) as f:
+            data = json.load(f)
+        global _nq_last_backtest_finished
+        with _nq_state_lock:
+            _nq_trades[:] = data.get("nq_trades", [])
+            _nq_summary.clear()
+            _nq_summary.update(data.get("nq_summary", {}))
+            _nq_signal_log.clear()
+            _nq_signal_log.extend(data.get("nq_signal_log", []))
+            _nq_last_backtest_finished = data.get("nq_last_backtest_finished")
+        print(f"Loaded persisted NQ state: {len(_nq_trades)} backtest trades, {len(_nq_signal_log)} live signals")
+    except Exception as e:
+        log_error(f"load_nq_state: {e}")
 
 
 def save_state():
@@ -15008,6 +15126,7 @@ def neuro_mining_loop():
                     _neuro_mining_running = False
                     _neuro_mining_current_symbol = None
                     _neuro_mining_progress_ts = time.time()
+                save_neuro_state()  # v0.99.240 — persist the freshly-promoted top-N so a restart doesn't lose potentially hours of full-universe compute
         except Exception as e:
             log_error(f"neuro_mining_loop: {e}")
             with _neuro_state_lock:
@@ -15063,6 +15182,7 @@ def neuro_live_loop():
                     })
             _neuro_prev_signal_keys = {(s, t) for s, t in new_keys.items()}
             neuro_track_signal_outcomes()
+            save_neuro_state()  # v0.99.240 — persist any new fired signal / outcome update from this pass
         except Exception as e:
             log_error(f"neuro_live_loop: {e}")
         time.sleep(900)  # check every 15m regardless of the (usually 1h) structure TF
@@ -15434,6 +15554,7 @@ def nq_backtest_loop():
             with _nq_state_lock:
                 _nq_backtest_running = False
                 _nq_last_backtest_finished = time.time()
+            save_nq_state()  # v0.99.240 — persist the freshly-completed backtest
         except Exception as e:
             log_error(f"nq_backtest_loop: {e}")
             with _nq_state_lock:
@@ -15489,6 +15610,7 @@ def nq_live_loop():
                             entry["exit_price"] = exit_price
                             entry["exit_time"] = exit_time
                             entry["pnl_r"] = pnl_r
+            save_nq_state()  # v0.99.240 — persist any new fired signal / outcome update from this pass
         except Exception as e:
             log_error(f"nq_live_loop: {e}")
         time.sleep(900)
@@ -15566,6 +15688,7 @@ def api_reset_nq():
             global _nq_live_signal, _nq_prev_signal_key
             _nq_live_signal = None
             _nq_prev_signal_key = None
+        save_nq_state()  # v0.99.240 — persist the reset immediately, so a restart right after doesn't resurrect the old cleared data from disk
         NQ_BACKTEST_TRIGGER.set()
         return jsonify({"ok": True})
     except Exception as e:
@@ -16789,6 +16912,9 @@ def api_reset_neuro():
             _neuro_live_signals.clear()
             global _neuro_active_symbols
             _neuro_active_symbols = list(NEURO_COINS[:NEURO_TOP_N])
+        with _neuro_signal_log_lock:
+            _neuro_signal_log.clear()
+        save_neuro_state()  # v0.99.240 — persist the reset immediately, so a restart right after doesn't resurrect the old cleared data from disk
         # Same fix as api_reset_lsw()/api_reset_msnr() — wakes the mining
         # loop immediately instead of leaving it asleep for up to
         # NEURO_REFRESH_SEC (24h default).
@@ -21206,6 +21332,8 @@ def index():
 # ----------------------------------------------------------------------------
 if __name__ == "__main__":
     load_state()
+    load_neuro_state()
+    load_nq_state()
     load_settings()
     load_credentials()
     _load_alert_cfg()
