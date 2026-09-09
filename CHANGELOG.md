@@ -13616,3 +13616,48 @@ v0.99.240 - Neuro and NQ Model backtest/live-signal state now SURVIVES a
          because the current cycle couldn't refresh it.
          Verified: py_compile, pyflakes, 56 routes, real runtime 200 on
          / and /api/neuro/status.
+
+v0.99.241 - Targeted audit of Sweep/Neuro/MSNR/Mirror per direct user
+         request ("поищи баги и критические моменты... другие не
+         смотри"). Found and fixed a systematic gap: the "no with-block,
+         bounded-time, shutdown(wait=False)" hang fix (originally applied
+         to LSW's/MSNR's own BACKTEST loops back in v0.99.194/195) was
+         NEVER propagated to any of their LIVE-scan loops, which run far
+         more often than a backtest cycle and are thus more exposed:
+         - lsw_live_loop(): still used `with ThreadPoolExecutor(...) as
+           ex: ex.map(...)` with zero per-item bound — fixed.
+         - mirror_live_loop(): identical pattern — fixed.
+         - msnr_live_loop(): BOTH its primary scan and add-on ("добір")
+           scan blocks had `with ThreadPoolExecutor(...) as ex: for _ in
+           as_completed(futs): pass` — not even a timeout param on
+           as_completed, on top of the same with-block issue — fixed
+           both.
+         - mirror_backtest_loop(): had an as_completed(timeout=...) bound
+           already, but STILL used `with ThreadPoolExecutor(...) as ex:`
+           — if that timeout ever actually fired (the exact case it
+           exists to handle), the resulting exception still propagates
+           through the with-block, whose __exit__ calls shutdown(wait=
+           True) and blocks anyway, silently defeating the timeout for
+           precisely the scenario it was meant to catch. Fixed to the
+           same no-with-block pattern.
+         All four now use the same explicit ex=ThreadPoolExecutor(...)
+         + try/finally: ex.shutdown(wait=False) shape, with per-item
+         fut.result(timeout=...) AND an outer as_completed(timeout=...)
+         guard, matching the established pattern from every other
+         already-fixed loop this session.
+         Also specifically verified (no bug found, noted for the
+         record): MSNR's own live trade-firing path already re-reads
+         STATE["msnr_autotrade_symbols"]/eligibility fresh at the moment
+         of decision (not a stale loop-start snapshot) — it was NOT
+         subject to the same live_universe-snapshot race already fixed
+         for LSW/Mirror in v0.99.239. Neuro has no live order-execution
+         path at all (signal-generation/tracking only), so the tier-
+         aware liquidation math and the live-universe race both don't
+         apply to it.
+         Note (out of scope per direct user instruction to only look at
+         these 4 modules): FT5's own live loop (ft5_live_loop()) has the
+         identical with-block pattern and would benefit from the same
+         fix — flagged here for a future pass, not touched in this one.
+         Verified: py_compile, pyflakes, 56 routes, real runtime 200 on
+         /, /api/lsw/status, /api/mirror/status, /api/msnr/status, and
+         /api/neuro/status.
