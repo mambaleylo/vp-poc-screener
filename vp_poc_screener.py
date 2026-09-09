@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.242"
+APP_VERSION = "0.99.243"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3401,7 +3401,21 @@ def compute_risk_based_position(direction, entry, sl, leverage_cap, mmr_pct, tot
     # v0.99.237 — notional is leverage-independent (see docstring above),
     # so it's computed FIRST, letting the correct real tier be looked up
     # before any leverage decision is made.
-    notional_usd = risk_amount / (sl_distance_pct / 100.0)
+    # v0.99.243 — CRITICAL FIX, per direct user follow-up ("сделка по
+    # стопу закроется на 5% как и ожидаем, верно?"): the ORIGINAL formula
+    # only sized the position so the PRICE MOVE to SL costs exactly
+    # risk_amount — it never subtracted round-trip trading fees (open +
+    # close, ~0.05%/side by default), which get added ON TOP of that once
+    # the stop actually fires. Fees scale with NOTIONAL, not with the
+    # target risk amount, and notional itself grows the TIGHTER the stop
+    # is (notional = risk/sl_pct) — so for a tight-stop, high-leverage
+    # trade this isn't a rounding error: verified on the user's own real
+    # XRP trade numbers, the realized loss would have been 6.34% instead
+    # of the intended 5% (27% more than the target). Fixed by including
+    # the round-trip fee rate directly in the denominator, so solving for
+    # notional now targets (price-move loss + both-sides fees) = risk_
+    # amount exactly, instead of just the price-move portion alone.
+    notional_usd = risk_amount / (sl_distance_pct / 100.0 + 2 * SCALP_TAKER_FEE_PCT)
     real_mmr_pct, real_leverage_cap = mmr_pct, leverage_cap
     if symbol and tiers_by_symbol:
         tier_mmr, tier_lev = lookup_risk_tier_for_notional(symbol, notional_usd, tiers_by_symbol)
