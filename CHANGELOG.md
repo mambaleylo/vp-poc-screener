@@ -13736,3 +13736,38 @@ v0.99.243 - CRITICAL FIX: realized loss at a hit stop-loss could exceed
          fees) now comes to exactly 5.000% of balance, matching the
          configured target precisely.
          Verified: py_compile, pyflakes, real runtime 200.
+
+v0.99.244 - MSNR chart now visually distinguishes the CAUSAL levels from
+         background structure, per direct user request ("хочу, чтобы в
+         mnsr появилось на графике логика сигнала, линии и ТП на
+         основании чего происходит вход"). The backend already returned
+         everything needed (pivots array + signal.level/level_type/
+         opposite_level) and the chart already drew ALL A-shape/V-shape
+         pivots as dashed lines — but every pivot got the exact same
+         treatment regardless of whether it actually drove this specific
+         signal, so with several nearby levels on screen there was no
+         way to tell at a glance WHICH one caused the entry versus which
+         were just unrelated background structure.
+         Now: the level that got swept for the QM entry (sig.level) and
+         its paired Storyline level used as the TP source (sig.
+         opposite_level) are matched by price and drawn distinctly —
+         solid, thicker (2.5px vs the standard dashed 1.5px), with an
+         explicit "⚡ ПРИЧИНА ВХОДА (QM-свип)" / "🎯 ЦЕЛЬ (Storyline)"
+         label prefix — while every other background pivot is faded
+         (40% opacity) so the causal pair stands out immediately. Also
+         added a one-line legend to the chart modal's own caption text
+         explaining what thick-solid vs faded-dashed means.
+         CRITICAL FIX found before shipping: the 🎯 target emoji was
+         written as a literal `\ud83c\udfaf` surrogate-pair escape inside
+         a non-raw Python string — the exact same UnicodeEncodeError-
+         causing mistake this codebase has hit multiple times before
+         this session (Python's own parser decodes that escape as two
+         invalid lone surrogates in a regular string literal, crashing
+         the whole page with a 500 at first real request). Caught via
+         the mandatory pre-push surrogate-escape scan and real-runtime
+         check this project already established as required steps —
+         replaced with the literal 🎯 character instead of an escaped
+         surrogate pair, re-verified 0 surrogate escapes file-wide and a
+         clean 200 on a real server run afterward.
+         Verified: py_compile, pyflakes, node --check, 56 routes, real
+         runtime 200 on /, zero surrogate escapes.
