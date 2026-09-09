@@ -13539,3 +13539,37 @@ v0.99.238 - Per direct user follow-up ("может перед открытием
          symbol fetch result for that trade, while an untouched symbol
          would keep using the bulk cache.
          Verified: py_compile, pyflakes, 56 routes, real runtime 200.
+
+v0.99.239 - Root-caused the "XRP_USDT fired a real trade but isn't in
+         the backtest table at all" report through follow-up questions.
+         Two separate things were going on, both benign individually,
+         but the combination is a real race: (1) "Живые сигналы" is a
+         PERSISTENT append-only log that never gets wiped — a symbol
+         that fired once stays there forever, completely independent of
+         whether it's still being tracked; (2) the backtest ranking
+         table is rebuilt from SCRATCH every cycle from only the CURRENT
+         top-N-by-volume universe, so a symbol not in this cycle's
+         universe just isn't there, full stop, even if it fired
+         yesterday. Neither of those alone explains firing a REAL trade
+         for a symbol absent from the table, though.
+         Actual root cause: lsw_live_loop()/mirror_live_loop() each read
+         their own live_universe as a ONE-TIME SNAPSHOT at the start of
+         a scan pass, then scan every symbol in that snapshot (which can
+         take real time across up to 100 symbols). If the much longer
+         (~100-symbol) backtest cycle completes and REBUILDS that same
+         live_universe list WHILE the scan pass is still in flight, a
+         symbol from the OLD snapshot — already dropped from the fresh
+         universe — can still fire a real trade off stale membership,
+         even though the table the user is looking at has already moved
+         on without it. This matches exactly: a trade firing, then the
+         symbol being gone from the table just ~16 minutes later.
+         Fix: both lsw_scan_symbol_live() and mirror_scan_symbol_live()
+         now re-check CURRENT (not snapshotted) live_universe membership
+         right before spending real money via execute_autotrade() — the
+         signal itself is still genuinely fresh (detected against
+         current candles) so it stays logged either way, but a symbol
+         already dropped this cycle no longer gets to open a new real
+         position moments later. Logs a clear message identifying this
+         exact race when it's caught.
+         Verified: py_compile, pyflakes, 56 routes, real runtime 200 on
+         / and /api/lsw/status.
