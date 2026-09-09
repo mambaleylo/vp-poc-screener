@@ -13455,3 +13455,87 @@ v0.99.236 - Neuro's universe is now DYNAMIC and full-market, per direct
          10-coin seed list survives intact through a fully-failed cycle.
          Verified: py_compile, pyflakes, node --check, 56 routes, real
          runtime 200 on / and /api/neuro/status, zero surrogate escapes.
+
+v0.99.237 - CRITICAL SAFETY FIX: stop-loss could sit beyond Gate.io's
+         real liquidation price, per direct user report of a real trade
+         (XRP_USDT SHORT, entry 1.4356, SL 1.44096, 82x) whose ACTUAL
+         Gate.io liquidation price (~1.4358) sat far CLOSER to entry
+         than the stop — the position would get liquidated before the
+         SL ever had a chance to fire. Reverse-engineered the user's
+         real numbers: the true liquidation buffer was only 0.037x of
+         the required 1.5x safety margin (implied real MMR ~1.2%).
+         Root cause: get_futures_risk_limit_tiers() collapsed each
+         symbol's MULTIPLE real tiers down to a single "best case" pair
+         (the LOWEST MMR and HIGHEST max-leverage seen across ALL
+         tiers), and every consumer treated that as unconditionally
+         applicable. But MMR/max-leverage are tiered BY POSITION
+         NOTIONAL on Gate.io (like every exchange with risk limits): a
+         small tier-1 position gets low MMR + high leverage cap, but
+         once a position's real notional crosses into a higher tier,
+         the REAL MMR is higher and REAL max leverage is lower. Using
+         the smallest tier's numbers for a trade whose actual notional
+         landed in a higher tier meant computing a leverage that looked
+         safe against an MMR that never actually applied.
+         Key insight enabling a clean fix with NO iteration needed: for
+         a fixed target risk_amount and sl_distance_pct, the resulting
+         NOTIONAL is fixed too, independent of leverage (risk_amount =
+         margin*leverage*sl_pct = notional*sl_pct, so notional =
+         risk_amount/sl_pct regardless of how that notional later splits
+         into margin vs leverage). This means the correct real tier can
+         be looked up BEFORE ever picking a leverage.
+         get_futures_risk_limit_tiers() now ALSO returns a third dict,
+         tiers_out[symbol] = sorted list of (notional_threshold, mmr,
+         max_leverage) — the old two flat maps are kept for lightweight
+         display uses. New lookup_risk_tier_for_notional(symbol,
+         notional, tiers_by_symbol). compute_risk_based_position()
+         rewritten: computes notional FIRST (risk_amount/sl_pct), looks
+         up the tier that notional actually falls into, THEN computes
+         safe leverage using that tier's real mmr/max-leverage — wired
+         into execute_autotrade() (the shared path every module's real
+         orders go through) via new symbol/tiers_by_symbol params.
+         msnr_trade_beyond_liquidation() (backtest filtering + MSNR's
+         own leverage-adjustment loop) had the same flat-lowest-MMR bug;
+         since it can't cheaply know an exact notional without a live
+         balance fetch on every backtest trade, it now uses the WORST-
+         CASE (highest) MMR across all of a symbol's tiers instead —
+         errs toward filtering out more marginal trades rather than an
+         optimistic best-case guess.
+         Also fixed: user separately reported XRP_USDT missing from
+         LSW's autotrade list entirely — flagged for follow-up
+         investigation (not yet root-caused in this fix).
+         Verified directly against the user's real trade shape: with a
+         synthetic 3-tier XRP_USDT setup (tier 2's MMR=1.2% being the
+         one that actually applies to this trade's real ~$2410
+         notional), the OLD code picked 98x leverage (unsafe — real
+         buffer would undercut the required margin), the NEW code picks
+         50x with margin correctly recomputed for the REAL tier,
+         verified buffer 0.74% >= required 0.56% (SAFE).
+
+v0.99.238 - Per direct user follow-up ("может перед открытием сделки
+         запрашивать?"): execute_autotrade() now does a FRESH, single-
+         symbol risk-limit-tier fetch right before sizing every REAL
+         (non-dry-run) trade, instead of relying solely on the periodic
+         bulk STATE["scalp_risk_tiers"] cache (refreshed every
+         SCALP_REFRESH_SEC, hours apart — could be stale, or still
+         completely empty if the app just started and scalp_loop()
+         hasn't finished its first cycle). Confirmed via Gate.io's own
+         official SDK docs (Python/C#/Java/Node.js all documenting the
+         same behavior) that /futures/usdt/risk_limit_tiers accepts an
+         optional `contract` filter param — when passed, returns ONLY
+         that one contract's tiers, no pagination needed, cheap enough
+         to call on every trade since risk-limit tiers are exchange
+         configuration that essentially never changes.
+         New get_risk_limit_tiers_for_symbol(symbol) (single-contract
+         fetch) + shared _parse_risk_limit_rows() (row-parsing logic
+         extracted so the bulk and single-symbol fetchers can never
+         parse differently). execute_autotrade() calls it right before
+         compute_risk_based_position(), and — only when the fresh fetch
+         actually succeeds — overrides just that one symbol's entry in
+         the tier map for this call; a failed/empty fresh fetch falls
+         straight back to the bulk cache, so one network hiccup never
+         leaves a symbol with zero tier data.
+         Verified directly: a deliberately stale/wrong bulk-cache tier
+         for XRP_USDT gets correctly overridden by the fresh single-
+         symbol fetch result for that trade, while an untouched symbol
+         would keep using the bulk cache.
+         Verified: py_compile, pyflakes, 56 routes, real runtime 200.
