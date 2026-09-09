@@ -13888,3 +13888,17 @@ v0.99.248 - New compact Telegram digest after each Neuro full-universe
          escapes (used Python's own proper \U0001f9e0 8-hex-digit
          escape for the 🧠 emoji, not the JS-style surrogate-pair form
          that has caused crashes elsewhere in this codebase).
+
+v0.99.249 - Simplified the Neuro backtest digest's format, per direct
+         user follow-up ("зачем что-то там умножать и т.п., монета-wr-
+         rr, всё — то что в бэктесте карточка показывает короче").
+         v0.99.248's format multiplied avg_pnl_r by 100 to get a
+         percentage; the user wanted no derived math at all — just the
+         SAME winrate/RR numbers already shown on each coin's own
+         backtest card, condensed to one line. Format changed from
+         "{SYMBOL} {avg_pnl_r×100:+d}%-RR{rr}" to "{SYMBOL}-{winrate:.0f}
+         %-RR{rr:.0f}", e.g. "BTC-45%-RR2" instead of "BTC -47%-RR2".
+         Updated the setting's own UI description to match. Verified the
+         corrected format directly on synthetic data.
+         Verified: py_compile, pyflakes, node --check, 56 routes, real
+         runtime 200, zero surrogate escapes.
