@@ -13862,3 +13862,29 @@ v0.99.247 - NEURO_TOP_N is now a live-editable setting instead of a
          Verified: py_compile, pyflakes, node --check, 56 routes, real
          runtime 200 confirming neuro_top_n correctly present and
          settable via /api/settings, zero surrogate escapes.
+
+v0.99.248 - New compact Telegram digest after each Neuro full-universe
+         backtest cycle, per direct user request ("после бэктеста
+         присылать в кратком формате статистику... типа BTC -47%-RR2.
+         Следующую монету ниже, в столбик короче. Галочку в настройки").
+         Confirmed scope with the user: Neuro specifically (not Sweep).
+         New separate toggle TELEGRAM_ALERTS_NEURO_SUMMARY (off by
+         default, distinct from the existing TELEGRAM_ALERTS_NEURO which
+         only covers live-signal alerts) — fully wired (settings tuple/
+         get/global/apply/checkbox/JS-map), new "↳ Сводка бэктеста
+         Neuro" row under the Telegram settings group.
+         Sent right after the top-N promotion at the end of a
+         successful mining cycle (same point save_neuro_state() already
+         fires from) — one line per symbol, already in the cycle's own
+         rank order (best avg_pnl_r first): "{SYMBOL} {avg_pnl_r×100:+d}
+         %-RR{chosen_rr:.0f}", e.g. "BTC -47%-RR2" / "ETH +35%-RR3" —
+         average P&L expressed as a percentage and the RR that was
+         auto-tuned for that symbol this cycle, stacked one per line.
+         Verified the exact formatting on synthetic data matches the
+         user's own example precisely (BTC -47%-RR2, etc.).
+         Verified: py_compile, pyflakes, node --check, 56 routes, real
+         runtime 200 confirming telegram_alerts_neuro_summary correctly
+         present (defaulting False) in /api/settings, zero surrogate
+         escapes (used Python's own proper \U0001f9e0 8-hex-digit
+         escape for the 🧠 emoji, not the JS-style surrogate-pair form
+         that has caused crashes elsewhere in this codebase).
