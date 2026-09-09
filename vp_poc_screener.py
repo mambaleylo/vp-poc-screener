@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.238"
+APP_VERSION = "0.99.239"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -11048,6 +11048,18 @@ def mirror_scan_symbol_live(symbol):
         with state_lock:
             STATE["mirror_signals"].appendleft(record)
         if AUTOTRADE_ENABLED_MIRROR:
+            # v0.99.239 — same live_universe-snapshot race fix as LSW's own
+            # (see lsw_scan_symbol_live()'s comment for the full mechanism):
+            # mirror_live_loop() also scans a one-time snapshot of
+            # mirror_live_universe, so a symbol dropped by a concurrently-
+            # completing backtest cycle could still fire a real trade here
+            # off the stale snapshot. Re-check current membership right
+            # before spending real money — signal stays logged either way.
+            with state_lock:
+                still_active = symbol in STATE.get("mirror_live_universe", [])
+            if not still_active:
+                log_error(f"mirror_scan_symbol_live {symbol}: signal fired but symbol was dropped from mirror_live_universe mid-scan — signal logged, real trade skipped")
+                return
             autotrade_result = execute_autotrade("mirror", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
             sim_execute_trade("mirror", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_MIRROR, record)
@@ -12355,6 +12367,29 @@ def lsw_scan_symbol_live(symbol):
         with state_lock:
             STATE["lsw_signals"].appendleft(record)
         if AUTOTRADE_ENABLED_LSW:
+            # v0.99.239 — per direct user report: a real trade fired for a
+            # symbol (XRP_USDT) that had ALREADY disappeared from the
+            # backtest ranking table by the time they checked, just
+            # minutes later. Root cause: lsw_live_loop() reads STATE[
+            # "lsw_live_universe"] as a ONE-TIME SNAPSHOT at the start of
+            # its scan pass, then scans every symbol in that snapshot —
+            # if the (much longer, ~100-symbol) backtest cycle completes
+            # and rebuilds lsw_live_universe WHILE this scan pass is still
+            # in flight, a symbol from the OLD snapshot can still fire a
+            # trade here even though it's already been dropped from the
+            # freshly-rebuilt universe/table the user is looking at. The
+            # signal itself is still genuinely fresh (detected against
+            # current candles, not stale data) so it's still recorded in
+            # the log above, but re-checking membership in the CURRENT
+            # (not snapshotted) live universe right before spending real
+            # money keeps the actual trading consistent with what the
+            # table shows — a coin that's been dropped this cycle
+            # shouldn't still open a new position moments later.
+            with state_lock:
+                still_active = symbol in STATE.get("lsw_live_universe", [])
+            if not still_active:
+                log_error(f"lsw_scan_symbol_live {symbol}: signal fired but symbol was dropped from lsw_live_universe mid-scan (backtest cycle rebuilt it concurrently) — signal logged, real trade skipped")
+                return
             autotrade_result = execute_autotrade("lsw", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
             sim_execute_trade("lsw", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_LSW, record)
