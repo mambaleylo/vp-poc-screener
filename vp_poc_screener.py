@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.236"
+APP_VERSION = "0.99.238"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1484,6 +1484,7 @@ STATE = {
     "risk_autotune_log": deque(maxlen=200),
     "risk_autotune_last_change": {},  # param_key -> unix ts, for cooldown enforcement
     "scalp_max_leverage_map": {},
+    "scalp_risk_tiers": {},  # v0.99.237 — symbol -> sorted list of (notional_threshold, mmr, max_leverage) tiers, for notional-aware safe-leverage lookups
     "scalp_data": {},          # symbol -> {interval -> {direction -> target-summary}}
     "scalp_recommendations": {},  # symbol -> best config (or None)
     "scalp_last_build_started": None,
@@ -3352,7 +3353,8 @@ def compute_max_safe_leverage(direction, sl_distance_pct, mmr_pct, leverage_cap,
     return None
 
 
-def compute_risk_based_position(direction, entry, sl, leverage_cap, mmr_pct, total_equity, risk_pct=None):
+def compute_risk_based_position(direction, entry, sl, leverage_cap, mmr_pct, total_equity, risk_pct=None,
+                                 symbol=None, tiers_by_symbol=None):
     """v0.99.102 — the new, fully-automatic replacement for both manual
     leverage AND manual position-size selection, per direct user
     confirmation ("максимально безопасное плечо → минимальный margin
@@ -3360,16 +3362,29 @@ def compute_risk_based_position(direction, entry, sl, leverage_cap, mmr_pct, tot
     SAFE leverage (compute_max_safe_leverage() above), then derives the
     MINIMUM margin needed to still risk exactly risk_pct% of total_
     equity at that leverage.
-        risk_amount = total_equity * risk_pct/100
-        loss_at_sl  = margin_usd * leverage * sl_distance_pct/100
-        => margin_usd = risk_amount / (leverage * sl_distance_pct/100)
-    margin and leverage are inversely related for a fixed risk target
-    and SL distance — using the highest SAFE leverage available (not
-    an arbitrary lower one) minimizes how much capital gets tied up in
-    any single trade while keeping the dollar risk exactly fixed,
-    rather than the old model where leverage was a flat per-module
-    constant with no relationship to the actual SL width of a given
-    signal at all.
+
+    v0.99.237 — CRITICAL FIX, per a real user trade where the ACTUAL
+    Gate.io liquidation price sat far closer to entry than the stop
+    (see get_futures_risk_limit_tiers()'s own docstring for the full
+    root-cause). The key insight that makes this fixable without any
+    iteration: for a FIXED target risk_amount and sl_distance_pct, the
+    resulting NOTIONAL is fixed too, independent of leverage —
+        risk_amount = margin_usd * leverage * sl_distance_pct/100
+                     = (margin_usd * leverage) * sl_distance_pct/100
+                     = notional_usd * sl_distance_pct/100
+        => notional_usd = risk_amount / (sl_distance_pct/100)
+    Leverage only decides how that fixed notional splits into margin —
+    it never changes the notional itself. So the notional (and thus
+    which real Gate.io risk-limit TIER applies) can be computed FIRST,
+    before ever picking a leverage, then the tier's REAL mmr/max-
+    leverage (via lookup_risk_tier_for_notional()) replace the
+    caller-supplied best-case mmr_pct/leverage_cap for the actual safe-
+    leverage calculation — no guessing, no iterating.
+    `symbol`+`tiers_by_symbol` are optional: when supplied, this tier-
+    aware correction runs; when omitted (e.g. a caller with no tier
+    data available), falls back to the old single mmr_pct/leverage_cap
+    behavior exactly as before — same fallback discipline as the rest
+    of this codebase's optional-data-source parameters.
     Returns (margin_usd, leverage, skip_reason) — skip_reason is None
     on success, otherwise a human-readable string with margin_usd=0,
     leverage=0, matching compute_position_size()'s own convention."""
@@ -3379,14 +3394,27 @@ def compute_risk_based_position(direction, entry, sl, leverage_cap, mmr_pct, tot
     sl_distance_pct = abs(entry - sl) / entry * 100
     if sl_distance_pct <= 0:
         return 0, 0, "некорректное расстояние до стопа (ноль или отрицательное)"
-    leverage = compute_max_safe_leverage(direction, sl_distance_pct, mmr_pct, leverage_cap)
-    if leverage is None:
-        return 0, 0, (f"даже плечо 1x не удерживает стоп ({sl_distance_pct:.3f}%) "
-                       f"в безопасной зоне от ликвидации — сделка пропущена")
     if not total_equity or total_equity <= 0:
         return 0, 0, "не удалось получить баланс счёта для расчёта размера позиции"
     risk_amount = total_equity * risk_pct / 100.0
-    margin_usd = risk_amount / (leverage * sl_distance_pct / 100.0)
+
+    # v0.99.237 — notional is leverage-independent (see docstring above),
+    # so it's computed FIRST, letting the correct real tier be looked up
+    # before any leverage decision is made.
+    notional_usd = risk_amount / (sl_distance_pct / 100.0)
+    real_mmr_pct, real_leverage_cap = mmr_pct, leverage_cap
+    if symbol and tiers_by_symbol:
+        tier_mmr, tier_lev = lookup_risk_tier_for_notional(symbol, notional_usd, tiers_by_symbol)
+        if tier_mmr is not None:
+            real_mmr_pct = tier_mmr
+        if tier_lev is not None:
+            real_leverage_cap = min(leverage_cap, tier_lev) if leverage_cap else tier_lev
+
+    leverage = compute_max_safe_leverage(direction, sl_distance_pct, real_mmr_pct, real_leverage_cap)
+    if leverage is None:
+        return 0, 0, (f"даже плечо 1x не удерживает стоп ({sl_distance_pct:.3f}%) "
+                       f"в безопасной зоне от ликвидации — сделка пропущена")
+    margin_usd = notional_usd / leverage
     return margin_usd, leverage, None
 
 
@@ -3968,10 +3996,28 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
             # universe hasn't covered yet.
             with state_lock:
                 mmr_map = STATE.get("scalp_mmr_map", {})
+                tiers_by_symbol = STATE.get("scalp_risk_tiers", {})
             mmr_pct = mmr_map.get(symbol, SCALP_DEFAULT_MMR_PCT)
 
+            # v0.99.238 — per direct user follow-up ("может перед открытием
+            # сделки запрашивать?"): a fresh, single-symbol tier fetch right
+            # before sizing this REAL trade, so it's never relying on the
+            # periodic bulk cache being fresh or even populated yet.
+            # Risk-limit tiers are exchange config, essentially static, so
+            # this single-contract call is cheap. Only OVERRIDES the cache
+            # for this one symbol when the fresh fetch actually succeeds —
+            # a failed/empty fresh fetch silently falls back to whatever
+            # the bulk cache already had, never leaves this symbol with
+            # zero tier data just because of one network hiccup.
+            if not AUTOTRADE_DRY_RUN:
+                fresh_tiers = get_risk_limit_tiers_for_symbol(symbol)
+                if fresh_tiers:
+                    tiers_by_symbol = dict(tiers_by_symbol)
+                    tiers_by_symbol[symbol] = fresh_tiers
+
             margin, leverage, skip_reason = compute_risk_based_position(
-                direction, entry, sl, leverage_cap, mmr_pct, total_equity, risk_pct=risk_pct_override)
+                direction, entry, sl, leverage_cap, mmr_pct, total_equity, risk_pct=risk_pct_override,
+                symbol=symbol, tiers_by_symbol=tiers_by_symbol)
             record["leverage"] = leverage
             record["risk_pct"] = round(risk_pct_override if risk_pct_override is not None else AUTOTRADE_RISK_PCT_OF_BALANCE, 4)
 
@@ -4396,20 +4442,49 @@ def build_universe():
 
 
 def get_futures_risk_limit_tiers():
-    """Public, no-auth endpoint that exposes each contract's own tiered
+    """Public, no-auth endpoint that exposes each contract's own TIERED
     maintenance margin rate AND max leverage — used instead of assuming
     one fixed MMR/leverage cap for every coin (altcoins often carry a
     higher MMR and a MUCH lower max leverage than BTC/ETH's lowest
     tier — confirmed by the user: a coin the math said needed 23-47x
-    for, the exchange itself only allows 10x on). Field names are
-    parsed defensively: if the exchange's exact schema doesn't match
-    what's expected here, this returns empty maps and every symbol just
-    falls back to the conservative defaults. Parsing successfully to a
-    float isn't proof it's the right field, though — a wrong field name
-    could still produce a plausible-looking number (this exact bug
-    shipped once for MMR: a value that only made sense as roughly -3.2%
-    MMR passed through unnoticed). Anything outside a realistic range
-    gets discarded, same as if it were missing, for both fields.
+    for, the exchange itself only allows 10x on).
+
+    v0.99.237 — CRITICAL FIX, per direct user report of a REAL trade
+    (XRP_USDT SHORT, entry 1.4356, SL 1.44096, 82x) whose ACTUAL Gate.io
+    liquidation price (~1.4358) sat far CLOSER to entry than the stop —
+    the position would get liquidated before the stop ever had a chance
+    to fire. Root cause: this function used to collapse each symbol's
+    MULTIPLE tiers down to a single "best case" pair — the LOWEST MMR
+    seen across all tiers and the HIGHEST max-leverage seen — and every
+    consumer (compute_max_safe_leverage() included) treated that as if
+    it applied unconditionally. But MMR/max-leverage are tiered BY
+    POSITION NOTIONAL on Gate.io (like on every exchange with risk
+    limits): a small tier-1 position gets a low MMR and high leverage
+    cap, but once the position's own notional crosses into a higher
+    tier, the REAL MMR is higher and the REAL max leverage is lower.
+    Using the smallest tier's numbers when the actual trade's notional
+    put it in a HIGHER tier meant computing a leverage that looked safe
+    against an MMR that never actually applied — reverse-engineering the
+    user's real numbers showed the TRUE MMR was roughly 1.2%, not
+    whatever near-zero-tier value the old code had picked.
+    Now returns a THIRD dict, tiers_out[symbol] = sorted list of
+    (notional_threshold, mmr, max_leverage) tuples ascending by
+    threshold, so callers can look up the tier that actually applies to
+    a given position's real notional (see lookup_risk_tier_for_notional()
+    below) instead of assuming the best-case tier always applies. The
+    old two flat maps (lowest-MMR, highest-leverage) are kept for
+    lightweight/non-safety-critical display uses that don't have a
+    notional to check against yet.
+
+    Field names are parsed defensively: if the exchange's exact schema
+    doesn't match what's expected here, this returns empty maps and
+    every symbol just falls back to the conservative defaults. Parsing
+    successfully to a float isn't proof it's the right field, though —
+    a wrong field name could still produce a plausible-looking number
+    (this exact bug shipped once for MMR: a value that only made sense
+    as roughly -3.2% MMR passed through unnoticed). Anything outside a
+    realistic range gets discarded, same as if it were missing, for all
+    three fields.
     Paginated: without a `contract` filter, Gate's own docs say this
     endpoint defaults to only the top 100 markets — a single
     unpaginated call silently covered a small fraction of the universe
@@ -4448,11 +4523,19 @@ def get_futures_risk_limit_tiers():
     except Exception as e:
         log_error(f"get_futures_risk_limit_tiers: {e}")
         if not all_rows:
-            return {}, {}
-    data = all_rows
+            return {}, {}, {}
+    return _parse_risk_limit_rows(all_rows)
+
+
+def _parse_risk_limit_rows(rows):
+    """v0.99.238 — shared defensive row-parsing, extracted so both the
+    full-universe get_futures_risk_limit_tiers() and the single-symbol
+    get_risk_limit_tiers_for_symbol() (used for a fresh pre-trade check)
+    parse identically rather than risking the two drifting apart."""
     mmr_out = {}
     lev_out = {}
-    for row in data:
+    tiers_out = {}
+    for row in rows:
         try:
             name = row.get("contract") or row.get("name")
             if not name:
@@ -4460,24 +4543,93 @@ def get_futures_risk_limit_tiers():
             mmr = row.get("maintenance_rate")
             if mmr is None:
                 mmr = row.get("maintain_rate")
-            if mmr is not None:
-                mmr = float(mmr)
-                if SCALP_MMR_SANITY_MIN <= mmr <= SCALP_MMR_SANITY_MAX:
-                    if name not in mmr_out or mmr < mmr_out[name]:
-                        mmr_out[name] = mmr
+            threshold = row.get("risk_limit")
+            if threshold is None:
+                threshold = row.get("risk_limit_max")
+            if threshold is None:
+                threshold = row.get("risk_limit_value")
             max_lev = row.get("leverage_max")
             if max_lev is None:
                 max_lev = row.get("max_leverage")
+            mmr_valid = lev_valid = threshold_valid = False
+            if mmr is not None:
+                mmr = float(mmr)
+                mmr_valid = SCALP_MMR_SANITY_MIN <= mmr <= SCALP_MMR_SANITY_MAX
             if max_lev is not None:
                 max_lev = float(max_lev)
-                if SCALP_LEVERAGE_SANITY_MIN <= max_lev <= SCALP_LEVERAGE_SANITY_MAX:
-                    # keep the HIGHEST max-leverage seen (the lowest-risk /
-                    # smallest-size tier allows the most leverage)
-                    if name not in lev_out or max_lev > lev_out[name]:
-                        lev_out[name] = max_lev
+                lev_valid = SCALP_LEVERAGE_SANITY_MIN <= max_lev <= SCALP_LEVERAGE_SANITY_MAX
+            if threshold is not None:
+                threshold = float(threshold)
+                threshold_valid = threshold > 0
+            if mmr_valid:
+                if name not in mmr_out or mmr < mmr_out[name]:
+                    mmr_out[name] = mmr
+            if lev_valid:
+                # keep the HIGHEST max-leverage seen (the lowest-risk /
+                # smallest-size tier allows the most leverage) — used only
+                # by the flat map's non-safety-critical display consumers
+                if name not in lev_out or max_lev > lev_out[name]:
+                    lev_out[name] = max_lev
+            if mmr_valid and lev_valid and threshold_valid:
+                tiers_out.setdefault(name, []).append((threshold, mmr, max_lev))
         except (TypeError, ValueError, AttributeError):
             continue
-    return mmr_out, lev_out
+    for name in tiers_out:
+        tiers_out[name].sort(key=lambda t: t[0])
+    return mmr_out, lev_out, tiers_out
+
+
+def get_risk_limit_tiers_for_symbol(symbol):
+    """v0.99.238 — per direct user follow-up ("может перед открытием
+    сделки запрашивать?"): a lightweight, single-contract fetch (Gate's
+    own `contract` filter param, confirmed via their official SDK docs
+    across languages — "when passed, returns just that contract's own
+    tiers, pagination limit/offset ignored") called RIGHT BEFORE sizing
+    a real trade in execute_autotrade(), so the tier data used is always
+    current for THIS specific symbol rather than depending on the
+    periodic bulk STATE["scalp_risk_tiers"] cache (refreshed every
+    SCALP_REFRESH_SEC, hours apart) which could be stale or — worse —
+    still empty if the app just started and scalp_loop() hasn't
+    completed its first cycle yet. Risk-limit tiers are exchange
+    configuration, not market data, so they essentially never change —
+    this single-symbol call is cheap and safe to make on every trade.
+    Returns the sorted tier list for `symbol` (possibly empty on
+    failure or if the symbol has no tier data) — callers should fall
+    back to the bulk cache when this comes back empty, not treat that
+    as "no tiers configured for real"."""
+    try:
+        r = requests.get(f"{GATE_BASE}/futures/usdt/risk_limit_tiers",
+                          params={"contract": symbol}, timeout=HTTP_TIMEOUT)
+        r.raise_for_status()
+        rows = r.json()
+    except Exception as e:
+        log_error(f"get_risk_limit_tiers_for_symbol {symbol}: {e}")
+        return []
+    _, _, tiers_out = _parse_risk_limit_rows(rows)
+    return tiers_out.get(symbol, [])
+
+
+def lookup_risk_tier_for_notional(symbol, notional_usd, tiers_by_symbol):
+    """v0.99.237 — given a position's actual notional (USD), find the
+    risk-limit tier that ACTUALLY applies on Gate.io, and return that
+    tier's real (mmr_pct, max_leverage). Tiers are ascending thresholds;
+    the first tier whose threshold >= notional is the one that applies
+    (a tier's threshold is the UPPER bound of position size it covers).
+    If notional exceeds every known threshold, the highest tier applies
+    (Gate's own behavior — you simply can't exceed the top tier's max
+    position size at all, so if this fires the trade should have already
+    been capped upstream). Returns (None, None) if no tier data exists
+    for this symbol at all — callers fall back to their own defaults."""
+    tiers = tiers_by_symbol.get(symbol)
+    if not tiers:
+        return None, None
+    for threshold, mmr, max_lev in tiers:
+        if notional_usd <= threshold:
+            return mmr, max_lev
+    # Notional exceeds every tier's threshold — use the highest (last) tier,
+    # the most conservative real values available.
+    return tiers[-1][1], tiers[-1][2]
+
 
 
 def build_scalp_universe():
@@ -6386,12 +6538,13 @@ def scalp_loop():
                 STATE["scalp_symbols_done"] = 0
 
             universe, scores = build_scalp_universe()
-            mmr_map, max_leverage_map = get_futures_risk_limit_tiers()
+            mmr_map, max_leverage_map, tiers_by_symbol = get_futures_risk_limit_tiers()
             with state_lock:
                 STATE["scalp_universe"] = universe
                 STATE["scalp_universe_scores"] = scores
                 STATE["scalp_mmr_map"] = mmr_map
                 STATE["scalp_max_leverage_map"] = max_leverage_map
+                STATE["scalp_risk_tiers"] = tiers_by_symbol  # v0.99.237 — full tier list per symbol, for notional-aware safe-leverage lookups
                 # purge symbols that dropped out of this cycle's universe,
                 # rather than letting stale entries linger indefinitely
                 STATE["scalp_data"] = {}
@@ -8477,7 +8630,25 @@ def msnr_trade_beyond_liquidation(symbol, direction, entry, sl, leverage=None):
     leverage = leverage if leverage is not None else msnr_symbol_effective_leverage(symbol)
     with state_lock:
         mmr_map = STATE.get("scalp_mmr_map", {})
+        tiers_by_symbol = STATE.get("scalp_risk_tiers", {})
     mmr_pct = mmr_map.get(symbol, SCALP_DEFAULT_MMR_PCT)
+    # v0.99.237 — same root issue as execute_autotrade()'s own
+    # compute_risk_based_position(): mmr_map's flat value is the BEST-CASE
+    # (lowest) MMR across all of this contract's real tiers, which only
+    # applies to the smallest tier. This function has no cheap way to know
+    # the EXACT notional a hypothetical/backtest trade would use (that
+    # would need a live balance fetch on every single trade being
+    # filtered — wasteful during a backtest sweeping thousands of
+    # candidates), so it takes the safer alternative: the WORST-CASE
+    # (highest) MMR seen across this symbol's own tiers, when tier data
+    # exists. Errs toward filtering out MORE marginal trades rather than
+    # passing one through on an optimistic best-case assumption that may
+    # never actually apply once the real position's notional lands in a
+    # higher tier — the same failure mode that let an unsafe real trade
+    # through before this fix.
+    tiers = tiers_by_symbol.get(symbol) if tiers_by_symbol else None
+    if tiers:
+        mmr_pct = max(t[1] for t in tiers)
     liq_buffer_pct = compute_scalp_liquidation_move_pct(direction, leverage, mmr_pct)
     if liq_buffer_pct is None:
         return False
@@ -15732,6 +15903,7 @@ def api_reset_scalp():
             STATE["scalp_universe_scores"] = {}
             STATE["scalp_mmr_map"] = {}
             STATE["scalp_max_leverage_map"] = {}
+            STATE["scalp_risk_tiers"] = {}
             STATE["scalp_data"] = {}
             STATE["scalp_recommendations"] = {}
             STATE["scalp_last_build_started"] = None
