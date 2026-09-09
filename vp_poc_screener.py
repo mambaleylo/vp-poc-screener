@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.248"
+APP_VERSION = "0.99.249"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -15304,20 +15304,19 @@ def neuro_mining_loop():
                     _neuro_mining_progress_ts = time.time()
                 save_neuro_state()  # v0.99.240 — persist the freshly-promoted top-N so a restart doesn't lose potentially hours of full-universe compute
                 if TELEGRAM_ALERTS_NEURO_SUMMARY and top:
-                    # v0.99.248 — per direct user request ("после бэктеста
-                    # присылать в кратком формате статистику... типа BTC
-                    # -47%-RR2. Следующую монету ниже, в столбик"): one
-                    # line per symbol, already in rank order (best avg_pnl_r
-                    # first, same order the top-N cut itself used) —
-                    # SYMBOL, avg P&L as a percentage (×100, so -0.47R
-                    # reads as "-47%"), and the RR that was auto-tuned for
-                    # it this cycle.
+                    # v0.99.249 — per direct user follow-up ("зачем что-то
+                    # там умножать и т.п., монета-wr-rr, всё — то что в
+                    # бэктесте карточка показывает короче"): no derived
+                    # math — just the SAME winrate/RR numbers already shown
+                    # on each coin's own backtest card, one line per symbol
+                    # in rank order.
                     lines = []
                     for sym, (_, _, summary) in top:
-                        pnl_pct = round((summary.get("avg_pnl_r") or 0) * 100)
+                        wr = summary.get("winrate")
+                        wr_txt = f"{wr:.0f}%" if wr is not None else "?%"
                         rr = summary.get("chosen_rr")
                         rr_txt = f"RR{rr:.0f}" if rr is not None else "RR?"
-                        lines.append(f"{sym.replace('_USDT', '')} {pnl_pct:+d}%-{rr_txt}")
+                        lines.append(f"{sym.replace('_USDT', '')}-{wr_txt}-{rr_txt}")
                     send_telegram("\U0001f9e0 Neuro \u0431\u044d\u043a\u0442\u0435\u0441\u0442:\n" + "\n".join(lines), category="neuro")
         except Exception as e:
             log_error(f"neuro_mining_loop: {e}")
@@ -18043,7 +18042,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">↳ Сводка бэктеста Neuro</div>
-          <div class="sub">краткая сводка по топ-N монетам после каждого полного цикла бэктеста — по одной строке на монету, например "BTC -47%-RR2" (ср. P&L в % · подобранный RR)</div>
+          <div class="sub">краткая сводка по топ-N монетам после каждого полного цикла бэктеста — по одной строке на монету, например "BTC-45%-RR2" (винрейт и подобранный RR — те же цифры что и на карточке монеты)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramNeuroSummary"><span class="switchSlider"></span></label>
       </div>
