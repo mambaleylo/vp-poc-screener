@@ -13661,3 +13661,42 @@ v0.99.241 - Targeted audit of Sweep/Neuro/MSNR/Mirror per direct user
          Verified: py_compile, pyflakes, 56 routes, real runtime 200 on
          /, /api/lsw/status, /api/mirror/status, /api/msnr/status, and
          /api/neuro/status.
+
+v0.99.242 - CRITICAL FIX: found a SECOND path still exposed to the exact
+         liquidation-tier bug fixed in v0.99.237, while re-verifying
+         coverage per direct user follow-up ("то есть проблема
+         исправлена?"). MSNR's "all-in" sizing mode (all_in_margin_pct,
+         MSNR_ALL_IN_ENABLED — uses a fixed % of equity as margin instead
+         of the risk-% formula) called compute_max_safe_leverage()
+         directly with the SAME flat, best-case mmr_pct/leverage_cap
+         local variables that compute_risk_based_position() corrects
+         INTERNALLY via its own symbol/tiers_by_symbol params — but
+         those corrected values are never exposed back to the caller,
+         so this separate all-in calculation, a few lines below, was
+         still using the old optimistic best-case tier assumption
+         entirely unfixed.
+         Since all-in mode fixes MARGIN first (not notional), the tier
+         that will actually apply once margin*leverage is known can't
+         be looked up in one deterministic pass the way compute_risk_
+         based_position()'s notional-first approach does. Falls back to
+         the same WORST-CASE (highest MMR, lowest max-leverage across
+         all of the symbol's tiers) approach already used by msnr_
+         trade_beyond_liquidation() for the identical "can't cheaply
+         know the exact notional in advance" reason — errs conservative
+         rather than optimistic.
+         Verified directly against the same synthetic 3-tier XRP_USDT
+         setup used to validate the original fix: old behavior picked
+         98x (unsafe), new behavior picks 20x (using the worst tier's
+         real MMR=2.5%/max-lev=20x) — correctly far more conservative.
+         Also directly confirmed (per the same audit): every real-money
+         order-placement path in the app (Volume Profile Bounce/
+         Breakout, Scalp, MSNR ×3 call sites, Mirror, LSW) funnels
+         through this one shared execute_autotrade() function — AMD/EMA
+         Touch/FT5/NQ Model place no real orders at all currently
+         (signal/tracking only), so the tier fix's coverage is now
+         complete across every path that can actually spend real money.
+         Per direct user confirmation, the PAPER SIMULATOR (sim_execute_
+         trade()) deliberately keeps its own older, simpler fixed-
+         leverage model — not touched, since no real capital is at risk
+         there.
+         Verified: py_compile, pyflakes, 56 routes, real runtime 200.
