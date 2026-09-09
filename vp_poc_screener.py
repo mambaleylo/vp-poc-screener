@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.243"
+APP_VERSION = "0.99.244"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -19017,7 +19017,7 @@ async function openMsnrChart(symbol, sigTime) {
       const resTxt = data.result ? ` · ${data.result}${data.exit_price ? ' @ '+fmtNum(data.exit_price) : ''}` : '';
       const levelTxt = sig.level_type === 'A' ? 'A-shape (resist)' : 'V-shape (support)';
       document.getElementById('msnrModalParams').textContent =
-        `${fmtDateTime(sig.time)} · ${sig.direction} от ${levelTxt} · entry ${fmtNum(sig.entry)} · SL ${fmtNum(sig.sl)} · TP ${fmtNum(sig.tp)}${resTxt}`;
+        `${fmtDateTime(sig.time)} · ${sig.direction} от ${levelTxt} · entry ${fmtNum(sig.entry)} · SL ${fmtNum(sig.sl)} · TP ${fmtNum(sig.tp)}${resTxt} · \u26a1 \u0442\u043e\u043b\u0441\u0442\u0430\u044f \u043b\u0438\u043d\u0438\u044f = \u043f\u0440\u0438\u0447\u0438\u043d\u0430 \u0432\u0445\u043e\u0434\u0430/\u0446\u0435\u043b\u044c, \u0431\u043b\u0435\u0434\u043d\u0430\u044f \u043f\u0443\u043d\u043a\u0442\u0438\u0440 = \u0444\u043e\u043d\u043e\u0432\u044b\u0435 \u0443\u0440\u043e\u0432\u043d\u0438`;
     }
     drawMsnrChart(data);
   } catch (e) {
@@ -19108,10 +19108,35 @@ function drawMsnrChart(data) {
   };
 
   pivots.forEach(p => {
+    // v0.99.244 — per direct user request ("хочу чтобы появилась логика
+    // сигнала, линии и ТП на основании чего происходит вход"): the levels
+    // that actually CAUSED this signal (the one that got swept for the
+    // QM entry, and its paired Storyline level used as the TP source)
+    // get drawn distinctly — solid + thicker + a "ПРИЧИНА ВХОДА"/"ЦЕЛЬ
+    // (Storyline)" label — instead of blending into the same generic
+    // A-shape/V-shape treatment as every other background pivot MSNR
+    // happens to have confirmed nearby. Matched by price (within a tiny
+    // tolerance for float rounding) since pivots don't carry an id.
+    const isEntryLevel = sig && sig.level != null && Math.abs(p.price - sig.level) < p.price * 0.0001;
+    const isOppositeLevel = sig && sig.opposite_level != null && Math.abs(p.price - sig.opposite_level) < p.price * 0.0001;
     const color = p.type === 'A' ? '#e8b93d' : '#3ddc97';
     const yy = yP(p.price);
-    drawMsnrDashedLine(yy, color);
-    msnrLabels.push({ y: yy, text: (p.type === 'A' ? 'A-shape ' : 'V-shape ') + fmtNum(p.price), color });
+    if (isEntryLevel || isOppositeLevel) {
+      ctx.setLineDash([]);
+      ctx.lineWidth = 2.5;
+      ctx.strokeStyle = color;
+      ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(chartW, yy); ctx.stroke();
+      const tag = isEntryLevel ? '\u26a1 \u041f\u0420\u0418\u0427\u0418\u041d\u0410 \u0412\u0425\u041e\u0414\u0410 (QM-\u0441\u0432\u0438\u043f) ' : '🎯 \u0426\u0415\u041b\u042c (Storyline) ';
+      msnrLabels.push({ y: yy, text: tag + (p.type === 'A' ? 'A-shape ' : 'V-shape ') + fmtNum(p.price), color });
+    } else {
+      // Background pivots not directly involved in THIS signal — kept
+      // visible for context (how the Storyline formed) but faded and
+      // thinner so the causal levels above stand out at a glance.
+      ctx.globalAlpha = 0.4;
+      drawMsnrDashedLine(yy, color);
+      ctx.globalAlpha = 1;
+      msnrLabels.push({ y: yy, text: (p.type === 'A' ? 'A-shape ' : 'V-shape ') + fmtNum(p.price), color });
+    }
   });
 
   if (sig) {
