@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.249"
+APP_VERSION = "0.99.250"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -19841,7 +19841,7 @@ async function refreshNeuro() {
         const comboTag = p.is_combo ? ` <span style="color:#a855f7;">\u043a\u043e\u043c\u0431\u043e\u00d7${p.combo_depth||2}</span>` : '';
         const decayTag = p.decaying ? ` <span style="color:#ffa726;">\u26a0\ufe0f \u043e\u0441\u043b\u0430\u0431\u0435\u0432\u0430\u0435\u0442</span>` : '';
         return `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1c2433;font-size:11px;">
-          <span class="dim">${p.type}=${p.value}${comboTag}${decayTag}</span>
+          <span class="dim">${translateNeuroCondition(p.type, p.value)}${comboTag}${decayTag}</span>
           <span class="${dirCls}">${p.direction} (z=${p.z}, n=${p.n})</span>
         </div>`;
       }).join('');
@@ -19950,6 +19950,58 @@ async function refreshNeuro() {
 
 function openNeuroChart(symbol, sigTime) {
   return openVgiChart(symbol, sigTime, '/api/neuro/chart', '');
+}
+
+// v0.99.250 — per direct user request ("хочу видеть зависимости на
+// русском языке для меня в нейро"): DISPLAY-ONLY translation — the
+// underlying pattern data (type/value strings) stays exactly as the
+// mining engine produces it, this only reformats what gets shown.
+const NEURO_KEY_LABELS = {
+  hour: '\u0447\u0430\u0441', dow: '\u0434\u0435\u043d\u044c \u043d\u0435\u0434\u0435\u043b\u0438', dom_third: '\u0442\u0440\u0435\u0442\u044c \u043c\u0435\u0441\u044f\u0446\u0430',
+  weekend: '\u0432\u044b\u0445\u043e\u0434\u043d\u044b\u0435', session: '\u0441\u0435\u0441\u0441\u0438\u044f', rsi_zone: '\u0437\u043e\u043d\u0430 RSI',
+  stoch_zone: '\u0437\u043e\u043d\u0430 \u0441\u0442\u043e\u0445\u0430\u0441\u0442\u0438\u043a\u0430', ema20_side: '\u0446\u0435\u043d\u0430 \u043e\u0442 EMA20', ema50_side: '\u0446\u0435\u043d\u0430 \u043e\u0442 EMA50',
+  ema100_side: '\u0446\u0435\u043d\u0430 \u043e\u0442 EMA100', ema200_side: '\u0446\u0435\u043d\u0430 \u043e\u0442 EMA200', ema_stack: '\u0441\u0442\u0435\u043a EMA',
+  macd_hist: '\u0433\u0438\u0441\u0442\u043e\u0433\u0440\u0430\u043c\u043c\u0430 MACD', macd_cross: '\u043f\u0435\u0440\u0435\u0441\u0435\u0447\u0435\u043d\u0438\u0435 MACD', bb_pctb: '\u043f\u043e\u043b\u043e\u0441\u0430 \u0411\u043e\u043b\u043b\u0438\u043d\u0434\u0436\u0435\u0440\u0430',
+  vol_zone: '\u043e\u0431\u044a\u0451\u043c', vol_regime: '\u0440\u0435\u0436\u0438\u043c \u0432\u043e\u043b\u0430\u0442\u0438\u043b\u044c\u043d\u043e\u0441\u0442\u0438', range_zone: '\u0440\u0430\u0437\u043c\u0430\u0445 \u0441\u0432\u0435\u0447\u0438',
+  body_zone: '\u0442\u0435\u043b\u043e \u0441\u0432\u0435\u0447\u0438', streak: '\u0441\u0435\u0440\u0438\u044f \u0441\u0432\u0435\u0447\u0435\u0439', range_pos: '\u043f\u043e\u0437\u0438\u0446\u0438\u044f \u0432 \u0434\u0438\u0430\u043f\u0430\u0437\u043e\u043d\u0435',
+  dd_zone: '\u043f\u0440\u043e\u0441\u0430\u0434\u043a\u0430 \u043e\u0442 \u0445\u0430\u044f', htf_trend: '\u0442\u0440\u0435\u043d\u0434 4\u0447', daily_trend: '\u0434\u043d\u0435\u0432\u043d\u043e\u0439 \u0442\u0440\u0435\u043d\u0434',
+  funding_zone: '\u0444\u0430\u043d\u0434\u0438\u043d\u0433', btc_agree: '\u0441\u043e\u0433\u043b\u0430\u0441\u0438\u0435 \u0441 BTC', oi_trend: '\u0442\u0440\u0435\u043d\u0434 \u043e\u0442\u043a\u0440. \u0438\u043d\u0442\u0435\u0440\u0435\u0441\u0430',
+  eth_agree: '\u0441\u043e\u0433\u043b\u0430\u0441\u0438\u0435 \u0441 ETH', h4_rsi_zone: 'RSI \u043d\u0430 4\u0447', williams_zone: 'Williams %R',
+  adx_zone: '\u0441\u0438\u043b\u0430 \u0442\u0440\u0435\u043d\u0434\u0430 (ADX)', vwap_side: '\u0446\u0435\u043d\u0430 \u043e\u0442 VWAP', ichimoku: '\u043e\u0431\u043b\u0430\u043a\u043e \u0418\u0448\u0438\u043c\u043e\u043a\u0443',
+  roc_zone: 'momentum (ROC)', wick_dominance: '\u0444\u0438\u0442\u0438\u043b\u044c \u0441\u0432\u0435\u0447\u0438', round_number: '\u043a\u0440\u0443\u0433\u043b\u043e\u0435 \u0447\u0438\u0441\u043b\u043e',
+  atr_trend: '\u0442\u0440\u0435\u043d\u0434 \u0432\u043e\u043b\u0430\u0442\u0438\u043b\u044c\u043d\u043e\u0441\u0442\u0438 (ATR)', lsw_sweep: '\u0441\u0438\u0433\u043d\u0430\u043b Sweep', mirror_signal: '\u0441\u0438\u0433\u043d\u0430\u043b \u0417\u0435\u0440\u043a\u0430\u043b\u043e',
+};
+const NEURO_VALUE_LABELS = {
+  low: '\u043d\u0438\u0437\u043a\u0438\u0439', high: '\u0432\u044b\u0441\u043e\u043a\u0438\u0439', mid: '\u0441\u0440\u0435\u0434\u043d\u0438\u0439', normal: '\u043e\u0431\u044b\u0447\u043d\u044b\u0439',
+  spike: '\u0432\u0441\u043f\u043b\u0435\u0441\u043a', above: '\u0432\u044b\u0448\u0435', below: '\u043d\u0438\u0436\u0435', bull_stack: '\u0431\u044b\u0447\u0438\u0439', bear_stack: '\u043c\u0435\u0434\u0432\u0435\u0436\u0438\u0439',
+  mixed: '\u0441\u043c\u0435\u0448\u0430\u043d\u043d\u044b\u0439', rising: '\u0440\u0430\u0441\u0442\u0451\u0442', falling: '\u043f\u0430\u0434\u0430\u0435\u0442', flat: '\u0440\u043e\u0432\u043d\u043e',
+  agree: '\u0441\u043e\u0432\u043f\u0430\u0434\u0430\u0435\u0442', diverge: '\u0440\u0430\u0441\u0445\u043e\u0434\u0438\u0442\u0441\u044f', none: '\u043d\u0435\u0442',
+  long_recent: 'LONG \u043d\u0435\u0434\u0430\u0432\u043d\u043e', short_recent: 'SHORT \u043d\u0435\u0434\u0430\u0432\u043d\u043e', both_recent: '\u043e\u0431\u0430 \u043d\u0435\u0434\u0430\u0432\u043d\u043e',
+  weekend: '\u0432\u044b\u0445\u043e\u0434\u043d\u043e\u0439', weekday: '\u0431\u0443\u0434\u043d\u0438\u0439', early: '\u043d\u0430\u0447\u0430\u043b\u043e', late: '\u043a\u043e\u043d\u0435\u0446',
+  weak: '\u0441\u043b\u0430\u0431\u044b\u0439', moderate: '\u0443\u043c\u0435\u0440\u0435\u043d\u043d\u044b\u0439', strong: '\u0441\u0438\u043b\u044c\u043d\u044b\u0439',
+  oversold: '\u043f\u0435\u0440\u0435\u043f\u0440\u043e\u0434\u0430\u043d', overbought: '\u043f\u0435\u0440\u0435\u043a\u0443\u043f\u043b\u0435\u043d', in_cloud: '\u0432 \u043e\u0431\u043b\u0430\u043a\u0435',
+  above_cloud: '\u043d\u0430\u0434 \u043e\u0431\u043b\u0430\u043a\u043e\u043c', below_cloud: '\u043f\u043e\u0434 \u043e\u0431\u043b\u0430\u043a\u043e\u043c', strong_up: '\u0441\u0438\u043b\u044c\u043d\u044b\u0439 \u0440\u043e\u0441\u0442',
+  up: '\u0440\u043e\u0441\u0442', down: '\u043f\u0430\u0434\u0435\u043d\u0438\u0435', strong_down: '\u0441\u0438\u043b\u044c\u043d\u043e\u0435 \u043f\u0430\u0434\u0435\u043d\u0438\u0435',
+  upper: '\u0432\u0435\u0440\u0445\u043d\u0438\u0439', lower: '\u043d\u0438\u0436\u043d\u0438\u0439', balanced: '\u0441\u0431\u0430\u043b\u0430\u043d\u0441\u0438\u0440\u043e\u0432\u0430\u043d', near: '\u0440\u044f\u0434\u043e\u043c', far: '\u0434\u0430\u043b\u0435\u043a\u043e',
+  positive: '\u043f\u043e\u043b\u043e\u0436\u0438\u0442\u0435\u043b\u044c\u043d\u0430\u044f', negative: '\u043e\u0442\u0440\u0438\u0446\u0430\u0442\u0435\u043b\u044c\u043d\u0430\u044f', bull_cross: '\u0431\u044b\u0447\u044c\u0435 \u043f\u0435\u0440\u0435\u0441\u0435\u0447\u0435\u043d\u0438\u0435',
+  bear_cross: '\u043c\u0435\u0434\u0432\u0435\u0436\u044c\u0435 \u043f\u0435\u0440\u0435\u0441\u0435\u0447\u0435\u043d\u0438\u0435', big: '\u0431\u043e\u043b\u044c\u0448\u043e\u0439', small: '\u043c\u0430\u043b\u0435\u043d\u044c\u043a\u0438\u0439',
+  near_high: '\u0443 \u0445\u0430\u044f', near_low: '\u0443 \u043b\u043e\u044f', asian: '\u0430\u0437\u0438\u0430\u0442\u0441\u043a\u0430\u044f', london: '\u043b\u043e\u043d\u0434\u043e\u043d\u0441\u043a\u0430\u044f',
+  london_ny_overlap: '\u043b\u043e\u043d\u0434\u043e\u043d+\u041d\u042c', ny: '\u043d\u044c\u044e-\u0439\u043e\u0440\u043a\u0441\u043a\u0430\u044f', off_hours: '\u0432\u043d\u0435 \u0441\u0435\u0441\u0441\u0438\u0439',
+};
+const NEURO_DOW_NAMES = ['\u041f\u043d','\u0412\u0442','\u0421\u0440','\u0427\u0442','\u041f\u0442','\u0421\u0431','\u0412\u0441'];
+function neuroTranslateValue(key, val) {
+  if (key === 'dow' && /^[0-9]+$/.test(val)) return NEURO_DOW_NAMES[+val] || val;
+  if (key === 'hour' && /^[0-9]+$/.test(val)) return `${val}:00`;
+  if (key === 'streak') {
+    const m = val.match(/^(up|down|na)([0-9]+)$/);
+    if (m) return (m[1]==='up'?'\u0440\u043e\u0441\u0442 ':m[1]==='down'?'\u043f\u0430\u0434\u0435\u043d\u0438\u0435 ':'\u043d\u0435\u0442 ') + m[2] + '\u0431\u0430\u0440';
+  }
+  return NEURO_VALUE_LABELS[val] || val;
+}
+function translateNeuroCondition(type, value) {
+  const keys = String(type).split('+');
+  const vals = String(value).split('|');
+  return keys.map((k, i) => `${NEURO_KEY_LABELS[k] || k}=${neuroTranslateValue(k, vals[i])}`).join(' + ');
 }
 
 function openNqChart(sigTime) {
