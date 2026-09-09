@@ -13825,3 +13825,40 @@ v0.99.246 - NEURO_TOP_N lowered 10->5 per direct user request ("вместо
          "last known good state" from before this change.
          Verified: py_compile, pyflakes, 56 routes, real runtime 200
          confirming /api/neuro/status's config.top_n reads 5.
+
+v0.99.247 - NEURO_TOP_N is now a live-editable setting instead of a
+         fixed constant, per direct user request ("добавь этот параметр
+         в настройки, применение можно сделать сразу же, ведь список
+         хранится же где-то"). Fully wired (settings tuple/get/global/
+         numeric-input/JS-map) — new "↳ Сколько монет держать в топе"
+         number field under the Neuro settings group.
+         Immediate-apply logic, exactly as the user suggested: a
+         DECREASE re-ranks the symbols already sitting in _neuro_
+         patterns/_neuro_trades/_neuro_summary (their full backtest data
+         is still in memory — no need to wait for the next cycle) by
+         avg_pnl_r and trims down to the new N right away, persisting via
+         save_neuro_state() immediately. An INCREASE can't be applied
+         the same way — the other scanned-but-not-selected coins' data
+         is deliberately NOT kept in memory after a cycle completes
+         (v0.99.236's own memory-conscious design) — so growing the
+         active set only takes effect once the next full mining cycle
+         re-scans the whole universe; this is explained directly in the
+         setting's own UI description.
+         CRITICAL FIX found before shipping: the new code read
+         _neuro_active_symbols before ever declaring it in apply_
+         settings()'s own `global` statement — since the same function
+         also ASSIGNS to that name later in the same code path, Python
+         treated it as local for the entire function and raised
+         "referenced before assignment" the moment neuro_top_n was set,
+         caught by the mandatory pyflakes pass before shipping (not by
+         a passing py_compile alone, which doesn't catch this class of
+         error) — fixed by adding it to the function's existing global
+         declaration.
+         Verified directly: simulated 10 active symbols with known avg_
+         pnl_r rankings, set neuro_top_n=5 via apply_settings(), and
+         confirmed exactly the best 5 (by avg_pnl_r) survived in
+         _neuro_active_symbols/_neuro_patterns/_neuro_summary, the rest
+         correctly removed.
+         Verified: py_compile, pyflakes, node --check, 56 routes, real
+         runtime 200 confirming neuro_top_n correctly present and
+         settable via /api/settings, zero surrogate escapes.
