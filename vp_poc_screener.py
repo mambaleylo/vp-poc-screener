@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.244"
+APP_VERSION = "0.99.245"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -793,6 +793,8 @@ LSW_LIVE_MIN_SAMPLE = int(os.environ.get("VP_LSW_LIVE_MIN_SAMPLE", 30))  # a sym
 LSW_LIVE_MIN_WINRATE = float(os.environ.get("VP_LSW_LIVE_MIN_WINRATE", 50.0))  # raised 35->50, v0.99.138, per direct user request ("Подними порог для авто торговли 50% для монеты")
 AUTOTRADE_ENABLED_LSW = os.environ.get("VP_AUTOTRADE_LSW", "0") == "1"  # v0.99.120, per direct user request ("надо живые сигналы сделать и авто торговлю как и везде, тоже с риском 2%") — off by default like every other module's own autotrade toggle, opt-in via settings
 AUTOTRADE_LEVERAGE_LSW = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_LSW", 10))  # only used by sim_execute_trade()'s own separate paper-balance simulator (deliberately left on its own old leverage/size system, same as every other module) — execute_autotrade() itself computes real leverage automatically per-trade, same risk-based sizing every module shares (see execute_autotrade()'s own docstring)
+AUTOTRADE_ENABLED_NEURO = os.environ.get("VP_AUTOTRADE_NEURO", "0") == "1"  # v0.99.245, per direct user request ("надо сделать как в свип, настройки такие же, процент из настроек, расчет до ликвидации и ТП все так же") — same off-by-default, opt-in pattern as every other module's own toggle
+AUTOTRADE_LEVERAGE_NEURO = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_NEURO", 10))  # same role as AUTOTRADE_LEVERAGE_LSW — only the paper simulator's own fallback leverage, real orders go through execute_autotrade()'s automatic risk-based sizing
 TELEGRAM_ALERTS_LSW = os.environ.get("VP_TG_ALERTS_LSW", "1") == "1"
 TELEGRAM_ALERTS_EMA_BULL = os.environ.get("VP_TG_ALERTS_EMA_BULL", "1") == "1"
 # v0.99.121 — higher-timeframe trend filter, per direct user request
@@ -1035,7 +1037,7 @@ CREDENTIALS_FILE = os.environ.get(
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_nq", "telegram_alerts_network",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "msnr_all_in_enabled", "msnr_single_best_enabled",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled",
                   "autotrade_risk_pct",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   "lsw_rr", "lsw_equal_tolerance_pct",
@@ -1118,6 +1120,7 @@ def get_settings():
         "autotrade_msnr": AUTOTRADE_ENABLED_MSNR,
         "autotrade_mirror": AUTOTRADE_ENABLED_MIRROR,
         "autotrade_lsw": AUTOTRADE_ENABLED_LSW,
+        "autotrade_neuro": AUTOTRADE_ENABLED_NEURO,
         "scalp_min_rr": SCALP_MIN_RR,
         "scalp_sl_buffer_mult": SCALP_SL_BUFFER_MULT,
     }
@@ -1137,7 +1140,7 @@ def apply_settings(updates):
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED, LSW_ATR_SWEEP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_EMA_BULL, TELEGRAM_ALERTS_AMD, TELEGRAM_ALERTS_NEURO, TELEGRAM_ALERTS_NQ, TELEGRAM_ALERTS_NETWORK
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED, MSNR_SINGLE_BEST_ENABLED
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, AUTOTRADE_ENABLED_NEURO, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED, MSNR_SINGLE_BEST_ENABLED
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
@@ -1300,6 +1303,8 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_MIRROR = bool(updates["autotrade_mirror"])
     if "autotrade_lsw" in updates:
         AUTOTRADE_ENABLED_LSW = bool(updates["autotrade_lsw"])
+    if "autotrade_neuro" in updates:
+        AUTOTRADE_ENABLED_NEURO = bool(updates["autotrade_neuro"])
     if "telegram_alerts_hourly" in updates:
         TELEGRAM_ALERTS_HOURLY = bool(updates["telegram_alerts_hourly"])
     if "scalp_min_rr" in updates:
@@ -15296,14 +15301,45 @@ def neuro_live_loop():
                     category="neuro",
                 )
                 with _neuro_signal_log_lock:
-                    _neuro_signal_log.appendleft({
+                    record = {
                         "symbol": symbol, "direction": sig["direction"],
                         "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
                         "rr": sig.get("rr"), "score": sig.get("score"),
                         "time": sig_time, "detected_at": time.time(),
                         "status": "OPEN", "result": None,
                         "exit_price": None, "exit_time": None, "pnl_r": None,
-                    })
+                    }
+                    _neuro_signal_log.appendleft(record)
+                if AUTOTRADE_ENABLED_NEURO:
+                    # v0.99.245 — same live_universe-snapshot race guard as
+                    # LSW's/Mirror's own (v0.99.239): active_symbols above
+                    # is a one-time snapshot from the top of this pass; if
+                    # a mining cycle rebuilds _neuro_active_symbols WHILE
+                    # this pass is still scanning, re-check current
+                    # membership right before spending real money — the
+                    # signal stays logged either way.
+                    with _neuro_state_lock:
+                        still_active = symbol in _neuro_active_symbols
+                    if not still_active:
+                        log_error(f"neuro_live_loop {symbol}: signal fired but symbol was dropped from _neuro_active_symbols mid-scan — signal logged, real trade skipped")
+                        continue
+                    # v0.99.245 — per direct user request ("надо сделать как
+                    # в свип, настройки такие же, процент из настроек,
+                    # расчет до ликвидации и ТП все так же"): identical
+                    # call shape to LSW's/Mirror's own live trade-firing —
+                    # execute_autotrade() is the SAME shared function every
+                    # module's real orders go through, so Neuro
+                    # automatically inherits everything already built
+                    # there: risk-%-of-balance sizing from settings, tier-
+                    # aware safe leverage (v0.99.237/238/242), and fee-
+                    # aware position sizing so the realized SL loss matches
+                    # the configured risk % exactly (v0.99.243) — no
+                    # separate reimplementation, so it can never drift out
+                    # of sync with LSW's own behavior the way past copy-
+                    # pasted sizing logic has.
+                    autotrade_result = execute_autotrade("neuro", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
+                    sim_execute_trade("neuro", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                                       autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_NEURO, record)
             _neuro_prev_signal_keys = {(s, t) for s, t in new_keys.items()}
             neuro_track_signal_outcomes()
             save_neuro_state()  # v0.99.240 — persist any new fired signal / outcome update from this pass
@@ -18045,6 +18081,13 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeLsw"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Neuro</div>
+          <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча под безопасное расстояние до ликвидации и размера позиции, что и у Sweep/остальных режимов</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeNeuro"><span class="switchSlider"></span></label>
+      </div>
     </div>
 
     <div class="dim hint-block" style="font-size:12px;margin-top:16px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
@@ -20658,6 +20701,7 @@ const setInputs = {
   autotrade_msnr: document.getElementById('setAutotradeMsnr'),
   autotrade_mirror: document.getElementById('setAutotradeMirror'),
   autotrade_lsw: document.getElementById('setAutotradeLsw'),
+  autotrade_neuro: document.getElementById('setAutotradeNeuro'),
 };
 
 const setValueInputs = {
