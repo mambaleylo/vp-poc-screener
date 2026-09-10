@@ -13942,3 +13942,67 @@ v0.99.250 - Neuro's top-5 dependency list now shows in Russian, per
          Verified: py_compile (with -W error), pyflakes, node --check,
          56 routes, real runtime 200 on / and /api/neuro/status, zero
          surrogate escapes.
+
+v0.99.251 - TWO real bugs found and fixed, per direct user report of both
+         suspicions being correct:
+
+         1) CRITICAL: real Neuro entries could fire far from the
+         intended entry, degrading RR badly ("вход в сделку выполняется
+         не по entry, а чуть ли не возле рейка или стопа, нарушается rr,
+         тейк маленький"). Root cause: neuro_scan_live()'s entry is the
+         LAST CLOSED CANDLE's close price, but neuro_live_loop() only
+         checks every 900s (15 min) — not synced to candle-close
+         boundaries — so up to ~15 minutes can pass between "signal
+         detected at this price" and "the real market order (execute_
+         autotrade() places a true market order, price="0"/tif="ioc")
+         actually fills at whatever price is current then". The existing
+         pre-open check (added for a different, earlier report) only
+         rejected a signal if price had ALREADY moved PAST the sl — it
+         never checked the other direction, where price drifts
+         FAVORABLY toward tp during that gap. Since tp/sl get placed at
+         the ORIGINAL theoretical levels (not recalculated from the
+         actual fill), a large favorable drift leaves very little real
+         distance to tp left — exactly "тейк маленький" even though sl/
+         tp were computed with the intended RR.
+         Fix: new AUTOTRADE_MAX_FAVORABLE_DRIFT_R (0.5, i.e. half the
+         signal's own SL distance) — execute_autotrade()'s existing
+         fresh-price pre-open check now ALSO rejects the trade if
+         current price has already moved more than this many R toward
+         tp, symmetric to the existing SL-crossed check. Applies to
+         EVERY module via the shared execute_autotrade() path, not just
+         Neuro.
+
+         2) CRITICAL: both the Neuro BACKTEST and LIVE paths could open
+         overlapping trades on the same symbol ("бэктест считает все
+         точки входа, даже если открыта предыдущая сделка... не ждёт
+         закрытия, открывает множество сделок перекрывающих друг
+         друга?"). Confirmed yes on both:
+         - Backtest (neuro_simulate_trades()): the old gap check only
+           enforced min_gap — the SMALLEST of NEURO_FORWARD_HORIZONS (as
+           low as 4 bars) — between ENTRY bars (last_entry_i = i), while
+           a real trade can stay open up to NEURO_MAX_WAIT_BARS=48 bars.
+           Since 4 << 48, new "trades" could and did open while a
+           previous one on the same symbol was still fully unresolved —
+           inflating the trade count with overlapping, correlated
+           observations no real one-position-per-symbol account could
+           ever actually take simultaneously. Fixed by tracking the bar
+           index where the PREVIOUS trade actually resolved (its SL/TP
+           hit bar, or its timeout bar) and gating the next entry on
+           THAT instead of the old fixed small gap. Verified directly:
+           a persistently-true synthetic condition that used to produce
+           overlapping entries every ~4 bars now produces zero overlaps
+           across 215 real trades.
+         - Live (neuro_live_loop()): the `fired` dedup only keyed on
+           (symbol, sig_time) — catching re-firing the EXACT SAME
+           signal, but not catching a genuinely NEW signal on an hour
+           where the underlying condition (e.g. "weekend", which can
+           stay true for many consecutive hourly bars) is still true
+           while a PREVIOUS real position on that symbol hasn't closed
+           yet — meaning multiple overlapping REAL positions could pile
+           onto the same symbol. Fixed with a no-open-position guard
+           checking the persistent _neuro_signal_log for an existing
+           OPEN entry on that symbol before firing a new one — skipped
+           (not even logged) entirely while one is open, matching the
+           backtest's own new "doesn't count as a separate trade" logic.
+         Verified: py_compile (-W error), pyflakes, 56 routes, real
+         runtime 200 on / and /api/neuro/status.
