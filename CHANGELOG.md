@@ -14045,3 +14045,87 @@ v0.99.252 - CRITICAL FIX: Neuro's top-N ranking used FULL-HISTORY
          (-1.0R, all losses) correctly ranks it BELOW the steady coin.
          Verified: py_compile (-W error), pyflakes, 56 routes, real
          runtime 200 on / and /api/neuro/status.
+
+v0.99.253 - Full targeted audit of the Neuro module, per direct user
+         request ("сделай проверку полностью режима нейро, выяви
+         проблемы, нюансы... добавь ещё пачку параметров для
+         перебора"). Two real bugs found and fixed, plus a new batch of
+         6 condition types added.
+
+         BUG 1: neuro_mining_loop()'s automatic top-N cut was fixed in
+         v0.99.252 to rank by aggregate_recent's own avg_pnl_r (last 30
+         closed trades) instead of the full-history average — but
+         apply_settings()'s manual neuro_top_n trim (added in v0.99.247,
+         BEFORE that fix existed) was never updated to match, so it
+         still ranked by the old full-history figure. Two conceptually
+         identical "pick the best N" operations had silently drifted
+         onto different ranking criteria. Fixed by factoring the ranking
+         logic into a new shared neuro_rank_metric(summary) function,
+         used identically by both the automatic mining-loop cut and the
+         manual settings-driven trim.
+
+         BUG 2: neuro_scan_live() (the LIVE signal check, running every
+         15 min) independently re-fetched BTC's and ETH's OWN full 1h
+         history for EVERY non-BTC/ETH active symbol on every single
+         pass — the exact same redundant-fetch pattern already fixed
+         for the MINING loop back in v0.99.216, but never applied to the
+         live loop. With only ~5 active symbols post-v0.99.246 this is
+         far less severe than the original 20-coin case, but still a
+         real, avoidable inefficiency happening 96 times/day instead of
+         once. Fixed: neuro_scan_live() now accepts precomputed_btc_
+         candles/precomputed_eth_candles params (falls back to self-
+         fetching when not supplied), and neuro_live_loop() fetches
+         BTC/ETH's own history ONCE per 15-min pass and shares it across
+         every active symbol's scan.
+
+         Areas specifically reviewed and confirmed correct (no bug):
+         neuro_track_signal_outcomes() tracks purely off the persistent
+         signal log, independent of current top-N ranking, so a coin
+         rotating out of the active set doesn't lose outcome tracking
+         for an already-open trade; the no-open-position guard (v0.99.
+         251) checks the signal log directly, not tied to ranking
+         either; the favorable-drift check's division is guarded against
+         zero SL distance; the walk-forward train/test boundary doesn't
+         create a discontinuity in the overlap-prevention state (v0.99.
+         251) since simulation runs as one continuous pass over the
+         full candle series.
+
+         NEW: 6 additional condition types, added to NEURO_CONDITION_
+         KEYS (44 total now) and NEURO_COMBO_KEYS (37 total, daily_streak
+         excluded for the same too-many-distinct-values reason as the
+         existing intraday streak):
+         - bb_width_zone (squeeze/normal/expansion) — Bollinger Band
+           width normalized by price, a volatility lens based on closing-
+           price dispersion, genuinely distinct from the existing ATR-
+           based vol_regime (the two can and do diverge).
+         - obv_trend (rising/falling/flat) — On-Balance Volume trend,
+           whether volume has persistently supported or fought the
+           recent price direction, distinct from vol_zone's single-bar
+           level.
+         - supertrend_side (above/below) — classic ATR-based trend
+           overlay, "stickier" through noise than a simple EMA cross.
+         - rsi_divergence (bullish/bearish/none) — price makes a new
+           N-bar extreme but RSI fails to confirm it, a classic reversal
+           warning distinct from rsi_zone's simple oversold/overbought
+           level (a divergence can occur at any RSI level).
+         - daily_streak (up1-5/down1-5) — consecutive same-direction
+           DAILY candles aligned to each 1h bar, a genuinely different
+           timescale than the existing intraday hourly-candle streak.
+         - btc_vol_regime (high_vol/low_vol/normal_vol) — BTC's OWN
+           ATR-based volatility regime as broader-market context,
+           distinct from each symbol's own vol_regime.
+         All 6 formulas prototyped and verified standalone before
+         integration (sensible value ranges/distributions on synthetic
+         data), then validated end-to-end through neuro_compute_
+         conditions() and a full neuro_walk_forward() run on realistic-
+         scale (5000-bar) synthetic data — all 6 produced non-degenerate
+         distributions and appeared in genuinely confirmed dependencies
+         (2552 total confirmed, with 94-189 involving each of the 5
+         combo-eligible new keys).
+         Also extended the Russian display-translation dictionaries
+         (v0.99.250) with labels for all 6 new keys and their values,
+         including daily_streak's own dynamic up{N}/down{N} pattern
+         handling (mirroring the existing "streak" key's own logic).
+         Verified: py_compile (-W error), pyflakes, node --check, 56
+         routes, real runtime 200 on / and /api/neuro/status, zero
+         surrogate escapes.
