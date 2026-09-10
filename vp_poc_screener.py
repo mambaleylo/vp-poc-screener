@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.251"
+APP_VERSION = "0.99.252"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -15300,14 +15300,41 @@ def neuro_mining_loop():
                     _neuro_mining_done += 1
                     _neuro_mining_progress_ts = time.time()
 
-            # v0.99.236 — rank by avg_pnl_r, requiring at least NEURO_TOP_N_
-            # MIN_TRADES closed backtest trades before a coin is even
-            # eligible — per direct user request ("минимум выборки сделок
-            # чтобы не попасть монета с 3 сделками и случайным +5R").
+            # v0.99.252 — CRITICAL FIX, per direct user report of a real
+            # coin's "recent 40 signals" record looking terrible (~25.7%
+            # WR against a ~25% breakeven, effectively coin-flip) despite
+            # having made the top-N cut: ranking by FULL-HISTORY avg_pnl_r
+            # let an early great stretch mask a currently-bad one — a coin
+            # "shone in month 1, terrible since" still averages out to a
+            # decent number over the whole period. The decay/culprit-
+            # removal protections built earlier (v0.99.219-222) only ever
+            # gated NEW live signals going forward; they never fed back
+            # into this ranking step or the displayed trade history, so
+            # they couldn't have prevented exactly this. Fixed by ranking
+            # on aggregate_recent's own avg_pnl_r — the LAST NEURO_AGG_
+            # DECAY_WINDOW (30) closed trades' average, the SAME recency
+            # window already computed for decay detection — instead of
+            # the full-history one, so a coin currently on a bad stretch
+            # can no longer coast into the top on an inflated historical
+            # average. Falls back to the full-history figure only when a
+            # coin doesn't yet have enough recent trades for aggregate_
+            # recent's own verdict to be trustworthy (NEURO_AGG_DECAY_
+            # MIN_N=15) — a newly-added or rarely-firing symbol with too
+            # few recent trades shouldn't be unrankable outright, just
+            # judged on what's actually available. The overall min-
+            # trades floor (NEURO_TOP_N_MIN_TRADES, on the FULL history)
+            # stays as the base eligibility gate — per the user's own
+            # earlier request, unchanged.
+            def _rank_metric(res):
+                agg = res[2].get("aggregate_recent") or {}
+                if agg.get("n", 0) >= NEURO_AGG_DECAY_MIN_N and agg.get("avg_pnl_r") is not None:
+                    return agg["avg_pnl_r"]
+                return res[2].get("avg_pnl_r")
+
             eligible = [(sym, res) for sym, res in all_results.items()
                         if (res[2].get("n") or 0) >= NEURO_TOP_N_MIN_TRADES
                         and res[2].get("avg_pnl_r") is not None]
-            eligible.sort(key=lambda item: -item[1][2]["avg_pnl_r"])
+            eligible.sort(key=lambda item: -_rank_metric(item[1]))
             top = eligible[:NEURO_TOP_N]
             new_active = [sym for sym, _ in top]
 
