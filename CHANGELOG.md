@@ -14006,3 +14006,42 @@ v0.99.251 - TWO real bugs found and fixed, per direct user report of both
            backtest's own new "doesn't count as a separate trade" logic.
          Verified: py_compile (-W error), pyflakes, 56 routes, real
          runtime 200 on / and /api/neuro/status.
+
+v0.99.252 - CRITICAL FIX: Neuro's top-N ranking used FULL-HISTORY
+         avg_pnl_r, letting a coin with a great early stretch and a
+         terrible recent one still rank well — per direct user report
+         of a real coin whose visible "recent 40 signals" list worked
+         out to ~25.7% WR against a ~25% breakeven for its RR (a coin
+         flip) despite having made the top-N cut, and the user's own
+         suspicion ("средняя статистика позволила в топ попасть монете"
+         — average stats let a coin into the top — "первые месяцы
+         статистика была шикарной, потом ужасная в конце" — great early
+         months, terrible at the end).
+         Confirmed directly in the code (the comment was even already
+         there, unnoticed): the decay/culprit-removal protections built
+         earlier this session (v0.99.219-222) only ever gate NEW live
+         signals going forward — they never fed back into either the
+         ranking metric used for the top-N cut or the displayed "recent
+         N trades" history (which stays deliberately unaltered as the
+         honest historical record). Ranking on the FULL-history average
+         meant an early great run could mathematically outweigh a
+         currently bad one in the overall mean, with nothing in the
+         selection step aware that the coin's OWN recent trades look
+         nothing like its historical average anymore.
+         Fixed: neuro_mining_loop()'s top-N ranking now sorts on
+         aggregate_recent's own avg_pnl_r — the SAME last-
+         NEURO_AGG_DECAY_WINDOW(30)-closed-trades average already
+         computed for decay detection — instead of the full-history
+         figure, whenever a coin has enough recent trades for that
+         verdict to be trustworthy (NEURO_AGG_DECAY_MIN_N=15). Falls
+         back to the full-history average only for a coin that doesn't
+         yet have enough recent trades. The overall NEURO_TOP_N_MIN_
+         TRADES floor (on full history) stays as the base eligibility
+         gate, unchanged, per the user's own earlier request.
+         Verified directly with a synthetic case: a coin with 30 wins
+         (+3R) followed by 30 losses (-1R) — full-history average +1.0R
+         — used to rank ABOVE a consistently-modest coin averaging
+         +0.33R throughout; after the fix, its recent-30 average
+         (-1.0R, all losses) correctly ranks it BELOW the steady coin.
+         Verified: py_compile (-W error), pyflakes, 56 routes, real
+         runtime 200 on / and /api/neuro/status.
