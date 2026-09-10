@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.250"
+APP_VERSION = "0.99.251"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -962,6 +962,7 @@ AUTOTRADE_SIZE_MODE = os.environ.get("VP_AUTOTRADE_SIZE_MODE", "percent")  # "pe
 AUTOTRADE_SIZE_VALUE = float(os.environ.get("VP_AUTOTRADE_SIZE_VALUE", 2.0))  # percent: % of futures wallet balance; fixed: raw USD margin, leverage-independent either way
 AUTOTRADE_RISK_PCT_OF_BALANCE = float(os.environ.get("VP_AUTOTRADE_RISK_PCT", 5.0))  # v0.99.102, per direct user request ("надо чтобы размер позиции только можно было выбрать"): % of TOTAL account equity risked per trade if SL hits — drives the now-auto-computed leverage, replacing every module's own fixed leverage constant. The user picks position SIZE (margin, via AUTOTRADE_SIZE_MODE/VALUE above, unchanged); leverage is derived per-trade from this risk target, this signal's own SL distance, and the chosen margin — no longer a manual choice at all. v0.99.145 — default raised 2.0->5.0 and made settings-editable, per direct user request ("Риск на сделку сделай 5% с выбором в настройках")
 AUTOTRADE_EMERGENCY_SL_BUFFER_PCT = float(os.environ.get("VP_AUTOTRADE_EMERGENCY_SL_BUFFER_PCT", 0.3))  # v0.99.146, per direct user report (a signal fired after price had already moved past its own sl, opened anyway, the stop then failed to place, leaving a real position with nothing but liquidation as its actual stop) — when the SL leg of place_tp_sl_orders() fails on an already-open real position, ONE emergency retry is attempted at this % away from a freshly-fetched current price (not the original, now-invalid sl), per the user's own direct choice ("выставить маленький стоп если да" — a small protective stop, not an immediate market close)
+AUTOTRADE_MAX_FAVORABLE_DRIFT_R = float(os.environ.get("VP_AUTOTRADE_MAX_FAVORABLE_DRIFT_R", 0.5))  # v0.99.251, per direct user report ("иногда вход в сделку выполняется... чуть ли не возле рейка или стопа, нарушается rr, тейк маленький"): the existing pre-open check only rejected a signal if price had ALREADY moved PAST the sl by execution time — it never checked the OTHER direction, where price drifts FAVORABLY toward tp during the gap between signal detection (from a candle close that can be minutes old) and the actual market order firing. Since the market order fills at whatever price is current then, but tp/sl get placed at the ORIGINAL theoretical levels, a large favorable drift leaves very little real distance to tp — a much worse realized RR than the signal intended, even though the trade still "wins" on paper. Expressed in units of the signal's own SL distance (1R = the full entry-to-sl distance) so it scales naturally with each symbol's own volatility rather than a fixed price/percent threshold.
 MSNR_ALL_IN_ENABLED = os.environ.get("VP_MSNR_ALL_IN", "0") == "1"  # v0.99.157 — MSNR-only "ва-банк" mode: use ~95% of total equity as MARGIN per trade instead of AUTOTRADE_RISK_PCT_OF_BALANCE. Leverage is still auto-computed from the signal's own SL distance (same liquidation safety). Off by default.
 MSNR_ALL_IN_MARGIN_PCT = float(os.environ.get("VP_MSNR_ALL_IN_MARGIN_PCT", 95.0))
 SCALP_MARTINGALE_ENABLED = os.environ.get("VP_SCALP_MARTINGALE_ENABLED", "0") == "1"  # v0.99.109, per direct user request ("удвоение после стоплосса... классический мартингейл"): defaults OFF — a deliberate opt-in given the real, well-understood risk of exponentially escalating position size on a losing streak (a mathematically inevitable property of Martingale-style sizing, not a bug), not something that should silently activate for an existing account. See scalp_martingale_multiplier_for_symbol()'s own docstring for the full mechanics.
@@ -4281,6 +4282,31 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
                     with state_lock:
                         STATE["autotrade_log"].appendleft(record)
                     return record
+                # v0.99.251 — symmetric check for drift in the OTHER
+                # direction: entry/sl/tp were computed from a candle close
+                # that can be minutes old by now (see AUTOTRADE_MAX_
+                # FAVORABLE_DRIFT_R's own comment for the full mechanism).
+                # If price has already run more than half the SL distance
+                # toward tp, the real trade would open with far less
+                # actual reward left than the signal intended — skip
+                # rather than silently accept a degraded RR.
+                sl_dist_r = abs(entry - sl)
+                if sl_dist_r > 0:
+                    favorable_move = (current_price - entry) if direction == "LONG" else (entry - current_price)
+                    drift_r = favorable_move / sl_dist_r
+                    if drift_r > AUTOTRADE_MAX_FAVORABLE_DRIFT_R:
+                        record["status"] = "SKIPPED"
+                        record["detail"] = (f"цена ({current_price}) уже прошла {drift_r:.2f}R в сторону тейка "
+                                             f"к моменту открытия (лимит {AUTOTRADE_MAX_FAVORABLE_DRIFT_R}R) — "
+                                             f"сделка не открыта, реальный RR был бы сильно хуже расчётного")
+                        send_telegram(
+                            f"⚠️ {symbol} ({mode}): сигнал устарел — цена {current_price:.6g} уже прошла "
+                            f"{drift_r:.2f}R к тейку, не открыта",
+                            category=None,
+                        )
+                        with state_lock:
+                            STATE["autotrade_log"].appendleft(record)
+                        return record
 
             try:
                 reconcile_positions_and_orders()
@@ -14658,11 +14684,25 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
     conds = neuro_compute_conditions(candles, htf_candles, funding_records, btc_candles, d1_candles, oi_records, eth_candles)
     atr14 = neuro_atr_series(candles, 14)
     trades = []
-    last_entry_i = -10**9
-    min_gap = min((p.get("horizon") or NEURO_FORWARD_HORIZONS[0]) for p in confirmed_patterns)
+    occupied_until_i = -10**9
+    # v0.99.251 — CRITICAL FIX, per direct user report ("нет ли такой
+    # проблемы, когда бэктест считает все точки входа, даже если открыта
+    # предыдущая сделка... открывает множество сделок перекрывающих друг
+    # друга?"): confirmed yes. The old gap check only enforced min_gap —
+    # the SMALLEST of NEURO_FORWARD_HORIZONS (as low as 4 bars) — between
+    # ENTRY bars, using `last_entry_i = i` (the entry bar itself), while a
+    # real trade can stay open up to NEURO_MAX_WAIT_BARS=48 bars before
+    # timing out. Since 4 << 48, the backtest could and did open new
+    # "trades" while a previous one on the SAME symbol was still fully
+    # unresolved — inflating the trade count with overlapping, highly-
+    # correlated observations no real account (with one real position
+    # per symbol) could have actually taken simultaneously. Fixed by
+    # tracking the bar index where the PREVIOUS trade actually resolved
+    # (its SL/TP hit, or its timeout bar if neither hit in time) and
+    # gating the next entry on THAT instead of the old entry-based gap.
     for i in range(len(candles) - 1):
-        if i - last_entry_i < min_gap:
-            continue  # avoid overlapping trades from the same/adjacent bars
+        if i < occupied_until_i:
+            continue  # previous trade on this symbol hasn't resolved yet
         matched = None
         for p in confirmed_patterns:
             cur_val = _neuro_pattern_value(p, conds[i])
@@ -14682,18 +14722,19 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
         tp = entry + sl_dist * rr if direction == "LONG" else entry - sl_dist * rr
 
         result = "TIMEOUT"; exit_price = exit_time = None
+        exit_j = min(i + NEURO_MAX_WAIT_BARS, len(candles) - 1)  # default: occupied through the timeout bar even if the loop below never finds an explicit SL/TP hit
         for j in range(i + 1, min(i + 1 + NEURO_MAX_WAIT_BARS, len(candles))):
             b = candles[j]
             if direction == "LONG":
                 if b["low"] <= sl:
-                    result, exit_price, exit_time = "LOSS", sl, b["time"]; break
+                    result, exit_price, exit_time = "LOSS", sl, b["time"]; exit_j = j; break
                 if b["high"] >= tp:
-                    result, exit_price, exit_time = "WIN", tp, b["time"]; break
+                    result, exit_price, exit_time = "WIN", tp, b["time"]; exit_j = j; break
             else:
                 if b["high"] >= sl:
-                    result, exit_price, exit_time = "LOSS", sl, b["time"]; break
+                    result, exit_price, exit_time = "LOSS", sl, b["time"]; exit_j = j; break
                 if b["low"] <= tp:
-                    result, exit_price, exit_time = "WIN", tp, b["time"]; break
+                    result, exit_price, exit_time = "WIN", tp, b["time"]; exit_j = j; break
 
         pnl_r = None
         if exit_price:
@@ -14710,7 +14751,7 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
             "exit_price": round(exit_price, 8) if exit_price else None,
             "exit_time": exit_time, "pnl_r": pnl_r,
         })
-        last_entry_i = i
+        occupied_until_i = exit_j
     return trades
 
 
@@ -15354,6 +15395,22 @@ def neuro_live_loop():
                      if (s, t) not in _neuro_prev_signal_keys}
             for symbol, sig_time in fired.items():
                 sig = new_signals[symbol]
+                # v0.99.251 — no-open-position guard, per direct user
+                # report ("бэктест считает все точки входа, даже если
+                # открыта предыдущая сделка... не ждёт закрытия"). The
+                # same underlying condition can stay true across several
+                # consecutive hourly bars (e.g. "weekend"), so `fired`'s
+                # own (symbol, sig_time) dedup alone would let a genuinely
+                # NEW signal fire — and a real trade open — every single
+                # hour the condition holds, piling multiple overlapping
+                # REAL positions onto the same symbol. Skip (but still
+                # log) a new signal while the previous one on this symbol
+                # is still OPEN in the persistent live-signal log.
+                with _neuro_signal_log_lock:
+                    already_open = any(s["symbol"] == symbol and s["status"] == "OPEN" for s in _neuro_signal_log)
+                if already_open:
+                    log_error(f"neuro_live_loop {symbol}: new signal detected but a previous one is still OPEN — signal skipped entirely (no log entry, no trade) to avoid piling into the same symbol")
+                    continue
                 arrow = "\u2b06\ufe0f" if sig["direction"] == "LONG" else "\u2b07\ufe0f"
                 pat_txt = ", ".join(f"{p['type']}={p['value']}(z={p['z']})" for p in sig["patterns"][:3])
                 send_telegram(
