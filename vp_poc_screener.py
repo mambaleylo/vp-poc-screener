@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.252"
+APP_VERSION = "0.99.253"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1222,7 +1222,7 @@ def apply_settings(updates):
                 if len(current_active) > new_top_n:
                     ranked = sorted(
                         current_active,
-                        key=lambda s: -(_neuro_summary.get(s, {}).get("avg_pnl_r") or float("-inf")),
+                        key=lambda s: -(neuro_rank_metric(_neuro_summary.get(s, {})) or float("-inf")),
                     )
                     keep = set(ranked[:new_top_n])
                     for sym in list(_neuro_patterns.keys()):
@@ -13935,6 +13935,97 @@ def _neuro_align_recent_signals(candles, raw_sigs, lookback_bars=4):
     return out
 
 
+def neuro_bb_width_series(closes, period=20):
+    """Bollinger Band width (normalized by mean price) — a volatility
+    SQUEEZE/EXPANSION measure distinct from the existing ATR-based
+    vol_regime: BB width reflects dispersion of CLOSING prices over a
+    shorter window, ATR reflects true range including gaps/wicks — the
+    two can and do diverge (e.g. quiet closes with occasional violent
+    wicks vs steadily widening closes with tame wicks)."""
+    out = [None] * len(closes)
+    for i in range(period - 1, len(closes)):
+        window = closes[i - period + 1:i + 1]
+        mean = sum(window) / period
+        if mean <= 0:
+            continue
+        var = sum((x - mean) ** 2 for x in window) / period
+        out[i] = (4 * var ** 0.5) / mean
+    return out
+
+
+def neuro_obv_series(candles):
+    """On-Balance Volume — cumulative volume-weighted direction. A
+    genuinely different momentum lens than vol_zone (a single bar's
+    volume level) or vol_regime (ATR-based): OBV accumulates volume in
+    the direction of each bar's own close-to-close move, so its TREND
+    reflects whether volume has been persistently supporting the recent
+    price direction or fighting it."""
+    obv = [0.0] * len(candles)
+    for i in range(1, len(candles)):
+        if candles[i]["close"] > candles[i - 1]["close"]:
+            obv[i] = obv[i - 1] + candles[i]["volume"]
+        elif candles[i]["close"] < candles[i - 1]["close"]:
+            obv[i] = obv[i - 1] - candles[i]["volume"]
+        else:
+            obv[i] = obv[i - 1]
+    return obv
+
+
+def neuro_supertrend_series(candles, period=10, mult=3.0):
+    """Classic ATR-based Supertrend — a trend-following overlay with a
+    genuinely different shape than EMA-side/MACD: it flips only when
+    price closes decisively through a volatility-adjusted band, giving
+    it more "stickiness" through noise than a simple moving-average
+    cross."""
+    atr = neuro_atr_series(candles, period)
+    out = [None] * len(candles)
+    final_upper = final_lower = None
+    cur_trend = 1
+    for i in range(len(candles)):
+        if atr[i] is None:
+            continue
+        c = candles[i]
+        hl2 = (c["high"] + c["low"]) / 2
+        basic_upper = hl2 + mult * atr[i]
+        basic_lower = hl2 - mult * atr[i]
+        if final_upper is None:
+            final_upper, final_lower = basic_upper, basic_lower
+        else:
+            final_upper = basic_upper if (basic_upper < final_upper or candles[i - 1]["close"] > final_upper) else final_upper
+            final_lower = basic_lower if (basic_lower > final_lower or candles[i - 1]["close"] < final_lower) else final_lower
+        if c["close"] > final_upper:
+            cur_trend = 1
+        elif c["close"] < final_lower:
+            cur_trend = -1
+        out[i] = "above" if cur_trend == 1 else "below"
+    return out
+
+
+def neuro_rsi_divergence_series(candles, rsi_series_vals, lookback=14):
+    """Classic bullish/bearish RSI divergence: price makes a new N-bar
+    extreme but RSI fails to confirm it — a well-known reversal-warning
+    pattern distinct from rsi_zone's own simple level (oversold/
+    overbought), since a divergence can occur at ANY RSI level, not
+    just the extremes."""
+    out = [None] * len(candles)
+    for i in range(lookback, len(candles)):
+        if rsi_series_vals[i] is None or rsi_series_vals[i - lookback] is None:
+            continue
+        window_low_idx = min(range(i - lookback, i + 1), key=lambda k: candles[k]["low"])
+        window_high_idx = max(range(i - lookback, i + 1), key=lambda k: candles[k]["high"])
+        if (window_low_idx == i and candles[i]["low"] < candles[i - lookback]["low"]
+                and rsi_series_vals[i] is not None and rsi_series_vals[i - lookback] is not None
+                and rsi_series_vals[i] > rsi_series_vals[i - lookback]):
+            out[i] = "bullish"
+        elif (window_high_idx == i and candles[i]["high"] > candles[i - lookback]["high"]
+                and rsi_series_vals[i] is not None and rsi_series_vals[i - lookback] is not None
+                and rsi_series_vals[i] < rsi_series_vals[i - lookback]):
+            out[i] = "bearish"
+        else:
+            out[i] = "none"
+    return out
+
+
 def neuro_align_lsw_sweep(candles, lookback_bars=4):
     """v0.99.233 — 'symbiosis' condition, per direct user request: reuses
     LSW's OWN real liquidity-sweep detector directly on the SAME 1h
@@ -13988,6 +14079,67 @@ def neuro_align_h4_rsi(candles, h4_candles, period=14):
         else:
             r = h4_rsi[j]
             out.append("low" if r < 30 else "high" if r > 70 else "mid")
+    return out
+
+
+def neuro_align_daily_streak(candles, d1_candles):
+    """Consecutive same-direction DAILY candles, aligned to each 1h bar —
+    a genuinely different timescale than the existing intraday "streak"
+    (consecutive same-color HOURLY bars); a market can easily be choppy
+    intrabar while still closing green/red for several days running, or
+    vice versa."""
+    if not d1_candles or len(d1_candles) < 5:
+        return [None] * len(candles)
+    d1_times = [c["time"] for c in d1_candles]
+    d1_streak = [None] * len(d1_candles)
+    cur_dir, cur_len = None, 0
+    for i, c in enumerate(d1_candles):
+        d = "up" if c["close"] > c["open"] else "down" if c["close"] < c["open"] else None
+        if d is None:
+            d1_streak[i] = None
+            continue
+        if d == cur_dir:
+            cur_len += 1
+        else:
+            cur_dir, cur_len = d, 1
+        capped = min(cur_len, 5)
+        d1_streak[i] = f"{cur_dir}{capped}"
+    out = []
+    j = -1
+    for c in candles:
+        while j + 1 < len(d1_times) and d1_times[j + 1] <= c["time"]:
+            j += 1
+        out.append(d1_streak[j] if j >= 0 else None)
+    return out
+
+
+def neuro_align_btc_vol_regime(candles, btc_candles):
+    """BTC's OWN ATR-based volatility regime, aligned to each bar — the
+    broader market's current volatility backdrop, distinct from each
+    symbol's own vol_regime (an altcoin can be calm while BTC itself is
+    thrashing, or vice versa — a regime shift in BTC often precedes or
+    accompanies moves across the whole market)."""
+    if not btc_candles or len(btc_candles) < 110:
+        return [None] * len(candles)
+    btc_atr = neuro_atr_series(btc_candles, 14)
+    btc_times = [c["time"] for c in btc_candles]
+    btc_regime = [None] * len(btc_candles)
+    for i in range(100, len(btc_candles)):
+        if not btc_atr[i]:
+            continue
+        recent = [a for a in btc_atr[i - 100:i] if a]
+        if not recent:
+            continue
+        avg_atr = sum(recent) / len(recent)
+        if avg_atr > 0:
+            vr = btc_atr[i] / avg_atr
+            btc_regime[i] = "high_vol" if vr >= 1.4 else "low_vol" if vr <= 0.7 else "normal_vol"
+    out = []
+    j = -1
+    for c in candles:
+        while j + 1 < len(btc_times) and btc_times[j + 1] <= c["time"]:
+            j += 1
+        out.append(btc_regime[j] if j >= 0 else None)
     return out
 
 
@@ -14150,6 +14302,12 @@ def neuro_compute_conditions(candles, htf_candles=None, funding_records=None, bt
     h4_rsi_zone = neuro_align_h4_rsi(candles, htf_candles) if htf_candles else [None] * len(candles)
     lsw_sweep = neuro_align_lsw_sweep(candles)  # no extra data needed — computed straight from `candles` itself
     mirror_signal = neuro_align_mirror_signal(candles)  # same — no extra data needed
+    bb_width = neuro_bb_width_series(closes)  # no extra data needed
+    obv = neuro_obv_series(candles)  # no extra data needed
+    supertrend = neuro_supertrend_series(candles)  # no extra data needed
+    rsi_divergence = neuro_rsi_divergence_series(candles, rsi14)  # reuses the already-computed rsi14 series
+    daily_streak = neuro_align_daily_streak(candles, d1_candles) if d1_candles else [None] * len(candles)
+    btc_vol_regime = neuro_align_btc_vol_regime(candles, btc_candles) if btc_candles else [None] * len(candles)
 
     conds = []
     streak = 0
@@ -14216,6 +14374,26 @@ def neuro_compute_conditions(candles, htf_candles=None, funding_records=None, bt
             bucket["lsw_sweep"] = lsw_sweep[i]
         if mirror_signal[i] is not None:
             bucket["mirror_signal"] = mirror_signal[i]
+        if bb_width[i] is not None and i >= 40:
+            recent_bbw = [w for w in bb_width[max(0, i - 100):i] if w is not None]
+            if recent_bbw:
+                avg_bbw = sum(recent_bbw) / len(recent_bbw)
+                if avg_bbw > 0:
+                    ratio = bb_width[i] / avg_bbw
+                    bucket["bb_width_zone"] = "squeeze" if ratio <= 0.6 else "expansion" if ratio >= 1.6 else "normal"
+        if i >= 20:
+            recent_obv = [obv[k] for k in range(max(0, i - 20), i + 1)]
+            if len(recent_obv) >= 2 and recent_obv[0] != recent_obv[-1]:
+                obv_change_pct = (recent_obv[-1] - recent_obv[0]) / (abs(recent_obv[0]) + 1e-9)
+                bucket["obv_trend"] = "rising" if obv_change_pct > 0.05 else "falling" if obv_change_pct < -0.05 else "flat"
+        if supertrend[i] is not None:
+            bucket["supertrend_side"] = supertrend[i]
+        if rsi_divergence[i] is not None:
+            bucket["rsi_divergence"] = rsi_divergence[i]
+        if daily_streak[i] is not None:
+            bucket["daily_streak"] = daily_streak[i]
+        if btc_vol_regime[i] is not None:
+            bucket["btc_vol_regime"] = btc_vol_regime[i]
         if williams_r[i] is not None:
             w = williams_r[i]
             bucket["williams_zone"] = "oversold" if w <= -80 else "overbought" if w >= -20 else "mid"
@@ -14333,12 +14511,16 @@ NEURO_CONDITION_KEYS = ("hour", "dow", "dom_third", "weekend", "session", "rsi_z
                         "body_zone", "streak", "range_pos", "dd_zone", "htf_trend", "daily_trend",
                         "funding_zone", "btc_agree", "oi_trend", "eth_agree", "h4_rsi_zone",
                         "williams_zone", "adx_zone", "vwap_side", "ichimoku", "roc_zone",
-                        "wick_dominance", "round_number", "atr_trend", "lsw_sweep", "mirror_signal")
+                        "wick_dominance", "round_number", "atr_trend", "lsw_sweep", "mirror_signal",
+                        "bb_width_zone", "obv_trend", "supertrend_side", "rsi_divergence",
+                        "daily_streak", "btc_vol_regime")
 
 # Curated subset used for PAIRWISE combinations — deliberately excludes "hour"
 # and "streak" (too many distinct values, would dilute sample sizes and
 # explode the hypothesis count); "session"/"weekend" are the coarser
 # time-of-day/day-type substitutes that DO go into combos instead.
+# "daily_streak" excluded for the same reason as "streak" (up to 10
+# distinct dir+count values).
 # Combos get a stricter min_sample/z_threshold below since testing hundreds
 # of pairs raises real false-discovery risk — same "don't fool yourself"
 # discipline as the single-condition walk-forward.
@@ -14347,7 +14529,8 @@ NEURO_COMBO_KEYS = ("dow", "weekend", "session", "rsi_zone", "stoch_zone", "ema2
                     "vol_regime", "range_zone", "dd_zone", "htf_trend", "daily_trend", "funding_zone",
                     "btc_agree", "oi_trend", "dom_third", "eth_agree", "h4_rsi_zone", "williams_zone",
                     "adx_zone", "vwap_side", "ichimoku", "roc_zone", "wick_dominance", "atr_trend",
-                    "lsw_sweep", "mirror_signal")
+                    "lsw_sweep", "mirror_signal", "bb_width_zone", "obv_trend", "supertrend_side",
+                    "rsi_divergence", "btc_vol_regime")
 NEURO_FORWARD_HORIZONS = [4, 12, 24]  # test several forward-looking windows independently
 NEURO_COMBO_MIN_SAMPLE_MULT = 2.0   # combos need more samples to trust (more hypotheses tested)
 NEURO_COMBO_Z_BONUS = 0.5           # and a higher bar on z, same reasoning
@@ -14805,6 +14988,23 @@ def neuro_pick_best_rr(train_candles, confirmed_patterns, htf_candles=None, fund
     return best_rr, sweep
 
 
+def neuro_rank_metric(summary):
+    """v0.99.253 — shared ranking metric for BOTH neuro_mining_loop()'s
+    own top-N cut and apply_settings()'s manual neuro_top_n trim — factored
+    out after finding the two had drifted apart (v0.99.252 fixed the
+    former to rank by recent-30 avg_pnl_r, but left the latter still
+    ranking by the old full-history figure, exactly the same class of
+    stale-average problem being fixed). Prefers aggregate_recent's own
+    avg_pnl_r (last NEURO_AGG_DECAY_WINDOW closed trades) whenever there
+    are enough of them to trust (NEURO_AGG_DECAY_MIN_N), falling back to
+    the full-history figure only when a coin doesn't have enough recent
+    trades yet for the recent verdict to be meaningful."""
+    agg = summary.get("aggregate_recent") or {}
+    if agg.get("n", 0) >= NEURO_AGG_DECAY_MIN_N and agg.get("avg_pnl_r") is not None:
+        return agg["avg_pnl_r"]
+    return summary.get("avg_pnl_r")
+
+
 def neuro_check_aggregate_decay(trades, chosen_rr):
     """Aggregate, pattern-agnostic recency check: look at the actual
     combined outcome of the last NEURO_AGG_DECAY_WINDOW closed trades for
@@ -14993,7 +15193,7 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
         return [], [], {}
 
 
-def neuro_scan_live(symbol, confirmed_patterns, rr=None):
+def neuro_scan_live(symbol, confirmed_patterns, rr=None, precomputed_btc_candles=None, precomputed_eth_candles=None):
     """Check the most recently closed bar's conditions against this symbol's
     confirmed dependencies (single + combo); combine agreeing ones into a
     single signal. `rr` should be this symbol's own auto-tuned value from
@@ -15001,7 +15201,16 @@ def neuro_scan_live(symbol, confirmed_patterns, rr=None):
     Patterns implicated in a recent bad aggregate stretch are already
     purged from `confirmed_patterns` by neuro_backtest_symbol (see
     neuro_find_culprit_patterns()) before this is ever called — no
-    separate whole-symbol mute needed here anymore."""
+    separate whole-symbol mute needed here anymore.
+    v0.99.253 — precomputed_btc_candles/precomputed_eth_candles let the
+    caller (neuro_live_loop(), scanning all active symbols every 15 min)
+    fetch BTC's/ETH's OWN 1h history ONCE per pass and reuse it for every
+    other symbol's correlation check, instead of every symbol
+    independently re-fetching the exact same BTC+ETH history on every
+    single pass — the same redundant-fetch bug already fixed for the
+    mining loop back in v0.99.216, found still present here during a
+    full audit of the module. Falls back to self-fetching when not
+    supplied (e.g. a standalone/manual call)."""
     rr = rr if rr is not None else NEURO_RR
     try:
         if not confirmed_patterns:
@@ -15024,11 +15233,17 @@ def neuro_scan_live(symbol, confirmed_patterns, rr=None):
             oi_records = get_contract_stats(symbol, interval="1h", limit=200)
         except Exception as e:
             log_error(f"neuro_scan_live {symbol} OI: {e}")
-        btc_candles = None
-        if symbol != "BTC_USDT":
+        if symbol == "BTC_USDT":
+            btc_candles = None
+        elif precomputed_btc_candles is not None:
+            btc_candles = precomputed_btc_candles
+        else:
             btc_candles = get_candles_range("BTC_USDT", NEURO_TF, start_ts, now) or []
-        eth_candles = None
-        if symbol != "ETH_USDT":
+        if symbol == "ETH_USDT":
+            eth_candles = None
+        elif precomputed_eth_candles is not None:
+            eth_candles = precomputed_eth_candles
+        else:
             eth_candles = get_candles_range("ETH_USDT", NEURO_TF, start_ts, now) or []
 
         conds = neuro_compute_conditions(closed_candles, htf_candles, funding_records, btc_candles, d1_candles, oi_records, eth_candles)
@@ -15325,16 +15540,10 @@ def neuro_mining_loop():
             # trades floor (NEURO_TOP_N_MIN_TRADES, on the FULL history)
             # stays as the base eligibility gate — per the user's own
             # earlier request, unchanged.
-            def _rank_metric(res):
-                agg = res[2].get("aggregate_recent") or {}
-                if agg.get("n", 0) >= NEURO_AGG_DECAY_MIN_N and agg.get("avg_pnl_r") is not None:
-                    return agg["avg_pnl_r"]
-                return res[2].get("avg_pnl_r")
-
             eligible = [(sym, res) for sym, res in all_results.items()
                         if (res[2].get("n") or 0) >= NEURO_TOP_N_MIN_TRADES
                         and res[2].get("avg_pnl_r") is not None]
-            eligible.sort(key=lambda item: -_rank_metric(item[1]))
+            eligible.sort(key=lambda item: -neuro_rank_metric(item[1][2]))
             top = eligible[:NEURO_TOP_N]
             new_active = [sym for sym, _ in top]
 
@@ -15408,12 +15617,31 @@ def neuro_live_loop():
                 patterns_snapshot = dict(_neuro_patterns)
                 summary_snapshot = dict(_neuro_summary)
                 active_symbols = list(_neuro_active_symbols)
+            # v0.99.253 — same shared BTC/ETH prefetch already applied to
+            # the mining loop back in v0.99.216, found still missing here
+            # during a full audit: with only ~5 active symbols this isn't
+            # nearly as costly as the original 20-coin case, but it's the
+            # exact same unnecessary redundant fetch, happening on every
+            # 15-min pass instead of once/day like the mining loop.
+            now_ts = int(time.time())
+            neuro_live_start_ts = now_ts - 250 * INTERVAL_SECONDS.get(NEURO_TF, 3600)
+            shared_btc_candles = shared_eth_candles = None
+            try:
+                shared_btc_candles = get_candles_range("BTC_USDT", NEURO_TF, neuro_live_start_ts, now_ts) or []
+            except Exception as e:
+                log_error(f"neuro_live_loop: shared BTC prefetch failed: {e}")
+            try:
+                shared_eth_candles = get_candles_range("ETH_USDT", NEURO_TF, neuro_live_start_ts, now_ts) or []
+            except Exception as e:
+                log_error(f"neuro_live_loop: shared ETH prefetch failed: {e}")
             new_signals = {}
             for symbol in active_symbols:
                 confirmed = patterns_snapshot.get(symbol) or []
                 sym_summary = summary_snapshot.get(symbol) or {}
                 chosen_rr = sym_summary.get("chosen_rr")
-                sig = neuro_scan_live(symbol, confirmed, rr=chosen_rr)
+                sig = neuro_scan_live(symbol, confirmed, rr=chosen_rr,
+                                       precomputed_btc_candles=shared_btc_candles,
+                                       precomputed_eth_candles=shared_eth_candles)
                 new_signals[symbol] = sig
             with _neuro_state_lock:
                 _neuro_live_signals.update(new_signals)
@@ -20054,6 +20282,9 @@ const NEURO_KEY_LABELS = {
   adx_zone: '\u0441\u0438\u043b\u0430 \u0442\u0440\u0435\u043d\u0434\u0430 (ADX)', vwap_side: '\u0446\u0435\u043d\u0430 \u043e\u0442 VWAP', ichimoku: '\u043e\u0431\u043b\u0430\u043a\u043e \u0418\u0448\u0438\u043c\u043e\u043a\u0443',
   roc_zone: 'momentum (ROC)', wick_dominance: '\u0444\u0438\u0442\u0438\u043b\u044c \u0441\u0432\u0435\u0447\u0438', round_number: '\u043a\u0440\u0443\u0433\u043b\u043e\u0435 \u0447\u0438\u0441\u043b\u043e',
   atr_trend: '\u0442\u0440\u0435\u043d\u0434 \u0432\u043e\u043b\u0430\u0442\u0438\u043b\u044c\u043d\u043e\u0441\u0442\u0438 (ATR)', lsw_sweep: '\u0441\u0438\u0433\u043d\u0430\u043b Sweep', mirror_signal: '\u0441\u0438\u0433\u043d\u0430\u043b \u0417\u0435\u0440\u043a\u0430\u043b\u043e',
+  bb_width_zone: '\u0448\u0438\u0440\u0438\u043d\u0430 \u043f\u043e\u043b\u043e\u0441 \u0411\u043e\u043b\u043b\u0438\u043d\u0434\u0436\u0435\u0440\u0430', obv_trend: '\u0442\u0440\u0435\u043d\u0434 OBV (\u043e\u0431\u044a\u0451\u043c)',
+  supertrend_side: '\u0441\u0442\u043e\u0440\u043e\u043d\u0430 Supertrend', rsi_divergence: '\u0434\u0438\u0432\u0435\u0440\u0433\u0435\u043d\u0446\u0438\u044f RSI',
+  daily_streak: '\u0434\u043d\u0435\u0432\u043d\u0430\u044f \u0441\u0435\u0440\u0438\u044f', btc_vol_regime: '\u0432\u043e\u043b\u0430\u0442\u0438\u043b\u044c\u043d\u043e\u0441\u0442\u044c BTC',
 };
 const NEURO_VALUE_LABELS = {
   low: '\u043d\u0438\u0437\u043a\u0438\u0439', high: '\u0432\u044b\u0441\u043e\u043a\u0438\u0439', mid: '\u0441\u0440\u0435\u0434\u043d\u0438\u0439', normal: '\u043e\u0431\u044b\u0447\u043d\u044b\u0439',
@@ -20071,6 +20302,8 @@ const NEURO_VALUE_LABELS = {
   bear_cross: '\u043c\u0435\u0434\u0432\u0435\u0436\u044c\u0435 \u043f\u0435\u0440\u0435\u0441\u0435\u0447\u0435\u043d\u0438\u0435', big: '\u0431\u043e\u043b\u044c\u0448\u043e\u0439', small: '\u043c\u0430\u043b\u0435\u043d\u044c\u043a\u0438\u0439',
   near_high: '\u0443 \u0445\u0430\u044f', near_low: '\u0443 \u043b\u043e\u044f', asian: '\u0430\u0437\u0438\u0430\u0442\u0441\u043a\u0430\u044f', london: '\u043b\u043e\u043d\u0434\u043e\u043d\u0441\u043a\u0430\u044f',
   london_ny_overlap: '\u043b\u043e\u043d\u0434\u043e\u043d+\u041d\u042c', ny: '\u043d\u044c\u044e-\u0439\u043e\u0440\u043a\u0441\u043a\u0430\u044f', off_hours: '\u0432\u043d\u0435 \u0441\u0435\u0441\u0441\u0438\u0439',
+  squeeze: '\u0441\u0436\u0430\u0442\u0438\u0435', expansion: '\u0440\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u0438\u0435', bullish: '\u0431\u044b\u0447\u044c\u044f', bearish: '\u043c\u0435\u0434\u0432\u0435\u0436\u044c\u044f',
+  high_vol: '\u0432\u044b\u0441\u043e\u043a\u0430\u044f', low_vol: '\u043d\u0438\u0437\u043a\u0430\u044f', normal_vol: '\u043e\u0431\u044b\u0447\u043d\u0430\u044f',
 };
 const NEURO_DOW_NAMES = ['\u041f\u043d','\u0412\u0442','\u0421\u0440','\u0427\u0442','\u041f\u0442','\u0421\u0431','\u0412\u0441'];
 function neuroTranslateValue(key, val) {
@@ -20079,6 +20312,10 @@ function neuroTranslateValue(key, val) {
   if (key === 'streak') {
     const m = val.match(/^(up|down|na)([0-9]+)$/);
     if (m) return (m[1]==='up'?'\u0440\u043e\u0441\u0442 ':m[1]==='down'?'\u043f\u0430\u0434\u0435\u043d\u0438\u0435 ':'\u043d\u0435\u0442 ') + m[2] + '\u0431\u0430\u0440';
+  }
+  if (key === 'daily_streak') {
+    const m = val.match(/^(up|down)([0-9]+)$/);
+    if (m) return (m[1]==='up'?'\u0440\u043e\u0441\u0442 ':'\u043f\u0430\u0434\u0435\u043d\u0438\u0435 ') + m[2] + '\u0434\u043d.';
   }
   return NEURO_VALUE_LABELS[val] || val;
 }
