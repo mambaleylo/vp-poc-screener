@@ -14178,3 +14178,115 @@ v0.99.254 - 3 more condition types added to Neuro, per direct user
          Verified: py_compile (-W error), pyflakes, node --check, 56
          routes, real runtime 200 on / and /api/neuro/status, zero
          surrogate escapes.
+
+v0.99.255 - "Veto filter" second layer for Neuro, per direct user
+         request ("есть смысл на бэктесте к сделкам по стопам отдельно
+         прогнать ещё раз фильтры, может можно спасти часть сделок?").
+         Flagged the overfitting trap in the literal framing first (re-
+         running filters against ALREADY-KNOWN historical losses and
+         re-measuring on the SAME data would almost certainly "improve"
+         the backtest by curve-fitting to noise in that specific sample,
+         telling you nothing about future trades) — user confirmed
+         wanting it built the honest way regardless of fewer "saved"
+         trades.
+         A GENUINELY DIFFERENT question than the main mining loop's own
+         ("does condition X predict forward return"): given a CONFIRMED
+         pattern already fired a trade, does some EXTRA condition at
+         entry time discriminate between THAT pattern's own wins and
+         losses? New neuro_find_veto_filters(): for each pattern with
+         enough TRAIN trades (30+), finds the OTHER condition value with
+         the biggest win-rate lift over the pattern's own overall TRAIN
+         win rate (15+ pp lift, 10+ trades in that value-slice) — then
+         VALIDATES the SAME filter against the pattern's own TEST-period
+         trades, requiring the TEST lift retain at least half the TRAIN
+         lift before trusting it. Only patterns that pass BOTH stages
+         get a veto_filter attached.
+         Verified the discipline works as intended with two targeted
+         synthetic tests: a GENUINE relationship (holds in both train
+         and test) was correctly discovered and validated (82.4%/81.8%
+         train/test win rates vs 43% baseline); a SPURIOUS train-only
+         relationship (pure chance correlation, no real effect in test)
+         was correctly REJECTED — no veto filter returned. On fully
+         random realistic-scale synthetic data (9500 bars, no genuine
+         edge anywhere), the search correctly found zero veto filters
+         rather than fabricating false positives.
+         Wired into neuro_backtest_symbol() right after trade
+         simulation (adds ~20s/symbol from recomputing conditions once
+         more — 77.4s total vs ~57s before, still well under the 480s
+         per-symbol ceiling) and into neuro_scan_live()'s matching loop
+         (a pattern whose veto condition isn't satisfied right now gets
+         skipped for THIS signal, same treatment as a decaying pattern,
+         without being dropped from the confirmed list). Added a "🛡️
+         вето-фильтр" badge with a tooltip (train/test win rates, sample
+         sizes) to the top-patterns display for transparency.
+         Verified: py_compile (-W error), pyflakes, node --check, 58
+         routes, real runtime 200, zero surrogate escapes (caught and
+         fixed a shield-emoji surrogate-pair mistake before shipping —
+         the same trap this codebase has hit before — via the mandatory
+         pre-push scan).
+
+v0.99.256 - Fixed Neuro's silent Telegram notifications and a stale-
+         display bug in its own errors panel, per direct user report
+         ("исправь еще в нейро уведомления, никакие не приходят, ни о
+         статистике бэктеста, ни живые сигналы") plus a follow-up
+         request for a non-destructive backtest restart button.
+
+         BUG 1 (confirmed, fixed): v0.99.248's backtest-summary message
+         used category="neuro" — the SAME category as live-signal
+         alerts — so send_telegram()'s gating checked TELEGRAM_ALERTS_
+         NEURO instead of the dedicated TELEGRAM_ALERTS_NEURO_SUMMARY
+         toggle built specifically for it. A user who enabled "Сводка
+         бэктеста Neuro" without separately confirming "Алерты Neuro"
+         (live signals) was on would see the summary silently gated by
+         the WRONG toggle. Fixed: summary now uses its own "neuro_
+         summary" category, matching its own dedicated setting.
+
+         LIVE SIGNALS investigated at length: user confirmed real trades
+         DO open on the exchange (proving neuro_live_loop() reaches and
+         executes send_telegram() — it's the very next line before
+         execute_autotrade() in the same code block, with only the no-
+         open-position guard in between) and confirmed "Алерты Neuro" IS
+         enabled. Structural code review found no additional bug in
+         send_telegram()'s own gating or the live-loop's dedup logic;
+         the remaining likely explanations are delivery-level (the
+         shared 200-slot Telegram queue silently drops a message if
+         full under sustained load from other modules, or an HTTP-level
+         rejection) — both already logged via log_error() when they
+         happen, but the user had no way to actually SEE that log.
+
+         BUG 2 (found while investigating BUG 1's diagnostics):
+         STATE["errors"] — the single shared error log EVERY module's
+         log_error() calls feed into — was only ever exposed via /api/
+         status, and that response's errors list was rendered as part
+         of the Volume Profile tab's OWN detail card, nowhere else.
+         Disabling Volume Profile (confirmed by the user: "удаления
+         индикатора volume" via its own settings toggle) meant the ONLY
+         place ANY module's errors were visible — including Neuro's own
+         Telegram delivery failures — went dark too, even though the
+         log itself kept accumulating fine underneath. Fixed with a new,
+         always-available GET /api/errors endpoint (last 100 entries)
+         and a persistent "⚠️ Ошибки (N)" collapsible panel in the page
+         header, visible on every tab regardless of which modules are
+         enabled — polled every refreshAll() cycle (15s) independent of
+         Volume Profile's own state. Verified live: a real 403 error
+         from an unrelated module (MSNR, in this sandbox) appeared
+         correctly via the new endpoint immediately.
+
+         NEW: non-destructive "Перезапустить бэктест Neuro" button, per
+         direct user request ("не всегда удобно перезапуск делать
+         удалением статистики"). New POST /api/neuro/restart_backtest —
+         wakes the mining loop for an immediate fresh full-universe
+         cycle, same NEURO_MINING_TRIGGER.set() as the existing destructive
+         "Очистить Neuro" reset, but does NOT clear any existing
+         patterns/trades/summary/active-symbols/signal-log first — the
+         current top-N stays fully visible and tradeable until the new
+         cycle actually finishes and replaces it (or the existing
+         v0.99.236 safety net keeps it untouched if the new cycle finds
+         nothing usable).
+         Also fixed a found stale-text bug while touching the existing
+         reset button: its own confirmation dialog still said "по всем
+         10 монетам" from before v0.99.246 lowered the default to 5.
+         Verified: py_compile (-W error), pyflakes, node --check, 58
+         routes, real runtime 200 confirming both new endpoints (/api/
+         errors, /api/neuro/restart_backtest) respond correctly, zero
+         surrogate escapes.
