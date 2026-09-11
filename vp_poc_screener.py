@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.256"
+APP_VERSION = "0.99.257"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -15291,7 +15291,27 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
 
         htf_candles = get_candles_range(symbol, "4h", start_ts, now) or []
         d1_candles = get_candles_range(symbol, "1d", start_ts, now) or []
-        funding_records = neuro_fetch_funding_rate(symbol, start_ts, now)
+        # v0.99.257 — CRITICAL FIX, per direct user report (screenshot of
+        # the new global errors panel showing repeated "neuro_fetch_
+        # funding_rate ...: 400 Client Error" across many symbols, every
+        # mining cycle). Root cause: this call reused `start_ts` — the
+        # SAME start of the FULL NEURO_HISTORY_DAYS (1500-day, ~4.1-year)
+        # candle-fetch window — for the funding-rate request too. Gate's
+        # own funding_rate endpoint (like several of its neighboring
+        # history endpoints — margin account book and margin history both
+        # documented at "30 days at most") appears to reject a multi-year
+        # range outright with a flat 400, meaning this fetch has been
+        # failing on EVERY symbol, EVERY cycle, leaving funding_zone with
+        # ZERO real coverage across the entire backtest regardless of
+        # symbol. neuro_scan_live()'s OWN identical call already uses a
+        # reasonable 30-day window and works fine — reused a similarly
+        # bounded window here instead of the full history. neuro_align_
+        # funding_rate() already degrades gracefully for bars outside the
+        # fetched range (plain None, not a crash) — same behavior as
+        # before for those older bars, but now the recent portion of the
+        # backtest actually gets real funding_zone data instead of none
+        # of it ever working at all.
+        funding_records = neuro_fetch_funding_rate(symbol, now - 60 * 86400, now)
         oi_records = []
         try:
             oi_records = get_contract_stats(symbol, interval="1h", limit=999)
