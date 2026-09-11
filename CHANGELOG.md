@@ -14129,3 +14129,52 @@ v0.99.253 - Full targeted audit of the Neuro module, per direct user
          Verified: py_compile (-W error), pyflakes, node --check, 56
          routes, real runtime 200 on / and /api/neuro/status, zero
          surrogate escapes.
+
+v0.99.254 - 3 more condition types added to Neuro, per direct user
+         request ("поищи в интернете связки которые могут нам помочь
+         для составления комбинаций") — researched via web search rather
+         than guessed, to add genuinely evidence-backed, non-redundant
+         indicators:
+         - cci_zone (overbought/oversold/neutral) — Commodity Channel
+           Index, an UNBOUNDED momentum oscillator (unlike RSI/
+           Stochastic's fixed 0-100 range), confirmed via StockCharts/
+           CrossTrade/AvaTrade research as a standard "team player"
+           indicator specifically valued because it keeps discriminating
+           during strong sustained moves where bounded oscillators
+           simply pin at their caps.
+         - chop_zone (choppy/trending/transition) — Choppiness Index,
+           measuring whether price is moving EFFICIENTLY (trend) or just
+           churning without net progress (chop) via log(sum of true
+           range) vs log(net range). Confirmed via research as
+           mathematically distinct from — and commonly paired WITH, not
+           instead of — the existing ADX-based adx_zone: ADX measures
+           directional strength, CHOP measures movement efficiency.
+         - poc_side (above/below/at_poc) — price's position relative to
+           the rolling Point of Control (the price level with the most
+           traded volume over a recent window) — this app's OWN
+           namesake concept (vp_poc_screener), not yet present as a
+           Neuro condition despite being central to the rest of the app.
+           Deliberately implemented as a lightweight, fast rolling
+           approximation (verified 0.43s for 9500 bars) rather than
+           reusing the app's own heavier compute_profile() (built for a
+           single live snapshot, not per-bar historical computation).
+           Genuinely distinct from vwap_side: POC is the volume-weighted
+           MODE (most single-price agreement), VWAP is the volume-
+           weighted MEAN — confirmed via research these can and do sit
+           at different prices in a skewed/multi-peaked distribution.
+         All 3 formulas prototyped and verified standalone (sensible
+         value ranges matching their reference definitions) before
+         integration, then validated end-to-end through neuro_compute_
+         conditions() and a full neuro_walk_forward() run on 5000-bar
+         synthetic data — all 3 produced non-degenerate distributions
+         and appeared in genuinely confirmed dependencies (poc_side
+         alone in 478 of 2626 total confirmed patterns).
+         NEURO_CONDITION_KEYS now 47 total, NEURO_COMBO_KEYS 40.
+         Extended the Russian display-translation dictionaries with
+         labels for all 3 new keys and their values (reusing the
+         already-existing "перекуплен"/"перепродан" translations for
+         overbought/oversold rather than duplicating them — found and
+         removed an accidental duplicate key while adding these).
+         Verified: py_compile (-W error), pyflakes, node --check, 56
+         routes, real runtime 200 on / and /api/neuro/status, zero
+         surrogate escapes.
