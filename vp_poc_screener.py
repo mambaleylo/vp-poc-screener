@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.254"
+APP_VERSION = "0.99.256"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6155,6 +6155,8 @@ def send_telegram(text, category=None):
     if category == "amd" and not TELEGRAM_ALERTS_AMD:
         return
     if category == "neuro" and not TELEGRAM_ALERTS_NEURO:
+        return
+    if category == "neuro_summary" and not TELEGRAM_ALERTS_NEURO_SUMMARY:
         return
     if category == "nq" and not TELEGRAM_ALERTS_NQ:
         return
@@ -13700,6 +13702,84 @@ NEURO_DECAY_MIN_RECENT_N = 8  # minimum occurrences in a recency window before t
 NEURO_AGG_DECAY_WINDOW = 30       # look at the last N CLOSED (non-timeout) trades for this symbol
 NEURO_AGG_DECAY_MIN_N = 15        # minimum closed trades in that window before trusting the verdict
 NEURO_AGG_DECAY_MARGIN_PP = 5.0   # flag if recent WR is more than this many percentage points below RR breakeven
+
+# v0.99.255 — "veto filter" second-layer, per direct user request ("есть
+# смысл на бэктесте к сделкам по стопам отдельно прогнать ещё раз фильтры,
+# может можно спасти часть сделок?"). A GENUINELY DIFFERENT question than
+# the main mining loop's own ("does condition X predict forward return"):
+# given that a CONFIRMED pattern already fired a trade, does some EXTRA
+# condition at entry time discriminate between THAT pattern's own wins and
+# losses? Found on TRAIN only, then VALIDATED it still holds on TEST
+# before being trusted — the exact same walk-forward discipline as
+# everything else in this module, deliberately NOT just re-running
+# filters against the fixed historical losses and declaring victory
+# (which would just curve-fit to noise in that specific sample — flagged
+# to the user directly before building this).
+NEURO_VETO_MIN_TRAIN_TRADES = 30   # minimum (win+loss) trades for a pattern before even attempting veto-filter discovery
+NEURO_VETO_MIN_VALUE_SAMPLE = 10   # minimum trades within one candidate value-slice to trust its own win rate
+NEURO_VETO_MIN_TEST_TRADES = 10    # minimum matching TEST trades to trust the validation
+NEURO_VETO_MIN_WR_LIFT_PP = 15.0   # minimum win-rate percentage-point improvement on TRAIN to even consider a candidate
+NEURO_VETO_TEST_LIFT_FRACTION = 0.5  # the TEST lift must retain at least this fraction of the TRAIN lift to be trusted
+
+
+def neuro_find_veto_filters(confirmed_patterns, trades, full_conds, boundary_time):
+    """Returns {(pattern_type, pattern_value): veto_filter_dict} for every
+    confirmed pattern where a second condition was found (on TRAIN) and
+    confirmed (on TEST) to meaningfully discriminate between that
+    pattern's own wins and losses. `full_conds` must be computed over the
+    SAME candle series `trades`' own bar_idx values index into (i.e. the
+    full train+test series, not a separately-indexed slice)."""
+    train_group, test_group = {}, {}
+    for t in trades:
+        if t["result"] not in ("WIN", "LOSS"):
+            continue
+        key = (t["pattern_type"], t["pattern_value"])
+        bucket = train_group if t["time"] <= boundary_time else test_group
+        bucket.setdefault(key, []).append(t)
+
+    veto_filters = {}
+    for pat in confirmed_patterns:
+        key = (pat["type"], str(pat["value"]))
+        own_keys = set(pat["type"].split("+"))
+        train_trades_for_pat = train_group.get(key, [])
+        if len(train_trades_for_pat) < NEURO_VETO_MIN_TRAIN_TRADES:
+            continue
+        overall_wr = sum(1 for t in train_trades_for_pat if t["result"] == "WIN") / len(train_trades_for_pat) * 100
+
+        by_val = {}
+        for t in train_trades_for_pat:
+            bucket = full_conds[t["bar_idx"]]
+            for other_key in NEURO_CONDITION_KEYS:
+                if other_key in own_keys:
+                    continue
+                v = bucket.get(other_key)
+                if v is not None:
+                    by_val.setdefault((other_key, v), []).append(t)
+
+        best = None
+        for (other_key, val), group in by_val.items():
+            if len(group) < NEURO_VETO_MIN_VALUE_SAMPLE:
+                continue
+            wr = sum(1 for t in group if t["result"] == "WIN") / len(group) * 100
+            lift = wr - overall_wr
+            if lift >= NEURO_VETO_MIN_WR_LIFT_PP and (best is None or lift > best["lift"]):
+                best = {"key": other_key, "value": val, "train_wr": round(wr, 1),
+                        "train_n": len(group), "train_overall_wr": round(overall_wr, 1), "lift": round(lift, 1)}
+        if not best:
+            continue
+
+        test_trades_for_pat = test_group.get(key, [])
+        test_matching = [t for t in test_trades_for_pat if full_conds[t["bar_idx"]].get(best["key"]) == best["value"]]
+        if len(test_matching) < NEURO_VETO_MIN_TEST_TRADES or not test_trades_for_pat:
+            continue
+        test_wr = sum(1 for t in test_matching if t["result"] == "WIN") / len(test_matching) * 100
+        test_overall_wr = sum(1 for t in test_trades_for_pat if t["result"] == "WIN") / len(test_trades_for_pat) * 100
+        test_lift = test_wr - test_overall_wr
+        if test_lift >= best["lift"] * NEURO_VETO_TEST_LIFT_FRACTION:
+            veto_filters[key] = {**best, "test_wr": round(test_wr, 1), "test_n": len(test_matching),
+                                  "test_lift": round(test_lift, 1)}
+    return veto_filters
+
 NEURO_SL_ATR_MULT    = float(os.environ.get("VP_NEURO_SL_ATR_MULT", 1.5))
 NEURO_MAX_WAIT_BARS  = int(os.environ.get("VP_NEURO_MAX_WAIT_BARS", 48))
 NEURO_MIN_AGREE_Z    = float(os.environ.get("VP_NEURO_MIN_AGREE_Z", 2.5))  # combined |z| needed to fire a live signal
@@ -15026,7 +15106,7 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
                 pnl_r = -abs(pnl_r)
 
         trades.append({
-            "time": candles[i]["time"], "entry_time": entry_bar["time"],
+            "time": candles[i]["time"], "entry_time": entry_bar["time"], "bar_idx": i,
             "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8), "rr": rr,
             "direction": direction, "pattern_type": matched["type"], "pattern_value": str(matched["value"]),
             "z": matched["z"], "is_combo": matched.get("is_combo", False), "result": result,
@@ -15253,6 +15333,26 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
         trades = neuro_simulate_trades(candles, confirmed, htf_candles=htf_candles, funding_records=funding_records,
                                         btc_candles=btc_candles, d1_candles=d1_candles, oi_records=oi_records,
                                         eth_candles=eth_candles, rr=chosen_rr)
+
+        # v0.99.255 — "veto filter" second-layer, per direct user request
+        # ("есть смысл на бэктесте к сделкам по стопам отдельно прогнать
+        # ещё раз фильтры, может можно спасти часть сделок?"). See
+        # neuro_find_veto_filters()'s own docstring for the full train/
+        # test discipline this follows (deliberately NOT just re-running
+        # filters against the fixed historical losses, which would just
+        # curve-fit to noise in that specific sample). full_conds is
+        # recomputed once more here (a small fraction of this function's
+        # own total cost next to combo mining/RR sweep) since neuro_
+        # simulate_trades() doesn't expose the condition series it
+        # computed internally back to the caller.
+        full_conds = neuro_compute_conditions(candles, htf_candles, funding_records, btc_candles, d1_candles, oi_records, eth_candles)
+        veto_filters = neuro_find_veto_filters(confirmed, trades, full_conds, boundary_time)
+        if veto_filters:
+            for pat in confirmed:
+                vf = veto_filters.get((pat["type"], str(pat["value"])))
+                if vf:
+                    pat["veto_filter"] = vf
+
         closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
         wins = sum(1 for t in closed if t["result"] == "WIN")
         losses = len(closed) - wins
@@ -15364,6 +15464,15 @@ def neuro_scan_live(symbol, confirmed_patterns, rr=None, precomputed_btc_candles
                 # — only excluded from acting on it going forward.
             cur_val = _neuro_pattern_value(p, last)
             if cur_val is not None and cur_val == p["value"]:
+                veto = p.get("veto_filter")
+                if veto and last.get(veto["key"]) != veto["value"]:
+                    continue  # v0.99.255 — this pattern's own confirmed
+                    # veto-filter condition isn't satisfied right now,
+                    # so the extra layer that predicted win-vs-loss for
+                    # ITS OWN past trades says this specific firing looks
+                    # more like its historical losses than its wins —
+                    # skip it, same as a decaying pattern, without
+                    # dropping it from the confirmed list entirely.
                 matched.append(p)
         if not matched:
             return None
@@ -15693,7 +15802,7 @@ def neuro_mining_loop():
                         rr = summary.get("chosen_rr")
                         rr_txt = f"RR{rr:.0f}" if rr is not None else "RR?"
                         lines.append(f"{sym.replace('_USDT', '')}-{wr_txt}-{rr_txt}")
-                    send_telegram("\U0001f9e0 Neuro \u0431\u044d\u043a\u0442\u0435\u0441\u0442:\n" + "\n".join(lines), category="neuro")
+                    send_telegram("\U0001f9e0 Neuro \u0431\u044d\u043a\u0442\u0435\u0441\u0442:\n" + "\n".join(lines), category="neuro_summary")
         except Exception as e:
             log_error(f"neuro_mining_loop: {e}")
             with _neuro_state_lock:
@@ -16433,6 +16542,23 @@ def api_overview():
         "scalp": {"winrate": scalp["win_rate"], "wins": scalp["wins"], "losses": scalp["losses"], "timeouts": scalp["timeouts"], "open": scalp["open"],
                    "enabled": SCALP_SIGNALS_ENABLED},
     })
+
+
+@app.route("/api/errors")
+def api_errors():
+    """v0.99.256 — per direct user report ("Панель не вижу, после
+    удаления индикатора volume"): the global error log (STATE["errors"],
+    fed by log_error() from EVERY module — LSW, MSNR, Neuro, NQ, Scalp,
+    etc.) was only ever exposed via /api/status, and that response's own
+    errors list was rendered as part of the Volume Profile tab's OWN
+    detail card — nowhere else. Disabling/leaving that specific tab
+    meant the ONLY place errors from ANY module were visible went dark
+    too, even though the underlying log kept accumulating fine. New
+    standalone, always-available endpoint so the errors panel doesn't
+    depend on Volume Profile being active or even enabled."""
+    with state_lock:
+        errors = list(STATE["errors"])[-100:]
+    return jsonify({"errors": errors})
 
 
 @app.route("/api/status")
@@ -17558,6 +17684,27 @@ def api_reset_neuro():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/neuro/restart_backtest", methods=["POST"])
+def api_neuro_restart_backtest():
+    """v0.99.256 — per direct user request ("добавь кнопку перезапуска
+    бэктеста для нейро, не всегда удобно перезапуск делать удалением
+    статистики"): wakes the mining loop to start a fresh full-universe
+    cycle RIGHT NOW, same as api_reset_neuro()'s own trigger — but,
+    unlike that endpoint, does NOT clear _neuro_patterns/_neuro_trades/
+    _neuro_summary/_neuro_active_symbols/_neuro_signal_log first. The
+    current top-N stays fully visible and tradeable exactly as-is until
+    the new cycle actually finishes and naturally replaces it (or, if
+    the new cycle finds nothing usable, the existing v0.99.236 safety
+    net keeps the current data untouched — see neuro_mining_loop()'s own
+    "universe scan produced zero usable results" branch)."""
+    try:
+        NEURO_MINING_TRIGGER.set()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_neuro_restart_backtest: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/reset/risk_autotune", methods=["POST"])
 def api_reset_risk_autotune():
     """Resets every parameter risk_autotune_pass() touches back to its
@@ -17987,6 +18134,7 @@ INDEX_HTML = """<!doctype html>
       <button id="resetMirrorBtn">Очистить Зеркало</button>
       <button id="resetLswBtn">Очистить Sweep</button>
       <button id="resetNeuroBtn">Очистить Neuro</button>
+      <button id="restartNeuroBacktestBtn">Перезапустить бэктест Neuro</button>
       <button id="resetNqBtn">Очистить NQ</button>
       <button id="resetSimulatorBtn">Сбросить симулятор</button>
       <button id="resetRiskAutotuneBtn">Сбросить авто-тюнинг</button>
@@ -17998,6 +18146,10 @@ INDEX_HTML = """<!doctype html>
   <details id="riskAutotuneBox" style="margin-top:4px;font-size:11.5px;display:none;">
     <summary class="dim" style="cursor:pointer;">Авто-тюнинг риска</summary>
     <div id="riskAutotuneLog" class="dim" style="margin-top:4px;"></div>
+  </details>
+  <details id="globalErrorsBox" style="margin-top:4px;font-size:11.5px;">
+    <summary class="dim loss" style="cursor:pointer;">⚠️ Ошибки (<span id="globalErrorsCount">0</span>)</summary>
+    <div id="globalErrorsList" class="dim" style="margin-top:4px;font-size:12px;max-height:300px;overflow-y:auto;"></div>
   </details>
 </header>
 <div class="tabs">
@@ -20251,8 +20403,10 @@ async function refreshNeuro() {
         const dirCls = p.direction === 'LONG' ? 'win' : 'loss';
         const comboTag = p.is_combo ? ` <span style="color:#a855f7;">\u043a\u043e\u043c\u0431\u043e\u00d7${p.combo_depth||2}</span>` : '';
         const decayTag = p.decaying ? ` <span style="color:#ffa726;">\u26a0\ufe0f \u043e\u0441\u043b\u0430\u0431\u0435\u0432\u0430\u0435\u0442</span>` : '';
+        const vf = p.veto_filter;
+        const vetoTag = vf ? ` <span style="color:#4fc3f7;" title="\u0432\u0442\u043e\u0440\u043e\u0439 \u0441\u043b\u043e\u0439: \u0442\u043e\u043b\u044c\u043a\u043e \u043a\u043e\u0433\u0434\u0430 ${translateNeuroCondition(vf.key, vf.value)} (train ${vf.train_wr}% \u0432\u043c\u0435\u0441\u0442\u043e ${vf.train_overall_wr}%, test ${vf.test_wr}%, n=${vf.test_n})">🛡️ \u0432\u0435\u0442\u043e-\u0444\u0438\u043b\u044c\u0442\u0440</span>` : '';
         return `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1c2433;font-size:11px;">
-          <span class="dim">${translateNeuroCondition(p.type, p.value)}${comboTag}${decayTag}</span>
+          <span class="dim">${translateNeuroCondition(p.type, p.value)}${comboTag}${decayTag}${vetoTag}</span>
           <span class="${dirCls}">${p.direction} (z=${p.z}, n=${p.n})</span>
         </div>`;
       }).join('');
@@ -21117,11 +21271,32 @@ async function refreshSimulator() {
   setPanelHtml(panel, headerHtml + tableHtml);
 }
 
+async function refreshGlobalErrors() {
+  // v0.99.256 — universal errors panel, per direct user report that the
+  // old embedded-in-Volume-Profile-tab errors list disappears entirely
+  // once that specific tab/module is off, even though every OTHER
+  // module's own errors (LSW, MSNR, Neuro, NQ, etc.) keep accumulating
+  // in the same shared log. Always polled regardless of which tab is
+  // active or which modules are enabled.
+  try {
+    const r = await fetch('/api/errors');
+    const data = await r.json();
+    const errs = data.errors || [];
+    document.getElementById('globalErrorsCount').textContent = errs.length;
+    document.getElementById('globalErrorsList').innerHTML = errs.length
+      ? errs.slice().reverse().map(e => `${fmtTime(e.t)} — ${e.msg}`).join('<br>')
+      : 'Ошибок нет.';
+  } catch (e) {
+    // best-effort — a failed poll of this panel shouldn't break the rest of the UI
+  }
+}
+
 async function refreshAll() {
   await refreshStatus();
   await refreshOverview();
   await refreshAutotradeBanner();
   await refreshSignals();
+  await refreshGlobalErrors();
   if (activeTab === 'signals') await refreshTuning();
   if (activeTab === 'scalp') await refreshScalp();
   if (activeTab === 'msnr') await refreshMsnr();
@@ -21174,8 +21349,36 @@ wireResetButton('resetLswBtn', '/api/reset/lsw',
   'Удалить накопленный бэктест и сигналы Sweep? Остальное не тронет. Это необратимо.',
   'Очистить Sweep');
 wireResetButton('resetNeuroBtn', '/api/reset/neuro',
-  'Удалить накопленные зависимости, сделки и сигналы Neuro по всем 10 монетам и начать заново? Это необратимо.',
+  'Удалить накопленные зависимости, сделки и сигналы Neuro по всем монетам топ-N и начать заново? Это необратимо.',
   'Очистить Neuro');
+function wireRestartButton(btnId, endpoint, confirmMsg, idleLabel) {
+  // v0.99.256 — separate from wireResetButton() above: this action is
+  // NOT destructive (doesn't clear anything first), so it gets its own
+  // busy/error copy instead of borrowing "Удаляю..."/"Не удалось
+  // очистить" from the delete-and-restart buttons.
+  const btn = document.getElementById(btnId);
+  btn.onclick = async () => {
+    const sure = confirm(confirmMsg);
+    if (!sure) return;
+    btn.disabled = true;
+    btn.textContent = 'Запускаю...';
+    try {
+      const res = await (await fetch(endpoint, {method: 'POST'})).json();
+      if (res.ok) {
+        await refreshAll();
+      } else {
+        alert('Не удалось запустить: ' + (res.error || 'неизвестная ошибка'));
+      }
+    } catch (e) {
+      alert('Не удалось запустить: ' + e);
+    }
+    btn.disabled = false;
+    btn.textContent = idleLabel;
+  };
+}
+wireRestartButton('restartNeuroBacktestBtn', '/api/neuro/restart_backtest',
+  'Запустить новый полный цикл бэктеста Neuro прямо сейчас? Текущие данные (топ-N, паттерны) останутся видны и торгуемы, пока новый цикл не завершится и не заменит их.',
+  'Перезапустить бэктест Neuro');
 wireResetButton('resetNqBtn', '/api/reset/nq',
   'Удалить накопленный бэктест и сигналы NQ Model? Это необратимо.',
   'Очистить NQ');
