@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.259"
+APP_VERSION = "0.99.261"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13683,7 +13683,7 @@ NEURO_TRAIN_FRAC     = float(os.environ.get("VP_NEURO_TRAIN_FRAC", 0.7))  # walk
 NEURO_HISTORY_DAYS   = int(os.environ.get("VP_NEURO_HISTORY_DAYS", 1500))  # ask for as much as possible; exchange will just return what it has
 NEURO_REFRESH_SEC    = int(os.environ.get("VP_NEURO_REFRESH_SEC", 24 * 3600))  # v0.99.236 — raised 4h->24h per direct user request: with the universe now 120 coins instead of a fixed 20, a full cycle takes MUCH longer, and re-mining more than once a day added little value anyway (the underlying ~13-month rolling window barely shifts hour to hour — established during an earlier session discussion)
 NEURO_MINING_TRIGGER = threading.Event()  # v0.99.212 — same "Очистить X doesn't wake the sleeping loop" fix as LSW/MSNR's own trigger events, for the new "Очистить Neuro" button
-NEURO_PER_SYMBOL_MAX_SEC = int(os.environ.get("VP_NEURO_PER_SYMBOL_MAX_SEC", 480))  # v0.99.212, raised 300->480 in v0.99.216 — hard ceiling per symbol so one stuck coin can't block the whole sequential mining cycle forever; raised given 20 coins + more indicators now legitimately need more time even without anything actually stuck
+NEURO_PER_SYMBOL_MAX_SEC = int(os.environ.get("VP_NEURO_PER_SYMBOL_MAX_SEC", 720))  # v0.99.212, raised 300->480 in v0.99.216, raised 480->720 in v0.99.261 — per direct user report of multiple real symbols hitting the old 480s ceiling on real hardware after this session's cumulative additions (38->47 conditions, veto filters, early-exit rule search) made per-symbol processing genuinely slower even after removing a redundant condition-recomputation (see neuro_simulate_trades()'s own return_conds param) — real devices are slower than the sandbox this was tuned against, so the ceiling needed headroom, not just the one fixable inefficiency
 NEURO_RR             = float(os.environ.get("VP_NEURO_RR", 2.0))  # fallback/default only — see NEURO_RR_CANDIDATES below for the actual per-symbol auto-tuned value
 NEURO_RR_CANDIDATES  = [1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0]  # v0.99.210 — small step (0.25), modest range, per direct user request ("вариативность RR, но не с гигантским шагом"). Best one picked per-symbol from TRAIN-period trades only (same walk-forward discipline as the condition mining itself), then applied to the reported trade history and live signals.
 NEURO_RR_MIN_TRADES  = int(os.environ.get("VP_NEURO_RR_MIN_TRADES", 15))  # don't trust an RR pick based on fewer than this many train-period trades
@@ -13720,6 +13720,65 @@ NEURO_VETO_MIN_VALUE_SAMPLE = 10   # minimum trades within one candidate value-s
 NEURO_VETO_MIN_TEST_TRADES = 10    # minimum matching TEST trades to trust the validation
 NEURO_VETO_MIN_WR_LIFT_PP = 15.0   # minimum win-rate percentage-point improvement on TRAIN to even consider a candidate
 NEURO_VETO_TEST_LIFT_FRACTION = 0.5  # the TEST lift must retain at least this fraction of the TRAIN lift to be trusted
+
+
+def neuro_find_early_exit_rule(trades, boundary_time):
+    """v0.99.260 — per direct user request: find, on TRAIN only, an (mae_
+    threshold, mfe_threshold) pair such that trades matching "mae_at_k >=
+    mae_threshold AND mfe_at_k <= mfe_threshold" turn out overwhelmingly
+    to be LOSSES — then VALIDATE the exact same rule against TEST-period
+    trades before trusting it, same walk-forward discipline as neuro_
+    find_veto_filters(). Only considers trades that survived_k (resolved
+    AFTER the checkpoint — nothing to decide early for a trade that
+    already closed by then). Returns a rule dict or None."""
+    candidates_mae = [0.3, 0.4, 0.5, 0.6, 0.7, 0.8]
+    candidates_mfe = [0.1, 0.15, 0.2, 0.25, 0.3]
+
+    train_pool = [t for t in trades if t["survived_k"] and t["result"] in ("WIN", "LOSS") and t["time"] <= boundary_time]
+    test_pool = [t for t in trades if t["survived_k"] and t["result"] in ("WIN", "LOSS") and t["time"] > boundary_time]
+    if len(train_pool) < NEURO_EARLY_EXIT_MIN_TRAIN_N:
+        return None
+
+    best = None
+    for mae_th in candidates_mae:
+        for mfe_th in candidates_mfe:
+            matching = [t for t in train_pool if t["mae_at_k"] >= mae_th and t["mfe_at_k"] <= mfe_th]
+            if len(matching) < NEURO_EARLY_EXIT_MIN_TRAIN_N:
+                continue
+            wr = sum(1 for t in matching if t["result"] == "WIN") / len(matching) * 100
+            if wr > NEURO_EARLY_EXIT_MAX_WR_PP:
+                continue
+            # Prefer the candidate with the MOST matching trades among
+            # those clearing the win-rate bar — more coverage is more
+            # useful in practice than shaving a couple more points off
+            # an already-low win rate on a smaller slice.
+            if best is None or len(matching) > best["train_n"]:
+                best = {"mae_threshold": mae_th, "mfe_threshold": mfe_th,
+                        "train_wr": round(wr, 1), "train_n": len(matching)}
+    if not best:
+        return None
+
+    test_matching = [t for t in test_pool if t["mae_at_k"] >= best["mae_threshold"] and t["mfe_at_k"] <= best["mfe_threshold"]]
+    if len(test_matching) < NEURO_EARLY_EXIT_MIN_TEST_N:
+        return None
+    test_wr = sum(1 for t in test_matching if t["result"] == "WIN") / len(test_matching) * 100
+    if abs(test_wr - best["train_wr"]) > NEURO_EARLY_EXIT_TEST_WR_TOLERANCE_PP or test_wr > NEURO_EARLY_EXIT_MAX_WR_PP * 2:
+        return None  # didn't hold up on TEST — reject rather than trust a TRAIN-only fluke
+
+    # Honest expected benefit: average realized pnl if exiting AT the
+    # checkpoint bar's own close (close_at_k_pnl) vs the trade's actual
+    # historical pnl_r (waiting for full resolution) — for the SAME
+    # matching TEST trades, so this is an out-of-sample estimate, not a
+    # backfit number.
+    avg_actual = sum(t["pnl_r"] for t in test_matching) / len(test_matching)
+    avg_if_exited_early = sum((t["close_at_k_pnl"] if t["close_at_k_pnl"] is not None else t["pnl_r"]) for t in test_matching) / len(test_matching)
+
+    best["test_wr"] = round(test_wr, 1)
+    best["test_n"] = len(test_matching)
+    best["avg_pnl_actual"] = round(avg_actual, 3)
+    best["avg_pnl_if_early_exit"] = round(avg_if_exited_early, 3)
+    best["k"] = NEURO_EARLY_EXIT_K
+    return best
 
 
 def neuro_find_veto_filters(confirmed_patterns, trades, full_conds, boundary_time):
@@ -13782,6 +13841,25 @@ def neuro_find_veto_filters(confirmed_patterns, trades, full_conds, boundary_tim
 
 NEURO_SL_ATR_MULT    = float(os.environ.get("VP_NEURO_SL_ATR_MULT", 1.5))
 NEURO_MAX_WAIT_BARS  = int(os.environ.get("VP_NEURO_MAX_WAIT_BARS", 48))
+
+# v0.99.260 — early-exit ("cut losses early") layer, per direct user
+# request ("сигнал закрывается по стопу если сразу идёт к нему... минусовые
+# сделки можно закрывать раньше, при этом писать статистику для таких
+# сигналов, закрытых раньше времени, чтобы знать его исход"). Verified the
+# underlying idea directly on synthetic data BEFORE building anything: at
+# a fixed early checkpoint (bar 3), trades already showing a large adverse
+# excursion (MAE) with little favorable movement (MFE) turned out to have
+# a dramatically lower eventual win rate than the overall average (0.1%
+# vs 22.4% baseline in the synthetic test) — consistent with basic first-
+# passage-time intuition (already being close to a barrier makes hitting
+# it far more likely), not a fluke pattern-specific correlation. Still
+# found and validated the SAME honest train-then-test way as the veto-
+# filter feature (v0.99.255) before ever wiring it into anything real.
+NEURO_EARLY_EXIT_K = 3            # bar count checkpoint for the early MAE/MFE reading
+NEURO_EARLY_EXIT_MIN_TRAIN_N = 30  # minimum TRAIN trades surviving to bar K before even searching for a rule
+NEURO_EARLY_EXIT_MIN_TEST_N = 10   # minimum matching TEST trades to trust the validation
+NEURO_EARLY_EXIT_MAX_WR_PP = 15.0  # candidate rule's own TRAIN win rate among matching trades must be at most this many points, i.e. a strong loss-skew
+NEURO_EARLY_EXIT_TEST_WR_TOLERANCE_PP = 15.0  # the TEST win rate among matching trades must stay within this many points of the TRAIN win rate to trust it held up
 NEURO_MIN_AGREE_Z    = float(os.environ.get("VP_NEURO_MIN_AGREE_Z", 2.5))  # combined |z| needed to fire a live signal
 TELEGRAM_ALERTS_NEURO = os.environ.get("VP_TG_ALERTS_NEURO", "1") == "1"
 TELEGRAM_ALERTS_NEURO_SUMMARY = os.environ.get("VP_TG_ALERTS_NEURO_SUMMARY", "0") == "1"  # v0.99.248 — separate toggle, per direct user request ("присылать в кратком формате статистику бэктеста... галочку в настройки на уведомление такого типа") — a compact per-symbol digest at the end of each full mining cycle, distinct from TELEGRAM_ALERTS_NEURO's own live-signal alerts
@@ -15032,15 +15110,23 @@ def neuro_walk_forward(candles, forward_bars=None, min_sample=None, z_threshold=
 
 
 def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding_records=None, btc_candles=None,
-                           d1_candles=None, oi_records=None, eth_candles=None, rr=None):
+                           d1_candles=None, oi_records=None, eth_candles=None, rr=None, return_conds=False):
     """Turn confirmed dependencies into an actual trade history: whenever a
     confirmed condition (single OR pairwise combo) is true on a bar, enter at
     the NEXT bar's open in the confirmed direction, SL/TP from ATR, track the
     real outcome. This is the honest track record shown alongside the raw
     pattern list. `rr` defaults to NEURO_RR but callers pass the per-symbol
-    auto-tuned value once neuro_pick_best_rr() has chosen one."""
+    auto-tuned value once neuro_pick_best_rr() has chosen one.
+    v0.99.261 — return_conds=True also returns the condition series this
+    function computes internally, per direct user report of neuro_mining_
+    loop hitting its own 480s per-symbol ceiling on real hardware — the
+    caller (neuro_backtest_symbol(), for the veto-filter search added in
+    v0.99.255) was recomputing this SAME 47-condition series a second time
+    right after calling this function, since there was no way to get it
+    back otherwise. Doubling that cost on every symbol was a real,
+    avoidable contributor to symbols timing out."""
     if not confirmed_patterns:
-        return []
+        return ([], []) if return_conds else []
     rr = rr if rr is not None else NEURO_RR
 
     conds = neuro_compute_conditions(candles, htf_candles, funding_records, btc_candles, d1_candles, oi_records, eth_candles)
@@ -15085,8 +15171,30 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
 
         result = "TIMEOUT"; exit_price = exit_time = None
         exit_j = min(i + NEURO_MAX_WAIT_BARS, len(candles) - 1)  # default: occupied through the timeout bar even if the loop below never finds an explicit SL/TP hit
+        # v0.99.260 — measure the max adverse/favorable excursion (in R)
+        # within the first NEURO_EARLY_EXIT_K bars, purely as DATA on
+        # every trade — neuro_find_early_exit_rule() decides afterward,
+        # from honest train/test validation, whether this actually
+        # predicts eventual outcome; this loop never acts on it itself.
+        mae_at_k = mfe_at_k = 0.0
+        close_at_k_pnl = None
         for j in range(i + 1, min(i + 1 + NEURO_MAX_WAIT_BARS, len(candles))):
             b = candles[j]
+            if j - i <= NEURO_EARLY_EXIT_K:
+                if direction == "LONG":
+                    mae_at_k = max(mae_at_k, (entry - b["low"]) / sl_dist)
+                    mfe_at_k = max(mfe_at_k, (b["high"] - entry) / sl_dist)
+                else:
+                    mae_at_k = max(mae_at_k, (b["high"] - entry) / sl_dist)
+                    mfe_at_k = max(mfe_at_k, (entry - b["low"]) / sl_dist)
+                if j - i == NEURO_EARLY_EXIT_K:
+                    # v0.99.260 — the price we'd REALISTICALLY capture by
+                    # exiting right at this checkpoint (a market close at
+                    # bar K's own close), as distinct from mae_at_k (the
+                    # single worst intra-window excursion, not necessarily
+                    # where an exit decision would actually be made).
+                    close_at_k_pnl = ((b["close"] - entry) / sl_dist if direction == "LONG"
+                                      else (entry - b["close"]) / sl_dist)
             if direction == "LONG":
                 if b["low"] <= sl:
                     result, exit_price, exit_time = "LOSS", sl, b["time"]; exit_j = j; break
@@ -15112,9 +15220,16 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
             "z": matched["z"], "is_combo": matched.get("is_combo", False), "result": result,
             "exit_price": round(exit_price, 8) if exit_price else None,
             "exit_time": exit_time, "pnl_r": pnl_r,
+            # v0.99.260 — see NEURO_EARLY_EXIT_K's own comment. survived_k
+            # is False when the trade already resolved AT or BEFORE the
+            # checkpoint bar — there's no "early exit decision" to have
+            # made for those, so mae_at_k/mfe_at_k aren't meaningful.
+            "mae_at_k": round(mae_at_k, 3), "mfe_at_k": round(mfe_at_k, 3),
+            "close_at_k_pnl": round(close_at_k_pnl, 3) if close_at_k_pnl is not None else None,
+            "survived_k": (exit_j - i) > NEURO_EARLY_EXIT_K,
         })
         occupied_until_i = exit_j
-    return trades
+    return (trades, conds) if return_conds else trades
 
 
 def neuro_fetch_funding_rate(symbol, start_ts, end_ts, limit=1000):
@@ -15210,7 +15325,7 @@ def neuro_check_aggregate_decay(trades, chosen_rr):
     this symbol, regardless of which specific pattern produced each one.
     Catches a regime shift that drags down many different patterns a
     little each — something no single pattern's own decay flag would."""
-    closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
+    closed = [t for t in trades if t["result"] in ("WIN", "LOSS", "LOSS_EARLY")]  # v0.99.260 — count early-exited losses too, same as the main summary
     recent = closed[-NEURO_AGG_DECAY_WINDOW:]
     if len(recent) < NEURO_AGG_DECAY_MIN_N:
         return {"n": len(recent), "wr": None, "avg_pnl_r": None, "underperforming": False}
@@ -15234,7 +15349,7 @@ def neuro_find_culprit_patterns(trades, window=None):
     least 3 of its own trades within the window before judging a pattern
     (a single bad trade shouldn't condemn it)."""
     window = window or NEURO_AGG_DECAY_WINDOW
-    closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
+    closed = [t for t in trades if t["result"] in ("WIN", "LOSS", "LOSS_EARLY")]  # v0.99.260 — count early-exited losses too, same as the main summary
     recent = closed[-window:]
     by_pattern = {}
     for t in recent:
@@ -15367,22 +15482,23 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
             d1_candles=_train_slice(d1_candles), oi_records=_train_slice(oi_records),
             eth_candles=_train_slice(eth_candles))
 
-        trades = neuro_simulate_trades(candles, confirmed, htf_candles=htf_candles, funding_records=funding_records,
-                                        btc_candles=btc_candles, d1_candles=d1_candles, oi_records=oi_records,
-                                        eth_candles=eth_candles, rr=chosen_rr)
+        trades, full_conds = neuro_simulate_trades(candles, confirmed, htf_candles=htf_candles, funding_records=funding_records,
+                                                    btc_candles=btc_candles, d1_candles=d1_candles, oi_records=oi_records,
+                                                    eth_candles=eth_candles, rr=chosen_rr, return_conds=True)
 
-        # v0.99.255 — "veto filter" second-layer, per direct user request
-        # ("есть смысл на бэктесте к сделкам по стопам отдельно прогнать
-        # ещё раз фильтры, может можно спасти часть сделок?"). See
-        # neuro_find_veto_filters()'s own docstring for the full train/
-        # test discipline this follows (deliberately NOT just re-running
-        # filters against the fixed historical losses, which would just
-        # curve-fit to noise in that specific sample). full_conds is
-        # recomputed once more here (a small fraction of this function's
-        # own total cost next to combo mining/RR sweep) since neuro_
-        # simulate_trades() doesn't expose the condition series it
-        # computed internally back to the caller.
-        full_conds = neuro_compute_conditions(candles, htf_candles, funding_records, btc_candles, d1_candles, oi_records, eth_candles)
+        # v0.99.255 -- "veto filter" second-layer, per direct user request
+        # (see neuro_find_veto_filters()'s own docstring for the full
+        # train/test discipline this follows).
+        # v0.99.261 -- CRITICAL PERFORMANCE FIX, per direct user report of
+        # neuro_mining_loop hitting its own 480s per-symbol ceiling on
+        # real hardware for multiple symbols in one cycle: full_conds
+        # used to be computed a SECOND time here from scratch (the exact
+        # same 47-condition series neuro_simulate_trades() already
+        # computes internally) purely because that function didn't
+        # expose it back -- doubling condition-computation cost on every
+        # single symbol. Now reused directly via neuro_simulate_trades()'s
+        # own return_conds=True -- no behavior change, same conditions,
+        # just computed once instead of twice.
         veto_filters = neuro_find_veto_filters(confirmed, trades, full_conds, boundary_time)
         if veto_filters:
             for pat in confirmed:
@@ -15390,7 +15506,30 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
                 if vf:
                     pat["veto_filter"] = vf
 
-        closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
+        # v0.99.260 — apply the validated early-exit rule (if one was
+        # found) to the actual trade history: a matching trade's result/
+        # pnl_r are REWRITTEN to reflect exiting at the checkpoint bar's
+        # close instead of waiting for full resolution, but the ORIGINAL
+        # outcome is kept in would_have_been_result/would_have_been_pnl_r
+        # — per direct user request ("писать статистику для таких
+        # сигналов, закрытых раньше времени, чтобы знать его исход") —
+        # so the honest counterfactual stays visible rather than being
+        # silently discarded.
+        early_exit_rule = neuro_find_early_exit_rule(trades, boundary_time)
+        if early_exit_rule:
+            for t in trades:
+                if not t["survived_k"] or t["result"] not in ("WIN", "LOSS"):
+                    continue
+                if t["mae_at_k"] >= early_exit_rule["mae_threshold"] and t["mfe_at_k"] <= early_exit_rule["mfe_threshold"]:
+                    k_bar = candles[t["bar_idx"] + NEURO_EARLY_EXIT_K]
+                    t["would_have_been_result"] = t["result"]
+                    t["would_have_been_pnl_r"] = t["pnl_r"]
+                    t["result"] = "LOSS_EARLY"
+                    t["pnl_r"] = t["close_at_k_pnl"] if t["close_at_k_pnl"] is not None else t["pnl_r"]
+                    t["exit_price"] = round(k_bar["close"], 8)
+                    t["exit_time"] = k_bar["time"]
+
+        closed = [t for t in trades if t["result"] in ("WIN", "LOSS", "LOSS_EARLY")]
         wins = sum(1 for t in closed if t["result"] == "WIN")
         losses = len(closed) - wins
         wr = round(wins / len(closed) * 100, 1) if closed else None
@@ -15422,7 +15561,8 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
                    "combos_confirmed": sum(1 for p in confirmed if p.get("is_combo")),
                    "decaying_confirmed": sum(1 for p in confirmed if p.get("decaying")),
                    "chosen_rr": chosen_rr, "rr_sweep": rr_sweep,
-                   "aggregate_recent": aggregate_recent, "culprits_removed": culprits_removed}
+                   "aggregate_recent": aggregate_recent, "culprits_removed": culprits_removed,
+                   "early_exit_rule": early_exit_rule}
         return confirmed, trades, summary
     except Exception as e:
         log_error(f"neuro_backtest_symbol {symbol}: {e}")
@@ -15563,16 +15703,64 @@ _neuro_signal_log = deque(maxlen=NEURO_SIGNAL_HISTORY)
 _neuro_signal_log_lock = threading.Lock()
 
 
+def neuro_close_position_early(symbol, direction):
+    """v0.99.260 — closes a REAL open Neuro position early, once the
+    validated early-exit rule triggers on a live signal. `direction` is
+    the signal's OWN original direction — the close order goes the
+    OPPOSITE way, reduce_only, for whatever the position's ACTUAL
+    current size is (re-fetched fresh, not assumed from the original
+    entry size). Also cancels any pending SL/TP trigger orders for this
+    contract first, so they don't linger as orphaned orders (or, worse,
+    fire after the position is already flat) once it's gone."""
+    try:
+        positions = get_open_positions()
+        pos = next((p for p in positions if p.get("contract") == symbol), None)
+        if not pos:
+            return {"ok": False, "reason": "no open position found"}
+        size = float(pos.get("size", 0) or 0)
+        if size == 0:
+            return {"ok": False, "reason": "position size is zero"}
+        contracts = abs(size)
+        actual_direction = "LONG" if size > 0 else "SHORT"
+        close_direction = "SHORT" if actual_direction == "LONG" else "LONG"
+        try:
+            for order in (get_open_price_orders() or []):
+                if order.get("initial", {}).get("contract") == symbol:
+                    cancel_price_order(order.get("id"))
+        except Exception as e:
+            log_error(f"neuro_close_position_early {symbol}: order cleanup: {e}")
+        result = place_market_order(symbol, close_direction, contracts, reduce_only=True)
+        return {"ok": True, "result": result}
+    except Exception as e:
+        log_error(f"neuro_close_position_early {symbol}: {e}")
+        return {"ok": False, "reason": str(e)}
+
+
 def neuro_track_signal_outcomes():
     """Same shared MFE/MAE/WIN/LOSS/TIMEOUT tracking shape as
-    _lsw_track_signal_outcomes()/_mirror_track_signal_outcomes()."""
+    _lsw_track_signal_outcomes()/_mirror_track_signal_outcomes().
+    v0.99.260 — per direct user request ("минусовые сделки можно закрывать
+    раньше, при этом писать статистику для таких сигналов... чтобы знать
+    его исход"): a signal whose symbol has a validated early_exit_rule
+    (see neuro_find_early_exit_rule()) gets checked at the SAME
+    NEURO_EARLY_EXIT_K-bar checkpoint used during backtesting — if it
+    matches, the REAL position gets closed early (when AUTOTRADE_ENABLED_
+    NEURO) and the signal is marked CLOSED/LOSS_EARLY immediately, but
+    ALSO flagged shadow_pending=True so this same function keeps
+    tracking it on later passes purely to fill in would_have_been_
+    result/would_have_been_pnl_r once the ORIGINAL sl/tp/timeout would
+    have actually resolved — the honest counterfactual, for stats only,
+    never re-opening or otherwise touching the real (already-closed)
+    position."""
     now = time.time()
     with _neuro_signal_log_lock:
-        open_signals = [s for s in _neuro_signal_log if s["status"] == "OPEN"]
+        open_signals = [s for s in _neuro_signal_log if s["status"] == "OPEN" or s.get("shadow_pending")]
     if not open_signals:
         return
     interval_sec = INTERVAL_SECONDS.get(NEURO_TF, 3600)
     all_candles = fetch_candles_concurrent([(s["symbol"], NEURO_TF, 300) for s in open_signals])
+    with _neuro_state_lock:
+        summary_snapshot = dict(_neuro_summary)
     for sig, candles in zip(open_signals, all_candles):
         try:
             if candles is None:
@@ -15582,6 +15770,45 @@ def neuro_track_signal_outcomes():
             direction = sig["direction"]
             entry = sig["entry"]
             risk = abs(entry - sig["sl"]) or 1e-9
+            is_shadow = sig["status"] == "CLOSED" and sig.get("shadow_pending")
+
+            if not is_shadow:
+                rule = (summary_snapshot.get(sig["symbol"]) or {}).get("early_exit_rule")
+                if rule and len(future) >= NEURO_EARLY_EXIT_K and not sig.get("early_exit_checked"):
+                    with _neuro_signal_log_lock:
+                        sig["early_exit_checked"] = True  # evaluate this exactly once per signal
+                    window = future[:NEURO_EARLY_EXIT_K]
+                    mae_k = mfe_k = 0.0
+                    for c in window:
+                        if direction == "LONG":
+                            mae_k = max(mae_k, (entry - c["low"]) / risk)
+                            mfe_k = max(mfe_k, (c["high"] - entry) / risk)
+                        else:
+                            mae_k = max(mae_k, (c["high"] - entry) / risk)
+                            mfe_k = max(mfe_k, (entry - c["low"]) / risk)
+                    if mae_k >= rule["mae_threshold"] and mfe_k <= rule["mfe_threshold"]:
+                        k_bar = window[-1]
+                        realized = ((k_bar["close"] - entry) / risk if direction == "LONG"
+                                    else (entry - k_bar["close"]) / risk)
+                        with _neuro_signal_log_lock:
+                            sig["status"] = "CLOSED"
+                            sig["result"] = "LOSS_EARLY"
+                            sig["exit_price"] = k_bar["close"]
+                            sig["exit_time"] = k_bar["time"]
+                            sig["pnl_r"] = round(realized, 3)
+                            sig["shadow_pending"] = True
+                            sig["would_have_been_result"] = None
+                        if AUTOTRADE_ENABLED_NEURO:
+                            close_result = neuro_close_position_early(sig["symbol"], direction)
+                            log_error(f"neuro early-exit {sig['symbol']}: real close attempt -> {close_result}")
+                        send_telegram(
+                            f"\u2702\ufe0f NEURO {sig['symbol']}: \u0437\u0430\u043a\u0440\u044b\u0442 \u0440\u0430\u043d\u044c\u0448\u0435 \u0441\u0440\u043e\u043a\u0430 "
+                            f"\u043f\u043e \u043f\u0440\u0430\u0432\u0438\u043b\u0443 \u0440\u0430\u043d\u043d\u0435\u0433\u043e \u0432\u044b\u0445\u043e\u0434\u0430 "
+                            f"({realized:+.2f}R) \u2014 \u0446\u0435\u043d\u0430 \u0441\u0440\u0430\u0437\u0443 \u043f\u043e\u0448\u043b\u0430 \u043a \u0441\u0442\u043e\u043f\u0443",
+                            category="neuro",
+                        )
+                        continue
+
             result = exit_price = exit_time = None
             bars_seen = 0
             for c in future:
@@ -15609,11 +15836,16 @@ def neuro_track_signal_outcomes():
                     raw = (exit_price - entry) / risk if direction == "LONG" else (entry - exit_price) / risk
                     pnl_r = round(raw if result != "LOSS" else -abs(raw), 3)
                 with _neuro_signal_log_lock:
-                    sig["status"] = "CLOSED"
-                    sig["result"] = result
-                    sig["exit_price"] = exit_price
-                    sig["exit_time"] = exit_time
-                    sig["pnl_r"] = pnl_r
+                    if is_shadow:
+                        sig["would_have_been_result"] = result
+                        sig["would_have_been_pnl_r"] = pnl_r
+                        sig["shadow_pending"] = False
+                    else:
+                        sig["status"] = "CLOSED"
+                        sig["result"] = result
+                        sig["exit_price"] = exit_price
+                        sig["exit_time"] = exit_time
+                        sig["pnl_r"] = pnl_r
         except Exception as e:
             log_error(f"neuro_outcome {sig['symbol']}: {e}")
 
@@ -15622,7 +15854,7 @@ def neuro_compute_signal_stats(active_symbols=None):
     active_symbols = active_symbols if active_symbols is not None else NEURO_COINS
     with _neuro_signal_log_lock:
         signals = list(_neuro_signal_log)
-    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS", "LOSS_EARLY")]  # v0.99.261 — count early-exited losses too
     wins = sum(1 for s in closed if s["result"] == "WIN")
     losses = len(closed) - wins
     open_n = sum(1 for s in signals if s["status"] == "OPEN")
@@ -20485,12 +20717,21 @@ async function refreshNeuro() {
       // ---- Recent trades table with click-to-chart ----
       const trades = c.recent_trades || [];
       const tradeRows = trades.map(t => {
-        const rc = t.result==='WIN'?'win':t.result==='LOSS'?'loss':'dim';
+        const rc = t.result==='WIN'?'win':(t.result==='LOSS'||t.result==='LOSS_EARLY')?'loss':'dim';
         const dirCls = t.direction === 'LONG' ? 'win' : 'loss';
+        // v0.99.260 — LOSS_EARLY per direct user request ("минусовые
+        // сделки можно закрывать раньше... писать статистику, чтобы
+        // знать его исход"): shown distinctly from a plain LOSS, with
+        // the honest counterfactual (what would have happened waiting
+        // for full resolution) in a tooltip once known.
+        const whb = t.would_have_been_result;
+        const whbTxt = whb ? ` title="\u0431\u044b\u043b\u043e \u0431\u044b: ${whb}${t.would_have_been_pnl_r!=null?' ('+(t.would_have_been_pnl_r>0?'+':'')+t.would_have_been_pnl_r+'R)':''}"` : '';
         const statusHtml = t.result==='WIN'
           ? `<span class="win">WIN @ ${fmtNum(t.exit_price)}</span>`
           : t.result==='LOSS'
           ? `<span class="loss">LOSS @ ${fmtNum(t.exit_price)}</span>`
+          : t.result==='LOSS_EARLY'
+          ? `<span class="loss"${whbTxt}>\u2702\ufe0f \u0440\u0430\u043d\u043d\u0438\u0439 \u0432\u044b\u0445\u043e\u0434 @ ${fmtNum(t.exit_price)}</span>`
           : '<span class="dim">TIMEOUT</span>';
         return `<tr onclick="openNeuroChart('${c.symbol}', ${t.time})" style="cursor:pointer;">
           <td class="dim">${fmtDateTime(t.entry_time)}</td>
@@ -20517,12 +20758,15 @@ async function refreshNeuro() {
       const liveSigs = c.recent_live_signals || [];
       const lsStats = c.live_signal_stats;
       const liveSigRows = liveSigs.map(sig => {
-        const rc = sig.result==='WIN'?'win':sig.result==='LOSS'?'loss':'dim';
+        const rc = sig.result==='WIN'?'win':(sig.result==='LOSS'||sig.result==='LOSS_EARLY')?'loss':'dim';
         const dirCls = sig.direction === 'LONG' ? 'win' : 'loss';
+        const whb = sig.would_have_been_result;
+        const whbTxt = whb ? ` title="\u0431\u044b\u043b\u043e \u0431\u044b: ${whb}${sig.would_have_been_pnl_r!=null?' ('+(sig.would_have_been_pnl_r>0?'+':'')+sig.would_have_been_pnl_r+'R)':''}"` : '';
         const statusHtml = sig.status === 'OPEN'
           ? '<span class="dim">\u041e\u0422\u041a\u0420\u042b\u0422\u0410</span>'
           : sig.result==='WIN' ? `<span class="win">WIN @ ${fmtNum(sig.exit_price)}</span>`
           : sig.result==='LOSS' ? `<span class="loss">LOSS @ ${fmtNum(sig.exit_price)}</span>`
+          : sig.result==='LOSS_EARLY' ? `<span class="loss"${whbTxt}>\u2702\ufe0f \u0440\u0430\u043d\u043d\u0438\u0439 \u0432\u044b\u0445\u043e\u0434 @ ${fmtNum(sig.exit_price)}</span>`
           : '<span class="dim">TIMEOUT</span>';
         return `<tr onclick="openNeuroChart('${c.symbol}', ${sig.time})" style="cursor:pointer;">
           <td class="dim">${fmtDateTime(sig.time)}</td>
