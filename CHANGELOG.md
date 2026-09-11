@@ -14326,3 +14326,29 @@ v0.99.257 - CRITICAL FIX: neuro_fetch_funding_rate() was failing with a
          unnoticed until the new errors panel made it directly visible.
          Verified: py_compile (-W error), pyflakes, 58 routes, real
          runtime 200 on / and /api/neuro/status.
+
+v0.99.258 - neuro_fetch_funding_rate() now adaptively discovers Gate's
+         actual max time range instead of settling for a fixed
+         conservative guess, per direct user follow-up to v0.99.257's
+         fix ("лучше же больше дней для бэктеста" — more days is better
+         for the backtest). v0.99.257 picked 60 days by analogy with
+         OTHER Gate.io endpoints' documented "30 days at most" limits —
+         reasonable but never directly confirmed for this specific
+         endpoint, and a fixed guess either wastes available history (if
+         the true limit is bigger) or still fails (if it's smaller).
+         Now tries the FULL caller-requested range first (neuro_backtest_
+         symbol() passes the complete NEURO_HISTORY_DAYS start_ts again),
+         and on a 400 response, HALVES the window and retries — up to 6
+         times — so it automatically converges close to whatever the
+         real maximum turns out to be, symbol by symbol, rather than
+         hard-coding an assumption. Non-400 failures (network errors,
+         other HTTP codes) still fail immediately without retrying, same
+         as before.
+         Verified with a mocked exchange simulating an (unknown-to-the-
+         code) real 90-day limit: starting from a 1500-day request, the
+         halving sequence (1500→750→375→188→94→47 days) correctly
+         converges to a working sub-90-day range and successfully
+         returns real data, landing safely under the true limit within
+         a small number of attempts.
+         Verified: py_compile (-W error), pyflakes, 58 routes, real
+         runtime 200 on / and /api/neuro/status.
