@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.257"
+APP_VERSION = "0.99.258"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -15118,25 +15118,45 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
 
 
 def neuro_fetch_funding_rate(symbol, start_ts, end_ts, limit=1000):
-    """GET /futures/usdt/funding_rate — Gate.io's historical funding rate."""
-    try:
-        r = requests.get(
-            f"{GATE_BASE}/futures/usdt/funding_rate",
-            params={"contract": symbol, "limit": limit, "from": start_ts, "to": end_ts},
-            timeout=HTTP_TIMEOUT,
-        )
-        r.raise_for_status()
-        out = []
-        for row in r.json():
-            try:
-                out.append({"time": int(row.get("t", row.get("time", 0))), "rate": float(row.get("r", row.get("rate", 0)))})
-            except (TypeError, ValueError):
+    """GET /futures/usdt/funding_rate — Gate.io's historical funding rate.
+    v0.99.258 — per direct user follow-up to the v0.99.257 fix ("лучше же
+    больше дней для бэктеста"): rather than permanently settling for a
+    guessed-conservative fixed window (v0.99.257's own 60-day compromise,
+    chosen only by analogy with OTHER Gate.io endpoints' documented "30
+    days at most" limits — this endpoint's own real limit was never
+    directly confirmed), this now tries the CALLER's full requested range
+    first and, on a 400 (the range exceeds whatever undocumented max Gate
+    enforces here), HALVES the window and retries — up to 6 times — so it
+    automatically discovers close to the actual maximum the exchange
+    allows instead of leaving usable history on the table if the true
+    limit turns out to be bigger than a fixed guess."""
+    range_start = start_ts
+    last_error = None
+    for attempt in range(6):
+        try:
+            r = requests.get(
+                f"{GATE_BASE}/futures/usdt/funding_rate",
+                params={"contract": symbol, "limit": limit, "from": range_start, "to": end_ts},
+                timeout=HTTP_TIMEOUT,
+            )
+            if r.status_code == 400 and range_start < end_ts - 86400:
+                range_start = end_ts - (end_ts - range_start) // 2
                 continue
-        out.sort(key=lambda x: x["time"])
-        return out
-    except Exception as e:
-        log_error(f"neuro_fetch_funding_rate {symbol}: {e}")
-        return []
+            r.raise_for_status()
+            out = []
+            for row in r.json():
+                try:
+                    out.append({"time": int(row.get("t", row.get("time", 0))), "rate": float(row.get("r", row.get("rate", 0)))})
+                except (TypeError, ValueError):
+                    continue
+            out.sort(key=lambda x: x["time"])
+            return out
+        except Exception as e:
+            last_error = e
+            break
+    if last_error:
+        log_error(f"neuro_fetch_funding_rate {symbol}: {last_error}")
+    return []
 
 
 def neuro_pick_best_rr(train_candles, confirmed_patterns, htf_candles=None, funding_records=None,
@@ -15296,22 +15316,19 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
         # funding_rate ...: 400 Client Error" across many symbols, every
         # mining cycle). Root cause: this call reused `start_ts` — the
         # SAME start of the FULL NEURO_HISTORY_DAYS (1500-day, ~4.1-year)
-        # candle-fetch window — for the funding-rate request too. Gate's
-        # own funding_rate endpoint (like several of its neighboring
-        # history endpoints — margin account book and margin history both
-        # documented at "30 days at most") appears to reject a multi-year
-        # range outright with a flat 400, meaning this fetch has been
-        # failing on EVERY symbol, EVERY cycle, leaving funding_zone with
-        # ZERO real coverage across the entire backtest regardless of
-        # symbol. neuro_scan_live()'s OWN identical call already uses a
-        # reasonable 30-day window and works fine — reused a similarly
-        # bounded window here instead of the full history. neuro_align_
-        # funding_rate() already degrades gracefully for bars outside the
-        # fetched range (plain None, not a crash) — same behavior as
-        # before for those older bars, but now the recent portion of the
-        # backtest actually gets real funding_zone data instead of none
-        # of it ever working at all.
-        funding_records = neuro_fetch_funding_rate(symbol, now - 60 * 86400, now)
+        # candle-fetch window — for the funding-rate request too, and
+        # Gate's own funding_rate endpoint appears to reject a range that
+        # wide outright with a flat 400.
+        # v0.99.258 — per direct user follow-up ("лучше же больше дней
+        # для бэктеста"): rather than permanently settling for v0.99.257's
+        # own guessed-conservative 60-day compromise, passes the FULL
+        # start_ts back here and lets neuro_fetch_funding_rate() itself
+        # adaptively halve the window on a 400 until it finds the actual
+        # widest range Gate allows — see that function's own docstring.
+        # neuro_align_funding_rate() already degrades gracefully for bars
+        # outside whatever range ends up actually returned (plain None,
+        # not a crash).
+        funding_records = neuro_fetch_funding_rate(symbol, start_ts, now)
         oi_records = []
         try:
             oi_records = get_contract_stats(symbol, interval="1h", limit=999)
