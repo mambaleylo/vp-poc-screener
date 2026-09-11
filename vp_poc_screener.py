@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.258"
+APP_VERSION = "0.99.259"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -17985,13 +17985,26 @@ INDEX_HTML = """<!doctype html>
   #settingsCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
   #settingsBody { padding:4px 16px 16px; overflow-y:auto; }
   .settingsGroup { margin-top:18px; border:1px solid #1c2433; border-radius:12px; overflow:hidden; }
+  .settingsGroup { border-left:3px solid var(--mod-color, #3a4356); }
   .settingsGroup:first-child { margin-top:4px; }
-  .settingsGroupTitle { padding:10px 14px; font-size:11px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:#6b7688; background:#0d1220; border-bottom:1px solid #1c2433; }
+  .settingsGroupTitle { padding:10px 14px; font-size:11px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:#6b7688; background:#0d1220; border-bottom:1px solid #1c2433; cursor:pointer; list-style:none; display:flex; align-items:center; justify-content:space-between; user-select:none; }
+  .settingsGroupTitle::-webkit-details-marker { display:none; }
+  .settingsGroupTitle::after { content:"▸"; color:var(--mod-color, #6b7688); font-size:12px; transition:transform .15s; margin-left:8px; }
+  details[open] > .settingsGroupTitle::after { transform:rotate(90deg); }
+  details[data-warn] > .settingsGroupTitle { color:#ffb08a; }
   .settingsGroup .settingRow { padding:14px; }
   .settingsGroup .settingRow:last-child { border-bottom:none; }
   .settingRow { display:flex; justify-content:space-between; align-items:center; padding:14px 0; border-bottom:1px solid #1c2433; }
   .settingRow .label { font-size:14px; }
   .settingRow .sub { font-size:11px; color:#8b98ab; margin-top:2px; }
+  .settingRow.subRow { padding-left:26px; background:#0a0d15; }
+  .settingRow.subRow .label { font-size:12.5px; color:#aab3c2; }
+  .settingRow.subRow2 { padding-left:42px; }
+  #settingsSearchWrap { padding:4px 0 12px; position:sticky; top:0; background:#05070c; z-index:2; }
+  #settingsSearch { width:100%; background:#12182a; border:1px solid #232d42; color:#fff; padding:10px 12px; border-radius:10px; font-size:13px; }
+  #settingsSearch::placeholder { color:#6b7688; }
+  .settingsGroup.searchHidden { display:none; }
+  .settingRow.searchHidden { display:none; }
   .switch { position:relative; display:inline-block; width:44px; height:24px; flex-shrink:0; }
   .switch input { opacity:0; width:0; height:0; }
   .switchSlider { position:absolute; cursor:pointer; inset:0; background:#3a4356; border-radius:24px; transition:.15s; }
@@ -18280,8 +18293,11 @@ INDEX_HTML = """<!doctype html>
     <button id="settingsCloseBtn">Закрыть</button>
   </div>
   <div id="settingsBody">
-    <div class="settingsGroup">
-      <div class="settingsGroupTitle">Volume Profile</div>
+    <div id="settingsSearchWrap">
+      <input type="text" id="settingsSearch" placeholder="Поиск по настройкам…">
+    </div>
+    <details class="settingsGroup" style="--mod-color:#4fc3f7;" open><summary class="settingsGroupTitle">Volume Profile</summary><div class="settingsGroupBody">
+      
       <div class="settingRow">
         <div>
           <div class="label">Volume Profile сканер</div>
@@ -18303,10 +18319,10 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setBreakout"><span class="switchSlider"></span></label>
       </div>
-    </div>
+    </div></details>>
 
-    <div class="settingsGroup">
-      <div class="settingsGroupTitle">Скальпинг</div>
+    <details class="settingsGroup" style="--mod-color:#ffb74d;" open><summary class="settingsGroupTitle">Скальпинг</summary><div class="settingsGroupBody">
+      
       <div class="settingRow">
         <div>
           <div class="label">Скальпинг</div>
@@ -18321,10 +18337,10 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setScalpSignals"><span class="switchSlider"></span></label>
       </div>
-    </div>
+    </div></details>>
 
-    <div class="settingsGroup">
-      <div class="settingsGroupTitle" style="color:#e0a030;">MSNR ⚠️ Экспериментально</div>
+    <details class="settingsGroup" style="--mod-color:#ff7043;" data-warn style="background:rgba(255,112,67,0.05);" open><summary class="settingsGroupTitle" style="color:#e0a030;">MSNR ⚠️ Экспериментально</summary><div class="settingsGroupBody">
+      
       <div class="settingRow">
         <div>
           <div class="label">Сканирование (только золото)</div>
@@ -18374,10 +18390,10 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setMsnrPerSymbolFilters"><span class="switchSlider"></span></label>
       </div>
-    </div>
+    </div></details>>
 
-    <div class="settingsGroup">
-      <div class="settingsGroupTitle" style="color:#e0a030;">FT5 ⚠️ Экспериментально</div>
+    <details class="settingsGroup" style="--mod-color:#ff7043;" data-warn style="background:rgba(255,112,67,0.05);" open><summary class="settingsGroupTitle" style="color:#e0a030;">FT5 ⚠️ Экспериментально</summary><div class="settingsGroupBody">
+      
       <div class="settingRow">
         <div>
           <div class="label">Сканирование</div>
@@ -18406,10 +18422,10 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setFt5SessionFilter"><span class="switchSlider"></span></label>
       </div>
-    </div>
+    </div></details>>
 
-    <div class="settingsGroup">
-      <div class="settingsGroupTitle">Зеркало</div>
+    <details class="settingsGroup" style="--mod-color:#ba68c8;" open><summary class="settingsGroupTitle">Зеркало</summary><div class="settingsGroupBody">
+      
       <div class="settingRow">
         <div>
           <div class="label">Сканирование</div>
@@ -18445,10 +18461,10 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setMirrorHtfFilter"><span class="switchSlider"></span></label>
       </div>
-    </div>
+    </div></details>>
 
-    <div class="settingsGroup">
-      <div class="settingsGroupTitle">EMA Touch (EMA🚀)</div>
+    <details class="settingsGroup" style="--mod-color:#66bb6a;" open><summary class="settingsGroupTitle">EMA Touch (EMA🚀)</summary><div class="settingsGroupBody">
+      
       <div class="settingRow">
         <div>
           <div class="label">Сканирование</div>
@@ -18456,7 +18472,10 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setEmaTouch"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingsGroupTitle">AMD Cycle</div>
+    </div></details>>
+
+    <details class="settingsGroup" style="--mod-color:#4db6ac;" open><summary class="settingsGroupTitle">AMD Cycle</summary><div class="settingsGroupBody">
+      
       <div class="settingRow">
         <div>
           <div class="label">Сканирование</div>
@@ -18464,7 +18483,10 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setAmd"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingsGroupTitle">🧠 Neuro</div>
+    </div></details>>
+
+    <details class="settingsGroup" style="--mod-color:#f06292;" open><summary class="settingsGroupTitle">🧠 Neuro</summary><div class="settingsGroupBody">
+      
       <div class="settingRow">
         <div>
           <div class="label">Работа (майнинг + живой скан)</div>
@@ -18479,7 +18501,10 @@ INDEX_HTML = """<!doctype html>
         </div>
         <input type="number" id="setNeuroTopN" min="1" max="50" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
       </div>
-      <div class="settingsGroupTitle">NQ Model (NAS100_USDT)</div>
+    </div></details>>
+
+    <details class="settingsGroup" style="--mod-color:#7986cb;" open><summary class="settingsGroupTitle">NQ Model (NAS100_USDT)</summary><div class="settingsGroupBody">
+      
       <div class="settingRow">
         <div>
           <div class="label">Сканирование</div>
@@ -18487,7 +18512,10 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setNq"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingsGroupTitle">Sweep (Liquidity Sweep)</div>
+    </div></details>>
+
+    <details class="settingsGroup" style="--mod-color:#4dd0e1;" open><summary class="settingsGroupTitle">Sweep (Liquidity Sweep)</summary><div class="settingsGroupBody">
+      
       <div class="settingRow">
         <div>
           <div class="label">Сканирование</div>
@@ -18572,10 +18600,10 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setLswDirectionFilter"><span class="switchSlider"></span></label>
       </div>
-    </div>
+    </div></details>>
 
-    <div class="settingsGroup">
-      <div class="settingsGroupTitle">Telegram</div>
+    <details class="settingsGroup" style="--mod-color:#26a5e4;" open><summary class="settingsGroupTitle">Telegram</summary><div class="settingsGroupBody">
+      
       <div class="settingRow">
         <div>
           <div class="label">Уведомления в Telegram</div>
@@ -18674,10 +18702,10 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramHourly"><span class="switchSlider"></span></label>
       </div>
-    </div>
+    </div></details>>
 
-    <div class="settingsGroup">
-      <div class="settingsGroupTitle">Автоторговля</div>
+    <details class="settingsGroup" style="--mod-color:#ef5350;" data-warn style="background:rgba(255,112,67,0.05);" open><summary class="settingsGroupTitle">Автоторговля</summary><div class="settingsGroupBody">
+      
       <div class="settingRow">
         <div>
           <div class="label">API-ключи Gate.io</div>
@@ -18764,7 +18792,7 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeNeuro"><span class="switchSlider"></span></label>
       </div>
-    </div>
+    </div></details>>
 
     <div class="dim hint-block" style="font-size:12px;margin-top:16px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
   </div>
@@ -21530,6 +21558,42 @@ async function loadSettings() {
     const s = await (await fetch('/api/settings')).json();
     applySettingsToInputs(s);
   } catch (e) {}
+}
+
+// v0.99.259 — per direct user request ("глянь на дизайн меню настроек,
+// может как-то можно улучшить наглядность"): mark every "↳"-prefixed
+// sub-setting row so it can be visually subordinated (indent + muted
+// label) under its own group's main toggle. Runs once — the settings
+// markup itself doesn't change after load.
+document.querySelectorAll('#settingsBody .settingRow .label').forEach(lbl => {
+  const t = lbl.textContent.trim();
+  if (t.startsWith('↳↳')) {
+    lbl.closest('.settingRow').classList.add('subRow', 'subRow2');
+  } else if (t.startsWith('↳')) {
+    lbl.closest('.settingRow').classList.add('subRow');
+  }
+});
+
+// Search-as-you-type filter across every settings row's label+sub text.
+// A group with no matching row (and no non-empty query) hides entirely;
+// a group with at least one match auto-expands so the match is visible
+// without an extra click.
+const settingsSearchInput = document.getElementById('settingsSearch');
+if (settingsSearchInput) {
+  settingsSearchInput.oninput = () => {
+    const q = settingsSearchInput.value.trim().toLowerCase();
+    document.querySelectorAll('#settingsBody > details.settingsGroup').forEach(group => {
+      let anyMatch = false;
+      group.querySelectorAll('.settingRow').forEach(row => {
+        const text = row.textContent.toLowerCase();
+        const match = !q || text.includes(q);
+        row.classList.toggle('searchHidden', !match);
+        if (match) anyMatch = true;
+      });
+      group.classList.toggle('searchHidden', !anyMatch);
+      if (q && anyMatch) group.open = true;
+    });
+  };
 }
 
 document.getElementById('settingsBtn').onclick = async () => {
