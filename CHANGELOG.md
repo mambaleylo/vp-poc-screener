@@ -14404,3 +14404,102 @@ v0.99.259 - Settings menu redesign for scannability, per direct user
          duplicated in the restructuring, real runtime 200 confirming
          /api/settings still returns all 70 keys, zero surrogate
          escapes.
+
+v0.99.260 - "Early exit" layer for Neuro, per direct user request
+         ("сигнал закрывается по стопу если сразу идёт к нему... минусовые
+         сделки можно закрывать раньше, при этом писать статистику для
+         таких сигналов, закрытых раньше времени, чтобы знать его исход").
+         Verified the underlying idea directly on synthetic data BEFORE
+         building anything: trades already showing a large adverse
+         excursion (MAE) with little favorable movement (MFE) within the
+         first NEURO_EARLY_EXIT_K=3 bars turned out to have a dramatically
+         lower eventual win rate than the overall average (0.1% vs 22.4%
+         baseline) — consistent with basic first-passage-time intuition,
+         not a fluke pattern-specific correlation.
+         New neuro_find_early_exit_rule(): on TRAIN, searches a grid of
+         (mae_threshold, mfe_threshold) pairs for one where matching
+         trades are overwhelmingly LOSSES (≤15pp win rate, 30+ trades) —
+         then VALIDATES the exact same rule against TEST-period trades
+         (test win rate must stay within 15pp of train, 10+ matching
+         trades) before trusting it, same walk-forward discipline as the
+         veto-filter feature (v0.99.255). Verified end-to-end on
+         realistic-scale (9500-bar) synthetic data: train WR 10.0%, test
+         WR 14.3% (held up), honest out-of-sample benefit — avg pnl for
+         matching trades improves from -0.571R (waiting for full
+         resolution) to -0.403R (exiting at the checkpoint's own close).
+         Wired into the actual backtest (neuro_backtest_symbol()): a
+         matching trade's result/pnl_r get rewritten to "LOSS_EARLY" with
+         the realized checkpoint-close pnl, while the ORIGINAL outcome is
+         preserved in would_have_been_result/would_have_been_pnl_r — the
+         honest counterfactual stays visible instead of being discarded,
+         per the user's explicit request. neuro_check_aggregate_decay()/
+         neuro_find_culprit_patterns() updated to count LOSS_EARLY as a
+         loss too, for consistency with the main summary.
+         Wired into LIVE tracking (neuro_track_signal_outcomes()): an
+         OPEN signal on a symbol with a validated early_exit_rule gets
+         checked once at the K-bar checkpoint — if triggered, a NEW
+         neuro_close_position_early() closes the REAL position (cancels
+         any pending SL/TP trigger orders first, then a reduce-only
+         market order in the opposite direction for the position's
+         actual current size) when AUTOTRADE_ENABLED_NEURO, sends a
+         Telegram alert, and marks the signal CLOSED/LOSS_EARLY with the
+         realized pnl — but ALSO flags shadow_pending=True so outcome
+         tracking keeps quietly following the SAME sl/tp/entry on later
+         passes purely to fill in the counterfactual would_have_been_
+         result once it actually resolves, never touching the real
+         (already-closed) position again. The existing no-open-position
+         guard (v0.99.251) checks status=="OPEN" specifically, so an
+         early-exited (status=CLOSED) symbol correctly becomes tradeable
+         again immediately, matching the real, closed position.
+         Verified the full live mechanism with mocked exchange calls: a
+         signal diving hard toward its stop in the first 3 bars
+         correctly triggers CLOSED/LOSS_EARLY with a realistic realized
+         pnl and a Telegram alert; a second tracking pass correctly
+         resolves would_have_been_result to the actual eventual outcome
+         (LOSS) without altering the real recorded exit; a separate test
+         with AUTOTRADE_ENABLED_NEURO=True confirmed the real-close path
+         correctly cancels the stale trigger order and places a reduce-
+         only market order in the right direction and exact position
+         size.
+         Added LOSS_EARLY display (distinct "✂️ ранний выход" label, with
+         the would-have-been outcome in a tooltip) to both the backtest
+         trades table and the live-signals table in the UI.
+         Verified: py_compile (-W error), pyflakes, node --check, 58
+         routes, real runtime 200, zero surrogate escapes.
+
+v0.99.261 - Performance fix + safety margin for neuro_mining_loop's own
+         per-symbol timeout, per direct user report (screenshot of the
+         v0.99.256 global errors panel showing "neuro_mining_loop:
+         {SYMBOL} exceeded 480s — skipping, abandoning stuck thread" for
+         multiple real symbols in one cycle on real hardware).
+         Found and fixed one confirmed, avoidable inefficiency: neuro_
+         backtest_symbol() was recomputing the full 47-condition series
+         a SECOND time from scratch purely for the veto-filter search
+         (v0.99.255), since neuro_simulate_trades() had no way to return
+         the condition series it already computes internally — doubling
+         that specific cost on every single symbol. Fixed with a new
+         return_conds=True param on neuro_simulate_trades() (backward
+         compatible — existing callers unaffected) so neuro_backtest_
+         symbol() now reuses the same computed series instead of paying
+         for it twice. Verified on realistic-scale (9500-bar) synthetic
+         data: full per-symbol pipeline (mining + simulate+conds + veto-
+         filter + early-exit search) now totals ~65s, comfortably under
+         the ceiling.
+         Also raised NEURO_PER_SYMBOL_MAX_SEC 480->720 as an honest
+         additional safety margin — the redundant computation wasn't the
+         full explanation for hitting the ceiling on real symbols; this
+         session's cumulative additions (38->47 conditions, veto filters,
+         early-exit rule search) genuinely made per-symbol processing
+         slower, and a real phone (Termux/Android) plus real network
+         latency plus resource contention from other concurrently-running
+         modules is inherently slower than the sandbox this constant was
+         originally tuned against. NEURO_WATCHDOG_STUCK_SEC (derived from
+         this constant) scales automatically (1080s -> 1560s), no
+         separate update needed.
+         Also confirmed (no bug): the "new signal detected but a previous
+         one is still OPEN — signal skipped" entries visible in the same
+         screenshot are the v0.99.251 no-open-position guard working
+         exactly as intended, not an error condition despite being logged
+         via log_error() for visibility.
+         Verified: py_compile (-W error), pyflakes, 58 routes, real
+         runtime 200 on / and /api/neuro/status.
