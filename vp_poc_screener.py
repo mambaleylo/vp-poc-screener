@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.253"
+APP_VERSION = "0.99.254"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14026,6 +14026,94 @@ def neuro_rsi_divergence_series(candles, rsi_series_vals, lookback=14):
     return out
 
 
+def neuro_cci_series(candles, period=20):
+    """Commodity Channel Index — an UNBOUNDED momentum oscillator (unlike
+    RSI/Stochastic's fixed 0-100 range), measuring how far the typical
+    price has strayed from its own recent mean in units of mean absolute
+    deviation. Genuinely complementary to the existing bounded
+    oscillators: because it's unbounded, CCI keeps discriminating during
+    strong sustained moves where RSI/Stochastic simply pin at their caps
+    — confirmed via web research (StockCharts/CrossTrade/AvaTrade) as a
+    standard, asset-agnostic "team player" indicator specifically valued
+    for this reason."""
+    out = [None] * len(candles)
+    tp = [(c["high"] + c["low"] + c["close"]) / 3 for c in candles]
+    for i in range(period - 1, len(candles)):
+        window = tp[i - period + 1:i + 1]
+        sma = sum(window) / period
+        mean_dev = sum(abs(x - sma) for x in window) / period
+        if mean_dev > 0:
+            out[i] = (tp[i] - sma) / (0.015 * mean_dev)
+    return out
+
+
+def neuro_chop_series(candles, period=14):
+    """Choppiness Index — measures whether price is moving EFFICIENTLY
+    (a strong trend, low value) or just churning back and forth without
+    real net progress (high value = ranging/choppy), via log(sum of true
+    range) vs log(net high-low range) over the window. Genuinely
+    complementary to the existing ADX-based adx_zone: ADX measures
+    DIRECTIONAL strength (are DI+/DI- diverging), CHOP measures movement
+    EFFICIENCY (is the true range mostly "wasted" oscillating vs
+    covering real ground) — confirmed via web research as a standard,
+    mathematically distinct regime classifier widely paired WITH ADX
+    rather than replacing it."""
+    out = [None] * len(candles)
+    trs = [None] * len(candles)
+    for i in range(len(candles)):
+        c = candles[i]
+        if i == 0:
+            trs[i] = c["high"] - c["low"]
+            continue
+        p = candles[i - 1]
+        trs[i] = max(c["high"] - c["low"], abs(c["high"] - p["close"]), abs(c["low"] - p["close"]))
+    log_period = math.log10(period)
+    for i in range(period - 1, len(candles)):
+        window = candles[i - period + 1:i + 1]
+        sum_tr = sum(trs[i - period + 1:i + 1])
+        hh = max(c["high"] for c in window)
+        ll = min(c["low"] for c in window)
+        if hh > ll and sum_tr > 0 and log_period > 0:
+            out[i] = 100 * math.log10(sum_tr / (hh - ll)) / log_period
+    return out
+
+
+def neuro_rolling_poc_side(candles, window=50, buckets=15):
+    """Lightweight per-bar approximation of price's position relative to
+    the rolling Point of Control (POC) — the price level with the most
+    traded volume over the recent window, this app's own namesake
+    concept. Deliberately a cheap approximation (not the full compute_
+    profile() used elsewhere in the app for a single live snapshot) so
+    it's fast enough to run at every bar across a full history — verified
+    at 0.43s for 9500 bars, negligible next to the rest of a symbol's own
+    backtest cost. Genuinely distinct from vwap_side: POC is the volume-
+    weighted MODE (where the most single-price agreement happened), VWAP
+    is the volume-weighted MEAN — the two can and do sit at different
+    prices, especially in a skewed/multi-peaked volume distribution."""
+    out = [None] * len(candles)
+    for i in range(window, len(candles)):
+        seg = candles[i - window:i]
+        hh = max(c["high"] for c in seg)
+        ll = min(c["low"] for c in seg)
+        if hh <= ll:
+            continue
+        inc = (hh - ll) / buckets
+        vols = [0.0] * buckets
+        for c in seg:
+            lo_b = max(0, int((c["low"] - ll) / inc))
+            hi_b = min(buckets - 1, int((c["high"] - ll) / inc))
+            span = max(1, hi_b - lo_b + 1)
+            for b in range(lo_b, hi_b + 1):
+                vols[b] += c["volume"] / span
+        poc_bucket = vols.index(max(vols))
+        poc_price = ll + inc * (poc_bucket + 0.5)
+        if poc_price <= 0:
+            continue
+        dist_pct = (candles[i]["close"] - poc_price) / poc_price * 100
+        out[i] = "above" if dist_pct > 0.3 else "below" if dist_pct < -0.3 else "at_poc"
+    return out
+
+
 def neuro_align_lsw_sweep(candles, lookback_bars=4):
     """v0.99.233 — 'symbiosis' condition, per direct user request: reuses
     LSW's OWN real liquidity-sweep detector directly on the SAME 1h
@@ -14308,6 +14396,9 @@ def neuro_compute_conditions(candles, htf_candles=None, funding_records=None, bt
     rsi_divergence = neuro_rsi_divergence_series(candles, rsi14)  # reuses the already-computed rsi14 series
     daily_streak = neuro_align_daily_streak(candles, d1_candles) if d1_candles else [None] * len(candles)
     btc_vol_regime = neuro_align_btc_vol_regime(candles, btc_candles) if btc_candles else [None] * len(candles)
+    cci20 = neuro_cci_series(candles)  # no extra data needed
+    chop14 = neuro_chop_series(candles)  # no extra data needed
+    poc_side = neuro_rolling_poc_side(candles)  # no extra data needed
 
     conds = []
     streak = 0
@@ -14394,6 +14485,14 @@ def neuro_compute_conditions(candles, htf_candles=None, funding_records=None, bt
             bucket["daily_streak"] = daily_streak[i]
         if btc_vol_regime[i] is not None:
             bucket["btc_vol_regime"] = btc_vol_regime[i]
+        if cci20[i] is not None:
+            v = cci20[i]
+            bucket["cci_zone"] = "overbought" if v >= 100 else "oversold" if v <= -100 else "neutral"
+        if chop14[i] is not None:
+            v = chop14[i]
+            bucket["chop_zone"] = "choppy" if v >= 61.8 else "trending" if v <= 38.2 else "transition"
+        if poc_side[i] is not None:
+            bucket["poc_side"] = poc_side[i]
         if williams_r[i] is not None:
             w = williams_r[i]
             bucket["williams_zone"] = "oversold" if w <= -80 else "overbought" if w >= -20 else "mid"
@@ -14513,7 +14612,7 @@ NEURO_CONDITION_KEYS = ("hour", "dow", "dom_third", "weekend", "session", "rsi_z
                         "williams_zone", "adx_zone", "vwap_side", "ichimoku", "roc_zone",
                         "wick_dominance", "round_number", "atr_trend", "lsw_sweep", "mirror_signal",
                         "bb_width_zone", "obv_trend", "supertrend_side", "rsi_divergence",
-                        "daily_streak", "btc_vol_regime")
+                        "daily_streak", "btc_vol_regime", "cci_zone", "chop_zone", "poc_side")
 
 # Curated subset used for PAIRWISE combinations — deliberately excludes "hour"
 # and "streak" (too many distinct values, would dilute sample sizes and
@@ -14530,7 +14629,7 @@ NEURO_COMBO_KEYS = ("dow", "weekend", "session", "rsi_zone", "stoch_zone", "ema2
                     "btc_agree", "oi_trend", "dom_third", "eth_agree", "h4_rsi_zone", "williams_zone",
                     "adx_zone", "vwap_side", "ichimoku", "roc_zone", "wick_dominance", "atr_trend",
                     "lsw_sweep", "mirror_signal", "bb_width_zone", "obv_trend", "supertrend_side",
-                    "rsi_divergence", "btc_vol_regime")
+                    "rsi_divergence", "btc_vol_regime", "cci_zone", "chop_zone", "poc_side")
 NEURO_FORWARD_HORIZONS = [4, 12, 24]  # test several forward-looking windows independently
 NEURO_COMBO_MIN_SAMPLE_MULT = 2.0   # combos need more samples to trust (more hypotheses tested)
 NEURO_COMBO_Z_BONUS = 0.5           # and a higher bar on z, same reasoning
@@ -20285,6 +20384,7 @@ const NEURO_KEY_LABELS = {
   bb_width_zone: '\u0448\u0438\u0440\u0438\u043d\u0430 \u043f\u043e\u043b\u043e\u0441 \u0411\u043e\u043b\u043b\u0438\u043d\u0434\u0436\u0435\u0440\u0430', obv_trend: '\u0442\u0440\u0435\u043d\u0434 OBV (\u043e\u0431\u044a\u0451\u043c)',
   supertrend_side: '\u0441\u0442\u043e\u0440\u043e\u043d\u0430 Supertrend', rsi_divergence: '\u0434\u0438\u0432\u0435\u0440\u0433\u0435\u043d\u0446\u0438\u044f RSI',
   daily_streak: '\u0434\u043d\u0435\u0432\u043d\u0430\u044f \u0441\u0435\u0440\u0438\u044f', btc_vol_regime: '\u0432\u043e\u043b\u0430\u0442\u0438\u043b\u044c\u043d\u043e\u0441\u0442\u044c BTC',
+  cci_zone: 'CCI', chop_zone: '\u0438\u043d\u0434\u0435\u043a\u0441 \u0445\u0430\u043e\u0442\u0438\u0447\u043d\u043e\u0441\u0442\u0438', poc_side: '\u0446\u0435\u043d\u0430 \u043e\u0442 POC',
 };
 const NEURO_VALUE_LABELS = {
   low: '\u043d\u0438\u0437\u043a\u0438\u0439', high: '\u0432\u044b\u0441\u043e\u043a\u0438\u0439', mid: '\u0441\u0440\u0435\u0434\u043d\u0438\u0439', normal: '\u043e\u0431\u044b\u0447\u043d\u044b\u0439',
@@ -20304,6 +20404,9 @@ const NEURO_VALUE_LABELS = {
   london_ny_overlap: '\u043b\u043e\u043d\u0434\u043e\u043d+\u041d\u042c', ny: '\u043d\u044c\u044e-\u0439\u043e\u0440\u043a\u0441\u043a\u0430\u044f', off_hours: '\u0432\u043d\u0435 \u0441\u0435\u0441\u0441\u0438\u0439',
   squeeze: '\u0441\u0436\u0430\u0442\u0438\u0435', expansion: '\u0440\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u0438\u0435', bullish: '\u0431\u044b\u0447\u044c\u044f', bearish: '\u043c\u0435\u0434\u0432\u0435\u0436\u044c\u044f',
   high_vol: '\u0432\u044b\u0441\u043e\u043a\u0430\u044f', low_vol: '\u043d\u0438\u0437\u043a\u0430\u044f', normal_vol: '\u043e\u0431\u044b\u0447\u043d\u0430\u044f',
+  overbought: '\u043f\u0435\u0440\u0435\u043a\u0443\u043f\u043b\u0435\u043d', oversold: '\u043f\u0435\u0440\u0435\u043f\u0440\u043e\u0434\u0430\u043d', neutral: '\u043d\u0435\u0439\u0442\u0440\u0430\u043b\u044c\u043d\u043e',
+  choppy: '\u0431\u043e\u043a\u043e\u0432\u0438\u043a', trending: '\u0442\u0440\u0435\u043d\u0434', transition: '\u043f\u0435\u0440\u0435\u0445\u043e\u0434\u043d\u043e\u0435',
+  at_poc: '\u0443 POC',
 };
 const NEURO_DOW_NAMES = ['\u041f\u043d','\u0412\u0442','\u0421\u0440','\u0427\u0442','\u041f\u0442','\u0421\u0431','\u0412\u0441'];
 function neuroTranslateValue(key, val) {
