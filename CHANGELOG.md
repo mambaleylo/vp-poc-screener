@@ -14290,3 +14290,39 @@ v0.99.256 - Fixed Neuro's silent Telegram notifications and a stale-
          routes, real runtime 200 confirming both new endpoints (/api/
          errors, /api/neuro/restart_backtest) respond correctly, zero
          surrogate escapes.
+
+v0.99.257 - CRITICAL FIX: neuro_fetch_funding_rate() was failing with a
+         400 Bad Request on EVERY symbol, EVERY mining cycle — spotted
+         directly by the user via the new global errors panel (v0.99.256)
+         showing a wall of repeated "neuro_fetch_funding_rate {SYMBOL}:
+         400 Client Error" entries. Root cause: neuro_backtest_symbol()
+         reused `start_ts` — the start of the FULL NEURO_HISTORY_DAYS
+         (1500-day, ~4.1-year) candle-fetch window — for the funding-
+         rate request too, asking Gate.io for years of funding-rate
+         history in one call. Researched Gate's own API docs/SDKs:
+         several neighboring history endpoints (margin account book,
+         margin transaction history) are explicitly documented with a
+         hard "30 days at most" range limit; funding_rate isn't
+         documented with an exact figure but the consistent 400 across
+         every single symbol strongly matches the same class of range-
+         too-large rejection. neuro_scan_live()'s own identical call
+         already correctly uses a 30-day window and works fine — the
+         backtest-side call was the only one still using the full-
+         history start_ts.
+         Fixed: backtest-side call now requests the last 60 days
+         instead of the full history. Confirmed neuro_align_funding_
+         rate() already degrades gracefully for bars outside the
+         fetched range (plain None per bar, not a crash) — bars in the
+         far past still get no funding_zone value (same as before,
+         since the fetch was returning nothing there anyway), but the
+         recent portion of every symbol's backtest now gets REAL
+         funding_zone data for the first time, instead of the condition
+         being completely dead across 100% of history on every symbol.
+         Also confirmed neuro_fetch_funding_rate() itself already
+         handled the failure safely (catches the exception, returns []
+         rather than crashing the whole backtest) — this was silently
+         degrading a specific condition's coverage to zero, not
+         breaking the mining cycle itself, which is why it went
+         unnoticed until the new errors panel made it directly visible.
+         Verified: py_compile (-W error), pyflakes, 58 routes, real
+         runtime 200 on / and /api/neuro/status.
