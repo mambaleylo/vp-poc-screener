@@ -14352,3 +14352,55 @@ v0.99.258 - neuro_fetch_funding_rate() now adaptively discovers Gate's
          a small number of attempts.
          Verified: py_compile (-W error), pyflakes, 58 routes, real
          runtime 200 on / and /api/neuro/status.
+
+v0.99.259 - Settings menu redesign for scannability, per direct user
+         request ("глянь на дизайн меню настроек, может как-то можно
+         улучшить наглядность, блоки, цвет, сортировка, размер").
+         12 module groups, all always fully expanded, with no visual
+         distinction between a group's main on/off toggle and its own
+         nested "↳"-prefixed sub-settings, and no way to find one
+         specific setting except scrolling the whole thing.
+         - Every group converted to a native <details>/<summary>
+           (collapsible, no JS needed for the toggle itself) — all
+           start open (nothing hidden that wasn't visible before), just
+           now collapsible per-group.
+         - Each group gets its own colored left-border accent (12
+           distinct hues) plus a matching color on its own collapse
+           arrow, so the eye can jump straight to a module by color
+           instead of reading every title.
+         - The two already-orange "⚠️ Экспериментальный" groups (MSNR,
+           FT5) and Автоторговля (real money) get a subtle warning-
+           tinted background across the WHOLE group, not just colored
+           title text, making the "handle with care" groups visually
+           distinct from the rest at a glance.
+         - Every "↳"-prefixed sub-setting row now gets a visible indent,
+           a muted/smaller label, and a slightly different background —
+           subordinating it visually under its own group's main toggle
+           instead of reading as a same-weight peer row. "↳↳"
+           (Martingale, nested two levels under Автоторговля →
+           Скальпинг) gets extra indent on top of that.
+         - New search box at the top of the settings modal — filters
+           every row across all 12 groups by label+description text as
+           you type, auto-expanding any group with a match and hiding
+           groups with none, so finding one specific setting among ~65
+           no longer means scrolling the whole list.
+         CRITICAL FIX found and corrected before shipping: 4 of the 12
+         groups (AMD Cycle, Neuro, NQ Model, Sweep) turned out to have
+         NO settingsGroup wrapper div of their own at all in the
+         existing markup — a pre-existing structural gap from when they
+         were added in earlier sessions — meaning they were actually
+         all nested inside EMA Touch's own group div. The first
+         automated collapsible-conversion pass (via a script tracking
+         div nesting depth) correctly found only 8 balanced groups and
+         would have bundled all 5 of those into one giant "EMA Touch"
+         collapsible if shipped as-is. Caught by verifying the expected
+         count (12) against what the script actually converted before
+         any further changes — inserted proper group boundaries for all
+         4, re-verified via HTML-parser-based structural balance
+         checking, then re-ran the conversion cleanly.
+         Verified: py_compile (-W error), pyflakes, node --check, 58
+         routes, exact same checkbox/number-input COUNT (59/4) as the
+         pre-redesign version confirming zero settings were lost or
+         duplicated in the restructuring, real runtime 200 confirming
+         /api/settings still returns all 70 keys, zero surrogate
+         escapes.
