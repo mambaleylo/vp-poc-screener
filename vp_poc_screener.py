@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.261"
+APP_VERSION = "0.99.262"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1036,7 +1036,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled",
                   "autotrade_risk_pct",
@@ -1076,6 +1076,7 @@ def get_settings():
         "amd_enabled": AMD_ENABLED,
         "neuro_enabled": NEURO_ENABLED,
         "neuro_top_n": NEURO_TOP_N,
+        "neuro_display_n": NEURO_DISPLAY_N,
         "nq_enabled": NQ_ENABLED,
         "lsw_enabled": LSW_ENABLED,
         "lsw_rr": LSW_RR,
@@ -1138,7 +1139,7 @@ def apply_settings(updates):
     global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, FT5_HTF_FILTER_ENABLED, FT5_SESSION_FILTER_ENABLED, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, MSNR_MIN_RR_FILTER_ENABLED, MSNR_HTF_FILTER_ENABLED, MSNR_PER_SYMBOL_FILTERS_ENABLED, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT, MIRROR_AUTOTUNE_TOLERANCE_ENABLED
     global MIRROR_VOLUME_FILTER_ENABLED, MIRROR_HTF_FILTER_ENABLED
-    global EMA_TOUCH_ENABLED, AMD_ENABLED, NEURO_ENABLED, NEURO_TOP_N, _neuro_active_symbols, NQ_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
+    global EMA_TOUCH_ENABLED, AMD_ENABLED, NEURO_ENABLED, NEURO_TOP_N, NEURO_DISPLAY_N, _neuro_active_symbols, _neuro_display_symbols, NQ_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED, LSW_ATR_SWEEP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
@@ -1217,6 +1218,12 @@ def apply_settings(updates):
             # memory-conscious design), so growing the active set only
             # takes effect once the next full mining cycle re-scans
             # everything.
+            # v0.99.262 — per direct user request for a separate display
+            # count: a symbol dropped from ACTIVE by a lower top_n is no
+            # longer deleted outright — it just stops being traded/live-
+            # scanned while staying visible (greyed out) as long as it's
+            # still within the display set. Only symbols falling out of
+            # BOTH active and display get their data actually removed.
             with _neuro_state_lock:
                 current_active = list(_neuro_active_symbols)
                 if len(current_active) > new_top_n:
@@ -1224,7 +1231,32 @@ def apply_settings(updates):
                         current_active,
                         key=lambda s: -(neuro_rank_metric(_neuro_summary.get(s, {})) or float("-inf")),
                     )
-                    keep = set(ranked[:new_top_n])
+                    _neuro_active_symbols = ranked[:new_top_n]
+            if len(current_active) > new_top_n:
+                save_neuro_state()
+    if "neuro_display_n" in updates:
+        try:
+            new_display_n = int(updates["neuro_display_n"])
+        except (TypeError, ValueError):
+            new_display_n = None
+        if new_display_n and new_display_n > 0:
+            NEURO_DISPLAY_N = new_display_n
+            effective_n = max(new_display_n, NEURO_TOP_N)
+            # v0.99.262 — same immediate-apply-on-decrease logic as neuro_
+            # top_n's own (see its comment above): trims the DISPLAY set
+            # (and, only now, actually deletes the dropped symbols' data,
+            # since they're no longer kept for reference either) down to
+            # the new count using data already in memory. An increase
+            # can't pull in symbols that weren't kept — takes effect on
+            # the next full mining cycle.
+            with _neuro_state_lock:
+                current_display = list(_neuro_display_symbols)
+                if len(current_display) > effective_n:
+                    ranked = sorted(
+                        current_display,
+                        key=lambda s: -(neuro_rank_metric(_neuro_summary.get(s, {})) or float("-inf")),
+                    )
+                    keep = set(ranked[:effective_n])
                     for sym in list(_neuro_patterns.keys()):
                         if sym not in keep:
                             del _neuro_patterns[sym]
@@ -1237,8 +1269,9 @@ def apply_settings(updates):
                     for sym in list(_neuro_live_signals.keys()):
                         if sym not in keep:
                             del _neuro_live_signals[sym]
-                    _neuro_active_symbols = ranked[:new_top_n]
-            if len(current_active) > new_top_n:
+                    _neuro_display_symbols = ranked[:effective_n]
+                    _neuro_active_symbols = [s for s in _neuro_active_symbols if s in keep]
+            if len(current_display) > effective_n:
                 save_neuro_state()
     if "nq_enabled" in updates:
         NQ_ENABLED = bool(updates["nq_enabled"])
@@ -5649,6 +5682,7 @@ def save_neuro_state():
                 "neuro_trades": dict(_neuro_trades),
                 "neuro_summary": dict(_neuro_summary),
                 "neuro_active_symbols": list(_neuro_active_symbols),
+                "neuro_display_symbols": list(_neuro_display_symbols),
                 "neuro_last_mined": _neuro_last_mined,
             }
         with _neuro_signal_log_lock:
@@ -5669,7 +5703,7 @@ def load_neuro_state():
     try:
         with open(NEURO_STATE_FILE) as f:
             data = json.load(f)
-        global _neuro_active_symbols, _neuro_last_mined
+        global _neuro_active_symbols, _neuro_display_symbols, _neuro_last_mined
         with _neuro_state_lock:
             _neuro_patterns.clear()
             _neuro_patterns.update(data.get("neuro_patterns", {}))
@@ -5680,6 +5714,12 @@ def load_neuro_state():
             restored_active = data.get("neuro_active_symbols")
             if restored_active:
                 _neuro_active_symbols = restored_active
+            # v0.99.262 — restored_display falls back to restored_active
+            # for a state file saved BEFORE this feature existed, so an
+            # upgrade doesn't lose the active symbols' own visibility.
+            restored_display = data.get("neuro_display_symbols") or restored_active
+            if restored_display:
+                _neuro_display_symbols = restored_display
             _neuro_last_mined = data.get("neuro_last_mined")
         with _neuro_signal_log_lock:
             _neuro_signal_log.clear()
@@ -13673,7 +13713,8 @@ NEURO_COINS          = ["BTC_USDT", "ETH_USDT", "SOL_USDT", "XRP_USDT", "DOGE_US
                         "TRX_USDT", "MATIC_USDT", "LTC_USDT", "ATOM_USDT", "NEAR_USDT",
                         "APT_USDT", "ARB_USDT", "OP_USDT", "SUI_USDT", "TON_USDT"]  # v0.99.215 — expanded 10->20 per direct user request; now the always-included seed set (see NEURO_UNIVERSE_SIZE above)
 NEURO_UNIVERSE_SIZE  = int(os.environ.get("VP_NEURO_UNIVERSE_SIZE", 120))  # v0.99.236 — wide volume-ranked candidate pool, same scale as LSW's own 100-120
-NEURO_TOP_N          = int(os.environ.get("VP_NEURO_TOP_N", 5))  # v0.99.246 — lowered 10->5 per direct user request; how many survive the full-universe backtest, ranked by avg_pnl_r
+NEURO_TOP_N          = int(os.environ.get("VP_NEURO_TOP_N", 5))  # v0.99.246 — lowered 10->5 per direct user request; how many survive the full-universe backtest AND are actually traded/live-scanned, ranked by avg_pnl_r
+NEURO_DISPLAY_N       = int(os.environ.get("VP_NEURO_DISPLAY_N", 5))  # v0.99.262, per direct user request ("не количество топ для авто торговли, а ещё и для просто отображения... остальные показывать серым"): how many symbols get KEPT and SHOWN in the UI after ranking — always clamped to at least NEURO_TOP_N (can't display fewer than you trade). The extra (NEURO_DISPLAY_N - NEURO_TOP_N) symbols beyond the tradeable top-N are shown for reference (their own backtest results) but are NOT live-scanned or autotraded — the UI greys them out so it's obvious which cards are just informational.
 NEURO_TOP_N_MIN_TRADES = int(os.environ.get("VP_NEURO_TOP_N_MIN_TRADES", 20))  # per direct user request — don't let a coin with e.g. 3 lucky trades and +5R average beat out one with 50 trades and a solid +0.3R; a coin needs at least this many closed backtest trades to even be RANKED for the top-N cut (coins below this are excluded from the active set entirely, not just ranked low)
 NEURO_TF             = os.environ.get("VP_NEURO_TF", "1h")
 NEURO_FORWARD_BARS   = int(os.environ.get("VP_NEURO_FORWARD_BARS", 12))   # measure forward return over next N bars
@@ -15686,6 +15727,7 @@ _neuro_mining_total = 0
 _neuro_mining_current_symbol = None
 _neuro_mining_progress_ts = time.time()  # v0.99.217 — last time real progress happened, for the watchdog below
 _neuro_active_symbols = list(NEURO_COINS[:NEURO_TOP_N])  # v0.99.236 — current top-N survivors of the full-universe backtest; starts as the seed coins until the first cycle completes
+_neuro_display_symbols = list(NEURO_COINS[:max(NEURO_DISPLAY_N, NEURO_TOP_N)])  # v0.99.262 — superset of _neuro_active_symbols: everything shown in the UI, whether or not it's actually traded
 _neuro_prev_signal_keys = set()
 
 # v0.99.227 — persistent live-signal LOG with real tracked outcomes, per
@@ -15916,7 +15958,7 @@ def neuro_mining_watchdog():
 
 def neuro_mining_loop():
     global _neuro_last_mined, _neuro_mining_running, _neuro_mining_done, _neuro_mining_total
-    global _neuro_mining_current_symbol, _neuro_mining_progress_ts, _neuro_active_symbols
+    global _neuro_mining_current_symbol, _neuro_mining_progress_ts, _neuro_active_symbols, _neuro_display_symbols
     while True:
         try:
             if not NEURO_ENABLED:
@@ -16021,8 +16063,16 @@ def neuro_mining_loop():
                         if (res[2].get("n") or 0) >= NEURO_TOP_N_MIN_TRADES
                         and res[2].get("avg_pnl_r") is not None]
             eligible.sort(key=lambda item: -neuro_rank_metric(item[1][2]))
-            top = eligible[:NEURO_TOP_N]
+            # v0.99.262 — per direct user request ("не количество топ для
+            # авто торговли, а ещё и для просто отображения... остальные
+            # показывать серым"): keep max(NEURO_DISPLAY_N, NEURO_TOP_N)
+            # symbols for STORAGE/DISPLAY, but only the first NEURO_TOP_N
+            # of those (still the best-ranked ones) are actually traded/
+            # live-scanned — the rest are shown read-only.
+            display_top = eligible[:max(NEURO_DISPLAY_N, NEURO_TOP_N)]
+            top = display_top[:NEURO_TOP_N]
             new_active = [sym for sym, _ in top]
+            new_display = [sym for sym, _ in display_top]
 
             if not all_results:
                 # v0.99.236 — safety net: a totally empty all_results (e.g.
@@ -16042,15 +16092,20 @@ def neuro_mining_loop():
                     _neuro_patterns.clear()
                     _neuro_trades.clear()
                     _neuro_summary.clear()
-                    for sym, (confirmed, trades, summary) in top:
+                    for sym, (confirmed, trades, summary) in display_top:
                         _neuro_patterns[sym] = confirmed
                         _neuro_trades[sym] = trades
                         _neuro_summary[sym] = summary
                     _neuro_active_symbols = new_active
+                    _neuro_display_symbols = new_display
                     # Drop live-signal state for any symbol that fell out of
-                    # the active set — its badge shouldn't linger in the UI.
+                    # the DISPLAY set entirely — its badge shouldn't linger
+                    # in the UI. A symbol still shown but no longer traded
+                    # (dropped from active, kept in display) keeps whatever
+                    # historical live-signal badge it already had — it's
+                    # just not scanned for NEW ones anymore.
                     for sym in list(_neuro_live_signals.keys()):
-                        if sym not in new_active:
+                        if sym not in new_display:
                             del _neuro_live_signals[sym]
                     _neuro_last_mined = int(time.time())
                     _neuro_mining_running = False
@@ -16212,15 +16267,18 @@ def api_neuro_status():
         mining_total = _neuro_mining_total
         mining_current = _neuro_mining_current_symbol
         active_symbols = list(_neuro_active_symbols)
+        display_symbols = list(_neuro_display_symbols)
     with _neuro_signal_log_lock:
         signal_log = list(_neuro_signal_log)
     signal_stats = neuro_compute_signal_stats(active_symbols)
+    active_set = set(active_symbols)
     coins = []
-    for symbol in active_symbols:
+    for symbol in display_symbols:
         recent_trades = (trades.get(symbol) or [])[-40:][::-1]
         recent_live_signals = [s for s in signal_log if s["symbol"] == symbol][:40]
         coins.append({
             "symbol": symbol,
+            "is_active": symbol in active_set,  # v0.99.262 — False = shown for reference (own backtest results) but not live-scanned or traded
             "summary": summary.get(symbol, {}),
             "top_patterns": (patterns.get(symbol) or [])[:8],
             "live_signal": live_signals.get(symbol),
@@ -16236,7 +16294,7 @@ def api_neuro_status():
                    "history_days": NEURO_HISTORY_DAYS, "z_threshold": NEURO_Z_THRESHOLD,
                    "min_agree_z": NEURO_MIN_AGREE_Z, "refresh_sec": NEURO_REFRESH_SEC,
                    "universe_size": NEURO_UNIVERSE_SIZE, "top_n": NEURO_TOP_N,
-                   "top_n_min_trades": NEURO_TOP_N_MIN_TRADES},
+                   "display_n": NEURO_DISPLAY_N, "top_n_min_trades": NEURO_TOP_N_MIN_TRADES},
     })
 
 
@@ -17938,8 +17996,9 @@ def api_reset_neuro():
             _neuro_trades.clear()
             _neuro_summary.clear()
             _neuro_live_signals.clear()
-            global _neuro_active_symbols
+            global _neuro_active_symbols, _neuro_display_symbols
             _neuro_active_symbols = list(NEURO_COINS[:NEURO_TOP_N])
+            _neuro_display_symbols = list(NEURO_COINS[:max(NEURO_DISPLAY_N, NEURO_TOP_N)])
         with _neuro_signal_log_lock:
             _neuro_signal_log.clear()
         save_neuro_state()  # v0.99.240 — persist the reset immediately, so a restart right after doesn't resurrect the old cleared data from disk
@@ -18551,7 +18610,7 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setBreakout"><span class="switchSlider"></span></label>
       </div>
-    </div></details>>
+    </div></details>
 
     <details class="settingsGroup" style="--mod-color:#ffb74d;" open><summary class="settingsGroupTitle">Скальпинг</summary><div class="settingsGroupBody">
       
@@ -18569,7 +18628,7 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setScalpSignals"><span class="switchSlider"></span></label>
       </div>
-    </div></details>>
+    </div></details>
 
     <details class="settingsGroup" style="--mod-color:#ff7043;" data-warn style="background:rgba(255,112,67,0.05);" open><summary class="settingsGroupTitle" style="color:#e0a030;">MSNR ⚠️ Экспериментально</summary><div class="settingsGroupBody">
       
@@ -18622,7 +18681,7 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setMsnrPerSymbolFilters"><span class="switchSlider"></span></label>
       </div>
-    </div></details>>
+    </div></details>
 
     <details class="settingsGroup" style="--mod-color:#ff7043;" data-warn style="background:rgba(255,112,67,0.05);" open><summary class="settingsGroupTitle" style="color:#e0a030;">FT5 ⚠️ Экспериментально</summary><div class="settingsGroupBody">
       
@@ -18654,7 +18713,7 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setFt5SessionFilter"><span class="switchSlider"></span></label>
       </div>
-    </div></details>>
+    </div></details>
 
     <details class="settingsGroup" style="--mod-color:#ba68c8;" open><summary class="settingsGroupTitle">Зеркало</summary><div class="settingsGroupBody">
       
@@ -18693,7 +18752,7 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setMirrorHtfFilter"><span class="switchSlider"></span></label>
       </div>
-    </div></details>>
+    </div></details>
 
     <details class="settingsGroup" style="--mod-color:#66bb6a;" open><summary class="settingsGroupTitle">EMA Touch (EMA🚀)</summary><div class="settingsGroupBody">
       
@@ -18704,7 +18763,7 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setEmaTouch"><span class="switchSlider"></span></label>
       </div>
-    </div></details>>
+    </div></details>
 
     <details class="settingsGroup" style="--mod-color:#4db6ac;" open><summary class="settingsGroupTitle">AMD Cycle</summary><div class="settingsGroupBody">
       
@@ -18715,7 +18774,7 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setAmd"><span class="switchSlider"></span></label>
       </div>
-    </div></details>>
+    </div></details>
 
     <details class="settingsGroup" style="--mod-color:#f06292;" open><summary class="settingsGroupTitle">🧠 Neuro</summary><div class="settingsGroupBody">
       
@@ -18733,7 +18792,14 @@ INDEX_HTML = """<!doctype html>
         </div>
         <input type="number" id="setNeuroTopN" min="1" max="50" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
       </div>
-    </div></details>>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Сколько монет отображать</div>
+          <div class="sub">не меньше числа выше — торгуются только лучшие по числу выше, а карточки сверх этого показываются серым как справочные (свой бэктест есть, но не торгуются и не сканируются вживую)</div>
+        </div>
+        <input type="number" id="setNeuroDisplayN" min="1" max="50" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+      </div>
+    </div></details>
 
     <details class="settingsGroup" style="--mod-color:#7986cb;" open><summary class="settingsGroupTitle">NQ Model (NAS100_USDT)</summary><div class="settingsGroupBody">
       
@@ -18744,7 +18810,7 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setNq"><span class="switchSlider"></span></label>
       </div>
-    </div></details>>
+    </div></details>
 
     <details class="settingsGroup" style="--mod-color:#4dd0e1;" open><summary class="settingsGroupTitle">Sweep (Liquidity Sweep)</summary><div class="settingsGroupBody">
       
@@ -18832,7 +18898,7 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setLswDirectionFilter"><span class="switchSlider"></span></label>
       </div>
-    </div></details>>
+    </div></details>
 
     <details class="settingsGroup" style="--mod-color:#26a5e4;" open><summary class="settingsGroupTitle">Telegram</summary><div class="settingsGroupBody">
       
@@ -18934,7 +19000,7 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramHourly"><span class="switchSlider"></span></label>
       </div>
-    </div></details>>
+    </div></details>
 
     <details class="settingsGroup" style="--mod-color:#ef5350;" data-warn style="background:rgba(255,112,67,0.05);" open><summary class="settingsGroupTitle">Автоторговля</summary><div class="settingsGroupBody">
       
@@ -19024,7 +19090,7 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeNeuro"><span class="switchSlider"></span></label>
       </div>
-    </div></details>>
+    </div></details>
 
     <div class="dim hint-block" style="font-size:12px;margin-top:16px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
   </div>
@@ -20790,8 +20856,21 @@ async function refreshNeuro() {
           </details>`
         : '';
 
-      return `<div style="margin-bottom:14px;padding:12px;background:#12182a;border-radius:10px;border:1px solid #232d45;">
+      // v0.99.262 — per direct user request ("торговать 5, а остальные
+      // 5 показывать серым цветом... чтобы было понятно, что они не
+      // торгуются"): a coin kept for DISPLAY only (beyond the tradeable
+      // top-N) gets muted styling + an explicit badge, instead of
+      // looking identical to an actively-traded one.
+      const isActive = c.is_active !== false;
+      const cardStyle = isActive
+        ? 'margin-bottom:14px;padding:12px;background:#12182a;border-radius:10px;border:1px solid #232d45;'
+        : 'margin-bottom:14px;padding:12px;background:#0d1018;border-radius:10px;border:1px dashed #3a4256;opacity:0.6;';
+      const inactiveBadge = isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:#2a2f3d;border-radius:6px;">
+        <span class="dim" style="font-size:10px;">\u26aa \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0441\u043f\u0440\u0430\u0432\u043a\u0438 \u2014 \u043d\u0435 \u0442\u043e\u0440\u0433\u0443\u0435\u0442\u0441\u044f \u0438 \u043d\u0435 \u0441\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442\u0441\u044f \u0432\u0436\u0438\u0432\u0443\u044e</span>
+      </div>`;
+      return `<div style="${cardStyle}">
         <div style="font-size:15px;font-weight:700;color:#c792ea;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
+        ${inactiveBadge}
         ${underperformBadge}
         ${liveBadge}
         ${bigStats}
@@ -20803,7 +20882,7 @@ async function refreshNeuro() {
 
     panel.innerHTML = `
       <div class="dim hint-block" style="margin-bottom:10px;">
-        <b>🧠 Neuro</b> \u2014 \u0441\u0430\u043c\u043e\u043e\u0431\u0443\u0447\u0430\u044e\u0449\u0430\u044f\u0441\u044f \u0441\u0438\u0441\u0442\u0435\u043c\u0430 \u043f\u043e\u0438\u0441\u043a\u0430 \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439. \u041a\u0430\u0436\u0434\u044b\u0439 \u0446\u0438\u043a\u043b \u0441\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442 \u0434\u043e ${cfg.universe_size||120} \u043b\u0438\u043a\u0432\u0438\u0434\u043d\u044b\u0445 \u043c\u043e\u043d\u0435\u0442, \u043f\u0440\u043e\u0433\u043e\u043d\u044f\u0435\u0442 \u043f\u043e\u043b\u043d\u044b\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442 \u043f\u043e \u043a\u0430\u0436\u0434\u043e\u0439, \u0438 \u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0435\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u0442\u043e\u043f-${cfg.top_n||10} \u043f\u043e \u0441\u0440. P&L (\u043c\u0438\u043d\u0438\u043c\u0443\u043c ${cfg.top_n_min_trades||20} \u0441\u0434\u0435\u043b\u043e\u043a \u0447\u0442\u043e\u0431\u044b \u043f\u043e\u043f\u0430\u0441\u0442\u044c \u0432 \u043e\u0442\u0431\u043e\u0440). \u041f\u043e \u043c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u043e \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438 (\u0447\u0430\u0441\u043e\u0432\u044b\u0435 \u0441\u0432\u0435\u0447\u0438), \u043f\u0435\u0440\u0435\u0431\u0438\u0440\u0430\u0435\u0442 \u0432\u0441\u0435\u0432\u043e\u0437\u043c\u043e\u0436\u043d\u044b\u0435 \u0443\u0441\u043b\u043e\u0432\u0438\u044f
+        <b>🧠 Neuro</b> \u2014 \u0441\u0430\u043c\u043e\u043e\u0431\u0443\u0447\u0430\u044e\u0449\u0430\u044f\u0441\u044f \u0441\u0438\u0441\u0442\u0435\u043c\u0430 \u043f\u043e\u0438\u0441\u043a\u0430 \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439. \u041a\u0430\u0436\u0434\u044b\u0439 \u0446\u0438\u043a\u043b \u0441\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442 \u0434\u043e ${cfg.universe_size||120} \u043b\u0438\u043a\u0432\u0438\u0434\u043d\u044b\u0445 \u043c\u043e\u043d\u0435\u0442, \u043f\u0440\u043e\u0433\u043e\u043d\u044f\u0435\u0442 \u043f\u043e\u043b\u043d\u044b\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442 \u043f\u043e \u043a\u0430\u0436\u0434\u043e\u0439, \u0442\u043e\u0440\u0433\u0443\u0435\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u0442\u043e\u043f-${cfg.top_n||5} \u043f\u043e \u0441\u0440. P&L, \u043d\u043e \u043c\u043e\u0436\u0435\u0442 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0442\u044c \u0434\u043e ${cfg.display_n||cfg.top_n||5} \u043a\u0430\u0440\u0442\u043e\u0447\u0435\u043a \u2014 \u043b\u0438\u0448\u043d\u0438\u0435 \u0441\u0435\u0440\u044b\u0435, \u0441\u043f\u0440\u0430\u0432\u043e\u0447\u043d\u044b\u0435 (\u043c\u0438\u043d\u0438\u043c\u0443\u043c ${cfg.top_n_min_trades||20} \u0441\u0434\u0435\u043b\u043e\u043a \u0447\u0442\u043e\u0431\u044b \u043f\u043e\u043f\u0430\u0441\u0442\u044c \u0432 \u043e\u0442\u0431\u043e\u0440). \u041f\u043e \u043c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u043e \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438 (\u0447\u0430\u0441\u043e\u0432\u044b\u0435 \u0441\u0432\u0435\u0447\u0438), \u043f\u0435\u0440\u0435\u0431\u0438\u0440\u0430\u0435\u0442 \u0432\u0441\u0435\u0432\u043e\u0437\u043c\u043e\u0436\u043d\u044b\u0435 \u0443\u0441\u043b\u043e\u0432\u0438\u044f
         (\u0447\u0430\u0441 \u0434\u043d\u044f, \u0434\u0435\u043d\u044c \u043d\u0435\u0434\u0435\u043b\u0438, RSI, EMA, MACD, Bollinger, \u043e\u0431\u044a\u0451\u043c, funding rate, \u043a\u043e\u0440\u0440\u0435\u043b\u044f\u0446\u0438\u044f \u0441 BTC \u0438 \u0434\u0440.) \u0438 \u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0435\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u0442\u043e,
         \u0447\u0442\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0435\u0442\u0441\u044f \u043d\u0430 \u043e\u0442\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0445 \u0434\u0430\u043d\u043d\u044b\u0445 (walk-forward). \u041a\u0430\u0440\u0442\u043e\u0447\u043a\u0430 \u043a\u0430\u0436\u0434\u043e\u0439 \u043c\u043e\u043d\u0435\u0442\u044b: \u0436\u0438\u0432\u043e\u0439 \u0441\u0438\u0433\u043d\u0430\u043b \u0441\u0432\u0435\u0440\u0445\u0443, \u0437\u0430\u0442\u0435\u043c WINRATE/P&L/RR/W-L-T, \u043f\u043e\u0442\u043e\u043c \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0438 \u0438 \u0441\u0434\u0435\u043b\u043a\u0438 (\u0440\u0430\u0441\u043a\u0440\u044b\u0432\u0430\u044e\u0442\u0441\u044f). \u041a\u043b\u0438\u043a \u043f\u043e \u0441\u0434\u0435\u043b\u043a\u0435 \u2014 \u0433\u0440\u0430\u0444\u0438\u043a. \u041f\u0435\u0440\u0435\u043c\u0430\u0439\u043d\u0438\u0432\u0430\u0435\u0442 \u043a\u0430\u0436\u0434\u044b\u0435 ${Math.round((cfg.refresh_sec||14400)/3600)}\u0447.
       </div>
@@ -21774,6 +21853,7 @@ const setValueInputs = {
   lsw_rr: document.getElementById('setLswRR'),
   autotrade_risk_pct: document.getElementById('setAutotradeRiskPct'),
   neuro_top_n: document.getElementById('setNeuroTopN'),
+  neuro_display_n: document.getElementById('setNeuroDisplayN'),
 };
 
 function applySettingsToInputs(s) {
