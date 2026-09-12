@@ -14503,3 +14503,59 @@ v0.99.261 - Performance fix + safety margin for neuro_mining_loop's own
          via log_error() for visibility.
          Verified: py_compile (-W error), pyflakes, 58 routes, real
          runtime 200 on / and /api/neuro/status.
+
+v0.99.262 - Separate "how many to trade" vs "how many to show" for Neuro,
+         per direct user request ("не количество топ для авто торговли,
+         а ещё и для просто отображения... остальные показывать серым
+         цветом... чтобы было понятно, что они не торгуются").
+         New NEURO_DISPLAY_N setting (defaults equal to NEURO_TOP_N, so
+         existing behavior is unchanged unless the user explicitly
+         raises it) — always clamped to at least NEURO_TOP_N. The
+         backtest cycle now keeps max(NEURO_DISPLAY_N, NEURO_TOP_N)
+         symbols' full data (patterns/trades/summary) instead of just
+         NEURO_TOP_N, in a new _neuro_display_symbols list (superset of
+         _neuro_active_symbols). Only the top NEURO_TOP_N of those are
+         live-scanned/autotraded; the rest are informational-only —
+         their own backtest results are shown but nothing new fires for
+         them.
+         api_neuro_status() now returns ALL display symbols (not just
+         active ones), each tagged is_active: true/false — the frontend
+         renders non-active cards with muted styling (dashed border,
+         reduced opacity, dark background) and an explicit "⚪ только
+         для справки — не торгуется и не сканируется вживую" badge, so
+         it's unambiguous at a glance which cards are actually live.
+         apply_settings()'s neuro_top_n handler no longer deletes a
+         symbol's data outright when it drops out of the active set —
+         it just moves from active to display-only (as long as it's
+         still within the display count), preserving its own backtest
+         results for reference instead of discarding them. New sibling
+         neuro_display_n handler follows the same immediate-apply-on-
+         decrease / next-cycle-on-increase pattern already established
+         for neuro_top_n (v0.99.247) — a decrease re-ranks and trims
+         using data already in memory; an increase needs the next full
+         cycle since non-kept symbols' data isn't retained (v0.99.236's
+         own memory-conscious design).
+         save_neuro_state()/load_neuro_state()/api_reset_neuro() updated
+         to persist/restore/reset _neuro_display_symbols alongside the
+         existing active-symbols state; loading an OLDER state file
+         (saved before this feature existed) falls back display to
+         whatever active symbols it had, so nothing regresses on
+         upgrade.
+         CRITICAL FIX found and corrected while touching this code: 12
+         settings groups each had a stray literal ">" character right
+         after their own closing </details> tag (`</div></details>>`) —
+         a leftover artifact from the v0.99.259 settings-redesign's
+         automated conversion script. Harmless in practice (browsers
+         render a stray character outside any tag as inert text) but
+         invalid markup nonetheless — found by directly grepping for it
+         while editing a nearby settings row, fixed across all 12
+         occurrences at once.
+         Verified directly: with NEURO_TOP_N=5/NEURO_DISPLAY_N=10 on 15
+         synthetic ranked candidates, the top 5 correctly land in the
+         active (traded) set while symbols 6-10 correctly appear in the
+         display set but not the active one.
+         Verified: py_compile (-W error), pyflakes, node --check, 58
+         routes, real runtime 200 confirming neuro_display_n present in
+         both /api/settings and /api/neuro/status's config, and every
+         returned coin correctly tagged is_active, zero surrogate
+         escapes.
