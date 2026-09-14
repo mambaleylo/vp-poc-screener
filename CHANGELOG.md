@@ -14689,3 +14689,15 @@ v0.99.265 - Settings groups now start COLLAPSED by default, per direct
          routes, real runtime 200 confirming both new invert settings
          present (defaulting False) in /api/settings, zero surrogate
          escapes.
+
+v0.99.266 - Reordered the main tab bar, per direct user request ("поменяй
+         местами вкладки, сначала mnsr, потом sweep, neiro, потом
+         остальные"). New order: MSNR, Sweep, Neuro, then everything
+         else in its previous relative order (Volume, Скальпинг, FT5,
+         Зеркало, EMA🚀, AMD, NQ Model, Автоторговля, Симулятор).
+         Only the tab BAR's own button order changed — the underlying
+         content panels don't need to move, since tab switching shows/
+         hides them by their own data-tab id, not by DOM position.
+         Verified: py_compile (-W error), pyflakes, node --check, 58
+         routes, real runtime 200 confirming the served HTML's tab
+         buttons appear in the new order with all 12 present.
