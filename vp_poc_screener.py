@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.262"
+APP_VERSION = "0.99.264"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -795,6 +795,8 @@ AUTOTRADE_ENABLED_LSW = os.environ.get("VP_AUTOTRADE_LSW", "0") == "1"  # v0.99.
 AUTOTRADE_LEVERAGE_LSW = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_LSW", 10))  # only used by sim_execute_trade()'s own separate paper-balance simulator (deliberately left on its own old leverage/size system, same as every other module) — execute_autotrade() itself computes real leverage automatically per-trade, same risk-based sizing every module shares (see execute_autotrade()'s own docstring)
 AUTOTRADE_ENABLED_NEURO = os.environ.get("VP_AUTOTRADE_NEURO", "0") == "1"  # v0.99.245, per direct user request ("надо сделать как в свип, настройки такие же, процент из настроек, расчет до ликвидации и ТП все так же") — same off-by-default, opt-in pattern as every other module's own toggle
 AUTOTRADE_LEVERAGE_NEURO = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_NEURO", 10))  # same role as AUTOTRADE_LEVERAGE_LSW — only the paper simulator's own fallback leverage, real orders go through execute_autotrade()'s automatic risk-based sizing
+AUTOTRADE_INVERT_LSW = os.environ.get("VP_AUTOTRADE_INVERT_LSW", "0") == "1"  # v0.99.263, per direct user request ("галочку инвертированного открытия сделок... разница будет только на бирже, стоп станет тейком а тейк стопом") — off by default; see execute_autotrade()'s own docstring for the exact mechanics
+AUTOTRADE_INVERT_NEURO = os.environ.get("VP_AUTOTRADE_INVERT_NEURO", "0") == "1"  # same as AUTOTRADE_INVERT_LSW, for Neuro
 TELEGRAM_ALERTS_LSW = os.environ.get("VP_TG_ALERTS_LSW", "1") == "1"
 TELEGRAM_ALERTS_EMA_BULL = os.environ.get("VP_TG_ALERTS_EMA_BULL", "1") == "1"
 # v0.99.121 — higher-timeframe trend filter, per direct user request
@@ -1038,7 +1040,7 @@ CREDENTIALS_FILE = os.environ.get(
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "autotrade_invert_lsw", "autotrade_invert_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled",
                   "autotrade_risk_pct",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   "lsw_rr", "lsw_equal_tolerance_pct",
@@ -1125,6 +1127,8 @@ def get_settings():
         "autotrade_mirror": AUTOTRADE_ENABLED_MIRROR,
         "autotrade_lsw": AUTOTRADE_ENABLED_LSW,
         "autotrade_neuro": AUTOTRADE_ENABLED_NEURO,
+        "autotrade_invert_lsw": AUTOTRADE_INVERT_LSW,
+        "autotrade_invert_neuro": AUTOTRADE_INVERT_NEURO,
         "scalp_min_rr": SCALP_MIN_RR,
         "scalp_sl_buffer_mult": SCALP_SL_BUFFER_MULT,
     }
@@ -1144,7 +1148,7 @@ def apply_settings(updates):
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED, LSW_ATR_SWEEP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_EMA_BULL, TELEGRAM_ALERTS_AMD, TELEGRAM_ALERTS_NEURO, TELEGRAM_ALERTS_NEURO_SUMMARY, TELEGRAM_ALERTS_NQ, TELEGRAM_ALERTS_NETWORK
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, AUTOTRADE_ENABLED_NEURO, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED, MSNR_SINGLE_BEST_ENABLED
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, AUTOTRADE_ENABLED_NEURO, AUTOTRADE_INVERT_LSW, AUTOTRADE_INVERT_NEURO, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED, MSNR_SINGLE_BEST_ENABLED
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
@@ -1385,6 +1389,10 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_LSW = bool(updates["autotrade_lsw"])
     if "autotrade_neuro" in updates:
         AUTOTRADE_ENABLED_NEURO = bool(updates["autotrade_neuro"])
+    if "autotrade_invert_lsw" in updates:
+        AUTOTRADE_INVERT_LSW = bool(updates["autotrade_invert_lsw"])
+    if "autotrade_invert_neuro" in updates:
+        AUTOTRADE_INVERT_NEURO = bool(updates["autotrade_invert_neuro"])
     if "telegram_alerts_hourly" in updates:
         TELEGRAM_ALERTS_HOURLY = bool(updates["telegram_alerts_hourly"])
     if "scalp_min_rr" in updates:
@@ -4045,12 +4053,33 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
 
     Always writes exactly one entry to STATE["autotrade_log"], whether it
     trades, skips, or dry-runs, so the log is a complete record of every
-    signal that was even considered, not just the ones that fired."""
+    signal that was even considered, not just the ones that fired.
+
+    v0.99.263 — "inverted opening" toggle, per direct user request
+    ("галочку инвертированного открытия сделок, то есть разница будет
+    только на бирже, стоп станет тейком а тейк стопом... статистика и
+    т.п. останется такой же, только открытие сделок наоборот"): when
+    AUTOTRADE_INVERT_LSW/AUTOTRADE_INVERT_NEURO is on for this call's
+    own mode, EVERYTHING upstream of this function — pattern confirmation,
+    live-signal detection, the displayed direction/entry/sl/tp, Telegram
+    alerts, backtest stats — is completely untouched (all computed from
+    the caller's ORIGINAL direction/sl/tp exactly as before). Only the
+    REAL order placed here flips: opposite direction, with the original
+    two price levels swapped between sl/tp — the only way to keep the
+    same two price points while reversing direction and have the stop
+    and target still sit on the geometrically correct sides for that
+    reversed direction."""
+    signal_direction = direction
+    inverted = (mode == "lsw" and AUTOTRADE_INVERT_LSW) or (mode == "neuro" and AUTOTRADE_INVERT_NEURO)
+    if inverted:
+        direction = "SHORT" if direction == "LONG" else "LONG"
+        sl, tp = tp, sl
     record = {
         "time": time.time(), "mode": mode, "symbol": symbol, "direction": direction,
         "entry": entry, "sl": sl, "tp": tp, "leverage": None,
         "dry_run": AUTOTRADE_DRY_RUN, "extra": extra or {},
         "status": None, "detail": None, "contracts": None, "order_id": None,
+        "inverted": inverted, "signal_direction": signal_direction if inverted else None,
     }
     lock = _get_symbol_trade_lock(symbol)
     with lock:
@@ -11353,6 +11382,16 @@ def mirror_scan_symbol_live(symbol):
         }
         with state_lock:
             STATE["mirror_signals"].appendleft(record)
+        # v0.99.264 — same CRITICAL FIX as lsw_scan_symbol_live()'s own
+        # (see that call site's own comment for the full incident):
+        # autotrade_result was ONLY ever assigned inside the `if
+        # AUTOTRADE_ENABLED_MIRROR:` block below, but the Telegram
+        # message further down unconditionally read autotrade_result.
+        # get(...) — with autotrade OFF, that name was never defined at
+        # all, so message construction threw a bare NameError, silently
+        # caught by this function's own outer except-and-log, and the
+        # alert never sent.
+        autotrade_result = None
         if AUTOTRADE_ENABLED_MIRROR:
             # v0.99.239 — same live_universe-snapshot race fix as LSW's own
             # (see lsw_scan_symbol_live()'s comment for the full mechanism):
@@ -11380,11 +11419,12 @@ def mirror_scan_symbol_live(symbol):
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         pattern_labels = {"inside_bar": "внутренний бар", "tweezers": "пинцет",
                            "rails": "рельсы", "engulfing_doji": "поглощение на дожи"}
+        leverage_txt = f"{autotrade_result.get('leverage')}x" if autotrade_result and autotrade_result.get("leverage") else "\u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d\u0430"
         send_telegram(
             f"{arrow} {symbol} (рождение зеркалки \u2014 {pattern_labels.get(sig['pattern'], sig['pattern'])})\n"
             f"entry: {sig['entry']:.6g}\n"
             f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n"
-            f"плечо: {autotrade_result.get('leverage', '?')}x",
+            f"плечо: {leverage_txt}",
             category="mirror",
         )
     except Exception as e:
@@ -12703,6 +12743,18 @@ def lsw_scan_symbol_live(symbol):
         }
         with state_lock:
             STATE["lsw_signals"].appendleft(record)
+        # v0.99.264 — CRITICAL FIX, per direct user report ("почему то не
+        # приходят уведомления о сигналах sweep. Они же должны приходить
+        # если авто торговля выключена, а алерты включены?"): confirmed —
+        # autotrade_result was ONLY ever assigned inside the `if
+        # AUTOTRADE_ENABLED_LSW:` block below, but the Telegram message
+        # further down unconditionally read autotrade_result.get(...) —
+        # with autotrade OFF, that name was never defined at all, so the
+        # message construction threw a bare NameError, silently caught by
+        # this function's own outer except-and-log, and the alert never
+        # sent. Initialized here so the alert path is fully independent
+        # of whether autotrade fires.
+        autotrade_result = None
         if AUTOTRADE_ENABLED_LSW:
             # v0.99.239 — per direct user report: a real trade fired for a
             # symbol (XRP_USDT) that had ALREADY disappeared from the
@@ -12750,11 +12802,12 @@ def lsw_scan_symbol_live(symbol):
                     if _lsw_signal_cooldowns.get(symbol) == sig["entry_time"]:
                         del _lsw_signal_cooldowns[symbol]
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
+        leverage_txt = f"{autotrade_result.get('leverage')}x" if autotrade_result and autotrade_result.get("leverage") else "\u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d\u0430"
         send_telegram(
             f"{arrow} {symbol}\n"
             f"entry: {sig['entry']:.6g}\n"
             f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n"
-            f"плечо: {autotrade_result.get('leverage', '?')}x",
+            f"плечо: {leverage_txt}",
             category="lsw",
         )
     except Exception as e:
@@ -19083,12 +19136,26 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeLsw"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳↳ Инвертировать открытие (Sweep)</div>
+          <div class="sub">анализ, сигналы, статистика — всё остаётся как есть. Только на бирже реально открывается обратное направление, старый стоп становится тейком и наоборот</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeInvertLsw"><span class="switchSlider"></span></label>
+      </div>
       <div class="settingRow">
         <div>
           <div class="label">↳ Neuro</div>
           <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча под безопасное расстояние до ликвидации и размера позиции, что и у Sweep/остальных режимов</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeNeuro"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳↳ Инвертировать открытие (Neuro)</div>
+          <div class="sub">то же самое, что и для Sweep выше — на бирже реально открывается обратное направление, старый стоп становится тейком и наоборот</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeInvertNeuro"><span class="switchSlider"></span></label>
       </div>
     </div></details>
 
@@ -21846,6 +21913,8 @@ const setInputs = {
   autotrade_mirror: document.getElementById('setAutotradeMirror'),
   autotrade_lsw: document.getElementById('setAutotradeLsw'),
   autotrade_neuro: document.getElementById('setAutotradeNeuro'),
+  autotrade_invert_lsw: document.getElementById('setAutotradeInvertLsw'),
+  autotrade_invert_neuro: document.getElementById('setAutotradeInvertNeuro'),
 };
 
 const setValueInputs = {
