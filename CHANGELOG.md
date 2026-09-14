@@ -14622,3 +14622,70 @@ v0.99.264 - CRITICAL FIX: Sweep's and Mirror's own live-signal Telegram
          выключена") instead of a silent NameError.
          Verified: py_compile (-W error), pyflakes, node --check, 58
          routes, real runtime 200, zero surrogate escapes.
+
+v0.99.263 - "Inverted opening" toggle for Sweep and Neuro, per direct
+         user request ("галочку инвертированного открытия сделок...
+         разница будет только на бирже, стоп станет тейком а тейк
+         стопом... статистика и т.п. останется такой же, только открытие
+         сделок наоборот"). New AUTOTRADE_INVERT_LSW/AUTOTRADE_INVERT_
+         NEURO (off by default). Implemented directly in the shared
+         execute_autotrade() — the single function every module's real
+         orders go through — so EVERYTHING upstream (pattern
+         confirmation, live-signal detection, the displayed direction/
+         entry/sl/tp, Telegram alerts, backtest stats) stays completely
+         untouched; only the REAL order placed flips: opposite
+         direction, with the original two price levels swapped between
+         sl/tp (the only way to keep the same two price points while
+         reversing direction and have the stop/target still sit on the
+         geometrically correct sides). autotrade_log records both the
+         real (inverted) values used for the order AND the original
+         signal_direction for transparency.
+         Verified directly (dry-run): a LONG signal (entry 100, sl 99,
+         tp 103) with invert enabled correctly produces a real SHORT
+         order with sl=103 (above entry, correct for a short's stop)
+         and tp=99 (below entry, correct for a short's target).
+         New settings rows "↳↳ Инвертировать открытие" under Sweep and
+         Neuro's own autotrade toggles.
+
+v0.99.264 - CRITICAL FIX: Sweep and Mirror live-signal Telegram alerts
+         were silently failing to send whenever autotrade was OFF, per
+         direct user report ("почему то не приходят уведомления о
+         сигналах sweep. Они же должны приходить если авто торговля
+         выключена, а алерты включены?"). Confirmed the exact mechanism:
+         autotrade_result was only ever assigned inside the `if
+         AUTOTRADE_ENABLED_LSW:` (or MIRROR) block, but the Telegram
+         message construction further down unconditionally referenced
+         autotrade_result.get(...) for the leverage line — with
+         autotrade OFF, that name was never assigned at all, so Python
+         raised a bare UnboundLocalError right before the message ever
+         got built, silently caught by the function's own outer except-
+         and-log (visible only as a logged error, never as a missing
+         Telegram message the user could trace back to this cause).
+         Verified the exact failure mode with a minimal isolated
+         reproduction before fixing: the same expression pattern threw
+         UnboundLocalError specifically when the conditional assignment
+         branch was skipped. Fixed both lsw_scan_symbol_live() and
+         mirror_scan_symbol_live() by initializing autotrade_result =
+         None immediately before the autotrade block, so the Telegram
+         alert path is now fully independent of whether autotrade fires
+         — matching every other module's own intended behavior (alerts
+         gated only by their own TELEGRAM_ALERTS_* toggle, never by
+         autotrade state).
+         Checked every other module's own autotrade_result usage for the
+         same bug class: Neuro's Telegram message doesn't reference
+         autotrade_result at all (sent before the autotrade block), and
+         Scalp/MSNR/Volume-Profile's own usages are all inside the same
+         unconditional assignment scope — none of them share this
+         specific failure mode.
+
+v0.99.265 - Settings groups now start COLLAPSED by default, per direct
+         user request ("сделай блоки в настройках по умолчанию
+         свёрнутыми"). All 12 <details class="settingsGroup"> elements
+         (v0.99.259's own collapsible redesign) had their `open`
+         attribute removed — the search-as-you-type filter's own auto-
+         expand-on-match behavior is untouched, so searching for a
+         specific setting still opens the right group automatically.
+         Verified: py_compile (-W error), pyflakes, node --check, 58
+         routes, real runtime 200 confirming both new invert settings
+         present (defaulting False) in /api/settings, zero surrogate
+         escapes.
