@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.266"
+APP_VERSION = "0.99.267"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -10071,6 +10071,15 @@ def _msnr_backtest_one_symbol(symbol):
 
 
 def msnr_backtest_loop():
+    # v0.99.267 -- staggered backtest-cycle startup, per direct user
+    # request ("посмотри чтобы бэктесты не мешали друг другу... не хочу
+    # чтобы сигналы задерживались"): EVERY module's own backtest loop
+    # used to start its first cycle immediately at app boot with zero
+    # delay -- on every restart, all 7 backtest loops piled onto the
+    # SAME shared 10-slot GLOBAL_HTTP_SEMAPHORE at once, right when a
+    # live signal is most likely to also need a free slot. This module
+    # starts first (no delay) -- see the other 6 backtest loops' own
+    # comments for their own staggered offsets (90s apart).
     while True:
         try:
             if not MSNR_ENABLED:
@@ -10437,6 +10446,12 @@ def msnr_live_loop():
 # EXPERIMENTAL: FT5 — port of freqtrade-strategies' Strategy005 — loops
 # ============================================================================
 def ft5_backtest_loop():
+    # v0.99.267 -- staggered backtest-cycle startup, see msnr_backtest_
+    # loop()'s own comment for the full reasoning. This module's first
+    # cycle waits 270s before starting, spreading all 7 backtest
+    # loops' initial burst of network activity across ~9 minutes
+    # instead of all colliding on the shared semaphore at once.
+    time.sleep(270)
     while True:
         try:
             if not FT5_ENABLED:
@@ -11599,6 +11614,12 @@ def compute_mirror_signal_stats():
 
 
 def mirror_backtest_loop():
+    # v0.99.267 -- staggered backtest-cycle startup, see msnr_backtest_
+    # loop()'s own comment for the full reasoning. This module's first
+    # cycle waits 360s before starting, spreading all 7 backtest
+    # loops' initial burst of network activity across ~9 minutes
+    # instead of all colliding on the shared semaphore at once.
+    time.sleep(360)
     while True:
         try:
             if not MIRROR_ENABLED:
@@ -12931,6 +12952,12 @@ def _lsw_backtest_one(symbol):
 
 
 def lsw_backtest_loop():
+    # v0.99.267 -- staggered backtest-cycle startup, see msnr_backtest_
+    # loop()'s own comment for the full reasoning. This module's first
+    # cycle waits 90s before starting, spreading all 7 backtest
+    # loops' initial burst of network activity across ~9 minutes
+    # instead of all colliding on the shared semaphore at once.
+    time.sleep(90)
     while True:
         try:
             if not LSW_ENABLED:
@@ -13631,6 +13658,12 @@ def amd_backtest_loop():
     global _amd_backtest_running, _amd_backtest_total, _amd_backtest_done
     global _amd_backtest_last_finished, _amd_backtest_last_duration, _amd_backtest_summary
     global _amd_backtest_trades
+    # v0.99.267 -- staggered backtest-cycle startup, see msnr_backtest_
+    # loop()'s own comment for the full reasoning. This module's first
+    # cycle waits 450s before starting, spreading all 7 backtest
+    # loops' initial burst of network activity across ~9 minutes
+    # instead of all colliding on the shared semaphore at once.
+    time.sleep(450)
     while True:
         try:
             if not AMD_ENABLED:
@@ -16012,6 +16045,12 @@ def neuro_mining_watchdog():
 def neuro_mining_loop():
     global _neuro_last_mined, _neuro_mining_running, _neuro_mining_done, _neuro_mining_total
     global _neuro_mining_current_symbol, _neuro_mining_progress_ts, _neuro_active_symbols, _neuro_display_symbols
+    # v0.99.267 -- staggered backtest-cycle startup, see msnr_backtest_
+    # loop()'s own comment for the full reasoning. This module's first
+    # cycle waits 180s before starting, spreading all 7 backtest
+    # loops' initial burst of network activity across ~9 minutes
+    # instead of all colliding on the shared semaphore at once.
+    time.sleep(180)
     while True:
         try:
             if not NEURO_ENABLED:
@@ -16648,6 +16687,12 @@ _nq_prev_signal_key = None
 
 def nq_backtest_loop():
     global _nq_last_backtest_finished, _nq_backtest_running
+    # v0.99.267 -- staggered backtest-cycle startup, see msnr_backtest_
+    # loop()'s own comment for the full reasoning. This module's first
+    # cycle waits 540s before starting, spreading all 7 backtest
+    # loops' initial burst of network activity across ~9 minutes
+    # instead of all colliding on the shared semaphore at once.
+    time.sleep(540)
     while True:
         try:
             if not NQ_ENABLED:
