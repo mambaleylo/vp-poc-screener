@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.265"
+APP_VERSION = "0.99.266"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -18548,14 +18548,14 @@ INDEX_HTML = """<!doctype html>
 </header>
 <div class="tabs">
   <div class="tab active" data-tab="msnr">MSNR</div>
+  <div class="tab" data-tab="lsw">Sweep</div>
+  <div class="tab" data-tab="neuro" style="color:#a855f7;">🧠 Neuro</div>
   <div class="tab" data-tab="signals">Volume</div>
   <div class="tab" data-tab="scalp">Скальпинг</div>
   <div class="tab" data-tab="ft5" style="color:#e0a030;">FT5 ⚠️</div>
   <div class="tab" data-tab="mirror">Зеркало</div>
-  <div class="tab" data-tab="lsw">Sweep</div>
   <div class="tab" data-tab="emabull" style="color:#3ddc97;">EMA🚀</div>
   <div class="tab" data-tab="amd" style="color:#f0a030;">AMD</div>
-  <div class="tab" data-tab="neuro" style="color:#a855f7;">🧠 Neuro</div>
   <div class="tab" data-tab="nq" style="color:#4fc3f7;">NQ Model</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
