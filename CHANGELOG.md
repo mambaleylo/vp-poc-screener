@@ -14701,3 +14701,35 @@ v0.99.266 - Reordered the main tab bar, per direct user request ("поменяй
          Verified: py_compile (-W error), pyflakes, node --check, 58
          routes, real runtime 200 confirming the served HTML's tab
          buttons appear in the new order with all 12 present.
+
+v0.99.267 - Staggered ALL 7 modules' backtest-cycle startup, per direct
+         user request ("посмотри чтобы бэктесты не мешали друг другу...
+         не хочу чтобы сигналы задерживались"). Found a real, systemic
+         gap: MSNR, Sweep, Neuro, FT5, Mirror, AMD, and NQ Model each run
+         their own backtest loop, but EVERY one of them started its very
+         first cycle IMMEDIATELY at app boot, zero delay — meaning on
+         every restart, all 7 loops piled onto the SAME shared 10-slot
+         GLOBAL_HTTP_SEMAPHORE at the exact same moment, right when the
+         user is most likely watching the app closely and wanting fresh
+         signals. All 7 modules also share this ONE semaphore for every
+         network call app-wide (confirmed 13 usages across the whole
+         file) — heavy concurrent backtest activity from multiple
+         modules at once means a live-scan thread's own request can end
+         up queued behind a burst of backtest requests for a free slot.
+         Fixed with a one-time startup sleep before each backtest loop's
+         own `while True:`, spread 90s apart: MSNR (0s, no delay — the
+         first-reordered tab per the user's own priority), Sweep (90s),
+         Neuro (180s), FT5 (270s), Mirror (360s), AMD (450s), NQ Model
+         (540s) — the full initial burst of network activity now spreads
+         across ~9 minutes instead of colliding at t=0. Each module's
+         REFRESH_SEC interval (how often it re-runs after finishing) is
+         completely untouched — this only affects the very first cycle
+         after a restart, not steady-state scheduling.
+         Confirmed the corresponding LIVE-scan loops (msnr_live_loop,
+         lsw_live_loop, neuro_live_loop, mirror_live_loop, ft5_live_loop,
+         etc.) are completely unaffected — all still start checking for
+         signals immediately, exactly as before; only the heavier
+         backtest cycles got staggered.
+         Verified: py_compile (-W error), pyflakes, 58 routes, real
+         runtime 200 on /, /api/neuro/status, and /api/lsw/status while
+         the staggered startup delays are actively in progress.
