@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.264"
+APP_VERSION = "0.99.265"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -18640,7 +18640,7 @@ INDEX_HTML = """<!doctype html>
     <div id="settingsSearchWrap">
       <input type="text" id="settingsSearch" placeholder="Поиск по настройкам…">
     </div>
-    <details class="settingsGroup" style="--mod-color:#4fc3f7;" open><summary class="settingsGroupTitle">Volume Profile</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:#4fc3f7;"><summary class="settingsGroupTitle">Volume Profile</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
         <div>
@@ -18665,7 +18665,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#ffb74d;" open><summary class="settingsGroupTitle">Скальпинг</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:#ffb74d;"><summary class="settingsGroupTitle">Скальпинг</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
         <div>
@@ -18683,7 +18683,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#ff7043;" data-warn style="background:rgba(255,112,67,0.05);" open><summary class="settingsGroupTitle" style="color:#e0a030;">MSNR ⚠️ Экспериментально</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:#ff7043;" data-warn style="background:rgba(255,112,67,0.05);"><summary class="settingsGroupTitle" style="color:#e0a030;">MSNR ⚠️ Экспериментально</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
         <div>
@@ -18736,7 +18736,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#ff7043;" data-warn style="background:rgba(255,112,67,0.05);" open><summary class="settingsGroupTitle" style="color:#e0a030;">FT5 ⚠️ Экспериментально</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:#ff7043;" data-warn style="background:rgba(255,112,67,0.05);"><summary class="settingsGroupTitle" style="color:#e0a030;">FT5 ⚠️ Экспериментально</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
         <div>
@@ -18768,7 +18768,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#ba68c8;" open><summary class="settingsGroupTitle">Зеркало</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:#ba68c8;"><summary class="settingsGroupTitle">Зеркало</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
         <div>
@@ -18807,7 +18807,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#66bb6a;" open><summary class="settingsGroupTitle">EMA Touch (EMA🚀)</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:#66bb6a;"><summary class="settingsGroupTitle">EMA Touch (EMA🚀)</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
         <div>
@@ -18818,7 +18818,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#4db6ac;" open><summary class="settingsGroupTitle">AMD Cycle</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:#4db6ac;"><summary class="settingsGroupTitle">AMD Cycle</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
         <div>
@@ -18829,7 +18829,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#f06292;" open><summary class="settingsGroupTitle">🧠 Neuro</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:#f06292;"><summary class="settingsGroupTitle">🧠 Neuro</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
         <div>
@@ -18854,7 +18854,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#7986cb;" open><summary class="settingsGroupTitle">NQ Model (NAS100_USDT)</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:#7986cb;"><summary class="settingsGroupTitle">NQ Model (NAS100_USDT)</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
         <div>
@@ -18865,7 +18865,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#4dd0e1;" open><summary class="settingsGroupTitle">Sweep (Liquidity Sweep)</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:#4dd0e1;"><summary class="settingsGroupTitle">Sweep (Liquidity Sweep)</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
         <div>
@@ -18953,7 +18953,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#26a5e4;" open><summary class="settingsGroupTitle">Telegram</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:#26a5e4;"><summary class="settingsGroupTitle">Telegram</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
         <div>
@@ -19055,7 +19055,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#ef5350;" data-warn style="background:rgba(255,112,67,0.05);" open><summary class="settingsGroupTitle">Автоторговля</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:#ef5350;" data-warn style="background:rgba(255,112,67,0.05);"><summary class="settingsGroupTitle">Автоторговля</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
         <div>
