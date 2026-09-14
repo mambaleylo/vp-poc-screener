@@ -14559,3 +14559,66 @@ v0.99.262 - Separate "how many to trade" vs "how many to show" for Neuro,
          both /api/settings and /api/neuro/status's config, and every
          returned coin correctly tagged is_active, zero surrogate
          escapes.
+
+v0.99.263 - "Inverted opening" toggle for Sweep and Neuro, per direct
+         user request ("галочку инвертированного открытия сделок, то
+         есть разница будет только на бирже, стоп станет тейком а тейк
+         стопом... статистика и т.п. останется такой же, только открытие
+         сделок наоборот"). New AUTOTRADE_INVERT_LSW/AUTOTRADE_INVERT_
+         NEURO (off by default), wired into the SHARED execute_
+         autotrade() — the same single function every module's real
+         orders go through — right at its very top, before any of the
+         leverage/sizing/order-placement logic runs.
+         Everything upstream (pattern confirmation, live-signal
+         detection, the direction/entry/sl/tp shown in the live-signals
+         list, Telegram alerts, backtest stats) stays completely
+         untouched — all computed from the ORIGINAL values exactly as
+         before. Only the REAL order placed flips: opposite direction,
+         with the two original price levels swapped between sl/tp — the
+         only way to keep the same two price points while reversing
+         direction and have the stop/target still sit on the
+         geometrically correct sides for that reversed direction. The
+         autotrade log's own record carries both the real (inverted)
+         values used for the order AND signal_direction (the original,
+         non-inverted direction) for transparency.
+         Verified directly: a LONG signal (entry=100, sl=99, tp=103)
+         with AUTOTRADE_INVERT_LSW on correctly produces a real SHORT
+         order with sl=103/tp=99 — geometrically valid (SL above entry,
+         TP below, as required for a short).
+         Added "↳↳ Инвертировать открытие" sub-rows under each module's
+         own autotrade toggle in settings.
+         Verified: py_compile (-W error), pyflakes, node --check, 58
+         routes, real runtime 200, zero surrogate escapes.
+
+v0.99.264 - CRITICAL FIX: Sweep's and Mirror's own live-signal Telegram
+         alerts silently never fired when autotrade was OFF, per direct
+         user report ("почему то не приходят уведомления о сигналах
+         sweep. Они же должны приходить если авто торговля выключена, а
+         алерты включены?"). Confirmed and fixed in both modules: the
+         Telegram message text unconditionally read autotrade_result.
+         get('leverage', ...) — but autotrade_result was ONLY EVER
+         ASSIGNED inside the `if AUTOTRADE_ENABLED_LSW:`/`if AUTOTRADE_
+         ENABLED_MIRROR:` block above it. With autotrade off, that name
+         was never defined at all — message construction threw a bare
+         NameError, silently caught by each function's own outer except-
+         and-log wrapper, so the alert never actually sent, with no
+         visible symptom beyond a log entry the user had no reason to
+         connect to "missing notifications."
+         Fixed by initializing autotrade_result = None before the
+         autotrade block in both functions, and rewriting each Telegram
+         message's leverage line to show the real leverage when a trade
+         actually fired, or "автоторговля выключена" when it didn't —
+         instead of assuming a trade always fired.
+         Confirmed Neuro's own live-signal alert was NOT affected (its
+         message is built and sent BEFORE the autotrade block, with no
+         leverage reference at all). Also confirmed MSNR's own "only
+         notify when autotrade actually fires" behavior is a SEPARATE,
+         intentional design from an earlier explicit user request
+         ("мне не нужны уведомления в тг по монетам, которые не в
+         автоторговле") — not the same bug, working as designed.
+         Verified directly: reconstructed the exact message-building
+         code path with autotrade_result=None — confirmed no exception
+         and a correctly-formatted message ("плечо: автоторговля
+         выключена") instead of a silent NameError.
+         Verified: py_compile (-W error), pyflakes, node --check, 58
+         routes, real runtime 200, zero surrogate escapes.
