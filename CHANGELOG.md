@@ -14733,3 +14733,38 @@ v0.99.267 - Staggered ALL 7 modules' backtest-cycle startup, per direct
          Verified: py_compile (-W error), pyflakes, 58 routes, real
          runtime 200 on /, /api/neuro/status, and /api/lsw/status while
          the staggered startup delays are actively in progress.
+
+v0.99.268 - Shared concurrency cap across ALL 7 backtest loops, per
+         direct user follow-up ("а потом повторные?") to v0.99.267's
+         own startup stagger. Honestly re-examined the claim first when
+         challenged ("стоп, в коде разве не зашито когда выполняется
+         бэктест?") — confirmed directly: only REFRESH_SEC (wait after
+         a cycle finishes) and MAX_CYCLE_SEC (per-cycle ceiling) are
+         fixed in code; the actual cycle DURATION is NOT hardcoded
+         anywhere — it depends on real-time universe size/network
+         conditions and is only measured AFTER each cycle completes
+         (STATE keeps just the single last duration, not a history). An
+         earlier attempt to answer with a 30-day collision simulation
+         used GUESSED duration ranges, not real data — flagged as
+         unreliable and abandoned rather than presented as fact.
+         Given real durations can't be predicted, scheduling AROUND them
+         is the wrong approach — instead added a robust mechanism that
+         works regardless of actual timing: new BACKTEST_CONCURRENCY_
+         SEMAPHORE (default limit 2 of the app's 7 backtest loops
+         running at once), acquired right as each loop's own cycle
+         begins and released in a `finally` no matter how the cycle
+         ends (success, per-symbol timeout, or an uncaught exception) —
+         wired into MSNR, Sweep, Neuro, FT5, Mirror, AMD, and NQ Model.
+         This bounds concurrent load on the shared 10-slot GLOBAL_HTTP_
+         SEMAPHORE for the ENTIRE lifetime of the process, not just at
+         startup — v0.99.267's stagger only protected the very first
+         cycle after a restart; this protects every subsequent one too,
+         regardless of how cycle-duration variance drifts each module's
+         relative phase over time.
+         Verified directly with 4 simulated concurrent workers against
+         the real semaphore object: only 2 started immediately, the
+         other 2 correctly waited and started only as slots freed up —
+         confirming the cap holds exactly as designed.
+         Verified: py_compile (-W error), pyflakes, 58 routes, real
+         runtime 200 on /, /api/neuro/status, /api/lsw/status, and
+         /api/msnr/status, zero surrogate escapes.
