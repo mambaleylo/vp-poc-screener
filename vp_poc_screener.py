@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.269"
+APP_VERSION = "0.99.270"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -620,6 +620,8 @@ MSNR_RANK_INCOME_WINSORIZE_PCT = float(os.environ.get("VP_MSNR_RANK_INCOME_WINSO
 # next natural cycle goes back to waiting the full interval as before.
 MSNR_BACKTEST_TRIGGER = threading.Event()
 LSW_BACKTEST_TRIGGER = threading.Event()  # v0.99.137 — same "Очистить X doesn't wake the sleeping loop" fix as MSNR_BACKTEST_TRIGGER's own comment, applied to LSW ("Очистить Sweep"), per direct user report of the identical symptom
+MIRROR_BACKTEST_TRIGGER = threading.Event()  # v0.99.270 — same fix, found missing here while investigating the identical symptom for the new SNR module ("бэктест не идёт... кнопка перезапуска бэктеста принудительно"); "Очистить Зеркало" cleared data but never woke this loop early, same class of bug as MSNR/LSW's own
+FT5_BACKTEST_TRIGGER = threading.Event()  # same as MIRROR_BACKTEST_TRIGGER's own — "Очистить FT5" had the identical gap
 MSNR_AUTOTRADE_TOP_N = int(os.environ.get("VP_MSNR_AUTOTRADE_TOP_N", 10))  # v0.99.19 — how many non-gold symbols (by msnr_rank_by_winrate_sample()) get an individual autotrade toggle, on top of the always-eligible 3 gold ones. Raised 3->10 per direct follow-up request.
 MSNR_SINGLE_BEST_ENABLED = os.environ.get("VP_MSNR_SINGLE_BEST", "0") == "1"  # v0.99.207 — per direct user request: when on, only the ONE symbol with the highest compound_return_pct (biggest simulated $ profit) is allowed to autotrade, overriding the normal top-N pool entirely
 
@@ -10544,7 +10546,8 @@ def ft5_backtest_loop():
         finally:
             if _ft5_sem_acquired:
                 BACKTEST_CONCURRENCY_SEMAPHORE.release()
-        time.sleep(max(3600, FT5_REFRESH_SEC))
+        FT5_BACKTEST_TRIGGER.wait(timeout=max(3600, FT5_REFRESH_SEC))
+        FT5_BACKTEST_TRIGGER.clear()
 
 
 def ft5_live_loop():
@@ -11773,7 +11776,8 @@ def mirror_backtest_loop():
         finally:
             if _mirror_sem_acquired:
                 BACKTEST_CONCURRENCY_SEMAPHORE.release()
-        time.sleep(max(300, MIRROR_REFRESH_SEC))
+        MIRROR_BACKTEST_TRIGGER.wait(timeout=max(300, MIRROR_REFRESH_SEC))
+        MIRROR_BACKTEST_TRIGGER.clear()
 
 
 def mirror_live_loop():
@@ -13867,6 +13871,7 @@ SNR_MIN_TEST_TRADES   = 5                    # minimum TEST closed trades to tru
 SNR_HISTORY_DAYS      = 500                  # how far back to fetch candles for the backtest
 SNR_REFRESH_SEC       = int(os.environ.get("VP_SNR_REFRESH_SEC", 4 * 3600))  # re-optimize every 4h — small fixed symbol list, cheap enough to refresh often
 SNR_TRAIN_FRAC        = 0.7
+SNR_BACKTEST_TRIGGER  = threading.Event()  # v0.99.270 — per direct user request ("бэктест не идёт по индикатору, добавь кнопку перезапуска бэктеста принудительно как для нейро") — same "Очистить X doesn't wake the sleeping loop" fix as every other module's own trigger event
 
 
 def snr_find_pivots(candles, pivot_length):
@@ -14063,7 +14068,8 @@ def snr_backtest_loop():
         _snr_sem_acquired = False
         try:
             if not SNR_ENABLED:
-                time.sleep(max(300, SNR_REFRESH_SEC))
+                SNR_BACKTEST_TRIGGER.wait(timeout=max(300, SNR_REFRESH_SEC))
+                SNR_BACKTEST_TRIGGER.clear()
                 continue
             BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
             _snr_sem_acquired = True
@@ -14083,7 +14089,8 @@ def snr_backtest_loop():
         finally:
             if _snr_sem_acquired:
                 BACKTEST_CONCURRENCY_SEMAPHORE.release()
-        time.sleep(max(300, SNR_REFRESH_SEC))
+        SNR_BACKTEST_TRIGGER.wait(timeout=max(300, SNR_REFRESH_SEC))
+        SNR_BACKTEST_TRIGGER.clear()
 
 
 # Fixed top-5 majors, maximum available history, pure-Python statistical
@@ -17301,6 +17308,21 @@ def api_overview():
     })
 
 
+@app.route("/api/snr/restart_backtest", methods=["POST"])
+def api_snr_restart_backtest():
+    """v0.99.270 — per direct user request ("бэктест не идёт по
+    индикатору, добавь кнопку перезапуска бэктеста принудительно как
+    для нейро"): same non-destructive pattern as api_neuro_restart_
+    backtest() — wakes the loop for a fresh cycle right now without
+    clearing any existing results first."""
+    try:
+        SNR_BACKTEST_TRIGGER.set()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_snr_restart_backtest: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/snr/status")
 def api_snr_status():
     with state_lock:
@@ -17909,6 +17931,13 @@ def api_reset_mirror():
             STATE["mirror_last_backtest_finished"] = None
             STATE["mirror_last_backtest_duration"] = None
             STATE["mirror_signals"].clear()
+        # v0.99.270 — CRITICAL FIX found while adding the identical fix for
+        # the new SNR module: this never woke mirror_backtest_loop() early,
+        # same "Очистить X doesn't wake the sleeping loop" bug MSNR/LSW
+        # already had fixed back in v0.99.137 — "Очистить Зеркало" cleared
+        # the data but the user then had to wait out the FULL
+        # MIRROR_REFRESH_SEC before the next cycle actually started.
+        MIRROR_BACKTEST_TRIGGER.set()
         return jsonify({"ok": True})
     except Exception as e:
         log_error(f"api_reset_mirror: {e}")
@@ -18389,6 +18418,9 @@ def api_reset_ft5():
             STATE["ft5_last_backtest_finished"] = None
             STATE["ft5_last_backtest_duration"] = None
             STATE["ft5_signals"].clear()
+        # v0.99.270 — same CRITICAL FIX as api_reset_mirror()'s own — see
+        # that endpoint's own comment for the full incident.
+        FT5_BACKTEST_TRIGGER.set()
         return jsonify({"ok": True})
     except Exception as e:
         log_error(f"api_reset_ft5: {e}")
@@ -18923,6 +18955,7 @@ INDEX_HTML = """<!doctype html>
       <button id="resetLswBtn">Очистить Sweep</button>
       <button id="resetNeuroBtn">Очистить Neuro</button>
       <button id="restartNeuroBacktestBtn">Перезапустить бэктест Neuro</button>
+      <button id="restartSnrBacktestBtn">Перезапустить бэктест S/R</button>
       <button id="resetNqBtn">Очистить NQ</button>
       <button id="resetSimulatorBtn">Сбросить симулятор</button>
       <button id="resetRiskAutotuneBtn">Сбросить авто-тюнинг</button>
@@ -22285,6 +22318,9 @@ function wireRestartButton(btnId, endpoint, confirmMsg, idleLabel) {
 wireRestartButton('restartNeuroBacktestBtn', '/api/neuro/restart_backtest',
   'Запустить новый полный цикл бэктеста Neuro прямо сейчас? Текущие данные (топ-N, паттерны) останутся видны и торгуемы, пока новый цикл не завершится и не заменит их.',
   'Перезапустить бэктест Neuro');
+wireRestartButton('restartSnrBacktestBtn', '/api/snr/restart_backtest',
+  'Запустить новый цикл перебора параметров S/R Zones прямо сейчас, не дожидаясь расписания? Текущие результаты останутся видны, пока новый цикл не завершится.',
+  'Перезапустить бэктест S/R');
 wireResetButton('resetNqBtn', '/api/reset/nq',
   'Удалить накопленный бэктест и сигналы NQ Model? Это необратимо.',
   'Очистить NQ');
