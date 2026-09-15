@@ -14835,3 +14835,34 @@ v0.99.269 - NEW module: "S/R Zones", 4th tab, per direct user request
          /api/settings (defaulting True), and the new tab appears in the
          correct 4th position in the served HTML, zero surrogate
          escapes.
+
+v0.99.270 - Manual backtest-restart button for S/R Zones, per direct
+         user report ("бэктест не идёт по индикатору, добавь кнопку
+         перезапуска бэктеста принудительно как для нейро"). New
+         SNR_BACKTEST_TRIGGER (threading.Event) — snr_backtest_loop()
+         now uses .wait(timeout=...) instead of a plain time.sleep() for
+         its refresh interval, so it can be woken immediately; new POST
+         /api/snr/restart_backtest (non-destructive, same pattern as
+         api_neuro_restart_backtest() — wakes the loop without clearing
+         existing results first) and a new "Перезапустить бэктест S/R"
+         button next to Neuro's own.
+
+         CRITICAL FIX found while implementing this: the exact same
+         "Очистить X doesn't wake the sleeping loop" bug MSNR and LSW
+         already had fixed back in v0.99.137 turned out to STILL be
+         present, unnoticed, in TWO existing modules — Mirror and FT5.
+         Both mirror_backtest_loop() and ft5_backtest_loop() used a
+         plain time.sleep(REFRESH_SEC) with no trigger event at all, so
+         "Очистить Зеркало"/"Очистить FT5" cleared the stored data but
+         never actually woke the loop early — the user would then have
+         to wait out the FULL refresh interval (up to an hour) before
+         the next cycle actually started, the identical symptom now
+         reported for the brand-new SNR module. Fixed identically: new
+         MIRROR_BACKTEST_TRIGGER/FT5_BACKTEST_TRIGGER, both loops
+         switched to .wait(timeout=...), both reset endpoints
+         (api_reset_mirror/api_reset_ft5) now call .set() on their own
+         trigger.
+         Verified: py_compile (-W error), pyflakes, node --check, 60
+         routes, real runtime 200 confirming /api/snr/restart_backtest,
+         /api/reset/mirror, and /api/reset/ft5 all respond correctly,
+         zero surrogate escapes.
