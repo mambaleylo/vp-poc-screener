@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.268"
+APP_VERSION = "0.99.269"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1054,7 +1054,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "snr_enabled", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "autotrade_invert_lsw", "autotrade_invert_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled",
                   "autotrade_risk_pct",
@@ -1093,6 +1093,7 @@ def get_settings():
         "ema_touch_enabled": EMA_TOUCH_ENABLED,
         "amd_enabled": AMD_ENABLED,
         "neuro_enabled": NEURO_ENABLED,
+        "snr_enabled": SNR_ENABLED,
         "neuro_top_n": NEURO_TOP_N,
         "neuro_display_n": NEURO_DISPLAY_N,
         "nq_enabled": NQ_ENABLED,
@@ -1159,7 +1160,7 @@ def apply_settings(updates):
     global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, FT5_HTF_FILTER_ENABLED, FT5_SESSION_FILTER_ENABLED, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, MSNR_MIN_RR_FILTER_ENABLED, MSNR_HTF_FILTER_ENABLED, MSNR_PER_SYMBOL_FILTERS_ENABLED, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT, MIRROR_AUTOTUNE_TOLERANCE_ENABLED
     global MIRROR_VOLUME_FILTER_ENABLED, MIRROR_HTF_FILTER_ENABLED
-    global EMA_TOUCH_ENABLED, AMD_ENABLED, NEURO_ENABLED, NEURO_TOP_N, NEURO_DISPLAY_N, _neuro_active_symbols, _neuro_display_symbols, NQ_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
+    global EMA_TOUCH_ENABLED, AMD_ENABLED, NEURO_ENABLED, NEURO_TOP_N, NEURO_DISPLAY_N, _neuro_active_symbols, _neuro_display_symbols, SNR_ENABLED, NQ_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED, LSW_ATR_SWEEP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
@@ -1219,6 +1220,8 @@ def apply_settings(updates):
         AMD_ENABLED = bool(updates["amd_enabled"])
     if "neuro_enabled" in updates:
         NEURO_ENABLED = bool(updates["neuro_enabled"])
+    if "snr_enabled" in updates:
+        SNR_ENABLED = bool(updates["snr_enabled"])
     if "neuro_top_n" in updates:
         try:
             new_top_n = int(updates["neuro_top_n"])
@@ -1593,6 +1596,8 @@ STATE = {
     "risk_autotune_log": deque(maxlen=200),
     "risk_autotune_last_change": {},  # param_key -> unix ts, for cooldown enforcement
     "scalp_max_leverage_map": {},
+    "snr_results": {},  # v0.99.269 — per-symbol best (timeframe, pivot, strength, RR) found + honest train/test stats
+    "snr_last_backtest_finished": None,
     "scalp_risk_tiers": {},  # v0.99.237 — symbol -> sorted list of (notional_threshold, mmr, max_leverage) tiers, for notional-aware safe-leverage lookups
     "scalp_data": {},          # symbol -> {interval -> {direction -> target-summary}}
     "scalp_recommendations": {},  # symbol -> best config (or None)
@@ -13835,7 +13840,252 @@ def amd_loop():
 
 
 # ============================================================================
-# NEURO — self-learning dependency-mining engine (v0.99.206)
+# SNR — Support & Resistance zones, ported from the "Support & Resistance
+# (MTF) | Flux Charts" Pine Script indicator the user shared. v0.99.269,
+# per direct user request: the indicator itself is only a VISUALIZATION
+# (pivot-based S/R zones with strength-via-retest-count and close-based
+# break detection, no entry/SL/TP logic at all) — a trading rule had to be
+# designed and validated on top of it, not just ported as-is. Chosen rule:
+# trade the BOUNCE off an intact (not-yet-broken) zone once it accumulates
+# enough retest "strength" — LONG on a support retest, SHORT on a
+# resistance retest, SL beyond the zone (ATR-scaled), TP at a swept RR.
+# Per direct user follow-up ("сразу можно грузить только золото биткоин
+# солану"), scoped to a small fixed symbol list rather than a dynamic
+# volume-ranked universe — much simpler, no universe-builder needed.
+# ============================================================================
+SNR_ENABLED           = os.environ.get("VP_SNR_ENABLED", "1") == "1"
+SNR_SYMBOLS           = [s.strip() for s in os.environ.get("VP_SNR_SYMBOLS", "XAU_USDT,BTC_USDT,SOL_USDT").split(",") if s.strip()]
+SNR_TF_CANDIDATES     = ["1h", "4h", "1d"]  # per direct user request ("попробовать все фреймы")
+SNR_PIVOT_CANDIDATES  = [10, 15, 20]         # matches the Pine Script's own "Pivot Length" range
+SNR_STRENGTH_CANDIDATES = [1, 2, 3]          # matches the Pine Script's own "Strength" setting (1-4, capped here at 3 for a tractable sweep)
+SNR_RR_CANDIDATES     = [1.5, 2.0, 3.0]
+SNR_SL_ATR_MULT       = 0.5                  # SL distance beyond the zone, in ATR units
+SNR_TOO_CLOSE_ATR_MULT = 1.0 / 8              # matches the Pine Script's own tooCloseATR constant — merges pivots too close to an existing active zone
+SNR_MAX_WAIT_BARS     = 48                   # same timeout convention as every other module's own backtest
+SNR_MIN_TRAIN_TRADES  = 15                   # minimum TRAIN closed trades before trusting a (tf, pivot, strength, rr) candidate at all
+SNR_MIN_TEST_TRADES   = 5                    # minimum TEST closed trades to trust the validation
+SNR_HISTORY_DAYS      = 500                  # how far back to fetch candles for the backtest
+SNR_REFRESH_SEC       = int(os.environ.get("VP_SNR_REFRESH_SEC", 4 * 3600))  # re-optimize every 4h — small fixed symbol list, cheap enough to refresh often
+SNR_TRAIN_FRAC        = 0.7
+
+
+def snr_find_pivots(candles, pivot_length):
+    """Ported from the Pine Script's ta.pivothigh/pivotlow(pivot_length,
+    pivot_length): a pivot at index i is confirmed once pivot_length bars
+    on EACH side are known, i.e. only detectable starting at bar i+
+    pivot_length (the same "wait for confirmation" lag as the original
+    indicator)."""
+    n = len(candles)
+    pivots = []
+    for i in range(pivot_length, n - pivot_length):
+        window = candles[i - pivot_length:i + pivot_length + 1]
+        h, l = candles[i]["high"], candles[i]["low"]
+        if h == max(c["high"] for c in window):
+            pivots.append((i, h, "high"))
+        if l == min(c["low"] for c in window):
+            pivots.append((i, l, "low"))
+    return pivots
+
+
+def snr_build_zones(candles, atr, pivot_length, too_close_atr_mult=SNR_TOO_CLOSE_ATR_MULT):
+    """Builds S/R zones from confirmed pivots — same core idea as the Pine
+    Script (a new zone only forms if it's not too close to an already-
+    active zone of either type, matching the original's own "too close"
+    merge rule), simplified to a SINGLE timeframe (the original supports
+    combining up to 3 — not needed here since the timeframe itself is one
+    of the swept parameters). Strength starts at 1 (creation) and
+    increments on each RETEST (price touches the zone with a wick but
+    closes back on the origin side) before it's BROKEN (a close crosses
+    through, matching the Pine Script's default "Close" invalidation
+    mode, not "Wick")."""
+    pivots = sorted(snr_find_pivots(candles, pivot_length), key=lambda p: p[0])
+    zones = []
+    active = []
+    pi = 0
+    for i in range(len(candles)):
+        while pi < len(pivots) and pivots[pi][0] + pivot_length == i:
+            pidx, pprice, ptype = pivots[pi]
+            pi += 1
+            if not atr[i]:
+                continue
+            too_close = any(z["break_idx"] is None and abs(z["price"] - pprice) < atr[i] * too_close_atr_mult for z in active)
+            if not too_close:
+                z = {"type": "resistance" if ptype == "high" else "support", "price": pprice,
+                     "start_idx": pidx, "break_idx": None, "strength": 1, "retest_idxs": []}
+                zones.append(z)
+                active.append(z)
+        c = candles[i]
+        for z in active:
+            if z["break_idx"] is not None or i <= z["start_idx"]:
+                continue
+            if z["type"] == "resistance":
+                if c["close"] > z["price"]:
+                    z["break_idx"] = i
+                elif c["high"] >= z["price"] and c["close"] <= z["price"]:
+                    if not z["retest_idxs"] or z["retest_idxs"][-1] != i:
+                        z["strength"] += 1
+                        z["retest_idxs"].append(i)
+            else:
+                if c["close"] < z["price"]:
+                    z["break_idx"] = i
+                elif c["low"] <= z["price"] and c["close"] >= z["price"]:
+                    if not z["retest_idxs"] or z["retest_idxs"][-1] != i:
+                        z["strength"] += 1
+                        z["retest_idxs"].append(i)
+    return zones
+
+
+def snr_simulate_trades(candles, pivot_length, min_strength, rr, sl_atr_mult=SNR_SL_ATR_MULT,
+                         max_wait_bars=SNR_MAX_WAIT_BARS, atr=None):
+    """The trading rule DESIGNED on top of the Pine Script's own zone
+    detection (the indicator itself has no entry/SL/TP logic — see this
+    section's own header comment): trade the BOUNCE off an intact zone
+    once it reaches min_strength — LONG at a support retest, SHORT at a
+    resistance retest, entering at the NEXT bar's open, SL sl_atr_mult*ATR
+    beyond the zone, TP at rr times that distance. Same no-overlapping-
+    trades discipline as every other module this session (v0.99.251) —
+    the next entry on this same series can't fire until the previous
+    trade's own timeout/SL/TP bar has passed."""
+    if atr is None:
+        atr = neuro_atr_series(candles, 14)
+    zones = snr_build_zones(candles, atr, pivot_length)
+    events = []
+    for z in zones:
+        cum_strength = 1
+        for ridx in z["retest_idxs"]:
+            cum_strength += 1
+            if z["break_idx"] is not None and ridx >= z["break_idx"]:
+                continue
+            events.append((ridx, z, cum_strength))
+    events.sort(key=lambda e: e[0])
+
+    trades = []
+    occupied_until = -10 ** 9
+    for idx, z, cum_strength in events:
+        if idx < occupied_until or cum_strength < min_strength:
+            continue
+        if idx + 1 >= len(candles) or not atr[idx]:
+            continue
+        direction = "LONG" if z["type"] == "support" else "SHORT"
+        entry_bar = candles[idx + 1]
+        entry = entry_bar["open"]
+        sl_dist = atr[idx] * sl_atr_mult
+        if sl_dist <= 0:
+            continue
+        sl = entry - sl_dist if direction == "LONG" else entry + sl_dist
+        tp = entry + sl_dist * rr if direction == "LONG" else entry - sl_dist * rr
+        result, exit_time, exit_price = "TIMEOUT", None, None
+        exit_j = min(idx + 1 + max_wait_bars, len(candles) - 1)
+        for j in range(idx + 2, min(idx + 2 + max_wait_bars, len(candles))):
+            b = candles[j]
+            if direction == "LONG":
+                if b["low"] <= sl:
+                    result, exit_price, exit_time, exit_j = "LOSS", sl, b["time"], j
+                    break
+                if b["high"] >= tp:
+                    result, exit_price, exit_time, exit_j = "WIN", tp, b["time"], j
+                    break
+            else:
+                if b["high"] >= sl:
+                    result, exit_price, exit_time, exit_j = "LOSS", sl, b["time"], j
+                    break
+                if b["low"] <= tp:
+                    result, exit_price, exit_time, exit_j = "WIN", tp, b["time"], j
+                    break
+        pnl_r = rr if result == "WIN" else (-1.0 if result == "LOSS" else None)
+        trades.append({"time": candles[idx]["time"], "entry_time": entry_bar["time"],
+                        "direction": direction, "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8),
+                        "zone_price": round(z["price"], 8), "zone_strength": cum_strength,
+                        "result": result, "exit_price": round(exit_price, 8) if exit_price else None,
+                        "exit_time": exit_time, "pnl_r": pnl_r})
+        occupied_until = exit_j
+    return trades
+
+
+def snr_optimize_symbol(symbol):
+    """Sweeps timeframe x pivot_length x min_strength x rr for one symbol,
+    finding the best candidate on TRAIN data (min SNR_MIN_TRAIN_TRADES
+    closed trades, ranked by avg_pnl_r) and VALIDATING it on TEST data
+    (min SNR_MIN_TEST_TRADES) before trusting it — same walk-forward
+    discipline as every other module this session. Returns a dict with
+    the chosen params + honest train/test stats, or None if nothing
+    survives validation on any timeframe."""
+    best = None
+    for tf in SNR_TF_CANDIDATES:
+        try:
+            now = int(time.time())
+            start_ts = now - SNR_HISTORY_DAYS * 86400
+            candles = get_candles_range(symbol, tf, start_ts, now)
+            if not candles or len(candles) < 200:
+                continue
+            atr = neuro_atr_series(candles, 14)
+            split = int(len(candles) * SNR_TRAIN_FRAC)
+            boundary_time = candles[split - 1]["time"]
+
+            for pl in SNR_PIVOT_CANDIDATES:
+                for ms in SNR_STRENGTH_CANDIDATES:
+                    for rr in SNR_RR_CANDIDATES:
+                        trades = snr_simulate_trades(candles, pl, ms, rr, atr=atr)
+                        closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
+                        train = [t for t in closed if t["time"] <= boundary_time]
+                        test = [t for t in closed if t["time"] > boundary_time]
+                        if len(train) < SNR_MIN_TRAIN_TRADES or len(test) < SNR_MIN_TEST_TRADES:
+                            continue
+                        train_wr = sum(1 for t in train if t["result"] == "WIN") / len(train) * 100
+                        train_avg = sum(t["pnl_r"] for t in train) / len(train)
+                        test_wr = sum(1 for t in test if t["result"] == "WIN") / len(test) * 100
+                        test_avg = sum(t["pnl_r"] for t in test) / len(test)
+                        # Require the TEST avg P&L to ALSO be positive — not just the
+                        # train-discovered one — before this candidate is even considered,
+                        # same "don't trust a train-only result" discipline as elsewhere.
+                        if test_avg <= 0:
+                            continue
+                        if best is None or test_avg > best["test_avg_pnl_r"]:
+                            best = {
+                                "timeframe": tf, "pivot_length": pl, "min_strength": ms, "rr": rr,
+                                "train_n": len(train), "train_wr": round(train_wr, 1), "train_avg_pnl_r": round(train_avg, 3),
+                                "test_n": len(test), "test_wr": round(test_wr, 1), "test_avg_pnl_r": round(test_avg, 3),
+                                "recent_trades": closed[-40:][::-1],
+                            }
+        except Exception as e:
+            log_error(f"snr_optimize_symbol {symbol} {tf}: {e}")
+    return best
+
+
+def snr_backtest_loop():
+    # v0.99.269 — staggered startup + shared concurrency cap, same
+    # reasoning as every other module's own backtest loop (see
+    # msnr_backtest_loop()'s own comment) — this is the 8th backtest
+    # loop, given its own offset (630s) continuing the same 90s-apart
+    # spacing established in v0.99.267.
+    time.sleep(630)
+    while True:
+        _snr_sem_acquired = False
+        try:
+            if not SNR_ENABLED:
+                time.sleep(max(300, SNR_REFRESH_SEC))
+                continue
+            BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
+            _snr_sem_acquired = True
+            results = {}
+            for symbol in SNR_SYMBOLS:
+                try:
+                    best = snr_optimize_symbol(symbol)
+                    if best:
+                        results[symbol] = best
+                except Exception as e:
+                    log_error(f"snr_backtest_loop {symbol}: {e}")
+            with state_lock:
+                STATE["snr_results"] = results
+                STATE["snr_last_backtest_finished"] = time.time()
+        except Exception as e:
+            log_error(f"snr_backtest_loop: {e}")
+        finally:
+            if _snr_sem_acquired:
+                BACKTEST_CONCURRENCY_SEMAPHORE.release()
+        time.sleep(max(300, SNR_REFRESH_SEC))
+
+
 # Fixed top-5 majors, maximum available history, pure-Python statistical
 # pattern discovery across many condition types (calendar, RSI zone, EMA
 # side, volume regime, candle range/body size, streaks, range position),
@@ -17051,6 +17301,23 @@ def api_overview():
     })
 
 
+@app.route("/api/snr/status")
+def api_snr_status():
+    with state_lock:
+        results = dict(STATE["snr_results"])
+        last_finished = STATE["snr_last_backtest_finished"]
+    coins = []
+    for symbol in SNR_SYMBOLS:
+        r = results.get(symbol)
+        coins.append({"symbol": symbol, "found": r is not None, "result": r})
+    return jsonify({
+        "coins": coins, "last_backtest_finished": last_finished,
+        "config": {"symbols": SNR_SYMBOLS, "timeframes": SNR_TF_CANDIDATES,
+                   "pivot_candidates": SNR_PIVOT_CANDIDATES, "strength_candidates": SNR_STRENGTH_CANDIDATES,
+                   "rr_candidates": SNR_RR_CANDIDATES, "refresh_sec": SNR_REFRESH_SEC},
+    })
+
+
 @app.route("/api/errors")
 def api_errors():
     """v0.99.256 — per direct user report ("Панель не вижу, после
@@ -18677,6 +18944,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab active" data-tab="msnr">MSNR</div>
   <div class="tab" data-tab="lsw">Sweep</div>
   <div class="tab" data-tab="neuro" style="color:#a855f7;">🧠 Neuro</div>
+  <div class="tab" data-tab="snr" style="color:#26c6da;">S/R Zones</div>
   <div class="tab" data-tab="signals">Volume</div>
   <div class="tab" data-tab="scalp">Скальпинг</div>
   <div class="tab" data-tab="ft5" style="color:#e0a030;">FT5 ⚠️</div>
@@ -18705,6 +18973,7 @@ INDEX_HTML = """<!doctype html>
   <div id="emaBullPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="amdPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="neuroPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
+  <div id="snrPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="nqPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="simulatorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
@@ -18981,6 +19250,15 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
+    <details class="settingsGroup" style="--mod-color:#26c6da;"><summary class="settingsGroupTitle">S/R Zones (Flux Charts)</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (бэктест)</div>
+          <div class="sub">зоны поддержки/сопротивления по pivot high/low (порт индикатора Flux Charts), отскок от неповреждённого уровня — вход, стоп и тейк подбираются перебором по таймфрейму/pivot/силе/RR с проверкой на train/test. Пока только бэктест, без реальной торговли</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setSnr"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
     <details class="settingsGroup" style="--mod-color:#7986cb;"><summary class="settingsGroupTitle">NQ Model (NAS100_USDT)</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
@@ -19334,6 +19612,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('emaBullPanel').style.display = activeTab === 'emabull' ? 'block' : 'none';
     document.getElementById('amdPanel').style.display = activeTab === 'amd' ? 'block' : 'none';
     document.getElementById('neuroPanel').style.display = activeTab === 'neuro' ? 'block' : 'none';
+    document.getElementById('snrPanel').style.display = activeTab === 'snr' ? 'block' : 'none';
     document.getElementById('nqPanel').style.display = activeTab === 'nq' ? 'block' : 'none';
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
     document.getElementById('simulatorPanel').style.display = activeTab === 'simulator' ? 'block' : 'none';
@@ -19346,6 +19625,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'emabull') refreshEmaBull();
     if (activeTab === 'amd') refreshAmd();
     if (activeTab === 'neuro') refreshNeuro();
+    if (activeTab === 'snr') refreshSnr();
     if (activeTab === 'nq') refreshNq();
     if (activeTab === 'autotrade') refreshAutotrade();
     if (activeTab === 'simulator') refreshSimulator();
@@ -21095,6 +21375,50 @@ async function refreshNeuro() {
   }
 }
 
+async function refreshSnr() {
+  const panel = document.getElementById('snrPanel');
+  try {
+    const data = await (await fetch('/api/snr/status')).json();
+    const coins = data.coins || [];
+    const lastFinished = data.last_backtest_finished ? fmtDateTime(data.last_backtest_finished) : '\u2014';
+    const cards = coins.map(c => {
+      if (!c.found) {
+        return `<div style="margin-bottom:14px;padding:12px;background:#0d1018;border-radius:10px;border:1px dashed #3a4256;">
+          <div style="font-size:15px;font-weight:700;color:#26c6da;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
+          <span class="dim">\u043d\u0438\u0447\u0435\u0433\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u043e\u0433\u043e \u043d\u0430 train/test \u043f\u043e\u043a\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e</span>
+        </div>`;
+      }
+      const r = c.result;
+      const tradesRows = (r.recent_trades || []).slice(0, 15).map(t => {
+        const rc = t.result === 'WIN' ? 'win' : t.result === 'LOSS' ? 'loss' : 'dim';
+        return `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1c2433;font-size:11px;">
+          <span class="dim">${fmtDateTime(t.time)} ${t.direction} \u0443\u0440\u043e\u0432\u0435\u043d\u044c ${fmtNum(t.zone_price)} (\u0441\u0438\u043b\u0430 ${t.zone_strength})</span>
+          <span class="${rc}">${t.result}${t.pnl_r!=null?' '+(t.pnl_r>0?'+':'')+t.pnl_r+'R':''}</span>
+        </div>`;
+      }).join('');
+      return `<div style="margin-bottom:14px;padding:12px;background:#12182a;border-radius:10px;border:1px solid #232d45;">
+        <div style="font-size:15px;font-weight:700;color:#26c6da;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
+        <div class="dim" style="font-size:11px;margin-bottom:8px;">
+          \u0442\u0430\u0439\u043c\u0444\u0440\u0435\u0439\u043c ${r.timeframe} \u00b7 pivot ${r.pivot_length} \u00b7 \u0441\u0438\u043b\u0430\u2265${r.min_strength} \u00b7 RR${r.rr}
+        </div>
+        <div style="display:flex;gap:16px;margin-bottom:8px;">
+          <div><div class="dim" style="font-size:10px;">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R</div></div>
+          <div><div class="dim" style="font-size:10px;">TEST (n=${r.test_n})</div><div class="win">WR ${r.test_wr}% \u00b7 ${r.test_avg_pnl_r>0?'+':''}${r.test_avg_pnl_r}R</div></div>
+        </div>
+        <details><summary class="dim" style="cursor:pointer;font-size:11px;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0441\u0434\u0435\u043b\u043a\u0438</summary>${tradesRows}</details>
+      </div>`;
+    }).join('');
+    panel.innerHTML = `
+      <div class="dim" style="margin-bottom:10px;">
+        \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442: ${lastFinished} \u00b7 \u043c\u043e\u043d\u0435\u0442\u044b: ${(data.config&&data.config.symbols||[]).join(', ')}
+      </div>
+      ${cards || '<div class="dim">\u043f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445</div>'}
+    `;
+  } catch(e) {
+    panel.innerHTML = `<div class="dim">\u041e\u0448\u0438\u0431\u043a\u0430: ${e}</div>`;
+  }
+}
+
 function openNeuroChart(symbol, sigTime) {
   return openVgiChart(symbol, sigTime, '/api/neuro/chart', '');
 }
@@ -21998,6 +22322,7 @@ const setInputs = {
   ema_touch_enabled: document.getElementById('setEmaTouch'),
   amd_enabled: document.getElementById('setAmd'),
   neuro_enabled: document.getElementById('setNeuro'),
+  snr_enabled: document.getElementById('setSnr'),
   nq_enabled: document.getElementById('setNq'),
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
   lsw_structural_cap_enabled: document.getElementById('setLswStructuralCap'),
@@ -22930,6 +23255,7 @@ if __name__ == "__main__":
     threading.Thread(target=nq_backtest_loop, daemon=True).start()
     threading.Thread(target=nq_live_loop, daemon=True).start()
     threading.Thread(target=neuro_live_loop, daemon=True).start()
+    threading.Thread(target=snr_backtest_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     threading.Thread(target=risk_autotune_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
