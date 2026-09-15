@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.267"
+APP_VERSION = "0.99.268"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -158,6 +158,22 @@ WORKERS = int(os.environ.get("VP_WORKERS", 8))  # was 12 (before that, 8) — lo
 # semaphore instead of all firing at once.
 GLOBAL_MAX_CONCURRENT_REQUESTS = int(os.environ.get("VP_GLOBAL_MAX_CONCURRENT_REQUESTS", 10))
 GLOBAL_HTTP_SEMAPHORE = threading.Semaphore(GLOBAL_MAX_CONCURRENT_REQUESTS)
+# v0.99.268 — per direct user follow-up ("а потом повторные?"): the
+# v0.99.267 startup stagger only guarantees separation for the very
+# FIRST backtest cycle after a restart — after that, each of the 7
+# modules' own loops just wait REFRESH_SEC after their OWN cycle
+# finishes, on no shared clock, so cycle-duration variance (network
+# conditions, universe size fluctuations) lets their relative phase
+# drift over time, meaning they CAN randomly collide again on some
+# later day even with the initial stagger in place. This caps how many
+# of the 7 backtest loops can be ACTIVELY RUNNING their own cycle at
+# once, for the whole lifetime of the process, not just at startup —
+# acquired right before a cycle starts, released when it ends (success,
+# failure, or timeout), so a would-be 3rd concurrent cycle just waits
+# its turn instead of piling onto the shared HTTP semaphore alongside
+# 2 others already using it.
+BACKTEST_CONCURRENCY_LIMIT = int(os.environ.get("VP_BACKTEST_CONCURRENCY_LIMIT", 2))
+BACKTEST_CONCURRENCY_SEMAPHORE = threading.Semaphore(BACKTEST_CONCURRENCY_LIMIT)
 
 # v0.99.38 - CRITICAL FIX: per direct user report, 500s from api.gateio.ws
 # STILL burst even with v0.99.37's GLOBAL_HTTP_SEMAPHORE in place and
@@ -10096,21 +10112,37 @@ def msnr_backtest_loop():
             # ceiling. Fix: no "with", explicit shutdown(wait=False) so the
             # outer loop moves on immediately, abandoning the stuck thread.
             MAX_CYCLE_SEC = 60 * 60  # 1h hard ceiling for the whole cycle
-            _cycle_ex = ThreadPoolExecutor(max_workers=1)
-            _cycle_fut = _cycle_ex.submit(_msnr_run_one_backtest_cycle, t0)
+            # v0.99.268 — per direct user follow-up ("а потом повторные?"):
+            # the v0.99.267 startup stagger only separates the very FIRST
+            # cycle after a restart; real cycle duration isn't fixed in the
+            # code at all (it depends on real-time universe size/network
+            # conditions, only measured AFTER the fact), so relative phase
+            # between modules can drift and collide again later purely by
+            # chance. This acquires a shared, capped semaphore (default 2
+            # of the app's 7 backtest loops at once) for the ENTIRE cycle's
+            # lifetime, released in `finally` no matter how the cycle ends
+            # — bounds concurrent backtest activity on the shared HTTP
+            # semaphore for the whole life of the process, not just at
+            # startup.
+            BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
             try:
-                _cycle_fut.result(timeout=MAX_CYCLE_SEC)
-                _cycle_ex.shutdown(wait=False)
-            except (TimeoutError, FutureTimeoutError):
-                log_error(f"msnr_backtest_loop: entire cycle exceeded {MAX_CYCLE_SEC}s — aborting and retrying next interval")
-                with state_lock:
-                    STATE["msnr_backtest_running"] = False
-                _cycle_ex.shutdown(wait=False)
-            except Exception as e:
-                log_error(f"msnr_backtest_loop cycle: {e}")
-                with state_lock:
-                    STATE["msnr_backtest_running"] = False
-                _cycle_ex.shutdown(wait=False)
+                _cycle_ex = ThreadPoolExecutor(max_workers=1)
+                _cycle_fut = _cycle_ex.submit(_msnr_run_one_backtest_cycle, t0)
+                try:
+                    _cycle_fut.result(timeout=MAX_CYCLE_SEC)
+                    _cycle_ex.shutdown(wait=False)
+                except (TimeoutError, FutureTimeoutError):
+                    log_error(f"msnr_backtest_loop: entire cycle exceeded {MAX_CYCLE_SEC}s — aborting and retrying next interval")
+                    with state_lock:
+                        STATE["msnr_backtest_running"] = False
+                    _cycle_ex.shutdown(wait=False)
+                except Exception as e:
+                    log_error(f"msnr_backtest_loop cycle: {e}")
+                    with state_lock:
+                        STATE["msnr_backtest_running"] = False
+                    _cycle_ex.shutdown(wait=False)
+            finally:
+                BACKTEST_CONCURRENCY_SEMAPHORE.release()
         except Exception as e:
             log_error(f"msnr_backtest_loop outer: {e}")
         MSNR_BACKTEST_TRIGGER.wait(timeout=max(300, MSNR_REFRESH_SEC))
@@ -10453,11 +10485,16 @@ def ft5_backtest_loop():
     # instead of all colliding on the shared semaphore at once.
     time.sleep(270)
     while True:
+        _ft5_sem_acquired = False
         try:
             if not FT5_ENABLED:
                 time.sleep(60)
                 continue
             t0 = time.time()
+            # v0.99.268 — same shared concurrency cap as msnr_backtest_loop's
+            # own (see its comment for the full reasoning).
+            BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
+            _ft5_sem_acquired = True
             universe = ft5_build_universe()
             with state_lock:
                 STATE["ft5_universe"] = universe
@@ -10499,6 +10536,9 @@ def ft5_backtest_loop():
                 STATE["ft5_last_backtest_duration"] = round(time.time() - t0, 1)
         except Exception as e:
             log_error(f"ft5_backtest_loop: {e}")
+        finally:
+            if _ft5_sem_acquired:
+                BACKTEST_CONCURRENCY_SEMAPHORE.release()
         time.sleep(max(3600, FT5_REFRESH_SEC))
 
 
@@ -11621,11 +11661,16 @@ def mirror_backtest_loop():
     # instead of all colliding on the shared semaphore at once.
     time.sleep(360)
     while True:
+        _mirror_sem_acquired = False
         try:
             if not MIRROR_ENABLED:
                 time.sleep(60)
                 continue
             t0 = time.time()
+            # v0.99.268 — same shared concurrency cap as msnr_backtest_loop's
+            # own (see its comment for the full reasoning).
+            BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
+            _mirror_sem_acquired = True
             universe = mirror_build_universe()
             results_by_symbol = {}
             summary_by_symbol = {}
@@ -11720,6 +11765,9 @@ def mirror_backtest_loop():
                 STATE["mirror_last_backtest_duration"] = round(time.time() - t0, 1)
         except Exception as e:
             log_error(f"mirror_backtest_loop: {e}")
+        finally:
+            if _mirror_sem_acquired:
+                BACKTEST_CONCURRENCY_SEMAPHORE.release()
         time.sleep(max(300, MIRROR_REFRESH_SEC))
 
 
@@ -12979,23 +13027,29 @@ def lsw_backtest_loop():
             # abandoning the stuck thread (it's a daemon-adjacent one-off —
             # harmless to leak since the whole process is daemonized anyway).
             MAX_CYCLE_SEC = 2 * 60 * 60  # v0.99.231 — raised 1h->2h: universe grew 60->100 (+67%) and each symbol now also runs a 7-candidate RR sweep (v0.99.223), so the old 1h ceiling risked aborting a cycle that was genuinely still making progress, not actually stuck
-            _cycle_ex = ThreadPoolExecutor(max_workers=1)
-            _cycle_fut = _cycle_ex.submit(_lsw_run_one_backtest_cycle, t0)
+            # v0.99.268 — same shared concurrency cap as msnr_backtest_loop's
+            # own (see its comment for the full reasoning).
+            BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
             try:
-                _cycle_fut.result(timeout=MAX_CYCLE_SEC)
-                _cycle_ex.shutdown(wait=False)
-            except (TimeoutError, FutureTimeoutError):
-                log_error(f"lsw_backtest_loop: entire cycle exceeded {MAX_CYCLE_SEC}s — aborting, abandoning stuck thread")
-                with state_lock:
-                    STATE["lsw_backtest_running"] = False
-                    STATE["lsw_backtest_in_flight"] = []
-                _cycle_ex.shutdown(wait=False)
-            except Exception as e:
-                log_error(f"lsw_backtest_loop cycle: {e}")
-                with state_lock:
-                    STATE["lsw_backtest_running"] = False
-                    STATE["lsw_backtest_in_flight"] = []
-                _cycle_ex.shutdown(wait=False)
+                _cycle_ex = ThreadPoolExecutor(max_workers=1)
+                _cycle_fut = _cycle_ex.submit(_lsw_run_one_backtest_cycle, t0)
+                try:
+                    _cycle_fut.result(timeout=MAX_CYCLE_SEC)
+                    _cycle_ex.shutdown(wait=False)
+                except (TimeoutError, FutureTimeoutError):
+                    log_error(f"lsw_backtest_loop: entire cycle exceeded {MAX_CYCLE_SEC}s — aborting, abandoning stuck thread")
+                    with state_lock:
+                        STATE["lsw_backtest_running"] = False
+                        STATE["lsw_backtest_in_flight"] = []
+                    _cycle_ex.shutdown(wait=False)
+                except Exception as e:
+                    log_error(f"lsw_backtest_loop cycle: {e}")
+                    with state_lock:
+                        STATE["lsw_backtest_running"] = False
+                        STATE["lsw_backtest_in_flight"] = []
+                    _cycle_ex.shutdown(wait=False)
+            finally:
+                BACKTEST_CONCURRENCY_SEMAPHORE.release()
         except Exception as e:
             log_error(f"lsw_backtest_loop outer: {e}")
         LSW_BACKTEST_TRIGGER.wait(timeout=max(300, LSW_REFRESH_SEC))
@@ -13665,11 +13719,16 @@ def amd_backtest_loop():
     # instead of all colliding on the shared semaphore at once.
     time.sleep(450)
     while True:
+        _amd_sem_acquired = False
         try:
             if not AMD_ENABLED:
                 time.sleep(AMD_BACKTEST_REFRESH_SEC)
                 continue
             t0 = time.time()
+            # v0.99.268 — same shared concurrency cap as msnr_backtest_loop's
+            # own (see its comment for the full reasoning).
+            BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
+            _amd_sem_acquired = True
             universe = amd_scan_universe()
             with _amd_backtest_lock2:
                 _amd_backtest_total = len(universe)
@@ -13715,6 +13774,9 @@ def amd_backtest_loop():
             log_error(f"amd_backtest_loop: {e}")
             with _amd_backtest_lock2:
                 _amd_backtest_running = False
+        finally:
+            if _amd_sem_acquired:
+                BACKTEST_CONCURRENCY_SEMAPHORE.release()
         time.sleep(AMD_BACKTEST_REFRESH_SEC)
 
 
@@ -16052,10 +16114,19 @@ def neuro_mining_loop():
     # instead of all colliding on the shared semaphore at once.
     time.sleep(180)
     while True:
+        _neuro_sem_acquired = False
         try:
             if not NEURO_ENABLED:
                 time.sleep(max(300, NEURO_REFRESH_SEC))
                 continue
+            # v0.99.268 — same shared concurrency cap as msnr_backtest_loop's
+            # own (see its comment for the full reasoning): Neuro's own
+            # cycle has no single ThreadPoolExecutor wrapper like MSNR/LSW,
+            # so this acquires directly and releases via this same try's own
+            # `finally` below (added there instead of a nested try, to avoid
+            # re-indenting the whole cycle body).
+            BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
+            _neuro_sem_acquired = True
             # v0.99.236 — dynamic, volume-ranked universe (up to
             # NEURO_UNIVERSE_SIZE=120 candidates) instead of the old fixed
             # 20-coin list, per direct user request ("развяжем руки нейро
@@ -16223,6 +16294,9 @@ def neuro_mining_loop():
             log_error(f"neuro_mining_loop: {e}")
             with _neuro_state_lock:
                 _neuro_mining_running = False
+        finally:
+            if _neuro_sem_acquired:
+                BACKTEST_CONCURRENCY_SEMAPHORE.release()
         # v0.99.212 — Event.wait(timeout=...) instead of a plain sleep, same
         # fix as LSW/MSNR's own "Очистить X doesn't wake the sleeping loop"
         # — the new "Очистить Neuro" button can cut this short immediately.
@@ -16694,6 +16768,7 @@ def nq_backtest_loop():
     # instead of all colliding on the shared semaphore at once.
     time.sleep(540)
     while True:
+        _nq_sem_acquired = False
         try:
             if not NQ_ENABLED:
                 NQ_BACKTEST_TRIGGER.wait(timeout=3600)
@@ -16701,6 +16776,10 @@ def nq_backtest_loop():
                 continue
             with _nq_state_lock:
                 _nq_backtest_running = True
+            # v0.99.268 — same shared concurrency cap as msnr_backtest_loop's
+            # own (see its comment for the full reasoning).
+            BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
+            _nq_sem_acquired = True
             # Same no-with-block, bounded-time pattern as every other
             # module's own hang protection (LSW/MSNR/AMD v0.99.194/195/etc).
             ex = ThreadPoolExecutor(max_workers=1)
@@ -16726,6 +16805,9 @@ def nq_backtest_loop():
             log_error(f"nq_backtest_loop: {e}")
             with _nq_state_lock:
                 _nq_backtest_running = False
+        finally:
+            if _nq_sem_acquired:
+                BACKTEST_CONCURRENCY_SEMAPHORE.release()
         NQ_BACKTEST_TRIGGER.wait(timeout=3600)  # re-mine hourly — daily-candle-driven signal, no need for Neuro/LSW-style frequent re-mining
         NQ_BACKTEST_TRIGGER.clear()
 
