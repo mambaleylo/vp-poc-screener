@@ -14768,3 +14768,70 @@ v0.99.268 - Shared concurrency cap across ALL 7 backtest loops, per
          Verified: py_compile (-W error), pyflakes, 58 routes, real
          runtime 200 on /, /api/neuro/status, /api/lsw/status, and
          /api/msnr/status, zero surrogate escapes.
+
+v0.99.269 - NEW module: "S/R Zones", 4th tab, per direct user request
+         (shared the "Support & Resistance (MTF) | Flux Charts" Pine
+         Script indicator, asked to add it as a 4th tab, "собирать
+         статистику когда входить в сделку, где стоп где тейк... попробовать
+         все фреймы, перебрать все настройки", then scoped the initial
+         symbol list down to "золото биткоин солану").
+         The Pine Script itself is ONLY a visualization (pivot-based S/R
+         zones with strength-via-retest-count and close-based break
+         detection) — it has no entry/SL/TP logic at all, so a trading
+         rule had to be DESIGNED and validated on top of it, not just
+         ported. Chosen rule: trade the BOUNCE off an intact (not yet
+         broken) zone once it accumulates enough retest "strength" — LONG
+         on a support retest, SHORT on a resistance retest, SL beyond the
+         zone (ATR-scaled), TP at a swept RR multiple.
+         Ported core algorithm from the Pine Script as closely as
+         reasonable: snr_find_pivots() matches ta.pivothigh/pivotlow's
+         own confirmation-lag behavior; snr_build_zones() matches the
+         original's "too close to an existing active zone" merge rule
+         and its default "Close" invalidation mode (not "Wick") for
+         breaks, with strength incrementing on each retest before a
+         break. Verified each piece standalone on synthetic data before
+         integrating (pivot detection, zone building with realistic
+         zone/break/retest counts, and the full trade simulation).
+         New snr_optimize_symbol(): sweeps timeframe (1h/4h/1d, per
+         direct user request "попробовать все фреймы") x pivot_length
+         (10/15/20) x min_strength (1/2/3) x RR (1.5/2/3) — same walk-
+         forward discipline as every other module this session: finds
+         the best candidate on TRAIN (min 15 closed trades, ranked by
+         avg_pnl_r) and requires it ALSO show a positive avg P&L on TEST
+         (min 5 trades) before trusting it — a train-only positive
+         result that doesn't hold on TEST is rejected outright, not just
+         down-ranked.
+         Verified the honesty of the simulation directly: on pure random-
+         walk synthetic data (no genuine market structure at all), the
+         bounce strategy showed NEGATIVE average P&L across every single
+         parameter combination in the sweep — exactly what should happen
+         when there's no real edge to find, confirming the mechanism
+         isn't artificially inflating results.
+         Scoped to a small FIXED symbol list per the user's own follow-up
+         (XAU_USDT, BTC_USDT, SOL_USDT — XAU_USDT matching the existing
+         gold ticker already used elsewhere in the app, e.g. MSNR_
+         SYMBOLS) rather than a dynamic volume-ranked universe — no
+         universe-builder needed, dramatically simpler than every other
+         module's own architecture.
+         New snr_backtest_loop() as the 8th backtest loop in the app,
+         following the exact same v0.99.267/268 conventions already
+         established for the other 7: staggered startup (630s, continuing
+         the 90s-apart spacing) and using the shared BACKTEST_
+         CONCURRENCY_SEMAPHORE so it can never collide with the others
+         beyond the existing cap.
+         New GET /api/snr/status, new settings toggle (SNR_ENABLED, on by
+         default), new 4th tab "S/R Zones" (right after MSNR/Sweep/Neuro
+         per the user's own v0.99.266 tab reorder) showing each symbol's
+         best found (timeframe, pivot, strength, RR) with train/test
+         stats and recent trades.
+         Deliberately backtest-only for this first version — no live
+         scanning or autotrade yet (flagged as a natural next step, not
+         built in this pass given the scope already covered: porting the
+         indicator, designing and validating a trading rule, and wiring
+         a full new module end-to-end).
+         Verified: py_compile (-W error), pyflakes, node --check, 59
+         routes, real runtime 200 confirming /api/snr/status returns all
+         3 seed symbols with the correct config, snr_enabled present in
+         /api/settings (defaulting True), and the new tab appears in the
+         correct 4th position in the served HTML, zero surrogate
+         escapes.
