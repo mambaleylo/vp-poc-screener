@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.273"
+APP_VERSION = "0.99.274"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13942,7 +13942,7 @@ def amd_loop():
 # volume-ranked universe — much simpler, no universe-builder needed.
 # ============================================================================
 SNR_ENABLED           = os.environ.get("VP_SNR_ENABLED", "1") == "1"
-SNR_SEED_SYMBOLS      = [s.strip() for s in os.environ.get("VP_SNR_SYMBOLS", "XAU_USDT,BTC_USDT,SOL_USDT").split(",") if s.strip()]  # v0.99.271 — per the user's own original request ("сразу можно грузить только золото биткоин солану") — these stay ALWAYS included in the universe below, same "seed + dynamic" pattern as NEURO_COINS
+SNR_SEED_SYMBOLS      = [s.strip() for s in os.environ.get("VP_SNR_SYMBOLS", "XAU_USDT,BTC_USDT,SOL_USDT").split(",") if s.strip()]  # v0.99.274 — per direct user follow-up ("не нужно чтобы биткоин солана и золото были по любому в списке, пусть все ранжирует я честно"): NO LONGER force-included in the universe (see snr_build_universe()) — only used as the initial placeholder for _snr_active_symbols/_snr_display_symbols before the very first real backtest cycle completes
 SNR_UNIVERSE_SIZE     = int(os.environ.get("VP_SNR_UNIVERSE_SIZE", 30))  # v0.99.271, per direct user request for Neuro-style top-N trade/display settings — additional volume-ranked candidates considered alongside the seed symbols
 SNR_TOP_N             = int(os.environ.get("VP_SNR_TOP_N", 3))     # how many survive the full sweep AND are actually live-scanned/traded, ranked by TEST avg_pnl_r
 SNR_DISPLAY_N         = int(os.environ.get("VP_SNR_DISPLAY_N", 5))  # how many get kept/shown — always clamped to at least SNR_TOP_N, same semantics as NEURO_DISPLAY_N (v0.99.262)
@@ -13966,10 +13966,15 @@ _snr_prev_signal_keys = set()  # v0.99.271 — (symbol, bar_time) pairs already 
 
 
 def snr_build_universe():
-    """v0.99.271 — dynamic, volume-ranked candidate pool (same shape as
-    lsw_build_universe()/neuro_build_universe()), merged with the small
-    always-included SNR_SEED_SYMBOLS (gold/BTC/SOL per the user's own
-    original request)."""
+    """v0.99.274 — per direct user request ("Не нужно чтобы биткоин
+    Солана и золото были по любому в списке, пусть все ранжирует я
+    честно"): pure volume-ranked candidate pool, same shape as lsw_
+    build_universe()/mirror_build_universe()/ft5_build_universe() — no
+    forced seed symbols. XAU_USDT/BTC_USDT/SOL_USDT (the user's own
+    original v0.99.269 starting point) still appear naturally if their
+    own real 24h volume genuinely ranks them into the top SNR_
+    UNIVERSE_SIZE, same as every other candidate — no special
+    treatment either way."""
     try:
         tickers = get_tickers()
         seen_vol = {}
@@ -13987,17 +13992,10 @@ def snr_build_universe():
             if name not in seen_vol or vol > seen_vol[name]:
                 seen_vol[name] = vol
         ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
-        dynamic = [s[0] for s in ranked[:SNR_UNIVERSE_SIZE]]
+        return [s[0] for s in ranked[:SNR_UNIVERSE_SIZE]]
     except Exception as e:
         log_error(f"snr_build_universe: {e}")
-        dynamic = []
-    seen = set(SNR_SEED_SYMBOLS)
-    universe = list(SNR_SEED_SYMBOLS)
-    for s in dynamic:
-        if s not in seen:
-            universe.append(s)
-            seen.add(s)
-    return universe
+        return []
 
 
 def snr_find_pivots(candles, pivot_length):
@@ -17778,7 +17776,7 @@ def api_snr_status():
         "coins": coins, "last_backtest_finished": last_finished,
         "backtest_running": running, "waiting_for_slot": waiting, "progress_done": done, "progress_total": total,
         "current_symbol": current_symbol, "live_signal_stats": signal_stats,
-        "config": {"seed_symbols": SNR_SEED_SYMBOLS, "universe_size": SNR_UNIVERSE_SIZE,
+        "config": {"universe_size": SNR_UNIVERSE_SIZE,
                    "top_n": SNR_TOP_N, "display_n": SNR_DISPLAY_N, "timeframes": SNR_TF_CANDIDATES,
                    "pivot_candidates": SNR_PIVOT_CANDIDATES, "strength_candidates": SNR_STRENGTH_CANDIDATES,
                    "rr_candidates": SNR_RR_CANDIDATES, "refresh_sec": SNR_REFRESH_SEC},
@@ -21967,7 +21965,7 @@ async function refreshSnr() {
     }).join('');
     panel.innerHTML = `
       <div class="dim" style="margin-bottom:10px;">
-        \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442: ${lastFinished} \u00b7 \u0432\u0441\u0435\u043b\u0435\u043d\u043d\u0430\u044f: ${(data.config&&data.config.seed_symbols||[]).join(', ')} + ${data.config&&data.config.universe_size||0} \u043f\u043e \u043e\u0431\u044a\u0451\u043c\u0443
+        \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442: ${lastFinished} \u00b7 \u0432\u0441\u0435\u043b\u0435\u043d\u043d\u0430\u044f: \u0442\u043e\u043f-${data.config&&data.config.universe_size||0} \u043f\u043e \u043e\u0431\u044a\u0451\u043c\u0443 (\u0431\u0435\u0437 \u043f\u0440\u0438\u043d\u0443\u0434\u0438\u0442\u0435\u043b\u044c\u043d\u043e \u0432\u043a\u043b\u044e\u0447\u0451\u043d\u043d\u044b\u0445 \u043c\u043e\u043d\u0435\u0442)
       </div>
       ${progressHtml}
       ${lstatsHtml}
