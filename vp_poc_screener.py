@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.272"
+APP_VERSION = "0.99.273"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22768,6 +22768,8 @@ async function refreshAll() {
   if (activeTab === 'ft5') await refreshFt5();
   if (activeTab === 'mirror') await refreshMirror();
   if (activeTab === 'lsw') await refreshLsw();
+  if (activeTab === 'neuro') await refreshNeuro();
+  if (activeTab === 'snr') await refreshSnr();
   if (activeTab === 'autotrade') await refreshAutotrade();
   if (activeTab === 'simulator') await refreshSimulator();
 }
