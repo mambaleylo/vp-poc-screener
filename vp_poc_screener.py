@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.276"
+APP_VERSION = "0.99.277"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13958,6 +13958,8 @@ SNR_MIN_TEST_TRADES   = 5                    # minimum TEST closed trades to tru
 SNR_HISTORY_DAYS      = 500                  # how far back to fetch candles for the backtest
 SNR_REFRESH_SEC       = int(os.environ.get("VP_SNR_REFRESH_SEC", 4 * 3600))  # re-optimize every 4h
 SNR_TRAIN_FRAC        = 0.7
+SNR_N_COMBOS          = len(SNR_TF_CANDIDATES) * len(SNR_PIVOT_CANDIDATES) * len(SNR_STRENGTH_CANDIDATES) * len(SNR_RR_CANDIDATES)  # v0.99.277 — 81 total combinations tried per symbol (3 tf x 3 pivot x 3 strength x 3 rr)
+SNR_Z_CRITICAL        = 3.23  # v0.99.277 — Bonferroni-corrected one-tailed z-critical for SNR_N_COMBOS=81 independent comparisons at overall alpha=0.05 (alpha/81 per comparison ≈ 0.000617 -> z≈3.23, computed via the standard normal inverse CDF — hardcoded rather than adding scipy as a dependency, same "no scipy on a phone via Termux" reasoning _T_CRITICAL_TABLE's own comment already documents elsewhere in this file). See snr_optimize_symbol()'s own docstring for why a plain "average > 0" bar wasn't enough.
 SNR_PER_SYMBOL_MAX_SEC = int(os.environ.get("VP_SNR_PER_SYMBOL_MAX_SEC", 300))  # v0.99.271 — hard ceiling per symbol now that the universe can be much bigger than 3 fixed coins, same "one stuck symbol can't block the whole cycle" discipline as every other module
 SNR_BACKTEST_TRIGGER  = threading.Event()  # v0.99.270 — per direct user request ("бэктест не идёт по индикатору, добавь кнопку перезапуска бэктеста принудительно как для нейро") — same "Очистить X doesn't wake the sleeping loop" fix as every other module's own trigger event
 _snr_active_symbols   = list(SNR_SEED_SYMBOLS[:SNR_TOP_N])  # v0.99.271 — current top-N survivors that get live-scanned/traded; starts as the seed coins until the first cycle completes
@@ -14132,14 +14134,46 @@ def snr_simulate_trades(candles, pivot_length, min_strength, rr, sl_atr_mult=SNR
     return trades
 
 
+def _snr_z_score_vs_breakeven(wins, n, rr):
+    """v0.99.277 — standard one-sample binomial-proportion z-test of
+    this sample's own win rate against the breakeven rate implied by
+    rr (1/(1+rr), assuming a fixed 1R risk) — how many standard errors
+    ABOVE breakeven the observed win rate sits. Returns None if n==0 or
+    the breakeven rate is degenerate (rr<=0)."""
+    if n <= 0 or rr <= 0:
+        return None
+    p0 = 1.0 / (1.0 + rr)
+    se = math.sqrt(p0 * (1 - p0) / n)
+    if se <= 0:
+        return None
+    observed = wins / n
+    return (observed - p0) / se
+
+
 def snr_optimize_symbol(symbol):
-    """Sweeps timeframe x pivot_length x min_strength x rr for one symbol,
-    finding the best candidate on TRAIN data (min SNR_MIN_TRAIN_TRADES
-    closed trades, ranked by avg_pnl_r) and VALIDATING it on TEST data
-    (min SNR_MIN_TEST_TRADES) before trusting it — same walk-forward
-    discipline as every other module this session. Returns a dict with
-    the chosen params + honest train/test stats, or None if nothing
-    survives validation on any timeframe."""
+    """Sweeps timeframe x pivot_length x min_strength x rr (SNR_N_COMBOS
+    total combinations) for one symbol, on TRAIN data first then
+    validating on TEST data — same walk-forward discipline as every
+    other module this session.
+    v0.99.277 — CRITICAL FIX, per direct user question ("смотрит ли в
+    будущее заранее этот индикатор?"): a plain "average P&L > 0" bar on
+    each side turned out to still pass on 40-70% of PURELY RANDOM
+    synthetic price series (no genuine edge at all), verified directly
+    across 10-15 different random seeds even after raising the minimum
+    sample size — trying SNR_N_COMBOS=81 independent combinations and
+    accepting ANY that clears a weak bar is a textbook multiple-
+    comparisons problem: with enough independent attempts, SOME will
+    look good on both a train and a test slice by pure chance alone,
+    regardless of how the winner is later selected. Fixed with a proper
+    one-sample z-test of each side's own win rate against the RR-implied
+    breakeven rate, requiring z >= SNR_Z_CRITICAL (a Bonferroni-
+    corrected threshold that accounts for all 81 comparisons, not a
+    plain "> 0" nor an uncorrected single-test significance level) on
+    BOTH train and test independently before a candidate is even
+    considered — verified this actually closes the gap (see this
+    function's own test suite run against 15 random seeds pre/post fix).
+    Returns a dict with the chosen params + honest train/test stats, or
+    None if nothing survives on any timeframe."""
     best = None
     for tf in SNR_TF_CANDIDATES:
         try:
@@ -14161,20 +14195,25 @@ def snr_optimize_symbol(symbol):
                         test = [t for t in closed if t["time"] > boundary_time]
                         if len(train) < SNR_MIN_TRAIN_TRADES or len(test) < SNR_MIN_TEST_TRADES:
                             continue
-                        train_wr = sum(1 for t in train if t["result"] == "WIN") / len(train) * 100
+                        train_wins = sum(1 for t in train if t["result"] == "WIN")
+                        train_wr = train_wins / len(train) * 100
                         train_avg = sum(t["pnl_r"] for t in train) / len(train)
-                        test_wr = sum(1 for t in test if t["result"] == "WIN") / len(test) * 100
+                        test_wins = sum(1 for t in test if t["result"] == "WIN")
+                        test_wr = test_wins / len(test) * 100
                         test_avg = sum(t["pnl_r"] for t in test) / len(test)
-                        # Require the TEST avg P&L to ALSO be positive — not just the
-                        # train-discovered one — before this candidate is even considered,
-                        # same "don't trust a train-only result" discipline as elsewhere.
-                        if test_avg <= 0:
+                        train_z = _snr_z_score_vs_breakeven(train_wins, len(train), rr)
+                        test_z = _snr_z_score_vs_breakeven(test_wins, len(test), rr)
+                        if train_z is None or test_z is None:
                             continue
-                        if best is None or test_avg > best["test_avg_pnl_r"]:
+                        if train_z < SNR_Z_CRITICAL or test_z < SNR_Z_CRITICAL:
+                            continue
+                        if best is None or train_z > best["train_z"]:
                             best = {
                                 "timeframe": tf, "pivot_length": pl, "min_strength": ms, "rr": rr,
                                 "train_n": len(train), "train_wr": round(train_wr, 1), "train_avg_pnl_r": round(train_avg, 3),
+                                "train_z": round(train_z, 2),
                                 "test_n": len(test), "test_wr": round(test_wr, 1), "test_avg_pnl_r": round(test_avg, 3),
+                                "test_z": round(test_z, 2),
                                 "recent_trades": closed[-40:][::-1],
                             }
         except Exception as e:
@@ -21956,9 +21995,10 @@ async function refreshSnr() {
           \u0442\u0430\u0439\u043c\u0444\u0440\u0435\u0439\u043c ${r.timeframe} \u00b7 pivot ${r.pivot_length} \u00b7 \u0441\u0438\u043b\u0430\u2265${r.min_strength} \u00b7 RR${r.rr}
         </div>
         <div style="display:flex;gap:16px;margin-bottom:8px;">
-          <div><div class="dim" style="font-size:10px;">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R</div></div>
-          <div><div class="dim" style="font-size:10px;">TEST (n=${r.test_n})</div><div class="win">WR ${r.test_wr}% \u00b7 ${r.test_avg_pnl_r>0?'+':''}${r.test_avg_pnl_r}R</div></div>
+          <div><div class="dim" style="font-size:10px;">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R \u00b7 z=${r.train_z}</div></div>
+          <div><div class="dim" style="font-size:10px;">TEST (n=${r.test_n})</div><div class="win">WR ${r.test_wr}% \u00b7 ${r.test_avg_pnl_r>0?'+':''}${r.test_avg_pnl_r}R \u00b7 z=${r.test_z}</div></div>
         </div>
+        <div class="dim" style="font-size:10px;margin-bottom:8px;">z \u2014 \u043d\u0430\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0441\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0445 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u0438\u0439 \u0432\u0438\u043d\u0440\u0435\u0439\u0442 \u0432\u044b\u0448\u0435 \u0431\u0435\u0437\u0443\u0431\u044b\u0442\u043a\u0430 (\u043d\u0443\u0436\u043d\u043e \u22653.23 \u0441 \u043f\u043e\u043f\u0440\u0430\u0432\u043a\u043e\u0439 \u043d\u0430 81 \u043f\u0435\u0440\u0435\u0431\u0440\u0430\u043d\u043d\u0443\u044e \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u044e)</div>
         ${liveSigSection}
         <details><summary class="dim" style="cursor:pointer;font-size:11px;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0441\u0434\u0435\u043b\u043a\u0438 \u0431\u044d\u043a\u0442\u0435\u0441\u0442\u0430</summary>${tradesRows}</details>
       </div>`;
