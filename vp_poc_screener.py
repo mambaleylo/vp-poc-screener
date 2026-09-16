@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.270"
+APP_VERSION = "0.99.271"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -815,6 +815,10 @@ AUTOTRADE_ENABLED_NEURO = os.environ.get("VP_AUTOTRADE_NEURO", "0") == "1"  # v0
 AUTOTRADE_LEVERAGE_NEURO = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_NEURO", 10))  # same role as AUTOTRADE_LEVERAGE_LSW — only the paper simulator's own fallback leverage, real orders go through execute_autotrade()'s automatic risk-based sizing
 AUTOTRADE_INVERT_LSW = os.environ.get("VP_AUTOTRADE_INVERT_LSW", "0") == "1"  # v0.99.263, per direct user request ("галочку инвертированного открытия сделок... разница будет только на бирже, стоп станет тейком а тейк стопом") — off by default; see execute_autotrade()'s own docstring for the exact mechanics
 AUTOTRADE_INVERT_NEURO = os.environ.get("VP_AUTOTRADE_INVERT_NEURO", "0") == "1"  # same as AUTOTRADE_INVERT_LSW, for Neuro
+AUTOTRADE_ENABLED_SNR = os.environ.get("VP_AUTOTRADE_SNR", "0") == "1"  # v0.99.271, per direct user request for live signals — same off-by-default, opt-in pattern as every other module's own toggle
+AUTOTRADE_LEVERAGE_SNR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SNR", 10))  # only the paper simulator's own fallback leverage, real orders go through execute_autotrade()'s automatic risk-based sizing
+AUTOTRADE_INVERT_SNR = os.environ.get("VP_AUTOTRADE_INVERT_SNR", "0") == "1"  # same as AUTOTRADE_INVERT_LSW/NEURO, for S/R Zones
+TELEGRAM_ALERTS_SNR = os.environ.get("VP_TG_ALERTS_SNR", "1") == "1"
 TELEGRAM_ALERTS_LSW = os.environ.get("VP_TG_ALERTS_LSW", "1") == "1"
 TELEGRAM_ALERTS_EMA_BULL = os.environ.get("VP_TG_ALERTS_EMA_BULL", "1") == "1"
 # v0.99.121 — higher-timeframe trend filter, per direct user request
@@ -1056,7 +1060,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "snr_enabled", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "autotrade_invert_snr", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "autotrade_invert_lsw", "autotrade_invert_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled",
                   "autotrade_risk_pct",
@@ -1096,6 +1100,11 @@ def get_settings():
         "amd_enabled": AMD_ENABLED,
         "neuro_enabled": NEURO_ENABLED,
         "snr_enabled": SNR_ENABLED,
+        "snr_top_n": SNR_TOP_N,
+        "snr_display_n": SNR_DISPLAY_N,
+        "telegram_alerts_snr": TELEGRAM_ALERTS_SNR,
+        "autotrade_snr": AUTOTRADE_ENABLED_SNR,
+        "autotrade_invert_snr": AUTOTRADE_INVERT_SNR,
         "neuro_top_n": NEURO_TOP_N,
         "neuro_display_n": NEURO_DISPLAY_N,
         "nq_enabled": NQ_ENABLED,
@@ -1162,7 +1171,7 @@ def apply_settings(updates):
     global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, FT5_HTF_FILTER_ENABLED, FT5_SESSION_FILTER_ENABLED, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, MSNR_MIN_RR_FILTER_ENABLED, MSNR_HTF_FILTER_ENABLED, MSNR_PER_SYMBOL_FILTERS_ENABLED, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT, MIRROR_AUTOTUNE_TOLERANCE_ENABLED
     global MIRROR_VOLUME_FILTER_ENABLED, MIRROR_HTF_FILTER_ENABLED
-    global EMA_TOUCH_ENABLED, AMD_ENABLED, NEURO_ENABLED, NEURO_TOP_N, NEURO_DISPLAY_N, _neuro_active_symbols, _neuro_display_symbols, SNR_ENABLED, NQ_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
+    global EMA_TOUCH_ENABLED, AMD_ENABLED, NEURO_ENABLED, NEURO_TOP_N, NEURO_DISPLAY_N, _neuro_active_symbols, _neuro_display_symbols, SNR_ENABLED, SNR_TOP_N, SNR_DISPLAY_N, _snr_active_symbols, _snr_display_symbols, TELEGRAM_ALERTS_SNR, AUTOTRADE_ENABLED_SNR, AUTOTRADE_INVERT_SNR, NQ_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED, LSW_ATR_SWEEP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
@@ -1224,6 +1233,46 @@ def apply_settings(updates):
         NEURO_ENABLED = bool(updates["neuro_enabled"])
     if "snr_enabled" in updates:
         SNR_ENABLED = bool(updates["snr_enabled"])
+    if "telegram_alerts_snr" in updates:
+        TELEGRAM_ALERTS_SNR = bool(updates["telegram_alerts_snr"])
+    if "autotrade_snr" in updates:
+        AUTOTRADE_ENABLED_SNR = bool(updates["autotrade_snr"])
+    if "autotrade_invert_snr" in updates:
+        AUTOTRADE_INVERT_SNR = bool(updates["autotrade_invert_snr"])
+    if "snr_top_n" in updates:
+        try:
+            new_top_n = int(updates["snr_top_n"])
+        except (TypeError, ValueError):
+            new_top_n = None
+        if new_top_n and new_top_n > 0:
+            SNR_TOP_N = new_top_n
+            # v0.99.271 — same immediate-apply-on-decrease pattern as
+            # neuro_top_n's own (v0.99.247/262): re-rank symbols already
+            # sitting in STATE["snr_results"] down to the new N — no need
+            # to wait for the next full cycle. An increase only takes
+            # effect on the next cycle since non-kept symbols' data isn't
+            # retained.
+            with state_lock:
+                current_active = list(_snr_active_symbols)
+                if len(current_active) > new_top_n:
+                    ranked = sorted(current_active, key=lambda s: -(STATE["snr_results"].get(s, {}).get("test_avg_pnl_r") or float("-inf")))
+                    _snr_active_symbols = ranked[:new_top_n]
+    if "snr_display_n" in updates:
+        try:
+            new_display_n = int(updates["snr_display_n"])
+        except (TypeError, ValueError):
+            new_display_n = None
+        if new_display_n and new_display_n > 0:
+            SNR_DISPLAY_N = new_display_n
+            effective_n = max(new_display_n, SNR_TOP_N)
+            with state_lock:
+                current_display = list(_snr_display_symbols)
+                if len(current_display) > effective_n:
+                    ranked = sorted(current_display, key=lambda s: -(STATE["snr_results"].get(s, {}).get("test_avg_pnl_r") or float("-inf")))
+                    keep = set(ranked[:effective_n])
+                    STATE["snr_results"] = {k: v for k, v in STATE["snr_results"].items() if k in keep}
+                    _snr_display_symbols = ranked[:effective_n]
+                    _snr_active_symbols = [s for s in _snr_active_symbols if s in keep]
     if "neuro_top_n" in updates:
         try:
             new_top_n = int(updates["neuro_top_n"])
@@ -1600,6 +1649,10 @@ STATE = {
     "scalp_max_leverage_map": {},
     "snr_results": {},  # v0.99.269 — per-symbol best (timeframe, pivot, strength, RR) found + honest train/test stats
     "snr_last_backtest_finished": None,
+    "snr_backtest_running": False,  # v0.99.271 — per direct user request ("нужна шкала чтобы понимать идёт ли вообще бэктест")
+    "snr_progress_done": 0, "snr_progress_total": 0,
+    "snr_current_symbol": None, "snr_current_tf": None,
+    "snr_signals": deque(maxlen=500),  # v0.99.271 — live signal log, same shape as lsw_signals/mirror_signals
     "scalp_risk_tiers": {},  # v0.99.237 — symbol -> sorted list of (notional_threshold, mmr, max_leverage) tiers, for notional-aware safe-leverage lookups
     "scalp_data": {},          # symbol -> {interval -> {direction -> target-summary}}
     "scalp_recommendations": {},  # symbol -> best config (or None)
@@ -5862,6 +5915,10 @@ def save_state():
                 "mirror_symbol_overrides": STATE["mirror_symbol_overrides"],
                 "mirror_live_universe": STATE["mirror_live_universe"],
                 "lsw_signals": list(STATE["lsw_signals"]),
+                "snr_results": STATE["snr_results"],  # v0.99.271 — CRITICAL FIX: this and snr_signals/active/display symbols were never actually persisted (save_state() builds an explicit key list, not a generic STATE dump), so a restart would silently wipe every S/R Zones backtest result and live signal
+                "snr_signals": list(STATE["snr_signals"]),
+                "snr_active_symbols": list(_snr_active_symbols),
+                "snr_display_symbols": list(_snr_display_symbols),
                 "autotrade_log": list(STATE["autotrade_log"]),
                 "sim_balance": STATE["sim_balance"],
                 # Both PENDING and SETTLED now (previously PENDING was
@@ -5974,6 +6031,7 @@ def _backfill_mfe_mae(signal_list):
 
 
 def load_state():
+    global _snr_active_symbols, _snr_display_symbols
     if not os.path.exists(STATE_FILE):
         return
     try:
@@ -5993,6 +6051,10 @@ def load_state():
         mirror_symbol_overrides = data.get("mirror_symbol_overrides", {})
         mirror_live_universe = data.get("mirror_live_universe", [])
         lsw_signals = data.get("lsw_signals", [])
+        snr_results = data.get("snr_results", {})
+        snr_signals = data.get("snr_signals", [])
+        snr_active_symbols = data.get("snr_active_symbols")
+        snr_display_symbols = data.get("snr_display_symbols")
         autotrade_log = data.get("autotrade_log", [])
         sim_trades = data.get("sim_trades", [])
         risk_autotune_log = data.get("risk_autotune_log", [])
@@ -6011,6 +6073,12 @@ def load_state():
             STATE["mirror_symbol_overrides"] = mirror_symbol_overrides
             STATE["mirror_live_universe"] = mirror_live_universe
             STATE["lsw_signals"] = deque(_backfill_mfe_mae(lsw_signals), maxlen=LSW_SIGNAL_HISTORY)
+            STATE["snr_results"] = snr_results
+            STATE["snr_signals"] = deque(snr_signals, maxlen=500)
+            if snr_active_symbols:
+                _snr_active_symbols = snr_active_symbols
+            if snr_display_symbols:
+                _snr_display_symbols = snr_display_symbols
             STATE["autotrade_log"] = deque(autotrade_log, maxlen=AUTOTRADE_TRADE_HISTORY)
             STATE["risk_autotune_log"] = deque(risk_autotune_log, maxlen=200)
             STATE["risk_autotune_last_change"] = risk_autotune_last_change
@@ -6249,6 +6317,8 @@ def send_telegram(text, category=None):
     if category == "neuro" and not TELEGRAM_ALERTS_NEURO:
         return
     if category == "neuro_summary" and not TELEGRAM_ALERTS_NEURO_SUMMARY:
+        return
+    if category == "snr" and not TELEGRAM_ALERTS_SNR:
         return
     if category == "nq" and not TELEGRAM_ALERTS_NQ:
         return
@@ -13858,7 +13928,10 @@ def amd_loop():
 # volume-ranked universe — much simpler, no universe-builder needed.
 # ============================================================================
 SNR_ENABLED           = os.environ.get("VP_SNR_ENABLED", "1") == "1"
-SNR_SYMBOLS           = [s.strip() for s in os.environ.get("VP_SNR_SYMBOLS", "XAU_USDT,BTC_USDT,SOL_USDT").split(",") if s.strip()]
+SNR_SEED_SYMBOLS      = [s.strip() for s in os.environ.get("VP_SNR_SYMBOLS", "XAU_USDT,BTC_USDT,SOL_USDT").split(",") if s.strip()]  # v0.99.271 — per the user's own original request ("сразу можно грузить только золото биткоин солану") — these stay ALWAYS included in the universe below, same "seed + dynamic" pattern as NEURO_COINS
+SNR_UNIVERSE_SIZE     = int(os.environ.get("VP_SNR_UNIVERSE_SIZE", 30))  # v0.99.271, per direct user request for Neuro-style top-N trade/display settings — additional volume-ranked candidates considered alongside the seed symbols
+SNR_TOP_N             = int(os.environ.get("VP_SNR_TOP_N", 3))     # how many survive the full sweep AND are actually live-scanned/traded, ranked by TEST avg_pnl_r
+SNR_DISPLAY_N         = int(os.environ.get("VP_SNR_DISPLAY_N", 5))  # how many get kept/shown — always clamped to at least SNR_TOP_N, same semantics as NEURO_DISPLAY_N (v0.99.262)
 SNR_TF_CANDIDATES     = ["1h", "4h", "1d"]  # per direct user request ("попробовать все фреймы")
 SNR_PIVOT_CANDIDATES  = [10, 15, 20]         # matches the Pine Script's own "Pivot Length" range
 SNR_STRENGTH_CANDIDATES = [1, 2, 3]          # matches the Pine Script's own "Strength" setting (1-4, capped here at 3 for a tractable sweep)
@@ -13869,9 +13942,48 @@ SNR_MAX_WAIT_BARS     = 48                   # same timeout convention as every 
 SNR_MIN_TRAIN_TRADES  = 15                   # minimum TRAIN closed trades before trusting a (tf, pivot, strength, rr) candidate at all
 SNR_MIN_TEST_TRADES   = 5                    # minimum TEST closed trades to trust the validation
 SNR_HISTORY_DAYS      = 500                  # how far back to fetch candles for the backtest
-SNR_REFRESH_SEC       = int(os.environ.get("VP_SNR_REFRESH_SEC", 4 * 3600))  # re-optimize every 4h — small fixed symbol list, cheap enough to refresh often
+SNR_REFRESH_SEC       = int(os.environ.get("VP_SNR_REFRESH_SEC", 4 * 3600))  # re-optimize every 4h
 SNR_TRAIN_FRAC        = 0.7
+SNR_PER_SYMBOL_MAX_SEC = int(os.environ.get("VP_SNR_PER_SYMBOL_MAX_SEC", 300))  # v0.99.271 — hard ceiling per symbol now that the universe can be much bigger than 3 fixed coins, same "one stuck symbol can't block the whole cycle" discipline as every other module
 SNR_BACKTEST_TRIGGER  = threading.Event()  # v0.99.270 — per direct user request ("бэктест не идёт по индикатору, добавь кнопку перезапуска бэктеста принудительно как для нейро") — same "Очистить X doesn't wake the sleeping loop" fix as every other module's own trigger event
+_snr_active_symbols   = list(SNR_SEED_SYMBOLS[:SNR_TOP_N])  # v0.99.271 — current top-N survivors that get live-scanned/traded; starts as the seed coins until the first cycle completes
+_snr_display_symbols  = list(SNR_SEED_SYMBOLS[:max(SNR_DISPLAY_N, SNR_TOP_N)])  # v0.99.271 — superset of _snr_active_symbols: everything shown in the UI
+_snr_prev_signal_keys = set()  # v0.99.271 — (symbol, bar_time) pairs already fired, same dedup pattern as neuro_live_loop's own _neuro_prev_signal_keys
+
+
+def snr_build_universe():
+    """v0.99.271 — dynamic, volume-ranked candidate pool (same shape as
+    lsw_build_universe()/neuro_build_universe()), merged with the small
+    always-included SNR_SEED_SYMBOLS (gold/BTC/SOL per the user's own
+    original request)."""
+    try:
+        tickers = get_tickers()
+        seen_vol = {}
+        for t in tickers:
+            name = t.get("contract", "")
+            if not name.endswith("_USDT"):
+                continue
+            vol = t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0
+            try:
+                vol = float(vol)
+            except (TypeError, ValueError):
+                vol = 0.0
+            if vol < MIN_VOL_USD:
+                continue
+            if name not in seen_vol or vol > seen_vol[name]:
+                seen_vol[name] = vol
+        ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
+        dynamic = [s[0] for s in ranked[:SNR_UNIVERSE_SIZE]]
+    except Exception as e:
+        log_error(f"snr_build_universe: {e}")
+        dynamic = []
+    seen = set(SNR_SEED_SYMBOLS)
+    universe = list(SNR_SEED_SYMBOLS)
+    for s in dynamic:
+        if s not in seen:
+            universe.append(s)
+            seen.add(s)
+    return universe
 
 
 def snr_find_pivots(candles, pivot_length):
@@ -14058,6 +14170,7 @@ def snr_optimize_symbol(symbol):
 
 
 def snr_backtest_loop():
+    global _snr_active_symbols, _snr_display_symbols
     # v0.99.269 — staggered startup + shared concurrency cap, same
     # reasoning as every other module's own backtest loop (see
     # msnr_backtest_loop()'s own comment) — this is the 8th backtest
@@ -14073,24 +14186,226 @@ def snr_backtest_loop():
                 continue
             BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
             _snr_sem_acquired = True
-            results = {}
-            for symbol in SNR_SYMBOLS:
-                try:
-                    best = snr_optimize_symbol(symbol)
-                    if best:
-                        results[symbol] = best
-                except Exception as e:
-                    log_error(f"snr_backtest_loop {symbol}: {e}")
+            # v0.99.271 — dynamic universe + top-N trade/display split, per
+            # direct user request ("Настройку количества монет для торговли
+            # и отображения как в нейро") — same architecture as v0.99.236/
+            # 262's own Neuro design: scan the whole universe, keep only
+            # the best SNR_DISPLAY_N for reference, and only the best
+            # SNR_TOP_N of THOSE are actually live-scanned/traded.
+            universe = snr_build_universe()
             with state_lock:
-                STATE["snr_results"] = results
-                STATE["snr_last_backtest_finished"] = time.time()
+                STATE["snr_progress_done"] = 0
+                STATE["snr_progress_total"] = len(universe)
+                STATE["snr_backtest_running"] = True
+                STATE["snr_current_symbol"] = None
+                STATE["snr_current_tf"] = None
+            all_results = {}
+            for symbol in universe:
+                with state_lock:
+                    STATE["snr_current_symbol"] = symbol
+                # v0.99.271 — same no-with-block, bounded-per-item-time
+                # discipline as every other sequential backtest loop this
+                # session — one stuck symbol can't block the whole cycle.
+                ex = ThreadPoolExecutor(max_workers=1)
+                try:
+                    fut = ex.submit(snr_optimize_symbol, symbol)
+                    try:
+                        best = fut.result(timeout=SNR_PER_SYMBOL_MAX_SEC)
+                        if best:
+                            all_results[symbol] = best
+                    except (TimeoutError, FutureTimeoutError):
+                        log_error(f"snr_backtest_loop: {symbol} exceeded {SNR_PER_SYMBOL_MAX_SEC}s — skipping, abandoning stuck thread")
+                    except Exception as e:
+                        log_error(f"snr_backtest_loop {symbol}: {e}")
+                finally:
+                    ex.shutdown(wait=False)
+                with state_lock:
+                    STATE["snr_progress_done"] += 1
+
+            ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
+            display_top = ranked[:max(SNR_DISPLAY_N, SNR_TOP_N)]
+            active_top = display_top[:SNR_TOP_N]
+            with state_lock:
+                if all_results:
+                    STATE["snr_results"] = dict(display_top)
+                    _snr_active_symbols = [sym for sym, _ in active_top]
+                    _snr_display_symbols = [sym for sym, _ in display_top]
+                    STATE["snr_last_backtest_finished"] = time.time()
+                else:
+                    # v0.99.271 — same "don't wipe existing data on a fully
+                    # failed cycle" safety net as neuro_mining_loop()'s own
+                    # (v0.99.236) — a total network outage shouldn't blank
+                    # out whatever the previous cycle found.
+                    log_error("snr_backtest_loop: universe scan produced zero usable results this cycle — keeping previous results")
+                STATE["snr_backtest_running"] = False
+                STATE["snr_current_symbol"] = None
+            if all_results:
+                save_state()  # v0.99.271 — CRITICAL FIX: persist the freshly-completed cycle immediately, so a restart right after doesn't lose it (see save_state()'s own new snr_results/snr_signals/snr_active_symbols/snr_display_symbols keys)
         except Exception as e:
             log_error(f"snr_backtest_loop: {e}")
+            with state_lock:
+                STATE["snr_backtest_running"] = False
         finally:
             if _snr_sem_acquired:
                 BACKTEST_CONCURRENCY_SEMAPHORE.release()
         SNR_BACKTEST_TRIGGER.wait(timeout=max(300, SNR_REFRESH_SEC))
         SNR_BACKTEST_TRIGGER.clear()
+
+
+def snr_scan_symbol_live(symbol):
+    """v0.99.271 — per direct user request ("сами живые сигналы нужны").
+    Checks whether the LATEST closed bar is itself a retest event on an
+    unbroken zone meeting the symbol's own optimized min_strength — same
+    trade-generation rule as snr_simulate_trades(), just evaluated live
+    instead of replayed historically. Entry uses the current close (no
+    "next bar" exists yet live), same convention as every other module's
+    own live-scan function."""
+    with state_lock:
+        result = STATE["snr_results"].get(symbol)
+    if not result:
+        return None
+    tf, pivot_length, min_strength, rr = result["timeframe"], result["pivot_length"], result["min_strength"], result["rr"]
+    try:
+        now = int(time.time())
+        interval_sec = INTERVAL_SECONDS.get(tf, 3600)
+        start_ts = now - 250 * interval_sec
+        candles = get_candles_range(symbol, tf, start_ts, now)
+        closed = [c for c in candles if c["time"] + interval_sec <= now] if candles else []
+        if len(closed) < 100:
+            return None
+        atr = neuro_atr_series(closed, 14)
+        zones = snr_build_zones(closed, atr, pivot_length)
+        last_idx = len(closed) - 1
+        if not atr[last_idx]:
+            return None
+        for z in zones:
+            if z["break_idx"] is not None:
+                continue
+            if z["retest_idxs"] and z["retest_idxs"][-1] == last_idx and z["strength"] >= min_strength:
+                direction = "LONG" if z["type"] == "support" else "SHORT"
+                entry = closed[-1]["close"]
+                sl_dist = atr[last_idx] * SNR_SL_ATR_MULT
+                if sl_dist <= 0:
+                    continue
+                sl = entry - sl_dist if direction == "LONG" else entry + sl_dist
+                tp = entry + sl_dist * rr if direction == "LONG" else entry - sl_dist * rr
+                return {"direction": direction, "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8),
+                        "zone_price": round(z["price"], 8), "zone_strength": z["strength"],
+                        "time": closed[-1]["time"], "timeframe": tf}
+        return None
+    except Exception as e:
+        log_error(f"snr_scan_symbol_live {symbol}: {e}")
+        return None
+
+
+def snr_track_signal_outcomes():
+    """Same shared WIN/LOSS/TIMEOUT tracking shape as every other
+    module's own outcome tracker this session (lsw/mirror/neuro)."""
+    now = time.time()
+    with state_lock:
+        open_signals = [s for s in STATE["snr_signals"] if s["status"] == "OPEN"]
+    if not open_signals:
+        return
+    all_candles = fetch_candles_concurrent([(s["symbol"], s["timeframe"], 300) for s in open_signals])
+    for sig, candles in zip(open_signals, all_candles):
+        try:
+            if candles is None:
+                continue
+            interval_sec = INTERVAL_SECONDS.get(sig["timeframe"], 3600)
+            candles = [c for c in candles if c["time"] + interval_sec <= now]
+            future = [c for c in candles if c["time"] > sig["time"]]
+            direction, entry = sig["direction"], sig["entry"]
+            risk = abs(entry - sig["sl"]) or 1e-9
+            result = exit_price = exit_time = None
+            bars_seen = 0
+            for c in future:
+                bars_seen += 1
+                if direction == "LONG":
+                    if c["low"] <= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["high"] >= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+                else:
+                    if c["high"] >= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["low"] <= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+                if bars_seen >= SNR_MAX_WAIT_BARS:
+                    result, exit_price, exit_time = "TIMEOUT", c["close"], c["time"]
+                    break
+            if result:
+                pnl_r = None
+                if exit_price is not None:
+                    raw = (exit_price - entry) / risk if direction == "LONG" else (entry - exit_price) / risk
+                    pnl_r = round(raw if result != "LOSS" else -abs(raw), 3)
+                with state_lock:
+                    sig["status"] = "CLOSED"
+                    sig["result"] = result
+                    sig["exit_price"] = exit_price
+                    sig["exit_time"] = exit_time
+                    sig["pnl_r"] = pnl_r
+        except Exception as e:
+            log_error(f"snr_outcome {sig['symbol']}: {e}")
+
+
+def snr_live_loop():
+    global _snr_prev_signal_keys
+    while True:
+        try:
+            if not SNR_ENABLED:
+                time.sleep(900)
+                continue
+            with state_lock:
+                active_symbols = list(_snr_active_symbols)
+            new_signals = {}
+            for symbol in active_symbols:
+                sig = snr_scan_symbol_live(symbol)
+                if sig:
+                    new_signals[symbol] = sig
+            new_keys = {s: sig["time"] for s, sig in new_signals.items()}
+            fired = {s: t for s, t in new_keys.items() if (s, t) not in _snr_prev_signal_keys}
+            for symbol, sig_time in fired.items():
+                sig = new_signals[symbol]
+                # v0.99.251-style no-open-position guard, same discipline
+                # as every other module this session.
+                with state_lock:
+                    already_open = any(s["symbol"] == symbol and s["status"] == "OPEN" for s in STATE["snr_signals"])
+                if already_open:
+                    log_error(f"snr_live_loop {symbol}: new signal detected but a previous one is still OPEN — signal skipped entirely (no log entry, no trade) to avoid piling into the same symbol")
+                    continue
+                arrow = "\u2b06\ufe0f" if sig["direction"] == "LONG" else "\u2b07\ufe0f"
+                record = {"symbol": symbol, "direction": sig["direction"], "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
+                          "zone_price": sig["zone_price"], "zone_strength": sig["zone_strength"], "timeframe": sig["timeframe"],
+                          "time": sig["time"], "detected_at": time.time(), "status": "OPEN", "result": None,
+                          "exit_price": None, "exit_time": None, "pnl_r": None}
+                with state_lock:
+                    STATE["snr_signals"].appendleft(record)
+                autotrade_result = None
+                if AUTOTRADE_ENABLED_SNR:
+                    with state_lock:
+                        still_active = symbol in _snr_active_symbols
+                    if still_active:
+                        autotrade_result = execute_autotrade("snr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
+                        sim_execute_trade("snr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                                           autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_SNR, record)
+                    else:
+                        log_error(f"snr_live_loop {symbol}: signal fired but symbol was dropped from active set mid-scan — signal logged, real trade skipped")
+                leverage_txt = f"{autotrade_result.get('leverage')}x" if autotrade_result and autotrade_result.get("leverage") else "\u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d\u0430"
+                send_telegram(
+                    f"{arrow} S/R {symbol} ({sig['direction']}, \u0437\u043e\u043d\u0430 {sig['zone_price']:.6g}, \u0441\u0438\u043b\u0430 {sig['zone_strength']})\n"
+                    f"entry: {sig['entry']:.6g}\nSL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n\u043f\u043b\u0435\u0447\u043e: {leverage_txt}",
+                    category="snr",
+                )
+                save_state()  # v0.99.271 — persist each new live signal immediately, same as every other module's own signal log
+            _snr_prev_signal_keys = set(new_keys.items())
+            snr_track_signal_outcomes()
+        except Exception as e:
+            log_error(f"snr_live_loop: {e}")
+        time.sleep(900)
 
 
 # Fixed top-5 majors, maximum available history, pure-Python statistical
@@ -17308,6 +17623,63 @@ def api_overview():
     })
 
 
+@app.route("/api/snr/chart/<symbol>")
+def api_snr_chart(symbol):
+    """Same "look up the signal's own already-recorded entry/sl/tp,
+    don't re-derive with CURRENT optimized params" pattern as api_lsw_
+    chart()'s own (LSW_RR-style drift risk: a symbol's own chosen
+    timeframe/pivot/strength/RR can change between when a trade fired
+    and when its chart is later opened)."""
+    try:
+        sig_time = request.args.get("time")
+        if not sig_time:
+            return jsonify({"error": "missing time"}), 400
+        target = float(sig_time)
+        found_sig = None
+        found_result = None
+        found_exit_time = None
+        found_exit_price = None
+        tf = None
+        with state_lock:
+            live_match = next((s for s in STATE["snr_signals"] if s["symbol"] == symbol and abs(s["time"] - target) < 86400), None)
+            bt_result = STATE["snr_results"].get(symbol)
+        if live_match:
+            tf = live_match["timeframe"]
+            found_sig = {"time": live_match["time"], "direction": live_match["direction"],
+                         "entry": live_match["entry"], "sl": live_match["sl"], "tp": live_match["tp"],
+                         "zone_price": live_match.get("zone_price"), "zone_strength": live_match.get("zone_strength")}
+            found_result = live_match.get("result")
+            found_exit_time = live_match.get("exit_time")
+            found_exit_price = live_match.get("exit_price")
+        elif bt_result:
+            tf = bt_result["timeframe"]
+            bt_match = next((t for t in (bt_result.get("recent_trades") or []) if abs(t["time"] - target) < INTERVAL_SECONDS.get(tf, 3600)), None)
+            if bt_match:
+                found_sig = {"time": bt_match["time"], "direction": bt_match["direction"],
+                             "entry": bt_match["entry"], "sl": bt_match["sl"], "tp": bt_match["tp"],
+                             "zone_price": bt_match.get("zone_price"), "zone_strength": bt_match.get("zone_strength")}
+                found_result = bt_match.get("result")
+                found_exit_time = bt_match.get("exit_time")
+                found_exit_price = bt_match.get("exit_price")
+        if found_sig is None:
+            return jsonify({"error": "сигнал не найден"}), 404
+        interval_sec = INTERVAL_SECONDS.get(tf, 3600)
+        fetch_start = found_sig["time"] - 250 * interval_sec
+        fetch_end = (found_exit_time + 6 * interval_sec) if found_exit_time else (found_sig["time"] + 200 * interval_sec)
+        candles = get_candles_range(symbol, tf, fetch_start, fetch_end)
+        return jsonify({
+            "symbol": symbol, "candles": (candles or [])[-250:], "time": found_sig["time"],
+            "direction": found_sig["direction"], "entry": found_sig["entry"],
+            "sl": found_sig["sl"], "tp": found_sig["tp"],
+            "level_price": found_sig.get("zone_price"), "level_type": None,
+            "result": found_result, "exit_time": found_exit_time, "exit_price": found_exit_price,
+            "chart_source": "snr",
+        })
+    except Exception as e:
+        log_error(f"api_snr_chart {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/snr/restart_backtest", methods=["POST"])
 def api_snr_restart_backtest():
     """v0.99.270 — per direct user request ("бэктест не идёт по
@@ -17324,17 +17696,56 @@ def api_snr_restart_backtest():
 
 
 @app.route("/api/snr/status")
+def snr_compute_signal_stats(active_symbols=None):
+    with state_lock:
+        active_symbols = active_symbols if active_symbols is not None else list(_snr_active_symbols)
+        signals = list(STATE["snr_signals"])
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+    wins = sum(1 for s in closed if s["result"] == "WIN")
+    losses = len(closed) - wins
+    open_n = sum(1 for s in signals if s["status"] == "OPEN")
+    winrate = round(wins / len(closed) * 100, 1) if closed else None
+    avg_pnl = round(sum(s["pnl_r"] for s in closed if s.get("pnl_r") is not None) / len(closed), 3) if closed else None
+    by_symbol = {}
+    for sym in active_symbols:
+        sym_closed = [s for s in closed if s["symbol"] == sym]
+        sym_wins = sum(1 for s in sym_closed if s["result"] == "WIN")
+        if sym_closed or any(s["symbol"] == sym and s["status"] == "OPEN" for s in signals):
+            by_symbol[sym] = {
+                "n": len(sym_closed), "wins": sym_wins, "losses": len(sym_closed) - sym_wins,
+                "winrate": round(sym_wins / len(sym_closed) * 100, 1) if sym_closed else None,
+                "open": sum(1 for s in signals if s["symbol"] == sym and s["status"] == "OPEN"),
+            }
+    return {"total": len(signals), "wins": wins, "losses": losses, "open": open_n,
+            "winrate": winrate, "avg_pnl_r": avg_pnl, "by_symbol": by_symbol}
+
+
 def api_snr_status():
     with state_lock:
         results = dict(STATE["snr_results"])
         last_finished = STATE["snr_last_backtest_finished"]
+        running = STATE["snr_backtest_running"]
+        done = STATE["snr_progress_done"]
+        total = STATE["snr_progress_total"]
+        current_symbol = STATE["snr_current_symbol"]
+        active_symbols = list(_snr_active_symbols)
+        display_symbols = list(_snr_display_symbols)
+        signal_log = list(STATE["snr_signals"])
+    active_set = set(active_symbols)
+    signal_stats = snr_compute_signal_stats(active_symbols)
     coins = []
-    for symbol in SNR_SYMBOLS:
+    for symbol in display_symbols:
         r = results.get(symbol)
-        coins.append({"symbol": symbol, "found": r is not None, "result": r})
+        recent_live_signals = [s for s in signal_log if s["symbol"] == symbol][:40]
+        coins.append({"symbol": symbol, "is_active": symbol in active_set, "found": r is not None, "result": r,
+                       "live_signal_stats": signal_stats["by_symbol"].get(symbol),
+                       "recent_live_signals": recent_live_signals})
     return jsonify({
         "coins": coins, "last_backtest_finished": last_finished,
-        "config": {"symbols": SNR_SYMBOLS, "timeframes": SNR_TF_CANDIDATES,
+        "backtest_running": running, "progress_done": done, "progress_total": total,
+        "current_symbol": current_symbol, "live_signal_stats": signal_stats,
+        "config": {"seed_symbols": SNR_SEED_SYMBOLS, "universe_size": SNR_UNIVERSE_SIZE,
+                   "top_n": SNR_TOP_N, "display_n": SNR_DISPLAY_N, "timeframes": SNR_TF_CANDIDATES,
                    "pivot_candidates": SNR_PIVOT_CANDIDATES, "strength_candidates": SNR_STRENGTH_CANDIDATES,
                    "rr_candidates": SNR_RR_CANDIDATES, "refresh_sec": SNR_REFRESH_SEC},
     })
@@ -19286,10 +19697,31 @@ INDEX_HTML = """<!doctype html>
     <details class="settingsGroup" style="--mod-color:#26c6da;"><summary class="settingsGroupTitle">S/R Zones (Flux Charts)</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
-          <div class="label">Работа (бэктест)</div>
-          <div class="sub">зоны поддержки/сопротивления по pivot high/low (порт индикатора Flux Charts), отскок от неповреждённого уровня — вход, стоп и тейк подбираются перебором по таймфрейму/pivot/силе/RR с проверкой на train/test. Пока только бэктест, без реальной торговли</div>
+          <div class="label">Работа (бэктест + живые сигналы)</div>
+          <div class="sub">зоны поддержки/сопротивления по pivot high/low (порт индикатора Flux Charts), отскок от неповреждённого уровня — вход, стоп и тейк подбираются перебором по таймфрейму/pivot/силе/RR с проверкой на train/test</div>
         </div>
         <label class="switch"><input type="checkbox" id="setSnr"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ Алерты в Telegram</div>
+          <div class="sub">уведомление при каждом новом живом сигнале, независимо от автоторговли</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramAlertsSnr"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ Сколько монет держать в топе</div>
+          <div class="sub">бэктест проверяет всю вселенную каждый цикл — здесь только сколько лучших по TEST avg P&L остаются активными (торгуются)</div>
+        </div>
+        <input type="number" id="setSnrTopN" min="1" max="30" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ Сколько монет отображать</div>
+          <div class="sub">не меньше числа выше — торгуются только лучшие по числу выше, остальные показываются серым как справочные</div>
+        </div>
+        <input type="number" id="setSnrDisplayN" min="1" max="30" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
       </div>
     </div></details>
     <details class="settingsGroup" style="--mod-color:#7986cb;"><summary class="settingsGroupTitle">NQ Model (NAS100_USDT)</summary><div class="settingsGroupBody">
@@ -19594,6 +20026,20 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">то же самое, что и для Sweep выше — на бирже реально открывается обратное направление, старый стоп становится тейком и наоборот</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeInvertNeuro"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ S/R Zones</div>
+          <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча и размера позиции, что и у остальных режимов</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeSnr"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳↳ Инвертировать открытие (S/R)</div>
+          <div class="sub">то же самое, что и для Sweep/Neuro выше — на бирже реально открывается обратное направление, старый стоп становится тейком и наоборот</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeInvertSnr"><span class="switchSlider"></span></label>
       </div>
     </div></details>
 
@@ -21414,23 +21860,62 @@ async function refreshSnr() {
     const data = await (await fetch('/api/snr/status')).json();
     const coins = data.coins || [];
     const lastFinished = data.last_backtest_finished ? fmtDateTime(data.last_backtest_finished) : '\u2014';
+
+    // v0.99.271 -- per direct user request ("нужна шкала чтобы понимать
+    // идёт ли вообще бэктест") -- same progress-bar shape as Neuro's own.
+    let progressHtml = '';
+    if (data.backtest_running) {
+      const pct = data.progress_total ? Math.round(data.progress_done / data.progress_total * 100) : 0;
+      progressHtml = `<div style="margin-bottom:10px;">
+        <div class="dim" style="font-size:11px;margin-bottom:4px;">\u043f\u0435\u0440\u0435\u0431\u043e\u0440 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432: ${data.progress_done}/${data.progress_total}${data.current_symbol?' \u2014 \u0441\u0435\u0439\u0447\u0430\u0441 '+data.current_symbol:''}</div>
+        <div style="height:6px;background:#1c2433;border-radius:3px;overflow:hidden;">
+          <div style="height:100%;width:${pct}%;background:#26c6da;transition:width .3s;"></div>
+        </div>
+      </div>`;
+    }
+
+    const lstatsHtml = data.live_signal_stats && data.live_signal_stats.total
+      ? `<div class="dim" style="font-size:11px;margin-bottom:10px;">\u0436\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b \u0432\u0441\u0435\u0433\u043e: ${data.live_signal_stats.total} \u00b7 WR ${data.live_signal_stats.winrate!=null?data.live_signal_stats.winrate+'%':'\u2014'} \u00b7 \u043e\u0442\u043a\u0440\u044b\u0442\u043e: ${data.live_signal_stats.open}</div>`
+      : '';
+
     const cards = coins.map(c => {
+      const isActive = c.is_active !== false;
+      const cardStyle = isActive
+        ? 'margin-bottom:14px;padding:12px;background:#12182a;border-radius:10px;border:1px solid #232d45;'
+        : 'margin-bottom:14px;padding:12px;background:#0d1018;border-radius:10px;border:1px dashed #3a4256;opacity:0.6;';
+      const inactiveBadge = isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:#2a2f3d;border-radius:6px;">
+        <span class="dim" style="font-size:10px;">\u26aa \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0441\u043f\u0440\u0430\u0432\u043a\u0438 \u2014 \u043d\u0435 \u0442\u043e\u0440\u0433\u0443\u0435\u0442\u0441\u044f \u0438 \u043d\u0435 \u0441\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442\u0441\u044f \u0432\u0436\u0438\u0432\u0443\u044e</span>
+      </div>`;
       if (!c.found) {
-        return `<div style="margin-bottom:14px;padding:12px;background:#0d1018;border-radius:10px;border:1px dashed #3a4256;">
+        return `<div style="${cardStyle}">
           <div style="font-size:15px;font-weight:700;color:#26c6da;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
+          ${inactiveBadge}
           <span class="dim">\u043d\u0438\u0447\u0435\u0433\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u043e\u0433\u043e \u043d\u0430 train/test \u043f\u043e\u043a\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e</span>
         </div>`;
       }
       const r = c.result;
       const tradesRows = (r.recent_trades || []).slice(0, 15).map(t => {
         const rc = t.result === 'WIN' ? 'win' : t.result === 'LOSS' ? 'loss' : 'dim';
-        return `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1c2433;font-size:11px;">
+        return `<div onclick="openSnrChart('${c.symbol}', ${t.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1c2433;font-size:11px;">
           <span class="dim">${fmtDateTime(t.time)} ${t.direction} \u0443\u0440\u043e\u0432\u0435\u043d\u044c ${fmtNum(t.zone_price)} (\u0441\u0438\u043b\u0430 ${t.zone_strength})</span>
           <span class="${rc}">${t.result}${t.pnl_r!=null?' '+(t.pnl_r>0?'+':'')+t.pnl_r+'R':''}</span>
         </div>`;
       }).join('');
-      return `<div style="margin-bottom:14px;padding:12px;background:#12182a;border-radius:10px;border:1px solid #232d45;">
+      const liveSigs = c.recent_live_signals || [];
+      const liveSigRows = liveSigs.slice(0, 15).map(s => {
+        const rc = s.status === 'OPEN' ? 'dim' : s.result === 'WIN' ? 'win' : s.result === 'LOSS' ? 'loss' : 'dim';
+        const statusTxt = s.status === 'OPEN' ? '\u041e\u0422\u041a\u0420\u042b\u0422\u0410' : `${s.result}${s.pnl_r!=null?' '+(s.pnl_r>0?'+':'')+s.pnl_r+'R':''}`;
+        return `<div onclick="openSnrChart('${c.symbol}', ${s.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1c2433;font-size:11px;">
+          <span class="dim">${fmtDateTime(s.time)} ${s.direction} @ ${fmtNum(s.entry)}</span>
+          <span class="${rc}">${statusTxt}</span>
+        </div>`;
+      }).join('');
+      const liveSigSection = liveSigs.length
+        ? `<details open><summary class="dim" style="cursor:pointer;font-size:11px;">\u0436\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b (${liveSigs.length})</summary>${liveSigRows}</details>`
+        : '';
+      return `<div style="${cardStyle}">
         <div style="font-size:15px;font-weight:700;color:#26c6da;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
+        ${inactiveBadge}
         <div class="dim" style="font-size:11px;margin-bottom:8px;">
           \u0442\u0430\u0439\u043c\u0444\u0440\u0435\u0439\u043c ${r.timeframe} \u00b7 pivot ${r.pivot_length} \u00b7 \u0441\u0438\u043b\u0430\u2265${r.min_strength} \u00b7 RR${r.rr}
         </div>
@@ -21438,13 +21923,16 @@ async function refreshSnr() {
           <div><div class="dim" style="font-size:10px;">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R</div></div>
           <div><div class="dim" style="font-size:10px;">TEST (n=${r.test_n})</div><div class="win">WR ${r.test_wr}% \u00b7 ${r.test_avg_pnl_r>0?'+':''}${r.test_avg_pnl_r}R</div></div>
         </div>
-        <details><summary class="dim" style="cursor:pointer;font-size:11px;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0441\u0434\u0435\u043b\u043a\u0438</summary>${tradesRows}</details>
+        ${liveSigSection}
+        <details><summary class="dim" style="cursor:pointer;font-size:11px;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0441\u0434\u0435\u043b\u043a\u0438 \u0431\u044d\u043a\u0442\u0435\u0441\u0442\u0430</summary>${tradesRows}</details>
       </div>`;
     }).join('');
     panel.innerHTML = `
       <div class="dim" style="margin-bottom:10px;">
-        \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442: ${lastFinished} \u00b7 \u043c\u043e\u043d\u0435\u0442\u044b: ${(data.config&&data.config.symbols||[]).join(', ')}
+        \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442: ${lastFinished} \u00b7 \u0432\u0441\u0435\u043b\u0435\u043d\u043d\u0430\u044f: ${(data.config&&data.config.seed_symbols||[]).join(', ')} + ${data.config&&data.config.universe_size||0} \u043f\u043e \u043e\u0431\u044a\u0451\u043c\u0443
       </div>
+      ${progressHtml}
+      ${lstatsHtml}
       ${cards || '<div class="dim">\u043f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445</div>'}
     `;
   } catch(e) {
@@ -22359,6 +22847,9 @@ const setInputs = {
   amd_enabled: document.getElementById('setAmd'),
   neuro_enabled: document.getElementById('setNeuro'),
   snr_enabled: document.getElementById('setSnr'),
+  snr_top_n: document.getElementById('setSnrTopN'),
+  snr_display_n: document.getElementById('setSnrDisplayN'),
+  telegram_alerts_snr: document.getElementById('setTelegramAlertsSnr'),
   nq_enabled: document.getElementById('setNq'),
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
   lsw_structural_cap_enabled: document.getElementById('setLswStructuralCap'),
@@ -22403,6 +22894,8 @@ const setInputs = {
   autotrade_neuro: document.getElementById('setAutotradeNeuro'),
   autotrade_invert_lsw: document.getElementById('setAutotradeInvertLsw'),
   autotrade_invert_neuro: document.getElementById('setAutotradeInvertNeuro'),
+  autotrade_snr: document.getElementById('setAutotradeSnr'),
+  autotrade_invert_snr: document.getElementById('setAutotradeInvertSnr'),
 };
 
 const setValueInputs = {
@@ -23032,6 +23525,13 @@ function openAmdChart(symbol, sigTime) {
   return openVgiChart(symbol, sigTime, '/api/amd/chart', '');
 }
 
+function openSnrChart(symbol, sigTime) {
+  // Same reuse judgment as openLswChart above — S/R Zones' own signal
+  // shape (fixed entry/sl/tp/direction, zone price as the "level") is
+  // structurally identical too.
+  return openVgiChart(symbol, sigTime, '/api/snr/chart', '');
+}
+
 function drawVgiChart(data) {
   const canvas = document.getElementById('vgiChartCanvas');
   const wrap = document.getElementById('vgiChartWrap');
@@ -23292,6 +23792,7 @@ if __name__ == "__main__":
     threading.Thread(target=nq_live_loop, daemon=True).start()
     threading.Thread(target=neuro_live_loop, daemon=True).start()
     threading.Thread(target=snr_backtest_loop, daemon=True).start()
+    threading.Thread(target=snr_live_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     threading.Thread(target=risk_autotune_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
