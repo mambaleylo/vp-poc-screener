@@ -14988,3 +14988,19 @@ v0.99.272 - Two real bugs found and fixed, per direct user report ("шкалы
          and /api/snr/status confirmed to return the correct full
          structure (backtest_running as a real boolean, complete coins
          array) from a clean state, zero surrogate escapes.
+
+v0.99.273 - Progress bar (and everything else) on the S/R Zones tab only
+         updated on a tab switch away-and-back, per direct user report
+         ("почему то шкала обновляется только если переключить вкладку с
+         другим индикатором туда обратно"). Confirmed: refreshSnr() was
+         only ever called from the tab-CLICK handler, not from the
+         periodic 15s refreshAll() loop — its own per-tab call list
+         simply never included 'snr' (or 'neuro', which has the
+         identical progress-bar concept and the same gap). While
+         sitting on the tab without switching away, nothing ever
+         refetched, so a live-running backtest's own progress appeared
+         frozen. Fixed by adding both 'snr' and 'neuro' to refreshAll()'s
+         own per-tab list, matching the same 15s cadence already used
+         for msnr/ft5/mirror/lsw.
+         Verified: py_compile (-W error), pyflakes, node --check, real
+         runtime 200 on / and both /api/snr/status and /api/neuro/status.
