@@ -15058,3 +15058,39 @@ v0.99.275 - Investigated direct user report ("В результате тольк
          a suspected bug.
          Verified: py_compile (-W error), pyflakes, node --check, 61
          routes, real runtime 200 on / and /api/snr/status.
+
+v0.99.276 - Removed volume-based ranking/cap from S/R Zones' universe
+         entirely, per direct user follow-up ("может тогда давай уберем
+         сортировку по объему, пусть все поучаствую и если у монеты
+         лучший средний +r то она и займет первое место") after asking
+         what the train/test validation actually means and noting gold/
+         bitcoin had shown good results the day before.
+         Root cause confirmed: v0.99.274 removed the forced seed symbols
+         but still capped candidates to the top SNR_UNIVERSE_SIZE=30 BY
+         VOLUME — gold (XAU_USDT) almost certainly doesn't clear even
+         the baseline MIN_VOL_USD ($500k) liquidity floor at all (MSNR
+         keeps its own separate hardcoded gold symbol list specifically
+         because gold-tracking contracts don't reliably clear the
+         standard volume-ranked universe either), so it could have been
+         silently excluded from the candidate pool before ever reaching
+         the honest train/test comparison — explaining why it stopped
+         showing up despite performing well the day before (when it was
+         still force-included as a seed).
+         snr_build_universe() rewritten to return EVERY single "_USDT"
+         contract Gate.io lists — no volume ranking, no liquidity floor
+         at all. The ONLY thing now deciding a symbol's fate is its own
+         honest train+test result; a genuinely illiquid/broken contract
+         simply won't produce enough valid closed trades to pass
+         validation anyway (SNR_MIN_TRAIN_TRADES=15/SNR_MIN_TEST_
+         TRADES=5), so a separate liquidity gate isn't needed to filter
+         those out. SNR_UNIVERSE_SIZE kept defined (unused) in case a
+         future session wants a cap back deliberately. Removed the now-
+         stale "universe_size" field from /api/snr/status's config
+         (nothing caps it anymore) — the tab's own summary line now
+         shows the ACTUAL scanned count (progress_total) instead.
+         Verified directly: with XAU_USDT given a volume 100x below the
+         old $500k floor, it now correctly appears in the universe
+         alongside every other candidate, with all 52 test symbols
+         present and none silently dropped.
+         Verified: py_compile (-W error), pyflakes, node --check, 61
+         routes, real runtime 200 on / and /api/snr/status.
