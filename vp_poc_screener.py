@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.271"
+APP_VERSION = "0.99.272"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1650,6 +1650,7 @@ STATE = {
     "snr_results": {},  # v0.99.269 — per-symbol best (timeframe, pivot, strength, RR) found + honest train/test stats
     "snr_last_backtest_finished": None,
     "snr_backtest_running": False,  # v0.99.271 — per direct user request ("нужна шкала чтобы понимать идёт ли вообще бэктест")
+    "snr_waiting_for_slot": False,  # v0.99.272 — per direct user follow-up ("шкалы бэктеста не видно"): distinct from snr_backtest_running — true while queued behind BACKTEST_CONCURRENCY_SEMAPHORE's own 2-slot cap (shared with 7 other modules), before this cycle actually starts processing anything
     "snr_progress_done": 0, "snr_progress_total": 0,
     "snr_current_symbol": None, "snr_current_tf": None,
     "snr_signals": deque(maxlen=500),  # v0.99.271 — live signal log, same shape as lsw_signals/mirror_signals
@@ -10560,7 +10561,14 @@ def ft5_backtest_loop():
     # cycle waits 270s before starting, spreading all 7 backtest
     # loops' initial burst of network activity across ~9 minutes
     # instead of all colliding on the shared semaphore at once.
-    time.sleep(270)
+    # v0.99.272 -- CRITICAL FIX, per direct user report that "Очистить
+    # FT5"/a restart button did nothing right after a fresh restart:
+    # this used to be a PLAIN time.sleep(), which FT5_BACKTEST_TRIGGER.
+    # set() has no way to interrupt -- the button was silently a no-op
+    # for the ENTIRE initial stagger window. Now uses the same trigger
+    # for the startup delay too.
+    FT5_BACKTEST_TRIGGER.wait(timeout=270)
+    FT5_BACKTEST_TRIGGER.clear()
     while True:
         _ft5_sem_acquired = False
         try:
@@ -11737,7 +11745,10 @@ def mirror_backtest_loop():
     # cycle waits 360s before starting, spreading all 7 backtest
     # loops' initial burst of network activity across ~9 minutes
     # instead of all colliding on the shared semaphore at once.
-    time.sleep(360)
+    # v0.99.272 -- same CRITICAL FIX as ft5_backtest_loop()'s own — see
+    # that function's own comment for the full incident.
+    MIRROR_BACKTEST_TRIGGER.wait(timeout=360)
+    MIRROR_BACKTEST_TRIGGER.clear()
     while True:
         _mirror_sem_acquired = False
         try:
@@ -13084,7 +13095,10 @@ def lsw_backtest_loop():
     # cycle waits 90s before starting, spreading all 7 backtest
     # loops' initial burst of network activity across ~9 minutes
     # instead of all colliding on the shared semaphore at once.
-    time.sleep(90)
+    # v0.99.272 -- same CRITICAL FIX as ft5_backtest_loop()'s own — see
+    # that function's own comment for the full incident.
+    LSW_BACKTEST_TRIGGER.wait(timeout=90)
+    LSW_BACKTEST_TRIGGER.clear()
     while True:
         try:
             if not LSW_ENABLED:
@@ -14176,7 +14190,16 @@ def snr_backtest_loop():
     # msnr_backtest_loop()'s own comment) — this is the 8th backtest
     # loop, given its own offset (630s) continuing the same 90s-apart
     # spacing established in v0.99.267.
-    time.sleep(630)
+    # v0.99.272 — CRITICAL FIX, per direct user report ("шкалы бэктеста
+    # не видно" with only S/R Zones enabled, ruling out semaphore
+    # contention from other modules): this used to be a PLAIN time.
+    # sleep(), which SNR_BACKTEST_TRIGGER.set() (the "Перезапустить
+    # бэктест S/R" button, v0.99.270) has no way to interrupt — the
+    # button was silently a no-op for the ENTIRE initial 630s stagger
+    # window right after every restart. Now uses the same trigger for
+    # the startup delay too, so the button actually works immediately.
+    SNR_BACKTEST_TRIGGER.wait(timeout=630)
+    SNR_BACKTEST_TRIGGER.clear()
     while True:
         _snr_sem_acquired = False
         try:
@@ -14184,8 +14207,12 @@ def snr_backtest_loop():
                 SNR_BACKTEST_TRIGGER.wait(timeout=max(300, SNR_REFRESH_SEC))
                 SNR_BACKTEST_TRIGGER.clear()
                 continue
+            with state_lock:
+                STATE["snr_waiting_for_slot"] = True
             BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
             _snr_sem_acquired = True
+            with state_lock:
+                STATE["snr_waiting_for_slot"] = False
             # v0.99.271 — dynamic universe + top-N trade/display split, per
             # direct user request ("Настройку количества монет для торговли
             # и отображения как в нейро") — same architecture as v0.99.236/
@@ -16684,7 +16711,10 @@ def neuro_mining_loop():
     # cycle waits 180s before starting, spreading all 7 backtest
     # loops' initial burst of network activity across ~9 minutes
     # instead of all colliding on the shared semaphore at once.
-    time.sleep(180)
+    # v0.99.272 -- same CRITICAL FIX as ft5_backtest_loop()'s own — see
+    # that function's own comment for the full incident.
+    NEURO_MINING_TRIGGER.wait(timeout=180)
+    NEURO_MINING_TRIGGER.clear()
     while True:
         _neuro_sem_acquired = False
         try:
@@ -17338,7 +17368,10 @@ def nq_backtest_loop():
     # cycle waits 540s before starting, spreading all 7 backtest
     # loops' initial burst of network activity across ~9 minutes
     # instead of all colliding on the shared semaphore at once.
-    time.sleep(540)
+    # v0.99.272 -- same CRITICAL FIX as ft5_backtest_loop()'s own — see
+    # that function's own comment for the full incident.
+    NQ_BACKTEST_TRIGGER.wait(timeout=540)
+    NQ_BACKTEST_TRIGGER.clear()
     while True:
         _nq_sem_acquired = False
         try:
@@ -17695,7 +17728,6 @@ def api_snr_restart_backtest():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-@app.route("/api/snr/status")
 def snr_compute_signal_stats(active_symbols=None):
     with state_lock:
         active_symbols = active_symbols if active_symbols is not None else list(_snr_active_symbols)
@@ -17720,11 +17752,13 @@ def snr_compute_signal_stats(active_symbols=None):
             "winrate": winrate, "avg_pnl_r": avg_pnl, "by_symbol": by_symbol}
 
 
+@app.route("/api/snr/status")
 def api_snr_status():
     with state_lock:
         results = dict(STATE["snr_results"])
         last_finished = STATE["snr_last_backtest_finished"]
         running = STATE["snr_backtest_running"]
+        waiting = STATE["snr_waiting_for_slot"]
         done = STATE["snr_progress_done"]
         total = STATE["snr_progress_total"]
         current_symbol = STATE["snr_current_symbol"]
@@ -17742,7 +17776,7 @@ def api_snr_status():
                        "recent_live_signals": recent_live_signals})
     return jsonify({
         "coins": coins, "last_backtest_finished": last_finished,
-        "backtest_running": running, "progress_done": done, "progress_total": total,
+        "backtest_running": running, "waiting_for_slot": waiting, "progress_done": done, "progress_total": total,
         "current_symbol": current_symbol, "live_signal_stats": signal_stats,
         "config": {"seed_symbols": SNR_SEED_SYMBOLS, "universe_size": SNR_UNIVERSE_SIZE,
                    "top_n": SNR_TOP_N, "display_n": SNR_DISPLAY_N, "timeframes": SNR_TF_CANDIDATES,
@@ -21864,7 +21898,11 @@ async function refreshSnr() {
     // v0.99.271 -- per direct user request ("нужна шкала чтобы понимать
     // идёт ли вообще бэктест") -- same progress-bar shape as Neuro's own.
     let progressHtml = '';
-    if (data.backtest_running) {
+    if (data.waiting_for_slot) {
+      progressHtml = `<div class="dim" style="margin-bottom:10px;font-size:11px;">
+        \u23f3 \u043e\u0436\u0438\u0434\u0430\u0435\u0442 \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e\u0433\u043e \u043c\u0435\u0441\u0442\u0430 \u0441\u0440\u0435\u0434\u0438 \u0431\u044d\u043a\u0442\u0435\u0441\u0442\u043e\u0432 \u0434\u0440\u0443\u0433\u0438\u0445 \u043c\u043e\u0434\u0443\u043b\u0435\u0439 (\u043e\u0434\u043d\u043e\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u0440\u0430\u0431\u043e\u0442\u0430\u044e\u0442 \u043d\u0435 \u0431\u043e\u043b\u044c\u0448\u0435 2 \u0438\u0437 8)
+      </div>`;
+    } else if (data.backtest_running) {
       const pct = data.progress_total ? Math.round(data.progress_done / data.progress_total * 100) : 0;
       progressHtml = `<div style="margin-bottom:10px;">
         <div class="dim" style="font-size:11px;margin-bottom:4px;">\u043f\u0435\u0440\u0435\u0431\u043e\u0440 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432: ${data.progress_done}/${data.progress_total}${data.current_symbol?' \u2014 \u0441\u0435\u0439\u0447\u0430\u0441 '+data.current_symbol:''}</div>
