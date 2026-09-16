@@ -15004,3 +15004,28 @@ v0.99.273 - Progress bar (and everything else) on the S/R Zones tab only
          for msnr/ft5/mirror/lsw.
          Verified: py_compile (-W error), pyflakes, node --check, real
          runtime 200 on / and both /api/snr/status and /api/neuro/status.
+
+v0.99.274 - Removed forced seed symbols from S/R Zones' universe, per
+         direct user request ("не нужно чтобы биткоин солана и золото
+         были по любому в списке, пусть все ранжирует я честно").
+         snr_build_universe() rewritten to be a PURE volume-ranked pool
+         (same shape as lsw_build_universe()/mirror_build_universe()) —
+         no more force-including SNR_SEED_SYMBOLS regardless of their
+         own real volume. XAU_USDT/BTC_USDT/SOL_USDT (the user's own
+         original v0.99.269 starting point) still appear naturally if
+         their own real 24h volume genuinely ranks them into the top
+         SNR_UNIVERSE_SIZE, exactly like every other candidate — no
+         special treatment either way now. SNR_SEED_SYMBOLS itself is
+         kept only as the initial placeholder for _snr_active_symbols/
+         _snr_display_symbols before the very first real cycle
+         completes (so the tab shows SOMETHING before any honest
+         ranking exists yet), not as an ongoing bias.
+         Removed the now-misleading "seed_symbols" field from /api/snr/
+         status's own config (nothing is seeded anymore) and updated the
+         tab's own summary line accordingly.
+         Verified directly: with XAU_USDT given a volume just above the
+         minimum liquidity filter and a small SNR_UNIVERSE_SIZE=5, it
+         correctly gets excluded from the universe when it doesn't
+         honestly rank in the top 5 by volume — no forcing.
+         Verified: py_compile (-W error), pyflakes, node --check, 61
+         routes, real runtime 200 on / and /api/snr/status.
