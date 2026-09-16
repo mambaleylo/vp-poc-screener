@@ -14940,3 +14940,51 @@ v0.99.271 - Major S/R Zones expansion, per direct user request ("хочу
          6 new settings keys (snr_top_n, snr_display_n, telegram_alerts_
          snr, autotrade_snr, autotrade_invert_snr) present in /api/
          settings with sensible defaults, zero surrogate escapes.
+
+v0.99.272 - Two real bugs found and fixed, per direct user report ("шкалы
+         бэктеста не видно") and follow-up ("стоп, у меня только этот 1
+         индикатор включен для работы" — ruling out my first hypothesis).
+
+         BUG 1 (the actual root cause, found second): @app.route("/api/
+         snr/status") had landed on the WRONG function — snr_compute_
+         signal_stats() instead of api_snr_status() — a mechanical
+         mistake from the v0.99.271 edit that added both functions
+         together. The endpoint was silently returning ONLY the bare
+         signal-stats dict (total/wins/losses/winrate/by_symbol) instead
+         of the full status structure (coins, backtest_running, progress,
+         config) — meaning the S/R Zones tab's own JS was reading
+         undefined fields the whole time, not just missing a progress
+         bar specifically. Fixed by moving the decorator to the correct
+         function. Verified directly: the endpoint now correctly returns
+         backtest_running as an actual boolean and the full coins array,
+         confirmed via a clean-state real server run.
+
+         BUG 2 (real, but not the actual explanation once the user
+         clarified only S/R Zones was enabled): the SAME "restart button
+         can't wake the loop during its own initial startup stagger" gap
+         existed for ALL 6 modules with a working trigger+button (LSW,
+         Neuro, FT5, Mirror, NQ, SNR) — each one's v0.99.267 startup
+         delay used a PLAIN time.sleep(), which that module's own
+         restart/reset button's .set() call has no way to interrupt.
+         Pressing "Очистить X" or "Перезапустить бэктест X" right after
+         a fresh restart, before that module's own stagger had elapsed,
+         was silently a no-op for the whole delay window. Fixed all 6 by
+         switching their initial stagger to TRIGGER.wait(timeout=N) +
+         TRIGGER.clear(), matching the pattern already used for their
+         OWN recurring refresh wait. AMD was left untouched — it has
+         neither a reset button nor a trigger event to begin with, so
+         this class of bug doesn't apply to it.
+
+         Also added a distinct "waiting for a slot" indicator (new
+         snr_waiting_for_slot STATE flag, set before BACKTEST_
+         CONCURRENCY_SEMAPHORE.acquire() and cleared right after) so a
+         cycle queued behind the 2-of-8 concurrency cap (v0.99.268)
+         shows "⏳ ожидает свободного места" instead of looking
+         identical to "nothing happening" — useful once more than one
+         module is actually enabled at once, though not what explained
+         this specific report.
+         Verified: py_compile (-W error), pyflakes, node --check, 61
+         routes, real runtime 200 on / and /api/snr/restart_backtest,
+         and /api/snr/status confirmed to return the correct full
+         structure (backtest_running as a real boolean, complete coins
+         array) from a clean state, zero surrogate escapes.
