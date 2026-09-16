@@ -14866,3 +14866,77 @@ v0.99.270 - Manual backtest-restart button for S/R Zones, per direct
          routes, real runtime 200 confirming /api/snr/restart_backtest,
          /api/reset/mirror, and /api/reset/ft5 all respond correctly,
          zero surrogate escapes.
+
+v0.99.271 - Major S/R Zones expansion, per direct user request ("хочу
+         видеть график нажимая на сигнал, хочу так же тест разных RR...
+         Настройку количества монет для торговли и отображения как в
+         нейро... сами живые сигналы нужны со всеми настройками в меню
+         настроек") plus the earlier progress-bar request ("нужна шкала
+         чтобы понимать идёт ли вообще бэктест").
+
+         Progress bar: new STATE tracking (snr_backtest_running,
+         snr_progress_done/total, snr_current_symbol), wired through
+         snr_backtest_loop() and /api/snr/status, rendered as a progress
+         bar + "готово X/Y — сейчас SYMBOL" in the UI, same shape as
+         Neuro's own.
+
+         Dynamic universe + top-N trade/display split: replaced the
+         fixed 3-symbol list with snr_build_universe() (same volume-
+         ranked pattern as lsw_build_universe(), up to SNR_UNIVERSE_SIZE
+         =30 candidates) merged with the original seed symbols (XAU/BTC/
+         SOL, always included). New SNR_TOP_N=3 (traded) / SNR_DISPLAY_N
+         =5 (shown) settings, same semantics and immediate-apply-on-
+         decrease behavior as Neuro's own (v0.99.262) — ranked by TEST
+         avg_pnl_r (the honest out-of-sample figure) rather than train.
+         snr_backtest_loop() rewritten with a per-symbol timeout wrapper
+         (SNR_PER_SYMBOL_MAX_SEC=300) now that the universe can be much
+         bigger than 3 fixed coins, and a "don't wipe existing results on
+         a fully failed cycle" safety net matching neuro_mining_loop()'s
+         own (v0.99.236).
+
+         Live signals: new snr_scan_symbol_live() checks whether the
+         latest closed bar is itself a retest event on an unbroken zone
+         meeting the symbol's own optimized min_strength — same rule as
+         the backtest's own trade generation, evaluated live. New
+         snr_live_loop() (15-min cadence) with the same no-open-position
+         guard, dedup, Telegram alerts, and execute_autotrade()/
+         sim_execute_trade() wiring as every other module this session.
+         New snr_track_signal_outcomes() (WIN/LOSS/TIMEOUT, same shared
+         shape as lsw/mirror/neuro's own). New settings: telegram_alerts_
+         snr (on by default), autotrade_snr (off by default, same opt-in
+         pattern as every other module), autotrade_invert_snr (reusing
+         the same v0.99.263 inverted-opening mechanism already built for
+         Sweep/Neuro — no special-casing needed since execute_autotrade()
+         is fully mode-agnostic).
+
+         Chart on click: new GET /api/snr/chart/<symbol> (same "look up
+         the signal's own recorded entry/sl/tp, don't re-derive with
+         CURRENT optimized params" pattern as api_lsw_chart()'s own —
+         a symbol's chosen timeframe/pivot/strength/RR can drift between
+         when a trade fired and when its chart is later opened), new
+         openSnrChart() JS wrapper reusing the existing openVgiChart()
+         infrastructure, wired into both the live-signals list and the
+         backtest recent-trades list.
+
+         RR sweep: already existed since v0.99.269 (SNR_RR_CANDIDATES =
+         [1.5, 2.0, 3.0]) — confirmed present, no change needed.
+
+         CRITICAL FIX found while implementing all of the above: neither
+         snr_results nor snr_signals (nor the active/display symbol
+         lists) were ever actually being persisted — save_state() builds
+         an explicit named-key dict, not a generic STATE dump, and SNR's
+         own keys were simply never added to it when the module was
+         first created in v0.99.269. A server restart would have
+         silently wiped every backtest result and live signal with zero
+         warning. Fixed: added snr_results/snr_signals/snr_active_
+         symbols/snr_display_symbols to both save_state()'s own data
+         dict and load_state()'s own restoration logic, and added the
+         actual save_state() calls in both snr_backtest_loop() (after a
+         successful cycle) and snr_live_loop() (after each new signal)
+         — neither loop had ever called it at all.
+         Verified: py_compile (-W error), pyflakes, node --check, 61
+         routes, real runtime 200 confirming /api/snr/status (with the
+         new progress/config fields), /api/snr/restart_backtest, and all
+         6 new settings keys (snr_top_n, snr_display_n, telegram_alerts_
+         snr, autotrade_snr, autotrade_invert_snr) present in /api/
+         settings with sensible defaults, zero surrogate escapes.
