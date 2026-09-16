@@ -15029,3 +15029,32 @@ v0.99.274 - Removed forced seed symbols from S/R Zones' universe, per
          honestly rank in the top 5 by volume — no forcing.
          Verified: py_compile (-W error), pyflakes, node --check, 61
          routes, real runtime 200 on / and /api/snr/status.
+
+v0.99.275 - Investigated direct user report ("В результате только 1
+         карточка монеты, и все. Проверь вроде не хранятся настройки
+         количества карточек"). Confirmed directly that settings
+         persistence is NOT the problem: posted snr_top_n/snr_display_n
+         via /api/settings, verified both the API response AND the raw
+         vp_poc_settings.json file on disk reflect the new values
+         correctly, then confirmed apply_settings()/get_settings()/
+         SETTINGS_KEYS already had both wired in correctly since
+         v0.99.271.
+         Real explanation: _snr_display_symbols only ever contains
+         symbols that actually PASSED the strict train+test walk-
+         forward validation (positive test_avg_pnl_r) — with the
+         v0.99.274 fix removing forced seed symbols, it's entirely
+         plausible for a real, honestly-ranked crypto universe that
+         only a small handful (or just 1) of candidates clear that bar
+         in a given cycle; SNR_DISPLAY_N is an UPPER BOUND ("show up to
+         N"), not a promise of exactly N cards, and there was
+         previously no way to tell "the setting isn't working" from
+         "there simply aren't more qualifying candidates yet."
+         Added a clarifying summary line to the tab: now shows exactly
+         how many symbols passed validation out of how many display
+         slots are available (e.g. "прошли честную train/test проверку:
+         1 из до 5 мест для отображения"), with an explicit note when
+         fewer symbols qualify than the display cap allows, so a sparse
+         result reads as an honest, self-explaining outcome rather than
+         a suspected bug.
+         Verified: py_compile (-W error), pyflakes, node --check, 61
+         routes, real runtime 200 on / and /api/snr/status.
