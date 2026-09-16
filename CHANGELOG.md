@@ -15094,3 +15094,63 @@ v0.99.276 - Removed volume-based ranking/cap from S/R Zones' universe
          present and none silently dropped.
          Verified: py_compile (-W error), pyflakes, node --check, 61
          routes, real runtime 200 on / and /api/snr/status.
+
+v0.99.277 - Two real statistical honesty bugs found and fixed, per
+         direct user question ("Смотрит ли в будущее заранее этот
+         индикатор новый? Или все честно?").
+         Confirmed the CORE mechanics have no classic lookahead: a
+         pivot only becomes an active, tradeable zone starting at its
+         own confirm_idx (pivot_length bars after the pivot bar itself
+         — the same inherent confirmation lag the original Pine Script
+         indicator has), entries fire at the NEXT bar's open (never the
+         signal bar itself), and the train/test split is strictly
+         chronological (train always older, test always newer).
+
+         BUG 1: the winning (tf, pivot, strength, RR) combination among
+         all SNR_N_COMBOS=81 candidates was picked by comparing TEST
+         performance directly against other candidates — meaning test
+         data was used TWICE: once as an honest pass/fail gate, and
+         again as the ranking/selection criterion among everything that
+         passed. Picking whichever of many candidates looks BEST
+         specifically on the held-out set is a classic multiple-
+         comparisons leak. Fixed: the winner is now chosen by TRAIN
+         performance alone among candidates that also clear the test
+         gate — test data is used ONLY to confirm the train-picked
+         winner isn't a fluke, never to choose between candidates.
+
+         BUG 2 (the deeper one, found while directly testing the fix
+         above on synthetic no-edge data before shipping it): even
+         after fixing BUG 1, a plain "average P&L > 0" bar on each side
+         still passed on 40-70% of PURELY RANDOM synthetic price series
+         (no genuine edge at all) across repeated random seeds, even
+         after raising the minimum sample size from 15/5 to 40/15 —
+         trying 81 independent combinations and accepting any that
+         clears a weak bar is a textbook multiple-comparisons problem
+         regardless of sample size, since SOME of 81 independent tries
+         will look good on both a train and test slice by pure chance.
+         Fixed with a proper one-sample z-test of each side's own win
+         rate against the RR-implied breakeven rate, requiring z >=
+         3.23 (a Bonferroni-corrected threshold accounting for all 81
+         comparisons at overall alpha=0.05, hardcoded rather than
+         adding scipy as a dependency — same reasoning _T_CRITICAL_
+         TABLE's own comment already documents elsewhere in this file)
+         on BOTH train and test independently.
+         Verified directly: the old "average > 0" bar found a
+         "validated" result on 7-10 of 15-30 different random-walk
+         seeds with zero real edge; the new z-test-based gate found
+         ZERO false positives across 30 different random seeds.
+         Separately verified the z-test itself is correctly calibrated
+         (not simply "too strict to ever pass"): fed synthetic samples
+         with a KNOWN true edge (55% win rate against a 40% breakeven)
+         directly into the z-score function — a 200-trade sample
+         correctly cleared the bar (z=4.47) while a 60-trade sample
+         with the identical true edge correctly did NOT (z=2.90) —
+         exactly the expected, honest behavior of a real significance
+         test (more evidence needed to confidently detect a moderate
+         edge at this corrected significance level, not a bug).
+         Added train_z/test_z to both the API response and the tab's
+         own display, with a note explaining the ≥3.23 threshold, for
+         full transparency about what's actually being required now.
+         Verified: py_compile (-W error), pyflakes, node --check, 61
+         routes, real runtime 200 on / and /api/snr/status, zero
+         surrogate escapes.
