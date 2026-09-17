@@ -15189,3 +15189,33 @@ v0.99.278 - CRITICAL PERFORMANCE FIX: parallelized S/R Zones' backtest
          identical simulated per-item work).
          Verified: py_compile (-W error), pyflakes, node --check, 61
          routes, real runtime 200 on / and /api/snr/status.
+
+v0.99.279 - CRITICAL FIX: SNR's own top_n/display_n settings never
+         actually saved or displayed correctly, per direct user report
+         ("настройки где количество не сохраняются, по крайней мере
+         каждый перезапуск там пусто, значений нет"). Confirmed the
+         exact cause: the frontend has two separate input maps —
+         setInputs for checkboxes (reads/writes via .checked) and
+         setValueInputs for number/text fields (reads/writes via
+         .value) — and snr_top_n/snr_display_n had been placed in the
+         WRONG one (setInputs) when added in v0.99.271, while Neuro's
+         own identical neuro_top_n/neuro_display_n were correctly in
+         setValueInputs the whole time. This meant BOTH directions were
+         broken: changing the number field fired setInputs' own
+         onchange handler, which sends input.checked (meaningless/false
+         for a number input) instead of input.value — so the actual
+         typed number was never sent to the server at all; and loading
+         settings tried setInputs[key].checked = value, which does
+         nothing useful for a number input's displayed value, leaving
+         the field blank on every reload regardless of what was
+         actually saved server-side (confirmed separately that server-
+         side persistence itself — apply_settings/save_settings/vp_poc_
+         settings.json — was already correct; only the two frontend
+         input-map placements were wrong).
+         Fixed by moving both to setValueInputs, matching neuro_top_n/
+         neuro_display_n's own already-correct placement.
+         Verified end-to-end: POSTed snr_display_n via /api/settings,
+         confirmed both the immediate response AND a fresh subsequent
+         GET (simulating what the settings modal reads on open) return
+         the correct saved value.
+         Verified: py_compile (-W error), pyflakes, node --check.
