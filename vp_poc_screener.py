@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.277"
+APP_VERSION = "0.99.278"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1653,6 +1653,7 @@ STATE = {
     "snr_waiting_for_slot": False,  # v0.99.272 — per direct user follow-up ("шкалы бэктеста не видно"): distinct from snr_backtest_running — true while queued behind BACKTEST_CONCURRENCY_SEMAPHORE's own 2-slot cap (shared with 7 other modules), before this cycle actually starts processing anything
     "snr_progress_done": 0, "snr_progress_total": 0,
     "snr_current_symbol": None, "snr_current_tf": None,
+    "snr_progress_in_flight": [],  # v0.99.278 — per-symbol parallelism means multiple symbols are being processed at once now, not just one "current" symbol
     "snr_signals": deque(maxlen=500),  # v0.99.271 — live signal log, same shape as lsw_signals/mirror_signals
     "scalp_risk_tiers": {},  # v0.99.237 — symbol -> sorted list of (notional_threshold, mmr, max_leverage) tiers, for notional-aware safe-leverage lookups
     "scalp_data": {},          # symbol -> {interval -> {direction -> target-summary}}
@@ -14263,29 +14264,56 @@ def snr_backtest_loop():
                 STATE["snr_progress_total"] = len(universe)
                 STATE["snr_backtest_running"] = True
                 STATE["snr_current_symbol"] = None
+                STATE["snr_progress_in_flight"] = []
                 STATE["snr_current_tf"] = None
             all_results = {}
-            for symbol in universe:
+            # v0.99.278 — CRITICAL PERFORMANCE FIX, per direct user report
+            # ("988 монет, очень долго бэктест идет") after v0.99.276
+            # removed the volume cap entirely: this loop was processing
+            # the whole universe STRICTLY SEQUENTIALLY, one symbol at a
+            # time (a lone ThreadPoolExecutor(max_workers=1) per symbol,
+            # used only for its own timeout, never for concurrency across
+            # symbols) — the only one of the app's 8 backtest loops that
+            # never adopted the parallel-workers pattern every other
+            # module (MSNR/LSW/Mirror/FT5) already uses. With hundreds of
+            # symbols and no volume-based universe cap anymore, a fully
+            # sequential scan could take many hours. Now submits the
+            # WHOLE universe to a shared ThreadPoolExecutor(max_workers=
+            # min(WORKERS, len(universe))) — same pattern and same
+            # WORKERS=8 concurrency ceiling as every other module's own
+            # universe scan — processing results via as_completed() as
+            # they finish, same "write results the moment they're ready,
+            # don't batch until the whole loop ends" lesson _lsw_run_
+            # one_backtest_cycle()'s own v0.99.196 comment already
+            # documents. GLOBAL_HTTP_SEMAPHORE (10 total concurrent
+            # requests app-wide) and BACKTEST_CONCURRENCY_SEMAPHORE
+            # (already held for this whole cycle) still bound the actual
+            # network load regardless of how many local threads this
+            # spins up.
+            ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1))
+            try:
+                futs = {ex.submit(snr_optimize_symbol, s): s for s in universe}
                 with state_lock:
-                    STATE["snr_current_symbol"] = symbol
-                # v0.99.271 — same no-with-block, bounded-per-item-time
-                # discipline as every other sequential backtest loop this
-                # session — one stuck symbol can't block the whole cycle.
-                ex = ThreadPoolExecutor(max_workers=1)
+                    STATE["snr_progress_in_flight"] = list(futs.values())
                 try:
-                    fut = ex.submit(snr_optimize_symbol, symbol)
-                    try:
-                        best = fut.result(timeout=SNR_PER_SYMBOL_MAX_SEC)
-                        if best:
-                            all_results[symbol] = best
-                    except (TimeoutError, FutureTimeoutError):
-                        log_error(f"snr_backtest_loop: {symbol} exceeded {SNR_PER_SYMBOL_MAX_SEC}s — skipping, abandoning stuck thread")
-                    except Exception as e:
-                        log_error(f"snr_backtest_loop {symbol}: {e}")
-                finally:
-                    ex.shutdown(wait=False)
-                with state_lock:
-                    STATE["snr_progress_done"] += 1
+                    for fut in as_completed(futs, timeout=SNR_PER_SYMBOL_MAX_SEC * len(universe)):
+                        symbol = futs[fut]
+                        try:
+                            best = fut.result(timeout=SNR_PER_SYMBOL_MAX_SEC)
+                            if best:
+                                all_results[symbol] = best
+                        except (TimeoutError, FutureTimeoutError):
+                            log_error(f"snr_backtest_loop: {symbol} exceeded {SNR_PER_SYMBOL_MAX_SEC}s — skipping, abandoning stuck thread")
+                        except Exception as e:
+                            log_error(f"snr_backtest_loop {symbol}: {e}")
+                        with state_lock:
+                            STATE["snr_progress_done"] += 1
+                            if symbol in STATE["snr_progress_in_flight"]:
+                                STATE["snr_progress_in_flight"].remove(symbol)
+                except (TimeoutError, FutureTimeoutError):
+                    log_error("snr_backtest_loop: overall cycle exceeded its own ceiling — using whatever results completed so far")
+            finally:
+                ex.shutdown(wait=False)
 
             ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
             display_top = ranked[:max(SNR_DISPLAY_N, SNR_TOP_N)]
@@ -17800,6 +17828,7 @@ def api_snr_status():
         done = STATE["snr_progress_done"]
         total = STATE["snr_progress_total"]
         current_symbol = STATE["snr_current_symbol"]
+        in_flight = list(STATE["snr_progress_in_flight"])
         active_symbols = list(_snr_active_symbols)
         display_symbols = list(_snr_display_symbols)
         signal_log = list(STATE["snr_signals"])
@@ -17815,7 +17844,7 @@ def api_snr_status():
     return jsonify({
         "coins": coins, "last_backtest_finished": last_finished,
         "backtest_running": running, "waiting_for_slot": waiting, "progress_done": done, "progress_total": total,
-        "current_symbol": current_symbol, "live_signal_stats": signal_stats,
+        "current_symbol": current_symbol, "in_flight": in_flight, "live_signal_stats": signal_stats,
         "config": {"top_n": SNR_TOP_N, "display_n": SNR_DISPLAY_N, "timeframes": SNR_TF_CANDIDATES,
                    "pivot_candidates": SNR_PIVOT_CANDIDATES, "strength_candidates": SNR_STRENGTH_CANDIDATES,
                    "rr_candidates": SNR_RR_CANDIDATES, "refresh_sec": SNR_REFRESH_SEC},
@@ -21942,7 +21971,7 @@ async function refreshSnr() {
     } else if (data.backtest_running) {
       const pct = data.progress_total ? Math.round(data.progress_done / data.progress_total * 100) : 0;
       progressHtml = `<div style="margin-bottom:10px;">
-        <div class="dim" style="font-size:11px;margin-bottom:4px;">\u043f\u0435\u0440\u0435\u0431\u043e\u0440 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432: ${data.progress_done}/${data.progress_total}${data.current_symbol?' \u2014 \u0441\u0435\u0439\u0447\u0430\u0441 '+data.current_symbol:''}</div>
+        <div class="dim" style="font-size:11px;margin-bottom:4px;">\u043f\u0435\u0440\u0435\u0431\u043e\u0440 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432: ${data.progress_done}/${data.progress_total}${data.in_flight && data.in_flight.length ? ' \u2014 \u043e\u0434\u043d\u043e\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e: '+data.in_flight.slice(0,8).join(', ')+(data.in_flight.length>8?` +${data.in_flight.length-8}`:'') : ''}</div>
         <div style="height:6px;background:#1c2433;border-radius:3px;overflow:hidden;">
           <div style="height:100%;width:${pct}%;background:#26c6da;transition:width .3s;"></div>
         </div>
