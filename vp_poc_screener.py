@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.279"
+APP_VERSION = "0.99.280"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -819,6 +819,10 @@ AUTOTRADE_ENABLED_SNR = os.environ.get("VP_AUTOTRADE_SNR", "0") == "1"  # v0.99.
 AUTOTRADE_LEVERAGE_SNR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SNR", 10))  # only the paper simulator's own fallback leverage, real orders go through execute_autotrade()'s automatic risk-based sizing
 AUTOTRADE_INVERT_SNR = os.environ.get("VP_AUTOTRADE_INVERT_SNR", "0") == "1"  # same as AUTOTRADE_INVERT_LSW/NEURO, for S/R Zones
 TELEGRAM_ALERTS_SNR = os.environ.get("VP_TG_ALERTS_SNR", "1") == "1"
+AUTOTRADE_ENABLED_PRV = os.environ.get("VP_AUTOTRADE_PRV", "0") == "1"  # v0.99.280, per direct user request for Peak Reversal live trading — same off-by-default, opt-in pattern as every other module's own toggle
+AUTOTRADE_LEVERAGE_PRV = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_PRV", 10))  # only the paper simulator's own fallback leverage, real orders go through execute_autotrade()'s automatic risk-based sizing
+AUTOTRADE_INVERT_PRV = os.environ.get("VP_AUTOTRADE_INVERT_PRV", "0") == "1"  # same as AUTOTRADE_INVERT_LSW/NEURO/SNR
+TELEGRAM_ALERTS_PRV = os.environ.get("VP_TG_ALERTS_PRV", "1") == "1"
 TELEGRAM_ALERTS_LSW = os.environ.get("VP_TG_ALERTS_LSW", "1") == "1"
 TELEGRAM_ALERTS_EMA_BULL = os.environ.get("VP_TG_ALERTS_EMA_BULL", "1") == "1"
 # v0.99.121 — higher-timeframe trend filter, per direct user request
@@ -1060,7 +1064,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "autotrade_invert_snr", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "autotrade_invert_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "autotrade_invert_prv", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "autotrade_invert_lsw", "autotrade_invert_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled",
                   "autotrade_risk_pct",
@@ -1105,6 +1109,12 @@ def get_settings():
         "telegram_alerts_snr": TELEGRAM_ALERTS_SNR,
         "autotrade_snr": AUTOTRADE_ENABLED_SNR,
         "autotrade_invert_snr": AUTOTRADE_INVERT_SNR,
+        "prv_enabled": PRV_ENABLED,
+        "prv_top_n": PRV_TOP_N,
+        "prv_display_n": PRV_DISPLAY_N,
+        "telegram_alerts_prv": TELEGRAM_ALERTS_PRV,
+        "autotrade_prv": AUTOTRADE_ENABLED_PRV,
+        "autotrade_invert_prv": AUTOTRADE_INVERT_PRV,
         "neuro_top_n": NEURO_TOP_N,
         "neuro_display_n": NEURO_DISPLAY_N,
         "nq_enabled": NQ_ENABLED,
@@ -1171,7 +1181,7 @@ def apply_settings(updates):
     global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, FT5_HTF_FILTER_ENABLED, FT5_SESSION_FILTER_ENABLED, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, MSNR_MIN_RR_FILTER_ENABLED, MSNR_HTF_FILTER_ENABLED, MSNR_PER_SYMBOL_FILTERS_ENABLED, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT, MIRROR_AUTOTUNE_TOLERANCE_ENABLED
     global MIRROR_VOLUME_FILTER_ENABLED, MIRROR_HTF_FILTER_ENABLED
-    global EMA_TOUCH_ENABLED, AMD_ENABLED, NEURO_ENABLED, NEURO_TOP_N, NEURO_DISPLAY_N, _neuro_active_symbols, _neuro_display_symbols, SNR_ENABLED, SNR_TOP_N, SNR_DISPLAY_N, _snr_active_symbols, _snr_display_symbols, TELEGRAM_ALERTS_SNR, AUTOTRADE_ENABLED_SNR, AUTOTRADE_INVERT_SNR, NQ_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
+    global EMA_TOUCH_ENABLED, AMD_ENABLED, NEURO_ENABLED, NEURO_TOP_N, NEURO_DISPLAY_N, _neuro_active_symbols, _neuro_display_symbols, SNR_ENABLED, SNR_TOP_N, SNR_DISPLAY_N, _snr_active_symbols, _snr_display_symbols, TELEGRAM_ALERTS_SNR, AUTOTRADE_ENABLED_SNR, AUTOTRADE_INVERT_SNR, PRV_ENABLED, PRV_TOP_N, PRV_DISPLAY_N, _prv_active_symbols, _prv_display_symbols, TELEGRAM_ALERTS_PRV, AUTOTRADE_ENABLED_PRV, AUTOTRADE_INVERT_PRV, NQ_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED, LSW_ATR_SWEEP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
@@ -1273,6 +1283,42 @@ def apply_settings(updates):
                     STATE["snr_results"] = {k: v for k, v in STATE["snr_results"].items() if k in keep}
                     _snr_display_symbols = ranked[:effective_n]
                     _snr_active_symbols = [s for s in _snr_active_symbols if s in keep]
+    if "prv_enabled" in updates:
+        PRV_ENABLED = bool(updates["prv_enabled"])
+    if "telegram_alerts_prv" in updates:
+        TELEGRAM_ALERTS_PRV = bool(updates["telegram_alerts_prv"])
+    if "autotrade_prv" in updates:
+        AUTOTRADE_ENABLED_PRV = bool(updates["autotrade_prv"])
+    if "autotrade_invert_prv" in updates:
+        AUTOTRADE_INVERT_PRV = bool(updates["autotrade_invert_prv"])
+    if "prv_top_n" in updates:
+        try:
+            new_top_n = int(updates["prv_top_n"])
+        except (TypeError, ValueError):
+            new_top_n = None
+        if new_top_n and new_top_n > 0:
+            PRV_TOP_N = new_top_n
+            with state_lock:
+                current_active = list(_prv_active_symbols)
+                if len(current_active) > new_top_n:
+                    ranked = sorted(current_active, key=lambda s: -(STATE["prv_results"].get(s, {}).get("test_avg_pnl_r") or float("-inf")))
+                    _prv_active_symbols = ranked[:new_top_n]
+    if "prv_display_n" in updates:
+        try:
+            new_display_n = int(updates["prv_display_n"])
+        except (TypeError, ValueError):
+            new_display_n = None
+        if new_display_n and new_display_n > 0:
+            PRV_DISPLAY_N = new_display_n
+            effective_n = max(new_display_n, PRV_TOP_N)
+            with state_lock:
+                current_display = list(_prv_display_symbols)
+                if len(current_display) > effective_n:
+                    ranked = sorted(current_display, key=lambda s: -(STATE["prv_results"].get(s, {}).get("test_avg_pnl_r") or float("-inf")))
+                    keep = set(ranked[:effective_n])
+                    STATE["prv_results"] = {k: v for k, v in STATE["prv_results"].items() if k in keep}
+                    _prv_display_symbols = ranked[:effective_n]
+                    _prv_active_symbols = [s for s in _prv_active_symbols if s in keep]
     if "neuro_top_n" in updates:
         try:
             new_top_n = int(updates["neuro_top_n"])
@@ -1654,6 +1700,9 @@ STATE = {
     "snr_progress_done": 0, "snr_progress_total": 0,
     "snr_current_symbol": None, "snr_current_tf": None,
     "snr_progress_in_flight": [],  # v0.99.278 — per-symbol parallelism means multiple symbols are being processed at once now, not just one "current" symbol
+    "prv_results": {}, "prv_last_backtest_finished": None, "prv_backtest_running": False,
+    "prv_progress_done": 0, "prv_progress_total": 0, "prv_progress_in_flight": [],
+    "prv_signals": deque(maxlen=500),
     "snr_signals": deque(maxlen=500),  # v0.99.271 — live signal log, same shape as lsw_signals/mirror_signals
     "scalp_risk_tiers": {},  # v0.99.237 — symbol -> sorted list of (notional_threshold, mmr, max_leverage) tiers, for notional-aware safe-leverage lookups
     "scalp_data": {},          # symbol -> {interval -> {direction -> target-summary}}
@@ -5921,6 +5970,10 @@ def save_state():
                 "snr_signals": list(STATE["snr_signals"]),
                 "snr_active_symbols": list(_snr_active_symbols),
                 "snr_display_symbols": list(_snr_display_symbols),
+                "prv_results": STATE["prv_results"],
+                "prv_signals": list(STATE["prv_signals"]),
+                "prv_active_symbols": list(_prv_active_symbols),
+                "prv_display_symbols": list(_prv_display_symbols),
                 "autotrade_log": list(STATE["autotrade_log"]),
                 "sim_balance": STATE["sim_balance"],
                 # Both PENDING and SETTLED now (previously PENDING was
@@ -6033,7 +6086,7 @@ def _backfill_mfe_mae(signal_list):
 
 
 def load_state():
-    global _snr_active_symbols, _snr_display_symbols
+    global _snr_active_symbols, _snr_display_symbols, _prv_active_symbols, _prv_display_symbols
     if not os.path.exists(STATE_FILE):
         return
     try:
@@ -6057,6 +6110,10 @@ def load_state():
         snr_signals = data.get("snr_signals", [])
         snr_active_symbols = data.get("snr_active_symbols")
         snr_display_symbols = data.get("snr_display_symbols")
+        prv_results = data.get("prv_results", {})
+        prv_signals = data.get("prv_signals", [])
+        prv_active_symbols = data.get("prv_active_symbols")
+        prv_display_symbols = data.get("prv_display_symbols")
         autotrade_log = data.get("autotrade_log", [])
         sim_trades = data.get("sim_trades", [])
         risk_autotune_log = data.get("risk_autotune_log", [])
@@ -6081,6 +6138,12 @@ def load_state():
                 _snr_active_symbols = snr_active_symbols
             if snr_display_symbols:
                 _snr_display_symbols = snr_display_symbols
+            STATE["prv_results"] = prv_results
+            STATE["prv_signals"] = deque(prv_signals, maxlen=500)
+            if prv_active_symbols:
+                _prv_active_symbols = prv_active_symbols
+            if prv_display_symbols:
+                _prv_display_symbols = prv_display_symbols
             STATE["autotrade_log"] = deque(autotrade_log, maxlen=AUTOTRADE_TRADE_HISTORY)
             STATE["risk_autotune_log"] = deque(risk_autotune_log, maxlen=200)
             STATE["risk_autotune_last_change"] = risk_autotune_last_change
@@ -6321,6 +6384,8 @@ def send_telegram(text, category=None):
     if category == "neuro_summary" and not TELEGRAM_ALERTS_NEURO_SUMMARY:
         return
     if category == "snr" and not TELEGRAM_ALERTS_SNR:
+        return
+    if category == "prv" and not TELEGRAM_ALERTS_PRV:
         return
     if category == "nq" and not TELEGRAM_ALERTS_NQ:
         return
@@ -14501,6 +14566,461 @@ def snr_live_loop():
         time.sleep(900)
 
 
+# ============================================================================
+# PRV — "Peak Reversal" Keltner Channel mean-reversion, ported from the
+# "Peak Reversal v3" Pine Script the user shared. v0.99.280, per direct
+# user request: build the FULL production stack from the start this time
+# (learning from every bug found while building S&R Zones) — honest
+# Bonferroni-corrected z-test validation, parallel universe scanning
+# from day one, live signals, Telegram alerts, autotrade with the
+# shared risk-based position sizing, all in one pass rather than
+# backtest-only first.
+#
+# The Pine Script itself is a pure VISUALIZATION (Keltner Channel bands
+# + a squeeze detector + momentum-duration coloring) with no entry/SL/TP
+# logic — confirmed directly from its own source that the "triangle"
+# signals (showBandCross) fire on barstate.isconfirmed only (no
+# repainting), using the WICK (high/low) touching the INNER band by
+# default. Per direct user confirmation, this ports the REVERSION read
+# the indicator's own author describes ("the longer price stays outside,
+# the higher the risk of a turn"): a confirmed band-touch is read as an
+# extension, traded as a bet on reverting back toward the basis — LONG
+# when price wicks below the lower band, SHORT when price wicks above
+# the upper band (matching the Pine Script's own longCross/shortCross
+# naming, which names the band touched, not the trade direction).
+# ============================================================================
+PRV_ENABLED           = os.environ.get("VP_PRV_ENABLED", "1") == "1"
+PRV_MA_TYPE_CANDIDATES = ["EMA", "SMA"]        # matches the Pine Script's own "MA Type" input, limited to 2 of its 5 options to keep the search space tractable
+PRV_KC_LENGTH_CANDIDATES = [14, 20, 30]        # matches the Pine Script's own "MA Length" input (default 20)
+PRV_BAND_MULT_CANDIDATES = [1.5, 2.0, 2.5]     # matches the Pine Script's own "Inner" band multiplier input (default 2) — this module always signals off the INNER band, matching the indicator's own default signalBand="Inner"
+PRV_RR_CANDIDATES     = [1.0, 1.5, 2.0, 3.0]   # the take-profit distance, swept like every other module's own RR — per direct user request ("процент который мы забираем по тейку нужно подбирать по типу как rr")
+PRV_TF_CANDIDATES     = ["1h", "4h", "1d"]
+PRV_ATR_LENGTH        = 14   # matches the Pine Script's own default "ATR Length"
+PRV_SL_ATR_MULT       = 1.0  # SL distance beyond entry, in ATR units — fixed (not swept) to keep the search space tractable, same design choice as SNR_SL_ATR_MULT
+PRV_N_COMBOS          = len(PRV_MA_TYPE_CANDIDATES) * len(PRV_KC_LENGTH_CANDIDATES) * len(PRV_BAND_MULT_CANDIDATES) * len(PRV_RR_CANDIDATES) * len(PRV_TF_CANDIDATES)  # 216
+PRV_Z_CRITICAL        = 3.501  # Bonferroni-corrected one-tailed z-critical for PRV_N_COMBOS=216 independent comparisons at overall alpha=0.05 — same "hardcoded rather than adding scipy" reasoning as SNR_Z_CRITICAL's own comment
+PRV_MIN_TRAIN_TRADES  = 15
+PRV_MIN_TEST_TRADES   = 5
+PRV_HISTORY_DAYS      = 500
+PRV_TRAIN_FRAC        = 0.7
+PRV_MAX_WAIT_BARS     = 48
+PRV_UNIVERSE_SIZE     = 30  # per direct user request ("пока топ 30 по ликвидности с настройкой количества отображения/торговли") — unlike SNR, this DOES cap the universe by volume, by explicit user choice this time
+PRV_TOP_N             = int(os.environ.get("VP_PRV_TOP_N", 3))
+PRV_DISPLAY_N         = int(os.environ.get("VP_PRV_DISPLAY_N", 5))
+PRV_REFRESH_SEC       = int(os.environ.get("VP_PRV_REFRESH_SEC", 4 * 3600))
+PRV_PER_SYMBOL_MAX_SEC = int(os.environ.get("VP_PRV_PER_SYMBOL_MAX_SEC", 300))
+PRV_BACKTEST_TRIGGER  = threading.Event()  # per direct user report about SNR's own identical gap (v0.99.270) — built correctly from the start here
+_prv_active_symbols   = []
+_prv_display_symbols  = []
+_prv_prev_signal_keys = set()
+
+
+def prv_build_universe():
+    """Top PRV_UNIVERSE_SIZE symbols by 24h quote volume — per direct
+    user choice this time ("пока топ 30 по ликвидности"), unlike SNR's
+    own uncapped universe (v0.99.276)."""
+    try:
+        tickers = get_tickers()
+        seen_vol = {}
+        for t in tickers:
+            name = t.get("contract", "")
+            if not name.endswith("_USDT"):
+                continue
+            vol = t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0
+            try:
+                vol = float(vol)
+            except (TypeError, ValueError):
+                vol = 0.0
+            if name not in seen_vol or vol > seen_vol[name]:
+                seen_vol[name] = vol
+        ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
+        return [s[0] for s in ranked[:PRV_UNIVERSE_SIZE]]
+    except Exception as e:
+        log_error(f"prv_build_universe: {e}")
+        return []
+
+
+def prv_ma_series(candles, ma_type, length):
+    """EMA or SMA of close — matches the Pine Script's own "MA Type"
+    input, limited to these 2 of its 5 options (see PRV_MA_TYPE_
+    CANDIDATES's own comment)."""
+    closes = [c["close"] for c in candles]
+    out = [None] * len(closes)
+    if ma_type == "SMA":
+        for i in range(length - 1, len(closes)):
+            out[i] = sum(closes[i - length + 1:i + 1]) / length
+    else:  # EMA
+        k = 2.0 / (length + 1)
+        if len(closes) >= length:
+            out[length - 1] = sum(closes[:length]) / length
+            for i in range(length, len(closes)):
+                out[i] = closes[i] * k + out[i - 1] * (1 - k)
+    return out
+
+
+def prv_simulate_trades(candles, ma_type, kc_length, band_mult, rr, atr_length=PRV_ATR_LENGTH,
+                         sl_atr_mult=PRV_SL_ATR_MULT, max_wait_bars=PRV_MAX_WAIT_BARS, atr=None, basis=None):
+    """The trading rule DESIGNED on top of the Pine Script's own Keltner
+    Channel + band-cross visualization (the indicator itself has no
+    entry/SL/TP logic — see this section's own header comment): a
+    confirmed wick-touch of the inner band is read as an extension, bet
+    on reverting back toward the basis (the moving average) — LONG when
+    price wicks below the lower band, SHORT when price wicks above the
+    upper band, entering at the NEXT bar's open (never the signal bar
+    itself, matching the Pine Script's own barstate.isconfirmed gate —
+    no lookahead). SL is a fixed sl_atr_mult*ATR beyond entry; TP is
+    rr times that same distance — same no-overlapping-trades discipline
+    as every other module this session."""
+    if atr is None:
+        atr = neuro_atr_series(candles, atr_length)
+    if basis is None:
+        basis = prv_ma_series(candles, ma_type, kc_length)
+    trades = []
+    occupied_until = -10 ** 9
+    for i in range(kc_length, len(candles) - 1):
+        if i < occupied_until or basis[i] is None or not atr[i]:
+            continue
+        c = candles[i]
+        up_band = basis[i] + atr[i] * band_mult
+        down_band = basis[i] - atr[i] * band_mult
+        direction = None
+        if c["high"] >= up_band:
+            direction = "SHORT"
+        elif c["low"] <= down_band:
+            direction = "LONG"
+        if direction is None:
+            continue
+        entry_bar = candles[i + 1]
+        entry = entry_bar["open"]
+        sl_dist = atr[i] * sl_atr_mult
+        if sl_dist <= 0:
+            continue
+        sl = entry - sl_dist if direction == "LONG" else entry + sl_dist
+        tp = entry + sl_dist * rr if direction == "LONG" else entry - sl_dist * rr
+        result, exit_time, exit_price = "TIMEOUT", None, None
+        exit_j = min(i + 1 + max_wait_bars, len(candles) - 1)
+        mae_r = 0.0
+        for j in range(i + 2, min(i + 2 + max_wait_bars, len(candles))):
+            b = candles[j]
+            if direction == "LONG":
+                mae_r = max(mae_r, (entry - b["low"]) / sl_dist)
+                if b["low"] <= sl:
+                    result, exit_price, exit_time, exit_j = "LOSS", sl, b["time"], j
+                    break
+                if b["high"] >= tp:
+                    result, exit_price, exit_time, exit_j = "WIN", tp, b["time"], j
+                    break
+            else:
+                mae_r = max(mae_r, (b["high"] - entry) / sl_dist)
+                if b["high"] >= sl:
+                    result, exit_price, exit_time, exit_j = "LOSS", sl, b["time"], j
+                    break
+                if b["low"] <= tp:
+                    result, exit_price, exit_time, exit_j = "WIN", tp, b["time"], j
+                    break
+        pnl_r = rr if result == "WIN" else (-1.0 if result == "LOSS" else None)
+        trades.append({"time": c["time"], "entry_time": entry_bar["time"], "direction": direction,
+                        "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8),
+                        "result": result, "exit_price": round(exit_price, 8) if exit_price else None,
+                        "exit_time": exit_time, "pnl_r": pnl_r,
+                        "mae_r": round(mae_r, 3)})  # v0.99.280 — per direct user request ("нужно собирать статистику по движению против тейка"): max adverse excursion in R, informational only, doesn't affect the trade's own outcome
+        occupied_until = exit_j
+    return trades
+
+
+def prv_optimize_symbol(symbol):
+    """Sweeps ma_type x kc_length x band_mult x rr x timeframe (PRV_N_
+    COMBOS=216 total combinations) for one symbol — same walk-forward +
+    Bonferroni-corrected z-test discipline as snr_optimize_symbol()'s
+    own (v0.99.277), reusing that exact same _snr_z_score_vs_breakeven()
+    helper (the formula itself is generic, not SNR-specific). Winner is
+    chosen by TRAIN z-score alone among candidates that also clear the
+    TEST z-score gate — never by comparing TEST performance between
+    candidates, avoiding the exact multiple-comparisons leak found and
+    fixed for SNR (v0.99.277)."""
+    best = None
+    for tf in PRV_TF_CANDIDATES:
+        try:
+            now = int(time.time())
+            start_ts = now - PRV_HISTORY_DAYS * 86400
+            candles = get_candles_range(symbol, tf, start_ts, now)
+            if not candles or len(candles) < 200:
+                continue
+            atr = neuro_atr_series(candles, PRV_ATR_LENGTH)
+            split = int(len(candles) * PRV_TRAIN_FRAC)
+            boundary_time = candles[split - 1]["time"]
+
+            for ma_type in PRV_MA_TYPE_CANDIDATES:
+                for kc_length in PRV_KC_LENGTH_CANDIDATES:
+                    basis = prv_ma_series(candles, ma_type, kc_length)
+                    for band_mult in PRV_BAND_MULT_CANDIDATES:
+                        for rr in PRV_RR_CANDIDATES:
+                            trades = prv_simulate_trades(candles, ma_type, kc_length, band_mult, rr, atr=atr, basis=basis)
+                            closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
+                            train = [t for t in closed if t["time"] <= boundary_time]
+                            test = [t for t in closed if t["time"] > boundary_time]
+                            if len(train) < PRV_MIN_TRAIN_TRADES or len(test) < PRV_MIN_TEST_TRADES:
+                                continue
+                            train_wins = sum(1 for t in train if t["result"] == "WIN")
+                            train_wr = train_wins / len(train) * 100
+                            train_avg = sum(t["pnl_r"] for t in train) / len(train)
+                            test_wins = sum(1 for t in test if t["result"] == "WIN")
+                            test_wr = test_wins / len(test) * 100
+                            test_avg = sum(t["pnl_r"] for t in test) / len(test)
+                            train_z = _snr_z_score_vs_breakeven(train_wins, len(train), rr)
+                            test_z = _snr_z_score_vs_breakeven(test_wins, len(test), rr)
+                            if train_z is None or test_z is None:
+                                continue
+                            if train_z < PRV_Z_CRITICAL or test_z < PRV_Z_CRITICAL:
+                                continue
+                            avg_mae = sum(t["mae_r"] for t in closed) / len(closed)
+                            if best is None or train_z > best["train_z"]:
+                                best = {
+                                    "timeframe": tf, "ma_type": ma_type, "kc_length": kc_length,
+                                    "band_mult": band_mult, "rr": rr,
+                                    "train_n": len(train), "train_wr": round(train_wr, 1),
+                                    "train_avg_pnl_r": round(train_avg, 3), "train_z": round(train_z, 2),
+                                    "test_n": len(test), "test_wr": round(test_wr, 1),
+                                    "test_avg_pnl_r": round(test_avg, 3), "test_z": round(test_z, 2),
+                                    "avg_mae_r": round(avg_mae, 3),
+                                    "recent_trades": closed[-40:][::-1],
+                                }
+        except Exception as e:
+            log_error(f"prv_optimize_symbol {symbol} {tf}: {e}")
+    return best
+
+
+def prv_backtest_loop():
+    global _prv_active_symbols, _prv_display_symbols
+    # v0.99.280 — staggered startup, continuing the same 90s-apart
+    # spacing established in v0.99.267 (SNR was 630s as the 8th loop;
+    # this is the 9th, at 720s) — using the TRIGGER for the startup
+    # delay too from the very start, learning from the bug found and
+    # fixed for 6 other modules in v0.99.272.
+    PRV_BACKTEST_TRIGGER.wait(timeout=720)
+    PRV_BACKTEST_TRIGGER.clear()
+    while True:
+        _prv_sem_acquired = False
+        try:
+            if not PRV_ENABLED:
+                PRV_BACKTEST_TRIGGER.wait(timeout=max(300, PRV_REFRESH_SEC))
+                PRV_BACKTEST_TRIGGER.clear()
+                continue
+            BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
+            _prv_sem_acquired = True
+            universe = prv_build_universe()
+            with state_lock:
+                STATE["prv_progress_done"] = 0
+                STATE["prv_progress_total"] = len(universe)
+                STATE["prv_backtest_running"] = True
+                STATE["prv_progress_in_flight"] = []
+            all_results = {}
+            # v0.99.280 — parallel from the start (learning from SNR's
+            # own v0.99.278 fix rather than repeating the sequential
+            # mistake) — same ThreadPoolExecutor(max_workers=min(WORKERS,
+            # len(universe))) pattern as every other module's own
+            # universe scan.
+            ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1))
+            try:
+                futs = {ex.submit(prv_optimize_symbol, s): s for s in universe}
+                with state_lock:
+                    STATE["prv_progress_in_flight"] = list(futs.values())
+                try:
+                    for fut in as_completed(futs, timeout=PRV_PER_SYMBOL_MAX_SEC * len(universe)):
+                        symbol = futs[fut]
+                        try:
+                            best = fut.result(timeout=PRV_PER_SYMBOL_MAX_SEC)
+                            if best:
+                                all_results[symbol] = best
+                        except (TimeoutError, FutureTimeoutError):
+                            log_error(f"prv_backtest_loop: {symbol} exceeded {PRV_PER_SYMBOL_MAX_SEC}s — skipping, abandoning stuck thread")
+                        except Exception as e:
+                            log_error(f"prv_backtest_loop {symbol}: {e}")
+                        with state_lock:
+                            STATE["prv_progress_done"] += 1
+                            if symbol in STATE["prv_progress_in_flight"]:
+                                STATE["prv_progress_in_flight"].remove(symbol)
+                except (TimeoutError, FutureTimeoutError):
+                    log_error("prv_backtest_loop: overall cycle exceeded its own ceiling — using whatever results completed so far")
+            finally:
+                ex.shutdown(wait=False)
+
+            ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
+            display_top = ranked[:max(PRV_DISPLAY_N, PRV_TOP_N)]
+            active_top = display_top[:PRV_TOP_N]
+            with state_lock:
+                if all_results:
+                    STATE["prv_results"] = dict(display_top)
+                    _prv_active_symbols = [sym for sym, _ in active_top]
+                    _prv_display_symbols = [sym for sym, _ in display_top]
+                    STATE["prv_last_backtest_finished"] = time.time()
+                else:
+                    log_error("prv_backtest_loop: universe scan produced zero usable results this cycle — keeping previous results")
+                STATE["prv_backtest_running"] = False
+            if all_results:
+                save_state()
+        except Exception as e:
+            log_error(f"prv_backtest_loop: {e}")
+            with state_lock:
+                STATE["prv_backtest_running"] = False
+        finally:
+            if _prv_sem_acquired:
+                BACKTEST_CONCURRENCY_SEMAPHORE.release()
+        PRV_BACKTEST_TRIGGER.wait(timeout=max(300, PRV_REFRESH_SEC))
+        PRV_BACKTEST_TRIGGER.clear()
+
+
+def prv_scan_symbol_live(symbol):
+    """Checks whether the LATEST closed bar is itself a confirmed band-
+    touch on the symbol's own optimized (ma_type, kc_length, band_mult,
+    timeframe) — same rule as prv_simulate_trades(), evaluated live."""
+    with state_lock:
+        result = STATE["prv_results"].get(symbol)
+    if not result:
+        return None
+    tf, ma_type, kc_length, band_mult, rr = (result["timeframe"], result["ma_type"],
+                                              result["kc_length"], result["band_mult"], result["rr"])
+    try:
+        now = int(time.time())
+        interval_sec = INTERVAL_SECONDS.get(tf, 3600)
+        start_ts = now - max(250, kc_length + 50) * interval_sec
+        candles = get_candles_range(symbol, tf, start_ts, now)
+        closed = [c for c in candles if c["time"] + interval_sec <= now] if candles else []
+        if len(closed) < kc_length + 5:
+            return None
+        atr = neuro_atr_series(closed, PRV_ATR_LENGTH)
+        basis = prv_ma_series(closed, ma_type, kc_length)
+        last_idx = len(closed) - 1
+        if basis[last_idx] is None or not atr[last_idx]:
+            return None
+        c = closed[last_idx]
+        up_band = basis[last_idx] + atr[last_idx] * band_mult
+        down_band = basis[last_idx] - atr[last_idx] * band_mult
+        direction = None
+        if c["high"] >= up_band:
+            direction = "SHORT"
+        elif c["low"] <= down_band:
+            direction = "LONG"
+        if direction is None:
+            return None
+        entry = c["close"]
+        sl_dist = atr[last_idx] * PRV_SL_ATR_MULT
+        if sl_dist <= 0:
+            return None
+        sl = entry - sl_dist if direction == "LONG" else entry + sl_dist
+        tp = entry + sl_dist * rr if direction == "LONG" else entry - sl_dist * rr
+        return {"direction": direction, "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8),
+                "time": c["time"], "timeframe": tf}
+    except Exception as e:
+        log_error(f"prv_scan_symbol_live {symbol}: {e}")
+        return None
+
+
+def prv_track_signal_outcomes():
+    now = time.time()
+    with state_lock:
+        open_signals = [s for s in STATE["prv_signals"] if s["status"] == "OPEN"]
+    if not open_signals:
+        return
+    all_candles = fetch_candles_concurrent([(s["symbol"], s["timeframe"], 300) for s in open_signals])
+    for sig, candles in zip(open_signals, all_candles):
+        try:
+            if candles is None:
+                continue
+            interval_sec = INTERVAL_SECONDS.get(sig["timeframe"], 3600)
+            candles = [c for c in candles if c["time"] + interval_sec <= now]
+            future = [c for c in candles if c["time"] > sig["time"]]
+            direction, entry = sig["direction"], sig["entry"]
+            risk = abs(entry - sig["sl"]) or 1e-9
+            result = exit_price = exit_time = None
+            bars_seen = 0
+            for c in future:
+                bars_seen += 1
+                if direction == "LONG":
+                    if c["low"] <= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["high"] >= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+                else:
+                    if c["high"] >= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["low"] <= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+                if bars_seen >= PRV_MAX_WAIT_BARS:
+                    result, exit_price, exit_time = "TIMEOUT", c["close"], c["time"]
+                    break
+            if result:
+                pnl_r = None
+                if exit_price is not None:
+                    raw = (exit_price - entry) / risk if direction == "LONG" else (entry - exit_price) / risk
+                    pnl_r = round(raw if result != "LOSS" else -abs(raw), 3)
+                with state_lock:
+                    sig["status"] = "CLOSED"
+                    sig["result"] = result
+                    sig["exit_price"] = exit_price
+                    sig["exit_time"] = exit_time
+                    sig["pnl_r"] = pnl_r
+        except Exception as e:
+            log_error(f"prv_outcome {sig['symbol']}: {e}")
+
+
+def prv_live_loop():
+    global _prv_prev_signal_keys
+    while True:
+        try:
+            if not PRV_ENABLED:
+                time.sleep(900)
+                continue
+            with state_lock:
+                active_symbols = list(_prv_active_symbols)
+            new_signals = {}
+            for symbol in active_symbols:
+                sig = prv_scan_symbol_live(symbol)
+                if sig:
+                    new_signals[symbol] = sig
+            new_keys = {s: sig["time"] for s, sig in new_signals.items()}
+            fired = {s: t for s, t in new_keys.items() if (s, t) not in _prv_prev_signal_keys}
+            for symbol, sig_time in fired.items():
+                sig = new_signals[symbol]
+                with state_lock:
+                    already_open = any(s["symbol"] == symbol and s["status"] == "OPEN" for s in STATE["prv_signals"])
+                if already_open:
+                    log_error(f"prv_live_loop {symbol}: new signal detected but a previous one is still OPEN — signal skipped entirely (no log entry, no trade) to avoid piling into the same symbol")
+                    continue
+                arrow = "\u2b06\ufe0f" if sig["direction"] == "LONG" else "\u2b07\ufe0f"
+                record = {"symbol": symbol, "direction": sig["direction"], "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
+                          "timeframe": sig["timeframe"], "time": sig["time"], "detected_at": time.time(),
+                          "status": "OPEN", "result": None, "exit_price": None, "exit_time": None, "pnl_r": None}
+                with state_lock:
+                    STATE["prv_signals"].appendleft(record)
+                autotrade_result = None
+                if AUTOTRADE_ENABLED_PRV:
+                    with state_lock:
+                        still_active = symbol in _prv_active_symbols
+                    if still_active:
+                        autotrade_result = execute_autotrade("prv", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
+                        sim_execute_trade("prv", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                                           autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_PRV, record)
+                    else:
+                        log_error(f"prv_live_loop {symbol}: signal fired but symbol was dropped from active set mid-scan — signal logged, real trade skipped")
+                leverage_txt = f"{autotrade_result.get('leverage')}x" if autotrade_result and autotrade_result.get("leverage") else "\u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d\u0430"
+                send_telegram(
+                    f"{arrow} Peak Reversal {symbol} ({sig['direction']})\n"
+                    f"entry: {sig['entry']:.6g}\nSL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n\u043f\u043b\u0435\u0447\u043e: {leverage_txt}",
+                    category="prv",
+                )
+                save_state()
+            _prv_prev_signal_keys = set(new_keys.items())
+            prv_track_signal_outcomes()
+        except Exception as e:
+            log_error(f"prv_live_loop: {e}")
+        time.sleep(900)
+
+
 # Fixed top-5 majors, maximum available history, pure-Python statistical
 # pattern discovery across many condition types (calendar, RSI zone, EMA
 # side, volume regime, candle range/body size, streaks, range position),
@@ -17851,6 +18371,121 @@ def api_snr_status():
     })
 
 
+def prv_compute_signal_stats(active_symbols=None):
+    with state_lock:
+        active_symbols = active_symbols if active_symbols is not None else list(_prv_active_symbols)
+        signals = list(STATE["prv_signals"])
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+    wins = sum(1 for s in closed if s["result"] == "WIN")
+    losses = len(closed) - wins
+    open_n = sum(1 for s in signals if s["status"] == "OPEN")
+    winrate = round(wins / len(closed) * 100, 1) if closed else None
+    avg_pnl = round(sum(s["pnl_r"] for s in closed if s.get("pnl_r") is not None) / len(closed), 3) if closed else None
+    by_symbol = {}
+    for sym in active_symbols:
+        sym_closed = [s for s in closed if s["symbol"] == sym]
+        sym_wins = sum(1 for s in sym_closed if s["result"] == "WIN")
+        if sym_closed or any(s["symbol"] == sym and s["status"] == "OPEN" for s in signals):
+            by_symbol[sym] = {
+                "n": len(sym_closed), "wins": sym_wins, "losses": len(sym_closed) - sym_wins,
+                "winrate": round(sym_wins / len(sym_closed) * 100, 1) if sym_closed else None,
+                "open": sum(1 for s in signals if s["symbol"] == sym and s["status"] == "OPEN"),
+            }
+    return {"total": len(signals), "wins": wins, "losses": losses, "open": open_n,
+            "winrate": winrate, "avg_pnl_r": avg_pnl, "by_symbol": by_symbol}
+
+
+@app.route("/api/prv/status")
+def api_prv_status():
+    with state_lock:
+        results = dict(STATE["prv_results"])
+        last_finished = STATE["prv_last_backtest_finished"]
+        running = STATE["prv_backtest_running"]
+        done = STATE["prv_progress_done"]
+        total = STATE["prv_progress_total"]
+        in_flight = list(STATE["prv_progress_in_flight"])
+        active_symbols = list(_prv_active_symbols)
+        display_symbols = list(_prv_display_symbols)
+        signal_log = list(STATE["prv_signals"])
+    active_set = set(active_symbols)
+    signal_stats = prv_compute_signal_stats(active_symbols)
+    coins = []
+    for symbol in display_symbols:
+        r = results.get(symbol)
+        recent_live_signals = [s for s in signal_log if s["symbol"] == symbol][:40]
+        coins.append({"symbol": symbol, "is_active": symbol in active_set, "found": r is not None, "result": r,
+                       "live_signal_stats": signal_stats["by_symbol"].get(symbol),
+                       "recent_live_signals": recent_live_signals})
+    return jsonify({
+        "coins": coins, "last_backtest_finished": last_finished,
+        "backtest_running": running, "progress_done": done, "progress_total": total,
+        "in_flight": in_flight, "live_signal_stats": signal_stats,
+        "config": {"top_n": PRV_TOP_N, "display_n": PRV_DISPLAY_N, "timeframes": PRV_TF_CANDIDATES,
+                   "ma_type_candidates": PRV_MA_TYPE_CANDIDATES, "kc_length_candidates": PRV_KC_LENGTH_CANDIDATES,
+                   "band_mult_candidates": PRV_BAND_MULT_CANDIDATES, "rr_candidates": PRV_RR_CANDIDATES,
+                   "universe_size": PRV_UNIVERSE_SIZE, "refresh_sec": PRV_REFRESH_SEC},
+    })
+
+
+@app.route("/api/prv/restart_backtest", methods=["POST"])
+def api_prv_restart_backtest():
+    try:
+        PRV_BACKTEST_TRIGGER.set()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_prv_restart_backtest: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/prv/chart/<symbol>")
+def api_prv_chart(symbol):
+    try:
+        sig_time = request.args.get("time")
+        if not sig_time:
+            return jsonify({"error": "missing time"}), 400
+        target = float(sig_time)
+        found_sig = None
+        found_result = None
+        found_exit_time = None
+        found_exit_price = None
+        tf = None
+        with state_lock:
+            live_match = next((s for s in STATE["prv_signals"] if s["symbol"] == symbol and abs(s["time"] - target) < 86400), None)
+            bt_result = STATE["prv_results"].get(symbol)
+        if live_match:
+            tf = live_match["timeframe"]
+            found_sig = {"time": live_match["time"], "direction": live_match["direction"],
+                         "entry": live_match["entry"], "sl": live_match["sl"], "tp": live_match["tp"]}
+            found_result = live_match.get("result")
+            found_exit_time = live_match.get("exit_time")
+            found_exit_price = live_match.get("exit_price")
+        elif bt_result:
+            tf = bt_result["timeframe"]
+            bt_match = next((t for t in (bt_result.get("recent_trades") or []) if abs(t["time"] - target) < INTERVAL_SECONDS.get(tf, 3600)), None)
+            if bt_match:
+                found_sig = {"time": bt_match["time"], "direction": bt_match["direction"],
+                             "entry": bt_match["entry"], "sl": bt_match["sl"], "tp": bt_match["tp"]}
+                found_result = bt_match.get("result")
+                found_exit_time = bt_match.get("exit_time")
+                found_exit_price = bt_match.get("exit_price")
+        if found_sig is None:
+            return jsonify({"error": "\u0441\u0438\u0433\u043d\u0430\u043b \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d"}), 404
+        interval_sec = INTERVAL_SECONDS.get(tf, 3600)
+        fetch_start = found_sig["time"] - 250 * interval_sec
+        fetch_end = (found_exit_time + 6 * interval_sec) if found_exit_time else (found_sig["time"] + 200 * interval_sec)
+        candles = get_candles_range(symbol, tf, fetch_start, fetch_end)
+        return jsonify({
+            "symbol": symbol, "candles": (candles or [])[-250:], "time": found_sig["time"],
+            "direction": found_sig["direction"], "entry": found_sig["entry"],
+            "sl": found_sig["sl"], "tp": found_sig["tp"], "level_price": None, "level_type": None,
+            "result": found_result, "exit_time": found_exit_time, "exit_price": found_exit_price,
+            "chart_source": "prv",
+        })
+    except Exception as e:
+        log_error(f"api_prv_chart {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
 @app.route("/api/errors")
 def api_errors():
     """v0.99.256 — per direct user report ("Панель не вижу, после
@@ -19489,6 +20124,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="lsw">Sweep</div>
   <div class="tab" data-tab="neuro" style="color:#a855f7;">🧠 Neuro</div>
   <div class="tab" data-tab="snr" style="color:#26c6da;">S/R Zones</div>
+  <div class="tab" data-tab="prv" style="color:#ffa726;">Peak Reversal</div>
   <div class="tab" data-tab="signals">Volume</div>
   <div class="tab" data-tab="scalp">Скальпинг</div>
   <div class="tab" data-tab="ft5" style="color:#e0a030;">FT5 ⚠️</div>
@@ -19518,6 +20154,7 @@ INDEX_HTML = """<!doctype html>
   <div id="amdPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="neuroPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="snrPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
+  <div id="prvPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="nqPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
   <div id="simulatorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
@@ -19822,6 +20459,36 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">не меньше числа выше — торгуются только лучшие по числу выше, остальные показываются серым как справочные</div>
         </div>
         <input type="number" id="setSnrDisplayN" min="1" max="30" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+      </div>
+    </div></details>
+    <details class="settingsGroup" style="--mod-color:#ffa726;"><summary class="settingsGroupTitle">Peak Reversal (Keltner Channel)</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (бэктест + живые сигналы)</div>
+          <div class="sub">порт индикатора Peak Reversal v3 (Keltner Channel) — реверсия от касания внутренней полосы к средней, вход/стоп/тейк подбираются перебором по типу MA/длине/множителю полосы/RR/таймфрейму с проверкой на train/test</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setPrv"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ Алерты в Telegram</div>
+          <div class="sub">уведомление при каждом новом живом сигнале, независимо от автоторговли</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramAlertsPrv"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ Сколько монет держать в топе</div>
+          <div class="sub">вселенная — топ 30 по ликвидности; здесь сколько лучших по TEST avg P&L остаются активными (торгуются)</div>
+        </div>
+        <input type="number" id="setPrvTopN" min="1" max="30" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ Сколько монет отображать</div>
+          <div class="sub">не меньше числа выше — торгуются только лучшие по числу выше, остальные показываются серым как справочные</div>
+        </div>
+        <input type="number" id="setPrvDisplayN" min="1" max="30" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
       </div>
     </div></details>
     <details class="settingsGroup" style="--mod-color:#7986cb;"><summary class="settingsGroupTitle">NQ Model (NAS100_USDT)</summary><div class="settingsGroupBody">
@@ -20141,6 +20808,20 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeInvertSnr"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Peak Reversal</div>
+          <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча и размера позиции, что и у остальных режимов</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradePrv"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳↳ Инвертировать открытие (Peak Reversal)</div>
+          <div class="sub">то же самое, что и для Sweep/Neuro/S&R выше — на бирже реально открывается обратное направление, старый стоп становится тейком и наоборот</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeInvertPrv"><span class="switchSlider"></span></label>
+      </div>
     </div></details>
 
     <div class="dim hint-block" style="font-size:12px;margin-top:16px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
@@ -20192,6 +20873,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('amdPanel').style.display = activeTab === 'amd' ? 'block' : 'none';
     document.getElementById('neuroPanel').style.display = activeTab === 'neuro' ? 'block' : 'none';
     document.getElementById('snrPanel').style.display = activeTab === 'snr' ? 'block' : 'none';
+    document.getElementById('prvPanel').style.display = activeTab === 'prv' ? 'block' : 'none';
     document.getElementById('nqPanel').style.display = activeTab === 'nq' ? 'block' : 'none';
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
     document.getElementById('simulatorPanel').style.display = activeTab === 'simulator' ? 'block' : 'none';
@@ -20205,6 +20887,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'amd') refreshAmd();
     if (activeTab === 'neuro') refreshNeuro();
     if (activeTab === 'snr') refreshSnr();
+    if (activeTab === 'prv') refreshPrv();
     if (activeTab === 'nq') refreshNq();
     if (activeTab === 'autotrade') refreshAutotrade();
     if (activeTab === 'simulator') refreshSimulator();
@@ -22045,6 +22728,97 @@ async function refreshSnr() {
   }
 }
 
+async function refreshPrv() {
+  const panel = document.getElementById('prvPanel');
+  try {
+    const data = await (await fetch('/api/prv/status')).json();
+    const coins = data.coins || [];
+    const lastFinished = data.last_backtest_finished ? fmtDateTime(data.last_backtest_finished) : '\u2014';
+
+    // v0.99.271 -- per direct user request ("нужна шкала чтобы понимать
+    // идёт ли вообще бэктест") -- same progress-bar shape as Neuro's own.
+    let progressHtml = '';
+    if (data.waiting_for_slot) {
+      progressHtml = `<div class="dim" style="margin-bottom:10px;font-size:11px;">
+        \u23f3 \u043e\u0436\u0438\u0434\u0430\u0435\u0442 \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e\u0433\u043e \u043c\u0435\u0441\u0442\u0430 \u0441\u0440\u0435\u0434\u0438 \u0431\u044d\u043a\u0442\u0435\u0441\u0442\u043e\u0432 \u0434\u0440\u0443\u0433\u0438\u0445 \u043c\u043e\u0434\u0443\u043b\u0435\u0439 (\u043e\u0434\u043d\u043e\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u0440\u0430\u0431\u043e\u0442\u0430\u044e\u0442 \u043d\u0435 \u0431\u043e\u043b\u044c\u0448\u0435 2 \u0438\u0437 8)
+      </div>`;
+    } else if (data.backtest_running) {
+      const pct = data.progress_total ? Math.round(data.progress_done / data.progress_total * 100) : 0;
+      progressHtml = `<div style="margin-bottom:10px;">
+        <div class="dim" style="font-size:11px;margin-bottom:4px;">\u043f\u0435\u0440\u0435\u0431\u043e\u0440 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432: ${data.progress_done}/${data.progress_total}${data.in_flight && data.in_flight.length ? ' \u2014 \u043e\u0434\u043d\u043e\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e: '+data.in_flight.slice(0,8).join(', ')+(data.in_flight.length>8?` +${data.in_flight.length-8}`:'') : ''}</div>
+        <div style="height:6px;background:#1c2433;border-radius:3px;overflow:hidden;">
+          <div style="height:100%;width:${pct}%;background:#ffa726;transition:width .3s;"></div>
+        </div>
+      </div>`;
+    }
+
+    const lstatsHtml = data.live_signal_stats && data.live_signal_stats.total
+      ? `<div class="dim" style="font-size:11px;margin-bottom:10px;">\u0436\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b \u0432\u0441\u0435\u0433\u043e: ${data.live_signal_stats.total} \u00b7 WR ${data.live_signal_stats.winrate!=null?data.live_signal_stats.winrate+'%':'\u2014'} \u00b7 \u043e\u0442\u043a\u0440\u044b\u0442\u043e: ${data.live_signal_stats.open}</div>`
+      : '';
+
+    const cards = coins.map(c => {
+      const isActive = c.is_active !== false;
+      const cardStyle = isActive
+        ? 'margin-bottom:14px;padding:12px;background:#12182a;border-radius:10px;border:1px solid #232d45;'
+        : 'margin-bottom:14px;padding:12px;background:#0d1018;border-radius:10px;border:1px dashed #3a4256;opacity:0.6;';
+      const inactiveBadge = isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:#2a2f3d;border-radius:6px;">
+        <span class="dim" style="font-size:10px;">\u26aa \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0441\u043f\u0440\u0430\u0432\u043a\u0438 \u2014 \u043d\u0435 \u0442\u043e\u0440\u0433\u0443\u0435\u0442\u0441\u044f \u0438 \u043d\u0435 \u0441\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442\u0441\u044f \u0432\u0436\u0438\u0432\u0443\u044e</span>
+      </div>`;
+      if (!c.found) {
+        return `<div style="${cardStyle}">
+          <div style="font-size:15px;font-weight:700;color:#ffa726;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
+          ${inactiveBadge}
+          <span class="dim">\u043d\u0438\u0447\u0435\u0433\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u043e\u0433\u043e \u043d\u0430 train/test \u043f\u043e\u043a\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e</span>
+        </div>`;
+      }
+      const r = c.result;
+      const tradesRows = (r.recent_trades || []).slice(0, 15).map(t => {
+        const rc = t.result === 'WIN' ? 'win' : t.result === 'LOSS' ? 'loss' : 'dim';
+        return `<div onclick="openPrvChart('${c.symbol}', ${t.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1c2433;font-size:11px;">
+          <span class="dim">${fmtDateTime(t.time)} ${t.direction} @ ${fmtNum(t.entry)} \u0432\u043e \u0441\u0434\u0435\u043b\u043a\u0435 \u043c\u0430\u043a\u0441. \u043f\u0440\u043e\u0442\u0438\u0432 ${t.mae_r}R</span>
+          <span class="${rc}">${t.result}${t.pnl_r!=null?' '+(t.pnl_r>0?'+':'')+t.pnl_r+'R':''}</span>
+        </div>`;
+      }).join('');
+      const liveSigs = c.recent_live_signals || [];
+      const liveSigRows = liveSigs.slice(0, 15).map(s => {
+        const rc = s.status === 'OPEN' ? 'dim' : s.result === 'WIN' ? 'win' : s.result === 'LOSS' ? 'loss' : 'dim';
+        const statusTxt = s.status === 'OPEN' ? '\u041e\u0422\u041a\u0420\u042b\u0422\u0410' : `${s.result}${s.pnl_r!=null?' '+(s.pnl_r>0?'+':'')+s.pnl_r+'R':''}`;
+        return `<div onclick="openPrvChart('${c.symbol}', ${s.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1c2433;font-size:11px;">
+          <span class="dim">${fmtDateTime(s.time)} ${s.direction} @ ${fmtNum(s.entry)}</span>
+          <span class="${rc}">${statusTxt}</span>
+        </div>`;
+      }).join('');
+      const liveSigSection = liveSigs.length
+        ? `<details open><summary class="dim" style="cursor:pointer;font-size:11px;">\u0436\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b (${liveSigs.length})</summary>${liveSigRows}</details>`
+        : '';
+      return `<div style="${cardStyle}">
+        <div style="font-size:15px;font-weight:700;color:#ffa726;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
+        ${inactiveBadge}
+        <div class="dim" style="font-size:11px;margin-bottom:8px;">
+          \u0442\u0430\u0439\u043c\u0444\u0440\u0435\u0439\u043c ${r.timeframe} \u00b7 ${r.ma_type}${r.kc_length} \u00b7 \u043f\u043e\u043b\u043e\u0441\u0430\u00d7${r.band_mult} \u00b7 RR${r.rr} \u00b7 \u0441\u0440.MAE ${r.avg_mae_r}R
+        </div>
+        <div style="display:flex;gap:16px;margin-bottom:8px;">
+          <div><div class="dim" style="font-size:10px;">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R \u00b7 z=${r.train_z}</div></div>
+          <div><div class="dim" style="font-size:10px;">TEST (n=${r.test_n})</div><div class="win">WR ${r.test_wr}% \u00b7 ${r.test_avg_pnl_r>0?'+':''}${r.test_avg_pnl_r}R \u00b7 z=${r.test_z}</div></div>
+        </div>
+        <div class="dim" style="font-size:10px;margin-bottom:8px;">z \u2014 \u043d\u0430\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0441\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0445 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u0438\u0439 \u0432\u0438\u043d\u0440\u0435\u0439\u0442 \u0432\u044b\u0448\u0435 \u0431\u0435\u0437\u0443\u0431\u044b\u0442\u043a\u0430 (\u043d\u0443\u0436\u043d\u043e \u22653.501 \u0441 \u043f\u043e\u043f\u0440\u0430\u0432\u043a\u043e\u0439 \u043d\u0430 216 \u043f\u0435\u0440\u0435\u0431\u0440\u0430\u043d\u043d\u0443\u044e \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u044e)</div>
+        ${liveSigSection}
+        <details><summary class="dim" style="cursor:pointer;font-size:11px;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0441\u0434\u0435\u043b\u043a\u0438 \u0431\u044d\u043a\u0442\u0435\u0441\u0442\u0430</summary>${tradesRows}</details>
+      </div>`;
+    }).join('');
+    panel.innerHTML = `
+      <div class="dim" style="margin-bottom:10px;">
+        \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442: ${lastFinished} \u00b7 \u0432\u0441\u0435\u043b\u0435\u043d\u043d\u0430\u044f: \u0442\u043e\u043f-${data.config&&data.config.universe_size||30} \u043f\u043e \u043b\u0438\u043a\u0432\u0438\u0434\u043d\u043e\u0441\u0442\u0438 \u00b7 \u043f\u0440\u043e\u0448\u043b\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0443: ${coins.length} \u0438\u0437 \u0434\u043e ${data.config&&data.config.display_n||0} \u043c\u0435\u0441\u0442 \u0434\u043b\u044f \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f${coins.length < (data.config&&data.config.display_n||0) ? ' \u2014 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 \u043c\u043e\u043d\u0435\u0442\u044b \u0438\u0437 \u0432\u0441\u0435\u043b\u0435\u043d\u043d\u043e\u0439 \u043f\u0440\u043e\u0441\u0442\u043e \u043d\u0435 \u043f\u0440\u043e\u0448\u043b\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0443 \u043d\u0430 \u043e\u0442\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0445 \u0434\u0430\u043d\u043d\u044b\u0445, \u044d\u0442\u043e \u043d\u0435 \u0431\u0430\u0433 \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f' : ''}
+      </div>
+      ${progressHtml}
+      ${lstatsHtml}
+      ${cards || '<div class="dim">\u043f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445</div>'}
+    `;
+  } catch(e) {
+    panel.innerHTML = `<div class="dim">\u041e\u0448\u0438\u0431\u043a\u0430: ${e}</div>`;
+  }
+}
+
 function openNeuroChart(symbol, sigTime) {
   return openVgiChart(symbol, sigTime, '/api/neuro/chart', '');
 }
@@ -22837,6 +23611,7 @@ async function refreshAll() {
   if (activeTab === 'lsw') await refreshLsw();
   if (activeTab === 'neuro') await refreshNeuro();
   if (activeTab === 'snr') await refreshSnr();
+  if (activeTab === 'prv') await refreshPrv();
   if (activeTab === 'autotrade') await refreshAutotrade();
   if (activeTab === 'simulator') await refreshSimulator();
 }
@@ -22955,6 +23730,8 @@ const setInputs = {
   neuro_enabled: document.getElementById('setNeuro'),
   snr_enabled: document.getElementById('setSnr'),
   telegram_alerts_snr: document.getElementById('setTelegramAlertsSnr'),
+  prv_enabled: document.getElementById('setPrv'),
+  telegram_alerts_prv: document.getElementById('setTelegramAlertsPrv'),
   nq_enabled: document.getElementById('setNq'),
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
   lsw_structural_cap_enabled: document.getElementById('setLswStructuralCap'),
@@ -23001,6 +23778,8 @@ const setInputs = {
   autotrade_invert_neuro: document.getElementById('setAutotradeInvertNeuro'),
   autotrade_snr: document.getElementById('setAutotradeSnr'),
   autotrade_invert_snr: document.getElementById('setAutotradeInvertSnr'),
+  autotrade_prv: document.getElementById('setAutotradePrv'),
+  autotrade_invert_prv: document.getElementById('setAutotradeInvertPrv'),
 };
 
 const setValueInputs = {
@@ -23011,6 +23790,8 @@ const setValueInputs = {
   neuro_display_n: document.getElementById('setNeuroDisplayN'),
   snr_top_n: document.getElementById('setSnrTopN'),
   snr_display_n: document.getElementById('setSnrDisplayN'),
+  prv_top_n: document.getElementById('setPrvTopN'),
+  prv_display_n: document.getElementById('setPrvDisplayN'),
 };
 
 function applySettingsToInputs(s) {
@@ -23639,6 +24420,11 @@ function openSnrChart(symbol, sigTime) {
   return openVgiChart(symbol, sigTime, '/api/snr/chart', '');
 }
 
+function openPrvChart(symbol, sigTime) {
+  // Same reuse judgment as openSnrChart above.
+  return openVgiChart(symbol, sigTime, '/api/prv/chart', '');
+}
+
 function drawVgiChart(data) {
   const canvas = document.getElementById('vgiChartCanvas');
   const wrap = document.getElementById('vgiChartWrap');
@@ -23900,6 +24686,8 @@ if __name__ == "__main__":
     threading.Thread(target=neuro_live_loop, daemon=True).start()
     threading.Thread(target=snr_backtest_loop, daemon=True).start()
     threading.Thread(target=snr_live_loop, daemon=True).start()
+    threading.Thread(target=prv_backtest_loop, daemon=True).start()
+    threading.Thread(target=prv_live_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     threading.Thread(target=risk_autotune_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
