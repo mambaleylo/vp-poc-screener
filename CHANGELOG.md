@@ -15154,3 +15154,38 @@ v0.99.277 - Two real statistical honesty bugs found and fixed, per
          Verified: py_compile (-W error), pyflakes, node --check, 61
          routes, real runtime 200 on / and /api/snr/status, zero
          surrogate escapes.
+
+v0.99.278 - CRITICAL PERFORMANCE FIX: parallelized S/R Zones' backtest
+         loop, per direct user report ("988 монет, очень долго бэктест
+         идет") after v0.99.276 removed the universe's volume cap
+         entirely. Found the actual cause: snr_backtest_loop() was the
+         ONLY one of the app's 8 backtest loops that never adopted the
+         parallel-workers pattern every other module (MSNR, LSW, Mirror,
+         FT5) already uses — it processed the whole universe STRICTLY
+         SEQUENTIALLY, one symbol at a time, with a lone ThreadPool
+         Executor(max_workers=1) per symbol used only for that symbol's
+         own timeout, never for concurrency across symbols. With the
+         volume cap gone and potentially ~1000 candidates to scan, a
+         fully sequential run could take many hours.
+         Rewritten to submit the WHOLE universe to a shared ThreadPool
+         Executor(max_workers=min(WORKERS, len(universe))) — same
+         pattern and the same WORKERS=8 concurrency ceiling as every
+         other module's own universe scan — processing results via
+         as_completed() as they finish and writing each one into STATE
+         the moment it's ready, same "don't batch until the whole loop
+         ends" lesson _lsw_run_one_backtest_cycle()'s own v0.99.196 fix
+         already documents. GLOBAL_HTTP_SEMAPHORE (10 total concurrent
+         requests app-wide) and BACKTEST_CONCURRENCY_SEMAPHORE still
+         bound the actual network load regardless of how many local
+         threads this spins up — no change to either.
+         Since multiple symbols are now genuinely in flight at once,
+         replaced the single "current_symbol" progress field with a new
+         snr_progress_in_flight list (up to 8 entries) — /api/snr/status
+         and the tab's own progress line now show "одновременно: SYM1,
+         SYM2, ..." instead of a single misleading "сейчас SYMBOL".
+         Verified directly: a synthetic 40-item timing test comparing
+         the old sequential approach to the new 8-worker parallel one
+         showed exactly the expected ~8x speedup (2.01s -> 0.25s for
+         identical simulated per-item work).
+         Verified: py_compile (-W error), pyflakes, node --check, 61
+         routes, real runtime 200 on / and /api/snr/status.
