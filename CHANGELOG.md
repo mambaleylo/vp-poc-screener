@@ -15219,3 +15219,79 @@ v0.99.279 - CRITICAL FIX: SNR's own top_n/display_n settings never
          GET (simulating what the settings modal reads on open) return
          the correct saved value.
          Verified: py_compile (-W error), pyflakes, node --check.
+
+v0.99.280 - NEW module: "Peak Reversal", 5th tab, per direct user request
+         (shared the "Peak Reversal v3" Pine Script — a Keltner Channel
+         + squeeze detector indicator — asked for the full production
+         stack built from the start this time: "нужно делать не
+         тестово, а сразу с уведами, автоторговлей настройкой размера
+         позиции"). Deliberately learned from and avoided EVERY bug
+         found and fixed while building S&R Zones across the previous
+         session (v0.99.269-279):
+         - Parallel universe scanning from day one (not sequential-
+           then-fixed, matching v0.99.278's own fix for SNR).
+         - The restart-button trigger used for the INITIAL startup
+           stagger too, not just the recurring refresh wait (matching
+           v0.99.272's own fix for 6 modules including SNR).
+         - Number settings (prv_top_n/prv_display_n) placed correctly
+           in the frontend's setValueInputs map from the start, not
+           setInputs (matching v0.99.279's own fix for SNR's identical
+           mistake) — verified directly this time before shipping.
+         - Persistence (save_state/load_state) and the actual save_
+           state() calls added from the start (matching v0.99.271's own
+           fix for SNR, where both were originally missing).
+         - Both 'prv' and 'snr'/'neuro' remain in refreshAll()'s own
+           periodic per-tab list (matching v0.99.273's own fix).
+         - Honest Bonferroni-corrected z-test validation (reusing SNR's
+           own _snr_z_score_vs_breakeven() directly, no duplication)
+           from the very first version, not a naive "average > 0" bar
+           later found to leak on 40-70% of pure noise (v0.99.277).
+
+         Confirmed the Pine Script's own band-cross ("triangle") signals
+         fire only on barstate.isconfirmed (no repainting) using the
+         WICK touching the INNER band by default — verified directly
+         from the source the user shared. Per direct user confirmation
+         after reviewing the code together, ported the REVERSION read
+         the indicator's own author describes ("the longer price stays
+         outside, the higher the risk of a turn"): LONG when price wicks
+         below the lower band, SHORT when price wicks above the upper
+         band, entering at the next bar's open (no lookahead), betting
+         on reverting back toward the Keltner Channel's own basis (the
+         moving average).
+         New prv_optimize_symbol(): sweeps MA type (EMA/SMA) x KC length
+         (14/20/30) x band multiplier (1.5/2/2.5) x take-profit RR
+         (1/1.5/2/3, per direct user request "процент который мы
+         забираем по тейку нужно подбирать по типу как rr") x timeframe
+         (1h/4h/1d) — PRV_N_COMBOS=216 total combinations. Same walk-
+         forward + Bonferroni-corrected z-test discipline as SNR's own
+         (z >= 3.501, corrected for 216 comparisons this time). Also
+         tracks max adverse excursion (MAE) in R per trade, informational
+         only, per direct user request ("нужно собирать статистику по
+         движению против тейка").
+         Verified directly: 0/20 false positives on pure random-walk
+         synthetic data across 20 different seeds — the honest gate
+         correctly rejects noise from the very first version, matching
+         SNR's own post-fix behavior rather than its original buggy one.
+         Universe: top 30 symbols by 24h liquidity (per direct user
+         choice this time — "пока топ 30 по ликвидности"), unlike SNR's
+         own now-uncapped universe, with the same top_n (traded) /
+         display_n (shown) split as SNR/Neuro.
+         Full live stack: prv_scan_symbol_live() (same band-touch rule,
+         evaluated live), prv_live_loop() (15-min cadence, same no-open-
+         position guard/dedup/Telegram/execute_autotrade()/sim_execute_
+         trade() wiring as SNR's own), prv_track_signal_outcomes() (WIN/
+         LOSS/TIMEOUT). New settings: prv_enabled, telegram_alerts_prv
+         (on by default), autotrade_prv (off by default), autotrade_
+         invert_prv (reusing the same v0.99.263 inverted-opening
+         mechanism — no special-casing needed, execute_autotrade() is
+         fully mode-agnostic), prv_top_n, prv_display_n.
+         New GET /api/prv/status, POST /api/prv/restart_backtest, GET
+         /api/prv/chart/<symbol> (reusing the same openVgiChart()
+         frontend infrastructure via a new openPrvChart() wrapper).
+         Verified: py_compile (-W error), pyflakes, node --check, 64
+         routes, real runtime 200 confirming /api/prv/status, /api/prv/
+         restart_backtest, correct tab position (5th, right after S/R
+         Zones), all 6 new settings keys present in /api/settings with
+         correct defaults, and — directly tested this time before
+         shipping — prv_display_n correctly round-trips through a POST
+         and a subsequent fresh GET, zero surrogate escapes.
