@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.278"
+APP_VERSION = "0.99.279"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22954,8 +22954,6 @@ const setInputs = {
   amd_enabled: document.getElementById('setAmd'),
   neuro_enabled: document.getElementById('setNeuro'),
   snr_enabled: document.getElementById('setSnr'),
-  snr_top_n: document.getElementById('setSnrTopN'),
-  snr_display_n: document.getElementById('setSnrDisplayN'),
   telegram_alerts_snr: document.getElementById('setTelegramAlertsSnr'),
   nq_enabled: document.getElementById('setNq'),
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
@@ -23011,6 +23009,8 @@ const setValueInputs = {
   autotrade_risk_pct: document.getElementById('setAutotradeRiskPct'),
   neuro_top_n: document.getElementById('setNeuroTopN'),
   neuro_display_n: document.getElementById('setNeuroDisplayN'),
+  snr_top_n: document.getElementById('setSnrTopN'),
+  snr_display_n: document.getElementById('setSnrDisplayN'),
 };
 
 function applySettingsToInputs(s) {
