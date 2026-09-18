@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.281"
+APP_VERSION = "0.99.282"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -18320,9 +18320,23 @@ def api_snr_restart_backtest():
 
 
 def snr_compute_signal_stats(active_symbols=None):
+    """v0.99.282 — CRITICAL FIX, per direct user report of a headline
+    "живые сигналы всего: 1" total with no visible live-signal section
+    on the only displayed card: the "total"/"wins"/"losses"/"winrate"/
+    "avg_pnl_r" fields used to be computed over EVERY signal ever
+    recorded in STATE["snr_signals"], regardless of whether that
+    signal's own symbol is still in the current top-N — while by_symbol
+    (right below) already correctly scoped itself to active_symbols.
+    A symbol that fired a live signal, then got REPLACED in a later
+    re-ranking cycle by a better performer, would keep inflating this
+    headline total forever with a signal no card on the tab can ever
+    show again. Now the headline stats are scoped to active_symbols
+    too, same as by_symbol already was — consistent with what's
+    actually visible."""
     with state_lock:
         active_symbols = active_symbols if active_symbols is not None else list(_snr_active_symbols)
-        signals = list(STATE["snr_signals"])
+        all_signals = list(STATE["snr_signals"])
+    signals = [s for s in all_signals if s["symbol"] in active_symbols]
     closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
     wins = sum(1 for s in closed if s["result"] == "WIN")
     losses = len(closed) - wins
@@ -18377,9 +18391,12 @@ def api_snr_status():
 
 
 def prv_compute_signal_stats(active_symbols=None):
+    """v0.99.282 — same CRITICAL FIX as snr_compute_signal_stats()'s own
+    — see that function's own comment for the full incident."""
     with state_lock:
         active_symbols = active_symbols if active_symbols is not None else list(_prv_active_symbols)
-        signals = list(STATE["prv_signals"])
+        all_signals = list(STATE["prv_signals"])
+    signals = [s for s in all_signals if s["symbol"] in active_symbols]
     closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
     wins = sum(1 for s in closed if s["result"] == "WIN")
     losses = len(closed) - wins
@@ -22700,7 +22717,7 @@ async function refreshSnr() {
         const rc = s.status === 'OPEN' ? 'dim' : s.result === 'WIN' ? 'win' : s.result === 'LOSS' ? 'loss' : 'dim';
         const statusTxt = s.status === 'OPEN' ? '\u041e\u0422\u041a\u0420\u042b\u0422\u0410' : `${s.result}${s.pnl_r!=null?' '+(s.pnl_r>0?'+':'')+s.pnl_r+'R':''}`;
         return `<div onclick="openSnrChart('${c.symbol}', ${s.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1c2433;font-size:11px;">
-          <span class="dim">${fmtDateTime(s.time)} ${s.direction} @ ${fmtNum(s.entry)}</span>
+          <span class="dim">${fmtDateTime(s.time)} ${s.direction} \u0432\u0445\u043e\u0434 ${fmtNum(s.entry)} \u00b7 SL ${fmtNum(s.sl)} \u00b7 TP ${fmtNum(s.tp)}</span>
           <span class="${rc}">${statusTxt}</span>
         </div>`;
       }).join('');
@@ -22791,7 +22808,7 @@ async function refreshPrv() {
         const rc = s.status === 'OPEN' ? 'dim' : s.result === 'WIN' ? 'win' : s.result === 'LOSS' ? 'loss' : 'dim';
         const statusTxt = s.status === 'OPEN' ? '\u041e\u0422\u041a\u0420\u042b\u0422\u0410' : `${s.result}${s.pnl_r!=null?' '+(s.pnl_r>0?'+':'')+s.pnl_r+'R':''}`;
         return `<div onclick="openPrvChart('${c.symbol}', ${s.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1c2433;font-size:11px;">
-          <span class="dim">${fmtDateTime(s.time)} ${s.direction} @ ${fmtNum(s.entry)}</span>
+          <span class="dim">${fmtDateTime(s.time)} ${s.direction} \u0432\u0445\u043e\u0434 ${fmtNum(s.entry)} \u00b7 SL ${fmtNum(s.sl)} \u00b7 TP ${fmtNum(s.tp)}</span>
           <span class="${rc}">${statusTxt}</span>
         </div>`;
       }).join('');
