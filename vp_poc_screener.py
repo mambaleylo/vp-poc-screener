@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.288"
+APP_VERSION = "0.99.289"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14529,20 +14529,35 @@ def snr_backtest_loop():
             ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
             display_top = ranked[:max(SNR_DISPLAY_N, SNR_TOP_N)]
             active_top = display_top[:SNR_TOP_N]
+            # v0.99.288 — CRITICAL FIX, per direct user report ("застревание
+            # бэктеста... потом зависают даже настройки и не сохраняются
+            # после этой ошибки"): log_error() itself does `with state_lock:`
+            # internally (it appends to STATE["errors"]) — calling it from
+            # INSIDE this function's own `with state_lock:` block below was
+            # a guaranteed DEADLOCK the instant a cycle found zero usable
+            # results: state_lock is a plain threading.Lock() (confirmed
+            # non-reentrant), so the same thread trying to acquire it a
+            # second time blocks FOREVER, never reaching this block's own
+            # __exit__ — meaning the lock stays held forever, and EVERY
+            # other request needing state_lock (settings save/load, every
+            # status endpoint) hangs right along with it. Fixed by moving
+            # the log_error() call to AFTER the lock is released, using a
+            # plain boolean set inside the lock instead.
+            found_nothing = not all_results
             with state_lock:
                 if all_results:
                     STATE["snr_results"] = dict(display_top)
                     _snr_active_symbols = [sym for sym, _ in active_top]
                     _snr_display_symbols = [sym for sym, _ in display_top]
                     STATE["snr_last_backtest_finished"] = time.time()
-                else:
-                    # v0.99.271 — same "don't wipe existing data on a fully
-                    # failed cycle" safety net as neuro_mining_loop()'s own
-                    # (v0.99.236) — a total network outage shouldn't blank
-                    # out whatever the previous cycle found.
-                    log_error("snr_backtest_loop: universe scan produced zero usable results this cycle — keeping previous results")
                 STATE["snr_backtest_running"] = False
                 STATE["snr_current_symbol"] = None
+            if found_nothing:
+                # v0.99.271 — same "don't wipe existing data on a fully
+                # failed cycle" safety net as neuro_mining_loop()'s own
+                # (v0.99.236) — a total network outage shouldn't blank
+                # out whatever the previous cycle found.
+                log_error("snr_backtest_loop: universe scan produced zero usable results this cycle — keeping previous results")
             if all_results:
                 save_state()  # v0.99.271 — CRITICAL FIX: persist the freshly-completed cycle immediately, so a restart right after doesn't lose it (see save_state()'s own new snr_results/snr_signals/snr_active_symbols/snr_display_symbols keys)
         except Exception as e:
@@ -15008,15 +15023,18 @@ def prv_backtest_loop():
             ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
             display_top = ranked[:max(PRV_DISPLAY_N, PRV_TOP_N)]
             active_top = display_top[:PRV_TOP_N]
+            # v0.99.288 — same CRITICAL DEADLOCK FIX as snr_backtest_loop()'s
+            # own — see that function's own comment for the full incident.
+            found_nothing = not all_results
             with state_lock:
                 if all_results:
                     STATE["prv_results"] = dict(display_top)
                     _prv_active_symbols = [sym for sym, _ in active_top]
                     _prv_display_symbols = [sym for sym, _ in display_top]
                     STATE["prv_last_backtest_finished"] = time.time()
-                else:
-                    log_error("prv_backtest_loop: universe scan produced zero usable results this cycle — keeping previous results")
                 STATE["prv_backtest_running"] = False
+            if found_nothing:
+                log_error("prv_backtest_loop: universe scan produced zero usable results this cycle — keeping previous results")
             if all_results:
                 save_state()
         except Exception as e:
