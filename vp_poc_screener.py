@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.284"
+APP_VERSION = "0.99.285"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14362,7 +14362,28 @@ def snr_backtest_loop():
                 with state_lock:
                     STATE["snr_progress_in_flight"] = list(futs.values())
                 try:
-                    for fut in as_completed(futs, timeout=SNR_PER_SYMBOL_MAX_SEC * len(universe)):
+                    # v0.99.285 — CRITICAL FIX, per direct user report ("Перебор
+                    # по p/r завис на 29 из 30... на другом телефоне 28/30"):
+                    # this overall ceiling used to be PER_SYMBOL_MAX_SEC *
+                    # len(universe) — treating the WORST case as if every
+                    # single symbol could take the full per-symbol timeout
+                    # SEQUENTIALLY, ignoring that up to WORKERS=8 run
+                    # CONCURRENTLY. With 30 symbols that's 300*30=9000s (2.5
+                    # HOURS) before the cycle gives up on a genuinely stuck
+                    # symbol and moves on with whatever DID complete —
+                    # explaining exactly the "stuck near the end for a very
+                    # long time" symptom reported (confirmed the underlying
+                    # as_completed(timeout=X) mechanism itself DOES correctly
+                    # bound the wait and correctly proceeds with partial
+                    # results once it fires — verified directly with a
+                    # synthetic hung-worker test — the ceiling itself was
+                    # just far too generous for how parallel execution
+                    # actually works). Now scales by how many BATCHES of
+                    # WORKERS concurrent slots are actually needed
+                    # (ceil(len(universe)/WORKERS)), not the full sequential
+                    # count — 300*ceil(30/8)=300*4=1200s (20min) instead of
+                    # 9000s (2.5h) for the same 30-symbol universe.
+                    for fut in as_completed(futs, timeout=SNR_PER_SYMBOL_MAX_SEC * math.ceil(len(universe) / WORKERS)):
                         symbol = futs[fut]
                         try:
                             best = fut.result(timeout=SNR_PER_SYMBOL_MAX_SEC)
@@ -14831,7 +14852,7 @@ def prv_backtest_loop():
                 with state_lock:
                     STATE["prv_progress_in_flight"] = list(futs.values())
                 try:
-                    for fut in as_completed(futs, timeout=PRV_PER_SYMBOL_MAX_SEC * len(universe)):
+                    for fut in as_completed(futs, timeout=PRV_PER_SYMBOL_MAX_SEC * math.ceil(len(universe) / WORKERS)):
                         symbol = futs[fut]
                         try:
                             best = fut.result(timeout=PRV_PER_SYMBOL_MAX_SEC)
