@@ -15507,3 +15507,32 @@ v0.99.287 - S/R Zones (and Peak Reversal) no longer trade stablecoins,
          own existing design).
          Verified: py_compile (-W error), pyflakes, real runtime 200 on
          /, /api/snr/status, /api/prv/status.
+
+v0.99.288 - Halved network round-trips per symbol for S/R Zones and
+         Peak Reversal, per direct user follow-up confirming the
+         progress bar genuinely gets stuck at a partial count (e.g.
+         12/30) for a long time before a cycle completes — v0.99.285/286
+         already fixed the timeout MECHANISM but didn't address why
+         individual symbols were genuinely SLOW in the first place.
+         Profiled the actual parameter-sweep computation directly first
+         — confirmed FAST (~1.2s for the WHOLE 3-timeframe x 216-combo
+         sweep on realistic-scale synthetic data) — ruling out CPU cost
+         as the bottleneck. Counted the actual chunked network requests
+         get_candles_range() needs at the existing 500-day history: 1h
+         needs ~14 SEQUENTIAL chunks (12000 bars), 4h ~4 (3000 bars), 1d
+         just 1 (500 bars) — ~19 total per symbol, with the 1h timeframe
+         alone accounting for the large majority, and those chunks
+         aren't parallelizable within one symbol's own fetch (get_
+         candles_range()'s own loop is sequential) the way different
+         SYMBOLS are.
+         New snr_history_days_for_tf() (shared by both SNR and PRV):
+         caps 1h's own history to 150 days (3600 bars, ~4 chunks —
+         matching 4h's own cost at the full 500 days) while 4h/1d keep
+         the full 500 days since they're cheap regardless. Verified
+         directly: 19 requests/symbol -> 9 (2.1x fewer) — still far more
+         hourly bars (3600) than SNR_MIN_TRAIN_TRADES/SNR_MIN_TEST_
+         TRADES could ever need, so this shouldn't meaningfully hurt
+         statistical power.
+         Verified: py_compile (-W error), pyflakes, node --check, 64
+         routes, real runtime 200 on /, /api/snr/status, /api/prv/status,
+         zero surrogate escapes.
