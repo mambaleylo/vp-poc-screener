@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.287"
+APP_VERSION = "0.99.288"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14103,7 +14103,30 @@ SNR_TOO_CLOSE_ATR_MULT = 1.0 / 8              # matches the Pine Script's own to
 SNR_MAX_WAIT_BARS     = 48                   # same timeout convention as every other module's own backtest
 SNR_MIN_TRAIN_TRADES  = 15                   # minimum TRAIN closed trades before trusting a (tf, pivot, strength, rr) candidate at all
 SNR_MIN_TEST_TRADES   = 5                    # minimum TEST closed trades to trust the validation
-SNR_HISTORY_DAYS      = 500                  # how far back to fetch candles for the backtest
+SNR_HISTORY_DAYS      = 500                  # how far back to fetch candles for the backtest (4h/1d timeframes — see snr_history_days_for_tf() for why 1h gets less)
+
+
+def snr_history_days_for_tf(tf, base_days=SNR_HISTORY_DAYS):
+    """v0.99.288 — CRITICAL FIX, per direct user report of the progress
+    bar getting genuinely stuck at a partial count (e.g. 12/30) for a
+    long time before a cycle finally completes. Profiled the actual
+    parameter-sweep computation itself first — confirmed FAST (~1.2s
+    for the WHOLE 3-timeframe x 216-combo sweep on realistic-scale
+    synthetic data) — so the real cost is network I/O, not CPU. Counted
+    the actual chunked requests get_candles_range() needs at
+    base_days=500: 1h needs ~14 sequential chunks (12000 bars), 4h ~4
+    (3000 bars), 1d just 1 (500 bars) — the 1h timeframe alone accounts
+    for the large majority of a symbol's own ~19 total network round-
+    trips, and those chunks are fetched SEQUENTIALLY within one
+    timeframe's own fetch (get_candles_range()'s own loop), not
+    parallelizable the way different SYMBOLS are. Capping 1h's own
+    history to 150 days (3600 bars, ~4 chunks — matching 4h's own cost
+    at the full 500 days) roughly halves a symbol's total network cost
+    without meaningfully hurting statistical power — 3600 hourly bars
+    is still far more than SNR_MIN_TRAIN_TRADES/SNR_MIN_TEST_TRADES
+    could ever need. 4h/1d keep the full base_days since they're cheap
+    regardless."""
+    return min(base_days, 150) if tf == "1h" else base_days
 SNR_REFRESH_SEC       = int(os.environ.get("VP_SNR_REFRESH_SEC", 4 * 3600))  # re-optimize every 4h
 SNR_TRAIN_FRAC        = 0.7
 SNR_EXCLUDED_STABLES  = {  # v0.99.287 — per direct user report ("даже стэйблы торгуются, это ппц"): a stablecoin's whole point is staying pegged near 1.0, so it has near-zero genuine volatility — ATR-based SL/TP is nearly meaningless on one, and an occasional "significant" backtest result is far more likely a rare depeg blip than a real repeatable pattern. Excluded by symbol regardless of volume, since a stablecoin pair can genuinely clear the liquidity floor on its own. (Gold-tracking PAXG/XAUT are NOT stablecoins — real, tradeable volatility — deliberately left out of this list.)
@@ -14346,7 +14369,7 @@ def snr_optimize_symbol(symbol):
     for tf in SNR_TF_CANDIDATES:
         try:
             now = int(time.time())
-            start_ts = now - SNR_HISTORY_DAYS * 86400
+            start_ts = now - snr_history_days_for_tf(tf) * 86400
             candles = get_candles_range(symbol, tf, start_ts, now)
             if not candles or len(candles) < 200:
                 continue
@@ -14724,7 +14747,7 @@ PRV_N_COMBOS          = len(PRV_MA_TYPE_CANDIDATES) * len(PRV_KC_LENGTH_CANDIDAT
 PRV_Z_CRITICAL        = 3.501  # Bonferroni-corrected one-tailed z-critical for PRV_N_COMBOS=216 independent comparisons at overall alpha=0.05 — same "hardcoded rather than adding scipy" reasoning as SNR_Z_CRITICAL's own comment
 PRV_MIN_TRAIN_TRADES  = 15
 PRV_MIN_TEST_TRADES   = 5
-PRV_HISTORY_DAYS      = 500
+PRV_HISTORY_DAYS      = 500  # 4h/1d timeframes — see snr_history_days_for_tf() (reused here too) for why 1h gets a shorter history
 PRV_TRAIN_FRAC        = 0.7
 PRV_MAX_WAIT_BARS     = 48
 PRV_UNIVERSE_SIZE     = 30  # per direct user request ("пока топ 30 по ликвидности с настройкой количества отображения/торговли") — unlike SNR, this DOES cap the universe by volume, by explicit user choice this time
@@ -14875,7 +14898,7 @@ def prv_optimize_symbol(symbol):
     for tf in PRV_TF_CANDIDATES:
         try:
             now = int(time.time())
-            start_ts = now - PRV_HISTORY_DAYS * 86400
+            start_ts = now - snr_history_days_for_tf(tf, PRV_HISTORY_DAYS) * 86400
             candles = get_candles_range(symbol, tf, start_ts, now)
             if not candles or len(candles) < 200:
                 continue
