@@ -15327,3 +15327,36 @@ v0.99.281 - Two real bugs fixed in the new Peak Reversal module, per
          present in the served HTML and /api/prv/restart_backtest still
          responds correctly, and /api/prv/status now returns waiting_
          for_slot as an actual boolean.
+
+v0.99.282 - CRITICAL FIX: the "живые сигналы всего" headline stat on
+         both S/R Zones and Peak Reversal counted signals from symbols
+         that had since fallen OUT of the current top-N ranking, per
+         direct user report (screenshot showing "живые сигналы всего:
+         1 · WR 100%" with the only displayed card, CVS, showing zero
+         live signals of its own — just backtest trades).
+         Confirmed: snr_compute_signal_stats()/prv_compute_signal_
+         stats() computed total/wins/losses/winrate/avg_pnl_r over
+         EVERY signal ever recorded in STATE["snr_signals"]/["prv_
+         signals"], with no filtering by whether that signal's own
+         symbol is still active — while by_symbol (right below in the
+         same function) already correctly scoped itself to active_
+         symbols. A symbol that fired a live signal, then got replaced
+         in a LATER re-ranking cycle by a better performer (exactly
+         what happened here, per direct user follow-up confirming they
+         only ever had 1 coin displayed the whole time), keeps
+         inflating this headline total forever with a signal no
+         currently-displayed card can ever show again — explaining
+         the disconnect directly.
+         Fixed both functions identically: signals are now filtered to
+         active_symbols before computing ANY of the headline stats, not
+         just by_symbol, so the number at the top of the tab can never
+         disagree with what's actually shown on the cards below it.
+         Verified directly: a signal manually attached to a symbol NOT
+         in the current active set correctly no longer counts toward
+         the headline total (0, not 1) or winrate (null, not 100%).
+         Also added SL/TP directly to each live-signal row's own text
+         (not just visible after clicking through to the chart) — per
+         direct user desire for "живого сигнала с тейком" visible up
+         front, applied to both S/R Zones and Peak Reversal alike.
+         Verified: py_compile (-W error), pyflakes, node --check, 64
+         routes, real runtime 200 on /, /api/snr/status, /api/prv/status.
