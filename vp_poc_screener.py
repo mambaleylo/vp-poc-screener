@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.280"
+APP_VERSION = "0.99.281"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1701,6 +1701,7 @@ STATE = {
     "snr_current_symbol": None, "snr_current_tf": None,
     "snr_progress_in_flight": [],  # v0.99.278 — per-symbol parallelism means multiple symbols are being processed at once now, not just one "current" symbol
     "prv_results": {}, "prv_last_backtest_finished": None, "prv_backtest_running": False,
+    "prv_waiting_for_slot": False,
     "prv_progress_done": 0, "prv_progress_total": 0, "prv_progress_in_flight": [],
     "prv_signals": deque(maxlen=500),
     "snr_signals": deque(maxlen=500),  # v0.99.271 — live signal log, same shape as lsw_signals/mirror_signals
@@ -14806,8 +14807,12 @@ def prv_backtest_loop():
                 PRV_BACKTEST_TRIGGER.wait(timeout=max(300, PRV_REFRESH_SEC))
                 PRV_BACKTEST_TRIGGER.clear()
                 continue
+            with state_lock:
+                STATE["prv_waiting_for_slot"] = True
             BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
             _prv_sem_acquired = True
+            with state_lock:
+                STATE["prv_waiting_for_slot"] = False
             universe = prv_build_universe()
             with state_lock:
                 STATE["prv_progress_done"] = 0
@@ -18401,6 +18406,7 @@ def api_prv_status():
         results = dict(STATE["prv_results"])
         last_finished = STATE["prv_last_backtest_finished"]
         running = STATE["prv_backtest_running"]
+        waiting = STATE["prv_waiting_for_slot"]
         done = STATE["prv_progress_done"]
         total = STATE["prv_progress_total"]
         in_flight = list(STATE["prv_progress_in_flight"])
@@ -18418,7 +18424,7 @@ def api_prv_status():
                        "recent_live_signals": recent_live_signals})
     return jsonify({
         "coins": coins, "last_backtest_finished": last_finished,
-        "backtest_running": running, "progress_done": done, "progress_total": total,
+        "backtest_running": running, "waiting_for_slot": waiting, "progress_done": done, "progress_total": total,
         "in_flight": in_flight, "live_signal_stats": signal_stats,
         "config": {"top_n": PRV_TOP_N, "display_n": PRV_DISPLAY_N, "timeframes": PRV_TF_CANDIDATES,
                    "ma_type_candidates": PRV_MA_TYPE_CANDIDATES, "kc_length_candidates": PRV_KC_LENGTH_CANDIDATES,
@@ -20102,6 +20108,7 @@ INDEX_HTML = """<!doctype html>
       <button id="resetNeuroBtn">Очистить Neuro</button>
       <button id="restartNeuroBacktestBtn">Перезапустить бэктест Neuro</button>
       <button id="restartSnrBacktestBtn">Перезапустить бэктест S/R</button>
+      <button id="restartPrvBacktestBtn">Перезапустить бэктест Peak Reversal</button>
       <button id="resetNqBtn">Очистить NQ</button>
       <button id="resetSimulatorBtn">Сбросить симулятор</button>
       <button id="resetRiskAutotuneBtn">Сбросить авто-тюнинг</button>
@@ -22649,7 +22656,7 @@ async function refreshSnr() {
     let progressHtml = '';
     if (data.waiting_for_slot) {
       progressHtml = `<div class="dim" style="margin-bottom:10px;font-size:11px;">
-        \u23f3 \u043e\u0436\u0438\u0434\u0430\u0435\u0442 \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e\u0433\u043e \u043c\u0435\u0441\u0442\u0430 \u0441\u0440\u0435\u0434\u0438 \u0431\u044d\u043a\u0442\u0435\u0441\u0442\u043e\u0432 \u0434\u0440\u0443\u0433\u0438\u0445 \u043c\u043e\u0434\u0443\u043b\u0435\u0439 (\u043e\u0434\u043d\u043e\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u0440\u0430\u0431\u043e\u0442\u0430\u044e\u0442 \u043d\u0435 \u0431\u043e\u043b\u044c\u0448\u0435 2 \u0438\u0437 8)
+        \u23f3 \u043e\u0436\u0438\u0434\u0430\u0435\u0442 \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e\u0433\u043e \u043c\u0435\u0441\u0442\u0430 \u0441\u0440\u0435\u0434\u0438 \u0431\u044d\u043a\u0442\u0435\u0441\u0442\u043e\u0432 \u0434\u0440\u0443\u0433\u0438\u0445 \u043c\u043e\u0434\u0443\u043b\u0435\u0439 (\u043e\u0434\u043d\u043e\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u0440\u0430\u0431\u043e\u0442\u0430\u044e\u0442 \u043d\u0435 \u0431\u043e\u043b\u044c\u0448\u0435 2 \u0438\u0437 9)
       </div>`;
     } else if (data.backtest_running) {
       const pct = data.progress_total ? Math.round(data.progress_done / data.progress_total * 100) : 0;
@@ -22740,7 +22747,7 @@ async function refreshPrv() {
     let progressHtml = '';
     if (data.waiting_for_slot) {
       progressHtml = `<div class="dim" style="margin-bottom:10px;font-size:11px;">
-        \u23f3 \u043e\u0436\u0438\u0434\u0430\u0435\u0442 \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e\u0433\u043e \u043c\u0435\u0441\u0442\u0430 \u0441\u0440\u0435\u0434\u0438 \u0431\u044d\u043a\u0442\u0435\u0441\u0442\u043e\u0432 \u0434\u0440\u0443\u0433\u0438\u0445 \u043c\u043e\u0434\u0443\u043b\u0435\u0439 (\u043e\u0434\u043d\u043e\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u0440\u0430\u0431\u043e\u0442\u0430\u044e\u0442 \u043d\u0435 \u0431\u043e\u043b\u044c\u0448\u0435 2 \u0438\u0437 8)
+        \u23f3 \u043e\u0436\u0438\u0434\u0430\u0435\u0442 \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e\u0433\u043e \u043c\u0435\u0441\u0442\u0430 \u0441\u0440\u0435\u0434\u0438 \u0431\u044d\u043a\u0442\u0435\u0441\u0442\u043e\u0432 \u0434\u0440\u0443\u0433\u0438\u0445 \u043c\u043e\u0434\u0443\u043b\u0435\u0439 (\u043e\u0434\u043d\u043e\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u0440\u0430\u0431\u043e\u0442\u0430\u044e\u0442 \u043d\u0435 \u0431\u043e\u043b\u044c\u0448\u0435 2 \u0438\u0437 9)
       </div>`;
     } else if (data.backtest_running) {
       const pct = data.progress_total ? Math.round(data.progress_done / data.progress_total * 100) : 0;
@@ -23691,6 +23698,9 @@ wireRestartButton('restartNeuroBacktestBtn', '/api/neuro/restart_backtest',
 wireRestartButton('restartSnrBacktestBtn', '/api/snr/restart_backtest',
   'Запустить новый цикл перебора параметров S/R Zones прямо сейчас, не дожидаясь расписания? Текущие результаты останутся видны, пока новый цикл не завершится.',
   'Перезапустить бэктест S/R');
+wireRestartButton('restartPrvBacktestBtn', '/api/prv/restart_backtest',
+  'Запустить новый цикл перебора параметров Peak Reversal прямо сейчас, не дожидаясь расписания? Текущие результаты останутся видны, пока новый цикл не завершится.',
+  'Перезапустить бэктест Peak Reversal');
 wireResetButton('resetNqBtn', '/api/reset/nq',
   'Удалить накопленный бэктест и сигналы NQ Model? Это необратимо.',
   'Очистить NQ');
