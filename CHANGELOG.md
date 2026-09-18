@@ -15295,3 +15295,35 @@ v0.99.280 - NEW module: "Peak Reversal", 5th tab, per direct user request
          correct defaults, and — directly tested this time before
          shipping — prv_display_n correctly round-trips through a POST
          and a subsequent fresh GET, zero surrogate escapes.
+
+v0.99.281 - Two real bugs fixed in the new Peak Reversal module, per
+         direct user report ("Бэктест не начинается даже, кнопки
+         рестарта нету").
+
+         BUG 1 (confirmed): the restart button was genuinely missing —
+         v0.99.280 built the full backend (PRV_BACKTEST_TRIGGER, POST
+         /api/prv/restart_backtest, already tested and returning 200)
+         but never actually added the HTML button or its JS wiring,
+         unlike every other module's own restart/reset button. Added
+         "Перезапустить бэктест Peak Reversal" next to S/R Zones' own.
+
+         BUG 2 (found while investigating): PRV never got the
+         "waiting for a slot" indicator SNR has had since v0.99.272 —
+         with 9 backtest loops now sharing just 2 concurrency slots
+         (v0.99.268's own cap), a cycle queued behind others showed
+         nothing at all, indistinguishable from "not started yet" or
+         "genuinely stuck". Added prv_waiting_for_slot (same shape as
+         snr_waiting_for_slot), wired through the backtest loop, /api/
+         prv/status, and the tab's own progress display — the frontend
+         logic itself was already correct (refreshPrv() was generated
+         by copying the already-fixed refreshSnr(), which already
+         checked data.waiting_for_slot), it just had no backend field
+         to read yet. Also corrected a stale "2 из 8" note (written
+         before PRV itself became the 9th module sharing the semaphore)
+         to "2 из 9" in both S/R Zones' and Peak Reversal's own copies
+         of this note.
+         Verified: py_compile (-W error), pyflakes, node --check, 64
+         routes, real runtime 200 confirming the restart button is now
+         present in the served HTML and /api/prv/restart_backtest still
+         responds correctly, and /api/prv/status now returns waiting_
+         for_slot as an actual boolean.
