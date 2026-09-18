@@ -15572,3 +15572,33 @@ v0.99.289 - CRITICAL DEADLOCK FIX for S/R Zones and Peak Reversal, per
          Verified: py_compile (-W error), pyflakes, 64 routes, real
          runtime 200 on /, /api/snr/status, /api/prv/status, and
          /api/settings all responding correctly.
+
+v0.99.290 - Loosened Peak Reversal's own significance bar, per direct
+         user request ("Нет, лучше просто смягчить порог сам по себе,
+         чтобы чаще что-то находило") after the strict z>=3.501
+         (Bonferroni-corrected at overall alpha=0.05 for all 216
+         parameter combinations) routinely found zero validated symbols
+         on real market data — confirmed the deadlock fix (v0.99.289)
+         resolved the freeze, but the underlying "almost never finds
+         anything" concern (first raised while discussing the earlier
+         28/30-then-zero-results report) was real and separate.
+         PRV_Z_CRITICAL lowered from 3.501 to 3.113 — still Bonferroni-
+         corrected for the same 216 comparisons, just at overall
+         alpha=0.20 instead of 0.05 (a 20% chance of at least one false
+         positive across the whole search, up from 5%), NOT reverted to
+         an uncorrected "average > 0" bar (which earlier testing showed
+         leaks 40-70% false positives on pure noise). Directly verified
+         the new threshold's own false-positive rate before shipping:
+         0/30 on pure random-walk synthetic data, same test methodology
+         as the original 3.501 threshold's own v0.99.277 verification —
+         confirms this loosening doesn't reintroduce the noise problem,
+         though it doesn't guarantee more real findings will emerge on
+         actual market data (that depends on whether a genuine, if more
+         modest, edge exists there at all). SNR's own z>=3.23 threshold
+         left untouched — it's been finding results (e.g. the CVS
+         example from an earlier session), so there was no reported
+         need to loosen it.
+         Updated the tab's own displayed threshold text (">=3.501" ->
+         ">=3.11") to match.
+         Verified: py_compile (-W error), pyflakes, node --check, 64
+         routes, real runtime 200 on /, /api/prv/status.
