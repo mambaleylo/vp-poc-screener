@@ -15409,3 +15409,28 @@ v0.99.284 - Unified the ~13 header "Очистить X"/"Перезапусти�
          routes, real runtime 200 confirming all button classes are
          correctly present in the served HTML and prv_enabled correctly
          persists through a settings POST.
+
+v0.99.285 - Fixed the overall backtest-cycle ceiling for S/R Zones and
+         Peak Reversal being far too generous, per direct user report
+         ("Перебор по p/r завис на 29 из 30, zero usab result, на
+         другом телефоне 28/30"). First tested whether the underlying
+         as_completed(timeout=X) mechanism itself was broken (a
+         synthetic hung-worker test confirmed it correctly bounds the
+         wait and correctly proceeds with whatever completed once the
+         timeout fires — not a bug in that mechanism itself). The real
+         issue: the overall ceiling was computed as PER_SYMBOL_MAX_SEC *
+         len(universe) — treating the worst case as if every symbol
+         could take the full per-symbol timeout SEQUENTIALLY, ignoring
+         that up to WORKERS=8 run CONCURRENTLY. For a 30-symbol universe
+         that's 300*30=9000s (2.5 HOURS) before a cycle gives up on a
+         genuinely stuck symbol and moves on with partial results —
+         matching exactly the "stuck near the very end for a very long
+         time" symptom reported on two different phones. Fixed by
+         scaling the ceiling by how many BATCHES of WORKERS concurrent
+         slots are actually needed instead — SNR_/PRV_PER_SYMBOL_MAX_SEC
+         * ceil(len(universe)/WORKERS) — 300*ceil(30/8)=1200s (20min)
+         instead of 9000s (2.5h) for the same 30-symbol universe; for
+         SNR's own current ~988-symbol universe, 620min (~10.3h) instead
+         of ~82h.
+         Verified: py_compile (-W error), pyflakes, real runtime 200 on
+         /, /api/snr/status, /api/prv/status.
