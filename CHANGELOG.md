@@ -15602,3 +15602,33 @@ v0.99.290 - Loosened Peak Reversal's own significance bar, per direct
          ">=3.11") to match.
          Verified: py_compile (-W error), pyflakes, node --check, 64
          routes, real runtime 200 on /, /api/prv/status.
+
+v0.99.291 - Grew S/R Zones' own universe back up via a lower liquidity
+         floor, per direct user request ("давай увеличим количество
+         монет лучше, то есть порог ликвидности сменим") — after
+         v0.99.287's restored MIN_VOL_USD=$500k floor cut the universe
+         down to ~300 candidates, which then routinely found zero
+         validated results (a smaller universe means proportionally
+         fewer chances of a symbol clearing the same strict z-test bar,
+         even if the same underlying real edge rate exists — confirmed
+         no actual bug in v0.99.287's own filtering logic first).
+         Rather than loosening the z-test's own significance threshold
+         (the fix just applied to Peak Reversal, v0.99.290, for the
+         identical "almost never finds anything" symptom) — the user
+         specifically asked for a WIDER candidate pool instead, keeping
+         the statistical bar itself untouched. Added a dedicated
+         SNR_MIN_VOL_USD constant (default $50k, a tenth of the shared
+         MIN_VOL_USD) — NOT lowering the shared MIN_VOL_USD itself,
+         since LSW and MSNR also depend on that constant and weren't
+         asked to change. Still excludes genuinely dead/near-zero-
+         volume contracts, just far more permissively than the shared
+         $500k floor.
+         Verified directly: on a synthetic ticker set matching a
+         realistic volume distribution, the universe grew from ~343
+         candidates (old $500k floor) to ~671 (new $50k floor) — nearly
+         2x more candidates, each still getting an equal shot at the
+         same honest, unchanged z>=3.23 bar. Also confirmed SNR_MIN_
+         VOL_USD is referenced ONLY inside snr_build_universe() — no
+         other module's own universe-building was touched.
+         Verified: py_compile (-W error), pyflakes, real runtime 200 on
+         /, /api/snr/status.
