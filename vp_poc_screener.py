@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.285"
+APP_VERSION = "0.99.287"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3143,11 +3143,32 @@ def fetch_candles_concurrent(fetch_specs, workers=WORKERS):
             log_error(f"fetch_candles_concurrent {symbol}: {e}")
             return i, None
 
-    with ThreadPoolExecutor(max_workers=workers) as ex:
+    # v0.99.286 — CRITICAL FIX, per direct user report ("Заметил кстати
+    # что все бэктесты стопаются не доходя до конца"): this is used by
+    # EVERY module's own outcome-tracking (snr/prv/lsw/mirror_track_
+    # signal_outcomes and more) — had NO timeout at all, neither per-
+    # future nor overall, and used the context-manager form whose own
+    # implicit shutdown(wait=True) would ALSO hang on a stuck future. A
+    # single genuinely stuck candle fetch here could freeze outcome
+    # tracking for every module using it at once. results[i] already
+    # defaults to None (its own pre-initialized value above) for
+    # anything that never completes, so no extra fallback logic is
+    # needed beyond the timeout itself.
+    FETCH_PER_ITEM_TIMEOUT = HTTP_TIMEOUT * 3 + 30
+    ex = ThreadPoolExecutor(max_workers=workers)
+    try:
         futs = [ex.submit(_one, i, spec) for i, spec in enumerate(fetch_specs)]
-        for fut in as_completed(futs):
-            i, candles = fut.result()
-            results[i] = candles
+        try:
+            for fut in as_completed(futs, timeout=FETCH_PER_ITEM_TIMEOUT * math.ceil(len(futs) / workers)):
+                try:
+                    i, candles = fut.result(timeout=FETCH_PER_ITEM_TIMEOUT)
+                    results[i] = candles
+                except (TimeoutError, FutureTimeoutError):
+                    log_error(f"fetch_candles_concurrent: a fetch exceeded {FETCH_PER_ITEM_TIMEOUT}s — leaving it as None, abandoning stuck thread")
+        except (TimeoutError, FutureTimeoutError):
+            log_error("fetch_candles_concurrent: overall ceiling exceeded waiting on a stuck fetch — returning whatever completed")
+    finally:
+        ex.shutdown(wait=False)
     return results
 
 
@@ -6920,7 +6941,27 @@ def scan_loop():
                 for (s, interval, _limit), candles in zip(cache_specs, fetched):
                     candle_cache[(s, interval)] = candles
 
-            with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            # v0.99.286 — CRITICAL FIX, per direct user report ("Заметил
+            # кстати что все бэктесты стопаются не доходя до конца"):
+            # this is the CORE scan cycle (Volume Profile + Scalp) that
+            # everything else in the app runs alongside — it used the
+            # context-manager form (`with ThreadPoolExecutor(...) as ex:`)
+            # with a bare `for _ in as_completed(futs): pass`, meaning
+            # NEITHER a per-symbol timeout NOR an overall ceiling existed
+            # at all. A single genuinely stuck symbol here wouldn't just
+            # delay this one cycle — the context manager's own implicit
+            # ex.__exit__() -> shutdown(wait=True) would ALSO block
+            # waiting for that same stuck thread, freezing the app's own
+            # main scan loop indefinitely (and, since GLOBAL_HTTP_
+            # SEMAPHORE slots stay held by a genuinely-hung request, this
+            # could starve every OTHER module's own network access too —
+            # a very plausible explanation for "every backtest" appearing
+            # to stall, not just one). Same explicit-ex/try-finally/per-
+            # future-timeout/scaled-overall-ceiling pattern as every other
+            # module's own fix this session (v0.99.196 lineage).
+            SCAN_PER_SYMBOL_TIMEOUT = HTTP_TIMEOUT * 3 * 3 + 60
+            ex = ThreadPoolExecutor(max_workers=WORKERS)
+            try:
                 futs = []
                 if VOLUME_PROFILE_ENABLED:
                     futs += [ex.submit(scan_symbol, s) for s in universe]
@@ -6932,8 +6973,18 @@ def scan_loop():
                         key=lambda x: -x[1]["score"]
                     )[:SCALP_SIGNAL_TOP_N]
                     futs += [ex.submit(scan_symbol_scalp_signal, sym, rec) for sym, rec in top_recs]
-                for _ in as_completed(futs):
-                    pass
+                try:
+                    for fut in as_completed(futs, timeout=SCAN_PER_SYMBOL_TIMEOUT * math.ceil(len(futs) / WORKERS) if futs else 1):
+                        try:
+                            fut.result(timeout=SCAN_PER_SYMBOL_TIMEOUT)
+                        except (TimeoutError, FutureTimeoutError):
+                            log_error(f"main scan cycle: a symbol exceeded {SCAN_PER_SYMBOL_TIMEOUT}s — skipping, abandoning stuck thread")
+                        except Exception as e:
+                            log_error(f"main scan cycle: {e}")
+                except (TimeoutError, FutureTimeoutError):
+                    log_error("main scan cycle: overall ceiling exceeded waiting on a stuck symbol — proceeding with whatever completed")
+            finally:
+                ex.shutdown(wait=False)
             if VOLUME_PROFILE_ENABLED:
                 update_signal_outcomes()
                 auto_tune_cycle(universe)
@@ -7024,10 +7075,25 @@ def scalp_loop():
                 except Exception as e:
                     log_error(f"scalp process_one {symbol}: {e}")
 
-            with ThreadPoolExecutor(max_workers=WORKERS) as ex:
+            # v0.99.286 — same CRITICAL FIX as the main scan cycle's own
+            # (see its own comment for the full incident) — this had the
+            # identical no-timeout context-manager pattern.
+            SCALP_PER_SYMBOL_TIMEOUT = HTTP_TIMEOUT * 3 * 3 + 60
+            ex = ThreadPoolExecutor(max_workers=WORKERS)
+            try:
                 futs = [ex.submit(process_one, s) for s in universe]
-                for _ in as_completed(futs):
-                    pass
+                try:
+                    for fut in as_completed(futs, timeout=SCALP_PER_SYMBOL_TIMEOUT * math.ceil(len(futs) / WORKERS) if futs else 1):
+                        try:
+                            fut.result(timeout=SCALP_PER_SYMBOL_TIMEOUT)
+                        except (TimeoutError, FutureTimeoutError):
+                            log_error(f"scalp_loop: a symbol exceeded {SCALP_PER_SYMBOL_TIMEOUT}s — skipping, abandoning stuck thread")
+                        except Exception as e:
+                            log_error(f"scalp_loop: {e}")
+                except (TimeoutError, FutureTimeoutError):
+                    log_error("scalp_loop: overall ceiling exceeded waiting on a stuck symbol — proceeding with whatever completed")
+            finally:
+                ex.shutdown(wait=False)
 
             t1 = time.time()
             with state_lock:
@@ -10331,7 +10397,7 @@ def _msnr_run_one_backtest_cycle(t0):
             # outcome as an exception — keeps last-known-good data).
             PER_SYMBOL_TIMEOUT = HTTP_TIMEOUT * 3 * 3 + 60
             try:
-                for fut in as_completed(futs, timeout=PER_SYMBOL_TIMEOUT * len(universe)):
+                for fut in as_completed(futs, timeout=PER_SYMBOL_TIMEOUT * math.ceil(len(universe) / WORKERS)):
                     try:
                         res = fut.result(timeout=PER_SYMBOL_TIMEOUT)
                     except (TimeoutError, FutureTimeoutError):
@@ -10566,7 +10632,7 @@ def msnr_live_loop():
                 try:
                     futs = {ex.submit(msnr_scan_symbol_live, s): s for s in live_universe}
                     try:
-                        for fut in as_completed(futs, timeout=PER_SYM_TO * len(live_universe)):
+                        for fut in as_completed(futs, timeout=PER_SYM_TO * math.ceil(len(live_universe) / WORKERS)):
                             symbol = futs[fut]
                             try:
                                 fut.result(timeout=PER_SYM_TO)
@@ -10592,7 +10658,7 @@ def msnr_live_loop():
                 try:
                     futs = {ex.submit(msnr_scan_addon_live, s): s for s in live_universe}
                     try:
-                        for fut in as_completed(futs, timeout=PER_SYM_TO * len(live_universe)):
+                        for fut in as_completed(futs, timeout=PER_SYM_TO * math.ceil(len(live_universe) / WORKERS)):
                             symbol = futs[fut]
                             try:
                                 fut.result(timeout=PER_SYM_TO)
@@ -10704,10 +10770,25 @@ def ft5_live_loop():
             with state_lock:
                 live_universe = list(STATE["ft5_live_universe"])
             if live_universe:
-                with ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe))) as ex:
+                # v0.99.286 — same CRITICAL FIX as the main scan cycle's
+                # own (see its own comment for the full incident) — this
+                # had the identical no-timeout context-manager pattern.
+                FT5_LIVE_PER_SYMBOL_TIMEOUT = HTTP_TIMEOUT * 3 + 30
+                ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe)))
+                try:
                     futs = [ex.submit(ft5_scan_symbol_live, s) for s in live_universe]
-                    for _ in as_completed(futs):
-                        pass
+                    try:
+                        for fut in as_completed(futs, timeout=FT5_LIVE_PER_SYMBOL_TIMEOUT * math.ceil(len(futs) / WORKERS)):
+                            try:
+                                fut.result(timeout=FT5_LIVE_PER_SYMBOL_TIMEOUT)
+                            except (TimeoutError, FutureTimeoutError):
+                                log_error(f"ft5_live_loop: a symbol exceeded {FT5_LIVE_PER_SYMBOL_TIMEOUT}s — skipping, abandoning stuck thread")
+                            except Exception as e:
+                                log_error(f"ft5_live_loop: {e}")
+                    except (TimeoutError, FutureTimeoutError):
+                        log_error("ft5_live_loop: overall ceiling exceeded waiting on a stuck symbol — proceeding with whatever completed")
+                finally:
+                    ex.shutdown(wait=False)
             update_ft5_signal_outcomes()
         except Exception as e:
             log_error(f"ft5_live_loop: {e}")
@@ -11862,7 +11943,7 @@ def mirror_backtest_loop():
             try:
                 futs = {ex.submit(_backtest_one, s): s for s in universe}
                 try:
-                    for fut in as_completed(futs, timeout=PER_SYMBOL_TIMEOUT_M * len(universe)):
+                    for fut in as_completed(futs, timeout=PER_SYMBOL_TIMEOUT_M * math.ceil(len(universe) / WORKERS)):
                         symbol = futs[fut]
                         try:
                             results, meta, tuned = fut.result(timeout=PER_SYMBOL_TIMEOUT_M)
@@ -11961,7 +12042,7 @@ def mirror_live_loop():
                 try:
                     futs = {ex.submit(mirror_scan_symbol_live, s): s for s in live_universe}
                     try:
-                        for fut in as_completed(futs, timeout=PER_SYM_TO * len(live_universe)):
+                        for fut in as_completed(futs, timeout=PER_SYM_TO * math.ceil(len(live_universe) / WORKERS)):
                             symbol = futs[fut]
                             try:
                                 fut.result(timeout=PER_SYM_TO)
@@ -13255,7 +13336,7 @@ def _lsw_run_one_backtest_cycle(t0):
             futs = {ex.submit(_lsw_backtest_one, s): s for s in universe}
             PER_SYMBOL_TIMEOUT_L = HTTP_TIMEOUT * 3 * 3 + 60
             try:
-                completed_iter = as_completed(futs, timeout=PER_SYMBOL_TIMEOUT_L * len(universe))
+                completed_iter = as_completed(futs, timeout=PER_SYMBOL_TIMEOUT_L * math.ceil(len(universe) / WORKERS))
                 for fut in completed_iter:
                     symbol = futs[fut]
                     try:
@@ -13334,7 +13415,7 @@ def lsw_live_loop():
                 try:
                     futs = {ex.submit(lsw_scan_symbol_live, s): s for s in live_universe}
                     try:
-                        for fut in as_completed(futs, timeout=PER_SYM_TO * len(live_universe)):
+                        for fut in as_completed(futs, timeout=PER_SYM_TO * math.ceil(len(live_universe) / WORKERS)):
                             symbol = futs[fut]
                             try:
                                 fut.result(timeout=PER_SYM_TO)
@@ -13578,7 +13659,7 @@ def ema_bull_loop():
                     futs = [ex.submit(ema_touch_scan_symbol, s) for s in universe]
                     PER_SYM_TO = HTTP_TIMEOUT * 3 * 3 + 60
                     try:
-                        for fut in as_completed(futs, timeout=PER_SYM_TO * len(universe)):
+                        for fut in as_completed(futs, timeout=PER_SYM_TO * math.ceil(len(universe) / WORKERS)):
                             try:
                                 res = fut.result(timeout=PER_SYM_TO)
                                 if res:
@@ -13906,7 +13987,7 @@ def amd_backtest_loop():
                 futs = {ex.submit(amd_backtest_symbol, s): s for s in universe}
                 PER = HTTP_TIMEOUT * 3 * 3 + 60
                 try:
-                    for fut in as_completed(futs, timeout=PER * len(universe)):
+                    for fut in as_completed(futs, timeout=PER * math.ceil(len(universe) / WORKERS)):
                         symbol = futs[fut]
                         try:
                             trades, summary = fut.result(timeout=PER)
@@ -13959,7 +14040,7 @@ def amd_loop():
                     futs = [ex.submit(amd_scan_symbol_live, s) for s in universe]
                     PER = HTTP_TIMEOUT * 3 * 3 + 60
                     try:
-                        for fut in as_completed(futs, timeout=PER * len(universe)):
+                        for fut in as_completed(futs, timeout=PER * math.ceil(len(universe) / WORKERS)):
                             try:
                                 r = fut.result(timeout=PER)
                                 if r:
@@ -14025,6 +14106,11 @@ SNR_MIN_TEST_TRADES   = 5                    # minimum TEST closed trades to tru
 SNR_HISTORY_DAYS      = 500                  # how far back to fetch candles for the backtest
 SNR_REFRESH_SEC       = int(os.environ.get("VP_SNR_REFRESH_SEC", 4 * 3600))  # re-optimize every 4h
 SNR_TRAIN_FRAC        = 0.7
+SNR_EXCLUDED_STABLES  = {  # v0.99.287 — per direct user report ("даже стэйблы торгуются, это ппц"): a stablecoin's whole point is staying pegged near 1.0, so it has near-zero genuine volatility — ATR-based SL/TP is nearly meaningless on one, and an occasional "significant" backtest result is far more likely a rare depeg blip than a real repeatable pattern. Excluded by symbol regardless of volume, since a stablecoin pair can genuinely clear the liquidity floor on its own. (Gold-tracking PAXG/XAUT are NOT stablecoins — real, tradeable volatility — deliberately left out of this list.)
+    "USDC", "BUSD", "TUSD", "DAI", "FDUSD", "USDD", "GUSD", "USDP", "PYUSD",
+    "EURT", "EURC", "USTC", "UST", "FRAX", "LUSD", "SUSD", "USDE", "USDJ",
+    "HUSD", "USDN", "OUSD", "MIM", "USDX", "CUSD", "RSV",
+}
 SNR_N_COMBOS          = len(SNR_TF_CANDIDATES) * len(SNR_PIVOT_CANDIDATES) * len(SNR_STRENGTH_CANDIDATES) * len(SNR_RR_CANDIDATES)  # v0.99.277 — 81 total combinations tried per symbol (3 tf x 3 pivot x 3 strength x 3 rr)
 SNR_Z_CRITICAL        = 3.23  # v0.99.277 — Bonferroni-corrected one-tailed z-critical for SNR_N_COMBOS=81 independent comparisons at overall alpha=0.05 (alpha/81 per comparison ≈ 0.000617 -> z≈3.23, computed via the standard normal inverse CDF — hardcoded rather than adding scipy as a dependency, same "no scipy on a phone via Termux" reasoning _T_CRITICAL_TABLE's own comment already documents elsewhere in this file). See snr_optimize_symbol()'s own docstring for why a plain "average > 0" bar wasn't enough.
 SNR_PER_SYMBOL_MAX_SEC = int(os.environ.get("VP_SNR_PER_SYMBOL_MAX_SEC", 300))  # v0.99.271 — hard ceiling per symbol now that the universe can be much bigger than 3 fixed coins, same "one stuck symbol can't block the whole cycle" discipline as every other module
@@ -14035,34 +14121,49 @@ _snr_prev_signal_keys = set()  # v0.99.271 — (symbol, bar_time) pairs already 
 
 
 def snr_build_universe():
-    """v0.99.276 — per direct user follow-up ("может тогда давай уберем
-    сортировку по объему, пусть все поучаствую и если у монеты лучший
-    средний +r то она и займет первое место"): v0.99.274 removed the
-    forced seed symbols but still capped candidates to the top SNR_
-    UNIVERSE_SIZE BY VOLUME — gold (XAU_USDT) likely doesn't clear
-    even the baseline MIN_VOL_USD liquidity floor at all (MSNR keeps
-    its own separate hardcoded gold symbol list — MSNR_SYMBOLS —
-    specifically because gold-tracking contracts don't reliably clear
-    the standard volume-ranked universe either), so it could have been
-    silently excluded from the candidate pool entirely, never even
-    reaching the honest train/test comparison. Now returns EVERY
-    "_USDT" contract Gate.io lists — no volume ranking, no liquidity
-    floor — so the ONLY thing deciding a symbol's fate is its own
-    honest train+test result; a genuinely illiquid/broken contract
-    simply won't produce enough valid closed trades to pass
-    validation anyway (SNR_MIN_TRAIN_TRADES/SNR_MIN_TEST_TRADES), so
-    this doesn't need a separate liquidity gate to filter those out."""
+    """v0.99.287 — per direct user follow-up ("В s/r все подряд торгуется...
+    даже стэйблы торгуются, это ппц... Перебью, или как в msnr может,
+    смотри сам как лучше для этого индикатора"): v0.99.276 went all the
+    way to "every single _USDT contract, no floor at all" — which also
+    let through stablecoin pairs (USDC/BUSD/etc against USDT), whose
+    whole point is to stay pegged near 1.0 and thus have near-zero
+    genuine volatility; ATR-based SL/TP on such a pair is nearly
+    meaningless, and an occasional "significant" backtest result there
+    is far more likely to be a data glitch or a rare depeg blip than a
+    real, repeatable mean-reversion pattern. Landed on msnr_build_
+    backtest_universe()'s own compromise (see its own v0.99.48 comment,
+    which argues the EXACT same point the user made for SNR earlier —
+    "liquidity and signal quality are different things"): keep the
+    MIN_VOL_USD liquidity floor (filters genuinely illiquid junk, and
+    incidentally most low-volume stablecoin pairs too) but do NOT
+    additionally cap to a "top N by volume" ranking on top of that —
+    every sufficiently-liquid symbol still gets an equal shot at the
+    honest train/test comparison, matching the user's own original
+    "let the test decide, not a popularity rank" intent. On top of
+    that floor, an EXPLICIT stablecoin exclusion — volume alone can't
+    reliably catch these (a stablecoin pair can genuinely clear
+    MIN_VOL_USD), so they're filtered by symbol regardless of volume."""
     try:
         tickers = get_tickers()
-        seen = set()
-        universe = []
+        seen_vol = {}
         for t in tickers:
             name = t.get("contract", "")
-            if not name.endswith("_USDT") or name in seen:
+            if not name.endswith("_USDT"):
                 continue
-            seen.add(name)
-            universe.append(name)
-        return universe
+            base = name[:-len("_USDT")]
+            if base in SNR_EXCLUDED_STABLES:
+                continue
+            vol = t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0
+            try:
+                vol = float(vol)
+            except (TypeError, ValueError):
+                vol = 0.0
+            if vol < MIN_VOL_USD:
+                continue
+            if name not in seen_vol or vol > seen_vol[name]:
+                seen_vol[name] = vol
+        ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
+        return [s[0] for s in ranked]
     except Exception as e:
         log_error(f"snr_build_universe: {e}")
         return []
@@ -14640,13 +14741,23 @@ _prv_prev_signal_keys = set()
 def prv_build_universe():
     """Top PRV_UNIVERSE_SIZE symbols by 24h quote volume — per direct
     user choice this time ("пока топ 30 по ликвидности"), unlike SNR's
-    own uncapped universe (v0.99.276)."""
+    own uncapped universe (v0.99.276).
+    v0.99.287 — same stablecoin exclusion as snr_build_universe()'s own
+    (reusing the same SNR_EXCLUDED_STABLES set — it's a general-purpose
+    list, not SNR-specific): stablecoin pairs often carry genuinely HIGH
+    raw volume (arbitrage/settlement flow), so a pure volume ranking
+    with no awareness of this can rank one straight into the top 30 —
+    even more exposed to this than SNR's own MIN_VOL_USD-floor approach,
+    since there's no floor here at all, just a top-N cut."""
     try:
         tickers = get_tickers()
         seen_vol = {}
         for t in tickers:
             name = t.get("contract", "")
             if not name.endswith("_USDT"):
+                continue
+            base = name[:-len("_USDT")]
+            if base in SNR_EXCLUDED_STABLES:
                 continue
             vol = t.get("volume_24h_quote") or t.get("volume_24h_settle") or t.get("volume_24h") or 0
             try:
