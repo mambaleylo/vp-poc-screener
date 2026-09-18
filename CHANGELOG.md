@@ -15375,3 +15375,37 @@ v0.99.283 - Live signals for S/R Zones and Peak Reversal now shown as a
          same signals twice.
          Verified: py_compile (-W error), pyflakes, node --check, 64
          routes, real runtime 200 on /, /api/snr/status, /api/prv/status.
+
+v0.99.284 - Unified the ~13 header "Очистить X"/"Перезапустить бэктест X"
+         buttons' visual style, and hide buttons for disabled modules,
+         per direct user request ("надо все эти кнопки привести к
+         красивому единому виду, и, может, отображать только те, для
+         которых включен бэктест").
+         Root cause of the inconsistency found: an old CSS rule named
+         only 7 of the ~13 buttons by ID directly (#resetVolumeBtn,
+         #resetScalpBtn, #resetMsnrBtn, #resetFt5Btn, #resetMirrorBtn,
+         #resetRiskAutotuneBtn, #resetSimulatorBtn) with a red/danger
+         look — every other button (resetLswBtn, resetNeuroBtn, both
+         restart*BacktestBtn buttons, resetNqBtn) was simply never
+         included in that list, silently falling back to the browser's
+         own plain default button appearance. Removed that ad-hoc rule
+         entirely and replaced it with two explicit, meaningful classes
+         applied to every one of the ~13 buttons: .btnDanger (red — for
+         irreversible data-clearing actions, "Очистить X"/"Сбросить X")
+         and .btnNeutral (grey — for safe, non-destructive actions,
+         "Перезапустить бэктест X", which just wakes a cycle early and
+         keeps existing data until it's naturally replaced).
+         Added updateHeaderButtonVisibility(): hides a module's own
+         reset/restart button(s) when that module's "enabled" setting
+         is off (msnr_enabled, ft5_enabled, mirror_enabled, lsw_enabled,
+         neuro_enabled, snr_enabled, prv_enabled, nq_enabled) — called
+         on initial page load, whenever the settings modal loads fresh
+         data, and immediately after any checkbox setting is saved, so
+         toggling a module off hides its now-irrelevant button without
+         needing a page reload. Volume/Scalp/simulator/risk-autotune
+         reset buttons stay always visible — they aren't gated by a
+         single module "enabled" toggle the same way.
+         Verified: py_compile (-W error), pyflakes, node --check, 64
+         routes, real runtime 200 confirming all button classes are
+         correctly present in the served HTML and prv_enabled correctly
+         persists through a settings POST.
