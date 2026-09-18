@@ -15684,3 +15684,31 @@ v0.99.293 - Peak Reversal switched from a fixed top-30-by-volume
          from a fixed 30 to ~662 candidates.
          Verified: py_compile (-W error), pyflakes, node --check, 64
          routes, real runtime 200 on /, /api/prv/status.
+
+v0.99.294 - Added "va-bank" (ва-банк) mode to Sweep, S/R Zones, and
+         Peak Reversal, per direct user request ("добавь / проверь на
+         галочку вабанк... если включена, то игнорит основная
+         настройка с процентом и торгуется на весь депо"). MSNR
+         already had this exact mechanism (MSNR_ALL_IN_ENABLED,
+         v0.99.157) — extended the identical pattern to the other
+         three modules that autotrade: when enabled, ignores
+         AUTOTRADE_RISK_PCT_OF_BALANCE and uses ~95% of total equity as
+         MARGIN per trade instead (LSW_ALL_IN_MARGIN_PCT/SNR_ALL_IN_
+         MARGIN_PCT/PRV_ALL_IN_MARGIN_PCT, each independently
+         configurable, default 95%). Leverage is still auto-computed
+         from the signal's own SL distance exactly as before — this
+         doesn't bring liquidation any closer, it just puts nearly the
+         whole deposit's margin behind each trade instead of the usual
+         risk-percentage slice. execute_autotrade()'s own all_in_
+         margin_pct parameter already supported this generically (built
+         for MSNR originally) — just needed wiring into LSW's, SNR's,
+         and PRV's own execute_autotrade() call sites.
+         New settings: lsw_all_in_enabled, snr_all_in_enabled, prv_
+         all_in_enabled — all off by default, matching MSNR's own
+         convention. Added matching checkboxes next to each module's
+         own invert-opening toggle in the settings modal.
+         Verified: py_compile (-W error), pyflakes, node --check, 64
+         routes, real runtime 200 confirming all three new settings
+         keys default to false and the corresponding checkboxes are
+         present in the served HTML, and that toggling snr_all_in_
+         enabled via POST correctly persists.
