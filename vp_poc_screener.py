@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.291"
+APP_VERSION = "0.99.292"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5981,6 +5981,8 @@ def save_state():
                 "msnr_symbol_overrides": STATE["msnr_symbol_overrides"],
                 "msnr_autotrade_symbols": STATE["msnr_autotrade_symbols"],
                 "msnr_autotrade_top_set": STATE["msnr_autotrade_top_set"],
+                "msnr_backtest_results": STATE["msnr_backtest_results"],  # v0.99.292 — CRITICAL FIX, per direct user report ("почему результат бэктеста по sweep не пережил перезапуска? Проверь mnsr и два новых индикатора"): never persisted before — a restart silently wiped every MSNR backtest result (the discovered zone/RR settings for every symbol), forcing a full re-scan from scratch
+                "msnr_backtest_results_raw": STATE["msnr_backtest_results_raw"],
                 "ft5_signals": list(STATE["ft5_signals"]),
                 "ft5_symbol_overrides": STATE["ft5_symbol_overrides"],
                 "mirror_signals": list(STATE["mirror_signals"]),
@@ -5988,6 +5990,7 @@ def save_state():
                 "mirror_symbol_overrides": STATE["mirror_symbol_overrides"],
                 "mirror_live_universe": STATE["mirror_live_universe"],
                 "lsw_signals": list(STATE["lsw_signals"]),
+                "lsw_backtest_results": STATE["lsw_backtest_results"],  # v0.99.292 — CRITICAL FIX, same incident as msnr_backtest_results' own — never persisted before, a restart silently wiped every LSW backtest result
                 "snr_results": STATE["snr_results"],  # v0.99.271 — CRITICAL FIX: this and snr_signals/active/display symbols were never actually persisted (save_state() builds an explicit key list, not a generic STATE dump), so a restart would silently wipe every S/R Zones backtest result and live signal
                 "snr_signals": list(STATE["snr_signals"]),
                 "snr_active_symbols": list(_snr_active_symbols),
@@ -6121,6 +6124,8 @@ def load_state():
         msnr_symbol_overrides = data.get("msnr_symbol_overrides", {})
         msnr_autotrade_symbols = data.get("msnr_autotrade_symbols", {})
         msnr_autotrade_top_set = data.get("msnr_autotrade_top_set", [])
+        msnr_backtest_results = data.get("msnr_backtest_results", {})
+        msnr_backtest_results_raw = data.get("msnr_backtest_results_raw", {})
         ft5_signals = data.get("ft5_signals", [])
         ft5_symbol_overrides = data.get("ft5_symbol_overrides", {})
         mirror_signals = data.get("mirror_signals", [])
@@ -6128,6 +6133,7 @@ def load_state():
         mirror_symbol_overrides = data.get("mirror_symbol_overrides", {})
         mirror_live_universe = data.get("mirror_live_universe", [])
         lsw_signals = data.get("lsw_signals", [])
+        lsw_backtest_results = data.get("lsw_backtest_results", {})
         snr_results = data.get("snr_results", {})
         snr_signals = data.get("snr_signals", [])
         snr_active_symbols = data.get("snr_active_symbols")
@@ -6147,6 +6153,8 @@ def load_state():
             STATE["msnr_symbol_overrides"] = msnr_symbol_overrides
             STATE["msnr_autotrade_symbols"] = msnr_autotrade_symbols
             STATE["msnr_autotrade_top_set"] = msnr_autotrade_top_set
+            STATE["msnr_backtest_results"] = msnr_backtest_results
+            STATE["msnr_backtest_results_raw"] = msnr_backtest_results_raw
             STATE["ft5_signals"] = deque(_backfill_mfe_mae(ft5_signals), maxlen=FT5_SIGNAL_HISTORY)
             STATE["ft5_symbol_overrides"] = ft5_symbol_overrides
             STATE["mirror_signals"] = deque(_backfill_mfe_mae(mirror_signals), maxlen=MIRROR_SIGNAL_HISTORY)
@@ -6154,6 +6162,7 @@ def load_state():
             STATE["mirror_symbol_overrides"] = mirror_symbol_overrides
             STATE["mirror_live_universe"] = mirror_live_universe
             STATE["lsw_signals"] = deque(_backfill_mfe_mae(lsw_signals), maxlen=LSW_SIGNAL_HISTORY)
+            STATE["lsw_backtest_results"] = lsw_backtest_results
             STATE["snr_results"] = snr_results
             STATE["snr_signals"] = deque(snr_signals, maxlen=500)
             if snr_active_symbols:
