@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.289"
+APP_VERSION = "0.99.290"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14759,7 +14759,7 @@ PRV_TF_CANDIDATES     = ["1h", "4h", "1d"]
 PRV_ATR_LENGTH        = 14   # matches the Pine Script's own default "ATR Length"
 PRV_SL_ATR_MULT       = 1.0  # SL distance beyond entry, in ATR units — fixed (not swept) to keep the search space tractable, same design choice as SNR_SL_ATR_MULT
 PRV_N_COMBOS          = len(PRV_MA_TYPE_CANDIDATES) * len(PRV_KC_LENGTH_CANDIDATES) * len(PRV_BAND_MULT_CANDIDATES) * len(PRV_RR_CANDIDATES) * len(PRV_TF_CANDIDATES)  # 216
-PRV_Z_CRITICAL        = 3.501  # Bonferroni-corrected one-tailed z-critical for PRV_N_COMBOS=216 independent comparisons at overall alpha=0.05 — same "hardcoded rather than adding scipy" reasoning as SNR_Z_CRITICAL's own comment
+PRV_Z_CRITICAL        = 3.113  # v0.99.290 — per direct user request ("смягчить порог сам по себе, чтобы чаще что-то находило") after the strict z>=3.501 (alpha=0.05) bar routinely found zero validated symbols on real market data. Loosened to alpha=0.20 (still Bonferroni-corrected for all PRV_N_COMBOS=216 comparisons, NOT reverted to an uncorrected bar) — a 20% chance of at least one false positive across the whole search, up from 5%, while still directly verified at 0/30 false positives on pure random-walk synthetic data (same test as the original 3.501 threshold's own v0.99.277 verification) — same "hardcoded rather than adding scipy" reasoning as SNR_Z_CRITICAL's own comment.
 PRV_MIN_TRAIN_TRADES  = 15
 PRV_MIN_TEST_TRADES   = 5
 PRV_HISTORY_DAYS      = 500  # 4h/1d timeframes — see snr_history_days_for_tf() (reused here too) for why 1h gets a shorter history
@@ -23034,7 +23034,7 @@ async function refreshPrv() {
           <div><div class="dim" style="font-size:10px;">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R \u00b7 z=${r.train_z}</div></div>
           <div><div class="dim" style="font-size:10px;">TEST (n=${r.test_n})</div><div class="win">WR ${r.test_wr}% \u00b7 ${r.test_avg_pnl_r>0?'+':''}${r.test_avg_pnl_r}R \u00b7 z=${r.test_z}</div></div>
         </div>
-        <div class="dim" style="font-size:10px;margin-bottom:8px;">z \u2014 \u043d\u0430\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0441\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0445 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u0438\u0439 \u0432\u0438\u043d\u0440\u0435\u0439\u0442 \u0432\u044b\u0448\u0435 \u0431\u0435\u0437\u0443\u0431\u044b\u0442\u043a\u0430 (\u043d\u0443\u0436\u043d\u043e \u22653.501 \u0441 \u043f\u043e\u043f\u0440\u0430\u0432\u043a\u043e\u0439 \u043d\u0430 216 \u043f\u0435\u0440\u0435\u0431\u0440\u0430\u043d\u043d\u0443\u044e \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u044e)</div>
+        <div class="dim" style="font-size:10px;margin-bottom:8px;">z \u2014 \u043d\u0430\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0441\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0445 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u0438\u0439 \u0432\u0438\u043d\u0440\u0435\u0439\u0442 \u0432\u044b\u0448\u0435 \u0431\u0435\u0437\u0443\u0431\u044b\u0442\u043a\u0430 (\u043d\u0443\u0436\u043d\u043e \u22653.11 \u0441 \u043f\u043e\u043f\u0440\u0430\u0432\u043a\u043e\u0439 \u043d\u0430 216 \u043f\u0435\u0440\u0435\u0431\u0440\u0430\u043d\u043d\u0443\u044e \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u044e)</div>
         ${liveSigSection}
         <details><summary class="dim" style="cursor:pointer;font-size:11px;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0441\u0434\u0435\u043b\u043a\u0438 \u0431\u044d\u043a\u0442\u0435\u0441\u0442\u0430</summary>${tradesRows}</details>
       </div>`;
