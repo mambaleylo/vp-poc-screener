@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.293"
+APP_VERSION = "0.99.294"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -814,14 +814,20 @@ AUTOTRADE_LEVERAGE_LSW = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_LSW", 10))  #
 AUTOTRADE_ENABLED_NEURO = os.environ.get("VP_AUTOTRADE_NEURO", "0") == "1"  # v0.99.245, per direct user request ("надо сделать как в свип, настройки такие же, процент из настроек, расчет до ликвидации и ТП все так же") — same off-by-default, opt-in pattern as every other module's own toggle
 AUTOTRADE_LEVERAGE_NEURO = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_NEURO", 10))  # same role as AUTOTRADE_LEVERAGE_LSW — only the paper simulator's own fallback leverage, real orders go through execute_autotrade()'s automatic risk-based sizing
 AUTOTRADE_INVERT_LSW = os.environ.get("VP_AUTOTRADE_INVERT_LSW", "0") == "1"  # v0.99.263, per direct user request ("галочку инвертированного открытия сделок... разница будет только на бирже, стоп станет тейком а тейк стопом") — off by default; see execute_autotrade()'s own docstring for the exact mechanics
+LSW_ALL_IN_ENABLED = os.environ.get("VP_LSW_ALL_IN", "0") == "1"  # v0.99.294 — per direct user request ("добавь / проверь на галочку вабанк... торгуется на весь депо"), same mechanism as MSNR_ALL_IN_ENABLED's own (v0.99.157) — ignores AUTOTRADE_RISK_PCT_OF_BALANCE, uses LSW_ALL_IN_MARGIN_PCT of total equity as margin instead. Leverage is still auto-computed from the signal's own SL distance (same liquidation safety). Off by default.
+LSW_ALL_IN_MARGIN_PCT = float(os.environ.get("VP_LSW_ALL_IN_MARGIN_PCT", 95.0))
 AUTOTRADE_INVERT_NEURO = os.environ.get("VP_AUTOTRADE_INVERT_NEURO", "0") == "1"  # same as AUTOTRADE_INVERT_LSW, for Neuro
 AUTOTRADE_ENABLED_SNR = os.environ.get("VP_AUTOTRADE_SNR", "0") == "1"  # v0.99.271, per direct user request for live signals — same off-by-default, opt-in pattern as every other module's own toggle
 AUTOTRADE_LEVERAGE_SNR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SNR", 10))  # only the paper simulator's own fallback leverage, real orders go through execute_autotrade()'s automatic risk-based sizing
 AUTOTRADE_INVERT_SNR = os.environ.get("VP_AUTOTRADE_INVERT_SNR", "0") == "1"  # same as AUTOTRADE_INVERT_LSW/NEURO, for S/R Zones
+SNR_ALL_IN_ENABLED = os.environ.get("VP_SNR_ALL_IN", "0") == "1"  # v0.99.294 — same mechanism as MSNR_ALL_IN_ENABLED/LSW_ALL_IN_ENABLED's own, for S/R Zones. Off by default.
+SNR_ALL_IN_MARGIN_PCT = float(os.environ.get("VP_SNR_ALL_IN_MARGIN_PCT", 95.0))
 TELEGRAM_ALERTS_SNR = os.environ.get("VP_TG_ALERTS_SNR", "1") == "1"
 AUTOTRADE_ENABLED_PRV = os.environ.get("VP_AUTOTRADE_PRV", "0") == "1"  # v0.99.280, per direct user request for Peak Reversal live trading — same off-by-default, opt-in pattern as every other module's own toggle
 AUTOTRADE_LEVERAGE_PRV = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_PRV", 10))  # only the paper simulator's own fallback leverage, real orders go through execute_autotrade()'s automatic risk-based sizing
 AUTOTRADE_INVERT_PRV = os.environ.get("VP_AUTOTRADE_INVERT_PRV", "0") == "1"  # same as AUTOTRADE_INVERT_LSW/NEURO/SNR
+PRV_ALL_IN_ENABLED = os.environ.get("VP_PRV_ALL_IN", "0") == "1"  # v0.99.294 — same mechanism as MSNR_ALL_IN_ENABLED/LSW_ALL_IN_ENABLED/SNR_ALL_IN_ENABLED's own, for Peak Reversal. Off by default.
+PRV_ALL_IN_MARGIN_PCT = float(os.environ.get("VP_PRV_ALL_IN_MARGIN_PCT", 95.0))
 TELEGRAM_ALERTS_PRV = os.environ.get("VP_TG_ALERTS_PRV", "1") == "1"
 TELEGRAM_ALERTS_LSW = os.environ.get("VP_TG_ALERTS_LSW", "1") == "1"
 TELEGRAM_ALERTS_EMA_BULL = os.environ.get("VP_TG_ALERTS_EMA_BULL", "1") == "1"
@@ -1066,7 +1072,7 @@ CREDENTIALS_FILE = os.environ.get(
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "autotrade_invert_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "autotrade_invert_prv", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "autotrade_invert_lsw", "autotrade_invert_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "autotrade_invert_lsw", "autotrade_invert_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled", "lsw_all_in_enabled", "snr_all_in_enabled", "prv_all_in_enabled",
                   "autotrade_risk_pct",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   "lsw_rr", "lsw_equal_tolerance_pct",
@@ -1155,6 +1161,9 @@ def get_settings():
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
         "autotrade_risk_pct": AUTOTRADE_RISK_PCT_OF_BALANCE,
         "msnr_all_in_enabled": MSNR_ALL_IN_ENABLED,
+        "lsw_all_in_enabled": LSW_ALL_IN_ENABLED,
+        "snr_all_in_enabled": SNR_ALL_IN_ENABLED,
+        "prv_all_in_enabled": PRV_ALL_IN_ENABLED,
         "msnr_single_best_enabled": MSNR_SINGLE_BEST_ENABLED,
         "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
         "autotrade_breakout": AUTOTRADE_ENABLED_BREAKOUT,
@@ -1186,7 +1195,7 @@ def apply_settings(updates):
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED, LSW_ATR_SWEEP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_EMA_BULL, TELEGRAM_ALERTS_AMD, TELEGRAM_ALERTS_NEURO, TELEGRAM_ALERTS_NEURO_SUMMARY, TELEGRAM_ALERTS_NQ, TELEGRAM_ALERTS_NETWORK
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, AUTOTRADE_ENABLED_NEURO, AUTOTRADE_INVERT_LSW, AUTOTRADE_INVERT_NEURO, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED, MSNR_SINGLE_BEST_ENABLED
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, AUTOTRADE_ENABLED_NEURO, AUTOTRADE_INVERT_LSW, AUTOTRADE_INVERT_NEURO, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED, MSNR_SINGLE_BEST_ENABLED, LSW_ALL_IN_ENABLED, SNR_ALL_IN_ENABLED, PRV_ALL_IN_ENABLED
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
@@ -1485,6 +1494,12 @@ def apply_settings(updates):
             pass
     if "msnr_all_in_enabled" in updates:
         MSNR_ALL_IN_ENABLED = bool(updates["msnr_all_in_enabled"])
+    if "lsw_all_in_enabled" in updates:
+        LSW_ALL_IN_ENABLED = bool(updates["lsw_all_in_enabled"])
+    if "snr_all_in_enabled" in updates:
+        SNR_ALL_IN_ENABLED = bool(updates["snr_all_in_enabled"])
+    if "prv_all_in_enabled" in updates:
+        PRV_ALL_IN_ENABLED = bool(updates["prv_all_in_enabled"])
     if "msnr_single_best_enabled" in updates:
         MSNR_SINGLE_BEST_ENABLED = bool(updates["msnr_single_best_enabled"])
     if "autotrade_bounce" in updates:
@@ -13095,7 +13110,8 @@ def lsw_scan_symbol_live(symbol):
             if not still_active:
                 log_error(f"lsw_scan_symbol_live {symbol}: signal fired but symbol was dropped from lsw_live_universe mid-scan (backtest cycle rebuilt it concurrently) — signal logged, real trade skipped")
                 return
-            autotrade_result = execute_autotrade("lsw", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
+            autotrade_result = execute_autotrade("lsw", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                                                  all_in_margin_pct=LSW_ALL_IN_MARGIN_PCT if LSW_ALL_IN_ENABLED else None)
             sim_execute_trade("lsw", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_LSW, record)
             # v0.99.134 — BUG FOUND (per direct user report: a real
@@ -14727,7 +14743,8 @@ def snr_live_loop():
                     with state_lock:
                         still_active = symbol in _snr_active_symbols
                     if still_active:
-                        autotrade_result = execute_autotrade("snr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
+                        autotrade_result = execute_autotrade("snr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                                                              all_in_margin_pct=SNR_ALL_IN_MARGIN_PCT if SNR_ALL_IN_ENABLED else None)
                         sim_execute_trade("snr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                            autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_SNR, record)
                     else:
@@ -15209,7 +15226,8 @@ def prv_live_loop():
                     with state_lock:
                         still_active = symbol in _prv_active_symbols
                     if still_active:
-                        autotrade_result = execute_autotrade("prv", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
+                        autotrade_result = execute_autotrade("prv", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                                                              all_in_margin_pct=PRV_ALL_IN_MARGIN_PCT if PRV_ALL_IN_ENABLED else None)
                         sim_execute_trade("prv", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                            autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_PRV, record)
                     else:
@@ -21025,6 +21043,13 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="label">↳ Ва-банк (Sweep)</div>
+          <div class="sub">вместо риска N% от депо — использовать 95% депо как маржу на каждую Sweep-сделку. Плечо по-прежнему подбирается автоматически по стопу — ликвидация не становится ближе, просто в сделку идёт почти весь депозит</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setLswAllIn"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Neuro</div>
           <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча под безопасное расстояние до ликвидации и размера позиции, что и у Sweep/остальных режимов</div>
         </div>
@@ -21053,6 +21078,13 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="label">↳ Ва-банк (S/R)</div>
+          <div class="sub">вместо риска N% от депо — использовать 95% депо как маржу на каждую сделку S/R Zones. Плечо по-прежнему подбирается автоматически по стопу — ликвидация не становится ближе, просто в сделку идёт почти весь депозит</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setSnrAllIn"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Peak Reversal</div>
           <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча и размера позиции, что и у остальных режимов</div>
         </div>
@@ -21064,6 +21096,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">то же самое, что и для Sweep/Neuro/S&R выше — на бирже реально открывается обратное направление, старый стоп становится тейком и наоборот</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeInvertPrv"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Ва-банк (Peak Reversal)</div>
+          <div class="sub">вместо риска N% от депо — использовать 95% депо как маржу на каждую сделку Peak Reversal. Плечо по-прежнему подбирается автоматически по стопу — ликвидация не становится ближе, просто в сделку идёт почти весь депозит</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setPrvAllIn"><span class="switchSlider"></span></label>
       </div>
     </div></details>
 
@@ -23978,6 +24017,9 @@ const setInputs = {
   msnr_enabled: document.getElementById('setMsnr'),
   msnr_addon_enabled: document.getElementById('setMsnrAddon'),
   msnr_all_in_enabled: document.getElementById('setMsnrAllIn'),
+  lsw_all_in_enabled: document.getElementById('setLswAllIn'),
+  snr_all_in_enabled: document.getElementById('setSnrAllIn'),
+  prv_all_in_enabled: document.getElementById('setPrvAllIn'),
   msnr_single_best_enabled: document.getElementById('setMsnrSingleBest'),
   msnr_min_rr_filter_enabled: document.getElementById('setMsnrMinRrFilter'),
   msnr_htf_filter_enabled: document.getElementById('setMsnrHtfFilter'),
