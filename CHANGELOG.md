@@ -15536,3 +15536,39 @@ v0.99.288 - Halved network round-trips per symbol for S/R Zones and
          Verified: py_compile (-W error), pyflakes, node --check, 64
          routes, real runtime 200 on /, /api/snr/status, /api/prv/status,
          zero surrogate escapes.
+
+v0.99.289 - CRITICAL DEADLOCK FIX for S/R Zones and Peak Reversal, per
+         direct user report ("застревание бэктеста это не дело, потом
+         зависают даже настройки и не сохраняются после этой ошибки").
+         Found the exact root cause: snr_backtest_loop()/prv_backtest_
+         loop() called log_error() from INSIDE their own `with state_
+         lock:` block whenever a cycle found zero validated symbols —
+         but log_error() itself does `with state_lock:` internally (it
+         appends to STATE["errors"]). state_lock is a plain threading.
+         Lock() (confirmed non-reentrant), so the same thread trying to
+         acquire it a SECOND time blocks forever, waiting on itself —
+         and since that thread never reaches its own block's __exit__,
+         the lock stays held FOREVER. Every other request needing
+         state_lock — settings save/load, every single status endpoint
+         in the whole app — hangs right along with it, exactly matching
+         the reported symptom (backtest appears stuck, then settings
+         stop saving too).
+         This deadlock fires EVERY time a backtest cycle finds nothing
+         that passes the honest z-test — which, given how strict that
+         bar deliberately is (see v0.99.277's own reasoning), is a
+         routine, expected outcome, not a rare edge case — explaining
+         why this kept recurring.
+         Fixed both by moving the log_error() call to AFTER state_lock
+         is released (a plain boolean set inside the lock, used outside
+         it, instead of logging from within). Audited the WHOLE file
+         systematically (a script walking every `with state_lock:` and
+         `with _network_error_lock:` block's own body) for the same
+         pattern elsewhere — found zero other occurrences; this was
+         isolated to SNR/PRV.
+         Verified directly: reproduced the exact "zero results" branch
+         standalone, confirmed no deadlock, and confirmed state_lock is
+         genuinely free afterward by having a SEPARATE thread
+         successfully acquire it.
+         Verified: py_compile (-W error), pyflakes, 64 routes, real
+         runtime 200 on /, /api/snr/status, /api/prv/status, and
+         /api/settings all responding correctly.
