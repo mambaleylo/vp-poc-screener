@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.283"
+APP_VERSION = "0.99.284"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -19915,7 +19915,12 @@ INDEX_HTML = """<!doctype html>
   body.hints-hidden .hint-block { display: none !important; }
   header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
   #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  #resetVolumeBtn, #resetScalpBtn, #resetMsnrBtn, #resetFt5Btn, #resetMirrorBtn, #resetRiskAutotuneBtn, #resetSimulatorBtn { background:#3a1e22; border:none; color:#ff9b9b; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  /* v0.99.284 — old ID-list rule removed: it only ever named 7 of the
+     ~13 header buttons (missing resetLswBtn/resetNeuroBtn/restart*Btn/
+     resetNqBtn entirely) — the actual root cause of the "some buttons
+     red, some plain grey, no visible logic" inconsistency reported.
+     Superseded by the .btnDanger/.btnNeutral classes applied to every
+     one of them uniformly (see #headerTop's own rule above). */
   #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #settingsModal.open { display:flex; flex-direction:column; }
@@ -20046,6 +20051,18 @@ INDEX_HTML = """<!doctype html>
       -webkit-overflow-scrolling:touch; padding-bottom:4px;
     }
     #headerTop > div:last-child button { flex-shrink:0; font-size:11px; padding:6px 10px; }
+    /* v0.99.284 — per direct user request ("привести к красивому единому
+       виду"): explicit, consistent classes replacing whatever accidental
+       styling these ~20 header buttons had accumulated over many
+       sessions (no shared class/rule existed before this — some looked
+       red, some grey, with no logic behind which). Danger = irreversibly
+       deletes accumulated data (Очистить X / Сбросить X); Neutral =
+       safe, non-destructive (Перезапустить бэктест X — just wakes a
+       cycle early, keeps existing data until it's naturally replaced). */
+    #headerTop > div:last-child button.btnDanger { background:#3a1414; border:1px solid #6b2a2a; color:#ff8a8a; border-radius:8px; }
+    #headerTop > div:last-child button.btnNeutral { background:#1c2433; border:1px solid #2e3a52; color:#d0d8e8; border-radius:8px; }
+    #headerTop > div:last-child button.btnDanger:active { background:#4a1a1a; }
+    #headerTop > div:last-child button.btnNeutral:active { background:#26314a; }
     #status, #overview, #autotradeBanner { font-size:10.5px; }
     .tabs { flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; padding-bottom:2px; }
     .tab { flex-shrink:0; font-size:12px; padding:6px 10px; }
@@ -20116,19 +20133,19 @@ INDEX_HTML = """<!doctype html>
     <h1>VP-POC Screener</h1>
     <div style="display:flex;gap:8px;flex-wrap:wrap;">
       <button id="settingsBtn">⚙️ Настройки</button>
-      <button id="resetVolumeBtn">Очистить объём</button>
-      <button id="resetScalpBtn">Очистить скальпинг</button>
-      <button id="resetMsnrBtn">Очистить MSNR</button>
-      <button id="resetFt5Btn">Очистить FT5</button>
-      <button id="resetMirrorBtn">Очистить Зеркало</button>
-      <button id="resetLswBtn">Очистить Sweep</button>
-      <button id="resetNeuroBtn">Очистить Neuro</button>
-      <button id="restartNeuroBacktestBtn">Перезапустить бэктест Neuro</button>
-      <button id="restartSnrBacktestBtn">Перезапустить бэктест S/R</button>
-      <button id="restartPrvBacktestBtn">Перезапустить бэктест Peak Reversal</button>
-      <button id="resetNqBtn">Очистить NQ</button>
-      <button id="resetSimulatorBtn">Сбросить симулятор</button>
-      <button id="resetRiskAutotuneBtn">Сбросить авто-тюнинг</button>
+      <button id="resetVolumeBtn" class="btnDanger">Очистить объём</button>
+      <button id="resetScalpBtn" class="btnDanger">Очистить скальпинг</button>
+      <button id="resetMsnrBtn" class="btnDanger">Очистить MSNR</button>
+      <button id="resetFt5Btn" class="btnDanger">Очистить FT5</button>
+      <button id="resetMirrorBtn" class="btnDanger">Очистить Зеркало</button>
+      <button id="resetLswBtn" class="btnDanger">Очистить Sweep</button>
+      <button id="resetNeuroBtn" class="btnDanger">Очистить Neuro</button>
+      <button id="restartNeuroBacktestBtn" class="btnNeutral">Перезапустить бэктест Neuro</button>
+      <button id="restartSnrBacktestBtn" class="btnNeutral">Перезапустить бэктест S/R</button>
+      <button id="restartPrvBacktestBtn" class="btnNeutral">Перезапустить бэктест Peak Reversal</button>
+      <button id="resetNqBtn" class="btnDanger">Очистить NQ</button>
+      <button id="resetSimulatorBtn" class="btnDanger">Сбросить симулятор</button>
+      <button id="resetRiskAutotuneBtn" class="btnDanger">Сбросить авто-тюнинг</button>
     </div>
   </div>
   <div id="status">загрузка...</div>
@@ -23866,8 +23883,30 @@ async function loadSettings() {
   try {
     const s = await (await fetch('/api/settings')).json();
     applySettingsToInputs(s);
+    updateHeaderButtonVisibility(s);
   } catch (e) {}
 }
+
+// v0.99.284 — per direct user request ("может, отображать только те,
+// для которых включен бэктест"): the header's own "Очистить X"/
+// "Перезапустить бэктест X" buttons are only meaningful for a module
+// that's actually enabled — hide the rest instead of cluttering the
+// row with buttons for backtests that aren't even running. Volume/
+// Scalp/simulator/risk-autotune reset buttons stay always visible —
+// they aren't gated by a single module "enabled" toggle the same way.
+const HEADER_BTN_ENABLE_KEY = {
+  resetMsnrBtn: 'msnr_enabled', resetFt5Btn: 'ft5_enabled', resetMirrorBtn: 'mirror_enabled',
+  resetLswBtn: 'lsw_enabled', resetNeuroBtn: 'neuro_enabled', restartNeuroBacktestBtn: 'neuro_enabled',
+  restartSnrBacktestBtn: 'snr_enabled', restartPrvBacktestBtn: 'prv_enabled', resetNqBtn: 'nq_enabled',
+};
+function updateHeaderButtonVisibility(s) {
+  for (const btnId in HEADER_BTN_ENABLE_KEY) {
+    const btn = document.getElementById(btnId);
+    if (!btn) continue;
+    btn.style.display = s[HEADER_BTN_ENABLE_KEY[btnId]] ? '' : 'none';
+  }
+}
+loadSettings();
 
 // v0.99.259 — per direct user request ("глянь на дизайн меню настроек,
 // может как-то можно улучшить наглядность"): mark every "↳"-prefixed
@@ -23924,6 +23963,7 @@ for (const key in setInputs) {
       })).json();
       if (res.ok) {
         applySettingsToInputs(res.settings);
+        updateHeaderButtonVisibility(res.settings);
       } else {
         alert('Не удалось сохранить настройку');
         await loadSettings();
