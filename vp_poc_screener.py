@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.290"
+APP_VERSION = "0.99.291"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14129,6 +14129,7 @@ def snr_history_days_for_tf(tf, base_days=SNR_HISTORY_DAYS):
     return min(base_days, 150) if tf == "1h" else base_days
 SNR_REFRESH_SEC       = int(os.environ.get("VP_SNR_REFRESH_SEC", 4 * 3600))  # re-optimize every 4h
 SNR_TRAIN_FRAC        = 0.7
+SNR_MIN_VOL_USD       = float(os.environ.get("VP_SNR_MIN_VOL_USD", 50000))  # v0.99.291 — per direct user request ("давай увеличим количество монет лучше, то есть порог ликвидности сменим") after 300 candidates (MIN_VOL_USD=500k) found zero validated results — a DEDICATED, much lower floor just for SNR rather than lowering the shared MIN_VOL_USD (which LSW/MSNR also depend on and weren't asked to change). Still excludes genuinely dead/near-zero-volume contracts, just far more permissively than the shared $500k floor.
 SNR_EXCLUDED_STABLES  = {  # v0.99.287 — per direct user report ("даже стэйблы торгуются, это ппц"): a stablecoin's whole point is staying pegged near 1.0, so it has near-zero genuine volatility — ATR-based SL/TP is nearly meaningless on one, and an occasional "significant" backtest result is far more likely a rare depeg blip than a real repeatable pattern. Excluded by symbol regardless of volume, since a stablecoin pair can genuinely clear the liquidity floor on its own. (Gold-tracking PAXG/XAUT are NOT stablecoins — real, tradeable volatility — deliberately left out of this list.)
     "USDC", "BUSD", "TUSD", "DAI", "FDUSD", "USDD", "GUSD", "USDP", "PYUSD",
     "EURT", "EURC", "USTC", "UST", "FRAX", "LUSD", "SUSD", "USDE", "USDJ",
@@ -14165,7 +14166,16 @@ def snr_build_universe():
     "let the test decide, not a popularity rank" intent. On top of
     that floor, an EXPLICIT stablecoin exclusion — volume alone can't
     reliably catch these (a stablecoin pair can genuinely clear
-    MIN_VOL_USD), so they're filtered by symbol regardless of volume."""
+    MIN_VOL_USD), so they're filtered by symbol regardless of volume.
+    v0.99.291 — per direct user follow-up ("давай увеличим количество
+    монет лучше, то есть порог ликвидности сменим") after the shared
+    MIN_VOL_USD=$500k floor cut the universe down to ~300 candidates,
+    which then found zero validated results: switched to a dedicated,
+    much lower SNR_MIN_VOL_USD floor (own constant, doesn't touch the
+    shared MIN_VOL_USD other modules like LSW/MSNR still use) — casts a
+    much wider net of candidates while leaving the z-test's own
+    significance bar untouched, rather than loosening the statistical
+    threshold itself."""
     try:
         tickers = get_tickers()
         seen_vol = {}
@@ -14181,7 +14191,7 @@ def snr_build_universe():
                 vol = float(vol)
             except (TypeError, ValueError):
                 vol = 0.0
-            if vol < MIN_VOL_USD:
+            if vol < SNR_MIN_VOL_USD:
                 continue
             if name not in seen_vol or vol > seen_vol[name]:
                 seen_vol[name] = vol
