@@ -15434,3 +15434,76 @@ v0.99.285 - Fixed the overall backtest-cycle ceiling for S/R Zones and
          of ~82h.
          Verified: py_compile (-W error), pyflakes, real runtime 200 on
          /, /api/snr/status, /api/prv/status.
+
+v0.99.286 - CRITICAL FIX: found and fixed the SAME "no-timeout /
+         overly-pessimistic sequential-worst-case timeout" pattern
+         across essentially the WHOLE app, per direct user follow-up
+         ("Заметил кстати что все бэктесты стопаются не доходя до
+         конца" — noticed by the way that ALL backtests stop before
+         reaching the end). After v0.99.285 fixed SNR/PRV's own overly
+         generous ceiling, searched every other as_completed() call in
+         the file and found the identical "PER_SYMBOL_TIMEOUT *
+         len(universe)" (sequential-worst-case) pattern in MSNR, Mirror,
+         LSW, AMD (both backtest and live scan), EMA Touch, and every
+         module's own *_live_loop's *_TO * len(live_universe) — fixed
+         all of them to scale by ceil(len(...)/WORKERS) instead, matching
+         v0.99.285's own fix.
+         Found something more serious while auditing further: FOUR
+         places had NO timeout mechanism at ALL — the app's own CORE
+         scan cycle (Volume Profile + Scalp signals, the main 45s loop
+         everything else runs alongside), scalp_loop()'s own dedicated
+         cycle, ft5_live_loop(), and fetch_candles_concurrent() (used by
+         EVERY module's own outcome-tracking — snr/prv/lsw/mirror_
+         track_signal_outcomes and more). All four used the context-
+         manager form (`with ThreadPoolExecutor(...) as ex:`) with a
+         bare `for _ in as_completed(futs): pass` — a single genuinely
+         stuck symbol wouldn't just delay that one step: the context
+         manager's own implicit ex.__exit__() -> shutdown(wait=True)
+         would ALSO block waiting for that same stuck thread, freezing
+         the loop indefinitely, and since a hung request keeps its
+         GLOBAL_HTTP_SEMAPHORE slot held the whole time, this could
+         starve every OTHER module's own network access too — a
+         genuinely plausible root cause for "every backtest" appearing
+         to stall at once, not just one module's own cycle. Fixed all
+         four with the same explicit-ex/try-finally/per-future-timeout/
+         scaled-overall-ceiling pattern used everywhere else this
+         session.
+         Verified: py_compile (-W error), pyflakes, real runtime 200 on
+         /, /api/status, /api/scalp/status, /api/ft5/status.
+
+v0.99.287 - S/R Zones (and Peak Reversal) no longer trade stablecoins,
+         per direct user report ("В s/r все подряд торгуется... даже
+         стэйблы торгуются, это ппц") and follow-up ("или как в msnr
+         может, смотри сам как лучше для этого индикатора").
+         Landed on msnr_build_backtest_universe()'s own compromise
+         (its own v0.99.48 comment argues the exact point the user made
+         for SNR earlier — "liquidity and signal quality are different
+         things"): restored the MIN_VOL_USD liquidity floor for SNR
+         (filters genuinely illiquid junk) WITHOUT reintroducing a
+         "top N by volume" ranking cap on top of it — every
+         sufficiently-liquid symbol still gets an equal shot at the
+         honest train/test comparison, preserving the user's own
+         original "let the test decide, not a popularity rank" intent
+         from v0.99.276, while no longer scanning genuinely illiquid
+         contracts at all.
+         On top of that, added an explicit SNR_EXCLUDED_STABLES set
+         (USDC/BUSD/TUSD/DAI/FDUSD/and more) — volume alone can't
+         reliably exclude stablecoins, since a stablecoin pair can
+         genuinely clear a liquidity floor or even rank into PRV's own
+         top-30 (often carrying real arbitrage/settlement volume). A
+         stablecoin's whole point is staying pegged near 1.0, so it has
+         near-zero genuine volatility — ATR-based SL/TP is nearly
+         meaningless on one, and an occasional "significant" backtest
+         result is far more likely a rare depeg blip than a real
+         repeatable pattern. Applied to BOTH snr_build_universe() and
+         prv_build_universe() (reusing the same set — general-purpose,
+         not SNR-specific). Gold-tracking PAXG/XAUT are deliberately
+         NOT in this list — real, tradeable volatility, not stablecoins.
+         Verified directly: with a synthetic USDC_USDT given very high
+         volume (80M) alongside real candidates, it's correctly excluded
+         from BOTH SNR's and PRV's own universe, while a genuinely
+         illiquid symbol is correctly excluded from SNR's own (MIN_VOL_
+         USD floor) but not PRV's (top-N-only, no floor, matching its
+         own existing design).
+         Verified: py_compile (-W error), pyflakes, real runtime 200 on
+         /, /api/snr/status, /api/prv/status.
