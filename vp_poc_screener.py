@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.292"
+APP_VERSION = "0.99.293"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14784,7 +14784,8 @@ PRV_MIN_TEST_TRADES   = 5
 PRV_HISTORY_DAYS      = 500  # 4h/1d timeframes — see snr_history_days_for_tf() (reused here too) for why 1h gets a shorter history
 PRV_TRAIN_FRAC        = 0.7
 PRV_MAX_WAIT_BARS     = 48
-PRV_UNIVERSE_SIZE     = 30  # per direct user request ("пока топ 30 по ликвидности с настройкой количества отображения/торговли") — unlike SNR, this DOES cap the universe by volume, by explicit user choice this time
+PRV_UNIVERSE_SIZE     = 30  # v0.99.293 — no longer used to cap the universe (see prv_build_universe()'s own updated comment); kept defined only in case a future session wants a cap back deliberately, same as SNR_UNIVERSE_SIZE's own v0.99.276 precedent
+PRV_MIN_VOL_USD       = float(os.environ.get("VP_PRV_MIN_VOL_USD", 50000))  # v0.99.293 — per direct user request ("По p/r давай выборку как в s/r сделаем, а не топ 30, а то по прежнему ни одного сигнала") after top-30-by-volume routinely found zero signals at all — switched to the same low-floor-not-hard-cap approach as SNR's own SNR_MIN_VOL_USD (v0.99.291)
 PRV_TOP_N             = int(os.environ.get("VP_PRV_TOP_N", 3))
 PRV_DISPLAY_N         = int(os.environ.get("VP_PRV_DISPLAY_N", 5))
 PRV_REFRESH_SEC       = int(os.environ.get("VP_PRV_REFRESH_SEC", 4 * 3600))
@@ -14796,16 +14797,23 @@ _prv_prev_signal_keys = set()
 
 
 def prv_build_universe():
-    """Top PRV_UNIVERSE_SIZE symbols by 24h quote volume — per direct
-    user choice this time ("пока топ 30 по ликвидности"), unlike SNR's
-    own uncapped universe (v0.99.276).
-    v0.99.287 — same stablecoin exclusion as snr_build_universe()'s own
-    (reusing the same SNR_EXCLUDED_STABLES set — it's a general-purpose
-    list, not SNR-specific): stablecoin pairs often carry genuinely HIGH
-    raw volume (arbitrage/settlement flow), so a pure volume ranking
-    with no awareness of this can rank one straight into the top 30 —
-    even more exposed to this than SNR's own MIN_VOL_USD-floor approach,
-    since there's no floor here at all, just a top-N cut."""
+    """v0.99.293 — per direct user request ("По p/r давай выборку как в
+    s/r сделаем, а не топ 30, а то по прежнему ни одного сигнала"):
+    v0.99.280's original top-30-by-volume cap consistently found zero
+    validated signals — a 30-symbol universe gives proportionally very
+    few chances of any symbol clearing the honest z-test bar, matching
+    the exact same math discussed for SNR's own analogous v0.99.291 fix
+    (a smaller universe means fewer independent "shots" at finding a
+    genuine result, even if the same underlying real edge rate exists
+    across the market). Switched to SNR's own approach: a low liquidity
+    FLOOR (PRV_MIN_VOL_USD) with NO additional "top N by volume" cap on
+    top of it — every sufficiently-liquid symbol gets an equal shot at
+    the comparison, casting a much wider net than 30 fixed slots ever
+    could, while a genuinely illiquid contract still can't sneak in.
+    v0.99.287's own stablecoin exclusion (SNR_EXCLUDED_STABLES — a
+    general-purpose set, not SNR-specific) is unchanged: stablecoin
+    pairs often carry genuinely HIGH raw volume (arbitrage/settlement
+    flow), so volume alone still can't reliably exclude them."""
     try:
         tickers = get_tickers()
         seen_vol = {}
@@ -14821,10 +14829,12 @@ def prv_build_universe():
                 vol = float(vol)
             except (TypeError, ValueError):
                 vol = 0.0
+            if vol < PRV_MIN_VOL_USD:
+                continue
             if name not in seen_vol or vol > seen_vol[name]:
                 seen_vol[name] = vol
         ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
-        return [s[0] for s in ranked[:PRV_UNIVERSE_SIZE]]
+        return [s[0] for s in ranked]
     except Exception as e:
         log_error(f"prv_build_universe: {e}")
         return []
@@ -18638,7 +18648,7 @@ def api_prv_status():
         "config": {"top_n": PRV_TOP_N, "display_n": PRV_DISPLAY_N, "timeframes": PRV_TF_CANDIDATES,
                    "ma_type_candidates": PRV_MA_TYPE_CANDIDATES, "kc_length_candidates": PRV_KC_LENGTH_CANDIDATES,
                    "band_mult_candidates": PRV_BAND_MULT_CANDIDATES, "rr_candidates": PRV_RR_CANDIDATES,
-                   "universe_size": PRV_UNIVERSE_SIZE, "refresh_sec": PRV_REFRESH_SEC},
+                   "refresh_sec": PRV_REFRESH_SEC},
     })
 
 
@@ -23060,7 +23070,7 @@ async function refreshPrv() {
     }).join('');
     panel.innerHTML = `
       <div class="dim" style="margin-bottom:10px;">
-        \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442: ${lastFinished} \u00b7 \u0432\u0441\u0435\u043b\u0435\u043d\u043d\u0430\u044f: \u0442\u043e\u043f-${data.config&&data.config.universe_size||30} \u043f\u043e \u043b\u0438\u043a\u0432\u0438\u0434\u043d\u043e\u0441\u0442\u0438 \u00b7 \u043f\u0440\u043e\u0448\u043b\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0443: ${coins.length} \u0438\u0437 \u0434\u043e ${data.config&&data.config.display_n||0} \u043c\u0435\u0441\u0442 \u0434\u043b\u044f \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f${coins.length < (data.config&&data.config.display_n||0) ? ' \u2014 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 \u043c\u043e\u043d\u0435\u0442\u044b \u0438\u0437 \u0432\u0441\u0435\u043b\u0435\u043d\u043d\u043e\u0439 \u043f\u0440\u043e\u0441\u0442\u043e \u043d\u0435 \u043f\u0440\u043e\u0448\u043b\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0443 \u043d\u0430 \u043e\u0442\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0445 \u0434\u0430\u043d\u043d\u044b\u0445, \u044d\u0442\u043e \u043d\u0435 \u0431\u0430\u0433 \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f' : ''}
+        \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442: ${lastFinished} \u00b7 \u0432\u0441\u0435\u043b\u0435\u043d\u043d\u0430\u044f: \u0432\u0441\u0435 \u043b\u0438\u043a\u0432\u0438\u0434\u043d\u044b\u0435 \u0444\u044c\u044e\u0447\u0435\u0440\u0441\u044b (${data.progress_total||'?'} \u0448\u0442.), \u0431\u0435\u0437 \u043f\u043e\u0442\u043e\u043b\u043a\u0430 \u043f\u043e \u043e\u0431\u044a\u0451\u043c\u0443, \u0442\u043e\u043b\u044c\u043a\u043e \u043d\u0438\u0437\u043a\u0438\u0439 \u043f\u043e\u0440\u043e\u0433 \u043b\u0438\u043a\u0432\u0438\u0434\u043d\u043e\u0441\u0442\u0438 \u00b7 \u043f\u0440\u043e\u0448\u043b\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0443: ${coins.length} \u0438\u0437 \u0434\u043e ${data.config&&data.config.display_n||0} \u043c\u0435\u0441\u0442 \u0434\u043b\u044f \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f${coins.length < (data.config&&data.config.display_n||0) ? ' \u2014 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 \u043c\u043e\u043d\u0435\u0442\u044b \u0438\u0437 \u0432\u0441\u0435\u043b\u0435\u043d\u043d\u043e\u0439 \u043f\u0440\u043e\u0441\u0442\u043e \u043d\u0435 \u043f\u0440\u043e\u0448\u043b\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0443 \u043d\u0430 \u043e\u0442\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0445 \u0434\u0430\u043d\u043d\u044b\u0445, \u044d\u0442\u043e \u043d\u0435 \u0431\u0430\u0433 \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f' : ''}
       </div>
       ${progressHtml}
       ${lstatsHtml}
