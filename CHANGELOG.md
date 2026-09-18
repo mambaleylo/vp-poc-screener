@@ -15660,3 +15660,27 @@ v0.99.292 - CRITICAL FIX: MSNR's and LSW's own backtest results never
          (including MSNR's separate _raw copy) came back intact.
          Verified: py_compile (-W error), pyflakes, 64 routes, real
          runtime 200 on / and /api/status.
+
+v0.99.293 - Peak Reversal switched from a fixed top-30-by-volume
+         universe to S/R Zones' own low-floor approach, per direct
+         user request ("По p/r давай выборку как в s/r сделаем, а не
+         топ 30, а то по прежнему ни одного сигнала") — the original
+         top-30 cap (v0.99.280) consistently found zero validated
+         signals, matching the identical "smaller universe means
+         proportionally fewer chances of clearing the same z-test bar"
+         math already discussed for SNR's own analogous v0.99.291 fix.
+         Added a dedicated PRV_MIN_VOL_USD (default $50k, same as
+         SNR_MIN_VOL_USD) and removed the "[:PRV_UNIVERSE_SIZE]" cap
+         entirely — every symbol above this low liquidity floor now
+         gets an equal shot at the honest z-test, casting a much wider
+         net than 30 fixed slots ever could. PRV_UNIVERSE_SIZE kept
+         defined (unused) in case a future session wants a cap back.
+         v0.99.287's stablecoin exclusion is unchanged and still
+         applies. Updated /api/prv/status's own config (dropped the
+         now-meaningless "universe_size" field, same as SNR's own
+         v0.99.276 precedent) and the tab's own summary text to match.
+         Verified directly: on the same synthetic ticker distribution
+         used to verify SNR's own v0.99.291 fix, PRV's universe grew
+         from a fixed 30 to ~662 candidates.
+         Verified: py_compile (-W error), pyflakes, node --check, 64
+         routes, real runtime 200 on /, /api/prv/status.
