@@ -15360,3 +15360,18 @@ v0.99.282 - CRITICAL FIX: the "живые сигналы всего" headline st
          front, applied to both S/R Zones and Peak Reversal alike.
          Verified: py_compile (-W error), pyflakes, node --check, 64
          routes, real runtime 200 on /, /api/snr/status, /api/prv/status.
+
+v0.99.283 - Live signals for S/R Zones and Peak Reversal now shown as a
+         standalone flat table (Symbol/Dir/Entry/SL/TP/Status/Time),
+         same shape as MSNR's own dedicated signals table, per direct
+         user request ("хочу как в mnsr видеть отдельно сигналы
+         списком"). Previously each coin's own live signals were nested
+         inside a collapsible <details> section within that coin's own
+         card — the new table sits at the TOP of the tab, aggregating
+         every displayed coin's own recent_live_signals (already
+         available client-side, no new API field needed) sorted newest-
+         first, with the same click-to-chart behavior as before. The
+         old nested per-card section was removed to avoid showing the
+         same signals twice.
+         Verified: py_compile (-W error), pyflakes, node --check, 64
+         routes, real runtime 200 on /, /api/snr/status, /api/prv/status.
