@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.282"
+APP_VERSION = "0.99.283"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22689,6 +22689,26 @@ async function refreshSnr() {
       ? `<div class="dim" style="font-size:11px;margin-bottom:10px;">\u0436\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b \u0432\u0441\u0435\u0433\u043e: ${data.live_signal_stats.total} \u00b7 WR ${data.live_signal_stats.winrate!=null?data.live_signal_stats.winrate+'%':'\u2014'} \u00b7 \u043e\u0442\u043a\u0440\u044b\u0442\u043e: ${data.live_signal_stats.open}</div>`
       : '';
 
+    const allLiveSigs = [];
+    coins.forEach(c => (c.recent_live_signals || []).forEach(s => allLiveSigs.push(s)));
+    allLiveSigs.sort((a, b) => b.time - a.time);
+    const liveSigsTableHtml = allLiveSigs.length ? `
+      <div style="overflow-x:auto;margin-bottom:14px;">
+      <table style="font-size:11px;white-space:nowrap;width:100%;">
+        <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>Status</th><th>Time</th></tr></thead>
+        <tbody>${allLiveSigs.map(s => {
+          const rc = s.status === 'OPEN' ? 'dim' : s.result === 'WIN' ? 'win' : s.result === 'LOSS' ? 'loss' : 'dim';
+          const statusTxt = s.status === 'OPEN' ? '\u041e\u0422\u041a\u0420\u042b\u0422\u0410' : `${s.result}${s.pnl_r!=null?' '+(s.pnl_r>0?'+':'')+s.pnl_r+'R':''}`;
+          const dirClass = s.direction === 'SHORT' ? 'loss' : 'win';
+          return `<tr onclick="openSnrChart('${s.symbol}', ${s.time})" style="cursor:pointer;">
+            <td>${s.symbol.replace('_USDT','')}</td><td class="${dirClass}">${s.direction}</td>
+            <td>${fmtNum(s.entry)}</td><td>${fmtNum(s.sl)}</td><td>${fmtNum(s.tp)}</td>
+            <td class="${rc}">${statusTxt}</td><td class="dim">${fmtDateTime(s.time)}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+      </div>` : '';
+
     const cards = coins.map(c => {
       const isActive = c.is_active !== false;
       const cardStyle = isActive
@@ -22712,18 +22732,7 @@ async function refreshSnr() {
           <span class="${rc}">${t.result}${t.pnl_r!=null?' '+(t.pnl_r>0?'+':'')+t.pnl_r+'R':''}</span>
         </div>`;
       }).join('');
-      const liveSigs = c.recent_live_signals || [];
-      const liveSigRows = liveSigs.slice(0, 15).map(s => {
-        const rc = s.status === 'OPEN' ? 'dim' : s.result === 'WIN' ? 'win' : s.result === 'LOSS' ? 'loss' : 'dim';
-        const statusTxt = s.status === 'OPEN' ? '\u041e\u0422\u041a\u0420\u042b\u0422\u0410' : `${s.result}${s.pnl_r!=null?' '+(s.pnl_r>0?'+':'')+s.pnl_r+'R':''}`;
-        return `<div onclick="openSnrChart('${c.symbol}', ${s.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1c2433;font-size:11px;">
-          <span class="dim">${fmtDateTime(s.time)} ${s.direction} \u0432\u0445\u043e\u0434 ${fmtNum(s.entry)} \u00b7 SL ${fmtNum(s.sl)} \u00b7 TP ${fmtNum(s.tp)}</span>
-          <span class="${rc}">${statusTxt}</span>
-        </div>`;
-      }).join('');
-      const liveSigSection = liveSigs.length
-        ? `<details open><summary class="dim" style="cursor:pointer;font-size:11px;">\u0436\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b (${liveSigs.length})</summary>${liveSigRows}</details>`
-        : '';
+      const liveSigSection = '';
       return `<div style="${cardStyle}">
         <div style="font-size:15px;font-weight:700;color:#26c6da;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
         ${inactiveBadge}
@@ -22745,6 +22754,7 @@ async function refreshSnr() {
       </div>
       ${progressHtml}
       ${lstatsHtml}
+      ${liveSigsTableHtml}
       ${cards || '<div class="dim">\u043f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445</div>'}
     `;
   } catch(e) {
@@ -22780,6 +22790,26 @@ async function refreshPrv() {
       ? `<div class="dim" style="font-size:11px;margin-bottom:10px;">\u0436\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b \u0432\u0441\u0435\u0433\u043e: ${data.live_signal_stats.total} \u00b7 WR ${data.live_signal_stats.winrate!=null?data.live_signal_stats.winrate+'%':'\u2014'} \u00b7 \u043e\u0442\u043a\u0440\u044b\u0442\u043e: ${data.live_signal_stats.open}</div>`
       : '';
 
+    const allLiveSigs = [];
+    coins.forEach(c => (c.recent_live_signals || []).forEach(s => allLiveSigs.push(s)));
+    allLiveSigs.sort((a, b) => b.time - a.time);
+    const liveSigsTableHtml = allLiveSigs.length ? `
+      <div style="overflow-x:auto;margin-bottom:14px;">
+      <table style="font-size:11px;white-space:nowrap;width:100%;">
+        <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>Status</th><th>Time</th></tr></thead>
+        <tbody>${allLiveSigs.map(s => {
+          const rc = s.status === 'OPEN' ? 'dim' : s.result === 'WIN' ? 'win' : s.result === 'LOSS' ? 'loss' : 'dim';
+          const statusTxt = s.status === 'OPEN' ? '\u041e\u0422\u041a\u0420\u042b\u0422\u0410' : `${s.result}${s.pnl_r!=null?' '+(s.pnl_r>0?'+':'')+s.pnl_r+'R':''}`;
+          const dirClass = s.direction === 'SHORT' ? 'loss' : 'win';
+          return `<tr onclick="openPrvChart('${s.symbol}', ${s.time})" style="cursor:pointer;">
+            <td>${s.symbol.replace('_USDT','')}</td><td class="${dirClass}">${s.direction}</td>
+            <td>${fmtNum(s.entry)}</td><td>${fmtNum(s.sl)}</td><td>${fmtNum(s.tp)}</td>
+            <td class="${rc}">${statusTxt}</td><td class="dim">${fmtDateTime(s.time)}</td>
+          </tr>`;
+        }).join('')}</tbody>
+      </table>
+      </div>` : '';
+
     const cards = coins.map(c => {
       const isActive = c.is_active !== false;
       const cardStyle = isActive
@@ -22803,18 +22833,7 @@ async function refreshPrv() {
           <span class="${rc}">${t.result}${t.pnl_r!=null?' '+(t.pnl_r>0?'+':'')+t.pnl_r+'R':''}</span>
         </div>`;
       }).join('');
-      const liveSigs = c.recent_live_signals || [];
-      const liveSigRows = liveSigs.slice(0, 15).map(s => {
-        const rc = s.status === 'OPEN' ? 'dim' : s.result === 'WIN' ? 'win' : s.result === 'LOSS' ? 'loss' : 'dim';
-        const statusTxt = s.status === 'OPEN' ? '\u041e\u0422\u041a\u0420\u042b\u0422\u0410' : `${s.result}${s.pnl_r!=null?' '+(s.pnl_r>0?'+':'')+s.pnl_r+'R':''}`;
-        return `<div onclick="openPrvChart('${c.symbol}', ${s.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1c2433;font-size:11px;">
-          <span class="dim">${fmtDateTime(s.time)} ${s.direction} \u0432\u0445\u043e\u0434 ${fmtNum(s.entry)} \u00b7 SL ${fmtNum(s.sl)} \u00b7 TP ${fmtNum(s.tp)}</span>
-          <span class="${rc}">${statusTxt}</span>
-        </div>`;
-      }).join('');
-      const liveSigSection = liveSigs.length
-        ? `<details open><summary class="dim" style="cursor:pointer;font-size:11px;">\u0436\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b (${liveSigs.length})</summary>${liveSigRows}</details>`
-        : '';
+      const liveSigSection = '';
       return `<div style="${cardStyle}">
         <div style="font-size:15px;font-weight:700;color:#ffa726;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
         ${inactiveBadge}
@@ -22836,6 +22855,7 @@ async function refreshPrv() {
       </div>
       ${progressHtml}
       ${lstatsHtml}
+      ${liveSigsTableHtml}
       ${cards || '<div class="dim">\u043f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445</div>'}
     `;
   } catch(e) {
