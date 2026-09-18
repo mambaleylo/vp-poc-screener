@@ -15632,3 +15632,31 @@ v0.99.291 - Grew S/R Zones' own universe back up via a lower liquidity
          other module's own universe-building was touched.
          Verified: py_compile (-W error), pyflakes, real runtime 200 on
          /, /api/snr/status.
+
+v0.99.292 - CRITICAL FIX: MSNR's and LSW's own backtest results never
+         survived a restart, per direct user report ("почему результат
+         бэктеста по sweep не пережил перезапуска? Проверь mnsr и два
+         новых индикатора на эту проблему").
+         Checked all four as requested. Confirmed the two NEW modules
+         (S/R Zones, Peak Reversal) are fine — S/R Zones' own snr_
+         results/snr_signals/active/display symbols were already fixed
+         back in v0.99.271, and Peak Reversal was built with this in
+         mind from the start (v0.99.280).
+         Found the SAME "never actually persisted" bug (the exact
+         incident v0.99.271's own comment already documents for S/R
+         Zones) independently affecting BOTH older modules: LSW's own
+         backtest results live in STATE["lsw_backtest_results"], and
+         MSNR's own in STATE["msnr_backtest_results"] / "_raw" — none
+         of these three keys were ever included in save_state()'s own
+         explicit key list (it builds a specific dict, not a generic
+         STATE dump), so a restart silently wiped every discovered
+         zone/RR setting for every symbol in both modules, forcing a
+         full re-scan from scratch each time — exactly matching the
+         reported symptom for Sweep.
+         Added all three keys to both save_state() and load_state().
+         Verified directly: saved synthetic backtest results for both
+         modules, wiped in-memory STATE to simulate a restart, reloaded
+         from disk, and confirmed both LSW's and MSNR's own results
+         (including MSNR's separate _raw copy) came back intact.
+         Verified: py_compile (-W error), pyflakes, 64 routes, real
+         runtime 200 on / and /api/status.
