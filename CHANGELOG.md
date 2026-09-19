@@ -15817,3 +15817,48 @@ v0.99.296 - CRITICAL FIX: closed the actual gap behind "открытие сде�
          trade still passes through with no false-positive skip.
          Verified: py_compile (-W error), pyflakes, real runtime 200 on
          / and /api/status.
+
+v0.99.297 - CRITICAL FIX: found the ACTUAL root cause of "открытие
+         сделки на весь депозит" (opening with the full deposit)
+         despite AUTOTRADE_RISK_PCT_OF_BALANCE set to a modest 30% and
+         va-bank off — per direct user clarification ("Я про то
+         говорил, что у меня стоит например 30% от депо на сделку, а
+         открывается на весь") that v0.99.296's own affordability-
+         recheck fix didn't actually address, since it only catches
+         margin exceeding what's AVAILABLE — not margin quietly
+         climbing toward the full deposit while still technically
+         "affordable".
+         compute_risk_based_position()'s own formula solves for the
+         MARGIN needed so that a full stop-out loses exactly risk_pct%
+         of equity, at whatever leverage the SL distance's own safety
+         math allows. For a WIDE stop, safe leverage is naturally LOW,
+         and hitting the SAME target dollar risk at low leverage
+         requires proportionally MORE margin — nothing ever capped how
+         far this could climb. Verified directly: a stop as ordinary as
+         10-50% away already pushes margin to 50-75% of total equity
+         even at risk_pct=30%, and — more surprisingly — even a TIGHT
+         1% stop combined with a moderately-high MMR (2%, not unusual
+         for a real contract) pushed margin to 97.4% of equity, since
+         low mmr headroom also forces safe leverage down. A user
+         setting "30%" almost certainly means "don't commit more than
+         roughly that share of my account to one trade", not just
+         "don't lose more than that if it goes wrong" — the formula
+         only ever guaranteed the second half.
+         Fixed by capping margin at total_equity*risk_pct/100 directly
+         inside compute_risk_based_position() itself (not duplicated at
+         each call site) — if the wide-stop/high-mmr math would need
+         more margin than that to hit the full target risk, the trade
+         now uses LESS margin instead (correspondingly realizing
+         somewhat less than the full target risk_pct if the stop is
+         hit), rather than silently climbing toward the whole deposit.
+         Leverage itself is untouched — still the same value already
+         confirmed safe for that SL distance. Living inside this shared
+         function means every caller benefits automatically, including
+         v0.99.295's own fresh-price resize logic, with no duplicated
+         cap logic anywhere.
+         Verified directly: margin now holds steady at exactly 30% of
+         deposit across SL distances from 10% to 50% away (previously
+         climbed from 59% to 75%), and the earlier 97.4%-of-equity tight-
+         stop/high-mmr case now correctly caps at 30%.
+         Verified: py_compile (-W error), pyflakes, real runtime 200 on
+         / and /api/status.
