@@ -15949,3 +15949,37 @@ v0.99.300 - Added the three settings fields found missing during the
          HTML.
          Verified: py_compile (-W error), pyflakes, node --check, 64
          routes.
+
+v0.99.301 - CRITICAL FIX: 5 of the 11 "Очистить X" reset buttons never
+         actually persisted the cleared state to disk, per direct user
+         report ("Нажимаю очистить sweep, все очищается, но после
+         перезапуска история сигналов восстановилась").
+         Confirmed the exact mechanism: api_reset_lsw()/scalp/mirror/
+         msnr/ft5 all cleared STATE only in memory and never called
+         save_state() afterward — the OLD save file on disk still held
+         the un-cleared signal history, so a restart's own load_state()
+         silently restored it right back, making the "clear" button
+         look like it did nothing at all after any restart. Audited
+         all 11 reset endpoints systematically: NQ and Neuro were
+         already correct (they use their own dedicated save_nq_state()/
+         save_neuro_state() functions), Volume/simulator/risk_autotune/
+         the legacy bare /api/reset were already correct too — only
+         lsw/scalp/mirror/msnr/ft5 were missing the call. Added save_
+         state() to all five, immediately after their own state_lock
+         block, matching the working examples' own placement.
+         Found a SEPARATE, related bug while verifying the Mirror fix:
+         mirror_backtest_results was never included in save_state()/
+         load_state() at all — the same "never actually persisted"
+         incident lsw_backtest_results/msnr_backtest_results already
+         had fixed back in v0.99.292, just missed at the time since
+         only MSNR/LSW/S&R Zones/Peak Reversal were checked then, not
+         Mirror. Added it to both functions. Confirmed FT5 does NOT
+         have this bug — its own backtest results live in ft5_symbol_
+         overrides, which was already correctly persisted.
+         Verified directly: reset lsw/msnr/mirror/ft5/scalp via their
+         real endpoints, then read the actual state file off disk
+         afterward — lsw_signals/lsw_backtest_results/msnr_signals all
+         correctly empty on disk (not just in memory), and mirror_
+         backtest_results now present in the file at all.
+         Verified: py_compile (-W error), pyflakes, 64 routes, real
+         runtime 200 on /.
