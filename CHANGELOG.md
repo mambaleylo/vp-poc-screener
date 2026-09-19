@@ -15983,3 +15983,43 @@ v0.99.301 - CRITICAL FIX: 5 of the 11 "Очистить X" reset buttons never
          backtest_results now present in the file at all.
          Verified: py_compile (-W error), pyflakes, 64 routes, real
          runtime 200 on /.
+
+v0.99.302 - Removed Скальпинг/FT5/Зеркало/EMA Touch/AMD/NQ Model from
+         the UI entirely — tabs, settings groups, and header buttons —
+         per direct user request ("скальпинг, ft5, зеркало, ema, and и
+         nq можно вообще убрать, из настроек и вкладок"), resolving the
+         earlier "кнопки вверху не одинаковы для всех индикаторов"
+         complaint at the same time (AMD and EMA Touch, it turned out,
+         never had ANY header button at all, unlike every other
+         module — confirmed while auditing before the removal).
+         Chose the reversible path over deleting code: backend loops,
+         API endpoints, and state all stay intact, just defaulted OFF
+         (SCALP_SIGNALS_ENABLED/FT5_ENABLED/EMA_TOUCH_ENABLED/AMD_
+         ENABLED/NQ_ENABLED now default to "0"; Mirror was already off
+         by default) — a future session can bring any of them back by
+         flipping one constant and restoring the UI, rather than
+         rewriting from scratch.
+         Removed all 6 tabs, all 6 settings groups (Скальпинг, FT5,
+         Зеркало, EMA Touch, AMD Cycle, NQ Model), and the 4 header
+         buttons that existed for these modules (Очистить скальпинг/
+         FT5/Зеркало/NQ). Left the now-unreachable panel divs in place
+         (harmless empty containers, lower risk than removing them).
+         Critical follow-through: removing the settings groups left 16
+         dangling document.getElementById() references in setInputs/
+         setValueInputs (checkboxes/inputs that no longer exist), and
+         removing the 4 header buttons left dangling wireResetButton()
+         calls that would have thrown on a null button reference,
+         HALTING ALL SUBSEQUENT SCRIPT EXECUTION — the entire settings
+         panel and everything wired after those lines in the script
+         would have silently stopped working on page load. Found and
+         removed every one systematically (a script cross-checking
+         every getElementById() call in the whole frontend against
+         every id= actually present in the served HTML afterward
+         confirmed zero dangling references remain), plus cleaned the
+         3 dead entries out of updateHeaderButtonVisibility()'s own map
+         (that function is already null-safe, so this was cleanliness
+         rather than a second crash risk).
+         Verified: py_compile (-W error), pyflakes, node --check, 64
+         routes, real runtime 200 on /, /api/status, /api/settings —
+         confirmed exactly 8 tabs remain (msnr/lsw/neuro/snr/prv/
+         signals/autotrade/simulator).
