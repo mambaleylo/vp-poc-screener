@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.301"
+APP_VERSION = "0.99.302"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -273,7 +273,7 @@ SCALP_TARGET_PROFIT_USD = float(os.environ.get("VP_SCALP_TARGET_PROFIT_USD", 7.0
 # that symbol — no stop, per the original spec ("без стопа пока что"):
 # outcomes are WIN (target touched) or TIMEOUT (never touched within
 # the window), there is no LOSS state for this module.
-SCALP_SIGNALS_ENABLED = os.environ.get("VP_SCALP_SIGNALS_ENABLED", "1") == "1"
+SCALP_SIGNALS_ENABLED = os.environ.get("VP_SCALP_SIGNALS_ENABLED", "0") == "1"  # v0.99.302 — defaulted off, per direct user request ("скальпинг, ft5, зеркало, ema, амд и nq можно вообще убрать, из настроек и вкладок") — tab/settings hidden from the UI; backend code kept dormant rather than deleted, in case a future session wants it back
 SCALP_SIGNAL_HISTORY = 200
 SCALP_SIGNAL_TIMEOUT_MULT = float(os.environ.get("VP_SCALP_SIGNAL_TIMEOUT_MULT", 4.0))  # timeout = this many times the recommendation's own median time-to-hit
 SCALP_SL_BUFFER_MULT = float(os.environ.get("VP_SCALP_SL_BUFFER_MULT", 0.25))  # SL = p90_adverse_pct * (1 + this) — raised back up from 0.05, per direct user request after live LOSS MAE data (now n=26, a real sample — the earlier 0.05 cut was explicitly made cautious because it was based on n=1 loss) showed avg -1.167R / median -1.065R: losses were overshooting the nominal -1.0R stop by ~17% on average, meaning the 0.05 buffer wasn't actually covering real adverse excursion including slippage/wicks. Back-of-envelope from that overshoot: current_sl_pct = p90_adverse*1.05, and avg realized loss = -1.167*current_sl_pct ≈ p90_adverse*1.225 — so the true P90 estimate itself was being undershot by roughly that much once real execution is factored in. 0.25 targets bringing the stop back in line with what real losses actually reach, rather than picking an arbitrary round number; still needs verifying against the NEXT batch of live losses once they accumulate under the new buffer, same as the original 0.2->0.05 decision was based on watching real data rather than theory alone.
@@ -661,7 +661,7 @@ MSNR_SINGLE_BEST_ENABLED = os.environ.get("VP_MSNR_SINGLE_BEST", "0") == "1"  # 
 #     against the wrong variable), not a deliberate design choice. Not
 #     replicated here.
 # ============================================================================
-FT5_ENABLED = os.environ.get("VP_FT5_ENABLED", "1") == "1"
+FT5_ENABLED = os.environ.get("VP_FT5_ENABLED", "0") == "1"  # v0.99.302 — same off-by-default UI removal as SCALP_SIGNALS_ENABLED's own
 FT5_TF = os.environ.get("VP_FT5_TF", "5m")  # matches Strategy005's own timeframe
 FT5_UNIVERSE_SIZE = int(os.environ.get("VP_FT5_UNIVERSE_SIZE", 200))  # how many symbols get analyzed/optimized — wide net for finding what works
 FT5_LIVE_TOP_N = int(os.environ.get("VP_FT5_LIVE_TOP_N", 10))  # how many of the analyzed symbols (ranked by the optimizer's own avg_pnl_pct) actually get scanned for live signals — per direct user request: analyze broadly, trade narrowly on the best performers only (raised 5->10 per a follow-up request)
@@ -13699,7 +13699,7 @@ def lsw_live_loop():
 # v0.99.180
 # ============================================================================
 
-EMA_TOUCH_ENABLED      = os.environ.get("VP_EMA_TOUCH_ENABLED", "1") == "1"  # v0.99.225 — master on/off, per direct user report ("не могу отключить индикатор ema... от скана") — this tab had NO enable toggle at all before, unlike every other module (LSW_ENABLED/FT5_ENABLED/MSNR_ENABLED/AMD_ENABLED)
+EMA_TOUCH_ENABLED      = os.environ.get("VP_EMA_TOUCH_ENABLED", "0") == "1"  # v0.99.302 — same off-by-default UI removal as SCALP_SIGNALS_ENABLED's own
 EMA_TOUCH_EMA_PERIOD    = 28
 EMA_TOUCH_REFRESH_SEC   = int(os.environ.get("VP_EMA_TOUCH_REFRESH_SEC", 14400))
 EMA_TOUCH_NOISE_BARS    = int(os.environ.get("VP_EMA_TOUCH_NOISE_BARS", 3))
@@ -13926,7 +13926,7 @@ def ema_bull_loop():
 # v0.99.192
 # ============================================================================
 
-AMD_ENABLED          = os.environ.get("VP_AMD_ENABLED", "1") == "1"  # v0.99.225 — master on/off, same gap as EMA Touch (see EMA_TOUCH_ENABLED's own comment) — this tab also had no enable toggle at all before
+AMD_ENABLED          = os.environ.get("VP_AMD_ENABLED", "0") == "1"  # v0.99.302 — same off-by-default UI removal as SCALP_SIGNALS_ENABLED's own
 AMD_STRUCTURE_TF     = os.environ.get("VP_AMD_STRUCTURE_TF", "15m")  # v0.99.202 — lowered from 1h per direct user request for more frequent signals
 AMD_ENTRY_TF         = os.environ.get("VP_AMD_ENTRY_TF", "5m")
 AMD_REFRESH_SEC      = int(os.environ.get("VP_AMD_REFRESH_SEC", 300))     # scan every 5m — structure candle is now 15m, check often enough not to miss one
@@ -18154,7 +18154,7 @@ def api_neuro_chart(symbol):
 # restricted to candidates that never go below 3.0).
 # ============================================================================
 
-NQ_ENABLED           = os.environ.get("VP_NQ_ENABLED", "1") == "1"
+NQ_ENABLED           = os.environ.get("VP_NQ_ENABLED", "0") == "1"  # v0.99.302 — same off-by-default UI removal as SCALP_SIGNALS_ENABLED's own
 NQ_SYMBOL            = os.environ.get("VP_NQ_SYMBOL", "NAS100_USDT")
 NQ_TF                = os.environ.get("VP_NQ_TF", "15m")
 NQ_HISTORY_DAYS      = int(os.environ.get("VP_NQ_HISTORY_DAYS", 365))  # ask for a lot; NAS100_USDT only launched Jan 2026 so real history will be much shorter — code handles whatever comes back
@@ -20574,16 +20574,12 @@ INDEX_HTML = """<!doctype html>
     <div style="display:flex;gap:8px;flex-wrap:wrap;">
       <button id="settingsBtn">⚙️ Настройки</button>
       <button id="resetVolumeBtn" class="btnDanger">Очистить объём</button>
-      <button id="resetScalpBtn" class="btnDanger">Очистить скальпинг</button>
       <button id="resetMsnrBtn" class="btnDanger">Очистить MSNR</button>
-      <button id="resetFt5Btn" class="btnDanger">Очистить FT5</button>
-      <button id="resetMirrorBtn" class="btnDanger">Очистить Зеркало</button>
       <button id="resetLswBtn" class="btnDanger">Очистить Sweep</button>
       <button id="resetNeuroBtn" class="btnDanger">Очистить Neuro</button>
       <button id="restartNeuroBacktestBtn" class="btnNeutral">Перезапустить бэктест Neuro</button>
       <button id="restartSnrBacktestBtn" class="btnNeutral">Перезапустить бэктест S/R</button>
       <button id="restartPrvBacktestBtn" class="btnNeutral">Перезапустить бэктест Peak Reversal</button>
-      <button id="resetNqBtn" class="btnDanger">Очистить NQ</button>
       <button id="resetSimulatorBtn" class="btnDanger">Сбросить симулятор</button>
       <button id="resetRiskAutotuneBtn" class="btnDanger">Сбросить авто-тюнинг</button>
     </div>
@@ -20607,12 +20603,6 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="snr" style="color:#26c6da;">S/R Zones</div>
   <div class="tab" data-tab="prv" style="color:#ffa726;">Peak Reversal</div>
   <div class="tab" data-tab="signals">Volume</div>
-  <div class="tab" data-tab="scalp">Скальпинг</div>
-  <div class="tab" data-tab="ft5" style="color:#e0a030;">FT5 ⚠️</div>
-  <div class="tab" data-tab="mirror">Зеркало</div>
-  <div class="tab" data-tab="emabull" style="color:#3ddc97;">EMA🚀</div>
-  <div class="tab" data-tab="amd" style="color:#f0a030;">AMD</div>
-  <div class="tab" data-tab="nq" style="color:#4fc3f7;">NQ Model</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
   <div id="hintsToggleBtn" onclick="toggleHints()" style="margin-left:auto;padding:4px 10px;font-size:11px;color:#5a6a7a;cursor:pointer;user-select:none;align-self:center;" title="скрыть/показать подсказки">💡</div>
@@ -20723,23 +20713,6 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#ffb74d;"><summary class="settingsGroupTitle">Скальпинг</summary><div class="settingsGroupBody">
-      
-      <div class="settingRow">
-        <div>
-          <div class="label">Скальпинг</div>
-          <div class="sub">фоновый сбор статистики волатильности, раз в несколько часов</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setScalp"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Живые сигналы</div>
-          <div class="sub">топ монет по score, вход на закрытии свечи, TP/SL из статистики</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setScalpSignals"><span class="switchSlider"></span></label>
-      </div>
-    </div></details>
 
     <details class="settingsGroup" style="--mod-color:#ff7043;" data-warn style="background:rgba(255,112,67,0.05);"><summary class="settingsGroupTitle" style="color:#e0a030;">MSNR ⚠️ Экспериментально</summary><div class="settingsGroupBody">
       
@@ -20787,112 +20760,9 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#ff7043;" data-warn style="background:rgba(255,112,67,0.05);"><summary class="settingsGroupTitle" style="color:#e0a030;">FT5 ⚠️ Экспериментально</summary><div class="settingsGroupBody">
-      
-      <div class="settingRow">
-        <div>
-          <div class="label">Сканирование</div>
-          <div class="sub">порт Strategy005 (freqtrade) — свой перебор параметров на реальных данных, сигналы информационные (не подключены к автоторговле)</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setFt5"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Реверс сигналов</div>
-          <div class="sub">та же точка входа, но SHORT вместо LONG — выход только по стопу/лесенке (сигнальный выход не зеркалится, см. вкладку)</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setFt5Invert"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Фильтр по тренду (4ч, глобальный)</div>
-          <div class="sub">LONG только если тренд на 4ч вверх/нейтральный, SHORT только если вниз/нейтральный — единый для всех монет, как у Sweep/MSNR/Зеркала</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setFt5HtfFilter"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Фильтр по сессии (глобальный)</div>
-          <div class="sub">торговать только в часы 07:00–21:00 UTC — вне этого окна сигналы пропускаются как "мёртвая" сессия</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setFt5SessionFilter"><span class="switchSlider"></span></label>
-      </div>
-    </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#ba68c8;"><summary class="settingsGroupTitle">Зеркало</summary><div class="settingsGroupBody">
-      
-      <div class="settingRow">
-        <div>
-          <div class="label">Сканирование</div>
-          <div class="sub">"зеркальный уровень" — пробитая поддержка/сопротивление меняет роль при возврате цены; вход на паттерне разворота (внутренний бар/пинцет/рельсы/поглощение на дожи)</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setMirror"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ RR (тейк-профит)</div>
-          <div class="sub">фиксированное соотношение тейк:стоп от найденного стопа паттерна</div>
-        </div>
-        <input type="number" id="setMirrorRR" min="0.5" max="20" step="0.5" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Допуск касания уровня</div>
-          <div class="sub">насколько близко цена должна вернуться к пробитому уровню, чтобы считаться "касанием" (% от цены) — общее значение для всех монет, используется если автотюнинг ниже выключен или не подобрал для монеты свою комбинацию</div>
-        </div>
-        <input type="number" id="setMirrorTouchTolerance" min="0.01" max="2" step="0.01" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Допуск паттерна</div>
-          <div class="sub">допуск совпадения фитилей/тел для пинцета и рельсов, в % от большего из двух сравниваемых значений — общее значение, та же логика "используется без автотюнинга" что и выше</div>
-        </div>
-        <input type="number" id="setMirrorPatternTolerance" min="1" max="100" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Автотюнинг допусков</div>
-          <div class="sub">подбирает допуск касания и допуск паттерна отдельно для каждой монеты — только если комбинация проходит проверку на ДВУХ независимых кусках истории (сначала подбор на первых 70% данных, потом обязательная проверка на отложенных последних 30%, которые в подборе не участвовали). Если ни одна комбинация не прошла обе проверки — монета торгуется с обычными общими допусками</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setMirrorAutotuneTolerance"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Фильтр по объёму (глобальный)</div>
-          <div class="sub">единый порог 1.5× среднего объёма для всех монет — свеча паттерна должна показать реальное участие толпы, а не быть тихим фитилём</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setMirrorVolumeFilter"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Фильтр по тренду (4ч, глобальный)</div>
-          <div class="sub">LONG только если тренд на 4ч вверх/нейтральный, SHORT только если вниз/нейтральный — единый для всех монет, как у Sweep и MSNR</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setMirrorHtfFilter"><span class="switchSlider"></span></label>
-      </div>
-    </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#66bb6a;"><summary class="settingsGroupTitle">EMA Touch (EMA🚀)</summary><div class="settingsGroupBody">
-      
-      <div class="settingRow">
-        <div>
-          <div class="label">Сканирование</div>
-          <div class="sub">крупная импульсная свеча (1W/1M) касается EMA28 фитилём снизу и закрывается ниже неё — сигнал SHORT на отбое</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setEmaTouch"><span class="switchSlider"></span></label>
-      </div>
-    </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#4db6ac;"><summary class="settingsGroupTitle">AMD Cycle</summary><div class="settingsGroupBody">
-      
-      <div class="settingRow">
-        <div>
-          <div class="label">Сканирование</div>
-          <div class="sub">Accumulation → Manipulation → Distribution — тесная консолидация, ложный пробой за её границу, затем импульсная свеча в реальную сторону</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAmd"><span class="switchSlider"></span></label>
-      </div>
-    </div></details>
 
     <details class="settingsGroup" style="--mod-color:#f06292;"><summary class="settingsGroupTitle">🧠 Neuro</summary><div class="settingsGroupBody">
       
@@ -20970,16 +20840,6 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">не меньше числа выше — торгуются только лучшие по числу выше, остальные показываются серым как справочные</div>
         </div>
         <input type="number" id="setPrvDisplayN" min="1" max="30" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
-      </div>
-    </div></details>
-    <details class="settingsGroup" style="--mod-color:#7986cb;"><summary class="settingsGroupTitle">NQ Model (NAS100_USDT)</summary><div class="settingsGroupBody">
-      
-      <div class="settingRow">
-        <div>
-          <div class="label">Сканирование</div>
-          <div class="sub">Previous Day High/Low + цвет дневной свечи (бычья → ждём свипа хая, медвежья → лоу) + CISD-подтверждение (быстрый возврат через недавний структурный уровень) — вход в сторону разворота. Жёсткий минимум RR 1:3 (без исключений, по методичке), без ограничения числа сделок в день, без снижения риска после проигрыша</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setNq"><span class="switchSlider"></span></label>
       </div>
     </div></details>
 
@@ -24192,18 +24052,9 @@ function wireResetButton(btnId, endpoint, confirmMsg, idleLabel) {
 wireResetButton('resetVolumeBtn', '/api/reset/volume',
   'Удалить статистику и подобранные параметры Volume Profile (Сигналы/Watchlist/Тюнинг)? Это необратимо.',
   'Очистить объём');
-wireResetButton('resetScalpBtn', '/api/reset/scalp',
-  'Удалить накопленную статистику скальпинга (вселенная, данные по монетам, рекомендации)? Остальное не тронет. Это необратимо.',
-  'Очистить скальпинг');
 wireResetButton('resetMsnrBtn', '/api/reset/msnr',
   'Удалить накопленный бэктест и сигналы MSNR? Остальное не тронет. Это необратимо.',
   'Очистить MSNR');
-wireResetButton('resetFt5Btn', '/api/reset/ft5',
-  'Удалить накопленный анализ параметров и сигналы экспериментального FT5? Остальное не тронет. Это необратимо.',
-  'Очистить FT5');
-wireResetButton('resetMirrorBtn', '/api/reset/mirror',
-  'Удалить накопленный бэктест и сигналы Зеркала? Остальное не тронет. Это необратимо.',
-  'Очистить Зеркало');
 wireResetButton('resetLswBtn', '/api/reset/lsw',
   'Удалить накопленный бэктест и сигналы Sweep? Остальное не тронет. Это необратимо.',
   'Очистить Sweep');
@@ -24244,9 +24095,6 @@ wireRestartButton('restartSnrBacktestBtn', '/api/snr/restart_backtest',
 wireRestartButton('restartPrvBacktestBtn', '/api/prv/restart_backtest',
   'Запустить новый цикл перебора параметров Peak Reversal прямо сейчас, не дожидаясь расписания? Текущие результаты останутся видны, пока новый цикл не завершится.',
   'Перезапустить бэктест Peak Reversal');
-wireResetButton('resetNqBtn', '/api/reset/nq',
-  'Удалить накопленный бэктест и сигналы NQ Model? Это необратимо.',
-  'Очистить NQ');
 wireResetButton('resetRiskAutotuneBtn', '/api/reset/risk_autotune',
   'Сбросить все параметры авто-тюнинга риска (EMA/Скальпинг/Сессия) к значениям по умолчанию из кода, очистить лог и cooldown? Сами сигналы и статистику не тронет. Это необратимо.',
   'Сбросить авто-тюнинг');
@@ -24260,8 +24108,6 @@ const setInputs = {
   volume_profile_enabled: document.getElementById('setVolumeProfile'),
   bounce_enabled: document.getElementById('setBounce'),
   breakout_enabled: document.getElementById('setBreakout'),
-  scalp_enabled: document.getElementById('setScalp'),
-  scalp_signals_enabled: document.getElementById('setScalpSignals'),
   msnr_enabled: document.getElementById('setMsnr'),
   msnr_addon_enabled: document.getElementById('setMsnrAddon'),
   msnr_all_in_enabled: document.getElementById('setMsnrAllIn'),
@@ -24272,21 +24118,10 @@ const setInputs = {
   msnr_min_rr_filter_enabled: document.getElementById('setMsnrMinRrFilter'),
   msnr_htf_filter_enabled: document.getElementById('setMsnrHtfFilter'),
   msnr_per_symbol_filters_enabled: document.getElementById('setMsnrPerSymbolFilters'),
-  ft5_enabled: document.getElementById('setFt5'),
-  ft5_invert_signals: document.getElementById('setFt5Invert'),
-  ft5_htf_filter_enabled: document.getElementById('setFt5HtfFilter'),
-  ft5_session_filter_enabled: document.getElementById('setFt5SessionFilter'),
-  mirror_enabled: document.getElementById('setMirror'),
-  mirror_autotune_tolerance_enabled: document.getElementById('setMirrorAutotuneTolerance'),
-  mirror_volume_filter_enabled: document.getElementById('setMirrorVolumeFilter'),
-  mirror_htf_filter_enabled: document.getElementById('setMirrorHtfFilter'),
   lsw_enabled: document.getElementById('setLsw'),
-  ema_touch_enabled: document.getElementById('setEmaTouch'),
-  amd_enabled: document.getElementById('setAmd'),
   neuro_enabled: document.getElementById('setNeuro'),
   snr_enabled: document.getElementById('setSnr'),
   prv_enabled: document.getElementById('setPrv'),
-  nq_enabled: document.getElementById('setNq'),
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
   lsw_structural_cap_enabled: document.getElementById('setLswStructuralCap'),
   lsw_volume_filter_enabled: document.getElementById('setLswVolumeFilter'),
@@ -24339,9 +24174,6 @@ const setInputs = {
 };
 
 const setValueInputs = {
-  mirror_rr: document.getElementById('setMirrorRR'),
-  mirror_touch_tolerance_pct: document.getElementById('setMirrorTouchTolerance'),
-  mirror_pattern_tolerance_pct: document.getElementById('setMirrorPatternTolerance'),
   lsw_rr: document.getElementById('setLswRR'),
   lsw_equal_tolerance_pct: document.getElementById('setLswEqualTolerance'),
   autotrade_risk_pct: document.getElementById('setAutotradeRiskPct'),
@@ -24391,9 +24223,9 @@ async function loadSettings() {
 // Scalp/simulator/risk-autotune reset buttons stay always visible —
 // they aren't gated by a single module "enabled" toggle the same way.
 const HEADER_BTN_ENABLE_KEY = {
-  resetMsnrBtn: 'msnr_enabled', resetFt5Btn: 'ft5_enabled', resetMirrorBtn: 'mirror_enabled',
+  resetMsnrBtn: 'msnr_enabled',
   resetLswBtn: 'lsw_enabled', resetNeuroBtn: 'neuro_enabled', restartNeuroBacktestBtn: 'neuro_enabled',
-  restartSnrBacktestBtn: 'snr_enabled', restartPrvBacktestBtn: 'prv_enabled', resetNqBtn: 'nq_enabled',
+  restartSnrBacktestBtn: 'snr_enabled', restartPrvBacktestBtn: 'prv_enabled',
 };
 function updateHeaderButtonVisibility(s) {
   for (const btnId in HEADER_BTN_ENABLE_KEY) {
