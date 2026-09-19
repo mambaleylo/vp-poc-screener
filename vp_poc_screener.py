@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.302"
+APP_VERSION = "0.99.303"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -20573,6 +20573,7 @@ INDEX_HTML = """<!doctype html>
     <h1>VP-POC Screener</h1>
     <div style="display:flex;gap:8px;flex-wrap:wrap;">
       <button id="settingsBtn">⚙️ Настройки</button>
+      <button id="screensaverBtn" onclick="toggleScreensaver()" style="color:#5a6a7a;" title="скринсейвер (часы, защита AMOLED)">🕐</button>
       <button id="resetVolumeBtn" class="btnDanger">Очистить объём</button>
       <button id="resetMsnrBtn" class="btnDanger">Очистить MSNR</button>
       <button id="resetLswBtn" class="btnDanger">Очистить Sweep</button>
@@ -20606,7 +20607,6 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
   <div id="hintsToggleBtn" onclick="toggleHints()" style="margin-left:auto;padding:4px 10px;font-size:11px;color:#5a6a7a;cursor:pointer;user-select:none;align-self:center;" title="скрыть/показать подсказки">💡</div>
-  <div id="screensaverBtn" onclick="toggleScreensaver()" style="padding:4px 10px;font-size:11px;color:#5a6a7a;cursor:pointer;user-select:none;align-self:center;" title="скринсейвер (часы, защита AMOLED)">🕐</div>
 </div>
 <div class="panel">
   <div id="tuningPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
