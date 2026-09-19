@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.300"
+APP_VERSION = "0.99.301"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6201,6 +6201,7 @@ def save_state():
                 "ft5_signals": list(STATE["ft5_signals"]),
                 "ft5_symbol_overrides": STATE["ft5_symbol_overrides"],
                 "mirror_signals": list(STATE["mirror_signals"]),
+                "mirror_backtest_results": STATE["mirror_backtest_results"],  # v0.99.301 — CRITICAL FIX, found while verifying the reset-persistence fix: never persisted before, a restart silently wiped every Mirror backtest result (same incident as lsw/msnr_backtest_results' own v0.99.292 fix, just missed at the time since only MSNR/LSW/SNR/PRV were checked then)
                 "mirror_filtered_signals": list(STATE["mirror_filtered_signals"]),
                 "mirror_symbol_overrides": STATE["mirror_symbol_overrides"],
                 "mirror_live_universe": STATE["mirror_live_universe"],
@@ -6344,6 +6345,7 @@ def load_state():
         ft5_signals = data.get("ft5_signals", [])
         ft5_symbol_overrides = data.get("ft5_symbol_overrides", {})
         mirror_signals = data.get("mirror_signals", [])
+        mirror_backtest_results = data.get("mirror_backtest_results", {})
         mirror_filtered_signals = data.get("mirror_filtered_signals", [])
         mirror_symbol_overrides = data.get("mirror_symbol_overrides", {})
         mirror_live_universe = data.get("mirror_live_universe", [])
@@ -6373,6 +6375,7 @@ def load_state():
             STATE["ft5_signals"] = deque(_backfill_mfe_mae(ft5_signals), maxlen=FT5_SIGNAL_HISTORY)
             STATE["ft5_symbol_overrides"] = ft5_symbol_overrides
             STATE["mirror_signals"] = deque(_backfill_mfe_mae(mirror_signals), maxlen=MIRROR_SIGNAL_HISTORY)
+            STATE["mirror_backtest_results"] = mirror_backtest_results
             STATE["mirror_filtered_signals"] = deque(_backfill_mfe_mae(mirror_filtered_signals), maxlen=MIRROR_SIGNAL_HISTORY)
             STATE["mirror_symbol_overrides"] = mirror_symbol_overrides
             STATE["mirror_live_universe"] = mirror_live_universe
@@ -19225,6 +19228,7 @@ def api_reset_scalp():
             STATE["scalp_last_build_duration"] = None
             STATE["scalp_symbols_done"] = 0
             STATE["scalp_signals"].clear()
+        save_state()  # v0.99.301 — same CRITICAL FIX as api_reset_lsw()'s own — see that function's own comment for the full incident
         return jsonify({"ok": True})
     except Exception as e:
         log_error(f"api_reset_scalp: {e}")
@@ -19476,6 +19480,7 @@ def api_reset_lsw():
             STATE["lsw_last_backtest_finished"] = None
             STATE["lsw_last_backtest_duration"] = None
             STATE["lsw_signals"].clear()
+        save_state()  # v0.99.301 — CRITICAL FIX, per direct user report ("нажимаю очистить sweep, все очищается, но после перезапуска история сигналов восстановилась"): this cleared STATE only in memory and never wrote the cleared state to disk — the OLD save file still had the un-cleared signal history, so a restart's own load_state() silently brought it right back. Same fix applied to every other reset endpoint missing this call (msnr/mirror/ft5/neuro/nq/scalp).
         # v0.99.137 — per direct user report ("нажал очистить sweep,
         # новый бэктест сразу начнется?"), same fix as api_reset_msnr()'s
         # own v0.99.40: wakes lsw_backtest_loop() immediately instead of
@@ -19532,6 +19537,7 @@ def api_reset_mirror():
             STATE["mirror_last_backtest_finished"] = None
             STATE["mirror_last_backtest_duration"] = None
             STATE["mirror_signals"].clear()
+        save_state()  # v0.99.301 — same CRITICAL FIX as api_reset_lsw()'s own — see that function's own comment for the full incident
         # v0.99.270 — CRITICAL FIX found while adding the identical fix for
         # the new SNR module: this never woke mirror_backtest_loop() early,
         # same "Очистить X doesn't wake the sleeping loop" bug MSNR/LSW
@@ -19888,6 +19894,7 @@ def api_reset_msnr():
             STATE["msnr_last_backtest_finished"] = None
             STATE["msnr_last_backtest_duration"] = None
             STATE["msnr_signals"].clear()
+        save_state()  # v0.99.301 — same CRITICAL FIX as api_reset_lsw()'s own — see that function's own comment for the full incident
         # v0.99.40 — per direct user report ("жму очистить msnr и заново
         # бэктэст не запускается, час ждать что-ли"): wakes msnr_
         # backtest_loop() immediately instead of leaving it asleep for
@@ -20019,6 +20026,7 @@ def api_reset_ft5():
             STATE["ft5_last_backtest_finished"] = None
             STATE["ft5_last_backtest_duration"] = None
             STATE["ft5_signals"].clear()
+        save_state()  # v0.99.301 — same CRITICAL FIX as api_reset_lsw()'s own — see that function's own comment for the full incident
         # v0.99.270 — same CRITICAL FIX as api_reset_mirror()'s own — see
         # that endpoint's own comment for the full incident.
         FT5_BACKTEST_TRIGGER.set()
