@@ -15886,3 +15886,38 @@ v0.99.298 - Added a minimum winrate floor for Neuro's top-N selection,
          routes, real runtime 200 confirming neuro_min_winrate defaults
          to 35.0 in /api/settings and the input field is present in the
          served HTML.
+
+v0.99.299 - Consolidated scattered "same kind of setting" checkboxes
+         into their own dedicated sections, per direct user request
+         ("настройки уведомлений где-то в настройка общих, где-то в
+         самой монете, тоже самое и с вабанком, нужно каждое поле
+         пересмотреть и систематизировать") and follow-up choosing to
+         group by setting TYPE rather than reorder within each
+         module's own section.
+         Audited every telegram_alerts_* and *_all_in_enabled setting
+         across the whole app first. Found the "Telegram" settings
+         group already correctly held 12 of 14 module alert toggles
+         (VP, hourly, ft5, msnr, mirror, lsw, ema_bull, amd, neuro,
+         neuro_summary, nq, network) — only S/R Zones' and Peak
+         Reversal's own telegram_alerts_snr/prv (added later, in
+         v0.99.271/280) had ended up inside THEIR OWN module groups
+         instead, using a different ID naming convention besides
+         (setTelegramAlertsSnr/Prv vs the rest's plain setTelegramX).
+         Moved both into the Telegram group, renamed to match the
+         existing convention (setTelegramSnr/setTelegramPrv) — the
+         underlying settings keys themselves (telegram_alerts_snr/prv)
+         are unchanged, so no data migration was needed.
+         Similarly, found the "Автоторговля" group already held va-bank
+         for LSW/S/R Zones/Peak Reversal (added directly there in
+         v0.99.294) but MSNR's own (the ORIGINAL va-bank feature,
+         v0.99.157) had stayed inside MSNR's own settings group. Moved
+         it into Автоторговля, right under MSNR's own autotrade master
+         toggle — matching the other three's own placement. MSNR's
+         separate "single-best-coin" setting stayed put — that's a coin-
+         selection strategy choice, not an autotrade risk/margin
+         setting, so it doesn't belong in this pass.
+         Verified: py_compile (-W error), pyflakes, node --check, 64
+         routes, zero duplicate HTML ids introduced by the moves, real
+         runtime 200 confirming all 14 module-specific telegram
+         checkboxes and all 4 va-bank checkboxes are present in the
+         served HTML.
