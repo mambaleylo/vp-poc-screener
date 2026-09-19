@@ -15862,3 +15862,27 @@ v0.99.297 - CRITICAL FIX: found the ACTUAL root cause of "открытие
          stop/high-mmr case now correctly caps at 30%.
          Verified: py_compile (-W error), pyflakes, real runtime 200 on
          / and /api/status.
+
+v0.99.298 - Added a minimum winrate floor for Neuro's top-N selection,
+         per direct user request ("даже если сейчас карточка первая,
+         но винрейт 30 это мало для пропуска карточки"). A coin ranking
+         #1 by avg_pnl_r (the existing ranking metric) can still have a
+         low winrate if rare large wins offset frequent small losses —
+         new NEURO_MIN_WINRATE (default 35%) excludes a coin from the
+         active/tradeable set entirely once its winrate falls below it,
+         regardless of rank, same "excluded outright, not just ranked
+         low" treatment NEURO_TOP_N_MIN_TRADES's own sample-size floor
+         already gets. New neuro_effective_winrate() mirrors neuro_rank_
+         metric()'s own recent-preferred/full-history-fallback pattern
+         (using aggregate_recent's own winrate once NEURO_AGG_DECAY_
+         MIN_N recent trades exist), so the floor judges a coin by the
+         same evidence its ranking already does. New setting (neuro_min_
+         winrate) with an input field next to the existing top-N/
+         display-N ones.
+         Verified directly: a synthetic coin with winrate=30% (avg_pnl_r
+         =5.0, from rare big wins) correctly fails the 35% floor, while
+         a normal coin at 45% winrate (avg_pnl_r=0.3) correctly passes.
+         Verified: py_compile (-W error), pyflakes, node --check, 64
+         routes, real runtime 200 confirming neuro_min_winrate defaults
+         to 35.0 in /api/settings and the input field is present in the
+         served HTML.
