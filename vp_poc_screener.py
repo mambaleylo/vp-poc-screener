@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.294"
+APP_VERSION = "0.99.295"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4234,7 +4234,17 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
     and target still sit on the geometrically correct sides for that
     reversed direction."""
     signal_direction = direction
-    inverted = (mode == "lsw" and AUTOTRADE_INVERT_LSW) or (mode == "neuro" and AUTOTRADE_INVERT_NEURO)
+    # v0.99.295 — CRITICAL FIX, found while investigating a separate
+    # liquidation-safety report: this only ever checked "lsw"/"neuro" —
+    # AUTOTRADE_INVERT_SNR/AUTOTRADE_INVERT_PRV existed as settings
+    # (wired into SETTINGS_KEYS/get_settings/apply_settings, with
+    # working checkboxes in the UI) but were NEVER actually consulted
+    # here, so toggling "Инвертировать открытие" for S/R Zones or Peak
+    # Reversal silently did nothing at all — the setting saved fine,
+    # the checkbox showed as on, but every real order still went out
+    # in the ORIGINAL (non-inverted) direction.
+    inverted = ((mode == "lsw" and AUTOTRADE_INVERT_LSW) or (mode == "neuro" and AUTOTRADE_INVERT_NEURO)
+                or (mode == "snr" and AUTOTRADE_INVERT_SNR) or (mode == "prv" and AUTOTRADE_INVERT_PRV))
     if inverted:
         direction = "SHORT" if direction == "LONG" else "LONG"
         sl, tp = tp, sl
@@ -4403,6 +4413,60 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
             record["notional_usd"] = round(notional, 2) if notional else notional
             record["margin_usd"] = round(actual_margin, 2) if actual_margin else actual_margin
 
+            if not skip_reason and notional:
+                # v0.99.295 — CRITICAL FIX, per direct user report of a
+                # REAL trade where the stop ended up beyond Gate.io's own
+                # liquidation price despite AUTOTRADE_RISK_PCT_OF_BALANCE
+                # being a modest 30% and all-in mode being OFF. Root
+                # cause: compute_risk_based_position() picks a leverage
+                # that's safe for the ORIGINALLY-CALCULATED notional's own
+                # real tier (v0.99.237's own tier-aware fix) — but
+                # compute_contracts_from_margin() can round UP to a
+                # symbol's minimum tradeable lot size (accepting up to
+                # 1.5x the calculated notional, by design, rather than
+                # skip every near-minimum-size trade). That rounding was
+                # never re-checked against the tier that actually applies
+                # at the LARGER, POST-ROUNDING notional — on a low-priced,
+                # low-liquidity symbol with an unusually tight ATR-based
+                # stop (exactly what S/R Zones' and Peak Reversal's own
+                # recently-widened, low-liquidity-floor universe, v0.99.
+                # 291/293, now surfaces far more often than before), the
+                # real tier at the rounded-up notional can have a worse
+                # (higher) MMR or lower max-leverage than the tier used
+                # for the original safety calculation — meaning the
+                # leverage that was safe for the SMALL notional is no
+                # longer safe for the ACTUAL, LARGER one, silently letting
+                # liquidation land closer than the stop. Re-validates
+                # leverage safety against the REAL tier for the ACTUAL
+                # post-rounding notional; skips the trade entirely (same
+                # "skip rather than silently accept a compromised trade"
+                # discipline as compute_contracts_from_margin()'s own
+                # 1.5x threshold) rather than trying to silently patch the
+                # size/leverage after the fact.
+                sl_distance_pct = abs(entry - sl) / entry * 100 if entry else 0
+                real_mmr_pct, real_leverage_cap = mmr_pct, leverage_cap
+                if symbol and tiers_by_symbol:
+                    tier_mmr, tier_lev = lookup_risk_tier_for_notional(symbol, notional, tiers_by_symbol)
+                    if tier_mmr is not None:
+                        real_mmr_pct = tier_mmr
+                    if tier_lev is not None:
+                        real_leverage_cap = min(leverage_cap, tier_lev) if leverage_cap else tier_lev
+                required_buffer = sl_distance_pct * SCALP_SAFETY_MARGIN
+                actual_buffer = compute_scalp_liquidation_move_pct(direction, leverage, real_mmr_pct)
+                if leverage > (real_leverage_cap or leverage) or actual_buffer is None or actual_buffer < required_buffer:
+                    record["status"] = "SKIPPED"
+                    record["detail"] = (f"после округления до минимального лота реальный notional (${notional:.2f}) "
+                                         f"попадает в другой уровень маржи биржи, где плечо {leverage}x уже небезопасно "
+                                         f"для стопа {sl_distance_pct:.3f}% — сделка пропущена, чтобы не допустить "
+                                         f"ликвидацию раньше стопа")
+                    send_telegram(
+                        f"\u26a0\ufe0f {symbol} ({mode}): \u0441\u0434\u0435\u043b\u043a\u0430 \u043f\u0440\u043e\u043f\u0443\u0449\u0435\u043d\u0430 \u2014 {record['detail']}",
+                        category=mode,
+                    )
+                    with state_lock:
+                        STATE["autotrade_log"].appendleft(record)
+                    return record
+
             if skip_reason:
                 record["status"] = "SKIPPED"
                 record["detail"] = skip_reason
@@ -4533,6 +4597,76 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
                         with state_lock:
                             STATE["autotrade_log"].appendleft(record)
                         return record
+
+                # v0.99.295 — CRITICAL FIX, per direct user follow-up
+                # ("если в сделку автооткрытие входит спустя 2 часа
+                # например то и entry смещается и соответственно точка
+                # ликвидации, в таком случае менять плечо наверное
+                # надо"): the two drift checks just above only decide
+                # whether to SKIP a too-stale signal — they never
+                # updated the actual sizing. margin/leverage/contracts
+                # above were all computed against the SIGNAL's own
+                # theoretical `entry` (a candle close that can be
+                # minutes to hours old by the time this line runs), but
+                # the real market order about to fire fills at
+                # current_price instead, with sl/tp staying at their
+                # ORIGINAL absolute levels. If price drifted TOWARD sl
+                # (without crossing it — that's the check above), the
+                # REAL distance from actual fill to sl is narrower than
+                # the theoretical one used for the safety-leverage
+                # calculation, meaning the leverage picked for the WIDE
+                # theoretical distance can be genuinely too high for
+                # the REAL, tighter one — liquidation landing before
+                # the stop, matching the user's own reported real
+                # trade. Re-running the exact same sizing pipeline
+                # (compute_risk_based_position + compute_contracts_
+                # from_margin + this file's own post-rounding tier
+                # re-check just above) against current_price as the
+                # effective entry — not the stale one — before placing
+                # the real order fixes this at the source rather than
+                # patching leverage after the fact.
+                real_margin, real_leverage, real_skip = compute_risk_based_position(
+                    direction, current_price, sl, leverage_cap, mmr_pct, total_equity, risk_pct=risk_pct_override,
+                    symbol=symbol, tiers_by_symbol=tiers_by_symbol)
+                if all_in_margin_pct is not None and not real_skip:
+                    if wallet_balance is not None:
+                        real_margin = wallet_balance * all_in_margin_pct / 100.0
+                    else:
+                        real_margin = total_equity * all_in_margin_pct / 100.0
+                    real_leverage = leverage  # keep the all-in branch's own already-conservative leverage choice from above
+                if real_skip:
+                    record["status"] = "SKIPPED"
+                    record["detail"] = f"по факту свежей цены на момент открытия: {real_skip}"
+                    with state_lock:
+                        STATE["autotrade_log"].appendleft(record)
+                    return record
+                real_contracts, real_notional, real_actual_margin, real_skip2 = compute_contracts_from_margin(
+                    symbol, current_price, real_margin, real_leverage)
+                if not real_skip2 and real_notional:
+                    real_sl_distance_pct = abs(current_price - sl) / current_price * 100 if current_price else 0
+                    r_real_mmr_pct, r_real_leverage_cap = mmr_pct, leverage_cap
+                    if symbol and tiers_by_symbol:
+                        r_tier_mmr, r_tier_lev = lookup_risk_tier_for_notional(symbol, real_notional, tiers_by_symbol)
+                        if r_tier_mmr is not None:
+                            r_real_mmr_pct = r_tier_mmr
+                        if r_tier_lev is not None:
+                            r_real_leverage_cap = min(leverage_cap, r_tier_lev) if leverage_cap else r_tier_lev
+                    r_required = real_sl_distance_pct * SCALP_SAFETY_MARGIN
+                    r_actual_buf = compute_scalp_liquidation_move_pct(direction, real_leverage, r_real_mmr_pct)
+                    if real_leverage > (r_real_leverage_cap or real_leverage) or r_actual_buf is None or r_actual_buf < r_required:
+                        real_skip2 = (f"плечо {real_leverage}x небезопасно для реального стопа "
+                                      f"{real_sl_distance_pct:.3f}% по факту свежей цены — сделка пропущена")
+                if real_skip2:
+                    record["status"] = "SKIPPED"
+                    record["detail"] = f"по факту свежей цены на момент открытия: {real_skip2}"
+                    with state_lock:
+                        STATE["autotrade_log"].appendleft(record)
+                    return record
+                leverage, contracts, notional, actual_margin = real_leverage, real_contracts, real_notional, real_actual_margin
+                record["leverage"] = leverage
+                record["contracts"] = contracts
+                record["notional_usd"] = round(notional, 2) if notional else notional
+                record["margin_usd"] = round(actual_margin, 2) if actual_margin else actual_margin
 
             try:
                 reconcile_positions_and_orders()
