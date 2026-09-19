@@ -15921,3 +15921,31 @@ v0.99.299 - Consolidated scattered "same kind of setting" checkboxes
          runtime 200 confirming all 14 module-specific telegram
          checkboxes and all 4 va-bank checkboxes are present in the
          served HTML.
+
+v0.99.300 - Added the three settings fields found missing during the
+         v0.99.299 audit ("Проверь работоспособность и чтобы не было
+         дублей настроек" -> found 3 backend-only settings with no UI
+         -> user confirmed "Да" to adding them): lsw_equal_tolerance_pct
+         (how close two swing highs/lows must sit to count as the same
+         resting-liquidity level), mirror_touch_tolerance_pct (how
+         close price must return to a broken level to count as
+         "touching" it), and mirror_pattern_tolerance_pct (tweezers/
+         rails wick/body matching tolerance) — all three were already
+         fully wired on the backend (SETTINGS_KEYS/get_settings/apply_
+         settings) but had no input field anywhere, controllable only
+         via environment variables. Added number inputs in Sweep's and
+         Mirror's own settings groups, right after each module's own RR
+         field — the Mirror ones note their relationship to the
+         existing "Автотюнинг допусков" toggle (used as the general/
+         fallback value when autotune is off or hasn't found a good
+         per-symbol combo for a given coin).
+         Re-ran the full v0.99.299 audit after adding them: zero
+         duplicate HTML ids, zero duplicate setting keys in either JS
+         mapping, and — the original finding — zero settings left
+         without a corresponding UI element.
+         Verified directly: POSTed all three new fields via /api/
+         settings, confirmed they saved with the correct values, and
+         confirmed all three input elements are present in the served
+         HTML.
+         Verified: py_compile (-W error), pyflakes, node --check, 64
+         routes.
