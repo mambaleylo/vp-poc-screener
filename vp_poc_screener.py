@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.295"
+APP_VERSION = "0.99.296"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4667,6 +4667,42 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
                 record["contracts"] = contracts
                 record["notional_usd"] = round(notional, 2) if notional else notional
                 record["margin_usd"] = round(actual_margin, 2) if actual_margin else actual_margin
+
+            # v0.99.296 — CRITICAL FIX, per direct user follow-up ("А
+            # стоп за ликвидацией это исправит? И открытие сделки на
+            # весь депозит?"): the ONLY affordability check in this
+            # whole function (margin > wallet_balance*0.98 -> skip) ran
+            # against the very FIRST, theoretical `margin` value —
+            # computed from compute_risk_based_position() using the
+            # stale entry, BEFORE compute_contracts_from_margin()'s own
+            # min-lot rounding could inflate it (Fix 1, v0.99.295) and
+            # BEFORE this same function's own fresh-price resize could
+            # inflate it AGAIN (Fix 2, v0.99.295) — neither of those
+            # two LATER, potentially LARGER margin figures was ever
+            # re-checked against the account's actual available
+            # balance. A trade could clear the ORIGINAL small-margin
+            # affordability check, then grow well past it through
+            # either later step, silently committing far more of the
+            # deposit than AUTOTRADE_RISK_PCT_OF_BALANCE ever called
+            # for — with va-bank correctly OFF the whole time, since
+            # this had nothing to do with that toggle at all. Re-checks
+            # the FINAL actual_margin (whichever of the three paths
+            # produced it) against wallet_balance right here, one last
+            # time, immediately before the real order — same message
+            # and 98%-of-balance threshold as the original check above.
+            if wallet_balance is not None and actual_margin is not None and actual_margin > wallet_balance * 0.98:
+                record["status"] = "SKIPPED"
+                record["detail"] = (f"после пересчёта под реальную цену маржа ${actual_margin:.2f} превышает "
+                                     f"доступный баланс ${wallet_balance:.2f} (с запасом 2%) — сделка пропущена")
+                record["balance_skipped"] = True
+                send_telegram(
+                    f"⚠️ {symbol} ({mode}): после пересчёта не хватает баланса — нужно ${actual_margin:.2f}, "
+                    f"есть ${wallet_balance:.2f}",
+                    category=mode,
+                )
+                with state_lock:
+                    STATE["autotrade_log"].appendleft(record)
+                return record
 
             try:
                 reconcile_positions_and_orders()
