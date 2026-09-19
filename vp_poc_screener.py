@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.299"
+APP_VERSION = "0.99.300"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -20829,6 +20829,20 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="label">↳ Допуск касания уровня</div>
+          <div class="sub">насколько близко цена должна вернуться к пробитому уровню, чтобы считаться "касанием" (% от цены) — общее значение для всех монет, используется если автотюнинг ниже выключен или не подобрал для монеты свою комбинацию</div>
+        </div>
+        <input type="number" id="setMirrorTouchTolerance" min="0.01" max="2" step="0.01" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Допуск паттерна</div>
+          <div class="sub">допуск совпадения фитилей/тел для пинцета и рельсов, в % от большего из двух сравниваемых значений — общее значение, та же логика "используется без автотюнинга" что и выше</div>
+        </div>
+        <input type="number" id="setMirrorPatternTolerance" min="1" max="100" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Автотюнинг допусков</div>
           <div class="sub">подбирает допуск касания и допуск паттерна отдельно для каждой монеты — только если комбинация проходит проверку на ДВУХ независимых кусках истории (сначала подбор на первых 70% данных, потом обязательная проверка на отложенных последних 30%, которые в подборе не участвовали). Если ни одна комбинация не прошла обе проверки — монета торгуется с обычными общими допусками</div>
         </div>
@@ -20976,6 +20990,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">фиксированное соотношение тейк:стоп от стопа за экстремумом свипа</div>
         </div>
         <input type="number" id="setLswRR" min="0.5" max="20" step="0.5" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Допуск "равных" уровней</div>
+          <div class="sub">насколько близко должны быть два свинг-хая (или два свинг-лоу) друг к другу, чтобы считаться одним и тем же уровнем ликвидности (% от цены) — именно это делает уровень "равными хаями/лоу", а не просто одиночным свингом</div>
+        </div>
+        <input type="number" id="setLswEqualTolerance" min="0.01" max="2" step="0.01" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
       </div>
       <div class="settingRow">
         <div>
@@ -24311,7 +24332,10 @@ const setInputs = {
 
 const setValueInputs = {
   mirror_rr: document.getElementById('setMirrorRR'),
+  mirror_touch_tolerance_pct: document.getElementById('setMirrorTouchTolerance'),
+  mirror_pattern_tolerance_pct: document.getElementById('setMirrorPatternTolerance'),
   lsw_rr: document.getElementById('setLswRR'),
+  lsw_equal_tolerance_pct: document.getElementById('setLswEqualTolerance'),
   autotrade_risk_pct: document.getElementById('setAutotradeRiskPct'),
   neuro_top_n: document.getElementById('setNeuroTopN'),
   neuro_display_n: document.getElementById('setNeuroDisplayN'),
