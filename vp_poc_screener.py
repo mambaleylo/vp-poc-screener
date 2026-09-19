@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.296"
+APP_VERSION = "0.99.297"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3686,6 +3686,30 @@ def compute_risk_based_position(direction, entry, sl, leverage_cap, mmr_pct, tot
         return 0, 0, (f"даже плечо 1x не удерживает стоп ({sl_distance_pct:.3f}%) "
                        f"в безопасной зоне от ликвидации — сделка пропущена")
     margin_usd = notional_usd / leverage
+    # v0.99.297 — CRITICAL FIX, per direct user clarification ("у меня
+    # стоит например 30% от депо на сделку, а открывается на весь"):
+    # this formula solves for the MARGIN needed so that a FULL stop-out
+    # loses exactly risk_pct% of equity, at whatever leverage the SL
+    # distance's own safety math allows. For a WIDE stop, the safe
+    # leverage is naturally LOW, and hitting the SAME target dollar
+    # risk at low leverage requires proportionally MORE margin —
+    # verified directly that a stop as ordinary as 10-50% away can
+    # already push margin to 50-75% of total equity even at risk_pct=
+    # 30%, with nothing capping it as it climbs toward 100%. A user
+    # setting "30%" almost certainly means "don't commit more than
+    # roughly that share of my account to one trade" as much as "don't
+    # lose more than that" — this formula only ever guaranteed the
+    # second half. Caps margin at total_equity*risk_pct/100 directly:
+    # if the wide-stop math would need more margin than that to hit
+    # the full target risk, the trade now uses LESS margin (and
+    # correspondingly realizes somewhat LESS than the full target
+    # risk_pct if the stop is hit) rather than silently climbing past
+    # what the risk_pct setting means to the person who set it.
+    # Leverage itself is untouched — still the same value already
+    # confirmed safe for this SL distance.
+    max_margin = total_equity * risk_pct / 100.0
+    if margin_usd > max_margin:
+        margin_usd = max_margin
     return margin_usd, leverage, None
 
 
