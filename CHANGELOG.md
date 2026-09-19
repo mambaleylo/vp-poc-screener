@@ -15780,3 +15780,40 @@ v0.99.295 - THREE separate liquidation-safety fixes in execute_autotrade(),
          trade (dry-run) still sizes correctly with no false-positive
          skip, and confirmed SNR inversion now actually flips direction
          and swaps sl/tp as intended.
+
+v0.99.296 - CRITICAL FIX: closed the actual gap behind "открытие сделки
+         на весь депозит" (100% of deposit used despite va-bank OFF
+         and AUTOTRADE_RISK_PCT_OF_BALANCE at a modest 30%), per direct
+         user follow-up ("А стоп за ликвидацией это исправит? И
+         открытие сделки на весь депозит?") — a distinct, real gap
+         from v0.99.295's own liquidation-safety fixes, found while
+         directly answering that question rather than assuming the
+         earlier fixes already covered it.
+         Found: the ONLY affordability check in execute_autotrade()
+         (margin > wallet_balance*0.98 -> skip) ran against the very
+         FIRST, theoretical margin value from compute_risk_based_
+         position() — using the stale signal entry, BEFORE compute_
+         contracts_from_margin()'s own min-lot rounding could inflate
+         it (v0.99.295's own Fix 1) and BEFORE that same version's
+         fresh-price resize could inflate it again (Fix 2). Neither of
+         those two LATER, potentially much LARGER margin figures was
+         ever re-checked against the account's actual available
+         balance — a trade could clear the tiny original-margin
+         affordability check, then grow well past it through either
+         later step, silently committing far more of the deposit than
+         the risk setting called for. This had nothing to do with va-
+         bank at all, which is exactly why it stayed on with that
+         toggle correctly off.
+         Added one final affordability re-check, right before the real
+         order goes out, against whichever margin figure the function
+         actually ended up with (original, post-min-lot-rounding, or
+         post-fresh-price-resize) — same message and 98%-of-balance
+         threshold as the original check, just guaranteed to run against
+         the FINAL number rather than only the first one.
+         Verified directly: a small $150 account where the stale-entry
+         margin passed the original check but the fresh-price resize
+         grew it to $165.97 is now correctly SKIPPED with a clear
+         balance_skipped flag — confirmed a normal, sufficiently-funded
+         trade still passes through with no false-positive skip.
+         Verified: py_compile (-W error), pyflakes, real runtime 200 on
+         / and /api/status.
