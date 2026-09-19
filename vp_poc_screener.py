@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.303"
+APP_VERSION = "0.99.304"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9852,7 +9852,23 @@ def msnr_scan_symbol_live(symbol):
         # asked to close: a symbol that fell out of top-N between
         # backtest cycles would still pass this broader check and could
         # still fire.
-        if AUTOTRADE_ENABLED_MSNR and autotrade_symbols.get(symbol) and symbol in msnr_autotrade_eligible_symbols(overrides_snapshot):
+        # v0.99.304 — CRITICAL DIAGNOSTIC FIX, per direct user report
+        # ("Сделки по Мsnr не открываются. в истории сигналов я их вижу
+        # ... в списке автоторговли сигналов самих нет. Галочки все
+        # стоят в настройках"): this three-part gate silently recorded
+        # the signal (above) but did NOTHING ELSE if it failed — no log
+        # entry, no field on the record explaining why — leaving no way
+        # to tell "autotrade correctly declined this one" from "autotrade
+        # is broken". The per-symbol toggle and the eligibility re-check
+        # are BOTH re-evaluated fresh at THIS exact moment, not read from
+        # whatever the settings/status page showed the user earlier —
+        # a symbol's ranking can shift between the two. Now records
+        # exactly which of the three checks failed on the signal itself
+        # (visible in the signal history) whenever the gate doesn't pass.
+        gate_enabled = AUTOTRADE_ENABLED_MSNR
+        gate_symbol_on = bool(autotrade_symbols.get(symbol))
+        gate_eligible_now = symbol in msnr_autotrade_eligible_symbols(overrides_snapshot)
+        if gate_enabled and gate_symbol_on and gate_eligible_now:
             # v0.99.33, per direct user request: real order sizing now
             # compounds off THIS symbol's own live trade history — $40
             # on the very first autotrade-fired trade, then the whole
@@ -9934,6 +9950,21 @@ def msnr_scan_symbol_live(symbol):
             # was called, so we update it in-place here.
             if autotrade_result.get("balance_skipped"):
                 record["balance_skipped"] = True
+        else:
+            # v0.99.304 — see this block's own opening comment for the
+            # full incident. Records exactly why the gate didn't pass,
+            # right on the signal itself, so it's visible without
+            # needing to cross-reference the autotrade log (which never
+            # gets an entry at all when the gate fails before execute_
+            # autotrade() is even called).
+            reasons = []
+            if not gate_enabled:
+                reasons.append("автоторговля MSNR выключена в настройках")
+            if not gate_symbol_on:
+                reasons.append("для этой монеты автоторговля сейчас выключена автоматическим управлением (не в топ-N по винрейту, либо винрейт упал ниже 50%)")
+            if gate_symbol_on and not gate_eligible_now:
+                reasons.append("монета была в топ-N на момент последней проверки, но перестала быть eligible именно сейчас — рейтинг сместился между обновлениями")
+            record["autotrade_skip_reason"] = "; ".join(reasons) if reasons else "неизвестная причина"
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         level_txt = "A-shape (resist)" if sig["level_type"] == "A" else "V-shape (support)"
         # v0.99.74, per direct user request ("мне не нужны уведомления
@@ -21821,7 +21852,9 @@ async function refreshMsnr() {
     // Manual open button for SKIPPED/ERROR signals (e.g. insufficient balance at the time)
     const sizeTxt = s.autotrade_fired
       ? `<span title="\u043f\u043b\u0435\u0447\u043e \u043d\u0430 \u043c\u043e\u043c\u0435\u043d\u0442 \u0441\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u043d\u0438\u044f \u044d\u0442\u043e\u0433\u043e \u0441\u0438\u0433\u043d\u0430\u043b\u0430 \u2014 \u043c\u043e\u0433\u043b\u043e \u043e\u0442\u043b\u0438\u0447\u0430\u0442\u044c\u0441\u044f \u043e\u0442 \u0442\u0435\u043a\u0443\u0449\u0435\u0439 Kelly-\u0440\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0438 \u0432 \u0442\u0430\u0431\u043b\u0438\u0446\u0435 \u043d\u0438\u0436\u0435 \u2014 \u043e\u043d\u0430 \u043e\u0431\u043d\u043e\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u043a\u0430\u0436\u0434\u044b\u0439 \u0446\u0438\u043a\u043b, \u0438\u043b\u0438 \u0435\u0451 \u0441\u043f\u0435\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043e\u0436\u0430\u043b\u0438 \u0432\u043d\u0438\u0437 \u0438\u0437-\u0437\u0430 \u0448\u0438\u0440\u0438\u043d\u044b \u0441\u0442\u043e\u043f\u0430 \u044d\u0442\u043e\u0439 \u0441\u0434\u0435\u043b\u043a\u0438">$${s.live_size_usd}${s.leverage_used ? ' @ '+s.leverage_used+'x' : ''}</span>`
-      : (s.leverage_used ? `<span class="dim">${s.leverage_used}x</span>` : '<span class="dim">\u2014</span>');
+      : (s.autotrade_skip_reason
+          ? `<span class="dim" title="\u043f\u043e\u0447\u0435\u043c\u0443 \u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u043d\u0435 \u0441\u0440\u0430\u0431\u043e\u0442\u0430\u043b\u0430 \u043d\u0430 \u044d\u0442\u043e\u043c \u0441\u0438\u0433\u043d\u0430\u043b\u0435: ${s.autotrade_skip_reason}">\u26a0\ufe0f \u043d\u0435 \u043e\u0442\u043a\u0440\u044b\u0442\u043e</span>`
+          : (s.leverage_used ? `<span class="dim">${s.leverage_used}x</span>` : '<span class="dim">\u2014</span>'));
     // Manual open button — shown for closed/skipped signals where autotrade_fired=false
     // and autotrade is globally enabled for MSNR
     const canManualOpen = !s.autotrade_fired && s.status === 'OPEN' && cfg.autotrade_enabled;
