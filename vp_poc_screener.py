@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.297"
+APP_VERSION = "0.99.298"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1070,7 +1070,7 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "autotrade_invert_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "autotrade_invert_prv", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "neuro_min_winrate", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "autotrade_invert_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "autotrade_invert_prv", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "autotrade_invert_lsw", "autotrade_invert_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled", "lsw_all_in_enabled", "snr_all_in_enabled", "prv_all_in_enabled",
                   "autotrade_risk_pct",
@@ -1123,6 +1123,7 @@ def get_settings():
         "autotrade_invert_prv": AUTOTRADE_INVERT_PRV,
         "neuro_top_n": NEURO_TOP_N,
         "neuro_display_n": NEURO_DISPLAY_N,
+        "neuro_min_winrate": NEURO_MIN_WINRATE,
         "nq_enabled": NQ_ENABLED,
         "lsw_enabled": LSW_ENABLED,
         "lsw_rr": LSW_RR,
@@ -1190,7 +1191,7 @@ def apply_settings(updates):
     global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, FT5_HTF_FILTER_ENABLED, FT5_SESSION_FILTER_ENABLED, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, MSNR_MIN_RR_FILTER_ENABLED, MSNR_HTF_FILTER_ENABLED, MSNR_PER_SYMBOL_FILTERS_ENABLED, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT, MIRROR_AUTOTUNE_TOLERANCE_ENABLED
     global MIRROR_VOLUME_FILTER_ENABLED, MIRROR_HTF_FILTER_ENABLED
-    global EMA_TOUCH_ENABLED, AMD_ENABLED, NEURO_ENABLED, NEURO_TOP_N, NEURO_DISPLAY_N, _neuro_active_symbols, _neuro_display_symbols, SNR_ENABLED, SNR_TOP_N, SNR_DISPLAY_N, _snr_active_symbols, _snr_display_symbols, TELEGRAM_ALERTS_SNR, AUTOTRADE_ENABLED_SNR, AUTOTRADE_INVERT_SNR, PRV_ENABLED, PRV_TOP_N, PRV_DISPLAY_N, _prv_active_symbols, _prv_display_symbols, TELEGRAM_ALERTS_PRV, AUTOTRADE_ENABLED_PRV, AUTOTRADE_INVERT_PRV, NQ_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
+    global EMA_TOUCH_ENABLED, AMD_ENABLED, NEURO_ENABLED, NEURO_TOP_N, NEURO_DISPLAY_N, NEURO_MIN_WINRATE, _neuro_active_symbols, _neuro_display_symbols, SNR_ENABLED, SNR_TOP_N, SNR_DISPLAY_N, _snr_active_symbols, _snr_display_symbols, TELEGRAM_ALERTS_SNR, AUTOTRADE_ENABLED_SNR, AUTOTRADE_INVERT_SNR, PRV_ENABLED, PRV_TOP_N, PRV_DISPLAY_N, _prv_active_symbols, _prv_display_symbols, TELEGRAM_ALERTS_PRV, AUTOTRADE_ENABLED_PRV, AUTOTRADE_INVERT_PRV, NQ_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED, LSW_ATR_SWEEP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
@@ -1402,6 +1403,11 @@ def apply_settings(updates):
                     _neuro_active_symbols = [s for s in _neuro_active_symbols if s in keep]
             if len(current_display) > effective_n:
                 save_neuro_state()
+    if "neuro_min_winrate" in updates:
+        try:
+            NEURO_MIN_WINRATE = float(updates["neuro_min_winrate"])
+        except (TypeError, ValueError):
+            pass
     if "nq_enabled" in updates:
         NQ_ENABLED = bool(updates["nq_enabled"])
     if "lsw_enabled" in updates:
@@ -15468,6 +15474,7 @@ NEURO_UNIVERSE_SIZE  = int(os.environ.get("VP_NEURO_UNIVERSE_SIZE", 120))  # v0.
 NEURO_TOP_N          = int(os.environ.get("VP_NEURO_TOP_N", 5))  # v0.99.246 — lowered 10->5 per direct user request; how many survive the full-universe backtest AND are actually traded/live-scanned, ranked by avg_pnl_r
 NEURO_DISPLAY_N       = int(os.environ.get("VP_NEURO_DISPLAY_N", 5))  # v0.99.262, per direct user request ("не количество топ для авто торговли, а ещё и для просто отображения... остальные показывать серым"): how many symbols get KEPT and SHOWN in the UI after ranking — always clamped to at least NEURO_TOP_N (can't display fewer than you trade). The extra (NEURO_DISPLAY_N - NEURO_TOP_N) symbols beyond the tradeable top-N are shown for reference (their own backtest results) but are NOT live-scanned or autotraded — the UI greys them out so it's obvious which cards are just informational.
 NEURO_TOP_N_MIN_TRADES = int(os.environ.get("VP_NEURO_TOP_N_MIN_TRADES", 20))  # per direct user request — don't let a coin with e.g. 3 lucky trades and +5R average beat out one with 50 trades and a solid +0.3R; a coin needs at least this many closed backtest trades to even be RANKED for the top-N cut (coins below this are excluded from the active set entirely, not just ranked low)
+NEURO_MIN_WINRATE = float(os.environ.get("VP_NEURO_MIN_WINRATE", 35.0))  # v0.99.298 — per direct user request ("даже если сейчас карточка первая, но винрейт 30 это мало для пропуска карточки"): a coin ranking #1 by avg_pnl_r can still have a low winrate (rare big wins offsetting frequent small losses) — this is a SEPARATE floor from NEURO_TOP_N_MIN_TRADES (sample size) and the ranking metric itself (expected value); a coin below this winrate is excluded from the active/tradeable set entirely regardless of rank, same "excluded outright, not just ranked low" treatment as the min-trades floor. Uses aggregate_recent's own winrate when it has enough samples to trust (same NEURO_AGG_DECAY_MIN_N threshold neuro_rank_metric() already uses for consistency), falling back to the full-history winrate otherwise.
 NEURO_TF             = os.environ.get("VP_NEURO_TF", "1h")
 NEURO_FORWARD_BARS   = int(os.environ.get("VP_NEURO_FORWARD_BARS", 12))   # measure forward return over next N bars
 NEURO_MIN_SAMPLE     = int(os.environ.get("VP_NEURO_MIN_SAMPLE", 30))     # min occurrences per bucket to trust it
@@ -17095,6 +17102,16 @@ def neuro_pick_best_rr(train_candles, confirmed_patterns, htf_candles=None, fund
     return best_rr, sweep
 
 
+def neuro_effective_winrate(summary):
+    """v0.99.298 — same recent-preferred, full-history-fallback pattern
+    as neuro_rank_metric()'s own, so the winrate floor judges a coin by
+    the same evidence its ranking already does."""
+    agg = summary.get("aggregate_recent") or {}
+    if agg.get("n", 0) >= NEURO_AGG_DECAY_MIN_N and agg.get("wr") is not None:
+        return agg["wr"]
+    return summary.get("winrate")
+
+
 def neuro_rank_metric(summary):
     """v0.99.253 — shared ranking metric for BOTH neuro_mining_loop()'s
     own top-N cut and apply_settings()'s manual neuro_top_n trim — factored
@@ -17831,7 +17848,8 @@ def neuro_mining_loop():
             # earlier request, unchanged.
             eligible = [(sym, res) for sym, res in all_results.items()
                         if (res[2].get("n") or 0) >= NEURO_TOP_N_MIN_TRADES
-                        and res[2].get("avg_pnl_r") is not None]
+                        and res[2].get("avg_pnl_r") is not None
+                        and (neuro_effective_winrate(res[2]) or 0) >= NEURO_MIN_WINRATE]
             eligible.sort(key=lambda item: -neuro_rank_metric(item[1][2]))
             # v0.99.262 — per direct user request ("не количество топ для
             # авто торговли, а ещё и для просто отображения... остальные
@@ -20883,6 +20901,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">не меньше числа выше — торгуются только лучшие по числу выше, а карточки сверх этого показываются серым как справочные (свой бэктест есть, но не торгуются и не сканируются вживую)</div>
         </div>
         <input type="number" id="setNeuroDisplayN" min="1" max="50" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Минимальный винрейт для попадания в топ</div>
+          <div class="sub">монета исключается из торгуемых/активных полностью, даже если по среднему +R она заняла бы первое место — редкие крупные победы не должны маскировать низкий процент выигрышных сделок</div>
+        </div>
+        <input type="number" id="setNeuroMinWinrate" min="0" max="100" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
       </div>
     </div></details>
 
@@ -24290,6 +24315,7 @@ const setValueInputs = {
   autotrade_risk_pct: document.getElementById('setAutotradeRiskPct'),
   neuro_top_n: document.getElementById('setNeuroTopN'),
   neuro_display_n: document.getElementById('setNeuroDisplayN'),
+  neuro_min_winrate: document.getElementById('setNeuroMinWinrate'),
   snr_top_n: document.getElementById('setSnrTopN'),
   snr_display_n: document.getElementById('setSnrDisplayN'),
   prv_top_n: document.getElementById('setPrvTopN'),
