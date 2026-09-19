@@ -16023,3 +16023,15 @@ v0.99.302 - Removed Скальпинг/FT5/Зеркало/EMA Touch/AMD/NQ Model
          routes, real runtime 200 on /, /api/status, /api/settings —
          confirmed exactly 8 tabs remain (msnr/lsw/neuro/snr/prv/
          signals/autotrade/simulator).
+
+v0.99.303 - Moved the screensaver toggle button into the top header
+         menu, next to "Настройки", per direct user request ("Кнопку
+         скринсейвера помести в верхнее меню, где кнопка настроек") —
+         it used to sit at the far right of the tab bar, next to the
+         hints toggle. Converted from a bare <div> to a <button>
+         (matching the other header buttons' own element type) while
+         keeping its exact same onclick handler and icon; kept its
+         original text color inline so it doesn't briefly show
+         unstyled before the screensaver-state JS runs.
+         Verified: py_compile (-W error), pyflakes, real runtime 200
+         on / confirming the button is now next to settingsBtn.
