@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.298"
+APP_VERSION = "0.99.299"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -20751,13 +20751,6 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Ва-банк (MSNR)</div>
-          <div class="sub">вместо риска N% от депо — использовать 95% депо как маржу на каждую MSNR-сделку. Плечо по-прежнему подбирается автоматически по стопу — ликвидация не становится ближе, просто в сделку идёт почти весь депозит</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setMsnrAllIn"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
           <div class="label">↳ Только топ-1 монета (MSNR)</div>
           <div class="sub">торговать только ОДНУ монету — ту у которой сейчас самая большая симулированная $ прибыль (compound_return_pct), при этом винрейт ≥50%. Остальные монеты из топа автоматически выключаются из автоторговли пока включена эта галочка</div>
         </div>
@@ -20921,13 +20914,6 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow subRow">
         <div>
-          <div class="label">↳ Алерты в Telegram</div>
-          <div class="sub">уведомление при каждом новом живом сигнале, независимо от автоторговли</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramAlertsSnr"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
           <div class="label">↳ Сколько монет держать в топе</div>
           <div class="sub">бэктест проверяет всю вселенную каждый цикл — здесь только сколько лучших по TEST avg P&L остаются активными (торгуются)</div>
         </div>
@@ -20948,13 +20934,6 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">порт индикатора Peak Reversal v3 (Keltner Channel) — реверсия от касания внутренней полосы к средней, вход/стоп/тейк подбираются перебором по типу MA/длине/множителю полосы/RR/таймфрейму с проверкой на train/test</div>
         </div>
         <label class="switch"><input type="checkbox" id="setPrv"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳ Алерты в Telegram</div>
-          <div class="sub">уведомление при каждом новом живом сигнале, независимо от автоторговли</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramAlertsPrv"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow subRow">
         <div>
@@ -21151,6 +21130,20 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="label">↳ Алерты S/R Zones</div>
+          <div class="sub">новые живые сигналы отскока от зон поддержки/сопротивления</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramSnr"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Алерты Peak Reversal</div>
+          <div class="sub">новые живые сигналы реверсии от канала Кельтнера</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramPrv"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Нестабильность сети</div>
           <div class="sub">разово, когда за 10 минут накопилось 5+ сетевых ошибок (Read timed out / ConnectionError) — не про открытые позиции, только про сбор данных</div>
         </div>
@@ -21239,6 +21232,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">общий рубильник поверх переключателей по каждой монете (вкладка MSNR, колонка «Авто») — выключен здесь, значит не торгует НИКТО, даже если у монеты своя галочка стоит</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeMsnr"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳↳ Ва-банк (MSNR)</div>
+          <div class="sub">вместо риска N% от депо — использовать 95% депо как маржу на каждую MSNR-сделку. Плечо по-прежнему подбирается автоматически по стопу — ликвидация не становится ближе, просто в сделку идёт почти весь депозит</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setMsnrAllIn"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -24256,9 +24256,7 @@ const setInputs = {
   amd_enabled: document.getElementById('setAmd'),
   neuro_enabled: document.getElementById('setNeuro'),
   snr_enabled: document.getElementById('setSnr'),
-  telegram_alerts_snr: document.getElementById('setTelegramAlertsSnr'),
   prv_enabled: document.getElementById('setPrv'),
-  telegram_alerts_prv: document.getElementById('setTelegramAlertsPrv'),
   nq_enabled: document.getElementById('setNq'),
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
   lsw_structural_cap_enabled: document.getElementById('setLswStructuralCap'),
@@ -24283,6 +24281,8 @@ const setInputs = {
   telegram_alerts_neuro: document.getElementById('setTelegramNeuro'),
   telegram_alerts_neuro_summary: document.getElementById('setTelegramNeuroSummary'),
   telegram_alerts_nq: document.getElementById('setTelegramNq'),
+  telegram_alerts_snr: document.getElementById('setTelegramSnr'),
+  telegram_alerts_prv: document.getElementById('setTelegramPrv'),
   telegram_alerts_network: document.getElementById('setTelegramNetwork'),
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
   autotrade_bounce: document.getElementById('setAutotradeBounce'),
