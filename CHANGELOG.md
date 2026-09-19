@@ -15712,3 +15712,71 @@ v0.99.294 - Added "va-bank" (ва-банк) mode to Sweep, S/R Zones, and
          keys default to false and the corresponding checkboxes are
          present in the served HTML, and that toggling snr_all_in_
          enabled via POST correctly persists.
+
+v0.99.295 - THREE separate liquidation-safety fixes in execute_autotrade(),
+         all found while investigating a direct user report of a REAL
+         Peak Reversal trade where the stop ended up beyond Gate.io's
+         own liquidation price despite AUTOTRADE_RISK_PCT_OF_BALANCE
+         being a modest 30% and all-in mode being OFF.
+
+         FIX 1 — post-min-lot-rounding tier mismatch: compute_risk_
+         based_position() picks a leverage safe for the ORIGINALLY-
+         CALCULATED notional's own real risk-limit tier (v0.99.237's
+         own tier-aware fix), but compute_contracts_from_margin() can
+         round UP to a symbol's minimum tradeable lot (accepting up to
+         1.5x the calculated notional by design, rather than skip every
+         near-minimum-size trade) — that rounding was never re-checked
+         against the tier that actually applies at the LARGER, POST-
+         ROUNDING notional. On a low-priced, low-liquidity symbol with
+         an unusually tight ATR-based stop (exactly what S/R Zones' and
+         Peak Reversal's own recently-widened, low-liquidity-floor
+         universe — v0.99.291/293 — now surfaces far more often), the
+         real tier at the rounded-up notional can have worse (higher)
+         MMR or a lower max-leverage than the tier used for the
+         original safety calculation. Added a re-validation step right
+         after rounding: looks up the REAL tier for the actual post-
+         rounding notional and skips the trade entirely if the chosen
+         leverage is no longer safe for it, rather than silently
+         placing a compromised order.
+
+         FIX 2 — the actual root cause per direct user follow-up
+         ("если в сделку автооткрытие входит спустя 2 часа например то
+         и entry смещается и соответственно точка ликвидации"): margin/
+         leverage/contracts were ALL computed against the signal's own
+         theoretical `entry` (a candle close that can be minutes to
+         hours old by execution time) — but the REAL market order fills
+         at whatever get_last_price() returns then, with sl/tp staying
+         at their original absolute levels. The existing pre-open
+         staleness checks (v0.99.146/251) only decided whether to SKIP
+         a too-stale signal — they never updated the actual sizing. If
+         price drifted TOWARD sl (without crossing it — within the
+         existing checks' own tolerance), the REAL distance from actual
+         fill to sl is narrower than the theoretical one the leverage
+         was originally sized for, meaning that leverage can be
+         genuinely unsafe for the real, tighter stop. Now re-runs the
+         complete sizing pipeline (compute_risk_based_position +
+         compute_contracts_from_margin + Fix 1's own tier re-check)
+         against current_price as the effective entry once it's
+         confirmed to be within acceptable drift, replacing the stale
+         sizing before the real order goes out. Verified directly: a
+         price drifting from a 1% stop distance to a real 0.5% one
+         correctly produced a different (recalculated) leverage/margin/
+         notional, confirmed by bypassing dry-run's own early-return
+         (which skips this whole code path, including the pre-existing
+         staleness checks) with mocked exchange calls.
+
+         FIX 3 — found while reading through this same function: the
+         "inverted opening" toggle only ever checked mode=="lsw"/
+         "neuro" — AUTOTRADE_INVERT_SNR/AUTOTRADE_INVERT_PRV existed as
+         real settings (wired into SETTINGS_KEYS/get_settings/apply_
+         settings with working checkboxes) but were NEVER actually
+         consulted here, so toggling "Инвертировать открытие" for S/R
+         Zones or Peak Reversal silently did nothing — the setting
+         saved fine, the checkbox showed on, but every real order still
+         fired in the original direction. Fixed to check all four modes.
+
+         Verified: py_compile (-W error), pyflakes, 64 routes, real
+         runtime 200 on / and /api/status. Confirmed a normal safe
+         trade (dry-run) still sizes correctly with no false-positive
+         skip, and confirmed SNR inversion now actually flips direction
+         and swaps sl/tp as intended.
