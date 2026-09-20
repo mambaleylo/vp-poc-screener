@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.308"
+APP_VERSION = "0.99.309"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22336,13 +22336,14 @@ async function openMsnrChart(symbol, sigTime) {
     if (data.error) { document.getElementById('msnrModalParams').textContent = data.error; return; }
     currentMsnrData = data;
     const sig = data.signal;
+    const tfTxt = data.tf ? ` \u00b7 \u0422\u0424 ${data.tf}` : '';
     if (!sig) {
-      document.getElementById('msnrModalParams').textContent = 'подтверждённого QM-сигнала в этом окне нет — показан текущий Storyline';
+      document.getElementById('msnrModalParams').textContent = `подтверждённого QM-сигнала в этом окне нет — показан текущий Storyline${tfTxt}`;
     } else {
       const resTxt = data.result ? ` · ${data.result}${data.exit_price ? ' @ '+fmtNum(data.exit_price) : ''}` : '';
       const levelTxt = sig.level_type === 'A' ? 'A-shape (resist)' : 'V-shape (support)';
       document.getElementById('msnrModalParams').textContent =
-        `${fmtDateTime(sig.time)} · ${sig.direction} от ${levelTxt} · entry ${fmtNum(sig.entry)} · SL ${fmtNum(sig.sl)} · TP ${fmtNum(sig.tp)}${resTxt} · \u26a1 \u0442\u043e\u043b\u0441\u0442\u0430\u044f \u043b\u0438\u043d\u0438\u044f = \u043f\u0440\u0438\u0447\u0438\u043d\u0430 \u0432\u0445\u043e\u0434\u0430/\u0446\u0435\u043b\u044c, \u0431\u043b\u0435\u0434\u043d\u0430\u044f \u043f\u0443\u043d\u043a\u0442\u0438\u0440 = \u0444\u043e\u043d\u043e\u0432\u044b\u0435 \u0443\u0440\u043e\u0432\u043d\u0438`;
+        `${fmtDateTime(sig.time)}${tfTxt} · ${sig.direction} от ${levelTxt} · entry ${fmtNum(sig.entry)} · SL ${fmtNum(sig.sl)} · TP ${fmtNum(sig.tp)}${resTxt} · \u26a1 \u0442\u043e\u043b\u0441\u0442\u0430\u044f \u043b\u0438\u043d\u0438\u044f = \u043f\u0440\u0438\u0447\u0438\u043d\u0430 \u0432\u0445\u043e\u0434\u0430/\u0446\u0435\u043b\u044c, \u0431\u043b\u0435\u0434\u043d\u0430\u044f \u043f\u0443\u043d\u043a\u0442\u0438\u0440 = \u0444\u043e\u043d\u043e\u0432\u044b\u0435 \u0443\u0440\u043e\u0432\u043d\u0438`;
     }
     drawMsnrChart(data);
   } catch (e) {
