@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.307"
+APP_VERSION = "0.99.308"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -18777,7 +18777,7 @@ def api_amd_chart(symbol):
             "sl": found["sl"], "tp": found["tp"],
             "a_low": found.get("a_low"), "a_high": found.get("a_high"),
             "result": found_result, "exit_time": found_exit_time, "exit_price": found_exit_price,
-            "chart_source": "amd",
+            "chart_source": "amd", "tf": AMD_STRUCTURE_TF,
         })
     except Exception as e:
         log_error(f"api_amd_chart {symbol}: {e}")
@@ -18849,7 +18849,7 @@ def api_snr_chart(symbol):
             "sl": found_sig["sl"], "tp": found_sig["tp"],
             "level_price": found_sig.get("zone_price"), "level_type": None,
             "result": found_result, "exit_time": found_exit_time, "exit_price": found_exit_price,
-            "chart_source": "snr",
+            "chart_source": "snr", "tf": tf,
         })
     except Exception as e:
         log_error(f"api_snr_chart {symbol}: {e}")
@@ -19083,7 +19083,7 @@ def api_prv_chart(symbol):
             "direction": found_sig["direction"], "entry": found_sig["entry"],
             "sl": found_sig["sl"], "tp": found_sig["tp"], "level_price": None, "level_type": None,
             "result": found_result, "exit_time": found_exit_time, "exit_price": found_exit_price,
-            "chart_source": "prv",
+            "chart_source": "prv", "tf": tf,
         })
     except Exception as e:
         log_error(f"api_prv_chart {symbol}: {e}")
@@ -19482,7 +19482,7 @@ def api_mirror_chart(symbol):
             "pattern": found_sig.get("pattern"),
             "level_price": found_sig.get("level_price"), "level_type": found_sig.get("level_type"),
             "result": found_result, "exit_time": found_exit_time, "exit_price": found_exit_price,
-            "chart_source": "mirror",
+            "chart_source": "mirror", "tf": MIRROR_INTERVAL,
         })
     except Exception as e:
         log_error(f"api_mirror_chart {symbol}: {e}")
@@ -19603,7 +19603,7 @@ def api_lsw_chart(symbol):
             "sl": found_sig["sl"], "tp": found_sig["tp"], "rr": found_sig.get("rr"),
             "level_price": found_sig.get("level_price"), "level_type": found_sig.get("level_type"),
             "result": found_result, "exit_time": found_exit_time, "exit_price": found_exit_price,
-            "chart_source": "lsw",
+            "chart_source": "lsw", "tf": LSW_INTERVAL,
         })
     except Exception as e:
         log_error(f"api_lsw_chart {symbol}: {e}")
@@ -19993,7 +19993,7 @@ def api_msnr_chart(symbol):
             return jsonify({
                 "symbol": symbol, "candles": entry_candles, "pivots": visible_pivots,
                 "signal": found_sig, "result": found_result, "exit_time": found_exit_time,
-                "exit_price": found_exit_price, "chart_source": "msnr",
+                "exit_price": found_exit_price, "chart_source": "msnr", "tf": MSNR_ENTRY_TF,
             })
 
         # Fallback: no stored signal/trade matched `time` (or none was
@@ -20025,7 +20025,7 @@ def api_msnr_chart(symbol):
         return jsonify({
             "symbol": symbol, "candles": entry_candles, "pivots": visible_pivots,
             "signal": sig, "result": result, "exit_time": exit_time, "exit_price": exit_price,
-            "chart_source": "msnr",
+            "chart_source": "msnr", "tf": MSNR_ENTRY_TF,
         })
     except Exception as e:
         log_error(f"api_msnr_chart {symbol}: {e}")
@@ -20219,7 +20219,7 @@ def api_scalp_chart(symbol):
             "tp": sig["target_price"], "sl": sig["sl_price"],
             "result": sig.get("result"), "exit_time": sig.get("exit_time"), "exit_price": sig.get("exit_price"),
             "rr": rr,
-            "chart_source": "scalp",
+            "chart_source": "scalp", "tf": interval,
         })
     except Exception as e:
         log_error(f"api_scalp_chart {symbol}: {e}")
@@ -24953,7 +24953,7 @@ async function openVgiChart(symbol, sigTime, endpoint, extraQuery = '') {
       sourceTxt = ` · уровень снятия ${fmtNum(data.level_price)} (${isHigh ? 'равные хаи' : 'равные лоу'}${data.level_touches ? ', ' + data.level_touches + ' кас.' : ''})`;
     }
     document.getElementById('vgiModalParams').textContent =
-      `${fmtDateTime(sigTime)} · ${data.direction} · entry ${fmtNum(data.entry)} · SL ${fmtNum(data.sl)} · TP ${fmtNum(data.tp)} · RR ${data.rr}${patternTxt}${sourceTxt}${resTxt}`;
+      `${fmtDateTime(sigTime)}${data.tf ? ' \u00b7 \u0422\u0424 ' + data.tf : ''} \u00b7 ${data.direction} \u00b7 entry ${fmtNum(data.entry)} \u00b7 SL ${fmtNum(data.sl)} \u00b7 TP ${fmtNum(data.tp)} \u00b7 RR ${data.rr}${patternTxt}${sourceTxt}${resTxt}`;
     drawVgiChart(data);
   } catch (e) {
     document.getElementById('vgiModalParams').textContent = `ошибка загрузки: ${e}`;
