@@ -16191,3 +16191,27 @@ v0.99.307 - Found the ACTUAL, more direct root cause behind MSNR trades
          gate_signed_request exactly twice.
          Verified: py_compile (-W error), pyflakes, 66 routes, real
          runtime 200 on / and /api/status.
+
+v0.99.308 - Charts now show which candle timeframe they're displaying,
+         per direct user request ("На графиках не понятно какой
+         таймфрейм свечей, надо где-то указывать"). Found only Neuro
+         and NQ Model's own chart endpoints already returned a "tf"
+         field — the shared chart modal (openVgiChart/drawVgiChart,
+         used by AMD/S&R Zones/Peak Reversal/Mirror/Sweep/MSNR/Scalp)
+         never displayed it, and most of those endpoints didn't even
+         compute/return it in the first place. S&R Zones' and Peak
+         Reversal's own chart endpoints already computed a local `tf`
+         variable (used internally for fetching the right candles) but
+         never included it in the actual JSON response sent to the
+         frontend — a one-line addition. Added "tf" to AMD (AMD_
+         STRUCTURE_TF), Mirror (MIRROR_INTERVAL), Sweep (LSW_INTERVAL),
+         Scalp (the request's own `interval` param — a signal's
+         timeframe varies per-call, unlike every other module here),
+         and both of MSNR's own chart branches (MSNR_ENTRY_TF, the
+         actual timeframe of the displayed candles).
+         Added the timeframe to the shared chart modal's own params
+         line (right after the date/time, as "ТФ <interval>") — one
+         change in openVgiChart() covers every module that reuses it.
+         Verified: py_compile (-W error), pyflakes, node --check, 66
+         routes, real runtime 200 on /, /api/snr/status, /api/prv/
+         status, /api/msnr/status.
