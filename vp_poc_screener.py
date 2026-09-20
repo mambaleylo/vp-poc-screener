@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.304"
+APP_VERSION = "0.99.305"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -438,6 +438,7 @@ HOURLY_STATS_INTERVAL_SEC = int(os.environ.get("VP_HOURLY_STATS_INTERVAL_SEC", 3
 MSNR_ENABLED = os.environ.get("VP_MSNR_ENABLED", "1") == "1"
 MSNR_SYMBOLS = [s.strip() for s in os.environ.get("VP_MSNR_SYMBOLS", "XAU_USDT,XAUT_USDT,PAXG_USDT").split(",") if s.strip()]
 MSNR_STRUCTURE_TF = os.environ.get("VP_MSNR_STRUCTURE_TF", "1h")  # timeframe the OCL / A-shape / V-shape "Storyline" levels are built on
+MSNR_HIGHER_TF = os.environ.get("VP_MSNR_HIGHER_TF", "4h")  # v0.99.305 — per direct user request, after reviewing screenshots of the strategy author's own source material showing a 4h->1h->15m cascade (this app originally shipped a deliberately-collapsed 2-stage version, see this section's own header comment): 4h now supplies the BIG-PICTURE A/V pair and the TAKE-PROFIT target — a 1h level only fires if a same-type 4h level is CURRENTLY active too (the "refined 1h point within the 4h zone" from the screenshots), and TP becomes the opposite ACTIVE 4h level instead of the opposite 1h one, matching the source's own very high R:R (10-24R) by construction. SL calculation itself is UNCHANGED (still the sweep candle's own extreme x MSNR_SL_BUFFER_MULT) — that buffer was added for a real, previously-reported reason (bare-extreme stops getting hit too often) and the user's own "стоп за хай/лоу" description matches what this already does, not a request to remove the buffer.
 MSNR_ENTRY_TF = os.environ.get("VP_MSNR_ENTRY_TF", "15m")  # v0.99.126 changed this to "1m" per the strategy author's own trade screenshot (the QM trigger is watched on M1 in the source material). v0.99.147 — reverted back to "15m", per direct user report that 1m caused a dramatic drop in backtest signal count: Gate's ~10000-candle recency floor caps 1m history to ~6.9 days (vs ~102 days at 15m), so MSNR_BACKTEST_DAYS=40 was silently giving only ~7 days of entry-TF history instead of 40, leaving most symbols with 5-7 signals instead of the expected dozens. At 15m the backtest covers the full 40 days again. Live signals are fractionally less precise (15m candle vs 1m) but the author's strategy note remains intact — a future improvement would be a separate live entry_tf, but that's a bigger change than warranted here.
 MSNR_PIVOT_LEFT = int(os.environ.get("VP_MSNR_PIVOT_LEFT", 2))
 MSNR_PIVOT_RIGHT = int(os.environ.get("VP_MSNR_PIVOT_RIGHT", 2))
@@ -7866,7 +7867,8 @@ def msnr_build_pivots(structure_candles, pivot_left=MSNR_PIVOT_LEFT, pivot_right
     return pivots
 
 
-def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_LEFT, pivot_right=MSNR_PIVOT_RIGHT,
+def msnr_detect_signals(structure_candles, entry_candles, higher_structure_candles=None,
+                         pivot_left=MSNR_PIVOT_LEFT, pivot_right=MSNR_PIVOT_RIGHT,
                          min_leg_atr=MSNR_MIN_LEG_ATR, atr_period=MSNR_ATR_PERIOD,
                          qm_zone_pct=MSNR_QM_ZONE_PCT, qm_lookback=MSNR_QM_LOOKBACK_BARS,
                          sl_buffer_mult=MSNR_SL_BUFFER_MULT, fallback_rr=MSNR_FALLBACK_RR):
@@ -7902,20 +7904,41 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
     Trusting that per-symbol filter fully now instead of a blanket
     global ceiling that couldn't tell a genuinely unreachable target
     from a genuinely rare-but-profitable one.
+    v0.99.305 — added higher_structure_candles (MSNR_HIGHER_TF, 4h by
+    default), per direct user request after reviewing the strategy
+    author's own source screenshots showing a 4h->1h->15m cascade (this
+    module originally shipped a deliberately-collapsed 2-stage version,
+    see this section's own header comment for the full "why" at intro).
+    When given, a 1h A/V level only fires a QM signal if a same-type 4h
+    level (msnr_build_pivots() on higher_structure_candles) is ALSO
+    currently active — the "1h point refining the active 4h zone" the
+    screenshots show — and TP becomes the OPPOSITE ACTIVE 4h level
+    (same "must still be genuinely ahead of price" validity check as
+    the 1h-level TP it replaces) instead of the opposite 1h level,
+    falling back to fallback_rr under the exact same conditions as
+    before. Optional and defaults to None (old two-stage 1h/15m-only
+    behavior, no 4h gating at all) so msnr_addon_backtest_symbol()'s own
+    separate call site keeps working unchanged if it's ever left as-is.
     A level only fires once per "reign" (consumed on signal) — replaced by the next
     confirmed pivot of that type resets it.
     Returns (signals, pivots). signals: list of dicts with index (into
     entry_candles), time, direction, entry, sl, tp, level, level_type."""
     pivots = msnr_build_pivots(structure_candles, pivot_left, pivot_right, min_leg_atr, atr_period)
+    higher_pivots = msnr_build_pivots(higher_structure_candles, pivot_left, pivot_right, min_leg_atr, atr_period) if higher_structure_candles else []
+    use_higher_tf = higher_structure_candles is not None
     signals = []
     if not entry_candles:
         return signals, pivots
     pi = 0
+    hi = 0
     active_a = None
     active_v = None
+    active_higher_a = None
+    active_higher_v = None
     a_fired = False
     v_fired = False
     n_p = len(pivots)
+    n_hp = len(higher_pivots)
     for i, c in enumerate(entry_candles):
         while pi < n_p and pivots[pi]["confirm_time"] <= c["time"]:
             piv = pivots[pi]
@@ -7928,6 +7951,13 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
                     active_v = piv
                     v_fired = False
             pi += 1
+        while hi < n_hp and higher_pivots[hi]["confirm_time"] <= c["time"]:
+            hpiv = higher_pivots[hi]
+            if hpiv["type"] == "A":
+                active_higher_a = hpiv
+            else:
+                active_higher_v = hpiv
+            hi += 1
 
         cluster = entry_candles[max(0, i - qm_lookback + 1): i + 1]
         # v0.99.59, per direct user request ("второй фильтр" — volume
@@ -7949,7 +7979,7 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
         vol_avg = (sum(cc["volume"] for cc in vol_window) / len(vol_window)) if vol_window else None
         volume_ratio = round(c["volume"] / vol_avg, 3) if vol_avg and vol_avg > 0 else None
 
-        if active_a is not None and not a_fired:
+        if active_a is not None and not a_fired and (not use_higher_tf or active_higher_a is not None):
             level = active_a["price"]
             swept = [cc["high"] for cc in cluster if cc["high"] > level]
             if swept and c["close"] < level:
@@ -8006,7 +8036,16 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
                         # wired through settings/UI) in case a future
                         # session wants to reintroduce a cap deliberately —
                         # nothing in signal generation reads it anymore.
-                        opp = active_v["price"] if active_v is not None else None
+                        # v0.99.305 — opp now prefers the OPPOSITE ACTIVE 4h
+                        # level (msnr_build_pivots() on higher_structure_
+                        # candles) over the 1h one, per direct user request
+                        # matching the strategy author's own source
+                        # material (TP = the 4h Storyline target, not the
+                        # 1h one) — same "must still be genuinely ahead of
+                        # price" validity check either way, same fallback_
+                        # rr when neither is valid.
+                        opp = (active_higher_v["price"] if use_higher_tf and active_higher_v is not None
+                               else (active_v["price"] if active_v is not None else None))
                         opp_valid = opp is not None and opp < entry
                         tp = opp if opp_valid else entry - risk * fallback_rr
                         signals.append({
@@ -8018,7 +8057,7 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
                         })
                         a_fired = True
 
-        if active_v is not None and not v_fired:
+        if active_v is not None and not v_fired and (not use_higher_tf or active_higher_v is not None):
             level = active_v["price"]
             swept = [cc["low"] for cc in cluster if cc["low"] < level]
             if swept and c["close"] > level:
@@ -8036,7 +8075,11 @@ def msnr_detect_signals(structure_candles, entry_candles, pivot_left=MSNR_PIVOT_
                         # longer checks implied RR against rr_cap, only that
                         # the paired A-shape is still a genuine unmet target
                         # ahead of price.
-                        opp = active_a["price"] if active_a is not None else None
+                        # v0.99.305 — same "prefer opposite active 4h level"
+                        # change as the SHORT branch above, see its own
+                        # comment for the full reasoning.
+                        opp = (active_higher_a["price"] if use_higher_tf and active_higher_a is not None
+                               else (active_a["price"] if active_a is not None else None))
                         opp_valid = opp is not None and opp > entry
                         tp = opp if opp_valid else entry + risk * fallback_rr
                         signals.append({
@@ -8137,15 +8180,19 @@ def msnr_detect_addon_signals(addon_candles, primary_signals, qm_zone_pct=MSNR_Q
     return addon_signals
 
 
-def msnr_run_backtest(structure_candles, entry_candles, **params):
+def msnr_run_backtest(structure_candles, entry_candles, higher_structure_candles=None, **params):
     """Runs msnr_detect_signals(**params) + msnr_track_outcome() over the
     result and returns the full per-trade list (time/direction/entry/sl/
     tp/level/rr/result). The shared core behind both a plain single-
     params backtest and msnr_optimize_symbol()'s grid search — params
     are whichever of msnr_detect_signals()'s own kwargs (min_leg_atr,
     qm_zone_pct, qm_lookback, ...) the caller wants to override; anything
-    not given keeps msnr_detect_signals()'s own module-default."""
-    sigs, _pivots = msnr_detect_signals(structure_candles, entry_candles, **params)
+    not given keeps msnr_detect_signals()'s own module-default.
+    v0.99.305 — higher_structure_candles (MSNR_HIGHER_TF, 4h) threaded
+    through explicitly, not via **params, since it's a candle series
+    (like structure_candles/entry_candles) rather than a detect_signals
+    tuning knob."""
+    sigs, _pivots = msnr_detect_signals(structure_candles, entry_candles, higher_structure_candles, **params)
     results = []
     for sig in sigs:
         result, exit_time = msnr_track_outcome(entry_candles, sig)
@@ -8164,9 +8211,9 @@ def msnr_run_backtest(structure_candles, entry_candles, **params):
 
 
 def msnr_backtest_symbol(symbol, days=MSNR_BACKTEST_DAYS, **params):
-    """Fetches MSNR_BACKTEST_DAYS of both MSNR_STRUCTURE_TF and MSNR_
-    ENTRY_TF history and runs msnr_run_backtest() over the whole window.
-    Structure candles are fetched with extra lookback (structure TF is
+    """Fetches MSNR_BACKTEST_DAYS of MSNR_STRUCTURE_TF, MSNR_ENTRY_TF, and
+    MSNR_HIGHER_TF history and runs msnr_run_backtest() over the whole
+    window. Structure candles are fetched with extra lookback (structure TF is
     coarser, so this stays cheap) so the earliest entry-TF bars already
     have a real A/V pair to test against. Accepts the same param
     overrides as msnr_detect_signals — used both for a plain module-
@@ -8174,15 +8221,21 @@ def msnr_backtest_symbol(symbol, days=MSNR_BACKTEST_DAYS, **params):
     symbol's autotuned params. Deliberately left untouched by the
     v0.99.126 add-on feature (see msnr_addon_backtest_symbol() instead)
     — this stays the primary-only path msnr_optimize_symbol()'s own
-    grid search depends on."""
+    grid search depends on.
+    v0.99.305 — also fetches MSNR_HIGHER_TF (4h) with the SAME extra
+    lookback as structure_candles (coarser still, so this stays cheap
+    too), passed through to msnr_run_backtest() for the 4h gating/TP
+    logic — see msnr_detect_signals()'s own docstring for the full
+    "why"."""
     now = time.time()
     structure_start = now - (days + 20) * 86400
     structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, now)
+    higher_candles = get_candles_range(symbol, MSNR_HIGHER_TF, structure_start, now)
     entry_start = now - days * 86400
     entry_candles = get_candles_range(symbol, MSNR_ENTRY_TF, entry_start, now)
     if len(structure_candles) < MSNR_ATR_PERIOD + 10 or len(entry_candles) < 10:
         return []
-    return msnr_run_backtest(structure_candles, entry_candles, **params)
+    return msnr_run_backtest(structure_candles, entry_candles, higher_candles, **params)
 
 
 def msnr_addon_backtest_symbol(symbol, days=MSNR_BACKTEST_DAYS):
@@ -8199,12 +8252,13 @@ def msnr_addon_backtest_symbol(symbol, days=MSNR_BACKTEST_DAYS):
     now = time.time()
     structure_start = now - (days + 20) * 86400
     structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, now)
+    higher_candles = get_candles_range(symbol, MSNR_HIGHER_TF, structure_start, now)  # v0.99.305 — see msnr_detect_signals()'s own docstring
     entry_start = now - days * 86400
     entry_candles = get_candles_range(symbol, MSNR_ENTRY_TF, entry_start, now)
     addon_candles = get_candles_range(symbol, MSNR_ADDON_TF, entry_start, now)
     if len(structure_candles) < MSNR_ATR_PERIOD + 10 or len(entry_candles) < 10:
         return [], []
-    sigs, _pivots = msnr_detect_signals(structure_candles, entry_candles)
+    sigs, _pivots = msnr_detect_signals(structure_candles, entry_candles, higher_candles)
     primary_results = []
     for sig in sigs:
         result, exit_time = msnr_track_outcome(entry_candles, sig)
@@ -8388,6 +8442,7 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
     now = time.time()
     structure_start = now - (days + 20) * 86400
     structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, now)
+    higher_candles = get_candles_range(symbol, MSNR_HIGHER_TF, structure_start, now)  # v0.99.305 — fetched once, reused across all 27 grid combos below, same reasoning as structure_candles' own comment
     entry_start = now - days * 86400
     entry_candles = get_candles_range(symbol, MSNR_ENTRY_TF, entry_start, now)
     if len(structure_candles) < MSNR_ATR_PERIOD + 10 or len(entry_candles) < 10:
@@ -8411,7 +8466,7 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
     for min_leg_atr in MSNR_PARAM_GRID_MIN_LEG_ATR:
         for qm_zone_pct in MSNR_PARAM_GRID_QM_ZONE_PCT:
             for qm_lookback in MSNR_PARAM_GRID_QM_LOOKBACK:
-                results = msnr_run_backtest(structure_candles, entry_candles,
+                results = msnr_run_backtest(structure_candles, entry_candles, higher_candles,
                                              min_leg_atr=min_leg_atr, qm_zone_pct=qm_zone_pct,
                                              qm_lookback=qm_lookback)
                 tried.append(len(results))
@@ -9651,21 +9706,26 @@ def msnr_scan_symbol_live(symbol):
     structure + entry history, runs the SAME detector (with this
     symbol's autotuned params, see msnr_symbol_params()), and fires only
     if the LAST entry candle produced a brand-new signal not already
-    seen for this symbol."""
+    seen for this symbol.
+    v0.99.305 — also fetches MSNR_HIGHER_TF (4h) history, same "why" as
+    msnr_backtest_symbol()'s own comment."""
     if not MSNR_ENABLED:
         return
     try:
         params = msnr_symbol_params(symbol)
         structure_candles = get_candles(symbol, interval=MSNR_STRUCTURE_TF, limit=MSNR_ATR_PERIOD + 250)
+        higher_candles = get_candles(symbol, interval=MSNR_HIGHER_TF, limit=MSNR_ATR_PERIOD + 250)
         entry_candles = get_candles(symbol, interval=MSNR_ENTRY_TF, limit=params["qm_lookback"] + 200)
         now = time.time()
         s_interval_sec = INTERVAL_SECONDS.get(MSNR_STRUCTURE_TF, 3600)
+        h_interval_sec = INTERVAL_SECONDS.get(MSNR_HIGHER_TF, 14400)
         e_interval_sec = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
         structure_candles = [c for c in structure_candles if c["time"] + s_interval_sec <= now]
+        higher_candles = [c for c in higher_candles if c["time"] + h_interval_sec <= now]
         entry_candles = [c for c in entry_candles if c["time"] + e_interval_sec <= now]
         if len(structure_candles) < MSNR_ATR_PERIOD + 10 or len(entry_candles) < 10:
             return
-        sigs, _pivots = msnr_detect_signals(structure_candles, entry_candles, **params)
+        sigs, _pivots = msnr_detect_signals(structure_candles, entry_candles, higher_candles, **params)
         if not sigs:
             return
         sig = sigs[-1]
@@ -19860,16 +19920,19 @@ def api_msnr_chart(symbol):
         anchor = float(sig_time) if sig_time else now
         e_interval_sec = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
         s_interval_sec = INTERVAL_SECONDS.get(MSNR_STRUCTURE_TF, 3600)
+        h_interval_sec = INTERVAL_SECONDS.get(MSNR_HIGHER_TF, 14400)
         entry_end = min(now, anchor + 60 * e_interval_sec)
         entry_start = anchor - 220 * e_interval_sec
         structure_start = anchor - 260 * s_interval_sec
         structure_end = min(now, anchor + 60 * e_interval_sec)
+        higher_start = anchor - 260 * h_interval_sec  # v0.99.305 — see msnr_detect_signals()'s own docstring
         entry_candles = get_candles_range(symbol, MSNR_ENTRY_TF, entry_start, entry_end)
 
         if found_sig:
             structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, structure_end)
+            higher_candles = get_candles_range(symbol, MSNR_HIGHER_TF, higher_start, structure_end)
             params = msnr_symbol_params(symbol)
-            _sigs, pivots = msnr_detect_signals(structure_candles, entry_candles, **params)
+            _sigs, pivots = msnr_detect_signals(structure_candles, entry_candles, higher_candles, **params)
             window_start = entry_candles[0]["time"] if entry_candles else structure_start
             visible_pivots = [p for p in pivots if p["confirm_time"] >= window_start - 30 * s_interval_sec]
             return jsonify({
@@ -19883,7 +19946,8 @@ def api_msnr_chart(symbol):
         # same behavior this endpoint always had for that case.
         params = msnr_symbol_params(symbol)
         structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, structure_end)
-        sigs, pivots = msnr_detect_signals(structure_candles, entry_candles, **params)
+        higher_candles = get_candles_range(symbol, MSNR_HIGHER_TF, higher_start, structure_end)
+        sigs, pivots = msnr_detect_signals(structure_candles, entry_candles, higher_candles, **params)
         sig = None
         if sig_time:
             target = float(sig_time)
