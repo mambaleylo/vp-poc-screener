@@ -16035,3 +16035,94 @@ v0.99.303 - Moved the screensaver toggle button into the top header
          unstyled before the screensaver-state JS runs.
          Verified: py_compile (-W error), pyflakes, real runtime 200
          on / confirming the button is now next to settingsBtn.
+
+v0.99.304 - Added diagnostic visibility into WHY an MSNR signal doesn't
+         actually autotrade, per direct user report ("Сделки по Мsnr
+         не открываются. в истории сигналов я их вижу, время и дату. В
+         списке автоторговли сигналов самих нет. Галочки все стоят в
+         настройках").
+         Traced the exact gate: msnr_live_loop() only calls execute_
+         autotrade() when THREE conditions all hold — the master
+         AUTOTRADE_ENABLED_MSNR toggle, a PER-SYMBOL toggle that's
+         FULLY AUTOMATIC (only ever set by the backtest loop's own top-
+         N/win-rate management, not user-clickable — v0.99.108 removed
+         manual per-symbol control entirely), and a live RE-CHECK of
+         current eligibility at the exact moment the signal fires (not
+         whatever the settings/status page showed earlier — a symbol's
+         ranking can shift between the two). Confirmed this gate and
+         the status page's own displayed "Авто" column read the exact
+         same underlying data (no display/reality mismatch there), but
+         when the gate failed, NOTHING was logged or recorded at all —
+         no autotrade_log entry (matching "в списке автоторговли
+         сигналов самих нет" exactly, since execute_autotrade() is
+         never even called), and no explanation on the signal itself
+         either, making "the per-symbol auto-toggle correctly turned
+         off because the coin fell out of top-N" indistinguishable from
+         "autotrade is broken" — exactly the user's own reported
+         confusion, since the settings-level toggles they could see
+         and verify were indeed all correctly on.
+         Now records exactly which check failed as autotrade_skip_
+         reason directly on the signal record whenever the gate
+         doesn't pass, and shows it as a "⚠️ не открыто" tag with a
+         full-text tooltip in the MSNR signals table (in place of the
+         leverage figure, which isn't meaningful for a trade that never
+         happened) — no new API field wiring needed since /api/msnr/
+         signals already jsonify()s the full signal dict.
+         Verified: py_compile (-W error), pyflakes, node --check, real
+         runtime 200 on / and /api/msnr/status, and directly confirmed
+         the reason-string logic produces the correct, specific message
+         for the "auto-managed toggle currently off" case.
+
+v0.99.305 - Added the missing 4h stage to MSNR, restoring the full
+         4h->1h->15m cascade the strategy author's own source material
+         shows (this module originally shipped a deliberately-collapsed
+         2-stage version at introduction, v0.99.0 — see this section's
+         own header comment for that original "why"). Per direct user
+         request after sharing screenshots of the source tutorial and
+         confirming the exact design: "4ч даёт общую зону/направление,
+         1ч должен найти точный уровень именно внутри этой 4ч-зоны...
+         тейк это b поинт на часе... нет, тейк на 4х... Да, точно так".
+         New MSNR_HIGHER_TF (4h). msnr_build_pivots() needed no changes
+         at all — it was already generic over any candle series, so
+         it's now called a second time on 4h candles too. msnr_detect_
+         signals() gained an optional higher_structure_candles param:
+         tracks the currently-active 4h A/V pair alongside the existing
+         1h one (same confirm_time-based walk-forward, no lookahead),
+         and a 1h-level QM signal now only fires if a SAME-TYPE 4h level
+         is also currently active — the "1h point refining the active
+         4h zone" from the screenshots. TP now prefers the OPPOSITE
+         ACTIVE 4h level over the 1h one (same "must still be genuinely
+         ahead of price" validity check, same fallback_rr when neither
+         qualifies) — matching the source's own very high R:R (10-24R)
+         by construction more closely than the 1h-level TP did. SL
+         calculation itself is UNCHANGED — still the sweep candle's own
+         extreme x MSNR_SL_BUFFER_MULT; that buffer was added for a
+         real, previously-reported reason (bare-extreme stops getting
+         hit too often, v0.99.104) and the user's own "стоп за хай/лоу"
+         description matches what this already does, not a request to
+         remove it. The new param defaults to None (old two-stage
+         behavior, no 4h gating) for backward compatibility.
+         Threaded 4h candle fetching through every call site: msnr_
+         backtest_symbol(), msnr_addon_backtest_symbol(), msnr_optimize_
+         symbol() (fetched once, reused across all 27 grid combos, same
+         as structure_candles' own pattern), msnr_scan_symbol_live()
+         (live scanning), and the chart endpoint (both the "found a
+         stored signal" and "browse current live Storyline" branches) —
+         the chart's own displayed pivots/annotations now use the exact
+         same 4h-gated logic the live scanner actually fires on, not a
+         stale 2-stage view.
+         Verified directly with three targeted tests: (1) a synthetic
+         scenario with a real QM sweep but mocked 1h/4h pivots giving
+         CLEARLY different opposite levels (110 vs 150) confirmed TP is
+         150 (the 4h one) when higher_structure_candles is given, and
+         110 (the 1h one, unchanged) when it's omitted — confirming both
+         the new behavior and backward compatibility in one test; (2) a
+         scenario with an active 1h V-shape but NO matching-type 4h
+         level active at all correctly produced zero signals, confirming
+         the gate blocks unsupported levels; (3) on 30 rounds of full
+         random-walk synthetic data through the real (non-mocked)
+         detection pipeline, 4h-gated signal counts came out at or below
+         the ungated count every time, as expected for a strictly
+         additive filter.
+         Verified: py_compile (-W error), pyflakes, 64 routes, real
+         runtime 200 on / and /api/msnr/status.
