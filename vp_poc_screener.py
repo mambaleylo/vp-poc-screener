@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.306"
+APP_VERSION = "0.99.307"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3950,10 +3950,36 @@ def get_futures_total_equity():
     (no side effects), opts into gate_signed_request()'s own new retry
     mechanism to survive a transient timeout without wasting an
     otherwise-good signal upstream in execute_autotrade()."""
-    data = gate_signed_request("GET", "/futures/usdt/accounts", retry_on_timeout=True)
-    available = float(data.get("available", 0) or 0)
-    position_margin = sum(float(p.get("margin", 0) or 0) for p in get_open_positions())
-    return available + position_margin
+    for attempt in range(2):
+        data = gate_signed_request("GET", "/futures/usdt/accounts", retry_on_timeout=True)
+        available = float(data.get("available", 0) or 0)
+        position_margin = sum(float(p.get("margin", 0) or 0) for p in get_open_positions())
+        total = available + position_margin
+        if total > 0 or attempt == 1:
+            break
+        time.sleep(1)  # v0.99.307 — one retry before giving up: covers a transient/partial-response blip under load, cheap and could directly prevent a skipped trade
+    if total <= 0:
+        # v0.99.307 — CRITICAL DIAGNOSTIC FIX, per direct user report
+        # (Telegram screenshot: "AAVE_USDT (msnr): сделка пропущена —
+        # не удалось получить баланс счёта для расчёта размера
+        # позиции", repeated for a different symbol ~36 minutes later).
+        # gate_signed_request() itself ALWAYS raises on any network/
+        # HTTP failure — it never silently returns falsy data — so this
+        # function reaching a <=0 total means the call genuinely
+        # SUCCEEDED but the account response's own "available" field (or
+        # get_open_positions()'s own "margin" fields) came back as zero/
+        # missing. This function's own v0.99.106 fix already documents
+        # ONE real precedent for this exact shape of problem (Gate's
+        # "position_margin" field silently reading 0/stale on newer
+        # unified/portfolio-margin accounts) — "available" itself could
+        # plausibly have an analogous quirk on some account structure
+        # this hasn't been tested against, but there was previously no
+        # way to tell that apart from a genuine $0 balance. Logs the
+        # raw account response (data) whenever this happens so the NEXT
+        # occurrence leaves an actual diagnostic trail instead of just
+        # the same unexplained downstream skip message.
+        log_error(f"get_futures_total_equity: total came back <=0 (available={available}, position_margin={position_margin}) — raw account response: {json.dumps(data)[:400]}")
+    return total
 
 
 _dual_mode_cache = {"value": None, "fetched_at": 0}
