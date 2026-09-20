@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.305"
+APP_VERSION = "0.99.306"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -18830,6 +18830,35 @@ def api_snr_chart(symbol):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/msnr/restart_backtest", methods=["POST"])
+def api_msnr_restart_backtest():
+    """v0.99.306 — per direct user report ("У некоторых индикаторов нет
+    кнопки вверху перезапустить бэктест"): MSNR_BACKTEST_TRIGGER already
+    existed (added back in v0.99.137's own reset-doesn't-wake-the-loop
+    fix) but was only ever .set() from inside api_reset_msnr() — there
+    was no NON-destructive "just restart, keep existing results visible
+    until the new cycle finishes" endpoint, unlike Neuro/S&R Zones/Peak
+    Reversal, which all already had one. Same pattern as those three."""
+    try:
+        MSNR_BACKTEST_TRIGGER.set()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_msnr_restart_backtest: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/lsw/restart_backtest", methods=["POST"])
+def api_lsw_restart_backtest():
+    """v0.99.306 — same fix as api_msnr_restart_backtest()'s own, for
+    Sweep/LSW."""
+    try:
+        LSW_BACKTEST_TRIGGER.set()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_lsw_restart_backtest: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/snr/restart_backtest", methods=["POST"])
 def api_snr_restart_backtest():
     """v0.99.270 — per direct user request ("бэктест не идёт по
@@ -20671,7 +20700,9 @@ INDEX_HTML = """<!doctype html>
       <button id="screensaverBtn" onclick="toggleScreensaver()" style="color:#5a6a7a;" title="скринсейвер (часы, защита AMOLED)">🕐</button>
       <button id="resetVolumeBtn" class="btnDanger">Очистить объём</button>
       <button id="resetMsnrBtn" class="btnDanger">Очистить MSNR</button>
+      <button id="restartMsnrBacktestBtn" class="btnNeutral">Перезапустить бэктест MSNR</button>
       <button id="resetLswBtn" class="btnDanger">Очистить Sweep</button>
+      <button id="restartLswBacktestBtn" class="btnNeutral">Перезапустить бэктест Sweep</button>
       <button id="resetNeuroBtn" class="btnDanger">Очистить Neuro</button>
       <button id="restartNeuroBacktestBtn" class="btnNeutral">Перезапустить бэктест Neuro</button>
       <button id="restartSnrBacktestBtn" class="btnNeutral">Перезапустить бэктест S/R</button>
@@ -24152,9 +24183,15 @@ wireResetButton('resetVolumeBtn', '/api/reset/volume',
 wireResetButton('resetMsnrBtn', '/api/reset/msnr',
   'Удалить накопленный бэктест и сигналы MSNR? Остальное не тронет. Это необратимо.',
   'Очистить MSNR');
+wireRestartButton('restartMsnrBacktestBtn', '/api/msnr/restart_backtest',
+  'Запустить новый цикл перебора параметров MSNR прямо сейчас, не дожидаясь расписания? Текущие результаты останутся видны, пока новый цикл не завершится.',
+  'Перезапустить бэктест MSNR');
 wireResetButton('resetLswBtn', '/api/reset/lsw',
   'Удалить накопленный бэктест и сигналы Sweep? Остальное не тронет. Это необратимо.',
   'Очистить Sweep');
+wireRestartButton('restartLswBacktestBtn', '/api/lsw/restart_backtest',
+  'Запустить новый цикл перебора параметров Sweep прямо сейчас, не дожидаясь расписания? Текущие результаты останутся видны, пока новый цикл не завершится.',
+  'Перезапустить бэктест Sweep');
 wireResetButton('resetNeuroBtn', '/api/reset/neuro',
   'Удалить накопленные зависимости, сделки и сигналы Neuro по всем монетам топ-N и начать заново? Это необратимо.',
   'Очистить Neuro');
@@ -24320,8 +24357,8 @@ async function loadSettings() {
 // Scalp/simulator/risk-autotune reset buttons stay always visible —
 // they aren't gated by a single module "enabled" toggle the same way.
 const HEADER_BTN_ENABLE_KEY = {
-  resetMsnrBtn: 'msnr_enabled',
-  resetLswBtn: 'lsw_enabled', resetNeuroBtn: 'neuro_enabled', restartNeuroBacktestBtn: 'neuro_enabled',
+  resetMsnrBtn: 'msnr_enabled', restartMsnrBacktestBtn: 'msnr_enabled',
+  resetLswBtn: 'lsw_enabled', restartLswBacktestBtn: 'lsw_enabled', resetNeuroBtn: 'neuro_enabled', restartNeuroBacktestBtn: 'neuro_enabled',
   restartSnrBacktestBtn: 'snr_enabled', restartPrvBacktestBtn: 'prv_enabled',
 };
 function updateHeaderButtonVisibility(s) {
