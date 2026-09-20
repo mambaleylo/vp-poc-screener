@@ -16215,3 +16215,23 @@ v0.99.308 - Charts now show which candle timeframe they're displaying,
          Verified: py_compile (-W error), pyflakes, node --check, 66
          routes, real runtime 200 on /, /api/snr/status, /api/prv/
          status, /api/msnr/status.
+
+v0.99.309 - Fixed the timeframe still not showing on MSNR's own chart,
+         per direct user follow-up screenshot ("Где таймфрейм искать
+         то? Я не вижу") right after v0.99.308 shipped. Root cause:
+         MSNR has its own separate openMsnrChart()/drawMsnrChart()
+         implementation (custom pivot/Storyline rendering, distinct
+         from the shared openVgiChart() every other module's own chart
+         wrapper reuses) — v0.99.308's fix only touched openVgiChart()'s
+         own params line, never reaching this one. Confirmed every
+         OTHER chart-opening function (Neuro/NQ/Scalp/Mirror/Sweep/
+         AMD/S&R Zones/Peak Reversal) is a thin wrapper around the
+         shared function and was already covered. Added the same "ТФ
+         <interval>" text to both of openMsnrChart()'s own branches (no
+         confirmed signal in this window / a real signal found).
+         FT5's own similarly-separate openFt5Chart() was deliberately
+         left alone — that module has had no tab or way to reach this
+         chart since v0.99.302's UI removal, so fixing it now would be
+         invisible/wasted effort unless a future session re-enables it.
+         Verified: py_compile (-W error), pyflakes, node --check, real
+         runtime 200 on / and /api/msnr/status.
