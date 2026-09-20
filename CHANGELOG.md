@@ -16126,3 +16126,31 @@ v0.99.305 - Added the missing 4h stage to MSNR, restoring the full
          additive filter.
          Verified: py_compile (-W error), pyflakes, 64 routes, real
          runtime 200 on / and /api/msnr/status.
+
+v0.99.306 - Added missing "Перезапустить бэктест" buttons for MSNR and
+         Sweep, per direct user report ("У некоторых индикаторов нет
+         кнопки вверху перезапустить бэктест"). Neuro/S&R Zones/Peak
+         Reversal already had a non-destructive restart button (wakes
+         the backtest loop for a fresh cycle right now, keeps existing
+         results visible until the new one finishes) — MSNR and LSW
+         only ever had a destructive "Очистить" (clear) button, forcing
+         a full wipe just to trigger an early cycle.
+         Found their own MSNR_BACKTEST_TRIGGER/LSW_BACKTEST_TRIGGER
+         threading.Event()s already existed (added back in v0.99.137's
+         own "reset doesn't wake the sleeping loop" fix) but were only
+         ever .set() from inside the reset endpoints — no standalone
+         restart-only endpoint existed to trigger them without also
+         clearing. Confirmed both loops' own recurring wait already
+         uses the interruptible .wait(timeout=...) form (not a plain
+         time.sleep()), so a new endpoint just calling .set() directly
+         works correctly without any other loop changes needed.
+         Added POST /api/msnr/restart_backtest and /api/lsw/restart_
+         backtest (same shape as the existing snr/prv/neuro ones), new
+         header buttons "Перезапустить бэктест MSNR"/"...Sweep" next to
+         each module's own "Очистить" button, and added both to
+         updateHeaderButtonVisibility()'s own map so they hide/show
+         alongside their module's enabled toggle like every other
+         restart button already does.
+         Verified: py_compile (-W error), pyflakes, node --check, 66
+         routes, real runtime 200 confirming both new endpoints respond
+         200 and both new buttons are present in the served HTML.
