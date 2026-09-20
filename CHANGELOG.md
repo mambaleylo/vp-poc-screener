@@ -16154,3 +16154,40 @@ v0.99.306 - Added missing "Перезапустить бэктест" buttons fo
          Verified: py_compile (-W error), pyflakes, node --check, 66
          routes, real runtime 200 confirming both new endpoints respond
          200 and both new buttons are present in the served HTML.
+
+v0.99.307 - Found the ACTUAL, more direct root cause behind MSNR trades
+         not opening (superseding v0.99.304's own diagnostic-only fix)
+         — per direct user screenshot of two real Telegram alerts:
+         "AAVE_USDT (msnr): сделка пропущена — не удалось получить
+         баланс счёта для расчёта размера позиции", repeated ~36
+         minutes later for GOOGL_USDT.
+         Traced the exact message to compute_risk_based_position()'s
+         own "if not total_equity or total_equity <= 0" check —
+         confirmed gate_signed_request() itself ALWAYS raises on any
+         real network/HTTP failure (timeout, connection error, or non-
+         OK status), it never silently returns falsy data — so reaching
+         this specific message means get_futures_total_equity() itself
+         genuinely SUCCEEDED but its own "available" field (or get_open_
+         positions()'s own per-position "margin" fields) came back as
+         zero/missing, with NO diagnostic trail at all explaining why —
+         this exact function's own v0.99.106 fix already documents ONE
+         real precedent for this shape of problem (Gate's own
+         "position_margin" field silently reading 0/stale on newer
+         unified/portfolio-margin accounts); "available" itself could
+         plausibly have an analogous quirk this hasn't been tested
+         against, but there was previously no way to tell that apart
+         from a genuine $0 reading.
+         Added one retry (cheap, 1s delay) before accepting a <=0 total
+         — covers a transient/partial-response blip under load and
+         could directly prevent a trade from being skipped for no real
+         reason. If it's STILL <=0 after the retry, now logs the raw
+         account API response (available, position_margin, and the
+         full response body) so the next occurrence leaves an actual
+         diagnostic trail instead of the same unexplained downstream
+         skip message repeating forever.
+         Verified directly: a synthetic transient-then-success scenario
+         (first call returns available=0, second returns 500) correctly
+         recovers on the retry and returns the real balance, calling
+         gate_signed_request exactly twice.
+         Verified: py_compile (-W error), pyflakes, 66 routes, real
+         runtime 200 on / and /api/status.
