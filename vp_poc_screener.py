@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.312"
+APP_VERSION = "0.99.313"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -20432,6 +20432,37 @@ def api_autotrade_log():
         return jsonify(list(STATE["autotrade_log"]))
 
 
+@app.route("/api/autotrade/retry", methods=["POST"])
+def api_autotrade_retry():
+    """v0.99.313 — per direct user request ("Добавь возможность в
+    разделе авто торговли перекрыть попытаться сделку, которая не
+    открылась из-за ошибки"): re-runs execute_autotrade() with the
+    EXACT same mode/symbol/direction/entry/sl/tp as a past log entry
+    the user clicks on — entry/sl/tp are the ORIGINAL signal's own
+    values (not re-fetched), matching what a manual "try opening this
+    one again" button should mean; execute_autotrade() itself already
+    handles resizing for the CURRENT price (v0.99.295's own fresh-price
+    resize) and all the same safety checks (balance, liquidation-safety
+    re-check, etc.) a fresh signal would go through — this isn't a
+    special/bypassed code path, just the same function called again on
+    demand instead of from a live loop."""
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        mode = body.get("mode")
+        symbol = body.get("symbol")
+        direction = body.get("direction")
+        entry = body.get("entry")
+        sl = body.get("sl")
+        tp = body.get("tp")
+        if not all([mode, symbol, direction]) or entry is None or sl is None or tp is None:
+            return jsonify({"ok": False, "error": "не хватает данных сделки для повтора"}), 400
+        result = execute_autotrade(mode, symbol, direction, float(entry), float(sl), float(tp))
+        return jsonify({"ok": True, "result": result})
+    except Exception as e:
+        log_error(f"api_autotrade_retry: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/autotrade/status")
 def api_autotrade_status():
     with state_lock:
@@ -24137,13 +24168,15 @@ async function refreshAutotrade() {
     SKIPPED: 'Пропущена',
     ERROR: 'Ошибка',
   };
-  const rows = log.map(e => {
+  const rows = log.map((e, idx) => {
     const dirClass = e.direction === 'LONG' ? 'long' : (e.direction === 'SHORT' ? 'short' : 'dim');
     const statusClass = {OPENED: 'win', OPENED_TP_SL_FAILED: 'loss', DRY_RUN: 'status-open', SKIPPED: 'dim', ERROR: 'loss'}[e.status] || 'dim';
-    return `<tr>
+    const canRetry = (e.status === 'ERROR' || e.status === 'SKIPPED') && e.mode && e.symbol && e.direction && e.entry != null && e.sl != null && e.tp != null;
+    const retryAttr = canRetry ? ` data-retry-idx="${idx}" style="cursor:pointer;" title="\u043a\u043b\u0438\u043a \u2014 \u043f\u043e\u043f\u044b\u0442\u0430\u0442\u044c\u0441\u044f \u043e\u0442\u043a\u0440\u044b\u0442\u044c \u0441\u043d\u043e\u0432\u0430"` : '';
+    return `<tr${retryAttr}>
       <td class="dim">${fmtTimeWithDate(e.time)}</td><td>${modeLabels[e.mode] || e.mode}</td><td>${e.symbol}</td>
       <td class="${dirClass}">${e.direction || '-'}</td>
-      <td class="${statusClass}">${statusRu[e.status] || e.status}</td>
+      <td class="${statusClass}">${statusRu[e.status] || e.status}${canRetry ? ' \u21bb' : ''}</td>
       <td class="dim" style="max-width:280px;white-space:normal;">${e.detail || ''}</td>
     </tr>`;
   }).join('');
@@ -24157,6 +24190,28 @@ async function refreshAutotrade() {
     </div>` : '<div class="dim">Пока нет попыток автоторговли.</div>';
 
   setPanelHtml(panel, headerHtml + tableHtml);
+  panel.querySelectorAll('tr[data-retry-idx]').forEach(tr => {
+    tr.onclick = async () => {
+      const e = log[parseInt(tr.dataset.retryIdx, 10)];
+      const sure = confirm(`Повторить попытку открыть ${e.direction} ${e.symbol} (${modeLabels[e.mode] || e.mode})?\nentry ${e.entry} · SL ${e.sl} · TP ${e.tp}\nЭто реальная попытка открыть позицию на бирже (если dry-run выключен).`);
+      if (!sure) return;
+      tr.style.opacity = '0.5';
+      try {
+        const res = await (await fetch('/api/autotrade/retry', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({mode: e.mode, symbol: e.symbol, direction: e.direction, entry: e.entry, sl: e.sl, tp: e.tp}),
+        })).json();
+        if (!res.ok) {
+          alert('Не удалось повторить: ' + (res.error || '\u043d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u0430\u044f \u043e\u0448\u0438\u0431\u043a\u0430'));
+        }
+        await refreshAutotrade();
+      } catch (err) {
+        alert('Не удалось повторить: ' + err);
+        tr.style.opacity = '1';
+      }
+    };
+  });
 }
 
 async function refreshSimulator() {
