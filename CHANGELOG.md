@@ -16368,3 +16368,25 @@ v0.99.313 - Added a "retry" feature to the Автоторговля log, per dir
          separate/fake code path).
          Verified: py_compile (-W error), pyflakes, node --check, 67
          routes, real runtime 200 on / and /api/autotrade/log.
+
+v0.99.314 - MSNR's own chart now displays 1h candles by default instead
+         of 15m, per direct user request ("может по умолчанию для msnr
+         графиков отображать часовой таймфрейм?"). The actual QM-
+         trigger detection/backtest logic is completely UNCHANGED —
+         still MSNR_ENTRY_TF (15m) throughout; this only changes what
+         candles get DRAWN on the chart, which was unnecessarily noisy
+         at 15m resolution for just eyeballing a signal's own structure.
+         New optional ?display_tf= query param on /api/msnr/chart/
+         <symbol> (defaults to "1h", falls back to "1h" if an invalid
+         value is given) lets the old 15m view still be reached
+         (?display_tf=15m) if ever wanted. When display_tf matches
+         MSNR_ENTRY_TF, reuses the already-fetched entry_candles
+         directly instead of a redundant duplicate fetch.
+         Verified directly (network access to Gate.io itself is blocked
+         in this sandbox, same restriction throughout this whole
+         session, so tested with mocked candle fetching): a default
+         request correctly returns tf="1h" and fetches 15m/1h/1h/4h
+         (entry detection + a separate 1h display fetch + structure +
+         higher); an explicit ?display_tf=15m request correctly returns
+         tf="15m" and skips the redundant display fetch (15m/1h/4h only).
+         Verified: py_compile (-W error), pyflakes, 67 routes.
