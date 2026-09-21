@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.309"
+APP_VERSION = "0.99.310"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6617,6 +6617,32 @@ def _telegram_sender_worker():
         time.sleep(1.1)  # a little above Telegram's ~1 msg/sec/chat limit
 
 
+def format_leverage_txt(autotrade_result, autotrade_enabled):
+    """v0.99.310 — per direct user report (Telegram screenshot: a real
+    Sweep signal showing "плечо: автоторговля выключена" with no way to
+    tell whether that meant "autotrade is off in settings" or "autotrade
+    is ON but THIS specific trade was skipped/errored for some other
+    reason") — the old inline `f"{lev}x" if result and result.get(
+    "leverage") else "автоторговля выключена"` pattern (duplicated
+    across LSW/Mirror/SNR/PRV) collapsed BOTH of those genuinely
+    different situations into the same generic text whenever a result
+    existed but had no leverage figure (a SKIPPED/ERROR status, e.g.
+    from one of execute_autotrade()'s own several skip checks — balance,
+    liquidation-safety re-check, etc.) — indistinguishable from
+    autotrade being off entirely. Now shows the actual leverage when a
+    trade fired, "автоторговля выключена" only when the module's own
+    enabled flag is genuinely off, and the SPECIFIC skip/error detail
+    otherwise, so a real skip reason is always visible rather than
+    silently looking identical to "disabled"."""
+    if autotrade_result and autotrade_result.get("leverage"):
+        return f"{autotrade_result['leverage']}x"
+    if not autotrade_enabled:
+        return "автоторговля выключена"
+    if autotrade_result and autotrade_result.get("detail"):
+        return f"пропущено ({autotrade_result['detail']})"
+    return "пропущено"
+
+
 def send_telegram(text, category=None):
     if not TELEGRAM_ENABLED or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
@@ -12052,9 +12078,9 @@ def mirror_scan_symbol_live(symbol):
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
         pattern_labels = {"inside_bar": "внутренний бар", "tweezers": "пинцет",
                            "rails": "рельсы", "engulfing_doji": "поглощение на дожи"}
-        leverage_txt = f"{autotrade_result.get('leverage')}x" if autotrade_result and autotrade_result.get("leverage") else "\u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d\u0430"
+        leverage_txt = format_leverage_txt(autotrade_result, AUTOTRADE_ENABLED_MIRROR)
         send_telegram(
-            f"{arrow} {symbol} (рождение зеркалки \u2014 {pattern_labels.get(sig['pattern'], sig['pattern'])})\n"
+            f"{arrow} Зеркало {symbol} (рождение зеркалки \u2014 {pattern_labels.get(sig['pattern'], sig['pattern'])})\n"
             f"entry: {sig['entry']:.6g}\n"
             f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n"
             f"плечо: {leverage_txt}",
@@ -13454,9 +13480,9 @@ def lsw_scan_symbol_live(symbol):
                     if _lsw_signal_cooldowns.get(symbol) == sig["entry_time"]:
                         del _lsw_signal_cooldowns[symbol]
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
-        leverage_txt = f"{autotrade_result.get('leverage')}x" if autotrade_result and autotrade_result.get("leverage") else "\u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d\u0430"
+        leverage_txt = format_leverage_txt(autotrade_result, AUTOTRADE_ENABLED_LSW)
         send_telegram(
-            f"{arrow} {symbol}\n"
+            f"{arrow} Sweep {symbol}\n"
             f"entry: {sig['entry']:.6g}\n"
             f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n"
             f"плечо: {leverage_txt}",
@@ -15069,7 +15095,7 @@ def snr_live_loop():
                                            autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_SNR, record)
                     else:
                         log_error(f"snr_live_loop {symbol}: signal fired but symbol was dropped from active set mid-scan — signal logged, real trade skipped")
-                leverage_txt = f"{autotrade_result.get('leverage')}x" if autotrade_result and autotrade_result.get("leverage") else "\u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d\u0430"
+                leverage_txt = format_leverage_txt(autotrade_result, AUTOTRADE_ENABLED_SNR)
                 send_telegram(
                     f"{arrow} S/R {symbol} ({sig['direction']}, \u0437\u043e\u043d\u0430 {sig['zone_price']:.6g}, \u0441\u0438\u043b\u0430 {sig['zone_strength']})\n"
                     f"entry: {sig['entry']:.6g}\nSL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n\u043f\u043b\u0435\u0447\u043e: {leverage_txt}",
@@ -15552,7 +15578,7 @@ def prv_live_loop():
                                            autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_PRV, record)
                     else:
                         log_error(f"prv_live_loop {symbol}: signal fired but symbol was dropped from active set mid-scan — signal logged, real trade skipped")
-                leverage_txt = f"{autotrade_result.get('leverage')}x" if autotrade_result and autotrade_result.get("leverage") else "\u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d\u0430"
+                leverage_txt = format_leverage_txt(autotrade_result, AUTOTRADE_ENABLED_PRV)
                 send_telegram(
                     f"{arrow} Peak Reversal {symbol} ({sig['direction']})\n"
                     f"entry: {sig['entry']:.6g}\nSL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n\u043f\u043b\u0435\u0447\u043e: {leverage_txt}",
