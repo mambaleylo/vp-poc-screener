@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.311"
+APP_VERSION = "0.99.312"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3893,6 +3893,40 @@ def move_stop_to_breakeven(symbol, direction, sl_order_id, entry, tick, buffer_p
     return new_sl.get("id") if isinstance(new_sl, dict) else None
 
 
+def get_unified_account_equity():
+    """v0.99.312 — per direct user report + shared error-panel
+    screenshot: GET /futures/usdt/accounts genuinely reports 0 once an
+    account is upgraded to Gate's Unified Account (Single-Currency/
+    Multi-Currency/Portfolio Margin Mode) — confirmed via Gate's own
+    help docs that USDT-M Perpetual funds move OUT of the classic
+    futures account entirely once upgraded, and are held in the
+    unified account instead ("USDT-M Perpetual and Options assets will
+    not be displayed in the Futures Account" after upgrading). Queries
+    GET /unified/accounts (Gate's own documented endpoint for this) and
+    tries several plausible field names for the response's own total-
+    equity figure, since Gate's own API changelog wasn't specific
+    enough here to hardcode just one with confidence. Returns 0.0 (not
+    an exception) if the request itself fails or no known field is
+    present/positive — callers already have their own "still 0, give
+    up" handling for the classic endpoint, and this is only ever
+    consulted as a fallback after that."""
+    try:
+        data = gate_signed_request("GET", "/unified/accounts", retry_on_timeout=True)
+    except Exception as e:
+        log_error(f"get_unified_account_equity: fetch failed: {e}")
+        return 0.0
+    for field in ("unified_account_total_equity", "equity", "total"):
+        value = data.get(field)
+        if value not in (None, ""):
+            try:
+                parsed = float(value)
+            except (TypeError, ValueError):
+                continue
+            if parsed > 0:
+                return parsed
+    return 0.0
+
+
 def get_futures_wallet_balance():
     """GET /futures/usdt/accounts — returns the USDT futures wallet's
     available balance, used for percent-of-deposit position sizing
@@ -3904,9 +3938,17 @@ def get_futures_wallet_balance():
     v0.99.112 — retry_on_timeout=True: a read-only GET, safe to retry
     (no side effects), opts into gate_signed_request()'s own new retry
     mechanism to survive a transient timeout without wasting an
-    otherwise-good signal upstream in execute_autotrade()."""
+    otherwise-good signal upstream in execute_autotrade().
+    v0.99.312 — falls back to get_unified_account_equity() when the
+    classic endpoint's own "available" reads 0 — see that function's
+    own docstring for the full Unified Account incident."""
     data = gate_signed_request("GET", "/futures/usdt/accounts", retry_on_timeout=True)
-    return float(data.get("available", 0) or 0)
+    available = float(data.get("available", 0) or 0)
+    if available <= 0:
+        unified = get_unified_account_equity()
+        if unified > 0:
+            return unified
+    return available
 
 
 def get_futures_total_equity():
@@ -3968,17 +4010,17 @@ def get_futures_total_equity():
         # function reaching a <=0 total means the call genuinely
         # SUCCEEDED but the account response's own "available" field (or
         # get_open_positions()'s own "margin" fields) came back as zero/
-        # missing. This function's own v0.99.106 fix already documents
-        # ONE real precedent for this exact shape of problem (Gate's
-        # "position_margin" field silently reading 0/stale on newer
-        # unified/portfolio-margin accounts) — "available" itself could
-        # plausibly have an analogous quirk on some account structure
-        # this hasn't been tested against, but there was previously no
-        # way to tell that apart from a genuine $0 balance. Logs the
-        # raw account response (data) whenever this happens so the NEXT
-        # occurrence leaves an actual diagnostic trail instead of just
-        # the same unexplained downstream skip message.
-        log_error(f"get_futures_total_equity: total came back <=0 (available={available}, position_margin={position_margin}) — raw account response: {json.dumps(data)[:400]}")
+        # missing.
+        # v0.99.312 — CONFIRMED root cause, per the user's own follow-up
+        # error-panel screenshot: the raw response showed "total":
+        # "0.000000000" — the account is genuinely on Gate's Unified
+        # Account (funds moved off the classic futures endpoint
+        # entirely, see get_unified_account_equity()'s own docstring for
+        # the full incident). Falls back there now before giving up.
+        unified = get_unified_account_equity()
+        if unified > 0:
+            return unified
+        log_error(f"get_futures_total_equity: total came back <=0 (available={available}, position_margin={position_margin}), unified account fallback also <=0 — raw classic account response: {json.dumps(data)[:400]}")
     return total
 
 
