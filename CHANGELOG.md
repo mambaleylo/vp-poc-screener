@@ -16298,3 +16298,45 @@ v0.99.311 - Restructured the header buttons into clear visual groups,
          Verified: py_compile (-W error), pyflakes, real runtime 200 on
          / confirming every button id is still present in the served
          HTML.
+
+v0.99.312 - CRITICAL FIX: found the ACTUAL confirmed root cause behind
+         "не удалось получить баланс счёта" repeating despite v0.99.307's
+         own retry fix — per the user's own follow-up error-panel
+         screenshot showing the diagnostic that fix added: the raw
+         account response had every field correctly present, but its
+         own "total": "0.000000000" — the account genuinely has zero
+         balance on GET /futures/usdt/accounts specifically, not a
+         network blip or parsing bug.
+         Researched Gate's own help documentation directly: once an
+         account is upgraded to Gate's Unified Account (Single-Currency
+         Margin Mode, Multi-Currency Margin Mode, or Portfolio Margin
+         Mode), USDT-M Perpetual futures funds move OUT of the classic
+         futures account entirely and are held in the unified account
+         instead — Gate's own docs state this explicitly: "USDT-M
+         Perpetual and Options assets will not be displayed in the
+         Futures Account" after upgrading. This is the SAME underlying
+         cause the v0.99.106 fix already found and fixed for the
+         "position_margin" field specifically (marked deprecated on
+         unified/portfolio-margin accounts) — now confirmed to affect
+         "available"/"total" on the WHOLE classic endpoint too, not
+         just that one field.
+         Added get_unified_account_equity() — queries Gate's own
+         documented GET /unified/accounts endpoint, trying several
+         plausible field names for the response's own total-equity
+         figure (unified_account_total_equity/equity/total) since
+         Gate's own API changelog wasn't specific enough to hardcode
+         just one with confidence. Both get_futures_total_equity() and
+         get_futures_wallet_balance() (the latter found to have the
+         identical exposure — also reads "available" from the same
+         classic endpoint, used for percent-of-deposit sizing AND the
+         affordability check) now fall back to this whenever the
+         classic endpoint's own reading is <=0, working automatically
+         for BOTH classic and unified-mode accounts with no user
+         configuration needed.
+         Verified directly: a synthetic scenario with a genuinely-empty
+         classic response and real funds on /unified/accounts correctly
+         falls back and returns the unified balance for both functions;
+         a normal classic account with real funds returns correctly
+         without ever calling /unified/accounts at all.
+         Verified: py_compile (-W error), pyflakes, real runtime 200 on
+         / and /api/status.
