@@ -16340,3 +16340,31 @@ v0.99.312 - CRITICAL FIX: found the ACTUAL confirmed root cause behind
          without ever calling /unified/accounts at all.
          Verified: py_compile (-W error), pyflakes, real runtime 200 on
          / and /api/status.
+
+v0.99.313 - Added a "retry" feature to the Автоторговля log, per direct
+         user request ("Добавь возможность в разделе авто торговли
+         перекрыть попытаться сделку, которая не открылась из-за
+         ошибки, то есть нажимаю на сделку, подтверждаю и происходит
+         попытка ещё раз открыть сделку").
+         New POST /api/autotrade/retry — takes mode/symbol/direction/
+         entry/sl/tp from a past log entry and calls execute_autotrade()
+         with those EXACT values again. Not a special/bypassed code
+         path — the same function a live signal would call, so it still
+         goes through every existing safety check (balance, liquidation-
+         safety re-check, fresh-price resize, etc.) exactly as before;
+         a retry that's still genuinely unsafe or unaffordable will
+         still correctly get skipped/erroed rather than forced through.
+         In the Автоторговля tab, any log row with status ERROR or
+         SKIPPED (and complete enough data to retry — mode/symbol/
+         direction/entry/sl/tp all present) is now clickable (cursor
+         pointer, a "↻" marker, and a tooltip), showing a confirmation
+         dialog with the exact trade details before firing — same
+         "confirm before anything irreversible" pattern as every other
+         destructive button in this app.
+         Verified directly: POSTed a synthetic retry request and
+         confirmed execute_autotrade() genuinely ran again (same
+         function, same real error surfaced when the sandbox's own
+         network restriction blocked the actual exchange call — not a
+         separate/fake code path).
+         Verified: py_compile (-W error), pyflakes, node --check, 67
+         routes, real runtime 200 on / and /api/autotrade/log.
