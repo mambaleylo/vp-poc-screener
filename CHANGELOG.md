@@ -16235,3 +16235,40 @@ v0.99.309 - Fixed the timeframe still not showing on MSNR's own chart,
          invisible/wasted effort unless a future session re-enables it.
          Verified: py_compile (-W error), pyflakes, node --check, real
          runtime 200 on / and /api/msnr/status.
+
+v0.99.310 - Two Telegram notification clarity fixes, per direct user
+         report (screenshot: a real Sweep signal reading just "⬇️ SHORT
+         WLD_USDT" with no module name at all, and "плечо: автоторговля
+         выключена" with no way to tell whether that meant autotrade
+         being off in settings or ON but this specific trade being
+         skipped/errored) — "нужны понятные названия как во вкладках
+         сайта... нужно и то и то показывать".
+         FIX 1 — module names: audited every module's own Telegram
+         message. S/R Zones and Peak Reversal already had a clear name
+         ("S/R"/"Peak Reversal"). Sweep (LSW) had NONE at all — just
+         "{arrow} {symbol}" — confirmed as the exact message in the
+         screenshot. Mirror had an indirect hint ("рождение зеркалки")
+         but not its own tab name. Added "Sweep" and "Зеркало" (matching
+         the site's own tab names exactly) to both.
+         FIX 2 — leverage vs. disabled ambiguity: the old inline pattern
+         (duplicated across LSW/Mirror/SNR/PRV) collapsed two genuinely
+         different situations into the same generic "автоторговля
+         выключена" text whenever a result existed but had no leverage
+         figure — autotrade being truly OFF in settings, and autotrade
+         being ON but THIS trade specifically getting skipped/errored
+         (e.g. by any of execute_autotrade()'s own several skip checks —
+         balance, liquidation-safety re-check, min-lot rounding, etc.).
+         New shared format_leverage_txt(autotrade_result, autotrade_
+         enabled) helper: shows the real leverage when a trade fired,
+         "автоторговля выключена" only when the module's own enabled
+         flag is genuinely off, and the specific skip/error detail text
+         otherwise — a real skip reason is never silently indistinguishable
+         from "disabled" again. Wired into all four call sites (a fifth,
+         accidentally-broken send_telegram() call found and fixed while
+         editing SNR's own — a stray edit had deleted its own opening
+         line and message text).
+         Verified directly: the three distinct cases (fired with
+         leverage, genuinely disabled, enabled-but-skipped-with-detail)
+         each produce the correct, distinguishable text.
+         Verified: py_compile (-W error), pyflakes, real runtime 200 on
+         / and /api/status.
