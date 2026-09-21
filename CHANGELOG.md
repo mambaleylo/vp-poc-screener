@@ -16272,3 +16272,29 @@ v0.99.310 - Two Telegram notification clarity fixes, per direct user
          each produce the correct, distinguishable text.
          Verified: py_compile (-W error), pyflakes, real runtime 200 on
          / and /api/status.
+
+v0.99.311 - Restructured the header buttons into clear visual groups,
+         per direct user report (screenshot showing all ~13 buttons
+         wrapping haphazardly across lines: "сделай структуризацию
+         кнопок, а то все вразнобой"). The underlying HTML order was
+         already logical (module by module), but all buttons lived in
+         ONE flat flex-wrap container with no visual separation at all —
+         flex-wrap just packed items left-to-right filling each line
+         based on button width, breaking module pairs across lines
+         unpredictably regardless of the source order.
+         Changed the outer container to a column of small row-groups
+         (each its own flex-wrap div): utility icons (Настройки,
+         screensaver) · Очистить объём (standalone, Volume Profile has
+         no restart button) · MSNR's own clear+restart pair · Sweep's
+         own pair · Neuro's own pair · S/R Zones' + Peak Reversal's own
+         restart-only buttons together (neither has a destructive clear)
+         · Сбросить симулятор + Сбросить авто-тюнинг together. Each
+         module's own buttons now always stay on the same visual row
+         together, and groups are visibly separated regardless of
+         screen width.
+         The existing .btnDanger/.btnNeutral CSS rules (descendant
+         selectors, not direct-child) needed no changes — they still
+         correctly match buttons nested one level deeper.
+         Verified: py_compile (-W error), pyflakes, real runtime 200 on
+         / confirming every button id is still present in the served
+         HTML.
