@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.313"
+APP_VERSION = "0.99.314"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -20044,24 +20044,38 @@ def api_msnr_chart(symbol):
         e_interval_sec = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
         s_interval_sec = INTERVAL_SECONDS.get(MSNR_STRUCTURE_TF, 3600)
         h_interval_sec = INTERVAL_SECONDS.get(MSNR_HIGHER_TF, 14400)
+        # v0.99.314 — per direct user request ("может по умолчанию для
+        # msnr графиков отображать часовой таймфрейм?"): the actual QM-
+        # trigger detection/backtest logic is UNCHANGED — still MSNR_
+        # ENTRY_TF (15m) throughout, via entry_candles below. This only
+        # controls what candles get DRAWN on the chart, defaulting to
+        # 1h (less visually noisy than 15m for eyeballing a signal) —
+        # ?display_tf=15m in the URL still gets the old view if wanted.
+        display_tf = request.args.get("display_tf", "1h")
+        if display_tf not in INTERVAL_SECONDS:
+            display_tf = "1h"
+        d_interval_sec = INTERVAL_SECONDS.get(display_tf, 3600)
         entry_end = min(now, anchor + 60 * e_interval_sec)
         entry_start = anchor - 220 * e_interval_sec
+        display_end = min(now, anchor + 60 * d_interval_sec)
+        display_start = anchor - 220 * d_interval_sec
         structure_start = anchor - 260 * s_interval_sec
         structure_end = min(now, anchor + 60 * e_interval_sec)
         higher_start = anchor - 260 * h_interval_sec  # v0.99.305 — see msnr_detect_signals()'s own docstring
         entry_candles = get_candles_range(symbol, MSNR_ENTRY_TF, entry_start, entry_end)
+        display_candles = entry_candles if display_tf == MSNR_ENTRY_TF else get_candles_range(symbol, display_tf, display_start, display_end)
 
         if found_sig:
             structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, structure_end)
             higher_candles = get_candles_range(symbol, MSNR_HIGHER_TF, higher_start, structure_end)
             params = msnr_symbol_params(symbol)
             _sigs, pivots = msnr_detect_signals(structure_candles, entry_candles, higher_candles, **params)
-            window_start = entry_candles[0]["time"] if entry_candles else structure_start
+            window_start = display_candles[0]["time"] if display_candles else structure_start
             visible_pivots = [p for p in pivots if p["confirm_time"] >= window_start - 30 * s_interval_sec]
             return jsonify({
-                "symbol": symbol, "candles": entry_candles, "pivots": visible_pivots,
+                "symbol": symbol, "candles": display_candles, "pivots": visible_pivots,
                 "signal": found_sig, "result": found_result, "exit_time": found_exit_time,
-                "exit_price": found_exit_price, "chart_source": "msnr", "tf": MSNR_ENTRY_TF,
+                "exit_price": found_exit_price, "chart_source": "msnr", "tf": display_tf,
             })
 
         # Fallback: no stored signal/trade matched `time` (or none was
@@ -20086,14 +20100,14 @@ def api_msnr_chart(symbol):
                 exit_price = sig["tp"]
             elif result == "LOSS":
                 exit_price = sig["sl"]
-        # Only pivots confirmed within the returned entry-candle window are
+        # Only pivots confirmed within the returned display-candle window are
         # worth drawing — older ones would just be off-screen level clutter.
-        window_start = entry_candles[0]["time"] if entry_candles else structure_start
+        window_start = display_candles[0]["time"] if display_candles else structure_start
         visible_pivots = [p for p in pivots if p["confirm_time"] >= window_start - 30 * s_interval_sec]
         return jsonify({
-            "symbol": symbol, "candles": entry_candles, "pivots": visible_pivots,
+            "symbol": symbol, "candles": display_candles, "pivots": visible_pivots,
             "signal": sig, "result": result, "exit_time": exit_time, "exit_price": exit_price,
-            "chart_source": "msnr", "tf": MSNR_ENTRY_TF,
+            "chart_source": "msnr", "tf": display_tf,
         })
     except Exception as e:
         log_error(f"api_msnr_chart {symbol}: {e}")
