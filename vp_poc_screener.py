@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.310"
+APP_VERSION = "0.99.311"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -20747,20 +20747,34 @@ INDEX_HTML = """<!doctype html>
 <header>
   <div id="headerTop">
     <h1>VP-POC Screener</h1>
-    <div style="display:flex;gap:8px;flex-wrap:wrap;">
-      <button id="settingsBtn">⚙️ Настройки</button>
-      <button id="screensaverBtn" onclick="toggleScreensaver()" style="color:#5a6a7a;" title="скринсейвер (часы, защита AMOLED)">🕐</button>
-      <button id="resetVolumeBtn" class="btnDanger">Очистить объём</button>
-      <button id="resetMsnrBtn" class="btnDanger">Очистить MSNR</button>
-      <button id="restartMsnrBacktestBtn" class="btnNeutral">Перезапустить бэктест MSNR</button>
-      <button id="resetLswBtn" class="btnDanger">Очистить Sweep</button>
-      <button id="restartLswBacktestBtn" class="btnNeutral">Перезапустить бэктест Sweep</button>
-      <button id="resetNeuroBtn" class="btnDanger">Очистить Neuro</button>
-      <button id="restartNeuroBacktestBtn" class="btnNeutral">Перезапустить бэктест Neuro</button>
-      <button id="restartSnrBacktestBtn" class="btnNeutral">Перезапустить бэктест S/R</button>
-      <button id="restartPrvBacktestBtn" class="btnNeutral">Перезапустить бэктест Peak Reversal</button>
-      <button id="resetSimulatorBtn" class="btnDanger">Сбросить симулятор</button>
-      <button id="resetRiskAutotuneBtn" class="btnDanger">Сбросить авто-тюнинг</button>
+    <div style="display:flex;flex-direction:column;gap:6px;">
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button id="settingsBtn">⚙️ Настройки</button>
+        <button id="screensaverBtn" onclick="toggleScreensaver()" style="color:#5a6a7a;" title="скринсейвер (часы, защита AMOLED)">🕐</button>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button id="resetVolumeBtn" class="btnDanger">Очистить объём</button>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button id="resetMsnrBtn" class="btnDanger">Очистить MSNR</button>
+        <button id="restartMsnrBacktestBtn" class="btnNeutral">Перезапустить бэктест MSNR</button>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button id="resetLswBtn" class="btnDanger">Очистить Sweep</button>
+        <button id="restartLswBacktestBtn" class="btnNeutral">Перезапустить бэктест Sweep</button>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button id="resetNeuroBtn" class="btnDanger">Очистить Neuro</button>
+        <button id="restartNeuroBacktestBtn" class="btnNeutral">Перезапустить бэктест Neuro</button>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button id="restartSnrBacktestBtn" class="btnNeutral">Перезапустить бэктест S/R</button>
+        <button id="restartPrvBacktestBtn" class="btnNeutral">Перезапустить бэктест Peak Reversal</button>
+      </div>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        <button id="resetSimulatorBtn" class="btnDanger">Сбросить симулятор</button>
+        <button id="resetRiskAutotuneBtn" class="btnDanger">Сбросить авто-тюнинг</button>
+      </div>
     </div>
   </div>
   <div id="status">загрузка...</div>
