@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.317"
+APP_VERSION = "0.99.318"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9776,6 +9776,95 @@ def msnr_compound_trail(trades, start_balance=None, leverage=None):
     return trail
 
 
+def rr_compound_annotate(trades, symbol=None, start_balance=None):
+    """v0.99.318 — per user request ("везде где есть список сделок на
+    бэктесте писать предполагаемую прибыль если бы я начинал с 15$ ...
+    заходил бы всегда на весь депозит, как в msnr"): the MSNR va-bank
+    compounding simulation (msnr_compound_trail + msnr_optimal_leverage_
+    for_symbol), generalized for Neuro / S/R Zones / Peak Reversal.
+    Differences from the MSNR version, both deliberate:
+    - P&L comes from each trade's own pnl_r x its SL distance
+      (price move = pnl_r * |entry-sl|/entry), so Neuro's TIMEOUT and
+      LOSS_EARLY exits (partial R) compound correctly instead of being
+      skipped; for plain WIN/LOSS it's identical to the entry/sl/tp math.
+    - Kelly leverage search starts at 1x (MSNR's starts at its 10x
+      default), capped by the contract's own leverage_max; a candidate
+      is rejected if ANY trade's SL would sit past Gate's real
+      liquidation price (same check live all-in sizing enforces) or any
+      trade would wipe the margin.
+    Same fees (2 x AUTOTRADE_SIM_FEE_PCT x leverage per trade, win or
+    lose), same isolated-margin -100% floor, same MSNR_COMPOUND_START_
+    BALANCE ($15), full reinvestment every trade, chronological order.
+    Annotates each trade dict IN PLACE with compound_balance_after /
+    compound_pnl_pct (None = not simulated: no pnl_r, malformed, or the
+    account was already at $0). Returns the summary dict."""
+    start_balance = start_balance if start_balance is not None else MSNR_COMPOUND_START_BALANCE
+    trades = sorted([t for t in trades if isinstance(t, dict)], key=lambda t: t.get("time") or 0)
+    moves = []
+    for t in trades:
+        t["compound_balance_after"] = None
+        t["compound_pnl_pct"] = None
+        pr, entry, sl = t.get("pnl_r"), t.get("entry"), t.get("sl")
+        if pr is None or not entry or entry <= 0 or sl is None:
+            continue
+        sl_pct = abs(entry - sl) / entry
+        if sl_pct <= 0:
+            continue
+        moves.append((t, pr * sl_pct, sl_pct, t.get("direction")))
+    out = {"compound_start": start_balance, "compound_final_balance": start_balance,
+           "compound_return_pct": 0.0, "compound_leverage": None,
+           "compound_trades": 0, "compound_blown_at": None}
+    if not moves:
+        return out
+    ceiling = msnr_symbol_contract_max_leverage(symbol) if symbol else AUTOTRADE_LEVERAGE_MSNR
+    mmr_pct = None
+    if symbol:
+        with state_lock:
+            mmr_pct = STATE.get("scalp_mmr_map", {}).get(symbol, SCALP_DEFAULT_MMR_PCT)
+
+    def _log_growth(lev):
+        fee = 2 * AUTOTRADE_SIM_FEE_PCT * lev
+        total = 0.0
+        for _t, move, sl_pct, direction in moves:
+            if mmr_pct is not None and direction:
+                liq = compute_scalp_liquidation_move_pct(direction, lev, mmr_pct)
+                if liq is not None and sl_pct * 100 * SCALP_SAFETY_MARGIN > liq:
+                    return float("-inf")
+            f = move * lev - fee
+            if f <= -1.0:
+                return float("-inf")
+            total += math.log(1 + f)
+        return total / len(moves)
+
+    best_lev, best_score = 1.0, _log_growth(1.0)
+    lev = 1.5
+    while lev <= ceiling:
+        sc = _log_growth(lev)
+        if sc == float("-inf"):
+            break  # higher leverage only gets closer to liquidation/ruin
+        if sc > best_score:
+            best_lev, best_score = lev, sc
+        lev += 0.5
+
+    fee = 2 * AUTOTRADE_SIM_FEE_PCT * best_lev
+    balance = start_balance
+    n = 0
+    for t, move, _sl, _d in moves:
+        if balance <= 0:
+            break
+        f = max(move * best_lev - fee, -1.0)
+        balance = max(balance * (1 + f), 0.0)
+        n += 1
+        t["compound_balance_after"] = round(balance, 2)
+        t["compound_pnl_pct"] = round(f * 100, 1)
+        if balance <= 0 and out["compound_blown_at"] is None:
+            out["compound_blown_at"] = n
+    out.update({"compound_final_balance": round(balance, 2),
+                "compound_return_pct": round((balance / start_balance - 1) * 100, 1),
+                "compound_leverage": round(best_lev, 1), "compound_trades": n})
+    return out
+
+
 def msnr_compound_return(trades, start_balance=None, leverage=None):
     """Per direct user request: a compounding $ P&L simulation over one
     symbol's backtest — deliberately separate from msnr_summarize_
@@ -14855,9 +14944,17 @@ def snr_optimize_symbol(symbol):
                                 "test_z": round(test_z, 2),
                                 "test_days": round((candles[-1]["time"] - boundary_time) / 86400, 1),  # v0.99.315 — length of the test window, so the UI can show expected live-signal frequency (test_n / test_days)
                                 "recent_trades": closed[-40:][::-1],
+                                "_all_closed": closed,
                             }
         except Exception as e:
             log_error(f"snr_optimize_symbol {symbol} {tf}: {e}")
+    if best is not None:
+        # v0.99.318 — $15 va-bank compounding over the winning combo's full history
+        try:
+            best.update(rr_compound_annotate(best.pop("_all_closed"), symbol))
+        except Exception as e:
+            best.pop("_all_closed", None)
+            log_error(f"snr compound {symbol}: {e}")
     return best
 
 
@@ -15445,9 +15542,17 @@ def prv_optimize_symbol(symbol):
                                     "test_avg_pnl_r": round(test_avg, 3), "test_z": round(test_z, 2),
                                     "avg_mae_r": round(avg_mae, 3),
                                     "recent_trades": closed[-40:][::-1],
+                                    "_all_closed": closed,
                                 }
         except Exception as e:
             log_error(f"prv_optimize_symbol {symbol} {tf}: {e}")
+    if best is not None:
+        # v0.99.318 — $15 va-bank compounding over the winning combo's full history
+        try:
+            best.update(rr_compound_annotate(best.pop("_all_closed"), symbol))
+        except Exception as e:
+            best.pop("_all_closed", None)
+            log_error(f"prv compound {symbol}: {e}")
     return best
 
 
@@ -17624,7 +17729,8 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
                    "decaying_confirmed": sum(1 for p in confirmed if p.get("decaying")),
                    "chosen_rr": chosen_rr, "rr_sweep": rr_sweep,
                    "aggregate_recent": aggregate_recent, "culprits_removed": culprits_removed,
-                   "early_exit_rule": early_exit_rule}
+                   "early_exit_rule": early_exit_rule,
+                   **rr_compound_annotate(trades, symbol)}  # v0.99.318 — $15 va-bank simulation
         return confirmed, trades, summary
     except Exception as e:
         log_error(f"neuro_backtest_symbol {symbol}: {e}")
@@ -18315,6 +18421,20 @@ def api_neuro_status():
         signal_log = list(_neuro_signal_log)
     signal_stats = neuro_compute_signal_stats(active_symbols)
     active_set = set(active_symbols)
+    # v0.99.318 — coins mined before the $15 compounding simulation existed
+    # (Neuro re-mines only every 24h): compute it once now and cache it
+    # into the stored summary so it isn't recomputed on every poll.
+    for symbol in display_symbols:
+        if trades.get(symbol) and "compound_final_balance" not in summary.get(symbol, {}):
+            try:
+                comp = rr_compound_annotate(trades[symbol], symbol)
+            except Exception as e:
+                log_error(f"neuro compound {symbol}: {e}")
+                continue
+            with _neuro_state_lock:
+                if symbol in _neuro_summary:
+                    _neuro_summary[symbol].update(comp)
+            summary[symbol] = {**summary.get(symbol, {}), **comp}
     coins = []
     for symbol in display_symbols:
         recent_trades = (trades.get(symbol) or [])[-40:][::-1]
@@ -23205,6 +23325,7 @@ async function refreshNeuro() {
         <div class="dim" style="font-size:10px;margin-bottom:10px;">
           ${s.patterns_confirmed||0} \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043e (\u0438\u0437 \u043d\u0438\u0445 ${s.combos_confirmed||0} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439${s.decaying_confirmed ? `, <span style="color:#ffa726;">${s.decaying_confirmed} \u043e\u0441\u043b\u0430\u0431\u0435\u0432\u0430\u044e\u0442</span>` : ''}) \u00b7 ${s.history_bars||0} \u0447\u0430\u0441\u043e\u0432\u044b\u0445 \u0441\u0432\u0435\u0447\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438
         </div>
+        ${compoundSummaryHtml(s)}
         ${(s.rr_sweep && s.rr_sweep.length) ? `<details style="margin-bottom:8px;">
           <summary style="cursor:pointer;font-size:11px;color:#8a97b8;">\u043f\u043e\u0434\u0431\u043e\u0440 RR (\u043d\u0430 train-\u0447\u0430\u0441\u0442\u0438) \u25be</summary>
           <div style="overflow-x:auto;margin-top:4px;"><table style="font-size:10px;white-space:nowrap;">
@@ -23284,6 +23405,7 @@ async function refreshNeuro() {
           <td class="dim">${fmtNum(t.entry)}</td>
           <td>${statusHtml}</td>
           <td class="${rc}">${t.pnl_r!=null?(t.pnl_r>0?'+':'')+t.pnl_r+'R':'\u2014'}</td>
+          <td>${compoundCellTxt(t)}</td>
         </tr>`;
       }).join('');
       const tradesSection = trades.length
@@ -23291,7 +23413,7 @@ async function refreshNeuro() {
             <summary style="cursor:pointer;font-size:11px;color:#8a97b8;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 ${trades.length} \u0441\u0434\u0435\u043b\u043e\u043a (\u0431\u044d\u043a\u0442\u0435\u0441\u0442) \u25be</summary>
             <div style="overflow-x:auto;margin-top:6px;">
               <table style="font-size:10px;white-space:nowrap;">
-                <thead><tr><th>\u0412\u0445\u043e\u0434</th><th>Dir</th><th>Entry</th><th>\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442</th><th>P&L</th></tr></thead>
+                <thead><tr><th>\u0412\u0445\u043e\u0434</th><th>Dir</th><th>Entry</th><th>\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442</th><th>P&L</th><th>$15→</th></tr></thead>
                 <tbody>${tradeRows}</tbody>
               </table>
             </div>
@@ -23448,7 +23570,7 @@ async function refreshSnr() {
         const rc = t.result === 'WIN' ? 'win' : t.result === 'LOSS' ? 'loss' : 'dim';
         return `<div onclick="openSnrChart('${c.symbol}', ${t.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1c2433;font-size:11px;">
           <span class="dim">${fmtDateTime(t.time)} ${t.direction} \u0443\u0440\u043e\u0432\u0435\u043d\u044c ${fmtNum(t.zone_price)} (\u0441\u0438\u043b\u0430 ${t.zone_strength})</span>
-          <span class="${rc}">${t.result}${t.pnl_r!=null?' '+(t.pnl_r>0?'+':'')+t.pnl_r+'R':''}</span>
+          <span style="white-space:nowrap;"><span class="${rc}">${t.result}${t.pnl_r!=null?' '+(t.pnl_r>0?'+':'')+t.pnl_r+'R':''}</span> ${compoundCellTxt(t)}</span>
         </div>`;
       }).join('');
       const liveSigSection = '';
@@ -23464,6 +23586,7 @@ async function refreshSnr() {
         </div>
         <div class="dim" style="font-size:10px;margin-bottom:8px;">z \u2014 \u043d\u0430\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0441\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0445 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u0438\u0439 \u0432\u0438\u043d\u0440\u0435\u0439\u0442 \u0432\u044b\u0448\u0435 \u0431\u0435\u0437\u0443\u0431\u044b\u0442\u043a\u0430 (\u043d\u0443\u0436\u043d\u043e \u22653.23 \u0441 \u043f\u043e\u043f\u0440\u0430\u0432\u043a\u043e\u0439 \u043d\u0430 81 \u043f\u0435\u0440\u0435\u0431\u0440\u0430\u043d\u043d\u0443\u044e \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u044e)</div>
         ${liveSigSection}
+        ${compoundSummaryHtml(r)}
         <details><summary class="dim" style="cursor:pointer;font-size:11px;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0441\u0434\u0435\u043b\u043a\u0438 \u0431\u044d\u043a\u0442\u0435\u0441\u0442\u0430</summary>${tradesRows}</details>
       </div>`;
     }).join('');
@@ -23560,7 +23683,7 @@ async function refreshPrv() {
         const rc = t.result === 'WIN' ? 'win' : t.result === 'LOSS' ? 'loss' : 'dim';
         return `<div onclick="openPrvChart('${c.symbol}', ${t.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1c2433;font-size:11px;">
           <span class="dim">${fmtDateTime(t.time)} ${t.direction} @ ${fmtNum(t.entry)} \u0432\u043e \u0441\u0434\u0435\u043b\u043a\u0435 \u043c\u0430\u043a\u0441. \u043f\u0440\u043e\u0442\u0438\u0432 ${t.mae_r}R</span>
-          <span class="${rc}">${t.result}${t.pnl_r!=null?' '+(t.pnl_r>0?'+':'')+t.pnl_r+'R':''}</span>
+          <span style="white-space:nowrap;"><span class="${rc}">${t.result}${t.pnl_r!=null?' '+(t.pnl_r>0?'+':'')+t.pnl_r+'R':''}</span> ${compoundCellTxt(t)}</span>
         </div>`;
       }).join('');
       const liveSigSection = '';
@@ -23576,6 +23699,7 @@ async function refreshPrv() {
         </div>
         <div class="dim" style="font-size:10px;margin-bottom:8px;">z \u2014 \u043d\u0430\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0441\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0445 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u0438\u0439 \u0432\u0438\u043d\u0440\u0435\u0439\u0442 \u0432\u044b\u0448\u0435 \u0431\u0435\u0437\u0443\u0431\u044b\u0442\u043a\u0430 (\u043d\u0443\u0436\u043d\u043e \u22653.11 \u0441 \u043f\u043e\u043f\u0440\u0430\u0432\u043a\u043e\u0439 \u043d\u0430 216 \u043f\u0435\u0440\u0435\u0431\u0440\u0430\u043d\u043d\u0443\u044e \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u044e)</div>
         ${liveSigSection}
+        ${compoundSummaryHtml(r)}
         <details><summary class="dim" style="cursor:pointer;font-size:11px;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0441\u0434\u0435\u043b\u043a\u0438 \u0431\u044d\u043a\u0442\u0435\u0441\u0442\u0430</summary>${tradesRows}</details>
       </div>`;
     }).join('');
@@ -25015,6 +25139,29 @@ function drawEntryMarker(ctx, cx, cy, color) {
   ctx.restore();
 }
 
+// v0.99.318 — $15 va-bank compounding display (Neuro / S/R Zones / Peak Reversal)
+function fmtUsdCompact(v) {
+  if (v == null || !isFinite(v)) return '—';
+  const a = Math.abs(v);
+  if (a >= 1e12) return '$' + v.toExponential(1);
+  if (a >= 1e9) return '$' + (v / 1e9).toFixed(1) + 'B';
+  if (a >= 1e6) return '$' + (v / 1e6).toFixed(1) + 'M';
+  if (a >= 1e4) return '$' + (v / 1e3).toFixed(1) + 'K';
+  return '$' + v.toFixed(2);
+}
+function compoundSummaryHtml(x) {
+  if (!x || x.compound_final_balance == null || !x.compound_trades) return '';
+  const pct = x.compound_return_pct;
+  const cls = pct >= 0 ? 'win' : 'loss';
+  const blown = x.compound_blown_at ? ` · <span class="loss">слит на сделке #${x.compound_blown_at}</span>` : '';
+  const pctTxt = Math.abs(pct) >= 1e6 ? '×' + (pct / 100 + 1).toExponential(1) : (pct >= 0 ? '+' : '') + pct + '%';
+  return `<div style="font-size:11px;margin:4px 0 8px;">💰 <span class="dim">с $${x.compound_start} ва-банк:</span> <b class="${cls}">${fmtUsdCompact(x.compound_final_balance)}</b> <span class="${cls}">(${pctTxt})</span> <span class="dim">· плечо ${x.compound_leverage}x · ${x.compound_trades} сделок · с комиссиями</span>${blown}</div>`;
+}
+function compoundCellTxt(t) {
+  if (t.compound_balance_after == null) return '<span class="dim">—</span>';
+  const cls = (t.compound_pnl_pct || 0) >= 0 ? 'win' : 'loss';
+  return `<span class="${cls}">${fmtUsdCompact(t.compound_balance_after)}</span>`;
+}
 function fmtNum(n) {
   return Number(n).toPrecision(6).replace(/\\.?0+$/,'').replace(/\\.$/, '');
 }

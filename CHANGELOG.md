@@ -16472,3 +16472,43 @@ v0.99.317 - Neuro min-winrate floor fixes, per user report ("в бэктесте
          D (45% full / 33% recent), keeps B (40/41) and C (37%, too few
          recent trades -> full-history only), save_neuro_state called;
          POST lowering the floor sets the trigger, raising does not.
+
+v0.99.318 - $15 va-bank compounding on every backtest trade list for Neuro,
+         S/R Zones and Peak Reversal, per direct user request ("везде где
+         есть список сделок на бэктесте писать предполагаемую прибыль если
+         бы я начинал с 15$ ... заходил бы всегда на весь депозит, как в
+         msnr").
+         New rr_compound_annotate(trades, symbol): MSNR's compounding
+         model (msnr_compound_trail + msnr_optimal_leverage_for_symbol)
+         generalized — start MSNR_COMPOUND_START_BALANCE ($15), whole
+         balance reinvested every trade in chronological order, ONE flat
+         Kelly-optimal leverage per symbol (max E[log growth]) capped by
+         the contract's leverage_max and rejected if any trade's SL sits
+         past Gate's real liquidation price or would wipe the margin,
+         fees 2 x AUTOTRADE_SIM_FEE_PCT x leverage every trade, -100%
+         isolated-margin floor. Differences from MSNR: per-trade P&L =
+         pnl_r x SL distance (so Neuro's TIMEOUT / LOSS_EARLY partial
+         exits compound too instead of being skipped; identical to MSNR's
+         entry/sl/tp math for plain WIN/LOSS — cross-checked to the cent),
+         and the leverage search starts at 1x instead of MSNR's 10x.
+         Annotates each trade with compound_balance_after/compound_pnl_pct
+         and returns compound_final_balance/return_pct/leverage/trades/
+         blown_at.
+         Wiring: Neuro — merged into neuro_backtest_symbol()'s summary;
+         coins mined before this version get it computed once lazily in
+         /api/neuro/status and cached into _neuro_summary (Neuro re-mines
+         only every 24h). S/R Zones / Peak Reversal — the winning combo's
+         full closed-trade list is carried as a temporary _all_closed key
+         and compounded after the combo loop (popped, not stored); visible
+         after the next backtest cycle (or "↻ Бэктест").
+         UI: a "💰 с $15 ва-банк: $X (+Y%) · плечо Lx · N сделок · с
+         комиссиями" line on each card (+ "слит на сделке #N" if blown);
+         Neuro's trade table gets a "$15→" balance column, SNR/PRV rows
+         show the balance after each trade. Large balances shown compact
+         ($44.1K / $1.2M / $3.4B).
+         Verified: py_compile (-W error), pyflakes, real runtime 200 on /,
+         node --check, no surrogate escapes, jsdom render of the new
+         helpers; synthetic 600-trade test matches msnr_compound_trail()
+         exactly at the same leverage; TIMEOUT with pnl_r compounds,
+         pnl_r=None skipped; Neuro lazy path computes + caches via the
+         real /api/neuro/status route.
