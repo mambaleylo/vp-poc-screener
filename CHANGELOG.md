@@ -16654,3 +16654,26 @@ v0.99.323 - [developed on branch neuro-speedup; merged to main after the user ra
          old vs new on REAL Gate data with a shared response cache + frozen
          clock; negative control (a 0.01% SL change) is reported as a
          mismatch at the first differing trade.
+
+v0.99.325 - False "Зависание: MSNR бэктест — нет отклика 240 мин" (user's
+         Telegram, 20:09). Cause: v0.99.322's heartbeat was only at the
+         top of each backtest loop iteration, so the watchdog's gap had to
+         cover queueing for BACKTEST_CONCURRENCY_SEMAPHORE (limit 2) +
+         the cycle + the idle wait. With Neuro holding a slot for its
+         multi-hour cycle and Sweep/S&R/Peak sharing the other, MSNR can
+         legitimately queue for hours — a healthy loop read as hung.
+         Fix: acquire_backtest_slot(name) (acquire in 60s slices, beat
+         between) and wait_beating(event, timeout, name) (Event.wait in
+         60s slices, beat between, same return value) replace the bare
+         acquire()/TRIGGER.wait() in MSNR, Sweep, S&R, Peak and Neuro
+         loops; S&R/Peak beat after every finished symbol, Neuro on every
+         per-symbol progress update. LOOP_MAX_GAP_SEC for backtests now
+         covers WORK only: MSNR 90 min (1h cycle ceiling), Sweep 150 min
+         (2h), S&R/Peak/Neuro 60 min (per-symbol ceilings 300s/720s) —
+         shorter than before, so a real hang is caught sooner. Queueing is
+         still shown in the header ("⏳ в очереди на бэктест: …").
+         No trading/backtest logic touched.
+         Verified: py_compile (-W error), pyflakes; unit test — queued
+         behind two held slots keeps beating and proceeds on release;
+         wait_beating returns False on timeout / True when set; real
+         runtime /api/health clean on start.

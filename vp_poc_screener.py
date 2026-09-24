@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.323"
+APP_VERSION = "0.99.325"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6736,12 +6736,16 @@ LOOP_MAX_GAP_SEC = {
     "prv_live_loop": 60 * 60,
     "neuro_live_loop": 60 * 60,
     "reconcile_loop": 30 * 60,
-    # backtest loops: refresh interval + worst-case cycle length + slack
-    "msnr_backtest_loop": 4 * 3600,
-    "lsw_backtest_loop": 5 * 3600,
-    "snr_backtest_loop": 9 * 3600,
-    "prv_backtest_loop": 9 * 3600,
-    "neuro_mining_loop": 50 * 3600,
+    # backtest loops (v0.99.325): they now beat every minute while queued
+    # for a slot or idle between cycles, so the gap only has to cover real
+    # WORK — MSNR/Sweep: their own hard cycle ceiling (1h / 2h) + slack;
+    # S/R, Peak, Neuro beat after every finished symbol (per-symbol
+    # ceilings 300s / 720s), so an hour of silence there is a real stall.
+    "msnr_backtest_loop": 90 * 60,
+    "lsw_backtest_loop": 150 * 60,
+    "snr_backtest_loop": 60 * 60,
+    "prv_backtest_loop": 60 * 60,
+    "neuro_mining_loop": 60 * 60,
 }
 LOOP_LABELS = {
     "scan_loop": "Volume скан", "msnr_live_loop": "MSNR живой скан",
@@ -6757,6 +6761,30 @@ BACKTEST_RETRY_AFTER_ERROR_SEC = int(os.environ.get("VP_BACKTEST_RETRY_AFTER_ERR
 
 def heartbeat(name):
     _loop_heartbeats[name] = time.time()  # single dict store — atomic under the GIL, no lock needed
+
+
+def acquire_backtest_slot(name):
+    """v0.99.325 — BACKTEST_CONCURRENCY_SEMAPHORE.acquire() that keeps the
+    loop's heartbeat alive while it queues. A loop waiting its turn behind
+    a multi-hour Neuro cycle is healthy, not hung (user got a false
+    "Зависание: MSNR бэктест — нет отклика 240 мин")."""
+    while not BACKTEST_CONCURRENCY_SEMAPHORE.acquire(timeout=60):
+        heartbeat(name)
+    heartbeat(name)
+
+
+def wait_beating(event, timeout, name):
+    """v0.99.325 — event.wait(timeout) in <=60s slices with a heartbeat
+    between them, so an idle loop sleeping until its next cycle never
+    reads as silent. Same return value as Event.wait()."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return event.is_set()
+        if event.wait(timeout=min(60.0, remaining)):
+            return True
+        heartbeat(name)
 
 
 def stalled_loops():
@@ -10962,7 +10990,7 @@ def msnr_backtest_loop():
             # startup.
             with state_lock:
                 STATE["msnr_waiting_for_slot"] = True  # v0.99.322 — visible in /api/health
-            BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
+            acquire_backtest_slot("msnr_backtest_loop")  # v0.99.325 — beats while queued
             with state_lock:
                 STATE["msnr_waiting_for_slot"] = False
             try:
@@ -10991,7 +11019,7 @@ def msnr_backtest_loop():
         with state_lock:
             STATE["msnr_waiting_for_slot"] = False
         # v0.99.322 — failed/timed-out cycle retries in 30 min, not a full interval later
-        MSNR_BACKTEST_TRIGGER.wait(timeout=BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, MSNR_REFRESH_SEC))
+        wait_beating(MSNR_BACKTEST_TRIGGER, BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, MSNR_REFRESH_SEC), "msnr_backtest_loop")  # v0.99.325 — beats while idle
         MSNR_BACKTEST_TRIGGER.clear()
 
 
@@ -13911,7 +13939,7 @@ def lsw_backtest_loop():
             # own (see its comment for the full reasoning).
             with state_lock:
                 STATE["lsw_waiting_for_slot"] = True  # v0.99.322 — visible in /api/health
-            BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
+            acquire_backtest_slot("lsw_backtest_loop")  # v0.99.325 — beats while queued
             with state_lock:
                 STATE["lsw_waiting_for_slot"] = False
             try:
@@ -13942,7 +13970,7 @@ def lsw_backtest_loop():
         with state_lock:
             STATE["lsw_waiting_for_slot"] = False
         # v0.99.322 — failed/timed-out cycle retries in 30 min, not a full interval later
-        LSW_BACKTEST_TRIGGER.wait(timeout=BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, LSW_REFRESH_SEC))
+        wait_beating(LSW_BACKTEST_TRIGGER, BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, LSW_REFRESH_SEC), "lsw_backtest_loop")  # v0.99.325 — beats while idle
         LSW_BACKTEST_TRIGGER.clear()
 
 
@@ -15104,12 +15132,12 @@ def snr_backtest_loop():
         _cycle_failed = False
         try:
             if not SNR_ENABLED:
-                SNR_BACKTEST_TRIGGER.wait(timeout=max(300, SNR_REFRESH_SEC))
+                wait_beating(SNR_BACKTEST_TRIGGER, max(300, SNR_REFRESH_SEC), "snr_backtest_loop")  # v0.99.325 — beats while idle
                 SNR_BACKTEST_TRIGGER.clear()
                 continue
             with state_lock:
                 STATE["snr_waiting_for_slot"] = True
-            BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
+            acquire_backtest_slot("snr_backtest_loop")  # v0.99.325 — beats while queued
             _snr_sem_acquired = True
             with state_lock:
                 STATE["snr_waiting_for_slot"] = False
@@ -15179,6 +15207,7 @@ def snr_backtest_loop():
                     # count — 300*ceil(30/8)=300*4=1200s (20min) instead of
                     # 9000s (2.5h) for the same 30-symbol universe.
                     for fut in as_completed(futs, timeout=SNR_PER_SYMBOL_MAX_SEC * math.ceil(len(universe) / WORKERS)):
+                        heartbeat("snr_backtest_loop")  # v0.99.325 — progress beat per finished symbol
                         symbol = futs[fut]
                         try:
                             best = fut.result(timeout=SNR_PER_SYMBOL_MAX_SEC)
@@ -15243,7 +15272,7 @@ def snr_backtest_loop():
                 BACKTEST_CONCURRENCY_SEMAPHORE.release()
         # v0.99.322 — failed cycle (exception or zero usable results, e.g. a
         # network outage) retries in 30 min instead of the full 4h interval
-        SNR_BACKTEST_TRIGGER.wait(timeout=BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, SNR_REFRESH_SEC))
+        wait_beating(SNR_BACKTEST_TRIGGER, BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, SNR_REFRESH_SEC), "snr_backtest_loop")  # v0.99.325 — beats while idle
         SNR_BACKTEST_TRIGGER.clear()
 
 
@@ -15702,12 +15731,12 @@ def prv_backtest_loop():
         _cycle_failed = False
         try:
             if not PRV_ENABLED:
-                PRV_BACKTEST_TRIGGER.wait(timeout=max(300, PRV_REFRESH_SEC))
+                wait_beating(PRV_BACKTEST_TRIGGER, max(300, PRV_REFRESH_SEC), "prv_backtest_loop")  # v0.99.325 — beats while idle
                 PRV_BACKTEST_TRIGGER.clear()
                 continue
             with state_lock:
                 STATE["prv_waiting_for_slot"] = True
-            BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
+            acquire_backtest_slot("prv_backtest_loop")  # v0.99.325 — beats while queued
             _prv_sem_acquired = True
             with state_lock:
                 STATE["prv_waiting_for_slot"] = False
@@ -15730,6 +15759,7 @@ def prv_backtest_loop():
                     STATE["prv_progress_in_flight"] = list(futs.values())
                 try:
                     for fut in as_completed(futs, timeout=PRV_PER_SYMBOL_MAX_SEC * math.ceil(len(universe) / WORKERS)):
+                        heartbeat("prv_backtest_loop")  # v0.99.325 — progress beat per finished symbol
                         symbol = futs[fut]
                         try:
                             best = fut.result(timeout=PRV_PER_SYMBOL_MAX_SEC)
@@ -15777,7 +15807,7 @@ def prv_backtest_loop():
                 BACKTEST_CONCURRENCY_SEMAPHORE.release()
         # v0.99.322 — failed cycle (exception or zero usable results, e.g. a
         # network outage) retries in 30 min instead of the full 4h interval
-        PRV_BACKTEST_TRIGGER.wait(timeout=BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, PRV_REFRESH_SEC))
+        wait_beating(PRV_BACKTEST_TRIGGER, BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, PRV_REFRESH_SEC), "prv_backtest_loop")  # v0.99.325 — beats while idle
         PRV_BACKTEST_TRIGGER.clear()
 
 
@@ -18342,7 +18372,7 @@ def neuro_mining_loop():
             if not NEURO_ENABLED:
                 # v0.99.320 — was a plain time.sleep(24h): toggling Neuro
                 # off and back on left mining dead for up to a day.
-                NEURO_MINING_TRIGGER.wait(timeout=60)
+                wait_beating(NEURO_MINING_TRIGGER, 60, "neuro_mining_loop")  # v0.99.325 — beats while idle
                 NEURO_MINING_TRIGGER.clear()
                 continue
             # v0.99.268 — same shared concurrency cap as msnr_backtest_loop's
@@ -18353,7 +18383,7 @@ def neuro_mining_loop():
             # re-indenting the whole cycle body).
             with _neuro_state_lock:
                 _neuro_waiting_slot_since = time.time()
-            BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
+            acquire_backtest_slot("neuro_mining_loop")  # v0.99.325 — beats while queued
             _neuro_sem_acquired = True
             with _neuro_state_lock:
                 _neuro_waiting_slot_since = None
@@ -18368,6 +18398,7 @@ def neuro_mining_loop():
                 _neuro_mining_total = len(universe)
                 _neuro_mining_done = 0
                 _neuro_mining_progress_ts = time.time()
+                heartbeat("neuro_mining_loop")  # v0.99.325 — progress beat
 
             # v0.99.216 — fetch BTC's and ETH's OWN 1h history ONCE per
             # cycle here, instead of every other symbol independently
@@ -18390,6 +18421,7 @@ def neuro_mining_loop():
                 log_error(f"neuro_mining_loop: shared ETH prefetch failed: {e}")
             with _neuro_state_lock:
                 _neuro_mining_progress_ts = time.time()
+                heartbeat("neuro_mining_loop")  # v0.99.325 — progress beat
 
             # v0.99.236 — full-universe results are held in a LOCAL,
             # transient dict for the duration of this one cycle only (not
@@ -18404,6 +18436,7 @@ def neuro_mining_loop():
                 with _neuro_state_lock:
                     _neuro_mining_current_symbol = symbol
                     _neuro_mining_progress_ts = time.time()
+                    heartbeat("neuro_mining_loop")  # v0.99.325 — progress beat
                 # v0.99.212 — same "no with-block, bounded per-item time"
                 # fix as LSW/MSNR's own v0.99.194/195: this loop is
                 # SEQUENTIAL (not a thread pool), so without an explicit
@@ -18427,6 +18460,7 @@ def neuro_mining_loop():
                 with _neuro_state_lock:
                     _neuro_mining_done += 1
                     _neuro_mining_progress_ts = time.time()
+                    heartbeat("neuro_mining_loop")  # v0.99.325 — progress beat
 
             # v0.99.252 — CRITICAL FIX, per direct user report of a real
             # coin's "recent 40 signals" record looking terrible (~25.7%
@@ -18482,6 +18516,7 @@ def neuro_mining_loop():
                     _neuro_mining_running = False
                     _neuro_mining_current_symbol = None
                     _neuro_mining_progress_ts = time.time()
+                    heartbeat("neuro_mining_loop")  # v0.99.325 — progress beat
             else:
                 with _neuro_state_lock:
                     _neuro_patterns.clear()
@@ -18506,6 +18541,7 @@ def neuro_mining_loop():
                     _neuro_mining_running = False
                     _neuro_mining_current_symbol = None
                     _neuro_mining_progress_ts = time.time()
+                    heartbeat("neuro_mining_loop")  # v0.99.325 — progress beat
                 save_neuro_state()  # v0.99.240 — persist the freshly-promoted top-N so a restart doesn't lose potentially hours of full-universe compute
                 if TELEGRAM_ALERTS_NEURO_SUMMARY and top:
                     # v0.99.249 — per direct user follow-up ("зачем что-то
@@ -18543,7 +18579,7 @@ def neuro_mining_loop():
         # v0.99.320 — a FAILED cycle retries in 30 min instead of waiting
         # the full 24h (a daily-recurring failure used to mean days with
         # no fresh backtest and nothing visible in the tab).
-        NEURO_MINING_TRIGGER.wait(timeout=NEURO_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, NEURO_REFRESH_SEC))
+        wait_beating(NEURO_MINING_TRIGGER, NEURO_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, NEURO_REFRESH_SEC), "neuro_mining_loop")  # v0.99.325 — beats while idle
         NEURO_MINING_TRIGGER.clear()
 
 
