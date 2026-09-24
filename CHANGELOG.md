@@ -16589,3 +16589,43 @@ v0.99.321 - Removed every hardcoded symbol list that could be scanned or
          references), node --check, real runtime: all four status routes
          200, /api/msnr/status live_universe and effective_live_universe
          both [] on empty state.
+
+v0.99.322 - Stability pass over every visible module's background loops,
+         per user request ("проверь индикаторы из вкладок на подобные
+         ошибки и зависания как в Neuro... добавить стабильности").
+         Audit (MSNR, Sweep, S/R, Peak Reversal, Volume scan, reconcile,
+         + dormant FT5/Mirror/AMD/NQ):
+         - Semaphore leak (the Neuro bug): Neuro-only — no other module
+           has a thread-restarting watchdog; MSNR/LSW run each cycle in a
+           single-worker executor with a hard ceiling and always release
+           in `finally`; SNR/PRV bound every symbol + the whole cycle and
+           release in `finally`. Dormant modules check their *_ENABLED
+           flag BEFORE acquiring, so they don't hold slots. OK.
+         - Failure waits a full interval (the Neuro bug): PRESENT in MSNR
+           (1h), Sweep (1h), S/R (4h), Peak Reversal (4h) — an exception
+           or cycle timeout, and for S/R/Peak also a zero-result cycle
+           (typical network outage), waited the whole refresh interval.
+           FIXED: all retry after BACKTEST_RETRY_AFTER_ERROR_SEC (30 min).
+         - Blocking on the shared backtest slot was invisible for MSNR/
+           Sweep (S/R/Peak already had flags). FIXED: msnr_/lsw_waiting_
+           for_slot.
+         - No liveness monitoring anywhere: a hung/dead live loop (e.g.
+           the log_error-under-state_lock deadlock class) meant signals
+           silently stopped with nothing on screen. ADDED heartbeats at the
+           top of every loop iteration (12 loops) + system_health_watchdog
+           (every 60s): a loop silent past its own max expected gap
+           (LOOP_MAX_GAP_SEC — live loops 30-60 min / Sweep 3h; backtests
+           = interval + worst-case cycle, 4h..50h) is logged once, gets ONE
+           Telegram alert ("⚠️ Зависание: …") and a recovery message when
+           it resumes. /api/health + a header banner ("⛔ Зависло: … нет
+           отклика N" / "⛔ … ждёт свободного слота уже N" / "⏳ в очереди
+           на бэктест: …"). Detection only, deliberately NO auto-restart:
+           a thread that may still be alive, restarted, risks duplicate
+           loops placing duplicate real orders. Heartbeats are seeded at
+           startup so staggered first-cycle delays don't read as stalls.
+         Verified: py_compile (-W error), pyflakes, node --check, no
+         surrogates; real runtime /api/health clean on start; synthetic
+         stall test — live loop 2h silent + S/R backtest 10h waiting both
+         reported (with correct waiting_for_slot split), Telegram alert
+         sent exactly once per stall across watchdog passes; jsdom banner
+         renders both variants with zero JS errors.

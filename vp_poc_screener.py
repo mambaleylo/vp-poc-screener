@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.321"
+APP_VERSION = "0.99.322"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6713,6 +6713,102 @@ def format_leverage_txt(autotrade_result, autotrade_enabled):
     return "пропущено"
 
 
+# ============================================================================
+# v0.99.322 — SYSTEM HEALTH: per-loop heartbeats + a watchdog that surfaces
+# stalled loops, per user request ("проверь индикаторы на подобные ошибки
+# и зависания как в Neuro... добавить стабильности системе"). Every
+# background loop beats at the top of each iteration (including its
+# "module disabled" idle turns). A loop silent for longer than its own
+# max expected gap is almost certainly hung (deadlock, stuck network
+# call, dead thread) — the watchdog logs it once, sends one Telegram
+# alert, and /api/health feeds a red banner in the header. Detection
+# only, no auto-restart: restarting a thread that might still be alive
+# risks two copies of the same loop placing duplicate real orders.
+# ============================================================================
+_loop_heartbeats = {}          # name -> last beat (unix ts)
+_loop_stall_alerted = set()    # names already alerted for the current stall
+LOOP_MAX_GAP_SEC = {
+    # live / fast loops
+    "scan_loop": 30 * 60,
+    "msnr_live_loop": 60 * 60,
+    "lsw_live_loop": 3 * 3600,
+    "snr_live_loop": 60 * 60,
+    "prv_live_loop": 60 * 60,
+    "neuro_live_loop": 60 * 60,
+    "reconcile_loop": 30 * 60,
+    # backtest loops: refresh interval + worst-case cycle length + slack
+    "msnr_backtest_loop": 4 * 3600,
+    "lsw_backtest_loop": 5 * 3600,
+    "snr_backtest_loop": 9 * 3600,
+    "prv_backtest_loop": 9 * 3600,
+    "neuro_mining_loop": 50 * 3600,
+}
+LOOP_LABELS = {
+    "scan_loop": "Volume скан", "msnr_live_loop": "MSNR живой скан",
+    "lsw_live_loop": "Sweep живой скан", "snr_live_loop": "S/R живой скан",
+    "prv_live_loop": "Peak Reversal живой скан", "neuro_live_loop": "Neuro живой скан",
+    "reconcile_loop": "сверка позиций (автоторговля)",
+    "msnr_backtest_loop": "MSNR бэктест", "lsw_backtest_loop": "Sweep бэктест",
+    "snr_backtest_loop": "S/R бэктест", "prv_backtest_loop": "Peak Reversal бэктест",
+    "neuro_mining_loop": "Neuro майнинг",
+}
+BACKTEST_RETRY_AFTER_ERROR_SEC = int(os.environ.get("VP_BACKTEST_RETRY_AFTER_ERROR_SEC", 1800))  # v0.99.322 — failed backtest cycles retry in 30 min, not a full refresh interval later
+
+
+def heartbeat(name):
+    _loop_heartbeats[name] = time.time()  # single dict store — atomic under the GIL, no lock needed
+
+
+def stalled_loops():
+    now = time.time()
+    out = []
+    for name, gap in LOOP_MAX_GAP_SEC.items():
+        last = _loop_heartbeats.get(name)
+        if last is None:
+            continue  # loop not started (module thread not launched)
+        if now - last > gap:
+            out.append({"name": name, "label": LOOP_LABELS.get(name, name),
+                        "silent_min": int((now - last) / 60), "max_gap_min": int(gap / 60),
+                        "waiting_for_slot": _loop_waiting_for_slot(name)})
+    return out
+
+
+def _loop_waiting_for_slot(name):
+    """True when a backtest loop is 'silent' only because it's queued on
+    BACKTEST_CONCURRENCY_SEMAPHORE — still worth flagging past its max gap
+    (something else is hogging the slots), but it's a different diagnosis
+    than a hang."""
+    key = {"msnr_backtest_loop": "msnr_waiting_for_slot", "lsw_backtest_loop": "lsw_waiting_for_slot",
+           "snr_backtest_loop": "snr_waiting_for_slot", "prv_backtest_loop": "prv_waiting_for_slot"}.get(name)
+    if key:
+        return bool(STATE.get(key))  # plain dict read, no lock (called from the watchdog)
+    if name == "neuro_mining_loop":
+        return bool(_neuro_waiting_slot_since)
+    return False
+
+
+def system_health_watchdog():
+    while True:
+        time.sleep(60)
+        try:
+            stalled = stalled_loops()
+            names = {x["name"] for x in stalled}
+            for x in stalled:
+                if x["name"] not in _loop_stall_alerted:
+                    _loop_stall_alerted.add(x["name"])
+                    msg = (f"system_health_watchdog: {x['name']} silent for {x['silent_min']} min "
+                           f"(max expected {x['max_gap_min']} min) — likely hung")
+                    log_error(msg)
+                    send_telegram(f"⚠️ Зависание: {x['label']} — нет отклика {x['silent_min']} мин. "
+                                  f"Может потребоваться перезапуск сервера.")
+            for name in list(_loop_stall_alerted):
+                if name not in names:
+                    _loop_stall_alerted.discard(name)
+                    send_telegram(f"✅ {LOOP_LABELS.get(name, name)} снова работает.")
+        except Exception as e:
+            log_error(f"system_health_watchdog: {e}")
+
+
 def send_telegram(text, category=None):
     if not TELEGRAM_ENABLED or not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
         return
@@ -7254,6 +7350,7 @@ def compute_tuning_stats(reason=None):
 
 def scan_loop():
     while True:
+        heartbeat("scan_loop")  # v0.99.322 — see system_health_watchdog()
         try:
             t0 = time.time()
             with state_lock:
@@ -7464,6 +7561,7 @@ def reconcile_loop():
     inside execute_autotrade() right before a new position opens, so
     cleanup isn't left waiting on new trades during a quiet market."""
     while True:
+        heartbeat("reconcile_loop")  # v0.99.322 — see system_health_watchdog()
         try:
             if not AUTOTRADE_DRY_RUN:
                 reconcile_positions_and_orders()
@@ -10833,6 +10931,8 @@ def msnr_backtest_loop():
     # starts first (no delay) -- see the other 6 backtest loops' own
     # comments for their own staggered offsets (90s apart).
     while True:
+        heartbeat("msnr_backtest_loop")  # v0.99.322 — see system_health_watchdog()
+        _cycle_failed = False
         try:
             if not MSNR_ENABLED:
                 time.sleep(60)
@@ -10860,7 +10960,11 @@ def msnr_backtest_loop():
             # — bounds concurrent backtest activity on the shared HTTP
             # semaphore for the whole life of the process, not just at
             # startup.
+            with state_lock:
+                STATE["msnr_waiting_for_slot"] = True  # v0.99.322 — visible in /api/health
             BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
+            with state_lock:
+                STATE["msnr_waiting_for_slot"] = False
             try:
                 _cycle_ex = ThreadPoolExecutor(max_workers=1)
                 _cycle_fut = _cycle_ex.submit(_msnr_run_one_backtest_cycle, t0)
@@ -10868,11 +10972,13 @@ def msnr_backtest_loop():
                     _cycle_fut.result(timeout=MAX_CYCLE_SEC)
                     _cycle_ex.shutdown(wait=False)
                 except (TimeoutError, FutureTimeoutError):
+                    _cycle_failed = True
                     log_error(f"msnr_backtest_loop: entire cycle exceeded {MAX_CYCLE_SEC}s — aborting and retrying next interval")
                     with state_lock:
                         STATE["msnr_backtest_running"] = False
                     _cycle_ex.shutdown(wait=False)
                 except Exception as e:
+                    _cycle_failed = True
                     log_error(f"msnr_backtest_loop cycle: {e}")
                     with state_lock:
                         STATE["msnr_backtest_running"] = False
@@ -10880,8 +10986,12 @@ def msnr_backtest_loop():
             finally:
                 BACKTEST_CONCURRENCY_SEMAPHORE.release()
         except Exception as e:
+            _cycle_failed = True
             log_error(f"msnr_backtest_loop outer: {e}")
-        MSNR_BACKTEST_TRIGGER.wait(timeout=max(300, MSNR_REFRESH_SEC))
+        with state_lock:
+            STATE["msnr_waiting_for_slot"] = False
+        # v0.99.322 — failed/timed-out cycle retries in 30 min, not a full interval later
+        MSNR_BACKTEST_TRIGGER.wait(timeout=BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, MSNR_REFRESH_SEC))
         MSNR_BACKTEST_TRIGGER.clear()
 
 
@@ -11103,6 +11213,7 @@ def msnr_backtest_watchdog():
 
 def msnr_live_loop():
     while True:
+        heartbeat("msnr_live_loop")  # v0.99.322 — see system_health_watchdog()
         try:
             if not MSNR_ENABLED:
                 time.sleep(60)
@@ -13774,6 +13885,8 @@ def lsw_backtest_loop():
     LSW_BACKTEST_TRIGGER.wait(timeout=90)
     LSW_BACKTEST_TRIGGER.clear()
     while True:
+        heartbeat("lsw_backtest_loop")  # v0.99.322 — see system_health_watchdog()
+        _cycle_failed = False
         try:
             if not LSW_ENABLED:
                 time.sleep(60)
@@ -13796,7 +13909,11 @@ def lsw_backtest_loop():
             MAX_CYCLE_SEC = 2 * 60 * 60  # v0.99.231 — raised 1h->2h: universe grew 60->100 (+67%) and each symbol now also runs a 7-candidate RR sweep (v0.99.223), so the old 1h ceiling risked aborting a cycle that was genuinely still making progress, not actually stuck
             # v0.99.268 — same shared concurrency cap as msnr_backtest_loop's
             # own (see its comment for the full reasoning).
+            with state_lock:
+                STATE["lsw_waiting_for_slot"] = True  # v0.99.322 — visible in /api/health
             BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
+            with state_lock:
+                STATE["lsw_waiting_for_slot"] = False
             try:
                 _cycle_ex = ThreadPoolExecutor(max_workers=1)
                 _cycle_fut = _cycle_ex.submit(_lsw_run_one_backtest_cycle, t0)
@@ -13804,12 +13921,14 @@ def lsw_backtest_loop():
                     _cycle_fut.result(timeout=MAX_CYCLE_SEC)
                     _cycle_ex.shutdown(wait=False)
                 except (TimeoutError, FutureTimeoutError):
+                    _cycle_failed = True
                     log_error(f"lsw_backtest_loop: entire cycle exceeded {MAX_CYCLE_SEC}s — aborting, abandoning stuck thread")
                     with state_lock:
                         STATE["lsw_backtest_running"] = False
                         STATE["lsw_backtest_in_flight"] = []
                     _cycle_ex.shutdown(wait=False)
                 except Exception as e:
+                    _cycle_failed = True
                     log_error(f"lsw_backtest_loop cycle: {e}")
                     with state_lock:
                         STATE["lsw_backtest_running"] = False
@@ -13818,8 +13937,12 @@ def lsw_backtest_loop():
             finally:
                 BACKTEST_CONCURRENCY_SEMAPHORE.release()
         except Exception as e:
+            _cycle_failed = True
             log_error(f"lsw_backtest_loop outer: {e}")
-        LSW_BACKTEST_TRIGGER.wait(timeout=max(300, LSW_REFRESH_SEC))
+        with state_lock:
+            STATE["lsw_waiting_for_slot"] = False
+        # v0.99.322 — failed/timed-out cycle retries in 30 min, not a full interval later
+        LSW_BACKTEST_TRIGGER.wait(timeout=BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, LSW_REFRESH_SEC))
         LSW_BACKTEST_TRIGGER.clear()
 
 
@@ -13920,6 +14043,7 @@ def _lsw_run_one_backtest_cycle(t0):
 
 def lsw_live_loop():
     while True:
+        heartbeat("lsw_live_loop")  # v0.99.322 — see system_health_watchdog()
         try:
             if not LSW_ENABLED:
                 time.sleep(60)
@@ -14975,7 +15099,9 @@ def snr_backtest_loop():
     SNR_BACKTEST_TRIGGER.wait(timeout=630)
     SNR_BACKTEST_TRIGGER.clear()
     while True:
+        heartbeat("snr_backtest_loop")  # v0.99.322 — see system_health_watchdog()
         _snr_sem_acquired = False
+        _cycle_failed = False
         try:
             if not SNR_ENABLED:
                 SNR_BACKTEST_TRIGGER.wait(timeout=max(300, SNR_REFRESH_SEC))
@@ -15098,6 +15224,7 @@ def snr_backtest_loop():
                 STATE["snr_backtest_running"] = False
                 STATE["snr_current_symbol"] = None
             if found_nothing:
+                _cycle_failed = True  # v0.99.322 — e.g. network outage: retry in 30 min, not 4h
                 # v0.99.271 — same "don't wipe existing data on a fully
                 # failed cycle" safety net as neuro_mining_loop()'s own
                 # (v0.99.236) — a total network outage shouldn't blank
@@ -15106,13 +15233,17 @@ def snr_backtest_loop():
             if all_results:
                 save_state()  # v0.99.271 — CRITICAL FIX: persist the freshly-completed cycle immediately, so a restart right after doesn't lose it (see save_state()'s own new snr_results/snr_signals/snr_active_symbols/snr_display_symbols keys)
         except Exception as e:
+            _cycle_failed = True
             log_error(f"snr_backtest_loop: {e}")
             with state_lock:
                 STATE["snr_backtest_running"] = False
+                STATE["snr_waiting_for_slot"] = False
         finally:
             if _snr_sem_acquired:
                 BACKTEST_CONCURRENCY_SEMAPHORE.release()
-        SNR_BACKTEST_TRIGGER.wait(timeout=max(300, SNR_REFRESH_SEC))
+        # v0.99.322 — failed cycle (exception or zero usable results, e.g. a
+        # network outage) retries in 30 min instead of the full 4h interval
+        SNR_BACKTEST_TRIGGER.wait(timeout=BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, SNR_REFRESH_SEC))
         SNR_BACKTEST_TRIGGER.clear()
 
 
@@ -15243,6 +15374,7 @@ def snr_track_signal_outcomes():
 def snr_live_loop():
     global _snr_prev_signal_keys
     while True:
+        heartbeat("snr_live_loop")  # v0.99.322 — see system_health_watchdog()
         try:
             if not SNR_ENABLED:
                 time.sleep(900)
@@ -15565,7 +15697,9 @@ def prv_backtest_loop():
     PRV_BACKTEST_TRIGGER.wait(timeout=720)
     PRV_BACKTEST_TRIGGER.clear()
     while True:
+        heartbeat("prv_backtest_loop")  # v0.99.322 — see system_health_watchdog()
         _prv_sem_acquired = False
+        _cycle_failed = False
         try:
             if not PRV_ENABLED:
                 PRV_BACKTEST_TRIGGER.wait(timeout=max(300, PRV_REFRESH_SEC))
@@ -15628,17 +15762,22 @@ def prv_backtest_loop():
                     STATE["prv_last_backtest_finished"] = time.time()
                 STATE["prv_backtest_running"] = False
             if found_nothing:
+                _cycle_failed = True  # v0.99.322 — e.g. network outage: retry in 30 min, not 4h
                 log_error("prv_backtest_loop: universe scan produced zero usable results this cycle — keeping previous results")
             if all_results:
                 save_state()
         except Exception as e:
+            _cycle_failed = True
             log_error(f"prv_backtest_loop: {e}")
             with state_lock:
                 STATE["prv_backtest_running"] = False
+                STATE["prv_waiting_for_slot"] = False
         finally:
             if _prv_sem_acquired:
                 BACKTEST_CONCURRENCY_SEMAPHORE.release()
-        PRV_BACKTEST_TRIGGER.wait(timeout=max(300, PRV_REFRESH_SEC))
+        # v0.99.322 — failed cycle (exception or zero usable results, e.g. a
+        # network outage) retries in 30 min instead of the full 4h interval
+        PRV_BACKTEST_TRIGGER.wait(timeout=BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, PRV_REFRESH_SEC))
         PRV_BACKTEST_TRIGGER.clear()
 
 
@@ -15743,6 +15882,7 @@ def prv_track_signal_outcomes():
 def prv_live_loop():
     global _prv_prev_signal_keys
     while True:
+        heartbeat("prv_live_loop")  # v0.99.322 — see system_health_watchdog()
         try:
             if not PRV_ENABLED:
                 time.sleep(900)
@@ -18120,6 +18260,7 @@ def neuro_mining_loop():
     NEURO_MINING_TRIGGER.wait(timeout=180)
     NEURO_MINING_TRIGGER.clear()
     while True:
+        heartbeat("neuro_mining_loop")  # v0.99.322 — see system_health_watchdog()
         with _neuro_state_lock:
             if my_gen != _neuro_loop_gen:
                 return  # v0.99.320 — abandoned by the watchdog; a fresh loop replaced this one
@@ -18337,6 +18478,7 @@ def neuro_mining_loop():
 def neuro_live_loop():
     global _neuro_prev_signal_keys
     while True:
+        heartbeat("neuro_live_loop")  # v0.99.322 — see system_health_watchdog()
         try:
             if not NEURO_ENABLED:
                 time.sleep(900)
@@ -20031,6 +20173,20 @@ def msnr_effective_live_universe(live_universe, overrides, autotrade_symbols):
     return list(dict.fromkeys(list(live_universe) + toggled_on_allowed))
 
 
+@app.route("/api/health")
+def api_health():
+    """v0.99.322 — stalled loops + backtests waiting on the shared slot."""
+    with state_lock:
+        waiting = [lbl for key, lbl in (("msnr_waiting_for_slot", "MSNR"), ("lsw_waiting_for_slot", "Sweep"),
+                                        ("snr_waiting_for_slot", "S/R"), ("prv_waiting_for_slot", "Peak Reversal"))
+                   if STATE.get(key)]
+    with _neuro_state_lock:
+        if _neuro_waiting_slot_since:
+            waiting.append("Neuro")
+    return jsonify({"stalled": stalled_loops(), "waiting_for_slot": waiting,
+                    "backtest_slots": BACKTEST_CONCURRENCY_LIMIT})
+
+
 @app.route("/api/msnr/status")
 def api_msnr_status():
     """EXPERIMENTAL — see the MSNR module's own header comment."""
@@ -21119,6 +21275,7 @@ INDEX_HTML = """<!doctype html>
   <div id="status">загрузка...</div>
   <div id="overview" class="dim" style="margin-top:2px;font-size:12px;"></div>
   <div id="autotradeBanner" style="margin-top:2px;font-size:12px;"></div>
+  <div id="healthBanner" style="margin-top:2px;font-size:11.5px;"></div>
   <details id="riskAutotuneBox" style="margin-top:4px;font-size:11.5px;display:none;">
     <summary class="dim" style="cursor:pointer;">Авто-тюнинг риска</summary>
     <div id="riskAutotuneLog" class="dim" style="margin-top:4px;"></div>
@@ -24607,6 +24764,28 @@ async function refreshAll() {
 refreshAll();
 setInterval(refreshAll, 15000);
 
+// v0.99.322 — system health banner: loops that stopped responding
+async function refreshHealth() {
+  const el = document.getElementById('healthBanner');
+  if (!el) return;
+  try {
+    const h = await (await fetch('/api/health')).json();
+    const parts = [];
+    for (const x of (h.stalled || [])) {
+      const t = x.silent_min >= 120 ? Math.round(x.silent_min / 60) + ' ч' : x.silent_min + ' мин';
+      parts.push(x.waiting_for_slot
+        ? `<div class="loss">⛔ ${x.label} ждёт свободного слота бэктеста уже ${t} — слоты заняты другими модулями или зависшим циклом. Поможет перезапуск сервера.</div>`
+        : `<div class="loss">⛔ Зависло: ${x.label} — нет отклика ${t} (норма до ${Math.round(x.max_gap_min / 60 * 10) / 10} ч). Поможет перезапуск сервера.</div>`);
+    }
+    if ((h.waiting_for_slot || []).length) {
+      parts.push(`<div class="dim">⏳ в очереди на бэктест: ${h.waiting_for_slot.join(', ')} (одновременно идут не больше ${h.backtest_slots})</div>`);
+    }
+    el.innerHTML = parts.join('');
+  } catch (e) {}
+}
+refreshHealth();
+setInterval(refreshHealth, 60000);
+
 function wireResetButton(btnId, endpoint, confirmMsg, idleLabel) {
   const btn = document.getElementById(btnId);
   btn.onclick = async () => {
@@ -25732,6 +25911,9 @@ if __name__ == "__main__":
     threading.Thread(target=prv_backtest_loop, daemon=True).start()
     threading.Thread(target=prv_live_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
+    for _n in LOOP_MAX_GAP_SEC:  # v0.99.322 — seed so startup delays (up to 12 min) don't read as stalls
+        heartbeat(_n)
+    threading.Thread(target=system_health_watchdog, daemon=True).start()
     threading.Thread(target=risk_autotune_loop, daemon=True).start()
     port = int(os.environ.get("VP_PORT", 8080))
     tg_status = "настроен" if (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) else "не настроен"
