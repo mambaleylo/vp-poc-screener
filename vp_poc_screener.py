@@ -21,6 +21,7 @@ import os
 import json
 import time
 import math
+import struct
 import threading
 import traceback
 import queue
@@ -55,7 +56,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.325"
+APP_VERSION = "0.99.326"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3240,8 +3241,10 @@ def get_contract_stats(symbol, interval=OI_INTERVAL, limit=OI_LOOKBACK + 2):
     return out
 
 
-def get_candles_range(symbol, interval, start_ts, end_ts):
-    """Fetch every candle in [start_ts, end_ts] at a finer interval than the
+def _get_candles_range_live(symbol, interval, start_ts, end_ts):
+    """v0.99.324: the original network fetcher, unchanged (renamed; the
+    public get_candles_range() below adds the cross-cycle disk cache).
+    Fetch every candle in [start_ts, end_ts] at a finer interval than the
     main scan uses, paginating since the API caps each response and
     rejects combining `limit` with `from`/`to`. Used to build the volume
     profile from actual sub-bar data instead of approximating each
@@ -3351,6 +3354,198 @@ def get_candles_range(symbol, interval, start_ts, end_ts):
             seen[c["time"]] = c
         cur = chunk_end
     return sorted(seen.values(), key=lambda x: x["time"])
+
+
+# ============================================================================
+# v0.99.324 — cross-cycle candle cache, per user request (speed up the
+# network-bound backtests: MSNR / S&R / Peak re-downloaded their entire
+# history every cycle). Closed candles never change, so each (symbol,
+# interval) keeps a disk file of the candles already downloaded plus the
+# exact time span it fully covers; a request is answered from that file
+# for the covered part and only the tail (new candles + a 1-candle
+# overlap + the still-forming candle) is fetched live. The result must be
+# IDENTICAL to a fresh _get_candles_range_live() call:
+#   - same start clamp (earliest allowed = now - 9800 candles), same
+#     inclusive [from, to] window, fresh dicts in the same key order, sorted;
+#   - the forming candle and the last closed one are always fetched live;
+#   - coverage never includes a candle that wasn't closed for a full
+#     interval when stored, and the covered start is kept one candle
+#     inside what was fetched (no edge ambiguity);
+#   - any cache problem (missing/corrupt file, disk error) falls back to a
+#     plain live fetch. VP_CANDLE_CACHE=0 disables it entirely.
+# Verified old-vs-new on real Gate data with tools/compare_candles.py
+# before merging (see changelog).
+# ============================================================================
+CANDLE_CACHE_ENABLED = os.environ.get("VP_CANDLE_CACHE", "1") != "0"
+CANDLE_CACHE_DIR = os.environ.get(
+    "VP_CANDLE_CACHE_DIR",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_candle_cache"),
+)
+_CC_HEADER = struct.Struct("<qqq")      # cov_start, cov_end, n
+_CC_ROW = struct.Struct("<6d")          # time, open, high, low, close, volume
+_candle_cache_locks = {}
+_candle_cache_locks_guard = threading.Lock()
+_candle_cache_stats = {"hits": 0, "misses": 0, "errors": 0}
+# How Gate treats an UNALIGNED `from` (between two candle starts): "ceil" =
+# first candle returned starts at/after `from`; "floor" = the candle that
+# CONTAINS `from` is returned too. Not documented — learned from real
+# responses (_cc_learn_from_semantics); until it's known consistently, the
+# head of every cached request is fetched live, so the answer can't be
+# wrong either way.
+_cc_from_semantics = {"floor": 0, "ceil": 0, "conflict": False}
+_CC_SEMANTICS_MIN_OBS = 3
+
+
+def _cc_learn_from_semantics(cur0, sec, fresh):
+    if not fresh or cur0 % sec == 0:
+        return
+    first = fresh[0]["time"]
+    lo = (cur0 // sec) * sec
+    if first == lo:
+        _cc_from_semantics["floor"] += 1
+    elif first == lo + sec:
+        _cc_from_semantics["ceil"] += 1   # (a coin listed exactly there would look the same — conflict check below catches a wrong guess)
+    else:
+        return
+    if _cc_from_semantics["floor"] and _cc_from_semantics["ceil"]:
+        _cc_from_semantics["conflict"] = True
+
+
+def _cc_head_start(cur0, sec):
+    """First candle start a live fetch from cur0 would return, if Gate's
+    rule is known; None = unknown (caller fetches the head live)."""
+    sem = _cc_from_semantics
+    if sem["conflict"]:
+        return None
+    if cur0 % sec == 0:
+        return cur0
+    if sem["floor"] >= _CC_SEMANTICS_MIN_OBS and not sem["ceil"]:
+        return (cur0 // sec) * sec
+    if sem["ceil"] >= _CC_SEMANTICS_MIN_OBS and not sem["floor"]:
+        return (cur0 // sec) * sec + sec
+    return None
+
+
+def _cc_path(symbol, interval):
+    safe = "".join(ch for ch in f"{symbol}_{interval}" if ch.isalnum() or ch in "_-")
+    return os.path.join(CANDLE_CACHE_DIR, safe + ".bin")
+
+
+def _cc_load(symbol, interval):
+    try:
+        with open(_cc_path(symbol, interval), "rb") as f:
+            data = f.read()
+    except FileNotFoundError:
+        return None, None, {}
+    cov_s, cov_e, n = _CC_HEADER.unpack_from(data, 0)
+    if len(data) != _CC_HEADER.size + n * _CC_ROW.size:
+        raise ValueError("candle cache file size mismatch")
+    rows = {}
+    for row in _CC_ROW.iter_unpack(data[_CC_HEADER.size:]):
+        rows[int(row[0])] = row
+    return cov_s, cov_e, rows
+
+
+def _cc_save(symbol, interval, cov_s, cov_e, rows):
+    os.makedirs(CANDLE_CACHE_DIR, exist_ok=True)
+    keys = sorted(rows)
+    buf = bytearray(_CC_HEADER.pack(int(cov_s), int(cov_e), len(keys)))
+    for t in keys:
+        buf += _CC_ROW.pack(*rows[t])
+    path = _cc_path(symbol, interval)
+    tmp = path + ".tmp"
+    with open(tmp, "wb") as f:
+        f.write(buf)
+    os.replace(tmp, path)
+
+
+def _cc_row(c):
+    return (float(c["time"]), c["open"], c["high"], c["low"], c["close"], c["volume"])
+
+
+def _cc_dict(row):
+    # same keys, same order, same types as _parse_candles()
+    return {"time": int(row[0]), "open": row[1], "high": row[2],
+            "low": row[3], "close": row[4], "volume": row[5]}
+
+
+def get_candles_range(symbol, interval, start_ts, end_ts):
+    """Cached front for _get_candles_range_live() — see the block comment
+    above. Same arguments, same return value."""
+    if not CANDLE_CACHE_ENABLED:
+        return _get_candles_range_live(symbol, interval, start_ts, end_ts)
+    sec = INTERVAL_SECONDS.get(interval, 60)
+    now = time.time()
+    cur0 = max(int(start_ts), int(now - 9800 * sec))   # identical clamp to the live fetcher
+    end = int(end_ts)
+    if cur0 >= end:
+        return _get_candles_range_live(symbol, interval, start_ts, end_ts)
+    # last candle start that had fully closed at least one interval ago
+    closed_upto = (int(now) // sec) * sec - 2 * sec
+    key = (symbol, interval)
+    with _candle_cache_locks_guard:
+        lock = _candle_cache_locks.setdefault(key, threading.Lock())
+    with lock:
+        try:
+            cov_s, cov_e, rows = _cc_load(symbol, interval)
+        except Exception as e:
+            _candle_cache_stats["errors"] += 1
+            log_error(f"candle cache load {symbol} {interval}: {e} — live fetch")
+            cov_s, cov_e, rows = None, None, {}
+        head_start = _cc_head_start(cur0, sec)
+        if head_start is not None and cov_s is not None and head_start < cov_s:
+            head_start = None   # that head candle predates the covered span — fetch it live
+        head_to = (cur0 // sec) * sec + 2 * sec   # live-fetched head when Gate's `from` rule isn't known yet
+        if (cov_s is not None and cov_s <= cur0 <= cov_e
+                and (head_start is not None or head_to < min(end, cov_e))):
+            _candle_cache_stats["hits"] += 1
+            if head_start is not None:
+                out = []
+                cache_from = head_start
+            else:
+                out = _get_candles_range_live(symbol, interval, start_ts, head_to)
+                cache_from = head_to + 1
+            if end <= cov_e:
+                # rest fully inside the covered span — no further request
+                out.extend(_cc_dict(rows[t]) for t in sorted(rows) if cache_from <= t <= end)
+                return out
+            tail_from = cov_e + 1   # covered span is [cov_s, cov_e] inclusive
+            tail = _get_candles_range_live(symbol, interval, tail_from, end_ts)
+            out.extend(_cc_dict(rows[t]) for t in sorted(rows) if cache_from <= t <= cov_e)
+            out.extend(c for c in tail if c["time"] > cov_e)
+            # extend coverage with the tail's closed candles
+            new_e = min(end, closed_upto)
+            if new_e > cov_e:
+                for c in tail:
+                    if c["time"] <= new_e:
+                        rows[c["time"]] = _cc_row(c)
+                try:
+                    floor_t = now - 10000 * sec
+                    rows = {t: r for t, r in rows.items() if t >= floor_t}
+                    _cc_save(symbol, interval, max(cov_s, int(floor_t) + sec), new_e, rows)
+                except Exception as e:
+                    _candle_cache_stats["errors"] += 1
+                    log_error(f"candle cache save {symbol} {interval}: {e}")
+            return out
+        # not covered: plain live fetch (exactly the old behaviour), then store it
+        _candle_cache_stats["misses"] += 1
+        fresh = _get_candles_range_live(symbol, interval, start_ts, end_ts)
+        _cc_learn_from_semantics(cur0, sec, fresh)
+        new_s = cur0 + sec          # one candle inside the fetched start: no edge ambiguity
+        new_e = min(end, closed_upto)
+        if new_e > new_s:
+            store = {c["time"]: _cc_row(c) for c in fresh if new_s <= c["time"] <= new_e}
+            if cov_s is not None and cov_s <= new_e + sec and new_s <= cov_e + sec:
+                # overlaps/touches the old span: merge (fresh data wins)
+                for t, r in rows.items():
+                    store.setdefault(t, r)
+                new_s, new_e = min(new_s, cov_s), max(new_e, cov_e)
+            try:
+                _cc_save(symbol, interval, new_s, new_e, store)
+            except Exception as e:
+                _candle_cache_stats["errors"] += 1
+                log_error(f"candle cache save {symbol} {interval}: {e}")
+        return fresh
 
 
 def get_tickers():

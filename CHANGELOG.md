@@ -16677,3 +16677,33 @@ v0.99.325 - False "Зависание: MSNR бэктест — нет откли
          behind two held slots keeps beating and proceeds on release;
          wait_beating returns False on timeout / True when set; real
          runtime /api/health clean on start.
+v0.99.324 - [branch candle-cache, NOT merged until verified on real data]
+         Cross-cycle disk candle cache, per user request (speed up the
+         network-bound backtests — MSNR / S&R / Peak re-downloaded their
+         whole history every cycle).
+         get_candles_range() is now a cached front for the unchanged
+         fetcher (renamed _get_candles_range_live()). Per (symbol,
+         interval) a binary file in vp_candle_cache/ holds closed candles
+         plus the exact span [cov_start, cov_end] it fully covers; a
+         request inside that span is served from disk and only the tail
+         (new candles + the still-forming one) is fetched live. Identity
+         with a fresh fetch by construction: same start clamp (now - 9800
+         candles), inclusive window, fresh dicts in _parse_candles() key
+         order, sorted; only candles closed for a full interval are ever
+         stored; the stored span starts one candle inside what was fetched.
+         Gate's handling of an UNALIGNED `from` (candle containing it, or
+         the next one) is undocumented, so it's learned from real
+         responses (_cc_learn_from_semantics, needs 3 consistent
+         observations, any conflict -> disabled); until known, the head of
+         every cached request is fetched live. Any cache error -> plain
+         live fetch. VP_CANDLE_CACHE=0 turns it off.
+         Verified: pyflakes/py_compile; randomized equivalence test vs the
+         live fetcher — 10 runs x 400 requests (1m..1d, windows 1h..1500d,
+         unaligned bounds, advancing clock, a forming candle that changes
+         and a just-closed candle revised shortly after close) under BOTH
+         possible Gate `from` rules: 0 mismatches, ~60% fewer requests.
+         tools/compare_candles.py (old main vs new, real Gate data, warm
+         temp cache 6h back, compare 1h back, 64 combos per coin): passes
+         on a simulated Gate under both rules (-80% requests); negative
+         control (first cached candle dropped) reported 120 mismatches with
+         the exact missing candle times.
