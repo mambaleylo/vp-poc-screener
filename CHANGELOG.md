@@ -16422,3 +16422,27 @@ v0.99.315 - CRITICAL FIX: S/R Zones' live scanner was systematically
          results from the next backtest cycle onward.
          Verified: py_compile (-W error), pyflakes, node --check, real
          runtime 200 on / with /api/snr/status returning the new fields.
+
+v0.99.316 - Compact header, per direct user report (screenshot: "все
+         столбиком идёт, много места занимает" — v0.99.311's per-module
+         row groups stacked ~7 rows of full-width buttons above the tabs,
+         eating most of a phone screen).
+         Title + ⚙️ Настройки + 🕐 screensaver + a new 🛠 toggle now share
+         ONE row (mobile #headerTop switched from column to row, title
+         ellipsizes if tight). All 10 clear/restart buttons moved into a
+         collapsible #hdrActions panel, closed by default (open/closed
+         state remembered in localStorage). Inside, one compact row per
+         module: label + short "🗑 Очистить"/"🗑 Сбросить" (danger) and
+         "↻ Бэктест" (neutral). Button ids, handlers and the full
+         explicit confirm() texts are unchanged; wireReset/RestartButton
+         idle labels updated to the short forms so a button doesn't
+         revert to the old long text after use.
+         updateHeaderButtonVisibility() now also hides a module's whole
+         row when all its buttons are hidden (disabled module), so no
+         orphan labels. btnDanger/btnNeutral styling moved from the old
+         mobile-only "#headerTop > div:last-child" selectors to #hdrActions
+         rules that apply on every width.
+         Verified: py_compile (-W error), pyflakes clean, real runtime 200
+         on / with all 15 header ids present, node --check on extracted
+         JS, jsdom: panel starts closed, toggles open, Sweep row hidden
+         with lsw_enabled=false, zero runtime errors.

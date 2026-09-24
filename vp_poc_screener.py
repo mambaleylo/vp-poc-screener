@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.315"
+APP_VERSION = "0.99.316"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -20658,6 +20658,24 @@ INDEX_HTML = """<!doctype html>
      red, some plain grey, no visible logic" inconsistency reported.
      Superseded by the .btnDanger/.btnNeutral classes applied to every
      one of them uniformly (see #headerTop's own rule above). */
+  /* v0.99.316 — compact header (per user screenshot: "все столбиком
+     идёт, много места занимает"). Title + ⚙️/🕐/🛠 share one row; the
+     10 clear/restart buttons live in a collapsible #hdrActions panel
+     (closed by default, state remembered in localStorage), one compact
+     row per module: label + short "🗑 Очистить" / "↻ Бэктест". The
+     confirm() dialogs still carry the full, explicit wording. */
+  #hdrBtns button { flex-shrink:0; }
+  #screensaverBtn, #hdrActionsToggle { background:#1e2a3f; border:none; padding:6px 10px; border-radius:8px; font-size:12px; white-space:nowrap; }
+  #hdrActionsToggle { color:#9cc4ff; }
+  #hdrActionsToggle.open { background:#26314a; }
+  #hdrActions { margin:6px 0 2px; padding:6px 8px; background:#0e1320; border:1px solid #1f2937; border-radius:8px; display:flex; flex-direction:column; gap:4px; }
+  #hdrActions .hdrRow { display:flex; align-items:center; gap:6px; }
+  #hdrActions .hdrLbl { width:84px; flex-shrink:0; font-size:11.5px; color:#8a97ab; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #hdrActions button { font-size:11px; padding:4px 9px; border-radius:7px; white-space:nowrap; cursor:pointer; }
+  #hdrActions button.btnDanger { background:#3a1414; border:1px solid #6b2a2a; color:#ff8a8a; }
+  #hdrActions button.btnNeutral { background:#1c2433; border:1px solid #2e3a52; color:#d0d8e8; }
+  #hdrActions button.btnDanger:active { background:#4a1a1a; }
+  #hdrActions button.btnNeutral:active { background:#26314a; }
   #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
   #settingsModal.open { display:flex; flex-direction:column; }
@@ -20782,12 +20800,9 @@ INDEX_HTML = """<!doctype html>
   @media (max-width: 640px) {
     header { padding:8px 10px; position:static; }
     header h1 { font-size:15px; margin-bottom:6px; }
-    #headerTop { flex-direction:column; align-items:stretch; gap:2px; }
-    #headerTop > div:last-child {
-      display:flex; flex-wrap:nowrap; overflow-x:auto; gap:6px;
-      -webkit-overflow-scrolling:touch; padding-bottom:4px;
-    }
-    #headerTop > div:last-child button { flex-shrink:0; font-size:11px; padding:6px 10px; }
+    #headerTop { flex-direction:row; align-items:center; gap:6px; }
+    #headerTop h1 { margin-bottom:0; flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+    #hdrBtns button { font-size:11px; padding:6px 9px; }
     /* v0.99.284 — per direct user request ("привести к красивому единому
        виду"): explicit, consistent classes replacing whatever accidental
        styling these ~20 header buttons had accumulated over many
@@ -20796,10 +20811,7 @@ INDEX_HTML = """<!doctype html>
        deletes accumulated data (Очистить X / Сбросить X); Neutral =
        safe, non-destructive (Перезапустить бэктест X — just wakes a
        cycle early, keeps existing data until it's naturally replaced). */
-    #headerTop > div:last-child button.btnDanger { background:#3a1414; border:1px solid #6b2a2a; color:#ff8a8a; border-radius:8px; }
-    #headerTop > div:last-child button.btnNeutral { background:#1c2433; border:1px solid #2e3a52; color:#d0d8e8; border-radius:8px; }
-    #headerTop > div:last-child button.btnDanger:active { background:#4a1a1a; }
-    #headerTop > div:last-child button.btnNeutral:active { background:#26314a; }
+    /* (btnDanger/btnNeutral styling moved to #hdrActions rules, v0.99.316) */
     #status, #overview, #autotradeBanner { font-size:10.5px; }
     .tabs { flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; padding-bottom:2px; }
     .tab { flex-shrink:0; font-size:12px; padding:6px 10px; }
@@ -20868,35 +20880,21 @@ INDEX_HTML = """<!doctype html>
 <header>
   <div id="headerTop">
     <h1>VP-POC Screener</h1>
-    <div style="display:flex;flex-direction:column;gap:6px;">
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button id="settingsBtn">⚙️ Настройки</button>
-        <button id="screensaverBtn" onclick="toggleScreensaver()" style="color:#5a6a7a;" title="скринсейвер (часы, защита AMOLED)">🕐</button>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button id="resetVolumeBtn" class="btnDanger">Очистить объём</button>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button id="resetMsnrBtn" class="btnDanger">Очистить MSNR</button>
-        <button id="restartMsnrBacktestBtn" class="btnNeutral">Перезапустить бэктест MSNR</button>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button id="resetLswBtn" class="btnDanger">Очистить Sweep</button>
-        <button id="restartLswBacktestBtn" class="btnNeutral">Перезапустить бэктест Sweep</button>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button id="resetNeuroBtn" class="btnDanger">Очистить Neuro</button>
-        <button id="restartNeuroBacktestBtn" class="btnNeutral">Перезапустить бэктест Neuro</button>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button id="restartSnrBacktestBtn" class="btnNeutral">Перезапустить бэктест S/R</button>
-        <button id="restartPrvBacktestBtn" class="btnNeutral">Перезапустить бэктест Peak Reversal</button>
-      </div>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;">
-        <button id="resetSimulatorBtn" class="btnDanger">Сбросить симулятор</button>
-        <button id="resetRiskAutotuneBtn" class="btnDanger">Сбросить авто-тюнинг</button>
-      </div>
+    <div id="hdrBtns" style="display:flex;gap:6px;align-items:center;">
+      <button id="settingsBtn">⚙️ Настройки</button>
+      <button id="screensaverBtn" onclick="toggleScreensaver()" style="color:#5a6a7a;" title="скринсейвер (часы, защита AMOLED)">🕐</button>
+      <button id="hdrActionsToggle" title="очистка данных и перезапуск бэктестов">🛠 <span id="hdrActionsArrow">▾</span></button>
     </div>
+  </div>
+  <div id="hdrActions" style="display:none;">
+    <div class="hdrRow"><span class="hdrLbl">Объём</span><button id="resetVolumeBtn" class="btnDanger">🗑 Очистить</button></div>
+    <div class="hdrRow"><span class="hdrLbl">MSNR</span><button id="resetMsnrBtn" class="btnDanger">🗑 Очистить</button><button id="restartMsnrBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
+    <div class="hdrRow"><span class="hdrLbl">Sweep</span><button id="resetLswBtn" class="btnDanger">🗑 Очистить</button><button id="restartLswBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
+    <div class="hdrRow"><span class="hdrLbl">Neuro</span><button id="resetNeuroBtn" class="btnDanger">🗑 Очистить</button><button id="restartNeuroBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
+    <div class="hdrRow"><span class="hdrLbl">S/R Zones</span><button id="restartSnrBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
+    <div class="hdrRow"><span class="hdrLbl">Peak Rev.</span><button id="restartPrvBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
+    <div class="hdrRow"><span class="hdrLbl">Симулятор</span><button id="resetSimulatorBtn" class="btnDanger">🗑 Сбросить</button></div>
+    <div class="hdrRow"><span class="hdrLbl">Авто-тюнинг</span><button id="resetRiskAutotuneBtn" class="btnDanger">🗑 Сбросить</button></div>
   </div>
   <div id="status">загрузка...</div>
   <div id="overview" class="dim" style="margin-top:2px;font-size:12px;"></div>
@@ -24402,22 +24400,22 @@ function wireResetButton(btnId, endpoint, confirmMsg, idleLabel) {
 }
 wireResetButton('resetVolumeBtn', '/api/reset/volume',
   'Удалить статистику и подобранные параметры Volume Profile (Сигналы/Watchlist/Тюнинг)? Это необратимо.',
-  'Очистить объём');
+  '🗑 Очистить');
 wireResetButton('resetMsnrBtn', '/api/reset/msnr',
   'Удалить накопленный бэктест и сигналы MSNR? Остальное не тронет. Это необратимо.',
-  'Очистить MSNR');
+  '🗑 Очистить');
 wireRestartButton('restartMsnrBacktestBtn', '/api/msnr/restart_backtest',
   'Запустить новый цикл перебора параметров MSNR прямо сейчас, не дожидаясь расписания? Текущие результаты останутся видны, пока новый цикл не завершится.',
-  'Перезапустить бэктест MSNR');
+  '↻ Бэктест');
 wireResetButton('resetLswBtn', '/api/reset/lsw',
   'Удалить накопленный бэктест и сигналы Sweep? Остальное не тронет. Это необратимо.',
-  'Очистить Sweep');
+  '🗑 Очистить');
 wireRestartButton('restartLswBacktestBtn', '/api/lsw/restart_backtest',
   'Запустить новый цикл перебора параметров Sweep прямо сейчас, не дожидаясь расписания? Текущие результаты останутся видны, пока новый цикл не завершится.',
-  'Перезапустить бэктест Sweep');
+  '↻ Бэктест');
 wireResetButton('resetNeuroBtn', '/api/reset/neuro',
   'Удалить накопленные зависимости, сделки и сигналы Neuro по всем монетам топ-N и начать заново? Это необратимо.',
-  'Очистить Neuro');
+  '🗑 Очистить');
 function wireRestartButton(btnId, endpoint, confirmMsg, idleLabel) {
   // v0.99.256 — separate from wireResetButton() above: this action is
   // NOT destructive (doesn't clear anything first), so it gets its own
@@ -24445,19 +24443,19 @@ function wireRestartButton(btnId, endpoint, confirmMsg, idleLabel) {
 }
 wireRestartButton('restartNeuroBacktestBtn', '/api/neuro/restart_backtest',
   'Запустить новый полный цикл бэктеста Neuro прямо сейчас? Текущие данные (топ-N, паттерны) останутся видны и торгуемы, пока новый цикл не завершится и не заменит их.',
-  'Перезапустить бэктест Neuro');
+  '↻ Бэктест');
 wireRestartButton('restartSnrBacktestBtn', '/api/snr/restart_backtest',
   'Запустить новый цикл перебора параметров S/R Zones прямо сейчас, не дожидаясь расписания? Текущие результаты останутся видны, пока новый цикл не завершится.',
-  'Перезапустить бэктест S/R');
+  '↻ Бэктест');
 wireRestartButton('restartPrvBacktestBtn', '/api/prv/restart_backtest',
   'Запустить новый цикл перебора параметров Peak Reversal прямо сейчас, не дожидаясь расписания? Текущие результаты останутся видны, пока новый цикл не завершится.',
-  'Перезапустить бэктест Peak Reversal');
+  '↻ Бэктест');
 wireResetButton('resetRiskAutotuneBtn', '/api/reset/risk_autotune',
   'Сбросить все параметры авто-тюнинга риска (EMA/Скальпинг/Сессия) к значениям по умолчанию из кода, очистить лог и cooldown? Сами сигналы и статистику не тронет. Это необратимо.',
-  'Сбросить авто-тюнинг');
+  '🗑 Сбросить');
 wireResetButton('resetSimulatorBtn', '/api/simulator/reset',
   'Сбросить симулятор баланса к стартовому значению и удалить всю историю сделок? Это необратимо.',
-  'Сбросить симулятор');
+  '🗑 Сбросить');
 
 // ---------------- Settings modal ----------------
 const settingsModal = document.getElementById('settingsModal');
@@ -24590,7 +24588,27 @@ function updateHeaderButtonVisibility(s) {
     if (!btn) continue;
     btn.style.display = s[HEADER_BTN_ENABLE_KEY[btnId]] ? '' : 'none';
   }
+  // v0.99.316 — hide a module's whole row when all its buttons are hidden
+  document.querySelectorAll('#hdrActions .hdrRow').forEach(row => {
+    const anyVisible = [...row.querySelectorAll('button')].some(b => b.style.display !== 'none');
+    row.style.display = anyVisible ? '' : 'none';
+  });
 }
+(function () {
+  const panel = document.getElementById('hdrActions');
+  const tgl = document.getElementById('hdrActionsToggle');
+  const arrow = document.getElementById('hdrActionsArrow');
+  function setOpen(open) {
+    panel.style.display = open ? 'flex' : 'none';
+    tgl.classList.toggle('open', open);
+    arrow.textContent = open ? '▴' : '▾';
+    try { localStorage.setItem('hdrActionsOpen', open ? '1' : '0'); } catch (e) {}
+  }
+  let initial = false;
+  try { initial = localStorage.getItem('hdrActionsOpen') === '1'; } catch (e) {}
+  setOpen(initial);
+  tgl.onclick = () => setOpen(panel.style.display === 'none');
+})();
 loadSettings();
 
 // v0.99.259 — per direct user request ("глянь на дизайн меню настроек,
