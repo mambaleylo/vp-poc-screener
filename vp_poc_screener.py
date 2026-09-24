@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.314"
+APP_VERSION = "0.99.315"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14828,6 +14828,7 @@ def snr_optimize_symbol(symbol):
                                 "train_z": round(train_z, 2),
                                 "test_n": len(test), "test_wr": round(test_wr, 1), "test_avg_pnl_r": round(test_avg, 3),
                                 "test_z": round(test_z, 2),
+                                "test_days": round((candles[-1]["time"] - boundary_time) / 86400, 1),  # v0.99.315 — length of the test window, so the UI can show expected live-signal frequency (test_n / test_days)
                                 "recent_trades": closed[-40:][::-1],
                             }
         except Exception as e:
@@ -15010,34 +15011,58 @@ def snr_scan_symbol_live(symbol):
     try:
         now = int(time.time())
         interval_sec = INTERVAL_SECONDS.get(tf, 3600)
-        start_ts = now - 250 * interval_sec
+        # v0.99.315 — CRITICAL FIX, per direct user report ("есть ли
+        # живые сигналы вообще по s/r zone? за несколько дней ни одного
+        # нет"): this used to fetch only 250 bars, while the backtest
+        # that chose min_strength built its zones on the FULL history
+        # (snr_history_days_for_tf(): ~3600 bars at 1h, ~3000 at 4h,
+        # 500 at 1d). A zone's strength is the count of its retests over
+        # ALL visible history, and zones only exist if their origin
+        # pivot is inside the window — so the 250-bar live view saw
+        # truncated strengths (or no zone at all) for exactly the long-
+        # lived, heavily-retested zones the optimizer's min_strength was
+        # calibrated on, systematically suppressing live signals the
+        # backtest would have taken. Now fetches the SAME depth as the
+        # backtest, so live zones/strengths match what was validated.
+        start_ts = now - snr_history_days_for_tf(tf) * 86400
         candles = get_candles_range(symbol, tf, start_ts, now)
         closed = [c for c in candles if c["time"] + interval_sec <= now] if candles else []
         if len(closed) < 100:
             return None
-        atr = neuro_atr_series(closed, 14)
-        zones = snr_build_zones(closed, atr, pivot_length)
-        last_idx = len(closed) - 1
-        if not atr[last_idx]:
-            return None
-        for z in zones:
-            if z["break_idx"] is not None:
-                continue
-            if z["retest_idxs"] and z["retest_idxs"][-1] == last_idx and z["strength"] >= min_strength:
-                direction = "LONG" if z["type"] == "support" else "SHORT"
-                entry = closed[-1]["close"]
-                sl_dist = atr[last_idx] * SNR_SL_ATR_MULT
-                if sl_dist <= 0:
-                    continue
-                sl = entry - sl_dist if direction == "LONG" else entry + sl_dist
-                tp = entry + sl_dist * rr if direction == "LONG" else entry - sl_dist * rr
-                return {"direction": direction, "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8),
-                        "zone_price": round(z["price"], 8), "zone_strength": z["strength"],
-                        "time": closed[-1]["time"], "timeframe": tf}
-        return None
+        sig = snr_detect_live_signal(closed, pivot_length, min_strength, rr)
+        if sig:
+            sig["timeframe"] = tf
+        return sig
     except Exception as e:
         log_error(f"snr_scan_symbol_live {symbol}: {e}")
         return None
+
+
+def snr_detect_live_signal(closed, pivot_length, min_strength, rr):
+    """v0.99.315 — pure detection core split out of snr_scan_symbol_live()
+    so it can be verified directly against snr_simulate_trades()'s own
+    event set (no network). Returns a signal dict if the LAST bar of
+    `closed` is a retest of an unbroken zone meeting min_strength."""
+    atr = neuro_atr_series(closed, 14)
+    zones = snr_build_zones(closed, atr, pivot_length)
+    last_idx = len(closed) - 1
+    if not atr[last_idx]:
+        return None
+    for z in zones:
+        if z["break_idx"] is not None:
+            continue
+        if z["retest_idxs"] and z["retest_idxs"][-1] == last_idx and z["strength"] >= min_strength:
+            direction = "LONG" if z["type"] == "support" else "SHORT"
+            entry = closed[-1]["close"]
+            sl_dist = atr[last_idx] * SNR_SL_ATR_MULT
+            if sl_dist <= 0:
+                continue
+            sl = entry - sl_dist if direction == "LONG" else entry + sl_dist
+            tp = entry + sl_dist * rr if direction == "LONG" else entry - sl_dist * rr
+            return {"direction": direction, "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8),
+                    "zone_price": round(z["price"], 8), "zone_strength": z["strength"],
+                    "time": closed[-1]["time"]}
+    return None
 
 
 def snr_track_signal_outcomes():
@@ -15108,6 +15133,12 @@ def snr_live_loop():
                 sig = snr_scan_symbol_live(symbol)
                 if sig:
                     new_signals[symbol] = sig
+            # v0.99.315 — record that the live scan actually ran, so the tab
+            # can show "last checked HH:MM, N coins" instead of leaving the
+            # user unable to tell "no signals yet" from "scanner not running".
+            with state_lock:
+                STATE["snr_last_live_scan"] = time.time()
+                STATE["snr_last_live_scanned"] = len(active_symbols)
             new_keys = {s: sig["time"] for s, sig in new_signals.items()}
             fired = {s: t for s, t in new_keys.items() if (s, t) not in _snr_prev_signal_keys}
             for symbol, sig_time in fired.items():
@@ -19020,6 +19051,8 @@ def api_snr_status():
         active_symbols = list(_snr_active_symbols)
         display_symbols = list(_snr_display_symbols)
         signal_log = list(STATE["snr_signals"])
+        last_live_scan = STATE.get("snr_last_live_scan")
+        last_live_scanned = STATE.get("snr_last_live_scanned")
     active_set = set(active_symbols)
     signal_stats = snr_compute_signal_stats(active_symbols)
     coins = []
@@ -19033,6 +19066,7 @@ def api_snr_status():
         "coins": coins, "last_backtest_finished": last_finished,
         "backtest_running": running, "waiting_for_slot": waiting, "progress_done": done, "progress_total": total,
         "current_symbol": current_symbol, "in_flight": in_flight, "live_signal_stats": signal_stats,
+        "last_live_scan": last_live_scan, "last_live_scanned": last_live_scanned,
         "config": {"top_n": SNR_TOP_N, "display_n": SNR_DISPLAY_N, "timeframes": SNR_TF_CANDIDATES,
                    "pivot_candidates": SNR_PIVOT_CANDIDATES, "strength_candidates": SNR_STRENGTH_CANDIDATES,
                    "rr_candidates": SNR_RR_CANDIDATES, "refresh_sec": SNR_REFRESH_SEC},
@@ -23399,6 +23433,17 @@ async function refreshSnr() {
     panel.innerHTML = `
       <div class="dim" style="margin-bottom:10px;">
         \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442: ${lastFinished} \u00b7 \u0432\u0441\u0435\u043b\u0435\u043d\u043d\u0430\u044f: \u0432\u0441\u0435 \u043b\u0438\u043a\u0432\u0438\u0434\u043d\u044b\u0435 \u0444\u044c\u044e\u0447\u0435\u0440\u0441\u044b (${data.progress_total||'?'} \u0448\u0442.), \u0431\u0435\u0437 \u0444\u0438\u043b\u044c\u0442\u0440\u0430 \u043f\u043e \u043e\u0431\u044a\u0451\u043c\u0443 \u2014 \u043c\u0435\u0441\u0442\u043e \u0440\u0435\u0448\u0430\u0435\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u0447\u0435\u0441\u0442\u043d\u044b\u0439 train/test \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442 \u00b7 \u043f\u0440\u043e\u0448\u043b\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0443: ${coins.length} \u0438\u0437 \u0434\u043e ${data.config&&data.config.display_n||0} \u043c\u0435\u0441\u0442 \u0434\u043b\u044f \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f${coins.length < (data.config&&data.config.display_n||0) ? ' \u2014 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 \u043c\u043e\u043d\u0435\u0442\u044b \u0438\u0437 \u0432\u0441\u0435\u043b\u0435\u043d\u043d\u043e\u0439 \u043f\u0440\u043e\u0441\u0442\u043e \u043d\u0435 \u043f\u0440\u043e\u0448\u043b\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0443 \u043d\u0430 \u043e\u0442\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0445 \u0434\u0430\u043d\u043d\u044b\u0445, \u044d\u0442\u043e \u043d\u0435 \u0431\u0430\u0433 \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f' : ''}
+        <br>${(() => {
+          const scanTxt = data.last_live_scan
+            ? `живой скан: последний ${fmtDateTime(data.last_live_scan)}, проверено монет: ${data.last_live_scanned}`
+            : 'живой скан: ещё не запускался с момента старта';
+          const perDay = coins.filter(c => c.is_active && c.result && c.result.test_days > 0)
+            .reduce((acc, c) => acc + c.result.test_n / c.result.test_days, 0);
+          const freqTxt = perDay > 0
+            ? ` · по бэктесту ожидается ~1 сигнал в ${(1 / perDay).toFixed(1)} дн. на все торгуемые монеты вместе — несколько дней тишины для этой стратегии нормальны`
+            : '';
+          return scanTxt + freqTxt;
+        })()}
       </div>
       ${progressHtml}
       ${lstatsHtml}
