@@ -16707,3 +16707,25 @@ v0.99.324 - [branch candle-cache, NOT merged until verified on real data]
          on a simulated Gate under both rules (-80% requests); negative
          control (first cached candle dropped) reported 120 mismatches with
          the exact missing candle times.
+         v0.99.324b (same branch) — user's REAL-data run of
+         tools/compare_candles.py failed: "BTC_USDT 1h 40д (+1800/-1):
+         старая 961 свечей, новая 960; только в старой [1790265600]" (+2
+         more, all 1h, the candle at the range end). Gate's `from` rule
+         was learned correctly (floor: 39, ceil: 0), but its answer at the
+         END of a range depends on `from` as well (a simulated Gate that
+         returns floor(from) + floor((to-from)/interval)+1 points
+         reproduces exactly this failure) — so the cache's own tail
+         request (from = end of coverage) wasn't equivalent to the live
+         fetcher's last chunk. Fix: the cached path re-issues exactly the
+         live fetcher's own last chunk(s) — same `from` boundaries
+         (cur0 + k*900 candles), same `to` — and serves from disk only
+         the earlier, fully covered chunks; the old "answer entirely from
+         disk when end <= coverage" shortcut is gone. Coverage now grows
+         only as far as Gate actually returned closed candles.
+         Verified: the old cache version fails under the count-based Gate
+         models (as on the phone); the new one passes tools/
+         compare_candles.py against FIVE simulated Gate behaviours
+         (inclusive, floor-from, floor-from/ceil-to, two count-based) with
+         -80% requests, 0 mismatches in randomized long runs under all of
+         them, and a negative control (first cached candle dropped) is
+         still reported (36 mismatches). Real-data re-run required.

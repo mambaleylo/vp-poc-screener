@@ -3492,31 +3492,38 @@ def get_candles_range(symbol, interval, start_ts, end_ts):
             _candle_cache_stats["errors"] += 1
             log_error(f"candle cache load {symbol} {interval}: {e} — live fetch")
             cov_s, cov_e, rows = None, None, {}
-        head_start = _cc_head_start(cur0, sec)
-        if head_start is not None and cov_s is not None and head_start < cov_s:
-            head_start = None   # that head candle predates the covered span — fetch it live
-        head_to = (cur0 // sec) * sec + 2 * sec   # live-fetched head when Gate's `from` rule isn't known yet
-        if (cov_s is not None and cov_s <= cur0 <= cov_e
-                and (head_start is not None or head_to < min(end, cov_e))):
+        # v0.99.324b — per the user's real-data check (Gate's answer near
+        # the END of a range depends on the request's `from` too, so a
+        # cache-shaped tail request (from = end of coverage) is NOT
+        # equivalent). The cached path now re-issues exactly the request(s)
+        # the live fetcher would make for the last chunk(s) — same `from`
+        # boundaries (cur0 + k*900 candles), same `to` — and serves from
+        # disk only the earlier, fully-covered chunks. Whatever Gate does
+        # at the end of a range, the answer is Gate's own.
+        span = sec * 900
+        head = _cc_head_start(cur0, sec)
+        k = 0
+        if head is not None and cov_s is not None and cov_s <= head <= cov_e:
+            k = -(-(end - cur0) // span) - 1    # index of the live fetcher's last chunk
+            while k >= 1:
+                hb = _cc_head_start(cur0 + k * span, sec)
+                if hb is not None and hb - sec <= cov_e:
+                    break
+                k -= 1
+        if k >= 1:
             _candle_cache_stats["hits"] += 1
-            if head_start is not None:
-                out = []
-                cache_from = head_start
-            else:
-                out = _get_candles_range_live(symbol, interval, start_ts, head_to)
-                cache_from = head_to + 1
-            if end <= cov_e:
-                # rest fully inside the covered span — no further request
-                out.extend(_cc_dict(rows[t]) for t in sorted(rows) if cache_from <= t <= end)
-                return out
-            tail_from = cov_e + 1   # covered span is [cov_s, cov_e] inclusive
-            tail = _get_candles_range_live(symbol, interval, tail_from, end_ts)
-            out.extend(_cc_dict(rows[t]) for t in sorted(rows) if cache_from <= t <= cov_e)
-            out.extend(c for c in tail if c["time"] > cov_e)
-            # extend coverage with the tail's closed candles
-            new_e = min(end, closed_upto)
-            if new_e > cov_e:
-                for c in tail:
+            b = cur0 + k * span
+            hb = _cc_head_start(b, sec)
+            live = _get_candles_range_live(symbol, interval, b, end_ts)
+            merged = {t: _cc_dict(rows[t]) for t in rows if head <= t < hb}
+            for c in live:           # the live fetcher's later chunks overwrite earlier ones the same way
+                merged[c["time"]] = c
+            out = [merged[t] for t in sorted(merged)]
+            # extend coverage only as far as Gate actually returned closed candles
+            live_closed = [c["time"] for c in live if c["time"] <= closed_upto]
+            new_e = max(live_closed) if live_closed else cov_e
+            if new_e > cov_e and hb <= cov_e + sec:
+                for c in live:
                     if c["time"] <= new_e:
                         rows[c["time"]] = _cc_row(c)
                 try:
@@ -3527,12 +3534,14 @@ def get_candles_range(symbol, interval, start_ts, end_ts):
                     _candle_cache_stats["errors"] += 1
                     log_error(f"candle cache save {symbol} {interval}: {e}")
             return out
+
         # not covered: plain live fetch (exactly the old behaviour), then store it
         _candle_cache_stats["misses"] += 1
         fresh = _get_candles_range_live(symbol, interval, start_ts, end_ts)
         _cc_learn_from_semantics(cur0, sec, fresh)
         new_s = cur0 + sec          # one candle inside the fetched start: no edge ambiguity
-        new_e = min(end, closed_upto)
+        fresh_closed = [c["time"] for c in fresh if c["time"] <= closed_upto]
+        new_e = max(fresh_closed) if fresh_closed else new_s   # only as far as Gate actually returned
         if new_e > new_s:
             store = {c["time"]: _cc_row(c) for c in fresh if new_s <= c["time"] <= new_e}
             if cov_s is not None and cov_s <= new_e + sec and new_s <= cov_e + sec:
