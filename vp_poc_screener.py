@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.318"
+APP_VERSION = "0.99.319"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -20076,6 +20076,15 @@ def api_msnr_status():
         "enabled": MSNR_ENABLED,
         "symbols": MSNR_SYMBOLS,
         "live_universe": live_universe,
+        # v0.99.319 — diagnostics for "no MSNR signals for days": what the
+        # live loop ACTUALLY scans, and how many backtested symbols clear
+        # msnr_rank_by_winrate_sample()'s hard winrate>=45% bar (the gate
+        # that feeds the live universe).
+        "effective_live_universe": effective_live_universe,
+        "wr_floor_pass_n": sum(1 for ov in overrides.values()
+                               if ov and not ov.get("error") and not ov.get("stress_test_failed")
+                               and (ov.get("winrate") or 0) >= 45),
+        "backtested_n": sum(1 for ov in overrides.values() if ov and not ov.get("error")),
         "autotrade_eligible": autotrade_eligible,
         "backtest_universe_size": len(backtest_universe),
         "last_backtest_finished": last_backtest_finished,
@@ -22184,7 +22193,9 @@ async function refreshMsnr() {
   const buildTxt = status.backtest_running
     ? `бэктест выполняется: ${status.backtest_done||0}/${status.backtest_total||'?'} монет${status.backtest_started_at ? ' · идёт ' + Math.round((Date.now()/1000 - status.backtest_started_at)) + 'с' : ''}`
     : (status.last_backtest_finished
-      ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s)`
+      ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s)` +
+        // v0.99.319 — what the live scanner actually watches
+        (status.effective_live_universe ? ` · живой скан: ${status.effective_live_universe.length} монет (${status.effective_live_universe.map(x => x.replace('_USDT','')).join(', ') || '—'}) · WR≥45%: ${status.wr_floor_pass_n}/${status.backtested_n}` : '')
       : 'бэктест ещё не запускался');
   // v0.99.58, per direct user report ("ночью несколько часов прошло а
   // ребэктеста не было давно" — the exact scenario this session's own

@@ -16512,3 +16512,22 @@ v0.99.318 - $15 va-bank compounding on every backtest trade list for Neuro,
          exactly at the same leverage; TIMEOUT with pnl_r compounds,
          pnl_r=None skipped; Neuro lazy path computes + caches via the
          real /api/neuro/status route.
+
+v0.99.319 - MSNR live-scan diagnostics, per user report ("несколько дней
+         нет сигналов по msnr"). No code path changed in v0.99.316-318
+         touches MSNR; the timing points at v0.99.305 (20.09: 4h cascade,
+         TP = opposite ACTIVE 4h level). Suspected mechanism: TP from the
+         4h level pushes RR up, backtest winrates fall, and
+         msnr_rank_by_winrate_sample() has a HARD winrate>=45% bar feeding
+         msnr_compute_live_universe() — if few/no symbols clear it, the
+         live loop falls back to MSNR_SYMBOLS (gold only) and effectively
+         stops scanning the altcoin universe. Can't confirm from the
+         sandbox (Gate geo-blocked, no MSNR state in the repo), so this
+         version makes it visible instead of guessing:
+         /api/msnr/status now returns effective_live_universe (what
+         msnr_live_loop actually scans), wr_floor_pass_n and backtested_n;
+         the MSNR tab's "последний бэктест" line shows "живой скан: N
+         монет (list) · WR≥45%: M/K".
+         Verified: py_compile (-W error), pyflakes, node --check, real
+         runtime /api/msnr/status returning the new fields (empty state →
+         gold fallback, exactly the suspected symptom).
