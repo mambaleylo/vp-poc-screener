@@ -16390,3 +16390,35 @@ v0.99.314 - MSNR's own chart now displays 1h candles by default instead
          higher); an explicit ?display_tf=15m request correctly returns
          tf="15m" and skips the redundant display fetch (15m/1h/4h only).
          Verified: py_compile (-W error), pyflakes, 67 routes.
+
+v0.99.315 - CRITICAL FIX: S/R Zones' live scanner was systematically
+         missing signals the backtest would have taken, per direct user
+         report ("есть ли живые сигналы вообще по s/r zone? Чёт за
+         несколько дней ни одного нет").
+         Root cause: snr_scan_symbol_live() fetched only 250 bars, while
+         the backtest that chose each symbol's own min_strength built
+         its zones on the FULL history (snr_history_days_for_tf(): ~3600
+         bars at 1h, ~3000 at 4h, 500 at 1d). A zone's strength is the
+         count of its retests over ALL visible history, and a zone only
+         exists if its origin pivot is inside the window — so the
+         250-bar live view saw truncated strengths (or no zone at all)
+         for exactly the long-lived, heavily-retested zones min_strength
+         was calibrated on. Retest detection itself was confirmed causal
+         (no lookahead), so the mismatch was purely the history depth.
+         Fixed by fetching the same depth as the backtest. Split the
+         pure detection core out as snr_detect_live_signal() so it could
+         be verified directly: on synthetic mean-reverting series
+         (3 seeds x 3600 bars, live scan simulated at each of the last
+         600 bars), the old 250-bar window caught only 63 of 82 backtest
+         signals (77%); the full-history version caught 82 of 82, with
+         zero extra signals the backtest didn't have.
+         Also added visibility: the S/R tab now shows when the live scan
+         last ran and how many coins it checked (new snr_last_live_scan/
+         snr_last_live_scanned, exposed via /api/snr/status), plus the
+         expected signal frequency from the backtest's own test window
+         (new test_days field on each result: sum of test_n/test_days
+         across traded coins) — so "no signals for a few days" can be
+         told apart from "scanner not running". test_days appears on
+         results from the next backtest cycle onward.
+         Verified: py_compile (-W error), pyflakes, node --check, real
+         runtime 200 on / with /api/snr/status returning the new fields.
