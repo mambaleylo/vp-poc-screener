@@ -16531,3 +16531,36 @@ v0.99.319 - MSNR live-scan diagnostics, per user report ("несколько д�
          Verified: py_compile (-W error), pyflakes, node --check, real
          runtime /api/msnr/status returning the new fields (empty state →
          gold fallback, exactly the suspected symptom).
+
+v0.99.320 - Neuro mining-loop robustness, per user report ("почему 3 дня
+         мог не погоняться бэктест по neuro"). Can't see the phone's logs
+         from the sandbox, so fixed every code path found that can
+         silently stall mining for days, and made the state visible:
+         (1) Semaphore permit leak: neuro_mining_watchdog() abandons a
+         stuck loop thread and starts a fresh one, but the zombie kept its
+         BACKTEST_CONCURRENCY_SEMAPHORE permit forever (its `finally`
+         never runs). Limit is 2 — one leak halves backtest capacity for
+         every module, two block ALL backtests until restart. Now
+         _neuro_sem_holder_gen tracks which loop generation holds the
+         permit; the watchdog reclaims it and the zombie skips its own
+         release if it ever wakes.
+         (2) Duplicate loops: a zombie that later unstuck kept running as
+         a second mining loop. _neuro_loop_gen is bumped by the watchdog;
+         a loop whose generation is stale exits at its next turn.
+         (3) A failed cycle (any exception) waited the full 24h
+         NEURO_REFRESH_SEC before retrying — a daily-recurring failure
+         meant days without a fresh backtest. Now retries after
+         NEURO_RETRY_AFTER_ERROR_SEC (30 min).
+         (4) NEURO_ENABLED off -> plain time.sleep(24h), not
+         interruptible: toggling Neuro off/on left mining dead for up to
+         a day. Now a 60s interruptible wait.
+         (5) Blocking on the shared semaphore was invisible (mining_
+         running False, watchdog blind, UI showed only the old "последний
+         майнинг"). /api/neuro/status now returns waiting_slot_since,
+         last_error(+_ts), next_mining_ts; the Neuro tab shows "⏳ ждёт
+         свободного слота бэктеста с …", "следующий ~…", and "⚠️
+         последний цикл упал …: <error> · повтор через 30 мин".
+         Verified: py_compile (-W error), pyflakes; threaded test — a
+         loop hung holding a permit (permits 2→1), watchdog fires, gen
+         bumps, replacement loop runs, permits back to 2, and when the
+         zombie wakes and fails it does NOT double-release (stays 2).

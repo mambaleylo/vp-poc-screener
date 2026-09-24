@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.319"
+APP_VERSION = "0.99.320"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -17856,6 +17856,20 @@ _neuro_mining_progress_ts = time.time()  # v0.99.217 — last time real progress
 _neuro_active_symbols = list(NEURO_COINS[:NEURO_TOP_N])  # v0.99.236 — current top-N survivors of the full-universe backtest; starts as the seed coins until the first cycle completes
 _neuro_display_symbols = list(NEURO_COINS[:max(NEURO_DISPLAY_N, NEURO_TOP_N)])  # v0.99.262 — superset of _neuro_active_symbols: everything shown in the UI, whether or not it's actually traded
 _neuro_prev_signal_keys = set()
+# v0.99.320 — mining-loop robustness (user report: "почему 3 дня мог не
+# погоняться бэктест по neuro"). _neuro_loop_gen: bumped by the watchdog
+# when it abandons a stuck thread, so the zombie exits at its next loop
+# turn instead of running as a second, duplicate mining loop.
+# _neuro_sem_holder_gen: which loop generation currently holds a
+# BACKTEST_CONCURRENCY_SEMAPHORE permit — lets the watchdog hand an
+# abandoned thread's permit back (previously leaked forever: with a
+# limit of 2, one leak halves backtest capacity for every module, two
+# block ALL backtests until restart).
+_neuro_loop_gen = 0
+_neuro_sem_holder_gen = None
+_neuro_waiting_slot_since = None   # set while blocked on the shared backtest semaphore
+_neuro_last_error = None           # (ts, text) of the last failed cycle, shown in the UI
+NEURO_RETRY_AFTER_ERROR_SEC = int(os.environ.get("VP_NEURO_RETRY_AFTER_ERROR_SEC", 1800))
 
 # v0.99.227 — persistent live-signal LOG with real tracked outcomes, per
 # direct user request ("по нейро есть какая-то статистика живых сигналов?
@@ -18063,6 +18077,7 @@ NEURO_WATCHDOG_STUCK_SEC = NEURO_PER_SYMBOL_MAX_SEC * 2 + 120  # generous margin
 
 def neuro_mining_watchdog():
     global _neuro_mining_running, _neuro_mining_current_symbol, _neuro_mining_progress_ts
+    global _neuro_loop_gen, _neuro_sem_holder_gen
     while True:
         time.sleep(NEURO_WATCHDOG_CHECK_SEC)
         try:
@@ -18074,10 +18089,17 @@ def neuro_mining_watchdog():
                 log_error(f"neuro_mining_watchdog: mining loop stuck on {current} for over "
                           f"{NEURO_WATCHDOG_STUCK_SEC}s despite the per-symbol ceiling — starting a "
                           f"fresh mining thread (old one abandoned as a zombie, cannot be force-killed)")
+                orphan_permit = False
                 with _neuro_state_lock:
                     _neuro_mining_running = False
                     _neuro_mining_current_symbol = None
                     _neuro_mining_progress_ts = time.time()
+                    _neuro_loop_gen += 1  # v0.99.320 — zombie exits at its next loop turn
+                    if _neuro_sem_holder_gen is not None:
+                        _neuro_sem_holder_gen = None
+                        orphan_permit = True
+                if orphan_permit:
+                    BACKTEST_CONCURRENCY_SEMAPHORE.release()  # v0.99.320 — reclaim the zombie's permit (it skips its own release)
                 threading.Thread(target=neuro_mining_loop, daemon=True).start()
         except Exception as e:
             log_error(f"neuro_mining_watchdog: {e}")
@@ -18093,13 +18115,23 @@ def neuro_mining_loop():
     # instead of all colliding on the shared semaphore at once.
     # v0.99.272 -- same CRITICAL FIX as ft5_backtest_loop()'s own — see
     # that function's own comment for the full incident.
+    global _neuro_sem_holder_gen, _neuro_waiting_slot_since, _neuro_last_error
+    with _neuro_state_lock:
+        my_gen = _neuro_loop_gen
     NEURO_MINING_TRIGGER.wait(timeout=180)
     NEURO_MINING_TRIGGER.clear()
     while True:
+        with _neuro_state_lock:
+            if my_gen != _neuro_loop_gen:
+                return  # v0.99.320 — abandoned by the watchdog; a fresh loop replaced this one
         _neuro_sem_acquired = False
+        _cycle_failed = False
         try:
             if not NEURO_ENABLED:
-                time.sleep(max(300, NEURO_REFRESH_SEC))
+                # v0.99.320 — was a plain time.sleep(24h): toggling Neuro
+                # off and back on left mining dead for up to a day.
+                NEURO_MINING_TRIGGER.wait(timeout=60)
+                NEURO_MINING_TRIGGER.clear()
                 continue
             # v0.99.268 — same shared concurrency cap as msnr_backtest_loop's
             # own (see its comment for the full reasoning): Neuro's own
@@ -18107,8 +18139,13 @@ def neuro_mining_loop():
             # so this acquires directly and releases via this same try's own
             # `finally` below (added there instead of a nested try, to avoid
             # re-indenting the whole cycle body).
+            with _neuro_state_lock:
+                _neuro_waiting_slot_since = time.time()
             BACKTEST_CONCURRENCY_SEMAPHORE.acquire()
             _neuro_sem_acquired = True
+            with _neuro_state_lock:
+                _neuro_waiting_slot_since = None
+                _neuro_sem_holder_gen = my_gen
             # v0.99.236 — dynamic, volume-ranked universe (up to
             # NEURO_UNIVERSE_SIZE=120 candidates) instead of the old fixed
             # 20-coin list, per direct user request ("развяжем руки нейро
@@ -18274,16 +18311,27 @@ def neuro_mining_loop():
                         lines.append(f"{sym.replace('_USDT', '')}-{wr_txt}-{rr_txt}")
                     send_telegram("\U0001f9e0 Neuro \u0431\u044d\u043a\u0442\u0435\u0441\u0442:\n" + "\n".join(lines), category="neuro_summary")
         except Exception as e:
+            _cycle_failed = True
             log_error(f"neuro_mining_loop: {e}")
             with _neuro_state_lock:
                 _neuro_mining_running = False
+                _neuro_last_error = (int(time.time()), str(e)[:300])
         finally:
-            if _neuro_sem_acquired:
+            release_now = False
+            with _neuro_state_lock:
+                _neuro_waiting_slot_since = None
+                if _neuro_sem_acquired and _neuro_sem_holder_gen == my_gen:
+                    _neuro_sem_holder_gen = None
+                    release_now = True
+            if release_now:  # v0.99.320 — skip if the watchdog already reclaimed this permit
                 BACKTEST_CONCURRENCY_SEMAPHORE.release()
         # v0.99.212 — Event.wait(timeout=...) instead of a plain sleep, same
         # fix as LSW/MSNR's own "Очистить X doesn't wake the sleeping loop"
         # — the new "Очистить Neuro" button can cut this short immediately.
-        NEURO_MINING_TRIGGER.wait(timeout=max(300, NEURO_REFRESH_SEC))
+        # v0.99.320 — a FAILED cycle retries in 30 min instead of waiting
+        # the full 24h (a daily-recurring failure used to mean days with
+        # no fresh backtest and nothing visible in the tab).
+        NEURO_MINING_TRIGGER.wait(timeout=NEURO_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, NEURO_REFRESH_SEC))
         NEURO_MINING_TRIGGER.clear()
 
 
@@ -18411,6 +18459,8 @@ def api_neuro_status():
         summary = dict(_neuro_summary)
         live_signals = dict(_neuro_live_signals)
         last_mined = _neuro_last_mined
+        waiting_slot_since = _neuro_waiting_slot_since
+        last_error = _neuro_last_error
         running = _neuro_mining_running
         mining_done = _neuro_mining_done
         mining_total = _neuro_mining_total
@@ -18451,6 +18501,10 @@ def api_neuro_status():
         })
     return jsonify({
         "coins": coins, "last_mined": last_mined, "mining_running": running,
+        "waiting_slot_since": waiting_slot_since,
+        "last_error_ts": last_error[0] if last_error else None,
+        "last_error": last_error[1] if last_error else None,
+        "next_mining_ts": (last_mined + NEURO_REFRESH_SEC) if last_mined else None,
         "mining_done": mining_done, "mining_total": mining_total, "mining_current_symbol": mining_current,
         "live_signal_stats": signal_stats,
         "config": {"tf": NEURO_TF, "forward_bars": NEURO_FORWARD_BARS, "rr": NEURO_RR,
@@ -23273,7 +23327,11 @@ async function refreshNeuro() {
     const lastMined = data.last_mined ? fmtDateTime(data.last_mined) : '\u2014';
     const miningTxt = data.mining_running
       ? `<span class="dim">\u043c\u0430\u0439\u043d\u0438\u043d\u0433: ${data.mining_done||0}/${data.mining_total||coins.length||10} \u2014 \u0441\u0435\u0439\u0447\u0430\u0441 ${data.mining_current_symbol||'?'}</span>`
-      : `<span class="dim">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u043c\u0430\u0439\u043d\u0438\u043d\u0433: ${lastMined}</span>`;
+      : (data.waiting_slot_since
+        ? `<span style="color:#ffa726;">⏳ ждёт свободного слота бэктеста с ${fmtDateTime(data.waiting_slot_since)} (одновременно идут не больше 2 бэктестов) · последний майнинг: ${lastMined}</span>`
+        : `<span class="dim">последний майнинг: ${lastMined}${data.next_mining_ts ? ' · следующий ~' + fmtDateTime(data.next_mining_ts) : ''}</span>`)
+      + (data.last_error && (!data.last_mined || data.last_error_ts > data.last_mined)
+        ? `<div class="loss" style="font-size:10.5px;margin-top:2px;">⚠️ последний цикл упал ${fmtDateTime(data.last_error_ts)}: ${String(data.last_error).replace(/</g,'&lt;')} · повтор через 30 мин</div>` : '');
     const progressPct = data.mining_total ? Math.round((data.mining_done||0) / data.mining_total * 100) : 0;
     const progressBarHtml = data.mining_running ? `
       <div style="margin:6px 0 10px;">
