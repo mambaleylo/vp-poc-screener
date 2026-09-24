@@ -16446,3 +16446,29 @@ v0.99.316 - Compact header, per direct user report (screenshot: "все
          on / with all 15 header ids present, node --check on extracted
          JS, jsdom: panel starts closed, toggles open, Sweep row hidden
          with lsw_enabled=false, zero runtime errors.
+
+v0.99.317 - Neuro min-winrate floor fixes, per user report ("в бэктесте
+         Neuro вижу винрейт ниже, чем я поставил минимально в настройках").
+         Two real causes, neither a user error:
+         (1) Floor and card judged DIFFERENT numbers. neuro_effective_
+         winrate() (v0.99.298) used the recent-30-trade winrate whenever
+         it had >=15 trades, but the card's WINRATE shows the full-history
+         figure — so e.g. 31% overall with a lucky last-30 stretch at 38%
+         passed a 35% floor and displayed "31%". Now the floor takes
+         min(full-history WR, recent WR): a coin must clear the minimum
+         both overall (what the card shows) and recently (the original
+         v0.99.298 protection is kept).
+         (2) Changing the setting had no effect until the next mining
+         cycle — NEURO_REFRESH_SEC is 24h. apply_settings() now trims
+         immediately on a raise (drops failing coins from display/active/
+         patterns/trades/summary/live-signal state, same pattern as the
+         neuro_display_n trim, then save_neuro_state()); on a lower,
+         api_post_settings() wakes NEURO_MINING_TRIGGER for a fresh cycle
+         (dropped coins' data isn't kept, so only re-mining can re-admit
+         them). The trigger lives in the API route, not apply_settings(),
+         so startup load_settings() keeps the staggered 180s first cycle.
+         Verified: py_compile (-W error), pyflakes; synthetic test — floor
+         30->35 drops A (31% full / 38% recent — the reported case) and
+         D (45% full / 33% recent), keeps B (40/41) and C (37%, too few
+         recent trades -> full-history only), save_neuro_state called;
+         POST lowering the floor sets the trigger, raising does not.

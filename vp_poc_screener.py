@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.316"
+APP_VERSION = "0.99.317"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1406,9 +1406,34 @@ def apply_settings(updates):
                 save_neuro_state()
     if "neuro_min_winrate" in updates:
         try:
-            NEURO_MIN_WINRATE = float(updates["neuro_min_winrate"])
+            _new_min_wr = float(updates["neuro_min_winrate"])
         except (TypeError, ValueError):
-            pass
+            _new_min_wr = None
+        if _new_min_wr is not None:
+            NEURO_MIN_WINRATE = _new_min_wr
+            # v0.99.316 — apply immediately instead of waiting up to a full
+            # mining interval: raising the floor drops now-failing coins
+            # from the stored/displayed/traded sets using data already in
+            # memory (same trim pattern as neuro_display_n above); lowering
+            # it can't pull back coins that weren't kept, so it wakes the
+            # mining loop for a fresh cycle instead.
+            _dropped = False
+            with _neuro_state_lock:
+                keep = {s for s in _neuro_display_symbols
+                        if (neuro_effective_winrate(_neuro_summary.get(s, {})) or 0) >= NEURO_MIN_WINRATE}
+                if len(keep) < len(_neuro_display_symbols):
+                    _dropped = True
+                    for _d in (_neuro_patterns, _neuro_trades, _neuro_summary, _neuro_live_signals):
+                        for sym in list(_d.keys()):
+                            if sym not in keep:
+                                del _d[sym]
+                    _neuro_display_symbols = [s for s in _neuro_display_symbols if s in keep]
+                    _neuro_active_symbols = [s for s in _neuro_active_symbols if s in keep]
+            if _dropped:
+                save_neuro_state()
+            # (lowering the floor re-mines — triggered from api_post_settings,
+            # not here, so startup load_settings() doesn't skip the staggered
+            # 180s first-cycle delay)
     if "nq_enabled" in updates:
         NQ_ENABLED = bool(updates["nq_enabled"])
     if "lsw_enabled" in updates:
@@ -17322,13 +17347,21 @@ def neuro_pick_best_rr(train_candles, confirmed_patterns, htf_candles=None, fund
 
 
 def neuro_effective_winrate(summary):
-    """v0.99.298 — same recent-preferred, full-history-fallback pattern
-    as neuro_rank_metric()'s own, so the winrate floor judges a coin by
-    the same evidence its ranking already does."""
+    """v0.99.298 winrate floor input — see the v0.99.316 note below:
+    now min(full-history WR, recent-window WR when trustworthy)."""
+    # v0.99.316 — per user report ("в бэктесте Neuro вижу винрейт ниже,
+    # чем я поставил минимально"): the floor used to judge ONLY the recent
+    # window when it had enough trades, while the card shows the FULL-
+    # history winrate — so a coin at e.g. 31% overall with a lucky last-30
+    # stretch at 38% passed a 35% floor and showed "31%" on its card.
+    # Now the floor takes the LOWER of the two: a coin must clear the
+    # minimum both overall (what the card shows) and recently (the
+    # original v0.99.298 protection against a coin that's gone bad).
+    full = summary.get("winrate")
     agg = summary.get("aggregate_recent") or {}
-    if agg.get("n", 0) >= NEURO_AGG_DECAY_MIN_N and agg.get("wr") is not None:
-        return agg["wr"]
-    return summary.get("winrate")
+    recent = agg.get("wr") if agg.get("n", 0) >= NEURO_AGG_DECAY_MIN_N else None
+    vals = [v for v in (full, recent) if v is not None]
+    return min(vals) if vals else None
 
 
 def neuro_rank_metric(summary):
@@ -20429,8 +20462,14 @@ def api_post_settings():
     try:
         body = request.get_json(force=True, silent=True) or {}
         updates = {k: v for k, v in body.items() if k in SETTINGS_KEYS}
+        _prev_neuro_min_wr = NEURO_MIN_WINRATE
         apply_settings(updates)
         save_settings()
+        # v0.99.316 — a lowered Neuro winrate floor can only re-admit coins
+        # via a fresh mining cycle (dropped coins' data isn't kept), and the
+        # normal interval is 24h — wake the loop now.
+        if NEURO_MIN_WINRATE < _prev_neuro_min_wr:
+            NEURO_MINING_TRIGGER.set()
         return jsonify({"ok": True, "settings": get_settings()})
     except Exception as e:
         log_error(f"api_post_settings: {e}")
