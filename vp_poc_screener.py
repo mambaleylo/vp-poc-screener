@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.320"
+APP_VERSION = "0.99.321"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -436,7 +436,10 @@ HOURLY_STATS_INTERVAL_SEC = int(os.environ.get("VP_HOURLY_STATS_INTERVAL_SEC", 3
 # STATE references MSNR_SIGNAL_HISTORY at construction time.
 # ============================================================================
 MSNR_ENABLED = os.environ.get("VP_MSNR_ENABLED", "1") == "1"
-MSNR_SYMBOLS = [s.strip() for s in os.environ.get("VP_MSNR_SYMBOLS", "XAU_USDT,XAUT_USDT,PAXG_USDT").split(",") if s.strip()]
+# v0.99.321 — MSNR_SYMBOLS (fixed XAU/XAUT/PAXG list) removed entirely, per
+# user request ("никаких списков не должно быть"): the backtest universe is
+# purely liquidity-ranked and the live scan is purely the backtest's own
+# ranked selection. No hardcoded fallback.
 MSNR_STRUCTURE_TF = os.environ.get("VP_MSNR_STRUCTURE_TF", "1h")  # timeframe the OCL / A-shape / V-shape "Storyline" levels are built on
 MSNR_HIGHER_TF = os.environ.get("VP_MSNR_HIGHER_TF", "4h")  # v0.99.305 — per direct user request, after reviewing screenshots of the strategy author's own source material showing a 4h->1h->15m cascade (this app originally shipped a deliberately-collapsed 2-stage version, see this section's own header comment): 4h now supplies the BIG-PICTURE A/V pair and the TAKE-PROFIT target — a 1h level only fires if a same-type 4h level is CURRENTLY active too (the "refined 1h point within the 4h zone" from the screenshots), and TP becomes the opposite ACTIVE 4h level instead of the opposite 1h one, matching the source's own very high R:R (10-24R) by construction. SL calculation itself is UNCHANGED (still the sweep candle's own extreme x MSNR_SL_BUFFER_MULT) — that buffer was added for a real, previously-reported reason (bare-extreme stops getting hit too often) and the user's own "стоп за хай/лоу" description matches what this already does, not a request to remove the buffer.
 MSNR_ENTRY_TF = os.environ.get("VP_MSNR_ENTRY_TF", "15m")  # v0.99.126 changed this to "1m" per the strategy author's own trade screenshot (the QM trigger is watched on M1 in the source material). v0.99.147 — reverted back to "15m", per direct user report that 1m caused a dramatic drop in backtest signal count: Gate's ~10000-candle recency floor caps 1m history to ~6.9 days (vs ~102 days at 15m), so MSNR_BACKTEST_DAYS=40 was silently giving only ~7 days of entry-TF history instead of 40, leaving most symbols with 5-7 signals instead of the expected dozens. At 15m the backtest covers the full 40 days again. Live signals are fractionally less precise (15m candle vs 1m) but the author's strategy note remains intact — a future improvement would be a separate live entry_tf, but that's a bigger change than warranted here.
@@ -10505,11 +10508,7 @@ def msnr_build_backtest_universe():
             seen_vol[name] = vol
     ranked = sorted(seen_vol.items(), key=lambda x: -x[1])
     top_liquid = [s[0] for s in ranked]
-    combined = list(MSNR_SYMBOLS)
-    for sym in top_liquid:
-        if sym not in combined:
-            combined.append(sym)
-    return combined
+    return list(dict.fromkeys(top_liquid))  # v0.99.321 — no forced gold list
 
 
 def msnr_compute_live_universe(overrides, bounds=None):
@@ -11117,7 +11116,7 @@ def msnr_live_loop():
             # correct to scan regardless of backtest state, so this
             # fallback can't ever leave live scanning empty.
             with state_lock:
-                live_universe = list(STATE["msnr_live_universe"]) or list(MSNR_SYMBOLS)
+                live_universe = list(STATE["msnr_live_universe"])  # v0.99.321 — no gold fallback; empty until the first backtest ranks symbols
                 autotrade_symbols = dict(STATE["msnr_autotrade_symbols"])
                 overrides_snapshot = dict(STATE["msnr_symbol_overrides"])
             # v0.99.32, per direct user request ("топ 10 плюс галочка,
@@ -14617,7 +14616,7 @@ def amd_loop():
 # volume-ranked universe — much simpler, no universe-builder needed.
 # ============================================================================
 SNR_ENABLED           = os.environ.get("VP_SNR_ENABLED", "1") == "1"
-SNR_SEED_SYMBOLS      = [s.strip() for s in os.environ.get("VP_SNR_SYMBOLS", "XAU_USDT,BTC_USDT,SOL_USDT").split(",") if s.strip()]  # v0.99.274 — per direct user follow-up ("не нужно чтобы биткоин солана и золото были по любому в списке, пусть все ранжирует я честно"): NO LONGER force-included in the universe (see snr_build_universe()) — only used as the initial placeholder for _snr_active_symbols/_snr_display_symbols before the very first real backtest cycle completes
+# v0.99.321 — SNR_SEED_SYMBOLS (XAU/BTC/SOL seed list) removed per user request ("никаких списков не должно быть"): nothing is live-scanned/traded until the first backtest ranks symbols.
 SNR_UNIVERSE_SIZE     = int(os.environ.get("VP_SNR_UNIVERSE_SIZE", 30))  # v0.99.271 — no longer used to cap the universe (see snr_build_universe()'s own v0.99.276 comment); kept defined only in case a future session wants to reintroduce a cap deliberately
 SNR_TOP_N             = int(os.environ.get("VP_SNR_TOP_N", 3))     # how many survive the full sweep AND are actually live-scanned/traded, ranked by TEST avg_pnl_r
 SNR_DISPLAY_N         = int(os.environ.get("VP_SNR_DISPLAY_N", 5))  # how many get kept/shown — always clamped to at least SNR_TOP_N, same semantics as NEURO_DISPLAY_N (v0.99.262)
@@ -14666,8 +14665,8 @@ SNR_N_COMBOS          = len(SNR_TF_CANDIDATES) * len(SNR_PIVOT_CANDIDATES) * len
 SNR_Z_CRITICAL        = 3.23  # v0.99.277 — Bonferroni-corrected one-tailed z-critical for SNR_N_COMBOS=81 independent comparisons at overall alpha=0.05 (alpha/81 per comparison ≈ 0.000617 -> z≈3.23, computed via the standard normal inverse CDF — hardcoded rather than adding scipy as a dependency, same "no scipy on a phone via Termux" reasoning _T_CRITICAL_TABLE's own comment already documents elsewhere in this file). See snr_optimize_symbol()'s own docstring for why a plain "average > 0" bar wasn't enough.
 SNR_PER_SYMBOL_MAX_SEC = int(os.environ.get("VP_SNR_PER_SYMBOL_MAX_SEC", 300))  # v0.99.271 — hard ceiling per symbol now that the universe can be much bigger than 3 fixed coins, same "one stuck symbol can't block the whole cycle" discipline as every other module
 SNR_BACKTEST_TRIGGER  = threading.Event()  # v0.99.270 — per direct user request ("бэктест не идёт по индикатору, добавь кнопку перезапуска бэктеста принудительно как для нейро") — same "Очистить X doesn't wake the sleeping loop" fix as every other module's own trigger event
-_snr_active_symbols   = list(SNR_SEED_SYMBOLS[:SNR_TOP_N])  # v0.99.271 — current top-N survivors that get live-scanned/traded; starts as the seed coins until the first cycle completes
-_snr_display_symbols  = list(SNR_SEED_SYMBOLS[:max(SNR_DISPLAY_N, SNR_TOP_N)])  # v0.99.271 — superset of _snr_active_symbols: everything shown in the UI
+_snr_active_symbols   = []  # v0.99.321 — filled only by the backtest ranking (no seed list)
+_snr_display_symbols  = []  # v0.99.321 — filled only by the backtest ranking (no seed list)
 _snr_prev_signal_keys = set()  # v0.99.271 — (symbol, bar_time) pairs already fired, same dedup pattern as neuro_live_loop's own _neuro_prev_signal_keys
 
 
@@ -17853,8 +17852,8 @@ _neuro_mining_done = 0
 _neuro_mining_total = 0
 _neuro_mining_current_symbol = None
 _neuro_mining_progress_ts = time.time()  # v0.99.217 — last time real progress happened, for the watchdog below
-_neuro_active_symbols = list(NEURO_COINS[:NEURO_TOP_N])  # v0.99.236 — current top-N survivors of the full-universe backtest; starts as the seed coins until the first cycle completes
-_neuro_display_symbols = list(NEURO_COINS[:max(NEURO_DISPLAY_N, NEURO_TOP_N)])  # v0.99.262 — superset of _neuro_active_symbols: everything shown in the UI, whether or not it's actually traded
+_neuro_active_symbols = []  # v0.99.321 — filled only by the mining ranking; NEURO_COINS no longer traded as a seed before the first cycle
+_neuro_display_symbols = []  # v0.99.321 — see _neuro_active_symbols
 _neuro_prev_signal_keys = set()
 # v0.99.320 — mining-loop robustness (user report: "почему 3 дня мог не
 # погоняться бэктест по neuro"). _neuro_loop_gen: bumped by the watchdog
@@ -20039,7 +20038,7 @@ def api_msnr_status():
         overrides = dict(STATE["msnr_symbol_overrides"])
         backtest_universe = list(STATE["msnr_backtest_universe"])
         backtest_results_raw = dict(STATE["msnr_backtest_results_raw"])
-        live_universe = list(STATE["msnr_live_universe"]) or list(MSNR_SYMBOLS)
+        live_universe = list(STATE["msnr_live_universe"])  # v0.99.321 — no gold fallback; empty until the first backtest ranks symbols
         autotrade_symbols = dict(STATE["msnr_autotrade_symbols"])
         last_backtest_finished = STATE["msnr_last_backtest_finished"]
         last_backtest_duration = STATE["msnr_last_backtest_duration"]
@@ -20128,7 +20127,6 @@ def api_msnr_status():
     rr_buckets = msnr_rr_bucket_stats(pooled_trades)
     return jsonify({
         "enabled": MSNR_ENABLED,
-        "symbols": MSNR_SYMBOLS,
         "live_universe": live_universe,
         # v0.99.319 — diagnostics for "no MSNR signals for days": what the
         # live loop ACTUALLY scans, and how many backtested symbols clear
@@ -20372,7 +20370,7 @@ def api_reset_msnr():
             STATE["msnr_backtest_results_raw"] = {}
             STATE["msnr_backtest_summary"] = {}
             STATE["msnr_symbol_overrides"] = {}
-            STATE["msnr_live_universe"] = []  # v0.99.18: stale derived data, same reasoning as clearing overrides above — msnr_live_loop() falls back to MSNR_SYMBOLS (gold) until the next backtest cycle repopulates it
+            STATE["msnr_live_universe"] = []  # v0.99.18: stale derived data, same reasoning as clearing overrides above — (v0.99.321: no gold fallback any more) msnr_live_loop() scans nothing until the next backtest cycle repopulates it
             STATE["msnr_last_backtest_finished"] = None
             STATE["msnr_last_backtest_duration"] = None
             STATE["msnr_signals"].clear()
@@ -20567,8 +20565,8 @@ def api_reset_neuro():
             _neuro_summary.clear()
             _neuro_live_signals.clear()
             global _neuro_active_symbols, _neuro_display_symbols
-            _neuro_active_symbols = list(NEURO_COINS[:NEURO_TOP_N])
-            _neuro_display_symbols = list(NEURO_COINS[:max(NEURO_DISPLAY_N, NEURO_TOP_N)])
+            _neuro_active_symbols = []  # v0.99.321 — no seed list
+            _neuro_display_symbols = []
         with _neuro_signal_log_lock:
             _neuro_signal_log.clear()
         save_neuro_state()  # v0.99.240 — persist the reset immediately, so a restart right after doesn't resurrect the old cleared data from disk
@@ -22298,7 +22296,7 @@ async function refreshMsnr() {
   // truncated to the first 8 with a "+N ещё" tail (same pattern the
   // progress bar's own in-flight list already used above) since it
   // can grow arbitrarily long as more symbols qualify.
-  const liveSymbols = status.live_universe || status.symbols || [];
+  const liveSymbols = status.live_universe || [];
   const liveSymbolsTxt = liveSymbols.slice(0, 8).join(', ') + (liveSymbols.length > 8 ? ` +${liveSymbols.length - 8}` : '');
   const warnHtml = `
     <div class="dim hint-block" style="font-size:12px;margin-bottom:10px;">

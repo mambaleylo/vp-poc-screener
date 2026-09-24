@@ -16564,3 +16564,28 @@ v0.99.320 - Neuro mining-loop robustness, per user report ("почему 3 дн�
          loop hung holding a permit (permits 2→1), watchdog fires, gen
          bumps, replacement loop runs, permits back to 2, and when the
          zombie wakes and fails it does NOT double-release (stays 2).
+
+v0.99.321 - Removed every hardcoded symbol list that could be scanned or
+         traded without passing the backtest, per direct user request
+         ("убери этот список из золота... никаких списков не должно быть").
+         MSNR: MSNR_SYMBOLS (XAU/XAUT/PAXG) deleted. The backtest universe
+         is now purely liquidity-ranked (msnr_build_backtest_universe() no
+         longer force-prepends gold — gold still gets backtested if it's
+         liquid enough, like any coin). msnr_live_loop() and
+         api_msnr_status() no longer fall back to the gold list when
+         msnr_live_universe is empty — the live scan is exactly the
+         backtest's ranked selection, empty until the first cycle ranks
+         something. Dropped the status "symbols" field and the UI's
+         status.symbols fallback.
+         S/R Zones: SNR_SEED_SYMBOLS (XAU/BTC/SOL) deleted; _snr_active/
+         _display start empty instead of live-scanning/trading the seed
+         coins before the first backtest.
+         Neuro: _neuro_active/_display start empty (init and "Очистить
+         Neuro" reset) instead of trading NEURO_COINS before the first
+         mining cycle. NEURO_COINS stays only as always-included members
+         of the BACKTEST universe (BTC/ETH are needed as correlation
+         inputs) — they're traded only if they rank in like any coin.
+         Verified: py_compile (-W error), pyflakes (no remaining code
+         references), node --check, real runtime: all four status routes
+         200, /api/msnr/status live_universe and effective_live_universe
+         both [] on empty state.
