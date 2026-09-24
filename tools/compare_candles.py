@@ -72,7 +72,7 @@ def main(old_path, new_path, symbols):
 
     print("2/2 сравнение...")
     _frozen[0] = float(t_cmp)
-    total = bad = 0
+    total = bad = forming = 0
     req_old = req_new = 0
     for sym in symbols:
         sym_bad = 0
@@ -91,17 +91,32 @@ def main(old_path, new_path, symbols):
                     req_new += r2 - r1
                     total += 1
                     if json.dumps(a) != json.dumps(b):
+                        da = {c["time"]: c for c in a}
+                        db = {c["time"]: c for c in b}
+                        diff_t = sorted(t for t in set(da) | set(db) if da.get(t) != db.get(t))
+                        # A candle still FORMING in real time changes between the old
+                        # and the new download (seconds apart) — both versions always
+                        # fetch it live, so a difference there says nothing about the
+                        # cache. Only differences in really-closed candles count.
+                        real_now = _real_time()
+                        closed_diff = [t for t in diff_t if t + sec <= real_now]
+                        if not closed_diff:
+                            forming += 1
+                            continue
                         bad += 1
                         sym_bad += 1
-                        ta = {c["time"] for c in a}
-                        tb = {c["time"] for c in b}
+                        ta, tb = set(da), set(db)
                         print(f"  ❌ {sym} {iv} {days}д (+{start_jitter}/-{end_jitter}): "
                               f"старая {len(a)} свечей, новая {len(b)}; "
-                              f"только в старой {sorted(ta - tb)[:3]}, только в новой {sorted(tb - ta)[:3]}")
+                              f"только в старой {sorted(ta - tb)[:3]}, только в новой {sorted(tb - ta)[:3]}, "
+                              f"разные значения {[t for t in closed_diff if t in ta and t in tb][:3]}")
         print(f"  {sym}: {'✅ совпадает' if not sym_bad else f'❌ расхождений: {sym_bad}'}")
     shutil.rmtree(TMP_CACHE, ignore_errors=True)
     saved = (1 - req_new / req_old) * 100 if req_old else 0
     print(f"\nсравнений: {total}, запросов к бирже: старая {req_old}, новая {req_new} (−{saved:.0f}%)")
+    if forming:
+        print(f"(ещё {forming} сравнений отличались только ещё не закрытой свечой — она меняется в реальном "
+              f"времени между двумя скачиваниями и всегда качается с биржи; на кэш не влияет)")
     print("ИТОГ:", "✅ всё совпадает" if not bad else f"❌ расхождений: {bad} — пришли этот вывод")
     return 0 if not bad else 1
 
