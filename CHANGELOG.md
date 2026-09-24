@@ -16630,7 +16630,9 @@ v0.99.322 - Stability pass over every visible module's background loops,
          sent exactly once per stall across watchdog passes; jsdom banner
          renders both variants with zero JS errors.
 
-v0.99.323 - [branch neuro-speedup, NOT merged until verified on real data]
+v0.99.323 - [developed on branch neuro-speedup; merged to main after the user ran
+         tools/compare_neuro.py on REAL Gate data in Termux — old vs new:
+         "совпадает" (BTC_USDT, SOL_USDT, DOGE_USDT)]
          Neuro backtest CPU speedup, per user question ("бэктесты как-то
          ещё можно ускорить?"). Profiling (synthetic candles): MSNR/S&R/
          Peak spend <=1s CPU per coin (network-bound); Neuro ~108s per coin
