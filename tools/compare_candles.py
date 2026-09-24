@@ -62,13 +62,18 @@ def main(old_path, new_path, symbols):
     hour = int(_real_time()) // 3600 * 3600
     t_warm, t_cmp = hour - 6 * 3600, hour - 3600
 
-    print("1/2 прогрев кэша...")
-    _frozen[0] = float(t_warm)
-    for sym in symbols:
-        for iv in INTERVALS:
-            for days in WINDOWS_DAYS:
-                new.get_candles_range(sym, iv, t_warm - days * 86400 + 17, t_warm)
-    print(f"    правило биржи для неровного from: {new._cc_from_semantics}")
+    has_cache = hasattr(new, "_cc_from_semantics")
+    if has_cache:
+        print("1/2 прогрев кэша...")
+        _frozen[0] = float(t_warm)
+        for sym in symbols:
+            for iv in INTERVALS:
+                for days in WINDOWS_DAYS:
+                    new.get_candles_range(sym, iv, t_warm - days * 86400 + 17, t_warm)
+        print(f"    правило биржи для неровного from: {new._cc_from_semantics}")
+    else:
+        print("КОНТРОЛЬ: во второй версии нет кэша — сравниваются два обычных скачивания "
+              "(покажет, насколько биржа сама отвечает по-разному на одинаковые запросы)")
 
     print("2/2 сравнение...")
     _frozen[0] = float(t_cmp)
@@ -125,4 +130,9 @@ if __name__ == "__main__":
     if len(sys.argv) < 3:
         print(__doc__)
         sys.exit(2)
-    sys.exit(main(sys.argv[1], sys.argv[2], sys.argv[3:] or DEFAULT_SYMBOLS))
+    args = sys.argv[3:]
+    tf = [a.split("=", 1)[1] for a in args if a.startswith("--tf=")]
+    if tf:
+        INTERVALS[:] = tf[0].split(",")
+    syms = [a for a in args if not a.startswith("--")]
+    sys.exit(main(sys.argv[1], sys.argv[2], syms or DEFAULT_SYMBOLS))
