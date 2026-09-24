@@ -16629,3 +16629,26 @@ v0.99.322 - Stability pass over every visible module's background loops,
          reported (with correct waiting_for_slot split), Telegram alert
          sent exactly once per stall across watchdog passes; jsdom banner
          renders both variants with zero JS errors.
+
+v0.99.323 - [branch neuro-speedup, NOT merged until verified on real data]
+         Neuro backtest CPU speedup, per user question ("бэктесты как-то
+         ещё можно ускорить?"). Profiling (synthetic candles): MSNR/S&R/
+         Peak spend <=1s CPU per coin (network-bound); Neuro ~108s per coin
+         (CPU-bound, 120 coins sequential) — the system's bottleneck.
+         Pure refactors, identical results by construction:
+         - _neuro_grow_combos(): parent-match filter computed once per
+           parent instead of once per (parent, extra_key).
+         - neuro_walk_forward(): test bars bucketed by pattern value once
+           per pattern TYPE; each pattern is a dict lookup, not a scan.
+         - neuro_simulate_trades(): per-bar best match via
+           _neuro_pattern_groups()/_neuro_best_match_at() (one value per
+           type + dict lookup; ties -> earliest list position, the old
+           strict ">" winner), evaluated lazily only for bars the loop
+           actually visits, and cached with conditions/ATR across the RR
+           sweep's calls (thread-local, keyed on input object identity).
+         Verified: byte-identical output (patterns, trades, summary) vs
+         v0.99.322 on 3 synthetic coins (4744/609, 3434/792, 25187/375);
+         108s -> 41s and 216s -> 62s per coin. tools/compare_neuro.py runs
+         old vs new on REAL Gate data with a shared response cache + frozen
+         clock; negative control (a 0.01% SL change) is reported as a
+         mismatch at the first differing trade.

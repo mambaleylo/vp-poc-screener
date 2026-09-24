@@ -55,7 +55,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.322"
+APP_VERSION = "0.99.323"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -17175,14 +17175,17 @@ def _neuro_grow_combos(base_patterns, conds, fwd, valid_idx, mean_all, std_all, 
     for parent in top_parents:
         base_keys = parent["type"].split("+")
         base_vals = parent["value"].split("|")
+        # v0.99.323 — speed: the parent-match filter doesn't depend on
+        # extra_key, so compute it once per parent (was re-scanned for every
+        # one of NEURO_COMBO_KEYS). Same expression, same order, same result.
+        parent_idx = [i for i in valid_idx
+                      if all(conds[i].get(k) == v for k, v in zip(base_keys, base_vals))]
         for extra_key in NEURO_COMBO_KEYS:
             if extra_key in base_keys:
                 continue
             buckets = {}
-            for i in valid_idx:
+            for i in parent_idx:
                 b = conds[i]
-                if not all(b.get(k) == v for k, v in zip(base_keys, base_vals)):
-                    continue
                 extra_val = b.get(extra_key)
                 if extra_val is not None:
                     buckets.setdefault(extra_val, []).append(fwd[i])
@@ -17341,8 +17344,20 @@ def neuro_walk_forward(candles, forward_bars=None, min_sample=None, z_threshold=
         valid_test_idx = [i for i in range(len(test)) if test_fwd[i] is not None]
         latest_test_time = test[valid_test_idx[-1]]["time"] if valid_test_idx else 0
         day_cutoff = latest_test_time - NEURO_DECAY_WINDOW_DAYS * 86400
+        # v0.99.323 — speed: _neuro_pattern_value() depends only on the
+        # pattern's type (+ is_combo), so bucket every test bar by value
+        # once per type, then each pattern is a dict lookup instead of a
+        # full scan (thousands of patterns x thousands of bars). Lists keep
+        # ascending bar order, so matched_idx is identical to before.
+        _val_index = {}
         for pat in pats:
-            matched_idx = [i for i in valid_test_idx if _neuro_pattern_value(pat, test_conds[i]) == pat["value"]]
+            _vk = (pat["type"], bool(pat.get("is_combo")))
+            if _vk not in _val_index:
+                _d = {}
+                for i in valid_test_idx:
+                    _d.setdefault(_neuro_pattern_value(pat, test_conds[i]), []).append(i)
+                _val_index[_vk] = _d
+            matched_idx = list(_val_index[_vk].get(pat["value"], ()))
             test_rets = [test_fwd[i] for i in matched_idx]
             depth = pat.get("combo_depth", 1) if pat.get("is_combo") else 1
             min_needed = max(10, int(min_sample * (NEURO_COMBO_MIN_SAMPLE_MULT * max(depth - 1, 1) if pat.get("is_combo") else 1) // 3))
@@ -17397,6 +17412,47 @@ def neuro_walk_forward(candles, forward_bars=None, min_sample=None, z_threshold=
     return confirmed
 
 
+_neuro_sim_cache = threading.local()
+
+
+_NEURO_UNSET = object()
+
+
+def _neuro_pattern_groups(confirmed_patterns):
+    """v0.99.323 — patterns grouped by type: [(representative, {value:
+    (best_pattern, list_order)})]. Per (type, value) keeps the FIRST
+    pattern with the largest |z| (the old per-bar loop's strict ">")."""
+    groups = {}
+    for order, p in enumerate(confirmed_patterns):
+        if p.get("value") is None:
+            continue  # old loop: a non-None cur_val can never equal None
+        g = groups.setdefault((p["type"], bool(p.get("is_combo"))), [p, {}])
+        cur = g[1].get(p["value"])
+        if cur is None or abs(p["z"]) > abs(cur[0]["z"]):
+            g[1][p["value"]] = (p, order)
+    return list(groups.values())
+
+
+def _neuro_best_match_at(groups, cond_bucket):
+    """v0.99.323 — the pattern the old per-bar loop picked for one bar:
+    largest |z| among matching patterns, ties to the earliest list order.
+    One value evaluation per pattern TYPE + a dict lookup."""
+    matched = None
+    m_order = None
+    for rep_pat, by_val in groups:
+        cur_val = _neuro_pattern_value(rep_pat, cond_bucket)
+        if cur_val is None:
+            continue
+        hit = by_val.get(cur_val)
+        if hit is None:
+            continue
+        p, o = hit
+        if (matched is None or abs(p["z"]) > abs(matched["z"])
+                or (abs(p["z"]) == abs(matched["z"]) and o < m_order)):
+            matched, m_order = p, o
+    return matched
+
+
 def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding_records=None, btc_candles=None,
                            d1_candles=None, oi_records=None, eth_candles=None, rr=None, return_conds=False):
     """Turn confirmed dependencies into an actual trade history: whenever a
@@ -17417,8 +17473,27 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
         return ([], []) if return_conds else []
     rr = rr if rr is not None else NEURO_RR
 
-    conds = neuro_compute_conditions(candles, htf_candles, funding_records, btc_candles, d1_candles, oi_records, eth_candles)
-    atr14 = neuro_atr_series(candles, 14)
+    # v0.99.323 — speed: neuro_pick_best_rr() calls this once per RR
+    # candidate with the SAME candles/patterns; conditions, ATR and the
+    # per-bar best-matching pattern don't depend on rr, so they're computed
+    # once and reused (thread-local, keyed on the identity of every input
+    # object — the cache holds references, so ids can't be recycled).
+    _inputs = (candles, confirmed_patterns, htf_candles, funding_records, btc_candles,
+               d1_candles, oi_records, eth_candles)
+    _c = getattr(_neuro_sim_cache, "entry", None)
+    if (_c is not None and _c["n_pat"] == len(confirmed_patterns)
+            and all(a is b for a, b in zip(_c["inputs"], _inputs))):
+        conds, atr14, _best = _c["conds"], _c["atr14"], _c["best"]
+    else:
+        conds = neuro_compute_conditions(candles, htf_candles, funding_records, btc_candles, d1_candles, oi_records, eth_candles)
+        atr14 = neuro_atr_series(candles, 14)
+        # lazy: filled only for bars a simulation actually visits (bars
+        # inside an open trade are skipped), shared across RR candidates
+        _best = [_NEURO_UNSET] * max(len(candles) - 1, 0)
+        _neuro_sim_cache.entry = {"inputs": _inputs, "n_pat": len(confirmed_patterns),
+                                  "conds": conds, "atr14": atr14, "best": _best,
+                                  "groups": _neuro_pattern_groups(confirmed_patterns)}
+    _groups = _neuro_sim_cache.entry["groups"]
     trades = []
     occupied_until_i = -10**9
     # v0.99.251 — CRITICAL FIX, per direct user report ("нет ли такой
@@ -17439,12 +17514,9 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
     for i in range(len(candles) - 1):
         if i < occupied_until_i:
             continue  # previous trade on this symbol hasn't resolved yet
-        matched = None
-        for p in confirmed_patterns:
-            cur_val = _neuro_pattern_value(p, conds[i])
-            if cur_val is not None and cur_val == p["value"]:
-                if matched is None or abs(p["z"]) > abs(matched["z"]):
-                    matched = p
+        matched = _best[i]
+        if matched is _NEURO_UNSET:
+            matched = _best[i] = _neuro_best_match_at(_groups, conds[i])
         if not matched or not atr14[i]:
             continue
         entry_bar = candles[i + 1]
