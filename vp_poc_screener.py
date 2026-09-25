@@ -56,7 +56,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.326"
+APP_VERSION = "0.99.327"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -25073,6 +25073,51 @@ async function refreshAll() {
   if (activeTab === 'autotrade') await refreshAutotrade();
   if (activeTab === 'simulator') await refreshSimulator();
 }
+// v0.99.327 — keep <details> lists open across the 15s auto-refresh (user:
+// "открываю список сделок бэктеста s/r zone... он сам назад закрывается").
+// Every tab re-renders its panel via innerHTML, which recreates the
+// <details> closed. One observer for the whole page: when a re-render
+// removes open <details> and adds new ones in the same container, the new
+// ones matching by summary text (digits ignored, since counts/percentages
+// change) and occurrence order are reopened. No render code touched.
+(function keepDetailsOpenAcrossRerender() {
+  const norm = d => {
+    const sm = [...d.children].find(c => c.tagName === 'SUMMARY');
+    return sm ? sm.textContent.replace(/[\\d.,:%$+\\-−]+/g, '#').replace(/\\s+/g, ' ').trim() : '';
+  };
+  const collect = nodes => {
+    const out = [];
+    for (const n of nodes) {
+      if (n.nodeType !== 1) continue;
+      if (n.tagName === 'DETAILS') out.push(n);
+      out.push(...n.querySelectorAll('details'));
+    }
+    return out;
+  };
+  const keyed = list => {
+    const seen = {};
+    return list.map(d => { const k = norm(d); seen[k] = (seen[k] || 0) + 1; return k + '#' + seen[k]; });
+  };
+  new MutationObserver(records => {
+    const byTarget = new Map();
+    for (const r of records) {
+      if (r.type !== 'childList') continue;
+      const e = byTarget.get(r.target) || { removed: [], added: [] };
+      e.removed.push(...r.removedNodes); e.added.push(...r.addedNodes);
+      byTarget.set(r.target, e);
+    }
+    for (const { removed, added } of byTarget.values()) {
+      if (!removed.length || !added.length) continue;
+      const oldD = collect(removed);
+      if (!oldD.some(d => d.open)) continue;
+      const oldK = keyed(oldD);
+      const openKeys = new Set(oldK.filter((k, i) => oldD[i].open));
+      const newD = collect(added.filter(n => n.isConnected));  // only what's actually on the page now
+      keyed(newD).forEach((k, i) => { if (openKeys.has(k)) newD[i].open = true; });
+    }
+  }).observe(document.body, { childList: true, subtree: true });
+})();
+
 refreshAll();
 setInterval(refreshAll, 15000);
 
@@ -25708,6 +25753,10 @@ function fmtUsdCompact(v) {
   return '$' + v.toFixed(2);
 }
 function compoundSummaryHtml(x) {
+  if (x && x.compound_final_balance === undefined) {
+    // v0.99.327 — result computed by a version before the $15 simulation existed
+    return `<div class="dim" style="font-size:11px;margin:4px 0 8px;">💰 расчёт с $15 появится после следующего бэктеста этого модуля (или 🛠 → «↻ Бэктест»)</div>`;
+  }
   if (!x || x.compound_final_balance == null || !x.compound_trades) return '';
   const pct = x.compound_return_pct;
   const cls = pct >= 0 ? 'win' : 'loss';

@@ -16740,3 +16740,27 @@ v0.99.324 - [branch candle-cache, NOT merged until verified on real data]
          (SOL 1h 400д/1500д +1800/-1). Live backtests always request up to
          "now", where the last candle is the forming one and is always
          fetched live, so this Gate quirk doesn't reach them.
+
+v0.99.327 - Two UI fixes, per user report ("открываю список сделок
+         бэктеста s/r zone... он сам назад закрывается... нету расчёта
+         денег как я просил").
+         (1) <details> lists snapping shut: every tab re-renders its panel
+         via innerHTML on the 15s refresh, recreating them closed. Added
+         one page-wide MutationObserver (keepDetailsOpenAcrossRerender):
+         when a re-render removes open <details> and adds new ones in the
+         same container, the new ones matching by summary text (digits/
+         %/$ ignored — counts and winrates in summaries change) plus
+         occurrence order are reopened; only connected nodes are touched.
+         Covers every tab (MSNR, Sweep, Neuro, S/R, Peak, …) with no render
+         code changed; a list the user closes stays closed.
+         (2) $15 va-bank line missing on S/R: the code path works (unit-
+         tested on S/R-shaped trades), but results computed before
+         v0.99.318 carry no compound fields and S/R/Peak can't recompute
+         them from the stored last-40 trades — they appear after the
+         module's next backtest. The card now says so explicitly ("💰
+         расчёт с $15 появится после следующего бэктеста… или 🛠 → ↻
+         Бэктест") instead of showing nothing.
+         Verified: py_compile (-W error), pyflakes, node --check, no
+         surrogates; jsdom: 3 lists, 2 opened -> stay open across two
+         re-renders with changed numbers in the summary; user-closed stays
+         closed; placeholder renders.
