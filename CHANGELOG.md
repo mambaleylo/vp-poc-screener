@@ -17260,3 +17260,20 @@ v0.99.354 - "Ошибки 🗑 Очистить" in the 🛠 panel, per user ("�
          dialog since nothing of value is lost; the panel refreshes at once.
          Verified: py_compile (-W error), pyflakes, node --check; runtime:
          errors present -> clear -> 0.
+
+v0.99.355 - Simulator: $15 start + Telegram at $1000, per user ("на симуляторе
+         тоже 15 долларов на старте и уведомление в Telegram когда на
+         балансе 1000$"). AUTOTRADE_SIM_START_BALANCE 30 -> 15 (same start as
+         the backtest va-bank simulations). SIM_ALERT_BALANCE = 1000 (env
+         VP_SIM_ALERT_BALANCE): sweep_sim_trades() sends one Telegram on the
+         upward crossing ("🎉 Симулятор: баланс достиг $1 000 — сейчас $N
+         (старт $15). Последняя сделка: <module> <coin> +X$"); re-armed only
+         after the balance falls below 90% of the threshold (no spam around
+         the line); the sent-flag is persisted. Also fixed: "Сбросить
+         симулятор" never saved the reset to disk (the v0.99.301 class of
+         bug) — a restart restored the old simulator; now save_state() runs.
+         An existing simulator keeps its current balance/history until reset.
+         Verified: py_compile (-W error), pyflakes; unit test — crossing
+         alerts once, no repeat while above, re-arms after a drop below
+         $900 and alerts again on the next crossing; reset -> $15, flag
+         cleared.

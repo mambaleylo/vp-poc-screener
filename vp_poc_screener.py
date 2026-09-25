@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.354"
+APP_VERSION = "0.99.355"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1089,7 +1089,8 @@ AUTOTRADE_TRADE_HISTORY = 300
 # than a theoretical R-multiple, by keeping a live reference to the
 # originating signal record and reading its outcome once resolved.
 # ----------------------------------------------------------------------------
-AUTOTRADE_SIM_START_BALANCE = float(os.environ.get("VP_AUTOTRADE_SIM_START_BALANCE", 30.0))
+AUTOTRADE_SIM_START_BALANCE = float(os.environ.get("VP_AUTOTRADE_SIM_START_BALANCE", 15.0))  # v0.99.355 — 30 -> 15, same $15 start as the backtest va-bank simulations (user request)
+SIM_ALERT_BALANCE = float(os.environ.get("VP_SIM_ALERT_BALANCE", 1000.0))  # v0.99.355 — Telegram when the simulator balance reaches this
 AUTOTRADE_SIM_FEE_PCT = float(os.environ.get("VP_AUTOTRADE_SIM_FEE_PCT", 0.0005))  # taker fee per side, matches SCALP_TAKER_FEE_PCT's own default
 AUTOTRADE_SIM_TRADE_HISTORY = 500
 
@@ -5546,12 +5547,26 @@ def sweep_sim_trades():
         exit_fee = t["notional"] * AUTOTRADE_SIM_FEE_PCT
         net_pnl = gross_pnl - exit_fee
         with state_lock:
+            _prev_bal = STATE["sim_balance"]
             STATE["sim_balance"] = round(STATE["sim_balance"] + net_pnl, 6)
+            _new_bal = STATE["sim_balance"]
+            # v0.99.355 — one Telegram per upward crossing of SIM_ALERT_BALANCE;
+            # re-armed only after the balance falls back below 90% of it
+            _alert = False
+            if _new_bal >= SIM_ALERT_BALANCE > _prev_bal and not STATE.get("sim_alert_sent"):
+                STATE["sim_alert_sent"] = True
+                _alert = True
+            elif _new_bal < SIM_ALERT_BALANCE * 0.9:
+                STATE["sim_alert_sent"] = False
             t["status"] = "SETTLED"
             t["result"] = result
             t["pnl"] = round(net_pnl, 4)
             t["balance_after"] = STATE["sim_balance"]
             t["_signal_ref"] = None  # drop the reference once settled, nothing more to read from it
+        if _alert:
+            send_telegram(f"🎉 Симулятор: баланс достиг ${SIM_ALERT_BALANCE:,.0f} — сейчас ${_new_bal:,.0f} "
+                          f"(старт ${AUTOTRADE_SIM_START_BALANCE:,.0f}). Последняя сделка: {t.get('mode', '')} {t['symbol']} "
+                          f"{'+' if net_pnl >= 0 else ''}{net_pnl:,.2f}$".replace(",", " "))
 
 
 def build_universe():
@@ -6819,6 +6834,7 @@ def save_state():
                 "prv_display_symbols": list(_prv_display_symbols),
                 "autotrade_log": list(STATE["autotrade_log"]),
                 "sim_balance": STATE["sim_balance"],
+                "sim_alert_sent": bool(STATE.get("sim_alert_sent")),   # v0.99.355
                 # Both PENDING and SETTLED now (previously PENDING was
                 # excluded outright — see load_state()'s _relink_sim_trade()
                 # for why that silently lost real money from the paper
@@ -7000,6 +7016,7 @@ def load_state():
             STATE["risk_autotune_last_change"] = risk_autotune_last_change
             if "sim_balance" in data:
                 STATE["sim_balance"] = data["sim_balance"]
+            STATE["sim_alert_sent"] = bool(data.get("sim_alert_sent", False))   # v0.99.355
             restored_trades = []
             dropped_pending = 0
             for t in sim_trades:
@@ -22337,6 +22354,8 @@ def api_simulator_reset():
         with state_lock:
             STATE["sim_balance"] = AUTOTRADE_SIM_START_BALANCE
             STATE["sim_trades"].clear()
+            STATE["sim_alert_sent"] = False   # v0.99.355
+        save_state()   # v0.99.355 — the reset was never written to disk, so a restart brought the old simulator back
         return jsonify({"ok": True, "balance": AUTOTRADE_SIM_START_BALANCE})
     except Exception as e:
         log_error(f"api_simulator_reset: {e}")
