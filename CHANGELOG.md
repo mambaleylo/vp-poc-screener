@@ -17097,3 +17097,22 @@ v0.99.344 - "🗑 Очистить" for S/R Zones and Peak Reversal in the 🛠 
          Verified: py_compile (-W error), pyflakes, node --check; test
          client: both endpoints clear everything listed and set the
          trigger; buttons present in the page.
+
+v0.99.345 - API key check reworked, per user ("при проверке API везде
+         показывает остаток 0, но баланс всегда основного аккаунта, даже
+         если это субаккаунт"). The check showed /futures/usdt/accounts
+         total/available — on a Gate UNIFIED account "available" there is
+         always 0 (money sits in /unified/accounts; autotrade already
+         falls back to it), so every account looked empty. And it gave no
+         way to tell WHOSE keys were entered. Now /api/credentials/test
+         returns and the UI shows: the Gate UID of the keys (/account/
+         detail — a sub-account has its own UID, so identical UIDs on the
+         main and a module row mean the module was given main-account
+         keys), "баланс для сделок" = exactly what autotrade sizes from
+         (get_futures_total_equity(), unified fallback included), plus the
+         raw futures-available and unified-equity figures. All calls run
+         inside the module's account context.
+         Verified: py_compile (-W error), pyflakes, node --check; fake Gate
+         with a unified main (UID 111, 500.5) and sub (UID 222, 42.25):
+         main -> 111/500.5, S/R with sub keys -> 222/42.25, MSNR without
+         own keys -> main 111/500.5.

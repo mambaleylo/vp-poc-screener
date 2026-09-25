@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.344"
+APP_VERSION = "0.99.345"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21966,19 +21966,46 @@ def api_post_module_credentials():
 
 @app.route("/api/credentials/test", methods=["POST"])
 def api_test_credentials():
-    """v0.99.331 — read-only check of an account's keys: futures balance,
-    position mode, open positions count. mode "" = main account."""
+    """v0.99.331, reworked v0.99.345 (user: "при проверке API везде остаток 0,
+    а баланс всегда основного аккаунта, даже если это субаккаунт"). The
+    first version showed /futures/usdt/accounts total/available — on a
+    Gate UNIFIED account "available" there is always 0 and the money is in
+    /unified/accounts, so it looked empty/wrong. Now it reports:
+    - uid: the Gate user id the keys belong to (/account/detail) — the only
+      reliable proof that a module's keys are the SUB-account's, not the
+      main account's (a sub-account has its own uid);
+    - trade_balance: exactly what autotrade sizes positions from
+      (get_futures_total_equity(): futures available + position margin,
+      with the unified-equity fallback), plus the raw futures / unified
+      numbers for context."""
     body = request.get_json(force=True, silent=True) or {}
     mode = body.get("module") or None
     try:
         with using_account(mode):
             acc = current_account_id()
-            data = gate_signed_request("GET", "/futures/usdt/accounts")
-            positions = gate_signed_request("GET", "/futures/usdt/positions") or []
-        open_n = sum(1 for p in positions if float(p.get("size", 0) or 0) != 0)
-        return jsonify({"ok": True, "account": account_label(acc),
-                        "total": data.get("total"), "available": data.get("available"),
-                        "dual_mode": bool(data.get("in_dual_mode", False)), "open_positions": open_n})
+            uid = None
+            try:
+                det = gate_signed_request("GET", "/account/detail")
+                uid = det.get("user_id")
+            except Exception as e:
+                log_error(f"credentials test {account_label(acc)}: /account/detail: {e}")
+            fut = gate_signed_request("GET", "/futures/usdt/accounts") or {}
+            unified = None
+            try:
+                unified = get_unified_account_equity()
+            except Exception:
+                pass
+            try:
+                trade_balance = get_futures_total_equity()
+            except Exception as e:
+                trade_balance = None
+                log_error(f"credentials test {account_label(acc)}: equity: {e}")
+            positions = get_open_positions() or []
+        return jsonify({"ok": True, "account": account_label(acc), "uid": uid,
+                        "trade_balance": trade_balance,
+                        "futures_available": fut.get("available"), "futures_total": fut.get("total"),
+                        "unified_equity": unified,
+                        "dual_mode": bool(fut.get("in_dual_mode", False)), "open_positions": len(positions)})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)})
 
@@ -26387,7 +26414,7 @@ async function testGateAccount(mode) {
   try {
     const r = await (await fetch('/api/credentials/test', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({module: mode})})).json();
     if (el) el.innerHTML = r.ok
-      ? `<span class="win">✅ ${r.account}: баланс ${r.total} USDT (доступно ${r.available}) · режим ${r.dual_mode ? 'hedge (dual)' : 'one-way'} · открытых позиций ${r.open_positions}</span>`
+      ? `<span class="win">✅ ${r.account}${r.uid ? ` · UID ${r.uid}` : ''}: баланс для сделок <b>${r.trade_balance != null ? Number(r.trade_balance).toFixed(2) : '?'} USDT</b> · режим ${r.dual_mode ? 'hedge (dual)' : 'one-way'} · открытых позиций ${r.open_positions}</span><div class="dim" style="font-size:10px;">фьючерсный кошелёк: доступно ${r.futures_available ?? '?'}${r.unified_equity ? ` · единый аккаунт (unified): ${Number(r.unified_equity).toFixed(2)}` : ''} — у суб-аккаунта UID должен отличаться от основного</div>`
       : `<span class="loss">❌ ${r.error}</span>`;
   } catch (e) { if (el) el.textContent = 'ошибка: ' + e; }
 }
