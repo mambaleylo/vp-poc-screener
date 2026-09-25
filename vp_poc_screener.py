@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.348"
+APP_VERSION = "0.99.349"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -11816,7 +11816,12 @@ def msnr_backtest_watchdog():
     loop next observes the cycle NOT running, i.e. it finished or gave
     up, ready to warn again on the next cycle if that one also runs
     long)."""
+    # v0.99.349 — per user ("что за уведы? будто бесполезные"): it used to
+    # log an "error" whenever a cycle simply ran longer than 20 min, even
+    # while making steady progress (95/236 coins). Now it only reports a
+    # REAL stall: the done-counter hasn't moved for 10 minutes.
     warned_this_cycle = False
+    last_done, last_progress_at = None, time.time()
     while True:
         time.sleep(MSNR_BACKTEST_WATCHDOG_INTERVAL_SEC)
         try:
@@ -11828,12 +11833,16 @@ def msnr_backtest_watchdog():
                 total = STATE.get("msnr_backtest_total")
             if not running or not started_at:
                 warned_this_cycle = False
+                last_done, last_progress_at = None, time.time()
                 continue
-            elapsed = time.time() - started_at
-            if elapsed > MSNR_BACKTEST_WATCHDOG_THRESHOLD_SEC and not warned_this_cycle:
+            if done != last_done:
+                last_done, last_progress_at = done, time.time()
+                continue
+            stalled = time.time() - last_progress_at
+            if stalled > 600 and not warned_this_cycle:
                 log_error(
-                    f"msnr_backtest_watchdog: cycle running {round(elapsed / 60, 1)}min "
-                    f"(done {done}/{total}), still in flight: {in_flight}"
+                    f"msnr_backtest_watchdog: no progress for {round(stalled / 60)} min "
+                    f"(stuck at {done}/{total}), in flight: {in_flight}"
                 )
                 warned_this_cycle = True
         except Exception as e:
@@ -16181,7 +16190,7 @@ def snr_live_loop():
                 with state_lock:
                     already_open = any(s["symbol"] == symbol and s["status"] == "OPEN" for s in STATE["snr_signals"])
                 if already_open:
-                    log_error(f"snr_live_loop {symbol}: new signal detected but a previous one is still OPEN — signal skipped entirely (no log entry, no trade) to avoid piling into the same symbol")
+                    pass  # v0.99.349 — normal one-position-per-coin rule (same as the backtest); no longer reported as an error
                     continue
                 arrow = "\u2b06\ufe0f" if sig["direction"] == "LONG" else "\u2b07\ufe0f"
                 record = {"symbol": symbol, "direction": sig["direction"], "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
@@ -16693,7 +16702,7 @@ def prv_live_loop():
                 with state_lock:
                     already_open = any(s["symbol"] == symbol and s["status"] == "OPEN" for s in STATE["prv_signals"])
                 if already_open:
-                    log_error(f"prv_live_loop {symbol}: new signal detected but a previous one is still OPEN — signal skipped entirely (no log entry, no trade) to avoid piling into the same symbol")
+                    pass  # v0.99.349 — normal one-position-per-coin rule (same as the backtest); no longer reported as an error
                     continue
                 arrow = "\u2b06\ufe0f" if sig["direction"] == "LONG" else "\u2b07\ufe0f"
                 record = {"symbol": symbol, "direction": sig["direction"], "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
@@ -19558,7 +19567,7 @@ def neuro_live_loop():
                 with _neuro_signal_log_lock:
                     already_open = any(s["symbol"] == symbol and s["status"] == "OPEN" for s in _neuro_signal_log)
                 if already_open:
-                    log_error(f"neuro_live_loop {symbol}: new signal detected but a previous one is still OPEN — signal skipped entirely (no log entry, no trade) to avoid piling into the same symbol")
+                    pass  # v0.99.349 — normal one-position-per-coin rule (same as the backtest); no longer reported as an error
                     continue
                 arrow = "\u2b06\ufe0f" if sig["direction"] == "LONG" else "\u2b07\ufe0f"
                 pat_txt = ", ".join(f"{p['type']}={p['value']}(z={p['z']})" for p in sig["patterns"][:3])

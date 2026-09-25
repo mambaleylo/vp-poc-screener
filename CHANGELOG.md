@@ -17156,3 +17156,16 @@ v0.99.348 - Screensaver open-position check every 3 min, per user ("20 секу�
          redraw (_ssTick) also triggered a check. Now: one check right when
          the screensaver starts, then only every 3 min (the clock redraw no
          longer queries positions). The server-side 15s cache stays.
+
+v0.99.349 - Errors panel noise, per user ("что за уведы? будто бесполезные").
+         1) "snr/prv/neuro_live_loop X: new signal detected but a previous
+            one is still OPEN — signal skipped" was logged as an error every
+            time — it's the normal one-position-per-coin rule (identical to
+            the backtest's occupancy), so no longer reported.
+         2) msnr_backtest_watchdog logged an "error" whenever a cycle simply
+            ran >20 min even while progressing steadily (e.g. 95/236 coins —
+            MSNR backtests every liquid coin, so long cycles are normal). Now
+            it reports only a real stall: the done-counter unchanged for 10
+            minutes (hangs are also covered by the v0.99.322 heartbeats).
+         Kept: rare genuinely-informative notices (e.g. "symbol dropped
+         from the active set mid-scan").
