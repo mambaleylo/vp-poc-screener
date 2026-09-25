@@ -16912,3 +16912,24 @@ v0.99.333 - Honest MSNR live statistics, per user ("если сделка по m
          signals from this version on.
          Verified: py_compile (-W error), pyflakes, node --check; stats unit
          test (fired + skipped + dry-run counted, strategy-unselected not).
+
+v0.99.334 - Full backtest trade list for S/R Zones (and Peak Reversal, same
+         card), per user ("S/R zone хочу видеть список всех сделок
+         бэктеста, а не только последние"). Before: the result kept only
+         the last 40 trades and the card showed 15.
+         Backend: snr/prv_optimize_symbol() now keep the winning combo's
+         whole closed-trade list (already $15-compound-annotated) as
+         result["all_trades"] (newest first). /api/snr|prv/status strip it
+         (keeps the 15s poll light) and send all_trades_n instead; new
+         /api/snr|prv/trades/<symbol> serve the full list (fallback: the
+         last 40 for results computed before this version, flagged
+         "full": false).
+         UI: "все сделки бэктеста (N)" loads the list when opened
+         (loadBtTrades, cached per backtest run, re-filled after the
+         auto-refresh keeps it open); shared row renderers
+         snrTradeRowHtml/prvTradeRowHtml, click a row -> chart as before;
+         older results show a note until the next backtest.
+         Verified: py_compile (-W error), pyflakes, node --check; API test
+         (200 trades: status stripped + count, endpoint returns 200);
+         jsdom: summary "(200)", 200 rows on open, still open with 200 rows
+         after a re-render.

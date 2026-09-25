@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.333"
+APP_VERSION = "0.99.334"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -15679,7 +15679,9 @@ def snr_optimize_symbol(symbol):
     if best is not None:
         # v0.99.318 — $15 va-bank compounding over the winning combo's full history
         try:
-            best.update(rr_compound_annotate(best.pop("_all_closed"), symbol))
+            _all = best.pop("_all_closed")
+            best.update(rr_compound_annotate(_all, symbol))
+            best["all_trades"] = _all[::-1]   # v0.99.334 — full backtest trade list (newest first), served by /api/<mod>/trades/<symbol>
         except Exception as e:
             best.pop("_all_closed", None)
             log_error(f"snr compound {symbol}: {e}")
@@ -16286,7 +16288,9 @@ def prv_optimize_symbol(symbol):
     if best is not None:
         # v0.99.318 — $15 va-bank compounding over the winning combo's full history
         try:
-            best.update(rr_compound_annotate(best.pop("_all_closed"), symbol))
+            _all = best.pop("_all_closed")
+            best.update(rr_compound_annotate(_all, symbol))
+            best["all_trades"] = _all[::-1]   # v0.99.334 — full backtest trade list (newest first), served by /api/<mod>/trades/<symbol>
         except Exception as e:
             best.pop("_all_closed", None)
             log_error(f"prv compound {symbol}: {e}")
@@ -20224,10 +20228,30 @@ def snr_compute_signal_stats(active_symbols=None):
             "winrate": winrate, "avg_pnl_r": avg_pnl, "by_symbol": by_symbol}
 
 
+@app.route("/api/snr/trades/<symbol>")
+def api_snr_trades(symbol):
+    """v0.99.334 — every backtest trade of the coin's winning combo (older
+    results computed before this version only have the last 40)."""
+    with state_lock:
+        r = (STATE["snr_results"] or {}).get(symbol) or {}
+        trades = list(r.get("all_trades") or r.get("recent_trades") or [])
+    return jsonify({"symbol": symbol, "full": bool(r.get("all_trades")), "trades": trades})
+
+
+@app.route("/api/prv/trades/<symbol>")
+def api_prv_trades(symbol):
+    with state_lock:
+        r = (STATE["prv_results"] or {}).get(symbol) or {}
+        trades = list(r.get("all_trades") or r.get("recent_trades") or [])
+    return jsonify({"symbol": symbol, "full": bool(r.get("all_trades")), "trades": trades})
+
+
 @app.route("/api/snr/status")
 def api_snr_status():
     with state_lock:
         results = dict(STATE["snr_results"])
+        results = {k: ({kk: vv for kk, vv in v.items() if kk != "all_trades"} | {"all_trades_n": len(v.get("all_trades") or v.get("recent_trades") or [])})
+                   if isinstance(v, dict) else v for k, v in results.items()}   # v0.99.334 — full list via /api/snr/trades/<symbol>
         last_finished = STATE["snr_last_backtest_finished"]
         running = STATE["snr_backtest_running"]
         waiting = STATE["snr_waiting_for_slot"]
@@ -20291,6 +20315,8 @@ def prv_compute_signal_stats(active_symbols=None):
 def api_prv_status():
     with state_lock:
         results = dict(STATE["prv_results"])
+        results = {k: ({kk: vv for kk, vv in v.items() if kk != "all_trades"} | {"all_trades_n": len(v.get("all_trades") or v.get("recent_trades") or [])})
+                   if isinstance(v, dict) else v for k, v in results.items()}   # v0.99.334 — full list via /api/prv/trades/<symbol>
         last_finished = STATE["prv_last_backtest_finished"]
         running = STATE["prv_backtest_running"]
         waiting = STATE["prv_waiting_for_slot"]
@@ -24738,13 +24764,7 @@ async function refreshSnr() {
         </div>`;
       }
       const r = c.result;
-      const tradesRows = (r.recent_trades || []).slice(0, 15).map(t => {
-        const rc = t.result === 'WIN' ? 'win' : t.result === 'LOSS' ? 'loss' : 'dim';
-        return `<div onclick="openSnrChart('${c.symbol}', ${t.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1c2433;font-size:11px;">
-          <span class="dim">${fmtDateTime(t.time)} ${t.direction} \u0443\u0440\u043e\u0432\u0435\u043d\u044c ${fmtNum(t.zone_price)} (\u0441\u0438\u043b\u0430 ${t.zone_strength})</span>
-          <span style="white-space:nowrap;"><span class="${rc}">${t.result}${t.pnl_r!=null?' '+(t.pnl_r>0?'+':'')+t.pnl_r+'R':''}</span> ${compoundCellTxt(t)}</span>
-        </div>`;
-      }).join('');
+      const tradesRows = `<div class="btTradesBox"></div>`;   // v0.99.334 — filled by loadBtTrades() on open
       const liveSigSection = '';
       return `<div style="${cardStyle}">
         <div style="font-size:15px;font-weight:700;color:#26c6da;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
@@ -24759,7 +24779,7 @@ async function refreshSnr() {
         <div class="dim" style="font-size:10px;margin-bottom:8px;">z \u2014 \u043d\u0430\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0441\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0445 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u0438\u0439 \u0432\u0438\u043d\u0440\u0435\u0439\u0442 \u0432\u044b\u0448\u0435 \u0431\u0435\u0437\u0443\u0431\u044b\u0442\u043a\u0430 (\u043d\u0443\u0436\u043d\u043e \u22653.23 \u0441 \u043f\u043e\u043f\u0440\u0430\u0432\u043a\u043e\u0439 \u043d\u0430 81 \u043f\u0435\u0440\u0435\u0431\u0440\u0430\u043d\u043d\u0443\u044e \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u044e)</div>
         ${liveSigSection}
         ${compoundSummaryHtml(r)}
-        <details><summary class="dim" style="cursor:pointer;font-size:11px;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0441\u0434\u0435\u043b\u043a\u0438 \u0431\u044d\u043a\u0442\u0435\u0441\u0442\u0430</summary>${tradesRows}</details>
+        <details ontoggle="loadBtTrades(this, 'snr', '${c.symbol}', ${data.last_backtest_finished || 0})"><summary class="dim" style="cursor:pointer;font-size:11px;">все сделки бэктеста (${r.all_trades_n || 0})</summary>${tradesRows}</details>
       </div>`;
     }).join('');
     panel.innerHTML = `
@@ -24851,13 +24871,7 @@ async function refreshPrv() {
         </div>`;
       }
       const r = c.result;
-      const tradesRows = (r.recent_trades || []).slice(0, 15).map(t => {
-        const rc = t.result === 'WIN' ? 'win' : t.result === 'LOSS' ? 'loss' : 'dim';
-        return `<div onclick="openPrvChart('${c.symbol}', ${t.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1c2433;font-size:11px;">
-          <span class="dim">${fmtDateTime(t.time)} ${t.direction} @ ${fmtNum(t.entry)} \u0432\u043e \u0441\u0434\u0435\u043b\u043a\u0435 \u043c\u0430\u043a\u0441. \u043f\u0440\u043e\u0442\u0438\u0432 ${t.mae_r}R</span>
-          <span style="white-space:nowrap;"><span class="${rc}">${t.result}${t.pnl_r!=null?' '+(t.pnl_r>0?'+':'')+t.pnl_r+'R':''}</span> ${compoundCellTxt(t)}</span>
-        </div>`;
-      }).join('');
+      const tradesRows = `<div class="btTradesBox"></div>`;   // v0.99.334 — filled by loadBtTrades() on open
       const liveSigSection = '';
       return `<div style="${cardStyle}">
         <div style="font-size:15px;font-weight:700;color:#ffa726;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
@@ -24872,7 +24886,7 @@ async function refreshPrv() {
         <div class="dim" style="font-size:10px;margin-bottom:8px;">z \u2014 \u043d\u0430\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0441\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0445 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u0438\u0439 \u0432\u0438\u043d\u0440\u0435\u0439\u0442 \u0432\u044b\u0448\u0435 \u0431\u0435\u0437\u0443\u0431\u044b\u0442\u043a\u0430 (\u043d\u0443\u0436\u043d\u043e \u22653.11 \u0441 \u043f\u043e\u043f\u0440\u0430\u0432\u043a\u043e\u0439 \u043d\u0430 216 \u043f\u0435\u0440\u0435\u0431\u0440\u0430\u043d\u043d\u0443\u044e \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u044e)</div>
         ${liveSigSection}
         ${compoundSummaryHtml(r)}
-        <details><summary class="dim" style="cursor:pointer;font-size:11px;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0441\u0434\u0435\u043b\u043a\u0438 \u0431\u044d\u043a\u0442\u0435\u0441\u0442\u0430</summary>${tradesRows}</details>
+        <details ontoggle="loadBtTrades(this, 'prv', '${c.symbol}', ${data.last_backtest_finished || 0})"><summary class="dim" style="cursor:pointer;font-size:11px;">все сделки бэктеста (${r.all_trades_n || 0})</summary>${tradesRows}</details>
       </div>`;
     }).join('');
     panel.innerHTML = `
@@ -26466,6 +26480,39 @@ function compoundCellTxt(t) {
   if (t.compound_balance_after == null) return '<span class="dim">—</span>';
   const cls = (t.compound_pnl_pct || 0) >= 0 ? 'win' : 'loss';
   return `<span class="${cls}">${fmtUsdCompact(t.compound_balance_after)}</span>`;
+}
+// v0.99.334 — full backtest trade lists for S/R and Peak, loaded on open
+function snrTradeRowHtml(sym, t) {
+  const rc = t.result === 'WIN' ? 'win' : t.result === 'LOSS' ? 'loss' : 'dim';
+  return `<div onclick="openSnrChart('${sym}', ${t.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1c2433;font-size:11px;">
+    <span class="dim">${fmtDateTime(t.time)} ${t.direction} уровень ${fmtNum(t.zone_price)} (сила ${t.zone_strength})</span>
+    <span style="white-space:nowrap;"><span class="${rc}">${t.result}${t.pnl_r!=null?' '+(t.pnl_r>0?'+':'')+t.pnl_r+'R':''}</span> ${compoundCellTxt(t)}</span>
+  </div>`;
+}
+function prvTradeRowHtml(sym, t) {
+  const rc = t.result === 'WIN' ? 'win' : t.result === 'LOSS' ? 'loss' : 'dim';
+  return `<div onclick="openPrvChart('${sym}', ${t.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1c2433;font-size:11px;">
+    <span class="dim">${fmtDateTime(t.time)} ${t.direction} @ ${fmtNum(t.entry)} во сделке макс. против ${t.mae_r}R</span>
+    <span style="white-space:nowrap;"><span class="${rc}">${t.result}${t.pnl_r!=null?' '+(t.pnl_r>0?'+':'')+t.pnl_r+'R':''}</span> ${compoundCellTxt(t)}</span>
+  </div>`;
+}
+const _btTradesCache = {};
+async function loadBtTrades(det, mod, sym, stamp) {
+  if (!det.open) return;
+  const box = det.querySelector('.btTradesBox');
+  const key = `${mod}:${sym}:${stamp}`;
+  const render = d => {
+    const rowFn = mod === 'snr' ? snrTradeRowHtml : prvTradeRowHtml;
+    box.innerHTML = (d.full ? '' : '<div class="dim" style="font-size:10px;">у этого результата сохранены только последние 40 — полный список появится после следующего бэктеста</div>')
+      + (d.trades.length ? d.trades.map(t => rowFn(sym, t)).join('') : '<div class="dim">сделок нет</div>');
+  };
+  if (_btTradesCache[key]) { render(_btTradesCache[key]); return; }
+  box.innerHTML = '<div class="dim">загрузка…</div>';
+  try {
+    const d = await (await fetch(`/api/${mod}/trades/${sym}`)).json();
+    _btTradesCache[key] = d;
+    render(d);
+  } catch (e) { box.innerHTML = '<div class="loss">не удалось загрузить</div>'; }
 }
 function fmtNum(n) {
   return Number(n).toPrecision(6).replace(/\\.?0+$/,'').replace(/\\.$/, '');
