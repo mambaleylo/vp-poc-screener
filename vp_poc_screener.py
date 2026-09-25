@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.345"
+APP_VERSION = "0.99.346"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21964,6 +21964,40 @@ def api_post_module_credentials():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+_POS_SUMMARY_CACHE = {"at": 0.0, "data": None}
+_POS_SUMMARY_TTL = 15
+
+
+@app.route("/api/positions/summary")
+def api_positions_summary():
+    """v0.99.346 — REAL open positions on the exchange, across the main
+    account and every module sub-account (user: "часы на скринсейвере
+    зелёные, хотя сделок нет" — the clock used to go green on any OPEN
+    live SIGNAL of MSNR/Mirror/Sweep, including dry-run and not-opened
+    ones, and ignored Neuro/S&R/Peak). Cached 15s so several clients /
+    fast polling don't add exchange load."""
+    now = time.time()
+    if _POS_SUMMARY_CACHE["data"] is not None and now - _POS_SUMMARY_CACHE["at"] < _POS_SUMMARY_TTL:
+        return jsonify(_POS_SUMMARY_CACHE["data"])
+    total, by_acc, ok_any, errors = 0, {}, False, []
+    for acc in all_account_ids():
+        try:
+            with using_account(None if acc == "default" else acc):
+                key, secret, _a = _current_credentials()
+                if not key or not secret:
+                    continue
+                positions = get_open_positions() or []
+            n = sum(1 for p in positions if float(p.get("size", 0) or 0) != 0)
+            by_acc[account_label(acc)] = n
+            total += n
+            ok_any = True
+        except Exception as e:
+            errors.append(f"{account_label(acc)}: {e}")
+    data = {"ok": ok_any, "open": total, "by_account": by_acc, "errors": errors[:3], "checked_at": now}
+    _POS_SUMMARY_CACHE.update(at=now, data=data)
+    return jsonify(data)
+
+
 @app.route("/api/credentials/test", methods=["POST"])
 def api_test_credentials():
     """v0.99.331, reworked v0.99.345 (user: "при проверке API везде остаток 0,
@@ -27177,9 +27211,12 @@ async function toggleScreensaver() {
     _ssTick();
     _ssMove();
     _ssMoveTimer = setInterval(_ssMove, 30000);
+    clearInterval(_ssPosTimer);
+    _ssPosTimer = setInterval(_ssCheckOpenPositions, 20000);
   } else {
     overlay.style.display = 'none';
     clearInterval(_ssMoveTimer);
+    clearInterval(_ssPosTimer);
     if (document.fullscreenElement) try { document.exitFullscreen(); } catch(e) {}
     if (_ssWakeLock) { try { _ssWakeLock.release(); } catch(e) {} _ssWakeLock = null; }
   }
@@ -27195,19 +27232,17 @@ function _ssTick() {
   setTimeout(_ssTick, (60 - now.getSeconds()) * 1000 - now.getMilliseconds());
 }
 
+// v0.99.346 — green = a REAL position is open on the exchange (main account or
+// any module sub-account), not merely an OPEN signal; re-checked every 20s.
+let _ssPosTimer = null;
 async function _ssCheckOpenPositions() {
   try {
-    const [msnr, mirror, lsw] = await Promise.all([
-      fetch('/api/msnr/signals').then(r=>r.json()).catch(()=>[]),
-      fetch('/api/mirror/signals').then(r=>r.json()).catch(()=>[]),
-      fetch('/api/lsw/signals').then(r=>r.json()).catch(()=>[]),
-    ]);
-    const hasOpen =
-      (Array.isArray(msnr) ? msnr : []).some(s=>s.status==='OPEN') ||
-      (Array.isArray(mirror) ? mirror : []).some(s=>s.status==='OPEN') ||
-      (Array.isArray(lsw) ? lsw : []).some(s=>s.status==='OPEN');
-    document.getElementById('screensaverClock').style.color = hasOpen ? '#3ddc97' : '#ffffff';
-  } catch(e) {}
+    const d = await (await fetch('/api/positions/summary')).json();
+    if (!d.ok) return;   // exchange unreachable: keep the last known colour
+    const clock = document.getElementById('screensaverClock');
+    clock.style.color = d.open > 0 ? '#00ff88' : '#ffffff';
+    clock.title = d.open > 0 ? `открытых позиций: ${d.open}` : 'открытых позиций нет';
+  } catch (e) {}
 }
 
 function _ssMove() {

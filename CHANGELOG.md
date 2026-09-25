@@ -17116,3 +17116,20 @@ v0.99.345 - API key check reworked, per user ("при проверке API ве�
          with a unified main (UID 111, 500.5) and sub (UID 222, 42.25):
          main -> 111/500.5, S/R with sub keys -> 222/42.25, MSNR without
          own keys -> main 111/500.5.
+
+v0.99.346 - Screensaver clock colour = REAL open positions, per user ("часы на
+         скринсейвере должны быть зелёные если открыта сделка, проверять
+         чаще, а то сейчас сделок нет, но они зелёные"). It used to go
+         green on any OPEN live SIGNAL of MSNR/Mirror/Sweep — including
+         dry-run and not-opened ones (and, since v0.99.333, every
+         strategy-picked MSNR signal) — ignored Neuro/S&R/Peak, and was
+         checked once a minute. New GET /api/positions/summary: counts
+         non-zero exchange positions on the main account and every module
+         sub-account (skips accounts without keys), cached 15s. The clock
+         polls it every 20s while the screensaver is on: bright green
+         (#00ff88) with >=1 position, white with none; if the exchange
+         can't be reached it keeps the last known colour. Tooltip shows the
+         count.
+         Verified: py_compile (-W error), pyflakes, node --check; fake Gate:
+         a position on the S/R sub-account -> open 1, closed -> 0; no keys
+         -> ok false (colour unchanged).
