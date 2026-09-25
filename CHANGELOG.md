@@ -17149,3 +17149,10 @@ v0.99.347 - Settings as a real tree, per user ("настройка ва-банк
          Verified: py_compile (-W error), pyflakes, node --check; jsdom:
          module switch = tree1, its va-bank/invert = tree2, top-level rows
          untouched, labels without glyphs.
+
+v0.99.348 - Screensaver open-position check every 3 min, per user ("20 секунд
+         очень часто, раз в 3 минуты хотя бы"). It was effectively more
+         often than 20s: besides the 20s timer, the once-a-minute clock
+         redraw (_ssTick) also triggered a check. Now: one check right when
+         the screensaver starts, then only every 3 min (the clock redraw no
+         longer queries positions). The server-side 15s cache stays.

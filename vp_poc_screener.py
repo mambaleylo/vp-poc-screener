@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.347"
+APP_VERSION = "0.99.348"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -27232,7 +27232,8 @@ async function toggleScreensaver() {
     _ssMove();
     _ssMoveTimer = setInterval(_ssMove, 30000);
     clearInterval(_ssPosTimer);
-    _ssPosTimer = setInterval(_ssCheckOpenPositions, 20000);
+    _ssCheckOpenPositions();   // once right away, then every 3 min
+    _ssPosTimer = setInterval(_ssCheckOpenPositions, 180000);   // v0.99.348 — every 3 min (user: 20s too often)
   } else {
     overlay.style.display = 'none';
     clearInterval(_ssMoveTimer);
@@ -27248,12 +27249,11 @@ function _ssTick() {
   const hh = String(now.getHours()).padStart(2, '0');
   const mm = String(now.getMinutes()).padStart(2, '0');
   document.getElementById('screensaverTime').textContent = `${hh}:${mm}`;
-  _ssCheckOpenPositions();
   setTimeout(_ssTick, (60 - now.getSeconds()) * 1000 - now.getMilliseconds());
 }
 
 // v0.99.346 — green = a REAL position is open on the exchange (main account or
-// any module sub-account), not merely an OPEN signal; re-checked every 20s.
+// any module sub-account), not merely an OPEN signal; re-checked every 3 min.
 let _ssPosTimer = null;
 async function _ssCheckOpenPositions() {
   try {
