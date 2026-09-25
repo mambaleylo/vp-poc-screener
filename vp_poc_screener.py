@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.359"
+APP_VERSION = "0.99.360"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -11608,6 +11608,7 @@ def _msnr_backtest_one_symbol(symbol):
 # big-RR winners is visible.
 # ============================================================================
 MSNR_NF_TRIGGER = threading.Event()
+LSW_NF_TRIGGER = threading.Event()   # v0.99.360 — Sweep's Neuro-filter report
 MSNR_NF_TRAIN_FRAC = 0.7
 MSNR_NF_MIN_KEEP = float(os.environ.get("VP_MSNR_NF_MIN_KEEP", 0.5))   # filter must keep >= 50% of test trades
 MSNR_NF_MIN_TEST_TRADES = 30
@@ -11728,6 +11729,54 @@ def strategy_filter_report(rows_by_sym):
 def msnr_neuro_filter_analysis():
     with state_lock:
         results = {k: list(v or []) for k, v in (STATE.get("msnr_backtest_results") or {}).items()}
+    rows_by_sym = neuro_filter_rows_by_sym(results, "msnr_neuro_filter_loop", "msnr_neuro_filter_analysis")
+    if rows_by_sym is None:
+        return None
+    out = strategy_filter_report(rows_by_sym)   # v0.99.337 — shared with S/R
+    if out is None:
+        return None
+    with state_lock:
+        STATE["msnr_neuro_filters"] = out
+    return out
+
+
+def lsw_neuro_filter_analysis():
+    """v0.99.360 — same report for Sweep (user: "может и sweep прогонять по
+    фильтрам Neuro?"). Sweep trades have the same shape as MSNR's (WIN =
+    +rr, LOSS = -1R, TIMEOUT ignored), so the identical pipeline applies:
+    Neuro conditions on the last 1h bar CLOSED before the signal, pick on
+    the first 70% of each coin's trades, judge on the last 30%.
+    Informational only — nothing is applied to Sweep's trading."""
+    with state_lock:
+        results = {k: list(v or []) for k, v in (STATE.get("lsw_backtest_results") or {}).items()}
+    rows_by_sym = neuro_filter_rows_by_sym(results, "lsw_neuro_filter_loop", "lsw_neuro_filter_analysis")
+    if rows_by_sym is None:
+        return None
+    out = strategy_filter_report(rows_by_sym)
+    if out is None:
+        return None
+    with state_lock:
+        STATE["lsw_neuro_filters"] = out
+    return out
+
+
+def lsw_neuro_filter_loop():
+    LSW_NF_TRIGGER.wait(timeout=1500)   # first run ~25 min after start (results are persisted)
+    while True:
+        LSW_NF_TRIGGER.clear()
+        try:
+            if LSW_ENABLED:
+                lsw_neuro_filter_analysis()
+        except Exception as e:
+            log_error(f"lsw_neuro_filter_loop: {e}")
+        wait_beating(LSW_NF_TRIGGER, 6 * 3600, "lsw_neuro_filter_loop")   # after every Sweep backtest (trigger) or 6h
+
+
+def neuro_filter_rows_by_sym(results, loop_name, err_name):
+    """v0.99.360 — factored out of msnr_neuro_filter_analysis() unchanged:
+    {symbol: [trade]} (trade: time, result WIN/LOSS/TIMEOUT, rr) ->
+    {symbol: (train_rows, test_rows)} for strategy_filter_report(), or None
+    when there is nothing to analyse."""
     results = {k: v for k, v in results.items() if len([t for t in v if _msnr_nf_trade_r(t) is not None]) >= 5}
     if not results:
         return None
@@ -11739,7 +11788,7 @@ def msnr_neuro_filter_analysis():
     tf_sec = INTERVAL_SECONDS.get(NEURO_TF, 3600)
     rows_by_sym = {}
     for sym, trades in results.items():
-        heartbeat("msnr_neuro_filter_loop")
+        heartbeat(loop_name)
         try:
             candles = get_candles_range(sym, NEURO_TF, start_ts, now)
             if not candles or len(candles) < 300:
@@ -11755,7 +11804,7 @@ def msnr_neuro_filter_analysis():
             conds = neuro_compute_conditions(candles, htf, funding, None if sym == "BTC_USDT" else btc,
                                              d1, oi, None if sym == "ETH_USDT" else eth)
         except Exception as e:
-            log_error(f"msnr_neuro_filter_analysis {sym}: {e}")
+            log_error(f"{err_name} {sym}: {e}")
             continue
         times = [c["time"] for c in candles]
         rows = []
@@ -11771,12 +11820,7 @@ def msnr_neuro_filter_analysis():
         if len(rows) >= 5:
             cut = max(1, int(len(rows) * MSNR_NF_TRAIN_FRAC))
             rows_by_sym[sym] = (rows[:cut], rows[cut:])
-    out = strategy_filter_report(rows_by_sym)   # v0.99.337 — shared with S/R
-    if out is None:
-        return None
-    with state_lock:
-        STATE["msnr_neuro_filters"] = out
-    return out
+    return rows_by_sym
 
 
 def msnr_neuro_filter_loop():
@@ -14921,6 +14965,7 @@ def _lsw_run_one_backtest_cycle(t0):
         with state_lock:
             STATE["lsw_last_backtest_finished"] = time.time()
             STATE["lsw_last_backtest_duration"] = round(time.time() - t0, 1)
+        LSW_NF_TRIGGER.set()   # v0.99.360 — refresh the Neuro-filter report on fresh Sweep trades
     finally:
         with state_lock:
             STATE["lsw_backtest_running"] = False
@@ -21404,6 +21449,7 @@ def api_lsw_status():
         "enabled": LSW_ENABLED,
         "last_backtest_finished": last_backtest_finished,
         "last_backtest_duration": last_backtest_duration,
+        "neuro_filters": STATE.get("lsw_neuro_filters"),   # v0.99.360 (replaced atomically)
         "backtest_running": backtest_running,
         "backtest_total": backtest_total,
         "backtest_done": backtest_done,
@@ -21548,6 +21594,7 @@ def api_reset_lsw():
         with state_lock:
             STATE["lsw_backtest_results"] = {}
             STATE["lsw_backtest_summary"] = {}
+            STATE.pop("lsw_neuro_filters", None)   # v0.99.360
             STATE["lsw_live_universe"] = []
             STATE["lsw_last_backtest_finished"] = None
             STATE["lsw_last_backtest_duration"] = None
@@ -25087,17 +25134,20 @@ async function refreshLsw() {
       <td>${touchesTxt}</td>
       <td>${structureTxt}</td>
       <td>${atrSweepTxt}</td>
+      <td>${nfCoinCellHtml(status.neuro_filters, r.symbol)}</td>
     </tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
     <div class="dim hint-block" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории). Колонка RR — подобран отдельно под каждую монету на первых 70% её истории (train), применён к полной истории — наведи на значение чтобы увидеть всю кривую подбора. Последние 6 колонок показывают, что даёт КАЖДЫЙ фильтр САМ ПО СЕБЕ на сырых (нефильтрованных) сигналах монеты — не в связке с остальными фильтрами. В скобках — разница с винрейтом на тех же сырых сигналах без единого фильтра (это не то же самое, что колонка WR слева, там уже применены реально включённые фильтры). Пометка [выкл] — фильтр сейчас не участвует в реальной торговле, это просто оценка "а что если включить". Тренд-фильтр и структурный кэп по-прежнему доступны в настройках, просто убраны отсюда, чтобы не мозолить глаза:</div>
     <div style="overflow-x:auto;">
     <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>RR</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th><th>Подтверждение (соло)</th><th>Объём (соло)</th><th>FVG (соло)</th><th>Сессия (соло)</th><th>Касания≥${cfg.min_touches} (соло)</th><th>Структура свечи (соло)</th><th>ATR sweep (соло)</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>RR</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th><th>Подтверждение (соло)</th><th>Объём (соло)</th><th>FVG (соло)</th><th>Сессия (соло)</th><th>Касания≥${cfg.min_touches} (соло)</th><th>Структура свечи (соло)</th><th>ATR sweep (соло)</th><th title="лучший Neuro-фильтр, только тест-часть">🏆 Neuro-фильтр (тест)</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
-  setPanelHtml(panel, headerHtml + signalsTableHtml + btTableHtml);
+  setPanelHtml(panel, headerHtml + signalsTableHtml
+    + filterReportHtml(status.neuro_filters, "🧪 Neuro-фильтры для Sweep (информационно)", "считаются (≈25 мин после запуска и после каждого бэктеста Sweep)")   // v0.99.360
+    + btTableHtml);
   panel.querySelectorAll('tbody tr[data-time]').forEach(tr => {
     tr.onclick = () => openLswChart(tr.dataset.symbol, tr.dataset.time);
   });
@@ -27247,6 +27297,18 @@ function filterReportHtml(nf, title, pendingTxt) {
     <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="6" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
   </details>`;
 }
+// v0.99.360 — best filter's effect on one coin (test part), table-cell form
+function nfCoinCellHtml(nfRep, sym) {
+  const nf = nfRep && nfRep.top && nfRep.top[0];
+  const pc = nf && nf.per_coin && nf.per_coin[sym];
+  if (!pc) return '<span class="dim">—</span>';
+  if (!pc.n_b) return '<span class="dim">нет тест-сделок</span>';
+  if (pc.n_a === pc.n_b) return `<span class="dim" title="фильтр не убрал ни одной сделки этой монеты">без изменений (n=${pc.n_b})</span>`;
+  if (!pc.n_a) return `<span class="loss">убрал все ${pc.n_b}</span>`;
+  const d = Math.round((pc.wr_a - pc.wr_b) * 10) / 10;
+  const dCls = d > 0 ? 'win' : (d < 0 ? 'loss' : 'dim');
+  return `<span class="dim" title="тест-часть: до → после фильтра «${String(nf.label).replace(/"/g, '&quot;')}»">${pc.wr_b}%→${pc.wr_a}% (n=${pc.n_b}→${pc.n_a})</span> <span class="${dCls}">(${d > 0 ? '+' : ''}${d}%)</span>`;
+}
 function filterCoinLineHtml(nf, sym) {
   const f = nf && nf.top && nf.top[0];
   const pc = f && f.per_coin && f.per_coin[sym];
@@ -27750,6 +27812,7 @@ if __name__ == "__main__":
     threading.Thread(target=hourly_stats_loop, daemon=True).start()
     threading.Thread(target=msnr_backtest_loop, daemon=True).start()
     threading.Thread(target=msnr_neuro_filter_loop, daemon=True).start()  # v0.99.329
+    threading.Thread(target=lsw_neuro_filter_loop, daemon=True).start()   # v0.99.360
     threading.Thread(target=msnr_live_loop, daemon=True).start()
     threading.Thread(target=msnr_backtest_watchdog, daemon=True).start()
     threading.Thread(target=ft5_backtest_loop, daemon=True).start()

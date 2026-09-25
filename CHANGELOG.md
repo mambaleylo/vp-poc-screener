@@ -17342,3 +17342,18 @@ v0.99.359 - MSNR "Последний бэктест был 2.7 ч назад …
          Verified: py_compile (-W error), pyflakes, runtime start, JS check;
          thread test with a 1-permit semaphore: Neuro coin A,B → MSNR takes
          the slot → Neuro resumes C,D; all 4 coins done, permit released.
+v0.99.360 - Sweep: Neuro-filter report, same as MSNR's (user: "может и sweep
+         прогонять по фильтрам Neuro?"). Every Sweep backtest trade gets the
+         Neuro conditions of the last 1h bar CLOSED before its signal;
+         strategy_filter_report() picks each filter on the first 70% of a
+         coin's trades and judges it on the last 30%; 🏆 = no coin worse +
+         biggest test-WR gain. Shown as a collapsible "🧪 Neuro-фильтры для
+         Sweep" block plus a "🏆 Neuro-фильтр (тест)" column per coin.
+         Refreshed after every Sweep backtest (or 6h); cleared by
+         "Очистить Sweep". Informational only — Sweep trading unchanged.
+         The trade→rows step was factored out of msnr_neuro_filter_analysis()
+         into neuro_filter_rows_by_sym() unchanged.
+         Verified: py_compile (-W error), pyflakes, runtime start, JS check;
+         synthetic data: MSNR report byte-identical before/after the
+         refactor; Sweep report built from the same trades equals it; jsdom:
+         Sweep tab renders the block, the column and a per-coin cell.
