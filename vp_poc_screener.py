@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.329"
+APP_VERSION = "0.99.330"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1123,7 +1123,7 @@ CREDENTIALS_FILE = os.environ.get(
     "VP_CREDENTIALS_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
-SETTINGS_KEYS = ("volume_profile_enabled", "bounce_enabled", "breakout_enabled",
+SETTINGS_KEYS = ("volume_profile_enabled", "neuro_extra_conds_enabled", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "neuro_min_winrate", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "autotrade_invert_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "autotrade_invert_prv", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "autotrade_invert_lsw", "autotrade_invert_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled", "lsw_all_in_enabled", "snr_all_in_enabled", "prv_all_in_enabled",
@@ -1163,6 +1163,7 @@ def get_settings():
         "ema_touch_enabled": EMA_TOUCH_ENABLED,
         "amd_enabled": AMD_ENABLED,
         "neuro_enabled": NEURO_ENABLED,
+        "neuro_extra_conds_enabled": NEURO_EXTRA_CONDS_ENABLED,
         "snr_enabled": SNR_ENABLED,
         "snr_top_n": SNR_TOP_N,
         "snr_display_n": SNR_DISPLAY_N,
@@ -1305,6 +1306,8 @@ def apply_settings(updates):
         AMD_ENABLED = bool(updates["amd_enabled"])
     if "neuro_enabled" in updates:
         NEURO_ENABLED = bool(updates["neuro_enabled"])
+    if "neuro_extra_conds_enabled" in updates:   # v0.99.330 — takes effect on the next mining cycle
+        globals()["NEURO_EXTRA_CONDS_ENABLED"] = bool(updates["neuro_extra_conds_enabled"])
     if "snr_enabled" in updates:
         SNR_ENABLED = bool(updates["snr_enabled"])
     if "telegram_alerts_snr" in updates:
@@ -3283,7 +3286,14 @@ def get_contract_stats(symbol, interval=OI_INTERVAL, limit=OI_LOOKBACK + 2):
     out = []
     for c in r.json():
         try:
-            out.append({"time": int(c.get("time", 0)), "open_interest": float(c.get("open_interest", 0))})
+            rec = {"time": int(c.get("time", 0)), "open_interest": float(c.get("open_interest", 0))}
+            # v0.99.330 — extra fields for Neuro's liquidation / long-short conditions
+            for f in ("long_liq_usd", "short_liq_usd", "lsr_account", "lsr_taker"):
+                try:
+                    rec[f] = float(c[f]) if c.get(f) is not None else None
+                except (TypeError, ValueError):
+                    rec[f] = None
+            out.append(rec)
         except (TypeError, ValueError):
             continue
     out.sort(key=lambda x: x["time"])
@@ -11231,6 +11241,11 @@ NEURO_COND_LABELS = {
     "mirror_signal": "сигнал Mirror", "bb_width_zone": "ширина Боллинджера", "obv_trend": "OBV",
     "supertrend_side": "Supertrend", "rsi_divergence": "дивергенция RSI", "btc_vol_regime": "волатильность BTC",
     "cci_zone": "CCI", "chop_zone": "Choppiness", "poc_side": "цена vs POC",
+    "liq_zone": "ликвидации", "lsr_zone": "long/short толпы", "oi_price_quad": "OI+цена",
+    "funding_delta": "изменение фандинга", "premium_zone": "премия к индексу",
+    "weekly_open_side": "цена vs открытие недели", "monthly_open_side": "цена vs открытие месяца",
+    "pdhl_zone": "хай/лоу прошлого дня", "compression": "сжатие", "long_streak": "серия 5+",
+    "rs_btc_zone": "сила к BTC 24ч", "round_level": "круглый уровень",
 }
 
 
@@ -11273,6 +11288,7 @@ def msnr_neuro_filter_analysis():
             htf = get_candles_range(sym, "4h", start_ts, now) or []
             d1 = get_candles_range(sym, "1d", start_ts, now) or []
             funding = neuro_fetch_funding_rate(sym, start_ts, now)
+            neuro_set_index_context(sym, start_ts, now)   # v0.99.330
             try:
                 oi = get_contract_stats(sym, interval="1h", limit=999)
             except Exception:
@@ -11305,7 +11321,7 @@ def msnr_neuro_filter_analysis():
     # candidates: every (condition, value) seen on train, as "exclude" and "only"
     cands = set()
     for r in train:
-        for k in NEURO_COMBO_KEYS:
+        for k in _neuro_combo_keys():
             v = r["c"].get(k)
             if v is not None:
                 cands.add((k, v))
@@ -17260,6 +17276,154 @@ def neuro_align_oi_trend(candles, oi_records, lookback_pct=0.03):
     return out
 
 
+# ============================================================================
+# v0.99.330 — 11 extra Neuro conditions, per user request ("1-11 сделаем").
+# Toggle: NEURO_EXTRA_CONDS_ENABLED (settings "neuro_extra_conds_enabled").
+# Off -> not computed and not used in combos, i.e. exactly the old
+# condition set. Every value uses only data available at bar i's close.
+# ============================================================================
+NEURO_EXTRA_CONDS_ENABLED = os.environ.get("VP_NEURO_EXTRA_CONDS_ENABLED", "1") == "1"
+NEURO_EXTRA_KEYS = ("liq_zone", "lsr_zone", "oi_price_quad", "funding_delta", "premium_zone",
+                    "weekly_open_side", "monthly_open_side", "pdhl_zone", "compression",
+                    "long_streak", "rs_btc_zone", "round_level")
+_neuro_ctx = threading.local()   # .index_close: {bar_time: index close} for premium_zone (set per symbol)
+
+
+def _neuro_combo_keys():
+    return NEURO_COMBO_KEYS + NEURO_EXTRA_KEYS if NEURO_EXTRA_CONDS_ENABLED else NEURO_COMBO_KEYS
+
+
+def neuro_set_index_context(symbol, start_ts, end_ts):
+    """Fetch index-price candles (Gate contract prefix "index_") for the
+    premium/basis condition and make them visible to neuro_compute_
+    conditions() in THIS thread. Failure -> premium_zone simply absent."""
+    _neuro_ctx.index_close = {}
+    if not NEURO_EXTRA_CONDS_ENABLED:
+        return
+    try:
+        idx = get_candles_range(f"index_{symbol}", NEURO_TF, start_ts, end_ts) or []
+        _neuro_ctx.index_close = {c["time"]: c["close"] for c in idx if c.get("close")}
+    except Exception as e:
+        log_error(f"neuro index candles {symbol}: {e}")
+
+
+def neuro_clear_index_context():
+    _neuro_ctx.index_close = {}
+
+
+def neuro_extra_conditions(candles, oi_records=None, funding_records=None, btc_candles=None, d1_candles=None):
+    n = len(candles)
+    out = [dict() for _ in range(n)]
+    if not n:
+        return out
+    closes = [c["close"] for c in candles]
+    # contract_stats (liquidations, long/short, OI) aligned like neuro_align_oi_trend()
+    st = sorted(oi_records or [], key=lambda o: o["time"])
+    st_t = [o["time"] for o in st]
+    fr = sorted(funding_records or [], key=lambda f: f["time"])
+    fr_t = [f["time"] for f in fr]
+    btc_close = {c["time"]: c["close"] for c in (btc_candles or [])}
+    idx_close = getattr(_neuro_ctx, "index_close", None) or {}
+    d1 = sorted(d1_candles or [], key=lambda c: c["time"])
+    d1_t = [c["time"] for c in d1]
+    up = down = 0
+    for i, c in enumerate(candles):
+        b = out[i]
+        t = c["time"]
+        # 1. liquidation spikes: last 4 stat bars vs the 20 before
+        pos = bisect.bisect_right(st_t, t) - 1
+        if pos >= 24:
+            def _sum(f, a, z):
+                return sum((st[j].get(f) or 0.0) for j in range(a, z))
+            ll, sl = _sum("long_liq_usd", pos - 3, pos + 1), _sum("short_liq_usd", pos - 3, pos + 1)
+            base = (_sum("long_liq_usd", pos - 23, pos - 3) + _sum("short_liq_usd", pos - 23, pos - 3)) / 5.0
+            if st[pos].get("long_liq_usd") is not None:
+                if base > 0 and ll > 3 * base and ll >= sl:
+                    b["liq_zone"] = "long_liq_spike"
+                elif base > 0 and sl > 3 * base and sl > ll:
+                    b["liq_zone"] = "short_liq_spike"
+                else:
+                    b["liq_zone"] = "calm"
+        # 2. crowd positioning: long/short account ratio vs its own last 100
+        if pos >= 50 and st[pos].get("lsr_account") is not None:
+            hist = [st[j]["lsr_account"] for j in range(max(0, pos - 100), pos + 1) if st[j].get("lsr_account") is not None]
+            if len(hist) >= 30:
+                srt = sorted(hist)
+                v = st[pos]["lsr_account"]
+                b["lsr_zone"] = ("crowd_long" if v >= srt[int(len(srt) * 0.8)] else
+                                 "crowd_short" if v <= srt[int(len(srt) * 0.2)] else "neutral")
+        # 3. OI + price quadrant (20 bars, same OI thresholds as oi_trend)
+        if pos >= 20 and i >= 20 and st[pos - 20]["open_interest"] > 0:
+            oi_ch = (st[pos]["open_interest"] - st[pos - 20]["open_interest"]) / st[pos - 20]["open_interest"]
+            px_ch = closes[i] / closes[i - 20] - 1 if closes[i - 20] else 0
+            if abs(oi_ch) < 0.03 or abs(px_ch) < 0.01:
+                b["oi_price_quad"] = "flat"
+            else:
+                b["oi_price_quad"] = f"price_{'up' if px_ch > 0 else 'down'}_oi_{'up' if oi_ch > 0 else 'down'}"
+        # 4. funding change vs previous funding print
+        fp = bisect.bisect_right(fr_t, t) - 1
+        if fp >= 1:
+            d = fr[fp]["rate"] - fr[fp - 1]["rate"]
+            b["funding_delta"] = "rising" if d > 0.00003 else "falling" if d < -0.00003 else "flat"
+        # 5. premium / basis vs index price
+        ic = idx_close.get(t)
+        if ic:
+            basis = closes[i] / ic - 1
+            b["premium_zone"] = "premium" if basis > 0.001 else "discount" if basis < -0.001 else "flat"
+        # 6. weekly / monthly open side — open of the daily candle that
+        #    CONTAINS Monday 00:00 / the 1st 00:00 UTC (robust to however
+        #    Gate aligns its daily candles)
+        if d1_t:
+            day = t - t % 86400
+            wk = day - ((day // 86400 + 3) % 7) * 86400          # Monday 00:00 UTC
+            dt = datetime.fromtimestamp(day, timezone.utc)
+            mo = int(datetime(dt.year, dt.month, 1, tzinfo=timezone.utc).timestamp())
+            for key, start in (("weekly_open_side", wk), ("monthly_open_side", mo)):
+                k = bisect.bisect_right(d1_t, start) - 1
+                if 0 <= k < len(d1) and d1_t[k] + 86400 > start:
+                    b[key] = "above" if closes[i] >= d1[k]["open"] else "below"
+            # 7. previous day's high / low: the daily candle BEFORE the one
+            #    containing this bar (so it's fully closed)
+            k = bisect.bisect_right(d1_t, t) - 2
+            if k >= 0:
+                pdh, pdl = d1[k]["high"], d1[k]["low"]
+                px = closes[i]
+                b["pdhl_zone"] = ("above_pdh" if px > pdh else "below_pdl" if px < pdl else
+                                  "near_pdh" if (pdh - px) / px < 0.003 else
+                                  "near_pdl" if (px - pdl) / px < 0.003 else "inside")
+        # 8. volatility compression: NR7 / inside bar
+        if i >= 6:
+            rng = c["high"] - c["low"]
+            if rng <= min(candles[j]["high"] - candles[j]["low"] for j in range(i - 6, i)):
+                b["compression"] = "nr7"
+            elif c["high"] <= candles[i - 1]["high"] and c["low"] >= candles[i - 1]["low"]:
+                b["compression"] = "inside_bar"
+            else:
+                b["compression"] = "normal"
+        # 9. long same-colour runs (the existing "streak" caps at 4)
+        if c["close"] > c["open"]:
+            up, down = up + 1, 0
+        elif c["close"] < c["open"]:
+            up, down = 0, down + 1
+        else:
+            up = down = 0
+        b["long_streak"] = "up5plus" if up >= 5 else "down5plus" if down >= 5 else "none"
+        # 10. relative strength vs BTC over 24 bars
+        if i >= 24 and btc_close:
+            b0, b1 = btc_close.get(candles[i - 24]["time"]), btc_close.get(t)
+            if b0 and b1 and closes[i - 24]:
+                rs = (closes[i] / closes[i - 24] - 1) - (b1 / b0 - 1)
+                b["rs_btc_zone"] = "outperform" if rs > 0.02 else "underperform" if rs < -0.02 else "inline"
+        # 11. round-number proximity (step = half a power of ten below the price)
+        px = closes[i]
+        if px > 0:
+            step = 5 * 10 ** (math.floor(math.log10(px)) - 1)
+            nearest = round(px / step) * step
+            b["round_level"] = "near_round" if abs(px - nearest) / px < 0.003 else "away"
+    return out
+
+
+
 def neuro_compute_conditions(candles, htf_candles=None, funding_records=None, btc_candles=None,
                               d1_candles=None, oi_records=None, eth_candles=None):
     """One bucket-label dict per bar, across many independent condition types.
@@ -17481,6 +17645,9 @@ def neuro_compute_conditions(candles, htf_candles=None, funding_records=None, bt
                 bucket["dd_zone"] = "near_high" if pos >= 0.85 else "near_low" if pos <= 0.15 else "mid"
 
         conds.append(bucket)
+    if NEURO_EXTRA_CONDS_ENABLED:   # v0.99.330
+        for b, e in zip(conds, neuro_extra_conditions(candles, oi_records, funding_records, btc_candles, d1_candles)):
+            b.update(e)
     return conds
 
 
@@ -17634,7 +17801,7 @@ def _neuro_grow_combos(base_patterns, conds, fwd, valid_idx, mean_all, std_all, 
         # one of NEURO_COMBO_KEYS). Same expression, same order, same result.
         parent_idx = [i for i in valid_idx
                       if all(conds[i].get(k) == v for k, v in zip(base_keys, base_vals))]
-        for extra_key in NEURO_COMBO_KEYS:
+        for extra_key in _neuro_combo_keys():
             if extra_key in base_keys:
                 continue
             buckets = {}
@@ -17679,7 +17846,7 @@ def neuro_mine(candles, forward_bars=None, min_sample=None, z_threshold=None,
     horizons = [forward_bars] if forward_bars else NEURO_FORWARD_HORIZONS
 
     conds = neuro_compute_conditions(candles, htf_candles, funding_records, btc_candles, d1_candles, oi_records, eth_candles)
-    combo_pairs = list(itertools.combinations(NEURO_COMBO_KEYS, 2)) if include_combos else []
+    combo_pairs = list(itertools.combinations(_neuro_combo_keys(), 2)) if include_combos else []
 
     discovered = []
     for horizon in horizons:
@@ -18258,6 +18425,7 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
 
         htf_candles = get_candles_range(symbol, "4h", start_ts, now) or []
         d1_candles = get_candles_range(symbol, "1d", start_ts, now) or []
+        neuro_set_index_context(symbol, start_ts, now)   # v0.99.330 — premium_zone
         # v0.99.257 — CRITICAL FIX, per direct user report (screenshot of
         # the new global errors panel showing repeated "neuro_fetch_
         # funding_rate ...: 400 Client Error" across many symbols, every
@@ -18437,6 +18605,7 @@ def neuro_scan_live(symbol, confirmed_patterns, rr=None, precomputed_btc_candles
         d1_start = now - 130 * 86400
         d1_candles = get_candles_range(symbol, "1d", d1_start, now) or []
         funding_records = neuro_fetch_funding_rate(symbol, now - 30 * 86400, now)
+        neuro_set_index_context(symbol, start_ts, now)   # v0.99.330 — premium_zone (live)
         oi_records = []
         try:
             oi_records = get_contract_stats(symbol, interval="1h", limit=200)
@@ -21997,6 +22166,13 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="name">Neuro: дополнительные условия (12)</div>
+          <div class="sub">ликвидации, long/short толпы, OI+цена, изменение фандинга, премия к индексу, открытие недели/месяца, хай/лоу прошлого дня, сжатие, серия 5+, сила к BTC, круглые уровни — действует со следующего майнинга; выключите, чтобы сравнить с прежним набором</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setNeuroExtra"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Сколько монет держать в топе</div>
           <div class="sub">бэктест всё равно проверяет всю вселенную каждый цикл — здесь только сколько лучших по ср. P&L остаются активными. Уменьшение применяется сразу (пересчёт по уже сохранённым данным), увеличение — только со следующего полного цикла</div>
         </div>
@@ -25505,6 +25681,7 @@ const setInputs = {
   msnr_per_symbol_filters_enabled: document.getElementById('setMsnrPerSymbolFilters'),
   lsw_enabled: document.getElementById('setLsw'),
   neuro_enabled: document.getElementById('setNeuro'),
+  neuro_extra_conds_enabled: document.getElementById('setNeuroExtra'),
   snr_enabled: document.getElementById('setSnr'),
   prv_enabled: document.getElementById('setPrv'),
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),

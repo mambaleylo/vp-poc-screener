@@ -16811,3 +16811,34 @@ v0.99.329 - MSNR: Neuro conditions as candidate filters (informational
          Verified: py_compile (-W error), pyflakes, node --check, no
          surrogates; synthetic 4-coin run (2s): report built, per-coin
          split present; jsdom render of the MSNR panel with the report.
+
+v0.99.330 - 12 extra Neuro conditions (user's list 1-11; #9 split out as
+         "long_streak" since a capped 4-bar "streak" already existed), per
+         user request. neuro_extra_conditions(), merged into
+         neuro_compute_conditions() and added to the combo keys via
+         _neuro_combo_keys(): liq_zone (4h long/short liquidation USD vs
+         the prior 20h, >3x = spike), lsr_zone (account long/short ratio
+         vs its own last 100 -> crowd_long/crowd_short/neutral),
+         oi_price_quad (20-bar price x OI direction, same thresholds as
+         oi_trend), funding_delta (vs previous funding print), premium_zone
+         (close vs Gate "index_" price candles, +-0.1%), weekly_open_side /
+         monthly_open_side (vs the open of the daily candle containing
+         Monday / the 1st 00:00 UTC), pdhl_zone (vs the previous CLOSED
+         daily candle's high/low, 0.3% "near"), compression (NR7 / inside
+         bar), long_streak (5+ same-colour bars), rs_btc_zone (24-bar
+         return minus BTC's, +-2%), round_level (within 0.3% of a multiple
+         of 5x10^(floor(log10 p)-1)). All use data available at the bar's
+         close. get_contract_stats() now also keeps long_liq_usd /
+         short_liq_usd / lsr_account / lsr_taker (existing readers
+         unaffected). Index candles fetched per symbol in the backtest,
+         the live scan and the MSNR filter report (neuro_set_index_
+         context, thread-local). Labels added to the MSNR Neuro-filter
+         report. Note: Gate's contract_stats history is ~999 hourly
+         points (~41 days), so liq/lsr/OI-quad exist only in the recent
+         part of Neuro's long history.
+         Toggle: settings "Neuro: дополнительные условия (12)"
+         (neuro_extra_conds_enabled, default on; next mining cycle).
+         Verified: py_compile (-W error), pyflakes, node --check; toggle
+         OFF reproduces v0.99.322's Neuro output byte-for-byte (4744
+         patterns / 609 trades); ON: new keys appear in mined patterns,
+         ~+13% mining CPU; settings round-trip.
