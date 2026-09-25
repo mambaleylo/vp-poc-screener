@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.350"
+APP_VERSION = "0.99.351"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23799,7 +23799,7 @@ async function refreshMsnr() {
       ${staleWarnHtml}
       ${buildTxt}<br>
       ${progressBarHtml}
-      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · всего: ${ss.total||0} · клик по строке — график
+      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · всего: ${ss.total||0}<span class="hint-block"> · клик по строке — график</span>
     </div>`;
   const rrBuckets = status.rr_buckets || [];
   const rrBucketRows = rrBuckets.map(b => {
@@ -24571,7 +24571,7 @@ async function refreshMirror() {
       ${byPatternTxt ? `<span style="font-size:11px;">По паттернам: ${byPatternTxt}</span><br>` : ''}
       <b>Отсеянные фильтром</b> <span class="dim" style="font-size:11px;">(не торговались, только для проверки — стоило ли их пропускать)</span>: ${fssWr} (${fss.wins||0}W/${fss.losses||0}L) · открытых: ${fss.open||0} · всего: ${fss.n||0}<br>
       ${byReasonTxt ? `<span style="font-size:11px;">По причине отсева: ${byReasonTxt}</span><br>` : ''}
-      <span style="font-size:11px;">Зелёная точка — монета сейчас в живом скане. Клик по строке сигнала открывает график входа/выхода.</span>
+      <span class="hint-block" style="font-size:11px;">Зелёная точка — монета сейчас в живом скане. Клик по строке сигнала открывает график входа/выхода.</span>
     </div>`;
   const signalsRows = signals.map(s => {
     let statusHtml;
@@ -24732,7 +24732,7 @@ async function refreshLsw() {
       Фильтр по направлению: <span class="${cfg.direction_filter_enabled ? 'win' : 'dim'}">${cfg.direction_filter_enabled ? 'включён' : 'выключен'}</span><br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
       ${byLevelTxt ? `<span style="font-size:11px;">По типу уровня: ${byLevelTxt}</span><br>` : ''}
-      <span style="font-size:11px;">Зелёная точка — монета сейчас в живом скане. Клик по строке сигнала открывает график входа/выхода.</span>
+      <span class="hint-block" style="font-size:11px;">Зелёная точка — монета сейчас в живом скане. Клик по строке сигнала открывает график входа/выхода.</span>
     </div>`;
   const signalsRows = signals.map(s => {
     let statusHtml;
@@ -25165,7 +25165,7 @@ async function refreshSnr() {
           <div><div class="dim" style="font-size:10px;">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R \u00b7 z=${r.train_z}</div></div>
           <div><div class="dim" style="font-size:10px;">TEST (n=${r.test_n})</div><div class="win">WR ${r.test_wr}% \u00b7 ${r.test_avg_pnl_r>0?'+':''}${r.test_avg_pnl_r}R \u00b7 z=${r.test_z}</div></div>
         </div>
-        <div class="dim" style="font-size:10px;margin-bottom:8px;">z \u2014 \u043d\u0430\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0441\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0445 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u0438\u0439 \u0432\u0438\u043d\u0440\u0435\u0439\u0442 \u0432\u044b\u0448\u0435 \u0431\u0435\u0437\u0443\u0431\u044b\u0442\u043a\u0430 (\u043d\u0443\u0436\u043d\u043e \u22653.23 \u0441 \u043f\u043e\u043f\u0440\u0430\u0432\u043a\u043e\u0439 \u043d\u0430 81 \u043f\u0435\u0440\u0435\u0431\u0440\u0430\u043d\u043d\u0443\u044e \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u044e)</div>
+        <div class="dim hint-block" style="font-size:10px;margin-bottom:8px;">z — насколько стандартных отклонений винрейт выше безубытка (нужно ≥3.23 с поправкой на 81 перебранную комбинацию)</div>
         ${liveSigSection}
         ${compoundSummaryHtml(r)}
         ${filterCoinLineHtml(data.filters, c.symbol)}
@@ -25174,7 +25174,7 @@ async function refreshSnr() {
     }).join('');
     panel.innerHTML = `
       <div class="dim" style="margin-bottom:10px;">
-        \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442: ${lastFinished} \u00b7 \u0432\u0441\u0435\u043b\u0435\u043d\u043d\u0430\u044f: \u0432\u0441\u0435 \u043b\u0438\u043a\u0432\u0438\u0434\u043d\u044b\u0435 \u0444\u044c\u044e\u0447\u0435\u0440\u0441\u044b (${data.progress_total||'?'} \u0448\u0442.), \u0431\u0435\u0437 \u0444\u0438\u043b\u044c\u0442\u0440\u0430 \u043f\u043e \u043e\u0431\u044a\u0451\u043c\u0443 \u2014 \u043c\u0435\u0441\u0442\u043e \u0440\u0435\u0448\u0430\u0435\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u0447\u0435\u0441\u0442\u043d\u044b\u0439 train/test \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442 \u00b7 \u043f\u0440\u043e\u0448\u043b\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0443: ${coins.length} \u0438\u0437 \u0434\u043e ${data.config&&data.config.display_n||0} \u043c\u0435\u0441\u0442 \u0434\u043b\u044f \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f${coins.length < (data.config&&data.config.display_n||0) ? ' \u2014 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 \u043c\u043e\u043d\u0435\u0442\u044b \u0438\u0437 \u0432\u0441\u0435\u043b\u0435\u043d\u043d\u043e\u0439 \u043f\u0440\u043e\u0441\u0442\u043e \u043d\u0435 \u043f\u0440\u043e\u0448\u043b\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0443 \u043d\u0430 \u043e\u0442\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0445 \u0434\u0430\u043d\u043d\u044b\u0445, \u044d\u0442\u043e \u043d\u0435 \u0431\u0430\u0433 \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f' : ''}
+        последний бэктест: ${lastFinished} · <span class="hint-block">вселенная: все ликвидные фьючерсы (${data.progress_total||'?'} шт.), без фильтра по объёму — место решает только честный train/test результат · </span>прошли проверку: ${coins.length} из до ${data.config&&data.config.display_n||0} мест для отображения${coins.length < (data.config&&data.config.display_n||0) ? '<span class="hint-block"> — остальные монеты из вселенной просто не прошли проверку на отложенных данных, это не баг отображения</span>' : ''}
         <br>${(() => {
           const scanTxt = data.last_live_scan
             ? `живой скан: последний ${fmtDateTime(data.last_live_scan)}, проверено монет: ${data.last_live_scanned}`
@@ -25182,7 +25182,7 @@ async function refreshSnr() {
           const perDay = coins.filter(c => c.is_active && c.result && c.result.test_days > 0)
             .reduce((acc, c) => acc + c.result.test_n / c.result.test_days, 0);
           const freqTxt = perDay > 0
-            ? ` · по бэктесту ожидается ~1 сигнал в ${(1 / perDay).toFixed(1)} дн. на все торгуемые монеты вместе — несколько дней тишины для этой стратегии нормальны`
+            ? ` · по бэктесту ожидается ~1 сигнал в ${(1 / perDay).toFixed(1)} дн. на все торгуемые монеты вместе<span class="hint-block"> — несколько дней тишины для этой стратегии нормальны</span>`
             : '';
           return scanTxt + freqTxt;
         })()}
@@ -25210,7 +25210,7 @@ async function refreshPrv() {
     let progressHtml = '';
     if (data.waiting_for_slot) {
       progressHtml = `<div class="dim" style="margin-bottom:10px;font-size:11px;">
-        \u23f3 \u043e\u0436\u0438\u0434\u0430\u0435\u0442 \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e\u0433\u043e \u043c\u0435\u0441\u0442\u0430 \u0441\u0440\u0435\u0434\u0438 \u0431\u044d\u043a\u0442\u0435\u0441\u0442\u043e\u0432 \u0434\u0440\u0443\u0433\u0438\u0445 \u043c\u043e\u0434\u0443\u043b\u0435\u0439 (\u043e\u0434\u043d\u043e\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u0440\u0430\u0431\u043e\u0442\u0430\u044e\u0442 \u043d\u0435 \u0431\u043e\u043b\u044c\u0448\u0435 2 \u0438\u0437 9)
+        ⏳ ожидает свободного места среди бэктестов других модулей (одновременно идут не больше 2 бэктестов)
       </div>`;
     } else if (data.backtest_running) {
       const pct = data.progress_total ? Math.round(data.progress_done / data.progress_total * 100) : 0;
@@ -25274,7 +25274,7 @@ async function refreshPrv() {
           <div><div class="dim" style="font-size:10px;">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R \u00b7 z=${r.train_z}</div></div>
           <div><div class="dim" style="font-size:10px;">TEST (n=${r.test_n})</div><div class="win">WR ${r.test_wr}% \u00b7 ${r.test_avg_pnl_r>0?'+':''}${r.test_avg_pnl_r}R \u00b7 z=${r.test_z}</div></div>
         </div>
-        <div class="dim" style="font-size:10px;margin-bottom:8px;">z \u2014 \u043d\u0430\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0441\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0445 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u0438\u0439 \u0432\u0438\u043d\u0440\u0435\u0439\u0442 \u0432\u044b\u0448\u0435 \u0431\u0435\u0437\u0443\u0431\u044b\u0442\u043a\u0430 (\u043d\u0443\u0436\u043d\u043e \u22653.11 \u0441 \u043f\u043e\u043f\u0440\u0430\u0432\u043a\u043e\u0439 \u043d\u0430 216 \u043f\u0435\u0440\u0435\u0431\u0440\u0430\u043d\u043d\u0443\u044e \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u044e)</div>
+        <div class="dim hint-block" style="font-size:10px;margin-bottom:8px;">z — насколько стандартных отклонений винрейт выше безубытка (нужно ≥3.11 с поправкой на 216 перебранную комбинацию)</div>
         ${liveSigSection}
         ${compoundSummaryHtml(r)}
         <details ontoggle="loadBtTrades(this, 'prv', '${c.symbol}', ${data.last_backtest_finished || 0})"><summary class="dim" style="cursor:pointer;font-size:11px;">все сделки бэктеста (${r.all_trades_n || 0})</summary>${tradesRows}</details>
@@ -25282,7 +25282,7 @@ async function refreshPrv() {
     }).join('');
     panel.innerHTML = `
       <div class="dim" style="margin-bottom:10px;">
-        \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442: ${lastFinished} \u00b7 \u0432\u0441\u0435\u043b\u0435\u043d\u043d\u0430\u044f: \u0432\u0441\u0435 \u043b\u0438\u043a\u0432\u0438\u0434\u043d\u044b\u0435 \u0444\u044c\u044e\u0447\u0435\u0440\u0441\u044b (${data.progress_total||'?'} \u0448\u0442.), \u0431\u0435\u0437 \u043f\u043e\u0442\u043e\u043b\u043a\u0430 \u043f\u043e \u043e\u0431\u044a\u0451\u043c\u0443, \u0442\u043e\u043b\u044c\u043a\u043e \u043d\u0438\u0437\u043a\u0438\u0439 \u043f\u043e\u0440\u043e\u0433 \u043b\u0438\u043a\u0432\u0438\u0434\u043d\u043e\u0441\u0442\u0438 \u00b7 \u043f\u0440\u043e\u0448\u043b\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0443: ${coins.length} \u0438\u0437 \u0434\u043e ${data.config&&data.config.display_n||0} \u043c\u0435\u0441\u0442 \u0434\u043b\u044f \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f${coins.length < (data.config&&data.config.display_n||0) ? ' \u2014 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 \u043c\u043e\u043d\u0435\u0442\u044b \u0438\u0437 \u0432\u0441\u0435\u043b\u0435\u043d\u043d\u043e\u0439 \u043f\u0440\u043e\u0441\u0442\u043e \u043d\u0435 \u043f\u0440\u043e\u0448\u043b\u0438 \u043f\u0440\u043e\u0432\u0435\u0440\u043a\u0443 \u043d\u0430 \u043e\u0442\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0445 \u0434\u0430\u043d\u043d\u044b\u0445, \u044d\u0442\u043e \u043d\u0435 \u0431\u0430\u0433 \u043e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f' : ''}
+        последний бэктест: ${lastFinished} · <span class="hint-block">вселенная: все ликвидные фьючерсы (${data.progress_total||'?'} шт.), без потолка по объёму, только низкий порог ликвидности · </span>прошли проверку: ${coins.length} из до ${data.config&&data.config.display_n||0} мест для отображения${coins.length < (data.config&&data.config.display_n||0) ? '<span class="hint-block"> — остальные монеты из вселенной просто не прошли проверку на отложенных данных, это не баг отображения</span>' : ''}
       </div>
       ${progressHtml}
       ${lstatsHtml}

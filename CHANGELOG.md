@@ -17194,3 +17194,19 @@ v0.99.350 - Every error explained in plain Russian, per user ("сделай вс
          Verified: py_compile (-W error), pyflakes, node --check, no
          surrogates; 12 representative messages translated as intended;
          real runtime /api/errors shows ru for live 403 errors.
+
+v0.99.351 - Tab texts audited for the 💡 hints toggle, per user ("пройдись по
+         тексту на вкладках и определи что туда надо спрятать — много
+         лишнего текста как работает индикатор"). Already hint-blocks:
+         MSNR description + rules list + table/RR/Neuro-filter notes,
+         Neuro description, Sweep description, simulator explanation,
+         both filter-report explanations. Newly hidden with hints off:
+         S/R and Peak — the per-card "z — насколько стандартных отклонений…"
+         line, the "вселенная: все ликвидные фьючерсы (N шт.), без фильтра/
+         потолка по объёму…" part of the header and the "остальные монеты
+         просто не прошли проверку…" note (last-backtest time and "прошли
+         проверку N из M" stay), S/R's "— несколько дней тишины нормальны"
+         (the expected signal frequency stays); Sweep/Mirror "Зелёная
+         точка… клик по строке…"; MSNR "· клик по строке — график". Also
+         fixed Peak's stale "не больше 2 из 9" -> "не больше 2 бэктестов".
+         Numbers, statuses, warnings and data stay visible either way.
