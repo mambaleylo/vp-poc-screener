@@ -17169,3 +17169,28 @@ v0.99.349 - Errors panel noise, per user ("что за уведы? будто б
             minutes (hangs are also covered by the v0.99.322 heartbeats).
          Kept: rare genuinely-informative notices (e.g. "symbol dropped
          from the active set mid-scan").
+
+v0.99.350 - Every error explained in plain Russian, per user ("сделай все
+         ошибки читаемые на русском, чтобы я сам понимал что там").
+         error_to_russian(text) builds "ГДЕ · процесс · монета: что
+         случилось → что делать": module from the leading function name
+         (MSNR, Neuro, S/R Zones, Peak Reversal, Sweep, Автоторговля <module>
+         for execute_autotrade <mode>, Сверка позиций, Ордера стоп/тейк,
+         Кэш свечей, Telegram, API-ключи, Сохранение данных, …; for the
+         health watchdog, the stalled loop named in the message), process
+         (бэктест, живой скан, майнинг, отслеживание сделки, отчёт
+         фильтров, досрочное закрытие, …), first *_USDT coin (skipped for
+         in-flight lists), and ~40 cause patterns — network timeout / no
+         connection / 403 / 429 / 5xx / bad JSON / rejected trigger price /
+         insufficient balance / bad keys / missing keys / delisted
+         contract / order or position already gone / missing SL (auto-heal
+         failed → marked urgent) / emergency SL failed (urgent) / stuck or
+         slow symbol / zero-result cycle / hung loop / disk full / internal
+         bug ("пришли мне это сообщение"). Unknown texts say so honestly.
+         log_error() stores it as "ru" next to the untouched technical
+         "msg"; older/restored entries get it when served (/api/errors and
+         the status payload). UI: the Russian line first (urgent ones in
+         red), the technical text small underneath.
+         Verified: py_compile (-W error), pyflakes, node --check, no
+         surrogates; 12 representative messages translated as intended;
+         real runtime /api/errors shows ru for live 403 errors.

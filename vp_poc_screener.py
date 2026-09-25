@@ -21,6 +21,7 @@ import os
 import json
 import time
 import math
+import re
 import struct
 import sys
 import threading
@@ -57,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.349"
+APP_VERSION = "0.99.350"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3179,6 +3180,119 @@ _ERROR_TRANSLATIONS = (
 )
 
 
+# ============================================================================
+# v0.99.350 — every error explained in plain Russian, per user ("сделай все
+# ошибки читаемые на русском, чтобы я сам понимал что там"). The technical
+# text is kept (small, under the Russian line) for debugging.
+# error_to_russian(): WHERE (module + process, from the function name the
+# message starts with) + WHICH COIN (first *_USDT) + WHAT HAPPENED (cause,
+# matched on the whole text) + WHAT TO DO when there's anything to do.
+# ============================================================================
+_ERR_MODULES = (   # first match on the leading function name wins
+    ("msnr", "MSNR"), ("lsw", "Sweep"), ("snr", "S/R Zones"), ("prv", "Peak Reversal"),
+    ("neuro", "Neuro"), ("reconcile", "Сверка позиций на бирже"), ("execute_autotrade", "Автоторговля"),
+    ("place_close_trigger", "Ордера стоп/тейк"), ("move_stop", "Ордера стоп/тейк"),
+    ("telegram", "Telegram"), ("candle cache", "Кэш свечей"), ("fetch_candles", "Загрузка свечей"),
+    ("credentials", "API-ключи"), ("api_post_module_credentials", "API-ключи"),
+    ("save_", "Сохранение данных"), ("load_", "Загрузка сохранённых данных"),
+    ("system_health", "Контроль зависаний"), ("risk_autotune", "Авто-тюнинг риска"),
+    ("get_unified", "Баланс счёта"), ("get_futures", "Баланс счёта"), ("get_risk", "Лимиты биржи"),
+    ("scalp", "Данные о марже"), ("main scan", "Общий цикл"), ("scan_loop", "Общий цикл"),
+    ("ft5", "FT5"), ("mirror", "Зеркало"), ("amd", "AMD"), ("nq", "NQ"), ("ema", "EMA"),
+    ("api_", "Интерфейс"),
+)
+_ERR_PROCESS = (
+    ("filter_analysis", "отчёт фильтров"), ("filter_loop", "отчёт фильтров"),
+    ("mining", "майнинг"), ("backtest", "бэктест"), ("optimize", "бэктест"), ("build_universe", "список монет"),
+    ("compound", "расчёт $15"), ("outcome", "отслеживание сделки"), ("close_position_early", "досрочное закрытие"),
+    ("live", "живой скан"), ("scan_symbol_live", "живой скан"), ("chart", "график"), ("reset", "очистка"),
+    ("watchdog", "контроль бэктеста"), ("addon", "доливка"), ("index candles", "индексная цена"),
+    ("funding", "фандинг"), (" OI", "открытый интерес"),
+)
+_ERR_CAUSES = (   # (markers, explanation, advice) — first match wins
+    (("queue: full",), "очередь Telegram переполнена — часть уведомлений пропущена", ""),
+    (("telegram HTTP", "telegram network"), "не удалось отправить уведомление в Telegram (будет повтор)", ""),
+    (("no progress for",), "бэктест перестал продвигаться — похоже, завис", "если не пройдёт само за полчаса — перезапусти сервер"),
+    (("silent for", "likely hung"), "процесс перестал отвечать — похоже, завис", "перезапусти сервер"),
+    (("stuck on",), "зависла обработка монеты — запущена замена процесса", ""),
+    (("zero usable results",), "цикл не дал ни одного результата (обычно из-за сбоя сети) — оставлены прежние результаты, повтор через 30 мин", ""),
+    (("entire cycle exceeded", "overall cycle exceeded"), "весь цикл шёл слишком долго и прерван — повтор позже", ""),
+    (("as_completed timed out", "overall ceiling exceeded"), "цикл ждал зависшую монету — готовые результаты сохранены, она пропущена", ""),
+    (("timed out after", "exceeded", "a fetch exceeded"), "монета обрабатывалась слишком долго — пропущена в этом цикле", ""),
+    (("dropped from",), "монета выпала из списка активных во время скана — сигнал записан, сделка не открыта", ""),
+    (("missing SL",), "у открытой позиции нет стоп-лосса, автоматически поставить не удалось", "ПРОВЕРЬ ПОЗИЦИЮ НА БИРЖЕ ВРУЧНУЮ"),
+    (("auto-healed",), "у позиции не было стоп-лосса — поставлен автоматически", ""),
+    (("orphaned",), "найдены стоп/тейк-ордера без позиции — отменены", ""),
+    (("emergency SL placement ALSO failed",), "позиция открыта, но стоп-лосс поставить не удалось", "СРОЧНО ПОСТАВЬ СТОП ВРУЧНУЮ ИЛИ ЗАКРОЙ ПОЗИЦИЮ"),
+    (("new breakeven SL failed",), "старый стоп снят, а новый (безубыток) не поставился", "ПРОВЕРЬ СТОП НА БИРЖЕ"),
+    (("confirmed open on excha",), "ордер ответил с опозданием, но позиция на бирже открыта — продолжаем", ""),
+    (("AUTO_TRIGGER",), "биржа отклонила цену стопа/тейка (цена уже прошла уровень)", ""),
+    (("INSUFFICIENT_AVAILABLE", "insufficient", "not enough balance", "not enough margin", "BALANCE_NOT_ENOUGH"), "не хватает средств на счёте", "пополни фьючерсный/единый счёт"),
+    (("credentials not configured",), "API-ключи для этого счёта не заданы", "впиши ключи в настройках → Автоторговля"),
+    (("invalid signature", "INVALID_KEY", "INVALID_SIGNATURE", "auth failed", "Unauthorized", "401 Client Error", "FORBIDDEN_KEY"), "биржа не приняла API-ключи (неверные или без прав)", "проверь ключ, секрет и права на фьючерсы"),
+    (("Too Many Requests", "RATE_LIMIT", "TOO_MANY_REQUESTS", "429 Client Error"), "биржа ограничила частоту запросов", "обычно проходит само через минуту"),
+    (("403 Client Error",), "биржа отказала в доступе (403) — ограничение по стране/IP или прокси", "проверь VPN/прокси"),
+    (("CONTRACT_NOT_FOUND", "contract not found"), "такой монеты на бирже нет (делистинг/переименование)", ""),
+    (("ORDER_NOT_FOUND",), "ордер уже не существует (исполнен или отменён)", ""),
+    (("POSITION_EMPTY", "POSITION_NOT_FOUND"), "позиции уже нет на бирже", ""),
+    (("400 Client Error",), "биржа отклонила запрос как неверный (400)", ""),
+    (("500 Server Error", "502 ", "503 ", "504 ", "Bad Gateway", "Service Unavailable"), "сбой на стороне биржи — обычно временный", ""),
+    (("Read timed out", "ReadTimeout", "timed out", "Timeout"), "биржа не ответила вовремя (таймаут)", "обычно временно; если часто — проверь интернет"),
+    (("ConnectionError", "Max retries", "NameResolution", "Connection reset", "Connection aborted", "RemoteDisconnected", "network error"), "нет связи с биржей или интернетом", "проверь интернет на телефоне"),
+    (("JSONDecodeError", "Expecting value"), "биржа прислала непонятный ответ", "обычно временно"),
+    (("No space left",), "на телефоне закончилось место", "освободи память"),
+    (("Permission denied",), "нет прав на запись файла", ""),
+    (("KeyError",), "внутренняя ошибка: в данных не хватает поля", "пришли мне это сообщение"),
+    (("TypeError", "ValueError", "ZeroDivisionError", "AttributeError", "IndexError", "NameError", "not supported between", "object has no attribute", "unsupported operand", "list index out of range", "division by zero"), "внутренняя ошибка программы", "пришли мне это сообщение"),
+)
+
+
+_ERR_MODE_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "snr": "S/R Zones", "prv": "Peak Reversal", "neuro": "Neuro",
+                    "scalp": "Скальпинг", "ft5": "FT5", "mirror": "Зеркало", "bounce": "Bounce", "breakout": "Breakout"}
+
+
+def error_to_russian(text):
+    t = str(text)
+    head = t.split(":", 1)[0].strip()
+    head_l = head.lower()
+    if head_l.startswith("system_health_watchdog"):
+        # the stalled loop is named in the body: "msnr_live_loop silent for …"
+        body = t.split(":", 1)[1].strip() if ":" in t else ""
+        head_l = body.split(" ", 1)[0].lower()
+    module = next((lbl for pre, lbl in _ERR_MODULES if head_l.startswith(pre)), None)
+    process = next((lbl for pre, lbl in _ERR_PROCESS if pre.lower() in head_l), None)
+    if head_l.startswith("execute_autotrade"):
+        parts = head.split()
+        if len(parts) > 1 and parts[1].lower() in _ERR_MODE_LABELS:
+            module = f"Автоторговля {_ERR_MODE_LABELS[parts[1].lower()]}"
+    m = re.search(r"\b([A-Z0-9\u4e00-\u9fff]{1,20}_USDT)\b", t)
+    coin = m.group(1).replace("_USDT", "") if (m and "in flight" not in t and "no progress" not in t) else None
+    cause = advice = None
+    for markers, expl, adv in _ERR_CAUSES:
+        if any(mk in t for mk in markers):
+            cause, advice = expl, adv
+            break
+    where = " · ".join(x for x in (module, process) if x) or "Программа"
+    if coin:
+        where += f" · {coin}"
+    what = cause or "необычная ошибка (подробности ниже)"
+    return f"{where}: {what}" + (f" → {advice}" if advice else "")
+
+
+def _errors_with_ru(errs):
+    """v0.99.350 — entries logged before the Russian explanations existed
+    (or restored from disk) get theirs on the way out."""
+    out = []
+    for e in errs:
+        if isinstance(e, dict) and not e.get("ru"):
+            try:
+                e = {**e, "ru": error_to_russian(e.get("msg", ""))}
+            except Exception:
+                pass
+        out.append(e)
+    return out
+
+
 def _russian_error_prefix(text):
     for markers, prefix in _ERROR_TRANSLATIONS:
         if any(marker in text for marker in markers):
@@ -3188,10 +3302,13 @@ def _russian_error_prefix(text):
 
 def log_error(msg):
     text = str(msg)[:500]
-    text = _russian_error_prefix(text) + text
+    try:
+        ru = error_to_russian(text)   # v0.99.350
+    except Exception:
+        ru = None
     print("[ERR]", text)
     with state_lock:
-        STATE["errors"].append({"t": time.time(), "msg": text[:550]})
+        STATE["errors"].append({"t": time.time(), "msg": text[:550], "ru": ru})
     if any(marker in text for marker in _NETWORK_ERROR_MARKERS):
         now = time.time()
         with _network_error_lock:
@@ -20609,7 +20726,7 @@ def api_errors():
     standalone, always-available endpoint so the errors panel doesn't
     depend on Volume Profile being active or even enabled."""
     with state_lock:
-        errors = list(STATE["errors"])[-100:]
+        errors = _errors_with_ru(list(STATE["errors"])[-100:])
     return jsonify({"errors": errors})
 
 
@@ -20631,7 +20748,7 @@ def api_status():
             "last_scan_started": STATE["last_scan_started"],
             "last_scan_finished": STATE["last_scan_finished"],
             "last_scan_duration": STATE["last_scan_duration"],
-            "errors": list(STATE["errors"]),
+            "errors": _errors_with_ru(list(STATE["errors"])),
             "stats": stats,
             "auto_tune": {
                 "enabled": AUTO_TUNE_ENABLED,
@@ -23371,7 +23488,7 @@ async function refreshTuning() {
   const errHtml = errList.length ? `
     <div class="dim" style="margin-top:10px;padding-top:10px;border-top:1px solid #1c2433;">
       <b class="loss">Последние ошибки сканера (${errList.length}):</b><br>
-      <span style="font-size:12px;">${errList.slice().reverse().map(e => `${fmtTime(e.t)} — ${e.msg}`).join('<br>')}</span>
+      <span style="font-size:12px;">${errList.slice().reverse().map(errRowHtml).join('')}</span>
     </div>` : '';
   const detailHtml = `
     <div class="dim hint-block" style="margin-bottom:10px;">
@@ -25972,7 +26089,7 @@ async function refreshGlobalErrors() {
     const errs = data.errors || [];
     document.getElementById('globalErrorsCount').textContent = errs.length;
     document.getElementById('globalErrorsList').innerHTML = errs.length
-      ? errs.slice().reverse().map(e => `${fmtTime(e.t)} — ${e.msg}`).join('<br>')
+      ? errs.slice().reverse().map(errRowHtml).join('')
       : 'Ошибок нет.';
   } catch (e) {
     // best-effort — a failed poll of this panel shouldn't break the rest of the UI
@@ -26844,6 +26961,15 @@ function filterCoinLineHtml(nf, sym) {
   if (!pc.n_a) return `<div class="loss" style="font-size:11px;">🏆 фильтр (тест): убрал все ${pc.n_b} сделок</div>`;
   const d = Math.round((pc.wr_a - pc.wr_b) * 10) / 10;
   return `<div style="font-size:11px;" title="${String(f.label).replace(/"/g, '&quot;')}"><span class="dim">🏆 фильтр (тест): ${pc.wr_b}%→${pc.wr_a}% (n=${pc.n_b}→${pc.n_a})</span> <span class="${d > 0 ? 'win' : d < 0 ? 'loss' : 'dim'}">(${d > 0 ? '+' : ''}${d}%)</span></div>`;
+}
+// v0.99.350 — error row: plain-Russian line first, technical text small below
+function errRowHtml(e) {
+  const esc = x => String(x || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const urgent = /ВРУЧНУЮ|СРОЧНО|ПРОВЕРЬ СТОП/.test(e.ru || '');
+  return `<div style="padding:4px 0;border-bottom:1px solid #1c2433;">
+    <div${urgent ? ' class="loss"' : ''}>${fmtTime(e.t)} — ${esc(e.ru || e.msg)}</div>
+    ${e.ru ? `<div class="dim" style="font-size:10px;word-break:break-word;">${esc(e.msg)}</div>` : ''}
+  </div>`;
 }
 function fmtNum(n) {
   return Number(n).toPrecision(6).replace(/\\.?0+$/,'').replace(/\\.$/, '');
