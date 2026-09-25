@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.342"
+APP_VERSION = "0.99.343"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23729,7 +23729,7 @@ async function refreshMsnr() {
     const compClass = (r.compound_return_pct === null || r.compound_return_pct === undefined) ? 'dim' : (r.compound_return_pct > 0 ? 'win' : 'loss');
     const compBlownTxt = r.compound_blown_at ? ` (\u0441\u043b\u0438\u0432 \u043d\u0430 #${r.compound_blown_at})` : '';
     const compTxt = (r.compound_return_pct !== null && r.compound_return_pct !== undefined)
-      ? ` \u00b7 <span class="${compClass}">\u0434\u043e\u0445\u043e\u0434 ${r.compound_return_pct > 0 ? '+' : ''}${r.compound_return_pct}% ($${cfg.compound_start_balance}\u2192$${r.compound_final_balance})${compBlownTxt}</span>`
+      ? ` \u00b7 <span class="${compClass}">\u0434\u043e\u0445\u043e\u0434 ${r.compound_return_pct > 0 ? '+' : ''}${r.compound_return_pct}% ($${cfg.compound_start_balance}\u2192$${Math.trunc(r.compound_final_balance)})${compBlownTxt}</span>`
       : '';
     const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431${skipTxt}${skipRrMaxTxt}${skipSlTxt}${skipHoursTxt}${skipVolumeTxt}${liqTxt}${levTxt}${compTxt}${filterImpactTxt}`;
     const noteTxt = r.note ? ` \u26a0\ufe0f ${r.note}` : '';
@@ -23938,7 +23938,7 @@ async function loadMsnrTrades(symbol) {
       // see msnr_compound_trail()'s own docstring), shown as a dim
       // dash rather than a misleading $0.
       const compTxt = (t.compound_balance_after !== null && t.compound_balance_after !== undefined)
-        ? `<span class="${t.compound_pnl_pct >= 0 ? 'win' : 'loss'}">$${t.compound_balance_after} (${t.compound_pnl_pct >= 0 ? '+' : ''}${t.compound_pnl_pct}%)</span>`
+        ? `<span class="${t.compound_pnl_pct >= 0 ? 'win' : 'loss'}">$${Math.trunc(t.compound_balance_after)} (${t.compound_pnl_pct >= 0 ? '+' : ''}${t.compound_pnl_pct}%)</span>`
         : '<span class="dim">\u2014</span>';
       // v0.99.46, per direct user request ("рядом с каждой монетой ещё
       // и вычислять плечо"): this specific trade's OWN resolved
@@ -26607,7 +26607,7 @@ function fmtUsdCompact(v) {
   if (a >= 1e9) return '$' + (v / 1e9).toFixed(1) + 'B';
   if (a >= 1e6) return '$' + (v / 1e6).toFixed(1) + 'M';
   if (a >= 1e4) return '$' + (v / 1e3).toFixed(1) + 'K';
-  return '$' + v.toFixed(2);
+  return '$' + Math.trunc(v);   // v0.99.343 — whole dollars, no cents (user request)
 }
 function compoundSummaryHtml(x) {
   if (x && x.compound_final_balance === undefined) {

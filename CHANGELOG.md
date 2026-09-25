@@ -17077,3 +17077,10 @@ v0.99.342 - UI text audit after the recent changes, per user ("перечита�
            Peak Reversal (they showed raw "neuro"/"snr"/"prv").
          Verified: py_compile (-W error), pyflakes, node --check, no
          surrogates in the served page.
+
+v0.99.343 - $15 va-bank dollar values shown as whole dollars (no cents), per
+         user ("значения по каждой сделке в долларах можно отображать без
+         центов, только целую часть"): fmtUsdCompact (Neuro / S/R / Peak
+         per-trade balance + summary) truncates below $10K ($603.87 ->
+         $603; K/M/B forms unchanged); MSNR per-trade balance and its
+         "$15→$N" summary likewise. Display only.
