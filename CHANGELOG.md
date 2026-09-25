@@ -17038,3 +17038,20 @@ v0.99.340 - Header request-load line: "Volume 0.8/min" shown with Volume
          "общий цикл", scan_symbol_scalp/scalp* -> "скальпинг" (the 6-hourly
          margin-data refresh), only scan_symbol -> "Volume". Display only.
          Verified: pyflakes; attribution unit test (4 call paths).
+
+v0.99.341 - Volume removed from settings, per user ("и из настроек volume
+         можно убрать"). Removed: the "Volume Profile" settings group
+         (scanner / Bounce / Breakout switches), the Telegram "Алерты
+         Volume Profile" switch, the header panel's "Объём 🗑 Очистить" row
+         and its handler, and their settings-map entries.
+         VOLUME_PROFILE_ENABLED is now always False — apply_settings()
+         ignores a saved "on", so an old settings file can't bring the
+         scanner back; the Volume tab stays hidden. Volume code itself is
+         left in place (dormant).
+         Also fixed outdated MSNR settings wording left from the gold-only
+         days: "Сканирование (только золото)" -> "Сканирование MSNR",
+         "живые QM-сигналы по золоту" -> "живые сигналы MSNR" (the gold
+         list itself was removed in v0.99.321).
+         Verified: py_compile (-W error), pyflakes, node --check, no
+         surrogates; /api/settings returns volume_profile_enabled false and
+         stays false after POSTing true; no Volume controls left in the page.

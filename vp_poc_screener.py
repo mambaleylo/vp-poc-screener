@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.340"
+APP_VERSION = "0.99.341"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -126,7 +126,7 @@ MIN_VOL_USD = float(os.environ.get("VP_MIN_VOL_USD", 500000))  # min 24h quote v
 MAX_SYMBOLS = int(os.environ.get("VP_MAX_SYMBOLS", 250))  # universe cap — was 150, raised per user request (hardware headroom available)
 # master switch for the whole volume-profile screener (zones, bounce/breakout
 # signals, watchlist, auto-tuning) — turn off to run divergence-only
-VOLUME_PROFILE_ENABLED = os.environ.get("VP_VOLUME_PROFILE_ENABLED", "1") == "1"
+VOLUME_PROFILE_ENABLED = False   # v0.99.341 — Volume module retired (settings toggle removed; apply_settings ignores saved "on")
 SCAN_INTERVAL_SEC = int(os.environ.get("VP_SCAN_INTERVAL", 45))
 COOLDOWN_SEC = int(os.environ.get("VP_COOLDOWN", 900))    # per-symbol re-alert cooldown, applied after a signal on that symbol closes
 WORKERS = int(os.environ.get("VP_WORKERS", 8))  # was 12 (before that, 8) — lowered back per direct user request after live error logs showed repeated "network error after 2 retries" on read timeouts even WITH the v0.73.0/v0.75.0 retry logic in place, suggesting 12 concurrent requests was routinely saturating the actual available mobile bandwidth rather than any single request being unlucky
@@ -1259,7 +1259,7 @@ def apply_settings(updates):
     global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, AUTOTRADE_ENABLED_NEURO, AUTOTRADE_INVERT_LSW, AUTOTRADE_INVERT_NEURO, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED, MSNR_SINGLE_BEST_ENABLED, LSW_ALL_IN_ENABLED, SNR_ALL_IN_ENABLED, PRV_ALL_IN_ENABLED
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT
     if "volume_profile_enabled" in updates:
-        VOLUME_PROFILE_ENABLED = bool(updates["volume_profile_enabled"])
+        VOLUME_PROFILE_ENABLED = False   # v0.99.341 — Volume removed per user ("из настроек volume можно убрать"); can't be switched back on
     if "bounce_enabled" in updates:
         BOUNCE_ENABLED = bool(updates["bounce_enabled"])
     if "breakout_enabled" in updates:
@@ -22364,7 +22364,6 @@ INDEX_HTML = """<!doctype html>
     </div>
   </div>
   <div id="hdrActions" style="display:none;">
-    <div class="hdrRow"><span class="hdrLbl">Объём</span><button id="resetVolumeBtn" class="btnDanger">🗑 Очистить</button></div>
     <div class="hdrRow"><span class="hdrLbl">MSNR</span><button id="resetMsnrBtn" class="btnDanger">🗑 Очистить</button><button id="restartMsnrBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
     <div class="hdrRow"><span class="hdrLbl">Sweep</span><button id="resetLswBtn" class="btnDanger">🗑 Очистить</button><button id="restartLswBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
     <div class="hdrRow"><span class="hdrLbl">Neuro</span><button id="resetNeuroBtn" class="btnDanger">🗑 Очистить</button><button id="restartNeuroBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
@@ -22477,37 +22476,13 @@ INDEX_HTML = """<!doctype html>
     <div id="settingsSearchWrap">
       <input type="text" id="settingsSearch" placeholder="Поиск по настройкам…">
     </div>
-    <details class="settingsGroup" style="--mod-color:#4fc3f7;"><summary class="settingsGroupTitle">Volume Profile</summary><div class="settingsGroupBody">
-      
-      <div class="settingRow">
-        <div>
-          <div class="label">Volume Profile сканер</div>
-          <div class="sub">зоны, bounce/breakout сигналы, watchlist, автотюнинг</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setVolumeProfile"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Bounce сигналы</div>
-          <div class="sub">отбой от уровня</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setBounce"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Breakout сигналы</div>
-          <div class="sub">пробой после консолидации</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setBreakout"><span class="switchSlider"></span></label>
-      </div>
-    </div></details>
 
 
     <details class="settingsGroup" style="--mod-color:#ff7043;" data-warn style="background:rgba(255,112,67,0.05);"><summary class="settingsGroupTitle" style="color:#e0a030;">MSNR ⚠️ Экспериментально</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
         <div>
-          <div class="label">Сканирование (только золото)</div>
+          <div class="label">Сканирование MSNR</div>
           <div class="sub">Malaysian SNR / Storyline — см. предупреждение на вкладке. Автоторговля выключена по умолчанию.</div>
         </div>
         <label class="switch"><input type="checkbox" id="setMsnr"><span class="switchSlider"></span></label>
@@ -22745,15 +22720,8 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Алерты Volume Profile</div>
-          <div class="sub">bounce/breakout сигналы и их закрытие</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramVp"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
           <div class="label">↳ Алерты MSNR</div>
-          <div class="sub">живые QM-сигналы по золоту</div>
+          <div class="sub">живые сигналы MSNR</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramMsnr"><span class="switchSlider"></span></label>
       </div>
@@ -26005,9 +25973,6 @@ function wireResetButton(btnId, endpoint, confirmMsg, idleLabel) {
     btn.textContent = idleLabel;
   };
 }
-wireResetButton('resetVolumeBtn', '/api/reset/volume',
-  'Удалить статистику и подобранные параметры Volume Profile (Сигналы/Watchlist/Тюнинг)? Это необратимо.',
-  '🗑 Очистить');
 wireResetButton('resetMsnrBtn', '/api/reset/msnr',
   'Удалить накопленный бэктест и сигналы MSNR? Остальное не тронет. Это необратимо.',
   '🗑 Очистить');
@@ -26067,9 +26032,6 @@ wireResetButton('resetSimulatorBtn', '/api/simulator/reset',
 // ---------------- Settings modal ----------------
 const settingsModal = document.getElementById('settingsModal');
 const setInputs = {
-  volume_profile_enabled: document.getElementById('setVolumeProfile'),
-  bounce_enabled: document.getElementById('setBounce'),
-  breakout_enabled: document.getElementById('setBreakout'),
   msnr_enabled: document.getElementById('setMsnr'),
   msnr_addon_enabled: document.getElementById('setMsnrAddon'),
   msnr_all_in_enabled: document.getElementById('setMsnrAllIn'),
@@ -26096,7 +26058,6 @@ const setInputs = {
   lsw_entry_confirm_enabled: document.getElementById('setLswEntryConfirm'),
   lsw_direction_filter_enabled: document.getElementById('setLswDirectionFilter'),
   telegram_enabled: document.getElementById('setTelegram'),
-  telegram_alerts_vp: document.getElementById('setTelegramVp'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
   hourly_stats_enabled: document.getElementById('setHourlyStats'),
   telegram_alerts_msnr: document.getElementById('setTelegramMsnr'),
