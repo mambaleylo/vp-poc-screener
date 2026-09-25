@@ -16729,3 +16729,14 @@ v0.99.324 - [branch candle-cache, NOT merged until verified on real data]
          -80% requests, 0 mismatches in randomized long runs under all of
          them, and a negative control (first cached candle dropped) is
          still reported (36 mismatches). Real-data re-run required.
+         MERGED to main as v0.99.326 after real-data verification in the
+         user's Termux (tools/compare_candles.py, BTC/SOL/DOGE, 15m/1h/4h/
+         1d x 40/102/400/1500d x 4 boundary variants = 192 comparisons):
+         190 identical, -72% requests; the 2 remaining differences (both
+         1h, window ending 1s BEFORE an hour, the candle starting 1s AFTER
+         `to` present in one download and not the other) were shown to be
+         Gate's own response variance by a CONTROL run of the old fetcher
+         against itself (no cache at all): the identical symptom, 2 of 48
+         (SOL 1h 400д/1500д +1800/-1). Live backtests always request up to
+         "now", where the last candle is the forming one and is always
+         fetched live, so this Gate quirk doesn't reach them.
