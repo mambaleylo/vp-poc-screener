@@ -17210,3 +17210,26 @@ v0.99.351 - Tab texts audited for the 💡 hints toggle, per user ("пройди
          точка… клик по строке…"; MSNR "· клик по строке — график". Also
          fixed Peak's stale "не больше 2 из 9" -> "не больше 2 бэктестов".
          Numbers, statuses, warnings and data stay visible either way.
+
+v0.99.352 - MSNR (and Sweep) backtest re-running right after a cycle, per user
+         ("MSNR, а может и ещё кто-то, делает бэктест после старта, а потом
+         сразу же ещё раз запускает"). Cause: MSNR now backtests every
+         liquid coin (~236 on the user's screen, 121 done at 1550s → ~50
+         min per cycle), but the loop still had a FIXED 1h ceiling from the
+         70-coin days. Any slowdown (sharing the slot/requests with S/R,
+         Neuro queueing) pushed it over: the loop declared the cycle
+         failed and 30 min later started a NEW cycle (progress reset to 0
+         — "again") while the abandoned one was still running in the
+         background — two cycles writing the same state.
+         Fix: wait_cycle_future() replaces fut.result(timeout=FIXED) for
+         MSNR and Sweep — a cycle is abandoned only if its progress counter
+         (msnr_/lsw_backtest_done) doesn't move for 15 min, or after a 4h
+         hard cap; heartbeat every minute meanwhile. wait_previous_cycle()
+         guarantees a new cycle never starts while an abandoned one is
+         still running. S/R, Peak and Neuro already bound each symbol and
+         the whole cycle by per-symbol timeouts and aren't affected.
+         Note: a restart always starts a fresh cycle (last-run time isn't
+         persisted) — that part is by design.
+         Verified: py_compile (-W error), pyflakes; unit test — a slowly
+         progressing cycle runs to completion, a stalled one is aborted
+         with "no progress", the overlap guard waits for the zombie.

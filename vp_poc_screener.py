@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.351"
+APP_VERSION = "0.99.352"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7268,6 +7268,44 @@ def heartbeat(name):
     _loop_heartbeats[name] = time.time()  # single dict store — atomic under the GIL, no lock needed
 
 
+
+def wait_cycle_future(fut, name, progress_key, stall_sec=900, hard_sec=4 * 3600):
+    """v0.99.352 — wait for a backtest cycle running in its own thread.
+    Replaces fut.result(timeout=FIXED) for MSNR/Sweep (user: "MSNR делает
+    бэктест после старта, а потом сразу же ещё раз"): MSNR now backtests
+    every liquid coin (~236), which takes ~50 min on the phone, and its
+    fixed 1h ceiling cut healthy cycles off — the loop marked the cycle
+    failed, retried 30 min later and started a NEW cycle while the
+    abandoned one was still running (progress reset to 0 = "again").
+    Now a cycle is only abandoned if it STOPS PROGRESSING (progress
+    counter unchanged for stall_sec) or exceeds a generous hard ceiling;
+    beats the loop's heartbeat every minute while waiting."""
+    start = time.time()
+    last, last_t = None, start
+    while True:
+        try:
+            return fut.result(timeout=60)
+        except (TimeoutError, FutureTimeoutError):
+            pass
+        heartbeat(name)
+        with state_lock:
+            p = STATE.get(progress_key)
+        now = time.time()
+        if p != last:
+            last, last_t = p, now
+        if now - last_t > stall_sec or now - start > hard_sec:
+            raise FutureTimeoutError(f"no progress for {int((now - last_t) / 60)} min" if now - last_t > stall_sec
+                                     else f"exceeded {int(hard_sec / 3600)}h")
+
+
+def wait_previous_cycle(prev_fut, name):
+    """v0.99.352 — never start a new cycle while an abandoned one is still
+    running (they'd both write the same STATE)."""
+    while prev_fut is not None and not prev_fut.done():
+        heartbeat(name)
+        time.sleep(30)
+
+
 def acquire_backtest_slot(name):
     """v0.99.325 — BACKTEST_CONCURRENCY_SEMAPHORE.acquire() that keeps the
     loop's heartbeat alive while it queues. A loop waiting its turn behind
@@ -11675,6 +11713,7 @@ def msnr_backtest_loop():
     # live signal is most likely to also need a free slot. This module
     # starts first (no delay) -- see the other 6 backtest loops' own
     # comments for their own staggered offsets (90s apart).
+    _prev_cycle_fut = None   # v0.99.352
     while True:
         heartbeat("msnr_backtest_loop")  # v0.99.322 — see system_health_watchdog()
         _cycle_failed = False
@@ -11692,7 +11731,7 @@ def msnr_backtest_loop():
             # below never runs — silently defeating the whole point of the
             # ceiling. Fix: no "with", explicit shutdown(wait=False) so the
             # outer loop moves on immediately, abandoning the stuck thread.
-            MAX_CYCLE_SEC = 60 * 60  # 1h hard ceiling for the whole cycle
+            # v0.99.352 — fixed MAX_CYCLE_SEC removed: see wait_cycle_future() (stall-based, 4h hard cap)
             # v0.99.268 — per direct user follow-up ("а потом повторные?"):
             # the v0.99.267 startup stagger only separates the very FIRST
             # cycle after a restart; real cycle duration isn't fixed in the
@@ -11707,18 +11746,20 @@ def msnr_backtest_loop():
             # startup.
             with state_lock:
                 STATE["msnr_waiting_for_slot"] = True  # v0.99.322 — visible in /api/health
+            wait_previous_cycle(_prev_cycle_fut, "msnr_backtest_loop")   # v0.99.352 — no overlapping cycles
             acquire_backtest_slot("msnr_backtest_loop")  # v0.99.325 — beats while queued
             with state_lock:
                 STATE["msnr_waiting_for_slot"] = False
             try:
                 _cycle_ex = ThreadPoolExecutor(max_workers=1)
                 _cycle_fut = _cycle_ex.submit(_msnr_run_one_backtest_cycle, t0)
+                _prev_cycle_fut = _cycle_fut
                 try:
-                    _cycle_fut.result(timeout=MAX_CYCLE_SEC)
+                    wait_cycle_future(_cycle_fut, "msnr_backtest_loop", "msnr_backtest_done")   # v0.99.352 — abandon only on a real stall
                     _cycle_ex.shutdown(wait=False)
                 except (TimeoutError, FutureTimeoutError):
                     _cycle_failed = True
-                    log_error(f"msnr_backtest_loop: entire cycle exceeded {MAX_CYCLE_SEC}s — aborting and retrying next interval")
+                    log_error("msnr_backtest_loop: cycle stalled (no progress for 15 min or over 4h) — aborting, retry in 30 min")
                     with state_lock:
                         STATE["msnr_backtest_running"] = False
                     _cycle_ex.shutdown(wait=False)
@@ -14639,6 +14680,7 @@ def lsw_backtest_loop():
     # that function's own comment for the full incident.
     LSW_BACKTEST_TRIGGER.wait(timeout=90)
     LSW_BACKTEST_TRIGGER.clear()
+    _prev_cycle_fut = None   # v0.99.352
     while True:
         heartbeat("lsw_backtest_loop")  # v0.99.322 — see system_health_watchdog()
         _cycle_failed = False
@@ -14661,23 +14703,25 @@ def lsw_backtest_loop():
             # shutdown(wait=False) so the outer loop can move on immediately,
             # abandoning the stuck thread (it's a daemon-adjacent one-off —
             # harmless to leak since the whole process is daemonized anyway).
-            MAX_CYCLE_SEC = 2 * 60 * 60  # v0.99.231 — raised 1h->2h: universe grew 60->100 (+67%) and each symbol now also runs a 7-candidate RR sweep (v0.99.223), so the old 1h ceiling risked aborting a cycle that was genuinely still making progress, not actually stuck
+            # v0.99.352 — fixed MAX_CYCLE_SEC removed: see wait_cycle_future() (stall-based, 4h hard cap)
             # v0.99.268 — same shared concurrency cap as msnr_backtest_loop's
             # own (see its comment for the full reasoning).
             with state_lock:
                 STATE["lsw_waiting_for_slot"] = True  # v0.99.322 — visible in /api/health
+            wait_previous_cycle(_prev_cycle_fut, "lsw_backtest_loop")   # v0.99.352 — no overlapping cycles
             acquire_backtest_slot("lsw_backtest_loop")  # v0.99.325 — beats while queued
             with state_lock:
                 STATE["lsw_waiting_for_slot"] = False
             try:
                 _cycle_ex = ThreadPoolExecutor(max_workers=1)
                 _cycle_fut = _cycle_ex.submit(_lsw_run_one_backtest_cycle, t0)
+                _prev_cycle_fut = _cycle_fut
                 try:
-                    _cycle_fut.result(timeout=MAX_CYCLE_SEC)
+                    wait_cycle_future(_cycle_fut, "lsw_backtest_loop", "lsw_backtest_done")   # v0.99.352 — abandon only on a real stall
                     _cycle_ex.shutdown(wait=False)
                 except (TimeoutError, FutureTimeoutError):
                     _cycle_failed = True
-                    log_error(f"lsw_backtest_loop: entire cycle exceeded {MAX_CYCLE_SEC}s — aborting, abandoning stuck thread")
+                    log_error("lsw_backtest_loop: cycle stalled (no progress for 15 min or over 4h) — aborting, retry in 30 min")
                     with state_lock:
                         STATE["lsw_backtest_running"] = False
                         STATE["lsw_backtest_in_flight"] = []
