@@ -16987,3 +16987,28 @@ v0.99.337 - S/R candidate-filter report + header cleanup, per user ("есть
          3-coin S/R run (5s): all 5 S/R conditions populated, report built,
          duplicates collapsed; MSNR report still builds via the shared core;
          /api/snr/status carries "filters".
+
+v0.99.338 - S/R Zones bug audit, per user ("посмотри на баги s/r zone").
+         BUG (fixed): snr_simulate_trades() started checking SL/TP at
+         idx+2 — it skipped the ENTRY bar (entry = its open), so any stop
+         or target hit inside the first bar of a trade was ignored, while
+         the live outcome tracker DOES count that bar. With SL only 0.5 ATR
+         from entry, ~1/3 of trades touch the stop inside their entry bar.
+         Effect on 8 synthetic random-walk series (no real edge exists):
+         before 36.6% WR on 1508 trades — ABOVE the RR 2 breakeven of
+         33.3%, i.e. a fake edge created by the bug; after 33.3% on 1752
+         trades (exactly breakeven, as it should be on random data). The
+         entry bar is now checked (SL first if both touched, same as every
+         later bar) and the 48-bar timeout counts from the entry bar like
+         the live tracker. S/R backtest numbers (WR, $15 simulation, chosen
+         params, which coins pass) will change on the next S/R backtest —
+         towards what live trading actually does.
+         Noted, NOT changed (design, needs the user's decision): the SL is
+         placed 0.5 ATR from the ENTRY, not beyond the zone as the constant's
+         own comment says; in ~13% of synthetic trades the stop sits on the
+         wrong side of the level (inside the zone reaction). Backtest and
+         live are consistent with each other on this.
+         Checked OK: zone build uses only closed bars (pivot confirmed after
+         pivot_length bars); retest requires the close back on the zone
+         side; broken zones excluded in both backtest and live; strength
+         counting identical backtest/live; one position per coin in both.

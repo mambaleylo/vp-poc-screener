@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.337"
+APP_VERSION = "0.99.338"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -15582,8 +15582,15 @@ def snr_simulate_trades(candles, pivot_length, min_strength, rr, sl_atr_mult=SNR
         sl = entry - sl_dist if direction == "LONG" else entry + sl_dist
         tp = entry + sl_dist * rr if direction == "LONG" else entry - sl_dist * rr
         result, exit_time, exit_price = "TIMEOUT", None, None
-        exit_j = min(idx + 1 + max_wait_bars, len(candles) - 1)
-        for j in range(idx + 2, min(idx + 2 + max_wait_bars, len(candles))):
+        # v0.99.338 — BUG FIX: the scan used to start at idx+2, i.e. it
+        # skipped the ENTRY bar itself (entry is at its open), so a stop or
+        # target hit inside that first bar was ignored — while the live
+        # outcome tracker (snr_track_signal_outcomes) does count it. Now the
+        # entry bar is checked too (SL first if both are touched, the same
+        # conservative convention as every later bar), and the 48-bar
+        # timeout counts from the entry bar exactly like the live tracker.
+        exit_j = min(idx + max_wait_bars, len(candles) - 1)
+        for j in range(idx + 1, min(idx + 1 + max_wait_bars, len(candles))):
             b = candles[j]
             if direction == "LONG":
                 if b["low"] <= sl:
