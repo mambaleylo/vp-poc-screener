@@ -17233,3 +17233,23 @@ v0.99.352 - MSNR (and Sweep) backtest re-running right after a cycle, per user
          Verified: py_compile (-W error), pyflakes; unit test — a slowly
          progressing cycle runs to completion, a stalled one is aborted
          with "no progress", the overlap guard waits for the zombie.
+
+v0.99.353 - Sub-account keys: autosave + visible saved state, per user ("API
+         для субаккаунтов сохраняются? Вроде нет"). Checked end to end:
+         keys POSTed via the row's "Сохранить" persist in
+         vp_poc_module_credentials.json (0600, next to the script — an
+         update via curl doesn't touch it) and are reloaded after a
+         restart. The trap was the UI: every other setting saves the
+         moment it's changed, but these fields needed an explicit
+         "Сохранить" — keys typed and left were silently lost; and after a
+         reload the fields are empty (secrets are never sent back), which
+         looked like "not saved". Now: saved automatically as soon as both
+         key and secret are filled (onchange), the row stays open and shows
+         "✅ ключи сохранены — проверяю…" then the check result (UID +
+         balance); a configured row's placeholders say "сохранён: key
+         …XXXXXX — впиши новый, чтобы заменить" / "секрет сохранён (не
+         показывается)"; the rows refresh every time settings open.
+         Verified: py_compile (-W error), pyflakes, node --check; real
+         runtime: POST -> file 0600 -> restart -> still configured; jsdom:
+         key alone doesn't save, key+secret autosaves once, row reopens
+         with the check result.

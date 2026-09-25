@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.352"
+APP_VERSION = "0.99.353"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -26522,6 +26522,7 @@ document.getElementById('settingsBtn').onclick = async () => {
   settingsModal.classList.add('open');
   await loadSettings();
   await refreshGateApiStatus();
+  refreshModuleAccounts();   // v0.99.353 — always show the current saved state
 };
 document.getElementById('settingsCloseBtn').onclick = () => settingsModal.classList.remove('open');
 
@@ -26605,8 +26606,8 @@ async function refreshModuleAccounts() {
     box.innerHTML = Object.entries(m).map(([mode, a]) => `
       <details style="margin:4px 0;"><summary style="cursor:pointer;font-size:12px;">${a.label}: ${a.configured ? `<span class="win">свой суб-аккаунт</span> <span class="dim">key ${a.key_suffix}</span>` : '<span class="dim">основной счёт</span>'}</summary>
         <div style="display:flex;flex-direction:column;gap:6px;margin:6px 0;">
-          <input type="text" id="macKey_${mode}" placeholder="API Key суб-аккаунта" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:7px 9px;border-radius:8px;font-size:12px;">
-          <input type="password" id="macSecret_${mode}" placeholder="API Secret суб-аккаунта" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:7px 9px;border-radius:8px;font-size:12px;">
+          <input type="text" id="macKey_${mode}" onchange="autoSaveModuleAccount('${mode}')" placeholder="${a.configured ? `сохранён: key ${a.key_suffix} — впиши новый, чтобы заменить` : 'API Key суб-аккаунта'}" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:7px 9px;border-radius:8px;font-size:12px;">
+          <input type="password" id="macSecret_${mode}" onchange="autoSaveModuleAccount('${mode}')" placeholder="${a.configured ? 'секрет сохранён (не показывается)' : 'API Secret суб-аккаунта'}" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:7px 9px;border-radius:8px;font-size:12px;">
           <div style="display:flex;gap:6px;">
             <button onclick="saveModuleAccount('${mode}')" style="flex:1;background:#1e2a3f;border:none;color:#fff;padding:7px;border-radius:8px;font-size:12px;">Сохранить</button>
             <button onclick="testGateAccount('${mode}')" style="background:#1c2433;border:none;color:#9cc4ff;padding:7px 10px;border-radius:8px;font-size:12px;">Проверить</button>
@@ -26617,6 +26618,15 @@ async function refreshModuleAccounts() {
       </details>`).join('');
   } catch (e) { box.textContent = 'не удалось загрузить'; }
 }
+// v0.99.353 — every other setting saves on change, so keys typed here and
+// left without pressing "Сохранить" silently weren't saved (user: "API
+// для суб-аккаунтов сохраняются? вроде нет"). Now saved automatically as
+// soon as both fields are filled.
+function autoSaveModuleAccount(mode) {
+  const key = document.getElementById('macKey_' + mode).value.trim();
+  const secret = document.getElementById('macSecret_' + mode).value.trim();
+  if (key && secret) saveModuleAccount(mode);
+}
 async function saveModuleAccount(mode) {
   const key = document.getElementById('macKey_' + mode).value.trim();
   const secret = document.getElementById('macSecret_' + mode).value.trim();
@@ -26625,6 +26635,10 @@ async function saveModuleAccount(mode) {
     body: JSON.stringify({module: mode, api_key: key, api_secret: secret})})).json();
   if (!res.ok) { alert('Не удалось сохранить: ' + (res.error || '')); return; }
   await refreshModuleAccounts();
+  const det = document.getElementById('macKey_' + mode)?.closest('details');
+  if (det) det.open = true;   // keep the row open so the check result is visible
+  const el = document.getElementById('acctTest_' + mode);
+  if (el) el.innerHTML = '<span class="win">✅ ключи сохранены — проверяю…</span>';
   testGateAccount(mode);
 }
 async function clearModuleAccount(mode) {
