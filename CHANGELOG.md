@@ -17133,3 +17133,19 @@ v0.99.346 - Screensaver clock colour = REAL open positions, per user ("часы 
          Verified: py_compile (-W error), pyflakes, node --check; fake Gate:
          a position on the S/R sub-account -> open 1, closed -> 0; no keys
          -> ok false (colour unchanged).
+
+v0.99.347 - Settings as a real tree, per user ("настройка ва-банка должна быть
+         вложенной в раздел, чуть правее, как и инвертирование — красивое
+         дерево с родительским объектом"). Child rows were marked only by
+         "↳"/"↳↳" text with ad-hoc, inconsistent padding (some va-bank rows
+         had the subRow indent, others none; three va-bank rows were even
+         labelled level 1 like their parent). Now: every settings row whose
+         label starts with ↳ / ↳↳ gets .tree1 / .tree2 — indented 14 / 34px
+         with a guide line on the left, slightly smaller/softer label — the
+         glyphs are removed from the text, and old subRow paddings are
+         dropped so all children line up. Va-bank for Sweep, S/R and Peak
+         moved to level 2 (under their module), same as MSNR's and every
+         "Инвертировать открытие". Applies to all settings groups.
+         Verified: py_compile (-W error), pyflakes, node --check; jsdom:
+         module switch = tree1, its va-bank/invert = tree2, top-level rows
+         untouched, labels without glyphs.

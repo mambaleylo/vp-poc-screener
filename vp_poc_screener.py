@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.346"
+APP_VERSION = "0.99.347"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22246,6 +22246,14 @@ INDEX_HTML = """<!doctype html>
      (closed by default, state remembered in localStorage), one compact
      row per module: label + short "🗑 Очистить" / "↻ Бэктест". The
      confirm() dialogs still carry the full, explicit wording. */
+  /* v0.99.347 — settings tree: child switches indented under their parent
+     with a guide line (user: "ва-банк и инвертирование — вложенными, чуть
+     правее, красивое дерево с родительским объектом") */
+  .settingRow.tree1 { margin-left:14px; padding-left:10px; border-left:2px solid #2e3a52; }
+  .settingRow.tree2 { margin-left:34px; padding-left:10px; border-left:2px solid #26314a; }
+  .settingRow.tree1 .label, .settingRow.tree2 .label { font-size:13px; }
+  .settingRow.tree2 .label { color:#c8d0e0; }
+  .settingRow.tree1, .settingRow.tree2 { background:#0a0d15; }
   #hdrBtns button { flex-shrink:0; }
   #screensaverBtn, #hdrActionsToggle { background:#1e2a3f; border:none; padding:6px 10px; border-radius:8px; font-size:12px; white-space:nowrap; }
   #hdrActionsToggle { color:#9cc4ff; }
@@ -23029,7 +23037,7 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Ва-банк (Sweep)</div>
+          <div class="label">↳↳ Ва-банк (Sweep)</div>
           <div class="sub">вместо риска N% от депо — использовать 95% депо как маржу на каждую Sweep-сделку. Плечо по-прежнему подбирается автоматически по стопу — ликвидация не становится ближе, просто в сделку идёт почти весь депозит</div>
         </div>
         <label class="switch"><input type="checkbox" id="setLswAllIn"><span class="switchSlider"></span></label>
@@ -23064,7 +23072,7 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Ва-банк (S/R)</div>
+          <div class="label">↳↳ Ва-банк (S/R)</div>
           <div class="sub">вместо риска N% от депо — использовать 95% депо как маржу на каждую сделку S/R Zones. Плечо по-прежнему подбирается автоматически по стопу — ликвидация не становится ближе, просто в сделку идёт почти весь депозит</div>
         </div>
         <label class="switch"><input type="checkbox" id="setSnrAllIn"><span class="switchSlider"></span></label>
@@ -23085,7 +23093,7 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Ва-банк (Peak Reversal)</div>
+          <div class="label">↳↳ Ва-банк (Peak Reversal)</div>
           <div class="sub">вместо риска N% от депо — использовать 95% депо как маржу на каждую сделку Peak Reversal. Плечо по-прежнему подбирается автоматически по стопу — ликвидация не становится ближе, просто в сделку идёт почти весь депозит</div>
         </div>
         <label class="switch"><input type="checkbox" id="setPrvAllIn"><span class="switchSlider"></span></label>
@@ -26024,6 +26032,18 @@ async function refreshAll() {
     }
   }).observe(document.body, { childList: true, subtree: true });
 })();
+
+// v0.99.347 — settings tree (see .tree1/.tree2 CSS)
+document.querySelectorAll('.settingRow').forEach(row => {
+  const lbl = row.querySelector('.label');
+  if (!lbl || lbl.children.length) return;
+  const t = lbl.textContent.trim();
+  const lvl = t.startsWith('↳↳') ? 2 : (t.startsWith('↳') ? 1 : 0);
+  if (!lvl) return;
+  row.classList.remove('subRow', 'subRow2');   // one consistent indent scheme (old ad-hoc padding differed row to row)
+  row.classList.add('tree' + lvl);
+  lbl.textContent = t.replace(/^↳+\\s*/, '');
+});
 
 refreshAll();
 setInterval(refreshAll, 15000);
