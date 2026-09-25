@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.334"
+APP_VERSION = "0.99.335"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -15669,7 +15669,7 @@ def snr_optimize_symbol(symbol):
                                 "train_z": round(train_z, 2),
                                 "test_n": len(test), "test_wr": round(test_wr, 1), "test_avg_pnl_r": round(test_avg, 3),
                                 "test_z": round(test_z, 2),
-                                "test_days": round((candles[-1]["time"] - boundary_time) / 86400, 1),
+                                "test_days": round((candles[-1]["time"] - boundary_time) / 86400, 1), "test_start_time": boundary_time,  # v0.99.335 — train/test divider in the full trade list
                                 "history_days": round((candles[-1]["time"] - candles[0]["time"]) / 86400, 1),  # v0.99.332 — whole backtest window (train + test), shown as months in the UI  # v0.99.315 — length of the test window, so the UI can show expected live-signal frequency (test_n / test_days)
                                 "recent_trades": closed[-40:][::-1],
                                 "_all_closed": closed,
@@ -16280,6 +16280,9 @@ def prv_optimize_symbol(symbol):
                                     "test_n": len(test), "test_wr": round(test_wr, 1),
                                     "test_avg_pnl_r": round(test_avg, 3), "test_z": round(test_z, 2),
                                     "avg_mae_r": round(avg_mae, 3),
+                                    "test_days": round((candles[-1]["time"] - boundary_time) / 86400, 1),       # v0.99.335 (was missing on Peak)
+                                    "history_days": round((candles[-1]["time"] - candles[0]["time"]) / 86400, 1),  # v0.99.335 (was missing on Peak — no months shown)
+                                    "test_start_time": boundary_time,
                                     "recent_trades": closed[-40:][::-1],
                                     "_all_closed": closed,
                                 }
@@ -20235,7 +20238,7 @@ def api_snr_trades(symbol):
     with state_lock:
         r = (STATE["snr_results"] or {}).get(symbol) or {}
         trades = list(r.get("all_trades") or r.get("recent_trades") or [])
-    return jsonify({"symbol": symbol, "full": bool(r.get("all_trades")), "trades": trades})
+    return jsonify({"symbol": symbol, "full": bool(r.get("all_trades")), "trades": trades, "test_start_time": r.get("test_start_time")})
 
 
 @app.route("/api/prv/trades/<symbol>")
@@ -20243,7 +20246,7 @@ def api_prv_trades(symbol):
     with state_lock:
         r = (STATE["prv_results"] or {}).get(symbol) or {}
         trades = list(r.get("all_trades") or r.get("recent_trades") or [])
-    return jsonify({"symbol": symbol, "full": bool(r.get("all_trades")), "trades": trades})
+    return jsonify({"symbol": symbol, "full": bool(r.get("all_trades")), "trades": trades, "test_start_time": r.get("test_start_time")})
 
 
 @app.route("/api/snr/status")
@@ -26503,8 +26506,23 @@ async function loadBtTrades(det, mod, sym, stamp) {
   const key = `${mod}:${sym}:${stamp}`;
   const render = d => {
     const rowFn = mod === 'snr' ? snrTradeRowHtml : prvTradeRowHtml;
-    box.innerHTML = (d.full ? '' : '<div class="dim" style="font-size:10px;">у этого результата сохранены только последние 40 — полный список появится после следующего бэктеста</div>')
-      + (d.trades.length ? d.trades.map(t => rowFn(sym, t)).join('') : '<div class="dim">сделок нет</div>');
+    // v0.99.335 — chronological ledger (oldest first) so the $15 start is at
+    // the top, with a divider where the TEST part (unseen when the params
+    // were chosen) begins; the train part is shown in full too.
+    const chron = [...d.trades].sort((a, b) => a.time - b.time);
+    const split = d.test_start_time;
+    let html = d.full
+      ? `<div class="dim" style="font-size:10px;padding:3px 0;">старт: $15 ва-банк · сначала train-часть (на ней подбирались параметры), потом тест</div>`
+      : '<div class="dim" style="font-size:10px;">у этого результата сохранены только последние 40 сделок (без начала истории, поэтому баланс не с $15) — полный список появится после следующего бэктеста</div>';
+    let dividerDone = !split;
+    for (const t of chron) {
+      if (!dividerDone && t.time > split) {
+        html += `<div style="text-align:center;font-size:10px;color:#9cc4ff;padding:4px 0;border-bottom:1px solid #2e3a52;">── тест-часть (параметры её не видели) ──</div>`;
+        dividerDone = true;
+      }
+      html += rowFn(sym, t);
+    }
+    box.innerHTML = chron.length ? html : '<div class="dim">сделок нет</div>';
   };
   if (_btTradesCache[key]) { render(_btTradesCache[key]); return; }
   box.innerHTML = '<div class="dim">загрузка…</div>';

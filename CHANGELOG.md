@@ -16933,3 +16933,21 @@ v0.99.334 - Full backtest trade list for S/R Zones (and Peak Reversal, same
          (200 trades: status stripped + count, endpoint returns 200);
          jsdom: summary "(200)", 200 rows on open, still open with 200 rows
          after a re-render.
+
+v0.99.335 - Full S/R / Peak backtest list as a chronological ledger, per
+         user ("бэктест почему-то начинается уже с 600 долларов, а не с
+         15, либо показывать и train часть всю тогда"). The list already
+         held the whole history (train + test) and the $15 simulation runs
+         over all of it, but it was newest-first, so the top showed the
+         END balance; older results only had the last 40 trades (no
+         start). Now: oldest first, a "старт: $15 ва-банк" header line, and
+         a divider "── тест-часть (параметры её не видели) ──" at
+         test_start_time (new result field + returned by /api/snr|prv/
+         trades). The old-results note explains why their balance doesn't
+         start at $15.
+         Peak Reversal results were also missing test_days / history_days
+         (so v0.99.332's months never showed on Peak) — added with
+         test_start_time.
+         Verified: py_compile (-W error), pyflakes, node --check; jsdom:
+         header first, first trade at $15.00, divider present, list stays
+         open after re-render.
