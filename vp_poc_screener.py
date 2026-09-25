@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.328"
+APP_VERSION = "0.99.329"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -11201,6 +11201,176 @@ def _msnr_backtest_one_symbol(symbol):
             STATE["msnr_backtest_done"] += 1
 
 
+
+# ============================================================================
+# v0.99.329 — Neuro conditions as candidate FILTERS for MSNR (informational),
+# per user request: run every MSNR backtest trade through Neuro's condition
+# set and report which single filter raises winrate the most while cutting
+# the fewest trades, and — the user's hard requirement — improves (never
+# worsens) EVERY coin. Nothing is applied to MSNR's trades or live signals.
+# Honesty guards: a filter is PICKED on the first 70% of each coin's trades
+# (train) and JUDGED on the last 30% (test) it never saw; the per-coin
+# "no coin worse" check and the displayed numbers are test-only. Avg R is
+# shown next to winrate so a filter that buys winrate by dropping the rare
+# big-RR winners is visible.
+# ============================================================================
+MSNR_NF_TRIGGER = threading.Event()
+MSNR_NF_TRAIN_FRAC = 0.7
+MSNR_NF_MIN_KEEP = float(os.environ.get("VP_MSNR_NF_MIN_KEEP", 0.5))   # filter must keep >= 50% of test trades
+MSNR_NF_MIN_TEST_TRADES = 30
+NEURO_COND_LABELS = {
+    "dow": "день недели", "weekend": "выходные", "session": "сессия", "rsi_zone": "RSI",
+    "stoch_zone": "Stoch", "ema20_side": "цена vs EMA20", "ema50_side": "цена vs EMA50",
+    "ema100_side": "цена vs EMA100", "ema200_side": "цена vs EMA200", "ema_stack": "порядок EMA",
+    "macd_hist": "MACD гист.", "bb_pctb": "Боллинджер %B", "vol_zone": "объём", "vol_regime": "волатильность",
+    "range_zone": "положение в диапазоне", "dd_zone": "просадка от хая", "htf_trend": "тренд 4ч",
+    "daily_trend": "тренд 1д", "funding_zone": "фандинг", "btc_agree": "согласие с BTC",
+    "oi_trend": "OI", "dom_third": "доминация", "eth_agree": "согласие с ETH", "h4_rsi_zone": "RSI 4ч",
+    "williams_zone": "Williams %R", "adx_zone": "ADX", "vwap_side": "цена vs VWAP", "ichimoku": "Ишимоку",
+    "roc_zone": "ROC", "wick_dominance": "тени", "atr_trend": "тренд ATR", "lsw_sweep": "сигнал Sweep",
+    "mirror_signal": "сигнал Mirror", "bb_width_zone": "ширина Боллинджера", "obv_trend": "OBV",
+    "supertrend_side": "Supertrend", "rsi_divergence": "дивергенция RSI", "btc_vol_regime": "волатильность BTC",
+    "cci_zone": "CCI", "chop_zone": "Choppiness", "poc_side": "цена vs POC",
+}
+
+
+def _msnr_nf_trade_r(t):
+    if t.get("result") == "WIN":
+        return float(t.get("rr") or 0)
+    if t.get("result") == "LOSS":
+        return -1.0
+    return None
+
+
+def _msnr_nf_stats(rows):
+    closed = [r for r in rows if r["r"] is not None]
+    n = len(closed)
+    if not n:
+        return {"n": 0, "wr": None, "avg_r": None}
+    wins = sum(1 for r in closed if r["r"] > 0)
+    return {"n": n, "wr": round(wins / n * 100, 1), "avg_r": round(sum(r["r"] for r in closed) / n, 3)}
+
+
+def msnr_neuro_filter_analysis():
+    with state_lock:
+        results = {k: list(v or []) for k, v in (STATE.get("msnr_backtest_results") or {}).items()}
+    results = {k: v for k, v in results.items() if len([t for t in v if _msnr_nf_trade_r(t) is not None]) >= 5}
+    if not results:
+        return None
+    now = int(time.time())
+    first_trade = min(t["time"] for v in results.values() for t in v if t.get("time"))
+    start_ts = int(first_trade) - 120 * 86400     # indicator warm-up (EMA200 on 1h, daily EMAs)
+    btc = get_candles_range("BTC_USDT", NEURO_TF, start_ts, now) or []
+    eth = get_candles_range("ETH_USDT", NEURO_TF, start_ts, now) or []
+    tf_sec = INTERVAL_SECONDS.get(NEURO_TF, 3600)
+    rows_by_sym = {}
+    for sym, trades in results.items():
+        heartbeat("msnr_neuro_filter_loop")
+        try:
+            candles = get_candles_range(sym, NEURO_TF, start_ts, now)
+            if not candles or len(candles) < 300:
+                continue
+            htf = get_candles_range(sym, "4h", start_ts, now) or []
+            d1 = get_candles_range(sym, "1d", start_ts, now) or []
+            funding = neuro_fetch_funding_rate(sym, start_ts, now)
+            try:
+                oi = get_contract_stats(sym, interval="1h", limit=999)
+            except Exception:
+                oi = []
+            conds = neuro_compute_conditions(candles, htf, funding, None if sym == "BTC_USDT" else btc,
+                                             d1, oi, None if sym == "ETH_USDT" else eth)
+        except Exception as e:
+            log_error(f"msnr_neuro_filter_analysis {sym}: {e}")
+            continue
+        times = [c["time"] for c in candles]
+        rows = []
+        for t in sorted(trades, key=lambda x: x.get("time") or 0):
+            r = _msnr_nf_trade_r(t)
+            if r is None or not t.get("time"):
+                continue
+            # last 1h bar that had CLOSED before the MSNR signal — no look-ahead
+            i = bisect.bisect_right(times, int(t["time"]) - tf_sec) - 1
+            if i < 0 or i >= len(conds):
+                continue
+            rows.append({"r": r, "c": conds[i]})
+        if len(rows) >= 5:
+            cut = max(1, int(len(rows) * MSNR_NF_TRAIN_FRAC))
+            rows_by_sym[sym] = (rows[:cut], rows[cut:])
+    if not rows_by_sym:
+        return None
+    train = [r for tr, _ in rows_by_sym.values() for r in tr]
+    test = [r for _, te in rows_by_sym.values() for r in te]
+    base_train = _msnr_nf_stats(train)
+    base_test = _msnr_nf_stats(test)
+    # candidates: every (condition, value) seen on train, as "exclude" and "only"
+    cands = set()
+    for r in train:
+        for k in NEURO_COMBO_KEYS:
+            v = r["c"].get(k)
+            if v is not None:
+                cands.add((k, v))
+    scored = []
+    for k, v in cands:
+        for mode in ("exclude", "only"):
+            keep = (lambda c, k=k, v=v: c.get(k) != v) if mode == "exclude" else (lambda c, k=k, v=v: c.get(k) == v)
+            tr_kept = [r for r in train if keep(r["c"])]
+            st_tr = _msnr_nf_stats(tr_kept)
+            if not st_tr["n"] or st_tr["n"] < MSNR_NF_MIN_KEEP * base_train["n"] or st_tr["wr"] <= base_train["wr"]:
+                continue   # selection on TRAIN only
+            te_kept = [r for r in test if keep(r["c"])]
+            st_te = _msnr_nf_stats(te_kept)
+            if st_te["n"] < MSNR_NF_MIN_TEST_TRADES or st_te["n"] < MSNR_NF_MIN_KEEP * base_test["n"]:
+                continue
+            per_coin, better, worse, same = {}, 0, 0, 0
+            for sym, (_tr, te) in rows_by_sym.items():
+                b = _msnr_nf_stats(te)
+                a = _msnr_nf_stats([r for r in te if keep(r["c"])])
+                per_coin[sym] = {"n_b": b["n"], "n_a": a["n"], "wr_b": b["wr"], "wr_a": a["wr"],
+                                 "r_b": b["avg_r"], "r_a": a["avg_r"]}
+                if not b["n"]:
+                    continue
+                if a["n"] == b["n"]:
+                    same += 1
+                elif a["n"] and a["wr"] > b["wr"]:
+                    better += 1
+                elif a["n"] and a["wr"] == b["wr"]:
+                    same += 1
+                else:
+                    worse += 1
+            scored.append({
+                "key": k, "value": v, "mode": mode,
+                "label": f"{'убрать' if mode == 'exclude' else 'только'}: {NEURO_COND_LABELS.get(k, k)} = {v}",
+                "kept_pct": round(st_te["n"] / base_test["n"] * 100, 1),
+                "n_b": base_test["n"], "n_a": st_te["n"],
+                "wr_b": base_test["wr"], "wr_a": st_te["wr"],
+                "r_b": base_test["avg_r"], "r_a": st_te["avg_r"],
+                "coins_better": better, "coins_worse": worse, "coins_same": same,
+                "coins_total": better + worse + same,
+                "all_coins_ok": worse == 0 and better > 0,
+                "per_coin": per_coin,
+            })
+    # user's rule: every coin must gain (no coin worse), then biggest test WR gain,
+    # then fewest trades lost
+    scored.sort(key=lambda x: (not x["all_coins_ok"], -(x["wr_a"] - x["wr_b"]), -x["kept_pct"]))
+    out = {"computed_at": time.time(), "coins": len(rows_by_sym), "train_trades": base_train["n"],
+           "base": base_test, "top": scored[:10],
+           "all_coins_ok_n": sum(1 for x in scored if x["all_coins_ok"]), "candidates_n": len(scored)}
+    with state_lock:
+        STATE["msnr_neuro_filters"] = out
+    return out
+
+
+def msnr_neuro_filter_loop():
+    MSNR_NF_TRIGGER.wait(timeout=900)   # first run ~15 min after start (MSNR results are persisted)
+    while True:
+        MSNR_NF_TRIGGER.clear()
+        try:
+            if MSNR_ENABLED:
+                msnr_neuro_filter_analysis()
+        except Exception as e:
+            log_error(f"msnr_neuro_filter_loop: {e}")
+        wait_beating(MSNR_NF_TRIGGER, 6 * 3600, "msnr_neuro_filter_loop")   # re-run after every MSNR backtest (trigger) or 6h
+
 def msnr_backtest_loop():
     # v0.99.267 -- staggered backtest-cycle startup, per direct user
     # request ("посмотри чтобы бэктесты не мешали друг другу... не хочу
@@ -11370,6 +11540,7 @@ def _msnr_run_one_backtest_cycle(t0):
                         del d[sym]
             STATE["msnr_backtest_results"] = merged_results
             STATE["msnr_backtest_results_raw"] = merged_raw
+            MSNR_NF_TRIGGER.set()   # v0.99.329 — refresh the Neuro-filter report on fresh MSNR trades
             STATE["msnr_backtest_summary"] = merged_summary
             STATE["msnr_symbol_overrides"] = merged_overrides
             STATE["msnr_backtest_universe"] = universe
@@ -20681,6 +20852,7 @@ def api_msnr_status():
             "htf_filter_enabled": MSNR_HTF_FILTER_ENABLED, "htf_interval": MSNR_HTF_INTERVAL,
         },
         "top": ranked,
+        "neuro_filters": STATE.get("msnr_neuro_filters"),  # v0.99.329 (read without lock: replaced atomically)
     })
 
 
@@ -23077,6 +23249,18 @@ async function refreshMsnr() {
       return `<span class="${wrCls}" title="WR/n сделок отсеянных фильтром ликвидации — если высокий, возможно стоит торговать их с адаптивным плечом">${cp.winrate}% (n=${cp.n})</span>`;
     })();
     const htfSoloTxt = fmtMsnrSolo('htf_trend', 'Тренд 4ч');
+    // v0.99.329 — best Neuro filter's effect on THIS coin (test part only)
+    const nfTxt = (() => {
+      const nf = status.neuro_filters && status.neuro_filters.top && status.neuro_filters.top[0];
+      const pc = nf && nf.per_coin && nf.per_coin[r.symbol];
+      if (!pc) return '<span class="dim">—</span>';
+      if (!pc.n_b) return '<span class="dim">нет тест-сделок</span>';
+      if (pc.n_a === pc.n_b) return `<span class="dim" title="фильтр не убрал ни одной сделки этой монеты">без изменений (n=${pc.n_b})</span>`;
+      if (!pc.n_a) return `<span class="loss">убрал все ${pc.n_b}</span>`;
+      const d = Math.round((pc.wr_a - pc.wr_b) * 10) / 10;
+      const dCls = d > 0 ? 'win' : (d < 0 ? 'loss' : 'dim');
+      return `<span class="dim" title="тест-часть: до → после фильтра «${nf.label}»">${pc.wr_b}%→${pc.wr_a}% (n=${pc.n_b}→${pc.n_a})</span> <span class="${dCls}">(${d > 0 ? '+' : ''}${d}%)</span>`;
+    })();
     return separatorHtml + stressSeparatorHtml + `<tr onclick="toggleMsnrBacktestTrades('${r.symbol}')" style="cursor:pointer;">
       <td>${_msnrExpanded.has(r.symbol) ? '\u25be' : '\u25b8'} ${r.symbol}${r.live ? ' <span style="color:#3ddc97;" title="торгуется вживую">\u25cf</span>' : ' <span class="dim" title="только бэктест, не торгуется">\u25cb</span>'}</td>
       <td onclick="event.stopPropagation();">${autotradeCell}</td>
@@ -23091,19 +23275,42 @@ async function refreshMsnr() {
       <td>${liqSoloTxt}</td>
       <td title="винрейт сделок за зоной ликвидации — если высокий, возможно стоит торговать их с адаптивным плечом">${liqRejTxt}</td>
       <td>${htfSoloTxt}</td>
+      <td>${nfTxt}</td>
       <td class="dim" style="white-space:normal;min-width:220px;">${paramsTxt}${noteTxt}</td>
     </tr>
-    <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="14" style="padding:0;"><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0430...</div></td></tr>`;
+    <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="15" style="padding:0;"><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0430...</div></td></tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
     <div class="dim hint-block" style="margin-bottom:6px;"><b>\u0410\u0432\u0442\u043e\u0442\u044e\u043d\u0438\u043d\u0433 \u043f\u043e \u043c\u043e\u043d\u0435\u0442\u0430\u043c</b> (${cfg.backtest_days} \u0434\u043d\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438, \u043f\u0435\u0440\u0435\u0431\u043e\u0440 ${cfg.grid_min_leg_atr.length}\u00d7${cfg.grid_qm_zone_pct.length}\u00d7${cfg.grid_qm_lookback.length}=${cfg.grid_min_leg_atr.length*cfg.grid_qm_zone_pct.length*cfg.grid_qm_lookback.length} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432 \u043d\u0430 \u0441\u0438\u043c\u0432\u043e\u043b \u2014 \u043c\u0438\u043d. \u0438\u043c\u043f\u0443\u043b\u044c\u0441 (\u00d7ATR) / QM-\u0437\u043e\u043d\u0430 (%) / \u043e\u043a\u043d\u043e QM (\u0431\u0430\u0440\u044b), \u0442\u0430\u0431\u043b\u0438\u0446\u0430 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u0443\u0436\u0435 \u043b\u0443\u0447\u0448\u0438\u0439 \u043d\u0430\u0439\u0434\u0435\u043d\u043d\u044b\u0439 \u043a\u043e\u043c\u0431\u043e \u043f\u043e \u043a\u0430\u0436\u0434\u043e\u043c\u0443 \u0441\u0438\u043c\u0432\u043e\u043b\u0443) \u00b7 <b>score</b> \u2014 \u043d\u0438\u0436\u043d\u044f\u044f \u0434\u043e\u0432\u0435\u0440\u0438\u0442\u0435\u043b\u044c\u043d\u0430\u044f \u0433\u0440\u0430\u043d\u0438\u0446\u0430 \u0441\u0440\u0435\u0434\u043d\u0435\u0433\u043e R (\u043f\u043e \u043d\u0435\u0439 \u0438 \u0432\u044b\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044f \u043b\u0443\u0447\u0448\u0438\u0439 \u043a\u043e\u043c\u0431\u043e, \u0430 \u043d\u0435 \u043f\u043e \u0441\u044b\u0440\u043e\u043c\u0443 expectancy \u2014 \u0447\u0442\u043e\u0431\u044b \u043c\u0430\u043b\u0435\u043d\u044c\u043a\u0430\u044f \u0432\u044b\u0431\u043e\u0440\u043a\u0430 \u0441 \u0432\u0435\u0437\u0435\u043d\u0438\u0435\u043c \u043d\u0435 \u043f\u043e\u0431\u0435\u0436\u0434\u0430\u043b\u0430 \u0431\u043e\u043b\u044c\u0448\u0443\u044e \u0441\u0442\u0430\u0431\u0438\u043b\u044c\u043d\u0443\u044e) \u00b7 \u043a\u043b\u0438\u043a \u043f\u043e \u0441\u0442\u0440\u043e\u043a\u0435 \u2014 \u0440\u0430\u0441\u043a\u0440\u044b\u0442\u044c \u0441\u0434\u0435\u043b\u043a\u0438:</div>
     <div style="overflow-x:auto;">
     <table class="msnr-bt-table" style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Авто</th><th style="cursor:pointer;" onclick="msnrSortBy('winrate')">WR${_msnrSortKey==='winrate' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th style="cursor:pointer;" onclick="msnrSortBy('trades')">n${_msnrSortKey==='trades' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th>W/L/T</th><th>RR</th><th>Exp</th><th>Score</th><th>RR-диапазон (соло)</th><th>Объём (соло)</th><th>После ликвидации</th><th>За ликвидацией</th><th>Тренд 4ч (соло)</th><th>\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>Авто</th><th style="cursor:pointer;" onclick="msnrSortBy('winrate')">WR${_msnrSortKey==='winrate' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th style="cursor:pointer;" onclick="msnrSortBy('trades')">n${_msnrSortKey==='trades' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th>W/L/T</th><th>RR</th><th>Exp</th><th>Score</th><th>RR-диапазон (соло)</th><th>Объём (соло)</th><th>После ликвидации</th><th>За ликвидацией</th><th>Тренд 4ч (соло)</th><th>Neuro-фильтр (тест)</th><th>\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">\u0411\u044d\u043a\u0442\u0435\u0441\u0442 \u0435\u0449\u0451 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432.</div>';
-  setPanelHtml(panel, warnHtml + headerHtml + rrBucketsHtml + signalsTableHtml + btTableHtml);
+  // v0.99.329 — informational: Neuro conditions as candidate filters for MSNR
+  const nfHtml = (() => {
+    const nf = status.neuro_filters;
+    if (!nf) return `<details style="margin:8px 0;"><summary class="dim" style="cursor:pointer;font-size:11px;">🧪 Neuro-фильтры для MSNR — считаются (≈15 мин после запуска и после каждого бэктеста MSNR)</summary></details>`;
+    const b = nf.base || {};
+    const rowsHtml = (nf.top || []).slice(0, 8).map((f, i) => {
+      const dWr = Math.round((f.wr_a - f.wr_b) * 10) / 10;
+      const rCls = (f.r_a ?? 0) >= (f.r_b ?? 0) ? 'win' : 'loss';
+      const coins = f.all_coins_ok
+        ? `<span class="win">✅ ${f.coins_better} лучше, 0 хуже${f.coins_same ? `, ${f.coins_same} без изм.` : ''}</span>`
+        : `<span class="loss">${f.coins_better} лучше / ${f.coins_worse} хуже</span>`;
+      return `<tr><td>${i + 1}</td><td style="white-space:normal;min-width:160px;">${f.label}</td>
+        <td class="dim">${f.n_b}→${f.n_a} (${f.kept_pct}%)</td>
+        <td>${f.wr_b}%→<b class="win">${f.wr_a}%</b> <span class="win">(+${dWr})</span></td>
+        <td class="${rCls}">${f.r_b}→${f.r_a}R</td><td>${coins}</td></tr>`;
+    }).join('');
+    const okN = nf.all_coins_ok_n || 0;
+    return `<details style="margin:8px 0;"><summary style="cursor:pointer;font-size:12px;">🧪 Neuro-фильтры для MSNR (информационно): ${okN ? `<span class="win">${okN} улучшают все монеты</span>` : '<span class="dim">ни один не улучшил все монеты</span>'} · ${nf.coins} монет · тест-сделок ${b.n}, WR ${b.wr}%</summary>
+      <div class="dim hint-block" style="font-size:11px;margin:4px 0 6px;">Каждое условие Neuro на момент входа пробуется как фильтр («убрать» или «только»). Фильтр <b>выбирается на первых 70%</b> сделок каждой монеты, а цифры ниже — на <b>последних 30%</b>, которых он не видел. Сверху — те, что не ухудшили ни одну монету, дальше по приросту винрейта; оставляют не меньше 50% сделок. Средний R рядом: если он падает, фильтр «покупает» винрейт за счёт больших RR. К сделкам и сигналам MSNR ничего не применяется. Колонка «Neuro-фильтр (тест)» в таблице ниже — эффект фильтра №1 по каждой монете. Посчитано ${fmtTime(nf.computed_at)}.</div>
+      <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="6" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
+    </details>`;
+  })();
+  setPanelHtml(panel, warnHtml + headerHtml + rrBucketsHtml + signalsTableHtml + nfHtml + btTableHtml);
   restoreMsnrExpansion();
 }
 
@@ -26308,6 +26515,7 @@ if __name__ == "__main__":
     threading.Thread(target=scalp_loop, daemon=True).start()
     threading.Thread(target=hourly_stats_loop, daemon=True).start()
     threading.Thread(target=msnr_backtest_loop, daemon=True).start()
+    threading.Thread(target=msnr_neuro_filter_loop, daemon=True).start()  # v0.99.329
     threading.Thread(target=msnr_live_loop, daemon=True).start()
     threading.Thread(target=msnr_backtest_watchdog, daemon=True).start()
     threading.Thread(target=ft5_backtest_loop, daemon=True).start()

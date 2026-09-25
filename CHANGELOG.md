@@ -16785,3 +16785,29 @@ v0.99.328 - Exchange-load diagnostics, per user report ("бэктест особ
          behaviour change.
          Verified: py_compile (-W error), pyflakes, node --check; real
          runtime /api/health returns per-module rates.
+
+v0.99.329 - MSNR: Neuro conditions as candidate filters (informational
+         report), per user request ("прогонять сделки msnr через фильтры
+         из Neuro и выводить какой фильтр лучшим оказался для всех монет;
+         наименьшее уменьшение количества сделок, максимальное увеличение
+         винрейта; надо чтобы на всех монетах был прирост").
+         msnr_neuro_filter_analysis() (own thread msnr_neuro_filter_loop:
+         ~15 min after start, then after every MSNR backtest cycle via
+         MSNR_NF_TRIGGER, else every 6h): for every coin's MSNR backtest
+         trades, computes neuro_compute_conditions() on 1h data (+4h, 1d,
+         funding, OI, BTC, ETH — all via the candle cache) and reads each
+         trade's conditions on the last 1h bar CLOSED before the signal (no
+         look-ahead). Every (condition, value) is tried as "убрать" and
+         "только". Selection on the first 70% of each coin's trades
+         (train; must raise train WR and keep >= 50%); the report shows the
+         last 30% (test) only: trades before->after, WR, avg R, and per
+         coin better/worse/unchanged. Ranking: filters that worsen NO coin
+         first, then test-WR gain, then fewest trades lost. Stored in
+         STATE["msnr_neuro_filters"], exposed as /api/msnr/status
+         "neuro_filters". Nothing is applied to MSNR trades/signals.
+         UI (MSNR tab): collapsible "🧪 Neuro-фильтры для MSNR" table (top
+         8) + a per-coin column "Neuro-фильтр (тест)" in the backtest table
+         showing filter #1's WR/n before->after for that coin.
+         Verified: py_compile (-W error), pyflakes, node --check, no
+         surrogates; synthetic 4-coin run (2s): report built, per-coin
+         split present; jsdom render of the MSNR panel with the report.
