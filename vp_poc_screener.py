@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.332"
+APP_VERSION = "0.99.333"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -10653,6 +10653,14 @@ def msnr_scan_symbol_live(symbol):
         gate_enabled = AUTOTRADE_ENABLED_MSNR
         gate_symbol_on = bool(autotrade_symbols.get(symbol))
         gate_eligible_now = symbol in msnr_autotrade_eligible_symbols(overrides_snapshot)
+        # v0.99.333 — per user ("если сделка пропущена из-за нехватки баланса
+        # или ещё чего — я всё равно должен видеть её в живых сигналах,
+        # статистика должна быть честной, не важно что открылось на аккаунте"):
+        # the STRATEGY picked this trade (coin selected + eligible right now);
+        # whether the account then opened it (global autotrade switch,
+        # dry-run, balance, min lot, liquidation, exchange error) no longer
+        # decides whether it counts.
+        record["trade_intended"] = bool(gate_symbol_on and gate_eligible_now)
         if gate_enabled and gate_symbol_on and gate_eligible_now:
             # v0.99.33, per direct user request: real order sizing now
             # compounds off THIS symbol's own live trade history — $40
@@ -10696,6 +10704,8 @@ def msnr_scan_symbol_live(symbol):
                                                   sig["tp"],
                                                   all_in_margin_pct=MSNR_ALL_IN_MARGIN_PCT if MSNR_ALL_IN_ENABLED else None)
             order_opened = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
+            record["autotrade_status"] = autotrade_result.get("status")          # v0.99.333 — shown in the list
+            record["autotrade_detail"] = str(autotrade_result.get("detail") or "")[:200]
             # v0.99.134 — same cooldown-release-on-ERROR fix as LSW's own
             # (see that module's own call site comment for the full
             # incident): a bare network ERROR shouldn't permanently burn
@@ -10954,7 +10964,7 @@ def compute_msnr_signal_stats():
     # равно, то что не хватило баланса мои проблемы".
     with state_lock:
         signals = [s for s in STATE["msnr_signals"]
-                   if s.get("autotrade_fired") or s.get("balance_skipped")]
+                   if s.get("autotrade_fired") or s.get("balance_skipped") or s.get("trade_intended")]  # v0.99.333
     closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
     wins = sum(1 for s in closed if s["result"] == "WIN")
     losses = sum(1 for s in closed if s["result"] == "LOSS")
@@ -21165,7 +21175,8 @@ def api_msnr_signals():
     with state_lock:
         autotrade_symbols = dict(STATE["msnr_autotrade_symbols"])
         signals = [s for s in STATE["msnr_signals"]
-                   if autotrade_symbols.get(s["symbol"]) or s.get("status") == "OPEN" or s.get("balance_skipped")]
+                   if autotrade_symbols.get(s["symbol"]) or s.get("status") == "OPEN" or s.get("balance_skipped")
+                   or s.get("trade_intended")]  # v0.99.333
     return jsonify(signals)
 
 
@@ -23395,7 +23406,7 @@ async function refreshMsnr() {
     </table>
     </div>` : '';
   const signalsRows = signals
-    .filter(s => s.autotrade_fired || s.status !== 'OPEN')  // v0.99.158: hide OPEN signals without autotrade — they're tracking-only, not real positions
+    .filter(s => s.autotrade_fired || s.trade_intended || s.status !== 'OPEN')  // v0.99.333: strategy-picked trades stay visible even if the account didn't open them  // v0.99.158: hide OPEN signals without autotrade — they're tracking-only, not real positions
     .map((s, idx) => {
     const dirClass = s.direction === 'LONG' ? 'long' : 'short';
     let statusHtml;
@@ -23407,6 +23418,10 @@ async function refreshMsnr() {
     // v0.99.158: show leverage even when autotrade_fired=false (SKIPPED/ERROR),
     // so the user can see what leverage would have been used.
     // Manual open button for SKIPPED/ERROR signals (e.g. insufficient balance at the time)
+    // v0.99.333 — why the account didn't open a strategy-picked trade
+    const notOpenedTxt = (!s.autotrade_fired && s.autotrade_status && s.autotrade_status !== 'OPENED')
+      ? ` <span class="dim" style="font-size:10px;" title="${String(s.autotrade_detail || '').replace(/"/g, '&quot;')}">(${s.autotrade_status === 'DRY_RUN' ? 'dry-run' : (s.autotrade_status === 'SKIPPED' ? 'не открыта' : 'ошибка')}${s.autotrade_detail ? ': ' + String(s.autotrade_detail).slice(0, 40).replace(/</g, '&lt;') + (String(s.autotrade_detail).length > 40 ? '…' : '') : ''})</span>`
+      : '';
     const sizeTxt = s.autotrade_fired
       ? `<span title="\u043f\u043b\u0435\u0447\u043e \u043d\u0430 \u043c\u043e\u043c\u0435\u043d\u0442 \u0441\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u043d\u0438\u044f \u044d\u0442\u043e\u0433\u043e \u0441\u0438\u0433\u043d\u0430\u043b\u0430 \u2014 \u043c\u043e\u0433\u043b\u043e \u043e\u0442\u043b\u0438\u0447\u0430\u0442\u044c\u0441\u044f \u043e\u0442 \u0442\u0435\u043a\u0443\u0449\u0435\u0439 Kelly-\u0440\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0438 \u0432 \u0442\u0430\u0431\u043b\u0438\u0446\u0435 \u043d\u0438\u0436\u0435 \u2014 \u043e\u043d\u0430 \u043e\u0431\u043d\u043e\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u043a\u0430\u0436\u0434\u044b\u0439 \u0446\u0438\u043a\u043b, \u0438\u043b\u0438 \u0435\u0451 \u0441\u043f\u0435\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043e\u0436\u0430\u043b\u0438 \u0432\u043d\u0438\u0437 \u0438\u0437-\u0437\u0430 \u0448\u0438\u0440\u0438\u043d\u044b \u0441\u0442\u043e\u043f\u0430 \u044d\u0442\u043e\u0439 \u0441\u0434\u0435\u043b\u043a\u0438">$${s.live_size_usd}${s.leverage_used ? ' @ '+s.leverage_used+'x' : ''}</span>`
       : (s.autotrade_skip_reason
@@ -23422,7 +23437,7 @@ async function refreshMsnr() {
       <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td><td class="dim">${levelTxt}</td>
       <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.sl)}</td><td class="dim">${fmt(s.tp)}</td>
       <td class="dim">${sizeTxt}</td>
-      <td>${statusHtml}${manualBtn}</td><td class="dim" title="время свечи сигнала: ${fmtDateTime(s.time)}">${s.detected_at ? fmtDateTime(s.detected_at) : fmtDateTime(s.time)}${s.detected_at && Math.abs(s.detected_at - s.time) > 120 ? ` <span style="opacity:0.5;font-size:10px;">(свеча ${fmtTime(s.time)})</span>` : ''}</td>
+      <td>${statusHtml}${notOpenedTxt}${manualBtn}</td><td class="dim" title="время свечи сигнала: ${fmtDateTime(s.time)}">${s.detected_at ? fmtDateTime(s.detected_at) : fmtDateTime(s.time)}${s.detected_at && Math.abs(s.detected_at - s.time) > 120 ? ` <span style="opacity:0.5;font-size:10px;">(свеча ${fmtTime(s.time)})</span>` : ''}</td>
     </tr>`;
   }).join('');
   const signalsTableHtml = signals.length ? `

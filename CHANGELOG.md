@@ -16889,3 +16889,26 @@ v0.99.332 - Backtest length in months on every module, per user report
          "≈3 мес" in the last-backtest header line.
          Verified: py_compile (-W error), pyflakes, node --check, no
          surrogates; fmtMonths spot-checked.
+
+v0.99.333 - Honest MSNR live statistics, per user ("если сделка по msnr или
+         другая пропущена из-за нехватки баланса или ещё чего — я всё
+         равно должен видеть её в списке живых сигналов; статистика должна
+         быть честной, не важно что у меня на аккаунте открылось или нет").
+         Audit: S/R, Peak, Sweep and Neuro already record every live signal
+         BEFORE the autotrade attempt and count them all. MSNR did not: its
+         live stats counted only autotrade_fired or balance_skipped, the
+         list API/UI hid other skipped trades — so dry-run, min-lot,
+         liquidation, leverage or exchange-error skips (and everything
+         while the global MSNR autotrade switch was off) silently vanished
+         from the stats ("Живые сигналы: 0W/0L" in dry-run).
+         Now every signal gets trade_intended = the STRATEGY picked it (coin
+         selected in the top-N + eligible at that moment); account-side
+         outcomes no longer matter. compute_msnr_signal_stats(), /api/msnr/
+         signals and the list include trade_intended; each such row shows
+         why the account didn't open it ("(не открыта: минимальный лот…)",
+         "(dry-run)", "(ошибка: …)", full text on hover) from new
+         autotrade_status / autotrade_detail fields. Signals on coins the
+         strategy itself didn't select stay out, as before. Applies to
+         signals from this version on.
+         Verified: py_compile (-W error), pyflakes, node --check; stats unit
+         test (fired + skipped + dry-run counted, strategy-unselected not).
