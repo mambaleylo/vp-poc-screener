@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.339"
+APP_VERSION = "0.99.340"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -231,7 +231,12 @@ def _global_rate_gate():
 _EXCHANGE_LOAD = deque(maxlen=50000)       # (ts, module, queued_sec)
 _EXCHANGE_LOAD_PREFIXES = (("msnr", "MSNR"), ("lsw", "Sweep"), ("snr", "S/R"), ("prv", "Peak"),
                            ("neuro", "Neuro"), ("reconcile", "автоторговля"), ("autotrade", "автоторговля"),
-                           ("execute_", "автоторговля"), ("scan", "Volume"), ("_scan", "Volume"))
+                           ("execute_", "автоторговля"),
+                           # v0.99.340 — the main cycle's once-per-round pair-list request
+                           # (build_universe -> get_tickers) is NOT Volume: user saw
+                           # "Volume 0.8" with Volume switched off
+                           ("build_universe", "список пар"), ("scan_symbol_scalp", "скальпинг"), ("scalp", "скальпинг"), ("scan_symbol", "Volume"),
+                           ("scan_loop", "общий цикл"))
 
 
 def _exchange_load_record(queued):

@@ -17028,3 +17028,13 @@ v0.99.339 - Peak Reversal bug audit, per user ("проверь ещё P/R").
          touching both bands is the same live and backtest; one position
          per coin in both; entry = next open (backtest) vs signal-bar close
          (live) is the same convention as every module.
+
+v0.99.340 - Header request-load line: "Volume 0.8/min" shown with Volume
+         switched off (user: "почему я сейчас в шапке вижу volume?"). The
+         attribution matched any caller named scan* to Volume, so the main
+         cycle's once-per-round pair-list request (scan_loop ->
+         build_universe -> get_tickers, ~1 per 45-65s) was labelled
+         Volume. Now: build_universe -> "список пар", scan_loop ->
+         "общий цикл", scan_symbol_scalp/scalp* -> "скальпинг" (the 6-hourly
+         margin-data refresh), only scan_symbol -> "Volume". Display only.
+         Verified: pyflakes; attribution unit test (4 call paths).
