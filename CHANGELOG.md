@@ -17329,3 +17329,16 @@ v0.99.358 - Neuro: no fixed per-coin clock anymore (user: "может дольш
          stopped at the stall limit; endless-progress coin stopped at the hard
          cap; no leftover state. Longest gap between checkpoints in a full
          synthetic backtest: 1.6s of 41s (limit is 600s).
+v0.99.359 - MSNR "Последний бэктест был 2.7 ч назад … мог зависнуть" while
+         Termux was alive: MSNR was simply queued for a backtest slot (2 at
+         once) behind a multi-hour Neuro cycle and S/R. Two fixes:
+         1) Neuro hands its slot over between coins whenever MSNR/Sweep/
+            S/R/Peak is queued (backtest_others_waiting()), then queues
+            behind it; while paused it keeps the watchdogs fed. Coins are
+            computed independently, so results don't change.
+         2) /api/msnr/status exposes waiting_for_slot; when the backtest is
+            only queued the tab shows a calm "⏳ в очереди — это не
+            зависание" note instead of the red hang warning.
+         Verified: py_compile (-W error), pyflakes, runtime start, JS check;
+         thread test with a 1-permit semaphore: Neuro coin A,B → MSNR takes
+         the slot → Neuro resumes C,D; all 4 coins done, permit released.

@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.358"
+APP_VERSION = "0.99.359"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7385,6 +7385,12 @@ def wait_previous_cycle(prev_fut, name):
     while prev_fut is not None and not prev_fut.done():
         heartbeat(name)
         time.sleep(30)
+
+
+def backtest_others_waiting():
+    """v0.99.359 — is any flagged backtest loop queued for a slot?"""
+    return any(STATE.get(k) for k in ("msnr_waiting_for_slot", "lsw_waiting_for_slot",
+                                      "snr_waiting_for_slot", "prv_waiting_for_slot"))
 
 
 def acquire_backtest_slot(name):
@@ -19720,6 +19726,29 @@ def neuro_mining_loop():
                     _neuro_mining_done += 1
                     _neuro_mining_progress_ts = time.time()
                     heartbeat("neuro_mining_loop")  # v0.99.325 — progress beat
+                # v0.99.359 — a Neuro cycle can run for hours; holding a
+                # backtest slot the whole time starved MSNR (user saw
+                # "Последний бэктест был 2.7 ч назад" while MSNR sat in the
+                # queue). Between coins, if another backtest is queued,
+                # hand the slot over and queue behind it. Each coin is
+                # computed independently, so results don't change.
+                if _neuro_sem_acquired and backtest_others_waiting():
+                    with _neuro_state_lock:
+                        mine = _neuro_sem_holder_gen == my_gen
+                        if mine:
+                            _neuro_sem_holder_gen = None
+                    if mine:
+                        _neuro_sem_acquired = False
+                        BACKTEST_CONCURRENCY_SEMAPHORE.release()
+                        time.sleep(3)   # let the queued loop take the permit first
+                        with _neuro_state_lock:
+                            _neuro_waiting_slot_since = time.time()
+                        while not BACKTEST_CONCURRENCY_SEMAPHORE.acquire(timeout=60):
+                            _neuro_waiting_beat()   # paused mid-cycle on purpose — not a hang
+                        _neuro_sem_acquired = True
+                        with _neuro_state_lock:
+                            _neuro_waiting_slot_since = None
+                            _neuro_sem_holder_gen = my_gen
 
             # v0.99.252 — CRITICAL FIX, per direct user report of a real
             # coin's "recent 40 signals" record looking terrible (~25.7%
@@ -21651,6 +21680,7 @@ def api_msnr_status():
         backtest_in_flight = list(STATE["msnr_backtest_in_flight"])
         backtest_running = STATE["msnr_backtest_running"]
         backtest_started_at = STATE["msnr_backtest_started_at"]
+        waiting_for_slot = bool(STATE.get("msnr_waiting_for_slot"))   # v0.99.359
     # Ranked by msnr_ranking_score() (a lower-confidence-bound on mean R,
     # v0.99.5 — see msnr_ranking_score()'s own docstring), not raw
     # win-rate — same reasoning as FT5's api_ft5_status(): a lucky small
@@ -21745,7 +21775,7 @@ def api_msnr_status():
         "backtest_universe_size": len(backtest_universe),
         "last_backtest_finished": last_backtest_finished,
         "last_backtest_duration": last_backtest_duration,
-        "backtest_running": backtest_running,
+        "backtest_running": backtest_running, "waiting_for_slot": waiting_for_slot,
         "backtest_total": backtest_total,
         "backtest_done": backtest_done,
         "backtest_in_flight": backtest_in_flight,
@@ -23982,11 +24012,17 @@ async function refreshMsnr() {
   const staleSec = (!status.backtest_running && status.last_backtest_finished)
     ? (Date.now()/1000 - status.last_backtest_finished) : null;
   const staleThresholdSec = Math.max(3600, (cfg.refresh_sec || 3600) * 2.5);
-  const staleWarnHtml = (staleSec !== null && staleSec > staleThresholdSec) ? `
+  // v0.99.359 — queued behind other backtests is not a hang: say so plainly
+  const queuedInfoHtml = (staleSec !== null && staleSec > staleThresholdSec && status.waiting_for_slot) ? `
+    <div style="background:#1c2433;border:1px solid #4a5a78;border-radius:8px;padding:8px 12px;margin-bottom:10px;">
+      <b style="color:#ffcc66;">\u23f3 Бэктест MSNR в очереди — последний был ${Math.round(staleSec/3600*10)/10} ч назад</b><br>
+      <span style="font-size:11px;color:#aab4c8;">Это не зависание: одновременно идут не больше 2 бэктестов, MSNR ждёт свободного места. Neuro уступает место между монетами, так что очередь скоро дойдёт.</span>
+    </div>` : '';
+  const staleWarnHtml = queuedInfoHtml || ((staleSec !== null && staleSec > staleThresholdSec) ? `
     <div style="background:#3a1414;border:1px solid #e05050;border-radius:8px;padding:8px 12px;margin-bottom:10px;">
       <b style="color:#ff8080;">\u26a0\ufe0f \u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442 \u0431\u044b\u043b ${Math.round(staleSec/3600*10)/10} \u0447 \u043d\u0430\u0437\u0430\u0434</b><br>
       <span style="font-size:11px;color:#e0a0a0;">\u0426\u0438\u043a\u043b \u043c\u043e\u0433 \u0437\u0430\u0432\u0438\u0441\u043d\u0443\u0442\u044c \u0438\u043b\u0438 \u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u0435 \u0431\u044b\u043b\u043e \u043f\u0440\u0438\u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u043e (\u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440, Android \u043c\u043e\u0433 \u0443\u0431\u0438\u0442\u044c \u0444\u043e\u043d\u043e\u0432\u044b\u0439 Termux \u043f\u0440\u0438 \u043f\u0440\u043e\u0441\u0442\u043e\u0435 \u0441 \u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d\u043d\u044b\u043c \u044d\u043a\u0440\u0430\u043d\u043e\u043c). \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435, \u0447\u0442\u043e \u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u0435 \u0436\u0438\u0432\u043e, \u0438\u043b\u0438 \u043e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 \u0437\u0430\u043d\u043e\u0432\u043e.</span>
-    </div>` : '';
+    </div>` : '');
   const progressPct = status.backtest_total ? Math.round((status.backtest_done||0) / status.backtest_total * 100) : 0;
   const progressBarHtml = status.backtest_running ? `
     <div style="margin:6px 0 8px;">
