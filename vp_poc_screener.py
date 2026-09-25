@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.336"
+APP_VERSION = "0.99.337"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -11402,6 +11402,82 @@ def _msnr_nf_stats(rows):
     return {"n": n, "wr": round(wins / n * 100, 1), "avg_r": round(sum(r["r"] for r in closed) / n, 3)}
 
 
+def strategy_filter_report(rows_by_sym):
+    """v0.99.337 — shared core of the candidate-filter reports (MSNR's
+    Neuro-filter report, S/R's filter report). rows_by_sym: {symbol:
+    (train_rows, test_rows)}, row = {"r": trade R or None, "c": {cond: value}}.
+    Picks on TRAIN, reports TEST; ranks filters that worsen no coin first,
+    then test-WR gain, then fewest trades lost."""
+    if not rows_by_sym:
+        return None
+    train = [r for tr, _ in rows_by_sym.values() for r in tr]
+    test = [r for _, te in rows_by_sym.values() for r in te]
+    base_train = _msnr_nf_stats(train)
+    base_test = _msnr_nf_stats(test)
+    # candidates: every (condition, value) seen on train, as "exclude" and "only"
+    cands = set()
+    for r in train:
+        for k, v in r["c"].items():   # Neuro combo conditions + strategy-specific ones (categorical only)
+            if (v is not None and not isinstance(v, (list, dict))
+                    and (k in _neuro_combo_keys() or k.startswith("snr_"))):
+                cands.add((k, v))
+    scored = []
+    for k, v in cands:
+        for mode in ("exclude", "only"):
+            keep = (lambda c, k=k, v=v: c.get(k) != v) if mode == "exclude" else (lambda c, k=k, v=v: c.get(k) == v)
+            tr_kept = [r for r in train if keep(r["c"])]
+            st_tr = _msnr_nf_stats(tr_kept)
+            if not st_tr["n"] or st_tr["n"] < MSNR_NF_MIN_KEEP * base_train["n"] or st_tr["wr"] <= base_train["wr"]:
+                continue   # selection on TRAIN only
+            te_kept = [r for r in test if keep(r["c"])]
+            st_te = _msnr_nf_stats(te_kept)
+            if st_te["n"] < MSNR_NF_MIN_TEST_TRADES or st_te["n"] < MSNR_NF_MIN_KEEP * base_test["n"]:
+                continue
+            per_coin, better, worse, same = {}, 0, 0, 0
+            for sym, (_tr, te) in rows_by_sym.items():
+                b = _msnr_nf_stats(te)
+                a = _msnr_nf_stats([r for r in te if keep(r["c"])])
+                per_coin[sym] = {"n_b": b["n"], "n_a": a["n"], "wr_b": b["wr"], "wr_a": a["wr"],
+                                 "r_b": b["avg_r"], "r_a": a["avg_r"]}
+                if not b["n"]:
+                    continue
+                if a["n"] == b["n"]:
+                    same += 1
+                elif a["n"] and a["wr"] > b["wr"]:
+                    better += 1
+                elif a["n"] and a["wr"] == b["wr"]:
+                    same += 1
+                else:
+                    worse += 1
+            scored.append({
+                "key": k, "value": v, "mode": mode,
+                "label": f"{'убрать' if mode == 'exclude' else 'только'}: {NEURO_COND_LABELS.get(k, k)} = {v}",
+                "kept_pct": round(st_te["n"] / base_test["n"] * 100, 1),
+                "n_b": base_test["n"], "n_a": st_te["n"],
+                "wr_b": base_test["wr"], "wr_a": st_te["wr"],
+                "r_b": base_test["avg_r"], "r_a": st_te["avg_r"],
+                "coins_better": better, "coins_worse": worse, "coins_same": same,
+                "coins_total": better + worse + same,
+                "all_coins_ok": worse == 0 and better > 0,
+                "per_coin": per_coin,
+            })
+    # user's rule: every coin must gain (no coin worse), then biggest test WR gain,
+    # then fewest trades lost
+    scored.sort(key=lambda x: (not x["all_coins_ok"], -(x["wr_a"] - x["wr_b"]), -x["kept_pct"]))
+    # v0.99.337 — drop mirror duplicates ("убрать weekend" == "только weekday"): same kept trades
+    _seen, _uniq = set(), []
+    for x in scored:
+        sig = (x["n_a"], x["wr_a"], x["r_a"], tuple(sorted((k, v["n_a"], v["wr_a"]) for k, v in x["per_coin"].items())))
+        if sig not in _seen:
+            _seen.add(sig)
+            _uniq.append(x)
+    scored = _uniq
+    out = {"computed_at": time.time(), "coins": len(rows_by_sym), "train_trades": base_train["n"],
+           "base": base_test, "top": scored[:10],
+           "all_coins_ok_n": sum(1 for x in scored if x["all_coins_ok"]), "candidates_n": len(scored)}
+    return out
+
+
 def msnr_neuro_filter_analysis():
     with state_lock:
         results = {k: list(v or []) for k, v in (STATE.get("msnr_backtest_results") or {}).items()}
@@ -11448,65 +11524,9 @@ def msnr_neuro_filter_analysis():
         if len(rows) >= 5:
             cut = max(1, int(len(rows) * MSNR_NF_TRAIN_FRAC))
             rows_by_sym[sym] = (rows[:cut], rows[cut:])
-    if not rows_by_sym:
+    out = strategy_filter_report(rows_by_sym)   # v0.99.337 — shared with S/R
+    if out is None:
         return None
-    train = [r for tr, _ in rows_by_sym.values() for r in tr]
-    test = [r for _, te in rows_by_sym.values() for r in te]
-    base_train = _msnr_nf_stats(train)
-    base_test = _msnr_nf_stats(test)
-    # candidates: every (condition, value) seen on train, as "exclude" and "only"
-    cands = set()
-    for r in train:
-        for k in _neuro_combo_keys():
-            v = r["c"].get(k)
-            if v is not None:
-                cands.add((k, v))
-    scored = []
-    for k, v in cands:
-        for mode in ("exclude", "only"):
-            keep = (lambda c, k=k, v=v: c.get(k) != v) if mode == "exclude" else (lambda c, k=k, v=v: c.get(k) == v)
-            tr_kept = [r for r in train if keep(r["c"])]
-            st_tr = _msnr_nf_stats(tr_kept)
-            if not st_tr["n"] or st_tr["n"] < MSNR_NF_MIN_KEEP * base_train["n"] or st_tr["wr"] <= base_train["wr"]:
-                continue   # selection on TRAIN only
-            te_kept = [r for r in test if keep(r["c"])]
-            st_te = _msnr_nf_stats(te_kept)
-            if st_te["n"] < MSNR_NF_MIN_TEST_TRADES or st_te["n"] < MSNR_NF_MIN_KEEP * base_test["n"]:
-                continue
-            per_coin, better, worse, same = {}, 0, 0, 0
-            for sym, (_tr, te) in rows_by_sym.items():
-                b = _msnr_nf_stats(te)
-                a = _msnr_nf_stats([r for r in te if keep(r["c"])])
-                per_coin[sym] = {"n_b": b["n"], "n_a": a["n"], "wr_b": b["wr"], "wr_a": a["wr"],
-                                 "r_b": b["avg_r"], "r_a": a["avg_r"]}
-                if not b["n"]:
-                    continue
-                if a["n"] == b["n"]:
-                    same += 1
-                elif a["n"] and a["wr"] > b["wr"]:
-                    better += 1
-                elif a["n"] and a["wr"] == b["wr"]:
-                    same += 1
-                else:
-                    worse += 1
-            scored.append({
-                "key": k, "value": v, "mode": mode,
-                "label": f"{'убрать' if mode == 'exclude' else 'только'}: {NEURO_COND_LABELS.get(k, k)} = {v}",
-                "kept_pct": round(st_te["n"] / base_test["n"] * 100, 1),
-                "n_b": base_test["n"], "n_a": st_te["n"],
-                "wr_b": base_test["wr"], "wr_a": st_te["wr"],
-                "r_b": base_test["avg_r"], "r_a": st_te["avg_r"],
-                "coins_better": better, "coins_worse": worse, "coins_same": same,
-                "coins_total": better + worse + same,
-                "all_coins_ok": worse == 0 and better > 0,
-                "per_coin": per_coin,
-            })
-    # user's rule: every coin must gain (no coin worse), then biggest test WR gain,
-    # then fewest trades lost
-    scored.sort(key=lambda x: (not x["all_coins_ok"], -(x["wr_a"] - x["wr_b"]), -x["kept_pct"]))
-    out = {"computed_at": time.time(), "coins": len(rows_by_sym), "train_trades": base_train["n"],
-           "base": base_test, "top": scored[:10],
-           "all_coins_ok_n": sum(1 for x in scored if x["all_coins_ok"]), "candidates_n": len(scored)}
     with state_lock:
         STATE["msnr_neuro_filters"] = out
     return out
@@ -15688,6 +15708,145 @@ def snr_optimize_symbol(symbol):
     return best
 
 
+# ============================================================================
+# v0.99.337 — S/R candidate-filter report (informational), per user ("есть
+# крутой фильтр для S/R, который точно отсеет плохие сделки?"). Every S/R
+# backtest trade (winning combo, full history) gets five S/R-specific
+# conditions + all Neuro conditions at the signal, then the same honest
+# report as MSNR: pick on TRAIN (before the result's own test_start_time),
+# judge on TEST, "no coin worse" ranked first. Nothing is applied to S/R.
+# Note: the zone builder already only counts a retest whose bar CLOSED back
+# on the zone's side, so "rejection" here grades its QUALITY.
+# ============================================================================
+SNR_NF_TRIGGER = threading.Event()
+SNR_COND_LABELS = {
+    "snr_rejection": "качество отбоя (закрытие в своей половине свечи + тень)",
+    "snr_approach": "скорость подхода к зоне (5 свечей, ATR)",
+    "snr_room": "запас хода до противоположной зоны",
+    "snr_trend": "тренд (цена vs EMA200 своего ТФ)",
+    "snr_touches": "число касаний зоны",
+}
+NEURO_COND_LABELS.update(SNR_COND_LABELS)
+
+
+def snr_trade_conditions(candles, trades, pivot_length):
+    """Per trade: the 5 S/R-specific conditions at its retest bar."""
+    atr = neuro_atr_series(candles, 14)
+    zones = snr_build_zones(candles, atr, pivot_length)
+    closes = [c["close"] for c in candles]
+    ema200, k, e = [], 2 / 201, None
+    for x in closes:
+        e = x if e is None else e + k * (x - e)
+        ema200.append(e)
+    idx_by_time = {c["time"]: i for i, c in enumerate(candles)}
+    out = {}
+    for t in trades:
+        i = idx_by_time.get(t["time"])
+        if i is None or not atr[i]:
+            continue
+        c = candles[i]
+        long_ = t["direction"] == "LONG"
+        rng = c["high"] - c["low"]
+        cond = {}
+        if rng > 0:
+            pos = (c["close"] - c["low"]) / rng if long_ else (c["high"] - c["close"]) / rng
+            cond["snr_rejection"] = "strong" if pos >= 0.6 else "weak"
+        if i >= 5:
+            move = abs(closes[i] - closes[i - 5]) / atr[i]
+            cond["snr_approach"] = "fast" if move > 3 else "normal"
+        # nearest opposite zone that is confirmed and still intact at bar i
+        entry, tp = t["entry"], t["tp"]
+        opp = [z["price"] for z in zones
+               if z["type"] == ("resistance" if long_ else "support")
+               and z["start_idx"] + pivot_length <= i and (z["break_idx"] is None or z["break_idx"] > i)
+               and ((z["price"] > entry) if long_ else (z["price"] < entry))]
+        if opp:
+            nearest = min(opp) if long_ else max(opp)
+            cond["snr_room"] = "blocked" if (nearest < tp if long_ else nearest > tp) else "clear"
+        else:
+            cond["snr_room"] = "clear"
+        if i >= 200:
+            above = closes[i] >= ema200[i]
+            cond["snr_trend"] = "with_trend" if above == long_ else "against_trend"
+        st = t.get("zone_strength") or 0
+        cond["snr_touches"] = "5plus" if st >= 5 else ("3_4" if st >= 3 else "1_2")
+        out[t["time"]] = cond
+    return out
+
+
+def snr_filter_analysis():
+    with state_lock:
+        results = {k: dict(v) for k, v in (STATE.get("snr_results") or {}).items() if isinstance(v, dict)}
+    results = {k: v for k, v in results.items() if v.get("all_trades") and v.get("test_start_time")}
+    if not results:
+        return None
+    now = int(time.time())
+    rows_by_sym = {}
+    btc = eth = None
+    tf_sec = INTERVAL_SECONDS.get(NEURO_TF, 3600)
+    for sym, r in results.items():
+        heartbeat("snr_filter_loop")
+        try:
+            trades = sorted(r["all_trades"], key=lambda t: t["time"])
+            tf = r.get("timeframe")
+            first = trades[0]["time"]
+            candles = get_candles_range(sym, tf, now - snr_history_days_for_tf(tf) * 86400, now)
+            snr_c = snr_trade_conditions(candles, trades, int(r.get("pivot_length") or 5))
+            # Neuro conditions on 1h, last bar CLOSED before the signal (no look-ahead)
+            start_ts = int(first) - 120 * 86400
+            if btc is None:
+                btc = get_candles_range("BTC_USDT", NEURO_TF, start_ts, now) or []
+                eth = get_candles_range("ETH_USDT", NEURO_TF, start_ts, now) or []
+            h1 = get_candles_range(sym, NEURO_TF, start_ts, now) or []
+            neuro_c, h1_times = [], []
+            if len(h1) >= 300:
+                htf = get_candles_range(sym, "4h", start_ts, now) or []
+                d1 = get_candles_range(sym, "1d", start_ts, now) or []
+                funding = neuro_fetch_funding_rate(sym, start_ts, now)
+                neuro_set_index_context(sym, start_ts, now)
+                try:
+                    oi = get_contract_stats(sym, interval="1h", limit=999)
+                except Exception:
+                    oi = []
+                neuro_c = neuro_compute_conditions(h1, htf, funding, None if sym == "BTC_USDT" else btc,
+                                                   d1, oi, None if sym == "ETH_USDT" else eth)
+                h1_times = [c["time"] for c in h1]
+        except Exception as e:
+            log_error(f"snr_filter_analysis {sym}: {e}")
+            continue
+        split = r["test_start_time"]
+        train_rows, test_rows = [], []
+        for t in trades:
+            if t.get("pnl_r") is None:
+                continue
+            cond = dict(snr_c.get(t["time"], {}))
+            if neuro_c:
+                j = bisect.bisect_right(h1_times, int(t["time"]) - tf_sec) - 1
+                if 0 <= j < len(neuro_c):
+                    cond.update(neuro_c[j])
+            row = {"r": float(t["pnl_r"]), "c": cond}
+            (train_rows if t["time"] <= split else test_rows).append(row)
+        if train_rows and test_rows:
+            rows_by_sym[sym] = (train_rows, test_rows)
+    out = strategy_filter_report(rows_by_sym) if rows_by_sym else None
+    if out is not None:
+        with state_lock:
+            STATE["snr_filters"] = out
+    return out
+
+
+def snr_filter_loop():
+    SNR_NF_TRIGGER.wait(timeout=1200)
+    while True:
+        SNR_NF_TRIGGER.clear()
+        try:
+            if SNR_ENABLED:
+                snr_filter_analysis()
+        except Exception as e:
+            log_error(f"snr_filter_loop: {e}")
+        wait_beating(SNR_NF_TRIGGER, 6 * 3600, "snr_filter_loop")
+
+
 def snr_backtest_loop():
     global _snr_active_symbols, _snr_display_symbols
     # v0.99.269 — staggered startup + shared concurrency cap, same
@@ -15826,6 +15985,7 @@ def snr_backtest_loop():
             with state_lock:
                 if all_results:
                     STATE["snr_results"] = dict(display_top)
+                    SNR_NF_TRIGGER.set()   # v0.99.337 — refresh the S/R filter report
                     _snr_active_symbols = [sym for sym, _ in active_top]
                     _snr_display_symbols = [sym for sym, _ in display_top]
                     STATE["snr_last_backtest_finished"] = time.time()
@@ -20277,6 +20437,7 @@ def api_snr_status():
                        "live_signal_stats": signal_stats["by_symbol"].get(symbol),
                        "recent_live_signals": recent_live_signals})
     return jsonify({
+        "filters": STATE.get("snr_filters"),   # v0.99.337
         "coins": coins, "last_backtest_finished": last_finished,
         "backtest_running": running, "waiting_for_slot": waiting, "progress_done": done, "progress_total": total,
         "current_symbol": current_symbol, "in_flight": in_flight, "live_signal_stats": signal_stats,
@@ -22969,7 +23130,7 @@ async function refreshStatus() {
     const el = document.getElementById('status');
     const fetchErrTxt = s.excluded_fetch_error ? `, ${s.excluded_fetch_error} сетевых сбоев` : '';
     const scanTxt = s.last_scan_finished ? `скан ${s.last_scan_duration}s, ${s.universe_size} пар (искл. ${s.excluded_low_quality||0} неликвид${fetchErrTxt})` : 'сканирование...';
-    el.textContent = `v${s.version} · ${scanTxt}`;
+    el.textContent = s.volume_profile_enabled ? `v${s.version} · ${scanTxt}` : `v${s.version}`;  // v0.99.337 — Volume scan timing only when Volume is on
     const ra = s.risk_autotune;
     const raBox = document.getElementById('riskAutotuneBox');
     if (ra && ra.log && ra.log.length) {
@@ -24782,6 +24943,7 @@ async function refreshSnr() {
         <div class="dim" style="font-size:10px;margin-bottom:8px;">z \u2014 \u043d\u0430\u0441\u043a\u043e\u043b\u044c\u043a\u043e \u0441\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0445 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u0438\u0439 \u0432\u0438\u043d\u0440\u0435\u0439\u0442 \u0432\u044b\u0448\u0435 \u0431\u0435\u0437\u0443\u0431\u044b\u0442\u043a\u0430 (\u043d\u0443\u0436\u043d\u043e \u22653.23 \u0441 \u043f\u043e\u043f\u0440\u0430\u0432\u043a\u043e\u0439 \u043d\u0430 81 \u043f\u0435\u0440\u0435\u0431\u0440\u0430\u043d\u043d\u0443\u044e \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u044e)</div>
         ${liveSigSection}
         ${compoundSummaryHtml(r)}
+        ${filterCoinLineHtml(data.filters, c.symbol)}
         <details ontoggle="loadBtTrades(this, 'snr', '${c.symbol}', ${data.last_backtest_finished || 0})"><summary class="dim" style="cursor:pointer;font-size:11px;">все сделки бэктеста (${r.all_trades_n || 0})</summary>${tradesRows}</details>
       </div>`;
     }).join('');
@@ -24803,6 +24965,7 @@ async function refreshSnr() {
       ${progressHtml}
       ${lstatsHtml}
       ${liveSigsTableHtml}
+      ${filterReportHtml(data.filters, "🧪 Фильтры для S/R (информационно)", "считаются (≈20 мин после запуска и после каждого бэктеста S/R)")}
       ${cards || '<div class="dim">\u043f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445</div>'}
     `;
   } catch(e) {
@@ -26532,6 +26695,36 @@ async function loadBtTrades(det, mod, sym, stamp) {
     render(d);
   } catch (e) { box.innerHTML = '<div class="loss">не удалось загрузить</div>'; }
 }
+// v0.99.337 — candidate-filter report table (S/R; same format as MSNR's)
+function filterReportHtml(nf, title, pendingTxt) {
+  if (!nf) return `<details style="margin:8px 0;"><summary class="dim" style="cursor:pointer;font-size:11px;">${title} — ${pendingTxt}</summary></details>`;
+  const b = nf.base || {};
+  const rowsHtml = (nf.top || []).slice(0, 8).map((f, i) => {
+    const dWr = Math.round((f.wr_a - f.wr_b) * 10) / 10;
+    const rCls = (f.r_a ?? 0) >= (f.r_b ?? 0) ? 'win' : 'loss';
+    const coins = f.all_coins_ok
+      ? `<span class="win">✅ ${f.coins_better} лучше, 0 хуже${f.coins_same ? `, ${f.coins_same} без изм.` : ''}</span>`
+      : `<span class="loss">${f.coins_better} лучше / ${f.coins_worse} хуже</span>`;
+    return `<tr${i === 0 ? ' style="background:#15202e;"' : ''}><td>${i === 0 ? '🏆' : i + 1}</td><td style="white-space:normal;min-width:160px;">${f.label}</td>
+      <td class="dim">${f.n_b}→${f.n_a} (${f.kept_pct}%)</td>
+      <td>${f.wr_b}%→<b class="win">${f.wr_a}%</b> <span class="win">(+${dWr})</span></td>
+      <td class="${rCls}">${f.r_b}→${f.r_a}R</td><td>${coins}</td></tr>`;
+  }).join('');
+  const okN = nf.all_coins_ok_n || 0;
+  return `<details style="margin:8px 0;"><summary style="cursor:pointer;font-size:12px;">${title}: ${okN ? `<span class="win">${okN} улучшают все монеты</span>` : '<span class="dim">ни один не улучшил все монеты</span>'} · ${nf.coins} монет · тест-сделок ${b.n}, WR ${b.wr}%</summary>
+    <div class="dim hint-block" style="font-size:11px;margin:4px 0 6px;">Каждое условие пробуется как фильтр («убрать» / «только»). <b>Выбор — на train-части</b> (где подбирались параметры), цифры — на <b>тест-части</b>, которую он не видел. 🏆 — лучший: не ухудшил ни одну монету и дал наибольший рост винрейта; дальше — остальные по тому же правилу. Оставляют не меньше 50% сделок. Средний R рядом: если падает — фильтр «покупает» винрейт за счёт прибыли. В торговлю ничего не применяется. Посчитано ${fmtTime(nf.computed_at)}.</div>
+    <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="6" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
+  </details>`;
+}
+function filterCoinLineHtml(nf, sym) {
+  const f = nf && nf.top && nf.top[0];
+  const pc = f && f.per_coin && f.per_coin[sym];
+  if (!pc || !pc.n_b) return '';
+  if (pc.n_a === pc.n_b) return `<div class="dim" style="font-size:11px;">🏆 фильтр (тест): без изменений для этой монеты (n=${pc.n_b})</div>`;
+  if (!pc.n_a) return `<div class="loss" style="font-size:11px;">🏆 фильтр (тест): убрал все ${pc.n_b} сделок</div>`;
+  const d = Math.round((pc.wr_a - pc.wr_b) * 10) / 10;
+  return `<div style="font-size:11px;" title="${String(f.label).replace(/"/g, '&quot;')}"><span class="dim">🏆 фильтр (тест): ${pc.wr_b}%→${pc.wr_a}% (n=${pc.n_b}→${pc.n_a})</span> <span class="${d > 0 ? 'win' : d < 0 ? 'loss' : 'dim'}">(${d > 0 ? '+' : ''}${d}%)</span></div>`;
+}
 function fmtNum(n) {
   return Number(n).toPrecision(6).replace(/\\.?0+$/,'').replace(/\\.$/, '');
 }
@@ -27033,6 +27226,7 @@ if __name__ == "__main__":
     threading.Thread(target=nq_live_loop, daemon=True).start()
     threading.Thread(target=neuro_live_loop, daemon=True).start()
     threading.Thread(target=snr_backtest_loop, daemon=True).start()
+    threading.Thread(target=snr_filter_loop, daemon=True).start()   # v0.99.337
     threading.Thread(target=snr_live_loop, daemon=True).start()
     threading.Thread(target=prv_backtest_loop, daemon=True).start()
     threading.Thread(target=prv_live_loop, daemon=True).start()

@@ -16955,3 +16955,35 @@ v0.99.335 - Full S/R / Peak backtest list as a chronological ledger, per
 v0.99.336 - Tab order, per user ("вкладку Sweep помести после P/R"): MSNR ·
          Neuro · S/R Zones · Peak Reversal · Sweep · … . The per-module
          sub-account key list follows the same order.
+
+v0.99.337 - S/R candidate-filter report + header cleanup, per user ("есть
+         крутой фильтр для S/R, который точно отсеет плохие сделки?" →
+         "да, давай; и секунды убери"; "сколько фильтров будет показывать —
+         или только лучший?").
+         strategy_filter_report(rows_by_sym): the scoring core of v0.99.329
+         extracted and shared (MSNR report unchanged in method); candidates
+         = Neuro combo conditions + strategy-specific ("snr_*") ones,
+         categorical only; mirror duplicates ("убрать weekend" ==
+         "только weekday") collapsed.
+         S/R: snr_trade_conditions() adds 5 S/R-specific conditions at each
+         trade's retest bar — snr_rejection (close in its own 60% of the
+         bar = strong; the zone builder already requires the close back on
+         the zone's side, so this grades rejection QUALITY), snr_approach
+         (|5-bar move| > 3 ATR = fast), snr_room (nearest intact confirmed
+         opposite zone before TP = blocked), snr_trend (vs EMA200 of its own
+         TF), snr_touches (1-2 / 3-4 / 5+). snr_filter_analysis() runs every
+         S/R result's FULL trade list (v0.99.334) + Neuro conditions (1h,
+         last closed bar before the signal) through the report, split at
+         the result's own test_start_time (train = where params were
+         chosen). Own thread snr_filter_loop (~20 min after start, after
+         every S/R backtest via SNR_NF_TRIGGER, else 6h); /api/snr/status
+         "filters". UI: S/R tab "🧪 Фильтры для S/R" table — top 8, #1
+         marked 🏆 (no coin worse + largest test-WR gain; then the rest by
+         the same rule), plus a per-coin card line "🏆 фильтр (тест):
+         WR a→b (n)". Informational only.
+         Header: the leftover Volume "скан Ns, 250 пар" text is shown only
+         when Volume is on; otherwise just the version.
+         Verified: py_compile (-W error), pyflakes, node --check; synthetic
+         3-coin S/R run (5s): all 5 S/R conditions populated, report built,
+         duplicates collapsed; MSNR report still builds via the shared core;
+         /api/snr/status carries "filters".
