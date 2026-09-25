@@ -16842,3 +16842,37 @@ v0.99.330 - 12 extra Neuro conditions (user's list 1-11; #9 split out as
          OFF reproduces v0.99.322's Neuro output byte-for-byte (4744
          patterns / 609 trades); ON: new keys appear in mined patterns,
          ~+13% mining CPU; settings round-trip.
+
+v0.99.331 - Per-module Gate SUB-ACCOUNT API keys, per user request ("для
+         одного конкретного индикатора s/r или другого выбрать свои api
+         для биржи" — sub-account). MSNR / Sweep / Neuro / S/R / Peak can
+         each get their own key pair (settings → Автоторговля → "API-ключи
+         по модулям"); modules without one keep the main keys.
+         Mechanism: gate_signed_request() takes its keys from a
+         thread-local current account; using_account(mode) sets it.
+         execute_autotrade() is now a wrapper running the unchanged
+         implementation (_execute_autotrade_impl) inside the module's
+         account, so entry/TP/SL, leverage, balance-based sizing (incl.
+         va-bank), the "already in a position" check and the opportunistic
+         reconcile all hit that sub-account. Also wrapped: Neuro's early
+         close, the MSNR add-on's old-SL cancel. reconcile_loop() now runs
+         reconcile_positions_and_orders() once per account (main + every
+         module with its own keys); its alert-dedupe sets are per account,
+         its Telegram alerts are prefixed "[суб-аккаунт X]", and SL
+         auto-heal recovers stops only from modules trading on that
+         account. get_dual_mode() cache is per account.
+         NO silent fallback: a module whose keys are missing/invalid fails
+         its request (logged, ERROR in the autotrade log) — never trades
+         on the main account instead.
+         Storage: vp_poc_module_credentials.json (chmod 600), separate
+         from the main keys file. API: GET/POST /api/credentials/modules
+         (suffixes only), POST /api/credentials/test (read-only: balance,
+         position mode, open positions — main or a module's account).
+         Autotrade log records "account" and shows it under the module.
+         Verified: py_compile (-W error), pyflakes, node --check; unit
+         tests with a fake Gate — S/R requests signed with S/R's key, MSNR
+         (no own keys) with the main key; keys removed mid-context ->
+         RuntimeError, no fallback; reconcile under S/R uses only S/R's key
+         and prefixes its alert; dry-run execute_autotrade("snr") sized
+         from the sub-account balance, logged with its account; file
+         persisted 0600 and reloaded; /api/credentials/test works.

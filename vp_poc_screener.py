@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.330"
+APP_VERSION = "0.99.331"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1660,6 +1660,105 @@ GATE_API_KEY = ""
 GATE_API_SECRET = ""
 _credentials_lock = threading.Lock()
 
+# ============================================================================
+# v0.99.331 — per-module Gate sub-account API keys, per user request ("для
+# одного конкретного индикатора выбрать свои api для биржи", sub-account).
+# A module with its own keys trades, sizes (balance), checks positions,
+# reconciles and closes ONLY through them; everything else keeps the main
+# keys. Every private request picks its keys from a thread-local "current
+# account", set by using_account(mode) around execute_autotrade() and the
+# few other per-module exchange actions. NO silent fallback: if a module's
+# own keys fail, the request fails (logged + Telegram) — never the main
+# account's money.
+# Stored in their own file (chmod 600), separate from the main keys file.
+# ============================================================================
+MODULE_ACCOUNT_MODES = ("msnr", "lsw", "neuro", "snr", "prv")
+MODULE_ACCOUNT_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal"}
+MODULE_CREDENTIALS_FILE = os.environ.get(
+    "VP_MODULE_CREDENTIALS_FILE",
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_module_credentials.json"),
+)
+MODULE_CREDENTIALS = {}      # mode -> {"api_key": ..., "api_secret": ...}
+_acct_ctx = threading.local()
+
+
+def account_id_for_mode(mode):
+    return mode if mode in MODULE_CREDENTIALS else "default"
+
+
+def account_label(acc_id):
+    return "основной" if acc_id in (None, "default") else f"суб-аккаунт {MODULE_ACCOUNT_LABELS.get(acc_id, acc_id)}"
+
+
+def current_account_id():
+    return getattr(_acct_ctx, "account", None) or "default"
+
+
+def _acct_prefix():
+    acc = current_account_id()
+    return "" if acc == "default" else f"[{account_label(acc)}] "
+
+
+class using_account:
+    """with using_account("snr"): ... — every signed request inside goes
+    through S/R's own keys if it has them, else the main keys."""
+    def __init__(self, mode):
+        self.acc = account_id_for_mode(mode) if mode else "default"
+
+    def __enter__(self):
+        self.prev = getattr(_acct_ctx, "account", None)
+        _acct_ctx.account = self.acc
+        return self
+
+    def __exit__(self, *exc):
+        _acct_ctx.account = self.prev
+        return False
+
+
+def _current_credentials():
+    acc = current_account_id()
+    if acc != "default":
+        c = MODULE_CREDENTIALS.get(acc) or {}
+        return c.get("api_key", ""), c.get("api_secret", ""), acc   # no fallback to the main keys
+    return GATE_API_KEY, GATE_API_SECRET, acc
+
+
+def all_account_ids():
+    """Main account + each module account with its own keys (for reconcile)."""
+    return ["default"] + [m for m in MODULE_ACCOUNT_MODES if m in MODULE_CREDENTIALS]
+
+
+def load_module_credentials():
+    if not os.path.exists(MODULE_CREDENTIALS_FILE):
+        return
+    try:
+        with open(MODULE_CREDENTIALS_FILE) as f:
+            saved = json.load(f) or {}
+        with _credentials_lock:
+            MODULE_CREDENTIALS.clear()
+            for m, c in saved.items():
+                if m in MODULE_ACCOUNT_MODES and c.get("api_key") and c.get("api_secret"):
+                    MODULE_CREDENTIALS[m] = {"api_key": c["api_key"], "api_secret": c["api_secret"]}
+    except Exception as e:
+        log_error(f"load_module_credentials: {e}")
+
+
+def save_module_credentials(mode, api_key=None, api_secret=None):
+    """Set (both given) or clear (both None) one module's own keys."""
+    with _credentials_lock:
+        if api_key and api_secret:
+            MODULE_CREDENTIALS[mode] = {"api_key": api_key, "api_secret": api_secret}
+        else:
+            MODULE_CREDENTIALS.pop(mode, None)
+        try:
+            tmp_path = MODULE_CREDENTIALS_FILE + ".tmp"
+            with open(tmp_path, "w") as f:
+                json.dump(MODULE_CREDENTIALS, f)
+            os.chmod(tmp_path, 0o600)
+            os.replace(tmp_path, MODULE_CREDENTIALS_FILE)
+        except Exception as e:
+            log_error(f"save_module_credentials: {e}")
+
 
 def save_credentials(api_key, api_secret):
     """Writes to CREDENTIALS_FILE, chmod 600 (owner read/write only) — best
@@ -1702,8 +1801,9 @@ def gate_signed_request(method, url_path, query_string="", body=None, timeout=HT
     actually sent).
     Signature scheme (Gate APIv4): SIGN = HexEncode(HMAC_SHA512(secret,
     Method + "\\n" + URL + "\\n" + QueryString + "\\n" + HexEncode(SHA512(Payload)) + "\\n" + Timestamp))."""
-    if not GATE_API_KEY or not GATE_API_SECRET:
-        raise RuntimeError("Gate.io API credentials not configured")
+    api_key, api_secret, _acc = _current_credentials()   # v0.99.331 — per-module sub-account keys
+    if not api_key or not api_secret:
+        raise RuntimeError(f"Gate.io API credentials not configured ({account_label(_acc)})")
     payload_str = json.dumps(body) if body is not None else ""
     hashed_payload = hashlib.sha512(payload_str.encode("utf-8")).hexdigest()
     full_url_path = "/api/v4" + url_path
@@ -1733,9 +1833,9 @@ def gate_signed_request(method, url_path, query_string="", body=None, timeout=HT
     for attempt in range(attempts):
         ts = str(time.time())
         sign_string = f"{method}\n{full_url_path}\n{query_string}\n{hashed_payload}\n{ts}"
-        sign = hmac.new(GATE_API_SECRET.encode("utf-8"), sign_string.encode("utf-8"), hashlib.sha512).hexdigest()
+        sign = hmac.new(api_secret.encode("utf-8"), sign_string.encode("utf-8"), hashlib.sha512).hexdigest()
         headers = {
-            "KEY": GATE_API_KEY, "Timestamp": ts, "SIGN": sign,
+            "KEY": api_key, "Timestamp": ts, "SIGN": sign,
             "Accept": "application/json", "Content-Type": "application/json",
         }
         try:
@@ -4315,7 +4415,7 @@ def get_futures_total_equity():
     return total
 
 
-_dual_mode_cache = {"value": None, "fetched_at": 0}
+_dual_mode_cache_by_acc = {}   # v0.99.331 — per account: sub-accounts can be in a different position mode
 _dual_mode_cache_lock = threading.Lock()
 DUAL_MODE_CACHE_TTL_SEC = 3600  # this is an account-level setting that essentially never changes mid-session
 
@@ -4330,6 +4430,7 @@ def get_dual_mode():
     exact 400 that happened before this existed."""
     now = time.time()
     with _dual_mode_cache_lock:
+        _dual_mode_cache = _dual_mode_cache_by_acc.setdefault(current_account_id(), {"value": None, "fetched_at": 0})
         if _dual_mode_cache["value"] is not None and now - _dual_mode_cache["fetched_at"] < DUAL_MODE_CACHE_TTL_SEC:
             return _dual_mode_cache["value"]
     data = gate_signed_request("GET", "/futures/usdt/accounts")
@@ -4354,7 +4455,9 @@ def get_open_price_orders():
     return gate_signed_request("GET", "/futures/usdt/price_orders", query_string="status=open")
 
 
+_unprotected_alerted_by_acc = {}   # v0.99.331 — per account (was one global set)
 _unprotected_alerted = set()  # contracts already flagged — avoids re-alerting on every single new trade while the same position stays unprotected
+_missing_sl_alerted_by_acc = {}
 _missing_sl_alerted = set()  # v0.99.124 — same dedup, for the separate "has orders but none of them is a stop-loss" case
 
 
@@ -4381,6 +4484,11 @@ def find_open_signal_sl(symbol):
         "ft5_signals": STATE["ft5_signals"], "msnr_signals": STATE["msnr_signals"],
         "mirror_signals": STATE["mirror_signals"], "lsw_signals": STATE["lsw_signals"],
     }
+    # v0.99.331 — only modules trading on the account being reconciled
+    _list_mode = {"signals": "bounce", "scalp_signals": "scalp", "ft5_signals": "ft5",
+                  "msnr_signals": "msnr", "mirror_signals": "mirror", "lsw_signals": "lsw"}
+    _acc = current_account_id()
+    lists = {k: v for k, v in lists.items() if account_id_for_mode(_list_mode[k]) == _acc}
     with state_lock:
         for lst in lists.values():
             for s in lst:
@@ -4460,11 +4568,13 @@ def reconcile_positions_and_orders():
     orders against only 2 open positions after a lull with nothing new
     triggering a reconcile pass).
     Returns (unprotected_contracts, cancelled_contracts)."""
+    _unprotected_alerted = _unprotected_alerted_by_acc.setdefault(current_account_id(), set())  # v0.99.331
+    _missing_sl_alerted = _missing_sl_alerted_by_acc.setdefault(current_account_id(), set())
     try:
         positions = get_open_positions()
         triggers = get_open_price_orders()
     except Exception as e:
-        log_error(f"reconcile_positions_and_orders: {e}")
+        log_error(f"reconcile_positions_and_orders {account_label(current_account_id())}: {e}")
         return [], []
 
     open_contracts = {p["contract"] for p in positions if p.get("contract")}
@@ -4487,7 +4597,7 @@ def reconcile_positions_and_orders():
         _unprotected_alerted.update(unprotected)
     if new_ones:
         send_telegram(
-            f"⚠️ Незащищённые позиции без TP/SL: {', '.join(new_ones)} — проверь вручную на бирже",
+            _acct_prefix() + f"⚠️ Незащищённые позиции без TP/SL: {', '.join(new_ones)} — проверь вручную на бирже",
             category=None,
         )
 
@@ -4517,7 +4627,7 @@ def reconcile_positions_and_orders():
             if contract not in _missing_sl_alerted:
                 _missing_sl_alerted.add(contract)
                 send_telegram(
-                    f"⚠️ {contract}: есть ордер(а), но среди них нет стоп-лосса, и не нашлось "
+                    _acct_prefix() + f"⚠️ {contract}: есть ордер(а), но среди них нет стоп-лосса, и не нашлось "
                     f"записи сигнала, чтобы восстановить его автоматически — проверь вручную на бирже",
                     category=None,
                 )
@@ -4533,13 +4643,13 @@ def reconcile_positions_and_orders():
             place_close_trigger_order(contract, sig_direction, sl_rounded, expected_sl_rule, tick)
             missing_sl_healed.append(contract)
             _missing_sl_alerted.discard(contract)
-            send_telegram(f"✅ {contract}: автоматически восстановлен отсутствовавший стоп-лосс @ {sl_rounded}", category=None)
+            send_telegram(_acct_prefix() + f"✅ {contract}: автоматически восстановлен отсутствовавший стоп-лосс @ {sl_rounded}", category=None)
         except Exception as e:
             log_error(f"reconcile_positions_and_orders: {contract} missing SL, auto-heal retry failed: {e}")
             if contract not in _missing_sl_alerted:
                 _missing_sl_alerted.add(contract)
                 send_telegram(
-                    f"⚠️ {contract}: стоп-лосс отсутствует, автовосстановление тоже не удалось ({e}) — проверь вручную на бирже",
+                    _acct_prefix() + f"⚠️ {contract}: стоп-лосс отсутствует, автовосстановление тоже не удалось ({e}) — проверь вручную на бирже",
                     category=None,
                 )
             missing_sl_still_failed.append(contract)
@@ -4563,6 +4673,15 @@ def reconcile_positions_and_orders():
 
 
 def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_pct_override=None, allow_stack=False, all_in_margin_pct=None):
+    """v0.99.331 — runs the real implementation inside this module's own
+    account context (sub-account keys if configured, else main)."""
+    with using_account(mode):
+        return _execute_autotrade_impl(mode, symbol, direction, entry, sl, tp, extra=extra,
+                                       risk_pct_override=risk_pct_override, allow_stack=allow_stack,
+                                       all_in_margin_pct=all_in_margin_pct)
+
+
+def _execute_autotrade_impl(mode, symbol, direction, entry, sl, tp, extra=None, risk_pct_override=None, allow_stack=False, all_in_margin_pct=None):
     """The single entry point every signal source calls to (maybe) fire a
     real trade. `mode` is a short label (e.g. "bounce", "msnr", "scalp")
     used for the auto-trade-enabled toggle lookup and the log. `extra` is
@@ -4640,6 +4759,7 @@ def execute_autotrade(mode, symbol, direction, entry, sl, tp, extra=None, risk_p
         sl, tp = tp, sl
     record = {
         "time": time.time(), "mode": mode, "symbol": symbol, "direction": direction,
+        "account": account_label(current_account_id()),   # v0.99.331
         "entry": entry, "sl": sl, "tp": tp, "leverage": None,
         "dry_run": AUTOTRADE_DRY_RUN, "extra": extra or {},
         "status": None, "detail": None, "contracts": None, "order_id": None,
@@ -7855,7 +7975,12 @@ def reconcile_loop():
         heartbeat("reconcile_loop")  # v0.99.322 — see system_health_watchdog()
         try:
             if not AUTOTRADE_DRY_RUN:
-                reconcile_positions_and_orders()
+                for _acc in all_account_ids():   # v0.99.331 — main account + each module sub-account
+                    try:
+                        with using_account(None if _acc == "default" else _acc):
+                            reconcile_positions_and_orders()
+                    except Exception as e:
+                        log_error(f"reconcile_loop {account_label(_acc)}: {e}")
         except Exception as e:
             log_error(f"reconcile_loop: {e}")
         time.sleep(max(30, RECONCILE_INTERVAL_SEC))
@@ -10755,7 +10880,8 @@ def msnr_scan_addon_live(symbol):
         new_sl_order_id = autotrade_result.get("sl_order_id")
         if old_sl_order_id and old_sl_order_id != new_sl_order_id:
             try:
-                cancel_price_order(old_sl_order_id)
+                with using_account("msnr"):   # v0.99.331
+                    cancel_price_order(old_sl_order_id)
             except Exception as e:
                 log_error(f"msnr_scan_addon_live {symbol}: failed to cancel primary's old SL {old_sl_order_id} after add-on stacked — position may have TWO live SL orders now, check manually: {e}")
         with state_lock:
@@ -18816,7 +18942,8 @@ def neuro_track_signal_outcomes():
                             sig["shadow_pending"] = True
                             sig["would_have_been_result"] = None
                         if AUTOTRADE_ENABLED_NEURO:
-                            close_result = neuro_close_position_early(sig["symbol"], direction)
+                            with using_account("neuro"):   # v0.99.331
+                                close_result = neuro_close_position_early(sig["symbol"], direction)
                             log_error(f"neuro early-exit {sig['symbol']}: real close attempt -> {close_result}")
                         send_telegram(
                             f"\u2702\ufe0f NEURO {sig['symbol']}: \u0437\u0430\u043a\u0440\u044b\u0442 \u0440\u0430\u043d\u044c\u0448\u0435 \u0441\u0440\u043e\u043a\u0430 "
@@ -21541,6 +21668,57 @@ def api_post_credentials():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/credentials/modules", methods=["GET"])
+def api_get_module_credentials():
+    """v0.99.331 — per-module sub-account keys (suffixes only, never secrets)."""
+    out = {}
+    for m in MODULE_ACCOUNT_MODES:
+        c = MODULE_CREDENTIALS.get(m)
+        out[m] = {"label": MODULE_ACCOUNT_LABELS[m], "configured": bool(c),
+                  "key_suffix": ("…" + c["api_key"][-6:]) if c else None}
+    return jsonify(out)
+
+
+@app.route("/api/credentials/modules", methods=["POST"])
+def api_post_module_credentials():
+    try:
+        body = request.get_json(force=True, silent=True) or {}
+        mode = body.get("module")
+        if mode not in MODULE_ACCOUNT_MODES:
+            return jsonify({"ok": False, "error": "unknown module"}), 400
+        if body.get("clear"):
+            save_module_credentials(mode)
+            return jsonify({"ok": True, "configured": False})
+        api_key = (body.get("api_key") or "").strip()
+        api_secret = (body.get("api_secret") or "").strip()
+        if not api_key or not api_secret:
+            return jsonify({"ok": False, "error": "both api_key and api_secret are required"}), 400
+        save_module_credentials(mode, api_key, api_secret)
+        return jsonify({"ok": True, "configured": True})
+    except Exception as e:
+        log_error(f"api_post_module_credentials: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/credentials/test", methods=["POST"])
+def api_test_credentials():
+    """v0.99.331 — read-only check of an account's keys: futures balance,
+    position mode, open positions count. mode "" = main account."""
+    body = request.get_json(force=True, silent=True) or {}
+    mode = body.get("module") or None
+    try:
+        with using_account(mode):
+            acc = current_account_id()
+            data = gate_signed_request("GET", "/futures/usdt/accounts")
+            positions = gate_signed_request("GET", "/futures/usdt/positions") or []
+        open_n = sum(1 for p in positions if float(p.get("size", 0) or 0) != 0)
+        return jsonify({"ok": True, "account": account_label(acc),
+                        "total": data.get("total"), "available": data.get("available"),
+                        "dual_mode": bool(data.get("in_dual_mode", False)), "open_positions": open_n})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)})
+
+
 @app.route("/api/credentials", methods=["DELETE"])
 def api_delete_credentials():
     try:
@@ -22466,7 +22644,16 @@ INDEX_HTML = """<!doctype html>
         <div style="display:flex;gap:8px;">
           <button id="saveGateApiBtn" style="flex:1;background:#1e2a3f;border:none;color:#fff;padding:8px;border-radius:8px;font-size:13px;">Сохранить ключи</button>
           <button id="clearGateApiBtn" style="background:#3a1e22;border:none;color:#ff9b9b;padding:8px 12px;border-radius:8px;font-size:13px;">Удалить</button>
+          <button onclick="testGateAccount('')" style="background:#1c2433;border:none;color:#9cc4ff;padding:8px 12px;border-radius:8px;font-size:13px;">Проверить</button>
         </div>
+        <div class="sub" id="acctTest_main"></div>
+      </div>
+      <div class="settingRow" style="flex-direction:column;align-items:stretch;gap:6px;">
+        <div>
+          <div class="label">API-ключи по модулям (суб-аккаунты)</div>
+          <div class="sub">модуль со своими ключами торгует, считает баланс, проверяет позиции и стопы только на своём суб-аккаунте; если его ключи не работают — сделка не откроется (никакого переключения на основной счёт). Нужны права суб-аккаунта на фьючерсы (чтение + торговля).</div>
+        </div>
+        <div id="moduleAcctRows" class="dim">загрузка...</div>
       </div>
       <div class="settingRow">
         <div>
@@ -25363,7 +25550,7 @@ async function refreshAutotrade() {
     const canRetry = (e.status === 'ERROR' || e.status === 'SKIPPED') && e.mode && e.symbol && e.direction && e.entry != null && e.sl != null && e.tp != null;
     const retryAttr = canRetry ? ` data-retry-idx="${idx}" style="cursor:pointer;" title="\u043a\u043b\u0438\u043a \u2014 \u043f\u043e\u043f\u044b\u0442\u0430\u0442\u044c\u0441\u044f \u043e\u0442\u043a\u0440\u044b\u0442\u044c \u0441\u043d\u043e\u0432\u0430"` : '';
     return `<tr${retryAttr}>
-      <td class="dim">${fmtTimeWithDate(e.time)}</td><td>${modeLabels[e.mode] || e.mode}</td><td>${e.symbol}</td>
+      <td class="dim">${fmtTimeWithDate(e.time)}</td><td>${modeLabels[e.mode] || e.mode}${e.account && e.account !== 'основной' ? `<div class="dim" style="font-size:10px;">${e.account}</div>` : ''}</td><td>${e.symbol}</td>
       <td class="${dirClass}">${e.direction || '-'}</td>
       <td class="${statusClass}">${statusRu[e.status] || e.status}${canRetry ? ' \u21bb' : ''}</td>
       <td class="dim" style="max-width:280px;white-space:normal;">${e.detail || ''}</td>
@@ -25931,6 +26118,54 @@ document.getElementById('saveGateApiBtn').onclick = async () => {
     alert('Не удалось сохранить ключи: ' + err);
   }
 };
+
+// v0.99.331 — per-module sub-account keys
+async function refreshModuleAccounts() {
+  const box = document.getElementById('moduleAcctRows');
+  if (!box) return;
+  try {
+    const m = await (await fetch('/api/credentials/modules')).json();
+    box.innerHTML = Object.entries(m).map(([mode, a]) => `
+      <details style="margin:4px 0;"><summary style="cursor:pointer;font-size:12px;">${a.label}: ${a.configured ? `<span class="win">свой суб-аккаунт</span> <span class="dim">key ${a.key_suffix}</span>` : '<span class="dim">основной счёт</span>'}</summary>
+        <div style="display:flex;flex-direction:column;gap:6px;margin:6px 0;">
+          <input type="text" id="macKey_${mode}" placeholder="API Key суб-аккаунта" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:7px 9px;border-radius:8px;font-size:12px;">
+          <input type="password" id="macSecret_${mode}" placeholder="API Secret суб-аккаунта" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:7px 9px;border-radius:8px;font-size:12px;">
+          <div style="display:flex;gap:6px;">
+            <button onclick="saveModuleAccount('${mode}')" style="flex:1;background:#1e2a3f;border:none;color:#fff;padding:7px;border-radius:8px;font-size:12px;">Сохранить</button>
+            <button onclick="testGateAccount('${mode}')" style="background:#1c2433;border:none;color:#9cc4ff;padding:7px 10px;border-radius:8px;font-size:12px;">Проверить</button>
+            ${a.configured ? `<button onclick="clearModuleAccount('${mode}')" style="background:#3a1e22;border:none;color:#ff9b9b;padding:7px 10px;border-radius:8px;font-size:12px;">На основной</button>` : ''}
+          </div>
+          <div class="sub" id="acctTest_${mode}"></div>
+        </div>
+      </details>`).join('');
+  } catch (e) { box.textContent = 'не удалось загрузить'; }
+}
+async function saveModuleAccount(mode) {
+  const key = document.getElementById('macKey_' + mode).value.trim();
+  const secret = document.getElementById('macSecret_' + mode).value.trim();
+  if (!key || !secret) { alert('Заполни оба поля'); return; }
+  const res = await (await fetch('/api/credentials/modules', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({module: mode, api_key: key, api_secret: secret})})).json();
+  if (!res.ok) { alert('Не удалось сохранить: ' + (res.error || '')); return; }
+  await refreshModuleAccounts();
+  testGateAccount(mode);
+}
+async function clearModuleAccount(mode) {
+  if (!confirm('Вернуть модуль на основной счёт? Ключи суб-аккаунта будут удалены из программы. Уже открытые на суб-аккаунте позиции программа больше не будет сопровождать — закрой их или верни ключи.')) return;
+  await fetch('/api/credentials/modules', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({module: mode, clear: true})});
+  await refreshModuleAccounts();
+}
+async function testGateAccount(mode) {
+  const el = document.getElementById('acctTest_' + (mode || 'main'));
+  if (el) el.textContent = 'проверяю...';
+  try {
+    const r = await (await fetch('/api/credentials/test', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({module: mode})})).json();
+    if (el) el.innerHTML = r.ok
+      ? `<span class="win">✅ ${r.account}: баланс ${r.total} USDT (доступно ${r.available}) · режим ${r.dual_mode ? 'hedge (dual)' : 'one-way'} · открытых позиций ${r.open_positions}</span>`
+      : `<span class="loss">❌ ${r.error}</span>`;
+  } catch (e) { if (el) el.textContent = 'ошибка: ' + e; }
+}
+refreshModuleAccounts();
 
 document.getElementById('clearGateApiBtn').onclick = async () => {
   if (!confirm('Удалить сохранённые API-ключи Gate.io?')) return;
@@ -26685,6 +26920,7 @@ if __name__ == "__main__":
     load_nq_state()
     load_settings()
     load_credentials()
+    load_module_credentials()   # v0.99.331
     _load_alert_cfg()
     threading.Thread(target=_telegram_sender_worker, daemon=True).start()
     t = threading.Thread(target=scan_loop, daemon=True)
