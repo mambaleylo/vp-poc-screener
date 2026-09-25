@@ -22,6 +22,7 @@ import json
 import time
 import math
 import struct
+import sys
 import threading
 import traceback
 import queue
@@ -56,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.327"
+APP_VERSION = "0.99.328"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -211,6 +212,7 @@ def _global_rate_gate():
     that's what makes the spacing global and strict (every caller
     queues up in true request order) rather than just an average that
     a burst could still momentarily violate."""
+    t_enter = time.time()
     with _global_rate_lock:
         now = time.time()
         wait = _global_last_request_started[0] + GLOBAL_MIN_REQUEST_INTERVAL - now
@@ -218,6 +220,53 @@ def _global_rate_gate():
             time.sleep(wait)
             now = time.time()
         _global_last_request_started[0] = now
+    _exchange_load_record(now - t_enter)
+
+
+# v0.99.328 — exchange-load accounting (user: "бэктест особо быстрее не
+# стал, по крайней мере msnr — кэш свечей не работает?"). Every Gate
+# request passes _global_rate_gate(); record who made it (first caller
+# frame with a module prefix) and how long it queued for the app-wide
+# request slot, so the header can show where the request budget goes.
+_EXCHANGE_LOAD = deque(maxlen=50000)       # (ts, module, queued_sec)
+_EXCHANGE_LOAD_PREFIXES = (("msnr", "MSNR"), ("lsw", "Sweep"), ("snr", "S/R"), ("prv", "Peak"),
+                           ("neuro", "Neuro"), ("reconcile", "автоторговля"), ("autotrade", "автоторговля"),
+                           ("execute_", "автоторговля"), ("scan", "Volume"), ("_scan", "Volume"))
+
+
+def _exchange_load_record(queued):
+    try:
+        f = sys._getframe(2)
+        module = "прочее"
+        for _ in range(12):
+            if f is None:
+                break
+            name = f.f_code.co_name
+            hit = next((lbl for pre, lbl in _EXCHANGE_LOAD_PREFIXES if name.startswith(pre)), None)
+            if hit:
+                module = hit
+                break
+            f = f.f_back
+        _EXCHANGE_LOAD.append((time.time(), module, queued))
+    except Exception:
+        pass
+
+
+def exchange_load_summary(window_sec=600):
+    now = time.time()
+    rows = [r for r in list(_EXCHANGE_LOAD) if now - r[0] <= window_sec]
+    per = {}
+    for _ts, mod, q in rows:
+        n, qs = per.get(mod, (0, 0.0))
+        per[mod] = (n + 1, qs + q)
+    span_min = window_sec / 60
+    mods = sorted(({"module": m, "per_min": round(n / span_min, 1), "avg_queue_sec": round(qs / n, 2)}
+                   for m, (n, qs) in per.items()), key=lambda x: -x["per_min"])
+    total = len(rows)
+    return {"window_min": int(span_min), "total_per_min": round(total / span_min, 1),
+            "cap_per_min": round(60 / GLOBAL_MIN_REQUEST_INTERVAL),
+            "avg_queue_sec": round(sum(r[2] for r in rows) / total, 2) if total else 0.0,
+            "modules": mods, "candle_cache": dict(_candle_cache_stats)}
 SIGNAL_HISTORY = 200
 RR = float(os.environ.get("VP_RR", 2.0))                  # take-profit distance as a multiple of risk — raised from 1.5: collected MFE stats showed WIN median MFE ~2.8R, i.e. TP was cutting winners short
 ZONE_BUFFER_PCT = float(os.environ.get("VP_ZONE_BUFFER_PCT", 0.30))  # stop sits this far beyond the zone edge (fraction of zone height) — raised from 0.15: LOSS median MFE was ~1.7R, meaning a chunk of stopped-out trades kept moving in the original direction afterward — noise was clipping the stop too close
@@ -20496,7 +20545,8 @@ def api_health():
         if _neuro_waiting_slot_since:
             waiting.append("Neuro")
     return jsonify({"stalled": stalled_loops(), "waiting_for_slot": waiting,
-                    "backtest_slots": BACKTEST_CONCURRENCY_LIMIT})
+                    "backtest_slots": BACKTEST_CONCURRENCY_LIMIT,
+                    "exchange_load": exchange_load_summary()})
 
 
 @app.route("/api/msnr/status")
@@ -25133,6 +25183,13 @@ async function refreshHealth() {
       parts.push(x.waiting_for_slot
         ? `<div class="loss">⛔ ${x.label} ждёт свободного слота бэктеста уже ${t} — слоты заняты другими модулями или зависшим циклом. Поможет перезапуск сервера.</div>`
         : `<div class="loss">⛔ Зависло: ${x.label} — нет отклика ${t} (норма до ${Math.round(x.max_gap_min / 60 * 10) / 10} ч). Поможет перезапуск сервера.</div>`);
+    }
+    const L = h.exchange_load;
+    if (L && L.total_per_min > 0) {
+      const mods = (L.modules || []).map(m => `${m.module} ${m.per_min}`).join(' · ');
+      const cc = L.candle_cache || {};
+      const ccTot = (cc.hits || 0) + (cc.misses || 0);
+      parts.push(`<div class="dim">📊 запросов к бирже/мин: ${L.total_per_min} из ${L.cap_per_min} возможных (${mods}) · ожидание очереди ~${L.avg_queue_sec}с на запрос${ccTot ? ` · кэш свечей: ${Math.round(100 * (cc.hits || 0) / ccTot)}% из кэша (${ccTot})` : ''}</div>`);
     }
     if ((h.waiting_for_slot || []).length) {
       parts.push(`<div class="dim">⏳ в очереди на бэктест: ${h.waiting_for_slot.join(', ')} (одновременно идут не больше ${h.backtest_slots})</div>`);

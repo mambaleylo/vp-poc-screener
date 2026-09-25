@@ -16764,3 +16764,24 @@ v0.99.327 - Two UI fixes, per user report ("открываю список сде
          surrogates; jsdom: 3 lists, 2 opened -> stay open across two
          re-renders with changed numbers in the summary; user-closed stays
          closed; placeholder renders.
+
+v0.99.328 - Exchange-load diagnostics, per user report ("бэктест особо
+         быстрее не стал, по крайней мере msnr — кэш свечей не работает?").
+         Honest accounting of why MSNR gains little from the v0.99.326
+         cache: MSNR fetches only ~40-60 days (15m entry = 5 chunks, 1h
+         structure = 2, 4h higher + 4h HTF = 1 each) and the cache must
+         replay each series' LAST chunk live (see v0.99.324b), so ~9 -> ~4
+         requests per coin, and nothing on the first cycle after a restart
+         (it fills the cache). Long-history modules (Neuro 1h x 9800) gain
+         most. Whether MSNR is bound by requests at all is unknown — all
+         modules share ONE app-wide request budget (GLOBAL_MIN_REQUEST_
+         INTERVAL 0.12s = 500/min), and the Volume scan alone requests
+         candles for ~250 pairs every ~65s.
+         Added: _global_rate_gate() records each request's module (first
+         caller frame with a module prefix) and how long it queued;
+         exchange_load_summary() (10-min window) in /api/health; header
+         line "📊 запросов к бирже/мин: N из 500 (Volume … · MSNR … · …)
+         · ожидание очереди ~Xс на запрос · кэш свечей: Y% из кэша". No
+         behaviour change.
+         Verified: py_compile (-W error), pyflakes, node --check; real
+         runtime /api/health returns per-module rates.
