@@ -17315,3 +17315,17 @@ v0.99.357 - Neuro: no more cascade of "exceeded 720s" timeouts. Root cause:
          with account label, and explained in Russian with what to enable.
          Verified: py_compile (-W error), pyflakes, runtime start;
          synthetic-data test: worker cancelled at 2s/12s/25s stops in <0.01s.
+v0.99.358 - Neuro: no fixed per-coin clock anymore (user: "может дольше ждать,
+         если оно не зависло?"). The worker reports progress at every
+         checkpoint (neuro_check_cancel); neuro_wait_worker() keeps waiting
+         while it progresses and stops it only after NEURO_STALL_SEC (10 min)
+         with no checkpoint (a real hang) or as a last resort after
+         NEURO_PER_SYMBOL_HARD_MAX_SEC (4 h). While a slow coin progresses the
+         loop beats every 30s, so neither watchdog mistakes it for a hang
+         (NEURO_WATCHDOG_STUCK_SEC now follows the stall limit). Russian texts
+         for both stop reasons. Computation unchanged.
+         Verified: py_compile (-W error), pyflakes, runtime start, JS check;
+         thread tests: 10s coin with steady progress waited for; silent coin
+         stopped at the stall limit; endless-progress coin stopped at the hard
+         cap; no leftover state. Longest gap between checkpoints in a full
+         synthetic backtest: 1.6s of 41s (limit is 600s).

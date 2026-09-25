@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.357"
+APP_VERSION = "0.99.358"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3213,6 +3213,8 @@ _ERR_PROCESS = (
 _ERR_CAUSES = (   # (markers, explanation, advice) — first match wins
     (("queue: full",), "очередь Telegram переполнена — часть уведомлений пропущена", ""),
     (("telegram HTTP", "telegram network"), "не удалось отправить уведомление в Telegram (будет повтор)", ""),
+    (("stalled: no checkpoint",), "расчёт монеты завис (10 мин без продвижения) — остановлен, монета пропущена в этом цикле", ""),
+    (("hard limit: still computing",), "расчёт монеты шёл дольше предельных 4 ч — остановлен, монета пропущена в этом цикле", ""),
     (("no progress for",), "бэктест перестал продвигаться — похоже, завис", "если не пройдёт само за полчаса — перезапусти сервер"),
     (("silent for", "likely hung"), "процесс перестал отвечать — похоже, завис", "перезапусти сервер"),
     (("stuck on",), "зависла обработка монеты — запущена замена процесса", ""),
@@ -17013,6 +17015,16 @@ NEURO_HISTORY_DAYS   = int(os.environ.get("VP_NEURO_HISTORY_DAYS", 1500))  # ask
 NEURO_REFRESH_SEC    = int(os.environ.get("VP_NEURO_REFRESH_SEC", 24 * 3600))  # v0.99.236 — raised 4h->24h per direct user request: with the universe now 120 coins instead of a fixed 20, a full cycle takes MUCH longer, and re-mining more than once a day added little value anyway (the underlying ~13-month rolling window barely shifts hour to hour — established during an earlier session discussion)
 NEURO_MINING_TRIGGER = threading.Event()  # v0.99.212 — same "Очистить X doesn't wake the sleeping loop" fix as LSW/MSNR's own trigger events, for the new "Очистить Neuro" button
 NEURO_PER_SYMBOL_MAX_SEC = int(os.environ.get("VP_NEURO_PER_SYMBOL_MAX_SEC", 1500))  # v0.99.212, raised 300->480 in v0.99.216, raised 480->720 in v0.99.261 — per direct user report of multiple real symbols hitting the old 480s ceiling on real hardware after this session's cumulative additions (38->47 conditions, veto filters, early-exit rule search) made per-symbol processing genuinely slower even after removing a redundant condition-recomputation (see neuro_simulate_trades()'s own return_conds param) — real devices are slower than the sandbox this was tuned against, so the ceiling needed headroom, not just the one fixable inefficiency
+# v0.99.358 — per user ("может таки дольше ждать, если оно не зависло?"):
+# a coin is no longer cut off by a fixed clock. The worker reports progress
+# at every checkpoint; it is stopped only if it made NO progress for
+# NEURO_STALL_SEC (a real hang), or as a last resort after
+# NEURO_PER_SYMBOL_HARD_MAX_SEC. A slow-but-working coin is waited for.
+# NEURO_PER_SYMBOL_MAX_SEC above is kept only for old references.
+NEURO_STALL_SEC = int(os.environ.get("VP_NEURO_STALL_SEC", 600))
+NEURO_PER_SYMBOL_HARD_MAX_SEC = int(os.environ.get("VP_NEURO_PER_SYMBOL_HARD_MAX_SEC", 4 * 3600))
+NEURO_WAIT_POLL_SEC = 30
+_neuro_worker_progress = {}   # thread ident -> time.monotonic() of the last checkpoint
 # v0.99.357 — raised 720->1500 per user report (every coin hitting 720s).
 # The bigger fix is below: a timed-out coin's thread used to keep computing
 # in the background (Python can't kill a thread), so each timeout left a
@@ -17031,18 +17043,45 @@ _neuro_cancel_lock = threading.Lock()
 
 
 def neuro_check_cancel():
-    """Cheap checkpoint: a set lookup only when some thread was cancelled."""
-    if _neuro_cancelled_threads and threading.get_ident() in _neuro_cancelled_threads:
+    """Cheap checkpoint: records progress (v0.99.358) and stops the thread
+    if it was abandoned."""
+    ident = threading.get_ident()
+    _neuro_worker_progress[ident] = time.monotonic()
+    if _neuro_cancelled_threads and ident in _neuro_cancelled_threads:
         raise NeuroCancelled()
 
 
 def _neuro_run_cancellable(ident_box, fn, *args):
-    ident_box.append(threading.get_ident())
+    ident = threading.get_ident()
+    _neuro_worker_progress[ident] = time.monotonic()
+    ident_box.append(ident)
     try:
         return fn(*args)
     finally:
+        _neuro_worker_progress.pop(ident, None)
         with _neuro_cancel_lock:
-            _neuro_cancelled_threads.discard(threading.get_ident())
+            _neuro_cancelled_threads.discard(ident)
+
+
+def neuro_wait_worker(fut, ident_box, on_wait=None):
+    """v0.99.358 — wait for a Neuro worker while it keeps making progress.
+    Returns the result; raises FutureTimeoutError (after cancelling the
+    worker) on a real stall or the hard cap. The message says which."""
+    started = time.monotonic()
+    while True:
+        try:
+            return fut.result(timeout=NEURO_WAIT_POLL_SEC)
+        except (TimeoutError, FutureTimeoutError):
+            now = time.monotonic()
+            last = _neuro_worker_progress.get(ident_box[0], started) if ident_box else started
+            if now - last > NEURO_STALL_SEC:
+                neuro_cancel_thread(ident_box)
+                raise FutureTimeoutError(f"stalled: no checkpoint for {NEURO_STALL_SEC // 60} min, after {int(now - started) // 60} min total")
+            if now - started > NEURO_PER_SYMBOL_HARD_MAX_SEC:
+                neuro_cancel_thread(ident_box)
+                raise FutureTimeoutError(f"hard limit: still computing after {NEURO_PER_SYMBOL_HARD_MAX_SEC // 3600} h")
+            if on_wait:
+                on_wait()
 
 
 def neuro_cancel_thread(ident_box):
@@ -19522,7 +19561,7 @@ def neuro_compute_signal_stats(active_symbols=None):
 # thread is abandoned (a zombie, same as any single-symbol timeout already
 # accepts), but that's strictly better than permanent zero progress.
 NEURO_WATCHDOG_CHECK_SEC = 60
-NEURO_WATCHDOG_STUCK_SEC = NEURO_PER_SYMBOL_MAX_SEC * 2 + 120  # generous margin beyond the per-symbol ceiling itself
+NEURO_WATCHDOG_STUCK_SEC = NEURO_STALL_SEC * 2 + 120  # v0.99.358 — the loop beats while a coin makes progress  # generous margin beyond the per-symbol ceiling itself
 
 
 def neuro_mining_watchdog():
@@ -19553,6 +19592,15 @@ def neuro_mining_watchdog():
                 threading.Thread(target=neuro_mining_loop, daemon=True).start()
         except Exception as e:
             log_error(f"neuro_mining_watchdog: {e}")
+
+
+def _neuro_waiting_beat():
+    """v0.99.358 — called every 30s while the current coin is still making
+    progress, so the watchdogs see a slow coin as alive, not hung."""
+    global _neuro_mining_progress_ts
+    with _neuro_state_lock:
+        _neuro_mining_progress_ts = time.time()
+        heartbeat("neuro_mining_loop")
 
 
 def neuro_mining_loop():
@@ -19658,12 +19706,12 @@ def neuro_mining_loop():
                 try:
                     fut = ex.submit(_neuro_run_cancellable, _ident_box, neuro_backtest_symbol, symbol, shared_btc_candles, shared_eth_candles)
                     try:
-                        confirmed, trades, summary = fut.result(timeout=NEURO_PER_SYMBOL_MAX_SEC)
+                        confirmed, trades, summary = neuro_wait_worker(fut, _ident_box, _neuro_waiting_beat)
                         if summary.get("n"):
                             all_results[symbol] = (confirmed, trades, summary)
-                    except (TimeoutError, FutureTimeoutError):
+                    except (TimeoutError, FutureTimeoutError) as e:
                         neuro_cancel_thread(_ident_box)   # v0.99.357 — worker stops itself, no CPU-eating zombie
-                        log_error(f"neuro_mining_loop: {symbol} exceeded {NEURO_PER_SYMBOL_MAX_SEC // 60} min — skipping, calculation stopped")
+                        log_error(f"neuro_mining_loop: {symbol} {e} — skipping, calculation stopped")
                     except Exception as e:
                         log_error(f"neuro_mining_loop {symbol}: {e}")
                 finally:
