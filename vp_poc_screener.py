@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.356"
+APP_VERSION = "0.99.357"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3233,6 +3233,8 @@ _ERR_CAUSES = (   # (markers, explanation, advice) — first match wins
     (("invalid signature", "INVALID_KEY", "INVALID_SIGNATURE", "auth failed", "Unauthorized", "401 Client Error", "FORBIDDEN_KEY"), "биржа не приняла API-ключи (неверные или без прав)", "проверь ключ, секрет и права на фьючерсы"),
     (("Too Many Requests", "RATE_LIMIT", "TOO_MANY_REQUESTS", "429 Client Error"), "биржа ограничила частоту запросов", "обычно проходит само через минуту"),
     (("403 Client Error",), "биржа отказала в доступе (403) — ограничение по стране/IP или прокси", "проверь VPN/прокси"),
+    (("error for GET /unified/accounts",), "фьючерсный баланс 0, а единый счёт (Unified) этот API-ключ читать не может — нет права", "если счёт единый — включи в ключе право «Unified account / единый счёт: чтение»; если нет — просто пополни фьючерсный счёт (сообщение повторяется не чаще раза в 6 ч)"),
+    (("'FORBIDDEN'", "does not have permission"), "у API-ключа нет нужного права для этого запроса", "открой ключ на Gate и включи недостающее право"),
     (("CONTRACT_NOT_FOUND", "contract not found"), "такой монеты на бирже нет (делистинг/переименование)", ""),
     (("ORDER_NOT_FOUND",), "ордер уже не существует (исполнен или отменён)", ""),
     (("POSITION_EMPTY", "POSITION_NOT_FOUND"), "позиции уже нет на бирже", ""),
@@ -4407,6 +4409,11 @@ def move_stop_to_breakeven(symbol, direction, sl_order_id, entry, tick, buffer_p
     return new_sl.get("id") if isinstance(new_sl, dict) else None
 
 
+UNIFIED_FORBIDDEN_LOG_EVERY_SEC = 6 * 3600
+_unified_forbidden_logged = {}   # account id -> last time the 403 was logged
+_unified_forbidden_lock = threading.Lock()
+
+
 def get_unified_account_equity():
     """v0.99.312 — per direct user report + shared error-panel
     screenshot: GET /futures/usdt/accounts genuinely reports 0 once an
@@ -4427,7 +4434,20 @@ def get_unified_account_equity():
     try:
         data = gate_signed_request("GET", "/unified/accounts", retry_on_timeout=True)
     except Exception as e:
-        log_error(f"get_unified_account_equity: fetch failed: {e}")
+        # v0.99.357 — a key without the Unified permission gets the same
+        # 403 FORBIDDEN on every balance check (every trade attempt, every
+        # reconcile) — logged once per account per 6h instead of flooding
+        # the error panel with the identical line.
+        txt = str(e)
+        if "FORBIDDEN" in txt or "403" in txt:
+            acc = current_account_id()
+            now = time.time()
+            with _unified_forbidden_lock:
+                last = _unified_forbidden_logged.get(acc, 0.0)
+                if now - last < UNIFIED_FORBIDDEN_LOG_EVERY_SEC:
+                    return 0.0
+                _unified_forbidden_logged[acc] = now
+        log_error(f"get_unified_account_equity: {_acct_prefix()}fetch failed: {e}")
         return 0.0
     for field in ("unified_account_total_equity", "equity", "total"):
         value = data.get(field)
@@ -16992,7 +17012,43 @@ NEURO_TRAIN_FRAC     = float(os.environ.get("VP_NEURO_TRAIN_FRAC", 0.7))  # walk
 NEURO_HISTORY_DAYS   = int(os.environ.get("VP_NEURO_HISTORY_DAYS", 1500))  # ask for as much as possible; exchange will just return what it has
 NEURO_REFRESH_SEC    = int(os.environ.get("VP_NEURO_REFRESH_SEC", 24 * 3600))  # v0.99.236 — raised 4h->24h per direct user request: with the universe now 120 coins instead of a fixed 20, a full cycle takes MUCH longer, and re-mining more than once a day added little value anyway (the underlying ~13-month rolling window barely shifts hour to hour — established during an earlier session discussion)
 NEURO_MINING_TRIGGER = threading.Event()  # v0.99.212 — same "Очистить X doesn't wake the sleeping loop" fix as LSW/MSNR's own trigger events, for the new "Очистить Neuro" button
-NEURO_PER_SYMBOL_MAX_SEC = int(os.environ.get("VP_NEURO_PER_SYMBOL_MAX_SEC", 720))  # v0.99.212, raised 300->480 in v0.99.216, raised 480->720 in v0.99.261 — per direct user report of multiple real symbols hitting the old 480s ceiling on real hardware after this session's cumulative additions (38->47 conditions, veto filters, early-exit rule search) made per-symbol processing genuinely slower even after removing a redundant condition-recomputation (see neuro_simulate_trades()'s own return_conds param) — real devices are slower than the sandbox this was tuned against, so the ceiling needed headroom, not just the one fixable inefficiency
+NEURO_PER_SYMBOL_MAX_SEC = int(os.environ.get("VP_NEURO_PER_SYMBOL_MAX_SEC", 1500))  # v0.99.212, raised 300->480 in v0.99.216, raised 480->720 in v0.99.261 — per direct user report of multiple real symbols hitting the old 480s ceiling on real hardware after this session's cumulative additions (38->47 conditions, veto filters, early-exit rule search) made per-symbol processing genuinely slower even after removing a redundant condition-recomputation (see neuro_simulate_trades()'s own return_conds param) — real devices are slower than the sandbox this was tuned against, so the ceiling needed headroom, not just the one fixable inefficiency
+# v0.99.357 — raised 720->1500 per user report (every coin hitting 720s).
+# The bigger fix is below: a timed-out coin's thread used to keep computing
+# in the background (Python can't kill a thread), so each timeout left a
+# zombie eating CPU/GIL, the NEXT coin got slower and timed out too — a
+# cascade that made every coin fail. Now the worker checks a cancel flag at
+# its loop checkpoints and stops itself within seconds of being abandoned.
+
+
+class NeuroCancelled(BaseException):
+    """Raised inside an abandoned Neuro worker thread. BaseException so the
+    many broad `except Exception` blocks on the way up don't swallow it."""
+
+
+_neuro_cancelled_threads = set()   # thread idents told to stop
+_neuro_cancel_lock = threading.Lock()
+
+
+def neuro_check_cancel():
+    """Cheap checkpoint: a set lookup only when some thread was cancelled."""
+    if _neuro_cancelled_threads and threading.get_ident() in _neuro_cancelled_threads:
+        raise NeuroCancelled()
+
+
+def _neuro_run_cancellable(ident_box, fn, *args):
+    ident_box.append(threading.get_ident())
+    try:
+        return fn(*args)
+    finally:
+        with _neuro_cancel_lock:
+            _neuro_cancelled_threads.discard(threading.get_ident())
+
+
+def neuro_cancel_thread(ident_box):
+    if ident_box:
+        with _neuro_cancel_lock:
+            _neuro_cancelled_threads.add(ident_box[0])
 NEURO_RR             = float(os.environ.get("VP_NEURO_RR", 2.0))  # fallback/default only — see NEURO_RR_CANDIDATES below for the actual per-symbol auto-tuned value
 NEURO_RR_CANDIDATES  = [1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0]  # v0.99.210 — small step (0.25), modest range, per direct user request ("вариативность RR, но не с гигантским шагом"). Best one picked per-symbol from TRAIN-period trades only (same walk-forward discipline as the condition mining itself), then applied to the reported trade history and live signals.
 NEURO_RR_MIN_TRADES  = int(os.environ.get("VP_NEURO_RR_MIN_TRADES", 15))  # don't trust an RR pick based on fewer than this many train-period trades
@@ -17980,6 +18036,7 @@ def neuro_compute_conditions(candles, htf_candles=None, funding_records=None, bt
     """One bucket-label dict per bar, across many independent condition types.
     All extra-data params are OPTIONAL — when not supplied those specific
     condition types are simply skipped (bucket key absent for that bar)."""
+    neuro_check_cancel()   # v0.99.357
     closes = [c["close"] for c in candles]
     ema20 = neuro_ema_series(closes, 20)
     ema50 = neuro_ema_series(closes, 50)
@@ -18345,6 +18402,7 @@ def _neuro_grow_combos(base_patterns, conds, fwd, valid_idx, mean_all, std_all, 
     seen_signatures = set()
     grown = []
     for parent in top_parents:
+        neuro_check_cancel()   # v0.99.357
         base_keys = parent["type"].split("+")
         base_vals = parent["value"].split("|")
         # v0.99.323 — speed: the parent-match filter doesn't depend on
@@ -18413,6 +18471,7 @@ def neuro_mine(candles, forward_bars=None, min_sample=None, z_threshold=None,
         single_buckets = {}
         combo_buckets = {}
         for i in valid_idx:
+            neuro_check_cancel()   # v0.99.357
             b = conds[i]
             for key in NEURO_CONDITION_KEYS:
                 v = b.get(key)
@@ -18523,6 +18582,7 @@ def neuro_walk_forward(candles, forward_bars=None, min_sample=None, z_threshold=
         # ascending bar order, so matched_idx is identical to before.
         _val_index = {}
         for pat in pats:
+            neuro_check_cancel()   # v0.99.357
             _vk = (pat["type"], bool(pat.get("is_combo")))
             if _vk not in _val_index:
                 _d = {}
@@ -18666,6 +18726,7 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
                                   "conds": conds, "atr14": atr14, "best": _best,
                                   "groups": _neuro_pattern_groups(confirmed_patterns)}
     _groups = _neuro_sim_cache.entry["groups"]
+    neuro_check_cancel()   # v0.99.357
     trades = []
     occupied_until_i = -10**9
     # v0.99.251 — CRITICAL FIX, per direct user report ("нет ли такой
@@ -18684,6 +18745,7 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
     # (its SL/TP hit, or its timeout bar if neither hit in time) and
     # gating the next entry on THAT instead of the old entry-based gap.
     for i in range(len(candles) - 1):
+        neuro_check_cancel()   # v0.99.357
         if i < occupied_until_i:
             continue  # previous trade on this symbol hasn't resolved yet
         matched = _best[i]
@@ -19013,6 +19075,7 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
         else:
             eth_candles = get_candles_range("ETH_USDT", NEURO_TF, start_ts, now) or []
 
+        neuro_check_cancel()   # v0.99.357 — abandoned while fetching? stop before the heavy part
         confirmed = neuro_walk_forward(candles, htf_candles=htf_candles, funding_records=funding_records,
                                         btc_candles=btc_candles, d1_candles=d1_candles, oi_records=oi_records,
                                         eth_candles=eth_candles)
@@ -19050,6 +19113,7 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
         # single symbol. Now reused directly via neuro_simulate_trades()'s
         # own return_conds=True -- no behavior change, same conditions,
         # just computed once instead of twice.
+        neuro_check_cancel()   # v0.99.357
         veto_filters = neuro_find_veto_filters(confirmed, trades, full_conds, boundary_time)
         if veto_filters:
             for pat in confirmed:
@@ -19590,14 +19654,16 @@ def neuro_mining_loop():
                 # hanging past its own timeout) would block every
                 # subsequent symbol in the list forever, not just itself.
                 ex = ThreadPoolExecutor(max_workers=1)
+                _ident_box = []
                 try:
-                    fut = ex.submit(neuro_backtest_symbol, symbol, shared_btc_candles, shared_eth_candles)
+                    fut = ex.submit(_neuro_run_cancellable, _ident_box, neuro_backtest_symbol, symbol, shared_btc_candles, shared_eth_candles)
                     try:
                         confirmed, trades, summary = fut.result(timeout=NEURO_PER_SYMBOL_MAX_SEC)
                         if summary.get("n"):
                             all_results[symbol] = (confirmed, trades, summary)
                     except (TimeoutError, FutureTimeoutError):
-                        log_error(f"neuro_mining_loop: {symbol} exceeded {NEURO_PER_SYMBOL_MAX_SEC}s — skipping, abandoning stuck thread")
+                        neuro_cancel_thread(_ident_box)   # v0.99.357 — worker stops itself, no CPU-eating zombie
+                        log_error(f"neuro_mining_loop: {symbol} exceeded {NEURO_PER_SYMBOL_MAX_SEC // 60} min — skipping, calculation stopped")
                     except Exception as e:
                         log_error(f"neuro_mining_loop {symbol}: {e}")
                 finally:

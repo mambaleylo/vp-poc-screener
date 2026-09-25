@@ -17299,3 +17299,19 @@ v0.99.356 - Autotrade no longer skips "плечо Nx небезопасно дл
          case with mocked exchange (MMR 1%, stop 1.05% → fresh 1.54%, +0.48R):
          before — SKIPPED "плечо 45x небезопасно…"; after — OPENED at 33x
          with the note; no-drift and risk-% paths unchanged.
+v0.99.357 - Neuro: no more cascade of "exceeded 720s" timeouts. Root cause:
+         a timed-out coin's worker thread kept computing in the background
+         (Python can't kill threads), so every timeout left a zombie eating
+         CPU/GIL, the next coin ran slower and timed out too — until every
+         coin in the cycle failed. Now: cooperative cancellation
+         (NeuroCancelled, neuro_check_cancel() at loop checkpoints in
+         neuro_mine / _neuro_grow_combos / neuro_walk_forward /
+         neuro_compute_conditions / neuro_simulate_trades /
+         neuro_backtest_symbol) — an abandoned worker stops itself within
+         milliseconds. Per-coin ceiling raised 720s -> 1500s (25 min); the
+         watchdog margin follows it. Computation itself unchanged.
+         Unified-account 403 FORBIDDEN (key without Unified permission):
+         logged once per account per 6h instead of on every balance check,
+         with account label, and explained in Russian with what to enable.
+         Verified: py_compile (-W error), pyflakes, runtime start;
+         synthetic-data test: worker cancelled at 2s/12s/25s stops in <0.01s.
