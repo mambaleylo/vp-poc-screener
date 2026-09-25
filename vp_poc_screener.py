@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.338"
+APP_VERSION = "0.99.339"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16362,9 +16362,15 @@ def prv_simulate_trades(candles, ma_type, kc_length, band_mult, rr, atr_length=P
         sl = entry - sl_dist if direction == "LONG" else entry + sl_dist
         tp = entry + sl_dist * rr if direction == "LONG" else entry - sl_dist * rr
         result, exit_time, exit_price = "TIMEOUT", None, None
-        exit_j = min(i + 1 + max_wait_bars, len(candles) - 1)
+        # v0.99.339 — BUG FIX (same as S/R's in v0.99.338): the scan started
+        # at i+2 and skipped the ENTRY bar (entry = its open), so a stop or
+        # target hit inside the first bar of the trade was ignored — while
+        # the live tracker (prv_track_signal_outcomes) counts that bar. Now
+        # checked (SL first if both touched); timeout and MAE counted from
+        # the entry bar like the live tracker.
+        exit_j = min(i + max_wait_bars, len(candles) - 1)
         mae_r = 0.0
-        for j in range(i + 2, min(i + 2 + max_wait_bars, len(candles))):
+        for j in range(i + 1, min(i + 1 + max_wait_bars, len(candles))):
             b = candles[j]
             if direction == "LONG":
                 mae_r = max(mae_r, (entry - b["low"]) / sl_dist)

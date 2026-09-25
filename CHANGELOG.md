@@ -17012,3 +17012,19 @@ v0.99.338 - S/R Zones bug audit, per user ("посмотри на баги s/r z
          pivot_length bars); retest requires the close back on the zone
          side; broken zones excluded in both backtest and live; strength
          counting identical backtest/live; one position per coin in both.
+
+v0.99.339 - Peak Reversal bug audit, per user ("проверь ещё P/R").
+         BUG (fixed): the same entry-bar skip as S/R (v0.99.338) —
+         prv_simulate_trades() checked SL/TP from i+2, ignoring the entry
+         bar, while prv_track_signal_outcomes() counts it. Now checked (SL
+         first if both touched); 48-bar timeout and the MAE statistic count
+         from the entry bar. Smaller effect than on S/R because P/R's stop
+         is 1 ATR (vs 0.5): on 8 synthetic random-walk series 32.6% WR /
+         2000 trades -> 32.0% / 2051 (RR 2 breakeven 33.3%).
+         Checked OK: band touch uses only the signal bar's own high/low
+         (known at its close); SMA/EMA basis causal; live EMA seeded from
+         250 bars — with KC lengths 14/20/30 it has fully converged, so
+         live bands match the backtest's; SHORT-first priority on a bar
+         touching both bands is the same live and backtest; one position
+         per coin in both; entry = next open (backtest) vs signal-bar close
+         (live) is the same convention as every module.
