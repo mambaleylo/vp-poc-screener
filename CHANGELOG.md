@@ -17277,3 +17277,25 @@ v0.99.355 - Simulator: $15 start + Telegram at $1000, per user ("на симул
          alerts once, no repeat while above, re-arms after a drop below
          $900 and alerts again on the next crossing; reset -> $15, flag
          cleared.
+
+v0.99.356 - Autotrade no longer skips "плечо Nx небезопасно для реального стопа
+         X% по факту свежей цены" — it lowers the leverage instead, per user
+         (screenshot: three skips "плечо 41x небезопасно для реального стопа
+         1.2–1.5%", also on the manual "open" retry; "если цена не далеко
+         ушла — пересчитать плечо на безопасное и открыть"). Cause: in
+         va-bank (all-in) mode the fresh-price re-sizing kept the leverage
+         chosen for the signal's stop; when price had moved AWAY from the
+         stop (toward TP, still inside the 0.5R staleness limit) the real
+         stop is WIDER, so that leverage would liquidate before the stop →
+         skip. Now: compute_max_safe_leverage() for the REAL stop distance
+         and current risk tier, re-size contracts at it, re-verify tier +
+         liquidation buffer; skip only if no leverage is safe or the size
+         breaks lot rules. The staleness checks (price too far toward TP /
+         beyond SL) still decide whether to trade at all. The opened
+         trade's log line says e.g. "(плечо снижено 45x→33x под реальный
+         стоп 1.542% по свежей цене)". Applies to automatic opens and the
+         manual retry (same path).
+         Verified: py_compile (-W error), pyflakes; reproduced the user's
+         case with mocked exchange (MMR 1%, stop 1.05% → fresh 1.54%, +0.48R):
+         before — SKIPPED "плечо 45x небезопасно…"; after — OPENED at 33x
+         with the note; no-drift and risk-% paths unchanged.

@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.355"
+APP_VERSION = "0.99.356"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5287,8 +5287,49 @@ def _execute_autotrade_impl(mode, symbol, direction, entry, sl, tp, extra=None, 
                     r_required = real_sl_distance_pct * SCALP_SAFETY_MARGIN
                     r_actual_buf = compute_scalp_liquidation_move_pct(direction, real_leverage, r_real_mmr_pct)
                     if real_leverage > (r_real_leverage_cap or real_leverage) or r_actual_buf is None or r_actual_buf < r_required:
-                        real_skip2 = (f"плечо {real_leverage}x небезопасно для реального стопа "
-                                      f"{real_sl_distance_pct:.3f}% по факту свежей цены — сделка пропущена")
+                        # v0.99.356 — per user (screenshot: "плечо 41x небезопасно для
+                        # реального стопа 1.2–1.5% по факту свежей цены — сделка
+                        # пропущена", also on the manual retry): price moved AWAY
+                        # from the stop (toward TP, within the 0.5R staleness limit),
+                        # so the real stop is WIDER than the one the leverage was
+                        # picked for, and the SAME leverage would now liquidate
+                        # before the stop. Instead of skipping, re-pick the largest leverage
+                        # that is safe for the REAL stop distance (same
+                        # compute_max_safe_leverage() rule used everywhere), re-size
+                        # the contracts at it and re-verify against the risk tier —
+                        # skip only if no leverage is safe or the size no longer
+                        # fits the lot rules. Staleness checks above still decide
+                        # whether the price has run too far to trade at all.
+                        safe_lev = compute_max_safe_leverage(direction, real_sl_distance_pct, r_real_mmr_pct,
+                                                             r_real_leverage_cap or leverage_cap)
+                        if not safe_lev:
+                            real_skip2 = (f"при реальном стопе {real_sl_distance_pct:.3f}% (по свежей цене) нет "
+                                          f"безопасного плеча — сделка пропущена")
+                        else:
+                            if all_in_margin_pct is None:
+                                # risk-% sizing: the position NOTIONAL is what the risk
+                                # target set; keep it and put more margin behind it
+                                keep_notional = real_notional
+                                real_margin = keep_notional / safe_lev if safe_lev else real_margin
+                            old_lev = real_leverage
+                            real_leverage = safe_lev
+                            real_contracts, real_notional, real_actual_margin, real_skip2 = compute_contracts_from_margin(
+                                symbol, current_price, real_margin, real_leverage)
+                            if not real_skip2 and real_notional:
+                                chk_mmr, chk_cap = r_real_mmr_pct, r_real_leverage_cap
+                                if symbol and tiers_by_symbol:
+                                    t_mmr, t_lev = lookup_risk_tier_for_notional(symbol, real_notional, tiers_by_symbol)
+                                    if t_mmr is not None:
+                                        chk_mmr = t_mmr
+                                    if t_lev is not None:
+                                        chk_cap = min(chk_cap, t_lev) if chk_cap else t_lev
+                                buf2 = compute_scalp_liquidation_move_pct(direction, real_leverage, chk_mmr)
+                                if real_leverage > (chk_cap or real_leverage) or buf2 is None or buf2 < r_required:
+                                    real_skip2 = (f"плечо пересчитано {old_lev}x→{real_leverage}x под реальный стоп "
+                                                  f"{real_sl_distance_pct:.3f}%, но и оно небезопасно на этом объёме — сделка пропущена")
+                            if not real_skip2:
+                                record["leverage_note"] = (f"плечо снижено {old_lev}x→{real_leverage}x под реальный стоп "
+                                                           f"{real_sl_distance_pct:.3f}% по свежей цене")
                 if real_skip2:
                     record["status"] = "SKIPPED"
                     record["detail"] = f"по факту свежей цены на момент открытия: {real_skip2}"
@@ -5458,7 +5499,8 @@ def _execute_autotrade_impl(mode, symbol, direction, entry, sl, tp, extra=None, 
                 record["detail"] = f"позиция открыта, но TP/SL не выставились: {tp_sl_errors} — проверьте вручную"
             else:
                 record["status"] = "OPENED"
-                record["detail"] = f"открыта {direction} {contracts} контр. по {leverage}x плеча"
+                record["detail"] = f"открыта {direction} {contracts} контр. по {leverage}x плеча" + (
+                    f" ({record['leverage_note']})" if record.get("leverage_note") else "")   # v0.99.356
             with state_lock:
                 STATE["autotrade_log"].appendleft(record)
             return record
