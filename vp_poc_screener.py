@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.360"
+APP_VERSION = "0.99.361"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16033,6 +16033,7 @@ def snr_optimize_symbol(symbol):
 # on the zone's side, so "rejection" here grades its QUALITY.
 # ============================================================================
 SNR_NF_TRIGGER = threading.Event()
+PRV_NF_TRIGGER = threading.Event()   # v0.99.361 — Peak Reversal's Neuro-filter report
 SNR_COND_LABELS = {
     "snr_rejection": "качество отбоя (закрытие в своей половине свечи + тень)",
     "snr_approach": "скорость подхода к зоне (5 свечей, ATR)",
@@ -16147,6 +16148,77 @@ def snr_filter_analysis():
         with state_lock:
             STATE["snr_filters"] = out
     return out
+
+
+def prv_filter_analysis():
+    """v0.99.361 — Neuro-filter report for Peak Reversal (user: "и для p/r
+    тоже"). Same pipeline as S/R's: each backtest trade gets the Neuro
+    conditions of the last 1h bar CLOSED before its signal; the split is
+    PRV's own train/test boundary (test_start_time), r = the trade's pnl_r.
+    Informational only — PRV trading unchanged."""
+    with state_lock:
+        results = {k: dict(v) for k, v in (STATE.get("prv_results") or {}).items() if isinstance(v, dict)}
+    results = {k: v for k, v in results.items() if v.get("all_trades") and v.get("test_start_time")}
+    if not results:
+        return None
+    now = int(time.time())
+    rows_by_sym = {}
+    btc = eth = None
+    tf_sec = INTERVAL_SECONDS.get(NEURO_TF, 3600)
+    for sym, r in results.items():
+        heartbeat("prv_filter_loop")
+        try:
+            trades = sorted(r["all_trades"], key=lambda t: t["time"])
+            start_ts = int(trades[0]["time"]) - 120 * 86400
+            if btc is None:
+                btc = get_candles_range("BTC_USDT", NEURO_TF, start_ts, now) or []
+                eth = get_candles_range("ETH_USDT", NEURO_TF, start_ts, now) or []
+            h1 = get_candles_range(sym, NEURO_TF, start_ts, now) or []
+            if len(h1) < 300:
+                continue
+            htf = get_candles_range(sym, "4h", start_ts, now) or []
+            d1 = get_candles_range(sym, "1d", start_ts, now) or []
+            funding = neuro_fetch_funding_rate(sym, start_ts, now)
+            neuro_set_index_context(sym, start_ts, now)
+            try:
+                oi = get_contract_stats(sym, interval="1h", limit=999)
+            except Exception:
+                oi = []
+            neuro_c = neuro_compute_conditions(h1, htf, funding, None if sym == "BTC_USDT" else btc,
+                                               d1, oi, None if sym == "ETH_USDT" else eth)
+            h1_times = [c["time"] for c in h1]
+        except Exception as e:
+            log_error(f"prv_filter_analysis {sym}: {e}")
+            continue
+        split = r["test_start_time"]
+        train_rows, test_rows = [], []
+        for t in trades:
+            if t.get("pnl_r") is None:
+                continue
+            j = bisect.bisect_right(h1_times, int(t["time"]) - tf_sec) - 1
+            if not 0 <= j < len(neuro_c):
+                continue
+            row = {"r": float(t["pnl_r"]), "c": dict(neuro_c[j])}
+            (train_rows if t["time"] <= split else test_rows).append(row)
+        if train_rows and test_rows:
+            rows_by_sym[sym] = (train_rows, test_rows)
+    out = strategy_filter_report(rows_by_sym) if rows_by_sym else None
+    if out is not None:
+        with state_lock:
+            STATE["prv_filters"] = out
+    return out
+
+
+def prv_filter_loop():
+    PRV_NF_TRIGGER.wait(timeout=1800)
+    while True:
+        PRV_NF_TRIGGER.clear()
+        try:
+            if PRV_ENABLED:
+                prv_filter_analysis()
+        except Exception as e:
+            log_error(f"prv_filter_loop: {e}")
+        wait_beating(PRV_NF_TRIGGER, 6 * 3600, "prv_filter_loop")
 
 
 def snr_filter_loop():
@@ -16851,6 +16923,7 @@ def prv_backtest_loop():
             with state_lock:
                 if all_results:
                     STATE["prv_results"] = dict(display_top)
+                    PRV_NF_TRIGGER.set()   # v0.99.361 — refresh the P/R filter report
                     _prv_active_symbols = [sym for sym, _ in active_top]
                     _prv_display_symbols = [sym for sym, _ in display_top]
                     STATE["prv_last_backtest_finished"] = time.time()
@@ -20935,6 +21008,7 @@ def api_prv_status():
                        "live_signal_stats": signal_stats["by_symbol"].get(symbol),
                        "recent_live_signals": recent_live_signals})
     return jsonify({
+        "filters": STATE.get("prv_filters"),   # v0.99.361
         "coins": coins, "last_backtest_finished": last_finished,
         "backtest_running": running, "waiting_for_slot": waiting, "progress_done": done, "progress_total": total,
         "in_flight": in_flight, "live_signal_stats": signal_stats,
@@ -21575,6 +21649,7 @@ def api_reset_prv():
     try:
         with state_lock:
             STATE["prv_results"] = {}
+            STATE.pop("prv_filters", None)   # v0.99.361
             STATE["prv_last_backtest_finished"] = None
             STATE["prv_signals"].clear()
             _prv_active_symbols = []
@@ -25596,6 +25671,7 @@ async function refreshPrv() {
         <div class="dim hint-block" style="font-size:10px;margin-bottom:8px;">z — насколько стандартных отклонений винрейт выше безубытка (нужно ≥3.11 с поправкой на 216 перебранную комбинацию)</div>
         ${liveSigSection}
         ${compoundSummaryHtml(r)}
+        ${filterCoinLineHtml(data.filters, c.symbol)}
         <details ontoggle="loadBtTrades(this, 'prv', '${c.symbol}', ${data.last_backtest_finished || 0})"><summary class="dim" style="cursor:pointer;font-size:11px;">все сделки бэктеста (${r.all_trades_n || 0})</summary>${tradesRows}</details>
       </div>`;
     }).join('');
@@ -25606,6 +25682,7 @@ async function refreshPrv() {
       ${progressHtml}
       ${lstatsHtml}
       ${liveSigsTableHtml}
+      ${filterReportHtml(data.filters, "🧪 Neuro-фильтры для Peak Reversal (информационно)", "считаются (≈30 мин после запуска и после каждого бэктеста P/R)")}
       ${cards || '<div class="dim">\u043f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445</div>'}
     `;
   } catch(e) {
@@ -27831,6 +27908,7 @@ if __name__ == "__main__":
     threading.Thread(target=neuro_live_loop, daemon=True).start()
     threading.Thread(target=snr_backtest_loop, daemon=True).start()
     threading.Thread(target=snr_filter_loop, daemon=True).start()   # v0.99.337
+    threading.Thread(target=prv_filter_loop, daemon=True).start()   # v0.99.361
     threading.Thread(target=snr_live_loop, daemon=True).start()
     threading.Thread(target=prv_backtest_loop, daemon=True).start()
     threading.Thread(target=prv_live_loop, daemon=True).start()

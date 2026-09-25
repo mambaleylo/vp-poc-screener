@@ -17357,3 +17357,14 @@ v0.99.360 - Sweep: Neuro-filter report, same as MSNR's (user: "может и swe
          synthetic data: MSNR report byte-identical before/after the
          refactor; Sweep report built from the same trades equals it; jsdom:
          Sweep tab renders the block, the column and a per-coin cell.
+v0.99.361 - Peak Reversal: Neuro-filter report (user: "и для p/r тоже"), same
+         pipeline as S/R's: every P/R backtest trade gets the Neuro
+         conditions of the last 1h bar CLOSED before its signal; split =
+         P/R's own train/test boundary (test_start_time), r = pnl_r; picked
+         on train, judged on test, 🏆 = no coin worse + biggest test-WR gain.
+         Collapsible "🧪 Neuro-фильтры для Peak Reversal" block + a per-coin
+         "🏆 фильтр (тест)" line in each card. Refreshed after every P/R
+         backtest (or 6h); cleared by "Очистить P/R". Informational only.
+         Verified: py_compile (-W error), pyflakes, runtime start, JS check;
+         synthetic trades: report built, condition bar always closed before
+         the signal; jsdom: P/R tab renders the block and the coin line.
