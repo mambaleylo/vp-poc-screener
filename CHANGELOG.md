@@ -16951,3 +16951,7 @@ v0.99.335 - Full S/R / Peak backtest list as a chronological ledger, per
          Verified: py_compile (-W error), pyflakes, node --check; jsdom:
          header first, first trade at $15.00, divider present, list stays
          open after re-render.
+
+v0.99.336 - Tab order, per user ("вкладку Sweep помести после P/R"): MSNR ·
+         Neuro · S/R Zones · Peak Reversal · Sweep · … . The per-module
+         sub-account key list follows the same order.

@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.335"
+APP_VERSION = "0.99.336"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1672,7 +1672,7 @@ _credentials_lock = threading.Lock()
 # account's money.
 # Stored in their own file (chmod 600), separate from the main keys file.
 # ============================================================================
-MODULE_ACCOUNT_MODES = ("msnr", "lsw", "neuro", "snr", "prv")
+MODULE_ACCOUNT_MODES = ("msnr", "neuro", "snr", "prv", "lsw")  # v0.99.336 — same order as the tabs
 MODULE_ACCOUNT_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal"}
 MODULE_CREDENTIALS_FILE = os.environ.get(
     "VP_MODULE_CREDENTIALS_FILE",
@@ -22209,10 +22209,10 @@ INDEX_HTML = """<!doctype html>
 </header>
 <div class="tabs">
   <div class="tab active" data-tab="msnr">MSNR</div>
-  <div class="tab" data-tab="lsw">Sweep</div>
   <div class="tab" data-tab="neuro" style="color:#a855f7;">🧠 Neuro</div>
   <div class="tab" data-tab="snr" style="color:#26c6da;">S/R Zones</div>
   <div class="tab" data-tab="prv" style="color:#ffa726;">Peak Reversal</div>
+  <div class="tab" data-tab="lsw">Sweep</div>
   <div class="tab" data-tab="signals">Volume</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
