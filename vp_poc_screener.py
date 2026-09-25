@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.343"
+APP_VERSION = "0.99.344"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21113,6 +21113,50 @@ def api_lsw_signals():
         return jsonify(list(STATE["lsw_signals"]))
 
 
+@app.route("/api/reset/snr", methods=["POST"])
+def api_reset_snr():
+    """v0.99.344 — per user ("кнопок очистки по S/R и P/R нету"): wipe S/R's
+    backtest results, live signal history, filter report and active coins,
+    persist, and start a fresh backtest. Positions already open on the
+    exchange are not touched."""
+    global _snr_active_symbols, _snr_display_symbols
+    try:
+        with state_lock:
+            STATE["snr_results"] = {}
+            STATE["snr_last_backtest_finished"] = None
+            STATE["snr_signals"].clear()
+            STATE.pop("snr_filters", None)
+            _snr_active_symbols = []
+            _snr_display_symbols = []
+            _snr_prev_signal_keys.clear()
+        save_state()
+        SNR_BACKTEST_TRIGGER.set()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset_snr: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/reset/prv", methods=["POST"])
+def api_reset_prv():
+    """v0.99.344 — same for Peak Reversal."""
+    global _prv_active_symbols, _prv_display_symbols
+    try:
+        with state_lock:
+            STATE["prv_results"] = {}
+            STATE["prv_last_backtest_finished"] = None
+            STATE["prv_signals"].clear()
+            _prv_active_symbols = []
+            _prv_display_symbols = []
+            _prv_prev_signal_keys.clear()
+        save_state()
+        PRV_BACKTEST_TRIGGER.set()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset_prv: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/reset/lsw", methods=["POST"])
 def api_reset_lsw():
     try:
@@ -22367,8 +22411,8 @@ INDEX_HTML = """<!doctype html>
     <div class="hdrRow"><span class="hdrLbl">MSNR</span><button id="resetMsnrBtn" class="btnDanger">🗑 Очистить</button><button id="restartMsnrBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
     <div class="hdrRow"><span class="hdrLbl">Sweep</span><button id="resetLswBtn" class="btnDanger">🗑 Очистить</button><button id="restartLswBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
     <div class="hdrRow"><span class="hdrLbl">Neuro</span><button id="resetNeuroBtn" class="btnDanger">🗑 Очистить</button><button id="restartNeuroBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
-    <div class="hdrRow"><span class="hdrLbl">S/R Zones</span><button id="restartSnrBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
-    <div class="hdrRow"><span class="hdrLbl">Peak Rev.</span><button id="restartPrvBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
+    <div class="hdrRow"><span class="hdrLbl">S/R Zones</span><button id="resetSnrBtn" class="btnDanger">🗑 Очистить</button><button id="restartSnrBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
+    <div class="hdrRow"><span class="hdrLbl">Peak Rev.</span><button id="resetPrvBtn" class="btnDanger">🗑 Очистить</button><button id="restartPrvBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
     <div class="hdrRow"><span class="hdrLbl">Симулятор</span><button id="resetSimulatorBtn" class="btnDanger">🗑 Сбросить</button></div>
     <div class="hdrRow"><span class="hdrLbl">Авто-тюнинг</span><button id="resetRiskAutotuneBtn" class="btnDanger">🗑 Сбросить</button></div>
   </div>
@@ -25985,6 +26029,12 @@ wireResetButton('resetLswBtn', '/api/reset/lsw',
 wireRestartButton('restartLswBacktestBtn', '/api/lsw/restart_backtest',
   'Запустить новый цикл перебора параметров Sweep прямо сейчас, не дожидаясь расписания? Текущие результаты останутся видны, пока новый цикл не завершится.',
   '↻ Бэктест');
+wireResetButton('resetSnrBtn', '/api/reset/snr',
+  'Удалить результаты бэктеста, историю живых сигналов и отчёт фильтров S/R Zones и сразу запустить новый бэктест? Уже открытые на бирже позиции не трогаются. Это необратимо.',
+  '🗑 Очистить');
+wireResetButton('resetPrvBtn', '/api/reset/prv',
+  'Удалить результаты бэктеста и историю живых сигналов Peak Reversal и сразу запустить новый бэктест? Уже открытые на бирже позиции не трогаются. Это необратимо.',
+  '🗑 Очистить');
 wireResetButton('resetNeuroBtn', '/api/reset/neuro',
   'Удалить накопленные зависимости, сделки и сигналы Neuro по всем монетам топ-N и начать заново? Это необратимо.',
   '🗑 Очистить');
@@ -26150,6 +26200,7 @@ const HEADER_BTN_ENABLE_KEY = {
   resetMsnrBtn: 'msnr_enabled', restartMsnrBacktestBtn: 'msnr_enabled',
   resetLswBtn: 'lsw_enabled', restartLswBacktestBtn: 'lsw_enabled', resetNeuroBtn: 'neuro_enabled', restartNeuroBacktestBtn: 'neuro_enabled',
   restartSnrBacktestBtn: 'snr_enabled', restartPrvBacktestBtn: 'prv_enabled',
+  resetSnrBtn: 'snr_enabled', resetPrvBtn: 'prv_enabled',
 };
 function updateHeaderButtonVisibility(s) {
   for (const btnId in HEADER_BTN_ENABLE_KEY) {

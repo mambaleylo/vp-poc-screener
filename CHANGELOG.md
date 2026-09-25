@@ -17084,3 +17084,16 @@ v0.99.343 - $15 va-bank dollar values shown as whole dollars (no cents), per
          per-trade balance + summary) truncates below $10K ($603.87 ->
          $603; K/M/B forms unchanged); MSNR per-trade balance and its
          "$15→$N" summary likewise. Display only.
+
+v0.99.344 - "🗑 Очистить" for S/R Zones and Peak Reversal in the 🛠 panel,
+         per user ("кнопок очистки по S/R и P/R нету"). New POST
+         /api/reset/snr and /api/reset/prv: clear the module's backtest
+         results (incl. full trade lists), live-signal history, active/
+         display coins, fired-signal dedup keys (S/R also its filter
+         report), persist immediately (save_state — the lesson of
+         v0.99.301) and wake the backtest loop for a fresh cycle.
+         Positions already open on the exchange are untouched. Buttons
+         follow the module's enabled switch like the others.
+         Verified: py_compile (-W error), pyflakes, node --check; test
+         client: both endpoints clear everything listed and set the
+         trigger; buttons present in the page.
