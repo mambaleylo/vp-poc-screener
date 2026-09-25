@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.331"
+APP_VERSION = "0.99.332"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -15659,7 +15659,8 @@ def snr_optimize_symbol(symbol):
                                 "train_z": round(train_z, 2),
                                 "test_n": len(test), "test_wr": round(test_wr, 1), "test_avg_pnl_r": round(test_avg, 3),
                                 "test_z": round(test_z, 2),
-                                "test_days": round((candles[-1]["time"] - boundary_time) / 86400, 1),  # v0.99.315 — length of the test window, so the UI can show expected live-signal frequency (test_n / test_days)
+                                "test_days": round((candles[-1]["time"] - boundary_time) / 86400, 1),
+                                "history_days": round((candles[-1]["time"] - candles[0]["time"]) / 86400, 1),  # v0.99.332 — whole backtest window (train + test), shown as months in the UI  # v0.99.315 — length of the test window, so the UI can show expected live-signal frequency (test_n / test_days)
                                 "recent_trades": closed[-40:][::-1],
                                 "_all_closed": closed,
                             }
@@ -23299,7 +23300,7 @@ async function refreshMsnr() {
   const buildTxt = status.backtest_running
     ? `бэктест выполняется: ${status.backtest_done||0}/${status.backtest_total||'?'} монет${status.backtest_started_at ? ' · идёт ' + Math.round((Date.now()/1000 - status.backtest_started_at)) + 'с' : ''}`
     : (status.last_backtest_finished
-      ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s)` +
+      ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) \u00b7 история ${fmtMonths(cfg.backtest_days)}` +
         // v0.99.319 — what the live scanner actually watches
         (status.effective_live_universe ? ` · живой скан: ${status.effective_live_universe.length} монет (${status.effective_live_universe.map(x => x.replace('_USDT','')).join(', ') || '—'}) · WR≥45%: ${status.wr_floor_pass_n}/${status.backtested_n}` : '')
       : 'бэктест ещё не запускался');
@@ -24273,7 +24274,7 @@ async function refreshLsw() {
   const buildTxt = status.backtest_running
     ? `бэктест выполняется (начат ${status.backtest_started_at ? fmtTime(status.backtest_started_at) : '?'}): ${status.backtest_done||0}/${status.backtest_total||'?'} монет${status.backtest_started_at ? ' · идёт ' + Math.round((Date.now()/1000 - status.backtest_started_at)) + 'с' : ''}`
     : status.last_backtest_finished
-    ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · в живом скане: ${(status.live_universe||[]).length}/${(status.top||[]).length} монет (винрейт > ${cfg.live_min_winrate}%)`
+    ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · история ${fmtMonths(cfg.backtest_days)} · в живом скане: ${(status.live_universe||[]).length}/${(status.top||[]).length} монет (винрейт > ${cfg.live_min_winrate}%)`
     : 'бэктест ещё не завершился — живой скан новых сигналов на паузе, чтобы не показывать неотфильтрованные монеты';
   const progressPct = status.backtest_total ? Math.round((status.backtest_done||0) / status.backtest_total * 100) : 0;
   const progressBarHtml = status.backtest_running ? `
@@ -24479,7 +24480,7 @@ async function refreshNeuro() {
           </div>
         </div>
         <div class="dim" style="font-size:10px;margin-bottom:10px;">
-          ${s.patterns_confirmed||0} \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043e (\u0438\u0437 \u043d\u0438\u0445 ${s.combos_confirmed||0} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439${s.decaying_confirmed ? `, <span style="color:#ffa726;">${s.decaying_confirmed} \u043e\u0441\u043b\u0430\u0431\u0435\u0432\u0430\u044e\u0442</span>` : ''}) \u00b7 ${s.history_bars||0} \u0447\u0430\u0441\u043e\u0432\u044b\u0445 \u0441\u0432\u0435\u0447\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438
+          ${s.patterns_confirmed||0} \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043e (\u0438\u0437 \u043d\u0438\u0445 ${s.combos_confirmed||0} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439${s.decaying_confirmed ? `, <span style="color:#ffa726;">${s.decaying_confirmed} \u043e\u0441\u043b\u0430\u0431\u0435\u0432\u0430\u044e\u0442</span>` : ''}) \u00b7 ${s.history_bars||0} \u0447\u0430\u0441\u043e\u0432\u044b\u0445 \u0441\u0432\u0435\u0447\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438 (${fmtMonths((s.history_bars||0)/24)})
         </div>
         ${compoundSummaryHtml(s)}
         ${(s.rr_sweep && s.rr_sweep.length) ? `<details style="margin-bottom:8px;">
@@ -24734,7 +24735,7 @@ async function refreshSnr() {
         <div style="font-size:15px;font-weight:700;color:#26c6da;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
         ${inactiveBadge}
         <div class="dim" style="font-size:11px;margin-bottom:8px;">
-          \u0442\u0430\u0439\u043c\u0444\u0440\u0435\u0439\u043c ${r.timeframe} \u00b7 pivot ${r.pivot_length} \u00b7 \u0441\u0438\u043b\u0430\u2265${r.min_strength} \u00b7 RR${r.rr}
+          \u0442\u0430\u0439\u043c\u0444\u0440\u0435\u0439\u043c ${r.timeframe}${r.history_days ? ` \u00b7 бэктест ${fmtMonths(r.history_days)}${r.test_days ? ` (тест ${fmtMonths(r.test_days)})` : ""}` : ""} \u00b7 pivot ${r.pivot_length} \u00b7 \u0441\u0438\u043b\u0430\u2265${r.min_strength} \u00b7 RR${r.rr}
         </div>
         <div style="display:flex;gap:16px;margin-bottom:8px;">
           <div><div class="dim" style="font-size:10px;">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R \u00b7 z=${r.train_z}</div></div>
@@ -24847,7 +24848,7 @@ async function refreshPrv() {
         <div style="font-size:15px;font-weight:700;color:#ffa726;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
         ${inactiveBadge}
         <div class="dim" style="font-size:11px;margin-bottom:8px;">
-          \u0442\u0430\u0439\u043c\u0444\u0440\u0435\u0439\u043c ${r.timeframe} \u00b7 ${r.ma_type}${r.kc_length} \u00b7 \u043f\u043e\u043b\u043e\u0441\u0430\u00d7${r.band_mult} \u00b7 RR${r.rr} \u00b7 \u0441\u0440.MAE ${r.avg_mae_r}R
+          \u0442\u0430\u0439\u043c\u0444\u0440\u0435\u0439\u043c ${r.timeframe}${r.history_days ? ` \u00b7 бэктест ${fmtMonths(r.history_days)}${r.test_days ? ` (тест ${fmtMonths(r.test_days)})` : ""}` : ""} \u00b7 ${r.ma_type}${r.kc_length} \u00b7 \u043f\u043e\u043b\u043e\u0441\u0430\u00d7${r.band_mult} \u00b7 RR${r.rr} \u00b7 \u0441\u0440.MAE ${r.avg_mae_r}R
         </div>
         <div style="display:flex;gap:16px;margin-bottom:8px;">
           <div><div class="dim" style="font-size:10px;">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R \u00b7 z=${r.train_z}</div></div>
@@ -26419,6 +26420,12 @@ function drawEntryMarker(ctx, cx, cy, color) {
 }
 
 // v0.99.318 — $15 va-bank compounding display (Neuro / S/R Zones / Peak Reversal)
+// v0.99.332 — backtest length in months (user: "не показывает за сколько месяцев бэктест")
+function fmtMonths(days) {
+  if (!days || !isFinite(days)) return '—';
+  const m = days / 30.44;
+  return m < 1 ? `${Math.round(days)} дн` : `≈${m < 10 ? m.toFixed(1) : Math.round(m)} мес`;
+}
 function fmtUsdCompact(v) {
   if (v == null || !isFinite(v)) return '—';
   const a = Math.abs(v);

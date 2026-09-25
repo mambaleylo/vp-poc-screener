@@ -16876,3 +16876,16 @@ v0.99.331 - Per-module Gate SUB-ACCOUNT API keys, per user request ("для
          and prefixes its alert; dry-run execute_autotrade("snr") sized
          from the sub-account balance, logged with its account; file
          persisted 0600 and reloaded; /api/credentials/test works.
+
+v0.99.332 - Backtest length in months on every module, per user report
+         ("S/R zone не показывает за сколько месяцев бэктест, в других
+         модулях тоже"). fmtMonths(days) (≈N мес, or N дн under a month).
+         S/R Zones / Peak Reversal: new result field history_days (whole
+         train+test candle span of the winning timeframe — it differs per
+         coin because 1h gets a shorter history than 4h/1d); card line
+         "таймфрейм 4h · бэктест ≈16 мес (тест ≈4.9 мес) · …" — appears
+         after each module's next backtest. Neuro: "N часовых свечей
+         истории (≈13 мес)". MSNR and Sweep: "· история ≈1.3 мес" /
+         "≈3 мес" in the last-backtest header line.
+         Verified: py_compile (-W error), pyflakes, node --check, no
+         surrogates; fmtMonths spot-checked.
