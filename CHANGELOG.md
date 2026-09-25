@@ -17055,3 +17055,25 @@ v0.99.341 - Volume removed from settings, per user ("и из настроек vo
          Verified: py_compile (-W error), pyflakes, node --check, no
          surrogates; /api/settings returns volume_profile_enabled false and
          stays false after POSTing true; no Volume controls left in the page.
+
+v0.99.342 - UI text audit after the recent changes, per user ("перечитай
+         весь текст в проекте, может где-то ещё правки нужны из-за
+         обновлений"). Fixed:
+         - Autotrade risk-% hint listed the modules that trade as "MSNR,
+           Зеркало, Sweep, Скальпинг" -> "MSNR, Neuro, S/R Zones, Peak
+           Reversal, Sweep".
+         - MSNR description: take-profit is the opposite ACTIVE 4h level and
+           a 1h signal needs an active same-type 4h level (v0.99.305), not
+           "the opposite level".
+         - MSNR info: "золото больше не форсируется… (эксперимент)" ->
+           "только монеты, отобранные бэктестом, никаких фиксированных
+           списков" (gold list removed in v0.99.321).
+         - MSNR info said the live-scan qualification is "top-10 by joint
+           score — the old winrate rule was removed", but
+           msnr_rank_by_winrate_sample() has a hard winrate >= 45% bar (+ no
+           failed stress test) — wording now matches the code.
+         - Neuro queue note "не больше 2 из 9" -> "не больше 2 бэктестов".
+         - Autotrade log / simulator mode labels lacked Neuro, S/R Zones and
+           Peak Reversal (they showed raw "neuro"/"snr"/"prv").
+         Verified: py_compile (-W error), pyflakes, node --check, no
+         surrogates in the served page.

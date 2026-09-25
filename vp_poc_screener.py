@@ -57,7 +57,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.341"
+APP_VERSION = "0.99.342"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22853,7 +22853,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">Риск на сделку</div>
-          <div class="sub">% от общего баланса счёта, который теряется при срабатывании стопа — общий для всех модулей с реальной автоторговлей (MSNR, Зеркало, Sweep, Скальпинг). Плечо на каждую сделку подбирается автоматически под этот риск и стоп конкретного сигнала</div>
+          <div class="sub">% от общего баланса счёта, который теряется при срабатывании стопа — общий для всех модулей с реальной автоторговлей (MSNR, Neuro, S/R Zones, Peak Reversal, Sweep). Плечо на каждую сделку подбирается автоматически под этот риск и стоп конкретного сигнала</div>
         </div>
         <input type="number" id="setAutotradeRiskPct" min="0.1" max="50" step="0.5" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
       </div>
@@ -23542,13 +23542,13 @@ async function refreshMsnr() {
   const liveSymbolsTxt = liveSymbols.slice(0, 8).join(', ') + (liveSymbols.length > 8 ? ` +${liveSymbols.length - 8}` : '');
   const warnHtml = `
     <div class="dim hint-block" style="font-size:12px;margin-bottom:10px;">
-      <b>MSNR / Malaysian SNR</b> (@xaubymedovyk): OCL-уровни по закрытиям, A/V-shape пивоты, вход — QM (ложный вынос + возврат), тейк — противоположный уровень (высокий R:R от природы паттерна). Бэктест честный, без заглядывания вперёд.
+      <b>MSNR / Malaysian SNR</b> (@xaubymedovyk): OCL-уровни по закрытиям, A/V-shape пивоты, вход — QM (ложный вынос + возврат), сигнал 1ч только при активном уровне того же типа на 4ч, тейк — противоположный активный уровень 4ч (высокий R:R от природы паттерна). Бэктест честный, без заглядывания вперёд.
     </div>`;
   const headerHtml = `
     <div class="dim hint-block" style="margin-bottom:4px;font-size:12px;">
       <ul style="margin:0 0 6px 18px;padding:0;">
-        <li>Живой скан: квалифицированные монеты (${liveSymbolsTxt || '—'}) — золото больше не форсируется, ранжируется наравне со всеми (эксперимент)</li>
-        <li>Квалификация в живой скан: только топ-10 по совместной оценке (винрейт, выборка, доход) или ручная галочка — старое правило «винрейт&gt;50%/выборка&gt;40» убрано</li>
+        <li>Живой скан: квалифицированные монеты (${liveSymbolsTxt || '—'}) — только монеты, отобранные бэктестом, никаких фиксированных списков</li>
+        <li>Квалификация в живой скан: топ-10 по совместной оценке (винрейт, выборка, доход) среди монет с винрейтом ≥45% и без провала стресс-теста, или ручная галочка</li>
         <li>Бэктест: ${status.backtest_universe_size || '?'} ликвидных монет · структура ${cfg.structure_tf} (L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf}</li>
         <li>Параметры (импульс/QM-зона/окно) автотюнятся отдельно на каждую монету — см. «Параметры» в таблице</li>
         <li>TP всегда реальный уровень пары (без потолка RR) — двусторонний фильтр по RR (снизу и сверху) на каждую монету отдельно, по её собственной статистике</li>
@@ -24862,7 +24862,7 @@ async function refreshSnr() {
     let progressHtml = '';
     if (data.waiting_for_slot) {
       progressHtml = `<div class="dim" style="margin-bottom:10px;font-size:11px;">
-        \u23f3 \u043e\u0436\u0438\u0434\u0430\u0435\u0442 \u0441\u0432\u043e\u0431\u043e\u0434\u043d\u043e\u0433\u043e \u043c\u0435\u0441\u0442\u0430 \u0441\u0440\u0435\u0434\u0438 \u0431\u044d\u043a\u0442\u0435\u0441\u0442\u043e\u0432 \u0434\u0440\u0443\u0433\u0438\u0445 \u043c\u043e\u0434\u0443\u043b\u0435\u0439 (\u043e\u0434\u043d\u043e\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e \u0440\u0430\u0431\u043e\u0442\u0430\u044e\u0442 \u043d\u0435 \u0431\u043e\u043b\u044c\u0448\u0435 2 \u0438\u0437 9)
+        ⏳ ожидает свободного места среди бэктестов других модулей (одновременно идут не больше 2 бэктестов)
       </div>`;
     } else if (data.backtest_running) {
       const pct = data.progress_total ? Math.round(data.progress_done / data.progress_total * 100) : 0;
@@ -25688,7 +25688,7 @@ async function refreshAutotrade() {
     (await fetch('/api/autotrade/log')).json(),
   ]);
   const panel = document.getElementById('autotradePanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', ft5: 'FT5', msnr: 'MSNR', mirror: 'Зеркало', lsw: 'Sweep'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', ft5: 'FT5', msnr: 'MSNR', mirror: 'Зеркало', lsw: 'Sweep', neuro: 'Neuro', snr: 'S/R Zones', prv: 'Peak Reversal'};
   const enabledTxt = Object.entries(status.enabled)
     .map(([k, v]) => `<span class="${v ? 'win' : 'dim'}">${modeLabels[k]}: ${v ? 'вкл' : 'выкл'}</span>`)
     .join(' &nbsp;·&nbsp; ');
@@ -25779,7 +25779,7 @@ async function refreshSimulator() {
     (await fetch('/api/autotrade/status')).json(),
   ]);
   const panel = document.getElementById('simulatorPanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', ft5: 'FT5', msnr: 'MSNR', mirror: 'Зеркало', lsw: 'Sweep'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', ft5: 'FT5', msnr: 'MSNR', mirror: 'Зеркало', lsw: 'Sweep', neuro: 'Neuro', snr: 'S/R Zones', prv: 'Peak Reversal'};
 
   const pnlClass = status.pnl_total >= 0 ? 'win' : 'loss';
   const sizeTxt = status.size_mode === 'percent' ? `${status.size_value}% от баланса` : `фикс. $${status.size_value}`;
