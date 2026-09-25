@@ -17253,3 +17253,10 @@ v0.99.353 - Sub-account keys: autosave + visible saved state, per user ("API
          runtime: POST -> file 0600 -> restart -> still configured; jsdom:
          key alone doesn't save, key+secret autosaves once, row reopens
          with the check result.
+
+v0.99.354 - "Ошибки 🗑 Очистить" in the 🛠 panel, per user ("ещё кнопку
+         очистки ошибок рядом с другими кнопками"). POST /api/errors/clear
+         empties the errors panel (and saves state); no confirmation
+         dialog since nothing of value is lost; the panel refreshes at once.
+         Verified: py_compile (-W error), pyflakes, node --check; runtime:
+         errors present -> clear -> 0.

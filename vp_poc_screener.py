@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.353"
+APP_VERSION = "0.99.354"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -20757,6 +20757,19 @@ def api_prv_chart(symbol):
         return jsonify({"error": str(e)}), 500
 
 
+@app.route("/api/errors/clear", methods=["POST"])
+def api_errors_clear():
+    """v0.99.354 — per user ("кнопку очистки ошибок рядом с другими
+    кнопками"): empties the errors panel (and its saved copy)."""
+    try:
+        with state_lock:
+            STATE["errors"].clear()
+        save_state()
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/errors")
 def api_errors():
     """v0.99.256 — per direct user report ("Панель не вижу, после
@@ -22654,6 +22667,7 @@ INDEX_HTML = """<!doctype html>
     <div class="hdrRow"><span class="hdrLbl">Peak Rev.</span><button id="resetPrvBtn" class="btnDanger">🗑 Очистить</button><button id="restartPrvBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
     <div class="hdrRow"><span class="hdrLbl">Симулятор</span><button id="resetSimulatorBtn" class="btnDanger">🗑 Сбросить</button></div>
     <div class="hdrRow"><span class="hdrLbl">Авто-тюнинг</span><button id="resetRiskAutotuneBtn" class="btnDanger">🗑 Сбросить</button></div>
+    <div class="hdrRow"><span class="hdrLbl">Ошибки</span><button id="clearErrorsBtn" class="btnDanger">🗑 Очистить</button></div>
   </div>
   <div id="status">загрузка...</div>
   <div id="overview" class="dim" style="margin-top:2px;font-size:12px;"></div>
@@ -26247,6 +26261,17 @@ async function refreshHealth() {
 refreshHealth();
 setInterval(refreshHealth, 60000);
 
+// v0.99.354 — clear the errors panel (no confirmation: nothing of value is lost)
+document.getElementById('clearErrorsBtn').onclick = async (ev) => {
+  const btn = ev.currentTarget;
+  btn.disabled = true;
+  try {
+    const res = await (await fetch('/api/errors/clear', {method: 'POST'})).json();
+    if (!res.ok) alert('Не удалось очистить: ' + (res.error || ''));
+    await refreshAll();
+  } catch (e) { alert('Не удалось очистить: ' + e); }
+  btn.disabled = false;
+};
 function wireResetButton(btnId, endpoint, confirmMsg, idleLabel) {
   const btn = document.getElementById(btnId);
   btn.onclick = async () => {
