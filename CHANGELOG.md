@@ -17580,3 +17580,12 @@ v0.99.374 - MSNR and Sweep progress lines say "⚙️ 1 ядро (этот мо�
          процессе)" (user looked for the cores info on the MSNR tab — only S/R,
          P/R and Neuro use worker processes so far).
          Verified: py_compile (-W error), pyflakes, runtime, JS check.
+v0.99.375 - FIX: the cores settings didn't save/apply (user: "настройка ядер не
+         сохраняется и не применяется, S/R 1 из 1, Neuro 0 из 1"). The two
+         number fields had been put in the CHECKBOX map of the settings UI, so
+         they were saved as `true` (= 1 process) and the field never showed the
+         number. Moved to the number-field map; a saved `true`/`false` from the
+         bug is ignored on load, so the default (3 / all cores) comes back.
+         Verified: py_compile (-W error), pyflakes, JS check; settings file with
+         the bogus true -> 3 / boost default; set 5 -> 5, survives a restart;
+         jsdom: fields show 3 / 8 and a change posts {"calc_workers": "5"}.

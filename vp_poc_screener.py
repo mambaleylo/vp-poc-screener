@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.374"
+APP_VERSION = "0.99.375"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1320,14 +1320,14 @@ def apply_settings(updates):
         globals()["NEURO_EXTRA_CONDS_ENABLED"] = bool(updates["neuro_extra_conds_enabled"])
     if "neuro_trade_filter_enabled" in updates:   # v0.99.364 — takes effect on each module's next backtest
         globals()["NEURO_TRADE_FILTER_ENABLED"] = bool(updates["neuro_trade_filter_enabled"])
-    if "calc_workers" in updates:   # v0.99.370 — 0 = compute in the main process
+    if "calc_workers" in updates and not isinstance(updates["calc_workers"], bool):   # v0.99.370 — 0 = main process; bool = saved by the v0.99.370-374 checkbox bug, ignored
         try:
             globals()["CALC_WORKERS"] = max(0, min(8, int(updates["calc_workers"])))
             globals()["_calc_failures"] = 0
         except (TypeError, ValueError):
             pass
         calc_apply_limit()
-    if "calc_workers_boost" in updates:   # v0.99.371
+    if "calc_workers_boost" in updates and not isinstance(updates["calc_workers_boost"], bool):   # v0.99.371 (bool: old checkbox bug, ignored)
         try:
             globals()["CALC_WORKERS_BOOST"] = max(0, min(8, int(updates["calc_workers_boost"])))
         except (TypeError, ValueError):
@@ -27939,8 +27939,6 @@ const setInputs = {
   neuro_enabled: document.getElementById('setNeuro'),
   neuro_extra_conds_enabled: document.getElementById('setNeuroExtra'),
   neuro_trade_filter_enabled: document.getElementById('setNeuroTradeFilter'),
-  calc_workers: document.getElementById('setCalcWorkers'),
-  calc_workers_boost: document.getElementById('setCalcWorkersBoost'),
   snr_enabled: document.getElementById('setSnr'),
   prv_enabled: document.getElementById('setPrv'),
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
@@ -28004,6 +28002,8 @@ const setValueInputs = {
   snr_display_n: document.getElementById('setSnrDisplayN'),
   prv_top_n: document.getElementById('setPrvTopN'),
   prv_display_n: document.getElementById('setPrvDisplayN'),
+  calc_workers: document.getElementById('setCalcWorkers'),              // v0.99.375 — number fields (were wrongly in the checkbox map: saved as true = 1)
+  calc_workers_boost: document.getElementById('setCalcWorkersBoost'),
 };
 
 function applySettingsToInputs(s) {
