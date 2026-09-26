@@ -17488,3 +17488,16 @@ v0.99.368 - Dollar balances get their own look (user: "баланс в долл�
          column (whole dollars now) and the "💰 с $15 ва-банк" line.
          Verified: py_compile (-W error), pyflakes, runtime, JS check; jsdom:
          trade row renders the .bal pill in amber.
+v0.99.369 - Provisional results while a backtest runs (user: "карточки появляются
+         по мере бэктеста?" → да, сделай). S/R and P/R: after every finished
+         coin the best coins found so far (same ranking as the cycle end —
+         test avg R after fees) are kept in STATE[*_provisional]; MSNR: the
+         best by MSNR's score so far (errors / failed stress test excluded).
+         Each tab shows a dashed "⏳ Предварительно — бэктест ещё идёт" block
+         with a compact table while its backtest runs; it disappears when the
+         cycle ends and the real list takes over. Display only: trading keeps
+         using the previous finished backtest until then. (Sweep already
+         published each coin as it finished.)
+         Verified: py_compile (-W error), pyflakes, runtime, JS check; state
+         helpers ranked correctly; status endpoints expose "provisional";
+         jsdom: S/R and MSNR blocks render, hidden when not running.

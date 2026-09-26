@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.368"
+APP_VERSION = "0.99.369"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -12326,6 +12326,7 @@ def _msnr_run_one_backtest_cycle(t0):
                         continue
                     symbol, override, results, raw_results, summary = res
                     overrides_by_symbol[symbol] = override
+                    msnr_provisional_top(overrides_by_symbol)   # v0.99.369
                     results_by_symbol[symbol] = results
                     raw_results_by_symbol[symbol] = raw_results
                     summary_by_symbol[symbol] = summary
@@ -12446,6 +12447,7 @@ def _msnr_run_one_backtest_cycle(t0):
         with state_lock:
             STATE["msnr_backtest_running"] = False
             STATE["msnr_backtest_in_flight"] = []
+            STATE["msnr_provisional"] = None   # v0.99.369
 
 
 def msnr_backtest_watchdog():
@@ -16508,6 +16510,31 @@ def _strategy_merge_filtered(mod, added, top_n, disp_n):
     return n_new
 
 
+def provisional_top(state, key, all_results, n):
+    """v0.99.369 — while an S/R / P/R cycle runs, the best coins found SO
+    FAR (same ranking as the cycle end: test avg R after fees), compact.
+    Display only — trading keeps using the previous finished list."""
+    ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])[:max(n, 5)]
+    rows = [{"symbol": sym, "timeframe": r.get("timeframe"), "rr": r.get("rr"),
+             "train_n": r.get("train_n"), "train_wr": r.get("train_wr"), "train_z": r.get("train_z"),
+             "test_n": r.get("test_n"), "test_wr": r.get("test_wr"), "test_avg_pnl_r": r.get("test_avg_pnl_r"),
+             "test_z": r.get("test_z")} for sym, r in ranked]
+    with state_lock:
+        state[key] = {"t": time.time(), "passed": len(all_results), "rows": rows}
+
+
+def msnr_provisional_top(overrides_by_symbol):
+    """v0.99.369 — MSNR: best coins so far in the running cycle (by the
+    same score MSNR ranks on), compact, display only."""
+    ok = [(s, o) for s, o in list(overrides_by_symbol.items())
+          if o and not o.get("error") and o.get("score") is not None and not o.get("stress_test_failed")]
+    ok.sort(key=lambda kv: -(kv[1].get("score") or 0))
+    rows = [{"symbol": s, "winrate": o.get("winrate"), "trades": o.get("trades"), "wins": o.get("wins"),
+             "losses": o.get("losses"), "expectancy_r": o.get("expectancy_r"), "score": o.get("score")} for s, o in ok[:10]]
+    with state_lock:
+        STATE["msnr_provisional"] = {"t": time.time(), "done": len(overrides_by_symbol), "rows": rows}
+
+
 def _variant_trades(c, f):
     """Closed trades of a candidate combo, with the Neuro filter applied."""
     if not f:
@@ -16980,6 +17007,7 @@ def snr_backtest_loop():
                     best = fut.result()
                     if best:
                         all_results[symbol] = best
+                        provisional_top(STATE, "snr_provisional", all_results, SNR_DISPLAY_N)   # v0.99.369
                 except Exception as e:
                     log_error(f"snr_backtest_loop {symbol}: {e}")
                 with state_lock:
@@ -17029,6 +17057,7 @@ def snr_backtest_loop():
                     _snr_display_symbols = [sym for sym, _ in display_top]
                     STATE["snr_last_backtest_finished"] = time.time()
                 STATE["snr_backtest_running"] = False
+                STATE["snr_provisional"] = None   # v0.99.369 — the real list is in place now
                 STATE["snr_current_symbol"] = None
             if not all_results and data_ok:
                 save_state()
@@ -17046,6 +17075,7 @@ def snr_backtest_loop():
             log_error(f"snr_backtest_loop: {e}")
             with state_lock:
                 STATE["snr_backtest_running"] = False
+                STATE["snr_provisional"] = None   # v0.99.369 — the real list is in place now
                 STATE["snr_waiting_for_slot"] = False
         finally:
             if _snr_sem_acquired:
@@ -17559,6 +17589,7 @@ def prv_backtest_loop():
                     best = fut.result()
                     if best:
                         all_results[symbol] = best
+                        provisional_top(STATE, "prv_provisional", all_results, PRV_DISPLAY_N)   # v0.99.369
                 except Exception as e:
                     log_error(f"prv_backtest_loop {symbol}: {e}")
                 with state_lock:
@@ -17590,6 +17621,7 @@ def prv_backtest_loop():
                     _prv_display_symbols = [sym for sym, _ in display_top]
                     STATE["prv_last_backtest_finished"] = time.time()
                 STATE["prv_backtest_running"] = False
+                STATE["prv_provisional"] = None   # v0.99.369 — the real list is in place now
             if found_nothing:
                 _cycle_failed = True  # v0.99.322 — e.g. network outage: retry in 30 min, not 4h
                 log_error("prv_backtest_loop: universe scan produced zero usable results this cycle — keeping previous results")
@@ -17600,6 +17632,7 @@ def prv_backtest_loop():
             log_error(f"prv_backtest_loop: {e}")
             with state_lock:
                 STATE["prv_backtest_running"] = False
+                STATE["prv_provisional"] = None   # v0.99.369 — the real list is in place now
                 STATE["prv_waiting_for_slot"] = False
         finally:
             if _prv_sem_acquired:
@@ -21666,6 +21699,7 @@ def api_snr_status():
                        "live_signal_stats": signal_stats["by_symbol"].get(symbol),
                        "recent_live_signals": recent_live_signals})
     return jsonify({
+        "provisional": STATE.get("snr_provisional"),   # v0.99.369
         "filter_phase": STATE.get("snr_filter_phase"),   # v0.99.366
         "diag": STATE.get("snr_diag"),   # v0.99.362
         "filters": STATE.get("snr_filters"),   # v0.99.337
@@ -21731,6 +21765,7 @@ def api_prv_status():
                        "live_signal_stats": signal_stats["by_symbol"].get(symbol),
                        "recent_live_signals": recent_live_signals})
     return jsonify({
+        "provisional": STATE.get("prv_provisional"),   # v0.99.369
         "filter_phase": STATE.get("prv_filter_phase"),   # v0.99.366
         "filters": STATE.get("prv_filters"),   # v0.99.361
         "coins": coins, "last_backtest_finished": last_finished,
@@ -22608,6 +22643,7 @@ def api_msnr_status():
     pooled_trades = [t for sym_trades in backtest_results_raw.values() for t in sym_trades]
     rr_buckets = msnr_rr_bucket_stats(pooled_trades)
     return jsonify({
+        "provisional": STATE.get("msnr_provisional"),   # v0.99.369
         "enabled": MSNR_ENABLED,
         "live_universe": live_universe,
         # v0.99.319 — diagnostics for "no MSNR signals for days": what the
@@ -24924,6 +24960,7 @@ async function refreshMsnr() {
       ${staleWarnHtml}
       ${buildTxt}<br>
       ${progressBarHtml}
+      ${provisionalHtml(status.provisional, status.backtest_running, 'msnr')}
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · всего: ${ss.total||0}<span class="hint-block"> · клик по строке — график</span>
     </div>`;
   const rrBuckets = status.rr_buckets || [];
@@ -26321,6 +26358,7 @@ async function refreshSnr() {
       ${progressHtml}
       ${lstatsHtml}
       ${liveSigsTableHtml}
+      ${provisionalHtml(data.provisional, data.backtest_running, 'snr')}
       ${filterPhaseHtml(data.filter_phase)}
       ${snrDiagHtml(data.diag)}
       ${filterReportHtml(data.filters, "🧪 Фильтры для S/R (информационно)", "считаются (≈20 мин после запуска и после каждого бэктеста S/R)")}
@@ -26423,6 +26461,7 @@ async function refreshPrv() {
       ${progressHtml}
       ${lstatsHtml}
       ${liveSigsTableHtml}
+      ${provisionalHtml(data.provisional, data.backtest_running, 'prv')}
       ${filterPhaseHtml(data.filter_phase)}
       ${filterReportHtml(data.filters, "🧪 Neuro-фильтры для Peak Reversal (информационно)", "считаются (≈30 мин после запуска и после каждого бэктеста P/R)")}
       ${cards || '<div class="dim">\u043f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445</div>'}
@@ -28115,6 +28154,20 @@ function filterReportHtml(nf, title, pendingTxt) {
     <div class="dim hint-block" style="font-size:11px;margin:4px 0 6px;">Каждое условие пробуется как фильтр («убрать» / «только»). <b>Выбор — на train-части</b> (где подбирались параметры), цифры — на <b>тест-части</b>, которую он не видел. 🏆 — лучший: не ухудшил ни одну монету и дал наибольший рост винрейта; дальше — остальные по тому же правилу. Оставляют не меньше 50% сделок. Средний R рядом: если падает — фильтр «покупает» винрейт за счёт прибыли. В торговлю ничего не применяется. Посчитано ${fmtTime(nf.computed_at)}.</div>
     <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="6" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
   </details>`;
+}
+// v0.99.369 — best coins found SO FAR while a backtest runs (display only)
+function provisionalHtml(p, running, kind) {
+  if (!running || !p || !p.rows || !p.rows.length) return '';
+  const sgn = v => v == null ? '?' : (v > 0 ? '+' : '') + v;
+  const rows = p.rows.map((r, i) => kind === 'msnr'
+    ? `<tr><td>${i + 1}</td><td>${r.symbol.replace('_USDT','')}</td><td>${r.winrate ?? '?'}%</td><td class="dim">n=${r.trades} (${r.wins}W/${r.losses}L)</td><td>${sgn(r.expectancy_r)}R</td><td class="dim">${r.score}</td></tr>`
+    : `<tr><td>${i + 1}</td><td>${r.symbol.replace('_USDT','')}</td><td class="dim">${r.timeframe} · RR${r.rr}</td><td class="dim">train ${r.train_wr}% z=${r.train_z}</td><td>test ${r.test_wr}% ${sgn(r.test_avg_pnl_r)}R z=${r.test_z} <span class="dim">(n=${r.test_n})</span></td></tr>`).join('');
+  const head = kind === 'msnr'
+    ? `уже посчитано монет: ${p.done}`
+    : `прошли проверку на данный момент: ${p.passed}`;
+  return `<details open style="margin:6px 0;border:1px dashed #4a5a78;border-radius:8px;padding:6px 8px;"><summary style="cursor:pointer;font-size:12px;color:#ffcc66;">⏳ Предварительно — бэктест ещё идёт (${head}, ${fmtDateTime(p.t)})</summary>
+    <div class="dim hint-block" style="font-size:10px;margin:4px 0;">Лучшие монеты среди уже посчитанных. Список ещё изменится; торговля идёт по прошлому завершённому бэктесту, пока этот не закончится.</div>
+    <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><tbody>${rows}</tbody></table></div></details>`;
 }
 // v0.99.366 — progress of the post-backtest Neuro-filter phase (S/R, P/R)
 function filterPhaseHtml(p) {
