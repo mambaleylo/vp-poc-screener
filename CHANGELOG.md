@@ -17501,3 +17501,26 @@ v0.99.369 - Provisional results while a backtest runs (user: "карточки �
          Verified: py_compile (-W error), pyflakes, runtime, JS check; state
          helpers ranked correctly; status endpoints expose "provisional";
          jsdom: S/R and MSNR blocks render, hidden when not running.
+v0.99.370 - S/R backtest on several CPU cores (user: "переделать под больше ядер
+         ... для s/r делай"). Python threads share one core (GIL), so the pure
+         calculation part of S/R — the 81-combo parameter search per coin —
+         now runs in separate worker PROCESSES (`python vp_poc_screener.py
+         --calc-worker`, JSON lines over stdin/stdout; multiprocessing is not
+         usable on Android/Termux). Split: snr_optimize_symbol() downloads
+         candles in the main process (rate limit + candle cache stay there) ->
+         snr_optimize_core() (pure, unchanged logic) in a worker -> $15
+         compounding back in the main process. Runtime settings (SNR_*,
+         NEURO_TF_*, fee) are sent with every task. Workers report progress
+         ticks, so the stall watchdog works as before; a stopped coin's worker
+         is killed (no zombie). After 3 consecutive worker failures it falls
+         back to in-process. Setting "Процессы для расчёта бэктеста S/R"
+         (calc_workers, default 3, 0 = old single-process way). ~85 MB RAM per
+         worker.
+         tools/compare_snr.py: old vs new on real Gate data (shared downloads,
+         frozen clock, coins in parallel like the app) + timing.
+         Verified: py_compile (-W error), pyflakes, runtime, JS check, setting
+         save; synthetic 6 coins in parallel: old == new(0 workers) == new(3
+         workers) byte-identical incl. diag/filter candidates, also with forced
+         passing combos (found and fixed: recent_trades must share objects with
+         the full list so the $15 compounding annotates both); 2-core sandbox:
+         46 s -> 24 s; cancelling a coin kills its worker in < 0.5 s.

@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.369"
+APP_VERSION = "0.99.370"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1130,7 +1130,7 @@ CREDENTIALS_FILE = os.environ.get(
     "VP_CREDENTIALS_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
-SETTINGS_KEYS = ("volume_profile_enabled", "neuro_extra_conds_enabled", "neuro_trade_filter_enabled", "bounce_enabled", "breakout_enabled",
+SETTINGS_KEYS = ("volume_profile_enabled", "neuro_extra_conds_enabled", "neuro_trade_filter_enabled", "calc_workers", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "neuro_min_winrate", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "autotrade_invert_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "autotrade_invert_prv", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "autotrade_invert_lsw", "autotrade_invert_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled", "lsw_all_in_enabled", "snr_all_in_enabled", "prv_all_in_enabled",
@@ -1172,6 +1172,7 @@ def get_settings():
         "neuro_enabled": NEURO_ENABLED,
         "neuro_extra_conds_enabled": NEURO_EXTRA_CONDS_ENABLED,
         "neuro_trade_filter_enabled": NEURO_TRADE_FILTER_ENABLED,
+        "calc_workers": CALC_WORKERS,
         "snr_enabled": SNR_ENABLED,
         "snr_top_n": SNR_TOP_N,
         "snr_display_n": SNR_DISPLAY_N,
@@ -1318,6 +1319,12 @@ def apply_settings(updates):
         globals()["NEURO_EXTRA_CONDS_ENABLED"] = bool(updates["neuro_extra_conds_enabled"])
     if "neuro_trade_filter_enabled" in updates:   # v0.99.364 — takes effect on each module's next backtest
         globals()["NEURO_TRADE_FILTER_ENABLED"] = bool(updates["neuro_trade_filter_enabled"])
+    if "calc_workers" in updates:   # v0.99.370 — 0 = compute in the main process
+        try:
+            globals()["CALC_WORKERS"] = max(0, min(6, int(updates["calc_workers"])))
+            globals()["_calc_failures"] = 0
+        except (TypeError, ValueError):
+            pass
     if "snr_enabled" in updates:
         SNR_ENABLED = bool(updates["snr_enabled"])
     if "telegram_alerts_snr" in updates:
@@ -16642,14 +16649,55 @@ def snr_optimize_symbol(symbol):
     function's own test suite run against 15 random seeds pre/post fix).
     Returns a dict with the chosen params + honest train/test stats, or
     None if nothing survives on any timeframe."""
-    best = None
-    diag = {"bars": {}, "combos_enough": 0, "near": None}   # v0.99.362 — why a coin fails
-    passing, near = [], []   # v0.99.364 — candidates for the Neuro filter
+    # v0.99.370 — split into: download (here, in the main process: exchange
+    # rate limit + candle cache live here) -> pure calculation
+    # (snr_optimize_core, which can run in a separate worker process on
+    # another CPU core) -> finish (here: $15 compounding needs the exchange).
+    candles_by_tf = {}
     for tf in SNR_TF_CANDIDATES:
         try:
             now = int(time.time())
             start_ts = now - snr_history_days_for_tf(tf) * 86400
-            candles = get_candles_range(symbol, tf, start_ts, now)
+            candles_by_tf[tf] = get_candles_range(symbol, tf, start_ts, now)
+        except Exception as e:
+            log_error(f"snr_optimize_symbol {symbol} {tf}: {e}")
+    out = calc_run("snr_optimize_core", {"candles_by_tf": candles_by_tf})
+    for msg in out["errors"]:
+        log_error(f"snr_optimize_symbol {symbol} {msg}")
+    best, diag = out["best"], out["diag"]
+    if best is not None and best.get("_all_closed") is not None:
+        # after a worker's JSON round trip recent_trades is a separate copy;
+        # re-share the trade objects (as in-process) so the $15 compounding
+        # below annotates recent_trades too
+        best["recent_trades"] = best["_all_closed"][-40:][::-1]
+    _snr_filter_cands[symbol] = out["filter_cands"]
+    _snr_diag[symbol] = {"passed": best is not None, **diag}
+    if best is not None:
+        # v0.99.318 — $15 va-bank compounding over the winning combo's full history
+        try:
+            _all = best.pop("_all_closed")
+            best.update(rr_compound_annotate(_all, symbol))
+            best["all_trades"] = _all[::-1]   # v0.99.334 — full backtest trade list (newest first), served by /api/<mod>/trades/<symbol>
+        except Exception as e:
+            best.pop("_all_closed", None)
+            log_error(f"snr compound {symbol}: {e}")
+    return best
+
+
+def snr_optimize_core(candles_by_tf):
+    """v0.99.370 — the pure-CPU part of snr_optimize_symbol(), unchanged:
+    no network, no shared state. Returns {"best" (without the $15
+    compounding), "diag", "filter_cands", "errors"}. Runs in-process or in
+    a calculation worker process (see calc_run)."""
+    best = None
+    errors = []
+    diag = {"bars": {}, "combos_enough": 0, "near": None}   # v0.99.362 — why a coin fails
+    passing, near = [], []   # v0.99.364 — candidates for the Neuro filter
+    for tf in SNR_TF_CANDIDATES:
+        if tf not in candles_by_tf:
+            continue   # download failed (already logged)
+        try:
+            candles = candles_by_tf[tf]
             diag["bars"][tf] = len(candles or [])
             if not candles or len(candles) < 200:
                 continue
@@ -16686,30 +16734,20 @@ def snr_optimize_symbol(symbol):
                             near.append(cand)
                             near.sort(key=lambda c: -c["train_z"])
                             del near[NEURO_TF_NEAR_K:]
+        except NeuroCancelled:
+            raise
         except Exception as e:
-            log_error(f"snr_optimize_symbol {symbol} {tf}: {e}")
+            errors.append(f"{tf}: {e}")
     passing.sort(key=lambda c: -c["train_z"])
     variants = [(c, None) for c in passing]
-    # v0.99.365 — the Neuro filter is tried AFTER the cycle, for the most
-    # promising coins only (snr_filter_loop -> strategy_filter_phase), not
-    # inline for every coin: computing Neuro conditions for ~500 coins made
-    # the S/R backtest take hours. Only the candidates' params are kept.
-    _snr_filter_cands[symbol] = [{k: c[k] for k in ("tf", "pl", "ms", "rr", "train_z")} for c in passing[:1] + near]
+    # v0.99.365 — the Neuro filter is tried AFTER the cycle (strategy_filter_phase);
+    # only the candidates' params are kept here.
+    filter_cands = [{k: c[k] for k in ("tf", "pl", "ms", "rr", "train_z")} for c in passing[:1] + near]
     if variants:
         c, f = max(variants, key=lambda v: _variant_train_z(v))
         best = _strategy_best_dict(c, f, {"timeframe": c["tf"], "pivot_length": c["pl"], "min_strength": c["ms"], "rr": c["rr"]})
     diag["filter_used"] = bool(best and best.get("neuro_filter"))
-    _snr_diag[symbol] = {"passed": best is not None, **diag}
-    if best is not None:
-        # v0.99.318 — $15 va-bank compounding over the winning combo's full history
-        try:
-            _all = best.pop("_all_closed")
-            best.update(rr_compound_annotate(_all, symbol))
-            best["all_trades"] = _all[::-1]   # v0.99.334 — full backtest trade list (newest first), served by /api/<mod>/trades/<symbol>
-        except Exception as e:
-            best.pop("_all_closed", None)
-            log_error(f"snr compound {symbol}: {e}")
-    return best
+    return {"best": best, "diag": diag, "filter_cands": filter_cands, "errors": errors}
 
 
 # ============================================================================
@@ -17956,6 +17994,170 @@ def run_pool_with_progress(fn, items, workers, loop_name, on_result, on_stop):
                     on_stop(futs[f], reason)
     finally:
         ex.shutdown(wait=False)
+
+
+# ============================================================================
+# v0.99.370 — calculation worker PROCESSES (user: "переделать под больше
+# ядер ... для s/r делай"). Python threads share one core (GIL); separate
+# processes each get their own. multiprocessing needs sem_open, which
+# Android/Termux lacks, so workers are plain child processes started with
+# `python vp_poc_screener.py --calc-worker`, talking JSON lines over
+# stdin/stdout. Only pure functions (no network, no shared state) are sent
+# there; downloads stay in the main process. A worker that hangs or is
+# abandoned is simply killed — no zombie threads. CALC_WORKERS = 0 turns it
+# off (everything computed in-process, as before).
+# Protocol, worker -> main: "P" = progress tick, "R <json>" = result,
+# "E <json text>" = error.
+# ============================================================================
+CALC_WORKERS = int(os.environ.get("VP_CALC_WORKERS", 3))
+CALC_FUNCS = ("snr_optimize_core",)
+# settings that can change at runtime are sent with every task, so a worker
+# always computes with the main process's current values
+CALC_CONST_PREFIXES = ("SNR_", "NEURO_TF_", "AUTOTRADE_SIM_FEE_PCT")
+_calc_pool = []            # idle worker Popen objects
+_calc_busy = 0
+_calc_cond = threading.Condition()
+_calc_failures = 0         # consecutive worker failures -> fall back to in-process
+_calc_stats = {"tasks": 0, "fallbacks": 0, "restarts": 0}
+
+
+class _CalcWorkerDied(Exception):
+    pass
+
+
+def neuro_is_cancelled():
+    return bool(_neuro_cancelled_threads) and threading.get_ident() in _neuro_cancelled_threads
+
+
+def _calc_spawn():
+    import subprocess
+    errlog = open(os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_calc_worker.log"), "ab")
+    proc = subprocess.Popen([sys.executable, "-u", os.path.abspath(__file__), "--calc-worker"],
+                            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=errlog,
+                            cwd=os.path.dirname(os.path.abspath(__file__)))
+    errlog.close()
+    return proc
+
+
+def _calc_kill(proc):
+    try:
+        proc.kill()
+        proc.wait(timeout=5)
+    except Exception:
+        pass
+
+
+def _calc_acquire():
+    global _calc_busy
+    with _calc_cond:
+        while _calc_busy >= max(1, CALC_WORKERS):
+            _calc_cond.wait(timeout=20)
+            neuro_check_cancel()   # queued for a worker: alive, and still stoppable
+        _calc_busy += 1
+        proc = _calc_pool.pop() if _calc_pool else None
+    if proc is None or proc.poll() is not None:
+        proc = _calc_spawn()
+    return proc
+
+
+def _calc_release(proc, healthy):
+    global _calc_busy
+    with _calc_cond:
+        _calc_busy -= 1
+        if healthy and proc.poll() is None and len(_calc_pool) < max(0, CALC_WORKERS):
+            _calc_pool.append(proc)
+            proc = None
+        _calc_cond.notify()
+    if proc is not None:
+        _calc_kill(proc)
+
+
+def _calc_exchange(proc, fn, kwargs):
+    import select
+    consts = {k: v for k, v in list(globals().items())
+              if k.startswith(CALC_CONST_PREFIXES) and isinstance(v, (int, float, str, bool, list))}
+    payload = (json.dumps({"fn": fn, "kw": kwargs, "consts": consts}, separators=(",", ":")) + "\n").encode()
+    try:
+        proc.stdin.write(payload)
+        proc.stdin.flush()
+    except (BrokenPipeError, OSError) as e:
+        raise _CalcWorkerDied(f"send failed: {e}")
+    fd = proc.stdout.fileno()
+    buf = b""
+    while True:
+        if neuro_is_cancelled():
+            raise NeuroCancelled()
+        ready, _, _ = select.select([fd], [], [], 2.0)
+        if not ready:
+            if proc.poll() is not None:
+                raise _CalcWorkerDied(f"worker exited ({proc.returncode})")
+            continue
+        chunk = os.read(fd, 1 << 20)
+        if not chunk:
+            raise _CalcWorkerDied(f"worker closed its output ({proc.poll()})")
+        buf += chunk
+        while b"\n" in buf:
+            line, buf = buf.split(b"\n", 1)
+            if line == b"P":
+                neuro_check_cancel()   # real progress in the worker -> progress here
+            elif line.startswith(b"R "):
+                return json.loads(line[2:])
+            elif line.startswith(b"E "):
+                raise RuntimeError(json.loads(line[2:]))
+
+
+def calc_run(fn, kwargs):
+    """Run a pure calculation function `fn(**kwargs)` in a worker process
+    (or in-process when CALC_WORKERS is 0 or workers keep failing). The
+    result is the same either way (JSON round trip of plain data)."""
+    global _calc_failures
+    assert fn in CALC_FUNCS
+    if CALC_WORKERS <= 0 or _calc_failures >= 3:
+        return globals()[fn](**kwargs)
+    proc = _calc_acquire()
+    healthy = False
+    try:
+        res = _calc_exchange(proc, fn, kwargs)
+        healthy = True
+        _calc_failures = 0
+        _calc_stats["tasks"] += 1
+        return res
+    except _CalcWorkerDied as e:
+        _calc_failures += 1
+        _calc_stats["fallbacks"] += 1
+        log_error(f"calc worker: {e} — computing this one in the main process")
+        return globals()[fn](**kwargs)
+    finally:
+        _calc_release(proc, healthy)
+
+
+def calc_worker_main():
+    """Entry point of a worker process (`--calc-worker`)."""
+    proto = os.fdopen(os.dup(1), "w", buffering=1)
+    sys.stdout = sys.stderr            # any stray print() must not break the protocol
+    last = [0.0]
+
+    def tick():
+        now = time.monotonic()
+        if now - last[0] >= 1.0:
+            last[0] = now
+            proto.write("P\n")
+
+    globals()["neuro_check_cancel"] = tick
+    globals()["log_error"] = lambda msg: print("[ERR]", msg, file=sys.stderr)
+    for line in sys.stdin:
+        if not line.strip():
+            continue
+        try:
+            task = json.loads(line)
+            globals().update(task.get("consts") or {})
+            if task.get("fn") not in CALC_FUNCS:
+                raise ValueError(f"unknown function {task.get('fn')}")
+            res = globals()[task["fn"]](**task["kw"])
+            proto.write("R " + json.dumps(res, separators=(",", ":")) + "\n")
+        except Exception as e:
+            proto.write("E " + json.dumps(f"{type(e).__name__}: {e}") + "\n")
+        proto.flush()
 
 
 def neuro_cancel_thread(ident_box):
@@ -23940,6 +24142,13 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="name">Процессы для расчёта бэктеста S/R</div>
+          <div class="sub">сколько ядер процессора использовать для перебора параметров S/R (каждый процесс ≈60–100 МБ памяти). 0 — считать как раньше, в одном процессе. Результаты одинаковые, меняется только скорость и нагрузка</div>
+        </div>
+        <input type="number" id="setCalcWorkers" min="0" max="6" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Сколько монет держать в топе</div>
           <div class="sub">бэктест всё равно проверяет всю вселенную каждый цикл — здесь только сколько лучших по ср. P&L остаются активными. Уменьшение применяется сразу (пересчёт по уже сохранённым данным), увеличение — только со следующего полного цикла</div>
         </div>
@@ -27491,6 +27700,7 @@ const setInputs = {
   neuro_enabled: document.getElementById('setNeuro'),
   neuro_extra_conds_enabled: document.getElementById('setNeuroExtra'),
   neuro_trade_filter_enabled: document.getElementById('setNeuroTradeFilter'),
+  calc_workers: document.getElementById('setCalcWorkers'),
   snr_enabled: document.getElementById('setSnr'),
   prv_enabled: document.getElementById('setPrv'),
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
@@ -28705,6 +28915,9 @@ def index():
 # Entrypoint
 # ----------------------------------------------------------------------------
 if __name__ == "__main__":
+    if "--calc-worker" in sys.argv:   # v0.99.370 — calculation worker process
+        calc_worker_main()
+        sys.exit(0)
     load_state()
     load_neuro_state()
     load_nq_state()
