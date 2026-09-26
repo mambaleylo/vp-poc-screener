@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.364"
+APP_VERSION = "0.99.365"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16374,7 +16374,103 @@ def snr_diag_summary(universe):
 
 
 NEURO_TF_NEAR_Z = 1.0    # v0.99.364 — combos this close on train get a filter attempt
-NEURO_TF_NEAR_K = 5      # at most this many near-miss combos per coin
+NEURO_TF_NEAR_K = 3      # at most this many near-miss combos per coin
+NEURO_TF_PHASE_COINS = int(os.environ.get("VP_NEURO_TF_PHASE_COINS", 15))   # v0.99.365 — coins per S/R / P/R filter phase
+_snr_filter_cands = {}   # symbol -> [candidate combo params] from the last S/R cycle
+_prv_filter_cands = {}   # same for P/R
+
+
+def _snr_rebuild_cand(symbol, p):
+    now = int(time.time())
+    candles = get_candles_range(symbol, p["tf"], now - snr_history_days_for_tf(p["tf"]) * 86400, now)
+    if not candles or len(candles) < 200:
+        return None
+    split = int(len(candles) * SNR_TRAIN_FRAC)
+    trades = snr_simulate_trades(candles, p["pl"], p["ms"], p["rr"], atr=neuro_atr_series(candles, 14))
+    return {**p, "closed": [t for t in trades if t["result"] in ("WIN", "LOSS")], "boundary": candles[split - 1]["time"],
+            "span": (candles[0]["time"], candles[-1]["time"])}
+
+
+def _prv_rebuild_cand(symbol, p):
+    now = int(time.time())
+    candles = get_candles_range(symbol, p["tf"], now - snr_history_days_for_tf(p["tf"], PRV_HISTORY_DAYS) * 86400, now)
+    if not candles or len(candles) < 200:
+        return None
+    split = int(len(candles) * PRV_TRAIN_FRAC)
+    trades = prv_simulate_trades(candles, p["ma_type"], p["kc_length"], p["band_mult"], p["rr"],
+                                 atr=neuro_atr_series(candles, PRV_ATR_LENGTH), basis=prv_ma_series(candles, p["ma_type"], p["kc_length"]))
+    return {**p, "closed": [t for t in trades if t["result"] in ("WIN", "LOSS")], "boundary": candles[split - 1]["time"],
+            "span": (candles[0]["time"], candles[-1]["time"])}
+
+
+def strategy_filter_phase(mod):
+    """v0.99.365 — the S/R / P/R Neuro-filter step, run by the filter loop
+    after each backtest cycle for the NEURO_TF_PHASE_COINS most promising
+    coins (best train z among their passing / near-miss combos). Same rule
+    as before: filter picked on train only, the filtered combo must pass
+    the fee-inclusive z test on train AND test. A coin that passes this way
+    (or passes better than without the filter) joins / replaces its entry
+    in the results, then the ranking is redone exactly like the cycle end."""
+    global _snr_active_symbols, _snr_display_symbols, _prv_active_symbols, _prv_display_symbols
+    if mod == "snr":
+        cands_map, rebuild, zc, mtr, mte = _snr_filter_cands, _snr_rebuild_cand, SNR_Z_CRITICAL, SNR_MIN_TRAIN_TRADES, SNR_MIN_TEST_TRADES
+        loop, top_n, disp_n = "snr_filter_loop", SNR_TOP_N, SNR_DISPLAY_N
+    else:
+        cands_map, rebuild, zc, mtr, mte = _prv_filter_cands, _prv_rebuild_cand, PRV_Z_CRITICAL, PRV_MIN_TRAIN_TRADES, PRV_MIN_TEST_TRADES
+        loop, top_n, disp_n = "prv_filter_loop", PRV_TOP_N, PRV_DISPLAY_N
+    ranked_coins = sorted(((s, max(c["train_z"] for c in cs)) for s, cs in list(cands_map.items()) if cs),
+                          key=lambda x: -x[1])[:NEURO_TF_PHASE_COINS]
+    added = {}
+    for sym, _z in ranked_coins:
+        heartbeat(loop)
+        try:
+            cands = [c for c in (rebuild(sym, p) for p in cands_map.get(sym, [])) if c]
+            for c in cands:
+                tz = _z_vs_breakeven_with_fees([t for t in c["closed"] if t["time"] <= c["boundary"]], c["rr"])
+                sz = _z_vs_breakeven_with_fees([t for t in c["closed"] if t["time"] > c["boundary"]], c["rr"])
+                c["train_z"] = tz if tz is not None else -99.0
+                c["test_z"] = sz if sz is not None else -99.0
+            variants = _strategy_filter_variants(sym, cands, zc, mtr, mte)
+            if not variants:
+                continue
+            c, f = max(variants, key=_variant_train_z)
+            params = ({"timeframe": c["tf"], "pivot_length": c["pl"], "min_strength": c["ms"], "rr": c["rr"]} if mod == "snr" else
+                      {"timeframe": c["tf"], "ma_type": c["ma_type"], "kc_length": c["kc_length"], "band_mult": c["band_mult"], "rr": c["rr"]})
+            best = _strategy_best_dict(c, f, params)
+            _all = best.pop("_all_closed")
+            best.update(rr_compound_annotate(_all, sym))
+            best["all_trades"] = _all[::-1]
+            added[sym] = best
+        except NeuroCancelled:
+            raise
+        except Exception as e:
+            log_error(f"{mod}_filter_phase {sym}: {e}")
+    if not added:
+        return 0
+    with state_lock:
+        results = dict(STATE.get(f"{mod}_results") or {})
+        n_new = 0
+        for sym, best in added.items():
+            cur = results.get(sym)
+            if cur is None or best["train_z"] > (cur.get("train_z") or -99):
+                n_new += cur is None
+                results[sym] = best
+        ranked = sorted(results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
+        display_top = ranked[:max(disp_n, top_n)]
+        active_top = display_top[:top_n]
+        STATE[f"{mod}_results"] = dict(display_top)
+        if mod == "snr":
+            _snr_active_symbols = [s for s, _ in active_top]
+            _snr_display_symbols = [s for s, _ in display_top]
+        else:
+            _prv_active_symbols = [s for s, _ in active_top]
+            _prv_display_symbols = [s for s, _ in display_top]
+        d = STATE.get(f"{mod}_diag")
+        if isinstance(d, dict):
+            d["passed"] = (d.get("passed") or 0) + n_new
+            d["filter_added"] = n_new
+    save_state()
+    return len(added)
 
 
 def _variant_trades(c, f):
@@ -16532,9 +16628,11 @@ def snr_optimize_symbol(symbol):
             log_error(f"snr_optimize_symbol {symbol} {tf}: {e}")
     passing.sort(key=lambda c: -c["train_z"])
     variants = [(c, None) for c in passing]
-    if NEURO_TRADE_FILTER_ENABLED:
-        variants += _strategy_filter_variants(symbol, passing[:1] + near, SNR_Z_CRITICAL,
-                                              SNR_MIN_TRAIN_TRADES, SNR_MIN_TEST_TRADES)
+    # v0.99.365 — the Neuro filter is tried AFTER the cycle, for the most
+    # promising coins only (snr_filter_loop -> strategy_filter_phase), not
+    # inline for every coin: computing Neuro conditions for ~500 coins made
+    # the S/R backtest take hours. Only the candidates' params are kept.
+    _snr_filter_cands[symbol] = [{k: c[k] for k in ("tf", "pl", "ms", "rr", "train_z")} for c in passing[:1] + near]
     if variants:
         c, f = max(variants, key=lambda v: _variant_train_z(v))
         best = _strategy_best_dict(c, f, {"timeframe": c["tf"], "pivot_length": c["pl"], "min_strength": c["ms"], "rr": c["rr"]})
@@ -16746,6 +16844,8 @@ def prv_filter_loop():
         try:
             if PRV_ENABLED:
                 prv_filter_analysis()
+                if NEURO_TRADE_FILTER_ENABLED:
+                    strategy_filter_phase("prv")   # v0.99.365
         except Exception as e:
             log_error(f"prv_filter_loop: {e}")
         wait_beating(PRV_NF_TRIGGER, 6 * 3600, "prv_filter_loop")
@@ -16758,6 +16858,8 @@ def snr_filter_loop():
         try:
             if SNR_ENABLED:
                 snr_filter_analysis()
+                if NEURO_TRADE_FILTER_ENABLED:
+                    strategy_filter_phase("snr")   # v0.99.365
         except Exception as e:
             log_error(f"snr_filter_loop: {e}")
         wait_beating(SNR_NF_TRIGGER, 6 * 3600, "snr_filter_loop")
@@ -17358,9 +17460,8 @@ def prv_optimize_symbol(symbol):
             log_error(f"prv_optimize_symbol {symbol} {tf}: {e}")
     passing.sort(key=lambda c: -c["train_z"])
     variants = [(c, None) for c in passing]
-    if NEURO_TRADE_FILTER_ENABLED:
-        variants += _strategy_filter_variants(symbol, passing[:1] + near, PRV_Z_CRITICAL,
-                                              PRV_MIN_TRAIN_TRADES, PRV_MIN_TEST_TRADES)
+    _prv_filter_cands[symbol] = [{k: c[k] for k in ("tf", "ma_type", "kc_length", "band_mult", "rr", "train_z")}
+                                 for c in passing[:1] + near]   # v0.99.365 — see snr_optimize_symbol
     if variants:
         c, f = max(variants, key=lambda v: _variant_train_z(v))
         best = _strategy_best_dict(c, f, {"timeframe": c["tf"], "ma_type": c["ma_type"], "kc_length": c["kc_length"],

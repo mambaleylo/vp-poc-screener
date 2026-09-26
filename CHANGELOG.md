@@ -17445,3 +17445,20 @@ v0.99.364 - Neuro filter INSIDE the backtests of S/R, P/R, MSNR and Sweep, and
          a minority RSI zone) -> found on train and accepted on test; apply
          steps idempotent; live check keeps a kept trade and drops a removed
          one; jsdom: card note, live badge, Sweep cell render.
+v0.99.365 - S/R backtest took hours after v0.99.364 (user: "S/R zone очень долго
+         идёт бэктест"): the Neuro-filter attempt ran INSIDE every coin's
+         optimization, and with ~500 coins almost every coin had a near-miss
+         combo, so Neuro conditions (a full 1h series + 4h/1d/funding/OI/
+         index/BTC/ETH) were computed for hundreds of coins, two at a time.
+         Now the backtest itself is exactly as fast as v0.99.363 (verified
+         byte-identical output with the filter setting ON) and only remembers
+         each coin's candidate combos (params only). After the cycle, the
+         filter loop runs strategy_filter_phase() for the 15 most promising
+         coins (best train z): re-simulates their candidates, applies the same
+         train-picked / train+test-validated filter rule, and merges coins
+         that pass (or pass better) into the results, then re-ranks exactly
+         like the cycle end. Same for P/R.
+         Verified: py_compile (-W error), pyflakes, runtime, JS check;
+         S/R + P/R optimize output identical to v0.99.363 with the filter on;
+         phase test: filtered variant found and merged, ranking/active list
+         rebuilt, no errors.
