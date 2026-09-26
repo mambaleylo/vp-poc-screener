@@ -17472,3 +17472,11 @@ v0.99.366 - S/R, P/R: the Neuro-filter phase now tries EVERY coin that has a
          Neuro: 37/412 монет · сейчас X · прошли с фильтром: N".
          Verified: py_compile (-W error), pyflakes, runtime, JS check; phase
          test (all coins, progress state, merge), jsdom progress line.
+v0.99.367 - Filter phase (S/R, P/R) processes 4 coins at once
+         (NEURO_TF_PHASE_WORKERS=4, via run_pool_with_progress, so a stuck coin
+         is stopped the usual way) and up to 4 Neuro condition series may be
+         computed at once (was 2; VP_NEURO_COND_PARALLEL). User: "можно больше
+         телефон нагрузить?". Note: Python computes on one core (GIL), so the
+         gain is mostly overlapping one coin's downloads with another's math.
+         Verified: py_compile (-W error), pyflakes, runtime, JS check; phase
+         test with the pool (same result as sequential, progress/done ok).

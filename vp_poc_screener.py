@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.366"
+APP_VERSION = "0.99.367"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -11774,7 +11774,7 @@ NEURO_TF_MIN_TRAIN = 15          # and at least this many
 NEURO_TF_MIN_TEST = 8            # test trades left after filtering, for MSNR/Sweep acceptance
 NEURO_TF_MIN_REMOVED = 5         # MSNR/Sweep: the filter must remove at least this many test trades
 NEURO_TF_ACCEPT_T = 1.0          # ... and those must be worse than the kept ones by t >= this
-_NEURO_COND_SEM = threading.Semaphore(2)   # condition series are memory-heavy: at most 2 at once
+_NEURO_COND_SEM = threading.Semaphore(int(os.environ.get("VP_NEURO_COND_PARALLEL", 4)))   # v0.99.367 — was 2; series are memory-heavy (~25 MB each while computed)
 _neuro_cond_cache = {}           # symbol -> {"t": created, "c": {1h bar time: cond dict}}
 _neuro_cond_cache_lock = threading.Lock()
 NEURO_COND_CACHE_TTL = 6 * 3600
@@ -16376,6 +16376,7 @@ def snr_diag_summary(universe):
 NEURO_TF_NEAR_Z = 1.0    # v0.99.364 — combos this close on train get a filter attempt
 NEURO_TF_NEAR_K = 3      # at most this many near-miss combos per coin
 NEURO_TF_PHASE_COINS = int(os.environ.get("VP_NEURO_TF_PHASE_COINS", 0))   # v0.99.366 — 0 = every coin with a candidate (was 15)
+NEURO_TF_PHASE_WORKERS = int(os.environ.get("VP_NEURO_TF_PHASE_WORKERS", 4))   # v0.99.367 — coins processed at once in the phase
 _snr_filter_cands = {}   # symbol -> [candidate combo params] from the last S/R cycle
 _prv_filter_cands = {}   # same for P/R
 
@@ -16422,42 +16423,55 @@ def strategy_filter_phase(mod):
     if NEURO_TF_PHASE_COINS > 0:
         ranked_coins = ranked_coins[:NEURO_TF_PHASE_COINS]
     added = {}
-    prog = {"t": time.time(), "done": 0, "total": len(ranked_coins), "added": 0, "current": None, "running": True}
+    prog = {"t": time.time(), "done": 0, "total": len(ranked_coins), "added": 0, "current": None,
+            "running": True, "workers": NEURO_TF_PHASE_WORKERS}
     with state_lock:
         STATE[f"{mod}_filter_phase"] = prog
-    for sym, _z in ranked_coins:
-        heartbeat(loop)
+
+    def one_coin(sym):
         with state_lock:
             prog["current"] = sym
+        cands = [c for c in (rebuild(sym, p) for p in cands_map.get(sym, [])) if c]
+        for c in cands:
+            tz = _z_vs_breakeven_with_fees([t for t in c["closed"] if t["time"] <= c["boundary"]], c["rr"])
+            sz = _z_vs_breakeven_with_fees([t for t in c["closed"] if t["time"] > c["boundary"]], c["rr"])
+            c["train_z"] = tz if tz is not None else -99.0
+            c["test_z"] = sz if sz is not None else -99.0
+        variants = _strategy_filter_variants(sym, cands, zc, mtr, mte)
+        if not variants:
+            return None
+        c, f = max(variants, key=_variant_train_z)
+        params = ({"timeframe": c["tf"], "pivot_length": c["pl"], "min_strength": c["ms"], "rr": c["rr"]} if mod == "snr" else
+                  {"timeframe": c["tf"], "ma_type": c["ma_type"], "kc_length": c["kc_length"], "band_mult": c["band_mult"], "rr": c["rr"]})
+        best = _strategy_best_dict(c, f, params)
+        _all = best.pop("_all_closed")
+        best.update(rr_compound_annotate(_all, sym))
+        best["all_trades"] = _all[::-1]
+        return best
+
+    def on_result(sym, fut):
         try:
-            cands = [c for c in (rebuild(sym, p) for p in cands_map.get(sym, [])) if c]
-            for c in cands:
-                tz = _z_vs_breakeven_with_fees([t for t in c["closed"] if t["time"] <= c["boundary"]], c["rr"])
-                sz = _z_vs_breakeven_with_fees([t for t in c["closed"] if t["time"] > c["boundary"]], c["rr"])
-                c["train_z"] = tz if tz is not None else -99.0
-                c["test_z"] = sz if sz is not None else -99.0
-            variants = _strategy_filter_variants(sym, cands, zc, mtr, mte)
-            if not variants:
-                continue
-            c, f = max(variants, key=_variant_train_z)
-            params = ({"timeframe": c["tf"], "pivot_length": c["pl"], "min_strength": c["ms"], "rr": c["rr"]} if mod == "snr" else
-                      {"timeframe": c["tf"], "ma_type": c["ma_type"], "kc_length": c["kc_length"], "band_mult": c["band_mult"], "rr": c["rr"]})
-            best = _strategy_best_dict(c, f, params)
-            _all = best.pop("_all_closed")
-            best.update(rr_compound_annotate(_all, sym))
-            best["all_trades"] = _all[::-1]
-            added[sym] = best
-            # v0.99.366 — merged right away, so coins show up while the phase runs
-            if _strategy_merge_filtered(mod, {sym: best}, top_n, disp_n):
-                with state_lock:
-                    prog["added"] += 1
-        except NeuroCancelled:
-            raise
+            best = fut.result()
+            if best is not None:
+                added[sym] = best
+                # v0.99.366 — merged right away, so coins show up while the phase runs
+                if _strategy_merge_filtered(mod, {sym: best}, top_n, disp_n):
+                    with state_lock:
+                        prog["added"] += 1
         except Exception as e:
             log_error(f"{mod}_filter_phase {sym}: {e}")
-        finally:
-            with state_lock:
-                prog["done"] += 1
+        with state_lock:
+            prog["done"] += 1
+
+    def on_stop(sym, reason):
+        log_error(f"{mod}_filter_phase: {sym} {reason} — skipping, calculation stopped")
+        with state_lock:
+            prog["done"] += 1
+
+    # v0.99.367 — several coins at once (user: "можно больше телефон нагрузить?").
+    # Python runs the calculations on ONE core (GIL), so this mostly overlaps
+    # one coin's network downloads with another's calculations.
+    run_pool_with_progress(one_coin, [sym for sym, _ in ranked_coins], NEURO_TF_PHASE_WORKERS, loop, on_result, on_stop)
     with state_lock:
         prog["running"] = False
         prog["current"] = None
