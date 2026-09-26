@@ -17480,3 +17480,11 @@ v0.99.367 - Filter phase (S/R, P/R) processes 4 coins at once
          gain is mostly overlapping one coin's downloads with another's math.
          Verified: py_compile (-W error), pyflakes, runtime, JS check; phase
          test with the pool (same result as sequential, progress/done ok).
+v0.99.368 - Dollar balances get their own look (user: "баланс в долларах надо
+         выделить другим цветом возле сигналов, сливается в строке"): new CSS
+         class .bal — amber text on a dark amber pill — for the balance after
+         each trade in the S/R / P/R / Neuro trade lists, the MSNR trade list
+         (the % change stays green/red next to it), the simulator's balance
+         column (whole dollars now) and the "💰 с $15 ва-банк" line.
+         Verified: py_compile (-W error), pyflakes, runtime, JS check; jsdom:
+         trade row renders the .bal pill in amber.

@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.367"
+APP_VERSION = "0.99.368"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23551,6 +23551,7 @@ INDEX_HTML = """<!doctype html>
   .short { color:#ff6b6b; font-weight:600; }
   .win { color:#3ddc97; font-weight:600; }
   .loss { color:#ff6b6b; font-weight:600; }
+  .bal { color:#ffcc66; background:#2a2412; border:1px solid #4a3d1c; border-radius:4px; padding:0 4px; font-weight:600; white-space:nowrap; }   /* v0.99.368 — dollar balance, stands out from WIN/LOSS */
   .status-open { color:#e8b93d; font-weight:600; }
   .status-timeout { color:#8b98ab; }
   .panel { padding:0 4px 20px; }
@@ -25301,7 +25302,7 @@ async function loadMsnrTrades(symbol) {
       // see msnr_compound_trail()'s own docstring), shown as a dim
       // dash rather than a misleading $0.
       const compTxt = (t.compound_balance_after !== null && t.compound_balance_after !== undefined)
-        ? `<span class="${t.compound_pnl_pct >= 0 ? 'win' : 'loss'}">$${Math.trunc(t.compound_balance_after)} (${t.compound_pnl_pct >= 0 ? '+' : ''}${t.compound_pnl_pct}%)</span>`
+        ? `<span class="bal">$${Math.trunc(t.compound_balance_after)}</span> <span class="${t.compound_pnl_pct >= 0 ? 'win' : 'loss'}">(${t.compound_pnl_pct >= 0 ? '+' : ''}${t.compound_pnl_pct}%)</span>`
         : '<span class="dim">\u2014</span>';
       // v0.99.46, per direct user request ("рядом с каждой монетой ещё
       // и вычислять плечо"): this specific trade's OWN resolved
@@ -27198,7 +27199,7 @@ async function refreshSimulator() {
       <td class="win">${t.tp !== null && t.tp !== undefined ? fmt(t.tp) : '-'}</td>
       <td class="dim">${fmt(t.margin,4)}$ x${t.leverage}</td>
       <td>${statusHtml}</td><td>${pnlTxt}</td>
-      <td class="dim">${t.balance_after !== null && t.balance_after !== undefined ? '$'+t.balance_after.toFixed(2) : '-'}</td>
+      <td>${t.balance_after !== null && t.balance_after !== undefined ? `<span class="bal">$${Math.trunc(t.balance_after)}</span>` : '<span class="dim">-</span>'}</td>
     </tr>`;
   }).join('');
 
@@ -28040,12 +28041,11 @@ function compoundSummaryHtml(x) {
   const cls = pct >= 0 ? 'win' : 'loss';
   const blown = x.compound_blown_at ? ` · <span class="loss">слит на сделке #${x.compound_blown_at}</span>` : '';
   const pctTxt = Math.abs(pct) >= 1e6 ? '×' + (pct / 100 + 1).toExponential(1) : (pct >= 0 ? '+' : '') + pct + '%';
-  return `<div style="font-size:11px;margin:4px 0 8px;">💰 <span class="dim">с $${x.compound_start} ва-банк:</span> <b class="${cls}">${fmtUsdCompact(x.compound_final_balance)}</b> <span class="${cls}">(${pctTxt})</span> <span class="dim">· плечо ${x.compound_leverage}x · ${x.compound_trades} сделок · с комиссиями</span>${blown}</div>`;
+  return `<div style="font-size:11px;margin:4px 0 8px;">💰 <span class="dim">с $${x.compound_start} ва-банк:</span> <span class="bal">${fmtUsdCompact(x.compound_final_balance)}</span> <span class="${cls}">(${pctTxt})</span> <span class="dim">· плечо ${x.compound_leverage}x · ${x.compound_trades} сделок · с комиссиями</span>${blown}</div>`;
 }
 function compoundCellTxt(t) {
   if (t.compound_balance_after == null) return '<span class="dim">—</span>';
-  const cls = (t.compound_pnl_pct || 0) >= 0 ? 'win' : 'loss';
-  return `<span class="${cls}">${fmtUsdCompact(t.compound_balance_after)}</span>`;
+  return `<span class="bal" title="баланс после этой сделки (старт $15, ва-банк, с комиссиями)">${fmtUsdCompact(t.compound_balance_after)}</span>`;   // v0.99.368 — own colour
 }
 // v0.99.334 — full backtest trade lists for S/R and Peak, loaded on open
 function snrTradeRowHtml(sym, t) {
