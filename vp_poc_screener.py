@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.382"
+APP_VERSION = "0.99.383"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -20805,6 +20805,7 @@ _neuro_trades = {}       # symbol -> trades list
 _neuro_summary = {}      # symbol -> summary dict
 _neuro_live_signals = {}  # symbol -> latest live signal or None
 _neuro_last_mined = None
+_neuro_startup_checked = False   # v0.99.383
 _neuro_mining_running = False
 _neuro_mining_done = 0
 _neuro_mining_total = 0
@@ -21085,8 +21086,21 @@ def neuro_mining_loop():
     global _neuro_sem_holder_gen, _neuro_waiting_slot_since, _neuro_last_error
     with _neuro_state_lock:
         my_gen = _neuro_loop_gen
-    NEURO_MINING_TRIGGER.wait(timeout=180)
+    triggered = NEURO_MINING_TRIGGER.wait(timeout=180)
     NEURO_MINING_TRIGGER.clear()
+    # v0.99.383 — per user ("Neuro сам пошёл на перебэктест после перезапуска"):
+    # on a server START, if the saved results are still fresh (mined less than
+    # NEURO_REFRESH_SEC ago), wait until they are due instead of re-mining
+    # right away. "Очистить" / "↻ Бэктест" (trigger) still start it at once;
+    # a watchdog-restarted loop (mid-cycle) is not affected.
+    global _neuro_startup_checked
+    if not _neuro_startup_checked:
+        _neuro_startup_checked = True
+        with _neuro_state_lock:
+            last, have = _neuro_last_mined, bool(_neuro_summary)
+        if not triggered and have and last and time.time() - last < NEURO_REFRESH_SEC:
+            if wait_beating(NEURO_MINING_TRIGGER, NEURO_REFRESH_SEC - (time.time() - last), "neuro_mining_loop"):
+                NEURO_MINING_TRIGGER.clear()
     while True:
         heartbeat("neuro_mining_loop")  # v0.99.322 — see system_health_watchdog()
         with _neuro_state_lock:

@@ -17665,3 +17665,10 @@ v0.99.382 - S/R: two-stage significance test (user: "по S/R нет вообщ�
          save; synthetic: passed combo == best-on-train, pass/fail follows the
          test threshold, in-process == 3 workers; P/R identical to v0.99.381;
          live-loop test: only the first card traded; jsdom: diag box.
+v0.99.383 - Neuro no longer re-mines on every server restart (user: "Neuro зачем-то
+         сам пошёл на перебэктест после перезапуска"). On start, if the saved
+         results are fresh (last mining < NEURO_REFRESH_SEC = 24 h ago), the
+         loop waits until they are due. "Очистить" / "↻ Бэктест" still start a
+         cycle immediately; a watchdog-restarted loop is unaffected.
+         Verified: py_compile (-W error), pyflakes, runtime; loop test: fresh
+         results -> no mining after start, 30 h old -> mining starts.
