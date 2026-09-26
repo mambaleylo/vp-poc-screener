@@ -17524,3 +17524,32 @@ v0.99.370 - S/R backtest on several CPU cores (user: "переделать по�
          passing combos (found and fixed: recent_trades must share objects with
          the full list so the $15 compounding annotates both); 2-core sandbox:
          46 s -> 24 s; cancelling a coin kills its worker in < 0.5 s.
+v0.99.371 - More work on several CPU cores (user: "давай ... P/R, Neuro; если
+         прогон ещё не выполнялся или была очистка — максимум ядер, потом 3";
+         "подбор фильтра Neuro тоже на полной мощности").
+         - P/R: prv_optimize_symbol() = download -> prv_optimize_core() (pure,
+           in a worker) -> $15 compounding, same as S/R in v0.99.370.
+         - Neuro: neuro_backtest_symbol() downloads (candles, 4h/1d, funding,
+           OI, index, BTC/ETH) and runs neuro_backtest_core() (mining, walk-
+           forward, RR, simulation, veto/early-exit, culprits, summary) in a
+           worker; the $15 fields are added back in the main process. The
+           mining loop computes as many coins at once as there are worker
+           processes (in batches, results put back in universe order so the
+           ranking is identical; the slot hand-over to other backtests happens
+           between batches). CALC_WORKERS = 0 keeps the old sequential loop.
+         - Neuro condition series (filter phase, MSNR/Sweep filters, reports):
+           neuro_conditions_core() runs in a worker; the S/R / P/R filter phase
+           runs at full power (all boost cores).
+         - Boost: while a module has no finished backtest yet (first run or
+           after "Очистить") calc_limit() allows CALC_WORKERS_BOOST processes
+           (default = number of CPU cores, max 8), then back to CALC_WORKERS (3).
+           New setting "↳ Процессов при первом прогоне / после «Очистить»".
+         - tools/compare_multicore.py: old vs new on real data for S/R, P/R and
+           Neuro, with timings.
+         Verified: py_compile (-W error), pyflakes, runtime, JS check, settings;
+         synthetic, strict type-aware comparison: Neuro backtest old == new(0)
+         == new(3 workers); P/R old == new (0/3) incl. passing coins; S/R
+         unchanged; condition series old == new (0/3); full Neuro mining cycle
+         sequential vs parallel identical (158 s -> 101 s on 2 cores); filter
+         phase identical with 0 and 3 workers; MSNR/Sweep apply + planted-edge
+         tests unchanged.

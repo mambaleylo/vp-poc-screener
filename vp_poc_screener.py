@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.370"
+APP_VERSION = "0.99.371"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1130,7 +1130,7 @@ CREDENTIALS_FILE = os.environ.get(
     "VP_CREDENTIALS_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
-SETTINGS_KEYS = ("volume_profile_enabled", "neuro_extra_conds_enabled", "neuro_trade_filter_enabled", "calc_workers", "bounce_enabled", "breakout_enabled",
+SETTINGS_KEYS = ("volume_profile_enabled", "neuro_extra_conds_enabled", "neuro_trade_filter_enabled", "calc_workers", "calc_workers_boost", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "neuro_min_winrate", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "autotrade_invert_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "autotrade_invert_prv", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "autotrade_invert_lsw", "autotrade_invert_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled", "lsw_all_in_enabled", "snr_all_in_enabled", "prv_all_in_enabled",
@@ -1173,6 +1173,7 @@ def get_settings():
         "neuro_extra_conds_enabled": NEURO_EXTRA_CONDS_ENABLED,
         "neuro_trade_filter_enabled": NEURO_TRADE_FILTER_ENABLED,
         "calc_workers": CALC_WORKERS,
+        "calc_workers_boost": CALC_WORKERS_BOOST,
         "snr_enabled": SNR_ENABLED,
         "snr_top_n": SNR_TOP_N,
         "snr_display_n": SNR_DISPLAY_N,
@@ -1321,8 +1322,13 @@ def apply_settings(updates):
         globals()["NEURO_TRADE_FILTER_ENABLED"] = bool(updates["neuro_trade_filter_enabled"])
     if "calc_workers" in updates:   # v0.99.370 — 0 = compute in the main process
         try:
-            globals()["CALC_WORKERS"] = max(0, min(6, int(updates["calc_workers"])))
+            globals()["CALC_WORKERS"] = max(0, min(8, int(updates["calc_workers"])))
             globals()["_calc_failures"] = 0
+        except (TypeError, ValueError):
+            pass
+    if "calc_workers_boost" in updates:   # v0.99.371
+        try:
+            globals()["CALC_WORKERS_BOOST"] = max(0, min(8, int(updates["calc_workers_boost"])))
         except (TypeError, ValueError):
             pass
     if "snr_enabled" in updates:
@@ -11781,7 +11787,7 @@ NEURO_TF_MIN_TRAIN = 15          # and at least this many
 NEURO_TF_MIN_TEST = 8            # test trades left after filtering, for MSNR/Sweep acceptance
 NEURO_TF_MIN_REMOVED = 5         # MSNR/Sweep: the filter must remove at least this many test trades
 NEURO_TF_ACCEPT_T = 1.0          # ... and those must be worse than the kept ones by t >= this
-_NEURO_COND_SEM = threading.Semaphore(int(os.environ.get("VP_NEURO_COND_PARALLEL", 4)))   # v0.99.367 — was 2; series are memory-heavy (~25 MB each while computed)
+_NEURO_COND_SEM = threading.Semaphore(int(os.environ.get("VP_NEURO_COND_PARALLEL", 8)))   # v0.99.367 — was 2; series are memory-heavy (~25 MB each while computed)
 _neuro_cond_cache = {}           # symbol -> {"t": created, "c": {1h bar time: cond dict}}
 _neuro_cond_cache_lock = threading.Lock()
 NEURO_COND_CACHE_TTL = 6 * 3600
@@ -11844,12 +11850,15 @@ def neuro_conditions_for_times(symbol, times):
                     oi = get_contract_stats(symbol, interval="1h", limit=999)
                 except Exception:
                     oi = []
-                conds = neuro_compute_conditions(h1, htf, funding, btc, d1, oi, eth)
-                idx = {c["time"]: i for i, c in enumerate(h1)}
+                # v0.99.371 — the heavy series runs in neuro_conditions_core()
+                # (a worker process on another core when enabled)
+                res = calc_run("neuro_conditions_core", {
+                    "h1": h1, "htf": htf, "funding": funding, "btc": btc, "d1": d1, "oi": oi, "eth": eth,
+                    "index_close": {str(k): v for k, v in (getattr(_neuro_ctx, "index_close", None) or {}).items()},
+                    "need": need})
                 for bt in need:
-                    i = idx.get(bt)
-                    got[bt] = _cond_pack(conds[i]) if i is not None and i < len(conds) else None
-                del conds
+                    c = res.get(str(bt))
+                    got[bt] = _cond_pack(c) if c is not None else None
                 neuro_clear_index_context()
             else:
                 got = {bt: None for bt in need}
@@ -11866,6 +11875,23 @@ def neuro_conditions_for_times(symbol, times):
                     _neuro_cond_cache.pop(oldest, None)
                 _neuro_cond_cache[symbol] = {"t": now, "c": dict(got)}
     return {t: _cond_unpack(have.get(_neuro_cond_bar(t))) for t in times}
+
+
+def neuro_conditions_core(h1, htf, funding, btc, d1, oi, eth, index_close, need):
+    """v0.99.371 — pure part of neuro_conditions_for_times(): the full Neuro
+    condition series, returned only for the requested 1h bars
+    ({str(bar time): cond dict or None})."""
+    _neuro_ctx.index_close = {int(k): v for k, v in (index_close or {}).items()}
+    try:
+        conds = neuro_compute_conditions(h1, htf, funding, btc, d1, oi, eth)
+    finally:
+        _neuro_ctx.index_close = {}
+    idx = {c["time"]: i for i, c in enumerate(h1)}
+    out = {}
+    for bt in need:
+        i = idx.get(bt)
+        out[str(bt)] = conds[i] if i is not None and i < len(conds) else None
+    return out
 
 
 def neuro_filter_label(f):
@@ -16480,7 +16506,14 @@ def strategy_filter_phase(mod):
     # v0.99.367 — several coins at once (user: "можно больше телефон нагрузить?").
     # Python runs the calculations on ONE core (GIL), so this mostly overlaps
     # one coin's network downloads with another's calculations.
-    run_pool_with_progress(one_coin, [sym for sym, _ in ranked_coins], NEURO_TF_PHASE_WORKERS, loop, on_result, on_stop)
+    # v0.99.371 — the phase runs at full power (all boost cores, user: "может он
+    # тоже должен на полной мощности делаться"): the heavy condition series
+    # goes to worker processes, one coin per core.
+    with calc_boost(mod + "_filter", CALC_WORKERS > 0):
+        nw = max(NEURO_TF_PHASE_WORKERS, calc_limit())
+        with state_lock:
+            prog["workers"] = nw
+        run_pool_with_progress(one_coin, [sym for sym, _ in ranked_coins], nw, loop, on_result, on_stop)
     with state_lock:
         prog["running"] = False
         prog["current"] = None
@@ -17060,8 +17093,9 @@ def snr_backtest_loop():
                     if symbol in STATE["snr_progress_in_flight"]:
                         STATE["snr_progress_in_flight"].remove(symbol)
 
-            run_pool_with_progress(snr_optimize_symbol, universe, min(WORKERS, len(universe) or 1),
-                                   "snr_backtest_loop", _snr_done, _snr_stop)
+            with calc_boost("snr", STATE.get("snr_last_backtest_finished") is None):   # v0.99.371
+                run_pool_with_progress(snr_optimize_symbol, universe, min(WORKERS, len(universe) or 1),
+                                       "snr_backtest_loop", _snr_done, _snr_stop)
 
             ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
             display_top = ranked[:max(SNR_DISPLAY_N, SNR_TOP_N)]
@@ -17520,13 +17554,47 @@ def prv_optimize_symbol(symbol):
     TEST z-score gate — never by comparing TEST performance between
     candidates, avoiding the exact multiple-comparisons leak found and
     fixed for SNR (v0.99.277)."""
-    best = None
-    passing, near = [], []   # v0.99.364 — candidates for the Neuro filter
+    # v0.99.371 — download here, pure calculation in prv_optimize_core()
+    # (may run in a worker process, see calc_run), $15 compounding here.
+    candles_by_tf = {}
     for tf in PRV_TF_CANDIDATES:
         try:
             now = int(time.time())
             start_ts = now - snr_history_days_for_tf(tf, PRV_HISTORY_DAYS) * 86400
-            candles = get_candles_range(symbol, tf, start_ts, now)
+            candles_by_tf[tf] = get_candles_range(symbol, tf, start_ts, now)
+        except Exception as e:
+            log_error(f"prv_optimize_symbol {symbol} {tf}: {e}")
+    out = calc_run("prv_optimize_core", {"candles_by_tf": candles_by_tf})
+    for msg in out["errors"]:
+        log_error(f"prv_optimize_symbol {symbol} {msg}")
+    best = out["best"]
+    if best is not None and best.get("_all_closed") is not None:
+        best["recent_trades"] = best["_all_closed"][-40:][::-1]   # share objects, as in-process (see snr)
+    _prv_filter_cands[symbol] = out["filter_cands"]
+    if best is not None:
+        # v0.99.318 — $15 va-bank compounding over the winning combo's full history
+        try:
+            _all = best.pop("_all_closed")
+            best.update(rr_compound_annotate(_all, symbol))
+            best["all_trades"] = _all[::-1]   # v0.99.334 — full backtest trade list (newest first), served by /api/<mod>/trades/<symbol>
+        except Exception as e:
+            best.pop("_all_closed", None)
+            log_error(f"prv compound {symbol}: {e}")
+    return best
+
+
+def prv_optimize_core(candles_by_tf):
+    """v0.99.371 — the pure-CPU part of prv_optimize_symbol(), unchanged
+    logic, no network / shared state. Returns {"best" (without the $15
+    compounding), "filter_cands", "errors"}."""
+    best = None
+    errors = []
+    passing, near = [], []   # v0.99.364 — candidates for the Neuro filter
+    for tf in PRV_TF_CANDIDATES:
+        if tf not in candles_by_tf:
+            continue   # download failed (already logged)
+        try:
+            candles = candles_by_tf[tf]
             if not candles or len(candles) < 200:
                 continue
             atr = neuro_atr_series(candles, PRV_ATR_LENGTH)
@@ -17559,26 +17627,19 @@ def prv_optimize_symbol(symbol):
                                 near.append(cand)
                                 near.sort(key=lambda c: -c["train_z"])
                                 del near[NEURO_TF_NEAR_K:]
+        except NeuroCancelled:
+            raise
         except Exception as e:
-            log_error(f"prv_optimize_symbol {symbol} {tf}: {e}")
+            errors.append(f"{tf}: {e}")
     passing.sort(key=lambda c: -c["train_z"])
     variants = [(c, None) for c in passing]
-    _prv_filter_cands[symbol] = [{k: c[k] for k in ("tf", "ma_type", "kc_length", "band_mult", "rr", "train_z")}
-                                 for c in passing[:1] + near]   # v0.99.365 — see snr_optimize_symbol
+    filter_cands = [{k: c[k] for k in ("tf", "ma_type", "kc_length", "band_mult", "rr", "train_z")}
+                    for c in passing[:1] + near]   # v0.99.365 — see snr_optimize_symbol
     if variants:
         c, f = max(variants, key=lambda v: _variant_train_z(v))
         best = _strategy_best_dict(c, f, {"timeframe": c["tf"], "ma_type": c["ma_type"], "kc_length": c["kc_length"],
                                           "band_mult": c["band_mult"], "rr": c["rr"]})
-    if best is not None:
-        # v0.99.318 — $15 va-bank compounding over the winning combo's full history
-        try:
-            _all = best.pop("_all_closed")
-            best.update(rr_compound_annotate(_all, symbol))
-            best["all_trades"] = _all[::-1]   # v0.99.334 — full backtest trade list (newest first), served by /api/<mod>/trades/<symbol>
-        except Exception as e:
-            best.pop("_all_closed", None)
-            log_error(f"prv compound {symbol}: {e}")
-    return best
+    return {"best": best, "filter_cands": filter_cands, "errors": errors}
 
 
 def prv_backtest_loop():
@@ -17642,8 +17703,9 @@ def prv_backtest_loop():
                     if symbol in STATE["prv_progress_in_flight"]:
                         STATE["prv_progress_in_flight"].remove(symbol)
 
-            run_pool_with_progress(prv_optimize_symbol, universe, min(WORKERS, len(universe) or 1),
-                                   "prv_backtest_loop", _prv_done, _prv_stop)
+            with calc_boost("prv", STATE.get("prv_last_backtest_finished") is None):   # v0.99.371
+                run_pool_with_progress(prv_optimize_symbol, universe, min(WORKERS, len(universe) or 1),
+                                       "prv_backtest_loop", _prv_done, _prv_stop)
 
             ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
             display_top = ranked[:max(PRV_DISPLAY_N, PRV_TOP_N)]
@@ -17953,7 +18015,7 @@ POOL_STALL_SEC = int(os.environ.get("VP_POOL_STALL_SEC", 600))
 POOL_HARD_MAX_SEC = int(os.environ.get("VP_POOL_HARD_MAX_SEC", 2 * 3600))
 
 
-def run_pool_with_progress(fn, items, workers, loop_name, on_result, on_stop):
+def run_pool_with_progress(fn, items, workers, loop_name, on_result, on_stop, stall_sec=None, hard_sec=None, on_tick=None):
     """v0.99.362 — parallel per-coin backtest (S/R, P/R) without a fixed
     per-coin clock. Every worker reports progress through
     neuro_check_cancel() checkpoints; one that made no progress for
@@ -17984,14 +18046,18 @@ def run_pool_with_progress(fn, items, workers, loop_name, on_result, on_stop):
                 started = first_seen.setdefault(f, now)
                 last = _neuro_worker_progress.get(box[0], started)
                 reason = None
-                if now - last > POOL_STALL_SEC:
-                    reason = f"stalled: no checkpoint for {POOL_STALL_SEC // 60} min"
-                elif now - started > POOL_HARD_MAX_SEC:
-                    reason = f"hard limit: still computing after {POOL_HARD_MAX_SEC // 3600} h"
+                st = stall_sec or POOL_STALL_SEC
+                hd = hard_sec or POOL_HARD_MAX_SEC
+                if now - last > st:
+                    reason = f"stalled: no checkpoint for {st // 60} min"
+                elif now - started > hd:
+                    reason = f"hard limit: still computing after {hd // 3600} h"
                 if reason:
                     neuro_cancel_thread(box)
                     pending.discard(f)
                     on_stop(futs[f], reason)
+            if on_tick and pending:
+                on_tick()   # v0.99.371 — workers still progressing: tell the caller's watchdog
     finally:
         ex.shutdown(wait=False)
 
@@ -18010,15 +18076,43 @@ def run_pool_with_progress(fn, items, workers, loop_name, on_result, on_stop):
 # "E <json text>" = error.
 # ============================================================================
 CALC_WORKERS = int(os.environ.get("VP_CALC_WORKERS", 3))
-CALC_FUNCS = ("snr_optimize_core",)
+CALC_FUNCS = ("snr_optimize_core", "prv_optimize_core", "neuro_backtest_core", "neuro_conditions_core")
 # settings that can change at runtime are sent with every task, so a worker
 # always computes with the main process's current values
-CALC_CONST_PREFIXES = ("SNR_", "NEURO_TF_", "AUTOTRADE_SIM_FEE_PCT")
+CALC_CONST_PREFIXES = ("SNR_", "PRV_", "NEURO_", "AUTOTRADE_SIM_FEE_PCT")
 _calc_pool = []            # idle worker Popen objects
 _calc_busy = 0
 _calc_cond = threading.Condition()
 _calc_failures = 0         # consecutive worker failures -> fall back to in-process
 _calc_stats = {"tasks": 0, "fallbacks": 0, "restarts": 0}
+# v0.99.371 — first run / after "Очистить": use more cores, then back to CALC_WORKERS
+CALC_WORKERS_BOOST = int(os.environ.get("VP_CALC_WORKERS_BOOST", min(8, os.cpu_count() or 4)))
+_calc_boost = set()        # modules currently in a first / post-reset run
+
+
+class calc_boost:
+    """with calc_boost("snr", first_run): ... — while any module's first
+    (or post-reset) cycle runs, calc_limit() allows CALC_WORKERS_BOOST."""
+    def __init__(self, mod, active):
+        self.mod, self.active = mod, bool(active)
+
+    def __enter__(self):
+        if self.active:
+            with _calc_cond:
+                _calc_boost.add(self.mod)
+        return self
+
+    def __exit__(self, *exc):
+        with _calc_cond:
+            _calc_boost.discard(self.mod)
+            _calc_cond.notify_all()
+        return False
+
+
+def calc_limit():
+    if CALC_WORKERS <= 0:
+        return 0
+    return max(CALC_WORKERS, CALC_WORKERS_BOOST) if _calc_boost else CALC_WORKERS
 
 
 class _CalcWorkerDied(Exception):
@@ -18050,7 +18144,7 @@ def _calc_kill(proc):
 def _calc_acquire():
     global _calc_busy
     with _calc_cond:
-        while _calc_busy >= max(1, CALC_WORKERS):
+        while _calc_busy >= max(1, calc_limit()):
             _calc_cond.wait(timeout=20)
             neuro_check_cancel()   # queued for a worker: alive, and still stoppable
         _calc_busy += 1
@@ -18064,7 +18158,7 @@ def _calc_release(proc, healthy):
     global _calc_busy
     with _calc_cond:
         _calc_busy -= 1
-        if healthy and proc.poll() is None and len(_calc_pool) < max(0, CALC_WORKERS):
+        if healthy and proc.poll() is None and len(_calc_pool) + _calc_busy < max(0, calc_limit()):
             _calc_pool.append(proc)
             proc = None
         _calc_cond.notify()
@@ -20128,69 +20222,15 @@ def neuro_build_universe():
     return universe
 
 
-def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_candles=None):
-    """Fetch max available history PLUS extra data sources (4h+1d trend,
-    funding rate, open interest, BTC/ETH correlation), mine + walk-forward
-    validate across many condition types and horizons, pick the best RR
-    from train-period trades only, simulate the resulting trade history
-    with that RR. Returns (confirmed_patterns, trades, summary).
-
-    precomputed_btc_candles/precomputed_eth_candles let the caller (the
-    mining loop, processing 20 symbols per cycle) fetch BTC's and ETH's
-    OWN 1h history ONCE and reuse it for every other symbol's correlation
-    check, instead of every one of the other 18 symbols independently
-    re-fetching the exact same BTC+ETH history each — a ~22-request-per-
-    cycle redundancy that was straining the app-wide shared
-    GLOBAL_HTTP_SEMAPHORE (10 concurrent) enough to make most symbols
-    time out against NEURO_PER_SYMBOL_MAX_SEC, per direct user report of
-    8-of-10 coins "hanging". Falls back to self-fetching when not
-    supplied (e.g. for a standalone/manual call)."""
+def neuro_backtest_core(candles, htf_candles, d1_candles, funding_records, oi_records,
+                        btc_candles, eth_candles, index_close):
+    """v0.99.371 — the pure-CPU part of neuro_backtest_symbol(), unchanged
+    logic, no network: mining + walk-forward, RR choice, trade simulation,
+    veto filters, early-exit rule, culprit removal, summary (without the
+    $15 fields). index_close ({time: close}, keys as strings for JSON) is
+    the premium_zone context the caller fetched."""
+    _neuro_ctx.index_close = {int(k): v for k, v in (index_close or {}).items()}
     try:
-        now = int(time.time())
-        start_ts = now - NEURO_HISTORY_DAYS * 86400
-        candles = get_candles_range(symbol, NEURO_TF, start_ts, now)
-        if not candles or len(candles) < 500:
-            return [], [], {}
-
-        htf_candles = get_candles_range(symbol, "4h", start_ts, now) or []
-        d1_candles = get_candles_range(symbol, "1d", start_ts, now) or []
-        neuro_set_index_context(symbol, start_ts, now)   # v0.99.330 — premium_zone
-        # v0.99.257 — CRITICAL FIX, per direct user report (screenshot of
-        # the new global errors panel showing repeated "neuro_fetch_
-        # funding_rate ...: 400 Client Error" across many symbols, every
-        # mining cycle). Root cause: this call reused `start_ts` — the
-        # SAME start of the FULL NEURO_HISTORY_DAYS (1500-day, ~4.1-year)
-        # candle-fetch window — for the funding-rate request too, and
-        # Gate's own funding_rate endpoint appears to reject a range that
-        # wide outright with a flat 400.
-        # v0.99.258 — per direct user follow-up ("лучше же больше дней
-        # для бэктеста"): rather than permanently settling for v0.99.257's
-        # own guessed-conservative 60-day compromise, passes the FULL
-        # start_ts back here and lets neuro_fetch_funding_rate() itself
-        # adaptively halve the window on a 400 until it finds the actual
-        # widest range Gate allows — see that function's own docstring.
-        # neuro_align_funding_rate() already degrades gracefully for bars
-        # outside whatever range ends up actually returned (plain None,
-        # not a crash).
-        funding_records = neuro_fetch_funding_rate(symbol, start_ts, now)
-        oi_records = []
-        try:
-            oi_records = get_contract_stats(symbol, interval="1h", limit=999)
-        except Exception as e:
-            log_error(f"neuro_backtest_symbol {symbol} OI: {e}")
-        if symbol == "BTC_USDT":
-            btc_candles = None
-        elif precomputed_btc_candles is not None:
-            btc_candles = precomputed_btc_candles
-        else:
-            btc_candles = get_candles_range("BTC_USDT", NEURO_TF, start_ts, now) or []
-        if symbol == "ETH_USDT":
-            eth_candles = None
-        elif precomputed_eth_candles is not None:
-            eth_candles = precomputed_eth_candles
-        else:
-            eth_candles = get_candles_range("ETH_USDT", NEURO_TF, start_ts, now) or []
-
         neuro_check_cancel()   # v0.99.357 — abandoned while fetching? stop before the heavy part
         confirmed = neuro_walk_forward(candles, htf_candles=htf_candles, funding_records=funding_records,
                                         btc_candles=btc_candles, d1_candles=d1_candles, oi_records=oi_records,
@@ -20294,7 +20334,87 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
                    "chosen_rr": chosen_rr, "rr_sweep": rr_sweep,
                    "aggregate_recent": aggregate_recent, "culprits_removed": culprits_removed,
                    "early_exit_rule": early_exit_rule,
-                   **rr_compound_annotate(trades, symbol)}  # v0.99.318 — $15 va-bank simulation
+                   }   # $15 va-bank fields are added by the caller (network)
+
+        return {"confirmed": confirmed, "trades": trades, "summary": summary}
+    finally:
+        _neuro_ctx.index_close = {}
+
+
+def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_candles=None):
+    """Fetch max available history PLUS extra data sources (4h+1d trend,
+    funding rate, open interest, BTC/ETH correlation), mine + walk-forward
+    validate across many condition types and horizons, pick the best RR
+    from train-period trades only, simulate the resulting trade history
+    with that RR. Returns (confirmed_patterns, trades, summary).
+
+    precomputed_btc_candles/precomputed_eth_candles let the caller (the
+    mining loop, processing 20 symbols per cycle) fetch BTC's and ETH's
+    OWN 1h history ONCE and reuse it for every other symbol's correlation
+    check, instead of every one of the other 18 symbols independently
+    re-fetching the exact same BTC+ETH history each — a ~22-request-per-
+    cycle redundancy that was straining the app-wide shared
+    GLOBAL_HTTP_SEMAPHORE (10 concurrent) enough to make most symbols
+    time out against NEURO_PER_SYMBOL_MAX_SEC, per direct user report of
+    8-of-10 coins "hanging". Falls back to self-fetching when not
+    supplied (e.g. for a standalone/manual call)."""
+    try:
+        now = int(time.time())
+        start_ts = now - NEURO_HISTORY_DAYS * 86400
+        candles = get_candles_range(symbol, NEURO_TF, start_ts, now)
+        if not candles or len(candles) < 500:
+            return [], [], {}
+
+        htf_candles = get_candles_range(symbol, "4h", start_ts, now) or []
+        d1_candles = get_candles_range(symbol, "1d", start_ts, now) or []
+        neuro_set_index_context(symbol, start_ts, now)   # v0.99.330 — premium_zone
+        # v0.99.257 — CRITICAL FIX, per direct user report (screenshot of
+        # the new global errors panel showing repeated "neuro_fetch_
+        # funding_rate ...: 400 Client Error" across many symbols, every
+        # mining cycle). Root cause: this call reused `start_ts` — the
+        # SAME start of the FULL NEURO_HISTORY_DAYS (1500-day, ~4.1-year)
+        # candle-fetch window — for the funding-rate request too, and
+        # Gate's own funding_rate endpoint appears to reject a range that
+        # wide outright with a flat 400.
+        # v0.99.258 — per direct user follow-up ("лучше же больше дней
+        # для бэктеста"): rather than permanently settling for v0.99.257's
+        # own guessed-conservative 60-day compromise, passes the FULL
+        # start_ts back here and lets neuro_fetch_funding_rate() itself
+        # adaptively halve the window on a 400 until it finds the actual
+        # widest range Gate allows — see that function's own docstring.
+        # neuro_align_funding_rate() already degrades gracefully for bars
+        # outside whatever range ends up actually returned (plain None,
+        # not a crash).
+        funding_records = neuro_fetch_funding_rate(symbol, start_ts, now)
+        oi_records = []
+        try:
+            oi_records = get_contract_stats(symbol, interval="1h", limit=999)
+        except Exception as e:
+            log_error(f"neuro_backtest_symbol {symbol} OI: {e}")
+        if symbol == "BTC_USDT":
+            btc_candles = None
+        elif precomputed_btc_candles is not None:
+            btc_candles = precomputed_btc_candles
+        else:
+            btc_candles = get_candles_range("BTC_USDT", NEURO_TF, start_ts, now) or []
+        if symbol == "ETH_USDT":
+            eth_candles = None
+        elif precomputed_eth_candles is not None:
+            eth_candles = precomputed_eth_candles
+        else:
+            eth_candles = get_candles_range("ETH_USDT", NEURO_TF, start_ts, now) or []
+
+        neuro_check_cancel()   # v0.99.357 — abandoned while fetching? stop before the heavy part
+        # v0.99.371 — the heavy part runs in neuro_backtest_core() (possibly in
+        # a worker process on another core); the $15 compounding needs the
+        # exchange, so it is added here.
+        out = calc_run("neuro_backtest_core", {
+            "candles": candles, "htf_candles": htf_candles, "d1_candles": d1_candles,
+            "funding_records": funding_records, "oi_records": oi_records,
+            "btc_candles": btc_candles, "eth_candles": eth_candles,
+            "index_close": {str(k): v for k, v in (getattr(_neuro_ctx, "index_close", None) or {}).items()}})
+        confirmed, trades, summary = out["confirmed"], out["trades"], out["summary"]
+        summary.update(rr_compound_annotate(trades, symbol))   # v0.99.318 — $15 va-bank simulation
         return confirmed, trades, summary
     except Exception as e:
         log_error(f"neuro_backtest_symbol {symbol}: {e}")
@@ -20767,63 +20887,133 @@ def neuro_mining_loop():
             # after ranking, keeping steady-state memory use the same as
             # the old fixed-20 design regardless of how wide the scan was.
             all_results = {}
-            for symbol in universe:
-                with _neuro_state_lock:
-                    _neuro_mining_current_symbol = symbol
-                    _neuro_mining_progress_ts = time.time()
-                    heartbeat("neuro_mining_loop")  # v0.99.325 — progress beat
-                # v0.99.212 — same "no with-block, bounded per-item time"
-                # fix as LSW/MSNR's own v0.99.194/195: this loop is
-                # SEQUENTIAL (not a thread pool), so without an explicit
-                # per-symbol ceiling, one stuck coin (e.g. a network call
-                # deep inside get_candles_range/neuro_fetch_funding_rate
-                # hanging past its own timeout) would block every
-                # subsequent symbol in the list forever, not just itself.
-                ex = ThreadPoolExecutor(max_workers=1)
-                _ident_box = []
-                try:
-                    fut = ex.submit(_neuro_run_cancellable, _ident_box, neuro_backtest_symbol, symbol, shared_btc_candles, shared_eth_candles)
-                    try:
-                        confirmed, trades, summary = neuro_wait_worker(fut, _ident_box, _neuro_waiting_beat)
-                        if summary.get("n"):
-                            all_results[symbol] = (confirmed, trades, summary)
-                    except (TimeoutError, FutureTimeoutError) as e:
-                        neuro_cancel_thread(_ident_box)   # v0.99.357 — worker stops itself, no CPU-eating zombie
-                        log_error(f"neuro_mining_loop: {symbol} {e} — skipping, calculation stopped")
-                    except Exception as e:
-                        log_error(f"neuro_mining_loop {symbol}: {e}")
-                finally:
-                    ex.shutdown(wait=False)  # never block on a stuck worker thread
-                with _neuro_state_lock:
-                    _neuro_mining_done += 1
-                    _neuro_mining_progress_ts = time.time()
-                    heartbeat("neuro_mining_loop")  # v0.99.325 — progress beat
-                # v0.99.359 — a Neuro cycle can run for hours; holding a
-                # backtest slot the whole time starved MSNR (user saw
-                # "Последний бэктест был 2.7 ч назад" while MSNR sat in the
-                # queue). Between coins, if another backtest is queued,
-                # hand the slot over and queue behind it. Each coin is
-                # computed independently, so results don't change.
-                if (_neuro_sem_acquired and backtest_others_waiting()
-                        and time.monotonic() - _neuro_slot_held_since >= NEURO_YIELD_AFTER_SEC):
-                    with _neuro_state_lock:
-                        mine = _neuro_sem_holder_gen == my_gen
-                        if mine:
-                            _neuro_sem_holder_gen = None
-                    if mine:
-                        _neuro_sem_acquired = False
-                        BACKTEST_CONCURRENCY_SEMAPHORE.release()
-                        time.sleep(3)   # let the queued loop take the permit first
+            # v0.99.371 — with calculation worker processes the coins are
+            # computed several at a time (one per core); results are put back
+            # in universe order, so the ranking below sees exactly what the
+            # sequential loop would. CALC_WORKERS = 0 keeps the old loop.
+            with calc_boost("neuro", not _neuro_summary):
+                _nw = calc_limit()
+                if _nw <= 1:
+                    for symbol in universe:
                         with _neuro_state_lock:
-                            _neuro_waiting_slot_since = time.time()
-                        while not BACKTEST_CONCURRENCY_SEMAPHORE.acquire(timeout=60):
-                            _neuro_waiting_beat()   # paused mid-cycle on purpose — not a hang
-                        _neuro_sem_acquired = True
-                        _neuro_slot_held_since = time.monotonic()
+                            _neuro_mining_current_symbol = symbol
+                            _neuro_mining_progress_ts = time.time()
+                            heartbeat("neuro_mining_loop")  # v0.99.325 — progress beat
+                        # v0.99.212 — same "no with-block, bounded per-item time"
+                        # fix as LSW/MSNR's own v0.99.194/195: this loop is
+                        # SEQUENTIAL (not a thread pool), so without an explicit
+                        # per-symbol ceiling, one stuck coin (e.g. a network call
+                        # deep inside get_candles_range/neuro_fetch_funding_rate
+                        # hanging past its own timeout) would block every
+                        # subsequent symbol in the list forever, not just itself.
+                        ex = ThreadPoolExecutor(max_workers=1)
+                        _ident_box = []
+                        try:
+                            fut = ex.submit(_neuro_run_cancellable, _ident_box, neuro_backtest_symbol, symbol, shared_btc_candles, shared_eth_candles)
+                            try:
+                                confirmed, trades, summary = neuro_wait_worker(fut, _ident_box, _neuro_waiting_beat)
+                                if summary.get("n"):
+                                    all_results[symbol] = (confirmed, trades, summary)
+                            except (TimeoutError, FutureTimeoutError) as e:
+                                neuro_cancel_thread(_ident_box)   # v0.99.357 — worker stops itself, no CPU-eating zombie
+                                log_error(f"neuro_mining_loop: {symbol} {e} — skipping, calculation stopped")
+                            except Exception as e:
+                                log_error(f"neuro_mining_loop {symbol}: {e}")
+                        finally:
+                            ex.shutdown(wait=False)  # never block on a stuck worker thread
                         with _neuro_state_lock:
-                            _neuro_waiting_slot_since = None
-                            _neuro_sem_holder_gen = my_gen
+                            _neuro_mining_done += 1
+                            _neuro_mining_progress_ts = time.time()
+                            heartbeat("neuro_mining_loop")  # v0.99.325 — progress beat
+                        # v0.99.359 — a Neuro cycle can run for hours; holding a
+                        # backtest slot the whole time starved MSNR (user saw
+                        # "Последний бэктест был 2.7 ч назад" while MSNR sat in the
+                        # queue). Between coins, if another backtest is queued,
+                        # hand the slot over and queue behind it. Each coin is
+                        # computed independently, so results don't change.
+                        if (_neuro_sem_acquired and backtest_others_waiting()
+                                and time.monotonic() - _neuro_slot_held_since >= NEURO_YIELD_AFTER_SEC):
+                            with _neuro_state_lock:
+                                mine = _neuro_sem_holder_gen == my_gen
+                                if mine:
+                                    _neuro_sem_holder_gen = None
+                            if mine:
+                                _neuro_sem_acquired = False
+                                BACKTEST_CONCURRENCY_SEMAPHORE.release()
+                                time.sleep(3)   # let the queued loop take the permit first
+                                with _neuro_state_lock:
+                                    _neuro_waiting_slot_since = time.time()
+                                while not BACKTEST_CONCURRENCY_SEMAPHORE.acquire(timeout=60):
+                                    _neuro_waiting_beat()   # paused mid-cycle on purpose — not a hang
+                                _neuro_sem_acquired = True
+                                _neuro_slot_held_since = time.monotonic()
+                                with _neuro_state_lock:
+                                    _neuro_waiting_slot_since = None
+                                    _neuro_sem_holder_gen = my_gen
 
+                else:
+                    _tmp_results = {}
+                    _order = list(universe)
+
+                    def _nm_done(sym, fut):
+                        global _neuro_mining_done, _neuro_mining_progress_ts
+                        try:
+                            c_, t_, s_ = fut.result()
+                            if s_.get("n"):
+                                _tmp_results[sym] = (c_, t_, s_)
+                        except Exception as e:
+                            log_error(f"neuro_mining_loop {sym}: {e}")
+                        with _neuro_state_lock:
+                            _neuro_mining_done += 1
+                            _neuro_mining_progress_ts = time.time()
+                            heartbeat("neuro_mining_loop")
+
+                    def _nm_stop(sym, reason):
+                        global _neuro_mining_done
+                        log_error(f"neuro_mining_loop: {sym} {reason} — skipping, calculation stopped")
+                        with _neuro_state_lock:
+                            _neuro_mining_done += 1
+
+                    for _bi in range(0, len(_order), _nw):
+                        _batch = _order[_bi:_bi + _nw]
+                        with _neuro_state_lock:
+                            _neuro_mining_current_symbol = ", ".join(_batch)
+                            _neuro_mining_progress_ts = time.time()
+                            heartbeat("neuro_mining_loop")
+                        run_pool_with_progress(
+                            lambda s_: neuro_backtest_symbol(s_, shared_btc_candles, shared_eth_candles),
+                            _batch, _nw, "neuro_mining_loop", _nm_done, _nm_stop,
+                            stall_sec=NEURO_STALL_SEC, hard_sec=NEURO_PER_SYMBOL_HARD_MAX_SEC,
+                            on_tick=_neuro_waiting_beat)
+                        # v0.99.359 — a Neuro cycle can run for hours; holding a
+                        # backtest slot the whole time starved MSNR (user saw
+                        # "Последний бэктест был 2.7 ч назад" while MSNR sat in the
+                        # queue). Between coins, if another backtest is queued,
+                        # hand the slot over and queue behind it. Each coin is
+                        # computed independently, so results don't change.
+                        if (_neuro_sem_acquired and backtest_others_waiting()
+                                and time.monotonic() - _neuro_slot_held_since >= NEURO_YIELD_AFTER_SEC):
+                            with _neuro_state_lock:
+                                mine = _neuro_sem_holder_gen == my_gen
+                                if mine:
+                                    _neuro_sem_holder_gen = None
+                            if mine:
+                                _neuro_sem_acquired = False
+                                BACKTEST_CONCURRENCY_SEMAPHORE.release()
+                                time.sleep(3)   # let the queued loop take the permit first
+                                with _neuro_state_lock:
+                                    _neuro_waiting_slot_since = time.time()
+                                while not BACKTEST_CONCURRENCY_SEMAPHORE.acquire(timeout=60):
+                                    _neuro_waiting_beat()   # paused mid-cycle on purpose — not a hang
+                                _neuro_sem_acquired = True
+                                _neuro_slot_held_since = time.monotonic()
+                                with _neuro_state_lock:
+                                    _neuro_waiting_slot_since = None
+                                    _neuro_sem_holder_gen = my_gen
+
+                    for _s in _order:
+                        if _s in _tmp_results:
+                            all_results[_s] = _tmp_results[_s]
             # v0.99.252 — CRITICAL FIX, per direct user report of a real
             # coin's "recent 40 signals" record looking terrible (~25.7%
             # WR against a ~25% breakeven, effectively coin-flip) despite
@@ -24142,10 +24332,17 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="name">Процессы для расчёта бэктеста S/R</div>
-          <div class="sub">сколько ядер процессора использовать для перебора параметров S/R (каждый процесс ≈60–100 МБ памяти). 0 — считать как раньше, в одном процессе. Результаты одинаковые, меняется только скорость и нагрузка</div>
+          <div class="name">Процессы для расчёта бэктестов (S/R, P/R, Neuro)</div>
+          <div class="sub">сколько ядер процессора использовать для расчёта (каждый процесс ≈85 МБ памяти). 0 — считать как раньше, в одном процессе. Результаты одинаковые, меняется только скорость и нагрузка</div>
         </div>
-        <input type="number" id="setCalcWorkers" min="0" max="6" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+        <input type="number" id="setCalcWorkers" min="0" max="8" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="name">↳ Процессов при первом прогоне / после «Очистить»</div>
+          <div class="sub">пока у модуля ещё нет ни одного готового бэктеста, расчёт идёт на этом числе ядер (по умолчанию — все), потом снова на числе выше</div>
+        </div>
+        <input type="number" id="setCalcWorkersBoost" min="0" max="8" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
       </div>
       <div class="settingRow">
         <div>
@@ -27701,6 +27898,7 @@ const setInputs = {
   neuro_extra_conds_enabled: document.getElementById('setNeuroExtra'),
   neuro_trade_filter_enabled: document.getElementById('setNeuroTradeFilter'),
   calc_workers: document.getElementById('setCalcWorkers'),
+  calc_workers_boost: document.getElementById('setCalcWorkersBoost'),
   snr_enabled: document.getElementById('setSnr'),
   prv_enabled: document.getElementById('setPrv'),
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
