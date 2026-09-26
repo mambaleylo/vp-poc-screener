@@ -17702,3 +17702,22 @@ v0.99.385 - Backtest results fully survive a restart, and no module re-runs its
          Verified: py_compile (-W error), pyflakes, runtime (/ = 200), JS check;
          save/load round trip; startup-skip tests (fresh -> waits, stale or
          triggered -> runs); jsdom: Neuro card checkboxes, POST, hint.
+v0.99.386 - Audit for bugs of the same kind (state lost / reset on restart).
+         - Duplicate signals: S/R, P/R and Neuro forgot an already-fired signal
+           as soon as one scan pass missed it, and every module forgot them on
+           restart; if the first copy had already closed, the same signal (same
+           coin, same bar) fired again — second Telegram message and second
+           real order. Now every module (MSNR, Sweep, S/R, P/R, Neuro) checks
+           the saved signal log for the same coin + bar before firing.
+         - Sweep wiped its table AND its live-scan list at the START of every
+           backtest, so Sweep traded nothing for the whole backtest (and an
+           interrupted one left only part of it). Old entries now stay until
+           each coin's new result replaces them; coins that left the universe
+           are dropped.
+         - S/R / P/R filter phase: candidate combos are saved, and the phase
+           finish time too; after a restart the phase re-runs if it had not
+           finished for the last backtest (same for the MSNR/Sweep report if
+           it is older than the last backtest).
+         Verified: py_compile (-W error), pyflakes, runtime (/ = 200), JS check;
+         tests: dedup helper, Sweep keeps live list during a cycle and drops
+         removed coins, filter-phase restart rules, save/load of candidates.

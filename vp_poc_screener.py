@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.385"
+APP_VERSION = "0.99.386"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -2018,6 +2018,19 @@ _cooldowns = {}  # (symbol, zone_key) -> last_alert_ts
 _cooldowns_lock = threading.Lock()
 _scalp_signal_cooldowns = {}  # (symbol, interval) -> last_signal_ts
 _scalp_signal_cooldowns_lock = threading.Lock()
+
+
+def signal_already_logged(log, symbol, t):
+    """v0.99.386 — the same signal (coin + signal bar) is never fired twice.
+    The in-memory dedup sets/cooldowns are empty after a restart and (for
+    S/R, P/R, Neuro) forget a signal as soon as one scan pass misses it; if
+    the first copy had already closed, the "already OPEN" guard let it fire
+    again — a second Telegram message and a second real order on the same
+    bar. The persisted signal log is the source of truth. Caller holds the
+    lock that protects `log`."""
+    if t is None:
+        return False
+    return any(s.get("symbol") == symbol and s.get("time") == t for s in log)
 
 
 def has_open_signal(symbol):
@@ -6947,6 +6960,8 @@ def save_state():
             for _k in PERSIST_BT_KEYS:
                 if _k in STATE:
                     data["bt__" + _k] = STATE[_k]
+            data["snr_filter_cands"] = dict(_snr_filter_cands)   # v0.99.386 — for the filter phase after a restart
+            data["prv_filter_cands"] = dict(_prv_filter_cands)
             # v0.99.362 — "save_state: dictionary changed size during
             # iteration": `data` held references to live STATE dicts and
             # json.dump ran after the lock was released, while a backtest
@@ -6978,6 +6993,8 @@ PERSIST_BT_KEYS = (
     "mirror_last_backtest_finished", "mirror_last_backtest_duration", "mirror_backtest_summary",
     "mirror_tuned_tolerances",
     "ft5_last_backtest_finished", "ft5_last_backtest_duration", "ft5_universe", "ft5_live_universe",
+    # v0.99.386
+    "snr_filter_phase_done_at", "prv_filter_phase_done_at",
 )
 
 
@@ -7149,6 +7166,8 @@ def load_state():
             STATE["lsw_signals"] = deque(_backfill_mfe_mae(lsw_signals), maxlen=LSW_SIGNAL_HISTORY)
             STATE["lsw_backtest_results"] = lsw_backtest_results
             STATE["lsw_trade_filters"] = data.get("lsw_trade_filters") or {}   # v0.99.364
+            _snr_filter_cands.update(data.get("snr_filter_cands") or {})   # v0.99.386
+            _prv_filter_cands.update(data.get("prv_filter_cands") or {})
             for _k in PERSIST_BT_KEYS:   # v0.99.385
                 _v = data.get("bt__" + _k)
                 if _v is None:
@@ -7580,18 +7599,31 @@ def bt_startup_skip(mod, trigger, refresh_sec, loop_name, triggered=False):
     return time.time() - t
 
 
-def nf_startup_wait(trigger, first_sec, report_key, loop_name):
+def nf_startup_wait(trigger, first_sec, report_key, loop_name, mod, done_key=None):
     """v0.99.385 — the Neuro-filter phase no longer re-runs after a server
     start when its saved report exists: it waits for the next backtest (which
-    sets the trigger) or the usual 6h. Without a saved report — as before."""
+    sets the trigger) or the usual 6h. Without a saved report — as before.
+    v0.99.386 — only when that work was actually finished for the LAST
+    backtest: a restart that interrupted it (report / S/R-P/R filter phase
+    older than the backtest) still runs it."""
     if trigger.wait(timeout=first_sec):
         return
     with state_lock:
         rep = STATE.get(report_key)
-    if isinstance(rep, dict) and rep.get("computed_at"):
-        remaining = 6 * 3600 - (time.time() - float(rep["computed_at"]))
-        if remaining > 0:
-            wait_beating(trigger, remaining, loop_name)
+        last_bt = STATE.get(f"{mod}_last_backtest_finished")
+        done_at = STATE.get(done_key) if done_key else None
+    if not (isinstance(rep, dict) and rep.get("computed_at")):
+        return
+    ref = float(rep["computed_at"])
+    if done_key and NEURO_TRADE_FILTER_ENABLED:
+        if not done_at:
+            return
+        ref = min(ref, float(done_at))
+    if last_bt and ref < float(last_bt):
+        return
+    remaining = 6 * 3600 - (time.time() - float(rep["computed_at"]))
+    if remaining > 0:
+        wait_beating(trigger, remaining, loop_name)
 
 
 def bt_first_run(mod):
@@ -11022,6 +11054,8 @@ def msnr_scan_symbol_live(symbol):
         with state_lock:
             if any(s["symbol"] == symbol and s.get("status") == "OPEN" for s in STATE["msnr_signals"]):
                 return
+            if signal_already_logged(STATE["msnr_signals"], symbol, sig["time"]):   # v0.99.386
+                return
         if has_open_signal_any_module(symbol, exclude="msnr_signals"):
             return
         record = {
@@ -12448,7 +12482,7 @@ def lsw_neuro_filter_analysis():
 
 
 def lsw_neuro_filter_loop():
-    nf_startup_wait(LSW_NF_TRIGGER, 1500, "lsw_neuro_filters", "lsw_neuro_filter_loop")   # v0.99.385
+    nf_startup_wait(LSW_NF_TRIGGER, 1500, "lsw_neuro_filters", "lsw_neuro_filter_loop", "lsw")   # v0.99.385
     while True:
         LSW_NF_TRIGGER.clear()
         try:
@@ -12497,7 +12531,7 @@ def neuro_filter_rows_by_sym(results, loop_name, err_name):
 
 
 def msnr_neuro_filter_loop():
-    nf_startup_wait(MSNR_NF_TRIGGER, 900, "msnr_neuro_filters", "msnr_neuro_filter_loop")   # v0.99.385
+    nf_startup_wait(MSNR_NF_TRIGGER, 900, "msnr_neuro_filters", "msnr_neuro_filter_loop", "msnr")   # v0.99.385
     while True:
         MSNR_NF_TRIGGER.clear()
         try:
@@ -15287,6 +15321,8 @@ def lsw_scan_symbol_live(symbol):
         with state_lock:
             if any(s["symbol"] == symbol and s.get("status") == "OPEN" for s in STATE["lsw_signals"]):
                 return
+            if signal_already_logged(STATE["lsw_signals"], symbol, sig["entry_time"]):   # v0.99.386
+                return
         if has_open_signal_any_module(symbol, exclude="lsw_signals"):
             return
         if LSW_ENTRY_CONFIRM_ENABLED:
@@ -15630,13 +15666,17 @@ def _lsw_run_one_backtest_cycle(t0):
         # (not a merge) since a symbol that's no longer in `universe` this
         # cycle should still disappear from the table, same intent as the
         # previous wholesale replacement — just written incrementally.
-        STATE["lsw_backtest_results"] = {}
-        STATE["lsw_backtest_summary"] = {}
-        STATE["lsw_filter_checkpoints"] = {}
-        STATE["lsw_chosen_rr"] = {}
-        STATE["lsw_rr_sweep"] = {}
-        STATE["lsw_live_universe"] = []
-        STATE["lsw_live_directions"] = {}
+        # v0.99.386 — NOT wiped at the start any more: the old table and,
+        # more importantly, the live-scan list stayed empty for the whole
+        # backtest (Sweep traded nothing for an hour), and an interrupted
+        # cycle left only part of it. Each coin's entry is replaced the moment
+        # its new result is ready; coins no longer in the universe are
+        # dropped at the end.
+        _univ = set(universe)
+        for _k in ("lsw_backtest_results", "lsw_backtest_summary", "lsw_filter_checkpoints",
+                   "lsw_chosen_rr", "lsw_rr_sweep", "lsw_live_directions"):
+            STATE[_k] = {k: v for k, v in (STATE.get(_k) or {}).items() if k in _univ or not _univ}
+        STATE["lsw_live_universe"] = [x for x in (STATE.get("lsw_live_universe") or []) if x in _univ or not _univ]
     try:
         ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1))
         try:
@@ -15665,8 +15705,12 @@ def _lsw_run_one_backtest_cycle(t0):
                             STATE["lsw_rr_sweep"][symbol] = meta.get("rr_sweep", [])
                             if is_live and symbol not in STATE["lsw_live_universe"]:
                                 STATE["lsw_live_universe"].append(symbol)
+                            elif not is_live and symbol in STATE["lsw_live_universe"]:   # v0.99.386
+                                STATE["lsw_live_universe"].remove(symbol)
                             if allowed_directions is not None:
                                 STATE["lsw_live_directions"][symbol] = allowed_directions
+                            else:
+                                STATE["lsw_live_directions"].pop(symbol, None)   # v0.99.386
                     except Exception as e:
                         log_error(f"lsw_backtest {symbol}: {e}")
             except (TimeoutError, FutureTimeoutError):
@@ -16825,6 +16869,8 @@ def strategy_filter_phase(mod):
     with state_lock:
         prog["running"] = False
         prog["current"] = None
+        STATE[f"{mod}_filter_phase_done_at"] = time.time()   # v0.99.386
+    save_state()
     return len(added)
 
 
@@ -17298,7 +17344,7 @@ def prv_filter_analysis():
 
 
 def prv_filter_loop():
-    nf_startup_wait(PRV_NF_TRIGGER, 1800, "prv_filters", "prv_filter_loop")   # v0.99.385
+    nf_startup_wait(PRV_NF_TRIGGER, 1800, "prv_filters", "prv_filter_loop", "prv", "prv_filter_phase_done_at")   # v0.99.385
     while True:
         PRV_NF_TRIGGER.clear()
         try:
@@ -17312,7 +17358,7 @@ def prv_filter_loop():
 
 
 def snr_filter_loop():
-    nf_startup_wait(SNR_NF_TRIGGER, 1200, "snr_filters", "snr_filter_loop")   # v0.99.385
+    nf_startup_wait(SNR_NF_TRIGGER, 1200, "snr_filters", "snr_filter_loop", "snr", "snr_filter_phase_done_at")   # v0.99.385
     while True:
         SNR_NF_TRIGGER.clear()
         try:
@@ -17640,6 +17686,8 @@ def snr_live_loop():
                 # as every other module this session.
                 with state_lock:
                     already_open = any(s["symbol"] == symbol and s["status"] == "OPEN" for s in STATE["snr_signals"])
+                    if signal_already_logged(STATE["snr_signals"], symbol, sig_time):   # v0.99.386
+                        continue
                 if already_open:
                     pass  # v0.99.349 — normal one-position-per-coin rule (same as the backtest); no longer reported as an error
                     continue
@@ -18207,6 +18255,8 @@ def prv_live_loop():
                 sig = new_signals[symbol]
                 with state_lock:
                     already_open = any(s["symbol"] == symbol and s["status"] == "OPEN" for s in STATE["prv_signals"])
+                    if signal_already_logged(STATE["prv_signals"], symbol, sig_time):   # v0.99.386
+                        continue
                 if already_open:
                     pass  # v0.99.349 — normal one-position-per-coin rule (same as the backtest); no longer reported as an error
                     continue
@@ -21610,6 +21660,9 @@ def neuro_live_loop():
                 # is still OPEN in the persistent live-signal log.
                 with _neuro_signal_log_lock:
                     already_open = any(s["symbol"] == symbol and s["status"] == "OPEN" for s in _neuro_signal_log)
+                    _dup = signal_already_logged(_neuro_signal_log, symbol, sig_time)   # v0.99.386
+                if _dup:
+                    continue
                 if already_open:
                     pass  # v0.99.349 — normal one-position-per-coin rule (same as the backtest); no longer reported as an error
                     continue
