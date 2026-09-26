@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.372"
+APP_VERSION = "0.99.373"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1326,11 +1326,13 @@ def apply_settings(updates):
             globals()["_calc_failures"] = 0
         except (TypeError, ValueError):
             pass
+        calc_apply_limit()
     if "calc_workers_boost" in updates:   # v0.99.371
         try:
             globals()["CALC_WORKERS_BOOST"] = max(0, min(8, int(updates["calc_workers_boost"])))
         except (TypeError, ValueError):
             pass
+        calc_apply_limit()
     if "snr_enabled" in updates:
         SNR_ENABLED = bool(updates["snr_enabled"])
     if "telegram_alerts_snr" in updates:
@@ -18120,6 +18122,19 @@ class calc_boost:
         return False
 
 
+def calc_apply_limit():
+    """v0.99.373 — a changed cores setting applies right away: waiting
+    tasks re-check the limit now, idle processes above it are closed.
+    Busy ones finish their current coin first."""
+    extra = []
+    with _calc_cond:
+        while _calc_pool and len(_calc_pool) + _calc_busy > calc_limit():
+            extra.append(_calc_pool.pop())
+        _calc_cond.notify_all()
+    for proc in extra:
+        _calc_kill(proc)
+
+
 def calc_limit():
     if CALC_WORKERS <= 0:
         return 0
@@ -20990,8 +21005,13 @@ def neuro_mining_loop():
                         with _neuro_state_lock:
                             _neuro_mining_done += 1
 
-                    for _bi in range(0, len(_order), _nw):
+                    _bi = 0
+                    while _bi < len(_order):
+                        # v0.99.373 — batch size re-read every batch, so a change of
+                        # the cores setting applies mid-cycle
+                        _nw = max(1, calc_limit())
                         _batch = _order[_bi:_bi + _nw]
+                        _bi += len(_batch)
                         with _neuro_state_lock:
                             _neuro_mining_current_symbol = ", ".join(_batch)
                             _neuro_mining_progress_ts = time.time()

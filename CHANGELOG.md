@@ -17567,3 +17567,12 @@ v0.99.372 - Cores in use shown next to the backtest progress (user: "рядом 
          Verified: py_compile (-W error), pyflakes, runtime, JS check; status
          endpoints expose calc; per-module counter 3/3 while 5 coins compute,
          0 after; jsdom: settings group + both fields, cores text renders.
+v0.99.373 - Cores setting applies on the fly (user: "на горячую смена количества
+         ядер пройдёт?"): calc_apply_limit() on save wakes tasks waiting for a
+         process (an increase starts extra processes within a second) and
+         closes idle processes above a lowered limit (busy ones finish their
+         current coin); the Neuro mining batch size is re-read every batch.
+         0 switches new calculations to the main process right away.
+         Verified: py_compile (-W error), pyflakes, runtime, settings save;
+         6 coins: limit 1 -> busy 1, set 3 -> busy 3 within 1 s, set 0 -> no
+         processes left after the running coins finished.
