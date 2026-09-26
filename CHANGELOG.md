@@ -17553,3 +17553,17 @@ v0.99.371 - More work on several CPU cores (user: "давай ... P/R, Neuro; е
          sequential vs parallel identical (158 s -> 101 s on 2 cores); filter
          phase identical with 0 and 3 workers; MSNR/Sweep apply + planted-edge
          tests unchanged.
+v0.99.372 - Cores in use shown next to the backtest progress (user: "рядом со
+         шкалой бэктеста показывать сколько ядер задействованы"): S/R and P/R
+         "перебор параметров: X/Y · ⚙️ ядер: 3 из 8", Neuro mining line, and
+         the filter-phase line (condition series); "(первый прогон — все
+         ядра)" while the boost is on; "1 ядро (расчёт в одном процессе)" when
+         workers are off. calc_status(module) counts worker processes per
+         module (calc_run tracks them by function); exposed as "calc" /
+         "calc_cond" in the S/R, P/R and Neuro status.
+         Settings: the cores fields and the "Фильтр Neuro в бэктесте" toggle
+         moved out of the 🧠 Neuro group into their own first group "⚙️
+         Производительность и фильтр Neuro" (user couldn't find them).
+         Verified: py_compile (-W error), pyflakes, runtime, JS check; status
+         endpoints expose calc; per-module counter 3/3 while 5 coins compute,
+         0 after; jsdom: settings group + both fields, cores text renders.

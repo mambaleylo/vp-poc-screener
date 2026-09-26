@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.371"
+APP_VERSION = "0.99.372"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -18088,6 +18088,17 @@ _calc_stats = {"tasks": 0, "fallbacks": 0, "restarts": 0}
 # v0.99.371 — first run / after "Очистить": use more cores, then back to CALC_WORKERS
 CALC_WORKERS_BOOST = int(os.environ.get("VP_CALC_WORKERS_BOOST", min(8, os.cpu_count() or 4)))
 _calc_boost = set()        # modules currently in a first / post-reset run
+_calc_busy_by = {}         # v0.99.372 — module -> worker processes it is using right now
+_CALC_FN_MODULE = {"snr_optimize_core": "snr", "prv_optimize_core": "prv",
+                   "neuro_backtest_core": "neuro", "neuro_conditions_core": "cond"}
+
+
+def calc_status(mod):
+    """v0.99.372 — for the UI: processes this module uses now, the current
+    limit, all busy, CPU cores, and whether the first-run boost is on."""
+    with _calc_cond:
+        return {"mine": _calc_busy_by.get(mod, 0), "busy": _calc_busy, "limit": calc_limit(),
+                "cores": os.cpu_count() or 0, "boost": bool(_calc_boost), "enabled": CALC_WORKERS > 0}
 
 
 class calc_boost:
@@ -18210,6 +18221,9 @@ def calc_run(fn, kwargs):
         return globals()[fn](**kwargs)
     proc = _calc_acquire()
     healthy = False
+    mod = _CALC_FN_MODULE.get(fn, fn)
+    with _calc_cond:
+        _calc_busy_by[mod] = _calc_busy_by.get(mod, 0) + 1
     try:
         res = _calc_exchange(proc, fn, kwargs)
         healthy = True
@@ -18222,6 +18236,8 @@ def calc_run(fn, kwargs):
         log_error(f"calc worker: {e} — computing this one in the main process")
         return globals()[fn](**kwargs)
     finally:
+        with _calc_cond:
+            _calc_busy_by[mod] = max(0, _calc_busy_by.get(mod, 1) - 1)
         _calc_release(proc, healthy)
 
 
@@ -21301,6 +21317,7 @@ def api_neuro_status():
             "recent_live_signals": recent_live_signals,
         })
     return jsonify({
+        "calc": calc_status("neuro"), "calc_cond": calc_status("cond"),   # v0.99.372
         "coins": coins, "last_mined": last_mined, "mining_running": running,
         "waiting_slot_since": waiting_slot_since,
         "last_error_ts": last_error[0] if last_error else None,
@@ -22091,6 +22108,7 @@ def api_snr_status():
                        "live_signal_stats": signal_stats["by_symbol"].get(symbol),
                        "recent_live_signals": recent_live_signals})
     return jsonify({
+        "calc": calc_status("snr"), "calc_cond": calc_status("cond"),   # v0.99.372
         "provisional": STATE.get("snr_provisional"),   # v0.99.369
         "filter_phase": STATE.get("snr_filter_phase"),   # v0.99.366
         "diag": STATE.get("snr_diag"),   # v0.99.362
@@ -22157,6 +22175,7 @@ def api_prv_status():
                        "live_signal_stats": signal_stats["by_symbol"].get(symbol),
                        "recent_live_signals": recent_live_signals})
     return jsonify({
+        "calc": calc_status("prv"), "calc_cond": calc_status("cond"),   # v0.99.372
         "provisional": STATE.get("prv_provisional"),   # v0.99.369
         "filter_phase": STATE.get("prv_filter_phase"),   # v0.99.366
         "filters": STATE.get("prv_filters"),   # v0.99.361
@@ -24257,6 +24276,29 @@ INDEX_HTML = """<!doctype html>
     </div>
 
 
+    <details class="settingsGroup" style="--mod-color:#b39ddb;"><summary class="settingsGroupTitle">⚙️ Производительность и фильтр Neuro</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="name">Фильтр Neuro в бэктесте MSNR / S/R / P/R / Sweep</div>
+          <div class="sub">для каждой монеты подбирается одно условие Neuro («убрать X» / «только X») — только по обучающей части; проверочная решает, принять ли его. Принятый фильтр применяется и к живым сигналам (отсеянный сигнал записывается с пометкой 🧪 и не торгуется). Действует со следующего бэктеста</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setNeuroTradeFilter"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="name">Процессы для расчёта бэктестов (S/R, P/R, Neuro)</div>
+          <div class="sub">сколько ядер процессора использовать для расчёта (каждый процесс ≈85 МБ памяти). 0 — считать как раньше, в одном процессе. Результаты одинаковые, меняется только скорость и нагрузка</div>
+        </div>
+        <input type="number" id="setCalcWorkers" min="0" max="8" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="name">↳ Процессов при первом прогоне / после «Очистить»</div>
+          <div class="sub">пока у модуля ещё нет ни одного готового бэктеста, расчёт идёт на этом числе ядер (по умолчанию — все), потом снова на числе выше</div>
+        </div>
+        <input type="number" id="setCalcWorkersBoost" min="0" max="8" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+      </div>
+    </div></details>
     <details class="settingsGroup" style="--mod-color:#ff7043;" data-warn style="background:rgba(255,112,67,0.05);"><summary class="settingsGroupTitle" style="color:#e0a030;">MSNR ⚠️ Экспериментально</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
@@ -24323,27 +24365,7 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setNeuroExtra"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow">
-        <div>
-          <div class="name">Фильтр Neuro в бэктесте MSNR / S/R / P/R / Sweep</div>
-          <div class="sub">для каждой монеты подбирается одно условие Neuro («убрать X» / «только X») — только по обучающей части; проверочная решает, принять ли его. Принятый фильтр применяется и к живым сигналам (отсеянный сигнал записывается с пометкой 🧪 и не торгуется). Действует со следующего бэктеста</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setNeuroTradeFilter"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="name">Процессы для расчёта бэктестов (S/R, P/R, Neuro)</div>
-          <div class="sub">сколько ядер процессора использовать для расчёта (каждый процесс ≈85 МБ памяти). 0 — считать как раньше, в одном процессе. Результаты одинаковые, меняется только скорость и нагрузка</div>
-        </div>
-        <input type="number" id="setCalcWorkers" min="0" max="8" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="name">↳ Процессов при первом прогоне / после «Очистить»</div>
-          <div class="sub">пока у модуля ещё нет ни одного готового бэктеста, расчёт идёт на этом числе ядер (по умолчанию — все), потом снова на числе выше</div>
-        </div>
-        <input type="number" id="setCalcWorkersBoost" min="0" max="8" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
-      </div>
+
       <div class="settingRow">
         <div>
           <div class="label">↳ Сколько монет держать в топе</div>
@@ -26415,7 +26437,7 @@ async function refreshNeuro() {
     const coins = data.coins || [];
     const lastMined = data.last_mined ? fmtDateTime(data.last_mined) : '\u2014';
     const miningTxt = data.mining_running
-      ? `<span class="dim">\u043c\u0430\u0439\u043d\u0438\u043d\u0433: ${data.mining_done||0}/${data.mining_total||coins.length||10} \u2014 \u0441\u0435\u0439\u0447\u0430\u0441 ${data.mining_current_symbol||'?'}</span>`
+      ? `<span class="dim">\u043c\u0430\u0439\u043d\u0438\u043d\u0433: ${data.mining_done||0}/${data.mining_total||coins.length||10} \u2014 \u0441\u0435\u0439\u0447\u0430\u0441 ${data.mining_current_symbol||'?'}</span>${coresTxt(data.calc)}`
         + (data.waiting_slot_since ? ` <span style="color:#ffa726;">· ⏸ пауза с ${fmtDateTime(data.waiting_slot_since)}: уступил слот другому бэктесту, продолжит после него</span>` : '')
       : (data.waiting_slot_since
         ? `<span style="color:#ffa726;">⏳ ждёт свободного слота бэктеста с ${fmtDateTime(data.waiting_slot_since)} (одновременно идут не больше 2 бэктестов) · последний майнинг: ${lastMined}</span>`
@@ -26678,7 +26700,7 @@ async function refreshSnr() {
     } else if (data.backtest_running) {
       const pct = data.progress_total ? Math.round(data.progress_done / data.progress_total * 100) : 0;
       progressHtml = `<div style="margin-bottom:10px;">
-        <div class="dim" style="font-size:11px;margin-bottom:4px;">\u043f\u0435\u0440\u0435\u0431\u043e\u0440 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432: ${data.progress_done}/${data.progress_total}${data.in_flight && data.in_flight.length ? ' \u2014 \u043e\u0434\u043d\u043e\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e: '+data.in_flight.slice(0,8).join(', ')+(data.in_flight.length>8?` +${data.in_flight.length-8}`:'') : ''}</div>
+        <div class="dim" style="font-size:11px;margin-bottom:4px;">\u043f\u0435\u0440\u0435\u0431\u043e\u0440 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432: ${data.progress_done}/${data.progress_total}${coresTxt(data.calc)}${data.in_flight && data.in_flight.length ? ' \u2014 \u043e\u0434\u043d\u043e\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e: '+data.in_flight.slice(0,8).join(', ')+(data.in_flight.length>8?` +${data.in_flight.length-8}`:'') : ''}</div>
         <div style="height:6px;background:#1c2433;border-radius:3px;overflow:hidden;">
           <div style="height:100%;width:${pct}%;background:#26c6da;transition:width .3s;"></div>
         </div>
@@ -26765,7 +26787,7 @@ async function refreshSnr() {
       ${lstatsHtml}
       ${liveSigsTableHtml}
       ${provisionalHtml(data.provisional, data.backtest_running, 'snr')}
-      ${filterPhaseHtml(data.filter_phase)}
+      ${filterPhaseHtml(data.filter_phase, data.calc_cond)}
       ${snrDiagHtml(data.diag)}
       ${filterReportHtml(data.filters, "🧪 Фильтры для S/R (информационно)", "считаются (≈20 мин после запуска и после каждого бэктеста S/R)")}
       ${cards || '<div class="dim">\u043f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445</div>'}
@@ -26792,7 +26814,7 @@ async function refreshPrv() {
     } else if (data.backtest_running) {
       const pct = data.progress_total ? Math.round(data.progress_done / data.progress_total * 100) : 0;
       progressHtml = `<div style="margin-bottom:10px;">
-        <div class="dim" style="font-size:11px;margin-bottom:4px;">\u043f\u0435\u0440\u0435\u0431\u043e\u0440 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432: ${data.progress_done}/${data.progress_total}${data.in_flight && data.in_flight.length ? ' \u2014 \u043e\u0434\u043d\u043e\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e: '+data.in_flight.slice(0,8).join(', ')+(data.in_flight.length>8?` +${data.in_flight.length-8}`:'') : ''}</div>
+        <div class="dim" style="font-size:11px;margin-bottom:4px;">\u043f\u0435\u0440\u0435\u0431\u043e\u0440 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432: ${data.progress_done}/${data.progress_total}${coresTxt(data.calc)}${data.in_flight && data.in_flight.length ? ' \u2014 \u043e\u0434\u043d\u043e\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e: '+data.in_flight.slice(0,8).join(', ')+(data.in_flight.length>8?` +${data.in_flight.length-8}`:'') : ''}</div>
         <div style="height:6px;background:#1c2433;border-radius:3px;overflow:hidden;">
           <div style="height:100%;width:${pct}%;background:#ffa726;transition:width .3s;"></div>
         </div>
@@ -26868,7 +26890,7 @@ async function refreshPrv() {
       ${lstatsHtml}
       ${liveSigsTableHtml}
       ${provisionalHtml(data.provisional, data.backtest_running, 'prv')}
-      ${filterPhaseHtml(data.filter_phase)}
+      ${filterPhaseHtml(data.filter_phase, data.calc_cond)}
       ${filterReportHtml(data.filters, "🧪 Neuro-фильтры для Peak Reversal (информационно)", "считаются (≈30 мин после запуска и после каждого бэктеста P/R)")}
       ${cards || '<div class="dim">\u043f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445</div>'}
     `;
@@ -28563,6 +28585,13 @@ function filterReportHtml(nf, title, pendingTxt) {
     <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="6" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
   </details>`;
 }
+// v0.99.372 — CPU cores in use, shown next to the backtest progress
+function coresTxt(c, extra) {
+  if (!c) return '';
+  if (!c.enabled) return ' <span class="dim">· ⚙️ 1 ядро (расчёт в одном процессе)</span>';
+  const mine = (c.mine || 0) + (extra && extra.mine || 0);
+  return ` <span style="color:#b39ddb;" title="процессы расчёта: этот модуль / лимит сейчас (всего занято ${c.busy} из ${c.cores} ядер телефона)">· ⚙️ ядер: ${mine} из ${c.limit}${c.boost ? ' (первый прогон — все ядра)' : ''}</span>`;
+}
 // v0.99.369 — best coins found SO FAR while a backtest runs (display only)
 function provisionalHtml(p, running, kind) {
   if (!running || !p || !p.rows || !p.rows.length) return '';
@@ -28578,10 +28607,10 @@ function provisionalHtml(p, running, kind) {
     <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><tbody>${rows}</tbody></table></div></details>`;
 }
 // v0.99.366 — progress of the post-backtest Neuro-filter phase (S/R, P/R)
-function filterPhaseHtml(p) {
+function filterPhaseHtml(p, calc) {
   if (!p || !p.total) return '';
   const pct = Math.round(p.done / p.total * 100);
-  return `<div class="dim" style="font-size:11px;margin:4px 0;">🧪 подбор фильтра Neuro: ${p.running ? `${p.done}/${p.total} монет (${pct}%)${p.current ? ' · сейчас ' + p.current.replace('_USDT','') : ''}` : `готово (${p.total} монет, ${fmtDateTime(p.t)})`} · прошли с фильтром: <b class="${p.added ? 'win' : ''}">${p.added}</b></div>`;
+  return `<div class="dim" style="font-size:11px;margin:4px 0;">🧪 подбор фильтра Neuro: ${p.running ? `${p.done}/${p.total} монет (${pct}%)${p.current ? ' · сейчас ' + p.current.replace('_USDT','') : ''}` : `готово (${p.total} монет, ${fmtDateTime(p.t)})`} · прошли с фильтром: <b class="${p.added ? 'win' : ''}">${p.added}</b>${p.running ? coresTxt(calc) : ''}</div>`;
 }
 // v0.99.364 — MSNR / Sweep: the Neuro filter decision for one coin
 function tradeFilterTxt(f, info, beforeTxt) {
