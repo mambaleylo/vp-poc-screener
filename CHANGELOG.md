@@ -17640,3 +17640,12 @@ v0.99.380 - Neuro-filter reports rethought (user: "в MSNR фильтры Neuro 
          the first card, the other recorded with not_best_card + Telegram
          note; report: planted edge passes (train t 6.9, test t 4.5, 12/0
          coins), random data passes in 1 of 40 runs; jsdom: report + badge.
+v0.99.381 - Neuro-filter report rule change limited to MSNR (user: "везде логика
+         устраивала и была понятна, кроме MSNR"). S/R, Sweep and P/R are back
+         on the original rule (v1: 🏆 = no coin worse + biggest test WR gain)
+         and the original table; MSNR keeps the v0.99.380 rule (v2: ranked on
+         train, top 3 judged on test). strategy_filter_report(rows, rule) with
+         _v1 (restored verbatim) and _v2; the UI picks by nf.rule.
+         Verified: py_compile (-W error), pyflakes, runtime, JS check; v1
+         byte-identical to the pre-v0.99.380 report on 20 random data sets;
+         jsdom: v1 table/texts as before, v2 with the t column.

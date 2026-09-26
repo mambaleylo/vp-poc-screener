@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.380"
+APP_VERSION = "0.99.381"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -11754,7 +11754,91 @@ def _pooled_split_t(kept, removed):
     return (sum(kept) / len(kept) - sum(removed) / len(removed)) / se if se > 0 else None
 
 
-def strategy_filter_report(rows_by_sym):
+def strategy_filter_report_v1(rows_by_sym):
+    """v0.99.337 — shared core of the candidate-filter reports (MSNR's
+    Neuro-filter report, S/R's filter report). rows_by_sym: {symbol:
+    (train_rows, test_rows)}, row = {"r": trade R or None, "c": {cond: value}}.
+    Picks on TRAIN, reports TEST; ranks filters that worsen no coin first,
+    then test-WR gain, then fewest trades lost."""
+    if not rows_by_sym:
+        return None
+    train = [r for tr, _ in rows_by_sym.values() for r in tr]
+    test = [r for _, te in rows_by_sym.values() for r in te]
+    base_train = _msnr_nf_stats(train)
+    base_test = _msnr_nf_stats(test)
+    # candidates: every (condition, value) seen on train, as "exclude" and "only"
+    cands = set()
+    for r in train:
+        for k, v in r["c"].items():   # Neuro combo conditions + strategy-specific ones (categorical only)
+            if (v is not None and not isinstance(v, (list, dict))
+                    and (k in _neuro_combo_keys() or k.startswith("snr_"))):
+                cands.add((k, v))
+    scored = []
+    for k, v in cands:
+        for mode in ("exclude", "only"):
+            keep = (lambda c, k=k, v=v: c.get(k) != v) if mode == "exclude" else (lambda c, k=k, v=v: c.get(k) == v)
+            tr_kept = [r for r in train if keep(r["c"])]
+            st_tr = _msnr_nf_stats(tr_kept)
+            if not st_tr["n"] or st_tr["n"] < MSNR_NF_MIN_KEEP * base_train["n"] or st_tr["wr"] <= base_train["wr"]:
+                continue   # selection on TRAIN only
+            te_kept = [r for r in test if keep(r["c"])]
+            st_te = _msnr_nf_stats(te_kept)
+            if st_te["n"] < MSNR_NF_MIN_TEST_TRADES or st_te["n"] < MSNR_NF_MIN_KEEP * base_test["n"]:
+                continue
+            per_coin, better, worse, same = {}, 0, 0, 0
+            for sym, (_tr, te) in rows_by_sym.items():
+                b = _msnr_nf_stats(te)
+                a = _msnr_nf_stats([r for r in te if keep(r["c"])])
+                per_coin[sym] = {"n_b": b["n"], "n_a": a["n"], "wr_b": b["wr"], "wr_a": a["wr"],
+                                 "r_b": b["avg_r"], "r_a": a["avg_r"]}
+                if not b["n"]:
+                    continue
+                if a["n"] == b["n"]:
+                    same += 1
+                elif a["n"] and a["wr"] > b["wr"]:
+                    better += 1
+                elif a["n"] and a["wr"] == b["wr"]:
+                    same += 1
+                else:
+                    worse += 1
+            scored.append({
+                "key": k, "value": v, "mode": mode,
+                "label": f"{'убрать' if mode == 'exclude' else 'только'}: {NEURO_COND_LABELS.get(k, k)} = {v}",
+                "kept_pct": round(st_te["n"] / base_test["n"] * 100, 1),
+                "n_b": base_test["n"], "n_a": st_te["n"],
+                "wr_b": base_test["wr"], "wr_a": st_te["wr"],
+                "r_b": base_test["avg_r"], "r_a": st_te["avg_r"],
+                "coins_better": better, "coins_worse": worse, "coins_same": same,
+                "coins_total": better + worse + same,
+                "all_coins_ok": worse == 0 and better > 0,
+                "per_coin": per_coin,
+            })
+    # user's rule: every coin must gain (no coin worse), then biggest test WR gain,
+    # then fewest trades lost
+    scored.sort(key=lambda x: (not x["all_coins_ok"], -(x["wr_a"] - x["wr_b"]), -x["kept_pct"]))
+    # v0.99.337 — drop mirror duplicates ("убрать weekend" == "только weekday"): same kept trades
+    _seen, _uniq = set(), []
+    for x in scored:
+        sig = (x["n_a"], x["wr_a"], x["r_a"], tuple(sorted((k, v["n_a"], v["wr_a"]) for k, v in x["per_coin"].items())))
+        if sig not in _seen:
+            _seen.add(sig)
+            _uniq.append(x)
+    scored = _uniq
+    out = {"computed_at": time.time(), "coins": len(rows_by_sym), "train_trades": base_train["n"],
+           "base": base_test, "top": scored[:10],
+           "all_coins_ok_n": sum(1 for x in scored if x["all_coins_ok"]), "candidates_n": len(scored)}
+    return out
+
+
+def strategy_filter_report(rows_by_sym, rule="v1"):
+    """v0.99.381 — S/R, Sweep and P/R keep the original rule (v1: 🏆 = no coin
+    worse + biggest test WR gain); MSNR uses the rethought one (v2, see
+    strategy_filter_report_v2) — per user: "везде логика устраивала, кроме
+    MSNR"."""
+    return strategy_filter_report_v2(rows_by_sym) if rule == "v2" else strategy_filter_report_v1(rows_by_sym)
+
+
+def strategy_filter_report_v2(rows_by_sym):
     """v0.99.337 — shared core of the candidate-filter reports (MSNR, S/R,
     Sweep, P/R). rows_by_sym: {symbol: (train_rows, test_rows)}, row =
     {"r": trade R, "c": {cond: value}}.
@@ -12223,7 +12307,7 @@ def msnr_neuro_filter_analysis():
     rows_by_sym = neuro_filter_rows_by_sym(results, "msnr_neuro_filter_loop", "msnr_neuro_filter_analysis")
     if rows_by_sym is None:
         return None
-    out = strategy_filter_report(rows_by_sym)   # v0.99.337 — shared with S/R
+    out = strategy_filter_report(rows_by_sym, rule="v2")   # v0.99.381 — MSNR: the rethought rule
     if out is None:
         return None
     with state_lock:
@@ -28738,7 +28822,28 @@ async function loadBtTrades(det, mod, sym, stamp) {
   } catch (e) { box.innerHTML = '<div class="loss">не удалось загрузить</div>'; }
 }
 // v0.99.337 — candidate-filter report table (S/R; same format as MSNR's)
+function filterReportHtmlV1(nf, title, pendingTxt) {   // v0.99.381 — original rule (S/R, Sweep, P/R)
+  if (!nf) return `<details style="margin:8px 0;"><summary class="dim" style="cursor:pointer;font-size:11px;">${title} — ${pendingTxt}</summary></details>`;
+  const b = nf.base || {};
+  const rowsHtml = (nf.top || []).slice(0, 8).map((f, i) => {
+    const dWr = Math.round((f.wr_a - f.wr_b) * 10) / 10;
+    const rCls = (f.r_a ?? 0) >= (f.r_b ?? 0) ? 'win' : 'loss';
+    const coins = f.all_coins_ok
+      ? `<span class="win">✅ ${f.coins_better} лучше, 0 хуже${f.coins_same ? `, ${f.coins_same} без изм.` : ''}</span>`
+      : `<span class="loss">${f.coins_better} лучше / ${f.coins_worse} хуже</span>`;
+    return `<tr${i === 0 ? ' style="background:#15202e;"' : ''}><td>${i === 0 ? '🏆' : i + 1}</td><td style="white-space:normal;min-width:160px;">${f.label}</td>
+      <td class="dim">${f.n_b}→${f.n_a} (${f.kept_pct}%)</td>
+      <td>${f.wr_b}%→<b class="win">${f.wr_a}%</b> <span class="win">(+${dWr})</span></td>
+      <td class="${rCls}">${f.r_b}→${f.r_a}R</td><td>${coins}</td></tr>`;
+  }).join('');
+  const okN = nf.all_coins_ok_n || 0;
+  return `<details style="margin:8px 0;"><summary style="cursor:pointer;font-size:12px;">${title}: ${okN ? `<span class="win">${okN} улучшают все монеты</span>` : '<span class="dim">ни один не улучшил все монеты</span>'} · ${nf.coins} монет · тест-сделок ${b.n}, WR ${b.wr}%</summary>
+    <div class="dim hint-block" style="font-size:11px;margin:4px 0 6px;">Каждое условие пробуется как фильтр («убрать» / «только»). <b>Выбор — на train-части</b> (где подбирались параметры), цифры — на <b>тест-части</b>, которую он не видел. 🏆 — лучший: не ухудшил ни одну монету и дал наибольший рост винрейта; дальше — остальные по тому же правилу. Оставляют не меньше 50% сделок. Средний R рядом: если падает — фильтр «покупает» винрейт за счёт прибыли. В торговлю ничего не применяется. Посчитано ${fmtTime(nf.computed_at)}.</div>
+    <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="6" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
+  </details>`;
+}
 function filterReportHtml(nf, title, pendingTxt) {
+  if (!nf || nf.rule !== 'v2') return filterReportHtmlV1(nf, title, pendingTxt);
   if (!nf) return `<details style="margin:8px 0;"><summary class="dim" style="cursor:pointer;font-size:11px;">${title} — ${pendingTxt}</summary></details>`;
   const b = nf.base || {};
   const rowsHtml = (nf.top || []).slice(0, 8).map((f, i) => {
@@ -28817,7 +28922,7 @@ function snrDiagHtml(d) {
 }
 // v0.99.360 — best filter's effect on one coin (test part), table-cell form
 function nfCoinCellHtml(nfRep, sym) {
-  const nf = nfRep && nfRep.top && nfRep.top[0] && nfRep.top[0].all_coins_ok ? nfRep.top[0] : null;   // v0.99.380 — only a filter that passed the test
+  const nf = nfRep && nfRep.top && nfRep.top[0] && (nfRep.rule !== 'v2' || nfRep.top[0].all_coins_ok) ? nfRep.top[0] : null;   // v0.99.380/381 — v2: only a filter that passed
   const pc = nf && nf.per_coin && nf.per_coin[sym];
   if (!pc) return '<span class="dim">—</span>';
   if (!pc.n_b) return '<span class="dim">нет тест-сделок</span>';
@@ -28828,7 +28933,7 @@ function nfCoinCellHtml(nfRep, sym) {
   return `<span class="dim" title="тест-часть: до → после фильтра «${String(nf.label).replace(/"/g, '&quot;')}»">${pc.wr_b}%→${pc.wr_a}% (n=${pc.n_b}→${pc.n_a})</span> <span class="${dCls}">(${d > 0 ? '+' : ''}${d}%)</span>`;
 }
 function filterCoinLineHtml(nf, sym) {
-  const f = nf && nf.top && nf.top[0] && nf.top[0].all_coins_ok ? nf.top[0] : null;   // v0.99.380
+  const f = nf && nf.top && nf.top[0] && (nf.rule !== 'v2' || nf.top[0].all_coins_ok) ? nf.top[0] : null;   // v0.99.380/381
   const pc = f && f.per_coin && f.per_coin[sym];
   if (!pc || !pc.n_b) return '';
   if (pc.n_a === pc.n_b) return `<div class="dim" style="font-size:11px;">🏆 фильтр (тест): без изменений для этой монеты (n=${pc.n_b})</div>`;
