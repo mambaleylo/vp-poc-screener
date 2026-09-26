@@ -17600,3 +17600,14 @@ v0.99.376 - MSNR and Sweep on several cores (user: "делай"). MSNR: the 27-c
          Verified: py_compile (-W error), pyflakes, runtime, JS check; synthetic
          4 coins in parallel: MSNR (incl. the best-combo path) and Sweep
          old == new(0) == new(3 workers), strict type-aware.
+v0.99.377 - Leverage shown for P/R (and S/R, Sweep) even with autotrade off (user:
+         "P/R нигде плечо не показывает, в уведомлениях если автоторговля
+         выключена"). planned_leverage(): the largest leverage whose
+         liquidation stays safely beyond the stop — the same
+         compute_max_safe_leverage() and conservative risk-tier numbers as the
+         va-bank path of execute_autotrade. Telegram: "плечо: 34x (расчётное —
+         автоторговля выключена)"; the real one when a trade opened. Signals
+         store it (leverage, leverage_planned) and the S/R / P/R live tables
+         have a "Плечо" column ("~34x" = planned, "12x" = real).
+         Verified: py_compile (-W error), pyflakes, runtime, JS check; 1.5%
+         stop, cap 50 -> 34x, with risk tiers -> 10x; texts; jsdom column.

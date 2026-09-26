@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.376"
+APP_VERSION = "0.99.377"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7310,7 +7310,31 @@ def _telegram_sender_worker():
         time.sleep(1.1)  # a little above Telegram's ~1 msg/sec/chat limit
 
 
-def format_leverage_txt(autotrade_result, autotrade_enabled):
+def planned_leverage(symbol, direction, entry, sl):
+    """v0.99.377 — the leverage a trade on this signal would get: the largest
+    one whose liquidation stays safely beyond the stop (same
+    compute_max_safe_leverage() and conservative risk-tier numbers as the
+    va-bank path of execute_autotrade). Shown even with autotrade off."""
+    try:
+        if not entry or not sl or entry == sl:
+            return None
+        try:
+            cap = get_contract_spec(symbol).get("leverage_max") or 125
+        except Exception:
+            cap = 125
+        with state_lock:
+            mmr = (STATE.get("scalp_mmr_map") or {}).get(symbol, SCALP_DEFAULT_MMR_PCT)
+            tiers = (STATE.get("scalp_risk_tiers") or {}).get(symbol)
+        if tiers:
+            mmr = max(t[1] for t in tiers)
+            cap = min(cap, min(t[2] for t in tiers))
+        return compute_max_safe_leverage(direction, abs(entry - sl) / entry * 100, mmr, cap)
+    except Exception as e:
+        log_error(f"planned_leverage {symbol}: {e}")
+        return None
+
+
+def format_leverage_txt(autotrade_result, autotrade_enabled, planned=None):
     """v0.99.310 — per direct user report (Telegram screenshot: a real
     Sweep signal showing "плечо: автоторговля выключена" with no way to
     tell whether that meant "autotrade is off in settings" or "autotrade
@@ -7330,7 +7354,8 @@ def format_leverage_txt(autotrade_result, autotrade_enabled):
     if autotrade_result and autotrade_result.get("leverage"):
         return f"{autotrade_result['leverage']}x"
     if not autotrade_enabled:
-        return "автоторговля выключена"
+        # v0.99.377 — still say which leverage a trade would get
+        return f"{planned}x (расчётное — автоторговля выключена)" if planned else "автоторговля выключена"
     if autotrade_result and autotrade_result.get("detail"):
         return f"пропущено ({autotrade_result['detail']})"
     return "пропущено"
@@ -15127,7 +15152,9 @@ def lsw_scan_symbol_live(symbol):
                     if _lsw_signal_cooldowns.get(symbol) == sig["entry_time"]:
                         del _lsw_signal_cooldowns[symbol]
         arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
-        leverage_txt = format_leverage_txt(autotrade_result, AUTOTRADE_ENABLED_LSW)
+        _plan = planned_leverage(symbol, sig["direction"], sig["entry"], sig["sl"])   # v0.99.377
+        record["leverage"] = (autotrade_result or {}).get("leverage") or _plan
+        leverage_txt = format_leverage_txt(autotrade_result, AUTOTRADE_ENABLED_LSW, _plan)
         send_telegram(
             f"{arrow} Sweep {symbol}\n"
             f"entry: {sig['entry']:.6g}\n"
@@ -17365,7 +17392,10 @@ def snr_live_loop():
                                            autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_SNR, record)
                     else:
                         log_error(f"snr_live_loop {symbol}: signal fired but symbol was dropped from active set mid-scan — signal logged, real trade skipped")
-                leverage_txt = format_leverage_txt(autotrade_result, AUTOTRADE_ENABLED_SNR)
+                _plan = planned_leverage(symbol, sig["direction"], sig["entry"], sig["sl"])   # v0.99.377
+                record["leverage"] = (autotrade_result or {}).get("leverage") or _plan
+                record["leverage_planned"] = not (autotrade_result or {}).get("leverage")
+                leverage_txt = format_leverage_txt(autotrade_result, AUTOTRADE_ENABLED_SNR, _plan)
                 send_telegram(
                     f"{arrow} S/R {symbol} ({sig['direction']}, \u0437\u043e\u043d\u0430 {sig['zone_price']:.6g}, \u0441\u0438\u043b\u0430 {sig['zone_strength']})\n"
                     f"entry: {sig['entry']:.6g}\nSL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n\u043f\u043b\u0435\u0447\u043e: {leverage_txt}"
@@ -17915,7 +17945,10 @@ def prv_live_loop():
                                            autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_PRV, record)
                     else:
                         log_error(f"prv_live_loop {symbol}: signal fired but symbol was dropped from active set mid-scan — signal logged, real trade skipped")
-                leverage_txt = format_leverage_txt(autotrade_result, AUTOTRADE_ENABLED_PRV)
+                _plan = planned_leverage(symbol, sig["direction"], sig["entry"], sig["sl"])   # v0.99.377
+                record["leverage"] = (autotrade_result or {}).get("leverage") or _plan
+                record["leverage_planned"] = not (autotrade_result or {}).get("leverage")
+                leverage_txt = format_leverage_txt(autotrade_result, AUTOTRADE_ENABLED_PRV, _plan)
                 send_telegram(
                     f"{arrow} Peak Reversal {symbol} ({sig['direction']})\n"
                     f"entry: {sig['entry']:.6g}\nSL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n\u043f\u043b\u0435\u0447\u043e: {leverage_txt}"
@@ -26771,7 +26804,7 @@ async function refreshSnr() {
     const liveSigsTableHtml = allLiveSigs.length ? `
       <div style="overflow-x:auto;margin-bottom:14px;">
       <table style="font-size:11px;white-space:nowrap;width:100%;">
-        <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>Status</th><th>Time</th></tr></thead>
+        <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th title="плечо: фактическое, если сделка открыта автоторговлей; иначе расчётное (~) — максимальное, при котором ликвидация остаётся за стопом">Плечо</th><th>Status</th><th>Time</th></tr></thead>
         <tbody>${allLiveSigs.map(s => {
           const rc = s.status === 'OPEN' ? 'dim' : s.result === 'WIN' ? 'win' : s.result === 'LOSS' ? 'loss' : 'dim';
           const statusTxt = s.status === 'OPEN' ? '\u041e\u0422\u041a\u0420\u042b\u0422\u0410' : `${s.result}${s.pnl_r!=null?' '+(s.pnl_r>0?'+':'')+s.pnl_r+'R':''}`;
@@ -26779,6 +26812,7 @@ async function refreshSnr() {
           return `<tr onclick="openSnrChart('${s.symbol}', ${s.time})" style="cursor:pointer;">
             <td>${s.symbol.replace('_USDT','')}</td><td class="${dirClass}">${s.direction}</td>
             <td>${fmtNum(s.entry)}</td><td>${fmtNum(s.sl)}</td><td>${fmtNum(s.tp)}</td>
+            <td class="dim">${s.leverage ? (s.leverage_planned ? '~' : '') + s.leverage + 'x' : '—'}</td>
             <td class="${rc}">${statusTxt}${s.neuro_filtered ? ` <span class="dim" title="отсеян фильтром Neuro «${s.neuro_filtered}» — записан для статистики, не торговался">🧪 не торговался</span>` : ''}</td><td class="dim">${fmtDateTime(s.time)}</td>
           </tr>`;
         }).join('')}</tbody>
@@ -26885,7 +26919,7 @@ async function refreshPrv() {
     const liveSigsTableHtml = allLiveSigs.length ? `
       <div style="overflow-x:auto;margin-bottom:14px;">
       <table style="font-size:11px;white-space:nowrap;width:100%;">
-        <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>Status</th><th>Time</th></tr></thead>
+        <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th title="плечо: фактическое, если сделка открыта автоторговлей; иначе расчётное (~) — максимальное, при котором ликвидация остаётся за стопом">Плечо</th><th>Status</th><th>Time</th></tr></thead>
         <tbody>${allLiveSigs.map(s => {
           const rc = s.status === 'OPEN' ? 'dim' : s.result === 'WIN' ? 'win' : s.result === 'LOSS' ? 'loss' : 'dim';
           const statusTxt = s.status === 'OPEN' ? '\u041e\u0422\u041a\u0420\u042b\u0422\u0410' : `${s.result}${s.pnl_r!=null?' '+(s.pnl_r>0?'+':'')+s.pnl_r+'R':''}`;
@@ -26893,6 +26927,7 @@ async function refreshPrv() {
           return `<tr onclick="openPrvChart('${s.symbol}', ${s.time})" style="cursor:pointer;">
             <td>${s.symbol.replace('_USDT','')}</td><td class="${dirClass}">${s.direction}</td>
             <td>${fmtNum(s.entry)}</td><td>${fmtNum(s.sl)}</td><td>${fmtNum(s.tp)}</td>
+            <td class="dim">${s.leverage ? (s.leverage_planned ? '~' : '') + s.leverage + 'x' : '—'}</td>
             <td class="${rc}">${statusTxt}${s.neuro_filtered ? ` <span class="dim" title="отсеян фильтром Neuro «${s.neuro_filtered}» — записан для статистики, не торговался">🧪 не торговался</span>` : ''}</td><td class="dim">${fmtDateTime(s.time)}</td>
           </tr>`;
         }).join('')}</tbody>
