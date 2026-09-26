@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.362"
+APP_VERSION = "0.99.363"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -15936,13 +15936,45 @@ def snr_simulate_trades(candles, pivot_length, min_strength, rr, sl_atr_mult=SNR
                     result, exit_price, exit_time, exit_j = "WIN", tp, b["time"], j
                     break
         pnl_r = rr if result == "WIN" else (-1.0 if result == "LOSS" else None)
-        trades.append({"time": candles[idx]["time"], "entry_time": entry_bar["time"],
+        fee_r = trade_fee_r(entry, sl)   # v0.99.363
+        trades.append({"time": candles[idx]["time"], "entry_time": entry_bar["time"], "fee_r": fee_r,
+                        "pnl_r_net": round(pnl_r - fee_r, 4) if pnl_r is not None else None,
                         "direction": direction, "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8),
                         "zone_price": round(z["price"], 8), "zone_strength": cum_strength,
                         "result": result, "exit_price": round(exit_price, 8) if exit_price else None,
                         "exit_time": exit_time, "pnl_r": pnl_r})
         occupied_until = exit_j
     return trades
+
+
+def trade_fee_r(entry, sl, fee_pct=None):
+    """v0.99.363 — round-trip taker fee (entry + exit) expressed in R:
+    2 x fee x entry / |entry - sl|. With a 1% stop and 0.05% per side this
+    is 0.1R per trade, win or loss."""
+    fee_pct = AUTOTRADE_SIM_FEE_PCT if fee_pct is None else fee_pct
+    dist = abs((entry or 0) - (sl or 0))
+    return round(2 * fee_pct * entry / dist, 4) if entry and dist > 0 else 0.0
+
+
+def _z_vs_breakeven_with_fees(trades, rr):
+    """v0.99.363 — same binomial z-test as _snr_z_score_vs_breakeven(), but
+    against the breakeven win rate AFTER fees: a win pays rr-f, a loss
+    costs 1+f, so breakeven p0 = (1+f)/(1+rr) with f = the sample's mean
+    fee in R. A combo only passes if it beats that, not the fee-free one."""
+    n = len(trades)
+    if n <= 0 or rr <= 0:
+        return None
+    wins = sum(1 for t in trades if t["result"] == "WIN")
+    f = sum(t.get("fee_r") or 0.0 for t in trades) / n
+    p0 = (1.0 + f) / (1.0 + rr)
+    if p0 >= 1.0:
+        return -99.0   # fees eat the whole target: can never be profitable
+    se = math.sqrt(p0 * (1 - p0) / n)
+    return (wins / n - p0) / se if se > 0 else None
+
+
+def _net_r(t):
+    return t["pnl_r_net"] if t.get("pnl_r_net") is not None else t["pnl_r"]
 
 
 def _snr_z_score_vs_breakeven(wins, n, rr):
@@ -16031,12 +16063,12 @@ def snr_optimize_symbol(symbol):
                             continue
                         train_wins = sum(1 for t in train if t["result"] == "WIN")
                         train_wr = train_wins / len(train) * 100
-                        train_avg = sum(t["pnl_r"] for t in train) / len(train)
+                        train_avg = sum(_net_r(t) for t in train) / len(train)   # v0.99.363 — after fees
                         test_wins = sum(1 for t in test if t["result"] == "WIN")
                         test_wr = test_wins / len(test) * 100
-                        test_avg = sum(t["pnl_r"] for t in test) / len(test)
-                        train_z = _snr_z_score_vs_breakeven(train_wins, len(train), rr)
-                        test_z = _snr_z_score_vs_breakeven(test_wins, len(test), rr)
+                        test_avg = sum(_net_r(t) for t in test) / len(test)
+                        train_z = _z_vs_breakeven_with_fees(train, rr)   # v0.99.363 — breakeven incl. fees
+                        test_z = _z_vs_breakeven_with_fees(test, rr)
                         if train_z is None or test_z is None:
                             continue
                         diag["combos_enough"] += 1
@@ -16054,6 +16086,8 @@ def snr_optimize_symbol(symbol):
                                 "train_z": round(train_z, 2),
                                 "test_n": len(test), "test_wr": round(test_wr, 1), "test_avg_pnl_r": round(test_avg, 3),
                                 "test_z": round(test_z, 2),
+                                "fees_included": True,   # v0.99.363 — avg R and z are after fees
+                                "avg_fee_r": round(sum(t.get("fee_r") or 0 for t in closed) / len(closed), 3),
                                 "test_days": round((candles[-1]["time"] - boundary_time) / 86400, 1), "test_start_time": boundary_time,  # v0.99.335 — train/test divider in the full trade list
                                 "history_days": round((candles[-1]["time"] - candles[0]["time"]) / 86400, 1),  # v0.99.332 — whole backtest window (train + test), shown as months in the UI  # v0.99.315 — length of the test window, so the UI can show expected live-signal frequency (test_n / test_days)
                                 "recent_trades": closed[-40:][::-1],
@@ -16191,7 +16225,7 @@ def snr_filter_analysis():
                 j = bisect.bisect_right(h1_times, int(t["time"]) - tf_sec) - 1
                 if 0 <= j < len(neuro_c):
                     cond.update(neuro_c[j])
-            row = {"r": float(t["pnl_r"]), "c": cond}
+            row = {"r": float(_net_r(t)), "c": cond}   # v0.99.363 — after fees
             (train_rows if t["time"] <= split else test_rows).append(row)
         if train_rows and test_rows:
             rows_by_sym[sym] = (train_rows, test_rows)
@@ -16250,7 +16284,7 @@ def prv_filter_analysis():
             j = bisect.bisect_right(h1_times, int(t["time"]) - tf_sec) - 1
             if not 0 <= j < len(neuro_c):
                 continue
-            row = {"r": float(t["pnl_r"]), "c": dict(neuro_c[j])}
+            row = {"r": float(_net_r(t)), "c": dict(neuro_c[j])}   # v0.99.363 — after fees
             (train_rows if t["time"] <= split else test_rows).append(row)
         if train_rows and test_rows:
             rows_by_sym[sym] = (train_rows, test_rows)
@@ -16808,7 +16842,9 @@ def prv_simulate_trades(candles, ma_type, kc_length, band_mult, rr, atr_length=P
                     result, exit_price, exit_time, exit_j = "WIN", tp, b["time"], j
                     break
         pnl_r = rr if result == "WIN" else (-1.0 if result == "LOSS" else None)
-        trades.append({"time": c["time"], "entry_time": entry_bar["time"], "direction": direction,
+        fee_r = trade_fee_r(entry, sl)   # v0.99.363
+        trades.append({"time": c["time"], "entry_time": entry_bar["time"], "direction": direction, "fee_r": fee_r,
+                        "pnl_r_net": round(pnl_r - fee_r, 4) if pnl_r is not None else None,
                         "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8),
                         "result": result, "exit_price": round(exit_price, 8) if exit_price else None,
                         "exit_time": exit_time, "pnl_r": pnl_r,
@@ -16853,12 +16889,12 @@ def prv_optimize_symbol(symbol):
                                 continue
                             train_wins = sum(1 for t in train if t["result"] == "WIN")
                             train_wr = train_wins / len(train) * 100
-                            train_avg = sum(t["pnl_r"] for t in train) / len(train)
+                            train_avg = sum(_net_r(t) for t in train) / len(train)   # v0.99.363 — after fees
                             test_wins = sum(1 for t in test if t["result"] == "WIN")
                             test_wr = test_wins / len(test) * 100
-                            test_avg = sum(t["pnl_r"] for t in test) / len(test)
-                            train_z = _snr_z_score_vs_breakeven(train_wins, len(train), rr)
-                            test_z = _snr_z_score_vs_breakeven(test_wins, len(test), rr)
+                            test_avg = sum(_net_r(t) for t in test) / len(test)
+                            train_z = _z_vs_breakeven_with_fees(train, rr)   # v0.99.363 — breakeven incl. fees
+                            test_z = _z_vs_breakeven_with_fees(test, rr)
                             if train_z is None or test_z is None:
                                 continue
                             if train_z < PRV_Z_CRITICAL or test_z < PRV_Z_CRITICAL:
@@ -16873,6 +16909,8 @@ def prv_optimize_symbol(symbol):
                                     "test_n": len(test), "test_wr": round(test_wr, 1),
                                     "test_avg_pnl_r": round(test_avg, 3), "test_z": round(test_z, 2),
                                     "avg_mae_r": round(avg_mae, 3),
+                                    "fees_included": True,   # v0.99.363 — avg R and z are after fees
+                                    "avg_fee_r": round(sum(t.get("fee_r") or 0 for t in closed) / len(closed), 3),
                                     "test_days": round((candles[-1]["time"] - boundary_time) / 86400, 1),       # v0.99.335 (was missing on Peak)
                                     "history_days": round((candles[-1]["time"] - candles[0]["time"]) / 86400, 1),  # v0.99.335 (was missing on Peak — no months shown)
                                     "test_start_time": boundary_time,
@@ -25649,11 +25687,12 @@ async function refreshSnr() {
         <div class="dim" style="font-size:11px;margin-bottom:8px;">
           \u0442\u0430\u0439\u043c\u0444\u0440\u0435\u0439\u043c ${r.timeframe}${r.history_days ? ` \u00b7 бэктест ${fmtMonths(r.history_days)}${r.test_days ? ` (тест ${fmtMonths(r.test_days)})` : ""}` : ""} \u00b7 pivot ${r.pivot_length} \u00b7 \u0441\u0438\u043b\u0430\u2265${r.min_strength} \u00b7 RR${r.rr}
         </div>
-        <div style="display:flex;gap:16px;margin-bottom:8px;">
+        <div style="display:flex;flex-wrap:wrap;gap:4px 16px;margin-bottom:8px;">
           <div><div class="dim" style="font-size:10px;">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R \u00b7 z=${r.train_z}</div></div>
           <div><div class="dim" style="font-size:10px;">TEST (n=${r.test_n})</div><div class="win">WR ${r.test_wr}% \u00b7 ${r.test_avg_pnl_r>0?'+':''}${r.test_avg_pnl_r}R \u00b7 z=${r.test_z}</div></div>
+          <div class="dim" style="font-size:10px;flex-basis:100%;">${r.fees_included ? `R и z — после комиссии (≈${r.avg_fee_r}R на сделку: 0.05% вход + 0.05% выход)` : 'R и z — без комиссии (старый бэктест, пересчитается)'}</div>
         </div>
-        <div class="dim hint-block" style="font-size:10px;margin-bottom:8px;">z — насколько стандартных отклонений винрейт выше безубытка (нужно ≥3.23 с поправкой на 81 перебранную комбинацию)</div>
+        <div class="dim hint-block" style="font-size:10px;margin-bottom:8px;">z — насколько стандартных отклонений винрейт выше безубытка с учётом комиссии (нужно ≥3.23 с поправкой на 81 перебранную комбинацию)</div>
         ${liveSigSection}
         ${compoundSummaryHtml(r)}
         ${filterCoinLineHtml(data.filters, c.symbol)}
@@ -25759,11 +25798,12 @@ async function refreshPrv() {
         <div class="dim" style="font-size:11px;margin-bottom:8px;">
           \u0442\u0430\u0439\u043c\u0444\u0440\u0435\u0439\u043c ${r.timeframe}${r.history_days ? ` \u00b7 бэктест ${fmtMonths(r.history_days)}${r.test_days ? ` (тест ${fmtMonths(r.test_days)})` : ""}` : ""} \u00b7 ${r.ma_type}${r.kc_length} \u00b7 \u043f\u043e\u043b\u043e\u0441\u0430\u00d7${r.band_mult} \u00b7 RR${r.rr} \u00b7 \u0441\u0440.MAE ${r.avg_mae_r}R
         </div>
-        <div style="display:flex;gap:16px;margin-bottom:8px;">
+        <div style="display:flex;flex-wrap:wrap;gap:4px 16px;margin-bottom:8px;">
           <div><div class="dim" style="font-size:10px;">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R \u00b7 z=${r.train_z}</div></div>
           <div><div class="dim" style="font-size:10px;">TEST (n=${r.test_n})</div><div class="win">WR ${r.test_wr}% \u00b7 ${r.test_avg_pnl_r>0?'+':''}${r.test_avg_pnl_r}R \u00b7 z=${r.test_z}</div></div>
+          <div class="dim" style="font-size:10px;flex-basis:100%;">${r.fees_included ? `R и z — после комиссии (≈${r.avg_fee_r}R на сделку: 0.05% вход + 0.05% выход)` : 'R и z — без комиссии (старый бэктест, пересчитается)'}</div>
         </div>
-        <div class="dim hint-block" style="font-size:10px;margin-bottom:8px;">z — насколько стандартных отклонений винрейт выше безубытка (нужно ≥3.11 с поправкой на 216 перебранную комбинацию)</div>
+        <div class="dim hint-block" style="font-size:10px;margin-bottom:8px;">z — насколько стандартных отклонений винрейт выше безубытка с учётом комиссии (нужно ≥3.11 с поправкой на 216 перебранную комбинацию)</div>
         ${liveSigSection}
         ${compoundSummaryHtml(r)}
         ${filterCoinLineHtml(data.filters, c.symbol)}

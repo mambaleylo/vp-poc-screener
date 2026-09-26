@@ -17395,3 +17395,18 @@ v0.99.362 - User: "S/R вообще не проходит бэктест, Neuro 
          limit, endless one at the hard cap, errors reported, no leftovers);
          yield test at 0 / 2.5s / 1200s; S/R diag on synthetic data; jsdom:
          S/R diag box renders.
+v0.99.363 - S/R and P/R backtests now include fees (user: "вроде было написано
+         что с комиссией" — only the $15 va-bank line included them; WR/R/z
+         did not). Every trade gets fee_r = 2 × 0.05% × entry / |entry − SL|
+         (taker in + out, in R) and pnl_r_net = pnl_r − fee_r. avg R (train/
+         test, ranking) uses net R; the significance test compares the win
+         rate against the breakeven AFTER fees, p0 = (1 + f)/(1 + rr), so a
+         combo only passes if it beats fees. Filter reports use net R.
+         pnl_r stays gross (the $15 compounding already deducts fees itself —
+         no double counting). Cards say "R и z — после комиссии (≈X R на
+         сделку)"; results from before say "без комиссии (пересчитается)".
+         This changes results on purpose: coins with a thin edge drop out.
+         Verified: py_compile (-W error), pyflakes, runtime, JS check;
+         synthetic: identical trade lists, fee fields present, e.g. mean fee
+         0.138R turned avg +0.07R into −0.068R and z 0.93 into −0.89; jsdom:
+         the fee note renders on a P/R card.
