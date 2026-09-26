@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.386"
+APP_VERSION = "0.99.387"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24416,252 +24416,206 @@ INDEX_HTML = """<!doctype html>
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>VP-POC Screener</title>
 <style>
-  :root { color-scheme: dark; }
-  * { box-sizing: border-box; }
-  body { margin:0; background:#0b0e14; color:#d7dee8; font-family: -apple-system, Roboto, Segoe UI, sans-serif; }
-  body.hints-hidden .hint-block { display: none !important; }
-  header { padding:10px 14px; background:#121826; position:sticky; top:0; z-index:5; border-bottom:1px solid #1f2937; }
-  #headerTop { display:flex; justify-content:space-between; align-items:flex-start; gap:10px; }
-  /* v0.99.284 — old ID-list rule removed: it only ever named 7 of the
-     ~13 header buttons (missing resetLswBtn/resetNeuroBtn/restart*Btn/
-     resetNqBtn entirely) — the actual root cause of the "some buttons
-     red, some plain grey, no visible logic" inconsistency reported.
-     Superseded by the .btnDanger/.btnNeutral classes applied to every
-     one of them uniformly (see #headerTop's own rule above). */
-  /* v0.99.316 — compact header (per user screenshot: "все столбиком
-     идёт, много места занимает"). Title + ⚙️/🕐/🛠 share one row; the
-     10 clear/restart buttons live in a collapsible #hdrActions panel
-     (closed by default, state remembered in localStorage), one compact
-     row per module: label + short "🗑 Очистить" / "↻ Бэктест". The
-     confirm() dialogs still carry the full, explicit wording. */
-  /* v0.99.347 — settings tree: child switches indented under their parent
-     with a guide line (user: "ва-банк и инвертирование — вложенными, чуть
-     правее, красивое дерево с родительским объектом") */
-  .settingRow.tree1 { margin-left:14px; padding-left:10px; border-left:2px solid #2e3a52; }
-  .settingRow.tree2 { margin-left:34px; padding-left:10px; border-left:2px solid #26314a; }
-  .settingRow.tree1 .label, .settingRow.tree2 .label { font-size:13px; }
-  .settingRow.tree2 .label { color:#c8d0e0; }
-  .settingRow.tree1, .settingRow.tree2 { background:#0a0d15; }
-  #hdrBtns button { flex-shrink:0; }
-  #screensaverBtn, #hdrActionsToggle { background:#1e2a3f; border:none; padding:6px 10px; border-radius:8px; font-size:12px; white-space:nowrap; }
-  #hdrActionsToggle { color:#9cc4ff; }
-  #hdrActionsToggle.open { background:#26314a; }
-  #hdrActions { margin:6px 0 2px; padding:6px 8px; background:#0e1320; border:1px solid #1f2937; border-radius:8px; display:flex; flex-direction:column; gap:4px; }
-  #hdrActions .hdrRow { display:flex; align-items:center; gap:6px; }
-  #hdrActions .hdrLbl { width:84px; flex-shrink:0; font-size:11.5px; color:#8a97ab; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-  #hdrActions button { font-size:11px; padding:4px 9px; border-radius:7px; white-space:nowrap; cursor:pointer; }
-  #hdrActions button.btnDanger { background:#3a1414; border:1px solid #6b2a2a; color:#ff8a8a; }
-  #hdrActions button.btnNeutral { background:#1c2433; border:1px solid #2e3a52; color:#d0d8e8; }
-  #hdrActions button.btnDanger:active { background:#4a1a1a; }
-  #hdrActions button.btnNeutral:active { background:#26314a; }
-  #settingsBtn { background:#1e2a3f; border:none; color:#9cc4ff; padding:6px 12px; border-radius:8px; font-size:12px; white-space:nowrap; }
-  #settingsModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
-  #settingsModal.open { display:flex; flex-direction:column; }
-  #settingsModalHeader { padding:12px; display:flex; justify-content:space-between; align-items:center; }
-  #settingsModalHeader h2 { font-size:15px; margin:0; }
-  #settingsCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
-  #settingsBody { padding:4px 16px 16px; overflow-y:auto; }
-  .settingsGroup { margin-top:18px; border:1px solid #1c2433; border-radius:12px; overflow:hidden; }
-  .settingsGroup { border-left:3px solid var(--mod-color, #3a4356); }
-  .settingsGroup:first-child { margin-top:4px; }
-  .settingsGroupTitle { padding:10px 14px; font-size:11px; font-weight:700; letter-spacing:0.06em; text-transform:uppercase; color:#6b7688; background:#0d1220; border-bottom:1px solid #1c2433; cursor:pointer; list-style:none; display:flex; align-items:center; justify-content:space-between; user-select:none; }
-  .settingsGroupTitle::-webkit-details-marker { display:none; }
-  .settingsGroupTitle::after { content:"▸"; color:var(--mod-color, #6b7688); font-size:12px; transition:transform .15s; margin-left:8px; }
-  details[open] > .settingsGroupTitle::after { transform:rotate(90deg); }
-  details[data-warn] > .settingsGroupTitle { color:#ffb08a; }
-  .settingsGroup .settingRow { padding:14px; }
-  .settingsGroup .settingRow:last-child { border-bottom:none; }
-  .settingRow { display:flex; justify-content:space-between; align-items:center; padding:14px 0; border-bottom:1px solid #1c2433; }
-  .settingRow .label { font-size:14px; }
-  .settingRow .sub { font-size:11px; color:#8b98ab; margin-top:2px; }
-  .settingRow.subRow { padding-left:26px; background:#0a0d15; }
-  .settingRow.subRow .label { font-size:12.5px; color:#aab3c2; }
-  .settingRow.subRow2 { padding-left:42px; }
-  #settingsSearchWrap { padding:4px 0 12px; position:sticky; top:0; background:#05070c; z-index:2; }
-  #settingsSearch { width:100%; background:#12182a; border:1px solid #232d42; color:#fff; padding:10px 12px; border-radius:10px; font-size:13px; }
-  #settingsSearch::placeholder { color:#6b7688; }
-  .settingsGroup.searchHidden { display:none; }
-  .settingRow.searchHidden { display:none; }
-  .switch { position:relative; display:inline-block; width:44px; height:24px; flex-shrink:0; }
-  .switch input { opacity:0; width:0; height:0; }
-  .switchSlider { position:absolute; cursor:pointer; inset:0; background:#3a4356; border-radius:24px; transition:.15s; }
-  .switchSlider:before { position:absolute; content:""; height:18px; width:18px; left:3px; bottom:3px; background:#fff; border-radius:50%; transition:.15s; }
-  input:checked + .switchSlider { background:#3ddc97; }
-  input:checked + .switchSlider:before { transform:translateX(20px); }
-  input:disabled + .switchSlider { opacity:.4; }
-  header h1 { font-size:16px; margin:0 0 4px; }
-  #status { font-size:11px; color:#8b98ab; }
-  .tabs { display:flex; gap:6px; padding:8px 10px 0; }
-  .tab { padding:7px 12px; border-radius:8px 8px 0 0; background:#161d2b; font-size:13px; cursor:pointer; color:#9aa7ba; }
-  .tab.active { background:#1e2a3f; color:#fff; }
-  table { width:100%; border-collapse:collapse; font-size:13px; }
-  th, td { padding:8px 10px; text-align:right; border-bottom:1px solid #1c2433; white-space:nowrap; }
-  th:first-child, td:first-child { text-align:left; }
-  th { color:#8b98ab; font-weight:500; font-size:11px; text-transform:uppercase; }
-  tr:active { background:#182036; }
-  .long { color:#3ddc97; font-weight:600; }
-  .short { color:#ff6b6b; font-weight:600; }
-  .win { color:#3ddc97; font-weight:600; }
-  .loss { color:#ff6b6b; font-weight:600; }
-  .bal { color:#ffcc66; background:#2a2412; border:1px solid #4a3d1c; border-radius:4px; padding:0 4px; font-weight:600; white-space:nowrap; }   /* v0.99.368 — dollar balance, stands out from WIN/LOSS */
-  .status-open { color:#e8b93d; font-weight:600; }
-  .status-timeout { color:#8b98ab; }
-  .panel { padding:0 4px 20px; }
-  #modal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
-  #modal.open { display:flex; flex-direction:column; }
-  #modalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
-  #modalHeader h2 { font-size:15px; margin:0; }
-  #closeBtn, #optimizeBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
-  #optimizeBtn { background:#2a4030; color:#7fe0ab; }
-  #optimizeBtn:disabled { opacity:.5; }
-  #chartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
-  canvas { width:100%; height:100%; display:block; background:#0d1017; border-radius:8px; }
-  #msnrModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
-  #msnrModal.open { display:flex; flex-direction:column; }
-  #msnrModalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
-  #msnrModalHeader h2 { font-size:15px; margin:0; }
-  #msnrCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
-  #msnrChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
-  #ft5Modal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
-  #ft5Modal.open { display:flex; flex-direction:column; }
-  #ft5ModalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
-  #ft5ModalHeader h2 { font-size:15px; margin:0; }
-  #ft5CloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
-  #ft5ChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
-  #vgiModal { position:fixed; inset:0; background:#05070c; display:none; z-index:999; }
-  #vgiModal.open { display:flex; flex-direction:column; }
-  #vgiModalHeader { padding:12px; display:flex; justify-content:space-between; align-items:flex-start; }
-  #vgiModalHeader h2 { font-size:15px; margin:0; }
-  #vgiCloseBtn { background:#1e2a3f; border:none; color:#fff; padding:6px 12px; border-radius:8px; font-size:13px; }
-  #vgiChartWrap { flex:1; overflow:hidden; padding:0 8px 8px; }
-  .dim { color:#8b98ab; }
-  .empty { padding:30px 14px; text-align:center; color:#6b7688; font-size:13px; }
+  /* v0.99.387 — mobile-first redesign (user: "переосмысли дизайн сайта,
+     каждый элемент, с расчётом на телефон"). One design system: colour
+     tokens, a 6-step type scale, 3 radii, 4px spacing grid. Inline styles
+     in the templates were mapped onto the same tokens. */
+  :root {
+    color-scheme: dark;
+    --bg:#07090d; --bg-2:#0c0f15; --card:#11151d; --inset:#0b0e14; --ctl:#1a2030; --ctl-2:#232b3d;
+    --line:#1d2430; --line-2:#2a3342;
+    --tx:#e8ecf2; --tx-2:#a6b0c0; --tx-3:#6c7789;
+    --acc:#7cb1ff; --acc-bg:rgba(124,177,255,.12);
+    --pos:#34d399; --pos-bg:rgba(52,211,153,.12);
+    --neg:#f87171; --neg-bg:rgba(248,113,113,.12);
+    --warn:#fbbf24; --warn-bg:rgba(251,191,36,.12); --warn-line:rgba(251,191,36,.35);
+    --money:#ffd166;
+    --neuro:#b794ff; --snr:#2ec5d9; --prv:#ffa94d; --lsw:#f58fb0; --msnr:#7cb1ff;
+    --fs-xs:11px; --fs-sm:12px; --fs:13px; --fs-md:15px; --fs-lg:17px; --fs-xl:21px;
+    --r-xs:6px; --r-sm:8px; --r:12px; --r-lg:16px;
+    --font: Roboto, -apple-system, "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+  html { -webkit-text-size-adjust:100%; }
+  body { margin:0; background:var(--bg); color:var(--tx); font-family:var(--font); font-size:14px; line-height:1.4; }
+  body.hints-hidden .hint-block { display:none !important; }
+  div.hint-block { background:var(--inset); border:1px solid var(--line); border-radius:var(--r); padding:10px 12px; color:var(--tx-2); font-size:var(--fs-sm) !important; line-height:1.5; }
+  div.hint-block ul { margin:6px 0; padding-left:18px; }
+  b, strong { font-weight:600; }
+  button { font-family:inherit; color:var(--tx); cursor:pointer; }
+  button:disabled { opacity:.5; }
+  input, select, textarea { font-family:inherit; }
+  input[type="number"], input[type="text"], input[type="password"], select, textarea {
+    background:var(--inset) !important; border:1px solid var(--line-2) !important; color:var(--tx) !important;
+    border-radius:var(--r-sm) !important; padding:7px 9px; font-size:var(--fs); }
+  input:focus, select:focus, textarea:focus { outline:none; border-color:var(--acc) !important; }
+  input[type="checkbox"] { accent-color:var(--pos); width:16px; height:16px; vertical-align:middle; }
+  summary { cursor:pointer; }
+  details > summary { color:var(--tx-2); }
+  .dim { color:var(--tx-2); }
+  .empty { padding:32px 16px; text-align:center; color:var(--tx-3); font-size:var(--fs); }
 
-  /* Mobile layout, v0.89.0 — per direct user request after a live
-     screenshot showed the header button row wrapping across ~4 lines
-     (eating most of the visible screen before any actual data) and the
-     12-column tables (EMA's, worst case) rendering all columns crushed
-     into unreadable widths on a narrow phone viewport.
-     v0.99.31: this rule used to put `display:block; overflow-x:auto`
-     directly ON every <table> element itself, applying to any table on
-     the page — present now or injected later — without needing to
-     touch each render function. That worked fine for the 4 tables that
-     had NO other scroll container of their own (the 3 static signals/
-     div/ema tables, and loadMsnrTrades()'s per-trade table), but every
-     OTHER dynamically-built table (MSNR backtest, session, ft5, vgi,
-     etc — 17 of them, all already wrapped in their own `<div style=
-     "overflow-x:auto;">`) ended up with TWO independent horizontal
-     scroll containers nested inside each other: the div wrapper AND
-     the table itself. Per direct user report ("шапка относительно
-     таблицы съезжает" — the header sliding out of sync with the body
-     as you scroll): that double-nesting is exactly what broke it —
-     v0.99.30's `position:sticky` sticks relative to whichever scroll
-     container is NEAREST, and with two nested ones per table, which
-     one actually ends up "nearest" (and therefore what the sticky
-     column sticks against) can end up being the WRONG one relative to
-     where the visible scroll offset actually lives, and `display:block`
-     on <table> also breaks the browser's native guarantee that thead
-     and tbody share one column grid (each can end up auto-sizing
-     independently), which is its own separate source of drift.
-     Fixed at the root instead of patching around it: <table> no longer
-     overrides its own display or becomes its own scroll container at
-     all (keeps native `display:table`, so thead/tbody column widths
-     stay a single shared grid, and sticky has exactly ONE scroll
-     ancestor to resolve against, never two) — ALL scrolling now goes
-     through the div wrapper alone. Added a wrapper to the 4 tables
-     that didn't have one (signals/div/ema tables in the static HTML
-     skeleton, and loadMsnrTrades()'s per-trade table) instead of
-     relying on the table-level rule for them specifically. The
-     `div[style*="overflow-x:auto"]` selector below (an attribute
-     substring match, not a class) reaches every existing wrapper div
-     without needing to touch 17+ render functions just to add a
-     shared class name to each one's already-consistent inline style. */
+  /* ---------- header ---------- */
+  header { padding:10px 12px 8px; background:var(--bg-2); border-bottom:1px solid var(--line); }
+  #headerTop { display:flex; justify-content:space-between; align-items:center; gap:8px; }
+  header h1 { font-size:var(--fs-lg); font-weight:700; letter-spacing:-.01em; margin:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
+  header h1 .ver { font-size:var(--fs-xs); font-weight:500; color:var(--tx-3); margin-left:6px; letter-spacing:0; }
+  #hdrBtns { display:flex; gap:6px; align-items:center; flex-shrink:0; }
+  #hdrBtns button { height:34px; min-width:34px; padding:0 10px; border:1px solid var(--line-2); background:var(--ctl); border-radius:var(--r-sm); font-size:var(--fs); white-space:nowrap; display:inline-flex; align-items:center; gap:4px; }
+  #hdrBtns button:active { background:var(--ctl-2); }
+  #settingsBtn { color:var(--tx); }
+  #screensaverBtn { color:var(--tx-3); }
+  #hdrActionsToggle { color:var(--tx-2); }
+  #hdrActionsToggle.open { background:var(--ctl-2); border-color:var(--acc); }
+  #hdrActions { margin:8px 0 2px; padding:8px; background:var(--inset); border:1px solid var(--line); border-radius:var(--r); display:flex; flex-direction:column; gap:6px; }
+  #hdrActions .hdrRow { display:flex; align-items:center; gap:6px; }
+  #hdrActions .hdrLbl { width:92px; flex-shrink:0; font-size:var(--fs-sm); color:var(--tx-2); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  #hdrActions button { font-size:var(--fs-sm); height:30px; padding:0 10px; border-radius:var(--r-sm); white-space:nowrap; }
+  #hdrActions button.btnDanger { background:var(--neg-bg); border:1px solid rgba(248,113,113,.35); color:var(--neg); }
+  #hdrActions button.btnNeutral { background:var(--ctl); border:1px solid var(--line-2); color:var(--tx); }
+  #hdrActions button:active { filter:brightness(1.25); }
+  #status { font-size:var(--fs-xs); color:var(--tx-3); }
+  #status:empty { display:none; }
+  #hdrChips { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; align-items:center; }
+  #hdrChips:empty { display:none; }
+  .pill { display:inline-flex; align-items:center; gap:5px; height:24px; padding:0 9px; border-radius:999px; font-size:var(--fs-xs); font-weight:600; white-space:nowrap; background:var(--ctl); color:var(--tx-2); border:1px solid var(--line-2); }
+  .pill.neg { background:var(--neg-bg); color:var(--neg); border-color:rgba(248,113,113,.35); }
+  .pill.pos { background:var(--pos-bg); color:var(--pos); border-color:rgba(52,211,153,.3); }
+  .pill.warn { background:var(--warn-bg); color:var(--warn); border-color:var(--warn-line); }
+  .pill .dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
+  .loadbar { display:inline-block; width:34px; height:4px; border-radius:2px; background:var(--line-2); overflow:hidden; vertical-align:middle; }
+  .loadbar > i { display:block; height:100%; background:var(--acc); }
+  #overview, #autotradeBanner, #healthBanner { font-size:var(--fs-xs); }
+  #overview:empty, #autotradeBanner:empty, #healthBanner:empty { display:none; }
+  #healthBanner .alert { margin-top:6px; padding:8px 10px; border-radius:var(--r-sm); background:var(--neg-bg); color:var(--neg); font-size:var(--fs-sm); }
+  #healthDetails { margin-top:6px; font-size:var(--fs-xs); color:var(--tx-2); background:var(--inset); border:1px solid var(--line); border-radius:var(--r-sm); padding:8px 10px; }
+  header details > summary { list-style:none; }
+  header details > summary::-webkit-details-marker { display:none; }
+  #globalErrorsBox, #riskAutotuneBox { margin-top:0 !important; }
+  #globalErrorsBox > summary, #riskAutotuneBox > summary { display:inline-flex; align-items:center; gap:5px; height:24px; padding:0 9px; border-radius:999px; font-size:var(--fs-xs); font-weight:600; background:var(--ctl); border:1px solid var(--line-2); color:var(--tx-2); }
+  #globalErrorsBox > summary.loss { background:var(--neg-bg); color:var(--neg); border-color:rgba(248,113,113,.35); }
+  #globalErrorsBox[open], #riskAutotuneBox[open] { flex-basis:100%; }
+  #globalErrorsList, #riskAutotuneLog { background:var(--inset); border:1px solid var(--line); border-radius:var(--r-sm); padding:8px 10px; }
+
+  /* ---------- tabs ---------- */
+  .tabs { display:flex; gap:4px; padding:8px 10px; position:sticky; top:0; z-index:6; background:rgba(7,9,13,.92); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); border-bottom:1px solid var(--line); overflow-x:auto; scrollbar-width:none; -webkit-overflow-scrolling:touch; }
+  .tabs::-webkit-scrollbar { display:none; }
+  .tab { flex-shrink:0; height:34px; display:inline-flex; align-items:center; padding:0 13px; border-radius:999px; background:transparent; font-size:var(--fs); font-weight:500; cursor:pointer; color:var(--tx-2); border:1px solid transparent; white-space:nowrap; }
+  .tab.active { background:var(--ctl); color:var(--tx) !important; border-color:var(--line-2); font-weight:600; }
+  .tab.active::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--tab-c, var(--acc)); margin-right:7px; }
+  .tab[data-tab="msnr"] { --tab-c:var(--msnr); }
+  .tab[data-tab="neuro"] { --tab-c:var(--neuro); }
+  .tab[data-tab="snr"] { --tab-c:var(--snr); }
+  .tab[data-tab="prv"] { --tab-c:var(--prv); }
+  .tab[data-tab="lsw"] { --tab-c:var(--lsw); }
+  #hintsToggleBtn { flex-shrink:0; height:34px; display:inline-flex; align-items:center; padding:0 8px !important; }
+
+  /* ---------- panels ---------- */
+  .panel { padding:4px 8px 28px; }
+  .panel > div[id$="Panel"] { font-size:var(--fs) !important; }
+  .panel details { margin:4px 0; }
+  .panel details > summary { padding:5px 0; list-style:none; display:block; }
+  .panel details > summary::-webkit-details-marker { display:none; }
+  .panel details > summary::before { content:"›"; display:inline-block; width:10px; margin-right:6px; text-align:center; color:var(--tx-3); font-size:17px; line-height:1; transition:transform .15s; vertical-align:-1px; }
+  .panel details[open] > summary::before { transform:rotate(90deg); }
+
+  /* ---------- tables ---------- */
+  table { width:100%; border-collapse:separate; border-spacing:0; font-size:var(--fs-sm); font-variant-numeric:tabular-nums; }
+  th, td { padding:8px 8px; text-align:right; border-bottom:1px solid var(--line); white-space:nowrap; }
+  th:first-child, td:first-child { text-align:left; }
+  th { color:var(--tx-3); font-weight:600; font-size:10.5px; letter-spacing:.04em; text-transform:uppercase; background:var(--bg); }
+  tbody tr:last-child td { border-bottom:none; }
+  tr:active td { background:var(--ctl); }
+  div[style*="overflow-x:auto"] { -webkit-overflow-scrolling:touch; max-width:100%; scrollbar-width:none; }
+  div[style*="overflow-x:auto"]::-webkit-scrollbar { display:none; }
+
+  /* ---------- signal list (replaces wide signal tables on the phone) ---------- */
+  .sigList { border:1px solid var(--line); border-radius:var(--r); background:var(--card); overflow:hidden; margin-bottom:14px; }
+  .sig { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:3px 10px; padding:10px 12px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .sig:last-child { border-bottom:none; }
+  .sig:active { background:var(--ctl); }
+  .sig .s-top { display:flex; gap:7px; align-items:center; min-width:0; font-size:var(--fs); }
+  .sig .s-sym { font-weight:700; color:var(--tx); }
+  .sig .s-time { color:var(--tx-3); font-size:var(--fs-xs); white-space:nowrap; }
+  .sig .s-st { text-align:right; font-weight:600; font-size:var(--fs); white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .sig .s-sub { grid-column:1 / -1; color:var(--tx-2); font-size:var(--fs-xs); font-variant-numeric:tabular-nums; line-height:1.45; }
+  .dirb { display:inline-block; font-size:10px; font-weight:700; letter-spacing:.04em; padding:1px 6px; border-radius:var(--r-xs); }
+  .dirb.long { color:var(--pos); background:var(--pos-bg); }
+  .dirb.short { color:var(--neg); background:var(--neg-bg); }
+  .stOpen { color:var(--warn); }
+  .sigMore { margin:-6px 0 14px !important; }
+  .sigMore > summary { color:var(--acc) !important; font-size:var(--fs-sm); }
+  .secTitle { font-size:var(--fs-sm); font-weight:600; color:var(--tx-2); text-transform:uppercase; letter-spacing:.05em; margin:14px 2px 8px; }
+
+  /* ---------- semantic text ---------- */
+  .long, .win { color:var(--pos); font-weight:600; }
+  .short, .loss { color:var(--neg); font-weight:600; }
+  .bal { color:var(--money); background:rgba(255,209,102,.1); border:1px solid rgba(255,209,102,.3); border-radius:var(--r-xs); padding:0 5px; font-weight:600; white-space:nowrap; font-variant-numeric:tabular-nums; }
+  .status-open { color:var(--warn); font-weight:600; }
+  .status-timeout { color:var(--tx-3); }
+
+  /* ---------- modals ---------- */
+  #modal, #msnrModal, #ft5Modal, #vgiModal, #settingsModal { position:fixed; inset:0; background:var(--bg); display:none; z-index:999; }
+  #modal.open, #msnrModal.open, #ft5Modal.open, #vgiModal.open, #settingsModal.open { display:flex; flex-direction:column; }
+  #modalHeader, #msnrModalHeader, #ft5ModalHeader, #vgiModalHeader, #settingsModalHeader { padding:12px 12px 10px; display:flex; justify-content:space-between; align-items:flex-start; gap:8px; border-bottom:1px solid var(--line); background:var(--bg-2); }
+  #modalHeader h2, #msnrModalHeader h2, #ft5ModalHeader h2, #vgiModalHeader h2, #settingsModalHeader h2 { font-size:var(--fs-lg); font-weight:700; margin:0; }
+  #settingsModalHeader { align-items:center; }
+  #closeBtn, #optimizeBtn, #msnrCloseBtn, #ft5CloseBtn, #vgiCloseBtn, #settingsCloseBtn { height:34px; padding:0 14px; background:var(--ctl); border:1px solid var(--line-2); border-radius:var(--r-sm); font-size:var(--fs); font-weight:500; }
+  #optimizeBtn { background:var(--pos-bg); color:var(--pos); border-color:rgba(52,211,153,.3); }
+  #chartWrap, #msnrChartWrap, #ft5ChartWrap, #vgiChartWrap { flex:1; overflow:hidden; padding:8px; }
+  canvas { width:100%; height:100%; display:block; background:var(--inset); border-radius:var(--r); }
+
+  /* ---------- settings ---------- */
+  #settingsBody { padding:0 12px 24px; overflow-y:auto; }
+  #settingsSearchWrap { padding:10px 0; position:sticky; top:0; background:var(--bg); z-index:2; }
+  #settingsSearch { width:100%; height:40px; background:var(--card) !important; border:1px solid var(--line-2) !important; padding:0 12px; border-radius:var(--r) !important; font-size:var(--fs-md); }
+  #settingsSearch::placeholder { color:var(--tx-3); }
+  .settingsGroup { margin-top:12px; background:var(--card); border:1px solid var(--line); border-radius:var(--r-lg); overflow:hidden; position:relative; }
+  .settingsGroup::before { content:""; position:absolute; left:0; top:0; bottom:0; width:3px; background:var(--mod-color, var(--line-2)); }
+  .settingsGroup:first-child { margin-top:2px; }
+  .settingsGroupTitle { padding:13px 14px 13px 16px; font-size:var(--fs-sm); font-weight:700; letter-spacing:.05em; text-transform:uppercase; color:var(--tx-2); cursor:pointer; list-style:none; display:flex; align-items:center; justify-content:space-between; user-select:none; }
+  .settingsGroupTitle::-webkit-details-marker { display:none; }
+  .settingsGroupTitle::after { content:"›"; color:var(--mod-color, var(--tx-3)); font-size:20px; line-height:1; transition:transform .15s; margin-left:8px; }
+  details[open] > .settingsGroupTitle { border-bottom:1px solid var(--line); }
+  details[open] > .settingsGroupTitle::after { transform:rotate(90deg); }
+  details[data-warn] > .settingsGroupTitle { color:var(--warn); }
+  .settingRow { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:12px 14px 12px 16px; border-bottom:1px solid var(--line); }
+  .settingsGroup .settingRow:last-child { border-bottom:none; }
+  .settingRow > div:first-child { min-width:0; flex:1; }
+  .settingRow .label, .settingRow .name { font-size:var(--fs-md); font-weight:500; color:var(--tx); line-height:1.3; }
+  .settingRow .sub { font-size:var(--fs-sm); color:var(--tx-3); margin-top:3px; line-height:1.35; }
+  .settingRow.subRow, .settingRow.tree1 { padding-left:30px; background:var(--inset); }
+  .settingRow.subRow2, .settingRow.tree2 { padding-left:44px; background:var(--inset); }
+  .settingRow.subRow .label, .settingRow.tree1 .label, .settingRow.tree2 .label { font-size:var(--fs); color:var(--tx); }
+  .settingRow.tree1, .settingRow.tree2 { margin-left:0; border-left:none; }
+  .settingsGroup.searchHidden, .settingRow.searchHidden { display:none; }
+  .switch { position:relative; display:inline-block; width:46px; height:28px; flex-shrink:0; }
+  .switch input { opacity:0; width:0; height:0; }
+  .switchSlider { position:absolute; cursor:pointer; inset:0; background:var(--ctl-2); border-radius:999px; transition:.15s; }
+  .switchSlider:before { position:absolute; content:""; height:22px; width:22px; left:3px; bottom:3px; background:#fff; border-radius:50%; transition:.15s; box-shadow:0 1px 3px rgba(0,0,0,.4); }
+  input:checked + .switchSlider { background:var(--pos); }
+  input:checked + .switchSlider:before { transform:translateX(18px); }
+  input:disabled + .switchSlider { opacity:.4; }
+
+  /* ---------- phone ---------- */
   @media (max-width: 640px) {
-    header { padding:8px 10px; position:static; }
-    header h1 { font-size:15px; margin-bottom:6px; }
-    #headerTop { flex-direction:row; align-items:center; gap:6px; }
-    #headerTop h1 { margin-bottom:0; flex:1; min-width:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
-    #hdrBtns button { font-size:11px; padding:6px 9px; }
-    /* v0.99.284 — per direct user request ("привести к красивому единому
-       виду"): explicit, consistent classes replacing whatever accidental
-       styling these ~20 header buttons had accumulated over many
-       sessions (no shared class/rule existed before this — some looked
-       red, some grey, with no logic behind which). Danger = irreversibly
-       deletes accumulated data (Очистить X / Сбросить X); Neutral =
-       safe, non-destructive (Перезапустить бэктест X — just wakes a
-       cycle early, keeps existing data until it's naturally replaced). */
-    /* (btnDanger/btnNeutral styling moved to #hdrActions rules, v0.99.316) */
-    #status, #overview, #autotradeBanner { font-size:10.5px; }
-    .tabs { flex-wrap:nowrap; overflow-x:auto; -webkit-overflow-scrolling:touch; padding-bottom:2px; }
-    .tab { flex-shrink:0; font-size:12px; padding:6px 10px; }
-    table { white-space:nowrap; }
-    div[style*="overflow-x:auto"] { -webkit-overflow-scrolling:touch; max-width:100%; }
-    /* v0.99.28, per direct user request after a live portrait-mode
-       screenshot of the MSNR backtest table: cells were still padded/
-       sized for a desktop-width table, wasting horizontal space that
-       matters far more on a narrow phone than the extra tap-target
-       size does — shrunk from the original 6px 8px / 12px (already a
-       reduction from the 8px 10px / 13px desktop default) to fit
-       meaningfully more columns before horizontal scroll kicks in.
-       Applies to every table on the page (same "one CSS-only rule,
-       works for both static and dynamically-injected tables" reasoning
-       v0.89.0 already established above) — the dense multi-column
-       backtest tables (MSNR/FT5/VGI/session/etc, all built the same
-       way) are the ones that actually needed it, but a uniformly
-       tighter mobile table is a reasonable default everywhere, not
-       just there. */
-    th, td { padding:4px 4px; font-size:10.5px; }
-    /* v0.99.62, per direct user report (Huawei MatePad 12.2, landscape
-       — "все не влазит, надо скролить, немного буквально"): horizontal
-       cell padding trimmed 6px -> 4px per side (vertical unchanged) —
-       a small, uniform width saving across every column of every table
-       this same global rule already covers, rather than touching any
-       one table's own layout specifically. */
-    /* v0.99.30, per direct user request ("давай закрепим"): pin the
-       first column (Symbol, in every one of these tables) so it stays
-       visible while swiping through the rest — now that v0.99.29 fixed
-       scroll position actually surviving a refresh, sitting on a
-       stable horizontal scroll for a few seconds without knowing which
-       ROW you're looking at was the next obvious friction point.
-       position:sticky sticks relative to the nearest scrolling
-       ancestor — v0.99.31 made that ALWAYS the div wrapper now (never
-       the table itself), so there's exactly one unambiguous scroll
-       container per table for this to resolve against. Needs an
-       explicit background (not "transparent", the actual body
-       background color) since a sticky cell that's otherwise
-       transparent lets every OTHER column's text scroll visibly
-       underneath it instead of being hidden by it — defeats the
-       purpose. Scoped to mobile only: on desktop these tables
-       generally fit without horizontal scroll in the first place, so
-       there's nothing to pin against. */
-    th:first-child, td:first-child { position:sticky; left:0; z-index:2; background:#0b0e14; }
-    tr:active td:first-child { background:#182036; }
-    /* v0.99.49, per direct user request ("галочку как и имя монеты
-       сделай фиксированным при скролле"): pin the SECOND column too,
-       but only for the MSNR backtest table (.msnr-bt-table) — its
-       2nd column is the autotrade checkbox, which is exactly what
-       needs to stay visible alongside the pinned Symbol name while
-       swiping through the rest of that specific table's many columns.
-       Not applied globally like the first-column rule above: other
-       tables' 2nd column varies a lot in width (Dir/Reason/etc), and
-       forcing a second sticky column everywhere would need a matching
-       fixed width for column 1 in EVERY table to avoid column 2
-       overlapping it — only .msnr-bt-table's first column (short
-       ticker symbols) is narrow and predictable enough to give a safe
-       fixed width to. */
-    .msnr-bt-table th:first-child, .msnr-bt-table td:first-child { width:92px; min-width:92px; max-width:92px; overflow:hidden; text-overflow:ellipsis; }
-    .msnr-bt-table th:nth-child(2), .msnr-bt-table td:nth-child(2) { position:sticky; left:92px; z-index:2; background:#0b0e14; }
-    .msnr-bt-table tr:active td:nth-child(2) { background:#182036; }
+    header { padding:10px 10px 8px; }
+    th, td { padding:7px 6px; }
+    th:first-child, td:first-child { position:sticky; left:0; z-index:2; background:var(--bg); }
+    tr:active td:first-child { background:var(--ctl); }
+    .msnr-bt-table th:first-child, .msnr-bt-table td:first-child { width:96px; min-width:96px; max-width:96px; overflow:hidden; text-overflow:ellipsis; }
+    .msnr-bt-table th:nth-child(2), .msnr-bt-table td:nth-child(2) { position:sticky; left:96px; z-index:2; background:var(--bg); }
+    .msnr-bt-table tr:active td:nth-child(2) { background:var(--ctl); }
   }
 </style>
 </head>
 <body>
 <header>
   <div id="headerTop">
-    <h1>VP-POC Screener</h1>
+    <h1>VP-POC<span class="ver" id="hdrVer"></span></h1>
     <div id="hdrBtns" style="display:flex;gap:6px;align-items:center;">
       <button id="settingsBtn">⚙️ Настройки</button>
-      <button id="screensaverBtn" onclick="toggleScreensaver()" style="color:#5a6a7a;" title="скринсейвер (часы, защита AMOLED)">🕐</button>
+      <button id="screensaverBtn" onclick="toggleScreensaver()" title="скринсейвер (часы, защита AMOLED)">🕐</button>
       <button id="hdrActionsToggle" title="очистка данных и перезапуск бэктестов">🛠 <span id="hdrActionsArrow">▾</span></button>
     </div>
   </div>
@@ -24675,51 +24629,54 @@ INDEX_HTML = """<!doctype html>
     <div class="hdrRow"><span class="hdrLbl">Авто-тюнинг</span><button id="resetRiskAutotuneBtn" class="btnDanger">🗑 Сбросить</button></div>
     <div class="hdrRow"><span class="hdrLbl">Ошибки</span><button id="clearErrorsBtn" class="btnDanger">🗑 Очистить</button></div>
   </div>
-  <div id="status">загрузка...</div>
-  <div id="overview" class="dim" style="margin-top:2px;font-size:12px;"></div>
-  <div id="autotradeBanner" style="margin-top:2px;font-size:12px;"></div>
-  <div id="healthBanner" style="margin-top:2px;font-size:11.5px;"></div>
-  <details id="riskAutotuneBox" style="margin-top:4px;font-size:11.5px;display:none;">
-    <summary class="dim" style="cursor:pointer;">Авто-тюнинг риска</summary>
-    <div id="riskAutotuneLog" class="dim" style="margin-top:4px;"></div>
-  </details>
-  <details id="globalErrorsBox" style="margin-top:4px;font-size:11.5px;">
-    <summary class="dim loss" style="cursor:pointer;">⚠️ Ошибки (<span id="globalErrorsCount">0</span>)</summary>
-    <div id="globalErrorsList" class="dim" style="margin-top:4px;font-size:12px;max-height:300px;overflow-y:auto;"></div>
-  </details>
+  <div id="status"></div>
+  <div id="overview" class="dim" style="margin-top:4px;"></div>
+  <div id="hdrChips">
+    <span id="autotradeBanner"></span>
+    <span id="healthPill"></span>
+    <details id="globalErrorsBox" style="display:none;">
+      <summary class="loss">⚠ Ошибки <span id="globalErrorsCount">0</span></summary>
+      <div id="globalErrorsList" class="dim" style="margin-top:6px;font-size:var(--fs-sm);max-height:300px;overflow-y:auto;"></div>
+    </details>
+    <details id="riskAutotuneBox" style="display:none;">
+      <summary>Авто-тюнинг риска</summary>
+      <div id="riskAutotuneLog" class="dim" style="margin-top:6px;font-size:var(--fs-sm);"></div>
+    </details>
+  </div>
+  <div id="healthBanner"></div>
 </header>
 <div class="tabs">
   <div class="tab active" data-tab="msnr">MSNR</div>
-  <div class="tab" data-tab="neuro" style="color:#a855f7;">🧠 Neuro</div>
-  <div class="tab" data-tab="snr" style="color:#26c6da;">S/R Zones</div>
-  <div class="tab" data-tab="prv" style="color:#ffa726;">Peak Reversal</div>
+  <div class="tab" data-tab="neuro" style="color:var(--neuro);">🧠 Neuro</div>
+  <div class="tab" data-tab="snr" style="color:var(--snr);">S/R Zones</div>
+  <div class="tab" data-tab="prv" style="color:var(--prv);">Peak Reversal</div>
   <div class="tab" data-tab="lsw">Sweep</div>
   <div class="tab" data-tab="signals">Volume</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
-  <div id="hintsToggleBtn" onclick="toggleHints()" style="margin-left:auto;padding:4px 10px;font-size:11px;color:#5a6a7a;cursor:pointer;user-select:none;align-self:center;" title="скрыть/показать подсказки">💡</div>
+  <div id="hintsToggleBtn" onclick="toggleHints()" style="margin-left:auto;padding:4px 10px;font-size:var(--fs-sm);color:var(--tx-3);cursor:pointer;user-select:none;align-self:center;" title="скрыть/показать подсказки">💡</div>
 </div>
 <div class="panel">
-  <div id="tuningPanel" style="display:none;padding:10px 4px;font-size:13px;"></div>
+  <div id="tuningPanel" style="display:none;padding:10px 4px;font-size:var(--fs);"></div>
   <div style="overflow-x:auto;">
   <table id="signalsTable" style="display:none">
     <thead><tr><th>Symbol</th><th>Dir</th><th>Reason</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>MFE(R)</th><th>MAE(R)</th><th>Status</th><th>Time</th></tr></thead>
     <tbody></tbody>
   </table>
   </div>
-  <div id="scalpPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
-  <div id="msnrPanel" style="display:block;padding:8px 4px;font-size:12px;"></div>
-  <div id="ft5Panel" style="display:none;padding:8px 4px;font-size:12px;"></div>
-  <div id="mirrorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
-  <div id="lswPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
-  <div id="emaBullPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
-  <div id="amdPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
-  <div id="neuroPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
-  <div id="snrPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
-  <div id="prvPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
-  <div id="nqPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
-  <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
-  <div id="simulatorPanel" style="display:none;padding:8px 4px;font-size:12px;"></div>
+  <div id="scalpPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="msnrPanel" style="display:block;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="ft5Panel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="mirrorPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="lswPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="emaBullPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="amdPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="neuroPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="snrPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="prvPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="nqPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="simulatorPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div class="empty" id="emptyMsg" style="display:none">Пока нет данных</div>
 </div>
 
@@ -24727,7 +24684,7 @@ INDEX_HTML = """<!doctype html>
   <div id="modalHeader">
     <div>
       <h2 id="modalTitle">-</h2>
-      <div id="modalParams" class="dim" style="font-size:11px;margin-top:2px;"></div>
+      <div id="modalParams" class="dim" style="font-size:var(--fs-sm);margin-top:2px;"></div>
     </div>
     <div style="display:flex;gap:8px;">
       <button id="optimizeBtn">Оптимизировать</button>
@@ -24741,7 +24698,7 @@ INDEX_HTML = """<!doctype html>
   <div id="msnrModalHeader">
     <div>
       <h2 id="msnrModalTitle">-</h2>
-      <div id="msnrModalParams" class="dim" style="font-size:11px;margin-top:2px;"></div>
+      <div id="msnrModalParams" class="dim" style="font-size:var(--fs-sm);margin-top:2px;"></div>
     </div>
     <button id="msnrCloseBtn">Закрыть</button>
   </div>
@@ -24752,7 +24709,7 @@ INDEX_HTML = """<!doctype html>
   <div id="ft5ModalHeader">
     <div>
       <h2 id="ft5ModalTitle">-</h2>
-      <div id="ft5ModalParams" class="dim" style="font-size:11px;margin-top:2px;"></div>
+      <div id="ft5ModalParams" class="dim" style="font-size:var(--fs-sm);margin-top:2px;"></div>
     </div>
     <button id="ft5CloseBtn">Закрыть</button>
   </div>
@@ -24763,7 +24720,7 @@ INDEX_HTML = """<!doctype html>
   <div id="vgiModalHeader">
     <div>
       <h2 id="vgiModalTitle">-</h2>
-      <div id="vgiModalParams" class="dim" style="font-size:11px;margin-top:2px;"></div>
+      <div id="vgiModalParams" class="dim" style="font-size:var(--fs-sm);margin-top:2px;"></div>
     </div>
     <button id="vgiCloseBtn">Закрыть</button>
   </div>
@@ -24781,7 +24738,7 @@ INDEX_HTML = """<!doctype html>
     </div>
 
 
-    <details class="settingsGroup" style="--mod-color:#b39ddb;"><summary class="settingsGroupTitle">⚙️ Производительность и фильтр Neuro</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--neuro);"><summary class="settingsGroupTitle">⚙️ Производительность и фильтр Neuro</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="name">Фильтр Neuro в бэктесте MSNR / S/R / P/R / Sweep</div>
@@ -24794,17 +24751,17 @@ INDEX_HTML = """<!doctype html>
           <div class="name">Процессы для расчёта бэктестов (MSNR, Neuro, S/R, P/R, Sweep)</div>
           <div class="sub">сколько ядер процессора использовать для расчёта (каждый процесс ≈85 МБ памяти). 0 — считать как раньше, в одном процессе. Результаты одинаковые, меняется только скорость и нагрузка</div>
         </div>
-        <input type="number" id="setCalcWorkers" min="0" max="8" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+        <input type="number" id="setCalcWorkers" min="0" max="8" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
       <div class="settingRow">
         <div>
           <div class="name">↳ Процессов при первом прогоне / после «Очистить»</div>
           <div class="sub">пока у модуля ещё нет ни одного готового бэктеста, расчёт идёт на этом числе ядер (по умолчанию — все), потом снова на числе выше</div>
         </div>
-        <input type="number" id="setCalcWorkersBoost" min="0" max="8" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+        <input type="number" id="setCalcWorkersBoost" min="0" max="8" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
     </div></details>
-    <details class="settingsGroup" style="--mod-color:#ff7043;" data-warn style="background:rgba(255,112,67,0.05);"><summary class="settingsGroupTitle" style="color:#e0a030;">MSNR ⚠️ Экспериментально</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:#ff7043;" data-warn style="background:rgba(255,112,67,0.05);"><summary class="settingsGroupTitle" style="color:var(--warn);">MSNR ⚠️ Экспериментально</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
         <div>
@@ -24815,7 +24772,7 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Добор (add-on) <span style="color:#e0a030;">⚠️ реальный ордер</span></div>
+          <div class="label">↳ Добор (add-on) <span style="color:var(--warn);">⚠️ реальный ордер</span></div>
           <div class="sub">вторая доливка к уже открытой позиции при свежем QM на M30 по тому же уровню (h1/m30 SBR &gt; m1 QM + m30 добір). На Gate это сливается в одну позицию с усреднённой ценой — итоговый стоп берётся более консервативный (дальше от цены) из старого и нового</div>
         </div>
         <label class="switch"><input type="checkbox" id="setMsnrAddon"><span class="switchSlider"></span></label>
@@ -24876,25 +24833,25 @@ INDEX_HTML = """<!doctype html>
           <div class="label">↳ Сколько монет держать в топе</div>
           <div class="sub">бэктест всё равно проверяет всю вселенную каждый цикл — здесь только сколько лучших по ср. P&L остаются активными. Уменьшение применяется сразу (пересчёт по уже сохранённым данным), увеличение — только со следующего полного цикла</div>
         </div>
-        <input type="number" id="setNeuroTopN" min="1" max="50" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+        <input type="number" id="setNeuroTopN" min="1" max="50" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
       <div class="settingRow">
         <div>
           <div class="label">↳ Сколько монет отображать</div>
           <div class="sub">не меньше числа выше — торгуются только лучшие по числу выше, а карточки сверх этого показываются серым как справочные (свой бэктест есть, но не торгуются и не сканируются вживую)</div>
         </div>
-        <input type="number" id="setNeuroDisplayN" min="1" max="50" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+        <input type="number" id="setNeuroDisplayN" min="1" max="50" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
       <div class="settingRow">
         <div>
           <div class="label">↳ Минимальный винрейт для попадания в топ</div>
           <div class="sub">монета исключается из торгуемых/активных полностью, даже если по среднему +R она заняла бы первое место — редкие крупные победы не должны маскировать низкий процент выигрышных сделок</div>
         </div>
-        <input type="number" id="setNeuroMinWinrate" min="0" max="100" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+        <input type="number" id="setNeuroMinWinrate" min="0" max="100" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#26c6da;"><summary class="settingsGroupTitle">S/R Zones (Flux Charts)</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--snr);"><summary class="settingsGroupTitle">S/R Zones (Flux Charts)</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Работа (бэктест + живые сигналы)</div>
@@ -24907,14 +24864,14 @@ INDEX_HTML = """<!doctype html>
           <div class="label">↳ Сколько монет держать в топе</div>
           <div class="sub">бэктест проверяет всю вселенную каждый цикл — здесь только сколько лучших по TEST avg P&L остаются активными (торгуются)</div>
         </div>
-        <input type="number" id="setSnrTopN" min="1" max="30" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+        <input type="number" id="setSnrTopN" min="1" max="30" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
       <div class="settingRow subRow">
         <div>
           <div class="label">↳ Сколько монет отображать</div>
           <div class="sub">не меньше числа выше — торгуются только лучшие по числу выше, остальные показываются серым как справочные</div>
         </div>
-        <input type="number" id="setSnrDisplayN" min="1" max="30" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+        <input type="number" id="setSnrDisplayN" min="1" max="30" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
       <div class="settingRow">
         <div>
@@ -24937,14 +24894,14 @@ INDEX_HTML = """<!doctype html>
           <div class="label">↳ Сколько монет держать в топе</div>
           <div class="sub">вселенная — топ 30 по ликвидности; здесь сколько лучших по TEST avg P&L остаются активными (торгуются)</div>
         </div>
-        <input type="number" id="setPrvTopN" min="1" max="30" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+        <input type="number" id="setPrvTopN" min="1" max="30" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
       <div class="settingRow subRow">
         <div>
           <div class="label">↳ Сколько монет отображать</div>
           <div class="sub">не меньше числа выше — торгуются только лучшие по числу выше, остальные показываются серым как справочные</div>
         </div>
-        <input type="number" id="setPrvDisplayN" min="1" max="30" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+        <input type="number" id="setPrvDisplayN" min="1" max="30" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
       <div class="settingRow">
         <div>
@@ -24955,7 +24912,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:#4dd0e1;"><summary class="settingsGroupTitle">Sweep (Liquidity Sweep)</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--snr);"><summary class="settingsGroupTitle">Sweep (Liquidity Sweep)</summary><div class="settingsGroupBody">
       
       <div class="settingRow">
         <div>
@@ -24969,14 +24926,14 @@ INDEX_HTML = """<!doctype html>
           <div class="label">↳ RR (тейк-профит)</div>
           <div class="sub">фиксированное соотношение тейк:стоп от стопа за экстремумом свипа</div>
         </div>
-        <input type="number" id="setLswRR" min="0.5" max="20" step="0.5" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+        <input type="number" id="setLswRR" min="0.5" max="20" step="0.5" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
       <div class="settingRow">
         <div>
           <div class="label">↳ Допуск "равных" уровней</div>
           <div class="sub">насколько близко должны быть два свинг-хая (или два свинг-лоу) друг к другу, чтобы считаться одним и тем же уровнем ликвидности (% от цены) — именно это делает уровень "равными хаями/лоу", а не просто одиночным свингом</div>
         </div>
-        <input type="number" id="setLswEqualTolerance" min="0.01" max="2" step="0.01" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+        <input type="number" id="setLswEqualTolerance" min="0.01" max="2" step="0.01" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
       <div class="settingRow">
         <div>
@@ -25168,12 +25125,12 @@ INDEX_HTML = """<!doctype html>
         </div>
       </div>
       <div class="settingRow" style="flex-direction:column;align-items:stretch;gap:8px;">
-        <input type="text" id="setGateApiKey" placeholder="API Key" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;">
-        <input type="password" id="setGateApiSecret" placeholder="API Secret" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:8px 10px;border-radius:8px;font-size:13px;">
+        <input type="text" id="setGateApiKey" placeholder="API Key" style="background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:8px 10px;border-radius:var(--r-sm);font-size:var(--fs);">
+        <input type="password" id="setGateApiSecret" placeholder="API Secret" style="background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:8px 10px;border-radius:var(--r-sm);font-size:var(--fs);">
         <div style="display:flex;gap:8px;">
-          <button id="saveGateApiBtn" style="flex:1;background:#1e2a3f;border:none;color:#fff;padding:8px;border-radius:8px;font-size:13px;">Сохранить ключи</button>
-          <button id="clearGateApiBtn" style="background:#3a1e22;border:none;color:#ff9b9b;padding:8px 12px;border-radius:8px;font-size:13px;">Удалить</button>
-          <button onclick="testGateAccount('')" style="background:#1c2433;border:none;color:#9cc4ff;padding:8px 12px;border-radius:8px;font-size:13px;">Проверить</button>
+          <button id="saveGateApiBtn" style="flex:1;background:var(--ctl);border:none;color:var(--tx);padding:8px;border-radius:var(--r-sm);font-size:var(--fs);">Сохранить ключи</button>
+          <button id="clearGateApiBtn" style="background:var(--neg-bg);border:none;color:var(--neg);padding:8px 12px;border-radius:var(--r-sm);font-size:var(--fs);">Удалить</button>
+          <button onclick="testGateAccount('')" style="background:var(--line);border:none;color:var(--acc);padding:8px 12px;border-radius:var(--r-sm);font-size:var(--fs);">Проверить</button>
         </div>
         <div class="sub" id="acctTest_main"></div>
       </div>
@@ -25196,7 +25153,7 @@ INDEX_HTML = """<!doctype html>
           <div class="label">Риск на сделку</div>
           <div class="sub">% от общего баланса счёта, который теряется при срабатывании стопа — общий для всех модулей с реальной автоторговлей (MSNR, Neuro, S/R Zones, Peak Reversal, Sweep). Плечо на каждую сделку подбирается автоматически под этот риск и стоп конкретного сигнала</div>
         </div>
-        <input type="number" id="setAutotradeRiskPct" min="0.1" max="50" step="0.5" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+        <input type="number" id="setAutotradeRiskPct" min="0.1" max="50" step="0.5" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
       <div class="settingRow">
         <div>
@@ -25335,7 +25292,7 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <div class="dim hint-block" style="font-size:12px;margin-top:16px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
+    <div class="dim hint-block" style="font-size:var(--fs);margin-top:16px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
   </div>
 </div>
 
@@ -25368,10 +25325,30 @@ function toggleHints() {
     if (btn) btn.style.opacity = '0.4';
   }
 })();
+// v0.99.387 — "SOL" instead of "SOL_USDT" everywhere on screen (every pair is
+// a USDT perpetual); only visible text is touched, never ids/handlers
+function _stripUsdt(root) {
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let n;
+  while ((n = w.nextNode())) {
+    if (n.nodeValue.indexOf('_USDT') >= 0) n.nodeValue = n.nodeValue.replace(/([A-Za-z0-9\u4e00-\u9fff]+)_USDT\\b/g, '$1');
+  }
+}
+(() => {
+  const obs = new MutationObserver(ms => {
+    for (const m of ms) for (const nd of m.addedNodes) {
+      if (nd.nodeType === 3) { if (nd.nodeValue.indexOf('_USDT') >= 0) nd.nodeValue = nd.nodeValue.replace(/([A-Za-z0-9\u4e00-\u9fff]+)_USDT\\b/g, '$1'); }
+      else if (nd.nodeType === 1) _stripUsdt(nd);
+    }
+  });
+  obs.observe(document.body, {childList: true, subtree: true});
+  _stripUsdt(document.body);
+})();
 document.querySelectorAll('.tab').forEach(el => {
   el.onclick = () => {
     document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
     el.classList.add('active');
+    try { el.scrollIntoView({block: 'nearest', inline: 'center', behavior: 'smooth'}); } catch (e) {}   // v0.99.387
     activeTab = el.dataset.tab;
     document.getElementById('signalsTable').style.display = activeTab === 'signals' ? 'table' : 'none';
     document.getElementById('tuningPanel').style.display = activeTab === 'signals' ? 'block' : 'none';
@@ -25425,6 +25402,36 @@ document.querySelectorAll('.tab').forEach(el => {
 // the overwhelmingly common case (same symbols, same sort order), so
 // position is a reliable-enough proxy without threading ids through
 // every render function in the app.
+// v0.99.387 — one compact 2-line row per live signal (phone-friendly):
+// coin · direction · time | result ; entry / SL / TP and extras below
+function sigStatusShort(s) {
+  if (s.status === 'OPEN' || (!s.result && s.status !== 'CLOSED')) return '<span class="stOpen">открыта</span>';
+  const r = s.pnl_r != null ? s.pnl_r : (s.result === 'TIMEOUT' ? s.timeout_pnl_r : null);
+  const rTxt = r != null ? ' ' + (r > 0 ? '+' : '') + r + 'R' : '';
+  if (s.result === 'WIN') return `<span class="win">WIN${rTxt}</span>`;
+  if (s.result === 'LOSS' || s.result === 'LOSS_EARLY') return `<span class="loss">${s.result === 'LOSS_EARLY' ? 'выход' : 'LOSS'}${rTxt}</span>`;
+  if (s.result === 'TIMEOUT') return `<span class="${r == null ? 'status-timeout' : (r >= 0 ? 'win' : 'loss')}">тайм-аут${rTxt}</span>`;
+  return `<span class="dim">${s.result || '—'}</span>`;
+}
+function sigItemHtml(s, o) {
+  o = o || {};
+  const dir = s.direction === 'SHORT' ? 'short' : 'long';
+  const t = s.detected_at || s.time;
+  const parts = [`вход ${fmtNum(s.entry)}`, `SL ${fmtNum(s.sl)}`, `TP ${fmtNum(s.tp)}`].concat(o.extra || []);
+  return `<div class="sig"${o.attrs ? ' ' + o.attrs : ''}${o.onclick ? ` onclick="${o.onclick}"` : ''}>
+    <div class="s-top"><span class="s-sym">${s.symbol}</span><span class="dirb ${dir}">${s.direction}</span><span class="s-time">${t ? fmtDateTime(t) : ''}</span></div>
+    <div class="s-st">${o.statusHtml || sigStatusShort(s)}</div>
+    <div class="s-sub">${parts.filter(x => x && String(x).replace(/<[^>]*>/g, '').trim() && String(x).replace(/<[^>]*>/g, '').trim() !== '\u2014').join(' · ')}</div>
+  </div>`;
+}
+
+function sigListHtml(rowsHtml, first) {   // v0.99.387 — latest N visible, the rest behind "ещё N"
+  first = first || 8;
+  const head = rowsHtml.slice(0, first).join(''), rest = rowsHtml.slice(first);
+  return `<div class="secTitle">Живые сигналы · ${rowsHtml.length}</div><div class="sigList">${head}</div>`
+    + (rest.length ? `<details class="sigMore"><summary>ещё ${rest.length}</summary><div class="sigList">${rest.join('')}</div></details>` : '');
+}
+
 function setPanelHtml(panel, html) {
   const scrollable = el => el.scrollWidth > el.clientWidth;
   const before = Array.from(panel.querySelectorAll('*')).filter(scrollable).map(el => el.scrollLeft);
@@ -25464,7 +25471,8 @@ async function refreshStatus() {
     const el = document.getElementById('status');
     const fetchErrTxt = s.excluded_fetch_error ? `, ${s.excluded_fetch_error} сетевых сбоев` : '';
     const scanTxt = s.last_scan_finished ? `скан ${s.last_scan_duration}s, ${s.universe_size} пар (искл. ${s.excluded_low_quality||0} неликвид${fetchErrTxt})` : 'сканирование...';
-    el.textContent = s.volume_profile_enabled ? `v${s.version} · ${scanTxt}` : `v${s.version}`;  // v0.99.337 — Volume scan timing only when Volume is on
+    const _ver = document.getElementById('hdrVer'); if (_ver) _ver.textContent = 'v' + s.version;   // v0.99.387
+    el.textContent = s.volume_profile_enabled ? scanTxt : '';  // v0.99.337 — Volume scan timing only when Volume is on
     const ra = s.risk_autotune;
     const raBox = document.getElementById('riskAutotuneBox');
     if (ra && ra.log && ra.log.length) {
@@ -25595,9 +25603,9 @@ async function refreshTuning() {
   const cvTxt = cv.total ? `с v${s.version}: ${cv.winrate}% (${cv.wins}W/${cv.losses}L)` : `с v${s.version}: пока нет закрытых`;
   const errList = s.errors || [];
   const errHtml = errList.length ? `
-    <div class="dim" style="margin-top:10px;padding-top:10px;border-top:1px solid #1c2433;">
+    <div class="dim" style="margin-top:10px;padding-top:10px;border-top:1px solid var(--line);">
       <b class="loss">Последние ошибки сканера (${errList.length}):</b><br>
-      <span style="font-size:12px;">${errList.slice().reverse().map(errRowHtml).join('')}</span>
+      <span style="font-size:var(--fs);">${errList.slice().reverse().map(errRowHtml).join('')}</span>
     </div>` : '';
   const detailHtml = `
     <div class="dim hint-block" style="margin-bottom:10px;">
@@ -25606,11 +25614,11 @@ async function refreshTuning() {
       За этот скан отклонено — тренд: ${s.filtered_by_trend||0}, объём: ${s.filtered_by_volume||0}, OI: ${s.filtered_by_oi||0}, устарел: ${s.filtered_by_staleness||0} · ${cvTxt}
     </div>${errHtml}`;
   if (!t.count) {
-    el.innerHTML = detailHtml + '<div class="dim" style="padding-top:10px;border-top:1px solid #1c2433;"><b>Объём (Volume Profile) — статистика</b><br>Пока недостаточно данных — подожди пару циклов скана.</div>';
+    el.innerHTML = detailHtml + '<div class="dim" style="padding-top:10px;border-top:1px solid var(--line);"><b>Объём (Volume Profile) — статистика</b><br>Пока недостаточно данных — подожди пару циклов скана.</div>';
     return;
   }
   el.innerHTML = detailHtml + `
-    <div class="dim hint-block" style="margin-bottom:10px;padding-top:10px;border-top:1px solid #1c2433;">
+    <div class="dim hint-block" style="margin-bottom:10px;padding-top:10px;border-top:1px solid var(--line);">
       <b>Объём (Volume Profile) — статистика</b> · Всего сигналов с накопленными данными: ${t.count} ·
       WIN: ${t.wins_n} · LOSS: ${t.losses_n} · OPEN: ${t.open_n}
     </div>
@@ -25630,7 +25638,7 @@ async function refreshTuning() {
       <span class="loss">LOSS MFE: ${fmtStat(t.by_reason?.breakout?.mfe_r_losses_at_close)}</span> ·
       <span class="loss">MAE: ${fmtStat(t.by_reason?.breakout?.mae_r_losses_at_close)}</span>
     </div>
-    <div class="dim" style="margin-bottom:10px;font-size:12px;">
+    <div class="dim" style="margin-bottom:10px;font-size:var(--fs);">
       Если WIN MFE (на закрытии) заметно больше текущего RR — тейк резал прибыль рано,
       можно двигать дальше. Если LOSS MFE (на закрытии) заметно больше 0 — часть лоссов
       была в плюсе перед тем как развернуться и выбить стоп, тейк можно ставить ближе.
@@ -25639,7 +25647,7 @@ async function refreshTuning() {
       реально нужно было.
     </div>
     <details style="margin-top:6px;">
-      <summary class="dim" style="cursor:pointer;font-size:12px;">Полное окно (${t.mfe_track_hours}ч после сигнала, включая то, что было уже после закрытия — для оценки общего запаса, не для оценки конкретной сделки)</summary>
+      <summary class="dim" style="cursor:pointer;font-size:var(--fs);">Полное окно (${t.mfe_track_hours}ч после сигнала, включая то, что было уже после закрытия — для оценки общего запаса, не для оценки конкретной сделки)</summary>
       <div style="margin-top:8px;"><b>MFE (R):</b><br>
         <span class="dim">все: ${fmtStat(t.mfe_r_all)}</span><br>
         <span class="win">WIN: ${fmtStat(t.mfe_r_wins)}</span><br>
@@ -25659,8 +25667,8 @@ let scalpExpanded = null;
 
 function fmtScalpRow(r, rank) {
   const dirClass = r.direction === 'LONG' ? 'long' : 'short';
-  const mmrTag = r.mmr_verified ? '' : '<span title="MMR не подтверждён с Gate.io, используется консервативный дефолт" style="color:#e0a030;">~</span>';
-  const levTag = r.leverage_verified ? '' : '<span title="Макс. плечо биржи для этой монеты не подтверждено с Gate.io — используется консервативный дефолт (10x). Реальный лимит биржи может отличаться, проверь вручную перед входом." style="color:#e0a030;">~</span>';
+  const mmrTag = r.mmr_verified ? '' : '<span title="MMR не подтверждён с Gate.io, используется консервативный дефолт" style="color:var(--warn);">~</span>';
+  const levTag = r.leverage_verified ? '' : '<span title="Макс. плечо биржи для этой монеты не подтверждено с Gate.io — используется консервативный дефолт (10x). Реальный лимит биржи может отличаться, проверь вручную перед входом." style="color:var(--warn);">~</span>';
   return `<tr data-symbol="${r.symbol}" style="cursor:pointer;">
     <td class="dim">${rank}</td>
     <td>${r.symbol}</td>
@@ -25695,7 +25703,7 @@ async function refreshScalp() {
       <span class="win">WIN MAE: ${fmtStat(ts.mae_r_wins_at_close)}</span><br>
       <span class="loss">LOSS MFE: ${fmtStat(ts.mfe_r_losses_at_close)}</span><br>
       <span class="loss">LOSS MAE: ${fmtStat(ts.mae_r_losses_at_close)}</span><br>
-      <span class="dim" style="font-size:11px;">Если WIN MFE заметно больше 1.0 (текущий тейк = target_pct/sl_pct в R) — тейк можно двигать дальше. Если WIN MAE близко к -1.0 — почти дошло до стопа перед тем как выиграть, стоп можно чуть шире. Если LOSS MAE заметно меньше -1.0 по модулю — стоп теснее, чем нужно.</span>
+      <span class="dim" style="font-size:var(--fs-sm);">Если WIN MFE заметно больше 1.0 (текущий тейк = target_pct/sl_pct в R) — тейк можно двигать дальше. Если WIN MAE близко к -1.0 — почти дошло до стопа перед тем как выиграть, стоп можно чуть шире. Если LOSS MAE заметно меньше -1.0 по модулю — стоп теснее, чем нужно.</span>
     </div>` : '<div class="dim" style="margin-bottom:8px;">MFE/MAE статистика пока копится — нужны закрытые сделки.</div>';
   const headerHtml = `
     <div class="dim hint-block" style="margin-bottom:8px;">
@@ -25703,7 +25711,7 @@ async function refreshScalp() {
       мин. hit-rate ${cfg.min_hit_rate}% · запас безопасности x${cfg.safety_margin} · комиссия ${(cfg.taker_fee_pct*100).toFixed(3)}%/сторону<br>
       ${buildTxt} · без безопасной конфигурации: ${status.no_safe_config_count}<br>
       <b>Живые сигналы</b> (вход на закрытии свечи, топ-${cfg.signal_top_n || 1} по score): ${ssWr} (${ss.wins||0}W/${ss.losses||0}L/${ss.timeouts||0}TIMEOUT) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
-      <span style="font-size:11px;">~ рядом с буфером = MMR не подтверждён с Gate.io, используется консервативный дефолт ${(cfg.default_mmr_pct*100).toFixed(2)}%<br>
+      <span style="font-size:var(--fs-sm);">~ рядом с буфером = MMR не подтверждён с Gate.io, используется консервативный дефолт ${(cfg.default_mmr_pct*100).toFixed(2)}%<br>
       ~ рядом с плечом = макс. плечо биржи для монеты не подтверждено, используется дефолт ${cfg.default_max_leverage}x — проверь реальный лимит на бирже перед входом<br>
       Клик по строке живого сигнала открывает график входа/выхода.</span>
     </div>
@@ -25734,7 +25742,7 @@ async function refreshScalp() {
   }).join('');
   const signalsTableHtml = signals.length ? `
     <div style="overflow-x:auto;margin-bottom:14px;">
-    <table style="font-size:11px;white-space:nowrap;">
+    <table style="font-size:var(--fs-sm);white-space:nowrap;">
       <thead><tr><th>Symbol</th><th>Dir</th><th>TF</th><th>Entry</th><th>Target</th><th>SL</th><th>Плечо</th><th>Status</th><th>Time</th></tr></thead>
       <tbody>${signalsRows}</tbody>
     </table>
@@ -25750,7 +25758,7 @@ async function refreshScalp() {
   setPanelHtml(panel, headerHtml + signalsTableHtml + `
     <div class="dim hint-block" style="margin-bottom:6px;"><b>Рекомендации по монетам</b> (для справки, откуда берутся сигналы):</div>
     <div style="overflow-x:auto;">
-    <table style="font-size:11px;white-space:nowrap;">
+    <table style="font-size:var(--fs-sm);white-space:nowrap;">
       <thead><tr>
         <th>#</th><th>Symbol</th><th>Vola</th><th>Dir</th><th>TF</th><th>Target</th>
         <th>Hit-rate</th><th>До цели</th><th>Trades/д</th><th>Плечо</th><th>Буфер</th><th>p90 adv</th><th>Score</th>
@@ -25779,8 +25787,8 @@ async function openScalpDetail(symbol) {
   try {
     const j = await (await fetch(`/api/scalp/symbol/${symbol}`)).json();
     if (j.error) { detail.innerHTML = `<div class="dim">${j.error}</div>`; return; }
-    let html = `<div style="border-top:1px solid #1c2433;padding-top:8px;"><b>${symbol}</b> — полная разбивка по ТФ/направлению/цели` +
-      `${j.mmr_verified ? '' : ' <span style="color:#e0a030;">(MMR не подтверждён, дефолт)</span>'}:</div>`;
+    let html = `<div style="border-top:1px solid var(--line);padding-top:8px;"><b>${symbol}</b> — полная разбивка по ТФ/направлению/цели` +
+      `${j.mmr_verified ? '' : ' <span style="color:var(--warn);">(MMR не подтверждён, дефолт)</span>'}:</div>`;
     for (const interval in j.data) {
       for (const direction in j.data[interval]) {
         const dirClass = direction === 'LONG' ? 'long' : 'short';
@@ -25791,7 +25799,7 @@ async function openScalpDetail(symbol) {
           const t = targets[pct];
           parts.push(`${pct}%: ${t.hit_rate}% (n=${t.n}, ${t.median_bars_to_hit}б, p90adv ${t.p90_adverse_pct}%)`);
         }
-        html += `<span style="font-size:11px;">${parts.join(' · ')}</span></div>`;
+        html += `<span style="font-size:var(--fs-sm);">${parts.join(' · ')}</span></div>`;
       }
     }
     detail.innerHTML = html;
@@ -25860,22 +25868,22 @@ async function refreshMsnr() {
   const staleThresholdSec = Math.max(3600, (cfg.refresh_sec || 3600) * 2.5);
   // v0.99.359 — queued behind other backtests is not a hang: say so plainly
   const queuedInfoHtml = (staleSec !== null && staleSec > staleThresholdSec && status.waiting_for_slot) ? `
-    <div style="background:#1c2433;border:1px solid #4a5a78;border-radius:8px;padding:8px 12px;margin-bottom:10px;">
-      <b style="color:#ffcc66;">\u23f3 Бэктест MSNR в очереди — последний был ${Math.round(staleSec/3600*10)/10} ч назад</b><br>
-      <span style="font-size:11px;color:#aab4c8;">Это не зависание: одновременно идут не больше 2 бэктестов, MSNR ждёт свободного места. Neuro уступает место между монетами, так что очередь скоро дойдёт.</span>
+    <div style="background:var(--line);border:1px solid var(--line-2);border-radius:var(--r-sm);padding:8px 12px;margin-bottom:10px;">
+      <b style="color:var(--money);">\u23f3 Бэктест MSNR в очереди — последний был ${Math.round(staleSec/3600*10)/10} ч назад</b><br>
+      <span style="font-size:var(--fs-sm);color:var(--tx-2);">Это не зависание: одновременно идут не больше 2 бэктестов, MSNR ждёт свободного места. Neuro уступает место между монетами, так что очередь скоро дойдёт.</span>
     </div>` : '';
   const staleWarnHtml = queuedInfoHtml || ((staleSec !== null && staleSec > staleThresholdSec) ? `
-    <div style="background:#3a1414;border:1px solid #e05050;border-radius:8px;padding:8px 12px;margin-bottom:10px;">
-      <b style="color:#ff8080;">\u26a0\ufe0f \u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442 \u0431\u044b\u043b ${Math.round(staleSec/3600*10)/10} \u0447 \u043d\u0430\u0437\u0430\u0434</b><br>
-      <span style="font-size:11px;color:#e0a0a0;">\u0426\u0438\u043a\u043b \u043c\u043e\u0433 \u0437\u0430\u0432\u0438\u0441\u043d\u0443\u0442\u044c \u0438\u043b\u0438 \u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u0435 \u0431\u044b\u043b\u043e \u043f\u0440\u0438\u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u043e (\u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440, Android \u043c\u043e\u0433 \u0443\u0431\u0438\u0442\u044c \u0444\u043e\u043d\u043e\u0432\u044b\u0439 Termux \u043f\u0440\u0438 \u043f\u0440\u043e\u0441\u0442\u043e\u0435 \u0441 \u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d\u043d\u044b\u043c \u044d\u043a\u0440\u0430\u043d\u043e\u043c). \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435, \u0447\u0442\u043e \u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u0435 \u0436\u0438\u0432\u043e, \u0438\u043b\u0438 \u043e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 \u0437\u0430\u043d\u043e\u0432\u043e.</span>
+    <div style="background:var(--neg-bg);border:1px solid var(--neg);border-radius:var(--r-sm);padding:8px 12px;margin-bottom:10px;">
+      <b style="color:var(--neg);">\u26a0\ufe0f \u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442 \u0431\u044b\u043b ${Math.round(staleSec/3600*10)/10} \u0447 \u043d\u0430\u0437\u0430\u0434</b><br>
+      <span style="font-size:var(--fs-sm);color:var(--neg);">\u0426\u0438\u043a\u043b \u043c\u043e\u0433 \u0437\u0430\u0432\u0438\u0441\u043d\u0443\u0442\u044c \u0438\u043b\u0438 \u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u0435 \u0431\u044b\u043b\u043e \u043f\u0440\u0438\u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u043e (\u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440, Android \u043c\u043e\u0433 \u0443\u0431\u0438\u0442\u044c \u0444\u043e\u043d\u043e\u0432\u044b\u0439 Termux \u043f\u0440\u0438 \u043f\u0440\u043e\u0441\u0442\u043e\u0435 \u0441 \u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d\u043d\u044b\u043c \u044d\u043a\u0440\u0430\u043d\u043e\u043c). \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435, \u0447\u0442\u043e \u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u0435 \u0436\u0438\u0432\u043e, \u0438\u043b\u0438 \u043e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 \u0437\u0430\u043d\u043e\u0432\u043e.</span>
     </div>` : '');
   const progressPct = status.backtest_total ? Math.round((status.backtest_done||0) / status.backtest_total * 100) : 0;
   const progressBarHtml = status.backtest_running ? `
     <div style="margin:6px 0 8px;">
-      <div style="background:#1c2433;border-radius:6px;height:8px;overflow:hidden;">
-        <div style="background:#3ddc97;height:100%;width:${progressPct}%;transition:width 0.4s;"></div>
+      <div style="background:var(--line);border-radius:var(--r-xs);height:8px;overflow:hidden;">
+        <div style="background:var(--pos);height:100%;width:${progressPct}%;transition:width 0.4s;"></div>
       </div>
-      <div class="dim" style="font-size:11px;margin-top:3px;">
+      <div class="dim" style="font-size:var(--fs-sm);margin-top:3px;">
         ${progressPct}% · сейчас: ${(status.backtest_in_flight||[]).slice(0,6).join(', ') || '—'}${(status.backtest_in_flight||[]).length > 6 ? ` +${status.backtest_in_flight.length-6}` : ''}
       </div>
     </div>` : '';
@@ -25895,22 +25903,22 @@ async function refreshMsnr() {
   const liveSymbols = status.live_universe || [];
   const liveSymbolsTxt = liveSymbols.slice(0, 8).join(', ') + (liveSymbols.length > 8 ? ` +${liveSymbols.length - 8}` : '');
   const warnHtml = `
-    <div class="dim hint-block" style="font-size:12px;margin-bottom:10px;">
+    <div class="dim hint-block" style="font-size:var(--fs);margin-bottom:10px;">
       <b>MSNR / Malaysian SNR</b> (@xaubymedovyk): OCL-уровни по закрытиям, A/V-shape пивоты, вход — QM (ложный вынос + возврат), сигнал 1ч только при активном уровне того же типа на 4ч, тейк — противоположный активный уровень 4ч (высокий R:R от природы паттерна). Бэктест честный, без заглядывания вперёд.
     </div>`;
   const headerHtml = `
-    <div class="dim hint-block" style="margin-bottom:4px;font-size:12px;">
+    <div class="dim hint-block" style="margin-bottom:4px;font-size:var(--fs);">
       <ul style="margin:0 0 6px 18px;padding:0;">
         <li>Живой скан: квалифицированные монеты (${liveSymbolsTxt || '—'}) — только монеты, отобранные бэктестом, никаких фиксированных списков</li>
         <li>Квалификация в живой скан: топ-10 по совместной оценке (винрейт, выборка, доход) среди монет с винрейтом ≥45% и без провала стресс-теста, или ручная галочка</li>
         <li>Бэктест: ${status.backtest_universe_size || '?'} ликвидных монет · структура ${cfg.structure_tf} (L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf}</li>
-        <li>Параметры (импульс/QM-зона/окно) автотюнятся отдельно на каждую монету — см. «Параметры» в таблице</li>
+        <li>Параметры (импульс/QM-зона/окно) автотюнятся отдельно на каждую монету — нажмите на монету в таблице, чтобы увидеть их</li>
         <li>TP всегда реальный уровень пары (без потолка RR) — двусторонний фильтр по RR (снизу и сверху) на каждую монету отдельно, по её собственной статистике</li>
         <li>Автоторговля (если включена в настройках) — по всем монетам живого скана</li>
       </ul>
-      <div class="dim hint-block" style="font-size:11px;margin:0 0 6px 0;">Топ-10 и таблица ниже отсортированы одной и той же оценкой — произведением нормализованных винрейта/выборки(до фильтров)/дохода с равными весами: слабость по любому из трёх параметров обнуляет итог, сильные стороны не компенсируют — без разрыва между топ-10 и остальными.</div>
+      <div class="dim hint-block" style="font-size:var(--fs-sm);margin:0 0 6px 0;">Топ-10 и таблица ниже отсортированы одной и той же оценкой — произведением нормализованных винрейта/выборки(до фильтров)/дохода с равными весами: слабость по любому из трёх параметров обнуляет итог, сильные стороны не компенсируют — без разрыва между топ-10 и остальными.</div>
     </div>
-    <div class="dim" style="margin-bottom:8px;font-size:12px;">
+    <div class="dim" style="margin-bottom:8px;font-size:var(--fs);">
       ${staleWarnHtml}
       ${buildTxt}<br>
       ${progressBarHtml}
@@ -25931,7 +25939,7 @@ async function refreshMsnr() {
   const rrBucketsHtml = rrBuckets.some(b => b.n > 0) ? `
     <div class="dim hint-block" style="margin:8px 0 6px;"><b>Винрейт по диапазонам RR</b> (все монеты вместе, по факту закрытых сделок) — здесь видно, если один диапазон RR систематически проваливается, даже если пул усреднённых цифр этого не показывает:</div>
     <div style="overflow-x:auto;margin-bottom:14px;">
-    <table style="font-size:11px;white-space:nowrap;">
+    <table style="font-size:var(--fs-sm);white-space:nowrap;">
       <thead><tr><th>RR</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th></tr></thead>
       <tbody>${rrBucketRows}</tbody>
     </table>
@@ -25951,10 +25959,10 @@ async function refreshMsnr() {
     // Manual open button for SKIPPED/ERROR signals (e.g. insufficient balance at the time)
     // v0.99.333 — why the account didn't open a strategy-picked trade
     const notOpenedTxt = (!s.autotrade_fired && s.autotrade_status && s.autotrade_status !== 'OPENED')
-      ? ` <span class="dim" style="font-size:10px;" title="${String(s.autotrade_detail || '').replace(/"/g, '&quot;')}">(${s.autotrade_status === 'DRY_RUN' ? 'dry-run' : (s.autotrade_status === 'SKIPPED' ? 'не открыта' : 'ошибка')}${s.autotrade_detail ? ': ' + String(s.autotrade_detail).slice(0, 40).replace(/</g, '&lt;') + (String(s.autotrade_detail).length > 40 ? '…' : '') : ''})</span>`
+      ? ` <span class="dim" style="font-size:var(--fs-xs);" title="${String(s.autotrade_detail || '').replace(/"/g, '&quot;')}">(${s.autotrade_status === 'DRY_RUN' ? 'dry-run' : (s.autotrade_status === 'SKIPPED' ? 'не открыта' : 'ошибка')}${s.autotrade_detail ? ': ' + String(s.autotrade_detail).slice(0, 40).replace(/</g, '&lt;') + (String(s.autotrade_detail).length > 40 ? '…' : '') : ''})</span>`
       : '';
     const sizeTxt = s.autotrade_fired
-      ? `<span title="\u043f\u043b\u0435\u0447\u043e \u043d\u0430 \u043c\u043e\u043c\u0435\u043d\u0442 \u0441\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u043d\u0438\u044f \u044d\u0442\u043e\u0433\u043e \u0441\u0438\u0433\u043d\u0430\u043b\u0430 \u2014 \u043c\u043e\u0433\u043b\u043e \u043e\u0442\u043b\u0438\u0447\u0430\u0442\u044c\u0441\u044f \u043e\u0442 \u0442\u0435\u043a\u0443\u0449\u0435\u0439 Kelly-\u0440\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0438 \u0432 \u0442\u0430\u0431\u043b\u0438\u0446\u0435 \u043d\u0438\u0436\u0435 \u2014 \u043e\u043d\u0430 \u043e\u0431\u043d\u043e\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u043a\u0430\u0436\u0434\u044b\u0439 \u0446\u0438\u043a\u043b, \u0438\u043b\u0438 \u0435\u0451 \u0441\u043f\u0435\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043e\u0436\u0430\u043b\u0438 \u0432\u043d\u0438\u0437 \u0438\u0437-\u0437\u0430 \u0448\u0438\u0440\u0438\u043d\u044b \u0441\u0442\u043e\u043f\u0430 \u044d\u0442\u043e\u0439 \u0441\u0434\u0435\u043b\u043a\u0438">$${s.live_size_usd}${s.leverage_used ? ' @ '+s.leverage_used+'x' : ''}</span>`
+      ? `<span title="\u043f\u043b\u0435\u0447\u043e \u043d\u0430 \u043c\u043e\u043c\u0435\u043d\u0442 \u0441\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u043d\u0438\u044f \u044d\u0442\u043e\u0433\u043e \u0441\u0438\u0433\u043d\u0430\u043b\u0430 \u2014 \u043c\u043e\u0433\u043b\u043e \u043e\u0442\u043b\u0438\u0447\u0430\u0442\u044c\u0441\u044f \u043e\u0442 \u0442\u0435\u043a\u0443\u0449\u0435\u0439 Kelly-\u0440\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0438 \u0432 \u0442\u0430\u0431\u043b\u0438\u0446\u0435 \u043d\u0438\u0436\u0435 \u2014 \u043e\u043d\u0430 \u043e\u0431\u043d\u043e\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u043a\u0430\u0436\u0434\u044b\u0439 \u0446\u0438\u043a\u043b, \u0438\u043b\u0438 \u0435\u0451 \u0441\u043f\u0435\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043e\u0436\u0430\u043b\u0438 \u0432\u043d\u0438\u0437 \u0438\u0437-\u0437\u0430 \u0448\u0438\u0440\u0438\u043d\u044b \u0441\u0442\u043e\u043f\u0430 \u044d\u0442\u043e\u0439 \u0441\u0434\u0435\u043b\u043a\u0438">${s.live_size_usd != null ? '$' + s.live_size_usd : ''}${s.leverage_used ? (s.live_size_usd != null ? ' @ ' : '') + s.leverage_used + 'x' : ''}${s.live_size_usd == null && !s.leverage_used ? '\u2014' : ''}</span>`
       : (s.autotrade_skip_reason
           ? `<span class="dim" title="\u043f\u043e\u0447\u0435\u043c\u0443 \u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u043d\u0435 \u0441\u0440\u0430\u0431\u043e\u0442\u0430\u043b\u0430 \u043d\u0430 \u044d\u0442\u043e\u043c \u0441\u0438\u0433\u043d\u0430\u043b\u0435: ${s.autotrade_skip_reason}">\u26a0\ufe0f \u043d\u0435 \u043e\u0442\u043a\u0440\u044b\u0442\u043e</span>`
           : (s.leverage_used ? `<span class="dim">${s.leverage_used}x</span>` : '<span class="dim">\u2014</span>'));
@@ -25962,22 +25970,15 @@ async function refreshMsnr() {
     // and autotrade is globally enabled for MSNR
     const canManualOpen = !s.autotrade_fired && s.status === 'OPEN' && cfg.autotrade_enabled;
     const manualBtn = canManualOpen
-      ? `<button onclick="event.stopPropagation();msnrManualOpen('${s.symbol}',${s.time},'${s.direction}',${s.entry},${s.sl},${s.tp})" style="font-size:10px;padding:2px 6px;background:#1e3a2f;border:1px solid #3ddc97;color:#3ddc97;border-radius:4px;cursor:pointer;margin-left:4px;" title="Открыть сделку вручную (с подтверждением)">▶ открыть</button>`
+      ? `<button onclick="event.stopPropagation();msnrManualOpen('${s.symbol}',${s.time},'${s.direction}',${s.entry},${s.sl},${s.tp})" style="font-size:var(--fs-xs);padding:2px 6px;background:var(--pos-bg);border:1px solid var(--pos);color:var(--pos);border-radius:var(--r-xs);cursor:pointer;margin-left:4px;" title="Открыть сделку вручную (с подтверждением)">▶ открыть</button>`
       : '';
-    return `<tr onclick="openMsnrChart('${s.symbol}', ${s.time})" style="cursor:pointer;">
-      <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td><td class="dim">${levelTxt}</td>
-      <td>${fmt(s.entry)}</td><td class="dim">${fmt(s.sl)}</td><td class="dim">${fmt(s.tp)}</td>
-      <td class="dim">${sizeTxt}</td>
-      <td>${statusHtml}${notOpenedTxt}${manualBtn}</td><td class="dim" title="время свечи сигнала: ${fmtDateTime(s.time)}">${s.detected_at ? fmtDateTime(s.detected_at) : fmtDateTime(s.time)}${s.detected_at && Math.abs(s.detected_at - s.time) > 120 ? ` <span style="opacity:0.5;font-size:10px;">(свеча ${fmtTime(s.time)})</span>` : ''}</td>
-    </tr>`;
-  }).join('');
-  const signalsTableHtml = signals.length ? `
-    <div style="overflow-x:auto;margin-bottom:14px;">
-    <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Dir</th><th>Уровень</th><th>Entry</th><th>SL</th><th>TP</th><th>Размер</th><th>Status</th><th>Время</th></tr></thead>
-      <tbody>${signalsRows}</tbody>
-    </table>
-    </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
+    void statusHtml; void dirClass;   // v0.99.387 — compact list row
+    return sigItemHtml(s, {onclick: `openMsnrChart('${s.symbol}', ${s.time})`,
+      extra: [levelTxt, sizeTxt, (s.exit_price && s.status !== 'OPEN') ? `выход ${fmt(s.exit_price)}${s.exit_time ? ' в ' + fmtTime(s.exit_time) : ''}` : '',
+              (notOpenedTxt + manualBtn) || '']});
+  });
+  const signalsTableHtml = signalsRows.length ? sigListHtml(signalsRows)
+    : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
   const btRows = [...(status.top || [])].sort((a, b) => {
     // v0.99.19: autotrade-eligible rows (the ones with a checkbox) are
     // grouped to the TOP of the table first, regardless of the active
@@ -26108,8 +26109,8 @@ async function refreshMsnr() {
     // qualifies (shown checked/green) or it doesn't (shown unchecked/
     // dim), nothing left to click.
     const autotradeCell = r.autotrade_eligible
-      ? `<span class="${r.autotrade_on ? 'win' : 'dim'}" style="font-size:14px;" title="${r.autotrade_on ? 'авто-включено: в топе и WR>50%' : 'в топе, но WR не выше 50% — авто-выключено'}">${r.autotrade_on ? '\u2713' : '\u2014'}</span>`
-      : '<span class="dim" style="font-size:10px;">\u2014</span>';
+      ? `<span class="${r.autotrade_on ? 'win' : 'dim'}" style="font-size:var(--fs-md);" title="${r.autotrade_on ? 'авто-включено: в топе и WR>50%' : 'в топе, но WR не выше 50% — авто-выключено'}">${r.autotrade_on ? '\u2713' : '\u2014'}</span>`
+      : '<span class="dim" style="font-size:var(--fs-xs);">\u2014</span>';
     // v0.99.19: a visible separator row exactly at the eligible/rest
     // boundary — the sort above already groups eligible rows first,
     // this makes that grouping obvious at a glance instead of relying
@@ -26118,7 +26119,7 @@ async function refreshMsnr() {
     // past this line, just not auto-ranked; a checkbox still renders
     // for any manual_toggle_allowed row below it.
     const separatorHtml = (idx > 0 && arr[idx - 1].autotrade_eligible && !r.autotrade_eligible)
-      ? `<tr><td colspan="14" class="dim" style="font-size:10px;padding:4px 0;border-top:1px solid #1c2433;">\u2014 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 (\u0432\u043d\u0435 \u0442\u043e\u043f-10, \u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u0432\u0440\u0443\u0447\u043d\u0443\u044e \u2014 \u043d\u0430 \u0441\u0432\u043e\u0439 \u0440\u0438\u0441\u043a) \u2014</td></tr>`
+      ? `<tr><td colspan="14" class="dim" style="font-size:var(--fs-xs);padding:4px 0;border-top:1px solid var(--line);">\u2014 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 (\u0432\u043d\u0435 \u0442\u043e\u043f-10, \u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u0432\u0440\u0443\u0447\u043d\u0443\u044e \u2014 \u043d\u0430 \u0441\u0432\u043e\u0439 \u0440\u0438\u0441\u043a) \u2014</td></tr>`
       : '';
     // v0.99.27, per direct user request: same idea, one tier lower —
     // a visible separator exactly where stress_test_failed rows begin
@@ -26127,7 +26128,7 @@ async function refreshMsnr() {
     // own $ compounding simulation and is excluded from ranking/
     // autotrade entirely, not just scored lower.
     const stressSeparatorHtml = (idx > 0 && !arr[idx - 1].stress_test_failed && r.stress_test_failed)
-      ? `<tr><td colspan="14" class="loss" style="font-size:10px;padding:4px 0;border-top:1px solid #1c2433;">\u2014 \u043f\u0440\u043e\u0432\u0430\u043b\u0438\u043b\u0438 $-\u0441\u0438\u043c\u0443\u043b\u044f\u0446\u0438\u044e \u0434\u0435\u043f\u043e\u0437\u0438\u0442\u0430 (\u0434\u043e\u0445\u043e\u0434 \u2264 0%), \u0438\u0441\u043a\u043b\u044e\u0447\u0435\u043d\u044b \u0438\u0437 \u0442\u043e\u043f\u0430/\u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u0438 \u2014</td></tr>`
+      ? `<tr><td colspan="14" class="loss" style="font-size:var(--fs-xs);padding:4px 0;border-top:1px solid var(--line);">\u2014 \u043f\u0440\u043e\u0432\u0430\u043b\u0438\u043b\u0438 $-\u0441\u0438\u043c\u0443\u043b\u044f\u0446\u0438\u044e \u0434\u0435\u043f\u043e\u0437\u0438\u0442\u0430 (\u0434\u043e\u0445\u043e\u0434 \u2264 0%), \u0438\u0441\u043a\u043b\u044e\u0447\u0435\u043d\u044b \u0438\u0437 \u0442\u043e\u043f\u0430/\u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u0438 \u2014</td></tr>`
       : '';
     // v0.99.141 — solo-checkpoint columns for the 2 new GLOBAL filters
     // (see MSNR_MIN_RR_FILTER_ENABLED's own comment), reading them by
@@ -26172,7 +26173,7 @@ async function refreshMsnr() {
       return `<span class="dim" title="тест-часть: до → после фильтра «${nf.label}»">${pc.wr_b}%→${pc.wr_a}% (n=${pc.n_b}→${pc.n_a})</span> <span class="${dCls}">(${d > 0 ? '+' : ''}${d}%)</span>`;
     })();
     return separatorHtml + stressSeparatorHtml + `<tr onclick="toggleMsnrBacktestTrades('${r.symbol}')" style="cursor:pointer;">
-      <td>${_msnrExpanded.has(r.symbol) ? '\u25be' : '\u25b8'} ${r.symbol}${r.live ? ' <span style="color:#3ddc97;" title="торгуется вживую">\u25cf</span>' : ' <span class="dim" title="только бэктест, не торгуется">\u25cb</span>'}</td>
+      <td>${_msnrExpanded.has(r.symbol) ? '\u25be' : '\u25b8'} ${r.symbol}${r.live ? ' <span style="color:var(--pos);" title="торгуется вживую">\u25cf</span>' : ' <span class="dim" title="только бэктест, не торгуется">\u25cb</span>'}</td>
       <td onclick="event.stopPropagation();">${autotradeCell}</td>
       <td class="${wrClass}">${r.winrate !== null && r.winrate !== undefined ? r.winrate+'%' : '-'}</td>
       <td class="dim">n=${r.trades}${(r.raw_closed_n !== null && r.raw_closed_n !== undefined && r.raw_closed_n > r.trades) ? ` <span title="исходная выборка до фильтров — именно её смотрит отбор в топ/live">(было ${r.raw_closed_n})</span>` : ''}</td>
@@ -26186,22 +26187,21 @@ async function refreshMsnr() {
       <td title="винрейт сделок за зоной ликвидации — если высокий, возможно стоит торговать их с адаптивным плечом">${liqRejTxt}</td>
       <td>${htfSoloTxt}</td>
       <td>${nfTxt}</td>
-      <td class="dim" style="white-space:normal;min-width:220px;">${paramsTxt}${noteTxt}<br>${tradeFilterTxt(r.neuro_filter, r.neuro_filter_info, r.neuro_filter_before && `было WR ${r.neuro_filter_before.winrate}% n=${r.neuro_filter_before.trades}`)}</td>
     </tr>
-    <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="15" style="padding:0;"><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0430...</div></td></tr>`;
+    <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="15" style="padding:0;position:static;"><div class="dim" style="position:sticky;left:0;width:calc(100vw - 24px);white-space:normal;padding:8px 4px;font-size:var(--fs-sm);line-height:1.45;">${paramsTxt}${noteTxt}<br>${tradeFilterTxt(r.neuro_filter, r.neuro_filter_info, r.neuro_filter_before && `было WR ${r.neuro_filter_before.winrate}% n=${r.neuro_filter_before.trades}`)}</div><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0430...</div></td></tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
     <div class="dim hint-block" style="margin-bottom:6px;"><b>\u0410\u0432\u0442\u043e\u0442\u044e\u043d\u0438\u043d\u0433 \u043f\u043e \u043c\u043e\u043d\u0435\u0442\u0430\u043c</b> (${cfg.backtest_days} \u0434\u043d\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438, \u043f\u0435\u0440\u0435\u0431\u043e\u0440 ${cfg.grid_min_leg_atr.length}\u00d7${cfg.grid_qm_zone_pct.length}\u00d7${cfg.grid_qm_lookback.length}=${cfg.grid_min_leg_atr.length*cfg.grid_qm_zone_pct.length*cfg.grid_qm_lookback.length} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432 \u043d\u0430 \u0441\u0438\u043c\u0432\u043e\u043b \u2014 \u043c\u0438\u043d. \u0438\u043c\u043f\u0443\u043b\u044c\u0441 (\u00d7ATR) / QM-\u0437\u043e\u043d\u0430 (%) / \u043e\u043a\u043d\u043e QM (\u0431\u0430\u0440\u044b), \u0442\u0430\u0431\u043b\u0438\u0446\u0430 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u0443\u0436\u0435 \u043b\u0443\u0447\u0448\u0438\u0439 \u043d\u0430\u0439\u0434\u0435\u043d\u043d\u044b\u0439 \u043a\u043e\u043c\u0431\u043e \u043f\u043e \u043a\u0430\u0436\u0434\u043e\u043c\u0443 \u0441\u0438\u043c\u0432\u043e\u043b\u0443) \u00b7 <b>score</b> \u2014 \u043d\u0438\u0436\u043d\u044f\u044f \u0434\u043e\u0432\u0435\u0440\u0438\u0442\u0435\u043b\u044c\u043d\u0430\u044f \u0433\u0440\u0430\u043d\u0438\u0446\u0430 \u0441\u0440\u0435\u0434\u043d\u0435\u0433\u043e R (\u043f\u043e \u043d\u0435\u0439 \u0438 \u0432\u044b\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044f \u043b\u0443\u0447\u0448\u0438\u0439 \u043a\u043e\u043c\u0431\u043e, \u0430 \u043d\u0435 \u043f\u043e \u0441\u044b\u0440\u043e\u043c\u0443 expectancy \u2014 \u0447\u0442\u043e\u0431\u044b \u043c\u0430\u043b\u0435\u043d\u044c\u043a\u0430\u044f \u0432\u044b\u0431\u043e\u0440\u043a\u0430 \u0441 \u0432\u0435\u0437\u0435\u043d\u0438\u0435\u043c \u043d\u0435 \u043f\u043e\u0431\u0435\u0436\u0434\u0430\u043b\u0430 \u0431\u043e\u043b\u044c\u0448\u0443\u044e \u0441\u0442\u0430\u0431\u0438\u043b\u044c\u043d\u0443\u044e) \u00b7 \u043a\u043b\u0438\u043a \u043f\u043e \u0441\u0442\u0440\u043e\u043a\u0435 \u2014 \u0440\u0430\u0441\u043a\u0440\u044b\u0442\u044c \u0441\u0434\u0435\u043b\u043a\u0438:</div>
     <div style="overflow-x:auto;">
-    <table class="msnr-bt-table" style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Авто</th><th style="cursor:pointer;" onclick="msnrSortBy('winrate')">WR${_msnrSortKey==='winrate' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th style="cursor:pointer;" onclick="msnrSortBy('trades')">n${_msnrSortKey==='trades' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th>W/L/T</th><th>RR</th><th>Exp</th><th>Score</th><th>RR-диапазон (соло)</th><th>Объём (соло)</th><th>После ликвидации</th><th>За ликвидацией</th><th>Тренд 4ч (соло)</th><th>Neuro-фильтр (тест)</th><th>\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b</th></tr></thead>
+    <table class="msnr-bt-table" style="font-size:var(--fs-sm);white-space:nowrap;">
+      <thead><tr><th>Symbol</th><th>Авто</th><th style="cursor:pointer;" onclick="msnrSortBy('winrate')">WR${_msnrSortKey==='winrate' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th style="cursor:pointer;" onclick="msnrSortBy('trades')">n${_msnrSortKey==='trades' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th>W/L/T</th><th>RR</th><th>Exp</th><th>Score</th><th>RR-диапазон (соло)</th><th>Объём (соло)</th><th>После ликвидации</th><th>За ликвидацией</th><th>Тренд 4ч (соло)</th><th>Neuro-фильтр (тест)</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
     </div>` : '<div class="dim">\u0411\u044d\u043a\u0442\u0435\u0441\u0442 \u0435\u0449\u0451 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432.</div>';
   // v0.99.329 — informational: Neuro conditions as candidate filters for MSNR
   const nfHtml = (() => {
     const nf = status.neuro_filters;
-    if (!nf) return `<details style="margin:8px 0;"><summary class="dim" style="cursor:pointer;font-size:11px;">🧪 Neuro-фильтры для MSNR — считаются (≈15 мин после запуска и после каждого бэктеста MSNR)</summary></details>`;
+    if (!nf) return `<details style="margin:8px 0;"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">🧪 Neuro-фильтры для MSNR — считаются (≈15 мин после запуска и после каждого бэктеста MSNR)</summary></details>`;
     const b = nf.base || {};
     const rowsHtml = (nf.top || []).slice(0, 8).map((f, i) => {
       const dWr = Math.round((f.wr_a - f.wr_b) * 10) / 10;
@@ -26210,15 +26210,15 @@ async function refreshMsnr() {
         ? `<span class="win">✅ ${f.coins_better} лучше / ${f.coins_worse} хуже</span>`
         : `<span class="${f.coins_better > f.coins_worse ? 'dim' : 'loss'}">${f.coins_better} лучше / ${f.coins_worse} хуже</span>`;
       const tTxt = `<td class="dim" title="t: насколько убранные сделки хуже оставшихся (train — где фильтр выбран, test — проверка; проверяются 3 лучших по train, для прохода нужно test ≥ 2)">${f.train_t ?? '—'} → ${f.test_t ?? '—'}</td>`;
-      return `<tr${i === 0 && f.all_coins_ok ? ' style="background:#15202e;"' : ''}><td>${i === 0 && f.all_coins_ok ? '🏆' : i + 1}</td><td style="white-space:normal;min-width:160px;">${f.label}</td>
+      return `<tr${i === 0 && f.all_coins_ok ? ' style="background:var(--card);"' : ''}><td>${i === 0 && f.all_coins_ok ? '🏆' : i + 1}</td><td style="white-space:normal;min-width:160px;">${f.label}</td>
         <td class="dim">${f.n_b}→${f.n_a} (${f.kept_pct}%)</td>
         <td>${f.wr_b}%→<b class="${dWr >= 0 ? 'win' : 'loss'}">${f.wr_a}%</b> <span class="${dWr >= 0 ? 'win' : 'loss'}">(${dWr >= 0 ? '+' : ''}${dWr})</span></td>
         <td class="${rCls}">${f.r_b}→${f.r_a}R</td>${tTxt}<td>${coins}</td></tr>`;
     }).join('');
     const okN = nf.all_coins_ok_n || 0;
-    return `<details style="margin:8px 0;"><summary style="cursor:pointer;font-size:12px;">🧪 Neuro-фильтры для MSNR (информационно): ${okN ? `<span class="win">${okN} прошли проверку</span>` : '<span class="dim">ни один не прошёл проверку</span>'} · ${nf.coins} монет · тест-сделок ${b.n}, WR ${b.wr}%</summary>
-      <div class="dim hint-block" style="font-size:11px;margin:4px 0 6px;">Один общий фильтр для всех монет. Каждое условие Neuro на момент входа пробуется как «убрать» / «только». <b>Выбор и порядок — только по train-части</b> (первые 70% сделок каждой монеты): насколько убранные сделки хуже оставшихся (t). <b>Test-часть</b>, которую фильтр не видел, только проверяет: проверяются только 3 лучших по train (иначе среди сотен вариантов какой-то «пройдёт» случайно); фильтр проходит, если на test убранные сделки тоже явно хуже (t ≥ 2), средний R вырос и монет стало лучше больше, чем хуже. 🏆 — лучший по train из прошедших. Оставляют не меньше 50% сделок. Раньше требовалось «ни одна монета не хуже» — при десятках монет с парой тест-сделок это почти невозможно. Свой фильтр для каждой монеты подбирается отдельно в самом бэктесте (настройка «Фильтр Neuro в бэктесте»). Этот общий отчёт к сделкам MSNR не применяется. Колонка «Neuro-фильтр (тест)» в таблице ниже — эффект фильтра №1 по каждой монете. Посчитано ${fmtTime(nf.computed_at)}.</div>
-      <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>t train→test</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="7" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
+    return `<details style="margin:8px 0;"><summary style="cursor:pointer;font-size:var(--fs);">🧪 Neuro-фильтры для MSNR (информационно): ${okN ? `<span class="win">${okN} прошли проверку</span>` : '<span class="dim">ни один не прошёл проверку</span>'} · ${nf.coins} монет · тест-сделок ${b.n}, WR ${b.wr}%</summary>
+      <div class="dim hint-block" style="font-size:var(--fs-sm);margin:4px 0 6px;">Один общий фильтр для всех монет. Каждое условие Neuro на момент входа пробуется как «убрать» / «только». <b>Выбор и порядок — только по train-части</b> (первые 70% сделок каждой монеты): насколько убранные сделки хуже оставшихся (t). <b>Test-часть</b>, которую фильтр не видел, только проверяет: проверяются только 3 лучших по train (иначе среди сотен вариантов какой-то «пройдёт» случайно); фильтр проходит, если на test убранные сделки тоже явно хуже (t ≥ 2), средний R вырос и монет стало лучше больше, чем хуже. 🏆 — лучший по train из прошедших. Оставляют не меньше 50% сделок. Раньше требовалось «ни одна монета не хуже» — при десятках монет с парой тест-сделок это почти невозможно. Свой фильтр для каждой монеты подбирается отдельно в самом бэктесте (настройка «Фильтр Neuro в бэктесте»). Этот общий отчёт к сделкам MSNR не применяется. Колонка «Neuro-фильтр (тест)» в таблице ниже — эффект фильтра №1 по каждой монете. Посчитано ${fmtTime(nf.computed_at)}.</div>
+      <div style="overflow-x:auto;"><table style="font-size:var(--fs-sm);white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>t train→test</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="7" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
     </details>`;
   })();
   setPanelHtml(panel, warnHtml + headerHtml + rrBucketsHtml + signalsTableHtml + nfHtml + btTableHtml);
@@ -26316,7 +26316,7 @@ async function loadMsnrTrades(symbol) {
         <td>${compTxt}</td>
       </tr>`;
     }).join('');
-    body.innerHTML = `<div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;width:100%;">
+    body.innerHTML = `<div style="overflow-x:auto;"><table style="font-size:var(--fs-sm);white-space:nowrap;width:100%;">
       <thead><tr><th>Время</th><th>Dir</th><th>Уровень</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Плечо</th><th>Result</th><th>Баланс</th></tr></thead>
       <tbody>${rows}</tbody>
     </table></div>`;
@@ -26561,16 +26561,16 @@ async function refreshFt5() {
     ? `последний перебор параметров: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · анализ: ${status.symbols_done}/${status.universe_size} монет · живой скан: топ-${status.live_top_n} (${(status.live_universe||[]).join(', ') || 'ещё не выбраны'})`
     : `перебор параметров ещё не завершился (${status.symbols_done}/${status.universe_size || '?'}) — живой скан начнётся после первого прохода`;
   const warnHtml = `
-    <div style="background:#2a1f0e;border:1px solid #e0a030;border-radius:10px;padding:10px 14px;margin-bottom:12px;">
-      <b style="color:#e0a030;">⚠️ Экспериментально</b><br>
-      <span style="font-size:12px;color:#d9c08a;">Портирована структура Strategy005 (github.com/freqtrade/freqtrade-strategies, автор Gerald Lonlas) — 6 индикаторов (MACD, Minus DI, RSI+Fisher, Stochastic, SAR, SMA) + лесенка тейка по времени + фикс. стоп -10%. Оригинальные hyperopt-параметры взяты из бэктеста на 20 днях 2018 года — почти наверняка переподогнаны под тот период, поэтому НЕ скопированы напрямую: здесь свой перебор параметров на реальных данных этой биржи. Автоторговля и общий симулятор сознательно НЕ подключены — у стратегии нет единого фиксированного тейка (выход по времени/сигналу/стопу), а вся текущая инфраструктура рассчитана на пару SL/TP. Сигналы ниже — информационные. Соотношение тейк:стоп здесь не одно число: тейк — лесенка по времени (5%→1%), стоп фиксирован (10%), поэтому ниже показан и плановый диапазон (лесенка/стоп), и реализованный RR по факту закрытых сделок. В реверс-режиме — та же точка входа, но SHORT со стопом/лесенкой зеркально; сигнальный выход (RSI/MACD/MinusDI/SAR) не зеркалится и для реверс-сделок не используется.</span>
+    <div style="background:var(--warn-bg);border:1px solid var(--warn);border-radius:var(--r);padding:10px 14px;margin-bottom:12px;">
+      <b style="color:var(--warn);">⚠️ Экспериментально</b><br>
+      <span style="font-size:var(--fs);color:var(--warn);">Портирована структура Strategy005 (github.com/freqtrade/freqtrade-strategies, автор Gerald Lonlas) — 6 индикаторов (MACD, Minus DI, RSI+Fisher, Stochastic, SAR, SMA) + лесенка тейка по времени + фикс. стоп -10%. Оригинальные hyperopt-параметры взяты из бэктеста на 20 днях 2018 года — почти наверняка переподогнаны под тот период, поэтому НЕ скопированы напрямую: здесь свой перебор параметров на реальных данных этой биржи. Автоторговля и общий симулятор сознательно НЕ подключены — у стратегии нет единого фиксированного тейка (выход по времени/сигналу/стопу), а вся текущая инфраструктура рассчитана на пару SL/TP. Сигналы ниже — информационные. Соотношение тейк:стоп здесь не одно число: тейк — лесенка по времени (5%→1%), стоп фиксирован (10%), поэтому ниже показан и плановый диапазон (лесенка/стоп), и реализованный RR по факту закрытых сделок. В реверс-режиме — та же точка входа, но SHORT со стопом/лесенкой зеркально; сигнальный выход (RSI/MACD/MinusDI/SAR) не зеркалится и для реверс-сделок не используется.</span>
     </div>`;
   const headerHtml = `
     <div class="dim hint-block" style="margin-bottom:8px;">
-      ТФ ${cfg.tf} · стоп ${(cfg.stoploss_pct*100).toFixed(0)}% · ${plannedRrTxt} · перебор: buy_rsi${JSON.stringify(cfg.grid_buy_rsi)} × buy_fisher${JSON.stringify(cfg.grid_buy_fisher)} × sell_rsi${JSON.stringify(cfg.grid_sell_rsi)}${cfg.invert_signals ? ` · <span style="color:#ffcc55;font-weight:bold;">РЕВЕРС ВКЛЮЧЁН</span>` : ''}<br>
+      ТФ ${cfg.tf} · стоп ${(cfg.stoploss_pct*100).toFixed(0)}% · ${plannedRrTxt} · перебор: buy_rsi${JSON.stringify(cfg.grid_buy_rsi)} × buy_fisher${JSON.stringify(cfg.grid_buy_fisher)} × sell_rsi${JSON.stringify(cfg.grid_sell_rsi)}${cfg.invert_signals ? ` · <span style="color:var(--money);font-weight:bold;">РЕВЕРС ВКЛЮЧЁН</span>` : ''}<br>
       ${buildTxt}<br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · средний P&L/сделку: ${avgPnlTxt} · ${rrTxt} · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
-      <span style="font-size:11px;">Клик по строке сигнала открывает график входа/выхода.</span>
+      <span style="font-size:var(--fs-sm);">Клик по строке сигнала открывает график входа/выхода.</span>
     </div>
     ${(ss.wins || ss.losses) ? `
     <div style="margin-bottom:8px;"><b>MFE/MAE (R) на закрытии</b> — сколько реально было хода в плюс/минус к моменту исхода (${ss.wins||0}W/${ss.losses||0}L):<br>
@@ -26578,7 +26578,7 @@ async function refreshFt5() {
       <span class="win">WIN MAE: ${fmtStat(ss.mae_r_wins_at_close)}</span><br>
       <span class="loss">LOSS MFE: ${fmtStat(ss.mfe_r_losses_at_close)}</span><br>
       <span class="loss">LOSS MAE: ${fmtStat(ss.mae_r_losses_at_close)}</span><br>
-      <span class="dim" style="font-size:11px;">Эти цифры питают авто-тюнинг решения о реверсе.</span>
+      <span class="dim" style="font-size:var(--fs-sm);">Эти цифры питают авто-тюнинг решения о реверсе.</span>
     </div>` : ''}`;
   const signalsRows = signals.map(s => {
     let statusHtml;
@@ -26596,7 +26596,7 @@ async function refreshFt5() {
   }).join('');
   const signalsTableHtml = signals.length ? `
     <div style="overflow-x:auto;margin-bottom:14px;">
-    <table style="font-size:11px;white-space:nowrap;">
+    <table style="font-size:var(--fs-sm);white-space:nowrap;">
       <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>Параметры</th><th>Status</th><th>RR (факт)</th><th>Время входа</th></tr></thead>
       <tbody>${signalsRows}</tbody>
     </table>
@@ -26627,7 +26627,7 @@ async function refreshFt5() {
     const htfSoloTxt = fmtFt5Solo('htf_trend', cfg.htf_filter_enabled);
     const sessionSoloTxt = fmtFt5Solo('session', cfg.session_filter_enabled);
     return `<tr>
-      <td>${r.symbol}${inLive ? ' <span style="color:#3ddc97;" title="в живом скане">●</span>' : ''}</td>
+      <td>${r.symbol}${inLive ? ' <span style="color:var(--pos);" title="в живом скане">●</span>' : ''}</td>
       <td class="dim">rsi${r.buy_rsi}/fish${r.buy_fisher}/sell${r.sell_rsi}</td>
       <td class="${pnlClass}">${r.avg_pnl_pct>0?'+':''}${r.avg_pnl_pct}%</td>
       <td class="dim">${r.score !== null && r.score !== undefined ? r.score : '-'}</td>
@@ -26642,7 +26642,7 @@ async function refreshFt5() {
   const btTableHtml = (status.top || []).length ? `
     <div class="dim hint-block" style="margin-bottom:6px;"><b>Перебор параметров по монетам</b> (${cfg.backtest_days} дней истории, отбор по score — нижней доверительной границе среднего P&L: чем меньше выборка ИЛИ чем больше разброс (частые крупные лоссы вперемешку с выигрышами) — тем сильнее штраф, независимо от n). Зелёная точка — монета сейчас в живом скане (топ-${status.live_top_n}). Последние 2 колонки — что даёт КАЖДЫЙ новый глобальный фильтр САМ ПО СЕБЕ, поверх остального:</div>
     <div style="overflow-x:auto;">
-    <table style="font-size:11px;white-space:nowrap;">
+    <table style="font-size:var(--fs-sm);white-space:nowrap;">
       <thead><tr><th>Symbol</th><th>Параметры</th><th>Avg P&L</th><th>Score</th><th>RR (факт)</th><th>n</th><th>W</th><th>L</th><th>Тренд 4ч (соло)</th><th>Сессия (соло)</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
@@ -26685,10 +26685,10 @@ async function refreshMirror() {
       «Зеркальный уровень» — пробитый уровень поддержки/сопротивления при возврате цены меняет роль на противоположную; вход на одном из 4 разворотных паттернов на уровне. Стоп по каждой монете дополнительно фильтруется по ширине (см. таблицу ниже — «до» и «после» фильтра).<br>
       ТФ ${cfg.interval} · RR ${cfg.rr} · допуск касания ${cfg.touch_tolerance_pct}% · допуск паттерна ${cfg.pattern_tolerance_pct}% · ${buildTxt}<br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
-      ${byPatternTxt ? `<span style="font-size:11px;">По паттернам: ${byPatternTxt}</span><br>` : ''}
-      <b>Отсеянные фильтром</b> <span class="dim" style="font-size:11px;">(не торговались, только для проверки — стоило ли их пропускать)</span>: ${fssWr} (${fss.wins||0}W/${fss.losses||0}L) · открытых: ${fss.open||0} · всего: ${fss.n||0}<br>
-      ${byReasonTxt ? `<span style="font-size:11px;">По причине отсева: ${byReasonTxt}</span><br>` : ''}
-      <span class="hint-block" style="font-size:11px;">Зелёная точка — монета сейчас в живом скане. Клик по строке сигнала открывает график входа/выхода.</span>
+      ${byPatternTxt ? `<span style="font-size:var(--fs-sm);">По паттернам: ${byPatternTxt}</span><br>` : ''}
+      <b>Отсеянные фильтром</b> <span class="dim" style="font-size:var(--fs-sm);">(не торговались, только для проверки — стоило ли их пропускать)</span>: ${fssWr} (${fss.wins||0}W/${fss.losses||0}L) · открытых: ${fss.open||0} · всего: ${fss.n||0}<br>
+      ${byReasonTxt ? `<span style="font-size:var(--fs-sm);">По причине отсева: ${byReasonTxt}</span><br>` : ''}
+      <span class="hint-block" style="font-size:var(--fs-sm);">Зелёная точка — монета сейчас в живом скане. Клик по строке сигнала открывает график входа/выхода.</span>
     </div>`;
   const signalsRows = signals.map(s => {
     let statusHtml;
@@ -26711,19 +26711,19 @@ async function refreshMirror() {
       <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td>
       <td class="dim">${patternLabels[s.pattern] || s.pattern}</td>
       <td>${fmt(s.entry)}</td><td>${fmt(s.sl)}</td><td>${fmt(s.tp)}</td>
-      <td>${s.rr}</td><td>${statusHtml}</td><td class="dim" title="время свечи сигнала: ${fmtDateTime(s.time)}">${s.detected_at ? fmtDateTime(s.detected_at) : fmtDateTime(s.time)}${s.detected_at && Math.abs(s.detected_at - s.time) > 120 ? ` <span style="opacity:0.5;font-size:10px;">(свеча ${fmtTime(s.time)})</span>` : ''}</td>
+      <td>${s.rr}</td><td>${statusHtml}</td><td class="dim" title="время свечи сигнала: ${fmtDateTime(s.time)}">${s.detected_at ? fmtDateTime(s.detected_at) : fmtDateTime(s.time)}${s.detected_at && Math.abs(s.detected_at - s.time) > 120 ? ` <span style="opacity:0.5;font-size:var(--fs-xs);">(свеча ${fmtTime(s.time)})</span>` : ''}</td>
     </tr>`;
   }).join('');
   const signalsTableHtml = signals.length ? `
     <div style="overflow-x:auto;margin-bottom:14px;">
-    <table style="font-size:11px;white-space:nowrap;">
+    <table style="font-size:var(--fs-sm);white-space:nowrap;">
       <thead><tr><th>Symbol</th><th>Dir</th><th>Паттерн</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Status</th><th>Время</th></tr></thead>
       <tbody>${signalsRows}</tbody>
     </table>
     </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
   const btRows = (status.top || []).map(r => {
     const wrClass = (r.win_rate || 0) >= 50 ? 'win' : 'loss';
-    const liveDot = r.live ? ' <span style="color:#3ddc97;" title="в живом скане">●</span>' : '';
+    const liveDot = r.live ? ' <span style="color:var(--pos);" title="в живом скане">●</span>' : '';
     const skipTxt = (r.skip_sl_pct_min !== null && r.skip_sl_pct_min !== undefined)
       ? `<span class="loss">skip SL≥${r.skip_sl_pct_min}%</span>` : '<span class="dim">-</span>';
     // v0.99.98, per external code review batch 1 ("Авто-гейт по
@@ -26795,7 +26795,7 @@ async function refreshMirror() {
   const btTableHtml = (status.top || []).length ? `
     <div class="dim hint-block" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории) — итоговый винрейт/n уже ПОСЛЕ обоих фильтров (ширина стопа + паттерн)${cfg.autotune_tolerance_enabled ? ', допуски автотюнинга — по колонке справа' : ''}. Последние 2 колонки — что даёт КАЖДЫЙ новый глобальный фильтр САМ ПО СЕБЕ, поверх остальных (не в связке с ними чем нибудь ещё):</div>
     <div style="overflow-x:auto;">
-    <table style="font-size:11px;white-space:nowrap;">
+    <table style="font-size:var(--fs-sm);white-space:nowrap;">
       <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>Фильтр SL</th><th>Фильтр паттерна</th><th>По направлению</th><th>До → После</th><th>Допуски</th><th>Объём (соло)</th><th>Тренд 4ч (соло)</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
@@ -26826,10 +26826,10 @@ async function refreshLsw() {
   const progressPct = status.backtest_total ? Math.round((status.backtest_done||0) / status.backtest_total * 100) : 0;
   const progressBarHtml = status.backtest_running ? `
     <div style="margin:6px 0 8px;">
-      <div style="background:#1c2433;border-radius:6px;height:8px;overflow:hidden;">
-        <div style="background:#3ddc97;height:100%;width:${progressPct}%;transition:width 0.4s;"></div>
+      <div style="background:var(--line);border-radius:var(--r-xs);height:8px;overflow:hidden;">
+        <div style="background:var(--pos);height:100%;width:${progressPct}%;transition:width 0.4s;"></div>
       </div>
-      <div class="dim" style="font-size:11px;margin-top:3px;">
+      <div class="dim" style="font-size:var(--fs-sm);margin-top:3px;">
         ${progressPct}% · сейчас: ${(status.backtest_in_flight||[]).slice(0,6).join(', ') || '—'}${(status.backtest_in_flight||[]).length > 6 ? ` +${status.backtest_in_flight.length-6}` : ''}
       </div>
     </div>` : '';
@@ -26839,17 +26839,16 @@ async function refreshLsw() {
     <div class="dim" style="margin-bottom:8px;">
       ТФ ${cfg.interval} · RR ${cfg.rr} · допуск равенства уровней ${cfg.equal_tolerance_pct}% · буфер стопа ${cfg.sl_buffer_pct}% · ${buildTxt}<br>
       ${progressBarHtml}
-      Фильтр по тренду (${cfg.htf_interval}): <span class="${cfg.htf_filter_enabled ? 'win' : 'dim'}">${cfg.htf_filter_enabled ? 'включён' : 'выключен'}</span> ·
-      Структурный кэп: <span class="${cfg.structural_cap_enabled ? 'win' : 'dim'}">${cfg.structural_cap_enabled ? 'включён' : 'выключен'}</span> ·
-      Подтверждение (${cfg.entry_confirm_interval}): <span class="${cfg.entry_confirm_enabled ? 'win' : 'dim'}">${cfg.entry_confirm_enabled ? 'включено' : 'выключено'}</span> ·
-      Фильтр по объёму: <span class="${cfg.volume_filter_enabled ? 'win' : 'dim'}">${cfg.volume_filter_enabled ? 'включён' : 'выключен'}</span> ·
-      FVG: <span class="${cfg.fvg_filter_enabled ? 'win' : 'dim'}">${cfg.fvg_filter_enabled ? 'включён' : 'выключен'}</span> ·
-      Сессия: <span class="${cfg.session_filter_enabled ? 'win' : 'dim'}">${cfg.session_filter_enabled ? 'включена' : 'выключена'}</span> ·
-      Мин. касаний: <span class="${cfg.min_touches_enabled ? 'win' : 'dim'}">${cfg.min_touches_enabled ? 'включён' : 'выключен'}</span> ·
-      Фильтр по направлению: <span class="${cfg.direction_filter_enabled ? 'win' : 'dim'}">${cfg.direction_filter_enabled ? 'включён' : 'выключен'}</span><br>
+      ${(() => {   // v0.99.387 — only the filters that are ON (the full on/off list is in Settings)
+        const on = [[cfg.htf_filter_enabled, `тренд ${cfg.htf_interval}`], [cfg.structural_cap_enabled, 'структурный кэп'],
+          [cfg.entry_confirm_enabled, `подтверждение ${cfg.entry_confirm_interval}`], [cfg.volume_filter_enabled, 'объём'],
+          [cfg.fvg_filter_enabled, 'FVG'], [cfg.session_filter_enabled, 'сессия'], [cfg.min_touches_enabled, 'мин. касаний'],
+          [cfg.direction_filter_enabled, 'направление']].filter(x => x[0]).map(x => x[1]);
+        return 'Фильтры: ' + (on.length ? `<span class="win">${on.join(', ')}</span>` : '<span class="dim">все выключены</span>');
+      })()}<br>
       <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
-      ${byLevelTxt ? `<span style="font-size:11px;">По типу уровня: ${byLevelTxt}</span><br>` : ''}
-      <span class="hint-block" style="font-size:11px;">Зелёная точка — монета сейчас в живом скане. Клик по строке сигнала открывает график входа/выхода.</span>
+      ${byLevelTxt ? `<span style="font-size:var(--fs-sm);">По типу уровня: ${byLevelTxt}</span><br>` : ''}
+      <span class="hint-block" style="font-size:var(--fs-sm);">Зелёная точка — монета сейчас в живом скане. Клик по строке сигнала открывает график входа/выхода.</span>
     </div>`;
   const signalsRows = signals.map(s => {
     let statusHtml;
@@ -26865,24 +26864,16 @@ async function refreshLsw() {
     const dirClass = s.direction === 'SHORT' ? 'short' : 'long';
     const confirmLabels = {BOS: 'BOS', ABSORPTION: 'поглощение', INVERSION: 'инверсия'};
     const confirmTxt = s.confirm_method ? (confirmLabels[s.confirm_method] || s.confirm_method) : '-';
-    return `<tr data-symbol="${s.symbol}" data-time="${s.time}" style="cursor:pointer;">
-      <td>${s.symbol}</td><td class="${dirClass}">${s.direction}</td>
-      <td class="dim">${levelTypeLabels[s.level_type] || s.level_type} (x${s.level_touches||'?'})</td>
-      <td class="dim">${confirmTxt}</td>
-      <td>${fmt(s.entry)}</td><td>${fmt(s.sl)}</td><td>${fmt(s.tp)}</td>
-      <td>${s.rr}</td><td>${statusHtml}</td><td class="dim" title="время свечи сигнала: ${fmtDateTime(s.time)}">${s.detected_at ? fmtDateTime(s.detected_at) : fmtDateTime(s.time)}${s.detected_at && Math.abs(s.detected_at - s.time) > 120 ? ` <span style="opacity:0.5;font-size:10px;">(свеча ${fmtTime(s.time)})</span>` : ''}</td>
-    </tr>`;
-  }).join('');
-  const signalsTableHtml = signals.length ? `
-    <div style="overflow-x:auto;margin-bottom:14px;">
-    <table style="font-size:11px;white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Dir</th><th>Уровень</th><th>Модель входа</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Status</th><th>Время</th></tr></thead>
-      <tbody>${signalsRows}</tbody>
-    </table>
-    </div>` : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
+    void statusHtml; void dirClass;   // v0.99.387 — compact list row
+    return sigItemHtml(s, {attrs: `data-symbol="${s.symbol}" data-time="${s.time}"`,
+      extra: [`${levelTypeLabels[s.level_type] || s.level_type} ×${s.level_touches || '?'}`, confirmTxt !== '-' ? confirmTxt : '', s.rr ? `RR ${s.rr}` : '',
+              (s.exit_price && s.status !== 'OPEN') ? `выход ${fmt(s.exit_price)}${s.exit_time ? ' в ' + fmtTime(s.exit_time) : ''}` : '']});
+  });
+  const signalsTableHtml = signalsRows.length ? sigListHtml(signalsRows)
+    : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
   const btRows = (status.top || []).map(r => {
     const wrClass = (r.win_rate || 0) >= 50 ? 'win' : 'loss';
-    const liveDot = r.live ? ' <span style="color:#3ddc97;" title="в живом скане">●</span>' : '';
+    const liveDot = r.live ? ' <span style="color:var(--pos);" title="в живом скане">●</span>' : '';
     const bd = r.by_direction || {};
     const fmtWr = v => (v === null || v === undefined) ? '?' : `${v}%`;
     const byDirTxt = (bd.LONG || bd.SHORT)
@@ -26941,7 +26932,7 @@ async function refreshLsw() {
   const btTableHtml = (status.top || []).length ? `
     <div class="dim hint-block" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории). Колонка RR — подобран отдельно под каждую монету на первых 70% её истории (train), применён к полной истории — наведи на значение чтобы увидеть всю кривую подбора. Последние 6 колонок показывают, что даёт КАЖДЫЙ фильтр САМ ПО СЕБЕ на сырых (нефильтрованных) сигналах монеты — не в связке с остальными фильтрами. В скобках — разница с винрейтом на тех же сырых сигналах без единого фильтра (это не то же самое, что колонка WR слева, там уже применены реально включённые фильтры). Пометка [выкл] — фильтр сейчас не участвует в реальной торговле, это просто оценка "а что если включить". Тренд-фильтр и структурный кэп по-прежнему доступны в настройках, просто убраны отсюда, чтобы не мозолить глаза:</div>
     <div style="overflow-x:auto;">
-    <table style="font-size:11px;white-space:nowrap;">
+    <table style="font-size:var(--fs-sm);white-space:nowrap;">
       <thead><tr><th>Symbol</th><th>RR</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th><th>Подтверждение (соло)</th><th>Объём (соло)</th><th>FVG (соло)</th><th>Сессия (соло)</th><th>Касания≥${cfg.min_touches} (соло)</th><th>Структура свечи (соло)</th><th>ATR sweep (соло)</th><th title="лучший Neuro-фильтр, только тест-часть">🏆 Neuro-фильтр (тест)</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
@@ -26949,7 +26940,7 @@ async function refreshLsw() {
   setPanelHtml(panel, headerHtml + signalsTableHtml
     + filterReportHtml(status.neuro_filters, "🧪 Neuro-фильтры для Sweep (информационно)", "считаются (≈25 мин после запуска и после каждого бэктеста Sweep)")   // v0.99.360
     + btTableHtml);
-  panel.querySelectorAll('tbody tr[data-time]').forEach(tr => {
+  panel.querySelectorAll('.sig[data-time], tbody tr[data-time]').forEach(tr => {
     tr.onclick = () => openLswChart(tr.dataset.symbol, tr.dataset.time);
   });
 }
@@ -26974,17 +26965,17 @@ async function refreshNeuro() {
     const lastMined = data.last_mined ? fmtDateTime(data.last_mined) : '\u2014';
     const miningTxt = data.mining_running
       ? `<span class="dim">\u043c\u0430\u0439\u043d\u0438\u043d\u0433: ${data.mining_done||0}/${data.mining_total||coins.length||10} \u2014 \u0441\u0435\u0439\u0447\u0430\u0441 ${data.mining_current_symbol||'?'}</span>${coresTxt(data.calc)}`
-        + (data.waiting_slot_since ? ` <span style="color:#ffa726;">· ⏸ пауза с ${fmtDateTime(data.waiting_slot_since)}: уступил слот другому бэктесту, продолжит после него</span>` : '')
+        + (data.waiting_slot_since ? ` <span style="color:var(--warn);">· ⏸ пауза с ${fmtDateTime(data.waiting_slot_since)}: уступил слот другому бэктесту, продолжит после него</span>` : '')
       : (data.waiting_slot_since
-        ? `<span style="color:#ffa726;">⏳ ждёт свободного слота бэктеста с ${fmtDateTime(data.waiting_slot_since)} (одновременно идут не больше 2 бэктестов) · последний майнинг: ${lastMined}</span>`
+        ? `<span style="color:var(--warn);">⏳ ждёт свободного слота бэктеста с ${fmtDateTime(data.waiting_slot_since)} (одновременно идут не больше 2 бэктестов) · последний майнинг: ${lastMined}</span>`
         : `<span class="dim">последний майнинг: ${lastMined}${data.next_mining_ts ? ' · следующий ~' + fmtDateTime(data.next_mining_ts) : ''}</span>`)
       + (data.last_error && (!data.last_mined || data.last_error_ts > data.last_mined)
-        ? `<div class="loss" style="font-size:10.5px;margin-top:2px;">⚠️ последний цикл упал ${fmtDateTime(data.last_error_ts)}: ${String(data.last_error).replace(/</g,'&lt;')} · повтор через 30 мин</div>` : '');
+        ? `<div class="loss" style="font-size:var(--fs-xs);margin-top:2px;">⚠️ последний цикл упал ${fmtDateTime(data.last_error_ts)}: ${String(data.last_error).replace(/</g,'&lt;')} · повтор через 30 мин</div>` : '');
     const progressPct = data.mining_total ? Math.round((data.mining_done||0) / data.mining_total * 100) : 0;
     const progressBarHtml = data.mining_running ? `
       <div style="margin:6px 0 10px;">
-        <div style="background:#1c2433;border-radius:6px;height:8px;overflow:hidden;">
-          <div style="background:#a855f7;height:100%;width:${progressPct}%;transition:width 0.4s;"></div>
+        <div style="background:var(--line);border-radius:var(--r-xs);height:8px;overflow:hidden;">
+          <div style="background:var(--neuro);height:100%;width:${progressPct}%;transition:width 0.4s;"></div>
         </div>
       </div>` : '';
 
@@ -26993,22 +26984,22 @@ async function refreshNeuro() {
     // per coin below) ----
     const lstats = data.live_signal_stats || {};
     const lstatsHtml = lstats.total ? `
-      <div style="display:flex;gap:0;margin:10px 0 14px;background:#0d1320;border-radius:8px;overflow:hidden;border:1px solid #232d45;">
-        <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #232d45;">
-          <div style="font-size:18px;font-weight:700;" class="${(lstats.winrate||0)>=33?'win':'loss'}">${lstats.winrate!=null?lstats.winrate+'%':'\u2014'}</div>
-          <div class="dim" style="font-size:9px;">\u0416\u0418\u0412\u041e\u0419 WINRATE</div>
+      <div style="display:flex;gap:0;margin:10px 0 14px;background:var(--inset);border-radius:var(--r-sm);overflow:hidden;border:1px solid var(--line);">
+        <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid var(--line);">
+          <div style="font-size:var(--fs-lg);font-weight:700;" class="${(lstats.winrate||0)>=33?'win':'loss'}">${lstats.winrate!=null?lstats.winrate+'%':'\u2014'}</div>
+          <div class="dim" style="font-size:var(--fs-xs);">\u0416\u0418\u0412\u041e\u0419 WINRATE</div>
         </div>
-        <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #232d45;">
-          <div style="font-size:18px;font-weight:700;" class="${(lstats.avg_pnl_r||0)>=0?'win':'loss'}">${lstats.avg_pnl_r!=null?(lstats.avg_pnl_r>0?'+':'')+lstats.avg_pnl_r+'R':'\u2014'}</div>
-          <div class="dim" style="font-size:9px;">\u0421\u0420. P&L</div>
+        <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid var(--line);">
+          <div style="font-size:var(--fs-lg);font-weight:700;" class="${(lstats.avg_pnl_r||0)>=0?'win':'loss'}">${lstats.avg_pnl_r!=null?(lstats.avg_pnl_r>0?'+':'')+lstats.avg_pnl_r+'R':'\u2014'}</div>
+          <div class="dim" style="font-size:var(--fs-xs);">\u0421\u0420. P&L</div>
         </div>
         <div style="flex:1;text-align:center;padding:8px 4px;">
-          <div style="font-size:13px;font-weight:700;">
+          <div style="font-size:var(--fs);font-weight:700;">
             <span class="win">${lstats.wins}W</span>/<span class="loss">${lstats.losses}L</span>/<span class="dim">${lstats.open}\u0436\u0434\u0451\u0442</span>
           </div>
-          <div class="dim" style="font-size:9px;">\u0432\u0441\u0435\u0433\u043e ${lstats.total} \u0441\u0438\u0433\u043d\u0430\u043b\u043e\u0432</div>
+          <div class="dim" style="font-size:var(--fs-xs);">\u0432\u0441\u0435\u0433\u043e ${lstats.total} \u0441\u0438\u0433\u043d\u0430\u043b\u043e\u0432</div>
         </div>
-      </div>` : `<div class="dim" style="margin:10px 0;font-size:11px;">\u0436\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b \u0435\u0449\u0451 \u043d\u0435 \u0441\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u043b\u0438 \u2014 \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u043d\u0430\u043a\u043e\u043f\u0438\u0442\u0441\u044f \u0441\u043e \u0432\u0440\u0435\u043c\u0435\u043d\u0435\u043c</div>`;
+      </div>` : `<div class="dim" style="margin:10px 0;font-size:var(--fs-sm);">\u0436\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b \u0435\u0449\u0451 \u043d\u0435 \u0441\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u043b\u0438 \u2014 \u0441\u0442\u0430\u0442\u0438\u0441\u0442\u0438\u043a\u0430 \u043d\u0430\u043a\u043e\u043f\u0438\u0442\u0441\u044f \u0441\u043e \u0432\u0440\u0435\u043c\u0435\u043d\u0435\u043c</div>`;
 
     const cards = coins.map(c => {
       const s = c.summary || {};
@@ -27019,35 +27010,35 @@ async function refreshNeuro() {
 
       // ---- Big scorecard row ----
       const bigStats = hasStats ? `
-        <div style="display:flex;gap:0;margin:10px 0;background:#0d1320;border-radius:8px;overflow:hidden;">
-          <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #232d45;">
-            <div style="font-size:20px;font-weight:700;" class="${wrCls}">${s.winrate}%</div>
-            <div class="dim" style="font-size:9px;">WINRATE</div>
+        <div style="display:flex;gap:0;margin:10px 0;background:var(--inset);border-radius:var(--r-sm);overflow:hidden;">
+          <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid var(--line);">
+            <div style="font-size:var(--fs-xl);font-weight:700;" class="${wrCls}">${s.winrate}%</div>
+            <div class="dim" style="font-size:var(--fs-xs);">WINRATE</div>
           </div>
-          <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #232d45;">
-            <div style="font-size:20px;font-weight:700;" class="${pnlCls}">${s.avg_pnl_r>0?'+':''}${s.avg_pnl_r}R</div>
-            <div class="dim" style="font-size:9px;">\u0421\u0420. P&L</div>
+          <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid var(--line);">
+            <div style="font-size:var(--fs-xl);font-weight:700;" class="${pnlCls}">${s.avg_pnl_r>0?'+':''}${s.avg_pnl_r}R</div>
+            <div class="dim" style="font-size:var(--fs-xs);">\u0421\u0420. P&L</div>
           </div>
-          <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #232d45;">
-            <div style="font-size:20px;font-weight:700;color:#e8ecf5;">1:${(s.chosen_rr||cfg.rr||2).toFixed(2)}</div>
-            <div class="dim" style="font-size:9px;">RR (\u043f\u043e\u0434\u043e\u0431\u0440\u0430\u043d)</div>
+          <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid var(--line);">
+            <div style="font-size:var(--fs-xl);font-weight:700;color:var(--tx);">1:${(s.chosen_rr||cfg.rr||2).toFixed(2)}</div>
+            <div class="dim" style="font-size:var(--fs-xs);">RR (\u043f\u043e\u0434\u043e\u0431\u0440\u0430\u043d)</div>
           </div>
           <div style="flex:1;text-align:center;padding:8px 4px;">
-            <div style="font-size:14px;font-weight:700;color:#e8ecf5;">
+            <div style="font-size:var(--fs-md);font-weight:700;color:var(--tx);">
               <span class="win">${s.wins}W</span>/<span class="loss">${s.losses}L</span>/<span class="dim">${s.timeouts}T</span>
             </div>
-            <div class="dim" style="font-size:9px;">n=${s.n} \u0438\u0437 ${s.total}</div>
+            <div class="dim" style="font-size:var(--fs-xs);">n=${s.n} \u0438\u0437 ${s.total}</div>
           </div>
         </div>
-        <div class="dim" style="font-size:10px;margin-bottom:10px;">
-          ${s.patterns_confirmed||0} \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043e (\u0438\u0437 \u043d\u0438\u0445 ${s.combos_confirmed||0} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439${s.decaying_confirmed ? `, <span style="color:#ffa726;">${s.decaying_confirmed} \u043e\u0441\u043b\u0430\u0431\u0435\u0432\u0430\u044e\u0442</span>` : ''}) \u00b7 ${s.history_bars||0} \u0447\u0430\u0441\u043e\u0432\u044b\u0445 \u0441\u0432\u0435\u0447\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438 (${fmtMonths((s.history_bars||0)/24)})
+        <div class="dim" style="font-size:var(--fs-xs);margin-bottom:10px;">
+          ${s.patterns_confirmed||0} \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043e (\u0438\u0437 \u043d\u0438\u0445 ${s.combos_confirmed||0} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439${s.decaying_confirmed ? `, <span style="color:var(--warn);">${s.decaying_confirmed} \u043e\u0441\u043b\u0430\u0431\u0435\u0432\u0430\u044e\u0442</span>` : ''}) \u00b7 ${s.history_bars||0} \u0447\u0430\u0441\u043e\u0432\u044b\u0445 \u0441\u0432\u0435\u0447\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438 (${fmtMonths((s.history_bars||0)/24)})
         </div>
         ${compoundSummaryHtml(s)}
         ${(s.rr_sweep && s.rr_sweep.length) ? `<details style="margin-bottom:8px;">
-          <summary style="cursor:pointer;font-size:11px;color:#8a97b8;">\u043f\u043e\u0434\u0431\u043e\u0440 RR (\u043d\u0430 train-\u0447\u0430\u0441\u0442\u0438) \u25be</summary>
-          <div style="overflow-x:auto;margin-top:4px;"><table style="font-size:10px;white-space:nowrap;">
+          <summary style="cursor:pointer;font-size:var(--fs-sm);color:var(--tx-2);">\u043f\u043e\u0434\u0431\u043e\u0440 RR (\u043d\u0430 train-\u0447\u0430\u0441\u0442\u0438)</summary>
+          <div style="overflow-x:auto;margin-top:4px;"><table style="font-size:var(--fs-xs);white-space:nowrap;">
             <thead><tr><th>RR</th><th>n</th><th>WR</th><th>avg P&L</th></tr></thead>
-            <tbody>${s.rr_sweep.map(r => `<tr style="${r.rr===s.chosen_rr?'background:#1a2f24;':''}">
+            <tbody>${s.rr_sweep.map(r => `<tr style="${r.rr===s.chosen_rr?'background:var(--pos-bg);':''}">
               <td class="${r.rr===s.chosen_rr?'win':'dim'}">1:${r.rr.toFixed(2)}${r.rr===s.chosen_rr?' \u2605':''}</td>
               <td class="dim">${r.n}</td>
               <td class="dim">${r.winrate!=null?r.winrate+'%':'\u2014'}</td>
@@ -27060,39 +27051,39 @@ async function refreshNeuro() {
       // ---- Live signal badge (always visible, clearly separated) ----
       const agg = s.aggregate_recent || {};
       const underperformBadge = agg.underperforming
-        ? `<div style="padding:8px 10px;margin-bottom:8px;background:rgba(255,167,38,0.12);border-radius:8px;border:1px solid #ffa726;">
-            <div style="color:#ffa726;font-weight:700;font-size:12px;">\u26a0\ufe0f \u0431\u044b\u043b\u0430 \u043f\u043b\u043e\u0445\u0430\u044f \u0441\u0435\u0440\u0438\u044f \u2014 \u0443\u0431\u0440\u0430\u043d\u043e ${s.culprits_removed||0} \u0432\u0438\u043d\u043e\u0432\u043d\u044b\u0445 \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439</div>
-            <div class="dim" style="font-size:10px;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 ${agg.n} \u0441\u0434\u0435\u043b\u043e\u043a: WR ${agg.wr}% (\u043d\u0443\u0436\u043d\u043e \u2265${agg.breakeven_wr}% \u0434\u043b\u044f \u0431\u0435\u0437\u0443\u0431\u044b\u0442\u043a\u0430) \u00b7 avg ${agg.avg_pnl_r>0?'+':''}${agg.avg_pnl_r}R \u00b7 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0438 \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u044e\u0442 \u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c</div>
+        ? `<div style="padding:8px 10px;margin-bottom:8px;background:var(--warn-bg);border-radius:var(--r-sm);border:1px solid var(--warn-line);">
+            <div style="color:var(--warn);font-weight:700;font-size:var(--fs);">\u26a0\ufe0f \u0431\u044b\u043b\u0430 \u043f\u043b\u043e\u0445\u0430\u044f \u0441\u0435\u0440\u0438\u044f \u2014 \u0443\u0431\u0440\u0430\u043d\u043e ${s.culprits_removed||0} \u0432\u0438\u043d\u043e\u0432\u043d\u044b\u0445 \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439</div>
+            <div class="dim" style="font-size:var(--fs-xs);">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 ${agg.n} \u0441\u0434\u0435\u043b\u043e\u043a: WR ${agg.wr}% (\u043d\u0443\u0436\u043d\u043e \u2265${agg.breakeven_wr}% \u0434\u043b\u044f \u0431\u0435\u0437\u0443\u0431\u044b\u0442\u043a\u0430) \u00b7 avg ${agg.avg_pnl_r>0?'+':''}${agg.avg_pnl_r}R \u00b7 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0438 \u043f\u0440\u043e\u0434\u043e\u043b\u0436\u0430\u044e\u0442 \u0440\u0430\u0431\u043e\u0442\u0430\u0442\u044c</div>
           </div>`
         : '';
       const liveBadge = liveSig
-        ? `<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:10px;background:${liveSig.direction==='LONG'?'rgba(61,220,151,0.12)':'rgba(255,107,107,0.12)'};border-radius:8px;border:1px solid ${liveSig.direction==='LONG'?'#3ddc97':'#ff6b6b'};">
-            <div style="font-size:18px;">${liveSig.direction==='LONG'?'🟢':'🔴'}</div>
+        ? `<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:10px;background:${liveSig.direction==='LONG'?'rgba(61,220,151,0.12)':'rgba(255,107,107,0.12)'};border-radius:var(--r-sm);border:1px solid ${liveSig.direction==='LONG'?'var(--pos)':'var(--neg)'};">
+            <div style="font-size:var(--fs-lg);">${liveSig.direction==='LONG'?'🟢':'🔴'}</div>
             <div style="flex:1;">
-              <div class="${liveSig.direction==='LONG'?'win':'loss'}" style="font-weight:700;font-size:13px;">\u0416\u0418\u0412\u041e\u0419 \u0421\u0418\u0413\u041d\u0410\u041b: ${liveSig.direction}</div>
-              <div class="dim" style="font-size:10px;">entry ${fmtNum(liveSig.entry)} \u00b7 SL ${fmtNum(liveSig.sl)} \u00b7 TP ${fmtNum(liveSig.tp)} \u00b7 score ${liveSig.score}</div>
+              <div class="${liveSig.direction==='LONG'?'win':'loss'}" style="font-weight:700;font-size:var(--fs);">\u0416\u0418\u0412\u041e\u0419 \u0421\u0418\u0413\u041d\u0410\u041b: ${liveSig.direction}</div>
+              <div class="dim" style="font-size:var(--fs-xs);">entry ${fmtNum(liveSig.entry)} \u00b7 SL ${fmtNum(liveSig.sl)} \u00b7 TP ${fmtNum(liveSig.tp)} \u00b7 score ${liveSig.score}</div>
             </div>
           </div>`
-        : `<div style="padding:8px 10px;margin-bottom:10px;background:#0d1320;border-radius:8px;border:1px solid #232d45;">
-            <span class="dim" style="font-size:11px;">\u26aa \u0436\u0438\u0432\u043e\u0433\u043e \u0441\u0438\u0433\u043d\u0430\u043b\u0430 \u0441\u0435\u0439\u0447\u0430\u0441 \u043d\u0435\u0442</span>
+        : `<div style="padding:8px 10px;margin-bottom:10px;background:var(--inset);border-radius:var(--r-sm);border:1px solid var(--line);">
+            <span class="dim" style="font-size:var(--fs-sm);">\u26aa \u0436\u0438\u0432\u043e\u0433\u043e \u0441\u0438\u0433\u043d\u0430\u043b\u0430 \u0441\u0435\u0439\u0447\u0430\u0441 \u043d\u0435\u0442</span>
           </div>`;
 
       // ---- Confirmed dependencies, compact ----
       const topPats = (c.top_patterns || []).slice(0, 5);
       const patItems = topPats.map(p => {
         const dirCls = p.direction === 'LONG' ? 'win' : 'loss';
-        const comboTag = p.is_combo ? ` <span style="color:#a855f7;">\u043a\u043e\u043c\u0431\u043e\u00d7${p.combo_depth||2}</span>` : '';
-        const decayTag = p.decaying ? ` <span style="color:#ffa726;">\u26a0\ufe0f \u043e\u0441\u043b\u0430\u0431\u0435\u0432\u0430\u0435\u0442</span>` : '';
+        const comboTag = p.is_combo ? ` <span style="color:var(--neuro);">\u043a\u043e\u043c\u0431\u043e\u00d7${p.combo_depth||2}</span>` : '';
+        const decayTag = p.decaying ? ` <span style="color:var(--warn);">\u26a0\ufe0f \u043e\u0441\u043b\u0430\u0431\u0435\u0432\u0430\u0435\u0442</span>` : '';
         const vf = p.veto_filter;
-        const vetoTag = vf ? ` <span style="color:#4fc3f7;" title="\u0432\u0442\u043e\u0440\u043e\u0439 \u0441\u043b\u043e\u0439: \u0442\u043e\u043b\u044c\u043a\u043e \u043a\u043e\u0433\u0434\u0430 ${translateNeuroCondition(vf.key, vf.value)} (train ${vf.train_wr}% \u0432\u043c\u0435\u0441\u0442\u043e ${vf.train_overall_wr}%, test ${vf.test_wr}%, n=${vf.test_n})">🛡️ \u0432\u0435\u0442\u043e-\u0444\u0438\u043b\u044c\u0442\u0440</span>` : '';
-        return `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid #1c2433;font-size:11px;">
+        const vetoTag = vf ? ` <span style="color:var(--acc);" title="\u0432\u0442\u043e\u0440\u043e\u0439 \u0441\u043b\u043e\u0439: \u0442\u043e\u043b\u044c\u043a\u043e \u043a\u043e\u0433\u0434\u0430 ${translateNeuroCondition(vf.key, vf.value)} (train ${vf.train_wr}% \u0432\u043c\u0435\u0441\u0442\u043e ${vf.train_overall_wr}%, test ${vf.test_wr}%, n=${vf.test_n})">🛡️ \u0432\u0435\u0442\u043e-\u0444\u0438\u043b\u044c\u0442\u0440</span>` : '';
+        return `<div style="display:flex;justify-content:space-between;padding:4px 0;border-bottom:1px solid var(--line);font-size:var(--fs-sm);">
           <span class="dim">${translateNeuroCondition(p.type, p.value)}${comboTag}${decayTag}${vetoTag}</span>
           <span class="${dirCls}">${p.direction} (z=${p.z}, n=${p.n})</span>
         </div>`;
       }).join('');
       const patSection = topPats.length
         ? `<details style="margin-bottom:8px;">
-            <summary style="cursor:pointer;font-size:11px;color:#8a97b8;">\u0442\u043e\u043f-5 \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439 \u25be</summary>
+            <summary style="cursor:pointer;font-size:var(--fs-sm);color:var(--tx-2);">\u0442\u043e\u043f-5 \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439</summary>
             <div style="margin-top:4px;">${patItems}</div>
           </details>`
         : '';
@@ -27127,9 +27118,9 @@ async function refreshNeuro() {
       }).join('');
       const tradesSection = trades.length
         ? `<details>
-            <summary style="cursor:pointer;font-size:11px;color:#8a97b8;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 ${trades.length} \u0441\u0434\u0435\u043b\u043e\u043a (\u0431\u044d\u043a\u0442\u0435\u0441\u0442) \u25be</summary>
+            <summary style="cursor:pointer;font-size:var(--fs-sm);color:var(--tx-2);">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 ${trades.length} \u0441\u0434\u0435\u043b\u043e\u043a (\u0431\u044d\u043a\u0442\u0435\u0441\u0442)</summary>
             <div style="overflow-x:auto;margin-top:6px;">
-              <table style="font-size:10px;white-space:nowrap;">
+              <table style="font-size:var(--fs-xs);white-space:nowrap;">
                 <thead><tr><th>\u0412\u0445\u043e\u0434</th><th>Dir</th><th>Entry</th><th>\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442</th><th>P&L</th><th>$15→</th></tr></thead>
                 <tbody>${tradeRows}</tbody>
               </table>
@@ -27162,11 +27153,11 @@ async function refreshNeuro() {
       }).join('');
       const liveSigSection = liveSigs.length
         ? `<details style="margin-bottom:8px;">
-            <summary style="cursor:pointer;font-size:11px;color:#8a97b8;">
-              \u0416\u0418\u0412\u042b\u0415 \u0441\u0438\u0433\u043d\u0430\u043b\u044b: ${liveSigs.length}${lsStats && lsStats.n ? ` \u00b7 WR ${lsStats.winrate}% (${lsStats.wins}W/${lsStats.losses}L${lsStats.open?', '+lsStats.open+' \u043e\u0442\u043a\u0440\u044b\u0442\u043e':''})` : lsStats && lsStats.open ? ` \u00b7 ${lsStats.open} \u043e\u0442\u043a\u0440\u044b\u0442\u043e, \u0435\u0449\u0451 \u043d\u0435\u0442 \u0437\u0430\u043a\u0440\u044b\u0442\u044b\u0445` : ''} \u25be
+            <summary style="cursor:pointer;font-size:var(--fs-sm);color:var(--tx-2);">
+              \u0416\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b: ${liveSigs.length}${lsStats && lsStats.n ? ` \u00b7 WR ${lsStats.winrate}% (${lsStats.wins}W/${lsStats.losses}L${lsStats.open?', '+lsStats.open+' \u043e\u0442\u043a\u0440\u044b\u0442\u043e':''})` : lsStats && lsStats.open ? ` \u00b7 ${lsStats.open} \u043e\u0442\u043a\u0440\u044b\u0442\u043e, \u0435\u0449\u0451 \u043d\u0435\u0442 \u0437\u0430\u043a\u0440\u044b\u0442\u044b\u0445` : ''}
             </summary>
             <div style="overflow-x:auto;margin-top:6px;">
-              <table style="font-size:10px;white-space:nowrap;">
+              <table style="font-size:var(--fs-xs);white-space:nowrap;">
                 <thead><tr><th>\u0412\u0445\u043e\u0434</th><th>Dir</th><th>Entry</th><th>\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442</th><th>P&L</th></tr></thead>
                 <tbody>${liveSigRows}</tbody>
               </table>
@@ -27181,21 +27172,21 @@ async function refreshNeuro() {
       // looking identical to an actively-traded one.
       const isActive = c.is_active !== false;
       const cardStyle = isActive
-        ? 'margin-bottom:14px;padding:12px;background:#12182a;border-radius:10px;border:1px solid #232d45;'
-        : 'margin-bottom:14px;padding:12px;background:#0d1018;border-radius:10px;border:1px dashed #3a4256;opacity:0.6;';
-      const inactiveBadge = isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:#2a2f3d;border-radius:6px;">
-        <span class="dim" style="font-size:10px;">\u26aa \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0441\u043f\u0440\u0430\u0432\u043a\u0438 \u2014 \u043d\u0435 \u0442\u043e\u0440\u0433\u0443\u0435\u0442\u0441\u044f \u0438 \u043d\u0435 \u0441\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442\u0441\u044f \u0432\u0436\u0438\u0432\u0443\u044e</span>
+        ? 'margin-bottom:12px;padding:14px;background:var(--card);border-radius:var(--r-lg);border:1px solid var(--line);'
+        : 'margin-bottom:12px;padding:14px;background:var(--inset);border-radius:var(--r-lg);border:1px dashed var(--line-2);opacity:0.6;';
+      const inactiveBadge = isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:var(--ctl);border-radius:var(--r-xs);">
+        <span class="dim" style="font-size:var(--fs-xs);">\u26aa \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0441\u043f\u0440\u0430\u0432\u043a\u0438 \u2014 \u043d\u0435 \u0442\u043e\u0440\u0433\u0443\u0435\u0442\u0441\u044f \u0438 \u043d\u0435 \u0441\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442\u0441\u044f \u0432\u0436\u0438\u0432\u0443\u044e</span>
       </div>`;
       // v0.99.384 — per-card "trade this coin" checkbox (Neuro selected-only autotrade)
       const _selSet = new Set(data.autotrade_selected || []);
       const _selOn = _selSet.has(c.symbol);
-      const selBox = isActive ? `<label style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;margin-bottom:6px;border-radius:6px;cursor:pointer;background:${_selOn ? 'rgba(102,187,106,0.15)' : '#1a2030'};border:1px solid ${_selOn ? '#66bb6a' : '#2a3246'};font-size:11px;" onclick="event.stopPropagation();">
+      const selBox = isActive ? `<label style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;margin-bottom:6px;border-radius:var(--r-xs);cursor:pointer;background:${_selOn ? 'rgba(102,187,106,0.15)' : 'var(--card)'};border:1px solid ${_selOn ? 'var(--pos)' : 'var(--line-2)'};font-size:var(--fs-sm);" onclick="event.stopPropagation();">
           <input type="checkbox" ${_selOn ? 'checked' : ''} onchange="neuroAutotradeSelect('${c.symbol}', this.checked)">
           <span>🤖 торговать</span>
-          ${data.autotrade_selected_only ? (_selOn ? '' : '<span class="dim" style="font-size:10px;">— не торгуется</span>') : '<span class="dim" style="font-size:10px;">(включите «только отмеченные» в настройках автоторговли)</span>'}
+          ${data.autotrade_selected_only ? (_selOn ? '' : '<span class="dim" style="font-size:var(--fs-xs);">— не торгуется</span>') : '<span class="dim" style="font-size:var(--fs-xs);" title="включите «Neuro: только отмеченные монеты» в настройках автоторговли">· режим выкл.</span>'}
         </label>` : '';
       return `<div style="${cardStyle}">
-        <div style="font-size:15px;font-weight:700;color:#c792ea;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
+        <div style="font-size:var(--fs-md);font-weight:700;color:var(--neuro);margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
         ${selBox}
         ${inactiveBadge}
         ${underperformBadge}
@@ -27215,10 +27206,10 @@ async function refreshNeuro() {
       </div>
       <div style="margin-bottom:4px;">${miningTxt}</div>
       ${progressBarHtml}
-      <div id="neuroCanvasWrap" style="width:100%;height:220px;background:#0a0e1a;border-radius:10px;overflow:hidden;margin-bottom:14px;position:relative;">
+      <div id="neuroCanvasWrap" style="width:100%;height:220px;background:var(--inset);border-radius:var(--r);overflow:hidden;margin-bottom:14px;position:relative;">
         <canvas id="neuroCanvas" style="width:100%;height:100%;display:block;"></canvas>
       </div>
-      <div class="dim" style="font-size:11px;font-weight:700;margin-bottom:2px;">\u0416\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b \u0432\u0441\u0435\u0433\u043e \u043f\u043e\u0441\u0438\u0441\u0442\u0435\u043c\u0435 (\u0440\u0435\u0430\u043b\u044c\u043d\u044b\u0439 \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442, \u043d\u0435 \u0431\u044d\u043a\u0442\u0435\u0441\u0442)</div>
+      <div class="dim" style="font-size:var(--fs-sm);font-weight:700;margin-bottom:2px;">\u0416\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b \u0432\u0441\u0435\u0433\u043e \u043f\u043e \u0441\u0438\u0441\u0442\u0435\u043c\u0435 (\u0440\u0435\u0430\u043b\u044c\u043d\u044b\u0439 \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442, \u043d\u0435 \u0431\u044d\u043a\u0442\u0435\u0441\u0442)</div>
       ${lstatsHtml}
       ${cards}
     `;
@@ -27239,58 +27230,48 @@ async function refreshSnr() {
     // идёт ли вообще бэктест") -- same progress-bar shape as Neuro's own.
     let progressHtml = '';
     if (data.waiting_for_slot) {
-      progressHtml = `<div class="dim" style="margin-bottom:10px;font-size:11px;">
+      progressHtml = `<div class="dim" style="margin-bottom:10px;font-size:var(--fs-sm);">
         ⏳ ожидает свободного места среди бэктестов других модулей (одновременно идут не больше 2 бэктестов)
       </div>`;
     } else if (data.backtest_running) {
       const pct = data.progress_total ? Math.round(data.progress_done / data.progress_total * 100) : 0;
       progressHtml = `<div style="margin-bottom:10px;">
-        <div class="dim" style="font-size:11px;margin-bottom:4px;">\u043f\u0435\u0440\u0435\u0431\u043e\u0440 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432: ${data.progress_done}/${data.progress_total}${coresTxt(data.calc)}${data.in_flight && data.in_flight.length ? ' \u2014 \u043e\u0434\u043d\u043e\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e: '+data.in_flight.slice(0,8).join(', ')+(data.in_flight.length>8?` +${data.in_flight.length-8}`:'') : ''}</div>
-        <div style="height:6px;background:#1c2433;border-radius:3px;overflow:hidden;">
-          <div style="height:100%;width:${pct}%;background:#26c6da;transition:width .3s;"></div>
+        <div class="dim" style="font-size:var(--fs-sm);margin-bottom:4px;">\u043f\u0435\u0440\u0435\u0431\u043e\u0440 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432: ${data.progress_done}/${data.progress_total}${coresTxt(data.calc)}${data.in_flight && data.in_flight.length ? ' \u2014 \u043e\u0434\u043d\u043e\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e: '+data.in_flight.slice(0,8).join(', ')+(data.in_flight.length>8?` +${data.in_flight.length-8}`:'') : ''}</div>
+        <div style="height:6px;background:var(--line);border-radius:3px;overflow:hidden;">
+          <div style="height:100%;width:${pct}%;background:var(--snr);transition:width .3s;"></div>
         </div>
       </div>`;
     }
 
     const lstatsHtml = data.live_signal_stats && data.live_signal_stats.total
-      ? `<div class="dim" style="font-size:11px;margin-bottom:10px;">\u0436\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b \u0432\u0441\u0435\u0433\u043e: ${data.live_signal_stats.total} \u00b7 WR ${data.live_signal_stats.winrate!=null?data.live_signal_stats.winrate+'%':'\u2014'} \u00b7 \u043e\u0442\u043a\u0440\u044b\u0442\u043e: ${data.live_signal_stats.open}</div>`
+      ? `<div class="dim" style="font-size:var(--fs-sm);margin-bottom:10px;">\u0436\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b \u0432\u0441\u0435\u0433\u043e: ${data.live_signal_stats.total} \u00b7 WR ${data.live_signal_stats.winrate!=null?data.live_signal_stats.winrate+'%':'\u2014'} \u00b7 \u043e\u0442\u043a\u0440\u044b\u0442\u043e: ${data.live_signal_stats.open}</div>`
       : '';
 
     const allLiveSigs = [];
     coins.forEach(c => (c.recent_live_signals || []).forEach(s => allLiveSigs.push(s)));
     allLiveSigs.sort((a, b) => b.time - a.time);
-    const liveSigsTableHtml = allLiveSigs.length ? `
-      <div style="overflow-x:auto;margin-bottom:14px;">
-      <table style="font-size:11px;white-space:nowrap;width:100%;">
-        <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th title="плечо: фактическое, если сделка открыта автоторговлей; иначе расчётное (~) — максимальное, при котором ликвидация остаётся за стопом">Плечо</th><th>Status</th><th>Time</th></tr></thead>
-        <tbody>${allLiveSigs.map(s => {
-          const rc = s.status === 'OPEN' ? 'dim' : s.result === 'WIN' ? 'win' : s.result === 'LOSS' ? 'loss' : 'dim';
-          const statusTxt = s.status === 'OPEN' ? '\u041e\u0422\u041a\u0420\u042b\u0422\u0410' : `${s.result}${s.pnl_r!=null?' '+(s.pnl_r>0?'+':'')+s.pnl_r+'R':''}`;
-          const dirClass = s.direction === 'SHORT' ? 'loss' : 'win';
-          return `<tr onclick="openSnrChart('${s.symbol}', ${s.time})" style="cursor:pointer;">
-            <td>${s.symbol.replace('_USDT','')}</td><td class="${dirClass}">${s.direction}</td>
-            <td>${fmtNum(s.entry)}</td><td>${fmtNum(s.sl)}</td><td>${fmtNum(s.tp)}</td>
-            <td class="dim">${s.leverage ? (s.leverage_planned ? '~' : '') + s.leverage + 'x' : '—'}</td>
-            <td class="${rc}">${statusTxt}${s.neuro_filtered ? ` <span class="dim" title="отсеян фильтром Neuro «${s.neuro_filtered}» — записан для статистики, не торговался">🧪 не торговался</span>` : ''}</td><td class="dim">${fmtDateTime(s.time)}</td>
-          </tr>`;
-        }).join('')}</tbody>
-      </table>
-      </div>` : '';
+    const liveSigsTableHtml = allLiveSigs.length   // v0.99.387 — compact list
+      ? sigListHtml(allLiveSigs.map(sg => sigItemHtml(sg, {
+          onclick: `openSnrChart('${sg.symbol}', ${sg.time})`,
+          extra: [sg.leverage ? `плечо ${sg.leverage_planned ? '~' : ''}${sg.leverage}x` : '',
+                  sg.neuro_filtered ? `<span title="отсеян фильтром Neuro «${sg.neuro_filtered}» — записан для статистики, не торговался">🧪 не торговался</span>` : ''],
+        })))
+      : '';
 
     const cards = coins.map(c => {
       const isActive = c.is_active !== false;
       const cardStyle = isActive
-        ? 'margin-bottom:14px;padding:12px;background:#12182a;border-radius:10px;border:1px solid #232d45;'
-        : 'margin-bottom:14px;padding:12px;background:#0d1018;border-radius:10px;border:1px dashed #3a4256;opacity:0.6;';
+        ? 'margin-bottom:12px;padding:14px;background:var(--card);border-radius:var(--r-lg);border:1px solid var(--line);'
+        : 'margin-bottom:12px;padding:14px;background:var(--inset);border-radius:var(--r-lg);border:1px dashed var(--line-2);opacity:0.6;';
       const bestBadge = (data.single_best && c.symbol === data.best_symbol)
-        ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:#3a3012;border:1px solid #6b5520;border-radius:6px;"><span style="font-size:10px;color:#ffcc66;">⭐ торгуется (только лучшая карточка)</span></div>`
-        : (data.single_best && isActive ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:#1c2433;border-radius:6px;"><span class="dim" style="font-size:10px;">только сигналы — торгуется лучшая карточка</span></div>` : '');
-      const inactiveBadge = bestBadge + (isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:#2a2f3d;border-radius:6px;">
-        <span class="dim" style="font-size:10px;">\u26aa \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0441\u043f\u0440\u0430\u0432\u043a\u0438 \u2014 \u043d\u0435 \u0442\u043e\u0440\u0433\u0443\u0435\u0442\u0441\u044f \u0438 \u043d\u0435 \u0441\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442\u0441\u044f \u0432\u0436\u0438\u0432\u0443\u044e</span>
+        ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-xs);"><span style="font-size:var(--fs-xs);color:var(--money);">⭐ торгуется (только лучшая карточка)</span></div>`
+        : (data.single_best && isActive ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:var(--line);border-radius:var(--r-xs);"><span class="dim" style="font-size:var(--fs-xs);">только сигналы — торгуется лучшая карточка</span></div>` : '');
+      const inactiveBadge = bestBadge + (isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:var(--ctl);border-radius:var(--r-xs);">
+        <span class="dim" style="font-size:var(--fs-xs);">\u26aa \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0441\u043f\u0440\u0430\u0432\u043a\u0438 \u2014 \u043d\u0435 \u0442\u043e\u0440\u0433\u0443\u0435\u0442\u0441\u044f \u0438 \u043d\u0435 \u0441\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442\u0441\u044f \u0432\u0436\u0438\u0432\u0443\u044e</span>
       </div>`);
       if (!c.found) {
         return `<div style="${cardStyle}">
-          <div style="font-size:15px;font-weight:700;color:#26c6da;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
+          <div style="font-size:var(--fs-md);font-weight:700;color:var(--snr);margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
           ${inactiveBadge}
           <span class="dim">\u043d\u0438\u0447\u0435\u0433\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u043e\u0433\u043e \u043d\u0430 train/test \u043f\u043e\u043a\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e</span>
         </div>`;
@@ -27299,22 +27280,22 @@ async function refreshSnr() {
       const tradesRows = `<div class="btTradesBox"></div>`;   // v0.99.334 — filled by loadBtTrades() on open
       const liveSigSection = '';
       return `<div style="${cardStyle}">
-        <div style="font-size:15px;font-weight:700;color:#26c6da;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
+        <div style="font-size:var(--fs-md);font-weight:700;color:var(--snr);margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
         ${inactiveBadge}
-        <div class="dim" style="font-size:11px;margin-bottom:8px;">
+        <div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">
           \u0442\u0430\u0439\u043c\u0444\u0440\u0435\u0439\u043c ${r.timeframe}${r.history_days ? ` \u00b7 бэктест ${fmtMonths(r.history_days)}${r.test_days ? ` (тест ${fmtMonths(r.test_days)})` : ""}` : ""} \u00b7 pivot ${r.pivot_length} \u00b7 \u0441\u0438\u043b\u0430\u2265${r.min_strength} \u00b7 RR${r.rr}
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:4px 16px;margin-bottom:8px;">
-          <div><div class="dim" style="font-size:10px;">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R \u00b7 z=${r.train_z}</div></div>
-          <div><div class="dim" style="font-size:10px;">TEST (n=${r.test_n})</div><div class="win">WR ${r.test_wr}% \u00b7 ${r.test_avg_pnl_r>0?'+':''}${r.test_avg_pnl_r}R \u00b7 z=${r.test_z}</div></div>
-          <div class="dim" style="font-size:10px;flex-basis:100%;">${r.fees_included ? `R и z — после комиссии (≈${r.avg_fee_r}R на сделку: 0.05% вход + 0.05% выход)` : 'R и z — без комиссии (старый бэктест, пересчитается)'}</div>
+          <div><div class="dim" style="font-size:var(--fs-xs);">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R \u00b7 z=${r.train_z}</div></div>
+          <div><div class="dim" style="font-size:var(--fs-xs);">TEST (n=${r.test_n})</div><div class="win">WR ${r.test_wr}% \u00b7 ${r.test_avg_pnl_r>0?'+':''}${r.test_avg_pnl_r}R \u00b7 z=${r.test_z}</div></div>
+          <div class="dim" style="font-size:var(--fs-xs);flex-basis:100%;">${r.fees_included ? `R и z — после комиссии (≈${r.avg_fee_r}R на сделку: 0.05% вход + 0.05% выход)` : 'R и z — без комиссии (старый бэктест, пересчитается)'}</div>
           ${neuroFilterNoteHtml(r)}
         </div>
-        <div class="dim hint-block" style="font-size:10px;margin-bottom:8px;">z — насколько стандартных отклонений винрейт выше безубытка с учётом комиссии (нужно ≥3.23 с поправкой на 81 перебранную комбинацию)</div>
+        <div class="dim hint-block" style="font-size:var(--fs-xs);margin-bottom:8px;">z — насколько стандартных отклонений винрейт выше безубытка с учётом комиссии (нужно ≥3.23 с поправкой на 81 перебранную комбинацию)</div>
         ${liveSigSection}
         ${compoundSummaryHtml(r)}
         ${filterCoinLineHtml(data.filters, c.symbol)}
-        <details ontoggle="loadBtTrades(this, 'snr', '${c.symbol}', ${data.last_backtest_finished || 0})"><summary class="dim" style="cursor:pointer;font-size:11px;">все сделки бэктеста (${r.all_trades_n || 0})</summary>${tradesRows}</details>
+        <details ontoggle="loadBtTrades(this, 'snr', '${c.symbol}', ${data.last_backtest_finished || 0})"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">все сделки бэктеста (${r.all_trades_n || 0})</summary>${tradesRows}</details>
       </div>`;
     }).join('');
     panel.innerHTML = `
@@ -27357,58 +27338,48 @@ async function refreshPrv() {
     // идёт ли вообще бэктест") -- same progress-bar shape as Neuro's own.
     let progressHtml = '';
     if (data.waiting_for_slot) {
-      progressHtml = `<div class="dim" style="margin-bottom:10px;font-size:11px;">
+      progressHtml = `<div class="dim" style="margin-bottom:10px;font-size:var(--fs-sm);">
         ⏳ ожидает свободного места среди бэктестов других модулей (одновременно идут не больше 2 бэктестов)
       </div>`;
     } else if (data.backtest_running) {
       const pct = data.progress_total ? Math.round(data.progress_done / data.progress_total * 100) : 0;
       progressHtml = `<div style="margin-bottom:10px;">
-        <div class="dim" style="font-size:11px;margin-bottom:4px;">\u043f\u0435\u0440\u0435\u0431\u043e\u0440 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432: ${data.progress_done}/${data.progress_total}${coresTxt(data.calc)}${data.in_flight && data.in_flight.length ? ' \u2014 \u043e\u0434\u043d\u043e\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e: '+data.in_flight.slice(0,8).join(', ')+(data.in_flight.length>8?` +${data.in_flight.length-8}`:'') : ''}</div>
-        <div style="height:6px;background:#1c2433;border-radius:3px;overflow:hidden;">
-          <div style="height:100%;width:${pct}%;background:#ffa726;transition:width .3s;"></div>
+        <div class="dim" style="font-size:var(--fs-sm);margin-bottom:4px;">\u043f\u0435\u0440\u0435\u0431\u043e\u0440 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432: ${data.progress_done}/${data.progress_total}${coresTxt(data.calc)}${data.in_flight && data.in_flight.length ? ' \u2014 \u043e\u0434\u043d\u043e\u0432\u0440\u0435\u043c\u0435\u043d\u043d\u043e: '+data.in_flight.slice(0,8).join(', ')+(data.in_flight.length>8?` +${data.in_flight.length-8}`:'') : ''}</div>
+        <div style="height:6px;background:var(--line);border-radius:3px;overflow:hidden;">
+          <div style="height:100%;width:${pct}%;background:var(--prv);transition:width .3s;"></div>
         </div>
       </div>`;
     }
 
     const lstatsHtml = data.live_signal_stats && data.live_signal_stats.total
-      ? `<div class="dim" style="font-size:11px;margin-bottom:10px;">\u0436\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b \u0432\u0441\u0435\u0433\u043e: ${data.live_signal_stats.total} \u00b7 WR ${data.live_signal_stats.winrate!=null?data.live_signal_stats.winrate+'%':'\u2014'} \u00b7 \u043e\u0442\u043a\u0440\u044b\u0442\u043e: ${data.live_signal_stats.open}</div>`
+      ? `<div class="dim" style="font-size:var(--fs-sm);margin-bottom:10px;">\u0436\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b \u0432\u0441\u0435\u0433\u043e: ${data.live_signal_stats.total} \u00b7 WR ${data.live_signal_stats.winrate!=null?data.live_signal_stats.winrate+'%':'\u2014'} \u00b7 \u043e\u0442\u043a\u0440\u044b\u0442\u043e: ${data.live_signal_stats.open}</div>`
       : '';
 
     const allLiveSigs = [];
     coins.forEach(c => (c.recent_live_signals || []).forEach(s => allLiveSigs.push(s)));
     allLiveSigs.sort((a, b) => b.time - a.time);
-    const liveSigsTableHtml = allLiveSigs.length ? `
-      <div style="overflow-x:auto;margin-bottom:14px;">
-      <table style="font-size:11px;white-space:nowrap;width:100%;">
-        <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th title="плечо: фактическое, если сделка открыта автоторговлей; иначе расчётное (~) — максимальное, при котором ликвидация остаётся за стопом">Плечо</th><th>Status</th><th>Time</th></tr></thead>
-        <tbody>${allLiveSigs.map(s => {
-          const rc = s.status === 'OPEN' ? 'dim' : s.result === 'WIN' ? 'win' : s.result === 'LOSS' ? 'loss' : 'dim';
-          const statusTxt = s.status === 'OPEN' ? '\u041e\u0422\u041a\u0420\u042b\u0422\u0410' : `${s.result}${s.pnl_r!=null?' '+(s.pnl_r>0?'+':'')+s.pnl_r+'R':''}`;
-          const dirClass = s.direction === 'SHORT' ? 'loss' : 'win';
-          return `<tr onclick="openPrvChart('${s.symbol}', ${s.time})" style="cursor:pointer;">
-            <td>${s.symbol.replace('_USDT','')}</td><td class="${dirClass}">${s.direction}</td>
-            <td>${fmtNum(s.entry)}</td><td>${fmtNum(s.sl)}</td><td>${fmtNum(s.tp)}</td>
-            <td class="dim">${s.leverage ? (s.leverage_planned ? '~' : '') + s.leverage + 'x' : '—'}</td>
-            <td class="${rc}">${statusTxt}${s.neuro_filtered ? ` <span class="dim" title="отсеян фильтром Neuro «${s.neuro_filtered}» — записан для статистики, не торговался">🧪 не торговался</span>` : ''}</td><td class="dim">${fmtDateTime(s.time)}</td>
-          </tr>`;
-        }).join('')}</tbody>
-      </table>
-      </div>` : '';
+    const liveSigsTableHtml = allLiveSigs.length   // v0.99.387 — compact list
+      ? sigListHtml(allLiveSigs.map(sg => sigItemHtml(sg, {
+          onclick: `openPrvChart('${sg.symbol}', ${sg.time})`,
+          extra: [sg.leverage ? `плечо ${sg.leverage_planned ? '~' : ''}${sg.leverage}x` : '',
+                  sg.neuro_filtered ? `<span title="отсеян фильтром Neuro «${sg.neuro_filtered}» — записан для статистики, не торговался">🧪 не торговался</span>` : ''],
+        })))
+      : '';
 
     const cards = coins.map(c => {
       const isActive = c.is_active !== false;
       const cardStyle = isActive
-        ? 'margin-bottom:14px;padding:12px;background:#12182a;border-radius:10px;border:1px solid #232d45;'
-        : 'margin-bottom:14px;padding:12px;background:#0d1018;border-radius:10px;border:1px dashed #3a4256;opacity:0.6;';
+        ? 'margin-bottom:12px;padding:14px;background:var(--card);border-radius:var(--r-lg);border:1px solid var(--line);'
+        : 'margin-bottom:12px;padding:14px;background:var(--inset);border-radius:var(--r-lg);border:1px dashed var(--line-2);opacity:0.6;';
       const bestBadge = (data.single_best && c.symbol === data.best_symbol)
-        ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:#3a3012;border:1px solid #6b5520;border-radius:6px;"><span style="font-size:10px;color:#ffcc66;">⭐ торгуется (только лучшая карточка)</span></div>`
-        : (data.single_best && isActive ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:#1c2433;border-radius:6px;"><span class="dim" style="font-size:10px;">только сигналы — торгуется лучшая карточка</span></div>` : '');
-      const inactiveBadge = bestBadge + (isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:#2a2f3d;border-radius:6px;">
-        <span class="dim" style="font-size:10px;">\u26aa \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0441\u043f\u0440\u0430\u0432\u043a\u0438 \u2014 \u043d\u0435 \u0442\u043e\u0440\u0433\u0443\u0435\u0442\u0441\u044f \u0438 \u043d\u0435 \u0441\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442\u0441\u044f \u0432\u0436\u0438\u0432\u0443\u044e</span>
+        ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-xs);"><span style="font-size:var(--fs-xs);color:var(--money);">⭐ торгуется (только лучшая карточка)</span></div>`
+        : (data.single_best && isActive ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:var(--line);border-radius:var(--r-xs);"><span class="dim" style="font-size:var(--fs-xs);">только сигналы — торгуется лучшая карточка</span></div>` : '');
+      const inactiveBadge = bestBadge + (isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:var(--ctl);border-radius:var(--r-xs);">
+        <span class="dim" style="font-size:var(--fs-xs);">\u26aa \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0441\u043f\u0440\u0430\u0432\u043a\u0438 \u2014 \u043d\u0435 \u0442\u043e\u0440\u0433\u0443\u0435\u0442\u0441\u044f \u0438 \u043d\u0435 \u0441\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442\u0441\u044f \u0432\u0436\u0438\u0432\u0443\u044e</span>
       </div>`);
       if (!c.found) {
         return `<div style="${cardStyle}">
-          <div style="font-size:15px;font-weight:700;color:#ffa726;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
+          <div style="font-size:var(--fs-md);font-weight:700;color:var(--prv);margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
           ${inactiveBadge}
           <span class="dim">\u043d\u0438\u0447\u0435\u0433\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0451\u043d\u043d\u043e\u0433\u043e \u043d\u0430 train/test \u043f\u043e\u043a\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u043e</span>
         </div>`;
@@ -27417,22 +27388,22 @@ async function refreshPrv() {
       const tradesRows = `<div class="btTradesBox"></div>`;   // v0.99.334 — filled by loadBtTrades() on open
       const liveSigSection = '';
       return `<div style="${cardStyle}">
-        <div style="font-size:15px;font-weight:700;color:#ffa726;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
+        <div style="font-size:var(--fs-md);font-weight:700;color:var(--prv);margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
         ${inactiveBadge}
-        <div class="dim" style="font-size:11px;margin-bottom:8px;">
+        <div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">
           \u0442\u0430\u0439\u043c\u0444\u0440\u0435\u0439\u043c ${r.timeframe}${r.history_days ? ` \u00b7 бэктест ${fmtMonths(r.history_days)}${r.test_days ? ` (тест ${fmtMonths(r.test_days)})` : ""}` : ""} \u00b7 ${r.ma_type}${r.kc_length} \u00b7 \u043f\u043e\u043b\u043e\u0441\u0430\u00d7${r.band_mult} \u00b7 RR${r.rr} \u00b7 \u0441\u0440.MAE ${r.avg_mae_r}R
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:4px 16px;margin-bottom:8px;">
-          <div><div class="dim" style="font-size:10px;">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R \u00b7 z=${r.train_z}</div></div>
-          <div><div class="dim" style="font-size:10px;">TEST (n=${r.test_n})</div><div class="win">WR ${r.test_wr}% \u00b7 ${r.test_avg_pnl_r>0?'+':''}${r.test_avg_pnl_r}R \u00b7 z=${r.test_z}</div></div>
-          <div class="dim" style="font-size:10px;flex-basis:100%;">${r.fees_included ? `R и z — после комиссии (≈${r.avg_fee_r}R на сделку: 0.05% вход + 0.05% выход)` : 'R и z — без комиссии (старый бэктест, пересчитается)'}</div>
+          <div><div class="dim" style="font-size:var(--fs-xs);">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R \u00b7 z=${r.train_z}</div></div>
+          <div><div class="dim" style="font-size:var(--fs-xs);">TEST (n=${r.test_n})</div><div class="win">WR ${r.test_wr}% \u00b7 ${r.test_avg_pnl_r>0?'+':''}${r.test_avg_pnl_r}R \u00b7 z=${r.test_z}</div></div>
+          <div class="dim" style="font-size:var(--fs-xs);flex-basis:100%;">${r.fees_included ? `R и z — после комиссии (≈${r.avg_fee_r}R на сделку: 0.05% вход + 0.05% выход)` : 'R и z — без комиссии (старый бэктест, пересчитается)'}</div>
           ${neuroFilterNoteHtml(r)}
         </div>
-        <div class="dim hint-block" style="font-size:10px;margin-bottom:8px;">z — насколько стандартных отклонений винрейт выше безубытка с учётом комиссии (нужно ≥3.11 с поправкой на 216 перебранную комбинацию)</div>
+        <div class="dim hint-block" style="font-size:var(--fs-xs);margin-bottom:8px;">z — насколько стандартных отклонений винрейт выше безубытка с учётом комиссии (нужно ≥3.11 с поправкой на 216 перебранную комбинацию)</div>
         ${liveSigSection}
         ${compoundSummaryHtml(r)}
         ${filterCoinLineHtml(data.filters, c.symbol)}
-        <details ontoggle="loadBtTrades(this, 'prv', '${c.symbol}', ${data.last_backtest_finished || 0})"><summary class="dim" style="cursor:pointer;font-size:11px;">все сделки бэктеста (${r.all_trades_n || 0})</summary>${tradesRows}</details>
+        <details ontoggle="loadBtTrades(this, 'prv', '${c.symbol}', ${data.last_backtest_finished || 0})"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">все сделки бэктеста (${r.all_trades_n || 0})</summary>${tradesRows}</details>
       </div>`;
     }).join('');
     panel.innerHTML = `
@@ -27536,36 +27507,36 @@ async function refreshNq() {
     const pnlCls = (s.avg_pnl_r||0) >= 0 ? 'win' : 'loss';
 
     const bigStats = hasStats ? `
-      <div style="display:flex;gap:0;margin:10px 0;background:#0d1320;border-radius:8px;overflow:hidden;border:1px solid #232d45;">
-        <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #232d45;">
-          <div style="font-size:20px;font-weight:700;" class="${wrCls}">${s.winrate}%</div>
-          <div class="dim" style="font-size:9px;">WINRATE</div>
+      <div style="display:flex;gap:0;margin:10px 0;background:var(--inset);border-radius:var(--r-sm);overflow:hidden;border:1px solid var(--line);">
+        <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid var(--line);">
+          <div style="font-size:var(--fs-xl);font-weight:700;" class="${wrCls}">${s.winrate}%</div>
+          <div class="dim" style="font-size:var(--fs-xs);">WINRATE</div>
         </div>
-        <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #232d45;">
-          <div style="font-size:20px;font-weight:700;" class="${pnlCls}">${s.avg_pnl_r>0?'+':''}${s.avg_pnl_r}R</div>
-          <div class="dim" style="font-size:9px;">\u0421\u0420. P&L</div>
+        <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid var(--line);">
+          <div style="font-size:var(--fs-xl);font-weight:700;" class="${pnlCls}">${s.avg_pnl_r>0?'+':''}${s.avg_pnl_r}R</div>
+          <div class="dim" style="font-size:var(--fs-xs);">\u0421\u0420. P&L</div>
         </div>
-        <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid #232d45;">
-          <div style="font-size:20px;font-weight:700;color:#e8ecf5;">1:${(s.chosen_rr||cfg.rr||3).toFixed(2)}</div>
-          <div class="dim" style="font-size:9px;">RR (\u043f\u043e\u0434\u043e\u0431\u0440\u0430\u043d, \u2265 3.0)</div>
+        <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid var(--line);">
+          <div style="font-size:var(--fs-xl);font-weight:700;color:var(--tx);">1:${(s.chosen_rr||cfg.rr||3).toFixed(2)}</div>
+          <div class="dim" style="font-size:var(--fs-xs);">RR (\u043f\u043e\u0434\u043e\u0431\u0440\u0430\u043d, \u2265 3.0)</div>
         </div>
         <div style="flex:1;text-align:center;padding:8px 4px;">
-          <div style="font-size:14px;font-weight:700;">
+          <div style="font-size:var(--fs-md);font-weight:700;">
             <span class="win">${s.wins}W</span>/<span class="loss">${s.losses}L</span>/<span class="dim">${s.timeouts}T</span>
           </div>
-          <div class="dim" style="font-size:9px;">n=${s.n} \u0438\u0437 ${s.total}</div>
+          <div class="dim" style="font-size:var(--fs-xs);">n=${s.n} \u0438\u0437 ${s.total}</div>
         </div>
       </div>
-      <div class="dim" style="font-size:10px;margin-bottom:10px;">${s.history_bars||0} \u0431\u0430\u0440\u043e\u0432 (${cfg.tf}) \u00b7 ${s.history_days_daily||0} \u0434\u043d\u0435\u0432\u043d\u044b\u0445 \u0441\u0432\u0435\u0447\u0435\u0439</div>`
+      <div class="dim" style="font-size:var(--fs-xs);margin-bottom:10px;">${s.history_bars||0} \u0431\u0430\u0440\u043e\u0432 (${cfg.tf}) \u00b7 ${s.history_days_daily||0} \u0434\u043d\u0435\u0432\u043d\u044b\u0445 \u0441\u0432\u0435\u0447\u0435\u0439</div>`
       : '<div class="dim" style="margin:10px 0;">\u0435\u0449\u0451 \u043c\u0430\u0439\u043d\u0438\u0442\u0441\u044f\u2026 \u0434\u0430\u043d\u043d\u044b\u0445 \u043f\u043e\u043a\u0430 \u043d\u0435\u0442 (NAS100_USDT \u2014 \u043d\u043e\u0432\u044b\u0439 \u043a\u043e\u043d\u0442\u0440\u0430\u043a\u0442 \u043d\u0430 Gate.io, \u0437\u0430\u043f\u0443\u0449\u0435\u043d 23.01.2026, \u0440\u0435\u0430\u043b\u044c\u043d\u0430\u044f \u0438\u0441\u0442\u043e\u0440\u0438\u044f \u043c\u043e\u0436\u0435\u0442 \u0431\u044b\u0442\u044c \u043a\u043e\u0440\u043e\u0447\u0435)</div>';
 
     const rrSweep = s.rr_sweep || [];
     const rrSweepSection = rrSweep.length ? `
       <details style="margin-bottom:8px;">
-        <summary style="cursor:pointer;font-size:11px;color:#8a97b8;">\u043f\u043e\u0434\u0431\u043e\u0440 RR (\u043d\u0430 train-\u0447\u0430\u0441\u0442\u0438, \u043c\u0438\u043d\u0438\u043c\u0443\u043c 3.0) \u25be</summary>
-        <div style="overflow-x:auto;margin-top:4px;"><table style="font-size:10px;white-space:nowrap;">
+        <summary style="cursor:pointer;font-size:var(--fs-sm);color:var(--tx-2);">\u043f\u043e\u0434\u0431\u043e\u0440 RR (\u043d\u0430 train-\u0447\u0430\u0441\u0442\u0438, \u043c\u0438\u043d\u0438\u043c\u0443\u043c 3.0)</summary>
+        <div style="overflow-x:auto;margin-top:4px;"><table style="font-size:var(--fs-xs);white-space:nowrap;">
           <thead><tr><th>RR</th><th>n</th><th>WR</th><th>expectancy</th></tr></thead>
-          <tbody>${rrSweep.map(r => `<tr style="${r.rr===s.chosen_rr?'background:#1a2f24;':''}">
+          <tbody>${rrSweep.map(r => `<tr style="${r.rr===s.chosen_rr?'background:var(--pos-bg);':''}">
             <td class="${r.rr===s.chosen_rr?'win':'dim'}">1:${r.rr.toFixed(2)}${r.rr===s.chosen_rr?' \u2605':''}</td>
             <td class="dim">${r.n}</td>
             <td class="dim">${r.winrate!=null?r.winrate+'%':'\u2014'}</td>
@@ -27576,15 +27547,15 @@ async function refreshNq() {
 
     const liveSig = data.live_signal;
     const liveBadge = liveSig
-      ? `<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:10px;background:${liveSig.direction==='LONG'?'rgba(61,220,151,0.12)':'rgba(255,107,107,0.12)'};border-radius:8px;border:1px solid ${liveSig.direction==='LONG'?'#3ddc97':'#ff6b6b'};">
-          <div style="font-size:18px;">${liveSig.direction==='LONG'?'🟢':'🔴'}</div>
+      ? `<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:10px;background:${liveSig.direction==='LONG'?'rgba(61,220,151,0.12)':'rgba(255,107,107,0.12)'};border-radius:var(--r-sm);border:1px solid ${liveSig.direction==='LONG'?'var(--pos)':'var(--neg)'};">
+          <div style="font-size:var(--fs-lg);">${liveSig.direction==='LONG'?'🟢':'🔴'}</div>
           <div style="flex:1;">
-            <div class="${liveSig.direction==='LONG'?'win':'loss'}" style="font-weight:700;font-size:13px;">\u0416\u0418\u0412\u041e\u0419 \u0421\u0418\u0413\u041d\u0410\u041b: ${liveSig.direction}</div>
-            <div class="dim" style="font-size:10px;">entry ${fmtNum(liveSig.entry)} \u00b7 SL ${fmtNum(liveSig.sl)} \u00b7 TP ${fmtNum(liveSig.tp)} \u00b7 bias: ${liveSig.bias}</div>
+            <div class="${liveSig.direction==='LONG'?'win':'loss'}" style="font-weight:700;font-size:var(--fs);">\u0416\u0418\u0412\u041e\u0419 \u0421\u0418\u0413\u041d\u0410\u041b: ${liveSig.direction}</div>
+            <div class="dim" style="font-size:var(--fs-xs);">entry ${fmtNum(liveSig.entry)} \u00b7 SL ${fmtNum(liveSig.sl)} \u00b7 TP ${fmtNum(liveSig.tp)} \u00b7 bias: ${liveSig.bias}</div>
           </div>
         </div>`
-      : `<div style="padding:8px 10px;margin-bottom:10px;background:#0d1320;border-radius:8px;border:1px solid #232d45;">
-          <span class="dim" style="font-size:11px;">\u26aa \u0436\u0438\u0432\u043e\u0433\u043e \u0441\u0438\u0433\u043d\u0430\u043b\u0430 \u0441\u0435\u0439\u0447\u0430\u0441 \u043d\u0435\u0442</span>
+      : `<div style="padding:8px 10px;margin-bottom:10px;background:var(--inset);border-radius:var(--r-sm);border:1px solid var(--line);">
+          <span class="dim" style="font-size:var(--fs-sm);">\u26aa \u0436\u0438\u0432\u043e\u0433\u043e \u0441\u0438\u0433\u043d\u0430\u043b\u0430 \u0441\u0435\u0439\u0447\u0430\u0441 \u043d\u0435\u0442</span>
         </div>`;
 
     const lstats = data.signal_stats || {};
@@ -27607,10 +27578,10 @@ async function refreshNq() {
     }).join('');
     const liveLogSection = liveSigLog.length
       ? `<details style="margin-bottom:8px;">
-          <summary style="cursor:pointer;font-size:11px;color:#8a97b8;">
-            \u0416\u0418\u0412\u042b\u0415 \u0441\u0438\u0433\u043d\u0430\u043b\u044b: ${liveSigLog.length}${lstats.wins||lstats.losses ? ` \u00b7 WR ${lstats.winrate}% (${lstats.wins}W/${lstats.losses}L)` : ''} \u25be
+          <summary style="cursor:pointer;font-size:var(--fs-sm);color:var(--tx-2);">
+            \u0416\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b: ${liveSigLog.length}${lstats.wins||lstats.losses ? ` \u00b7 WR ${lstats.winrate}% (${lstats.wins}W/${lstats.losses}L)` : ''}
           </summary>
-          <div style="overflow-x:auto;margin-top:6px;"><table style="font-size:10px;white-space:nowrap;">
+          <div style="overflow-x:auto;margin-top:6px;"><table style="font-size:var(--fs-xs);white-space:nowrap;">
             <thead><tr><th>\u0412\u0445\u043e\u0434</th><th>Dir</th><th>Entry</th><th>\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442</th><th>P&L</th></tr></thead>
             <tbody>${liveLogRows}</tbody>
           </table></div>
@@ -27632,8 +27603,8 @@ async function refreshNq() {
       </tr>`;
     }).join('');
     const tradesSection = trades.length
-      ? `<details><summary style="cursor:pointer;font-size:11px;color:#8a97b8;">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 ${trades.length} \u0441\u0434\u0435\u043b\u043e\u043a (\u0431\u044d\u043a\u0442\u0435\u0441\u0442) \u25be</summary>
-          <div style="overflow-x:auto;margin-top:6px;"><table style="font-size:10px;white-space:nowrap;">
+      ? `<details><summary style="cursor:pointer;font-size:var(--fs-sm);color:var(--tx-2);">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 ${trades.length} \u0441\u0434\u0435\u043b\u043e\u043a (\u0431\u044d\u043a\u0442\u0435\u0441\u0442)</summary>
+          <div style="overflow-x:auto;margin-top:6px;"><table style="font-size:var(--fs-xs);white-space:nowrap;">
             <thead><tr><th>\u0412\u0445\u043e\u0434</th><th>Dir</th><th>Entry</th><th>\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442</th><th>P&L</th></tr></thead>
             <tbody>${tradeRows}</tbody>
           </table></div>
@@ -27643,7 +27614,7 @@ async function refreshNq() {
       <div class="dim hint-block" style="margin-bottom:10px;">
         <b>NQ Model</b> \u2014 Previous Day High/Low + \u0446\u0432\u0435\u0442 \u0434\u043d\u0435\u0432\u043d\u043e\u0439 \u0441\u0432\u0435\u0447\u0438 + CISD-\u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u0438\u0435, \u043d\u0430 ${data.symbol} (\u0438\u043d\u0434\u0435\u043a\u0441\u043d\u044b\u0439 \u043f\u0435\u0440\u043f\u0435\u0442\u0443\u0430\u043b \u043d\u0430 Nasdaq-100 \u043d\u0430 Gate.io, 24/7). \u0411\u044b\u0447\u044c\u044f \u0434\u043d\u0435\u0432\u043d\u0430\u044f \u0441\u0432\u0435\u0447\u0430 \u2192 \u0436\u0434\u0451\u043c \u0441\u0432\u0438\u043f\u0430 \u0445\u0430\u044f, \u043c\u0435\u0434\u0432\u0435\u0436\u044c\u044f \u2192 \u043b\u043e\u0443, \u0432\u0445\u043e\u0434 \u0432 \u0441\u0442\u043e\u0440\u043e\u043d\u0443 \u0440\u0430\u0437\u0432\u043e\u0440\u043e\u0442\u0430 \u043f\u043e\u0441\u043b\u0435 CISD. \u0416\u0451\u0441\u0442\u043a\u0438\u0439 \u043c\u0438\u043d\u0438\u043c\u0443\u043c RR 1:3, \u0431\u0435\u0437 \u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0435\u043d\u0438\u044f \u0447\u0438\u0441\u043b\u0430 \u0441\u0434\u0435\u043b\u043e\u043a \u0432 \u0434\u0435\u043d\u044c.
       </div>
-      <div class="dim" style="font-size:11px;margin-bottom:4px;">${data.backtest_running ? '\u0431\u044d\u043a\u0442\u0435\u0441\u0442 \u0432\u044b\u043f\u043e\u043b\u043d\u044f\u0435\u0442\u0441\u044f\u2026' : (data.last_backtest_finished ? '\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442: '+fmtDateTime(data.last_backtest_finished) : '\u0431\u044d\u043a\u0442\u0435\u0441\u0442 \u0435\u0449\u0451 \u043d\u0435 \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d')}</div>
+      <div class="dim" style="font-size:var(--fs-sm);margin-bottom:4px;">${data.backtest_running ? '\u0431\u044d\u043a\u0442\u0435\u0441\u0442 \u0432\u044b\u043f\u043e\u043b\u043d\u044f\u0435\u0442\u0441\u044f\u2026' : (data.last_backtest_finished ? '\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442: '+fmtDateTime(data.last_backtest_finished) : '\u0431\u044d\u043a\u0442\u0435\u0441\u0442 \u0435\u0449\u0451 \u043d\u0435 \u0437\u0430\u0432\u0435\u0440\u0448\u0451\u043d')}</div>
       ${liveBadge}
       ${bigStats}
       ${rrSweepSection}
@@ -27879,7 +27850,7 @@ async function refreshAmd() {
       </tr>`;
     }).join('');
     const tableHtml = results.length
-      ? `<div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;">
+      ? `<div style="overflow-x:auto;"><table style="font-size:var(--fs-sm);white-space:nowrap;">
           <thead><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>A-\u0437\u043e\u043d\u0430</th><th>D \u0441\u0432\u0435\u0447\u0430</th></tr></thead>
           <tbody>${rows}</tbody></table></div>`
       : '<div class="dim">\u041d\u0435\u0442 \u0436\u0438\u0432\u044b\u0445 \u0441\u0438\u0433\u043d\u0430\u043b\u043e\u0432 \u043f\u0440\u044f\u043c\u043e \u0441\u0435\u0439\u0447\u0430\u0441 \u2014 \u043f\u0430\u0442\u0442\u0435\u0440\u043d \u0440\u0435\u0434\u043a\u0438\u0439. \u0421\u043c\u043e\u0442\u0440\u0438 \u0431\u044d\u043a\u0442\u0435\u0441\u0442 \u043d\u0438\u0436\u0435.</div>';
@@ -27891,8 +27862,8 @@ async function refreshAmd() {
     const progressPct = data.backtest_total ? Math.round((data.backtest_done||0) / data.backtest_total * 100) : 0;
     const progressBarHtml = data.backtest_running ? `
       <div style="margin:6px 0 8px;">
-        <div style="background:#1c2433;border-radius:6px;height:8px;overflow:hidden;">
-          <div style="background:#3ddc97;height:100%;width:${progressPct}%;transition:width 0.4s;"></div>
+        <div style="background:var(--line);border-radius:var(--r-xs);height:8px;overflow:hidden;">
+          <div style="background:var(--pos);height:100%;width:${progressPct}%;transition:width 0.4s;"></div>
         </div>
       </div>` : '';
     const top = data.top || [];
@@ -27911,7 +27882,7 @@ async function refreshAmd() {
     }).join('');
     const btTableHtml = top.length
       ? `<div class="dim hint-block" style="margin:8px 0 6px;"><b>\u0411\u044d\u043a\u0442\u0435\u0441\u0442 \u043f\u043e \u043c\u043e\u043d\u0435\u0442\u0430\u043c</b> (${cfg.backtest_days} \u0434\u043d\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438). \u041d\u0430\u0436\u043c\u0438 \u043c\u043e\u043d\u0435\u0442\u0443 \u2014 \u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 \u0441\u0434\u0435\u043b\u043a\u0438.</div>
-        <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;">
+        <div style="overflow-x:auto;"><table style="font-size:var(--fs-sm);white-space:nowrap;">
           <thead><tr><th>Symbol</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>avg P&L</th></tr></thead>
           <tbody>${btRows}</tbody></table></div>`
       : `<div class="dim">${buildTxt}</div>`;
@@ -27961,9 +27932,9 @@ async function loadAmdBacktest(symbol) {
         <td class="${rc}">${t.pnl_r!=null?(t.pnl_r>0?'+':'')+t.pnl_r+'R':'\u2014'}</td>
       </tr>`;
     }).join('');
-    bp.innerHTML = `<b style="font-size:12px;">\u0411\u044d\u043a\u0442\u0435\u0441\u0442 ${symbol}</b> ${stat}
+    bp.innerHTML = `<b style="font-size:var(--fs);">\u0411\u044d\u043a\u0442\u0435\u0441\u0442 ${symbol}</b> ${stat}
       ${trades.length ? `<div style="overflow-x:auto;margin-top:6px;">
-        <table style="font-size:10px;white-space:nowrap;">
+        <table style="font-size:var(--fs-xs);white-space:nowrap;">
         <thead><tr><th>\u0412\u0445\u043e\u0434</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>\u0421\u0442\u0430\u0442\u0443\u0441</th><th>P&L</th></tr></thead>
         <tbody>${tRows}</tbody></table></div>` : ''}`;
   } catch(e) {
@@ -27979,9 +27950,9 @@ async function refreshAutotradeBanner() {
     if (!anyEnabled) {
       el.innerHTML = '';
     } else if (!s.dry_run) {
-      el.innerHTML = '<span style="color:#ff6b6b;font-weight:700;">⚠️ РЕАЛЬНЫЕ ОРДЕРА ВКЛЮЧЕНЫ</span>';
+      el.innerHTML = '<span class="pill neg" title="автоторговля открывает реальные ордера на бирже"><span class="dot"></span>Реальные ордера</span>';
     } else {
-      el.innerHTML = '<span style="color:#3ddc97;">✓ автоторговля: dry-run</span>';
+      el.innerHTML = '<span class="pill pos"><span class="dot"></span>Автоторговля: тест</span>';
     }
   } catch(e) {}
 }
@@ -27996,13 +27967,13 @@ async function refreshEmaBull() {
     const lastScan = data.last_scan ? fmtDateTime(data.last_scan) : '—';
     const rows = results.map(r => {
       const tfBadge = r.tf === '1M'
-        ? '<span style="color:#f0a030;">1M</span>'
+        ? '<span style="color:var(--warn);">1M</span>'
         : '<span class="dim">1W</span>';
       const distCls = r.dist_pct <= 3 ? 'win' : (r.dist_pct <= 8 ? 'status-open' : 'dim');
       return `<tr onclick="loadEmaBullBacktest('${r.symbol}')" style="cursor:pointer;">
         <td>${r.symbol}</td><td>${tfBadge}</td>
         <td class="dim">${fmtNum(r.high)}</td>
-        <td style="color:#c792ea;">${fmtNum(r.ema)}</td>
+        <td style="color:var(--neuro);">${fmtNum(r.ema)}</td>
         <td class="${distCls}">${r.dist_pct}% от EMA</td>
         <td class="dim">${fmtNum(r.sl)}</td>
         <td class="dim">${fmtNum(r.tp)}</td>
@@ -28010,7 +27981,7 @@ async function refreshEmaBull() {
       </tr>`;
     }).join('');
     const tableHtml = results.length
-      ? `<div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;">
+      ? `<div style="overflow-x:auto;"><table style="font-size:var(--fs-sm);white-space:nowrap;">
           <thead><tr><th>Symbol</th><th>ТФ</th><th>High</th>
             <th>EMA${cfg.ema_period||28}</th><th>Расстояние</th>
             <th>SL</th><th>TP</th><th>Свеча</th></tr></thead>
@@ -28064,14 +28035,14 @@ async function loadEmaBullBacktest(symbol) {
         </tr>`;
       }).join('');
       return `<div style="margin-bottom:12px;">
-        <b style="font-size:11px;">${label}:</b> ${stat}
+        <b style="font-size:var(--fs-sm);">${label}:</b> ${stat}
         ${trades.length ? `<div style="overflow-x:auto;margin-top:4px;">
-          <table style="font-size:10px;white-space:nowrap;">
+          <table style="font-size:var(--fs-xs);white-space:nowrap;">
           <thead><tr><th>Вход</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Статус</th><th>P&L</th></tr></thead>
           <tbody>${tRows}</tbody></table></div>` : ''}
       </div>`;
     };
-    bp.innerHTML = `<b style="font-size:12px;">Бэктест ${symbol} — SHORT от EMA28</b>
+    bp.innerHTML = `<b style="font-size:var(--fs);">Бэктест ${symbol} — SHORT от EMA28</b>
       ${renderSec('Недельный 1W', d.weekly  || {})}
       ${renderSec('Месячный 1M',  d.monthly || {})}`;
   } catch(e) {
@@ -28092,13 +28063,13 @@ async function refreshAutotrade() {
 
   let bannerHtml = '';
   if (!status.dry_run) {
-    bannerHtml = `<div style="background:#3a1e22;border:1px solid #ff6b6b;border-radius:10px;padding:12px 14px;margin-bottom:14px;">
-      <b style="color:#ff6b6b;">⚠️ РЕАЛЬНЫЕ ОРДЕРА ВКЛЮЧЕНЫ</b><br>
-      <span style="font-size:12px;color:#ffb3b3;">Dry-run выключен — включённые режимы будут открывать настоящие позиции на бирже за реальные деньги.</span>
+    bannerHtml = `<div style="background:var(--neg-bg);border:1px solid var(--neg);border-radius:var(--r);padding:12px 14px;margin-bottom:14px;">
+      <b style="color:var(--neg);">⚠️ РЕАЛЬНЫЕ ОРДЕРА ВКЛЮЧЕНЫ</b><br>
+      <span style="font-size:var(--fs);color:var(--neg);">Dry-run выключен — включённые режимы будут открывать настоящие позиции на бирже за реальные деньги.</span>
     </div>`;
   } else {
-    bannerHtml = `<div style="background:#132018;border:1px solid #3ddc97;border-radius:10px;padding:10px 14px;margin-bottom:14px;">
-      <span style="color:#3ddc97;font-size:12px;">✓ Dry-run включён — реальные ордера не отправляются, только лог того, что было бы сделано.</span>
+    bannerHtml = `<div style="background:var(--pos-bg);border:1px solid var(--pos);border-radius:var(--r);padding:10px 14px;margin-bottom:14px;">
+      <span style="color:var(--pos);font-size:var(--fs);">✓ Dry-run включён — реальные ордера не отправляются, только лог того, что было бы сделано.</span>
     </div>`;
   }
 
@@ -28129,7 +28100,7 @@ async function refreshAutotrade() {
     const canRetry = (e.status === 'ERROR' || e.status === 'SKIPPED') && e.mode && e.symbol && e.direction && e.entry != null && e.sl != null && e.tp != null;
     const retryAttr = canRetry ? ` data-retry-idx="${idx}" style="cursor:pointer;" title="\u043a\u043b\u0438\u043a \u2014 \u043f\u043e\u043f\u044b\u0442\u0430\u0442\u044c\u0441\u044f \u043e\u0442\u043a\u0440\u044b\u0442\u044c \u0441\u043d\u043e\u0432\u0430"` : '';
     return `<tr${retryAttr}>
-      <td class="dim">${fmtTimeWithDate(e.time)}</td><td>${modeLabels[e.mode] || e.mode}${e.account && e.account !== 'основной' ? `<div class="dim" style="font-size:10px;">${e.account}</div>` : ''}</td><td>${e.symbol}</td>
+      <td class="dim">${fmtTimeWithDate(e.time)}</td><td>${modeLabels[e.mode] || e.mode}${e.account && e.account !== 'основной' ? `<div class="dim" style="font-size:var(--fs-xs);">${e.account}</div>` : ''}</td><td>${e.symbol}</td>
       <td class="${dirClass}">${e.direction || '-'}</td>
       <td class="${statusClass}">${statusRu[e.status] || e.status}${canRetry ? ' \u21bb' : ''}</td>
       <td class="dim" style="max-width:280px;white-space:normal;">${e.detail || ''}</td>
@@ -28138,7 +28109,7 @@ async function refreshAutotrade() {
 
   const tableHtml = log.length ? `
     <div style="overflow-x:auto;">
-    <table style="font-size:11px;">
+    <table style="font-size:var(--fs-sm);">
       <thead><tr><th>Время</th><th>Режим</th><th>Symbol</th><th>Dir</th><th>Статус</th><th>Детали</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
@@ -28191,7 +28162,7 @@ async function refreshSimulator() {
     </div>
     <div style="margin-bottom:10px;">
       <div style="font-size:28px;font-weight:700;">$${status.balance.toFixed(2)}</div>
-      <div class="${pnlClass}" style="font-size:14px;">
+      <div class="${pnlClass}" style="font-size:var(--fs-md);">
         ${status.pnl_total >= 0 ? '+' : ''}${status.pnl_total.toFixed(2)}$
         (${status.pnl_pct !== null ? (status.pnl_pct >= 0 ? '+' : '') + status.pnl_pct + '%' : '-'})
         от старта $${status.start_balance.toFixed(2)}
@@ -28225,7 +28196,7 @@ async function refreshSimulator() {
 
   const tableHtml = trades.length ? `
     <div style="overflow-x:auto;">
-    <table style="font-size:11px;white-space:nowrap;">
+    <table style="font-size:var(--fs-sm);white-space:nowrap;">
       <thead><tr><th>Время</th><th>Режим</th><th>Symbol</th><th>Dir</th><th>Entry</th><th>SL</th><th>TP</th><th>Маржа/плечо</th><th>Статус</th><th>PnL</th><th>Баланс</th></tr></thead>
       <tbody>${rows}</tbody>
     </table>
@@ -28246,6 +28217,7 @@ async function refreshGlobalErrors() {
     const data = await r.json();
     const errs = data.errors || [];
     document.getElementById('globalErrorsCount').textContent = errs.length;
+    document.getElementById('globalErrorsBox').style.display = errs.length ? '' : 'none';   // v0.99.387 — chip only when there are errors
     document.getElementById('globalErrorsList').innerHTML = errs.length
       ? errs.slice().reverse().map(errRowHtml).join('')
       : 'Ошибок нет.';
@@ -28334,7 +28306,10 @@ setInterval(refreshAll, 15000);
 
 // v0.99.322 — system health banner: loops that stopped responding
 async function refreshHealth() {
+  // v0.99.387 — compact: a load pill in the header chip row (tap = details);
+  // real problems (stalled loop) stay as full-width red alerts
   const el = document.getElementById('healthBanner');
+  const pill = document.getElementById('healthPill');
   if (!el) return;
   try {
     const h = await (await fetch('/api/health')).json();
@@ -28342,21 +28317,34 @@ async function refreshHealth() {
     for (const x of (h.stalled || [])) {
       const t = x.silent_min >= 120 ? Math.round(x.silent_min / 60) + ' ч' : x.silent_min + ' мин';
       parts.push(x.waiting_for_slot
-        ? `<div class="loss">⛔ ${x.label} ждёт свободного слота бэктеста уже ${t} — слоты заняты другими модулями или зависшим циклом. Поможет перезапуск сервера.</div>`
-        : `<div class="loss">⛔ Зависло: ${x.label} — нет отклика ${t} (норма до ${Math.round(x.max_gap_min / 60 * 10) / 10} ч). Поможет перезапуск сервера.</div>`);
+        ? `<div class="alert">⛔ ${x.label} ждёт свободного слота бэктеста уже ${t} — слоты заняты другими модулями или зависшим циклом. Поможет перезапуск сервера.</div>`
+        : `<div class="alert">⛔ Зависло: ${x.label} — нет отклика ${t} (норма до ${Math.round(x.max_gap_min / 60 * 10) / 10} ч). Поможет перезапуск сервера.</div>`);
     }
     const L = h.exchange_load;
-    if (L && L.total_per_min > 0) {
-      const mods = (L.modules || []).map(m => `${m.module} ${m.per_min}`).join(' · ');
+    const wasOpen = !!(document.getElementById('healthDetails') && document.getElementById('healthDetails').dataset.open === '1');
+    if (L && L.total_per_min > 0 && pill) {
       const cc = L.candle_cache || {};
       const ccTot = (cc.hits || 0) + (cc.misses || 0);
-      parts.push(`<div class="dim">📊 запросов к бирже/мин: ${L.total_per_min} из ${L.cap_per_min} возможных (${mods}) · ожидание очереди ~${L.avg_queue_sec}с на запрос${ccTot ? ` · кэш свечей: ${Math.round(100 * (cc.hits || 0) / ccTot)}% из кэша (${ccTot})` : ''}</div>`);
+      const pct = Math.min(100, Math.round(100 * L.total_per_min / (L.cap_per_min || 500)));
+      const cls = pct >= 85 ? 'neg' : (pct >= 65 ? 'warn' : '');
+      pill.innerHTML = `<span class="pill ${cls}" onclick="toggleHealthDetails()" style="cursor:pointer;" title="запросы к бирже в минуту">API ${Math.round(L.total_per_min)}/${L.cap_per_min} <span class="loadbar"><i style="width:${pct}%;${cls ? 'background:currentColor;' : ''}"></i></span></span>`;
+      const mods = (L.modules || []).map(m => `<span style="white-space:nowrap;">${m.module} <b>${m.per_min}</b></span>`).join(' · ');
+      parts.push(`<div id="healthDetails" data-open="${wasOpen ? 1 : 0}" style="display:${wasOpen ? 'block' : 'none'};">Запросов к бирже в минуту: <b>${L.total_per_min}</b> из ${L.cap_per_min}<br>${mods}<br>Ожидание очереди ~${L.avg_queue_sec} с на запрос${ccTot ? ` · кэш свечей ${Math.round(100 * (cc.hits || 0) / ccTot)}% (${ccTot})` : ''}</div>`);
+    } else if (pill) {
+      pill.innerHTML = '';
     }
     if ((h.waiting_for_slot || []).length) {
-      parts.push(`<div class="dim">⏳ в очереди на бэктест: ${h.waiting_for_slot.join(', ')} (одновременно идут не больше ${h.backtest_slots})</div>`);
+      parts.push(`<div class="dim" style="margin-top:6px;font-size:var(--fs-xs);">⏳ в очереди на бэктест: ${h.waiting_for_slot.join(', ')} (одновременно не больше ${h.backtest_slots})</div>`);
     }
     el.innerHTML = parts.join('');
   } catch (e) {}
+}
+function toggleHealthDetails() {
+  const d = document.getElementById('healthDetails');
+  if (!d) return;
+  const open = d.dataset.open !== '1';
+  d.dataset.open = open ? '1' : '0';
+  d.style.display = open ? 'block' : 'none';
 }
 refreshHealth();
 setInterval(refreshHealth, 60000);
@@ -28735,14 +28723,14 @@ async function refreshModuleAccounts() {
   try {
     const m = await (await fetch('/api/credentials/modules')).json();
     box.innerHTML = Object.entries(m).map(([mode, a]) => `
-      <details style="margin:4px 0;"><summary style="cursor:pointer;font-size:12px;">${a.label}: ${a.configured ? `<span class="win">свой суб-аккаунт</span> <span class="dim">key ${a.key_suffix}</span>` : '<span class="dim">основной счёт</span>'}</summary>
+      <details style="margin:4px 0;"><summary style="cursor:pointer;font-size:var(--fs);">${a.label}: ${a.configured ? `<span class="win">свой суб-аккаунт</span> <span class="dim">key ${a.key_suffix}</span>` : '<span class="dim">основной счёт</span>'}</summary>
         <div style="display:flex;flex-direction:column;gap:6px;margin:6px 0;">
-          <input type="text" id="macKey_${mode}" onchange="autoSaveModuleAccount('${mode}')" placeholder="${a.configured ? `сохранён: key ${a.key_suffix} — впиши новый, чтобы заменить` : 'API Key суб-аккаунта'}" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:7px 9px;border-radius:8px;font-size:12px;">
-          <input type="password" id="macSecret_${mode}" onchange="autoSaveModuleAccount('${mode}')" placeholder="${a.configured ? 'секрет сохранён (не показывается)' : 'API Secret суб-аккаунта'}" style="background:#0d1220;border:1px solid #1c2433;color:#fff;padding:7px 9px;border-radius:8px;font-size:12px;">
+          <input type="text" id="macKey_${mode}" onchange="autoSaveModuleAccount('${mode}')" placeholder="${a.configured ? `сохранён: key ${a.key_suffix} — впиши новый, чтобы заменить` : 'API Key суб-аккаунта'}" style="background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:7px 9px;border-radius:var(--r-sm);font-size:var(--fs);">
+          <input type="password" id="macSecret_${mode}" onchange="autoSaveModuleAccount('${mode}')" placeholder="${a.configured ? 'секрет сохранён (не показывается)' : 'API Secret суб-аккаунта'}" style="background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:7px 9px;border-radius:var(--r-sm);font-size:var(--fs);">
           <div style="display:flex;gap:6px;">
-            <button onclick="saveModuleAccount('${mode}')" style="flex:1;background:#1e2a3f;border:none;color:#fff;padding:7px;border-radius:8px;font-size:12px;">Сохранить</button>
-            <button onclick="testGateAccount('${mode}')" style="background:#1c2433;border:none;color:#9cc4ff;padding:7px 10px;border-radius:8px;font-size:12px;">Проверить</button>
-            ${a.configured ? `<button onclick="clearModuleAccount('${mode}')" style="background:#3a1e22;border:none;color:#ff9b9b;padding:7px 10px;border-radius:8px;font-size:12px;">На основной</button>` : ''}
+            <button onclick="saveModuleAccount('${mode}')" style="flex:1;background:var(--ctl);border:none;color:var(--tx);padding:7px;border-radius:var(--r-sm);font-size:var(--fs);">Сохранить</button>
+            <button onclick="testGateAccount('${mode}')" style="background:var(--line);border:none;color:var(--acc);padding:7px 10px;border-radius:var(--r-sm);font-size:var(--fs);">Проверить</button>
+            ${a.configured ? `<button onclick="clearModuleAccount('${mode}')" style="background:var(--neg-bg);border:none;color:var(--neg);padding:7px 10px;border-radius:var(--r-sm);font-size:var(--fs);">На основной</button>` : ''}
           </div>
           <div class="sub" id="acctTest_${mode}"></div>
         </div>
@@ -28783,7 +28771,7 @@ async function testGateAccount(mode) {
   try {
     const r = await (await fetch('/api/credentials/test', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({module: mode})})).json();
     if (el) el.innerHTML = r.ok
-      ? `<span class="win">✅ ${r.account}${r.uid ? ` · UID ${r.uid}` : ''}: баланс для сделок <b>${r.trade_balance != null ? Number(r.trade_balance).toFixed(2) : '?'} USDT</b> · режим ${r.dual_mode ? 'hedge (dual)' : 'one-way'} · открытых позиций ${r.open_positions}</span><div class="dim" style="font-size:10px;">фьючерсный кошелёк: доступно ${r.futures_available ?? '?'}${r.unified_equity ? ` · единый аккаунт (unified): ${Number(r.unified_equity).toFixed(2)}` : ''} — у суб-аккаунта UID должен отличаться от основного</div>`
+      ? `<span class="win">✅ ${r.account}${r.uid ? ` · UID ${r.uid}` : ''}: баланс для сделок <b>${r.trade_balance != null ? Number(r.trade_balance).toFixed(2) : '?'} USDT</b> · режим ${r.dual_mode ? 'hedge (dual)' : 'one-way'} · открытых позиций ${r.open_positions}</span><div class="dim" style="font-size:var(--fs-xs);">фьючерсный кошелёк: доступно ${r.futures_available ?? '?'}${r.unified_equity ? ` · единый аккаунт (unified): ${Number(r.unified_equity).toFixed(2)}` : ''} — у суб-аккаунта UID должен отличаться от основного</div>`
       : `<span class="loss">❌ ${r.error}</span>`;
   } catch (e) { if (el) el.textContent = 'ошибка: ' + e; }
 }
@@ -29059,14 +29047,14 @@ function fmtUsdCompact(v) {
 function compoundSummaryHtml(x) {
   if (x && x.compound_final_balance === undefined) {
     // v0.99.327 — result computed by a version before the $15 simulation existed
-    return `<div class="dim" style="font-size:11px;margin:4px 0 8px;">💰 расчёт с $15 появится после следующего бэктеста этого модуля (или 🛠 → «↻ Бэктест»)</div>`;
+    return `<div class="dim" style="font-size:var(--fs-sm);margin:4px 0 8px;">💰 расчёт с $15 появится после следующего бэктеста этого модуля (или 🛠 → «↻ Бэктест»)</div>`;
   }
   if (!x || x.compound_final_balance == null || !x.compound_trades) return '';
   const pct = x.compound_return_pct;
   const cls = pct >= 0 ? 'win' : 'loss';
   const blown = x.compound_blown_at ? ` · <span class="loss">слит на сделке #${x.compound_blown_at}</span>` : '';
   const pctTxt = Math.abs(pct) >= 1e6 ? '×' + (pct / 100 + 1).toExponential(1) : (pct >= 0 ? '+' : '') + pct + '%';
-  return `<div style="font-size:11px;margin:4px 0 8px;">💰 <span class="dim">с $${x.compound_start} ва-банк:</span> <span class="bal">${fmtUsdCompact(x.compound_final_balance)}</span> <span class="${cls}">(${pctTxt})</span> <span class="dim">· плечо ${x.compound_leverage}x · ${x.compound_trades} сделок · с комиссиями</span>${blown}</div>`;
+  return `<div style="font-size:var(--fs-sm);margin:4px 0 8px;">💰 <span class="dim">с $${x.compound_start} ва-банк:</span> <span class="bal">${fmtUsdCompact(x.compound_final_balance)}</span> <span class="${cls}">(${pctTxt})</span> <span class="dim">· плечо ${x.compound_leverage}x · ${x.compound_trades} сделок · с комиссиями</span>${blown}</div>`;
 }
 function compoundCellTxt(t) {
   if (t.compound_balance_after == null) return '<span class="dim">—</span>';
@@ -29075,14 +29063,14 @@ function compoundCellTxt(t) {
 // v0.99.334 — full backtest trade lists for S/R and Peak, loaded on open
 function snrTradeRowHtml(sym, t) {
   const rc = t.result === 'WIN' ? 'win' : t.result === 'LOSS' ? 'loss' : 'dim';
-  return `<div onclick="openSnrChart('${sym}', ${t.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1c2433;font-size:11px;">
+  return `<div onclick="openSnrChart('${sym}', ${t.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--line);font-size:var(--fs-sm);">
     <span class="dim">${fmtDateTime(t.time)} ${t.direction} уровень ${fmtNum(t.zone_price)} (сила ${t.zone_strength})</span>
     <span style="white-space:nowrap;"><span class="${rc}">${t.result}${t.pnl_r!=null?' '+(t.pnl_r>0?'+':'')+t.pnl_r+'R':''}</span> ${compoundCellTxt(t)}</span>
   </div>`;
 }
 function prvTradeRowHtml(sym, t) {
   const rc = t.result === 'WIN' ? 'win' : t.result === 'LOSS' ? 'loss' : 'dim';
-  return `<div onclick="openPrvChart('${sym}', ${t.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid #1c2433;font-size:11px;">
+  return `<div onclick="openPrvChart('${sym}', ${t.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--line);font-size:var(--fs-sm);">
     <span class="dim">${fmtDateTime(t.time)} ${t.direction} @ ${fmtNum(t.entry)} во сделке макс. против ${t.mae_r}R</span>
     <span style="white-space:nowrap;"><span class="${rc}">${t.result}${t.pnl_r!=null?' '+(t.pnl_r>0?'+':'')+t.pnl_r+'R':''}</span> ${compoundCellTxt(t)}</span>
   </div>`;
@@ -29100,12 +29088,12 @@ async function loadBtTrades(det, mod, sym, stamp) {
     const chron = [...d.trades].sort((a, b) => a.time - b.time);
     const split = d.test_start_time;
     let html = d.full
-      ? `<div class="dim" style="font-size:10px;padding:3px 0;">старт: $15 ва-банк · сначала train-часть (на ней подбирались параметры), потом тест</div>`
-      : '<div class="dim" style="font-size:10px;">у этого результата сохранены только последние 40 сделок (без начала истории, поэтому баланс не с $15) — полный список появится после следующего бэктеста</div>';
+      ? `<div class="dim" style="font-size:var(--fs-xs);padding:3px 0;">старт: $15 ва-банк · сначала train-часть (на ней подбирались параметры), потом тест</div>`
+      : '<div class="dim" style="font-size:var(--fs-xs);">у этого результата сохранены только последние 40 сделок (без начала истории, поэтому баланс не с $15) — полный список появится после следующего бэктеста</div>';
     let dividerDone = !split;
     for (const t of chron) {
       if (!dividerDone && t.time > split) {
-        html += `<div style="text-align:center;font-size:10px;color:#9cc4ff;padding:4px 0;border-bottom:1px solid #2e3a52;">── тест-часть (параметры её не видели) ──</div>`;
+        html += `<div style="text-align:center;font-size:var(--fs-xs);color:var(--acc);padding:4px 0;border-bottom:1px solid var(--line-2);">── тест-часть (параметры её не видели) ──</div>`;
         dividerDone = true;
       }
       html += rowFn(sym, t);
@@ -29122,7 +29110,7 @@ async function loadBtTrades(det, mod, sym, stamp) {
 }
 // v0.99.337 — candidate-filter report table (S/R; same format as MSNR's)
 function filterReportHtmlV1(nf, title, pendingTxt) {   // v0.99.381 — original rule (S/R, Sweep, P/R)
-  if (!nf) return `<details style="margin:8px 0;"><summary class="dim" style="cursor:pointer;font-size:11px;">${title} — ${pendingTxt}</summary></details>`;
+  if (!nf) return `<details style="margin:8px 0;"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">${title} — ${pendingTxt}</summary></details>`;
   const b = nf.base || {};
   const rowsHtml = (nf.top || []).slice(0, 8).map((f, i) => {
     const dWr = Math.round((f.wr_a - f.wr_b) * 10) / 10;
@@ -29130,20 +29118,20 @@ function filterReportHtmlV1(nf, title, pendingTxt) {   // v0.99.381 — original
     const coins = f.all_coins_ok
       ? `<span class="win">✅ ${f.coins_better} лучше, 0 хуже${f.coins_same ? `, ${f.coins_same} без изм.` : ''}</span>`
       : `<span class="loss">${f.coins_better} лучше / ${f.coins_worse} хуже</span>`;
-    return `<tr${i === 0 ? ' style="background:#15202e;"' : ''}><td>${i === 0 ? '🏆' : i + 1}</td><td style="white-space:normal;min-width:160px;">${f.label}</td>
+    return `<tr${i === 0 ? ' style="background:var(--card);"' : ''}><td>${i === 0 ? '🏆' : i + 1}</td><td style="white-space:normal;min-width:160px;">${f.label}</td>
       <td class="dim">${f.n_b}→${f.n_a} (${f.kept_pct}%)</td>
       <td>${f.wr_b}%→<b class="win">${f.wr_a}%</b> <span class="win">(+${dWr})</span></td>
       <td class="${rCls}">${f.r_b}→${f.r_a}R</td><td>${coins}</td></tr>`;
   }).join('');
   const okN = nf.all_coins_ok_n || 0;
-  return `<details style="margin:8px 0;"><summary style="cursor:pointer;font-size:12px;">${title}: ${okN ? `<span class="win">${okN} улучшают все монеты</span>` : '<span class="dim">ни один не улучшил все монеты</span>'} · ${nf.coins} монет · тест-сделок ${b.n}, WR ${b.wr}%</summary>
-    <div class="dim hint-block" style="font-size:11px;margin:4px 0 6px;">Каждое условие пробуется как фильтр («убрать» / «только»). <b>Выбор — на train-части</b> (где подбирались параметры), цифры — на <b>тест-части</b>, которую он не видел. 🏆 — лучший: не ухудшил ни одну монету и дал наибольший рост винрейта; дальше — остальные по тому же правилу. Оставляют не меньше 50% сделок. Средний R рядом: если падает — фильтр «покупает» винрейт за счёт прибыли. В торговлю ничего не применяется. Посчитано ${fmtTime(nf.computed_at)}.</div>
-    <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="6" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
+  return `<details style="margin:8px 0;"><summary style="cursor:pointer;font-size:var(--fs);">${title}: ${okN ? `<span class="win">${okN} улучшают все монеты</span>` : '<span class="dim">ни один не улучшил все монеты</span>'} · ${nf.coins} монет · тест-сделок ${b.n}, WR ${b.wr}%</summary>
+    <div class="dim hint-block" style="font-size:var(--fs-sm);margin:4px 0 6px;">Каждое условие пробуется как фильтр («убрать» / «только»). <b>Выбор — на train-части</b> (где подбирались параметры), цифры — на <b>тест-части</b>, которую он не видел. 🏆 — лучший: не ухудшил ни одну монету и дал наибольший рост винрейта; дальше — остальные по тому же правилу. Оставляют не меньше 50% сделок. Средний R рядом: если падает — фильтр «покупает» винрейт за счёт прибыли. В торговлю ничего не применяется. Посчитано ${fmtTime(nf.computed_at)}.</div>
+    <div style="overflow-x:auto;"><table style="font-size:var(--fs-sm);white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="6" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
   </details>`;
 }
 function filterReportHtml(nf, title, pendingTxt) {
   if (!nf || nf.rule !== 'v2') return filterReportHtmlV1(nf, title, pendingTxt);
-  if (!nf) return `<details style="margin:8px 0;"><summary class="dim" style="cursor:pointer;font-size:11px;">${title} — ${pendingTxt}</summary></details>`;
+  if (!nf) return `<details style="margin:8px 0;"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">${title} — ${pendingTxt}</summary></details>`;
   const b = nf.base || {};
   const rowsHtml = (nf.top || []).slice(0, 8).map((f, i) => {
     const dWr = Math.round((f.wr_a - f.wr_b) * 10) / 10;
@@ -29152,15 +29140,15 @@ function filterReportHtml(nf, title, pendingTxt) {
       ? `<span class="win">✅ ${f.coins_better} лучше / ${f.coins_worse} хуже</span>`
       : `<span class="${f.coins_better > f.coins_worse ? 'dim' : 'loss'}">${f.coins_better} лучше / ${f.coins_worse} хуже</span>`;
     const tTxt = `<td class="dim" title="t: насколько убранные сделки хуже оставшихся (train — где фильтр выбран, test — проверка; проверяются 3 лучших по train, для прохода нужно test ≥ 2)">${f.train_t ?? '—'} → ${f.test_t ?? '—'}</td>`;
-    return `<tr${i === 0 && f.all_coins_ok ? ' style="background:#15202e;"' : ''}><td>${i === 0 && f.all_coins_ok ? '🏆' : i + 1}</td><td style="white-space:normal;min-width:160px;">${f.label}</td>
+    return `<tr${i === 0 && f.all_coins_ok ? ' style="background:var(--card);"' : ''}><td>${i === 0 && f.all_coins_ok ? '🏆' : i + 1}</td><td style="white-space:normal;min-width:160px;">${f.label}</td>
       <td class="dim">${f.n_b}→${f.n_a} (${f.kept_pct}%)</td>
       <td>${f.wr_b}%→<b class="${dWr >= 0 ? 'win' : 'loss'}">${f.wr_a}%</b> <span class="${dWr >= 0 ? 'win' : 'loss'}">(${dWr >= 0 ? '+' : ''}${dWr})</span></td>
       <td class="${rCls}">${f.r_b}→${f.r_a}R</td>${tTxt}<td>${coins}</td></tr>`;
   }).join('');
   const okN = nf.all_coins_ok_n || 0;
-  return `<details style="margin:8px 0;"><summary style="cursor:pointer;font-size:12px;">${title}: ${okN ? `<span class="win">${okN} прошли проверку</span>` : '<span class="dim">ни один не прошёл проверку</span>'} · ${nf.coins} монет · тест-сделок ${b.n}, WR ${b.wr}%</summary>
-    <div class="dim hint-block" style="font-size:11px;margin:4px 0 6px;">Один общий фильтр для всех монет. Каждое условие Neuro на момент входа пробуется как «убрать» / «только». <b>Выбор и порядок — только по train-части</b> (первые 70% сделок каждой монеты): насколько убранные сделки хуже оставшихся (t). <b>Test-часть</b>, которую фильтр не видел, только проверяет: проверяются только 3 лучших по train (иначе среди сотен вариантов какой-то «пройдёт» случайно); фильтр проходит, если на test убранные сделки тоже явно хуже (t ≥ 2), средний R вырос и монет стало лучше больше, чем хуже. 🏆 — лучший по train из прошедших. Оставляют не меньше 50% сделок. Раньше требовалось «ни одна монета не хуже» — при десятках монет с парой тест-сделок это почти невозможно. Свой фильтр для каждой монеты подбирается отдельно в самом бэктесте (настройка «Фильтр Neuro в бэктесте»). Этот общий отчёт в торговлю не применяется. Посчитано ${fmtTime(nf.computed_at)}.</div>
-    <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>t train→test</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="7" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
+  return `<details style="margin:8px 0;"><summary style="cursor:pointer;font-size:var(--fs);">${title}: ${okN ? `<span class="win">${okN} прошли проверку</span>` : '<span class="dim">ни один не прошёл проверку</span>'} · ${nf.coins} монет · тест-сделок ${b.n}, WR ${b.wr}%</summary>
+    <div class="dim hint-block" style="font-size:var(--fs-sm);margin:4px 0 6px;">Один общий фильтр для всех монет. Каждое условие Neuro на момент входа пробуется как «убрать» / «только». <b>Выбор и порядок — только по train-части</b> (первые 70% сделок каждой монеты): насколько убранные сделки хуже оставшихся (t). <b>Test-часть</b>, которую фильтр не видел, только проверяет: проверяются только 3 лучших по train (иначе среди сотен вариантов какой-то «пройдёт» случайно); фильтр проходит, если на test убранные сделки тоже явно хуже (t ≥ 2), средний R вырос и монет стало лучше больше, чем хуже. 🏆 — лучший по train из прошедших. Оставляют не меньше 50% сделок. Раньше требовалось «ни одна монета не хуже» — при десятках монет с парой тест-сделок это почти невозможно. Свой фильтр для каждой монеты подбирается отдельно в самом бэктесте (настройка «Фильтр Neuro в бэктесте»). Этот общий отчёт в торговлю не применяется. Посчитано ${fmtTime(nf.computed_at)}.</div>
+    <div style="overflow-x:auto;"><table style="font-size:var(--fs-sm);white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>t train→test</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="7" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
   </details>`;
 }
 // v0.99.372 — CPU cores in use, shown next to the backtest progress
@@ -29168,7 +29156,7 @@ function coresTxt(c, extra) {
   if (!c) return '';
   if (!c.enabled) return ' <span class="dim">· ⚙️ 1 ядро (расчёт в одном процессе)</span>';
   const mine = (c.mine || 0) + (extra && extra.mine || 0);
-  return ` <span style="color:#b39ddb;" title="процессы расчёта: этот модуль / лимит сейчас (всего занято ${c.busy} из ${c.cores} ядер телефона)">· ⚙️ ядер: ${mine} из ${c.limit}${c.boost ? ' (первый прогон — все ядра)' : ''}</span>`;
+  return ` <span style="color:var(--neuro);" title="процессы расчёта: этот модуль / лимит сейчас (всего занято ${c.busy} из ${c.cores} ядер телефона)">· ⚙️ ядер: ${mine} из ${c.limit}${c.boost ? ' (первый прогон — все ядра)' : ''}</span>`;
 }
 // v0.99.369 — best coins found SO FAR while a backtest runs (display only)
 function provisionalHtml(p, running, kind) {
@@ -29180,21 +29168,21 @@ function provisionalHtml(p, running, kind) {
   const head = kind === 'msnr'
     ? `уже посчитано монет: ${p.done}`
     : `прошли проверку на данный момент: ${p.passed}`;
-  return `<details open style="margin:6px 0;border:1px dashed #4a5a78;border-radius:8px;padding:6px 8px;"><summary style="cursor:pointer;font-size:12px;color:#ffcc66;">⏳ Предварительно — бэктест ещё идёт (${head}, ${fmtDateTime(p.t)})</summary>
-    <div class="dim hint-block" style="font-size:10px;margin:4px 0;">Лучшие монеты среди уже посчитанных. Список ещё изменится; торговля идёт по прошлому завершённому бэктесту, пока этот не закончится.</div>
-    <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><tbody>${rows}</tbody></table></div></details>`;
+  return `<details open style="margin:6px 0;border:1px dashed var(--line-2);border-radius:var(--r-sm);padding:6px 8px;"><summary style="cursor:pointer;font-size:var(--fs);color:var(--money);">⏳ Предварительно — бэктест ещё идёт (${head}, ${fmtDateTime(p.t)})</summary>
+    <div class="dim hint-block" style="font-size:var(--fs-xs);margin:4px 0;">Лучшие монеты среди уже посчитанных. Список ещё изменится; торговля идёт по прошлому завершённому бэктесту, пока этот не закончится.</div>
+    <div style="overflow-x:auto;"><table style="font-size:var(--fs-sm);white-space:nowrap;"><tbody>${rows}</tbody></table></div></details>`;
 }
 // v0.99.366 — progress of the post-backtest Neuro-filter phase (S/R, P/R)
 function filterPhaseHtml(p, calc) {
   if (!p || !p.total) return '';
   const pct = Math.round(p.done / p.total * 100);
-  return `<div class="dim" style="font-size:11px;margin:4px 0;">🧪 подбор фильтра Neuro: ${p.running ? `${p.done}/${p.total} монет (${pct}%)${p.current ? ' · сейчас ' + p.current.replace('_USDT','') : ''}` : `готово (${p.total} монет, ${fmtDateTime(p.t)})`} · прошли с фильтром: <b class="${p.added ? 'win' : ''}">${p.added}</b>${p.running ? coresTxt(calc) : ''}</div>`;
+  return `<div class="dim" style="font-size:var(--fs-sm);margin:4px 0;">🧪 подбор фильтра Neuro: ${p.running ? `${p.done}/${p.total} монет (${pct}%)${p.current ? ' · сейчас ' + p.current.replace('_USDT','') : ''}` : `готово (${p.total} монет, ${fmtDateTime(p.t)})`} · прошли с фильтром: <b class="${p.added ? 'win' : ''}">${p.added}</b>${p.running ? coresTxt(calc) : ''}</div>`;
 }
 // v0.99.364 — MSNR / Sweep: the Neuro filter decision for one coin
 function tradeFilterTxt(f, info, beforeTxt) {
   if (f) {
     const t = info && info.test_r_before != null ? ` · test: ${info.test_n_before}→${info.test_n_after} сделок, ${info.test_r_before}→${info.test_r_after}R` : '';
-    return `<span style="color:#b39ddb;" title="подобран на первых 70% сделок, принят потому что на последних 30% стало лучше; живые сигналы, которые он отсекает, не торгуются">🧪 ${f.label}</span><span class="dim">${beforeTxt ? ' · ' + beforeTxt : ''}${t}</span>`;
+    return `<span style="color:var(--neuro);" title="подобран на первых 70% сделок, принят потому что на последних 30% стало лучше; живые сигналы, которые он отсекает, не торгуются">🧪 ${f.label}</span><span class="dim">${beforeTxt ? ' · ' + beforeTxt : ''}${t}</span>`;
   }
   if (info && info.status) return `<span class="dim">🧪 фильтр: ${info.status}${info.label ? ` («${info.label}»: test ${info.test_r_before}→${info.test_r_after}R)` : ''}</span>`;
   return '';
@@ -29205,15 +29193,15 @@ function neuroFilterNoteHtml(r) {
   if (!nf) return '';
   const u = nf.unfiltered || {};
   const sgn = v => (v > 0 ? '+' : '') + v;
-  return `<div style="font-size:11px;flex-basis:100%;margin-top:2px;"><span style="color:#b39ddb;">🧪 фильтр Neuro: ${nf.label}</span>
+  return `<div style="font-size:var(--fs-sm);flex-basis:100%;margin-top:2px;"><span style="color:var(--neuro);">🧪 фильтр Neuro: ${nf.label}</span>
     <span class="dim">— подобран на train, проверен на test. Без фильтра: train WR ${u.train_wr}% ${sgn(u.train_avg_pnl_r)}R z=${u.train_z} (n=${u.train_n}) · test WR ${u.test_wr}% ${sgn(u.test_avg_pnl_r)}R z=${u.test_z} (n=${u.test_n}). Живые сигналы, которые он отсекает, не торгуются.</span></div>`;
 }
 // v0.99.362 — why S/R has no coins: shown right after a cycle where nothing passed
 function snrDiagHtml(d) {
   if (!d || d.passed) return '';
   const near = (d.near || []).map(n => `<div>${n.symbol.replace('_USDT','')}: z=${n.min_z} (нужно ${d.z_needed}) · ${n.tf}, пивот ${n.pivot_length}, сила ${n.min_strength}, RR ${n.rr} · train ${n.train_wr}% (n=${n.train_n}), test ${n.test_wr}% (n=${n.test_n})</div>`).join('');
-  return `<div style="background:#1c2433;border:1px solid #4a5a78;border-radius:8px;padding:8px 12px;margin:8px 0;font-size:12px;">
-    <b style="color:#ffcc66;">Бэктест S/R прошёл, но ни одна монета не прошла проверку значимости</b> <span class="dim">(${fmtDateTime(d.t)})</span><br>
+  return `<div style="background:var(--line);border:1px solid var(--line-2);border-radius:var(--r-sm);padding:8px 12px;margin:8px 0;font-size:var(--fs);">
+    <b style="color:var(--money);">Бэктест S/R прошёл, но ни одна монета не прошла проверку значимости</b> <span class="dim">(${fmtDateTime(d.t)})</span><br>
     <span class="dim">Проверено ${d.checked} из ${d.universe}: без данных ${d.no_data} · мало сделок (нужно ≥${d.min_train} train и ≥${d.min_test} test) ${d.few_trades} · результат есть, но недостаточно значимый ${d.not_significant}.
     ${d.z_test_needed ? `Правило: лучшая из 81 комбинации по train должна иметь z ≥ ${d.z_needed} (поправка на перебор), и затем один раз подтвердиться на test с z ≥ ${d.z_test_needed}. Прошли train, но не подтвердились на test: ${d.train_ok_test_fail || 0}.` : `Монета проходит, только если z ≥ ${d.z_needed} и на train, и на test — это защита от случайной удачи среди 81 проверенной комбинации.`}</span>
     ${(d.chosen_fail || []).length ? `<div style="margin-top:4px;"><span class="dim">Прошли train, test не подтвердил:</span>${d.chosen_fail.map(c => `<div>${c.symbol.replace('_USDT','')}: train z=${c.train_z}, test z=${c.test_z} (нужно ${d.z_test_needed}) · ${c.tf}, пивот ${c.pivot_length}, сила ${c.min_strength}, RR ${c.rr}</div>`).join('')}</div>` : ''}
@@ -29236,18 +29224,18 @@ function filterCoinLineHtml(nf, sym) {
   const f = nf && nf.top && nf.top[0] && (nf.rule !== 'v2' || nf.top[0].all_coins_ok) ? nf.top[0] : null;   // v0.99.380/381
   const pc = f && f.per_coin && f.per_coin[sym];
   if (!pc || !pc.n_b) return '';
-  if (pc.n_a === pc.n_b) return `<div class="dim" style="font-size:11px;">🏆 фильтр (тест): без изменений для этой монеты (n=${pc.n_b})</div>`;
-  if (!pc.n_a) return `<div class="loss" style="font-size:11px;">🏆 фильтр (тест): убрал все ${pc.n_b} сделок</div>`;
+  if (pc.n_a === pc.n_b) return `<div class="dim" style="font-size:var(--fs-sm);">🏆 фильтр (тест): без изменений для этой монеты (n=${pc.n_b})</div>`;
+  if (!pc.n_a) return `<div class="loss" style="font-size:var(--fs-sm);">🏆 фильтр (тест): убрал все ${pc.n_b} сделок</div>`;
   const d = Math.round((pc.wr_a - pc.wr_b) * 10) / 10;
-  return `<div style="font-size:11px;" title="${String(f.label).replace(/"/g, '&quot;')}"><span class="dim">🏆 фильтр (тест): ${pc.wr_b}%→${pc.wr_a}% (n=${pc.n_b}→${pc.n_a})</span> <span class="${d > 0 ? 'win' : d < 0 ? 'loss' : 'dim'}">(${d > 0 ? '+' : ''}${d}%)</span></div>`;
+  return `<div style="font-size:var(--fs-sm);" title="${String(f.label).replace(/"/g, '&quot;')}"><span class="dim">🏆 фильтр (тест): ${pc.wr_b}%→${pc.wr_a}% (n=${pc.n_b}→${pc.n_a})</span> <span class="${d > 0 ? 'win' : d < 0 ? 'loss' : 'dim'}">(${d > 0 ? '+' : ''}${d}%)</span></div>`;
 }
 // v0.99.350 — error row: plain-Russian line first, technical text small below
 function errRowHtml(e) {
   const esc = x => String(x || '').replace(/&/g, '&amp;').replace(/</g, '&lt;');
   const urgent = /ВРУЧНУЮ|СРОЧНО|ПРОВЕРЬ СТОП/.test(e.ru || '');
-  return `<div style="padding:4px 0;border-bottom:1px solid #1c2433;">
+  return `<div style="padding:4px 0;border-bottom:1px solid var(--line);">
     <div${urgent ? ' class="loss"' : ''}>${fmtTime(e.t)} — ${esc(e.ru || e.msg)}</div>
-    ${e.ru ? `<div class="dim" style="font-size:10px;word-break:break-word;">${esc(e.msg)}</div>` : ''}
+    ${e.ru ? `<div class="dim" style="font-size:var(--fs-xs);word-break:break-word;">${esc(e.msg)}</div>` : ''}
   </div>`;
 }
 function fmtNum(n) {
@@ -29703,7 +29691,7 @@ document.addEventListener('fullscreenchange', () => {
 
 </script>
 <!-- Screensaver overlay -->
-<div id="screensaverOverlay" style="display:none;position:fixed;inset:0;background:#000;z-index:9999;cursor:pointer;" onclick="toggleScreensaver()" title="нажмите чтобы выйти">
+<div id="screensaverOverlay" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:9999;cursor:pointer;" onclick="toggleScreensaver()" title="нажмите чтобы выйти">
   <div id="screensaverClock" style="position:absolute;font-family:monospace;font-weight:100;user-select:none;transition:color 0.5s;">
     <div id="screensaverTime" style="font-size:48px;line-height:1;letter-spacing:4px;"></div>
   </div>

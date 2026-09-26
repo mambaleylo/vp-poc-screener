@@ -17721,3 +17721,32 @@ v0.99.386 - Audit for bugs of the same kind (state lost / reset on restart).
          Verified: py_compile (-W error), pyflakes, runtime (/ = 200), JS check;
          tests: dedup helper, Sweep keeps live list during a cycle and drops
          removed coins, filter-phase restart rules, save/load of candidates.
+v0.99.387 - Mobile-first redesign (user: "переосмысли дизайн сайта, каждый элемент,
+         с расчётом на отображение на телефоне"). Display only — nothing
+         computed changed.
+         - One design system: colour tokens (AMOLED-dark background, card /
+           inset / control surfaces, semantic green/red/amber, per-module
+           accent colours), a 6-step type scale (11-21 px, Roboto,
+           tabular numbers), 3 radii, 4-px spacing. The ~480 inline styles in
+           the templates were mapped onto the same tokens (≤10.5 px text raised
+           to 11 px).
+         - Header: "VP-POC vX" + icon buttons; status as chips: "● Реальные
+           ордера", "API 299/500" with a load bar (tap = details), "⚠ Ошибки N"
+           (only when there are errors). Stalled-loop alerts stay full-width red.
+         - Tabs: sticky pill bar, module colour dot on the active tab, the
+           active tab scrolls into view.
+         - Live signals (MSNR, S/R, P/R, Sweep): compact two-line rows instead
+           of wide 8-10 column tables (coin · LONG/SHORT badge · time | result;
+           entry / SL / TP / extras below); latest 8 shown, the rest behind
+           "ещё N".
+         - MSNR table: the wide "Параметры" column moved into the row's tap-to-
+           expand area (rows are one line again); "$undefined" size fixed.
+         - Sweep: the long "Фильтр …: выключен" list -> "Фильтры: <only the
+           enabled ones>" (or "все выключены").
+         - "SOL" instead of "SOL_USDT" everywhere on screen.
+         - Cards, stat tiles, settings (bigger switches, 15-px labels, search
+           field), modals, details chevrons, hint boxes restyled; Neuro card
+           checkbox hint shortened.
+         Verified: py_compile (-W error), pyflakes, runtime (/ = 200), JS check,
+         Playwright at 393x852 on demo data for every tab + settings: no page
+         errors; jsdom Neuro checkbox test.
