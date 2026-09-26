@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.363"
+APP_VERSION = "0.99.364"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1130,7 +1130,7 @@ CREDENTIALS_FILE = os.environ.get(
     "VP_CREDENTIALS_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
-SETTINGS_KEYS = ("volume_profile_enabled", "neuro_extra_conds_enabled", "bounce_enabled", "breakout_enabled",
+SETTINGS_KEYS = ("volume_profile_enabled", "neuro_extra_conds_enabled", "neuro_trade_filter_enabled", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "neuro_min_winrate", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "autotrade_invert_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "autotrade_invert_prv", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "autotrade_invert_lsw", "autotrade_invert_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled", "lsw_all_in_enabled", "snr_all_in_enabled", "prv_all_in_enabled",
@@ -1171,6 +1171,7 @@ def get_settings():
         "amd_enabled": AMD_ENABLED,
         "neuro_enabled": NEURO_ENABLED,
         "neuro_extra_conds_enabled": NEURO_EXTRA_CONDS_ENABLED,
+        "neuro_trade_filter_enabled": NEURO_TRADE_FILTER_ENABLED,
         "snr_enabled": SNR_ENABLED,
         "snr_top_n": SNR_TOP_N,
         "snr_display_n": SNR_DISPLAY_N,
@@ -1315,6 +1316,8 @@ def apply_settings(updates):
         NEURO_ENABLED = bool(updates["neuro_enabled"])
     if "neuro_extra_conds_enabled" in updates:   # v0.99.330 — takes effect on the next mining cycle
         globals()["NEURO_EXTRA_CONDS_ENABLED"] = bool(updates["neuro_extra_conds_enabled"])
+    if "neuro_trade_filter_enabled" in updates:   # v0.99.364 — takes effect on each module's next backtest
+        globals()["NEURO_TRADE_FILTER_ENABLED"] = bool(updates["neuro_trade_filter_enabled"])
     if "snr_enabled" in updates:
         SNR_ENABLED = bool(updates["snr_enabled"])
     if "telegram_alerts_snr" in updates:
@@ -1969,6 +1972,7 @@ STATE = {
     # own comment).
     "lsw_signals": deque(maxlen=LSW_SIGNAL_HISTORY),
     "lsw_backtest_results": {},
+    "lsw_trade_filters": {},   # v0.99.364 — symbol -> accepted Neuro filter + decision info
     "lsw_backtest_summary": {},
     "lsw_filter_checkpoints": {},  # v0.99.136 — symbol -> {"raw","htf_filter","structural_cap","entry_confirm"}, each filter's own SOLO before/after (not chained), so a toggle's own contribution is visible before deciding whether to enable it
     "lsw_chosen_rr": {},  # v0.99.223 — symbol -> RR auto-tuned from that symbol's own train-only portion of history
@@ -6887,7 +6891,8 @@ def save_state():
                 "mirror_symbol_overrides": STATE["mirror_symbol_overrides"],
                 "mirror_live_universe": STATE["mirror_live_universe"],
                 "lsw_signals": list(STATE["lsw_signals"]),
-                "lsw_backtest_results": STATE["lsw_backtest_results"],  # v0.99.292 — CRITICAL FIX, same incident as msnr_backtest_results' own — never persisted before, a restart silently wiped every LSW backtest result
+                "lsw_backtest_results": STATE["lsw_backtest_results"],
+                "lsw_trade_filters": STATE.get("lsw_trade_filters") or {},   # v0.99.364  # v0.99.292 — CRITICAL FIX, same incident as msnr_backtest_results' own — never persisted before, a restart silently wiped every LSW backtest result
                 "snr_results": STATE["snr_results"],  # v0.99.271 — CRITICAL FIX: this and snr_signals/active/display symbols were never actually persisted (save_state() builds an explicit key list, not a generic STATE dump), so a restart would silently wipe every S/R Zones backtest result and live signal
                 "snr_signals": list(STATE["snr_signals"]),
                 "snr_active_symbols": list(_snr_active_symbols),
@@ -7079,6 +7084,7 @@ def load_state():
             STATE["mirror_live_universe"] = mirror_live_universe
             STATE["lsw_signals"] = deque(_backfill_mfe_mae(lsw_signals), maxlen=LSW_SIGNAL_HISTORY)
             STATE["lsw_backtest_results"] = lsw_backtest_results
+            STATE["lsw_trade_filters"] = data.get("lsw_trade_filters") or {}   # v0.99.364
             STATE["snr_results"] = snr_results
             STATE["snr_signals"] = deque(snr_signals, maxlen=500)
             if snr_active_symbols:
@@ -10922,6 +10928,12 @@ def msnr_scan_symbol_live(symbol):
         gate_enabled = AUTOTRADE_ENABLED_MSNR
         gate_symbol_on = bool(autotrade_symbols.get(symbol))
         gate_eligible_now = symbol in msnr_autotrade_eligible_symbols(overrides_snapshot)
+        # v0.99.364 — the coin's accepted Neuro filter applies live too
+        _nf = (overrides_snapshot.get(symbol) or {}).get("neuro_filter")
+        _nf_keep, _nf_val = neuro_filter_live_check(symbol, _nf, sig["time"])
+        if not _nf_keep:
+            record["neuro_filtered"] = _nf["label"]
+            gate_eligible_now = False
         # v0.99.333 — per user ("если сделка пропущена из-за нехватки баланса
         # или ещё чего — я всё равно должен видеть её в живых сигналах,
         # статистика должна быть честной, не важно что открылось на аккаунте"):
@@ -11748,6 +11760,351 @@ def strategy_filter_report(rows_by_sym):
     return out
 
 
+# ============================================================================
+# v0.99.364 — Neuro filter INSIDE the backtests of MSNR / S/R / P/R / Sweep
+# (user: "топ 1 фильтр сразу применять, чтобы живые сигналы и тест+трейн
+# были с учётом фильтра ... и для sweep и для msnr"). Per coin ONE Neuro
+# condition ("убрать X" / "только X") is picked on the TRAIN part only
+# (best t-stat of net R, keeps >= half the trades); the TEST part decides
+# whether it is accepted (each module's own pass rule). An accepted filter
+# is stored with the coin's result and applied to its live signals too.
+# ============================================================================
+NEURO_TF_MIN_KEEP = 0.5          # filter must keep >= 50% of train trades
+NEURO_TF_MIN_TRAIN = 15          # and at least this many
+NEURO_TF_MIN_TEST = 8            # test trades left after filtering, for MSNR/Sweep acceptance
+NEURO_TF_MIN_REMOVED = 5         # MSNR/Sweep: the filter must remove at least this many test trades
+NEURO_TF_ACCEPT_T = 1.0          # ... and those must be worse than the kept ones by t >= this
+_NEURO_COND_SEM = threading.Semaphore(2)   # condition series are memory-heavy: at most 2 at once
+_neuro_cond_cache = {}           # symbol -> {"t": created, "c": {1h bar time: cond dict}}
+_neuro_cond_cache_lock = threading.Lock()
+NEURO_COND_CACHE_TTL = 6 * 3600
+NEURO_COND_CACHE_MAX_SYMBOLS = 200
+_neuro_key_tuples = {}           # interned key orders: cached conditions are stored as (keys, values) tuples (~5x smaller than dicts)
+
+
+def _cond_pack(c):
+    if c is None:
+        return None
+    ks = tuple(c.keys())
+    ks = _neuro_key_tuples.setdefault(ks, ks)
+    return (ks, tuple(c.values()))
+
+
+def _cond_unpack(p):
+    return None if p is None else dict(zip(p[0], p[1]))
+
+
+def _neuro_cond_bar(t):
+    """1h bar whose close is the last one at or before `t` (no look-ahead):
+    the bar that OPENED at least one hour before the signal."""
+    t = int(t)
+    return (t - 3600) - (t - 3600) % 3600
+
+
+def neuro_conditions_for_times(symbol, times):
+    """{time: cond dict or None} — Neuro conditions of the last 1h bar that
+    CLOSED before each time. Cached per symbol (only the bars asked for);
+    missing ones are computed over [earliest missing - 120 days, now]."""
+    times = [int(t) for t in times if t]
+    if not times:
+        return {}
+    now = time.time()
+    with _neuro_cond_cache_lock:
+        ent = _neuro_cond_cache.get(symbol)
+        if ent and now - ent["t"] > NEURO_COND_CACHE_TTL:
+            ent = None
+            _neuro_cond_cache.pop(symbol, None)
+        have = dict(ent["c"]) if ent else {}
+    need = sorted({_neuro_cond_bar(t) for t in times} - set(have))
+    if need:
+        # wait for a slot while staying "alive" for the progress watchdogs
+        while not _NEURO_COND_SEM.acquire(timeout=20):
+            neuro_check_cancel()
+        try:
+            neuro_check_cancel()
+            start_ts = need[0] - 120 * 86400
+            end_ts = int(now)
+            h1 = get_candles_range(symbol, NEURO_TF, start_ts, end_ts) or []
+            got = {}
+            if len(h1) >= 300:
+                htf = get_candles_range(symbol, "4h", start_ts, end_ts) or []
+                d1 = get_candles_range(symbol, "1d", start_ts, end_ts) or []
+                btc = None if symbol == "BTC_USDT" else (get_candles_range("BTC_USDT", NEURO_TF, start_ts, end_ts) or [])
+                eth = None if symbol == "ETH_USDT" else (get_candles_range("ETH_USDT", NEURO_TF, start_ts, end_ts) or [])
+                funding = neuro_fetch_funding_rate(symbol, start_ts, end_ts)
+                neuro_set_index_context(symbol, start_ts, end_ts)
+                try:
+                    oi = get_contract_stats(symbol, interval="1h", limit=999)
+                except Exception:
+                    oi = []
+                conds = neuro_compute_conditions(h1, htf, funding, btc, d1, oi, eth)
+                idx = {c["time"]: i for i, c in enumerate(h1)}
+                for bt in need:
+                    i = idx.get(bt)
+                    got[bt] = _cond_pack(conds[i]) if i is not None and i < len(conds) else None
+                del conds
+                neuro_clear_index_context()
+            else:
+                got = {bt: None for bt in need}
+        finally:
+            _NEURO_COND_SEM.release()
+        have.update(got)
+        with _neuro_cond_cache_lock:
+            ent = _neuro_cond_cache.get(symbol)
+            if ent:
+                ent["c"].update(got)
+            else:
+                if len(_neuro_cond_cache) >= NEURO_COND_CACHE_MAX_SYMBOLS:
+                    oldest = min(_neuro_cond_cache, key=lambda k: _neuro_cond_cache[k]["t"])
+                    _neuro_cond_cache.pop(oldest, None)
+                _neuro_cond_cache[symbol] = {"t": now, "c": dict(got)}
+    return {t: _cond_unpack(have.get(_neuro_cond_bar(t))) for t in times}
+
+
+def neuro_filter_label(f):
+    return f"{'убрать' if f['mode'] == 'exclude' else 'только'}: {NEURO_COND_LABELS.get(f['key'], f['key'])} = {f['value']}"
+
+
+def neuro_filter_pass(f, cond):
+    """True = the trade/signal is kept. Unknown conditions (no data) are
+    kept — the same rule in the backtest and live."""
+    if not f or cond is None:
+        return True
+    v = cond.get(f["key"])
+    if v is None:
+        return True
+    return (str(v) != str(f["value"])) if f["mode"] == "exclude" else (str(v) == str(f["value"]))
+
+
+def _tstat(rs):
+    n = len(rs)
+    if n < 2:
+        return None
+    m = sum(rs) / n
+    var = sum((x - m) ** 2 for x in rs) / (n - 1)
+    return m / math.sqrt(var / n) if var > 0 else None
+
+
+def neuro_pick_trade_filter(train_rows):
+    """train_rows: [(net R, cond dict or None)]. Returns the single filter
+    with the best train t-stat of net R that beats no filter, or None.
+    Uses ONLY the train rows — the test part must not influence it."""
+    n = len(train_rows)
+    base = _tstat([r for r, _ in train_rows])
+    if base is None or n < NEURO_TF_MIN_TRAIN:
+        return None
+    keys = set(_neuro_combo_keys())
+    cands = set()
+    for _, c in train_rows:
+        if c:
+            for k, v in c.items():
+                if k in keys and v is not None and not isinstance(v, (list, dict)):
+                    cands.add((k, str(v)))
+    best = None
+    need = max(NEURO_TF_MIN_TRAIN, NEURO_TF_MIN_KEEP * n)
+    for k, v in sorted(cands):
+        for mode in ("exclude", "only"):
+            f = {"key": k, "value": v, "mode": mode}
+            kept = [r for r, c in train_rows if neuro_filter_pass(f, c)]
+            if len(kept) < need or len(kept) == n:
+                continue
+            t = _tstat(kept)
+            if t is not None and t > base and (best is None or t > best[0]):
+                best = (t, f)
+    if not best:
+        return None
+    f = dict(best[1])
+    f["label"] = neuro_filter_label(f)
+    f["train_t_before"], f["train_t_after"] = round(base, 2), round(best[0], 2)
+    return f
+
+
+def neuro_filter_live_check(symbol, f, sig_time):
+    """(keep, cond value) for a live signal under the coin's accepted filter."""
+    if not f or not NEURO_TRADE_FILTER_ENABLED:
+        return True, None
+    try:
+        cond = neuro_conditions_for_times(symbol, [sig_time]).get(int(sig_time))
+    except NeuroCancelled:
+        raise
+    except Exception as e:
+        log_error(f"neuro filter live {symbol}: {e}")
+        return True, None
+    v = cond.get(f["key"]) if cond else None
+    return neuro_filter_pass(f, cond), v
+
+
+def neuro_split_filter_for_trades(symbol, trades, split_time, r_of, time_key="time"):
+    """MSNR / Sweep helper: pick a filter on trades with time <= split_time,
+    accept it only if the test part (time > split_time) gets a better mean
+    net R while keeping >= 50% (and >= NEURO_TF_MIN_TEST) of its trades.
+    Returns (filter or None, info dict for the UI)."""
+    closed = [t for t in trades if r_of(t) is not None and t.get(time_key)]
+    if len(closed) < NEURO_TF_MIN_TRAIN + NEURO_TF_MIN_TEST:
+        return None, {"status": "мало сделок"}
+    cmap = neuro_conditions_for_times(symbol, [t[time_key] for t in closed])
+    rows = [(r_of(t), cmap.get(int(t[time_key])), t[time_key] <= split_time) for t in closed]
+    train = [(r, c) for r, c, is_tr in rows if is_tr]
+    test = [(r, c) for r, c, is_tr in rows if not is_tr]
+    f = neuro_pick_trade_filter(train)
+    if not f:
+        return None, {"status": "на обучающей части ни одно условие не помогло"}
+    kept = [r for r, c in test if neuro_filter_pass(f, c)]
+    removed = [r for r, c in test if not neuro_filter_pass(f, c)]
+    b_mean = sum(r for r, _ in test) / len(test) if test else None
+    a_mean = sum(kept) / len(kept) if kept else None
+    info = {"label": f["label"], "test_n_before": len(test), "test_n_after": len(kept),
+            "test_r_before": round(b_mean, 3) if b_mean is not None else None,
+            "test_r_after": round(a_mean, 3) if a_mean is not None else None}
+    # accepted only if, on the untouched test part, the trades it removes
+    # were clearly worse than the ones it keeps (one-sided Welch t >= 1) —
+    # a mere tiny improvement happens by chance for about half of all filters
+    # (two-sample t with the pooled spread of the whole test part)
+    t_diff = None
+    if len(kept) >= 2 and len(removed) >= NEURO_TF_MIN_REMOVED:
+        mk, mr = sum(kept) / len(kept), sum(removed) / len(removed)
+        allr = kept + removed
+        ma = sum(allr) / len(allr)
+        sd = math.sqrt(sum((x - ma) ** 2 for x in allr) / (len(allr) - 1))   # pooled: a few identical removed losses can't fake a huge t
+        se = sd * math.sqrt(1 / len(kept) + 1 / len(removed))
+        t_diff = (mk - mr) / se if se > 0 else None
+    info["test_t"] = round(t_diff, 2) if t_diff is not None else None
+    ok = (kept and len(kept) >= max(NEURO_TF_MIN_TEST, NEURO_TF_MIN_KEEP * len(test))
+          and b_mean is not None and a_mean > b_mean
+          and t_diff is not None and t_diff >= NEURO_TF_ACCEPT_T)
+    info["status"] = "принят" if ok else "отклонён проверочной частью"
+    return (f if ok else None), info
+
+
+def _rr_trade_net_r(t):
+    """MSNR / Sweep trade -> net R after fees (WIN +rr, LOSS -1), else None."""
+    if t.get("result") == "WIN" and t.get("rr") is not None:
+        r = float(t["rr"])
+    elif t.get("result") == "LOSS":
+        r = -1.0
+    else:
+        return None
+    return r - trade_fee_r(t.get("entry"), t.get("sl"))
+
+
+def _trades_sig(trades):
+    ts = [t.get("time") for t in trades if t.get("time")]
+    return [len(trades), min(ts) if ts else None, max(ts) if ts else None]
+
+
+def _filter_split_time(trades):
+    closed = sorted((t for t in trades if _rr_trade_net_r(t) is not None and t.get("time")), key=lambda t: t["time"])
+    if len(closed) < NEURO_TF_MIN_TRAIN + NEURO_TF_MIN_TEST:
+        return None
+    return closed[max(1, int(len(closed) * MSNR_NF_TRAIN_FRAC)) - 1]["time"]
+
+
+def _apply_filter_to_trades(symbol, trades, f):
+    cm = neuro_conditions_for_times(symbol, [t["time"] for t in trades if t.get("time")])
+    return [t for t in trades if not t.get("time") or neuro_filter_pass(f, cm.get(int(t["time"])))]
+
+
+def msnr_apply_neuro_trade_filters(loop_name="msnr_neuro_filter_loop"):
+    """v0.99.364 — per coin: pick a Neuro filter on the first 70% of MSNR's
+    backtest trades, accept it only if the last 30% gets better net R (see
+    neuro_split_filter_for_trades). Accepted -> the coin's trade list and
+    summary/score are recomputed on the filtered trades (so ranking, the
+    live universe and autotrade eligibility use them), and live signals
+    that fail it are recorded but not traded."""
+    with state_lock:
+        results = dict(STATE.get("msnr_backtest_results") or {})
+        overrides = dict(STATE.get("msnr_symbol_overrides") or {})
+    changed = {}
+    for sym, trades in results.items():
+        ov = overrides.get(sym) or {}
+        if "neuro_filter_info" in ov or not trades:
+            continue   # already decided for this backtest (the flag lives in the override itself)
+        heartbeat(loop_name)
+        info = {"status": "мало сделок"}
+        f = None
+        try:
+            split = _filter_split_time(trades)
+            if split is not None:
+                f, info = neuro_split_filter_for_trades(sym, trades, split, _rr_trade_net_r)
+        except Exception as e:
+            log_error(f"msnr neuro trade filter {sym}: {e}")
+            continue
+        kept = _apply_filter_to_trades(sym, trades, f) if f else None
+        changed[sym] = (trades, f, info, kept)
+    if not changed:
+        return
+    with state_lock:
+        res = STATE["msnr_backtest_results"]
+        ovs = STATE["msnr_symbol_overrides"]
+        summ = STATE.get("msnr_backtest_summary") or {}
+        for sym, (trades, f, info, kept) in changed.items():
+            if res.get(sym) is not trades or sym not in ovs:
+                continue   # a newer backtest replaced it meanwhile
+            ov = dict(ovs[sym])
+            ov["neuro_filter_info"] = info
+            if f:
+                ov["neuro_filter"] = {k: f[k] for k in ("key", "value", "mode", "label")}
+                ov["neuro_filter_before"] = {"trades": ov.get("trades"), "winrate": ov.get("winrate"),
+                                             "expectancy_r": ov.get("expectancy_r")}
+                _msnr_recompute_summary_score(ov, kept)
+                res[sym] = kept
+                summ[sym] = msnr_summarize_backtest(kept)
+            ovs[sym] = ov
+        STATE["msnr_live_universe"] = msnr_compute_live_universe(ovs, bounds=msnr_compute_rank_bounds(ovs))
+    save_state()
+
+
+def lsw_apply_neuro_trade_filters(loop_name="lsw_neuro_filter_loop"):
+    """v0.99.364 — same as msnr_apply_neuro_trade_filters() for Sweep: the
+    accepted filter rewrites the coin's trade list + summary, and its live
+    eligibility / directions are recomputed with lsw_live_decision()."""
+    with state_lock:
+        results = dict(STATE.get("lsw_backtest_results") or {})
+        fmap = dict(STATE.get("lsw_trade_filters") or {})
+    changed = {}
+    for sym, trades in results.items():
+        prev = fmap.get(sym) or {}
+        if not trades or prev.get("sig_after") == _trades_sig(trades):
+            continue   # this list is already the filtered/decided one
+        heartbeat(loop_name)
+        info = {"status": "мало сделок"}
+        f = None
+        try:
+            split = _filter_split_time(trades)
+            if split is not None:
+                f, info = neuro_split_filter_for_trades(sym, trades, split, _rr_trade_net_r)
+        except Exception as e:
+            log_error(f"lsw neuro trade filter {sym}: {e}")
+            continue
+        kept = _apply_filter_to_trades(sym, trades, f) if f else trades
+        changed[sym] = (trades, f, info, kept)
+    if not changed:
+        return
+    with state_lock:
+        res = STATE["lsw_backtest_results"]
+        fm = STATE.setdefault("lsw_trade_filters", {})
+        for sym, (trades, f, info, kept) in changed.items():
+            if res.get(sym) is not trades:
+                continue
+            entry = {"info": info, "sig_after": _trades_sig(kept)}
+            if f:
+                before = STATE["lsw_backtest_summary"].get(sym) or {}
+                entry["filter"] = {k: f[k] for k in ("key", "value", "mode", "label")}
+                entry["before"] = {"n": before.get("n"), "win_rate": before.get("win_rate")}
+                res[sym] = kept
+                summary = lsw_summarize_backtest(kept)
+                STATE["lsw_backtest_summary"][sym] = summary
+                is_live, dirs = lsw_live_decision(summary)
+                if is_live and sym not in STATE["lsw_live_universe"]:
+                    STATE["lsw_live_universe"].append(sym)
+                elif not is_live and sym in STATE["lsw_live_universe"]:
+                    STATE["lsw_live_universe"].remove(sym)
+                if dirs is not None:
+                    STATE["lsw_live_directions"][sym] = dirs
+            fm[sym] = entry
+    save_state()
+
+
 def msnr_neuro_filter_analysis():
     with state_lock:
         results = {k: list(v or []) for k, v in (STATE.get("msnr_backtest_results") or {}).items()}
@@ -11789,6 +12146,8 @@ def lsw_neuro_filter_loop():
         try:
             if LSW_ENABLED:
                 lsw_neuro_filter_analysis()
+                if NEURO_TRADE_FILTER_ENABLED:
+                    lsw_apply_neuro_trade_filters()   # v0.99.364
         except Exception as e:
             log_error(f"lsw_neuro_filter_loop: {e}")
         wait_beating(LSW_NF_TRIGGER, 6 * 3600, "lsw_neuro_filter_loop")   # after every Sweep backtest (trigger) or 6h
@@ -11802,43 +12161,27 @@ def neuro_filter_rows_by_sym(results, loop_name, err_name):
     results = {k: v for k, v in results.items() if len([t for t in v if _msnr_nf_trade_r(t) is not None]) >= 5}
     if not results:
         return None
-    now = int(time.time())
-    first_trade = min(t["time"] for v in results.values() for t in v if t.get("time"))
-    start_ts = int(first_trade) - 120 * 86400     # indicator warm-up (EMA200 on 1h, daily EMAs)
-    btc = get_candles_range("BTC_USDT", NEURO_TF, start_ts, now) or []
-    eth = get_candles_range("ETH_USDT", NEURO_TF, start_ts, now) or []
-    tf_sec = INTERVAL_SECONDS.get(NEURO_TF, 3600)
     rows_by_sym = {}
     for sym, trades in results.items():
         heartbeat(loop_name)
+        # v0.99.364 — conditions come from the shared per-symbol cache
+        # (neuro_conditions_for_times: same "last 1h bar CLOSED before the
+        # signal" rule), instead of recomputing every coin's full series on
+        # every report run
         try:
-            candles = get_candles_range(sym, NEURO_TF, start_ts, now)
-            if not candles or len(candles) < 300:
-                continue
-            htf = get_candles_range(sym, "4h", start_ts, now) or []
-            d1 = get_candles_range(sym, "1d", start_ts, now) or []
-            funding = neuro_fetch_funding_rate(sym, start_ts, now)
-            neuro_set_index_context(sym, start_ts, now)   # v0.99.330
-            try:
-                oi = get_contract_stats(sym, interval="1h", limit=999)
-            except Exception:
-                oi = []
-            conds = neuro_compute_conditions(candles, htf, funding, None if sym == "BTC_USDT" else btc,
-                                             d1, oi, None if sym == "ETH_USDT" else eth)
+            cmap = neuro_conditions_for_times(sym, [t["time"] for t in trades if t.get("time")])
         except Exception as e:
             log_error(f"{err_name} {sym}: {e}")
             continue
-        times = [c["time"] for c in candles]
         rows = []
         for t in sorted(trades, key=lambda x: x.get("time") or 0):
             r = _msnr_nf_trade_r(t)
             if r is None or not t.get("time"):
                 continue
-            # last 1h bar that had CLOSED before the MSNR signal — no look-ahead
-            i = bisect.bisect_right(times, int(t["time"]) - tf_sec) - 1
-            if i < 0 or i >= len(conds):
+            c = cmap.get(int(t["time"]))
+            if c is None:
                 continue
-            rows.append({"r": r, "c": conds[i]})
+            rows.append({"r": r, "c": c})
         if len(rows) >= 5:
             cut = max(1, int(len(rows) * MSNR_NF_TRAIN_FRAC))
             rows_by_sym[sym] = (rows[:cut], rows[cut:])
@@ -11852,6 +12195,8 @@ def msnr_neuro_filter_loop():
         try:
             if MSNR_ENABLED:
                 msnr_neuro_filter_analysis()
+                if NEURO_TRADE_FILTER_ENABLED:
+                    msnr_apply_neuro_trade_filters()   # v0.99.364
         except Exception as e:
             log_error(f"msnr_neuro_filter_loop: {e}")
         wait_beating(MSNR_NF_TRIGGER, 6 * 3600, "msnr_neuro_filter_loop")   # re-run after every MSNR backtest (trigger) or 6h
@@ -14454,6 +14799,26 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
     results = _track_all(sigs)
     return results, {"checkpoints": checkpoints, "chosen_rr": chosen_rr, "rr_sweep": rr_sweep}
 
+def lsw_live_decision(summary):
+    """v0.99.364 — factored out of lsw_backtest_loop() unchanged: is the
+    coin live-eligible, and which directions (None = no direction filter)."""
+    closed_n = summary["wins"] + summary["losses"]
+    is_live = (summary["win_rate"] is not None and summary["win_rate"] > LSW_LIVE_MIN_WINRATE
+               and closed_n >= LSW_LIVE_MIN_SAMPLE)
+    allowed_directions = None
+    if is_live and LSW_DIRECTION_FILTER_ENABLED:
+        allowed = []
+        bd = summary.get("by_direction") or {}
+        for d in ("LONG", "SHORT"):
+            dd = bd.get(d) or {}
+            if (dd.get("n", 0) >= LSW_DIRECTION_MIN_SAMPLE
+                    and dd.get("win_rate") is not None
+                    and dd["win_rate"] > LSW_LIVE_MIN_WINRATE):
+                allowed.append(d)
+        allowed_directions = allowed
+    return is_live, allowed_directions
+
+
 def lsw_summarize_backtest(results):
     total = len(results)
     if not total:
@@ -14647,7 +15012,14 @@ def lsw_scan_symbol_live(symbol):
         # sent. Initialized here so the alert path is fully independent
         # of whether autotrade fires.
         autotrade_result = None
-        if AUTOTRADE_ENABLED_LSW:
+        # v0.99.364 — the coin's accepted Neuro filter applies live too
+        with state_lock:
+            _nf = ((STATE.get("lsw_trade_filters") or {}).get(symbol) or {}).get("filter")
+        _nf_keep, _nf_val = neuro_filter_live_check(symbol, _nf, sig["entry_time"])
+        if not _nf_keep:
+            with state_lock:
+                record["neuro_filtered"] = _nf["label"]
+        if AUTOTRADE_ENABLED_LSW and _nf_keep:
             # v0.99.239 — per direct user report: a real trade fired for a
             # symbol (XRP_USDT) that had ALREADY disappeared from the
             # backtest ranking table by the time they checked, just
@@ -14700,7 +15072,8 @@ def lsw_scan_symbol_live(symbol):
             f"{arrow} Sweep {symbol}\n"
             f"entry: {sig['entry']:.6g}\n"
             f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n"
-            f"плечо: {leverage_txt}",
+            f"плечо: {leverage_txt}"
+            + ("" if _nf_keep else f"\n🧪 не торгуется — отсеян фильтром Neuro «{_nf['label']}» (сейчас: {_nf_val})"),
             category="lsw",
         )
     except Exception as e:
@@ -14785,7 +15158,7 @@ def update_lsw_signal_outcomes():
 
 def compute_lsw_signal_stats():
     with state_lock:
-        signals = list(STATE["lsw_signals"])
+        signals = [s for s in STATE["lsw_signals"] if not s.get("neuro_filtered")]   # v0.99.364
     closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
     wins = sum(1 for s in closed if s["result"] == "WIN")
     losses = sum(1 for s in closed if s["result"] == "LOSS")
@@ -14948,20 +15321,7 @@ def _lsw_run_one_backtest_cycle(t0):
                     try:
                         checkpoints = meta.get("checkpoints", {})
                         summary = lsw_summarize_backtest(results)
-                        closed_n = summary["wins"] + summary["losses"]
-                        is_live = (summary["win_rate"] is not None and summary["win_rate"] > LSW_LIVE_MIN_WINRATE
-                                   and closed_n >= LSW_LIVE_MIN_SAMPLE)
-                        allowed_directions = None
-                        if is_live and LSW_DIRECTION_FILTER_ENABLED:
-                            allowed = []
-                            bd = summary.get("by_direction") or {}
-                            for d in ("LONG", "SHORT"):
-                                dd = bd.get(d) or {}
-                                if (dd.get("n", 0) >= LSW_DIRECTION_MIN_SAMPLE
-                                        and dd.get("win_rate") is not None
-                                        and dd["win_rate"] > LSW_LIVE_MIN_WINRATE):
-                                    allowed.append(d)
-                            allowed_directions = allowed
+                        is_live, allowed_directions = lsw_live_decision(summary)   # v0.99.364 — same rule, shared
                         # Write THIS symbol's result immediately — never
                         # wait for the rest of the universe to also finish.
                         with state_lock:
@@ -16013,6 +16373,93 @@ def snr_diag_summary(universe):
             "near": [dict(n, symbol=s) for s, n in near]}
 
 
+NEURO_TF_NEAR_Z = 1.0    # v0.99.364 — combos this close on train get a filter attempt
+NEURO_TF_NEAR_K = 5      # at most this many near-miss combos per coin
+
+
+def _variant_trades(c, f):
+    """Closed trades of a candidate combo, with the Neuro filter applied."""
+    if not f:
+        return c["closed"]
+    cm = c["_conds"]
+    return [t for t in c["closed"] if neuro_filter_pass(f, cm.get(int(t["time"])))]
+
+
+def _variant_train_z(v):
+    c, f = v
+    return c["train_z"] if not f else f["_train_z"]
+
+
+def _strategy_filter_variants(symbol, cands, z_crit, min_train, min_test):
+    """v0.99.364 — S/R and P/R: for each candidate combo pick a Neuro filter
+    on its TRAIN trades only, then require the filtered combo to pass the
+    same fee-inclusive significance test on train AND on the untouched test
+    part. Returns [(candidate, filter)] for the ones that pass."""
+    if not cands:
+        return []
+    times = {int(t["time"]) for c in cands for t in c["closed"]}
+    cmap = neuro_conditions_for_times(symbol, times)
+    out = []
+    for c in cands:
+        neuro_check_cancel()
+        c["_conds"] = cmap
+        train = [t for t in c["closed"] if t["time"] <= c["boundary"]]
+        f = neuro_pick_trade_filter([(_net_r(t), cmap.get(int(t["time"]))) for t in train])
+        if not f:
+            continue
+        kept = _variant_trades(c, f)
+        ftrain = [t for t in kept if t["time"] <= c["boundary"]]
+        ftest = [t for t in kept if t["time"] > c["boundary"]]
+        if len(ftrain) < min_train or len(ftest) < min_test:
+            continue
+        tz, sz = _z_vs_breakeven_with_fees(ftrain, c["rr"]), _z_vs_breakeven_with_fees(ftest, c["rr"])
+        if tz is None or sz is None or tz < z_crit or sz < z_crit:
+            continue
+        f = dict(f, _train_z=tz, _test_z=sz)
+        out.append((c, f))
+    return out
+
+
+def _strategy_best_dict(c, f, params):
+    """Result dict for S/R / P/R from a candidate combo (+ optional filter).
+    Same fields as before v0.99.364, plus neuro_filter when one is used."""
+    closed = _variant_trades(c, f)
+    train = [t for t in closed if t["time"] <= c["boundary"]]
+    test = [t for t in closed if t["time"] > c["boundary"]]
+
+    def st(ts):
+        w = sum(1 for t in ts if t["result"] == "WIN")
+        return w / len(ts) * 100, sum(_net_r(t) for t in ts) / len(ts)
+    train_wr, train_avg = st(train)
+    test_wr, test_avg = st(test)
+    best = dict(params)
+    best.update({
+        "train_n": len(train), "train_wr": round(train_wr, 1), "train_avg_pnl_r": round(train_avg, 3),
+        "train_z": round(c["train_z"] if not f else f["_train_z"], 2),
+        "test_n": len(test), "test_wr": round(test_wr, 1), "test_avg_pnl_r": round(test_avg, 3),
+        "test_z": round(c["test_z"] if not f else f["_test_z"], 2),
+        "fees_included": True,   # v0.99.363 — avg R and z are after fees
+        "avg_fee_r": round(sum(t.get("fee_r") or 0 for t in closed) / len(closed), 3),
+        "test_days": round((c["span"][1] - c["boundary"]) / 86400, 1), "test_start_time": c["boundary"],
+        "history_days": round((c["span"][1] - c["span"][0]) / 86400, 1),
+        "recent_trades": closed[-40:][::-1],
+        "_all_closed": closed,
+    })
+    if "mae_r" in (closed[0] if closed else {}):
+        best["avg_mae_r"] = round(sum(t["mae_r"] for t in closed) / len(closed), 3)
+    if f:
+        otr = [t for t in c["closed"] if t["time"] <= c["boundary"]]
+        ote = [t for t in c["closed"] if t["time"] > c["boundary"]]
+        o_tr_wr, o_tr_avg = st(otr)
+        o_te_wr, o_te_avg = st(ote)
+        best["neuro_filter"] = {"key": f["key"], "value": f["value"], "mode": f["mode"], "label": f["label"],
+                                "unfiltered": {"train_n": len(otr), "train_wr": round(o_tr_wr, 1), "train_avg_pnl_r": round(o_tr_avg, 3),
+                                               "train_z": round(c["train_z"], 2),
+                                               "test_n": len(ote), "test_wr": round(o_te_wr, 1), "test_avg_pnl_r": round(o_te_avg, 3),
+                                               "test_z": round(c["test_z"], 2)}}
+    return best
+
+
 def snr_optimize_symbol(symbol):
     """Sweeps timeframe x pivot_length x min_strength x rr (SNR_N_COMBOS
     total combinations) for one symbol, on TRAIN data first then
@@ -16039,6 +16486,7 @@ def snr_optimize_symbol(symbol):
     None if nothing survives on any timeframe."""
     best = None
     diag = {"bars": {}, "combos_enough": 0, "near": None}   # v0.99.362 — why a coin fails
+    passing, near = [], []   # v0.99.364 — candidates for the Neuro filter
     for tf in SNR_TF_CANDIDATES:
         try:
             now = int(time.time())
@@ -16050,6 +16498,7 @@ def snr_optimize_symbol(symbol):
             atr = neuro_atr_series(candles, 14)
             split = int(len(candles) * SNR_TRAIN_FRAC)
             boundary_time = candles[split - 1]["time"]
+            span = (candles[0]["time"], candles[-1]["time"])
 
             for pl in SNR_PIVOT_CANDIDATES:
                 for ms in SNR_STRENGTH_CANDIDATES:
@@ -16061,12 +16510,6 @@ def snr_optimize_symbol(symbol):
                         test = [t for t in closed if t["time"] > boundary_time]
                         if len(train) < SNR_MIN_TRAIN_TRADES or len(test) < SNR_MIN_TEST_TRADES:
                             continue
-                        train_wins = sum(1 for t in train if t["result"] == "WIN")
-                        train_wr = train_wins / len(train) * 100
-                        train_avg = sum(_net_r(t) for t in train) / len(train)   # v0.99.363 — after fees
-                        test_wins = sum(1 for t in test if t["result"] == "WIN")
-                        test_wr = test_wins / len(test) * 100
-                        test_avg = sum(_net_r(t) for t in test) / len(test)
                         train_z = _z_vs_breakeven_with_fees(train, rr)   # v0.99.363 — breakeven incl. fees
                         test_z = _z_vs_breakeven_with_fees(test, rr)
                         if train_z is None or test_z is None:
@@ -16075,26 +16518,28 @@ def snr_optimize_symbol(symbol):
                         mz = min(train_z, test_z)
                         if diag["near"] is None or mz > diag["near"]["min_z"]:
                             diag["near"] = {"min_z": round(mz, 2), "tf": tf, "pivot_length": pl, "min_strength": ms, "rr": rr,
-                                            "train_n": len(train), "train_wr": round(train_wr, 1),
-                                            "test_n": len(test), "test_wr": round(test_wr, 1)}
-                        if train_z < SNR_Z_CRITICAL or test_z < SNR_Z_CRITICAL:
-                            continue
-                        if best is None or train_z > best["train_z"]:
-                            best = {
-                                "timeframe": tf, "pivot_length": pl, "min_strength": ms, "rr": rr,
-                                "train_n": len(train), "train_wr": round(train_wr, 1), "train_avg_pnl_r": round(train_avg, 3),
-                                "train_z": round(train_z, 2),
-                                "test_n": len(test), "test_wr": round(test_wr, 1), "test_avg_pnl_r": round(test_avg, 3),
-                                "test_z": round(test_z, 2),
-                                "fees_included": True,   # v0.99.363 — avg R and z are after fees
-                                "avg_fee_r": round(sum(t.get("fee_r") or 0 for t in closed) / len(closed), 3),
-                                "test_days": round((candles[-1]["time"] - boundary_time) / 86400, 1), "test_start_time": boundary_time,  # v0.99.335 — train/test divider in the full trade list
-                                "history_days": round((candles[-1]["time"] - candles[0]["time"]) / 86400, 1),  # v0.99.332 — whole backtest window (train + test), shown as months in the UI  # v0.99.315 — length of the test window, so the UI can show expected live-signal frequency (test_n / test_days)
-                                "recent_trades": closed[-40:][::-1],
-                                "_all_closed": closed,
-                            }
+                                            "train_n": len(train), "train_wr": round(sum(1 for t in train if t["result"] == "WIN") / len(train) * 100, 1),
+                                            "test_n": len(test), "test_wr": round(sum(1 for t in test if t["result"] == "WIN") / len(test) * 100, 1)}
+                        cand = {"tf": tf, "pl": pl, "ms": ms, "rr": rr, "closed": closed, "boundary": boundary_time,
+                                "span": span, "train_z": train_z, "test_z": test_z}
+                        if train_z >= SNR_Z_CRITICAL and test_z >= SNR_Z_CRITICAL:
+                            passing.append(cand)
+                        elif train_z >= NEURO_TF_NEAR_Z:
+                            near.append(cand)
+                            near.sort(key=lambda c: -c["train_z"])
+                            del near[NEURO_TF_NEAR_K:]
         except Exception as e:
             log_error(f"snr_optimize_symbol {symbol} {tf}: {e}")
+    passing.sort(key=lambda c: -c["train_z"])
+    variants = [(c, None) for c in passing]
+    if NEURO_TRADE_FILTER_ENABLED:
+        variants += _strategy_filter_variants(symbol, passing[:1] + near, SNR_Z_CRITICAL,
+                                              SNR_MIN_TRAIN_TRADES, SNR_MIN_TEST_TRADES)
+    if variants:
+        c, f = max(variants, key=lambda v: _variant_train_z(v))
+        best = _strategy_best_dict(c, f, {"timeframe": c["tf"], "pivot_length": c["pl"], "min_strength": c["ms"], "rr": c["rr"]})
+    diag["filter_used"] = bool(best and best.get("neuro_filter"))
+    _snr_diag[symbol] = {"passed": best is not None, **diag}
     if best is not None:
         # v0.99.318 — $15 va-bank compounding over the winning combo's full history
         try:
@@ -16104,7 +16549,6 @@ def snr_optimize_symbol(symbol):
         except Exception as e:
             best.pop("_all_closed", None)
             log_error(f"snr compound {symbol}: {e}")
-    _snr_diag[symbol] = {"passed": best is not None, **diag}
     return best
 
 
@@ -16636,10 +17080,17 @@ def snr_live_loop():
                           "zone_price": sig["zone_price"], "zone_strength": sig["zone_strength"], "timeframe": sig["timeframe"],
                           "time": sig["time"], "detected_at": time.time(), "status": "OPEN", "result": None,
                           "exit_price": None, "exit_time": None, "pnl_r": None}
+                # v0.99.364 — the coin's accepted Neuro filter applies live too:
+                # a filtered-out signal is recorded (and tracked) but not traded
+                with state_lock:
+                    _nf = (STATE["snr_results"].get(symbol) or {}).get("neuro_filter")
+                _nf_keep, _nf_val = neuro_filter_live_check(symbol, _nf, sig["time"])
+                if not _nf_keep:
+                    record["neuro_filtered"] = _nf["label"]
                 with state_lock:
                     STATE["snr_signals"].appendleft(record)
                 autotrade_result = None
-                if AUTOTRADE_ENABLED_SNR:
+                if AUTOTRADE_ENABLED_SNR and _nf_keep:
                     with state_lock:
                         still_active = symbol in _snr_active_symbols
                     if still_active:
@@ -16652,7 +17103,8 @@ def snr_live_loop():
                 leverage_txt = format_leverage_txt(autotrade_result, AUTOTRADE_ENABLED_SNR)
                 send_telegram(
                     f"{arrow} S/R {symbol} ({sig['direction']}, \u0437\u043e\u043d\u0430 {sig['zone_price']:.6g}, \u0441\u0438\u043b\u0430 {sig['zone_strength']})\n"
-                    f"entry: {sig['entry']:.6g}\nSL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n\u043f\u043b\u0435\u0447\u043e: {leverage_txt}",
+                    f"entry: {sig['entry']:.6g}\nSL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n\u043f\u043b\u0435\u0447\u043e: {leverage_txt}"
+                    + ("" if _nf_keep else f"\n🧪 не торгуется — отсеян фильтром Neuro «{_nf['label']}» (сейчас: {_nf_val})"),
                     category="snr",
                 )
                 save_state()  # v0.99.271 — persist each new live signal immediately, same as every other module's own signal log
@@ -16864,6 +17316,7 @@ def prv_optimize_symbol(symbol):
     candidates, avoiding the exact multiple-comparisons leak found and
     fixed for SNR (v0.99.277)."""
     best = None
+    passing, near = [], []   # v0.99.364 — candidates for the Neuro filter
     for tf in PRV_TF_CANDIDATES:
         try:
             now = int(time.time())
@@ -16874,6 +17327,7 @@ def prv_optimize_symbol(symbol):
             atr = neuro_atr_series(candles, PRV_ATR_LENGTH)
             split = int(len(candles) * PRV_TRAIN_FRAC)
             boundary_time = candles[split - 1]["time"]
+            span = (candles[0]["time"], candles[-1]["time"])
 
             for ma_type in PRV_MA_TYPE_CANDIDATES:
                 for kc_length in PRV_KC_LENGTH_CANDIDATES:
@@ -16887,38 +17341,30 @@ def prv_optimize_symbol(symbol):
                             test = [t for t in closed if t["time"] > boundary_time]
                             if len(train) < PRV_MIN_TRAIN_TRADES or len(test) < PRV_MIN_TEST_TRADES:
                                 continue
-                            train_wins = sum(1 for t in train if t["result"] == "WIN")
-                            train_wr = train_wins / len(train) * 100
-                            train_avg = sum(_net_r(t) for t in train) / len(train)   # v0.99.363 — after fees
-                            test_wins = sum(1 for t in test if t["result"] == "WIN")
-                            test_wr = test_wins / len(test) * 100
-                            test_avg = sum(_net_r(t) for t in test) / len(test)
                             train_z = _z_vs_breakeven_with_fees(train, rr)   # v0.99.363 — breakeven incl. fees
                             test_z = _z_vs_breakeven_with_fees(test, rr)
                             if train_z is None or test_z is None:
                                 continue
-                            if train_z < PRV_Z_CRITICAL or test_z < PRV_Z_CRITICAL:
-                                continue
-                            avg_mae = sum(t["mae_r"] for t in closed) / len(closed)
-                            if best is None or train_z > best["train_z"]:
-                                best = {
-                                    "timeframe": tf, "ma_type": ma_type, "kc_length": kc_length,
-                                    "band_mult": band_mult, "rr": rr,
-                                    "train_n": len(train), "train_wr": round(train_wr, 1),
-                                    "train_avg_pnl_r": round(train_avg, 3), "train_z": round(train_z, 2),
-                                    "test_n": len(test), "test_wr": round(test_wr, 1),
-                                    "test_avg_pnl_r": round(test_avg, 3), "test_z": round(test_z, 2),
-                                    "avg_mae_r": round(avg_mae, 3),
-                                    "fees_included": True,   # v0.99.363 — avg R and z are after fees
-                                    "avg_fee_r": round(sum(t.get("fee_r") or 0 for t in closed) / len(closed), 3),
-                                    "test_days": round((candles[-1]["time"] - boundary_time) / 86400, 1),       # v0.99.335 (was missing on Peak)
-                                    "history_days": round((candles[-1]["time"] - candles[0]["time"]) / 86400, 1),  # v0.99.335 (was missing on Peak — no months shown)
-                                    "test_start_time": boundary_time,
-                                    "recent_trades": closed[-40:][::-1],
-                                    "_all_closed": closed,
-                                }
+                            cand = {"tf": tf, "ma_type": ma_type, "kc_length": kc_length, "band_mult": band_mult, "rr": rr,
+                                    "closed": closed, "boundary": boundary_time, "span": span,
+                                    "train_z": train_z, "test_z": test_z}
+                            if train_z >= PRV_Z_CRITICAL and test_z >= PRV_Z_CRITICAL:
+                                passing.append(cand)
+                            elif train_z >= NEURO_TF_NEAR_Z:
+                                near.append(cand)
+                                near.sort(key=lambda c: -c["train_z"])
+                                del near[NEURO_TF_NEAR_K:]
         except Exception as e:
             log_error(f"prv_optimize_symbol {symbol} {tf}: {e}")
+    passing.sort(key=lambda c: -c["train_z"])
+    variants = [(c, None) for c in passing]
+    if NEURO_TRADE_FILTER_ENABLED:
+        variants += _strategy_filter_variants(symbol, passing[:1] + near, PRV_Z_CRITICAL,
+                                              PRV_MIN_TRAIN_TRADES, PRV_MIN_TEST_TRADES)
+    if variants:
+        c, f = max(variants, key=lambda v: _variant_train_z(v))
+        best = _strategy_best_dict(c, f, {"timeframe": c["tf"], "ma_type": c["ma_type"], "kc_length": c["kc_length"],
+                                          "band_mult": c["band_mult"], "rr": c["rr"]})
     if best is not None:
         # v0.99.318 — $15 va-bank compounding over the winning combo's full history
         try:
@@ -17154,10 +17600,17 @@ def prv_live_loop():
                 record = {"symbol": symbol, "direction": sig["direction"], "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
                           "timeframe": sig["timeframe"], "time": sig["time"], "detected_at": time.time(),
                           "status": "OPEN", "result": None, "exit_price": None, "exit_time": None, "pnl_r": None}
+                # v0.99.364 — the coin's accepted Neuro filter applies live too:
+                # a filtered-out signal is recorded (and tracked) but not traded
+                with state_lock:
+                    _nf = (STATE["prv_results"].get(symbol) or {}).get("neuro_filter")
+                _nf_keep, _nf_val = neuro_filter_live_check(symbol, _nf, sig["time"])
+                if not _nf_keep:
+                    record["neuro_filtered"] = _nf["label"]
                 with state_lock:
                     STATE["prv_signals"].appendleft(record)
                 autotrade_result = None
-                if AUTOTRADE_ENABLED_PRV:
+                if AUTOTRADE_ENABLED_PRV and _nf_keep:
                     with state_lock:
                         still_active = symbol in _prv_active_symbols
                     if still_active:
@@ -17170,7 +17623,8 @@ def prv_live_loop():
                 leverage_txt = format_leverage_txt(autotrade_result, AUTOTRADE_ENABLED_PRV)
                 send_telegram(
                     f"{arrow} Peak Reversal {symbol} ({sig['direction']})\n"
-                    f"entry: {sig['entry']:.6g}\nSL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n\u043f\u043b\u0435\u0447\u043e: {leverage_txt}",
+                    f"entry: {sig['entry']:.6g}\nSL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n\u043f\u043b\u0435\u0447\u043e: {leverage_txt}"
+                    + ("" if _nf_keep else f"\n🧪 не торгуется — отсеян фильтром Neuro «{_nf['label']}» (сейчас: {_nf_val})"),
                     category="prv",
                 )
                 save_state()
@@ -18180,6 +18634,7 @@ def neuro_align_oi_trend(candles, oi_records, lookback_pct=0.03):
 # condition set. Every value uses only data available at bar i's close.
 # ============================================================================
 NEURO_EXTRA_CONDS_ENABLED = os.environ.get("VP_NEURO_EXTRA_CONDS_ENABLED", "1") == "1"
+NEURO_TRADE_FILTER_ENABLED = os.environ.get("VP_NEURO_TRADE_FILTER_ENABLED", "1") == "1"   # v0.99.364 — see neuro_pick_trade_filter()
 NEURO_EXTRA_KEYS = ("liq_zone", "lsr_zone", "oi_price_quad", "funding_delta", "premium_zone",
                     "weekly_open_side", "monthly_open_side", "pdhl_zone", "compression",
                     "long_streak", "rs_btc_zone", "round_level")
@@ -21008,7 +21463,7 @@ def snr_compute_signal_stats(active_symbols=None):
     with state_lock:
         active_symbols = active_symbols if active_symbols is not None else list(_snr_active_symbols)
         all_signals = list(STATE["snr_signals"])
-    signals = [s for s in all_signals if s["symbol"] in active_symbols]
+    signals = [s for s in all_signals if s["symbol"] in active_symbols and not s.get("neuro_filtered")]   # v0.99.364
     closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
     wins = sum(1 for s in closed if s["result"] == "WIN")
     losses = len(closed) - wins
@@ -21093,7 +21548,7 @@ def prv_compute_signal_stats(active_symbols=None):
     with state_lock:
         active_symbols = active_symbols if active_symbols is not None else list(_prv_active_symbols)
         all_signals = list(STATE["prv_signals"])
-    signals = [s for s in all_signals if s["symbol"] in active_symbols]
+    signals = [s for s in all_signals if s["symbol"] in active_symbols and not s.get("neuro_filtered")]   # v0.99.364
     closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
     wins = sum(1 for s in closed if s["result"] == "WIN")
     losses = len(closed) - wins
@@ -21648,6 +22103,7 @@ def api_lsw_status():
                    live_directions=live_directions.get(sym),
                    filter_checkpoints=checkpoints.get(sym),
                    chosen_rr=chosen_rr_map.get(sym, LSW_RR),
+                   trade_filter=(STATE.get("lsw_trade_filters") or {}).get(sym),   # v0.99.364
                    rr_sweep=rr_sweep_map.get(sym, [])) for sym, s in summary.items()]
     ranked.sort(key=lambda r: (r["win_rate"] or 0, r["n"]), reverse=True)
     return jsonify({
@@ -21801,6 +22257,7 @@ def api_reset_lsw():
             STATE["lsw_backtest_results"] = {}
             STATE["lsw_backtest_summary"] = {}
             STATE.pop("lsw_neuro_filters", None)   # v0.99.360
+            STATE["lsw_trade_filters"] = {}   # v0.99.364
             STATE["lsw_live_universe"] = []
             STATE["lsw_last_backtest_finished"] = None
             STATE["lsw_last_backtest_duration"] = None
@@ -23301,6 +23758,13 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="name">Фильтр Neuro в бэктесте MSNR / S/R / P/R / Sweep</div>
+          <div class="sub">для каждой монеты подбирается одно условие Neuro («убрать X» / «только X») — только по обучающей части; проверочная решает, принять ли его. Принятый фильтр применяется и к живым сигналам (отсеянный сигнал записывается с пометкой 🧪 и не торгуется). Действует со следующего бэктеста</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setNeuroTradeFilter"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Сколько монет держать в топе</div>
           <div class="sub">бэктест всё равно проверяет всю вселенную каждый цикл — здесь только сколько лучших по ср. P&L остаются активными. Уменьшение применяется сразу (пересчёт по уже сохранённым данным), увеличение — только со следующего полного цикла</div>
         </div>
@@ -24592,7 +25056,7 @@ async function refreshMsnr() {
       <td title="винрейт сделок за зоной ликвидации — если высокий, возможно стоит торговать их с адаптивным плечом">${liqRejTxt}</td>
       <td>${htfSoloTxt}</td>
       <td>${nfTxt}</td>
-      <td class="dim" style="white-space:normal;min-width:220px;">${paramsTxt}${noteTxt}</td>
+      <td class="dim" style="white-space:normal;min-width:220px;">${paramsTxt}${noteTxt}<br>${tradeFilterTxt(r.neuro_filter, r.neuro_filter_info, r.neuro_filter_before && `было WR ${r.neuro_filter_before.winrate}% n=${r.neuro_filter_before.trades}`)}</td>
     </tr>
     <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="15" style="padding:0;"><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0430...</div></td></tr>`;
   }).join('');
@@ -25340,7 +25804,7 @@ async function refreshLsw() {
       <td>${touchesTxt}</td>
       <td>${structureTxt}</td>
       <td>${atrSweepTxt}</td>
-      <td>${nfCoinCellHtml(status.neuro_filters, r.symbol)}</td>
+      <td>${tradeFilterTxt(r.trade_filter && r.trade_filter.filter, r.trade_filter && r.trade_filter.info, r.trade_filter && r.trade_filter.before && `было WR ${r.trade_filter.before.win_rate}% n=${r.trade_filter.before.n}`)}<br>${nfCoinCellHtml(status.neuro_filters, r.symbol)}</td>
     </tr>`;
   }).join('');
   const btTableHtml = (status.top || []).length ? `
@@ -25657,7 +26121,7 @@ async function refreshSnr() {
           return `<tr onclick="openSnrChart('${s.symbol}', ${s.time})" style="cursor:pointer;">
             <td>${s.symbol.replace('_USDT','')}</td><td class="${dirClass}">${s.direction}</td>
             <td>${fmtNum(s.entry)}</td><td>${fmtNum(s.sl)}</td><td>${fmtNum(s.tp)}</td>
-            <td class="${rc}">${statusTxt}</td><td class="dim">${fmtDateTime(s.time)}</td>
+            <td class="${rc}">${statusTxt}${s.neuro_filtered ? ` <span class="dim" title="отсеян фильтром Neuro «${s.neuro_filtered}» — записан для статистики, не торговался">🧪 не торговался</span>` : ''}</td><td class="dim">${fmtDateTime(s.time)}</td>
           </tr>`;
         }).join('')}</tbody>
       </table>
@@ -25691,6 +26155,7 @@ async function refreshSnr() {
           <div><div class="dim" style="font-size:10px;">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R \u00b7 z=${r.train_z}</div></div>
           <div><div class="dim" style="font-size:10px;">TEST (n=${r.test_n})</div><div class="win">WR ${r.test_wr}% \u00b7 ${r.test_avg_pnl_r>0?'+':''}${r.test_avg_pnl_r}R \u00b7 z=${r.test_z}</div></div>
           <div class="dim" style="font-size:10px;flex-basis:100%;">${r.fees_included ? `R и z — после комиссии (≈${r.avg_fee_r}R на сделку: 0.05% вход + 0.05% выход)` : 'R и z — без комиссии (старый бэктест, пересчитается)'}</div>
+          ${neuroFilterNoteHtml(r)}
         </div>
         <div class="dim hint-block" style="font-size:10px;margin-bottom:8px;">z — насколько стандартных отклонений винрейт выше безубытка с учётом комиссии (нужно ≥3.23 с поправкой на 81 перебранную комбинацию)</div>
         ${liveSigSection}
@@ -25768,7 +26233,7 @@ async function refreshPrv() {
           return `<tr onclick="openPrvChart('${s.symbol}', ${s.time})" style="cursor:pointer;">
             <td>${s.symbol.replace('_USDT','')}</td><td class="${dirClass}">${s.direction}</td>
             <td>${fmtNum(s.entry)}</td><td>${fmtNum(s.sl)}</td><td>${fmtNum(s.tp)}</td>
-            <td class="${rc}">${statusTxt}</td><td class="dim">${fmtDateTime(s.time)}</td>
+            <td class="${rc}">${statusTxt}${s.neuro_filtered ? ` <span class="dim" title="отсеян фильтром Neuro «${s.neuro_filtered}» — записан для статистики, не торговался">🧪 не торговался</span>` : ''}</td><td class="dim">${fmtDateTime(s.time)}</td>
           </tr>`;
         }).join('')}</tbody>
       </table>
@@ -25802,6 +26267,7 @@ async function refreshPrv() {
           <div><div class="dim" style="font-size:10px;">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R \u00b7 z=${r.train_z}</div></div>
           <div><div class="dim" style="font-size:10px;">TEST (n=${r.test_n})</div><div class="win">WR ${r.test_wr}% \u00b7 ${r.test_avg_pnl_r>0?'+':''}${r.test_avg_pnl_r}R \u00b7 z=${r.test_z}</div></div>
           <div class="dim" style="font-size:10px;flex-basis:100%;">${r.fees_included ? `R и z — после комиссии (≈${r.avg_fee_r}R на сделку: 0.05% вход + 0.05% выход)` : 'R и z — без комиссии (старый бэктест, пересчитается)'}</div>
+          ${neuroFilterNoteHtml(r)}
         </div>
         <div class="dim hint-block" style="font-size:10px;margin-bottom:8px;">z — насколько стандартных отклонений винрейт выше безубытка с учётом комиссии (нужно ≥3.11 с поправкой на 216 перебранную комбинацию)</div>
         ${liveSigSection}
@@ -26844,6 +27310,7 @@ const setInputs = {
   lsw_enabled: document.getElementById('setLsw'),
   neuro_enabled: document.getElementById('setNeuro'),
   neuro_extra_conds_enabled: document.getElementById('setNeuroExtra'),
+  neuro_trade_filter_enabled: document.getElementById('setNeuroTradeFilter'),
   snr_enabled: document.getElementById('setSnr'),
   prv_enabled: document.getElementById('setPrv'),
   lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
@@ -27508,6 +27975,24 @@ function filterReportHtml(nf, title, pendingTxt) {
     <div class="dim hint-block" style="font-size:11px;margin:4px 0 6px;">Каждое условие пробуется как фильтр («убрать» / «только»). <b>Выбор — на train-части</b> (где подбирались параметры), цифры — на <b>тест-части</b>, которую он не видел. 🏆 — лучший: не ухудшил ни одну монету и дал наибольший рост винрейта; дальше — остальные по тому же правилу. Оставляют не меньше 50% сделок. Средний R рядом: если падает — фильтр «покупает» винрейт за счёт прибыли. В торговлю ничего не применяется. Посчитано ${fmtTime(nf.computed_at)}.</div>
     <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="6" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
   </details>`;
+}
+// v0.99.364 — MSNR / Sweep: the Neuro filter decision for one coin
+function tradeFilterTxt(f, info, beforeTxt) {
+  if (f) {
+    const t = info && info.test_r_before != null ? ` · test: ${info.test_n_before}→${info.test_n_after} сделок, ${info.test_r_before}→${info.test_r_after}R` : '';
+    return `<span style="color:#b39ddb;" title="подобран на первых 70% сделок, принят потому что на последних 30% стало лучше; живые сигналы, которые он отсекает, не торгуются">🧪 ${f.label}</span><span class="dim">${beforeTxt ? ' · ' + beforeTxt : ''}${t}</span>`;
+  }
+  if (info && info.status) return `<span class="dim">🧪 фильтр: ${info.status}${info.label ? ` («${info.label}»: test ${info.test_r_before}→${info.test_r_after}R)` : ''}</span>`;
+  return '';
+}
+// v0.99.364 — the coin's accepted Neuro filter: what it is and what it changed
+function neuroFilterNoteHtml(r) {
+  const nf = r && r.neuro_filter;
+  if (!nf) return '';
+  const u = nf.unfiltered || {};
+  const sgn = v => (v > 0 ? '+' : '') + v;
+  return `<div style="font-size:11px;flex-basis:100%;margin-top:2px;"><span style="color:#b39ddb;">🧪 фильтр Neuro: ${nf.label}</span>
+    <span class="dim">— подобран на train, проверен на test. Без фильтра: train WR ${u.train_wr}% ${sgn(u.train_avg_pnl_r)}R z=${u.train_z} (n=${u.train_n}) · test WR ${u.test_wr}% ${sgn(u.test_avg_pnl_r)}R z=${u.test_z} (n=${u.test_n}). Живые сигналы, которые он отсекает, не торгуются.</span></div>`;
 }
 // v0.99.362 — why S/R has no coins: shown right after a cycle where nothing passed
 function snrDiagHtml(d) {

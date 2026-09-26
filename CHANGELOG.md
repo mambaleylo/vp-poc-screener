@@ -17410,3 +17410,38 @@ v0.99.363 - S/R and P/R backtests now include fees (user: "вроде было �
          synthetic: identical trade lists, fee fields present, e.g. mean fee
          0.138R turned avg +0.07R into −0.068R and z 0.93 into −0.89; jsdom:
          the fee note renders on a P/R card.
+v0.99.364 - Neuro filter INSIDE the backtests of S/R, P/R, MSNR and Sweep, and
+         applied to their live signals (user: "топ 1 фильтр сразу применять,
+         чтобы живые сигналы и тест+трейн были с учётом фильтра ... и для
+         sweep и для msnr"). Setting "Фильтр Neuro в бэктесте MSNR / S/R /
+         P/R / Sweep" (neuro_trade_filter_enabled, default on).
+         One Neuro condition per coin ("убрать X" / "только X") is picked on
+         the TRAIN part only (best t-stat of net R after fees, keeps ≥ 50% and
+         ≥ 15 trades) — neuro_pick_trade_filter(). The test part decides:
+         - S/R, P/R: for the best passing combo and the 5 best near-miss combos
+           (train z ≥ 1) a filter is tried; the filtered combo must pass the
+           same fee-inclusive z ≥ critical on train AND on the untouched test
+           part. The winner (filtered or not) is the one with the best train z.
+           With the setting off results are byte-identical to v0.99.363.
+         - MSNR, Sweep (no per-combo test split): after each backtest the
+           filter is picked on the first 70% of the coin's trades and accepted
+           only if on the last 30% the trades it removes are clearly worse
+           than the ones it keeps (≥ 5 removed, pooled two-sample t ≥ 1) and
+           the kept mean net R is higher. Accepted -> the coin's trade list,
+           summary/score and live eligibility are recomputed on the filtered
+           trades (MSNR live universe, Sweep live universe/directions).
+         Live: a signal that fails the coin's filter is recorded with
+         neuro_filtered (🧪 "не торговался" in the lists, a note in Telegram)
+         and tracked, but not traded; it is left out of the live win-rate.
+         Conditions: neuro_conditions_for_times() — last 1h bar CLOSED before
+         the signal, shared per-symbol cache (compact tuples, 6h TTL, 200
+         coins), at most 2 series computed at once; the MSNR/Sweep reports
+         now read the same cache instead of recomputing every coin.
+         UI: filter + "без фильтра" numbers on S/R/P/R cards, filter decision
+         per coin in the MSNR and Sweep tables.
+         Verified: py_compile (-W error), pyflakes, runtime, JS check;
+         setting off -> S/R/P/R identical to v0.99.363 (incl. forced-pass
+         combos); random trades -> filters rejected; planted edge (losses on
+         a minority RSI zone) -> found on train and accepted on test; apply
+         steps idempotent; live check keeps a kept trade and drops a removed
+         one; jsdom: card note, live badge, Sweep cell render.
