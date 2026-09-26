@@ -17611,3 +17611,11 @@ v0.99.377 - Leverage shown for P/R (and S/R, Sweep) even with autotrade off (use
          have a "Плечо" column ("~34x" = planned, "12x" = real).
          Verified: py_compile (-W error), pyflakes, runtime, JS check; 1.5%
          stop, cap 50 -> 34x, with risk tiers -> 10x; texts; jsdom column.
+v0.99.378 - S/R and P/R trade charts (user: "RR undefined ещё пишет, а первые
+         сделки открываю по списку, старые — сигнал не найден"): the chart
+         endpoints searched only the last 40 backtest trades — now the full
+         list (the card's "все сделки бэктеста"), closest match by time. RR is
+         computed from the trade's own entry/SL/TP (these trades carry no rr
+         field); the header never prints "undefined" any more.
+         Verified: py_compile (-W error), pyflakes; Flask test client: an old
+         trade outside the last 40 is found for both modules, rr 1.5.

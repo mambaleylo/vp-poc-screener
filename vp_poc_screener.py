@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.377"
+APP_VERSION = "0.99.378"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22038,7 +22038,11 @@ def api_snr_chart(symbol):
             found_exit_price = live_match.get("exit_price")
         elif bt_result:
             tf = bt_result["timeframe"]
-            bt_match = next((t for t in (bt_result.get("recent_trades") or []) if abs(t["time"] - target) < INTERVAL_SECONDS.get(tf, 3600)), None)
+            # v0.99.378 — search the FULL backtest trade list (the card's "все сделки
+            # бэктеста"), not only the last 40 — older trades said "сигнал не найден"
+            _pool = bt_result.get("all_trades") or bt_result.get("recent_trades") or []
+            bt_match = min((t for t in _pool if abs(t["time"] - target) < INTERVAL_SECONDS.get(tf, 3600)),
+                           key=lambda t: abs(t["time"] - target), default=None)
             if bt_match:
                 found_sig = {"time": bt_match["time"], "direction": bt_match["direction"],
                              "entry": bt_match["entry"], "sl": bt_match["sl"], "tp": bt_match["tp"],
@@ -22055,7 +22059,7 @@ def api_snr_chart(symbol):
         return jsonify({
             "symbol": symbol, "candles": (candles or [])[-250:], "time": found_sig["time"],
             "direction": found_sig["direction"], "entry": found_sig["entry"],
-            "sl": found_sig["sl"], "tp": found_sig["tp"],
+            "sl": found_sig["sl"], "tp": found_sig["tp"], "rr": _rr_of(found_sig),
             "level_price": found_sig.get("zone_price"), "level_type": None,
             "result": found_result, "exit_time": found_exit_time, "exit_price": found_exit_price,
             "chart_source": "snr", "tf": tf,
@@ -22284,6 +22288,16 @@ def api_prv_restart_backtest():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+def _rr_of(sig):
+    """v0.99.378 — reward/risk from the signal's own prices (the chart header
+    showed "RR undefined": S/R / P/R trades don't carry an rr field)."""
+    try:
+        risk = abs(sig["entry"] - sig["sl"])
+        return round(abs(sig["tp"] - sig["entry"]) / risk, 2) if risk > 0 else None
+    except (KeyError, TypeError):
+        return None
+
+
 @app.route("/api/prv/chart/<symbol>")
 def api_prv_chart(symbol):
     try:
@@ -22308,7 +22322,11 @@ def api_prv_chart(symbol):
             found_exit_price = live_match.get("exit_price")
         elif bt_result:
             tf = bt_result["timeframe"]
-            bt_match = next((t for t in (bt_result.get("recent_trades") or []) if abs(t["time"] - target) < INTERVAL_SECONDS.get(tf, 3600)), None)
+            # v0.99.378 — search the FULL backtest trade list (the card's "все сделки
+            # бэктеста"), not only the last 40 — older trades said "сигнал не найден"
+            _pool = bt_result.get("all_trades") or bt_result.get("recent_trades") or []
+            bt_match = min((t for t in _pool if abs(t["time"] - target) < INTERVAL_SECONDS.get(tf, 3600)),
+                           key=lambda t: abs(t["time"] - target), default=None)
             if bt_match:
                 found_sig = {"time": bt_match["time"], "direction": bt_match["direction"],
                              "entry": bt_match["entry"], "sl": bt_match["sl"], "tp": bt_match["tp"]}
@@ -22324,7 +22342,7 @@ def api_prv_chart(symbol):
         return jsonify({
             "symbol": symbol, "candles": (candles or [])[-250:], "time": found_sig["time"],
             "direction": found_sig["direction"], "entry": found_sig["entry"],
-            "sl": found_sig["sl"], "tp": found_sig["tp"], "level_price": None, "level_type": None,
+            "sl": found_sig["sl"], "tp": found_sig["tp"], "rr": _rr_of(found_sig), "level_price": None, "level_type": None,
             "result": found_result, "exit_time": found_exit_time, "exit_price": found_exit_price,
             "chart_source": "prv", "tf": tf,
         })
@@ -28952,7 +28970,7 @@ async function openVgiChart(symbol, sigTime, endpoint, extraQuery = '') {
       sourceTxt = ` · уровень снятия ${fmtNum(data.level_price)} (${isHigh ? 'равные хаи' : 'равные лоу'}${data.level_touches ? ', ' + data.level_touches + ' кас.' : ''})`;
     }
     document.getElementById('vgiModalParams').textContent =
-      `${fmtDateTime(sigTime)}${data.tf ? ' \u00b7 \u0422\u0424 ' + data.tf : ''} \u00b7 ${data.direction} \u00b7 entry ${fmtNum(data.entry)} \u00b7 SL ${fmtNum(data.sl)} \u00b7 TP ${fmtNum(data.tp)} \u00b7 RR ${data.rr}${patternTxt}${sourceTxt}${resTxt}`;
+      `${fmtDateTime(sigTime)}${data.tf ? ' \u00b7 \u0422\u0424 ' + data.tf : ''} \u00b7 ${data.direction} \u00b7 entry ${fmtNum(data.entry)} \u00b7 SL ${fmtNum(data.sl)} \u00b7 TP ${fmtNum(data.tp)} \u00b7 RR ${data.rr != null ? data.rr : (data.entry && data.sl && data.tp && data.entry !== data.sl ? Math.round(Math.abs(data.tp - data.entry) / Math.abs(data.entry - data.sl) * 100) / 100 : '—')}${patternTxt}${sourceTxt}${resTxt}`;
     drawVgiChart(data);
   } catch (e) {
     document.getElementById('vgiModalParams').textContent = `ошибка загрузки: ${e}`;
