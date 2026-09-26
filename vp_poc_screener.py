@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.383"
+APP_VERSION = "0.99.385"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1130,7 +1130,7 @@ CREDENTIALS_FILE = os.environ.get(
     "VP_CREDENTIALS_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
-SETTINGS_KEYS = ("volume_profile_enabled", "prv_single_best_enabled", "snr_single_best_enabled", "neuro_extra_conds_enabled", "neuro_trade_filter_enabled", "calc_workers", "calc_workers_boost", "bounce_enabled", "breakout_enabled",
+SETTINGS_KEYS = ("volume_profile_enabled", "prv_single_best_enabled", "snr_single_best_enabled", "neuro_autotrade_selected_only", "neuro_extra_conds_enabled", "neuro_trade_filter_enabled", "calc_workers", "calc_workers_boost", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "neuro_min_winrate", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "autotrade_invert_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "autotrade_invert_prv", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "autotrade_invert_lsw", "autotrade_invert_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled", "lsw_all_in_enabled", "snr_all_in_enabled", "prv_all_in_enabled",
@@ -1177,6 +1177,7 @@ def get_settings():
         "snr_enabled": SNR_ENABLED,
         "snr_top_n": SNR_TOP_N,
         "snr_single_best_enabled": SNR_SINGLE_BEST_ENABLED,
+        "neuro_autotrade_selected_only": NEURO_AUTOTRADE_SELECTED_ONLY,
         "snr_display_n": SNR_DISPLAY_N,
         "telegram_alerts_snr": TELEGRAM_ALERTS_SNR,
         "autotrade_snr": AUTOTRADE_ENABLED_SNR,
@@ -1343,6 +1344,8 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_SNR = bool(updates["autotrade_snr"])
     if "autotrade_invert_snr" in updates:
         AUTOTRADE_INVERT_SNR = bool(updates["autotrade_invert_snr"])
+    if "neuro_autotrade_selected_only" in updates:   # v0.99.384
+        globals()["NEURO_AUTOTRADE_SELECTED_ONLY"] = bool(updates["neuro_autotrade_selected_only"])
     if "snr_single_best_enabled" in updates:   # v0.99.382
         globals()["SNR_SINGLE_BEST_ENABLED"] = bool(updates["snr_single_best_enabled"])
     if "snr_top_n" in updates:
@@ -6783,6 +6786,7 @@ def save_neuro_state():
                 "neuro_active_symbols": list(_neuro_active_symbols),
                 "neuro_display_symbols": list(_neuro_display_symbols),
                 "neuro_last_mined": _neuro_last_mined,
+                "neuro_autotrade_selected": dict(_neuro_autotrade_selected),   # v0.99.384
             }
         with _neuro_signal_log_lock:
             data["neuro_signal_log"] = list(_neuro_signal_log)
@@ -6820,6 +6824,8 @@ def load_neuro_state():
             if restored_display:
                 _neuro_display_symbols = restored_display
             _neuro_last_mined = data.get("neuro_last_mined")
+            _neuro_autotrade_selected.clear()
+            _neuro_autotrade_selected.update(data.get("neuro_autotrade_selected") or {})   # v0.99.384
         with _neuro_signal_log_lock:
             _neuro_signal_log.clear()
             _neuro_signal_log.extend(data.get("neuro_signal_log", []))
@@ -6937,6 +6943,10 @@ def save_state():
                 "risk_autotune_last_change": STATE["risk_autotune_last_change"],
                 "saved_at": time.time(),
             }
+            # v0.99.385 — backtest timestamps / summaries / live universes
+            for _k in PERSIST_BT_KEYS:
+                if _k in STATE:
+                    data["bt__" + _k] = STATE[_k]
             # v0.99.362 — "save_state: dictionary changed size during
             # iteration": `data` held references to live STATE dicts and
             # json.dump ran after the lock was released, while a backtest
@@ -6946,10 +6956,43 @@ def save_state():
         tmp_path = STATE_FILE + ".tmp"
         with _save_state_file_lock:
             with open(tmp_path, "w") as f:
-                json.dump(data, f)
+                json.dump(data, f, default=_json_default)
             os.replace(tmp_path, STATE_FILE)
     except Exception as e:
         log_error(f"save_state: {e}")
+
+
+# v0.99.385 — per user ("не везде поле «последний бэктест» что-то показывает,
+# обычно прочерк… чтобы везде результат бэктеста переживал перезапуск"):
+# the per-module finish time, summary table and live universe were never
+# saved, so after every restart they were empty ("—", empty Sweep table,
+# MSNR/Sweep live scan watching nothing until the next backtest finished).
+PERSIST_BT_KEYS = (
+    "msnr_last_backtest_finished", "msnr_last_backtest_duration", "msnr_backtest_summary",
+    "msnr_live_universe", "msnr_backtest_universe", "msnr_neuro_filters",
+    "lsw_last_backtest_finished", "lsw_last_backtest_duration", "lsw_backtest_summary",
+    "lsw_live_universe", "lsw_live_directions", "lsw_chosen_rr", "lsw_rr_sweep",
+    "lsw_filter_checkpoints", "lsw_neuro_filters",
+    "snr_last_backtest_finished", "snr_filters", "snr_diag",
+    "prv_last_backtest_finished", "prv_filters",
+    "mirror_last_backtest_finished", "mirror_last_backtest_duration", "mirror_backtest_summary",
+    "mirror_tuned_tolerances",
+    "ft5_last_backtest_finished", "ft5_last_backtest_duration", "ft5_universe", "ft5_live_universe",
+)
+
+
+def _json_default(o):
+    """v0.99.385 — never let one odd value (a set, a numpy number) break the whole save."""
+    if isinstance(o, (set, frozenset, tuple, deque)):
+        return list(o)
+    try:
+        return o.item()   # numpy scalar
+    except Exception:
+        pass
+    try:
+        return o.tolist()   # numpy array
+    except Exception:
+        return None
 
 
 def _snapshot_2lvl(v):
@@ -7106,6 +7149,14 @@ def load_state():
             STATE["lsw_signals"] = deque(_backfill_mfe_mae(lsw_signals), maxlen=LSW_SIGNAL_HISTORY)
             STATE["lsw_backtest_results"] = lsw_backtest_results
             STATE["lsw_trade_filters"] = data.get("lsw_trade_filters") or {}   # v0.99.364
+            for _k in PERSIST_BT_KEYS:   # v0.99.385
+                _v = data.get("bt__" + _k)
+                if _v is None:
+                    continue
+                _cur = STATE.get(_k)
+                if isinstance(_cur, (dict, list)) and not isinstance(_v, type(_cur)):
+                    continue   # shape changed between versions — keep the default
+                STATE[_k] = _v
             STATE["snr_results"] = snr_results
             STATE["snr_signals"] = deque(snr_signals, maxlen=500)
             if snr_active_symbols:
@@ -7489,6 +7540,64 @@ def wait_beating(event, timeout, name):
         if event.wait(timeout=min(60.0, remaining)):
             return True
         heartbeat(name)
+
+
+# v0.99.385 — per user ("MSNR тоже не надо чтобы автоперезапускался после
+# перезапуска сервера, как и другие индикаторы"): same rule as Neuro's own
+# (v0.99.383) for every backtest module. On a server START, if the saved
+# results are still fresh (finished less than one refresh interval ago), the
+# loop waits until they are due instead of re-running right away.
+# "Очистить" / "↻ Бэктест" (the trigger) still start it at once. Checked once
+# per process, so a watchdog-restarted loop is not affected.
+_BT_STARTUP_CHECKED = set()
+_BT_RAN = set()   # modules that already finished a cycle in THIS process (core boost)
+_BT_RESULTS_KEY = {"msnr": "msnr_backtest_results", "lsw": "lsw_backtest_results",
+                   "snr": "snr_results", "prv": "prv_results",
+                   "mirror": "mirror_backtest_results", "ft5": "ft5_symbol_overrides"}
+
+
+def bt_startup_skip(mod, trigger, refresh_sec, loop_name, triggered=False):
+    """Returns the number of seconds waited (0 = run now)."""
+    if mod in _BT_STARTUP_CHECKED:
+        return 0
+    _BT_STARTUP_CHECKED.add(mod)
+    if triggered or trigger.is_set():
+        return 0
+    with state_lock:
+        last = STATE.get(f"{mod}_last_backtest_finished")
+        # S/R and P/R may honestly end with 0 coins — their finish time is only
+        # stamped on a cycle that had data, so it alone counts as "fresh".
+        have = bool(STATE.get(_BT_RESULTS_KEY.get(mod, ""))) or mod in ("snr", "prv")
+    if not (have and last):
+        return 0
+    remaining = refresh_sec - (time.time() - last)
+    if remaining <= 0:
+        return 0
+    print(f"{loop_name}: saved results are fresh — next backtest in {remaining / 60:.0f} min")
+    t = time.time()
+    if wait_beating(trigger, remaining, loop_name):
+        trigger.clear()
+    return time.time() - t
+
+
+def nf_startup_wait(trigger, first_sec, report_key, loop_name):
+    """v0.99.385 — the Neuro-filter phase no longer re-runs after a server
+    start when its saved report exists: it waits for the next backtest (which
+    sets the trigger) or the usual 6h. Without a saved report — as before."""
+    if trigger.wait(timeout=first_sec):
+        return
+    with state_lock:
+        rep = STATE.get(report_key)
+    if isinstance(rep, dict) and rep.get("computed_at"):
+        remaining = 6 * 3600 - (time.time() - float(rep["computed_at"]))
+        if remaining > 0:
+            wait_beating(trigger, remaining, loop_name)
+
+
+def bt_first_run(mod):
+    """v0.99.385 — "first cycle since start" (max cores) now that the finish
+    time survives a restart."""
+    return mod not in _BT_RAN
 
 
 def stalled_loops():
@@ -12339,7 +12448,7 @@ def lsw_neuro_filter_analysis():
 
 
 def lsw_neuro_filter_loop():
-    LSW_NF_TRIGGER.wait(timeout=1500)   # first run ~25 min after start (results are persisted)
+    nf_startup_wait(LSW_NF_TRIGGER, 1500, "lsw_neuro_filters", "lsw_neuro_filter_loop")   # v0.99.385
     while True:
         LSW_NF_TRIGGER.clear()
         try:
@@ -12388,7 +12497,7 @@ def neuro_filter_rows_by_sym(results, loop_name, err_name):
 
 
 def msnr_neuro_filter_loop():
-    MSNR_NF_TRIGGER.wait(timeout=900)   # first run ~15 min after start (MSNR results are persisted)
+    nf_startup_wait(MSNR_NF_TRIGGER, 900, "msnr_neuro_filters", "msnr_neuro_filter_loop")   # v0.99.385
     while True:
         MSNR_NF_TRIGGER.clear()
         try:
@@ -12411,6 +12520,7 @@ def msnr_backtest_loop():
     # starts first (no delay) -- see the other 6 backtest loops' own
     # comments for their own staggered offsets (90s apart).
     _prev_cycle_fut = None   # v0.99.352
+    bt_startup_skip("msnr", MSNR_BACKTEST_TRIGGER, max(300, MSNR_REFRESH_SEC), "msnr_backtest_loop")   # v0.99.385
     while True:
         heartbeat("msnr_backtest_loop")  # v0.99.322 — see system_health_watchdog()
         _cycle_failed = False
@@ -12449,12 +12559,14 @@ def msnr_backtest_loop():
                 STATE["msnr_waiting_for_slot"] = False
             try:
                 _cycle_ex = ThreadPoolExecutor(max_workers=1)
-                _cycle_fut = _cycle_ex.submit(_calc_boosted, "msnr", STATE.get("msnr_last_backtest_finished") is None,
+                _cycle_fut = _cycle_ex.submit(_calc_boosted, "msnr", bt_first_run("msnr"),
                                               _msnr_run_one_backtest_cycle, t0)   # v0.99.375
                 _prev_cycle_fut = _cycle_fut
                 try:
                     wait_cycle_future(_cycle_fut, "msnr_backtest_loop", "msnr_backtest_done")   # v0.99.352 — abandon only on a real stall
                     _cycle_ex.shutdown(wait=False)
+                    _BT_RAN.add("msnr")   # v0.99.385
+                    save_state()   # v0.99.385 — persist the finished cycle right away
                 except (TimeoutError, FutureTimeoutError):
                     _cycle_failed = True
                     log_error("msnr_backtest_loop: cycle stalled (no progress for 15 min or over 4h) — aborting, retry in 30 min")
@@ -12832,8 +12944,9 @@ def ft5_backtest_loop():
     # set() has no way to interrupt -- the button was silently a no-op
     # for the ENTIRE initial stagger window. Now uses the same trigger
     # for the startup delay too.
-    FT5_BACKTEST_TRIGGER.wait(timeout=270)
+    _trig = FT5_BACKTEST_TRIGGER.wait(timeout=270)
     FT5_BACKTEST_TRIGGER.clear()
+    bt_startup_skip("ft5", FT5_BACKTEST_TRIGGER, max(3600, FT5_REFRESH_SEC), "ft5_backtest_loop", _trig)   # v0.99.385
     while True:
         _ft5_sem_acquired = False
         try:
@@ -14027,8 +14140,9 @@ def mirror_backtest_loop():
     # instead of all colliding on the shared semaphore at once.
     # v0.99.272 -- same CRITICAL FIX as ft5_backtest_loop()'s own — see
     # that function's own comment for the full incident.
-    MIRROR_BACKTEST_TRIGGER.wait(timeout=360)
+    _trig = MIRROR_BACKTEST_TRIGGER.wait(timeout=360)
     MIRROR_BACKTEST_TRIGGER.clear()
+    bt_startup_skip("mirror", MIRROR_BACKTEST_TRIGGER, max(300, MIRROR_REFRESH_SEC), "mirror_backtest_loop", _trig)   # v0.99.385
     while True:
         _mirror_sem_acquired = False
         try:
@@ -15419,8 +15533,9 @@ def lsw_backtest_loop():
     # instead of all colliding on the shared semaphore at once.
     # v0.99.272 -- same CRITICAL FIX as ft5_backtest_loop()'s own — see
     # that function's own comment for the full incident.
-    LSW_BACKTEST_TRIGGER.wait(timeout=90)
+    _trig = LSW_BACKTEST_TRIGGER.wait(timeout=90)
     LSW_BACKTEST_TRIGGER.clear()
+    bt_startup_skip("lsw", LSW_BACKTEST_TRIGGER, max(300, LSW_REFRESH_SEC), "lsw_backtest_loop", _trig)   # v0.99.385
     _prev_cycle_fut = None   # v0.99.352
     while True:
         heartbeat("lsw_backtest_loop")  # v0.99.322 — see system_health_watchdog()
@@ -15455,12 +15570,14 @@ def lsw_backtest_loop():
                 STATE["lsw_waiting_for_slot"] = False
             try:
                 _cycle_ex = ThreadPoolExecutor(max_workers=1)
-                _cycle_fut = _cycle_ex.submit(_calc_boosted, "lsw", STATE.get("lsw_last_backtest_finished") is None,
+                _cycle_fut = _cycle_ex.submit(_calc_boosted, "lsw", bt_first_run("lsw"),
                                               _lsw_run_one_backtest_cycle, t0)   # v0.99.375
                 _prev_cycle_fut = _cycle_fut
                 try:
                     wait_cycle_future(_cycle_fut, "lsw_backtest_loop", "lsw_backtest_done")   # v0.99.352 — abandon only on a real stall
                     _cycle_ex.shutdown(wait=False)
+                    _BT_RAN.add("lsw")   # v0.99.385
+                    save_state()   # v0.99.385
                 except (TimeoutError, FutureTimeoutError):
                     _cycle_failed = True
                     log_error("lsw_backtest_loop: cycle stalled (no progress for 15 min or over 4h) — aborting, retry in 30 min")
@@ -17181,7 +17298,7 @@ def prv_filter_analysis():
 
 
 def prv_filter_loop():
-    PRV_NF_TRIGGER.wait(timeout=1800)
+    nf_startup_wait(PRV_NF_TRIGGER, 1800, "prv_filters", "prv_filter_loop")   # v0.99.385
     while True:
         PRV_NF_TRIGGER.clear()
         try:
@@ -17195,7 +17312,7 @@ def prv_filter_loop():
 
 
 def snr_filter_loop():
-    SNR_NF_TRIGGER.wait(timeout=1200)
+    nf_startup_wait(SNR_NF_TRIGGER, 1200, "snr_filters", "snr_filter_loop")   # v0.99.385
     while True:
         SNR_NF_TRIGGER.clear()
         try:
@@ -17223,8 +17340,9 @@ def snr_backtest_loop():
     # button was silently a no-op for the ENTIRE initial 630s stagger
     # window right after every restart. Now uses the same trigger for
     # the startup delay too, so the button actually works immediately.
-    SNR_BACKTEST_TRIGGER.wait(timeout=630)
+    _trig = SNR_BACKTEST_TRIGGER.wait(timeout=630)
     SNR_BACKTEST_TRIGGER.clear()
+    bt_startup_skip("snr", SNR_BACKTEST_TRIGGER, max(300, SNR_REFRESH_SEC), "snr_backtest_loop", _trig)   # v0.99.385
     while True:
         heartbeat("snr_backtest_loop")  # v0.99.322 — see system_health_watchdog()
         _snr_sem_acquired = False
@@ -17303,9 +17421,10 @@ def snr_backtest_loop():
                     if symbol in STATE["snr_progress_in_flight"]:
                         STATE["snr_progress_in_flight"].remove(symbol)
 
-            with calc_boost("snr", STATE.get("snr_last_backtest_finished") is None):   # v0.99.371
+            with calc_boost("snr", bt_first_run("snr")):   # v0.99.371, v0.99.385
                 run_pool_with_progress(snr_optimize_symbol, universe, min(WORKERS, len(universe) or 1),
                                        "snr_backtest_loop", _snr_done, _snr_stop)
+            _BT_RAN.add("snr")   # v0.99.385
 
             ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
             display_top = ranked[:max(SNR_DISPLAY_N, SNR_TOP_N)]
@@ -17873,8 +17992,9 @@ def prv_backtest_loop():
     # this is the 9th, at 720s) — using the TRIGGER for the startup
     # delay too from the very start, learning from the bug found and
     # fixed for 6 other modules in v0.99.272.
-    PRV_BACKTEST_TRIGGER.wait(timeout=720)
+    _trig = PRV_BACKTEST_TRIGGER.wait(timeout=720)
     PRV_BACKTEST_TRIGGER.clear()
+    bt_startup_skip("prv", PRV_BACKTEST_TRIGGER, max(300, PRV_REFRESH_SEC), "prv_backtest_loop", _trig)   # v0.99.385
     while True:
         heartbeat("prv_backtest_loop")  # v0.99.322 — see system_health_watchdog()
         _prv_sem_acquired = False
@@ -17927,9 +18047,10 @@ def prv_backtest_loop():
                     if symbol in STATE["prv_progress_in_flight"]:
                         STATE["prv_progress_in_flight"].remove(symbol)
 
-            with calc_boost("prv", STATE.get("prv_last_backtest_finished") is None):   # v0.99.371
+            with calc_boost("prv", bt_first_run("prv")):   # v0.99.371, v0.99.385
                 run_pool_with_progress(prv_optimize_symbol, universe, min(WORKERS, len(universe) or 1),
                                        "prv_backtest_loop", _prv_done, _prv_stop)
+            _BT_RAN.add("prv")   # v0.99.385
 
             ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
             display_top = ranked[:max(PRV_DISPLAY_N, PRV_TOP_N)]
@@ -19371,7 +19492,8 @@ def neuro_align_oi_trend(candles, oi_records, lookback_pct=0.03):
 # condition set. Every value uses only data available at bar i's close.
 # ============================================================================
 NEURO_EXTRA_CONDS_ENABLED = os.environ.get("VP_NEURO_EXTRA_CONDS_ENABLED", "1") == "1"
-NEURO_TRADE_FILTER_ENABLED = os.environ.get("VP_NEURO_TRADE_FILTER_ENABLED", "1") == "1"   # v0.99.364 — see neuro_pick_trade_filter()
+NEURO_TRADE_FILTER_ENABLED = os.environ.get("VP_NEURO_TRADE_FILTER_ENABLED", "1") == "1"
+NEURO_AUTOTRADE_SELECTED_ONLY = os.environ.get("VP_NEURO_AUTOTRADE_SELECTED_ONLY", "0") == "1"   # v0.99.384   # v0.99.364 — see neuro_pick_trade_filter()
 NEURO_EXTRA_KEYS = ("liq_zone", "lsr_zone", "oi_price_quad", "funding_delta", "premium_zone",
                     "weekly_open_side", "monthly_open_side", "pdhl_zone", "compression",
                     "long_streak", "rs_btc_zone", "round_level")
@@ -20806,6 +20928,10 @@ _neuro_summary = {}      # symbol -> summary dict
 _neuro_live_signals = {}  # symbol -> latest live signal or None
 _neuro_last_mined = None
 _neuro_startup_checked = False   # v0.99.383
+# v0.99.384 — per user ("для нейро автоторговлю только выбранных монет с помощью
+# галочки на карточке среди активных"): when NEURO_AUTOTRADE_SELECTED_ONLY is on,
+# only coins ticked here are traded; the rest of the active coins give signals only
+_neuro_autotrade_selected = {}   # symbol -> True
 _neuro_mining_running = False
 _neuro_mining_done = 0
 _neuro_mining_total = 0
@@ -21489,10 +21615,14 @@ def neuro_live_loop():
                     continue
                 arrow = "\u2b06\ufe0f" if sig["direction"] == "LONG" else "\u2b07\ufe0f"
                 pat_txt = ", ".join(f"{p['type']}={p['value']}(z={p['z']})" for p in sig["patterns"][:3])
+                # v0.99.384 — "только отмеченные монеты"
+                with _neuro_state_lock:
+                    _sel_ok = (not NEURO_AUTOTRADE_SELECTED_ONLY) or bool(_neuro_autotrade_selected.get(symbol))
                 send_telegram(
                     f"{arrow} NEURO {symbol} ({sig['direction']}, score {sig['score']})\n"
                     f"entry: {sig['entry']}, SL: {sig['sl']}, TP: {sig['tp']}\n"
-                    f"\u0441\u043e\u0432\u043f\u0430\u0432\u0448\u0438\u0435\u0441\u044f \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0438: {pat_txt}",
+                    f"\u0441\u043e\u0432\u043f\u0430\u0432\u0448\u0438\u0435\u0441\u044f \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0438: {pat_txt}"
+                    + ("" if _sel_ok or not AUTOTRADE_ENABLED_NEURO else "\n☑️ не торгуется — монета не отмечена для автоторговли"),
                     category="neuro",
                 )
                 with _neuro_signal_log_lock:
@@ -21504,8 +21634,10 @@ def neuro_live_loop():
                         "status": "OPEN", "result": None,
                         "exit_price": None, "exit_time": None, "pnl_r": None,
                     }
+                    if not _sel_ok:
+                        record["not_selected"] = True   # v0.99.384
                     _neuro_signal_log.appendleft(record)
-                if AUTOTRADE_ENABLED_NEURO:
+                if AUTOTRADE_ENABLED_NEURO and _sel_ok:
                     # v0.99.245 — same live_universe-snapshot race guard as
                     # LSW's/Mirror's own (v0.99.239): active_symbols above
                     # is a one-time snapshot from the top of this pass; if
@@ -21592,6 +21724,7 @@ def api_neuro_status():
             "recent_live_signals": recent_live_signals,
         })
     return jsonify({
+        "autotrade_selected_only": NEURO_AUTOTRADE_SELECTED_ONLY, "autotrade_selected": sorted(_neuro_autotrade_selected),   # v0.99.384
         "calc": calc_status("neuro"), "calc_cond": calc_status("cond"),   # v0.99.372
         "coins": coins, "last_mined": last_mined, "mining_running": running,
         "waiting_slot_since": waiting_slot_since,
@@ -23809,6 +23942,27 @@ def api_reset_neuro():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/neuro/autotrade_select", methods=["POST"])
+def api_neuro_autotrade_select():
+    """v0.99.384 — tick / untick one Neuro coin for autotrade."""
+    try:
+        body = request.get_json(force=True) or {}
+        sym = str(body.get("symbol") or "").strip()
+        if not sym:
+            return jsonify({"ok": False, "error": "symbol required"}), 400
+        on = bool(body.get("on"))
+        with _neuro_state_lock:
+            if on:
+                _neuro_autotrade_selected[sym] = True
+            else:
+                _neuro_autotrade_selected.pop(sym, None)
+        save_neuro_state()
+        return jsonify({"ok": True, "selected": sorted(_neuro_autotrade_selected)})
+    except Exception as e:
+        log_error(f"api_neuro_autotrade_select: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/neuro/restart_backtest", methods=["POST"])
 def api_neuro_restart_backtest():
     """v0.99.256 — per direct user request ("добавь кнопку перезапуска
@@ -25069,6 +25223,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча под безопасное расстояние до ликвидации и размера позиции, что и у Sweep/остальных режимов</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeNeuro"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳↳ Neuro: только отмеченные монеты</div>
+          <div class="sub">автоторговля Neuro только по монетам, отмеченным галочкой «🤖 торговать» на активных карточках Neuro. Сигналы остальных приходят в Telegram с пометкой ☑️ и не торгуются</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setNeuroAutotradeSelectedOnly"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow subRow">
         <div>
@@ -26742,6 +26903,15 @@ async function refreshLsw() {
 
 let _neuroCanvasAnimId = null;
 
+async function neuroAutotradeSelect(symbol, on) {   // v0.99.384
+  try {
+    const r = await fetch('/api/neuro/autotrade_select', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({symbol, on})});
+    const j = await r.json();
+    if (!j.ok) alert('Не удалось сохранить: ' + (j.error || r.status));
+  } catch(e) { alert('Ошибка: ' + e); }
+  refreshNeuro();
+}
+
 async function refreshNeuro() {
   const panel = document.getElementById('neuroPanel');
   try {
@@ -26931,7 +27101,7 @@ async function refreshNeuro() {
           : '<span class="dim">TIMEOUT</span>';
         return `<tr onclick="openNeuroChart('${c.symbol}', ${sig.time})" style="cursor:pointer;">
           <td class="dim">${fmtDateTime(sig.time)}</td>
-          <td class="${dirCls}">${sig.direction}</td>
+          <td class="${dirCls}">${sig.direction}${sig.not_selected ? ' <span title="монета не была отмечена для автоторговли — не торговалась">☑️</span>' : ''}</td>
           <td class="dim">${fmtNum(sig.entry)}</td>
           <td>${statusHtml}</td>
           <td class="${rc}">${sig.pnl_r!=null?(sig.pnl_r>0?'+':'')+sig.pnl_r+'R':'\u2014'}</td>
@@ -26963,8 +27133,17 @@ async function refreshNeuro() {
       const inactiveBadge = isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:#2a2f3d;border-radius:6px;">
         <span class="dim" style="font-size:10px;">\u26aa \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0441\u043f\u0440\u0430\u0432\u043a\u0438 \u2014 \u043d\u0435 \u0442\u043e\u0440\u0433\u0443\u0435\u0442\u0441\u044f \u0438 \u043d\u0435 \u0441\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442\u0441\u044f \u0432\u0436\u0438\u0432\u0443\u044e</span>
       </div>`;
+      // v0.99.384 — per-card "trade this coin" checkbox (Neuro selected-only autotrade)
+      const _selSet = new Set(data.autotrade_selected || []);
+      const _selOn = _selSet.has(c.symbol);
+      const selBox = isActive ? `<label style="display:inline-flex;align-items:center;gap:6px;padding:3px 8px;margin-bottom:6px;border-radius:6px;cursor:pointer;background:${_selOn ? 'rgba(102,187,106,0.15)' : '#1a2030'};border:1px solid ${_selOn ? '#66bb6a' : '#2a3246'};font-size:11px;" onclick="event.stopPropagation();">
+          <input type="checkbox" ${_selOn ? 'checked' : ''} onchange="neuroAutotradeSelect('${c.symbol}', this.checked)">
+          <span>🤖 торговать</span>
+          ${data.autotrade_selected_only ? (_selOn ? '' : '<span class="dim" style="font-size:10px;">— не торгуется</span>') : '<span class="dim" style="font-size:10px;">(включите «только отмеченные» в настройках автоторговли)</span>'}
+        </label>` : '';
       return `<div style="${cardStyle}">
         <div style="font-size:15px;font-weight:700;color:#c792ea;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
+        ${selBox}
         ${inactiveBadge}
         ${underperformBadge}
         ${liveBadge}
@@ -28286,6 +28465,7 @@ const setInputs = {
   autotrade_mirror: document.getElementById('setAutotradeMirror'),
   autotrade_lsw: document.getElementById('setAutotradeLsw'),
   autotrade_neuro: document.getElementById('setAutotradeNeuro'),
+  neuro_autotrade_selected_only: document.getElementById('setNeuroAutotradeSelectedOnly'),
   autotrade_invert_lsw: document.getElementById('setAutotradeInvertLsw'),
   autotrade_invert_neuro: document.getElementById('setAutotradeInvertNeuro'),
   autotrade_snr: document.getElementById('setAutotradeSnr'),

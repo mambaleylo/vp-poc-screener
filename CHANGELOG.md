@@ -17672,3 +17672,33 @@ v0.99.383 - Neuro no longer re-mines on every server restart (user: "Neuro за�
          cycle immediately; a watchdog-restarted loop is unaffected.
          Verified: py_compile (-W error), pyflakes, runtime; loop test: fresh
          results -> no mining after start, 30 h old -> mining starts.
+v0.99.384 - Neuro: autotrade only the coins you tick (user: "автоторговлю только
+         выбранных монет с помощью галочки вкл/выкл на карточке"). New setting
+         "↳↳ Neuro: только отмеченные монеты" (autotrade section, default off)
+         and a "🤖 торговать" checkbox on every active Neuro card
+         (POST /api/neuro/autotrade_select, saved in the Neuro state file).
+         With the mode on, signals of unticked coins still go to Telegram with
+         "☑️ не торгуется — монета не отмечена" and are logged (☑️ in the card's
+         live-signal list), but no order is placed.
+v0.99.385 - Backtest results fully survive a restart, and no module re-runs its
+         backtest right after a restart while its results are fresh (user:
+         "MSNR тоже не надо чтобы автоперезапускался после перезапуска" and
+         "поле «последний бэктест» обычно прочерк… чтобы везде результат
+         бэктеста переживал перезапуск").
+         - Now saved: finish time/duration of MSNR, Sweep, S/R, P/R (and
+           Mirror/FT5), MSNR/Sweep summary tables and live-scan lists (Sweep's
+           table used to be empty and MSNR/Sweep live scans watched nothing
+           until the next backtest finished), Sweep RR/filters/directions, and
+           all Neuro-filter reports. Odd values (sets, numpy numbers) no longer
+           break the save.
+         - MSNR, Sweep, S/R, P/R, Mirror, FT5: on start, if the last backtest
+           finished less than one refresh interval ago, the loop waits until
+           it is due. "Очистить" / "↻ Бэктест" still start it immediately.
+         - Neuro-filter phase (MSNR/Sweep/S/R/P/R) doesn't re-run after a start
+           while its saved report is < 6 h old; it runs after the next backtest.
+         - MSNR and Sweep now save state right after each backtest cycle.
+         - "First cycle after start" (max cores) now means first in this
+           process, not "never finished".
+         Verified: py_compile (-W error), pyflakes, runtime (/ = 200), JS check;
+         save/load round trip; startup-skip tests (fresh -> waits, stale or
+         triggered -> runs); jsdom: Neuro card checkboxes, POST, hint.
