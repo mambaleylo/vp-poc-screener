@@ -34,7 +34,7 @@ import itertools
 from decimal import Decimal
 from collections import deque
 from datetime import datetime, timezone
-from concurrent.futures import ThreadPoolExecutor, as_completed, TimeoutError as FutureTimeoutError
+from concurrent.futures import ThreadPoolExecutor, as_completed, wait as futures_wait, FIRST_COMPLETED, TimeoutError as FutureTimeoutError
 
 import requests
 
@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.361"
+APP_VERSION = "0.99.362"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -3214,7 +3214,7 @@ _ERR_CAUSES = (   # (markers, explanation, advice) — first match wins
     (("queue: full",), "очередь Telegram переполнена — часть уведомлений пропущена", ""),
     (("telegram HTTP", "telegram network"), "не удалось отправить уведомление в Telegram (будет повтор)", ""),
     (("stalled: no checkpoint",), "расчёт монеты завис (10 мин без продвижения) — остановлен, монета пропущена в этом цикле", ""),
-    (("hard limit: still computing",), "расчёт монеты шёл дольше предельных 4 ч — остановлен, монета пропущена в этом цикле", ""),
+    (("hard limit: still computing",), "расчёт монеты шёл дольше предельного времени (Neuro 4 ч, S/R и P/R 2 ч) — остановлен, монета пропущена в этом цикле", ""),
     (("no progress for",), "бэктест перестал продвигаться — похоже, завис", "если не пройдёт само за полчаса — перезапусти сервер"),
     (("silent for", "likely hung"), "процесс перестал отвечать — похоже, завис", "перезапусти сервер"),
     (("stuck on",), "зависла обработка монеты — запущена замена процесса", ""),
@@ -6911,6 +6911,12 @@ def save_state():
                 "risk_autotune_last_change": STATE["risk_autotune_last_change"],
                 "saved_at": time.time(),
             }
+            # v0.99.362 — "save_state: dictionary changed size during
+            # iteration": `data` held references to live STATE dicts and
+            # json.dump ran after the lock was released, while a backtest
+            # was adding coins. Copy the containers (two levels: the dict
+            # and each coin's entry) while still holding the lock.
+            data = {k: _snapshot_2lvl(v) for k, v in data.items()}
         tmp_path = STATE_FILE + ".tmp"
         with _save_state_file_lock:
             with open(tmp_path, "w") as f:
@@ -6918,6 +6924,16 @@ def save_state():
             os.replace(tmp_path, STATE_FILE)
     except Exception as e:
         log_error(f"save_state: {e}")
+
+
+def _snapshot_2lvl(v):
+    def one(x):
+        return dict(x) if isinstance(x, dict) else (list(x) if isinstance(x, list) else x)
+    if isinstance(v, dict):
+        return {k: one(x) for k, x in v.items()}
+    if isinstance(v, list):
+        return [one(x) for x in v]
+    return v
 
 
 def _relink_sim_trade(trade):
@@ -7385,6 +7401,12 @@ def wait_previous_cycle(prev_fut, name):
     while prev_fut is not None and not prev_fut.done():
         heartbeat(name)
         time.sleep(30)
+
+
+# v0.99.362 — Neuro yields its slot only after holding it this long, so a
+# stream of short MSNR/Sweep/P/R cycles can't starve it (user: "Neuro
+# завис на 4" — it kept handing the slot over after every coin).
+NEURO_YIELD_AFTER_SEC = int(os.environ.get("VP_NEURO_YIELD_AFTER_SEC", 1200))
 
 
 def backtest_others_waiting():
@@ -15939,6 +15961,26 @@ def _snr_z_score_vs_breakeven(wins, n, rr):
     return (observed - p0) / se
 
 
+_snr_diag = {}   # v0.99.362 — symbol -> why it passed/failed in the last S/R cycle
+
+
+def snr_diag_summary(universe):
+    """v0.99.362 — per user ("S/R вообще не проходит бэктест"): when no coin
+    passes, say WHY instead of an empty tab — no data, too few trades, or
+    not significant enough — and which coins came closest."""
+    rows = [(s, _snr_diag[s]) for s in universe if s in _snr_diag]
+    no_data = sum(1 for _, d in rows if not any(n >= 200 for n in d["bars"].values()))
+    few = sum(1 for _, d in rows if any(n >= 200 for n in d["bars"].values()) and not d["combos_enough"])
+    weak = sum(1 for _, d in rows if d["combos_enough"] and not d["passed"])
+    passed = sum(1 for _, d in rows if d["passed"])
+    near = sorted(((s, d["near"]) for s, d in rows if d.get("near") and not d["passed"]),
+                  key=lambda x: -x[1]["min_z"])[:5]
+    return {"t": time.time(), "checked": len(rows), "universe": len(universe), "passed": passed,
+            "no_data": no_data, "few_trades": few, "not_significant": weak,
+            "z_needed": SNR_Z_CRITICAL, "min_train": SNR_MIN_TRAIN_TRADES, "min_test": SNR_MIN_TEST_TRADES,
+            "near": [dict(n, symbol=s) for s, n in near]}
+
+
 def snr_optimize_symbol(symbol):
     """Sweeps timeframe x pivot_length x min_strength x rr (SNR_N_COMBOS
     total combinations) for one symbol, on TRAIN data first then
@@ -15964,11 +16006,13 @@ def snr_optimize_symbol(symbol):
     Returns a dict with the chosen params + honest train/test stats, or
     None if nothing survives on any timeframe."""
     best = None
+    diag = {"bars": {}, "combos_enough": 0, "near": None}   # v0.99.362 — why a coin fails
     for tf in SNR_TF_CANDIDATES:
         try:
             now = int(time.time())
             start_ts = now - snr_history_days_for_tf(tf) * 86400
             candles = get_candles_range(symbol, tf, start_ts, now)
+            diag["bars"][tf] = len(candles or [])
             if not candles or len(candles) < 200:
                 continue
             atr = neuro_atr_series(candles, 14)
@@ -15978,6 +16022,7 @@ def snr_optimize_symbol(symbol):
             for pl in SNR_PIVOT_CANDIDATES:
                 for ms in SNR_STRENGTH_CANDIDATES:
                     for rr in SNR_RR_CANDIDATES:
+                        neuro_check_cancel()   # v0.99.362 — progress + stop point
                         trades = snr_simulate_trades(candles, pl, ms, rr, atr=atr)
                         closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
                         train = [t for t in closed if t["time"] <= boundary_time]
@@ -15994,6 +16039,12 @@ def snr_optimize_symbol(symbol):
                         test_z = _snr_z_score_vs_breakeven(test_wins, len(test), rr)
                         if train_z is None or test_z is None:
                             continue
+                        diag["combos_enough"] += 1
+                        mz = min(train_z, test_z)
+                        if diag["near"] is None or mz > diag["near"]["min_z"]:
+                            diag["near"] = {"min_z": round(mz, 2), "tf": tf, "pivot_length": pl, "min_strength": ms, "rr": rr,
+                                            "train_n": len(train), "train_wr": round(train_wr, 1),
+                                            "test_n": len(test), "test_wr": round(test_wr, 1)}
                         if train_z < SNR_Z_CRITICAL or test_z < SNR_Z_CRITICAL:
                             continue
                         if best is None or train_z > best["train_z"]:
@@ -16019,6 +16070,7 @@ def snr_optimize_symbol(symbol):
         except Exception as e:
             best.pop("_all_closed", None)
             log_error(f"snr compound {symbol}: {e}")
+    _snr_diag[symbol] = {"passed": best is not None, **diag}
     return best
 
 
@@ -16303,52 +16355,32 @@ def snr_backtest_loop():
             # (already held for this whole cycle) still bound the actual
             # network load regardless of how many local threads this
             # spins up.
-            ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1))
-            try:
-                futs = {ex.submit(snr_optimize_symbol, s): s for s in universe}
-                with state_lock:
-                    STATE["snr_progress_in_flight"] = list(futs.values())
+            # v0.99.362 — progress-based pool (see run_pool_with_progress):
+            # no fixed 300s per coin, stuck workers actually stop.
+            with state_lock:
+                STATE["snr_progress_in_flight"] = list(universe)
+
+            def _snr_done(symbol, fut):
                 try:
-                    # v0.99.285 — CRITICAL FIX, per direct user report ("Перебор
-                    # по p/r завис на 29 из 30... на другом телефоне 28/30"):
-                    # this overall ceiling used to be PER_SYMBOL_MAX_SEC *
-                    # len(universe) — treating the WORST case as if every
-                    # single symbol could take the full per-symbol timeout
-                    # SEQUENTIALLY, ignoring that up to WORKERS=8 run
-                    # CONCURRENTLY. With 30 symbols that's 300*30=9000s (2.5
-                    # HOURS) before the cycle gives up on a genuinely stuck
-                    # symbol and moves on with whatever DID complete —
-                    # explaining exactly the "stuck near the end for a very
-                    # long time" symptom reported (confirmed the underlying
-                    # as_completed(timeout=X) mechanism itself DOES correctly
-                    # bound the wait and correctly proceeds with partial
-                    # results once it fires — verified directly with a
-                    # synthetic hung-worker test — the ceiling itself was
-                    # just far too generous for how parallel execution
-                    # actually works). Now scales by how many BATCHES of
-                    # WORKERS concurrent slots are actually needed
-                    # (ceil(len(universe)/WORKERS)), not the full sequential
-                    # count — 300*ceil(30/8)=300*4=1200s (20min) instead of
-                    # 9000s (2.5h) for the same 30-symbol universe.
-                    for fut in as_completed(futs, timeout=SNR_PER_SYMBOL_MAX_SEC * math.ceil(len(universe) / WORKERS)):
-                        heartbeat("snr_backtest_loop")  # v0.99.325 — progress beat per finished symbol
-                        symbol = futs[fut]
-                        try:
-                            best = fut.result(timeout=SNR_PER_SYMBOL_MAX_SEC)
-                            if best:
-                                all_results[symbol] = best
-                        except (TimeoutError, FutureTimeoutError):
-                            log_error(f"snr_backtest_loop: {symbol} exceeded {SNR_PER_SYMBOL_MAX_SEC}s — skipping, abandoning stuck thread")
-                        except Exception as e:
-                            log_error(f"snr_backtest_loop {symbol}: {e}")
-                        with state_lock:
-                            STATE["snr_progress_done"] += 1
-                            if symbol in STATE["snr_progress_in_flight"]:
-                                STATE["snr_progress_in_flight"].remove(symbol)
-                except (TimeoutError, FutureTimeoutError):
-                    log_error("snr_backtest_loop: overall cycle exceeded its own ceiling — using whatever results completed so far")
-            finally:
-                ex.shutdown(wait=False)
+                    best = fut.result()
+                    if best:
+                        all_results[symbol] = best
+                except Exception as e:
+                    log_error(f"snr_backtest_loop {symbol}: {e}")
+                with state_lock:
+                    STATE["snr_progress_done"] += 1
+                    if symbol in STATE["snr_progress_in_flight"]:
+                        STATE["snr_progress_in_flight"].remove(symbol)
+
+            def _snr_stop(symbol, reason):
+                log_error(f"snr_backtest_loop: {symbol} {reason} — skipping, calculation stopped")
+                with state_lock:
+                    STATE["snr_progress_done"] += 1
+                    if symbol in STATE["snr_progress_in_flight"]:
+                        STATE["snr_progress_in_flight"].remove(symbol)
+
+            run_pool_with_progress(snr_optimize_symbol, universe, min(WORKERS, len(universe) or 1),
+                                   "snr_backtest_loop", _snr_done, _snr_stop)
 
             ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
             display_top = ranked[:max(SNR_DISPLAY_N, SNR_TOP_N)]
@@ -16367,9 +16399,15 @@ def snr_backtest_loop():
             # status endpoint) hangs right along with it. Fixed by moving
             # the log_error() call to AFTER the lock is released, using a
             # plain boolean set inside the lock instead.
-            found_nothing = not all_results
+            # v0.99.362 — tell "nothing passed the significance check" (an
+            # honest result: show it, don't retry every 30 min) apart from
+            # "no data" (network trouble: keep old results, retry soon).
+            _diag = snr_diag_summary(universe)
+            data_ok = _diag["checked"] > 0 and _diag["no_data"] < 0.5 * _diag["checked"]
+            found_nothing = not all_results and not data_ok
             with state_lock:
-                if all_results:
+                STATE["snr_diag"] = _diag
+                if all_results or data_ok:
                     STATE["snr_results"] = dict(display_top)
                     SNR_NF_TRIGGER.set()   # v0.99.337 — refresh the S/R filter report
                     _snr_active_symbols = [sym for sym, _ in active_top]
@@ -16377,6 +16415,8 @@ def snr_backtest_loop():
                     STATE["snr_last_backtest_finished"] = time.time()
                 STATE["snr_backtest_running"] = False
                 STATE["snr_current_symbol"] = None
+            if not all_results and data_ok:
+                save_state()
             if found_nothing:
                 _cycle_failed = True  # v0.99.322 — e.g. network outage: retry in 30 min, not 4h
                 # v0.99.271 — same "don't wipe existing data on a fully
@@ -16804,6 +16844,7 @@ def prv_optimize_symbol(symbol):
                     basis = prv_ma_series(candles, ma_type, kc_length)
                     for band_mult in PRV_BAND_MULT_CANDIDATES:
                         for rr in PRV_RR_CANDIDATES:
+                            neuro_check_cancel()   # v0.99.362 — progress + stop point
                             trades = prv_simulate_trades(candles, ma_type, kc_length, band_mult, rr, atr=atr, basis=basis)
                             closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
                             train = [t for t in closed if t["time"] <= boundary_time]
@@ -16888,31 +16929,32 @@ def prv_backtest_loop():
             # mistake) — same ThreadPoolExecutor(max_workers=min(WORKERS,
             # len(universe))) pattern as every other module's own
             # universe scan.
-            ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1))
-            try:
-                futs = {ex.submit(prv_optimize_symbol, s): s for s in universe}
-                with state_lock:
-                    STATE["prv_progress_in_flight"] = list(futs.values())
+            # v0.99.362 — progress-based pool (see run_pool_with_progress):
+            # no fixed 300s per coin, stuck workers actually stop.
+            with state_lock:
+                STATE["prv_progress_in_flight"] = list(universe)
+
+            def _prv_done(symbol, fut):
                 try:
-                    for fut in as_completed(futs, timeout=PRV_PER_SYMBOL_MAX_SEC * math.ceil(len(universe) / WORKERS)):
-                        heartbeat("prv_backtest_loop")  # v0.99.325 — progress beat per finished symbol
-                        symbol = futs[fut]
-                        try:
-                            best = fut.result(timeout=PRV_PER_SYMBOL_MAX_SEC)
-                            if best:
-                                all_results[symbol] = best
-                        except (TimeoutError, FutureTimeoutError):
-                            log_error(f"prv_backtest_loop: {symbol} exceeded {PRV_PER_SYMBOL_MAX_SEC}s — skipping, abandoning stuck thread")
-                        except Exception as e:
-                            log_error(f"prv_backtest_loop {symbol}: {e}")
-                        with state_lock:
-                            STATE["prv_progress_done"] += 1
-                            if symbol in STATE["prv_progress_in_flight"]:
-                                STATE["prv_progress_in_flight"].remove(symbol)
-                except (TimeoutError, FutureTimeoutError):
-                    log_error("prv_backtest_loop: overall cycle exceeded its own ceiling — using whatever results completed so far")
-            finally:
-                ex.shutdown(wait=False)
+                    best = fut.result()
+                    if best:
+                        all_results[symbol] = best
+                except Exception as e:
+                    log_error(f"prv_backtest_loop {symbol}: {e}")
+                with state_lock:
+                    STATE["prv_progress_done"] += 1
+                    if symbol in STATE["prv_progress_in_flight"]:
+                        STATE["prv_progress_in_flight"].remove(symbol)
+
+            def _prv_stop(symbol, reason):
+                log_error(f"prv_backtest_loop: {symbol} {reason} — skipping, calculation stopped")
+                with state_lock:
+                    STATE["prv_progress_done"] += 1
+                    if symbol in STATE["prv_progress_in_flight"]:
+                        STATE["prv_progress_in_flight"].remove(symbol)
+
+            run_pool_with_progress(prv_optimize_symbol, universe, min(WORKERS, len(universe) or 1),
+                                   "prv_backtest_loop", _prv_done, _prv_stop)
 
             ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
             display_top = ranked[:max(PRV_DISPLAY_N, PRV_TOP_N)]
@@ -17206,6 +17248,53 @@ def neuro_wait_worker(fut, ident_box, on_wait=None):
                 raise FutureTimeoutError(f"hard limit: still computing after {NEURO_PER_SYMBOL_HARD_MAX_SEC // 3600} h")
             if on_wait:
                 on_wait()
+
+
+POOL_STALL_SEC = int(os.environ.get("VP_POOL_STALL_SEC", 600))
+POOL_HARD_MAX_SEC = int(os.environ.get("VP_POOL_HARD_MAX_SEC", 2 * 3600))
+
+
+def run_pool_with_progress(fn, items, workers, loop_name, on_result, on_stop):
+    """v0.99.362 — parallel per-coin backtest (S/R, P/R) without a fixed
+    per-coin clock. Every worker reports progress through
+    neuro_check_cancel() checkpoints; one that made no progress for
+    POOL_STALL_SEC (a real hang) or ran POOL_HARD_MAX_SEC is told to stop
+    and actually stops at its next checkpoint — no CPU-eating zombie left
+    behind (the old "exceeded 300s — abandoning stuck thread" did leave
+    one, and each zombie slowed the rest until everything timed out).
+    on_result(item, fut) is called for each finished worker, on_stop(item,
+    reason) for each stopped one."""
+    ex = ThreadPoolExecutor(max_workers=max(1, workers))
+    boxes, futs, first_seen = {}, {}, {}
+    for it in items:
+        box = []
+        f = ex.submit(_neuro_run_cancellable, box, fn, it)
+        futs[f], boxes[f] = it, box
+    pending = set(futs)
+    try:
+        while pending:
+            done, pending = futures_wait(pending, timeout=NEURO_WAIT_POLL_SEC, return_when=FIRST_COMPLETED)
+            heartbeat(loop_name)
+            for f in done:
+                on_result(futs[f], f)
+            now = time.monotonic()
+            for f in list(pending):
+                box = boxes[f]
+                if not box:
+                    continue   # still queued, not started
+                started = first_seen.setdefault(f, now)
+                last = _neuro_worker_progress.get(box[0], started)
+                reason = None
+                if now - last > POOL_STALL_SEC:
+                    reason = f"stalled: no checkpoint for {POOL_STALL_SEC // 60} min"
+                elif now - started > POOL_HARD_MAX_SEC:
+                    reason = f"hard limit: still computing after {POOL_HARD_MAX_SEC // 3600} h"
+                if reason:
+                    neuro_cancel_thread(box)
+                    pending.discard(f)
+                    on_stop(futs[f], reason)
+    finally:
+        ex.shutdown(wait=False)
 
 
 def neuro_cancel_thread(ident_box):
@@ -19766,6 +19855,7 @@ def neuro_mining_loop():
                 _neuro_waiting_slot_since = time.time()
             acquire_backtest_slot("neuro_mining_loop")  # v0.99.325 — beats while queued
             _neuro_sem_acquired = True
+            _neuro_slot_held_since = time.monotonic()   # v0.99.362
             with _neuro_state_lock:
                 _neuro_waiting_slot_since = None
                 _neuro_sem_holder_gen = my_gen
@@ -19850,7 +19940,8 @@ def neuro_mining_loop():
                 # queue). Between coins, if another backtest is queued,
                 # hand the slot over and queue behind it. Each coin is
                 # computed independently, so results don't change.
-                if _neuro_sem_acquired and backtest_others_waiting():
+                if (_neuro_sem_acquired and backtest_others_waiting()
+                        and time.monotonic() - _neuro_slot_held_since >= NEURO_YIELD_AFTER_SEC):
                     with _neuro_state_lock:
                         mine = _neuro_sem_holder_gen == my_gen
                         if mine:
@@ -19864,6 +19955,7 @@ def neuro_mining_loop():
                         while not BACKTEST_CONCURRENCY_SEMAPHORE.acquire(timeout=60):
                             _neuro_waiting_beat()   # paused mid-cycle on purpose — not a hang
                         _neuro_sem_acquired = True
+                        _neuro_slot_held_since = time.monotonic()
                         with _neuro_state_lock:
                             _neuro_waiting_slot_since = None
                             _neuro_sem_holder_gen = my_gen
@@ -20945,6 +21037,7 @@ def api_snr_status():
                        "live_signal_stats": signal_stats["by_symbol"].get(symbol),
                        "recent_live_signals": recent_live_signals})
     return jsonify({
+        "diag": STATE.get("snr_diag"),   # v0.99.362
         "filters": STATE.get("snr_filters"),   # v0.99.337
         "coins": coins, "last_backtest_finished": last_finished,
         "backtest_running": running, "waiting_for_slot": waiting, "progress_done": done, "progress_total": total,
@@ -25239,6 +25332,7 @@ async function refreshNeuro() {
     const lastMined = data.last_mined ? fmtDateTime(data.last_mined) : '\u2014';
     const miningTxt = data.mining_running
       ? `<span class="dim">\u043c\u0430\u0439\u043d\u0438\u043d\u0433: ${data.mining_done||0}/${data.mining_total||coins.length||10} \u2014 \u0441\u0435\u0439\u0447\u0430\u0441 ${data.mining_current_symbol||'?'}</span>`
+        + (data.waiting_slot_since ? ` <span style="color:#ffa726;">· ⏸ пауза с ${fmtDateTime(data.waiting_slot_since)}: уступил слот другому бэктесту, продолжит после него</span>` : '')
       : (data.waiting_slot_since
         ? `<span style="color:#ffa726;">⏳ ждёт свободного слота бэктеста с ${fmtDateTime(data.waiting_slot_since)} (одновременно идут не больше 2 бэктестов) · последний майнинг: ${lastMined}</span>`
         : `<span class="dim">последний майнинг: ${lastMined}${data.next_mining_ts ? ' · следующий ~' + fmtDateTime(data.next_mining_ts) : ''}</span>`)
@@ -25584,6 +25678,7 @@ async function refreshSnr() {
       ${progressHtml}
       ${lstatsHtml}
       ${liveSigsTableHtml}
+      ${snrDiagHtml(data.diag)}
       ${filterReportHtml(data.filters, "🧪 Фильтры для S/R (информационно)", "считаются (≈20 мин после запуска и после каждого бэктеста S/R)")}
       ${cards || '<div class="dim">\u043f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445</div>'}
     `;
@@ -27373,6 +27468,17 @@ function filterReportHtml(nf, title, pendingTxt) {
     <div class="dim hint-block" style="font-size:11px;margin:4px 0 6px;">Каждое условие пробуется как фильтр («убрать» / «только»). <b>Выбор — на train-части</b> (где подбирались параметры), цифры — на <b>тест-части</b>, которую он не видел. 🏆 — лучший: не ухудшил ни одну монету и дал наибольший рост винрейта; дальше — остальные по тому же правилу. Оставляют не меньше 50% сделок. Средний R рядом: если падает — фильтр «покупает» винрейт за счёт прибыли. В торговлю ничего не применяется. Посчитано ${fmtTime(nf.computed_at)}.</div>
     <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="6" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
   </details>`;
+}
+// v0.99.362 — why S/R has no coins: shown right after a cycle where nothing passed
+function snrDiagHtml(d) {
+  if (!d || d.passed) return '';
+  const near = (d.near || []).map(n => `<div>${n.symbol.replace('_USDT','')}: z=${n.min_z} (нужно ${d.z_needed}) · ${n.tf}, пивот ${n.pivot_length}, сила ${n.min_strength}, RR ${n.rr} · train ${n.train_wr}% (n=${n.train_n}), test ${n.test_wr}% (n=${n.test_n})</div>`).join('');
+  return `<div style="background:#1c2433;border:1px solid #4a5a78;border-radius:8px;padding:8px 12px;margin:8px 0;font-size:12px;">
+    <b style="color:#ffcc66;">Бэктест S/R прошёл, но ни одна монета не прошла проверку значимости</b> <span class="dim">(${fmtDateTime(d.t)})</span><br>
+    <span class="dim">Проверено ${d.checked} из ${d.universe}: без данных ${d.no_data} · мало сделок (нужно ≥${d.min_train} train и ≥${d.min_test} test) ${d.few_trades} · результат есть, но недостаточно значимый ${d.not_significant}.
+    Монета проходит, только если z ≥ ${d.z_needed} и на train, и на test — это защита от случайной удачи среди 81 проверенной комбинации.</span>
+    ${near ? `<div style="margin-top:4px;"><span class="dim">Ближе всех (меньший из z train/test):</span>${near}</div>` : ''}
+  </div>`;
 }
 // v0.99.360 — best filter's effect on one coin (test part), table-cell form
 function nfCoinCellHtml(nfRep, sym) {

@@ -17368,3 +17368,30 @@ v0.99.361 - Peak Reversal: Neuro-filter report (user: "и для p/r тоже"),
          Verified: py_compile (-W error), pyflakes, runtime start, JS check;
          synthetic trades: report built, condition bar always closed before
          the signal; jsdom: P/R tab renders the block and the coin line.
+v0.99.362 - User: "S/R вообще не проходит бэктест, Neuro завис на 4" (+ screenshot:
+         "S/R: цикл не дал ни одного результата", "save_state: dictionary
+         changed size during iteration").
+         S/R: the cycle was finishing — just no coin passed the significance
+         check (z ≥ 3.23 on train AND test), and that was reported as a
+         network failure with a retry every 30 min (a full S/R cycle again
+         and again, loading the phone). Now: each coin records why it failed
+         (no data / too few trades / not significant, and its best z);
+         the tab shows "Бэктест S/R прошёл, но ни одна монета не прошла
+         проверку значимости" with the counts and the closest coins. If the
+         data was fine the result is accepted as is (empty list, normal
+         interval); only a mostly-no-data cycle is treated as a failure.
+         S/R and P/R pools: run_pool_with_progress() — no fixed 300s per
+         coin; a worker is stopped only after 10 min without progress or
+         2h, and it really stops (checkpoints in the optimize loops) instead
+         of staying as a CPU-eating zombie.
+         Neuro: yields its slot only after holding it ≥ 20 min
+         (NEURO_YIELD_AFTER_SEC), so back-to-back MSNR/Sweep/P/R cycles
+         can't starve it; the tab shows "⏸ пауза: уступил слот" when paused.
+         save_state: containers are copied inside the lock before writing
+         (json.dump used to iterate live dicts a backtest was growing).
+         Verified: py_compile (-W error), pyflakes, runtime, JS check;
+         save_state under concurrent writes: 12 errors before, 0 after; pool
+         test (progressing coin waited for, silent one stopped at the stall
+         limit, endless one at the hard cap, errors reported, no leftovers);
+         yield test at 0 / 2.5s / 1200s; S/R diag on synthetic data; jsdom:
+         S/R diag box renders.
