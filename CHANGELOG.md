@@ -17619,3 +17619,24 @@ v0.99.378 - S/R and P/R trade charts (user: "RR undefined ещё пишет, а 
          field); the header never prints "undefined" any more.
          Verified: py_compile (-W error), pyflakes; Flask test client: an old
          trade outside the last 40 is found for both modules, rr 1.5.
+v0.99.379 - P/R: "Автоторговля: только лучшая карточка" (prv_single_best_enabled,
+         like MSNR's "только топ-1"). When on, autotrade opens trades only on
+         the first P/R card (best test avg R after fees); the other active
+         coins still produce signals and Telegram alerts, marked "⭐ не
+         торгуется — только лучшая карточка (X)". Cards show "⭐ торгуется"
+         / "только сигналы".
+v0.99.380 - Neuro-filter reports rethought (user: "в MSNR фильтры Neuro никогда не
+         дадут результат, чтобы все монеты стали лучше"). strategy_filter_
+         report() (MSNR, S/R, Sweep, P/R): candidates are selected and RANKED
+         on TRAIN only (pooled t of kept vs removed trades); only the 3 best on
+         train are judged on TEST (testing hundreds would let some pass by
+         chance): pass = removed test trades clearly worse (t ≥ 2), kept avg R
+         higher, more coins better than worse. 🏆 = best-on-train that passed.
+         Old rule "no coin worse" + ranking by test gain removed. Table gets a
+         "t train→test" column; per-coin "🏆 фильтр" cells only for a passing
+         filter. (Per-coin filters inside the backtests are unchanged.)
+         Verified: py_compile (-W error), pyflakes, runtime, JS check, setting
+         save; live-loop test: with single-best on, autotrade fired only for
+         the first card, the other recorded with not_best_card + Telegram
+         note; report: planted edge passes (train t 6.9, test t 4.5, 12/0
+         coins), random data passes in 1 of 40 runs; jsdom: report + badge.

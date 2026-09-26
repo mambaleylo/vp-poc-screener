@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.378"
+APP_VERSION = "0.99.380"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1130,7 +1130,7 @@ CREDENTIALS_FILE = os.environ.get(
     "VP_CREDENTIALS_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
-SETTINGS_KEYS = ("volume_profile_enabled", "neuro_extra_conds_enabled", "neuro_trade_filter_enabled", "calc_workers", "calc_workers_boost", "bounce_enabled", "breakout_enabled",
+SETTINGS_KEYS = ("volume_profile_enabled", "prv_single_best_enabled", "neuro_extra_conds_enabled", "neuro_trade_filter_enabled", "calc_workers", "calc_workers_boost", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "neuro_min_winrate", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "autotrade_invert_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "autotrade_invert_prv", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "autotrade_invert_lsw", "autotrade_invert_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled", "lsw_all_in_enabled", "snr_all_in_enabled", "prv_all_in_enabled",
@@ -1182,6 +1182,7 @@ def get_settings():
         "autotrade_invert_snr": AUTOTRADE_INVERT_SNR,
         "prv_enabled": PRV_ENABLED,
         "prv_top_n": PRV_TOP_N,
+        "prv_single_best_enabled": PRV_SINGLE_BEST_ENABLED,
         "prv_display_n": PRV_DISPLAY_N,
         "telegram_alerts_prv": TELEGRAM_ALERTS_PRV,
         "autotrade_prv": AUTOTRADE_ENABLED_PRV,
@@ -1383,6 +1384,8 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_PRV = bool(updates["autotrade_prv"])
     if "autotrade_invert_prv" in updates:
         AUTOTRADE_INVERT_PRV = bool(updates["autotrade_invert_prv"])
+    if "prv_single_best_enabled" in updates:   # v0.99.379
+        globals()["PRV_SINGLE_BEST_ENABLED"] = bool(updates["prv_single_best_enabled"])
     if "prv_top_n" in updates:
         try:
             new_top_n = int(updates["prv_top_n"])
@@ -11735,19 +11738,42 @@ def _msnr_nf_stats(rows):
     return {"n": n, "wr": round(wins / n * 100, 1), "avg_r": round(sum(r["r"] for r in closed) / n, 3)}
 
 
+REPORT_TEST_TOP_K = 3      # v0.99.380 — filters judged on test (the best 3 on train)
+REPORT_ACCEPT_T = 2.0      # ... and they must separate on test by t >= 2
+
+
+def _pooled_split_t(kept, removed):
+    """Two-sample t (kept vs removed) with the pooled spread of both — the
+    same shape as the MSNR/Sweep per-coin filter acceptance."""
+    if len(kept) < 2 or len(removed) < NEURO_TF_MIN_REMOVED:
+        return None
+    allr = kept + removed
+    ma = sum(allr) / len(allr)
+    sd = math.sqrt(sum((x - ma) ** 2 for x in allr) / (len(allr) - 1))
+    se = sd * math.sqrt(1 / len(kept) + 1 / len(removed))
+    return (sum(kept) / len(kept) - sum(removed) / len(removed)) / se if se > 0 else None
+
+
 def strategy_filter_report(rows_by_sym):
-    """v0.99.337 — shared core of the candidate-filter reports (MSNR's
-    Neuro-filter report, S/R's filter report). rows_by_sym: {symbol:
-    (train_rows, test_rows)}, row = {"r": trade R or None, "c": {cond: value}}.
-    Picks on TRAIN, reports TEST; ranks filters that worsen no coin first,
-    then test-WR gain, then fewest trades lost."""
+    """v0.99.337 — shared core of the candidate-filter reports (MSNR, S/R,
+    Sweep, P/R). rows_by_sym: {symbol: (train_rows, test_rows)}, row =
+    {"r": trade R, "c": {cond: value}}.
+    v0.99.379 — rethought (user: "в MSNR фильтры Neuro никогда не дадут
+    результат, чтобы все монеты стали лучше"): "every coin better" is almost
+    impossible with dozens of coins and a few test trades each, and the old
+    ranking by TEST gain let the test part pick the winner. Now:
+    - candidates are chosen and RANKED on TRAIN only (pooled t of the trades a
+      filter keeps vs the ones it removes, pooled over all coins);
+    - TEST only decides pass/fail: the removed test trades must be clearly
+      worse (pooled t >= 1), the kept average R higher, and more coins better
+      than worse;
+    - 🏆 = the best-on-train filter that passes the test."""
     if not rows_by_sym:
         return None
     train = [r for tr, _ in rows_by_sym.values() for r in tr]
     test = [r for _, te in rows_by_sym.values() for r in te]
     base_train = _msnr_nf_stats(train)
     base_test = _msnr_nf_stats(test)
-    # candidates: every (condition, value) seen on train, as "exclude" and "only"
     cands = set()
     for r in train:
         for k, v in r["c"].items():   # Neuro combo conditions + strategy-specific ones (categorical only)
@@ -11758,14 +11784,20 @@ def strategy_filter_report(rows_by_sym):
     for k, v in cands:
         for mode in ("exclude", "only"):
             keep = (lambda c, k=k, v=v: c.get(k) != v) if mode == "exclude" else (lambda c, k=k, v=v: c.get(k) == v)
-            tr_kept = [r for r in train if keep(r["c"])]
-            st_tr = _msnr_nf_stats(tr_kept)
-            if not st_tr["n"] or st_tr["n"] < MSNR_NF_MIN_KEEP * base_train["n"] or st_tr["wr"] <= base_train["wr"]:
+            tr_kept = [r["r"] for r in train if r["r"] is not None and keep(r["c"])]
+            tr_rem = [r["r"] for r in train if r["r"] is not None and not keep(r["c"])]
+            if not tr_kept or len(tr_kept) < MSNR_NF_MIN_KEEP * base_train["n"]:
+                continue
+            train_t = _pooled_split_t(tr_kept, tr_rem)
+            if train_t is None or train_t <= 0:
                 continue   # selection on TRAIN only
-            te_kept = [r for r in test if keep(r["c"])]
-            st_te = _msnr_nf_stats(te_kept)
+            te_kept_rows = [r for r in test if keep(r["c"])]
+            st_te = _msnr_nf_stats(te_kept_rows)
             if st_te["n"] < MSNR_NF_MIN_TEST_TRADES or st_te["n"] < MSNR_NF_MIN_KEEP * base_test["n"]:
                 continue
+            te_kept = [r["r"] for r in test if r["r"] is not None and keep(r["c"])]
+            te_rem = [r["r"] for r in test if r["r"] is not None and not keep(r["c"])]
+            test_t = _pooled_split_t(te_kept, te_rem)
             per_coin, better, worse, same = {}, 0, 0, 0
             for sym, (_tr, te) in rows_by_sym.items():
                 b = _msnr_nf_stats(te)
@@ -11776,12 +11808,14 @@ def strategy_filter_report(rows_by_sym):
                     continue
                 if a["n"] == b["n"]:
                     same += 1
-                elif a["n"] and a["wr"] > b["wr"]:
+                elif a["n"] and a["avg_r"] > b["avg_r"]:
                     better += 1
-                elif a["n"] and a["wr"] == b["wr"]:
+                elif a["n"] and a["avg_r"] == b["avg_r"]:
                     same += 1
                 else:
                     worse += 1
+            passes = (test_t is not None and test_t >= REPORT_ACCEPT_T
+                      and st_te["avg_r"] > base_test["avg_r"] and better > worse)
             scored.append({
                 "key": k, "value": v, "mode": mode,
                 "label": f"{'убрать' if mode == 'exclude' else 'только'}: {NEURO_COND_LABELS.get(k, k)} = {v}",
@@ -11789,14 +11823,21 @@ def strategy_filter_report(rows_by_sym):
                 "n_b": base_test["n"], "n_a": st_te["n"],
                 "wr_b": base_test["wr"], "wr_a": st_te["wr"],
                 "r_b": base_test["avg_r"], "r_a": st_te["avg_r"],
+                "train_t": round(train_t, 2), "test_t": round(test_t, 2) if test_t is not None else None,
                 "coins_better": better, "coins_worse": worse, "coins_same": same,
                 "coins_total": better + worse + same,
-                "all_coins_ok": worse == 0 and better > 0,
+                "all_coins_ok": passes,   # kept name for the UI: now "passed the test"
                 "per_coin": per_coin,
             })
-    # user's rule: every coin must gain (no coin worse), then biggest test WR gain,
-    # then fewest trades lost
-    scored.sort(key=lambda x: (not x["all_coins_ok"], -(x["wr_a"] - x["wr_b"]), -x["kept_pct"]))
+    # only the REPORT_TEST_TOP_K strongest-on-train filters are judged on test
+    # (testing hundreds of candidates on the same test part would let some
+    # pass by pure chance); the rest are listed for information only
+    scored.sort(key=lambda x: -x["train_t"])
+    for i, x in enumerate(scored):
+        x["tested"] = i < REPORT_TEST_TOP_K
+        x["all_coins_ok"] = x["all_coins_ok"] and x["tested"]
+    # ranking: passed first, then by TRAIN strength only
+    scored.sort(key=lambda x: (not x["all_coins_ok"], -x["train_t"]))
     # v0.99.337 — drop mirror duplicates ("убрать weekend" == "только weekday"): same kept trades
     _seen, _uniq = set(), []
     for x in scored:
@@ -11806,7 +11847,7 @@ def strategy_filter_report(rows_by_sym):
             _uniq.append(x)
     scored = _uniq
     out = {"computed_at": time.time(), "coins": len(rows_by_sym), "train_trades": base_train["n"],
-           "base": base_test, "top": scored[:10],
+           "base": base_test, "top": scored[:10], "rule": "v2",
            "all_coins_ok_n": sum(1 for x in scored if x["all_coins_ok"]), "candidates_n": len(scored)}
     return out
 
@@ -17451,6 +17492,9 @@ PRV_MAX_WAIT_BARS     = 48
 PRV_UNIVERSE_SIZE     = 30  # v0.99.293 — no longer used to cap the universe (see prv_build_universe()'s own updated comment); kept defined only in case a future session wants a cap back deliberately, same as SNR_UNIVERSE_SIZE's own v0.99.276 precedent
 PRV_MIN_VOL_USD       = float(os.environ.get("VP_PRV_MIN_VOL_USD", 50000))  # v0.99.293 — per direct user request ("По p/r давай выборку как в s/r сделаем, а не топ 30, а то по прежнему ни одного сигнала") after top-30-by-volume routinely found zero signals at all — switched to the same low-floor-not-hard-cap approach as SNR's own SNR_MIN_VOL_USD (v0.99.291)
 PRV_TOP_N             = int(os.environ.get("VP_PRV_TOP_N", 3))
+# v0.99.379 — like MSNR's "только топ-1": autotrade only the FIRST P/R card
+# (best test avg R after fees); the other active coins still give signals.
+PRV_SINGLE_BEST_ENABLED = os.environ.get("VP_PRV_SINGLE_BEST", "0") == "1"
 PRV_DISPLAY_N         = int(os.environ.get("VP_PRV_DISPLAY_N", 5))
 PRV_REFRESH_SEC       = int(os.environ.get("VP_PRV_REFRESH_SEC", 4 * 3600))
 PRV_PER_SYMBOL_MAX_SEC = int(os.environ.get("VP_PRV_PER_SYMBOL_MAX_SEC", 300))
@@ -17935,7 +17979,13 @@ def prv_live_loop():
                 with state_lock:
                     STATE["prv_signals"].appendleft(record)
                 autotrade_result = None
-                if AUTOTRADE_ENABLED_PRV and _nf_keep:
+                # v0.99.379 — "только лучшая карточка": trade only the first card
+                with state_lock:
+                    _prv_best = _prv_active_symbols[0] if _prv_active_symbols else None
+                _prv_best_ok = (not PRV_SINGLE_BEST_ENABLED) or symbol == _prv_best
+                if not _prv_best_ok:
+                    record["not_best_card"] = _prv_best
+                if AUTOTRADE_ENABLED_PRV and _nf_keep and _prv_best_ok:
                     with state_lock:
                         still_active = symbol in _prv_active_symbols
                     if still_active:
@@ -17948,11 +17998,13 @@ def prv_live_loop():
                 _plan = planned_leverage(symbol, sig["direction"], sig["entry"], sig["sl"])   # v0.99.377
                 record["leverage"] = (autotrade_result or {}).get("leverage") or _plan
                 record["leverage_planned"] = not (autotrade_result or {}).get("leverage")
-                leverage_txt = format_leverage_txt(autotrade_result, AUTOTRADE_ENABLED_PRV, _plan)
+                leverage_txt = format_leverage_txt(autotrade_result if _prv_best_ok else {"detail": "торгуется только лучшая карточка"},
+                                                   AUTOTRADE_ENABLED_PRV, _plan)
                 send_telegram(
                     f"{arrow} Peak Reversal {symbol} ({sig['direction']})\n"
                     f"entry: {sig['entry']:.6g}\nSL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n\u043f\u043b\u0435\u0447\u043e: {leverage_txt}"
-                    + ("" if _nf_keep else f"\n🧪 не торгуется — отсеян фильтром Neuro «{_nf['label']}» (сейчас: {_nf_val})"),
+                    + ("" if _nf_keep else f"\n🧪 не торгуется — отсеян фильтром Neuro «{_nf['label']}» (сейчас: {_nf_val})")
+                    + ("" if _prv_best_ok else f"\n⭐ не торгуется — включено «только лучшая карточка» ({(_prv_best or '—').replace('_USDT', '')})"),
                     category="prv",
                 )
                 save_state()
@@ -22264,6 +22316,8 @@ def api_prv_status():
                        "live_signal_stats": signal_stats["by_symbol"].get(symbol),
                        "recent_live_signals": recent_live_signals})
     return jsonify({
+        "single_best": PRV_SINGLE_BEST_ENABLED,   # v0.99.379
+        "best_symbol": (_prv_active_symbols[0] if _prv_active_symbols else None),
         "calc": calc_status("prv"), "calc_cond": calc_status("cond"),   # v0.99.372
         "provisional": STATE.get("prv_provisional"),   # v0.99.369
         "filter_phase": STATE.get("prv_filter_phase"),   # v0.99.366
@@ -24539,6 +24593,13 @@ INDEX_HTML = """<!doctype html>
         </div>
         <input type="number" id="setPrvDisplayN" min="1" max="30" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
       </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Автоторговля: только лучшая карточка</div>
+          <div class="sub">торговать только ОДНУ монету — первую карточку (лучший средний R на проверочной части после комиссий). Остальные активные монеты продолжают давать сигналы и уведомления, но автоторговля по ним не открывает сделки</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setPrvSingleBest"><span class="switchSlider"></span></label>
+      </div>
     </div></details>
 
     <details class="settingsGroup" style="--mod-color:#4dd0e1;"><summary class="settingsGroupTitle">Sweep (Liquidity Sweep)</summary><div class="settingsGroupBody">
@@ -25740,7 +25801,7 @@ async function refreshMsnr() {
     const htfSoloTxt = fmtMsnrSolo('htf_trend', 'Тренд 4ч');
     // v0.99.329 — best Neuro filter's effect on THIS coin (test part only)
     const nfTxt = (() => {
-      const nf = status.neuro_filters && status.neuro_filters.top && status.neuro_filters.top[0];
+      const nf = status.neuro_filters && status.neuro_filters.top && status.neuro_filters.top[0] && status.neuro_filters.top[0].all_coins_ok ? status.neuro_filters.top[0] : null;   // v0.99.380
       const pc = nf && nf.per_coin && nf.per_coin[r.symbol];
       if (!pc) return '<span class="dim">—</span>';
       if (!pc.n_b) return '<span class="dim">нет тест-сделок</span>';
@@ -25785,18 +25846,19 @@ async function refreshMsnr() {
     const rowsHtml = (nf.top || []).slice(0, 8).map((f, i) => {
       const dWr = Math.round((f.wr_a - f.wr_b) * 10) / 10;
       const rCls = (f.r_a ?? 0) >= (f.r_b ?? 0) ? 'win' : 'loss';
-      const coins = f.all_coins_ok
-        ? `<span class="win">✅ ${f.coins_better} лучше, 0 хуже${f.coins_same ? `, ${f.coins_same} без изм.` : ''}</span>`
-        : `<span class="loss">${f.coins_better} лучше / ${f.coins_worse} хуже</span>`;
-      return `<tr><td>${i + 1}</td><td style="white-space:normal;min-width:160px;">${f.label}</td>
+      const coins = f.all_coins_ok   // v0.99.379 — "passed the test" (majority of coins better, removed trades clearly worse)
+        ? `<span class="win">✅ ${f.coins_better} лучше / ${f.coins_worse} хуже</span>`
+        : `<span class="${f.coins_better > f.coins_worse ? 'dim' : 'loss'}">${f.coins_better} лучше / ${f.coins_worse} хуже</span>`;
+      const tTxt = `<td class="dim" title="t: насколько убранные сделки хуже оставшихся (train — где фильтр выбран, test — проверка; проверяются 3 лучших по train, для прохода нужно test ≥ 2)">${f.train_t ?? '—'} → ${f.test_t ?? '—'}</td>`;
+      return `<tr${i === 0 && f.all_coins_ok ? ' style="background:#15202e;"' : ''}><td>${i === 0 && f.all_coins_ok ? '🏆' : i + 1}</td><td style="white-space:normal;min-width:160px;">${f.label}</td>
         <td class="dim">${f.n_b}→${f.n_a} (${f.kept_pct}%)</td>
-        <td>${f.wr_b}%→<b class="win">${f.wr_a}%</b> <span class="win">(+${dWr})</span></td>
-        <td class="${rCls}">${f.r_b}→${f.r_a}R</td><td>${coins}</td></tr>`;
+        <td>${f.wr_b}%→<b class="${dWr >= 0 ? 'win' : 'loss'}">${f.wr_a}%</b> <span class="${dWr >= 0 ? 'win' : 'loss'}">(${dWr >= 0 ? '+' : ''}${dWr})</span></td>
+        <td class="${rCls}">${f.r_b}→${f.r_a}R</td>${tTxt}<td>${coins}</td></tr>`;
     }).join('');
     const okN = nf.all_coins_ok_n || 0;
-    return `<details style="margin:8px 0;"><summary style="cursor:pointer;font-size:12px;">🧪 Neuro-фильтры для MSNR (информационно): ${okN ? `<span class="win">${okN} улучшают все монеты</span>` : '<span class="dim">ни один не улучшил все монеты</span>'} · ${nf.coins} монет · тест-сделок ${b.n}, WR ${b.wr}%</summary>
-      <div class="dim hint-block" style="font-size:11px;margin:4px 0 6px;">Каждое условие Neuro на момент входа пробуется как фильтр («убрать» или «только»). Фильтр <b>выбирается на первых 70%</b> сделок каждой монеты, а цифры ниже — на <b>последних 30%</b>, которых он не видел. Сверху — те, что не ухудшили ни одну монету, дальше по приросту винрейта; оставляют не меньше 50% сделок. Средний R рядом: если он падает, фильтр «покупает» винрейт за счёт больших RR. К сделкам и сигналам MSNR ничего не применяется. Колонка «Neuro-фильтр (тест)» в таблице ниже — эффект фильтра №1 по каждой монете. Посчитано ${fmtTime(nf.computed_at)}.</div>
-      <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="6" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
+    return `<details style="margin:8px 0;"><summary style="cursor:pointer;font-size:12px;">🧪 Neuro-фильтры для MSNR (информационно): ${okN ? `<span class="win">${okN} прошли проверку</span>` : '<span class="dim">ни один не прошёл проверку</span>'} · ${nf.coins} монет · тест-сделок ${b.n}, WR ${b.wr}%</summary>
+      <div class="dim hint-block" style="font-size:11px;margin:4px 0 6px;">Один общий фильтр для всех монет. Каждое условие Neuro на момент входа пробуется как «убрать» / «только». <b>Выбор и порядок — только по train-части</b> (первые 70% сделок каждой монеты): насколько убранные сделки хуже оставшихся (t). <b>Test-часть</b>, которую фильтр не видел, только проверяет: проверяются только 3 лучших по train (иначе среди сотен вариантов какой-то «пройдёт» случайно); фильтр проходит, если на test убранные сделки тоже явно хуже (t ≥ 2), средний R вырос и монет стало лучше больше, чем хуже. 🏆 — лучший по train из прошедших. Оставляют не меньше 50% сделок. Раньше требовалось «ни одна монета не хуже» — при десятках монет с парой тест-сделок это почти невозможно. Свой фильтр для каждой монеты подбирается отдельно в самом бэктесте (настройка «Фильтр Neuro в бэктесте»). Этот общий отчёт к сделкам MSNR не применяется. Колонка «Neuro-фильтр (тест)» в таблице ниже — эффект фильтра №1 по каждой монете. Посчитано ${fmtTime(nf.computed_at)}.</div>
+      <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>t train→test</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="7" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
     </details>`;
   })();
   setPanelHtml(panel, warnHtml + headerHtml + rrBucketsHtml + signalsTableHtml + nfHtml + btTableHtml);
@@ -26957,9 +27019,12 @@ async function refreshPrv() {
       const cardStyle = isActive
         ? 'margin-bottom:14px;padding:12px;background:#12182a;border-radius:10px;border:1px solid #232d45;'
         : 'margin-bottom:14px;padding:12px;background:#0d1018;border-radius:10px;border:1px dashed #3a4256;opacity:0.6;';
-      const inactiveBadge = isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:#2a2f3d;border-radius:6px;">
+      const bestBadge = (data.single_best && c.symbol === data.best_symbol)
+        ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:#3a3012;border:1px solid #6b5520;border-radius:6px;"><span style="font-size:10px;color:#ffcc66;">⭐ торгуется (только лучшая карточка)</span></div>`
+        : (data.single_best && isActive ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:#1c2433;border-radius:6px;"><span class="dim" style="font-size:10px;">только сигналы — торгуется лучшая карточка</span></div>` : '');
+      const inactiveBadge = bestBadge + (isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:#2a2f3d;border-radius:6px;">
         <span class="dim" style="font-size:10px;">\u26aa \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0441\u043f\u0440\u0430\u0432\u043a\u0438 \u2014 \u043d\u0435 \u0442\u043e\u0440\u0433\u0443\u0435\u0442\u0441\u044f \u0438 \u043d\u0435 \u0441\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442\u0441\u044f \u0432\u0436\u0438\u0432\u0443\u044e</span>
-      </div>`;
+      </div>`);
       if (!c.found) {
         return `<div style="${cardStyle}">
           <div style="font-size:15px;font-weight:700;color:#ffa726;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
@@ -28019,6 +28084,7 @@ const setInputs = {
   snr_all_in_enabled: document.getElementById('setSnrAllIn'),
   prv_all_in_enabled: document.getElementById('setPrvAllIn'),
   msnr_single_best_enabled: document.getElementById('setMsnrSingleBest'),
+  prv_single_best_enabled: document.getElementById('setPrvSingleBest'),
   msnr_min_rr_filter_enabled: document.getElementById('setMsnrMinRrFilter'),
   msnr_htf_filter_enabled: document.getElementById('setMsnrHtfFilter'),
   msnr_per_symbol_filters_enabled: document.getElementById('setMsnrPerSymbolFilters'),
@@ -28678,18 +28744,19 @@ function filterReportHtml(nf, title, pendingTxt) {
   const rowsHtml = (nf.top || []).slice(0, 8).map((f, i) => {
     const dWr = Math.round((f.wr_a - f.wr_b) * 10) / 10;
     const rCls = (f.r_a ?? 0) >= (f.r_b ?? 0) ? 'win' : 'loss';
-    const coins = f.all_coins_ok
-      ? `<span class="win">✅ ${f.coins_better} лучше, 0 хуже${f.coins_same ? `, ${f.coins_same} без изм.` : ''}</span>`
-      : `<span class="loss">${f.coins_better} лучше / ${f.coins_worse} хуже</span>`;
-    return `<tr${i === 0 ? ' style="background:#15202e;"' : ''}><td>${i === 0 ? '🏆' : i + 1}</td><td style="white-space:normal;min-width:160px;">${f.label}</td>
+    const coins = f.all_coins_ok   // v0.99.379 — "passed the test" (majority of coins better, removed trades clearly worse)
+      ? `<span class="win">✅ ${f.coins_better} лучше / ${f.coins_worse} хуже</span>`
+      : `<span class="${f.coins_better > f.coins_worse ? 'dim' : 'loss'}">${f.coins_better} лучше / ${f.coins_worse} хуже</span>`;
+    const tTxt = `<td class="dim" title="t: насколько убранные сделки хуже оставшихся (train — где фильтр выбран, test — проверка; проверяются 3 лучших по train, для прохода нужно test ≥ 2)">${f.train_t ?? '—'} → ${f.test_t ?? '—'}</td>`;
+    return `<tr${i === 0 && f.all_coins_ok ? ' style="background:#15202e;"' : ''}><td>${i === 0 && f.all_coins_ok ? '🏆' : i + 1}</td><td style="white-space:normal;min-width:160px;">${f.label}</td>
       <td class="dim">${f.n_b}→${f.n_a} (${f.kept_pct}%)</td>
-      <td>${f.wr_b}%→<b class="win">${f.wr_a}%</b> <span class="win">(+${dWr})</span></td>
-      <td class="${rCls}">${f.r_b}→${f.r_a}R</td><td>${coins}</td></tr>`;
+      <td>${f.wr_b}%→<b class="${dWr >= 0 ? 'win' : 'loss'}">${f.wr_a}%</b> <span class="${dWr >= 0 ? 'win' : 'loss'}">(${dWr >= 0 ? '+' : ''}${dWr})</span></td>
+      <td class="${rCls}">${f.r_b}→${f.r_a}R</td>${tTxt}<td>${coins}</td></tr>`;
   }).join('');
   const okN = nf.all_coins_ok_n || 0;
-  return `<details style="margin:8px 0;"><summary style="cursor:pointer;font-size:12px;">${title}: ${okN ? `<span class="win">${okN} улучшают все монеты</span>` : '<span class="dim">ни один не улучшил все монеты</span>'} · ${nf.coins} монет · тест-сделок ${b.n}, WR ${b.wr}%</summary>
-    <div class="dim hint-block" style="font-size:11px;margin:4px 0 6px;">Каждое условие пробуется как фильтр («убрать» / «только»). <b>Выбор — на train-части</b> (где подбирались параметры), цифры — на <b>тест-части</b>, которую он не видел. 🏆 — лучший: не ухудшил ни одну монету и дал наибольший рост винрейта; дальше — остальные по тому же правилу. Оставляют не меньше 50% сделок. Средний R рядом: если падает — фильтр «покупает» винрейт за счёт прибыли. В торговлю ничего не применяется. Посчитано ${fmtTime(nf.computed_at)}.</div>
-    <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="6" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
+  return `<details style="margin:8px 0;"><summary style="cursor:pointer;font-size:12px;">${title}: ${okN ? `<span class="win">${okN} прошли проверку</span>` : '<span class="dim">ни один не прошёл проверку</span>'} · ${nf.coins} монет · тест-сделок ${b.n}, WR ${b.wr}%</summary>
+    <div class="dim hint-block" style="font-size:11px;margin:4px 0 6px;">Один общий фильтр для всех монет. Каждое условие Neuro на момент входа пробуется как «убрать» / «только». <b>Выбор и порядок — только по train-части</b> (первые 70% сделок каждой монеты): насколько убранные сделки хуже оставшихся (t). <b>Test-часть</b>, которую фильтр не видел, только проверяет: проверяются только 3 лучших по train (иначе среди сотен вариантов какой-то «пройдёт» случайно); фильтр проходит, если на test убранные сделки тоже явно хуже (t ≥ 2), средний R вырос и монет стало лучше больше, чем хуже. 🏆 — лучший по train из прошедших. Оставляют не меньше 50% сделок. Раньше требовалось «ни одна монета не хуже» — при десятках монет с парой тест-сделок это почти невозможно. Свой фильтр для каждой монеты подбирается отдельно в самом бэктесте (настройка «Фильтр Neuro в бэктесте»). Этот общий отчёт в торговлю не применяется. Посчитано ${fmtTime(nf.computed_at)}.</div>
+    <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>t train→test</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="7" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
   </details>`;
 }
 // v0.99.372 — CPU cores in use, shown next to the backtest progress
@@ -28750,7 +28817,7 @@ function snrDiagHtml(d) {
 }
 // v0.99.360 — best filter's effect on one coin (test part), table-cell form
 function nfCoinCellHtml(nfRep, sym) {
-  const nf = nfRep && nfRep.top && nfRep.top[0];
+  const nf = nfRep && nfRep.top && nfRep.top[0] && nfRep.top[0].all_coins_ok ? nfRep.top[0] : null;   // v0.99.380 — only a filter that passed the test
   const pc = nf && nf.per_coin && nf.per_coin[sym];
   if (!pc) return '<span class="dim">—</span>';
   if (!pc.n_b) return '<span class="dim">нет тест-сделок</span>';
@@ -28761,7 +28828,7 @@ function nfCoinCellHtml(nfRep, sym) {
   return `<span class="dim" title="тест-часть: до → после фильтра «${String(nf.label).replace(/"/g, '&quot;')}»">${pc.wr_b}%→${pc.wr_a}% (n=${pc.n_b}→${pc.n_a})</span> <span class="${dCls}">(${d > 0 ? '+' : ''}${d}%)</span>`;
 }
 function filterCoinLineHtml(nf, sym) {
-  const f = nf && nf.top && nf.top[0];
+  const f = nf && nf.top && nf.top[0] && nf.top[0].all_coins_ok ? nf.top[0] : null;   // v0.99.380
   const pc = f && f.per_coin && f.per_coin[sym];
   if (!pc || !pc.n_b) return '';
   if (pc.n_a === pc.n_b) return `<div class="dim" style="font-size:11px;">🏆 фильтр (тест): без изменений для этой монеты (n=${pc.n_b})</div>`;
