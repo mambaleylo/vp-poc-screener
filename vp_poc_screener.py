@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.381"
+APP_VERSION = "0.99.382"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1130,7 +1130,7 @@ CREDENTIALS_FILE = os.environ.get(
     "VP_CREDENTIALS_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
-SETTINGS_KEYS = ("volume_profile_enabled", "prv_single_best_enabled", "neuro_extra_conds_enabled", "neuro_trade_filter_enabled", "calc_workers", "calc_workers_boost", "bounce_enabled", "breakout_enabled",
+SETTINGS_KEYS = ("volume_profile_enabled", "prv_single_best_enabled", "snr_single_best_enabled", "neuro_extra_conds_enabled", "neuro_trade_filter_enabled", "calc_workers", "calc_workers_boost", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "neuro_min_winrate", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "autotrade_invert_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "autotrade_invert_prv", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "autotrade_invert_lsw", "autotrade_invert_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled", "lsw_all_in_enabled", "snr_all_in_enabled", "prv_all_in_enabled",
@@ -1176,6 +1176,7 @@ def get_settings():
         "calc_workers_boost": CALC_WORKERS_BOOST,
         "snr_enabled": SNR_ENABLED,
         "snr_top_n": SNR_TOP_N,
+        "snr_single_best_enabled": SNR_SINGLE_BEST_ENABLED,
         "snr_display_n": SNR_DISPLAY_N,
         "telegram_alerts_snr": TELEGRAM_ALERTS_SNR,
         "autotrade_snr": AUTOTRADE_ENABLED_SNR,
@@ -1342,6 +1343,8 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_SNR = bool(updates["autotrade_snr"])
     if "autotrade_invert_snr" in updates:
         AUTOTRADE_INVERT_SNR = bool(updates["autotrade_invert_snr"])
+    if "snr_single_best_enabled" in updates:   # v0.99.382
+        globals()["SNR_SINGLE_BEST_ENABLED"] = bool(updates["snr_single_best_enabled"])
     if "snr_top_n" in updates:
         try:
             new_top_n = int(updates["snr_top_n"])
@@ -16269,6 +16272,7 @@ SNR_ENABLED           = os.environ.get("VP_SNR_ENABLED", "1") == "1"
 # v0.99.321 — SNR_SEED_SYMBOLS (XAU/BTC/SOL seed list) removed per user request ("никаких списков не должно быть"): nothing is live-scanned/traded until the first backtest ranks symbols.
 SNR_UNIVERSE_SIZE     = int(os.environ.get("VP_SNR_UNIVERSE_SIZE", 30))  # v0.99.271 — no longer used to cap the universe (see snr_build_universe()'s own v0.99.276 comment); kept defined only in case a future session wants to reintroduce a cap deliberately
 SNR_TOP_N             = int(os.environ.get("VP_SNR_TOP_N", 3))     # how many survive the full sweep AND are actually live-scanned/traded, ranked by TEST avg_pnl_r
+SNR_SINGLE_BEST_ENABLED = os.environ.get("VP_SNR_SINGLE_BEST", "0") == "1"   # v0.99.382 — autotrade only the first S/R card
 SNR_DISPLAY_N         = int(os.environ.get("VP_SNR_DISPLAY_N", 5))  # how many get kept/shown — always clamped to at least SNR_TOP_N, same semantics as NEURO_DISPLAY_N (v0.99.262)
 SNR_TF_CANDIDATES     = ["1h", "4h", "1d"]  # per direct user request ("попробовать все фреймы")
 SNR_PIVOT_CANDIDATES  = [10, 15, 20]         # matches the Pine Script's own "Pivot Length" range
@@ -16312,6 +16316,7 @@ SNR_EXCLUDED_STABLES  = {  # v0.99.287 — per direct user report ("даже с�
     "HUSD", "USDN", "OUSD", "MIM", "USDX", "CUSD", "RSV",
 }
 SNR_N_COMBOS          = len(SNR_TF_CANDIDATES) * len(SNR_PIVOT_CANDIDATES) * len(SNR_STRENGTH_CANDIDATES) * len(SNR_RR_CANDIDATES)  # v0.99.277 — 81 total combinations tried per symbol (3 tf x 3 pivot x 3 strength x 3 rr)
+SNR_TEST_Z            = float(os.environ.get("VP_SNR_TEST_Z", 2.0))   # v0.99.382 — one confirmation of the chosen combo on test
 SNR_Z_CRITICAL        = 3.23  # v0.99.277 — Bonferroni-corrected one-tailed z-critical for SNR_N_COMBOS=81 independent comparisons at overall alpha=0.05 (alpha/81 per comparison ≈ 0.000617 -> z≈3.23, computed via the standard normal inverse CDF — hardcoded rather than adding scipy as a dependency, same "no scipy on a phone via Termux" reasoning _T_CRITICAL_TABLE's own comment already documents elsewhere in this file). See snr_optimize_symbol()'s own docstring for why a plain "average > 0" bar wasn't enough.
 SNR_PER_SYMBOL_MAX_SEC = int(os.environ.get("VP_SNR_PER_SYMBOL_MAX_SEC", 300))  # v0.99.271 — hard ceiling per symbol now that the universe can be much bigger than 3 fixed coins, same "one stuck symbol can't block the whole cycle" discipline as every other module
 SNR_BACKTEST_TRIGGER  = threading.Event()  # v0.99.270 — per direct user request ("бэктест не идёт по индикатору, добавь кнопку перезапуска бэктеста принудительно как для нейро") — same "Очистить X doesn't wake the sleeping loop" fix as every other module's own trigger event
@@ -16580,9 +16585,15 @@ def snr_diag_summary(universe):
     passed = sum(1 for _, d in rows if d["passed"])
     near = sorted(((s, d["near"]) for s, d in rows if d.get("near") and not d["passed"]),
                   key=lambda x: -x[1]["min_z"])[:5]
+    # v0.99.382 — coins whose best-on-train combo qualified but failed the one test
+    chosen_fail = sorted(((s, d["chosen"]) for s, d in rows if d.get("chosen") and not d["passed"]),
+                         key=lambda x: -x[1]["test_z"])[:5]
     return {"t": time.time(), "checked": len(rows), "universe": len(universe), "passed": passed,
             "no_data": no_data, "few_trades": few, "not_significant": weak,
-            "z_needed": SNR_Z_CRITICAL, "min_train": SNR_MIN_TRAIN_TRADES, "min_test": SNR_MIN_TEST_TRADES,
+            "z_needed": SNR_Z_CRITICAL, "z_test_needed": SNR_TEST_Z,
+            "min_train": SNR_MIN_TRAIN_TRADES, "min_test": SNR_MIN_TEST_TRADES,
+            "train_ok_test_fail": sum(1 for _, d in rows if d.get("chosen") and not d["passed"]),
+            "chosen_fail": [dict(c, symbol=s) for s, c in chosen_fail],
             "near": [dict(n, symbol=s) for s, n in near]}
 
 
@@ -16627,9 +16638,11 @@ def strategy_filter_phase(mod):
     in the results, then the ranking is redone exactly like the cycle end."""
     if mod == "snr":
         cands_map, rebuild, zc, mtr, mte = _snr_filter_cands, _snr_rebuild_cand, SNR_Z_CRITICAL, SNR_MIN_TRAIN_TRADES, SNR_MIN_TEST_TRADES
+        tcrit = SNR_TEST_Z   # v0.99.382
         loop, top_n, disp_n = "snr_filter_loop", SNR_TOP_N, SNR_DISPLAY_N
     else:
         cands_map, rebuild, zc, mtr, mte = _prv_filter_cands, _prv_rebuild_cand, PRV_Z_CRITICAL, PRV_MIN_TRAIN_TRADES, PRV_MIN_TEST_TRADES
+        tcrit = None
         loop, top_n, disp_n = "prv_filter_loop", PRV_TOP_N, PRV_DISPLAY_N
     ranked_coins = sorted(((s, max(c["train_z"] for c in cs)) for s, cs in list(cands_map.items()) if cs),
                           key=lambda x: -x[1])
@@ -16650,7 +16663,7 @@ def strategy_filter_phase(mod):
             sz = _z_vs_breakeven_with_fees([t for t in c["closed"] if t["time"] > c["boundary"]], c["rr"])
             c["train_z"] = tz if tz is not None else -99.0
             c["test_z"] = sz if sz is not None else -99.0
-        variants = _strategy_filter_variants(sym, cands, zc, mtr, mte)
+        variants = _strategy_filter_variants(sym, cands, zc, mtr, mte, test_crit=tcrit)
         if not variants:
             return None
         c, f = max(variants, key=_variant_train_z)
@@ -16766,7 +16779,7 @@ def _variant_train_z(v):
     return c["train_z"] if not f else f["_train_z"]
 
 
-def _strategy_filter_variants(symbol, cands, z_crit, min_train, min_test):
+def _strategy_filter_variants(symbol, cands, z_crit, min_train, min_test, test_crit=None):
     """v0.99.364 — S/R and P/R: for each candidate combo pick a Neuro filter
     on its TRAIN trades only, then require the filtered combo to pass the
     same fee-inclusive significance test on train AND on the untouched test
@@ -16789,10 +16802,16 @@ def _strategy_filter_variants(symbol, cands, z_crit, min_train, min_test):
         if len(ftrain) < min_train or len(ftest) < min_test:
             continue
         tz, sz = _z_vs_breakeven_with_fees(ftrain, c["rr"]), _z_vs_breakeven_with_fees(ftest, c["rr"])
-        if tz is None or sz is None or tz < z_crit or sz < z_crit:
-            continue
+        if test_crit is None:
+            if tz is None or sz is None or tz < z_crit or sz < z_crit:
+                continue
+        elif tz is None or sz is None or tz < z_crit:
+            continue   # v0.99.382 (S/R): train-qualified only; the test is applied once below
         f = dict(f, _train_z=tz, _test_z=sz)
         out.append((c, f))
+    if test_crit is not None and out:
+        best = max(out, key=lambda v: v[1]["_train_z"])
+        return [best] if best[1]["_test_z"] >= test_crit else []
     return out
 
 
@@ -16939,8 +16958,8 @@ def snr_optimize_core(candles_by_tf):
                                             "test_n": len(test), "test_wr": round(sum(1 for t in test if t["result"] == "WIN") / len(test) * 100, 1)}
                         cand = {"tf": tf, "pl": pl, "ms": ms, "rr": rr, "closed": closed, "boundary": boundary_time,
                                 "span": span, "train_z": train_z, "test_z": test_z}
-                        if train_z >= SNR_Z_CRITICAL and test_z >= SNR_Z_CRITICAL:
-                            passing.append(cand)
+                        if train_z >= SNR_Z_CRITICAL:
+                            passing.append(cand)   # v0.99.382 — train-qualified; the test decides below
                         elif train_z >= NEURO_TF_NEAR_Z:
                             near.append(cand)
                             near.sort(key=lambda c: -c["train_z"])
@@ -16950,10 +16969,23 @@ def snr_optimize_core(candles_by_tf):
         except Exception as e:
             errors.append(f"{tf}: {e}")
     passing.sort(key=lambda c: -c["train_z"])
-    variants = [(c, None) for c in passing]
+    # v0.99.382 — two-stage test (user: "поменяй для s/r"): the Bonferroni
+    # z >= SNR_Z_CRITICAL (81 combos) applies to the SELECTION on train; the
+    # single best-on-train combo is then confirmed ONCE on test with
+    # z >= SNR_TEST_Z. If it fails, the coin fails — no trying the next combo
+    # on test (that would let the test part pick).
+    chosen = passing[0] if passing else None
+    diag["chosen"] = ({"tf": chosen["tf"], "pivot_length": chosen["pl"], "min_strength": chosen["ms"], "rr": chosen["rr"],
+                       "train_z": round(chosen["train_z"], 2), "test_z": round(chosen["test_z"], 2)} if chosen else None)
+    if chosen is not None and chosen["test_z"] >= SNR_TEST_Z:
+        variants = [(chosen, None)]
+    else:
+        variants = []
+        if chosen is not None:
+            near = ([chosen] + near)[:NEURO_TF_NEAR_K + 1]   # still a filter candidate
     # v0.99.365 — the Neuro filter is tried AFTER the cycle (strategy_filter_phase);
     # only the candidates' params are kept here.
-    filter_cands = [{k: c[k] for k in ("tf", "pl", "ms", "rr", "train_z")} for c in passing[:1] + near]
+    filter_cands = [{k: c[k] for k in ("tf", "pl", "ms", "rr", "train_z")} for c in (passing[:1] if variants else []) + near]
     if variants:
         c, f = max(variants, key=lambda v: _variant_train_z(v))
         best = _strategy_best_dict(c, f, {"timeframe": c["tf"], "pivot_length": c["pl"], "min_strength": c["ms"], "rr": c["rr"]})
@@ -17507,7 +17539,13 @@ def snr_live_loop():
                 with state_lock:
                     STATE["snr_signals"].appendleft(record)
                 autotrade_result = None
-                if AUTOTRADE_ENABLED_SNR and _nf_keep:
+                # v0.99.382 — "только лучшая карточка": trade only the first card
+                with state_lock:
+                    _snr_best = _snr_active_symbols[0] if _snr_active_symbols else None
+                _snr_best_ok = (not SNR_SINGLE_BEST_ENABLED) or symbol == _snr_best
+                if not _snr_best_ok:
+                    record["not_best_card"] = _snr_best
+                if AUTOTRADE_ENABLED_SNR and _nf_keep and _snr_best_ok:
                     with state_lock:
                         still_active = symbol in _snr_active_symbols
                     if still_active:
@@ -17520,11 +17558,13 @@ def snr_live_loop():
                 _plan = planned_leverage(symbol, sig["direction"], sig["entry"], sig["sl"])   # v0.99.377
                 record["leverage"] = (autotrade_result or {}).get("leverage") or _plan
                 record["leverage_planned"] = not (autotrade_result or {}).get("leverage")
-                leverage_txt = format_leverage_txt(autotrade_result, AUTOTRADE_ENABLED_SNR, _plan)
+                leverage_txt = format_leverage_txt(autotrade_result if _snr_best_ok else {"detail": "торгуется только лучшая карточка"},
+                                                   AUTOTRADE_ENABLED_SNR, _plan)
                 send_telegram(
                     f"{arrow} S/R {symbol} ({sig['direction']}, \u0437\u043e\u043d\u0430 {sig['zone_price']:.6g}, \u0441\u0438\u043b\u0430 {sig['zone_strength']})\n"
                     f"entry: {sig['entry']:.6g}\nSL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n\u043f\u043b\u0435\u0447\u043e: {leverage_txt}"
-                    + ("" if _nf_keep else f"\n🧪 не торгуется — отсеян фильтром Neuro «{_nf['label']}» (сейчас: {_nf_val})"),
+                    + ("" if _nf_keep else f"\n🧪 не торгуется — отсеян фильтром Neuro «{_nf['label']}» (сейчас: {_nf_val})")
+                    + ("" if _snr_best_ok else f"\n⭐ не торгуется — включено «только лучшая карточка» ({(_snr_best or '—').replace('_USDT', '')})"),
                     category="snr",
                 )
                 save_state()  # v0.99.271 — persist each new live signal immediately, same as every other module's own signal log
@@ -22333,6 +22373,7 @@ def api_snr_status():
                        "live_signal_stats": signal_stats["by_symbol"].get(symbol),
                        "recent_live_signals": recent_live_signals})
     return jsonify({
+        "single_best": SNR_SINGLE_BEST_ENABLED, "best_symbol": (_snr_active_symbols[0] if _snr_active_symbols else None),   # v0.99.382
         "calc": calc_status("snr"), "calc_cond": calc_status("cond"),   # v0.99.372
         "provisional": STATE.get("snr_provisional"),   # v0.99.369
         "filter_phase": STATE.get("snr_filter_phase"),   # v0.99.366
@@ -24653,6 +24694,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">не меньше числа выше — торгуются только лучшие по числу выше, остальные показываются серым как справочные</div>
         </div>
         <input type="number" id="setSnrDisplayN" min="1" max="30" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Автоторговля: только лучшая карточка</div>
+          <div class="sub">торговать только ОДНУ монету — первую карточку (лучший средний R на проверочной части после комиссий). Остальные активные монеты продолжают давать сигналы и уведомления, но автоторговля по ним не открывает сделки</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setSnrSingleBest"><span class="switchSlider"></span></label>
       </div>
     </div></details>
     <details class="settingsGroup" style="--mod-color:#ffa726;"><summary class="settingsGroupTitle">Peak Reversal (Keltner Channel)</summary><div class="settingsGroupBody">
@@ -26988,9 +27036,12 @@ async function refreshSnr() {
       const cardStyle = isActive
         ? 'margin-bottom:14px;padding:12px;background:#12182a;border-radius:10px;border:1px solid #232d45;'
         : 'margin-bottom:14px;padding:12px;background:#0d1018;border-radius:10px;border:1px dashed #3a4256;opacity:0.6;';
-      const inactiveBadge = isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:#2a2f3d;border-radius:6px;">
+      const bestBadge = (data.single_best && c.symbol === data.best_symbol)
+        ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:#3a3012;border:1px solid #6b5520;border-radius:6px;"><span style="font-size:10px;color:#ffcc66;">⭐ торгуется (только лучшая карточка)</span></div>`
+        : (data.single_best && isActive ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:#1c2433;border-radius:6px;"><span class="dim" style="font-size:10px;">только сигналы — торгуется лучшая карточка</span></div>` : '');
+      const inactiveBadge = bestBadge + (isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:#2a2f3d;border-radius:6px;">
         <span class="dim" style="font-size:10px;">\u26aa \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0441\u043f\u0440\u0430\u0432\u043a\u0438 \u2014 \u043d\u0435 \u0442\u043e\u0440\u0433\u0443\u0435\u0442\u0441\u044f \u0438 \u043d\u0435 \u0441\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442\u0441\u044f \u0432\u0436\u0438\u0432\u0443\u044e</span>
-      </div>`;
+      </div>`);
       if (!c.found) {
         return `<div style="${cardStyle}">
           <div style="font-size:15px;font-weight:700;color:#26c6da;margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
@@ -28169,6 +28220,7 @@ const setInputs = {
   prv_all_in_enabled: document.getElementById('setPrvAllIn'),
   msnr_single_best_enabled: document.getElementById('setMsnrSingleBest'),
   prv_single_best_enabled: document.getElementById('setPrvSingleBest'),
+  snr_single_best_enabled: document.getElementById('setSnrSingleBest'),
   msnr_min_rr_filter_enabled: document.getElementById('setMsnrMinRrFilter'),
   msnr_htf_filter_enabled: document.getElementById('setMsnrHtfFilter'),
   msnr_per_symbol_filters_enabled: document.getElementById('setMsnrPerSymbolFilters'),
@@ -28916,7 +28968,8 @@ function snrDiagHtml(d) {
   return `<div style="background:#1c2433;border:1px solid #4a5a78;border-radius:8px;padding:8px 12px;margin:8px 0;font-size:12px;">
     <b style="color:#ffcc66;">Бэктест S/R прошёл, но ни одна монета не прошла проверку значимости</b> <span class="dim">(${fmtDateTime(d.t)})</span><br>
     <span class="dim">Проверено ${d.checked} из ${d.universe}: без данных ${d.no_data} · мало сделок (нужно ≥${d.min_train} train и ≥${d.min_test} test) ${d.few_trades} · результат есть, но недостаточно значимый ${d.not_significant}.
-    Монета проходит, только если z ≥ ${d.z_needed} и на train, и на test — это защита от случайной удачи среди 81 проверенной комбинации.</span>
+    ${d.z_test_needed ? `Правило: лучшая из 81 комбинации по train должна иметь z ≥ ${d.z_needed} (поправка на перебор), и затем один раз подтвердиться на test с z ≥ ${d.z_test_needed}. Прошли train, но не подтвердились на test: ${d.train_ok_test_fail || 0}.` : `Монета проходит, только если z ≥ ${d.z_needed} и на train, и на test — это защита от случайной удачи среди 81 проверенной комбинации.`}</span>
+    ${(d.chosen_fail || []).length ? `<div style="margin-top:4px;"><span class="dim">Прошли train, test не подтвердил:</span>${d.chosen_fail.map(c => `<div>${c.symbol.replace('_USDT','')}: train z=${c.train_z}, test z=${c.test_z} (нужно ${d.z_test_needed}) · ${c.tf}, пивот ${c.pivot_length}, сила ${c.min_strength}, RR ${c.rr}</div>`).join('')}</div>` : ''}
     ${near ? `<div style="margin-top:4px;"><span class="dim">Ближе всех (меньший из z train/test):</span>${near}</div>` : ''}
   </div>`;
 }

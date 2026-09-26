@@ -17649,3 +17649,19 @@ v0.99.381 - Neuro-filter report rule change limited to MSNR (user: "везде �
          Verified: py_compile (-W error), pyflakes, runtime, JS check; v1
          byte-identical to the pre-v0.99.380 report on 20 random data sets;
          jsdom: v1 table/texts as before, v2 with the t column.
+v0.99.382 - S/R: two-stage significance test (user: "по S/R нет вообще монет";
+         agreed to try it on S/R first). The Bonferroni z ≥ 3.23 (81 combos)
+         now applies only to the SELECTION on train; the single best-on-train
+         combo is confirmed ONCE on test with z ≥ SNR_TEST_Z (2.0, after fees).
+         If it fails, the coin fails — the next combo is not tried on test.
+         Filter phase uses the same rule (filter picked on train, the best
+         filtered combo tested once). The "why no coins" box explains the rule
+         and lists coins that passed train but not test (train z / test z).
+         P/R unchanged.
+         S/R: "Автоторговля: только лучшая карточка" (snr_single_best_enabled),
+         same as P/R: only the first card is traded, others signal only
+         ("⭐ не торгуется" in Telegram, badges on cards).
+         Verified: py_compile (-W error), pyflakes, runtime, JS check, setting
+         save; synthetic: passed combo == best-on-train, pass/fail follows the
+         test threshold, in-process == 3 workers; P/R identical to v0.99.381;
+         live-loop test: only the first card traded; jsdom: diag box.
