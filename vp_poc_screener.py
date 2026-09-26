@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.373"
+APP_VERSION = "0.99.374"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -25327,7 +25327,7 @@ async function refreshMsnr() {
   const ss = status.signals_stats || {};
   const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `<span class="${ss.winrate >= 50 ? 'win' : 'loss'}">${ss.winrate}%</span>` : '<span class="dim">-</span>';
   const buildTxt = status.backtest_running
-    ? `бэктест выполняется: ${status.backtest_done||0}/${status.backtest_total||'?'} монет${status.backtest_started_at ? ' · идёт ' + Math.round((Date.now()/1000 - status.backtest_started_at)) + 'с' : ''}`
+    ? `бэктест выполняется: ${status.backtest_done||0}/${status.backtest_total||'?'} монет${status.backtest_started_at ? ' · идёт ' + Math.round((Date.now()/1000 - status.backtest_started_at)) + 'с' : ''} <span class="dim" title="на несколько ядер пока переведены S/R, Peak Reversal и Neuro; этот модуль считается в основном процессе">· ⚙️ 1 ядро (этот модуль пока в одном процессе)</span>`
     : (status.last_backtest_finished
       ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) \u00b7 история ${fmtMonths(cfg.backtest_days)}` +
         // v0.99.319 — what the live scanner actually watches
@@ -26312,7 +26312,7 @@ async function refreshLsw() {
     return `${levelTypeLabels[lt] || lt}: ${wr} (n=${s.n})`;
   }).join(' · ');
   const buildTxt = status.backtest_running
-    ? `бэктест выполняется (начат ${status.backtest_started_at ? fmtTime(status.backtest_started_at) : '?'}): ${status.backtest_done||0}/${status.backtest_total||'?'} монет${status.backtest_started_at ? ' · идёт ' + Math.round((Date.now()/1000 - status.backtest_started_at)) + 'с' : ''}`
+    ? `бэктест выполняется (начат ${status.backtest_started_at ? fmtTime(status.backtest_started_at) : '?'}): ${status.backtest_done||0}/${status.backtest_total||'?'} монет${status.backtest_started_at ? ' · идёт ' + Math.round((Date.now()/1000 - status.backtest_started_at)) + 'с' : ''} <span class="dim" title="на несколько ядер пока переведены S/R, Peak Reversal и Neuro; этот модуль считается в основном процессе">· ⚙️ 1 ядро (этот модуль пока в одном процессе)</span>`
     : status.last_backtest_finished
     ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · история ${fmtMonths(cfg.backtest_days)} · в живом скане: ${(status.live_universe||[]).length}/${(status.top||[]).length} монет (винрейт > ${cfg.live_min_winrate}%)`
     : 'бэктест ещё не завершился — живой скан новых сигналов на паузе, чтобы не показывать неотфильтрованные монеты';

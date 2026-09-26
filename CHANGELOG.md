@@ -17576,3 +17576,7 @@ v0.99.373 - Cores setting applies on the fly (user: "на горячую сме�
          Verified: py_compile (-W error), pyflakes, runtime, settings save;
          6 coins: limit 1 -> busy 1, set 3 -> busy 3 within 1 s, set 0 -> no
          processes left after the running coins finished.
+v0.99.374 - MSNR and Sweep progress lines say "⚙️ 1 ядро (этот модуль пока в одном
+         процессе)" (user looked for the cores info on the MSNR tab — only S/R,
+         P/R and Neuro use worker processes so far).
+         Verified: py_compile (-W error), pyflakes, runtime, JS check.
