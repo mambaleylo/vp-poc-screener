@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.365"
+APP_VERSION = "0.99.366"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16375,7 +16375,7 @@ def snr_diag_summary(universe):
 
 NEURO_TF_NEAR_Z = 1.0    # v0.99.364 — combos this close on train get a filter attempt
 NEURO_TF_NEAR_K = 3      # at most this many near-miss combos per coin
-NEURO_TF_PHASE_COINS = int(os.environ.get("VP_NEURO_TF_PHASE_COINS", 15))   # v0.99.365 — coins per S/R / P/R filter phase
+NEURO_TF_PHASE_COINS = int(os.environ.get("VP_NEURO_TF_PHASE_COINS", 0))   # v0.99.366 — 0 = every coin with a candidate (was 15)
 _snr_filter_cands = {}   # symbol -> [candidate combo params] from the last S/R cycle
 _prv_filter_cands = {}   # same for P/R
 
@@ -16411,7 +16411,6 @@ def strategy_filter_phase(mod):
     the fee-inclusive z test on train AND test. A coin that passes this way
     (or passes better than without the filter) joins / replaces its entry
     in the results, then the ranking is redone exactly like the cycle end."""
-    global _snr_active_symbols, _snr_display_symbols, _prv_active_symbols, _prv_display_symbols
     if mod == "snr":
         cands_map, rebuild, zc, mtr, mte = _snr_filter_cands, _snr_rebuild_cand, SNR_Z_CRITICAL, SNR_MIN_TRAIN_TRADES, SNR_MIN_TEST_TRADES
         loop, top_n, disp_n = "snr_filter_loop", SNR_TOP_N, SNR_DISPLAY_N
@@ -16419,10 +16418,17 @@ def strategy_filter_phase(mod):
         cands_map, rebuild, zc, mtr, mte = _prv_filter_cands, _prv_rebuild_cand, PRV_Z_CRITICAL, PRV_MIN_TRAIN_TRADES, PRV_MIN_TEST_TRADES
         loop, top_n, disp_n = "prv_filter_loop", PRV_TOP_N, PRV_DISPLAY_N
     ranked_coins = sorted(((s, max(c["train_z"] for c in cs)) for s, cs in list(cands_map.items()) if cs),
-                          key=lambda x: -x[1])[:NEURO_TF_PHASE_COINS]
+                          key=lambda x: -x[1])
+    if NEURO_TF_PHASE_COINS > 0:
+        ranked_coins = ranked_coins[:NEURO_TF_PHASE_COINS]
     added = {}
+    prog = {"t": time.time(), "done": 0, "total": len(ranked_coins), "added": 0, "current": None, "running": True}
+    with state_lock:
+        STATE[f"{mod}_filter_phase"] = prog
     for sym, _z in ranked_coins:
         heartbeat(loop)
+        with state_lock:
+            prog["current"] = sym
         try:
             cands = [c for c in (rebuild(sym, p) for p in cands_map.get(sym, [])) if c]
             for c in cands:
@@ -16441,12 +16447,27 @@ def strategy_filter_phase(mod):
             best.update(rr_compound_annotate(_all, sym))
             best["all_trades"] = _all[::-1]
             added[sym] = best
+            # v0.99.366 — merged right away, so coins show up while the phase runs
+            if _strategy_merge_filtered(mod, {sym: best}, top_n, disp_n):
+                with state_lock:
+                    prog["added"] += 1
         except NeuroCancelled:
             raise
         except Exception as e:
             log_error(f"{mod}_filter_phase {sym}: {e}")
-    if not added:
-        return 0
+        finally:
+            with state_lock:
+                prog["done"] += 1
+    with state_lock:
+        prog["running"] = False
+        prog["current"] = None
+    return len(added)
+
+
+def _strategy_merge_filtered(mod, added, top_n, disp_n):
+    """Merge filter-phase results into S/R / P/R results and re-rank exactly
+    like the cycle end. Returns how many coins are new in the results."""
+    global _snr_active_symbols, _snr_display_symbols, _prv_active_symbols, _prv_display_symbols
     with state_lock:
         results = dict(STATE.get(f"{mod}_results") or {})
         n_new = 0
@@ -16468,9 +16489,9 @@ def strategy_filter_phase(mod):
         d = STATE.get(f"{mod}_diag")
         if isinstance(d, dict):
             d["passed"] = (d.get("passed") or 0) + n_new
-            d["filter_added"] = n_new
+            d["filter_added"] = (d.get("filter_added") or 0) + n_new
     save_state()
-    return len(added)
+    return n_new
 
 
 def _variant_trades(c, f):
@@ -21631,6 +21652,7 @@ def api_snr_status():
                        "live_signal_stats": signal_stats["by_symbol"].get(symbol),
                        "recent_live_signals": recent_live_signals})
     return jsonify({
+        "filter_phase": STATE.get("snr_filter_phase"),   # v0.99.366
         "diag": STATE.get("snr_diag"),   # v0.99.362
         "filters": STATE.get("snr_filters"),   # v0.99.337
         "coins": coins, "last_backtest_finished": last_finished,
@@ -21695,6 +21717,7 @@ def api_prv_status():
                        "live_signal_stats": signal_stats["by_symbol"].get(symbol),
                        "recent_live_signals": recent_live_signals})
     return jsonify({
+        "filter_phase": STATE.get("prv_filter_phase"),   # v0.99.366
         "filters": STATE.get("prv_filters"),   # v0.99.361
         "coins": coins, "last_backtest_finished": last_finished,
         "backtest_running": running, "waiting_for_slot": waiting, "progress_done": done, "progress_total": total,
@@ -26283,6 +26306,7 @@ async function refreshSnr() {
       ${progressHtml}
       ${lstatsHtml}
       ${liveSigsTableHtml}
+      ${filterPhaseHtml(data.filter_phase)}
       ${snrDiagHtml(data.diag)}
       ${filterReportHtml(data.filters, "🧪 Фильтры для S/R (информационно)", "считаются (≈20 мин после запуска и после каждого бэктеста S/R)")}
       ${cards || '<div class="dim">\u043f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445</div>'}
@@ -26384,6 +26408,7 @@ async function refreshPrv() {
       ${progressHtml}
       ${lstatsHtml}
       ${liveSigsTableHtml}
+      ${filterPhaseHtml(data.filter_phase)}
       ${filterReportHtml(data.filters, "🧪 Neuro-фильтры для Peak Reversal (информационно)", "считаются (≈30 мин после запуска и после каждого бэктеста P/R)")}
       ${cards || '<div class="dim">\u043f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445</div>'}
     `;
@@ -28076,6 +28101,12 @@ function filterReportHtml(nf, title, pendingTxt) {
     <div class="dim hint-block" style="font-size:11px;margin:4px 0 6px;">Каждое условие пробуется как фильтр («убрать» / «только»). <b>Выбор — на train-части</b> (где подбирались параметры), цифры — на <b>тест-части</b>, которую он не видел. 🏆 — лучший: не ухудшил ни одну монету и дал наибольший рост винрейта; дальше — остальные по тому же правилу. Оставляют не меньше 50% сделок. Средний R рядом: если падает — фильтр «покупает» винрейт за счёт прибыли. В торговлю ничего не применяется. Посчитано ${fmtTime(nf.computed_at)}.</div>
     <div style="overflow-x:auto;"><table style="font-size:11px;white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="6" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
   </details>`;
+}
+// v0.99.366 — progress of the post-backtest Neuro-filter phase (S/R, P/R)
+function filterPhaseHtml(p) {
+  if (!p || !p.total) return '';
+  const pct = Math.round(p.done / p.total * 100);
+  return `<div class="dim" style="font-size:11px;margin:4px 0;">🧪 подбор фильтра Neuro: ${p.running ? `${p.done}/${p.total} монет (${pct}%)${p.current ? ' · сейчас ' + p.current.replace('_USDT','') : ''}` : `готово (${p.total} монет, ${fmtDateTime(p.t)})`} · прошли с фильтром: <b class="${p.added ? 'win' : ''}">${p.added}</b></div>`;
 }
 // v0.99.364 — MSNR / Sweep: the Neuro filter decision for one coin
 function tradeFilterTxt(f, info, beforeTxt) {

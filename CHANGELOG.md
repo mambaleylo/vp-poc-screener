@@ -17462,3 +17462,13 @@ v0.99.365 - S/R backtest took hours after v0.99.364 (user: "S/R zone очень 
          S/R + P/R optimize output identical to v0.99.363 with the filter on;
          phase test: filtered variant found and merged, ranking/active list
          rebuilt, no errors.
+v0.99.366 - S/R, P/R: the Neuro-filter phase now tries EVERY coin that has a
+         candidate combo (NEURO_TF_PHASE_COINS default 15 -> 0 = all; user:
+         "надо фильтр сразу использовать, так шанс больше что больше 1 монеты
+         пройдут"). Coins are processed from most to least promising and each
+         one that passes is merged into the results immediately (not at the
+         end), so they appear while the phase runs; the backtest itself stays
+         as fast as v0.99.363. Progress line in both tabs: "🧪 подбор фильтра
+         Neuro: 37/412 монет · сейчас X · прошли с фильтром: N".
+         Verified: py_compile (-W error), pyflakes, runtime, JS check; phase
+         test (all coins, progress state, merge), jsdom progress line.
