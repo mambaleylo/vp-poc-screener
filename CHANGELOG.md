@@ -17589,3 +17589,14 @@ v0.99.375 - FIX: the cores settings didn't save/apply (user: "настройка
          Verified: py_compile (-W error), pyflakes, JS check; settings file with
          the bogus true -> 3 / boost default; set 5 -> 5, survives a restart;
          jsdom: fields show 3 / 8 and a change posts {"calc_workers": "5"}.
+v0.99.376 - MSNR and Sweep on several cores (user: "делай"). MSNR: the 27-combo
+         grid (msnr_grid_core) runs in a worker; downloads, per-symbol filters,
+         leverage and compounding stay in the main process. Sweep: everything
+         after the downloads (lsw_backtest_core: RR on train, detection,
+         filter checkpoints, active chain, one-position rule) runs in a worker.
+         Both cycles get the first-run / post-reset boost; their progress lines
+         show "⚙️ ядер: X из Y". MSNR_/LSW_ settings are sent with every task.
+         tools/compare_multicore.py now also checks MSNR and Sweep.
+         Verified: py_compile (-W error), pyflakes, runtime, JS check; synthetic
+         4 coins in parallel: MSNR (incl. the best-combo path) and Sweep
+         old == new(0) == new(3 workers), strict type-aware.

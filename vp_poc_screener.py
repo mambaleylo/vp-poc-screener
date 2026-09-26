@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.375"
+APP_VERSION = "0.99.376"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9341,6 +9341,43 @@ def _msnr_recompute_summary_score(best, best_results):
     best["score"] = round(msnr_ranking_score(r_values, filtered_summary["losses"]), 4) if r_values else None
 
 
+def msnr_grid_core(structure_candles, entry_candles, higher_candles, now):
+    """v0.99.375 — the pure-CPU grid search of msnr_optimize_symbol(),
+    unchanged logic: returns {"best", "best_results", "tried"}."""
+    best = None
+    best_score = None
+    best_results = []
+    tried = []
+    for min_leg_atr in MSNR_PARAM_GRID_MIN_LEG_ATR:
+        for qm_zone_pct in MSNR_PARAM_GRID_QM_ZONE_PCT:
+            for qm_lookback in MSNR_PARAM_GRID_QM_LOOKBACK:
+                results = msnr_run_backtest(structure_candles, entry_candles, higher_candles,
+                                             min_leg_atr=min_leg_atr, qm_zone_pct=qm_zone_pct,
+                                             qm_lookback=qm_lookback)
+                tried.append(len(results))
+                closed = [r for r in results if r["result"] in ("WIN", "LOSS")]
+                if len(closed) < MSNR_MIN_BACKTEST_TRADES:
+                    continue
+                wins = sum(1 for r in closed if r["result"] == "WIN")
+                losses_count = len(closed) - wins
+                r_values = [r["rr"] for r in closed if r["result"] == "WIN" and r["rr"] is not None]
+                r_values += [-1.0] * losses_count
+                score = msnr_ranking_score(r_values, losses_count)
+                if best is None or score > best_score:
+                    summary = msnr_summarize_backtest(results)
+                    best = {
+                        "min_leg_atr": min_leg_atr, "qm_zone_pct": qm_zone_pct, "qm_lookback_bars": qm_lookback,
+                        "trades": len(results), "wins": wins, "losses": losses_count,
+                        "timeouts": len(results) - len(closed),
+                        "winrate": summary["win_rate"], "avg_rr": summary["avg_rr"],
+                        "median_rr": summary["median_rr"], "expectancy_r": summary["expectancy_r"],
+                        "score": round(score, 4), "optimized_at": now, "candles_used": len(entry_candles),
+                    }
+                    best_score = score
+                    best_results = results
+    return {"best": best, "best_results": best_results, "tried": tried}
+
+
 def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
     """Grid search over (min_leg_atr, qm_zone_pct, qm_lookback) —
     MSNR_PARAM_GRID_MIN_LEG_ATR x MSNR_PARAM_GRID_QM_ZONE_PCT x
@@ -9385,37 +9422,11 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
         # the documented contract: both trade lists are empty (there's
         # no backtest to report), not just the override.
         return {"error": "not enough history"}, [], []
-    best = None
-    best_score = None
-    best_results = []
-    tried = []
-    for min_leg_atr in MSNR_PARAM_GRID_MIN_LEG_ATR:
-        for qm_zone_pct in MSNR_PARAM_GRID_QM_ZONE_PCT:
-            for qm_lookback in MSNR_PARAM_GRID_QM_LOOKBACK:
-                results = msnr_run_backtest(structure_candles, entry_candles, higher_candles,
-                                             min_leg_atr=min_leg_atr, qm_zone_pct=qm_zone_pct,
-                                             qm_lookback=qm_lookback)
-                tried.append(len(results))
-                closed = [r for r in results if r["result"] in ("WIN", "LOSS")]
-                if len(closed) < MSNR_MIN_BACKTEST_TRADES:
-                    continue
-                wins = sum(1 for r in closed if r["result"] == "WIN")
-                losses_count = len(closed) - wins
-                r_values = [r["rr"] for r in closed if r["result"] == "WIN" and r["rr"] is not None]
-                r_values += [-1.0] * losses_count
-                score = msnr_ranking_score(r_values, losses_count)
-                if best is None or score > best_score:
-                    summary = msnr_summarize_backtest(results)
-                    best = {
-                        "min_leg_atr": min_leg_atr, "qm_zone_pct": qm_zone_pct, "qm_lookback_bars": qm_lookback,
-                        "trades": len(results), "wins": wins, "losses": losses_count,
-                        "timeouts": len(results) - len(closed),
-                        "winrate": summary["win_rate"], "avg_rr": summary["avg_rr"],
-                        "median_rr": summary["median_rr"], "expectancy_r": summary["expectancy_r"],
-                        "score": round(score, 4), "optimized_at": now, "candles_used": len(entry_candles),
-                    }
-                    best_score = score
-                    best_results = results
+    # v0.99.375 — the 27-combo grid runs in msnr_grid_core() (possibly in a
+    # worker process on another core); everything after it stays here.
+    _g = calc_run("msnr_grid_core", {"structure_candles": structure_candles, "entry_candles": entry_candles,
+                                     "higher_candles": higher_candles, "now": now})
+    best, best_results, tried = _g["best"], _g["best_results"], _g["tried"]
     if best is None:
         mid_atr = MSNR_PARAM_GRID_MIN_LEG_ATR[len(MSNR_PARAM_GRID_MIN_LEG_ATR) // 2]
         mid_zone = MSNR_PARAM_GRID_QM_ZONE_PCT[len(MSNR_PARAM_GRID_QM_ZONE_PCT) // 2]
@@ -12285,7 +12296,8 @@ def msnr_backtest_loop():
                 STATE["msnr_waiting_for_slot"] = False
             try:
                 _cycle_ex = ThreadPoolExecutor(max_workers=1)
-                _cycle_fut = _cycle_ex.submit(_msnr_run_one_backtest_cycle, t0)
+                _cycle_fut = _cycle_ex.submit(_calc_boosted, "msnr", STATE.get("msnr_last_backtest_finished") is None,
+                                              _msnr_run_one_backtest_cycle, t0)   # v0.99.375
                 _prev_cycle_fut = _cycle_fut
                 try:
                     wait_cycle_future(_cycle_fut, "msnr_backtest_loop", "msnr_backtest_done")   # v0.99.352 — abandon only on a real stall
@@ -14706,66 +14718,10 @@ def lsw_pick_best_rr(candles, htf_candles, htf_interval_sec, confirm_candles, tr
     return best_rr, sweep
 
 
-def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
-    """Fetches LSW_BACKTEST_DAYS of LSW_INTERVAL history, runs the
-    detector + outcome tracker over the whole window. v0.99.121: when
-    LSW_HTF_FILTER_ENABLED, also fetches LSW_HTF_INTERVAL history over
-    the SAME window and runs lsw_filter_signals_by_htf_trend() before
-    tracking outcomes, so the backtest numbers reflect the filter
-    exactly as live trading would apply it. v0.99.122 adds two more,
-    same "reflect exactly what live would do" principle: when LSW_
-    STRUCTURAL_CAP_ENABLED, lsw_filter_signals_by_structural_cap() runs
-    directly against the already-fetched LSW_INTERVAL candles (no extra
-    fetch needed — it's a single-timeframe check); when LSW_ENTRY_
-    CONFIRM_ENABLED, fetches LSW_ENTRY_CONFIRM_INTERVAL (5m) history
-    over the same window and runs lsw_apply_entry_confirmation(), which
-    replaces each surviving signal's own entry/sl/tp or drops it if no
-    5m confirmation ever fired. v0.99.139 adds a 4th, lsw_filter_
-    signals_by_volume() (LSW_VOLUME_FILTER_ENABLED) — same single-
-    timeframe, no-extra-fetch shape as structural cap. v0.99.140 adds
-    3 more of the SAME no-extra-fetch shape: lsw_filter_signals_by_fvg()
-    (LSW_FVG_FILTER_ENABLED), lsw_filter_signals_by_session()
-    (LSW_SESSION_FILTER_ENABLED), lsw_filter_signals_by_min_touches()
-    (LSW_MIN_TOUCHES_ENABLED). Filter order for the ACTUAL result: HTF
-    trend -> structural cap -> volume -> min touches -> FVG -> session
-    -> 5m entry confirmation — cheapest/coarsest checks first, so the
-    (comparatively expensive) 5m confirmation only ever runs on signals
-    that already passed everything else.
-    v0.99.136, per direct user request ("хочу чтобы в sweep индикаторе
-    каждая из галочек настроек показывала в таблице что стало после
-    этого фильтра чтобы была оценка необходимости, вдруг она сделала
-    хуже"): ALSO computes, independently of which toggles are currently
-    on, what each filter would do ALONE against the raw signal pool —
-    not chained through the others, so each filter's own individual
-    contribution is visible without interaction effects. v0.99.139,
-    per direct follow-up ("убери из отображения в столбцах... добавим
-    ещё один"): the HTF trend and structural cap solo checkpoints are
-    no longer computed at all (their own toggles and detection code
-    stay fully usable in the ACTUAL chain below — only the extra solo-
-    checkpoint work for the no-longer-displayed columns was dropped).
-    Returns (results, meta) — results is the raw trades list using
-    whichever filters are ACTUALLY enabled right now (unchanged
-    behavior, still what live-eligibility/ranking is computed from);
-    meta = {"checkpoints": {"raw", "entry_confirm", "volume_filter",
-    "fvg_filter", "session_filter", "min_touches_filter"}}, each a
-    _mirror_checkpoint()-shaped {n, winrate, expectancy_r} dict
-    (reusing that exact helper — LSW shares the same fixed-RR-per-trade
-    shape MIRROR's own checkpoint math already assumes) or None where
-    there wasn't enough history to judge that filter at all."""
-    now = time.time()
-    fetch_start = now - days * 86400
-    candles = get_candles_range(symbol, LSW_INTERVAL, fetch_start, now)
-    if len(candles) < LSW_PIVOT_LEFT + LSW_PIVOT_RIGHT + 20:
-        return [], {"checkpoints": {"raw": None, "entry_confirm": None, "volume_filter": None,
-                                     "fvg_filter": None, "session_filter": None, "min_touches_filter": None,
-                                     "candle_structure": None, "atr_sweep": None},
-                     "chosen_rr": LSW_RR, "rr_sweep": []}
-
-    htf_interval_sec = INTERVAL_SECONDS.get(LSW_HTF_INTERVAL, 14400)
-    htf_fetch_start = fetch_start - LSW_HTF_EMA_PERIOD * htf_interval_sec
-    htf_candles = get_candles_range(symbol, LSW_HTF_INTERVAL, htf_fetch_start, now)
-    confirm_candles = get_candles_range(symbol, LSW_ENTRY_CONFIRM_INTERVAL, fetch_start, now)
-
+def lsw_backtest_core(candles, htf_candles, htf_interval_sec, confirm_candles):
+    """v0.99.375 — pure-CPU part of lsw_backtest_symbol(), unchanged logic:
+    RR choice on train, detection, filter checkpoints, active filter chain,
+    one-position rule. Returns {"results", "meta"}."""
     # v0.99.223 — pick RR from the TRAIN portion only, BEFORE detecting the
     # real signals below, so the chosen RR gets applied consistently to
     # the full-history result that follows.
@@ -14834,7 +14790,74 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
             filtered_sigs.append(sig)
         sigs = filtered_sigs
     results = _track_all(sigs)
-    return results, {"checkpoints": checkpoints, "chosen_rr": chosen_rr, "rr_sweep": rr_sweep}
+    return {"results": results, "meta": {"checkpoints": checkpoints, "chosen_rr": chosen_rr, "rr_sweep": rr_sweep}}
+
+
+def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
+    """Fetches LSW_BACKTEST_DAYS of LSW_INTERVAL history, runs the
+    detector + outcome tracker over the whole window. v0.99.121: when
+    LSW_HTF_FILTER_ENABLED, also fetches LSW_HTF_INTERVAL history over
+    the SAME window and runs lsw_filter_signals_by_htf_trend() before
+    tracking outcomes, so the backtest numbers reflect the filter
+    exactly as live trading would apply it. v0.99.122 adds two more,
+    same "reflect exactly what live would do" principle: when LSW_
+    STRUCTURAL_CAP_ENABLED, lsw_filter_signals_by_structural_cap() runs
+    directly against the already-fetched LSW_INTERVAL candles (no extra
+    fetch needed — it's a single-timeframe check); when LSW_ENTRY_
+    CONFIRM_ENABLED, fetches LSW_ENTRY_CONFIRM_INTERVAL (5m) history
+    over the same window and runs lsw_apply_entry_confirmation(), which
+    replaces each surviving signal's own entry/sl/tp or drops it if no
+    5m confirmation ever fired. v0.99.139 adds a 4th, lsw_filter_
+    signals_by_volume() (LSW_VOLUME_FILTER_ENABLED) — same single-
+    timeframe, no-extra-fetch shape as structural cap. v0.99.140 adds
+    3 more of the SAME no-extra-fetch shape: lsw_filter_signals_by_fvg()
+    (LSW_FVG_FILTER_ENABLED), lsw_filter_signals_by_session()
+    (LSW_SESSION_FILTER_ENABLED), lsw_filter_signals_by_min_touches()
+    (LSW_MIN_TOUCHES_ENABLED). Filter order for the ACTUAL result: HTF
+    trend -> structural cap -> volume -> min touches -> FVG -> session
+    -> 5m entry confirmation — cheapest/coarsest checks first, so the
+    (comparatively expensive) 5m confirmation only ever runs on signals
+    that already passed everything else.
+    v0.99.136, per direct user request ("хочу чтобы в sweep индикаторе
+    каждая из галочек настроек показывала в таблице что стало после
+    этого фильтра чтобы была оценка необходимости, вдруг она сделала
+    хуже"): ALSO computes, independently of which toggles are currently
+    on, what each filter would do ALONE against the raw signal pool —
+    not chained through the others, so each filter's own individual
+    contribution is visible without interaction effects. v0.99.139,
+    per direct follow-up ("убери из отображения в столбцах... добавим
+    ещё один"): the HTF trend and structural cap solo checkpoints are
+    no longer computed at all (their own toggles and detection code
+    stay fully usable in the ACTUAL chain below — only the extra solo-
+    checkpoint work for the no-longer-displayed columns was dropped).
+    Returns (results, meta) — results is the raw trades list using
+    whichever filters are ACTUALLY enabled right now (unchanged
+    behavior, still what live-eligibility/ranking is computed from);
+    meta = {"checkpoints": {"raw", "entry_confirm", "volume_filter",
+    "fvg_filter", "session_filter", "min_touches_filter"}}, each a
+    _mirror_checkpoint()-shaped {n, winrate, expectancy_r} dict
+    (reusing that exact helper — LSW shares the same fixed-RR-per-trade
+    shape MIRROR's own checkpoint math already assumes) or None where
+    there wasn't enough history to judge that filter at all."""
+    now = time.time()
+    fetch_start = now - days * 86400
+    candles = get_candles_range(symbol, LSW_INTERVAL, fetch_start, now)
+    if len(candles) < LSW_PIVOT_LEFT + LSW_PIVOT_RIGHT + 20:
+        return [], {"checkpoints": {"raw": None, "entry_confirm": None, "volume_filter": None,
+                                     "fvg_filter": None, "session_filter": None, "min_touches_filter": None,
+                                     "candle_structure": None, "atr_sweep": None},
+                     "chosen_rr": LSW_RR, "rr_sweep": []}
+
+    htf_interval_sec = INTERVAL_SECONDS.get(LSW_HTF_INTERVAL, 14400)
+    htf_fetch_start = fetch_start - LSW_HTF_EMA_PERIOD * htf_interval_sec
+    htf_candles = get_candles_range(symbol, LSW_HTF_INTERVAL, htf_fetch_start, now)
+    confirm_candles = get_candles_range(symbol, LSW_ENTRY_CONFIRM_INTERVAL, fetch_start, now)
+
+    # v0.99.375 — the calculation runs in lsw_backtest_core() (possibly in a
+    # worker process on another core)
+    _o = calc_run("lsw_backtest_core", {"candles": candles, "htf_candles": htf_candles,
+                                        "htf_interval_sec": htf_interval_sec, "confirm_candles": confirm_candles})
+    return _o["results"], _o["meta"]
 
 def lsw_live_decision(summary):
     """v0.99.364 — factored out of lsw_backtest_loop() unchanged: is the
@@ -15277,7 +15300,8 @@ def lsw_backtest_loop():
                 STATE["lsw_waiting_for_slot"] = False
             try:
                 _cycle_ex = ThreadPoolExecutor(max_workers=1)
-                _cycle_fut = _cycle_ex.submit(_lsw_run_one_backtest_cycle, t0)
+                _cycle_fut = _cycle_ex.submit(_calc_boosted, "lsw", STATE.get("lsw_last_backtest_finished") is None,
+                                              _lsw_run_one_backtest_cycle, t0)   # v0.99.375
                 _prev_cycle_fut = _cycle_fut
                 try:
                     wait_cycle_future(_cycle_fut, "lsw_backtest_loop", "lsw_backtest_done")   # v0.99.352 — abandon only on a real stall
@@ -18078,10 +18102,11 @@ def run_pool_with_progress(fn, items, workers, loop_name, on_result, on_stop, st
 # "E <json text>" = error.
 # ============================================================================
 CALC_WORKERS = int(os.environ.get("VP_CALC_WORKERS", 3))
-CALC_FUNCS = ("snr_optimize_core", "prv_optimize_core", "neuro_backtest_core", "neuro_conditions_core")
+CALC_FUNCS = ("snr_optimize_core", "prv_optimize_core", "neuro_backtest_core", "neuro_conditions_core",
+              "msnr_grid_core", "lsw_backtest_core")
 # settings that can change at runtime are sent with every task, so a worker
 # always computes with the main process's current values
-CALC_CONST_PREFIXES = ("SNR_", "PRV_", "NEURO_", "AUTOTRADE_SIM_FEE_PCT")
+CALC_CONST_PREFIXES = ("SNR_", "PRV_", "NEURO_", "MSNR_", "LSW_", "AUTOTRADE_SIM_FEE_PCT")
 _calc_pool = []            # idle worker Popen objects
 _calc_busy = 0
 _calc_cond = threading.Condition()
@@ -18092,7 +18117,8 @@ CALC_WORKERS_BOOST = int(os.environ.get("VP_CALC_WORKERS_BOOST", min(8, os.cpu_c
 _calc_boost = set()        # modules currently in a first / post-reset run
 _calc_busy_by = {}         # v0.99.372 — module -> worker processes it is using right now
 _CALC_FN_MODULE = {"snr_optimize_core": "snr", "prv_optimize_core": "prv",
-                   "neuro_backtest_core": "neuro", "neuro_conditions_core": "cond"}
+                   "neuro_backtest_core": "neuro", "neuro_conditions_core": "cond",
+                   "msnr_grid_core": "msnr", "lsw_backtest_core": "lsw"}
 
 
 def calc_status(mod):
@@ -18120,6 +18146,12 @@ class calc_boost:
             _calc_boost.discard(self.mod)
             _calc_cond.notify_all()
         return False
+
+
+def _calc_boosted(mod, first_run, fn, *args):
+    """v0.99.375 — run a backtest cycle with the first-run core boost."""
+    with calc_boost(mod, first_run):
+        return fn(*args)
 
 
 def calc_apply_limit():
@@ -22711,6 +22743,7 @@ def api_lsw_status():
                    rr_sweep=rr_sweep_map.get(sym, [])) for sym, s in summary.items()]
     ranked.sort(key=lambda r: (r["win_rate"] or 0, r["n"]), reverse=True)
     return jsonify({
+        "calc": calc_status("lsw"),   # v0.99.375
         "enabled": LSW_ENABLED,
         "last_backtest_finished": last_backtest_finished,
         "last_backtest_duration": last_backtest_duration,
@@ -23074,6 +23107,7 @@ def api_msnr_status():
     pooled_trades = [t for sym_trades in backtest_results_raw.values() for t in sym_trades]
     rr_buckets = msnr_rr_bucket_stats(pooled_trades)
     return jsonify({
+        "calc": calc_status("msnr"),   # v0.99.375
         "provisional": STATE.get("msnr_provisional"),   # v0.99.369
         "enabled": MSNR_ENABLED,
         "live_universe": live_universe,
@@ -24306,7 +24340,7 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="name">Процессы для расчёта бэктестов (S/R, P/R, Neuro)</div>
+          <div class="name">Процессы для расчёта бэктестов (MSNR, Neuro, S/R, P/R, Sweep)</div>
           <div class="sub">сколько ядер процессора использовать для расчёта (каждый процесс ≈85 МБ памяти). 0 — считать как раньше, в одном процессе. Результаты одинаковые, меняется только скорость и нагрузка</div>
         </div>
         <input type="number" id="setCalcWorkers" min="0" max="8" step="1" style="width:60px;background:#0d1220;border:1px solid #1c2433;color:#fff;padding:6px 8px;border-radius:6px;font-size:12px;">
@@ -25327,7 +25361,7 @@ async function refreshMsnr() {
   const ss = status.signals_stats || {};
   const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `<span class="${ss.winrate >= 50 ? 'win' : 'loss'}">${ss.winrate}%</span>` : '<span class="dim">-</span>';
   const buildTxt = status.backtest_running
-    ? `бэктест выполняется: ${status.backtest_done||0}/${status.backtest_total||'?'} монет${status.backtest_started_at ? ' · идёт ' + Math.round((Date.now()/1000 - status.backtest_started_at)) + 'с' : ''} <span class="dim" title="на несколько ядер пока переведены S/R, Peak Reversal и Neuro; этот модуль считается в основном процессе">· ⚙️ 1 ядро (этот модуль пока в одном процессе)</span>`
+    ? `бэктест выполняется: ${status.backtest_done||0}/${status.backtest_total||'?'} монет${status.backtest_started_at ? ' · идёт ' + Math.round((Date.now()/1000 - status.backtest_started_at)) + 'с' : ''}${coresTxt(status.calc)}`
     : (status.last_backtest_finished
       ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) \u00b7 история ${fmtMonths(cfg.backtest_days)}` +
         // v0.99.319 — what the live scanner actually watches
@@ -26312,7 +26346,7 @@ async function refreshLsw() {
     return `${levelTypeLabels[lt] || lt}: ${wr} (n=${s.n})`;
   }).join(' · ');
   const buildTxt = status.backtest_running
-    ? `бэктест выполняется (начат ${status.backtest_started_at ? fmtTime(status.backtest_started_at) : '?'}): ${status.backtest_done||0}/${status.backtest_total||'?'} монет${status.backtest_started_at ? ' · идёт ' + Math.round((Date.now()/1000 - status.backtest_started_at)) + 'с' : ''} <span class="dim" title="на несколько ядер пока переведены S/R, Peak Reversal и Neuro; этот модуль считается в основном процессе">· ⚙️ 1 ядро (этот модуль пока в одном процессе)</span>`
+    ? `бэктест выполняется (начат ${status.backtest_started_at ? fmtTime(status.backtest_started_at) : '?'}): ${status.backtest_done||0}/${status.backtest_total||'?'} монет${status.backtest_started_at ? ' · идёт ' + Math.round((Date.now()/1000 - status.backtest_started_at)) + 'с' : ''}${coresTxt(status.calc)}`
     : status.last_backtest_finished
     ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · история ${fmtMonths(cfg.backtest_days)} · в живом скане: ${(status.live_universe||[]).length}/${(status.top||[]).length} монет (винрейт > ${cfg.live_min_winrate}%)`
     : 'бэктест ещё не завершился — живой скан новых сигналов на паузе, чтобы не показывать неотфильтрованные монеты';

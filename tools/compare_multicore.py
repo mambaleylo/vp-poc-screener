@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Сверка расчёта на нескольких ядрах (S/R, P/R, Neuro): старая версия
+"""Сверка расчёта на нескольких ядрах (MSNR, Sweep, S/R, P/R, Neuro): старая версия
 (один процесс) против новой (отдельные процессы) на РЕАЛЬНЫХ данных Gate.
 
 Запуск (в Termux, из папки где лежат оба файла):
@@ -91,7 +91,9 @@ def main(old_path, new_path, symbols):
     new.CALC_WORKERS = max(new.CALC_WORKERS, new.CALC_WORKERS_BOOST)   # как при первом прогоне
     print(f"старая: v{getattr(old, 'APP_VERSION', '?')}   новая: v{getattr(new, 'APP_VERSION', '?')} "
           f"(процессов: {new.CALC_WORKERS})")
-    ok = check("S/R", old.snr_optimize_symbol, new.snr_optimize_symbol, symbols, 8, 8)
+    ok = check("MSNR", lambda s: list(old.msnr_optimize_symbol(s)), lambda s: list(new.msnr_optimize_symbol(s)), symbols, 8, 8)
+    ok &= check("Sweep", lambda s: list(old.lsw_backtest_symbol(s)), lambda s: list(new.lsw_backtest_symbol(s)), symbols, 8, 8)
+    ok &= check("S/R", old.snr_optimize_symbol, new.snr_optimize_symbol, symbols, 8, 8)
     ok &= check("P/R", old.prv_optimize_symbol, new.prv_optimize_symbol, symbols, 8, 8)
     nsyms = symbols[:3]
     btc_o = old.get_candles_range("BTC_USDT", old.NEURO_TF, int(time.time()) - old.NEURO_HISTORY_DAYS * 86400, int(time.time()))
