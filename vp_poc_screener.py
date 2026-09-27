@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.413"
+APP_VERSION = "0.99.414"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14209,6 +14209,69 @@ def _prv_rebuild_cand(symbol, p):
             "span": (candles[0]["time"], candles[-1]["time"])}
 
 
+STRATEGY_FILTER_KEEP_Z = 1.645   # v0.99.414 — a coin's accepted filter + combo is one fixed hypothesis on the next backtest (same bar as PRV_KEEP_Z)
+
+
+def strategy_carry_filters(mod, old_results, loop_name):
+    """v0.99.414 — per user ("сохранить фильтр через бэктест" — делай): a coin
+    that trades WITH its accepted Neuro filter is re-checked at the end of
+    the next backtest with that SAME combo + filter on the fresh data, so it
+    no longer disappears (or trades unfiltered) until the filter phase has
+    run again. It stays while the filtered trades hold z >= 1.645 on train
+    AND test (one fixed hypothesis, no new search); otherwise it's dropped
+    and the filter phase may find it anew. Returns {symbol: result}."""
+    snr = mod == "snr"
+    rebuild = _snr_rebuild_cand if snr else _prv_rebuild_cand
+    zc, tcrit = (SNR_Z_CRITICAL, SNR_TEST_Z) if snr else (PRV_Z_CRITICAL, PRV_TEST_Z)
+    mtr, mte = (SNR_MIN_TRAIN_TRADES, SNR_MIN_TEST_TRADES) if snr else (PRV_MIN_TRAIN_TRADES, PRV_MIN_TEST_TRADES)
+    out = {}
+    for sym, r in (old_results or {}).items():
+        nf = (r or {}).get("neuro_filter")
+        if not nf:
+            continue
+        heartbeat(loop_name)
+        try:
+            if snr:
+                p = {"tf": r["timeframe"], "pl": r["pivot_length"], "ms": r["min_strength"], "rr": r["rr"]}
+                params = {"timeframe": p["tf"], "pivot_length": p["pl"], "min_strength": p["ms"], "rr": p["rr"]}
+            else:
+                p = {"tf": r["timeframe"], "ma_type": r["ma_type"], "kc_length": r["kc_length"],
+                     "band_mult": r["band_mult"], "rr": r["rr"]}
+                params = {"timeframe": p["tf"], "ma_type": p["ma_type"], "kc_length": p["kc_length"],
+                          "band_mult": p["band_mult"], "rr": p["rr"]}
+            c = rebuild(sym, p)
+            if not c or not c["closed"]:
+                continue
+            c["_conds"] = neuro_conditions_for_times(sym, {int(t["time"]) for t in c["closed"]})
+            tr = [t for t in c["closed"] if t["time"] <= c["boundary"]]
+            te = [t for t in c["closed"] if t["time"] > c["boundary"]]
+            c["train_z"] = _z_vs_breakeven_with_fees(tr, p["rr"]) if tr else None
+            c["test_z"] = _z_vs_breakeven_with_fees(te, p["rr"]) if te else None
+            c["train_z"] = c["train_z"] if c["train_z"] is not None else -99.0
+            c["test_z"] = c["test_z"] if c["test_z"] is not None else -99.0
+            f = {k: nf[k] for k in ("key", "value", "mode", "label")}
+            kept = _variant_trades(c, f)
+            ftr = [t for t in kept if t["time"] <= c["boundary"]]
+            fte = [t for t in kept if t["time"] > c["boundary"]]
+            if len(ftr) < mtr or len(fte) < mte:
+                continue
+            tz, sz = _z_vs_breakeven_with_fees(ftr, p["rr"]), _z_vs_breakeven_with_fees(fte, p["rr"])
+            if tz is None or sz is None or tz < STRATEGY_FILTER_KEEP_Z or sz < STRATEGY_FILTER_KEEP_Z:
+                continue
+            f.update(_train_z=tz, _test_z=sz)
+            best = _strategy_best_dict(c, f, params)
+            _all = best.pop("_all_closed")
+            best.update(rr_compound_annotate(_all, sym))
+            best["all_trades"] = _all[::-1]
+            best["filter_carried"] = True
+            best["kept"] = not (tz >= zc and sz >= tcrit)
+            best["keep_z"] = STRATEGY_FILTER_KEEP_Z
+            out[sym] = best
+        except Exception as e:
+            log_error(f"{mod} carry filter {sym}: {e}")
+    return out
+
+
 def strategy_filter_phase(mod):
     """v0.99.365 — the S/R / P/R Neuro-filter step, run by the filter loop
     after each backtest cycle for the NEURO_TF_PHASE_COINS most promising
@@ -15002,6 +15065,10 @@ def snr_backtest_loop():
                 # coins are picked on their own TRAIN result; the test part stays untouched
                 ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["train_avg_pnl_r"])
             else:
+                if NEURO_TRADE_FILTER_ENABLED:   # v0.99.414 — coins keep their accepted Neuro filter through the backtest
+                    with state_lock:
+                        _old_snr = dict(STATE.get("snr_results") or {})
+                    all_results.update(strategy_carry_filters("snr", _old_snr, "snr_backtest_loop"))
                 ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
             display_top = ranked[:max(SNR_DISPLAY_N, SNR_TOP_N)]
             active_top = display_top[:SNR_TOP_N]
@@ -15807,6 +15874,10 @@ def prv_backtest_loop():
                                        "prv_backtest_loop", _prv_done, _prv_stop)
             _BT_RAN.add("prv")   # v0.99.385
             per_coin_results = dict(all_results)   # v0.99.411 — the hysteresis memory is for per-coin passes only
+            if NEURO_TRADE_FILTER_ENABLED:   # v0.99.414 — coins keep their accepted Neuro filter through the backtest
+                with state_lock:
+                    _old_prv = dict(STATE.get("prv_results") or {})
+                all_results.update(strategy_carry_filters("prv", _old_prv, "prv_backtest_loop"))
             if PRV_POOLED_ENABLED:   # v0.99.411 — strategy-level test; its coins are added to the per-coin passes
                 _pooled = prv_pooled_select({s_: _prv_pool_parts[s_] for s_ in universe if s_ in _prv_pool_parts})
                 with state_lock:
@@ -24155,7 +24226,7 @@ async function refreshSnr() {
         <div style="display:flex;flex-wrap:wrap;gap:4px 16px;margin-bottom:8px;">
           <div><div class="dim" style="font-size:var(--fs-xs);">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R \u00b7 z=${r.train_z}</div></div>
           <div><div class="dim" style="font-size:var(--fs-xs);">TEST (n=${r.test_n})</div><div class="win">WR ${r.test_wr}% \u00b7 ${r.test_avg_pnl_r>0?'+':''}${r.test_avg_pnl_r}R \u00b7 z=${r.test_z}</div></div>
-          ${r.kept ? `<div style="flex-basis:100%;font-size:var(--fs-xs);color:var(--warn);" title="попасть в список — z ≥ ${data.config && data.config.z_critical || 3.11} на обучении и тесте (поправка на перебор 216 вариантов); остаться с теми же настройками — z ≥ ${r.keep_z} (одна гипотеза, 95%)">↺ удержана${r.recovered ? ' (настройки восстановлены по живому сигналу)' : ''}: строгий порог сейчас не проходит, но держит порог удержания z ≥ ${r.keep_z}</div>` : ''}
+          ${r.kept ? `<div style="flex-basis:100%;font-size:var(--fs-xs);color:var(--warn);" title="попасть в список — z ≥ ${data.config && data.config.z_critical || 3.11} на обучении и тесте (поправка на перебор 216 вариантов); остаться с теми же настройками — z ≥ ${r.keep_z} (одна гипотеза, 95%)">↺ удержана${r.recovered ? ' (настройки восстановлены по живому сигналу)' : ''}${r.filter_carried ? ' вместе со своим фильтром Neuro' : ''}: строгий порог сейчас не проходит, но держит порог удержания z ≥ ${r.keep_z}</div>` : ''}
           <div class="dim" style="font-size:var(--fs-xs);flex-basis:100%;">${r.fees_included ? `R и z — после комиссии (≈${r.avg_fee_r}R на сделку: 0.05% вход + 0.05% выход)` : 'R и z — без комиссии (старый бэктест, пересчитается)'}</div>
           ${neuroFilterNoteHtml(r)}
         </div>

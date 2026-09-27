@@ -18135,3 +18135,13 @@ v0.99.413 - Tabs no longer jump on the 15 s auto-refresh (user: after opening a
          of the screen is at the same place again - also when content above it
          grew or shrank. Checked: a row in an open trade list stays at the same
          screen position through refreshes and a +400px block inserted above.
+v0.99.414 - S/R and P/R coins keep their accepted Neuro filter through the next
+         backtest (user). Before, each 4h backtest rebuilt the results without
+         filters and the coin came back filtered only after the filter phase -
+         in between it was missing (or traded unfiltered). Now the backtest
+         re-checks each coin that had a filter with the SAME combo + filter on
+         the fresh data and keeps it while the filtered trades hold z >= 1.645
+         on train and test (one fixed hypothesis); otherwise it's dropped and
+         the filter phase may find it anew. S/R only in per-coin mode (pooled
+         mode has no per-coin filters). Card: "↺ удержана вместе со своим
+         фильтром Neuro" when below the strict bar.
