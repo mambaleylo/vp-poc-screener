@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.408"
+APP_VERSION = "0.99.409"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -26369,8 +26369,6 @@ function _ssTick() {
   const hh = String(now.getHours()).padStart(2, '0');
   const mm = String(now.getMinutes()).padStart(2, '0');
   document.getElementById('screensaverTime').textContent = `${hh}:${mm}`;
-  document.getElementById('screensaverDate').textContent =
-    now.toLocaleDateString('ru-RU', {weekday: 'long', day: 'numeric', month: 'long'});   // v0.99.408
   setTimeout(_ssTick, (60 - now.getSeconds()) * 1000 - now.getMilliseconds());
 }
 
@@ -26472,20 +26470,17 @@ document.addEventListener('fullscreenchange', () => {
 </script>
 <!-- Screensaver overlay -->
 <style>
-  /* v0.99.408 — Apple lock-screen style: SF Pro on Apple devices, the
-     nearest system font elsewhere (Roboto on Android); thin, tight,
-     tabular digits so the width doesn't jump; weekday + date above */
-  #screensaverClock { padding:12px 22px 16px; border:2px solid transparent; border-radius:28px; text-align:center;
-    font-family:-apple-system, "SF Pro Display", "SF Pro Text", BlinkMacSystemFont, "Helvetica Neue", Roboto, system-ui, sans-serif;
+  /* v0.99.409 — only the font changed (per user): Apple's SF Pro on Apple
+     devices, the nearest system font elsewhere (Roboto on Android); thin,
+     tabular digits so the width doesn't jump. Size as before. */
+  #screensaverClock { padding:10px 16px; border:2px solid transparent; border-radius:14px;
+    font-family:-apple-system, "SF Pro Display", BlinkMacSystemFont, "Helvetica Neue", Roboto, system-ui, sans-serif;
     font-variant-numeric:tabular-nums; -webkit-font-smoothing:antialiased; transition:color 0.5s, border-color 0.5s; }
-  #screensaverDate { font-size:clamp(15px, 4.6vw, 24px); font-weight:500; letter-spacing:.01em; opacity:.78; margin-bottom:2px; }
-  #screensaverDate::first-letter { text-transform:uppercase; }
-  #screensaverTime { font-size:clamp(72px, 25vw, 150px); font-weight:200; line-height:1; letter-spacing:-.03em; }
+  #screensaverTime { font-size:48px; font-weight:200; line-height:1; letter-spacing:1px; }
   #screensaverClock.ssNoCharge { border-color:#ff3b30; }
 </style>
 <div id="screensaverOverlay" style="display:none;position:fixed;inset:0;background:#000;z-index:9999;cursor:pointer;touch-action:manipulation;user-select:none;" onclick="_ssTap()" title="двойное касание — выход">
   <div id="screensaverClock" style="position:absolute;user-select:none;">
-    <div id="screensaverDate"></div>
     <div id="screensaverTime"></div>
   </div>
 </div>

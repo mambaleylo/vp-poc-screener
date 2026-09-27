@@ -18085,3 +18085,6 @@ v0.99.408 - Simulator audit (user: wrong balance, trades opened by the
            Bounce/Breakout/Scalp/FT5/Mirror instead of Neuro/S/R/P/R.
          Screensaver: Apple lock-screen style - SF Pro / system font, thin
          large tabular digits, weekday and date above the time.
+v0.99.409 - Screensaver: back to the clock alone at its previous 48px size
+         (per user - only the font was to change): no date line; font stays
+         SF Pro / system font (Roboto on Android), thin, tabular digits.
