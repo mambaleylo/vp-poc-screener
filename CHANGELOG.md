@@ -18088,3 +18088,18 @@ v0.99.408 - Simulator audit (user: wrong balance, trades opened by the
 v0.99.409 - Screensaver: back to the clock alone at its previous 48px size
          (per user - only the font was to change): no date line; font stays
          SF Pro / system font (Roboto on Android), thin, tabular digits.
+v0.99.410 - P/R hysteresis (user: a coin passed, an hour later the re-run
+         dropped it). The window slides with every run (70/30 split of
+         history ending "now"), so a coin that passed right at the strict bar
+         (z >= 3.11, Bonferroni over 216 combos - a search) flipped out on a
+         one-trade shift. Now a coin that is in the results keeps its own
+         combo while train AND test z >= 1.645 (one fixed hypothesis,
+         one-sided 95%); below that it's dropped and must pass the strict bar
+         again. New coins still need the strict bar. Parameters of every
+         passing coin are remembered (prv_keep, persisted). A coin that fell
+         out before this version gets its combo back from its last live
+         signal (the combos that fire that exact band touch). Card shows
+         "↺ удержана".
+         Server start stops any other running copy of vp_poc_screener.py (and
+         its calc workers) before loading state - an old copy left running
+         after an update kept sending alerts from removed modules (MSNR).

@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.409"
+APP_VERSION = "0.99.410"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6884,7 +6884,7 @@ PERSIST_BT_KEYS = (
     "lsw_live_universe", "lsw_live_directions", "lsw_chosen_rr", "lsw_rr_sweep",
     "lsw_filter_checkpoints", "lsw_neuro_filters", "lsw_pooled", "lsw_backtest_interval",
     "snr_last_backtest_finished", "snr_filters", "snr_diag", "snr_pooled",
-    "prv_last_backtest_finished", "prv_filters",
+    "prv_last_backtest_finished", "prv_filters", "prv_keep",   # v0.99.410
     "mirror_last_backtest_finished", "mirror_last_backtest_duration", "mirror_backtest_summary",
     "mirror_tuned_tolerances",
     "ft5_last_backtest_finished", "ft5_last_backtest_duration", "ft5_universe", "ft5_live_universe",
@@ -15312,6 +15312,7 @@ PRV_ATR_LENGTH        = 14   # matches the Pine Script's own default "ATR Length
 PRV_SL_ATR_MULT       = 1.0  # SL distance beyond entry, in ATR units — fixed (not swept) to keep the search space tractable, same design choice as SNR_SL_ATR_MULT
 PRV_N_COMBOS          = len(PRV_MA_TYPE_CANDIDATES) * len(PRV_KC_LENGTH_CANDIDATES) * len(PRV_BAND_MULT_CANDIDATES) * len(PRV_RR_CANDIDATES) * len(PRV_TF_CANDIDATES)  # 216
 PRV_Z_CRITICAL        = 3.113  # v0.99.290 — per direct user request ("смягчить порог сам по себе, чтобы чаще что-то находило") after the strict z>=3.501 (alpha=0.05) bar routinely found zero validated symbols on real market data. Loosened to alpha=0.20 (still Bonferroni-corrected for all PRV_N_COMBOS=216 comparisons, NOT reverted to an uncorrected bar) — a 20% chance of at least one false positive across the whole search, up from 5%, while still directly verified at 0/30 false positives on pure random-walk synthetic data (same test as the original 3.501 threshold's own v0.99.277 verification) — same "hardcoded rather than adding scipy" reasoning as SNR_Z_CRITICAL's own comment.
+PRV_KEEP_Z            = 1.645  # v0.99.410 — hysteresis (user: "монета прошла, а через час уже нет"): entering needs PRV_Z_CRITICAL (Bonferroni over all 216 combos — a SEARCH); a coin already chosen is re-checked as ONE fixed hypothesis on the shifted window, for which one-sided 95% (z >= 1.645) on train AND test is the honest bar. Below that the coin is dropped and must pass the strict bar again.
 PRV_MIN_TRAIN_TRADES  = 15
 PRV_MIN_TEST_TRADES   = 5
 PRV_HISTORY_DAYS      = 500  # 4h/1d timeframes — see snr_history_days_for_tf() (reused here too) for why 1h gets a shorter history
@@ -15497,7 +15498,16 @@ def prv_optimize_symbol(symbol):
         except Exception as e:
             log_error(f"prv_optimize_symbol {symbol} {tf}: {e}")
     _prv_had_data[symbol] = any(len(v or []) >= 50 for v in candles_by_tf.values())   # v0.99.393
-    out = calc_run("prv_optimize_core", {"candles_by_tf": candles_by_tf})
+    # v0.99.410 — hysteresis: the coin's parameters from the last cycle it
+    # passed; for a coin without them, its last live signal
+    with state_lock:
+        keep = (STATE.get("prv_keep") or {}).get(symbol)
+        sig = next((dict(x) for x in STATE["prv_signals"] if x.get("symbol") == symbol), None) if not keep else None
+    recover = None
+    if sig and sig.get("sl") and sig.get("entry") and sig["entry"] != sig["sl"]:
+        recover = {"timeframe": sig.get("timeframe"), "time": sig.get("time"), "direction": sig.get("direction"),
+                   "rr": abs(sig["tp"] - sig["entry"]) / abs(sig["entry"] - sig["sl"])}
+    out = calc_run("prv_optimize_core", {"candles_by_tf": candles_by_tf, "keep": keep, "recover": recover})
     for msg in out["errors"]:
         log_error(f"prv_optimize_symbol {symbol} {msg}")
     best = out["best"]
@@ -15516,13 +15526,56 @@ def prv_optimize_symbol(symbol):
     return best
 
 
-def prv_optimize_core(candles_by_tf):
+def _prv_recover_combos(candles_by_tf, recover):
+    """v0.99.410 — which (tf, ma_type, kc_length, band_mult) would have fired
+    the coin's last live signal (same band-touch rule as the backtest and
+    the live scan): lets a coin that fell out before the hysteresis existed
+    get its own parameters back instead of a new search."""
+    tf = recover.get("timeframe")
+    candles = candles_by_tf.get(tf) or []
+    idx = next((i for i, c in enumerate(candles) if c["time"] == recover.get("time")), None)
+    if idx is None:
+        return set()
+    atr = neuro_atr_series(candles, PRV_ATR_LENGTH)
+    if not atr[idx]:
+        return set()
+    out = set()
+    c = candles[idx]
+    for ma_type in PRV_MA_TYPE_CANDIDATES:
+        for kc_length in PRV_KC_LENGTH_CANDIDATES:
+            basis = prv_ma_series(candles, ma_type, kc_length)
+            if idx < kc_length or basis[idx] is None:
+                continue
+            for band_mult in PRV_BAND_MULT_CANDIDATES:
+                d = ("SHORT" if c["high"] >= basis[idx] + atr[idx] * band_mult else
+                     "LONG" if c["low"] <= basis[idx] - atr[idx] * band_mult else None)
+                if d == recover.get("direction"):
+                    out.add((tf, ma_type, kc_length, band_mult))
+    return out
+
+
+def prv_optimize_core(candles_by_tf, keep=None, recover=None):
     """v0.99.371 — the pure-CPU part of prv_optimize_symbol(), unchanged
     logic, no network / shared state. Returns {"best" (without the $15
-    compounding), "filter_cands", "errors"}."""
+    compounding), "filter_cands", "errors"}.
+    v0.99.410 — keep: the coin's parameters from the last cycle it was in
+    the results; that combo stays while train AND test z >= PRV_KEEP_Z
+    (hysteresis, see PRV_KEEP_Z). recover: the coin's last live signal
+    ({timeframe, time, direction, rr}) for a coin without keep — the combos
+    that fired it are treated as kept."""
     best = None
     errors = []
     passing, near = [], []   # v0.99.364 — candidates for the Neuro filter
+    kept = []   # v0.99.410
+    keep_key = ((keep["timeframe"], keep["ma_type"], keep["kc_length"], keep["band_mult"], keep["rr"])
+                if keep else None)
+    rec_set, rec_rr = set(), None
+    if not keep and recover:
+        try:
+            rec_set = _prv_recover_combos(candles_by_tf, recover)
+            rec_rr = min(PRV_RR_CANDIDATES, key=lambda x: abs(x - (recover.get("rr") or 0)))
+        except Exception as e:
+            errors.append(f"recover: {e}")
     for tf in PRV_TF_CANDIDATES:
         if tf not in candles_by_tf:
             continue   # download failed (already logged)
@@ -15555,8 +15608,14 @@ def prv_optimize_core(candles_by_tf):
                             cand = {"tf": tf, "ma_type": ma_type, "kc_length": kc_length, "band_mult": band_mult, "rr": rr,
                                     "closed": closed, "boundary": boundary_time, "span": span,
                                     "train_z": train_z, "test_z": test_z}
+                            _key = (tf, ma_type, kc_length, band_mult, rr)
+                            _mine = _key == keep_key or ((tf, ma_type, kc_length, band_mult) in rec_set and rr == rec_rr)
+                            if _mine:
+                                cand["mine"] = True
                             if train_z >= PRV_Z_CRITICAL and test_z >= PRV_Z_CRITICAL:
                                 passing.append(cand)
+                            elif _mine and train_z >= PRV_KEEP_Z and test_z >= PRV_KEEP_Z:
+                                kept.append(cand)   # v0.99.410 — hysteresis
                             elif train_z >= NEURO_TF_NEAR_Z:
                                 near.append(cand)
                                 near.sort(key=lambda c: -c["train_z"])
@@ -15569,10 +15628,18 @@ def prv_optimize_core(candles_by_tf):
     variants = [(c, None) for c in passing]
     filter_cands = [{k: c[k] for k in ("tf", "ma_type", "kc_length", "band_mult", "rr", "train_z")}
                     for c in passing[:1] + near]   # v0.99.365 — see snr_optimize_symbol
-    if variants:
-        c, f = max(variants, key=lambda v: _variant_train_z(v))
+    # v0.99.410 — the coin's own combo first while it holds (strict or
+    # kept), so its parameters don't jump around between cycles either
+    own = [v for v in variants if v[0].get("mine")] + [(c, None) for c in kept]
+    pick = own or variants
+    if pick:
+        c, f = max(pick, key=lambda v: _variant_train_z(v))
         best = _strategy_best_dict(c, f, {"timeframe": c["tf"], "ma_type": c["ma_type"], "kc_length": c["kc_length"],
                                           "band_mult": c["band_mult"], "rr": c["rr"]})
+        strict = c["train_z"] >= PRV_Z_CRITICAL and c["test_z"] >= PRV_Z_CRITICAL
+        best["kept"] = not strict
+        best["keep_z"] = PRV_KEEP_Z
+        best["recovered"] = bool(c.get("mine") and not keep)
     return {"best": best, "filter_cands": filter_cands, "errors": errors}
 
 
@@ -15658,6 +15725,14 @@ def prv_backtest_loop():
             found_nothing = not all_results and not data_ok
             with state_lock:
                 if all_results or data_ok:
+                    # v0.99.410 — remember every coin that passed (or held) this
+                    # cycle for the hysteresis; a coin not in all_results fell
+                    # below PRV_KEEP_Z and is forgotten
+                    _old_keep = STATE.get("prv_keep") or {}
+                    STATE["prv_keep"] = {sym: {"timeframe": r_["timeframe"], "ma_type": r_["ma_type"], "kc_length": r_["kc_length"],
+                                               "band_mult": r_["band_mult"], "rr": r_["rr"],
+                                               "since": (_old_keep.get(sym) or {}).get("since") or time.time()}
+                                         for sym, r_ in all_results.items()}
                     STATE["prv_results"] = dict(display_top)
                     PRV_NF_TRIGGER.set()   # v0.99.361 — refresh the P/R filter report
                     _prv_active_symbols = [sym for sym, _ in active_top]
@@ -20430,7 +20505,7 @@ def api_prv_status():
         "config": {"top_n": PRV_TOP_N, "display_n": PRV_DISPLAY_N, "timeframes": PRV_TF_CANDIDATES,
                    "ma_type_candidates": PRV_MA_TYPE_CANDIDATES, "kc_length_candidates": PRV_KC_LENGTH_CANDIDATES,
                    "band_mult_candidates": PRV_BAND_MULT_CANDIDATES, "rr_candidates": PRV_RR_CANDIDATES,
-                   "refresh_sec": PRV_REFRESH_SEC},
+                   "refresh_sec": PRV_REFRESH_SEC, "z_critical": PRV_Z_CRITICAL, "keep_z": PRV_KEEP_Z},
     })
 
 
@@ -24000,6 +24075,7 @@ async function refreshSnr() {
         <div style="display:flex;flex-wrap:wrap;gap:4px 16px;margin-bottom:8px;">
           <div><div class="dim" style="font-size:var(--fs-xs);">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R \u00b7 z=${r.train_z}</div></div>
           <div><div class="dim" style="font-size:var(--fs-xs);">TEST (n=${r.test_n})</div><div class="win">WR ${r.test_wr}% \u00b7 ${r.test_avg_pnl_r>0?'+':''}${r.test_avg_pnl_r}R \u00b7 z=${r.test_z}</div></div>
+          ${r.kept ? `<div style="flex-basis:100%;font-size:var(--fs-xs);color:var(--warn);" title="попасть в список — z ≥ ${data.config && data.config.z_critical || 3.11} на обучении и тесте (поправка на перебор 216 вариантов); остаться с теми же настройками — z ≥ ${r.keep_z} (одна гипотеза, 95%)">↺ удержана${r.recovered ? ' (настройки восстановлены по живому сигналу)' : ''}: строгий порог сейчас не проходит, но держит порог удержания z ≥ ${r.keep_z}</div>` : ''}
           <div class="dim" style="font-size:var(--fs-xs);flex-basis:100%;">${r.fees_included ? `R и z — после комиссии (≈${r.avg_fee_r}R на сделку: 0.05% вход + 0.05% выход)` : 'R и z — без комиссии (старый бэктест, пересчитается)'}</div>
           ${neuroFilterNoteHtml(r)}
         </div>
@@ -26496,10 +26572,54 @@ def index():
 # ----------------------------------------------------------------------------
 # Entrypoint
 # ----------------------------------------------------------------------------
+def stop_previous_instances():
+    """v0.99.410 — per user ("у меня 404 версия и ругается на зависший msnr"):
+    a server started before an update kept running next to the new one and
+    kept sending alerts from code that no longer exists. On start, every
+    other running copy of this program (and its calc workers) is stopped
+    first, before the saved state is read, so the old copy can neither
+    alert nor overwrite the state any more."""
+    import signal
+    me = os.getpid()
+    others = []
+    try:
+        pids = [int(x) for x in os.listdir("/proc") if x.isdigit()]
+    except Exception:
+        return
+    for pid in pids:
+        if pid == me:
+            continue
+        try:
+            with open(f"/proc/{pid}/cmdline", "rb") as f:
+                args = [a.decode("utf-8", "replace") for a in f.read().split(b"\0") if a]
+        except Exception:
+            continue
+        if any(os.path.basename(a) == "vp_poc_screener.py" for a in args[1:3]) and "python" in os.path.basename(args[0] if args else ""):
+            others.append(pid)
+    if not others:
+        return
+    print(f"stopping a previous copy of the server: pid {others}")
+    for pid in others:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except Exception:
+            pass
+    deadline = time.time() + 10
+    while time.time() < deadline and any(os.path.exists(f"/proc/{pid}") for pid in others):
+        time.sleep(0.3)
+    for pid in others:
+        if os.path.exists(f"/proc/{pid}"):
+            try:
+                os.kill(pid, signal.SIGKILL)
+            except Exception:
+                pass
+
+
 if __name__ == "__main__":
     if "--calc-worker" in sys.argv:   # v0.99.370 — calculation worker process
         calc_worker_main()
         sys.exit(0)
+    stop_previous_instances()   # v0.99.410
     load_state()
     load_neuro_state()
     load_nq_state()
