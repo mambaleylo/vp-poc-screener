@@ -17927,3 +17927,12 @@ v0.99.398 - RR 4-5 with a real max holding time; Sweep removed.
          errors on every tab, no Sweep in the UI; synthetic: S/R random walk
          fails / weak edge passes with RR 4-5 + time exits, Neuro sweep picks
          RR by total R (RR 5: 347 trades vs 997 at RR 1.5 on the same period).
+v0.99.399 - Fix for v0.99.398's t-test: a small sample of ALL wins has ~zero spread,
+         so its t-statistic exploded (seen: z=3055; 5 wins of 5 on test passed
+         z >= 3.1, the old win-rate test gave 2.2). The variance is now floored
+         at rr — exactly a no-edge coin flip's variance for +rr/-1 trades — so
+         small samples are judged as strictly as before.
+         P/R check (user: "по p/r всё ок, не как в sweep?"): 150 random-walk
+         coins -> 0 passed (no false positives); 10 mean-reverting coins ->
+         10 passed, now on 4h with 45-154 test trades instead of 8-15 on 1d.
+         S/R pooled: random fails, weak edge passes (unchanged).

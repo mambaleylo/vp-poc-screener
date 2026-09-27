@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.398"
+APP_VERSION = "0.99.399"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -17006,15 +17006,21 @@ def _z_vs_breakeven_with_fees(trades, rr):
     values themselves; for pure +rr/-1 trades the two agree closely."""
     rs = [_net_r(t) for t in trades]
     rs = [r for r in rs if r is not None]
-    return _t_from_sums(len(rs), sum(rs), sum(r * r for r in rs)) if rs else None
+    return _t_from_sums(len(rs), sum(rs), sum(r * r for r in rs), var_floor=rr) if rs else None
 
 
-def _t_from_sums(n, s, q):
-    """v0.99.398 — t-statistic of the mean from n, sum and sum of squares."""
+def _t_from_sums(n, s, q, var_floor=None):
+    """v0.99.398 — t-statistic of the mean from n, sum and sum of squares.
+    var_floor: the variance can't be taken below this. For +rr/-1 trades a
+    no-edge coin flip (win rate 1/(1+rr)) has variance exactly rr — without
+    the floor, a small sample of ALL wins has ~zero spread and a huge t
+    (5 wins out of 5 would pass z >= 3; the old win-rate test gave 2.2)."""
     if n < 2:
         return None
     mean = s / n
     var = max(0.0, (q - s * s / n) / (n - 1))
+    if var_floor:
+        var = max(var, var_floor)
     return mean / math.sqrt(var / n) if var > 0 else None
 
 
@@ -17394,8 +17400,8 @@ def snr_pooled_select(parts):
         rr = float(rr)
         if a[0] < SNR_POOLED_MIN_TRAIN:
             continue
-        tz = _t_from_sums(a[0], a[3], a[2])   # v0.99.398 — t-test on net R (TIME_EXIT trades have any R)
-        sz = _t_from_sums(a[4], a[7], a[6]) if a[4] else None
+        tz = _t_from_sums(a[0], a[3], a[2], var_floor=rr)   # v0.99.398 — t-test on net R (TIME_EXIT trades have any R)
+        sz = _t_from_sums(a[4], a[7], a[6], var_floor=rr) if a[4] else None
         rows.append({"tf": tf, "pivot_length": int(pl), "min_strength": int(ms), "rr": rr, "coins": a[8],
                      "train_n": a[0], "train_wr": round(a[1] / a[0] * 100, 1), "train_avg_pnl_r": round(a[3] / a[0], 3),
                      "train_z": round(tz, 2) if tz is not None else None,
