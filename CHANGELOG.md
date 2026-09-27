@@ -17885,3 +17885,17 @@ v0.99.396 - Sweep: honest backtest and coin selection (user: "sweep пока д�
            3+ touches, stop+retest — honest pooled test for each.
          Verified: py_compile, pyflakes, JS check; synthetic 12 coins: 4x trades,
          no overlapping trades, pooled test ~0R on random data -> not live.
+v0.99.397 - Sweep moved to 4h, 1h dropped (user: "давай совсем тогда выполним переход
+         на 4h, текущий вариант уберем"). Real Gate data (tools/compare_sweep_
+         variants.py, 29 coins x 365 days of 1h): every 1h variant lost on the
+         honest test — all coins -0.10..-0.34R/trade after fees, z -3..-8; the
+         train-picked coins' edge vanished on test in all six variants.
+         - LSW_INTERVAL 1h -> 4h, history 730 days (~50-80 trades per coin),
+           HTF trend filter 4h -> 1d, 5m confirmation window 12 -> 48 bars,
+           live scan lookback 150 -> 400 bars (was shorter than the level
+           lifetime + pivot confirmation, so live saw other levels than the
+           backtest).
+         - Saved 1h results are dropped on the first start (timeframe stored
+           with the results), so they are never shown or traded as 4h.
+         - Autotrade still needs the pooled honest test (v0.99.396) to pass.
+         - compare_sweep_variants.py follows LSW_INTERVAL / LSW_BACKTEST_DAYS.

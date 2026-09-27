@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.396"
+APP_VERSION = "0.99.397"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -845,10 +845,10 @@ MIRROR_LIVE_MIN_WINRATE = float(os.environ.get("VP_MIRROR_LIVE_MIN_WINRATE", 38.
 # sim_execute_trade() pattern, same 2% base risk (AUTOTRADE_RISK_PCT_
 # OF_BALANCE), every other module already uses. Off by default either way.
 LSW_ENABLED = os.environ.get("VP_LSW_ENABLED", "0") == "1"  # off by default, same reasoning as every other new module here — user opts in after seeing real backtest numbers
-LSW_INTERVAL = os.environ.get("VP_LSW_INTERVAL", "1h")
+LSW_INTERVAL = os.environ.get("VP_LSW_INTERVAL", "4h")  # v0.99.397 — was 1h: on real Gate data (tools/compare_sweep_variants.py, 29 coins x 365 days) every 1h variant lost on the honest test (all coins -0.10..-0.34R/trade after fees, z -3..-8) — the tight wick stop made fees a big share of R. User: "давай совсем тогда выполним переход на 4h, текущий вариант уберем"
 LSW_PIVOT_LEFT = int(os.environ.get("VP_LSW_PIVOT_LEFT", 3))
 LSW_PIVOT_RIGHT = int(os.environ.get("VP_LSW_PIVOT_RIGHT", 3))
-LSW_LOOKBACK = int(os.environ.get("VP_LSW_LOOKBACK", 150))  # bars of history considered per live-scan pass
+LSW_LOOKBACK = int(os.environ.get("VP_LSW_LOOKBACK", 400))  # v0.99.397 — was 150: shorter than LSW_MAX_BARS_TO_SWEEP + pivot confirmation, so live saw fewer/other levels than the backtest  # bars of history considered per live-scan pass
 LSW_UNIVERSE_SIZE = int(os.environ.get("VP_LSW_UNIVERSE_SIZE", 100))  # v0.99.231 — raised 60->100 per direct user request, to give Gate.io's newer non-crypto perpetuals (NAS100/SPX500/UK100/XAU/XAG/XPT/XPD — all _USDT, all pass the existing universe filter already) a real chance to rank in by volume, rather than being crowded out by higher-volume crypto majors under the old cap. No other code change needed — lsw_build_universe() already accepts any _USDT contract; this just widens how many get through the volume-rank cutoff.
 LSW_EQUAL_TOLERANCE_PCT = float(os.environ.get("VP_LSW_EQUAL_TOLERANCE_PCT", 0.12))  # how close two swing highs (or two swing lows) must sit to count as the SAME resting-liquidity level, as % of price — this is what makes a level "equal highs/lows" rather than just one isolated swing
 LSW_SL_BUFFER_PCT = float(os.environ.get("VP_LSW_SL_BUFFER_PCT", 0.15))  # stop placed this far BEYOND the sweep candle's own wick extreme, as % of price — a small buffer so the stop isn't sitting exactly on the exact wick tip
@@ -868,7 +868,7 @@ LSW_RR_MIN_TRADES = int(os.environ.get("VP_LSW_RR_MIN_TRADES", 15))  # don't tru
 LSW_MAX_BARS_TO_SWEEP = int(os.environ.get("VP_LSW_MAX_BARS_TO_SWEEP", 150))  # a confirmed equal-highs/lows level not swept within this many bars goes stale and stops being watched
 LSW_MAX_WAIT_BARS = int(os.environ.get("VP_LSW_MAX_WAIT_BARS", 200))  # same shared backtest/live TIMEOUT cutoff shape as MIRROR_MAX_WAIT_BARS
 LSW_SIGNAL_HISTORY = 300
-LSW_BACKTEST_DAYS = int(os.environ.get("VP_LSW_BACKTEST_DAYS", 365))  # v0.99.396 — was 90: 5-15 trades per coin, far too few to tell skill from luck; Gate keeps ~416 days of 1h
+LSW_BACKTEST_DAYS = int(os.environ.get("VP_LSW_BACKTEST_DAYS", 730))  # v0.99.397 — 2 years of 4h (was 365 days of 1h): 4h gives ~4x fewer signals per day  # v0.99.396 — was 90: 5-15 trades per coin, far too few to tell skill from luck; Gate keeps ~416 days of 1h
 LSW_CONFIRM_FETCH_DAYS = int(os.environ.get("VP_LSW_CONFIRM_FETCH_DAYS", 30))  # v0.99.396 — 5m history for the entry-confirmation checkpoint (Gate keeps ~35 days of 5m anyway)
 LSW_MIN_TRAIN_TRADES = int(os.environ.get("VP_LSW_MIN_TRAIN_TRADES", 10))  # v0.99.396 — own train trades a coin needs to be picked
 LSW_POOLED_MIN_TEST = int(os.environ.get("VP_LSW_POOLED_MIN_TEST", 30))  # v0.99.396 — pooled test trades the strategy check needs
@@ -916,7 +916,7 @@ TELEGRAM_ALERTS_EMA_BULL = os.environ.get("VP_TG_ALERTS_EMA_BULL", "1") == "1"
 # own v0.99.114 filtered-signal shadow-tracking precedent for why that
 # question needs real data, not just intuition, before trusting it).
 LSW_HTF_FILTER_ENABLED = os.environ.get("VP_LSW_HTF_FILTER", "0") == "1"
-LSW_HTF_INTERVAL = os.environ.get("VP_LSW_HTF_INTERVAL", "4h")
+LSW_HTF_INTERVAL = os.environ.get("VP_LSW_HTF_INTERVAL", "1d")  # v0.99.397 — one step above the 4h base (was 4h above 1h)
 LSW_HTF_EMA_PERIOD = int(os.environ.get("VP_LSW_HTF_EMA_PERIOD", 50))
 LSW_HTF_TREND_BUFFER_PCT = float(os.environ.get("VP_LSW_HTF_TREND_BUFFER_PCT", 0.1))  # close must clear the EMA by this % to count as UP/DOWN rather than NEUTRAL — avoids flip-flopping right at the line
 # v0.99.122 — the reference note's remaining two rules, per direct
@@ -930,7 +930,7 @@ LSW_STRUCTURAL_CAP_PIVOT_LEFT = int(os.environ.get("VP_LSW_STRUCTURAL_CAP_PIVOT_
 LSW_STRUCTURAL_CAP_PIVOT_RIGHT = int(os.environ.get("VP_LSW_STRUCTURAL_CAP_PIVOT_RIGHT", 10))
 LSW_ENTRY_CONFIRM_ENABLED = os.environ.get("VP_LSW_ENTRY_CONFIRM", "0") == "1"
 LSW_ENTRY_CONFIRM_INTERVAL = os.environ.get("VP_LSW_ENTRY_CONFIRM_INTERVAL", "5m")
-LSW_ENTRY_CONFIRM_MAX_BARS = int(os.environ.get("VP_LSW_ENTRY_CONFIRM_MAX_BARS", 12))  # 12x5m = 1h — how long after the 1h sweep candle's own close to keep waiting for a 5m confirmation before giving up on the signal entirely
+LSW_ENTRY_CONFIRM_MAX_BARS = int(os.environ.get("VP_LSW_ENTRY_CONFIRM_MAX_BARS", 48))  # v0.99.397 — 48x5m = one 4h bar (was 12 = one 1h bar)  # 12x5m = 1h — how long after the 1h sweep candle's own close to keep waiting for a 5m confirmation before giving up on the signal entirely
 LSW_ENTRY_CONFIRM_PIVOT_LEFT = int(os.environ.get("VP_LSW_ENTRY_CONFIRM_PIVOT_LEFT", 2))
 LSW_ENTRY_CONFIRM_PIVOT_RIGHT = int(os.environ.get("VP_LSW_ENTRY_CONFIRM_PIVOT_RIGHT", 2))
 LSW_ENTRY_CONFIRM_WICK_RATIO = float(os.environ.get("VP_LSW_ENTRY_CONFIRM_WICK_RATIO", 0.6))  # how much of a 5m candle's own range its rejection wick + favorable close must cover to count as "поглощение" (absorption)
@@ -7004,7 +7004,7 @@ PERSIST_BT_KEYS = (
     "msnr_live_universe", "msnr_backtest_universe", "msnr_neuro_filters",
     "lsw_last_backtest_finished", "lsw_last_backtest_duration", "lsw_backtest_summary",
     "lsw_live_universe", "lsw_live_directions", "lsw_chosen_rr", "lsw_rr_sweep",
-    "lsw_filter_checkpoints", "lsw_neuro_filters", "lsw_pooled",
+    "lsw_filter_checkpoints", "lsw_neuro_filters", "lsw_pooled", "lsw_backtest_interval",
     "snr_last_backtest_finished", "snr_filters", "snr_diag", "snr_pooled",
     "prv_last_backtest_finished", "prv_filters",
     "mirror_last_backtest_finished", "mirror_last_backtest_duration", "mirror_backtest_summary",
@@ -15831,6 +15831,18 @@ def lsw_backtest_loop():
     # instead of all colliding on the shared semaphore at once.
     # v0.99.272 -- same CRITICAL FIX as ft5_backtest_loop()'s own — see
     # that function's own comment for the full incident.
+    # v0.99.397 — saved results from another timeframe (1h before the 4h
+    # switch) are not this strategy's: drop them so the startup skip can't
+    # keep showing / trading them, and backtest right away
+    with state_lock:
+        if STATE.get("lsw_backtest_interval") != LSW_INTERVAL:
+            for _k in ("lsw_backtest_results", "lsw_backtest_summary", "lsw_filter_checkpoints",
+                       "lsw_chosen_rr", "lsw_rr_sweep", "lsw_live_directions", "lsw_trade_filters"):
+                STATE[_k] = {}
+            STATE["lsw_live_universe"] = []
+            STATE["lsw_pooled"] = None
+            STATE["lsw_last_backtest_finished"] = None
+            STATE["lsw_backtest_interval"] = LSW_INTERVAL
     _trig = LSW_BACKTEST_TRIGGER.wait(timeout=90)
     LSW_BACKTEST_TRIGGER.clear()
     bt_startup_skip("lsw", LSW_BACKTEST_TRIGGER, max(300, LSW_REFRESH_SEC), "lsw_backtest_loop", _trig)   # v0.99.385

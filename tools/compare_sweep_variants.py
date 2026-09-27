@@ -5,7 +5,8 @@
     python compare_sweep_variants.py [МОНЕТА ...]
 
 Без списка монет берутся 30 самых ликвидных фьючерсов Gate. Ничего не торгует
-и не пишет в состояние сервера. 1h, 365 дней, одна позиция на монету.
+и не пишет в состояние сервера. Таймфрейм и глубина истории — как в
+vp_poc_screener.py (LSW_INTERVAL / LSW_BACKTEST_DAYS, сейчас 4h / 730 дней), одна позиция на монету.
 
 Для каждого варианта:
   - RR подбирается на первых 70% истории монеты (обучение), с комиссиями;
@@ -36,7 +37,7 @@ MAIN = next((p for p in (os.path.join(HERE, "vp_poc_screener.py"), os.path.join(
 if MAIN is None:
     sys.exit("не найден vp_poc_screener.py — положите этот скрипт в ту же папку, где он лежит")
 
-DAYS = 365
+DAYS = None   # v0.99.397 — taken from vp_poc_screener.py (LSW_BACKTEST_DAYS), like the timeframe
 TRAIN_FRAC = 0.7
 MIN_TRAIN = 10
 RETEST_BARS = 3
@@ -98,7 +99,7 @@ def variant_signals(m, candles, atr, variant, rr):
 
 
 def run_trades(m, candles, sigs):
-    wait = m.LSW_MAX_WAIT_BARS * 3600
+    wait = m.LSW_MAX_WAIT_BARS * m.INTERVAL_SECONDS.get(m.LSW_INTERVAL, 3600)
     trades, busy = [], float("-inf")
     for s in sigs:
         if s["entry_time"] < busy:
@@ -155,11 +156,12 @@ def main():
     variants = ["base", "sl_atr", "retest", "tol_atr", "touches3", "sl_atr+retest"]
     now = time.time()
     data = {}
-    print(f"загрузка {len(symbols)} монет, 1h, {DAYS} дней...")
+    tf, days = m.LSW_INTERVAL, DAYS or m.LSW_BACKTEST_DAYS
+    print(f"загрузка {len(symbols)} монет, {tf}, {days} дней...")
     for sym in symbols:
         try:
-            c = m.get_candles_range(sym, "1h", now - DAYS * 86400, now)
-            if len(c) > 500:
+            c = m.get_candles_range(sym, tf, now - days * 86400, now)
+            if len(c) > 300:
                 data[sym] = (c, m.neuro_atr_series(c, 14))
         except Exception as e:
             print(f"  {sym}: {e}")
