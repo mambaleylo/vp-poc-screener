@@ -17818,3 +17818,26 @@ v0.99.392 - MSNR: backtest made honest, live aligned with it (user: "почем�
          old reported +0.2..+0.5R expectancy (no edge exists), new ~0 / negative
          and the one coin old put in the top is excluded by its test part;
          backtest signals now all reproducible from closed-candle live views.
+v0.99.393 - Backtest scheduling made visible and tamed (user: "такое ощущение что
+         бэктесты запускаются не по таймерам, а бесконтрольно").
+         - Header "⏱" panel: what is running now, when each loop is next due
+           (and why: timer / retry after error), and a journal of every
+           backtest and filter run since the server start with its reason
+           (timer, button/settings, after a backtest, retry after an error,
+           server start, watchdog), duration, failures, Neuro pauses/resumes.
+         - P/R: a cycle where no coin passed was treated as a FAILED cycle and
+           retried every 30 min instead of 4h — P/R re-ran all day. Now only a
+           cycle where most coins got no candles counts as failed (same rule
+           S/R already had); an honest empty result is saved and waits 4h.
+         - Filter loops (MSNR/Sweep Neuro-filter, S/R and P/R filter phases)
+           no longer re-run every 6h on unchanged trades — only right after
+           their backtest (plus the existing startup catch-up).
+         - Neuro watchdog restart: the abandoned ("zombie") cycle used to keep
+           mining every remaining coin, without a slot, alongside the fresh
+           one, and then publish its results. It now stops at the next coin
+           and never publishes.
+         - Neuro cards sorted by TOTAL test profit (avg R x trades) instead of
+           avg R per trade (user: "сортировку по neuro ... по общей прибыли");
+           the card shows "итого ±XR".
+         Verified: py_compile, pyflakes, JS check; server run locally: journal
+         shows server-start / button / retry reasons correctly.

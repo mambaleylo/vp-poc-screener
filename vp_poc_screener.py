@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.392"
+APP_VERSION = "0.99.393"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7588,12 +7588,82 @@ _BT_RESULTS_KEY = {"msnr": "msnr_backtest_results", "lsw": "lsw_backtest_results
                    "mirror": "mirror_backtest_results", "ft5": "ft5_symbol_overrides"}
 
 
+# v0.99.393 — backtest run journal (user: "такое ощущение что бэктесты
+# запускаются не по таймерам, а бесконтрольно"). Every backtest / filter
+# cycle start and end is recorded with WHY it started (timer, button,
+# after a backtest, retry after an error, server start, watchdog), plus
+# when each loop is next due — shown in the header "⏱" panel. In memory
+# only: a restart starts a fresh journal.
+BT_JOURNAL = deque(maxlen=120)
+BT_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "snr": "S/R", "prv": "Peak Reversal", "neuro": "Neuro",
+             "msnr_nf": "MSNR фильтр", "lsw_nf": "Sweep фильтр", "snr_nf": "S/R фильтр", "prv_nf": "P/R фильтр"}
+BT_REASON_BUTTON = "кнопка «Бэктест» / «Очистить» / настройки"
+_bt_journal_lock = threading.Lock()
+_bt_next = {}      # mod -> {"at": ts, "reason": str} while a loop sleeps until its next cycle
+_bt_reason = {}    # mod -> reason the NEXT start will be logged with
+_bt_started = {}   # mod -> start ts of the cycle running now
+
+
+def bt_log(mod, ev, reason=None, note=None):
+    with _bt_journal_lock:
+        BT_JOURNAL.appendleft({"t": time.time(), "mod": mod, "ev": ev, "reason": reason, "note": note})
+
+
+def bt_set_reason(mod, reason):
+    with _bt_journal_lock:
+        _bt_reason[mod] = reason
+
+
+def bt_log_start(mod):
+    """The cycle really starts now (slot already taken)."""
+    with _bt_journal_lock:
+        reason = _bt_reason.pop(mod, None) or "запуск сервера"
+        _bt_started[mod] = time.time()
+        _bt_next.pop(mod, None)
+    bt_log(mod, "start", reason)
+
+
+def bt_log_end(mod, ok=True, note=None):
+    with _bt_journal_lock:
+        t0 = _bt_started.pop(mod, None)
+    dur = f"{(time.time() - t0) / 60:.0f} мин" if t0 else None
+    bt_log(mod, "end" if ok else "fail", None, ", ".join(x for x in (dur, note) if x) or None)
+
+
+def bt_wait(mod, trigger, timeout, loop_name, failed=False, trigger_reason=BT_REASON_BUTTON, scheduled=True):
+    """wait_beating() that records when the next cycle is due and why it
+    then starts. Returns True when the trigger fired. scheduled=False: the
+    loop only waits for its trigger (no timer shown)."""
+    timer_reason = "повтор после ошибки" if failed else "таймер"
+    with _bt_journal_lock:
+        if scheduled:
+            _bt_next[mod] = {"at": time.time() + max(0.0, timeout), "reason": timer_reason}
+    hit = wait_beating(trigger, timeout, loop_name)
+    with _bt_journal_lock:
+        _bt_next.pop(mod, None)
+        _bt_reason[mod] = trigger_reason if hit else timer_reason
+    return hit
+
+
+def bt_journal_snapshot():
+    now = time.time()
+    with _bt_journal_lock:
+        rows = [dict(r) for r in list(BT_JOURNAL)[:60]]
+        nxt = [{"mod": m, "at": v["at"], "reason": v["reason"]} for m, v in _bt_next.items()]
+        running = [{"mod": m, "since": t} for m, t in _bt_started.items()]
+    for r in rows + nxt + running:
+        r["label"] = BT_LABELS.get(r["mod"], r["mod"])
+    nxt.sort(key=lambda x: x["at"])
+    return {"journal": rows, "next": nxt, "running": running, "now": now}
+
+
 def bt_startup_skip(mod, trigger, refresh_sec, loop_name, triggered=False):
     """Returns the number of seconds waited (0 = run now)."""
     if mod in _BT_STARTUP_CHECKED:
         return 0
     _BT_STARTUP_CHECKED.add(mod)
     if triggered or trigger.is_set():
+        bt_set_reason(mod, BT_REASON_BUTTON)   # v0.99.393
         return 0
     with state_lock:
         last = STATE.get(f"{mod}_last_backtest_finished")
@@ -7604,12 +7674,16 @@ def bt_startup_skip(mod, trigger, refresh_sec, loop_name, triggered=False):
         return 0
     remaining = refresh_sec - (time.time() - last)
     if remaining <= 0:
+        bt_set_reason(mod, "запуск сервера (сохранённые результаты устарели)")   # v0.99.393
         return 0
     print(f"{loop_name}: saved results are fresh — next backtest in {remaining / 60:.0f} min")
     t = time.time()
-    if wait_beating(trigger, remaining, loop_name):
+    if bt_wait(mod, trigger, remaining, loop_name):   # v0.99.393 — journaled
         trigger.clear()
     return time.time() - t
+
+
+NF_IDLE_SEC = 30 * 86400   # v0.99.393 — filter loops run after each backtest (trigger), no timer re-runs
 
 
 def nf_startup_wait(trigger, first_sec, report_key, loop_name, mod, done_key=None):
@@ -7620,6 +7694,7 @@ def nf_startup_wait(trigger, first_sec, report_key, loop_name, mod, done_key=Non
     backtest: a restart that interrupted it (report / S/R-P/R filter phase
     older than the backtest) still runs it."""
     if trigger.wait(timeout=first_sec):
+        bt_set_reason(f"{mod}_nf", "после бэктеста")   # v0.99.393
         return
     with state_lock:
         rep = STATE.get(report_key)
@@ -7634,9 +7709,11 @@ def nf_startup_wait(trigger, first_sec, report_key, loop_name, mod, done_key=Non
         ref = min(ref, float(done_at))
     if last_bt and ref < float(last_bt):
         return
-    remaining = 6 * 3600 - (time.time() - float(rep["computed_at"]))
-    if remaining > 0:
-        wait_beating(trigger, remaining, loop_name)
+    # v0.99.393 — the report is up to date for the last backtest: wait for
+    # the next backtest only (was: re-run anyway once 6h old, on the very
+    # same trades — a full heavy filter pass that changed nothing).
+    if wait_beating(trigger, NF_IDLE_SEC, loop_name):
+        bt_set_reason(f"{mod}_nf", "после бэктеста")
 
 
 def bt_first_run(mod):
@@ -12593,14 +12670,23 @@ def lsw_neuro_filter_loop():
     nf_startup_wait(LSW_NF_TRIGGER, 1500, "lsw_neuro_filters", "lsw_neuro_filter_loop", "lsw")   # v0.99.385
     while True:
         LSW_NF_TRIGGER.clear()
+        _nf_on = LSW_ENABLED
+        if _nf_on:
+            bt_log_start("lsw_nf")   # v0.99.393
+        _nf_ok, _nf_err = True, None
         try:
             if LSW_ENABLED:
                 lsw_neuro_filter_analysis()
                 if NEURO_TRADE_FILTER_ENABLED:
                     lsw_apply_neuro_trade_filters()   # v0.99.364
         except Exception as e:
+            _nf_ok, _nf_err = False, str(e)[:80]
             log_error(f"lsw_neuro_filter_loop: {e}")
-        wait_beating(LSW_NF_TRIGGER, 6 * 3600, "lsw_neuro_filter_loop")   # after every Sweep backtest (trigger) or 6h
+        if _nf_on:
+            bt_log_end("lsw_nf", ok=_nf_ok, note=_nf_err)   # v0.99.393
+        # v0.99.393 — only after the next backtest (trigger); was also every
+        # 6h on unchanged trades
+        bt_wait("lsw_nf", LSW_NF_TRIGGER, NF_IDLE_SEC, "lsw_neuro_filter_loop", trigger_reason="после бэктеста", scheduled=False)   # after every Sweep backtest (trigger) or 6h
 
 
 def neuro_filter_rows_by_sym(results, loop_name, err_name):
@@ -12642,14 +12728,23 @@ def msnr_neuro_filter_loop():
     nf_startup_wait(MSNR_NF_TRIGGER, 900, "msnr_neuro_filters", "msnr_neuro_filter_loop", "msnr")   # v0.99.385
     while True:
         MSNR_NF_TRIGGER.clear()
+        _nf_on = MSNR_ENABLED
+        if _nf_on:
+            bt_log_start("msnr_nf")   # v0.99.393
+        _nf_ok, _nf_err = True, None
         try:
             if MSNR_ENABLED:
                 msnr_neuro_filter_analysis()
                 if NEURO_TRADE_FILTER_ENABLED:
                     msnr_apply_neuro_trade_filters()   # v0.99.364
         except Exception as e:
+            _nf_ok, _nf_err = False, str(e)[:80]
             log_error(f"msnr_neuro_filter_loop: {e}")
-        wait_beating(MSNR_NF_TRIGGER, 6 * 3600, "msnr_neuro_filter_loop")   # re-run after every MSNR backtest (trigger) or 6h
+        if _nf_on:
+            bt_log_end("msnr_nf", ok=_nf_ok, note=_nf_err)   # v0.99.393
+        # v0.99.393 — only after the next backtest (trigger); was also every
+        # 6h on unchanged trades
+        bt_wait("msnr_nf", MSNR_NF_TRIGGER, NF_IDLE_SEC, "msnr_neuro_filter_loop", trigger_reason="после бэктеста", scheduled=False)   # re-run after every MSNR backtest (trigger) or 6h
 
 def msnr_backtest_loop():
     # v0.99.267 -- staggered backtest-cycle startup, per direct user
@@ -12699,6 +12794,7 @@ def msnr_backtest_loop():
             acquire_backtest_slot("msnr_backtest_loop")  # v0.99.325 — beats while queued
             with state_lock:
                 STATE["msnr_waiting_for_slot"] = False
+            bt_log_start("msnr")   # v0.99.393
             try:
                 _cycle_ex = ThreadPoolExecutor(max_workers=1)
                 _cycle_fut = _cycle_ex.submit(_calc_boosted, "msnr", bt_first_run("msnr"),
@@ -12709,14 +12805,17 @@ def msnr_backtest_loop():
                     _cycle_ex.shutdown(wait=False)
                     _BT_RAN.add("msnr")   # v0.99.385
                     save_state()   # v0.99.385 — persist the finished cycle right away
+                    bt_log_end("msnr")   # v0.99.393
                 except (TimeoutError, FutureTimeoutError):
                     _cycle_failed = True
+                    bt_log_end("msnr", ok=False, note="завис, брошен")   # v0.99.393
                     log_error("msnr_backtest_loop: cycle stalled (no progress for 15 min or over 4h) — aborting, retry in 30 min")
                     with state_lock:
                         STATE["msnr_backtest_running"] = False
                     _cycle_ex.shutdown(wait=False)
                 except Exception as e:
                     _cycle_failed = True
+                    bt_log_end("msnr", ok=False, note=str(e)[:80])   # v0.99.393
                     log_error(f"msnr_backtest_loop cycle: {e}")
                     with state_lock:
                         STATE["msnr_backtest_running"] = False
@@ -12729,7 +12828,7 @@ def msnr_backtest_loop():
         with state_lock:
             STATE["msnr_waiting_for_slot"] = False
         # v0.99.322 — failed/timed-out cycle retries in 30 min, not a full interval later
-        wait_beating(MSNR_BACKTEST_TRIGGER, BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, MSNR_REFRESH_SEC), "msnr_backtest_loop")  # v0.99.325 — beats while idle
+        bt_wait("msnr", MSNR_BACKTEST_TRIGGER, BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, MSNR_REFRESH_SEC), "msnr_backtest_loop", failed=_cycle_failed)  # v0.99.325 — beats while idle; v0.99.393 — journaled
         MSNR_BACKTEST_TRIGGER.clear()
 
 
@@ -15712,6 +15811,7 @@ def lsw_backtest_loop():
             acquire_backtest_slot("lsw_backtest_loop")  # v0.99.325 — beats while queued
             with state_lock:
                 STATE["lsw_waiting_for_slot"] = False
+            bt_log_start("lsw")   # v0.99.393
             try:
                 _cycle_ex = ThreadPoolExecutor(max_workers=1)
                 _cycle_fut = _cycle_ex.submit(_calc_boosted, "lsw", bt_first_run("lsw"),
@@ -15722,8 +15822,10 @@ def lsw_backtest_loop():
                     _cycle_ex.shutdown(wait=False)
                     _BT_RAN.add("lsw")   # v0.99.385
                     save_state()   # v0.99.385
+                    bt_log_end("lsw")   # v0.99.393
                 except (TimeoutError, FutureTimeoutError):
                     _cycle_failed = True
+                    bt_log_end("lsw", ok=False, note="завис, брошен")   # v0.99.393
                     log_error("lsw_backtest_loop: cycle stalled (no progress for 15 min or over 4h) — aborting, retry in 30 min")
                     with state_lock:
                         STATE["lsw_backtest_running"] = False
@@ -15731,6 +15833,7 @@ def lsw_backtest_loop():
                     _cycle_ex.shutdown(wait=False)
                 except Exception as e:
                     _cycle_failed = True
+                    bt_log_end("lsw", ok=False, note=str(e)[:80])   # v0.99.393
                     log_error(f"lsw_backtest_loop cycle: {e}")
                     with state_lock:
                         STATE["lsw_backtest_running"] = False
@@ -15744,7 +15847,7 @@ def lsw_backtest_loop():
         with state_lock:
             STATE["lsw_waiting_for_slot"] = False
         # v0.99.322 — failed/timed-out cycle retries in 30 min, not a full interval later
-        wait_beating(LSW_BACKTEST_TRIGGER, BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, LSW_REFRESH_SEC), "lsw_backtest_loop")  # v0.99.325 — beats while idle
+        bt_wait("lsw", LSW_BACKTEST_TRIGGER, BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, LSW_REFRESH_SEC), "lsw_backtest_loop", failed=_cycle_failed)  # v0.99.325 — beats while idle; v0.99.393 — journaled
         LSW_BACKTEST_TRIGGER.clear()
 
 
@@ -16872,6 +16975,7 @@ NEURO_TF_PHASE_COINS = int(os.environ.get("VP_NEURO_TF_PHASE_COINS", 0))   # v0.
 NEURO_TF_PHASE_WORKERS = int(os.environ.get("VP_NEURO_TF_PHASE_WORKERS", 4))   # v0.99.367 — coins processed at once in the phase
 _snr_filter_cands = {}   # symbol -> [candidate combo params] from the last S/R cycle
 _prv_filter_cands = {}   # same for P/R
+_prv_had_data = {}       # v0.99.393 — symbol -> did the last P/R cycle get candles for it
 
 
 def _snr_rebuild_cand(symbol, p):
@@ -17455,28 +17559,46 @@ def prv_filter_loop():
     nf_startup_wait(PRV_NF_TRIGGER, 1800, "prv_filters", "prv_filter_loop", "prv", "prv_filter_phase_done_at")   # v0.99.385
     while True:
         PRV_NF_TRIGGER.clear()
+        _nf_on = PRV_ENABLED
+        if _nf_on:
+            bt_log_start("prv_nf")   # v0.99.393
+        _nf_ok, _nf_err = True, None
         try:
             if PRV_ENABLED:
                 prv_filter_analysis()
                 if NEURO_TRADE_FILTER_ENABLED:
                     strategy_filter_phase("prv")   # v0.99.365
         except Exception as e:
+            _nf_ok, _nf_err = False, str(e)[:80]
             log_error(f"prv_filter_loop: {e}")
-        wait_beating(PRV_NF_TRIGGER, 6 * 3600, "prv_filter_loop")
+        if _nf_on:
+            bt_log_end("prv_nf", ok=_nf_ok, note=_nf_err)   # v0.99.393
+        # v0.99.393 — only after the next backtest (trigger); was also every
+        # 6h on unchanged trades
+        bt_wait("prv_nf", PRV_NF_TRIGGER, NF_IDLE_SEC, "prv_filter_loop", trigger_reason="после бэктеста", scheduled=False)
 
 
 def snr_filter_loop():
     nf_startup_wait(SNR_NF_TRIGGER, 1200, "snr_filters", "snr_filter_loop", "snr", "snr_filter_phase_done_at")   # v0.99.385
     while True:
         SNR_NF_TRIGGER.clear()
+        _nf_on = SNR_ENABLED
+        if _nf_on:
+            bt_log_start("snr_nf")   # v0.99.393
+        _nf_ok, _nf_err = True, None
         try:
             if SNR_ENABLED:
                 snr_filter_analysis()
                 if NEURO_TRADE_FILTER_ENABLED:
                     strategy_filter_phase("snr")   # v0.99.365
         except Exception as e:
+            _nf_ok, _nf_err = False, str(e)[:80]
             log_error(f"snr_filter_loop: {e}")
-        wait_beating(SNR_NF_TRIGGER, 6 * 3600, "snr_filter_loop")
+        if _nf_on:
+            bt_log_end("snr_nf", ok=_nf_ok, note=_nf_err)   # v0.99.393
+        # v0.99.393 — only after the next backtest (trigger); was also every
+        # 6h on unchanged trades
+        bt_wait("snr_nf", SNR_NF_TRIGGER, NF_IDLE_SEC, "snr_filter_loop", trigger_reason="после бэктеста", scheduled=False)
 
 
 def snr_backtest_loop():
@@ -17512,6 +17634,7 @@ def snr_backtest_loop():
             _snr_sem_acquired = True
             with state_lock:
                 STATE["snr_waiting_for_slot"] = False
+            bt_log_start("snr")   # v0.99.393
             # v0.99.271 — dynamic universe + top-N trade/display split, per
             # direct user request ("Настройку количества монет для торговли
             # и отображения как в нейро") — same architecture as v0.99.236/
@@ -17623,10 +17746,13 @@ def snr_backtest_loop():
                 # (v0.99.236) — a total network outage shouldn't blank
                 # out whatever the previous cycle found.
                 log_error("snr_backtest_loop: universe scan produced zero usable results this cycle — keeping previous results")
+            bt_log_end("snr", ok=not found_nothing, note="нет данных с биржи" if found_nothing else f"монет в результатах: {len(all_results)}")   # v0.99.393
             if all_results:
                 save_state()  # v0.99.271 — CRITICAL FIX: persist the freshly-completed cycle immediately, so a restart right after doesn't lose it (see save_state()'s own new snr_results/snr_signals/snr_active_symbols/snr_display_symbols keys)
         except Exception as e:
             _cycle_failed = True
+            if "snr" in _bt_started:
+                bt_log_end("snr", ok=False, note=str(e)[:80])   # v0.99.393
             log_error(f"snr_backtest_loop: {e}")
             with state_lock:
                 STATE["snr_backtest_running"] = False
@@ -17637,7 +17763,7 @@ def snr_backtest_loop():
                 BACKTEST_CONCURRENCY_SEMAPHORE.release()
         # v0.99.322 — failed cycle (exception or zero usable results, e.g. a
         # network outage) retries in 30 min instead of the full 4h interval
-        wait_beating(SNR_BACKTEST_TRIGGER, BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, SNR_REFRESH_SEC), "snr_backtest_loop")  # v0.99.325 — beats while idle
+        bt_wait("snr", SNR_BACKTEST_TRIGGER, BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, SNR_REFRESH_SEC), "snr_backtest_loop", failed=_cycle_failed)  # v0.99.325 — beats while idle; v0.99.393 — journaled
         SNR_BACKTEST_TRIGGER.clear()
 
 
@@ -18063,6 +18189,7 @@ def prv_optimize_symbol(symbol):
             candles_by_tf[tf] = get_candles_range(symbol, tf, start_ts, now)
         except Exception as e:
             log_error(f"prv_optimize_symbol {symbol} {tf}: {e}")
+    _prv_had_data[symbol] = any(len(v or []) >= 50 for v in candles_by_tf.values())   # v0.99.393
     out = calc_run("prv_optimize_core", {"candles_by_tf": candles_by_tf})
     for msg in out["errors"]:
         log_error(f"prv_optimize_symbol {symbol} {msg}")
@@ -18166,6 +18293,7 @@ def prv_backtest_loop():
             _prv_sem_acquired = True
             with state_lock:
                 STATE["prv_waiting_for_slot"] = False
+            bt_log_start("prv")   # v0.99.393
             universe = prv_build_universe()
             with state_lock:
                 STATE["prv_progress_done"] = 0
@@ -18213,9 +18341,15 @@ def prv_backtest_loop():
             active_top = display_top[:PRV_TOP_N]
             # v0.99.288 — same CRITICAL DEADLOCK FIX as snr_backtest_loop()'s
             # own — see that function's own comment for the full incident.
-            found_nothing = not all_results
+            # v0.99.393 — "no coin passed" is an honest result, not a failed
+            # cycle: before, it retried every 30 min (the network-outage
+            # path) instead of every 4h — P/R re-ran all day. Same rule
+            # S/R already uses: only a cycle where most coins got no
+            # candles at all counts as failed.
+            data_ok = bool(universe) and sum(1 for s_ in universe if _prv_had_data.get(s_)) >= 0.5 * len(universe)
+            found_nothing = not all_results and not data_ok
             with state_lock:
-                if all_results:
+                if all_results or data_ok:
                     STATE["prv_results"] = dict(display_top)
                     PRV_NF_TRIGGER.set()   # v0.99.361 — refresh the P/R filter report
                     _prv_active_symbols = [sym for sym, _ in active_top]
@@ -18226,10 +18360,13 @@ def prv_backtest_loop():
             if found_nothing:
                 _cycle_failed = True  # v0.99.322 — e.g. network outage: retry in 30 min, not 4h
                 log_error("prv_backtest_loop: universe scan produced zero usable results this cycle — keeping previous results")
-            if all_results:
+            bt_log_end("prv", ok=not found_nothing, note="нет данных с биржи" if found_nothing else f"монет в результатах: {len(all_results)}")   # v0.99.393
+            if all_results or data_ok:
                 save_state()
         except Exception as e:
             _cycle_failed = True
+            if "prv" in _bt_started:
+                bt_log_end("prv", ok=False, note=str(e)[:80])   # v0.99.393
             log_error(f"prv_backtest_loop: {e}")
             with state_lock:
                 STATE["prv_backtest_running"] = False
@@ -18240,7 +18377,7 @@ def prv_backtest_loop():
                 BACKTEST_CONCURRENCY_SEMAPHORE.release()
         # v0.99.322 — failed cycle (exception or zero usable results, e.g. a
         # network outage) retries in 30 min instead of the full 4h interval
-        wait_beating(PRV_BACKTEST_TRIGGER, BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, PRV_REFRESH_SEC), "prv_backtest_loop")  # v0.99.325 — beats while idle
+        bt_wait("prv", PRV_BACKTEST_TRIGGER, BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, PRV_REFRESH_SEC), "prv_backtest_loop", failed=_cycle_failed)  # v0.99.325 — beats while idle; v0.99.393 — journaled
         PRV_BACKTEST_TRIGGER.clear()
 
 
@@ -21390,6 +21527,10 @@ NEURO_WATCHDOG_CHECK_SEC = 60
 NEURO_WATCHDOG_STUCK_SEC = NEURO_STALL_SEC * 2 + 120  # v0.99.358 — the loop beats while a coin makes progress  # generous margin beyond the per-symbol ceiling itself
 
 
+class _NeuroAbandoned(Exception):
+    """v0.99.393 — raised inside a mining cycle the watchdog replaced."""
+
+
 def neuro_mining_watchdog():
     global _neuro_mining_running, _neuro_mining_current_symbol, _neuro_mining_progress_ts
     global _neuro_loop_gen, _neuro_sem_holder_gen
@@ -21415,6 +21556,8 @@ def neuro_mining_watchdog():
                         orphan_permit = True
                 if orphan_permit:
                     BACKTEST_CONCURRENCY_SEMAPHORE.release()  # v0.99.320 — reclaim the zombie's permit (it skips its own release)
+                bt_log_end("neuro", ok=False, note=f"завис на {current}, перезапущен сторожем")   # v0.99.393
+                bt_set_reason("neuro", "сторож: предыдущий цикл завис")
                 threading.Thread(target=neuro_mining_loop, daemon=True).start()
         except Exception as e:
             log_error(f"neuro_mining_watchdog: {e}")
@@ -21444,6 +21587,8 @@ def neuro_mining_loop():
         my_gen = _neuro_loop_gen
     triggered = NEURO_MINING_TRIGGER.wait(timeout=180)
     NEURO_MINING_TRIGGER.clear()
+    if triggered:
+        bt_set_reason("neuro", BT_REASON_BUTTON)   # v0.99.393
     # v0.99.383 — per user ("Neuro сам пошёл на перебэктест после перезапуска"):
     # on a server START, if the saved results are still fresh (mined less than
     # NEURO_REFRESH_SEC ago), wait until they are due instead of re-mining
@@ -21455,7 +21600,7 @@ def neuro_mining_loop():
         with _neuro_state_lock:
             last, have = _neuro_last_mined, bool(_neuro_summary)
         if not triggered and have and last and time.time() - last < NEURO_REFRESH_SEC:
-            if wait_beating(NEURO_MINING_TRIGGER, NEURO_REFRESH_SEC - (time.time() - last), "neuro_mining_loop"):
+            if bt_wait("neuro", NEURO_MINING_TRIGGER, NEURO_REFRESH_SEC - (time.time() - last), "neuro_mining_loop"):   # v0.99.393 — journaled
                 NEURO_MINING_TRIGGER.clear()
     while True:
         heartbeat("neuro_mining_loop")  # v0.99.322 — see system_health_watchdog()
@@ -21485,6 +21630,7 @@ def neuro_mining_loop():
             with _neuro_state_lock:
                 _neuro_waiting_slot_since = None
                 _neuro_sem_holder_gen = my_gen
+            bt_log_start("neuro")   # v0.99.393
             # v0.99.236 — dynamic, volume-ranked universe (up to
             # NEURO_UNIVERSE_SIZE=120 candidates) instead of the old fixed
             # 20-coin list, per direct user request ("развяжем руки нейро
@@ -21538,6 +21684,8 @@ def neuro_mining_loop():
                 if _nw <= 1:
                     for symbol in universe:
                         with _neuro_state_lock:
+                            if my_gen != _neuro_loop_gen:
+                                raise _NeuroAbandoned()   # v0.99.393 — replaced by the watchdog: stop, don't finish a second copy of the cycle
                             _neuro_mining_current_symbol = symbol
                             _neuro_mining_progress_ts = time.time()
                             heartbeat("neuro_mining_loop")  # v0.99.325 — progress beat
@@ -21582,6 +21730,7 @@ def neuro_mining_loop():
                             if mine:
                                 _neuro_sem_acquired = False
                                 BACKTEST_CONCURRENCY_SEMAPHORE.release()
+                                bt_log("neuro", "pause", None, "уступил слот модулю в очереди")   # v0.99.393
                                 time.sleep(3)   # let the queued loop take the permit first
                                 with _neuro_state_lock:
                                     _neuro_waiting_slot_since = time.time()
@@ -21592,6 +21741,7 @@ def neuro_mining_loop():
                                 with _neuro_state_lock:
                                     _neuro_waiting_slot_since = None
                                     _neuro_sem_holder_gen = my_gen
+                                bt_log("neuro", "resume", None, "продолжил")   # v0.99.393
 
                 else:
                     _tmp_results = {}
@@ -21618,6 +21768,9 @@ def neuro_mining_loop():
 
                     _bi = 0
                     while _bi < len(_order):
+                        with _neuro_state_lock:
+                            if my_gen != _neuro_loop_gen:
+                                raise _NeuroAbandoned()   # v0.99.393 — see the sequential branch
                         # v0.99.373 — batch size re-read every batch, so a change of
                         # the cores setting applies mid-cycle
                         _nw = max(1, calc_limit())
@@ -21647,6 +21800,7 @@ def neuro_mining_loop():
                             if mine:
                                 _neuro_sem_acquired = False
                                 BACKTEST_CONCURRENCY_SEMAPHORE.release()
+                                bt_log("neuro", "pause", None, "уступил слот модулю в очереди")   # v0.99.393
                                 time.sleep(3)   # let the queued loop take the permit first
                                 with _neuro_state_lock:
                                     _neuro_waiting_slot_since = time.time()
@@ -21657,6 +21811,7 @@ def neuro_mining_loop():
                                 with _neuro_state_lock:
                                     _neuro_waiting_slot_since = None
                                     _neuro_sem_holder_gen = my_gen
+                                bt_log("neuro", "resume", None, "продолжил")   # v0.99.393
 
                     for _s in _order:
                         if _s in _tmp_results:
@@ -21686,6 +21841,9 @@ def neuro_mining_loop():
             # trades floor (NEURO_TOP_N_MIN_TRADES, on the FULL history)
             # stays as the base eligibility gate — per the user's own
             # earlier request, unchanged.
+            with _neuro_state_lock:
+                if my_gen != _neuro_loop_gen:
+                    raise _NeuroAbandoned()   # v0.99.393 — never publish results from an abandoned cycle
             eligible = [(sym, res) for sym, res in all_results.items() if neuro_eligible(res[2])]   # v0.99.389
             eligible.sort(key=lambda item: -neuro_rank_metric(item[1][2]))
             # v0.99.262 — per direct user request ("не количество топ для
@@ -21754,8 +21912,15 @@ def neuro_mining_loop():
                         rr_txt = f"RR{rr:.0f}" if rr is not None else "RR?"
                         lines.append(f"{sym.replace('_USDT', '')}-{wr_txt}-{rr_txt}")
                     send_telegram("\U0001f9e0 Neuro \u0431\u044d\u043a\u0442\u0435\u0441\u0442:\n" + "\n".join(lines), category="neuro_summary")
+            bt_log_end("neuro", ok=bool(all_results),
+                       note=f"в топе: {len(new_active)}" if all_results else "нет данных с биржи")   # v0.99.393
+        except _NeuroAbandoned:
+            log_error("neuro_mining_loop: abandoned by the watchdog — this old cycle stops, the fresh one continues")
+            return   # the finally below skips the permit release (the watchdog reclaimed it)
         except Exception as e:
             _cycle_failed = True
+            if "neuro" in _bt_started:
+                bt_log_end("neuro", ok=False, note=str(e)[:80])   # v0.99.393
             log_error(f"neuro_mining_loop: {e}")
             with _neuro_state_lock:
                 _neuro_mining_running = False
@@ -21775,7 +21940,7 @@ def neuro_mining_loop():
         # v0.99.320 — a FAILED cycle retries in 30 min instead of waiting
         # the full 24h (a daily-recurring failure used to mean days with
         # no fresh backtest and nothing visible in the tab).
-        wait_beating(NEURO_MINING_TRIGGER, NEURO_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, NEURO_REFRESH_SEC), "neuro_mining_loop")  # v0.99.325 — beats while idle
+        bt_wait("neuro", NEURO_MINING_TRIGGER, NEURO_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, NEURO_REFRESH_SEC), "neuro_mining_loop", failed=_cycle_failed)  # v0.99.325 — beats while idle; v0.99.393 — journaled
         NEURO_MINING_TRIGGER.clear()
 
 
@@ -23615,7 +23780,8 @@ def api_health():
             waiting.append("Neuro")
     return jsonify({"stalled": stalled_loops(), "waiting_for_slot": waiting,
                     "backtest_slots": BACKTEST_CONCURRENCY_LIMIT,
-                    "exchange_load": exchange_load_summary()})
+                    "exchange_load": exchange_load_summary(),
+                    "bt": bt_journal_snapshot()})   # v0.99.393
 
 
 @app.route("/api/msnr/status")
@@ -24811,6 +24977,7 @@ INDEX_HTML = """<!doctype html>
   <div id="hdrChips">
     <span id="autotradeBanner"></span>
     <span id="healthPill"></span>
+    <span id="btPill"></span>
     <details id="globalErrorsBox" style="display:none;">
       <summary class="loss">⚠ Ошибки <span id="globalErrorsCount">0</span></summary>
       <div id="globalErrorsList" class="dim" style="margin-top:6px;font-size:var(--fs-sm);max-height:300px;overflow-y:auto;"></div>
@@ -27133,10 +27300,13 @@ async function refreshNeuro() {
     // v0.99.390 — best first: by the honest TEST result (avg R net of fees);
     // coins without test trades go last. Display order only — which coins
     // trade is still decided on the validation part.
+    // v0.99.393 — per user ("сортировку по neuro сделаем не по rr а по общей
+    // прибыли"): by TOTAL test profit (avg R x trades) instead of avg R per
+    // trade — 20 trades at +0.3R now beat 3 trades at +0.5R.
     const _testR = c => {
       const sm = c.summary || {};
-      if (sm.method === 'holdout' && sm.n > 0 && sm.avg_pnl_r != null) return sm.avg_pnl_r;
-      return sm.method === 'holdout' ? -1e9 : (sm.avg_pnl_r != null ? sm.avg_pnl_r - 1e6 : -1e9);
+      if (sm.method === 'holdout' && sm.n > 0 && sm.avg_pnl_r != null) return sm.avg_pnl_r * sm.n;
+      return sm.method === 'holdout' ? -1e9 : (sm.avg_pnl_r != null ? sm.avg_pnl_r * (sm.n || 0) - 1e6 : -1e9);
     };
     const coins = (data.coins || []).slice().sort((a, b) => (_testR(b) - _testR(a)) || (((b.summary || {}).n || 0) - ((a.summary || {}).n || 0)));
     const lastMined = data.last_mined ? fmtDateTime(data.last_mined) : '\u2014';
@@ -27195,6 +27365,7 @@ async function refreshNeuro() {
           <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid var(--line);">
             <div style="font-size:var(--fs-xl);font-weight:700;" class="${pnlCls}">${s.avg_pnl_r>0?'+':''}${s.avg_pnl_r}R</div>
             <div class="dim" style="font-size:var(--fs-xs);">\u0421\u0420. P&L${s.method === 'holdout' ? ' · тест' : ''}</div>
+            <div class="${pnlCls}" style="font-size:var(--fs-xs);" title="суммарно за все сделки${s.method === 'holdout' ? ' тест-части' : ''} — по этому числу отсортированы карточки">итого ${s.avg_pnl_r * s.n > 0 ? '+' : ''}${Math.round(s.avg_pnl_r * s.n * 10) / 10}R</div>
           </div>
           <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid var(--line);">
             <div style="font-size:var(--fs-xl);font-weight:700;color:var(--tx);">1:${(s.chosen_rr||cfg.rr||2).toFixed(2)}</div>
@@ -28514,8 +28685,35 @@ async function refreshHealth() {
     if ((h.waiting_for_slot || []).length) {
       parts.push(`<div class="dim" style="margin-top:6px;font-size:var(--fs-xs);">⏳ в очереди на бэктест: ${h.waiting_for_slot.join(', ')} (одновременно не больше ${h.backtest_slots})</div>`);
     }
+    // v0.99.393 — backtest schedule + run journal: what runs now, what is due when, and why each run started
+    const B = h.bt;
+    const btPill = document.getElementById('btPill');
+    if (B && btPill) {
+      const nRun = (B.running || []).length;
+      btPill.innerHTML = `<span class="pill" onclick="toggleBtJournal()" style="cursor:pointer;" title="расписание и журнал бэктестов">⏱ ${nRun ? 'идёт ' + nRun : 'бэктесты'}</span>`;
+      const hm = t => new Date(t * 1000).toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'});
+      const dm = t => new Date(t * 1000).toLocaleDateString('ru-RU', {day: '2-digit', month: '2-digit'});
+      const inTxt = sec => sec >= 3600 ? `${Math.floor(sec / 3600)} ч ${Math.round(sec % 3600 / 60)} мин` : `${Math.max(0, Math.round(sec / 60))} мин`;
+      const run = (B.running || []).map(r => `<div>▶ <b>${r.label}</b> идёт ${inTxt(B.now - r.since)} (с ${hm(r.since)})</div>`).join('');
+      const nxt = (B.next || []).map(r => `<div>⏭ <b>${r.label}</b> в ${hm(r.at)}${new Date(r.at * 1000).toDateString() !== new Date().toDateString() ? ' ' + dm(r.at) : ''} (через ${inTxt(r.at - B.now)}) — ${r.reason}</div>`).join('');
+      const evTxt = {start: '▶ старт', end: '✓ готово', fail: '✗ сбой', pause: '⏸ пауза', resume: '▶ продолжил'};
+      const jr = (B.journal || []).map(r => `<div><span class="dim">${dm(r.t)} ${hm(r.t)}</span> <b>${r.label}</b> <span class="${r.ev === 'fail' ? 'loss' : (r.ev === 'end' ? 'win' : '')}">${evTxt[r.ev] || r.ev}</span>${r.reason ? ' — ' + r.reason : ''}${r.note ? ' <span class="dim">(' + r.note + ')</span>' : ''}</div>`).join('');
+      const wasBtOpen = !!(document.getElementById('btJournal') && document.getElementById('btJournal').dataset.open === '1');
+      parts.push(`<div id="btJournal" data-open="${wasBtOpen ? 1 : 0}" style="display:${wasBtOpen ? 'block' : 'none'};font-size:var(--fs-xs);line-height:1.5;margin-top:6px;">`
+        + `<b>Сейчас</b>${run || '<div class="dim">ничего не считается</div>'}`
+        + `<b>Дальше по расписанию</b>${nxt || '<div class="dim">—</div>'}`
+        + `<div class="dim">фильтры (Neuro-фильтр MSNR/Sweep, фильтры S/R, P/R) считаются только сразу после своего бэктеста</div>`
+        + `<b>Журнал</b> <span class="dim">(с последнего запуска сервера)</span>${jr || '<div class="dim">пока пусто</div>'}</div>`);
+    }
     el.innerHTML = parts.join('');
   } catch (e) {}
+}
+function toggleBtJournal() {
+  const d = document.getElementById('btJournal');
+  if (!d) return;
+  const open = d.dataset.open !== '1';
+  d.dataset.open = open ? '1' : '0';
+  d.style.display = open ? 'block' : 'none';
 }
 function toggleHealthDetails() {
   const d = document.getElementById('healthDetails');
