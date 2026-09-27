@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.410"
+APP_VERSION = "0.99.411"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6884,7 +6884,7 @@ PERSIST_BT_KEYS = (
     "lsw_live_universe", "lsw_live_directions", "lsw_chosen_rr", "lsw_rr_sweep",
     "lsw_filter_checkpoints", "lsw_neuro_filters", "lsw_pooled", "lsw_backtest_interval",
     "snr_last_backtest_finished", "snr_filters", "snr_diag", "snr_pooled",
-    "prv_last_backtest_finished", "prv_filters", "prv_keep",   # v0.99.410
+    "prv_last_backtest_finished", "prv_filters", "prv_keep", "prv_pooled",   # v0.99.410, v0.99.411
     "mirror_last_backtest_finished", "mirror_last_backtest_duration", "mirror_backtest_summary",
     "mirror_tuned_tolerances",
     "ft5_last_backtest_finished", "ft5_last_backtest_duration", "ft5_universe", "ft5_live_universe",
@@ -14223,7 +14223,7 @@ def strategy_filter_phase(mod):
         loop, top_n, disp_n = "snr_filter_loop", SNR_TOP_N, SNR_DISPLAY_N
     else:
         cands_map, rebuild, zc, mtr, mte = _prv_filter_cands, _prv_rebuild_cand, PRV_Z_CRITICAL, PRV_MIN_TRAIN_TRADES, PRV_MIN_TEST_TRADES
-        tcrit = None
+        tcrit = PRV_TEST_Z   # v0.99.411
         loop, top_n, disp_n = "prv_filter_loop", PRV_TOP_N, PRV_DISPLAY_N
     ranked_coins = sorted(((s, max(c["train_z"] for c in cs)) for s, cs in list(cands_map.items()) if cs),
                           key=lambda x: -x[1])
@@ -15312,6 +15312,11 @@ PRV_ATR_LENGTH        = 14   # matches the Pine Script's own default "ATR Length
 PRV_SL_ATR_MULT       = 1.0  # SL distance beyond entry, in ATR units — fixed (not swept) to keep the search space tractable, same design choice as SNR_SL_ATR_MULT
 PRV_N_COMBOS          = len(PRV_MA_TYPE_CANDIDATES) * len(PRV_KC_LENGTH_CANDIDATES) * len(PRV_BAND_MULT_CANDIDATES) * len(PRV_RR_CANDIDATES) * len(PRV_TF_CANDIDATES)  # 216
 PRV_Z_CRITICAL        = 3.113  # v0.99.290 — per direct user request ("смягчить порог сам по себе, чтобы чаще что-то находило") after the strict z>=3.501 (alpha=0.05) bar routinely found zero validated symbols on real market data. Loosened to alpha=0.20 (still Bonferroni-corrected for all PRV_N_COMBOS=216 comparisons, NOT reverted to an uncorrected bar) — a 20% chance of at least one false positive across the whole search, up from 5%, while still directly verified at 0/30 false positives on pure random-walk synthetic data (same test as the original 3.501 threshold's own v0.99.277 verification) — same "hardcoded rather than adding scipy" reasoning as SNR_Z_CRITICAL's own comment.
+PRV_TEST_Z            = float(os.environ.get("VP_PRV_TEST_Z", 2.0))   # v0.99.411 — the combo chosen on train is ONE hypothesis on test: z >= 2 (same as S/R's SNR_TEST_Z). Before, test also needed the Bonferroni bar for all combos, which the 5-30 test trades of one coin can hardly ever reach even with a real edge
+PRV_POOLED_ENABLED    = os.environ.get("VP_PRV_POOLED", "1") == "1"   # v0.99.411 — strategy-level test over all coins together (see prv_pooled_select)
+PRV_POOLED_MIN_TRAIN  = int(os.environ.get("VP_PRV_POOLED_MIN_TRAIN", 100))
+PRV_POOLED_MIN_TEST   = int(os.environ.get("VP_PRV_POOLED_MIN_TEST", 40))
+PRV_POOLED_MIN_COIN_TRAIN = int(os.environ.get("VP_PRV_POOLED_MIN_COIN_TRAIN", 5))
 PRV_KEEP_Z            = 1.645  # v0.99.410 — hysteresis (user: "монета прошла, а через час уже нет"): entering needs PRV_Z_CRITICAL (Bonferroni over all 216 combos — a SEARCH); a coin already chosen is re-checked as ONE fixed hypothesis on the shifted window, for which one-sided 95% (z >= 1.645) on train AND test is the honest bar. Below that the coin is dropped and must pass the strict bar again.
 PRV_MIN_TRAIN_TRADES  = 15
 PRV_MIN_TEST_TRADES   = 5
@@ -15327,6 +15332,8 @@ PRV_SINGLE_BEST_ENABLED = os.environ.get("VP_PRV_SINGLE_BEST", "0") == "1"
 PRV_DISPLAY_N         = int(os.environ.get("VP_PRV_DISPLAY_N", 5))
 PRV_REFRESH_SEC       = int(os.environ.get("VP_PRV_REFRESH_SEC", 4 * 3600))
 PRV_PER_SYMBOL_MAX_SEC = int(os.environ.get("VP_PRV_PER_SYMBOL_MAX_SEC", 300))
+PRV_POOLED_Z          = round(statistics.NormalDist().inv_cdf(1 - 0.05 / PRV_N_COMBOS), 2)   # v0.99.411 — pooled train bar: Bonferroni over all combos at 5%
+_prv_pool_parts = {}   # v0.99.411 — symbol -> {combo key: train/test counts} from the last P/R cycle
 PRV_BACKTEST_TRIGGER  = threading.Event()  # per direct user report about SNR's own identical gap (v0.99.270) — built correctly from the start here
 _prv_active_symbols   = []
 _prv_display_symbols  = []
@@ -15514,6 +15521,7 @@ def prv_optimize_symbol(symbol):
     if best is not None and best.get("_all_closed") is not None:
         best["recent_trades"] = best["_all_closed"][-40:][::-1]   # share objects, as in-process (see snr)
     _prv_filter_cands[symbol] = out["filter_cands"]
+    _prv_pool_parts[symbol] = out.get("pool") or {}   # v0.99.411
     if best is not None:
         # v0.99.318 — $15 va-bank compounding over the winning combo's full history
         try:
@@ -15567,6 +15575,7 @@ def prv_optimize_core(candles_by_tf, keep=None, recover=None):
     errors = []
     passing, near = [], []   # v0.99.364 — candidates for the Neuro filter
     kept = []   # v0.99.410
+    pool = {}   # v0.99.411
     keep_key = ((keep["timeframe"], keep["ma_type"], keep["kc_length"], keep["band_mult"], keep["rr"])
                 if keep else None)
     rec_set, rec_rr = set(), None
@@ -15599,6 +15608,11 @@ def prv_optimize_core(candles_by_tf, keep=None, recover=None):
                             closed = [t for t in trades if t["result"] in CLOSED_RESULTS]
                             train = [t for t in closed if t["time"] <= boundary_time]
                             test = [t for t in closed if t["time"] > boundary_time]
+                            pool[prv_combo_key(tf, ma_type, kc_length, band_mult, rr)] = (
+                                len(train), sum(1 for t in train if t["result"] == "WIN"),
+                                sum(_net_r(t) ** 2 for t in train), sum(_net_r(t) for t in train),
+                                len(test), sum(1 for t in test if t["result"] == "WIN"),
+                                sum(_net_r(t) ** 2 for t in test), sum(_net_r(t) for t in test))   # v0.99.411 — for the pooled test
                             if len(train) < PRV_MIN_TRAIN_TRADES or len(test) < PRV_MIN_TEST_TRADES:
                                 continue
                             train_z = _z_vs_breakeven_with_fees(train, rr)   # v0.99.363 — breakeven incl. fees
@@ -15612,7 +15626,7 @@ def prv_optimize_core(candles_by_tf, keep=None, recover=None):
                             _mine = _key == keep_key or ((tf, ma_type, kc_length, band_mult) in rec_set and rr == rec_rr)
                             if _mine:
                                 cand["mine"] = True
-                            if train_z >= PRV_Z_CRITICAL and test_z >= PRV_Z_CRITICAL:
+                            if train_z >= PRV_Z_CRITICAL and test_z >= PRV_TEST_Z:   # v0.99.411 — test: one hypothesis
                                 passing.append(cand)
                             elif _mine and train_z >= PRV_KEEP_Z and test_z >= PRV_KEEP_Z:
                                 kept.append(cand)   # v0.99.410 — hysteresis
@@ -15636,11 +15650,92 @@ def prv_optimize_core(candles_by_tf, keep=None, recover=None):
         c, f = max(pick, key=lambda v: _variant_train_z(v))
         best = _strategy_best_dict(c, f, {"timeframe": c["tf"], "ma_type": c["ma_type"], "kc_length": c["kc_length"],
                                           "band_mult": c["band_mult"], "rr": c["rr"]})
-        strict = c["train_z"] >= PRV_Z_CRITICAL and c["test_z"] >= PRV_Z_CRITICAL
+        strict = c["train_z"] >= PRV_Z_CRITICAL and c["test_z"] >= PRV_TEST_Z
         best["kept"] = not strict
         best["keep_z"] = PRV_KEEP_Z
         best["recovered"] = bool(c.get("mine") and not keep)
-    return {"best": best, "filter_cands": filter_cands, "errors": errors}
+    return {"best": best, "filter_cands": filter_cands, "errors": errors, "pool": pool}
+
+
+def prv_combo_key(tf, ma_type, kc_length, band_mult, rr):
+    return f"{tf}|{ma_type}|{kc_length}|{band_mult}|{rr}"
+
+
+def prv_pooled_select(parts):
+    """v0.99.411 — strategy-level test for Peak Reversal, same rule as S/R's
+    snr_pooled_select(): the trades of ALL coins per combo are added up;
+    the combo with the best pooled TRAIN z is chosen (it must clear
+    PRV_POOLED_Z, the Bonferroni bar for all combos) and passes only if the
+    pooled TEST part (never used for choosing) confirms it with
+    z >= PRV_TEST_Z and a positive net result. Hundreds of trades instead
+    of one coin's dozens: a weak but real edge shows up here."""
+    agg = {}
+    for part in parts.values():
+        for k, v in (part or {}).items():
+            a = agg.setdefault(k, [0, 0, 0.0, 0.0, 0, 0, 0.0, 0.0, 0])
+            for i in range(8):
+                a[i] += v[i]
+            if v[0] > 0:
+                a[8] += 1
+    rows = []
+    for k, a in agg.items():
+        tf, ma_type, kc_length, band_mult, rr = k.split("|")
+        rr = float(rr)
+        if a[0] < PRV_POOLED_MIN_TRAIN:
+            continue
+        tz = _t_from_sums(a[0], a[3], a[2], var_floor=rr)
+        sz = _t_from_sums(a[4], a[7], a[6], var_floor=rr) if a[4] else None
+        rows.append({"tf": tf, "ma_type": ma_type, "kc_length": int(kc_length), "band_mult": float(band_mult), "rr": rr,
+                     "coins": a[8], "train_n": a[0], "train_wr": round(a[1] / a[0] * 100, 1),
+                     "train_avg_pnl_r": round(a[3] / a[0], 3), "train_z": round(tz, 2) if tz is not None else None,
+                     "test_n": a[4], "test_wr": round(a[5] / a[4] * 100, 1) if a[4] else None,
+                     "test_avg_pnl_r": round(a[7] / a[4], 3) if a[4] else None,
+                     "test_z": round(sz, 2) if sz is not None else None})
+    rows.sort(key=lambda r: -(r["train_z"] if r["train_z"] is not None else -99))
+    top = rows[0] if rows else None
+    chosen = top if top and top["train_z"] is not None and top["train_z"] >= PRV_POOLED_Z else None
+    passed = bool(chosen and chosen["test_n"] >= PRV_POOLED_MIN_TEST and chosen["test_z"] is not None
+                  and chosen["test_z"] >= PRV_TEST_Z and (chosen["test_avg_pnl_r"] or 0) > 0)
+    return {"t": time.time(), "passed": passed, "chosen": chosen, "best_train": top, "top": rows[:8],
+            "coins": len(parts), "combos": len(rows), "combos_total": PRV_N_COMBOS,
+            "z_needed": PRV_POOLED_Z, "z_test_needed": PRV_TEST_Z,
+            "min_train": PRV_POOLED_MIN_TRAIN, "min_test": PRV_POOLED_MIN_TEST}
+
+
+def prv_pooled_results(chosen, symbols, loop_name="prv_backtest_loop"):
+    """v0.99.411 — per-coin cards for the confirmed pooled combo: coins with
+    >= PRV_POOLED_MIN_COIN_TRAIN own train trades and a positive own train
+    result (chosen on train only). Same result dict as a per-coin pass."""
+    key = prv_combo_key(chosen["tf"], chosen["ma_type"], chosen["kc_length"], chosen["band_mult"], chosen["rr"])
+    p = {"tf": chosen["tf"], "ma_type": chosen["ma_type"], "kc_length": chosen["kc_length"],
+         "band_mult": chosen["band_mult"], "rr": chosen["rr"]}
+    params = {"timeframe": p["tf"], "ma_type": p["ma_type"], "kc_length": p["kc_length"],
+              "band_mult": p["band_mult"], "rr": p["rr"]}
+    out = {}
+    for sym in symbols:
+        heartbeat(loop_name)
+        part = (_prv_pool_parts.get(sym) or {}).get(key)
+        if not part or part[0] < PRV_POOLED_MIN_COIN_TRAIN or part[3] <= 0:
+            continue
+        try:
+            c = _prv_rebuild_cand(sym, p)
+            if not c:
+                continue
+            tr = [t for t in c["closed"] if t["time"] <= c["boundary"]]
+            te = [t for t in c["closed"] if t["time"] > c["boundary"]]
+            if not tr or not te:
+                continue
+            c["train_z"] = _z_vs_breakeven_with_fees(tr, p["rr"]) or 0.0
+            c["test_z"] = _z_vs_breakeven_with_fees(te, p["rr"]) or 0.0
+            best = _strategy_best_dict(c, None, params)
+            _all = best.pop("_all_closed")
+            best.update(rr_compound_annotate(_all, sym))
+            best["all_trades"] = _all[::-1]
+            best["pooled"] = True
+            out[sym] = best
+        except Exception as e:
+            log_error(f"prv_pooled_results {sym}: {e}")
+    return out
 
 
 def prv_backtest_loop():
@@ -15706,10 +15801,19 @@ def prv_backtest_loop():
                     if symbol in STATE["prv_progress_in_flight"]:
                         STATE["prv_progress_in_flight"].remove(symbol)
 
+            _prv_pool_parts.clear()   # v0.99.411
             with calc_boost("prv", bt_first_run("prv")):   # v0.99.371, v0.99.385
                 run_pool_with_progress(prv_optimize_symbol, universe, min(WORKERS, len(universe) or 1),
                                        "prv_backtest_loop", _prv_done, _prv_stop)
             _BT_RAN.add("prv")   # v0.99.385
+            per_coin_results = dict(all_results)   # v0.99.411 — the hysteresis memory is for per-coin passes only
+            if PRV_POOLED_ENABLED:   # v0.99.411 — strategy-level test; its coins are added to the per-coin passes
+                _pooled = prv_pooled_select({s_: _prv_pool_parts[s_] for s_ in universe if s_ in _prv_pool_parts})
+                with state_lock:
+                    STATE["prv_pooled"] = _pooled
+                if _pooled["passed"]:
+                    for s_, r_ in prv_pooled_results(_pooled["chosen"], universe).items():
+                        all_results.setdefault(s_, r_)
 
             ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
             display_top = ranked[:max(PRV_DISPLAY_N, PRV_TOP_N)]
@@ -15732,7 +15836,7 @@ def prv_backtest_loop():
                     STATE["prv_keep"] = {sym: {"timeframe": r_["timeframe"], "ma_type": r_["ma_type"], "kc_length": r_["kc_length"],
                                                "band_mult": r_["band_mult"], "rr": r_["rr"],
                                                "since": (_old_keep.get(sym) or {}).get("since") or time.time()}
-                                         for sym, r_ in all_results.items()}
+                                         for sym, r_ in per_coin_results.items()}
                     STATE["prv_results"] = dict(display_top)
                     PRV_NF_TRIGGER.set()   # v0.99.361 — refresh the P/R filter report
                     _prv_active_symbols = [sym for sym, _ in active_top]
@@ -20497,6 +20601,7 @@ def api_prv_status():
         "best_symbol": (_prv_active_symbols[0] if _prv_active_symbols else None),
         "calc": calc_status("prv"), "calc_cond": calc_status("cond"),   # v0.99.372
         "provisional": STATE.get("prv_provisional"),   # v0.99.369
+        "pooled": STATE.get("prv_pooled") if PRV_POOLED_ENABLED else None,   # v0.99.411
         "filter_phase": STATE.get("prv_filter_phase"),   # v0.99.366
         "filters": STATE.get("prv_filters"),   # v0.99.361
         "coins": coins, "last_backtest_finished": last_finished,
@@ -20505,7 +20610,7 @@ def api_prv_status():
         "config": {"top_n": PRV_TOP_N, "display_n": PRV_DISPLAY_N, "timeframes": PRV_TF_CANDIDATES,
                    "ma_type_candidates": PRV_MA_TYPE_CANDIDATES, "kc_length_candidates": PRV_KC_LENGTH_CANDIDATES,
                    "band_mult_candidates": PRV_BAND_MULT_CANDIDATES, "rr_candidates": PRV_RR_CANDIDATES,
-                   "refresh_sec": PRV_REFRESH_SEC, "z_critical": PRV_Z_CRITICAL, "keep_z": PRV_KEEP_Z},
+                   "refresh_sec": PRV_REFRESH_SEC, "z_critical": PRV_Z_CRITICAL, "keep_z": PRV_KEEP_Z, "test_z": PRV_TEST_Z},
     })
 
 
@@ -24187,7 +24292,7 @@ async function refreshPrv() {
           <div class="dim" style="font-size:var(--fs-xs);flex-basis:100%;">${r.fees_included ? `R и z — после комиссии (≈${r.avg_fee_r}R на сделку: 0.05% вход + 0.05% выход)` : 'R и z — без комиссии (старый бэктест, пересчитается)'}</div>
           ${neuroFilterNoteHtml(r)}
         </div>
-        <div class="dim hint-block" style="font-size:var(--fs-xs);margin-bottom:8px;">z — насколько стандартных отклонений винрейт выше безубытка с учётом комиссии (нужно ≥3.11 с поправкой на 216 перебранную комбинацию)</div>
+        <div class="dim hint-block" style="font-size:var(--fs-xs);margin-bottom:8px;">z — насколько стандартных отклонений результат выше безубытка с учётом комиссии: на обучении нужно ≥${data.config && data.config.z_critical} (поправка на перебор всех комбинаций), на тесте — ≥${data.config && data.config.test_z} (проверяется один уже выбранный вариант). ${r.pooled ? 'Эта монета торгуется по комбинации, подтверждённой общей проверкой по всем монетам.' : ''}</div>
         ${liveSigSection}
         ${compoundSummaryHtml(r)}
         ${filterCoinLineHtml(data.filters, c.symbol)}
@@ -24201,6 +24306,7 @@ async function refreshPrv() {
       ${progressHtml}
       ${lstatsHtml}
       ${liveSigsTableHtml}
+      ${data.pooled ? snrPooledHtml(data.pooled) : ''}
       ${provisionalHtml(data.provisional, data.backtest_running, 'prv')}
       ${filterPhaseHtml(data.filter_phase, data.calc_cond)}
       ${filterReportHtml(data.filters, "🧪 Neuro-фильтры для Peak Reversal (информационно)", "считаются (≈30 мин после запуска и после каждого бэктеста P/R)")}
@@ -25962,7 +26068,8 @@ function snrPooledHtml(p) {
   if (!p) return '';
   const sgn = v => v == null ? '—' : (v > 0 ? '+' : '') + v;
   const line = (lbl, n, wr, r, z, need) => `${lbl}: n=${n} · WR ${wr == null ? '—' : wr + '%'} · ${sgn(r)}R/сделку · z=${z == null ? '—' : z}${need ? ` <span class="dim">(нужно ≥ ${need})</span>` : ''}`;
-  const combo = c => `${c.tf}, пивот ${c.pivot_length}, сила ${c.min_strength}, RR ${c.rr}`;
+  const combo = c => c.ma_type ? `${c.tf}, ${c.ma_type}${c.kc_length}, полоса×${c.band_mult}, RR ${c.rr}`   // v0.99.411 — P/R
+    : `${c.tf}, пивот ${c.pivot_length}, сила ${c.min_strength}, RR ${c.rr}`;
   const c = p.chosen || p.best_train;
   const verdict = p.passed
     ? `<b class="win">✓ Стратегия подтверждена на всех монетах вместе</b>`

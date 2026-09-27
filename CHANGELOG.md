@@ -18103,3 +18103,17 @@ v0.99.410 - P/R hysteresis (user: a coin passed, an hour later the re-run
          Server start stops any other running copy of vp_poc_screener.py (and
          its calc workers) before loading state - an old copy left running
          after an update kept sending alerts from removed modules (MSNR).
+v0.99.411 - P/R brought to the S/R scheme (user: no S/R or P/R coin passes):
+         * test bar z >= 2 (PRV_TEST_Z) for the combo chosen on train - one
+           hypothesis; before, test also needed the Bonferroni bar for all
+           combos, which one coin's 5-30 test trades can hardly reach.
+         * strategy-level pooled test (PRV_POOLED_*): trades of all coins per
+           combo added up; best pooled train z must clear the Bonferroni bar
+           over all combos at 5%, pooled test must confirm (z >= 2, net > 0);
+           then coins with a positive own train result for that combo trade
+           it. Added to the per-coin passes; hysteresis memory stays per-coin.
+           Shown on the P/R tab with the best combos table.
+         Synthetic check (30-60 coins): random walk - 0 per-coin passes, pooled
+         not confirmed (a lucky train z 3.95 failed on test, z 0.91); weak
+         mean reversion - only 2/30 coins pass alone, pooled confirms it
+         (test z 8.1 over 524 trades).
