@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.394"
+APP_VERSION = "0.99.395"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -27433,7 +27433,11 @@ async function refreshNeuro() {
       if (sm.method === 'holdout' && sm.n > 0 && sm.avg_pnl_r != null) return sm.avg_pnl_r * sm.n;
       return sm.method === 'holdout' ? -1e9 : (sm.avg_pnl_r != null ? sm.avg_pnl_r * (sm.n || 0) - 1e6 : -1e9);
     };
-    const coins = (data.coins || []).slice().sort((a, b) => (_testR(b) - _testR(a)) || (((b.summary || {}).n || 0) - ((a.summary || {}).n || 0)));
+    // v0.99.395 — per user ("перемешаны монеты отображаемые и активные ... на первую
+    // галочку поставить нельзя, на 5-ю можно"): tradeable (active) coins first,
+    // reference-only ones after them; total test profit orders each group.
+    const _act = c => (c.is_active !== false ? 1 : 0);
+    const coins = (data.coins || []).slice().sort((a, b) => (_act(b) - _act(a)) || (_testR(b) - _testR(a)) || (((b.summary || {}).n || 0) - ((a.summary || {}).n || 0)));
     const lastMined = data.last_mined ? fmtDateTime(data.last_mined) : '\u2014';
     const miningTxt = data.mining_running
       ? `<span class="dim">\u043c\u0430\u0439\u043d\u0438\u043d\u0433: ${data.mining_done||0}/${data.mining_total||coins.length||10} \u2014 \u0441\u0435\u0439\u0447\u0430\u0441 ${data.mining_current_symbol||'?'}</span>${coresTxt(data.calc)}`

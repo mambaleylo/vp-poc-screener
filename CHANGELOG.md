@@ -17858,3 +17858,7 @@ v0.99.394 - S/R: POOLED strategy test (user: "по s/r zone нет ни одно
          Verified: synthetic 8 coins — random walk: 0/5 seeds pass (no false
          positives); weak mean reversion: old per-coin rule 0/8 coins, pooled
          passes with every coin positive on test; strong edge: both pass.
+v0.99.395 - Neuro cards: tradeable (active) coins first, reference-only coins after
+         them, total test profit orders each group (user: "перемешаны монеты
+         отображаемые и активные ... на первую галочку поставить нельзя, на 5-ю
+         можно"). Which coins are active is unchanged (chosen on validation).
