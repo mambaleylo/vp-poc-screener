@@ -17841,3 +17841,20 @@ v0.99.393 - Backtest scheduling made visible and tamed (user: "такое ощу
            the card shows "итого ±XR".
          Verified: py_compile, pyflakes, JS check; server run locally: journal
          shows server-start / button / retry reasons correctly.
+v0.99.394 - S/R: POOLED strategy test (user: "по s/r zone нет ни одной монеты
+         прошедшей проверку ... что можно сделать?" -> variant A).
+         - Why nothing passed: each coin had to show z >= 3.23 on its own 15-50
+           train trades and z >= 2 on 5-15 test trades. A realistic edge
+           (+0.2R/trade at RR 2) needs ~200 test trades for z >= 2 — the rule
+           was statistically unpassable for a single coin.
+         - Now (VP_SNR_POOLED=1, default): ONE combo (tf x pivot x strength x
+           RR) for the whole strategy, chosen by the pooled TRAIN z of all
+           coins (>= 3.23 Bonferroni for 81 combos, >= 100 trades), confirmed
+           on the pooled TEST part (>= 40 trades, z >= 2, net R > 0). If it
+           passes, coins with >= 5 own train trades and a positive own train
+           result trade it, ranked by train (test stays untouched).
+         - Panel shows the verdict, the combo, pooled train/test n/WR/R/z and
+           the best combos; the per-coin filter phase is skipped in this mode.
+         Verified: synthetic 8 coins — random walk: 0/5 seeds pass (no false
+         positives); weak mean reversion: old per-coin rule 0/8 coins, pooled
+         passes with every coin positive on test; strong edge: both pass.

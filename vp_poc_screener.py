@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.393"
+APP_VERSION = "0.99.394"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7001,7 +7001,7 @@ PERSIST_BT_KEYS = (
     "lsw_last_backtest_finished", "lsw_last_backtest_duration", "lsw_backtest_summary",
     "lsw_live_universe", "lsw_live_directions", "lsw_chosen_rr", "lsw_rr_sweep",
     "lsw_filter_checkpoints", "lsw_neuro_filters",
-    "snr_last_backtest_finished", "snr_filters", "snr_diag",
+    "snr_last_backtest_finished", "snr_filters", "snr_diag", "snr_pooled",
     "prv_last_backtest_finished", "prv_filters",
     "mirror_last_backtest_finished", "mirror_last_backtest_duration", "mirror_backtest_summary",
     "mirror_tuned_tolerances",
@@ -16689,6 +16689,17 @@ SNR_EXCLUDED_STABLES  = {  # v0.99.287 — per direct user report ("даже с�
 }
 SNR_N_COMBOS          = len(SNR_TF_CANDIDATES) * len(SNR_PIVOT_CANDIDATES) * len(SNR_STRENGTH_CANDIDATES) * len(SNR_RR_CANDIDATES)  # v0.99.277 — 81 total combinations tried per symbol (3 tf x 3 pivot x 3 strength x 3 rr)
 SNR_TEST_Z            = float(os.environ.get("VP_SNR_TEST_Z", 2.0))   # v0.99.382 — one confirmation of the chosen combo on test
+# v0.99.394 — POOLED test (user: "по s/r zone нет ни одной монеты прошедшей
+# проверку ... что можно сделать?" -> variant A). Per coin, 15-50 train and
+# 5-15 test trades can't show a realistic edge (+0.2R/trade needs ~200 test
+# trades for z>=2), so almost nothing ever passed. Now ONE parameter combo
+# for the whole strategy is chosen on the train parts of ALL coins pooled
+# (Bonferroni z over the 81 combos, hundreds of trades) and must be
+# confirmed on the pooled test parts. If it is, the coins trade that combo.
+SNR_POOLED_ENABLED    = os.environ.get("VP_SNR_POOLED", "1") == "1"
+SNR_POOLED_MIN_TRAIN  = int(os.environ.get("VP_SNR_POOLED_MIN_TRAIN", 100))    # pooled train trades a combo needs to be considered
+SNR_POOLED_MIN_TEST   = int(os.environ.get("VP_SNR_POOLED_MIN_TEST", 40))      # pooled test trades needed for the confirmation
+SNR_POOLED_MIN_COIN_TRAIN = int(os.environ.get("VP_SNR_POOLED_MIN_COIN_TRAIN", 5))   # a coin trades the combo only with >= this many own train trades and a positive own train result
 SNR_Z_CRITICAL        = 3.23  # v0.99.277 — Bonferroni-corrected one-tailed z-critical for SNR_N_COMBOS=81 independent comparisons at overall alpha=0.05 (alpha/81 per comparison ≈ 0.000617 -> z≈3.23, computed via the standard normal inverse CDF — hardcoded rather than adding scipy as a dependency, same "no scipy on a phone via Termux" reasoning _T_CRITICAL_TABLE's own comment already documents elsewhere in this file). See snr_optimize_symbol()'s own docstring for why a plain "average > 0" bar wasn't enough.
 SNR_PER_SYMBOL_MAX_SEC = int(os.environ.get("VP_SNR_PER_SYMBOL_MAX_SEC", 300))  # v0.99.271 — hard ceiling per symbol now that the universe can be much bigger than 3 fixed coins, same "one stuck symbol can't block the whole cycle" discipline as every other module
 SNR_BACKTEST_TRIGGER  = threading.Event()  # v0.99.270 — per direct user request ("бэктест не идёт по индикатору, добавь кнопку перезапуска бэктеста принудительно как для нейро") — same "Очистить X doesn't wake the sleeping loop" fix as every other module's own trigger event
@@ -16944,6 +16955,7 @@ def _snr_z_score_vs_breakeven(wins, n, rr):
 
 
 _snr_diag = {}   # v0.99.362 — symbol -> why it passed/failed in the last S/R cycle
+_snr_pool_parts = {}   # v0.99.394 — symbol -> {combo key: per-combo train/test counts} from the last S/R cycle
 
 
 def snr_diag_summary(universe):
@@ -17230,6 +17242,96 @@ def _strategy_best_dict(c, f, params):
     return best
 
 
+def snr_combo_key(tf, pl, ms, rr):
+    return f"{tf}|{pl}|{ms}|{rr}"
+
+
+def _z_counts_vs_breakeven(n, wins, fee_sum, rr):
+    """v0.99.394 — _z_vs_breakeven_with_fees() from counts (pooled test)."""
+    if n <= 0 or rr <= 0:
+        return None
+    p0 = (1.0 + fee_sum / n) / (1.0 + rr)
+    if p0 >= 1.0:
+        return -99.0
+    se = math.sqrt(p0 * (1 - p0) / n)
+    return (wins / n - p0) / se if se > 0 else None
+
+
+def snr_pooled_select(parts):
+    """v0.99.394 — the strategy-level test over ALL coins (see
+    SNR_POOLED_ENABLED). parts: {symbol: {combo key: counts}}. The combo
+    with the best pooled TRAIN z is chosen (it must clear SNR_Z_CRITICAL,
+    the Bonferroni bar for all 81 combos); it passes only if the pooled
+    TEST part (never used for choosing) confirms it with z >= SNR_TEST_Z
+    and a positive net result."""
+    agg = {}
+    for pool in parts.values():
+        for k, v in (pool or {}).items():
+            a = agg.setdefault(k, [0, 0, 0.0, 0.0, 0, 0, 0.0, 0.0, 0])
+            for i in range(8):
+                a[i] += v[i]
+            if v[0] > 0:
+                a[8] += 1
+    rows = []
+    for k, a in agg.items():
+        tf, pl, ms, rr = k.split("|")
+        rr = float(rr)
+        if a[0] < SNR_POOLED_MIN_TRAIN:
+            continue
+        tz = _z_counts_vs_breakeven(a[0], a[1], a[2], rr)
+        sz = _z_counts_vs_breakeven(a[4], a[5], a[6], rr) if a[4] else None
+        rows.append({"tf": tf, "pivot_length": int(pl), "min_strength": int(ms), "rr": rr, "coins": a[8],
+                     "train_n": a[0], "train_wr": round(a[1] / a[0] * 100, 1), "train_avg_pnl_r": round(a[3] / a[0], 3),
+                     "train_z": round(tz, 2) if tz is not None else None,
+                     "test_n": a[4], "test_wr": round(a[5] / a[4] * 100, 1) if a[4] else None,
+                     "test_avg_pnl_r": round(a[7] / a[4], 3) if a[4] else None,
+                     "test_z": round(sz, 2) if sz is not None else None})
+    rows.sort(key=lambda r: -(r["train_z"] if r["train_z"] is not None else -99))
+    top = rows[0] if rows else None
+    chosen = top if top and top["train_z"] is not None and top["train_z"] >= SNR_Z_CRITICAL else None
+    passed = bool(chosen and chosen["test_n"] >= SNR_POOLED_MIN_TEST and chosen["test_z"] is not None
+                  and chosen["test_z"] >= SNR_TEST_Z and (chosen["test_avg_pnl_r"] or 0) > 0)
+    return {"t": time.time(), "passed": passed, "chosen": chosen, "best_train": top, "top": rows[:8],
+            "coins": len(parts), "combos": len(rows), "z_needed": SNR_Z_CRITICAL, "z_test_needed": SNR_TEST_Z,
+            "min_train": SNR_POOLED_MIN_TRAIN, "min_test": SNR_POOLED_MIN_TEST}
+
+
+def snr_pooled_results(chosen, symbols, loop_name="snr_backtest_loop"):
+    """v0.99.394 — per-coin result cards for the pooled combo: every coin
+    with >= SNR_POOLED_MIN_COIN_TRAIN own train trades and a positive own
+    train result (chosen on train only; the coin's test part stays
+    honest). Same result dict as a per-coin pass, so live scan, cards and
+    the trade list work unchanged."""
+    key = snr_combo_key(chosen["tf"], chosen["pivot_length"], chosen["min_strength"], chosen["rr"])
+    p = {"tf": chosen["tf"], "pl": chosen["pivot_length"], "ms": chosen["min_strength"], "rr": chosen["rr"]}
+    params = {"timeframe": p["tf"], "pivot_length": p["pl"], "min_strength": p["ms"], "rr": p["rr"]}
+    out = {}
+    for sym in symbols:
+        heartbeat(loop_name)
+        part = (_snr_pool_parts.get(sym) or {}).get(key)
+        if not part or part[0] < SNR_POOLED_MIN_COIN_TRAIN or part[3] <= 0:
+            continue
+        try:
+            c = _snr_rebuild_cand(sym, p)
+            if not c:
+                continue
+            tr = [t for t in c["closed"] if t["time"] <= c["boundary"]]
+            te = [t for t in c["closed"] if t["time"] > c["boundary"]]
+            if not tr or not te:
+                continue
+            c["train_z"] = _z_vs_breakeven_with_fees(tr, p["rr"]) or 0.0
+            c["test_z"] = _z_vs_breakeven_with_fees(te, p["rr"]) or 0.0
+            best = _strategy_best_dict(c, None, params)
+            _all = best.pop("_all_closed")
+            best.update(rr_compound_annotate(_all, sym))
+            best["all_trades"] = _all[::-1]
+            best["pooled"] = True
+            out[sym] = best
+        except Exception as e:
+            log_error(f"snr_pooled_results {sym}: {e}")
+    return out
+
+
 def snr_optimize_symbol(symbol):
     """Sweeps timeframe x pivot_length x min_strength x rr (SNR_N_COMBOS
     total combinations) for one symbol, on TRAIN data first then
@@ -17277,6 +17379,7 @@ def snr_optimize_symbol(symbol):
         best["recent_trades"] = best["_all_closed"][-40:][::-1]
     _snr_filter_cands[symbol] = out["filter_cands"]
     _snr_diag[symbol] = {"passed": best is not None, **diag}
+    _snr_pool_parts[symbol] = out.get("pool") or {}   # v0.99.394
     if best is not None:
         # v0.99.318 — $15 va-bank compounding over the winning combo's full history
         try:
@@ -17298,6 +17401,7 @@ def snr_optimize_core(candles_by_tf):
     errors = []
     diag = {"bars": {}, "combos_enough": 0, "near": None}   # v0.99.362 — why a coin fails
     passing, near = [], []   # v0.99.364 — candidates for the Neuro filter
+    pool = {}   # v0.99.394 — combo key -> (train n, wins, fee R sum, net R sum, test n, wins, fee R sum, net R sum)
     for tf in SNR_TF_CANDIDATES:
         if tf not in candles_by_tf:
             continue   # download failed (already logged)
@@ -17319,6 +17423,11 @@ def snr_optimize_core(candles_by_tf):
                         closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
                         train = [t for t in closed if t["time"] <= boundary_time]
                         test = [t for t in closed if t["time"] > boundary_time]
+                        pool[snr_combo_key(tf, pl, ms, rr)] = (
+                            len(train), sum(1 for t in train if t["result"] == "WIN"),
+                            sum(t.get("fee_r") or 0.0 for t in train), sum(_net_r(t) for t in train),
+                            len(test), sum(1 for t in test if t["result"] == "WIN"),
+                            sum(t.get("fee_r") or 0.0 for t in test), sum(_net_r(t) for t in test))   # v0.99.394
                         if len(train) < SNR_MIN_TRAIN_TRADES or len(test) < SNR_MIN_TEST_TRADES:
                             continue
                         train_z = _z_vs_breakeven_with_fees(train, rr)   # v0.99.363 — breakeven incl. fees
@@ -17365,7 +17474,7 @@ def snr_optimize_core(candles_by_tf):
         c, f = max(variants, key=lambda v: _variant_train_z(v))
         best = _strategy_best_dict(c, f, {"timeframe": c["tf"], "pivot_length": c["pl"], "min_strength": c["ms"], "rr": c["rr"]})
     diag["filter_used"] = bool(best and best.get("neuro_filter"))
-    return {"best": best, "diag": diag, "filter_cands": filter_cands, "errors": errors}
+    return {"best": best, "diag": diag, "filter_cands": filter_cands, "errors": errors, "pool": pool}
 
 
 # ============================================================================
@@ -17589,8 +17698,13 @@ def snr_filter_loop():
         try:
             if SNR_ENABLED:
                 snr_filter_analysis()
-                if NEURO_TRADE_FILTER_ENABLED:
+                if NEURO_TRADE_FILTER_ENABLED and not SNR_POOLED_ENABLED:
                     strategy_filter_phase("snr")   # v0.99.365
+                elif NEURO_TRADE_FILTER_ENABLED:
+                    # v0.99.394 — pooled mode: the per-coin filter phase would add back
+                    # per-coin cherry-picked combos; the pooled combo decides alone
+                    with state_lock:
+                        STATE["snr_filter_phase_done_at"] = time.time()
         except Exception as e:
             _nf_ok, _nf_err = False, str(e)[:80]
             log_error(f"snr_filter_loop: {e}")
@@ -17642,6 +17756,7 @@ def snr_backtest_loop():
             # the best SNR_DISPLAY_N for reference, and only the best
             # SNR_TOP_N of THOSE are actually live-scanned/traded.
             universe = snr_build_universe()
+            _snr_pool_parts.clear()   # v0.99.394
             with state_lock:
                 STATE["snr_progress_done"] = 0
                 STATE["snr_progress_total"] = len(universe)
@@ -17683,7 +17798,8 @@ def snr_backtest_loop():
                     best = fut.result()
                     if best:
                         all_results[symbol] = best
-                        provisional_top(STATE, "snr_provisional", all_results, SNR_DISPLAY_N)   # v0.99.369
+                        if not SNR_POOLED_ENABLED:   # v0.99.394 — pooled mode: per-coin passes aren't the result
+                            provisional_top(STATE, "snr_provisional", all_results, SNR_DISPLAY_N)   # v0.99.369
                 except Exception as e:
                     log_error(f"snr_backtest_loop {symbol}: {e}")
                 with state_lock:
@@ -17703,7 +17819,15 @@ def snr_backtest_loop():
                                        "snr_backtest_loop", _snr_done, _snr_stop)
             _BT_RAN.add("snr")   # v0.99.385
 
-            ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
+            if SNR_POOLED_ENABLED:   # v0.99.394 — one combo for all coins, tested on the pooled trades
+                _pooled = snr_pooled_select({s_: _snr_pool_parts[s_] for s_ in universe if s_ in _snr_pool_parts})
+                with state_lock:
+                    STATE["snr_pooled"] = _pooled
+                all_results = snr_pooled_results(_pooled["chosen"], universe) if _pooled["passed"] else {}
+                # coins are picked on their own TRAIN result; the test part stays untouched
+                ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["train_avg_pnl_r"])
+            else:
+                ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
             display_top = ranked[:max(SNR_DISPLAY_N, SNR_TOP_N)]
             active_top = display_top[:SNR_TOP_N]
             # v0.99.288 — CRITICAL FIX, per direct user report ("застревание
@@ -22920,6 +23044,7 @@ def api_snr_status():
         "provisional": STATE.get("snr_provisional"),   # v0.99.369
         "filter_phase": STATE.get("snr_filter_phase"),   # v0.99.366
         "diag": STATE.get("snr_diag"),   # v0.99.362
+        "pooled": STATE.get("snr_pooled") if SNR_POOLED_ENABLED else None,   # v0.99.394
         "filters": STATE.get("snr_filters"),   # v0.99.337
         "coins": coins, "last_backtest_finished": last_finished,
         "backtest_running": running, "waiting_for_slot": waiting, "progress_done": done, "progress_total": total,
@@ -27667,7 +27792,7 @@ async function refreshSnr() {
       ${liveSigsTableHtml}
       ${provisionalHtml(data.provisional, data.backtest_running, 'snr')}
       ${filterPhaseHtml(data.filter_phase, data.calc_cond)}
-      ${snrDiagHtml(data.diag)}
+      ${data.pooled ? snrPooledHtml(data.pooled) : snrDiagHtml(data.diag)}
       ${filterReportHtml(data.filters, "🧪 Фильтры для S/R (информационно)", "считаются (≈20 мин после запуска и после каждого бэктеста S/R)")}
       ${cards || '<div class="dim">\u043f\u043e\u043a\u0430 \u043d\u0435\u0442 \u0434\u0430\u043d\u043d\u044b\u0445</div>'}
     `;
@@ -29567,6 +29692,27 @@ function neuroFilterNoteHtml(r) {
   const sgn = v => (v > 0 ? '+' : '') + v;
   return `<div style="font-size:var(--fs-sm);flex-basis:100%;margin-top:2px;"><span style="color:var(--neuro);">🧪 фильтр Neuro: ${nf.label}</span>
     <span class="dim">— подобран на train, проверен на test. Без фильтра: train WR ${u.train_wr}% ${sgn(u.train_avg_pnl_r)}R z=${u.train_z} (n=${u.train_n}) · test WR ${u.test_wr}% ${sgn(u.test_avg_pnl_r)}R z=${u.test_z} (n=${u.test_n}). Живые сигналы, которые он отсекает, не торгуются.</span></div>`;
+}
+// v0.99.394 — pooled S/R test: one combo for the whole strategy, all coins' trades together
+function snrPooledHtml(p) {
+  if (!p) return '';
+  const sgn = v => v == null ? '—' : (v > 0 ? '+' : '') + v;
+  const line = (lbl, n, wr, r, z, need) => `${lbl}: n=${n} · WR ${wr == null ? '—' : wr + '%'} · ${sgn(r)}R/сделку · z=${z == null ? '—' : z}${need ? ` <span class="dim">(нужно ≥ ${need})</span>` : ''}`;
+  const combo = c => `${c.tf}, пивот ${c.pivot_length}, сила ${c.min_strength}, RR ${c.rr}`;
+  const c = p.chosen || p.best_train;
+  const verdict = p.passed
+    ? `<b class="win">✓ Стратегия подтверждена на всех монетах вместе</b>`
+    : (p.chosen ? `<b class="loss">✗ Лучшая комбинация прошла обучение, но тест её не подтвердил</b>`
+      : (c ? `<b class="loss">✗ Ни одна комбинация не набрала значимость на обучении</b>` : `<b class="loss">✗ Мало сделок для проверки</b>`));
+  const rows = (p.top || []).map(r => `<tr><td>${combo(r)}</td><td>${r.coins}</td><td>${r.train_n}</td><td>${sgn(r.train_avg_pnl_r)}</td><td>${r.train_z}</td><td>${r.test_n}</td><td>${sgn(r.test_avg_pnl_r)}</td><td>${r.test_z == null ? '—' : r.test_z}</td></tr>`).join('');
+  return `<div style="background:var(--line);border:1px solid var(--line-2);border-radius:var(--r-sm);padding:8px 12px;margin:8px 0;font-size:var(--fs);">
+    ${verdict} <span class="dim">(${fmtDateTime(p.t)} · ${p.coins} монет, сделки всех монет вместе)</span><br>
+    ${c ? `<div style="margin-top:4px;">Комбинация: <b>${combo(c)}</b> (лучшая по обучению из ${p.combos})</div>
+    <div>${line('обучение', c.train_n, c.train_wr, c.train_avg_pnl_r, c.train_z, p.z_needed)}</div>
+    <div>${line('<b>тест</b>', c.test_n, c.test_wr, c.test_avg_pnl_r, c.test_z, p.z_test_needed)}${c.test_n < p.min_test ? ` <span class="dim">· нужно ≥ ${p.min_test} сделок</span>` : ''}</div>` : `<div class="dim">ни у одной комбинации нет ≥ ${p.min_train} сделок на обучении</div>`}
+    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Правило: одна комбинация на всю стратегию выбирается по обучающей части всех монет (z ≥ ${p.z_needed} — поправка на перебор 81 комбинации) и подтверждается на их тестовой части (z ≥ ${p.z_test_needed}, результат после комиссий в плюсе). Если подтвердилась — торгуют монеты, у которых эта комбинация в плюсе на их собственном обучении. Суммы R — после комиссий. Монеты двигаются вместе, поэтому z на общем пуле немного завышен.</div>
+    ${rows ? `<details style="margin-top:4px;"><summary class="dim" style="cursor:pointer;">лучшие комбинации (по обучению)</summary><div style="overflow-x:auto;"><table style="font-size:var(--fs-xs);white-space:nowrap;"><thead><tr><th>комбинация</th><th>монет</th><th>train n</th><th>R</th><th>z</th><th>test n</th><th>R</th><th>z</th></tr></thead><tbody>${rows}</tbody></table></div></details>` : ''}
+  </div>`;
 }
 // v0.99.362 — why S/R has no coins: shown right after a cycle where nothing passed
 function snrDiagHtml(d) {
