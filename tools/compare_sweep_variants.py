@@ -14,7 +14,7 @@ vp_poc_screener.py (LSW_INTERVAL / LSW_BACKTEST_DAYS, сейчас 4h / 730 дн
   - ТЕСТ = последние 30% отобранных монет вместе — честная цифра
     (на нём ничего не подбиралось). Смотрите на R/сделку и z теста.
 
-Варианты:
+Варианты (RR подбирается по монете на обучении; «@N» — RR = N у всех монет):
   base      — как сейчас: вход на закрытии свечи-свипа, стоп за фитилём +0.15%
   sl_atr    — стоп дальше: за фитилём + 0.5 ATR (меньше выбивает шумом)
   retest    — вход лимиткой на ретесте уровня в течение 3 свечей (лучше цена,
@@ -112,13 +112,23 @@ def run_trades(m, candles, sigs):
         if res in ("WIN", "LOSS"):
             r = (s["rr"] if res == "WIN" else -1.0) - m.trade_fee_r(s["entry"], s["sl"])
             trades.append((s["entry_time"], res, r))
+        else:
+            # a real timeout (not "data ended"): closed at that bar's close, so
+            # big RRs aren't flattered by dropping the trades that never got there
+            k = s["entry_idx"] + m.LSW_MAX_WAIT_BARS
+            if k < len(candles):
+                risk = abs(s["entry"] - s["sl"])
+                move = candles[k]["close"] - s["entry"] if s["direction"] == "LONG" else s["entry"] - candles[k]["close"]
+                trades.append((s["entry_time"], "TIMEOUT", move / risk - m.trade_fee_r(s["entry"], s["sl"])))
     return trades
 
 
 def coin_variant(m, candles, atr, variant):
     split_t = candles[int(len(candles) * TRAIN_FRAC) - 1]["time"]
     best = None
-    for rr in m.LSW_RR_CANDIDATES:
+    # "name@4" = RR fixed at 4 for every coin (nothing chosen per coin)
+    variant, _, fixed = variant.partition("@")
+    for rr in ([float(fixed)] if fixed else m.LSW_RR_CANDIDATES):
         tr = [t for t in run_trades(m, candles, variant_signals(m, candles, atr, variant, rr)) if t[0] <= split_t]
         if len(tr) >= MIN_TRAIN:
             e = sum(t[2] for t in tr) / len(tr)
@@ -153,7 +163,11 @@ def main():
         except Exception as e:
             print("не удалось получить список монет:", e)
             sys.exit(1)
-    variants = ["base", "sl_atr", "retest", "tol_atr", "touches3", "sl_atr+retest"]
+    # 4h run (v0.99.397): retest / tol_atr / touches3 were clearly worse or had no trades — dropped.
+    # "@N" rows: RR fixed at N for all coins — shows which RR the strategy itself supports.
+    variants = ["base", "sl_atr", "sl_atr+retest",
+                "base@2", "base@3", "base@4", "base@5",
+                "sl_atr@3", "sl_atr@4", "sl_atr@5"]
     now = time.time()
     data = {}
     tf, days = m.LSW_INTERVAL, DAYS or m.LSW_BACKTEST_DAYS
@@ -178,12 +192,12 @@ def main():
                 picked += 1
                 train_all += r["train"]
                 test_all += r["test"]
-        print(f"=== {v}")
+        print(f"=== {v}" + (f"   (RR {v.split('@')[1]} у всех монет)" if "@" in v else "   (RR подбирается по монете)"))
         print(f"  отобрано по обучению: {picked} из {len(data)}")
         print(f"  обучение (отобранные): {stats(train_all)}")
         print(f"  ТЕСТ (отобранные):     {stats(test_all)}   ← честная цифра")
         print(f"  тест всех монет:       {stats(all_test)}\n")
-    print("Хороший вариант: ТЕСТ в плюсе с z ≥ 2 и заметно лучше base. Пришлите вывод — включу лучший.")
+    print("Хороший вариант: ТЕСТ (или тест всех монет для строк с @RR) в плюсе с z ≥ 2. Пришлите вывод — включу лучший.")
 
 
 if __name__ == "__main__":
