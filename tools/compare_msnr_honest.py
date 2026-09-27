@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""MSNR: старый расчёт против честного (v0.99.392) на РЕАЛЬНЫХ данных Gate.
+"""MSNR: старый расчёт против честного (v0.99.400) на РЕАЛЬНЫХ данных Gate.
 
 Запуск (в Termux, из папки где лежат оба файла):
     python compare_msnr_honest.py <старый .py> <новый .py> [МОНЕТА ...]
 
-Без списка монет берутся монеты с включённой автоторговлей MSNR из
-vp_poc_state.json (если файл лежит рядом с новым .py), иначе BTC/ETH/SOL/XRP/DOGE.
+Без списка монет берутся 25 монет из вселенной MSNR (широкая выборка — не
+те, что отобрал старый расчёт). В конце — вердикт, как в программе.
 
 Обе версии получают одинаковые данные (каждый ответ биржи скачивается один
 раз, время "заморожено"). Ничего не торгует и не пишет в состояние сервера.
@@ -19,8 +19,6 @@ vp_poc_state.json (если файл лежит рядом с новым .py), �
             подбирались без них. Честная цифра — «ТЕСТ».
 """
 import importlib.util
-import json
-import os
 import sys
 import time
 
@@ -84,21 +82,23 @@ def main():
         sys.exit(1)
     old_path, new_path = sys.argv[1], sys.argv[2]
     symbols = sys.argv[3:]
-    if not symbols:
-        try:
-            with open(os.path.join(os.path.dirname(os.path.abspath(new_path)), "vp_poc_state.json")) as f:
-                symbols = [s for s, on in (json.load(f).get("msnr_autotrade_symbols") or {}).items() if on][:8]
-        except Exception:
-            symbols = []
-    symbols = symbols or DEFAULT_SYMBOLS
     install_shared_data_layer(int(time.time()))
     old = load(old_path, "vp_old")
     new = load(new_path, "vp_new")
     for m in (old, new):
         m.CALC_WORKERS = 0            # в этом процессе, без рабочих процессов
+    if not symbols:
+        # a broad sample of the MSNR universe, NOT the coins the old rule
+        # picked (those were chosen on the same history — a biased sample)
+        try:
+            symbols = list(new.msnr_build_backtest_universe())[:25]
+        except Exception as e:
+            print("не удалось получить список монет:", e)
+    symbols = symbols or DEFAULT_SYMBOLS
     cost = new.msnr_trade_cost_frac()
     print(f"монеты: {', '.join(symbols)}   (издержки на сделку {cost * 100:.2f}% цены)\n")
     tot = {"old_test": [], "new_test": []}
+    new_ovs, new_res = {}, {}
     for sym in symbols:
         t0 = time.perf_counter()
         ob, ot, _ = old.msnr_optimize_symbol(sym)
@@ -108,6 +108,7 @@ def main():
         if ob.get("error") or nb.get("error"):
             print(f"=== {sym}: {ob.get('error') or nb.get('error')}\n")
             continue
+        new_ovs[sym], new_res[sym] = nb, nt
         split = nb["oos_split_time"]
         old_test = [t for t in ot if t["time"] >= split]
         new_test = [t for t in nt if t["time"] >= split]
@@ -119,11 +120,18 @@ def main():
         print(f"  СТАРЫЙ за период теста (с издержками): {stats(old_test, cost)}")
         print(f"  НОВЫЙ  вся история (с издержками): WR {nb.get('winrate')}% · {nb.get('expectancy_r')}R · "
               f"n={nb.get('trades')} · $15→{nb.get('compound_final_balance')}")
-        print(f"  НОВЫЙ  ТЕСТ: {stats(new_test, cost)}   ← честная цифра")
-        print(f"  НОВЫЙ  в топ: {'нет (' + str(nb.get('stress_reason')) + ')' if nb.get('stress_test_failed') else 'да'}\n")
+        print(f"  НОВЫЙ  обучение: n={nb.get('train_n')} · WR {nb.get('train_winrate')}% · {nb.get('train_expectancy_r')}R/сделку"
+              f" · {'отобрана' if nb.get('picked') else 'не отобрана'}")
+        print(f"  НОВЫЙ  ТЕСТ: {stats(new_test, cost)}   ← честная цифра\n")
     print("=== ВСЕ МОНЕТЫ ВМЕСТЕ, период теста, с издержками")
     print(f"  старый: {stats(tot['old_test'], cost)}")
     print(f"  новый:  {stats(tot['new_test'], cost)}")
+    if hasattr(new, "msnr_pooled_verdict"):
+        v = new.msnr_pooled_verdict(new_ovs, new_res)
+        print(f"\n=== ВЕРДИКТ (как в программе): отобрано {v['picked']} монет, их тест: n={v['test_n']} · "
+              f"{v['test_exp_r']}R/сделку · итого {v['test_sum_r']}R · z={v['test_z']}")
+        print("  → " + ("торговать можно: тест подтвердил" if v["passed"]
+                        else f"торговать нельзя: нужно n ≥ {v['min_test']} и z ≥ {v['z_needed']} с плюсом"))
 
 
 if __name__ == "__main__":

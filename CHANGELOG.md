@@ -17936,3 +17936,44 @@ v0.99.399 - Fix for v0.99.398's t-test: a small sample of ALL wins has ~zero spr
          coins -> 0 passed (no false positives); 10 mean-reverting coins ->
          10 passed, now on 4h with 45-154 test trades instead of 8-15 on 1d.
          S/R pooled: random fails, weak edge passes (unchanged).
+v0.99.400 - MSNR: backtest = live, honest go/no-go (user: "надо добить до уровня,
+         когда ты сможешь сказать что это смело можно торговать и результаты
+         настоящих сделок будут похожи на бэктест").
+         Backtest vs live mismatches fixed:
+         - One position per coin in the backtest (live ignores a new signal
+           while the coin has an OPEN one; the backtest counted overlapping
+           trades).
+         - Max holding time 300 x 15m (75h), same both sides: the backtest
+           closes at that bar's close (TIME_EXIT, real net R, counted in every
+           stat, $ simulation and Kelly); live closes the REAL position at
+           market. Before, the backtest dropped such trades and live had no
+           limit at all — and after ~100h a live signal fell out of the
+           400-bar tracking window and stayed OPEN forever, blocking the coin.
+           Old stuck OPEN signals are closed on the next pass.
+         Honest selection (the Sweep lesson):
+         - Kelly leverage is searched on the TRAIN trades only.
+         - A coin is picked on its train part (>= 10 trades, net R > 0); the
+           >= 45% (top) / >= 50% (auto-on) win-rate rules and the $ sort use
+           the train part (they used the whole window, test included).
+         - Autotrade only if the TEST trades of all picked coins together are
+           positive with z >= 2 over >= 30 trades (msnr_pooled_verdict()).
+           Otherwise nothing trades; the best picked coins are still scanned
+           and their signals recorded (not traded) for the live check.
+         - The per-coin "drop it if its test lost" gate (v0.99.392) is gone:
+           it used the test to select coins.
+         - History 40 -> 90 days (Gate keeps ~102 days of 15m).
+         New in the MSNR tab: the verdict block and "Сверка: живые сигналы vs
+         бэктест" — each live signal of the last 30 days vs the backtest's
+         trade on the same coin and candle: matched / same outcome / live R vs
+         backtest R, live-only and backtest-only trades.
+         tools/compare_msnr_honest.py: 25-coin broad sample by default, prints
+         the same verdict as the program.
+         Verified: py_compile, pyflakes, JS check, headless browser (no JS
+         errors); synthetic: 0 of 155 backtest signals unreproducible by live;
+         no overlapping trades; 8 random-walk coins all looked +0.13..+0.94R on
+         train, pooled test -0.155R -> not passed -> nothing eligible, signals
+         recorded; a live signal held 300 bars is closed (real close called,
+         live balance updated) and matched by the reconcile.
+         Also fixed while testing: the new reconcile function had been inserted
+         between @app.route("/api/msnr/status") and its handler (caught before
+         release; all routes audited).

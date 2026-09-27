@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.399"
+APP_VERSION = "0.99.400"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -563,7 +563,10 @@ MSNR_ADDON_ENABLED = os.environ.get("VP_MSNR_ADDON_ENABLED", "0") == "1"  # off 
 MSNR_ADDON_TF = os.environ.get("VP_MSNR_ADDON_TF", "30m")
 MSNR_MAX_RR = float(os.environ.get("VP_MSNR_MAX_RR", 8.0))  # v0.99.11 — per direct user observation (SPCX: trades with rr>6 consistently hit stop, never TP) that a genuine opposite-level TP can sit SO far away the trade is structurally unlikely to ever reach it before reversing. When the real opposite level would produce rr > this cap, msnr_detect_signals() used to fall back to fallback_rr's fixed target instead. v0.99.52, per direct user question ("а проверка... таблица... что-то даёт вообще?" -> "уберём не работу"): the pooled-RR-bucket autotune this comment used to describe (risk_autotune_pass() calling _risk_autotune_msnr_max_rr() off msnr_rr_bucket_stats()) was DISABLED (commented out, not deleted) — this value stopped changing on its own. v0.99.68, per direct user request ("в оригинале... эта стратегия ловит движения с очень большим rr, даже если winrate около 20-30, у нас так не получается"): the cap ITSELF was removed from msnr_detect_signals() — it was silently substituting MSNR_FALLBACK_RR=4.0 for any genuinely-far opposite level, preventing exactly the large-RR/low-winrate trades the strategy is designed around, and keeping msnr_symbol_rr_skip_min()'s own per-symbol statistical filter blind to that entire RR range. This constant is now fully vestigial — nothing in signal generation reads it — left defined (still wired through settings/UI) only in case a future session wants to reintroduce a cap deliberately. The rr_buckets table itself still displays in the UI, informational only.
 MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE = int(os.environ.get("VP_MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE", 15))  # v0.99.22 — per direct user request: MSNR_MAX_RR above is a single GLOBAL cap tuned off trades pooled across every symbol, which was a deliberate compromise (a single symbol's own sample is usually too small to bucket reliably) but leaves no way to catch a symbol whose OWN rr-vs-outcome pattern is bad even though the pooled average looks fine. This is the min closed-trade count a single symbol's OWN rr bucket (see msnr_rr_bucket_stats()) needs before msnr_symbol_rr_skip_min() trusts it enough to skip live signals in that range for that symbol specifically — see msnr_optimize_symbol()'s own "skip_rr_min" field and msnr_scan_symbol_live().
-MSNR_BACKTEST_DAYS = int(os.environ.get("VP_MSNR_BACKTEST_DAYS", 40))  # v0.99.41 — was 30, raised per direct user request. Confirmed feasible against Gate's own ~10000-candle recency floor (get_candles_range()'s own docstring): at interval=15m that floor is ~102 days back, so 40 days (3840 candles) sits well inside it with room to spare — get_candles_range() already paginates in ~900-point/~9.4-day chunks regardless of the total span requested, so this just means ~5 chunks per symbol instead of ~4, not a new code path.
+MSNR_BACKTEST_DAYS = int(os.environ.get("VP_MSNR_BACKTEST_DAYS", 90))  # v0.99.400 — was 40: the honest test part (last 30%) had ~12 days, a handful of trades per coin. Gate keeps ~102 days of 15m.
+MSNR_MIN_TRAIN_TRADES = int(os.environ.get("VP_MSNR_MIN_TRAIN_TRADES", 10))  # v0.99.400 — own train trades a coin needs to be picked
+MSNR_POOLED_MIN_TEST = int(os.environ.get("VP_MSNR_POOLED_MIN_TEST", 30))  # v0.99.400 — pooled test trades the strategy check needs
+MSNR_POOLED_TEST_Z = float(os.environ.get("VP_MSNR_POOLED_TEST_Z", 2.0))  # v0.99.400  # v0.99.41 — was 30, raised per direct user request. Confirmed feasible against Gate's own ~10000-candle recency floor (get_candles_range()'s own docstring): at interval=15m that floor is ~102 days back, so 40 days (3840 candles) sits well inside it with room to spare — get_candles_range() already paginates in ~900-point/~9.4-day chunks regardless of the total span requested, so this just means ~5 chunks per symbol instead of ~4, not a new code path.
 MSNR_SIGNAL_HISTORY = 200
 MSNR_REFRESH_SEC = int(os.environ.get("VP_MSNR_REFRESH_SEC", 3600))
 MSNR_SCAN_INTERVAL_SEC = int(os.environ.get("VP_MSNR_SCAN_INTERVAL_SEC", 300))
@@ -6985,7 +6988,7 @@ def save_state():
 # MSNR/Sweep live scan watching nothing until the next backtest finished).
 PERSIST_BT_KEYS = (
     "msnr_last_backtest_finished", "msnr_last_backtest_duration", "msnr_backtest_summary",
-    "msnr_live_universe", "msnr_backtest_universe", "msnr_neuro_filters",
+    "msnr_live_universe", "msnr_backtest_universe", "msnr_neuro_filters", "msnr_pooled",
     "lsw_last_backtest_finished", "lsw_last_backtest_duration", "lsw_backtest_summary",
     "lsw_live_universe", "lsw_live_directions", "lsw_chosen_rr", "lsw_rr_sweep",
     "lsw_filter_checkpoints", "lsw_neuro_filters", "lsw_pooled", "lsw_backtest_interval",
@@ -9281,10 +9284,23 @@ def msnr_detect_signals(structure_candles, entry_candles, higher_structure_candl
     return signals, pivots
 
 
-def msnr_track_outcome(entry_candles, sig, max_wait_bars=300):
+MSNR_MAX_WAIT_BARS = 300   # v0.99.400 — entry-TF bars (15m: 75h); also capped by max_hold_bars() (7 days)
+
+
+def msnr_max_hold_bars():
+    return max_hold_bars(MSNR_ENTRY_TF, MSNR_MAX_WAIT_BARS)
+
+
+def msnr_track_outcome(entry_candles, sig, max_wait_bars=None):
     """Walks forward from sig['index']+1 looking for TP/SL touch — SL
     checked first on any bar covering both, same conservative convention
-    as track_session_outcome()."""
+    as track_session_outcome().
+    v0.99.400 — a trade still open after max_wait_bars is closed at that
+    bar's close: ("TIME_EXIT", that bar's time). Live does exactly the
+    same (update_msnr_signal_outcomes() closes the real position). Before,
+    the backtest dropped such trades as TIMEOUT while live had no time
+    limit at all. "TIMEOUT" now only means the data ended first."""
+    max_wait_bars = max_wait_bars or msnr_max_hold_bars()
     n = len(entry_candles)
     for k in range(sig["index"] + 1, min(n, sig["index"] + 1 + max_wait_bars)):
         c = entry_candles[k]
@@ -9298,7 +9314,49 @@ def msnr_track_outcome(entry_candles, sig, max_wait_bars=300):
                 return "LOSS", c["time"]
             if c["low"] <= sig["tp"]:
                 return "WIN", c["time"]
+    if sig["index"] + max_wait_bars <= n - 1:
+        return "TIME_EXIT", entry_candles[sig["index"] + max_wait_bars]["time"]
     return "TIMEOUT", None
+
+
+def msnr_net_r_at(direction, entry, sl, exit_price):
+    """v0.99.400 — realized R of a trade closed at exit_price, in the same
+    net units as msnr_net_rr() (a stop-out = exactly -1)."""
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return None
+    cost = abs(entry) * msnr_trade_cost_frac()
+    move = (exit_price - entry) if direction == "LONG" else (entry - exit_price)
+    return round((move - cost) / (risk + cost), 3)
+
+
+def msnr_trade_r(t):
+    """v0.99.400 — a closed MSNR trade's net R: WIN +rr, LOSS -1, TIME_EXIT
+    its realized R; None for a trade still open."""
+    res = t.get("result")
+    if res == "WIN":
+        return t.get("rr")
+    if res == "LOSS":
+        return -1.0
+    if res == "TIME_EXIT":
+        return t.get("r_net")
+    return None
+
+
+def msnr_trade_move(t):
+    """v0.99.400 — signed price move of a closed trade as a fraction of
+    entry (for the $ compounding / Kelly math), or None."""
+    e = t.get("entry")
+    if not e or e <= 0:
+        return None
+    if t.get("result") == "WIN" and t.get("tp") is not None:
+        return abs(t["tp"] - e) / e
+    if t.get("result") == "LOSS" and t.get("sl") is not None:
+        return -abs(e - t["sl"]) / e
+    if t.get("result") == "TIME_EXIT" and t.get("exit_price") is not None:
+        x = t["exit_price"]
+        return ((x - e) if t.get("direction") == "LONG" else (e - x)) / e
+    return None
 
 
 def msnr_trade_cost_frac():
@@ -9403,20 +9461,34 @@ def msnr_run_backtest(structure_candles, entry_candles, higher_structure_candles
     tuning knob."""
     sigs, _pivots = msnr_detect_signals(structure_candles, entry_candles, higher_structure_candles, **params)
     results = []
+    busy_until = float("-inf")
+    by_time = {c["time"]: c for c in entry_candles}
     for sig in sigs:
+        # v0.99.400 — one position per coin, exactly like live (a new signal
+        # is ignored while the symbol has an OPEN one). Before, overlapping
+        # trades on one coin were all counted.
+        if sig["time"] <= busy_until:
+            continue
         result, exit_time = msnr_track_outcome(entry_candles, sig)
         risk = abs(sig["entry"] - sig["sl"])
         reward = abs(sig["tp"] - sig["entry"])
         rr_gross = round(reward / risk, 2) if risk > 0 else None
         rr = msnr_net_rr(sig["entry"], sig["sl"], sig["tp"])   # v0.99.392 — net of fees + slippage
+        exit_price = sig["tp"] if result == "WIN" else (sig["sl"] if result == "LOSS" else None)
+        if result == "TIME_EXIT":
+            exit_price = by_time[exit_time]["close"]
+        r_net = (rr if result == "WIN" else (-1.0 if result == "LOSS" else
+                 (msnr_net_r_at(sig["direction"], sig["entry"], sig["sl"], exit_price) if result == "TIME_EXIT" else None)))
         results.append({
             "time": sig["time"], "direction": sig["direction"],
             "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
             "level": sig["level"], "level_type": sig["level_type"],
             "opposite_level": sig.get("opposite_level"),
             "result": result, "exit_time": exit_time, "rr": rr, "rr_gross": rr_gross,
+            "exit_price": exit_price, "r_net": r_net,   # v0.99.400
             "volume_ratio": sig.get("volume_ratio"),
         })
+        busy_until = exit_time if exit_time else float("inf")
     return results
 
 
@@ -9549,7 +9621,7 @@ def _msnr_filter_checkpoint(trades, symbol, leverage_ceiling):
     — None values propagate the same "not enough evidence" meaning
     msnr_compound_return()/msnr_summarize_backtest() already use, not
     a silent 0."""
-    closed = [t for t in trades if t.get("result") in ("WIN", "LOSS")]
+    closed = [t for t in trades if msnr_trade_r(t) is not None]   # v0.99.400 — incl. TIME_EXIT
     if not closed:
         return {"n": 0, "winrate": None, "income_pct": None}
     summary = msnr_summarize_backtest(trades)
@@ -9616,9 +9688,8 @@ def _msnr_recompute_summary_score(best, best_results):
     best["avg_rr"] = filtered_summary["avg_rr"]
     best["median_rr"] = filtered_summary["median_rr"]
     best["expectancy_r"] = filtered_summary["expectancy_r"]
-    r_values = [t["rr"] for t in best_results if t["result"] == "WIN" and t["rr"] is not None]
-    r_values += [-1.0] * filtered_summary["losses"]
-    best["score"] = round(msnr_ranking_score(r_values, filtered_summary["losses"]), 4) if r_values else None
+    r_values = [r for r in (msnr_trade_r(t) for t in best_results) if r is not None]   # v0.99.400 — incl. TIME_EXIT
+    best["score"] = round(msnr_ranking_score(r_values, sum(1 for r in r_values if r < 0)), 4) if r_values else None
 
 
 def msnr_oos_split_time(entry_candles):
@@ -9631,19 +9702,18 @@ def msnr_oos_split_time(entry_candles):
 def msnr_is_train_trade(t, split_time):
     """v0.99.392 — a closed trade that opened AND resolved before the
     split, so choosing params on it never sees held-out prices."""
-    return (t.get("result") in ("WIN", "LOSS") and t["time"] < split_time
+    return (msnr_trade_r(t) is not None and t["time"] < split_time
             and t.get("exit_time") is not None and t["exit_time"] < split_time)
 
 
 def msnr_oos_stats(trades, split_time):
     """v0.99.392 — closed trades opened in the held-out part: n, win-rate
     and expectancy in net R (msnr_net_rr units: WIN +rr, LOSS -1)."""
-    test = [t for t in trades if t["time"] >= split_time and t.get("result") in ("WIN", "LOSS")]
+    test = [t for t in trades if t["time"] >= split_time and msnr_trade_r(t) is not None]
     if not test:
         return {"n": 0, "wins": 0, "winrate": None, "expectancy_r": None}
     wins = sum(1 for t in test if t["result"] == "WIN")
-    r_values = [t["rr"] for t in test if t["result"] == "WIN" and t.get("rr") is not None]
-    r_values += [-1.0] * (len(test) - wins)
+    r_values = [msnr_trade_r(t) for t in test]   # v0.99.400 — incl. TIME_EXIT
     return {"n": len(test), "wins": wins, "winrate": round(wins / len(test) * 100, 1),
             "expectancy_r": round(sum(r_values) / len(r_values), 2) if r_values else None}
 
@@ -9672,10 +9742,8 @@ def msnr_grid_core(structure_candles, entry_candles, higher_candles, now):
                 closed = [r for r in results if msnr_is_train_trade(r, split_time)]   # v0.99.392
                 if len(closed) < MSNR_MIN_BACKTEST_TRADES:
                     continue
-                wins = sum(1 for r in closed if r["result"] == "WIN")
-                losses_count = len(closed) - wins
-                r_values = [r["rr"] for r in closed if r["result"] == "WIN" and r["rr"] is not None]
-                r_values += [-1.0] * losses_count
+                r_values = [msnr_trade_r(r) for r in closed]   # v0.99.400 — incl. TIME_EXIT
+                losses_count = sum(1 for r in r_values if r < 0)
                 score = msnr_ranking_score(r_values, losses_count)
                 if best is None or score > best_score:
                     summary = msnr_summarize_backtest(results)
@@ -9889,7 +9957,11 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
     # liquidation, skip_sl_pct_min) — the same final trade set the
     # compound simulation right below already uses, not the raw
     # unfiltered history.
-    best["optimal_leverage"] = msnr_optimal_leverage_for_symbol(best_results, best.get("leverage_ceiling"), symbol=symbol)
+    # v0.99.400 — Kelly leverage is searched on the TRAIN trades only: the
+    # leverage live trades with must not be tuned on the part used to judge it
+    _split = msnr_oos_split_time(entry_candles)
+    _train = [t for t in best_results if msnr_is_train_trade(t, _split)]
+    best["optimal_leverage"] = msnr_optimal_leverage_for_symbol(_train, best.get("leverage_ceiling"), symbol=symbol)
     # v0.99.24, per direct user request: a $ compounding simulation
     # (start MSNR_COMPOUND_START_BALANCE, reinvest the whole balance
     # every trade) over best_results — the FILTERED list (skip_rr_min +
@@ -9930,10 +10002,22 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
     best["oos_expectancy_r"] = oos["expectancy_r"]
     best["oos_failed"] = (oos["n"] >= MSNR_OOS_MIN_TRADES and oos["expectancy_r"] is not None
                           and oos["expectancy_r"] <= 0)
-    best["stress_reason"] = ("oos" if best["oos_failed"] else None) if not best["stress_test_failed"] else "compound"
-    if best["oos_failed"]:
-        best["stress_test_failed"] = True
+    best["stress_reason"] = "compound" if best["stress_test_failed"] else None
+    # v0.99.400 — the coin is PICKED on its train part only (win rate, $
+    # compounding, net R); the test part is judged for all picked coins
+    # together (msnr_pooled_verdict()). A per-coin "drop it if its test
+    # lost" gate (v0.99.392) used the test to select coins — dropped.
+    _train = [t for t in best_results if msnr_is_train_trade(t, oos_split)]
+    _tr = [msnr_trade_r(t) for t in _train]
+    best["train_n"] = len(_tr)
+    best["train_winrate"] = round(sum(1 for t in _train if t["result"] == "WIN") / len(_tr) * 100, 1) if _tr else None
+    best["train_expectancy_r"] = round(sum(_tr) / len(_tr), 3) if _tr else None
+    _tc = msnr_compound_return(_train, leverage=best["optimal_leverage"]) if _tr else None
+    best["train_compound_return_pct"] = _tc["return_pct"] if _tc else None
+    best["picked"] = bool(len(_tr) >= MSNR_MIN_TRAIN_TRADES and best["train_expectancy_r"] is not None
+                          and best["train_expectancy_r"] > 0)
     best["cost_model"] = "net"   # v0.99.392 — rr/expectancy/score are net of fees + slippage
+    best["model"] = "v400"   # v0.99.400 — one position per coin, time exit, train-only picking
     return best, best_results, raw_results
 
 
@@ -9944,7 +10028,8 @@ def msnr_summarize_backtest(results):
                 "avg_rr": None, "median_rr": None, "expectancy_r": None}
     wins = sum(1 for r in results if r["result"] == "WIN")
     losses = sum(1 for r in results if r["result"] == "LOSS")
-    timeouts = sum(1 for r in results if r["result"] == "TIMEOUT")
+    time_exits = sum(1 for r in results if r["result"] == "TIME_EXIT")   # v0.99.400
+    timeouts = sum(1 for r in results if r["result"] == "TIMEOUT") + time_exits
     closed = wins + losses
     win_rate = round(wins / closed * 100, 1) if closed else None
     rrs = [r["rr"] for r in results if r["rr"] is not None]
@@ -9960,8 +10045,7 @@ def msnr_summarize_backtest(results):
     # (no real outcome to score). This is what actually tells you whether
     # the ~50% win-rate is sound: with real 10R+ targets, even a coin-flip
     # win-rate should show strongly positive expectancy.
-    r_values = [r["rr"] for r in results if r["result"] == "WIN" and r["rr"] is not None]
-    r_values += [-1.0 for r in results if r["result"] == "LOSS"]
+    r_values = [x for x in (msnr_trade_r(r) for r in results) if x is not None]   # v0.99.400 — incl. TIME_EXIT
     expectancy_r = round(sum(r_values) / len(r_values), 2) if r_values else None
     return {"n": total, "win_rate": win_rate, "wins": wins, "losses": losses, "timeouts": timeouts,
             "avg_rr": avg_rr, "median_rr": median_rr, "expectancy_r": expectancy_r}
@@ -10571,31 +10655,27 @@ def msnr_optimal_leverage_for_symbol(trades, ceiling_leverage=None, symbol=None)
         with state_lock:
             mmr_map = STATE.get("scalp_mmr_map", {})
         mmr_pct = mmr_map.get(symbol, SCALP_DEFAULT_MMR_PCT)
+    # v0.99.400 — every closed trade (incl. TIME_EXIT at its real exit
+    # price); the liquidation check uses each trade's own STOP distance,
+    # since any trade could have been stopped out
     moves = []
     for t in trades:
-        if t.get("result") not in ("WIN", "LOSS"):
+        mv = msnr_trade_move(t)
+        if mv is None or t.get("sl") is None:
             continue
-        entry = t.get("entry")
-        sl = t.get("sl")
-        tp = t.get("tp")
-        if not entry or entry <= 0 or sl is None or tp is None:
-            continue
-        if t["result"] == "WIN":
-            moves.append((1, abs(tp - entry) / entry, None))
-        else:
-            moves.append((-1, abs(entry - sl) / entry, t.get("direction")))
+        moves.append((mv, abs(t["entry"] - t["sl"]) / t["entry"], t.get("direction")))
     if not moves:
         return AUTOTRADE_LEVERAGE_MSNR
 
     def _log_growth(lev):
         total = 0.0
         fee_frac = msnr_trade_cost_frac() * lev   # v0.99.392 — fees + slippage
-        for sign, move_pct, direction in moves:
-            if sign == -1 and mmr_pct is not None and direction:
+        for move, sl_pct, direction in moves:
+            if mmr_pct is not None and direction:
                 liq_buffer_pct = compute_scalp_liquidation_move_pct(direction, lev, mmr_pct)
-                if liq_buffer_pct is not None and move_pct * 100 * SCALP_SAFETY_MARGIN > liq_buffer_pct:
+                if liq_buffer_pct is not None and sl_pct * 100 * SCALP_SAFETY_MARGIN > liq_buffer_pct:
                     return float("-inf")
-            pnl_frac = sign * move_pct * lev - fee_frac
+            pnl_frac = move * lev - fee_frac
             if pnl_frac <= -1.0:
                 return float("-inf")
             total += math.log(1 + pnl_frac)
@@ -10895,23 +10975,13 @@ def msnr_compound_trail(trades, start_balance=None, leverage=None):
     start_balance = start_balance if start_balance is not None else MSNR_COMPOUND_START_BALANCE
     leverage = leverage if leverage is not None else AUTOTRADE_LEVERAGE_MSNR
     fee_frac = msnr_trade_cost_frac() * leverage   # v0.99.392 — fees + slippage
-    closed = [t for t in trades if t.get("result") in ("WIN", "LOSS")]
+    closed = [t for t in trades if msnr_trade_move(t) is not None]   # v0.99.400 — incl. TIME_EXIT
     trail = []
     balance = start_balance
     for t in closed:
         if balance <= 0:
             break
-        entry = t.get("entry")
-        sl = t.get("sl")
-        tp = t.get("tp")
-        if not entry or entry <= 0 or sl is None or tp is None:
-            continue  # malformed trade record — skip without touching the running balance
-        if t["result"] == "WIN":
-            move_pct = abs(tp - entry) / entry
-            pnl_frac = move_pct * leverage - fee_frac
-        else:
-            move_pct = abs(entry - sl) / entry
-            pnl_frac = -move_pct * leverage - fee_frac
+        pnl_frac = msnr_trade_move(t) * leverage - fee_frac   # v0.99.400 — real exit price (WIN tp / LOSS sl / TIME_EXIT close)
         pnl_frac = max(pnl_frac, -1.0)  # isolated-margin floor — can't lose more than the margin risked
         balance_before = balance
         balance = balance * (1 + pnl_frac)
@@ -11043,7 +11113,7 @@ def msnr_compound_return(trades, start_balance=None, leverage=None):
     without consuming a slot), or None if there are no closed trades
     to compound over at all."""
     start_balance = start_balance if start_balance is not None else MSNR_COMPOUND_START_BALANCE
-    closed = [t for t in trades if t.get("result") in ("WIN", "LOSS")]
+    closed = [t for t in trades if msnr_trade_move(t) is not None]   # v0.99.400 — incl. TIME_EXIT
     if not closed:
         return None
     trail = msnr_compound_trail(trades, start_balance, leverage)
@@ -11566,7 +11636,11 @@ def update_msnr_signal_outcomes():
     now = time.time()
     with state_lock:
         open_signals = [s for s in STATE["msnr_signals"] if s["status"] == "OPEN"]
-    all_candles = fetch_candles_concurrent([(s["symbol"], MSNR_ENTRY_TF, 400) for s in open_signals])
+    hold = msnr_max_hold_bars()   # v0.99.400
+    # enough bars to cover a signal's whole allowed life (was a fixed 400:
+    # an older signal's hit could fall out of the window and it stayed OPEN
+    # forever, blocking the coin)
+    all_candles = fetch_candles_concurrent([(s["symbol"], MSNR_ENTRY_TF, min(1500, hold + 120)) for s in open_signals])
     msnr_interval_sec = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
     for sig, candles in zip(open_signals, all_candles):
         try:
@@ -11577,7 +11651,9 @@ def update_msnr_signal_outcomes():
             result = None
             exit_price = None
             exit_time = None
+            bars_seen = 0
             for c in future:
+                bars_seen += 1
                 if sig["direction"] == "LONG":
                     if c["low"] <= sig["sl"]:
                         result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
@@ -11592,12 +11668,24 @@ def update_msnr_signal_outcomes():
                     if c["low"] <= sig["tp"]:
                         result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
                         break
+                if bars_seen >= hold:   # v0.99.400 — max holding time, same as the backtest
+                    result, exit_price, exit_time = "TIME_EXIT", c["close"], c["time"]
+                    break
+            if not result and future and (now - sig["time"]) > (hold + 2) * msnr_interval_sec:
+                # older than its whole allowed life but the window no longer
+                # reaches back to it (a signal left OPEN by an older version):
+                # close it now at the latest price
+                result, exit_price, exit_time = "TIME_EXIT", future[-1]["close"], future[-1]["time"]
+            if result == "TIME_EXIT" and sig.get("autotrade_fired"):
+                log_error(f"msnr time exit {sig['symbol']}: {close_position_for_mode('msnr', sig['symbol'], sig['direction'])}")
             with state_lock:
                 if result:
                     sig["status"] = "CLOSED"
                     sig["result"] = result
                     sig["exit_price"] = exit_price
                     sig["exit_time"] = exit_time
+                    if result == "TIME_EXIT":
+                        sig["r_net"] = msnr_net_r_at(sig["direction"], sig["entry"], sig["sl"], exit_price)
             # v0.99.33, per direct user request: this signal's REAL
             # per-symbol live compounding balance only moves for a
             # signal an actual autotrade order was placed for — see
@@ -11606,8 +11694,13 @@ def update_msnr_signal_outcomes():
             # state_lock block above: msnr_update_live_balance() takes
             # its own lock internally, and state_lock isn't reentrant.
             if result and sig.get("autotrade_fired") and sig.get("leverage_used"):
-                msnr_update_live_balance(sig["symbol"], result, sig["entry"], sig["sl"], sig["tp"],
-                                          sig["leverage_used"])
+                if result == "TIME_EXIT":   # v0.99.400 — same P&L formula, at the real exit price
+                    gain = (exit_price - sig["entry"]) if sig["direction"] == "LONG" else (sig["entry"] - exit_price)
+                    msnr_update_live_balance(sig["symbol"], "WIN" if gain >= 0 else "LOSS", sig["entry"],
+                                              exit_price, exit_price, sig["leverage_used"])
+                else:
+                    msnr_update_live_balance(sig["symbol"], result, sig["entry"], sig["sl"], sig["tp"],
+                                              sig["leverage_used"])
         except Exception as e:
             log_error(f"msnr_outcome {sig['symbol']}: {e}")
 
@@ -11619,7 +11712,7 @@ def compute_msnr_signal_stats():
     with state_lock:
         signals = [s for s in STATE["msnr_signals"]
                    if s.get("autotrade_fired") or s.get("balance_skipped") or s.get("trade_intended")]  # v0.99.333
-    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS", "TIME_EXIT")]   # v0.99.400
     wins = sum(1 for s in closed if s["result"] == "WIN")
     losses = sum(1 for s in closed if s["result"] == "LOSS")
     timeouts = sum(1 for s in signals if s.get("result") == "TIMEOUT")
@@ -11716,7 +11809,16 @@ def msnr_compute_live_universe(overrides, bounds=None):
     unchanged so this stays consistent with whatever else in the same
     request/cycle is using the same ranking — see msnr_compute_rank_
     bounds()'s own docstring for why sharing it matters."""
-    return msnr_autotrade_eligible_symbols(overrides, bounds=bounds)
+    eligible = msnr_autotrade_eligible_symbols(overrides, bounds=bounds)
+    if eligible:
+        return eligible
+    # v0.99.400 — pooled test not passed: nothing trades, but the top
+    # train-picked coins are still scanned so live signals keep being
+    # recorded (never traded: they are not autotrade-eligible) for the
+    # live-vs-backtest check
+    picked = [(sym, ov) for sym, ov in overrides.items() if ov and not ov.get("error") and ov.get("picked")]
+    picked.sort(key=lambda p: -(p[1].get("train_compound_return_pct") or float("-inf")))
+    return [sym for sym, _ in picked[:MSNR_AUTOTRADE_TOP_N]]
 
 
 def msnr_compute_rank_bounds(overrides):
@@ -11887,6 +11989,34 @@ def msnr_symbol_rank_score(ov, bounds):
             (income_norm ** MSNR_RANK_INCOME_WEIGHT))
 
 
+def msnr_pooled_verdict(overrides, results):
+    """v0.99.400 — does MSNR work, honestly? The TEST trades (last
+    MSNR_OOS_TEST_FRAC of the window — params, leverage and the coin
+    choice never saw them) of every coin picked on its train part,
+    together: autotrade is allowed only if they are positive with
+    z >= MSNR_POOLED_TEST_Z over >= MSNR_POOLED_MIN_TEST trades."""
+    picked = [s for s, ov in overrides.items() if ov and not ov.get("error") and ov.get("picked")]
+    rs = []
+    for sym in picked:
+        split = overrides[sym].get("oos_split_time")
+        for t in results.get(sym) or []:
+            if split and t["time"] >= split:
+                r = msnr_trade_r(t)
+                if r is not None:
+                    rs.append(r)
+    n = len(rs)
+    z = _t_from_sums(n, sum(rs), sum(r * r for r in rs), var_floor=1.0) if n else None
+    mean = sum(rs) / n if n else None
+    return {"t": time.time(), "coins": sum(1 for ov in overrides.values() if ov and not ov.get("error")),
+            "picked": len(picked), "test_n": n, "test_exp_r": round(mean, 3) if mean is not None else None,
+            "test_sum_r": round(sum(rs), 1) if n else None,
+            "test_wr": round(sum(1 for r in rs if r > 0) / n * 100, 1) if n else None,
+            "test_z": round(z, 2) if z is not None else None,
+            "passed": bool(n >= MSNR_POOLED_MIN_TEST and z is not None and z >= MSNR_POOLED_TEST_Z and mean > 0),
+            "min_test": MSNR_POOLED_MIN_TEST, "z_needed": MSNR_POOLED_TEST_Z, "min_train": MSNR_MIN_TRAIN_TRADES,
+            "test_frac": MSNR_OOS_TEST_FRAC}
+
+
 def msnr_rank_by_winrate_sample(overrides, exclude=None, bounds=None):
     """Ranks symbols (excluding `exclude`, if given) by msnr_symbol_
     rank_score() against `bounds` (from msnr_compute_rank_bounds()) —
@@ -11925,13 +12055,20 @@ def msnr_rank_by_winrate_sample(overrides, exclude=None, bounds=None):
     blending with sample size or winrate beyond that 45 floor. `bounds`
     is accepted for call-signature compatibility with existing callers
     but is no longer read here."""
+    # v0.99.400 — honest version of the same rule: nothing is ranked unless
+    # the pooled test passed (msnr_pooled_verdict()); a coin must be picked
+    # on its train part; the >= 45 win-rate floor and the $ sort use the
+    # TRAIN part (they used the whole window, test included). Plain read of
+    # STATE (callers may hold state_lock, which is not re-entrant).
+    if not (STATE.get("msnr_pooled") or {}).get("passed"):
+        return []
     exclude = exclude or set()
     candidates = [(sym, ov) for sym, ov in overrides.items()
-                  if ov and not ov.get("error") and sym not in exclude
+                  if ov and not ov.get("error") and sym not in exclude and ov.get("picked")
                   and not ov.get("stress_test_failed")
-                  and (ov.get("winrate") or 0) >= 45]
-    candidates.sort(key=lambda pair: (pair[1].get("compound_return_pct")
-                                       if pair[1].get("compound_return_pct") is not None
+                  and (ov.get("train_winrate") or 0) >= 45]
+    candidates.sort(key=lambda pair: (pair[1].get("train_compound_return_pct")
+                                       if pair[1].get("train_compound_return_pct") is not None
                                        else float("-inf")),
                      reverse=True)
     return candidates
@@ -12041,11 +12178,8 @@ NEURO_COND_LABELS = {
 
 
 def _msnr_nf_trade_r(t):
-    if t.get("result") == "WIN":
-        return float(t.get("rr") or 0)
-    if t.get("result") == "LOSS":
-        return -1.0
-    return None
+    r = msnr_trade_r(t)   # v0.99.400 — incl. TIME_EXIT
+    return float(r) if r is not None else None
 
 
 def _msnr_nf_stats(rows):
@@ -12919,6 +13053,7 @@ def _msnr_run_one_backtest_cycle(t0):
             STATE["msnr_backtest_summary"] = merged_summary
             STATE["msnr_symbol_overrides"] = merged_overrides
             STATE["msnr_backtest_universe"] = universe
+            STATE["msnr_pooled"] = msnr_pooled_verdict(merged_overrides, merged_results)   # v0.99.400 — before any ranking
             # v0.99.78 — bounds computed here (once, off the just-
             # merged overrides) and threaded through so this
             # cycle's live-universe promotion uses the SAME
@@ -12957,25 +13092,25 @@ def _msnr_run_one_backtest_cycle(t0):
             # winrate>=50 bar — everything else is treated as ineligible this
             # cycle, same as if it had fallen out of the top-N.
             if MSNR_SINGLE_BEST_ENABLED and eligible_now:
-                candidates = [s for s in eligible_now
-                              if (merged_summary.get(s) or {}).get("win_rate") is not None
-                              and merged_summary[s]["win_rate"] >= 50
-                              and (merged_summary.get(s) or {}).get("compound_return_pct") is not None]
+                candidates = [s for s in eligible_now   # v0.99.400 — train-part numbers
+                              if (merged_overrides.get(s) or {}).get("train_winrate") is not None
+                              and merged_overrides[s]["train_winrate"] >= 50
+                              and merged_overrides[s].get("train_compound_return_pct") is not None]
                 if candidates:
-                    best_symbol = max(candidates, key=lambda s: merged_summary[s]["compound_return_pct"])
+                    best_symbol = max(candidates, key=lambda s: merged_overrides[s]["train_compound_return_pct"])
                     eligible_now = {best_symbol}
                 else:
                     eligible_now = set()
             prev_top_set = set(STATE.get("msnr_autotrade_top_set") or [])
             autotrade_symbols = STATE["msnr_autotrade_symbols"]
             for sym in eligible_now:
-                wr = (merged_summary.get(sym) or {}).get("win_rate")
+                wr = (merged_overrides.get(sym) or {}).get("train_winrate")   # v0.99.400 — train part
                 if wr is not None and wr >= 50 and not autotrade_symbols.get(sym):
                     autotrade_symbols[sym] = True
             for sym in prev_top_set:
                 if not autotrade_symbols.get(sym):
                     continue
-                wr = (merged_summary.get(sym) or {}).get("win_rate")
+                wr = (merged_overrides.get(sym) or {}).get("train_winrate")   # v0.99.400 — train part
                 still_qualifies = sym in eligible_now and wr is not None and wr >= 50
                 if not still_qualifies:
                     autotrade_symbols[sym] = False
@@ -24055,6 +24190,64 @@ def api_health():
                     "bt": bt_journal_snapshot()})   # v0.99.393
 
 
+def msnr_live_vs_backtest(days=30):
+    """v0.99.400 — the check that matters before trusting MSNR: every live
+    signal of the last `days` days (traded or only recorded) against the
+    CURRENT backtest's trade on the same coin and the same 15m candle.
+    Matched pairs: same outcome? live R vs backtest R. Live-only signals
+    and backtest-only trades (in the span that coin was being scanned)
+    show where live and backtest disagree on WHICH trades happen. Params
+    can change between backtest cycles, so some mismatch is normal; a
+    systematic gap (live R far below backtest R on the same trades, or
+    many live-only losers) is the red flag."""
+    now = time.time()
+    with state_lock:
+        sigs = [dict(s) for s in STATE["msnr_signals"] if (s.get("time") or 0) >= now - days * 86400]
+        results = {k: list(v or []) for k, v in (STATE.get("msnr_backtest_results") or {}).items()}
+    iv = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
+
+    def live_r(sg):
+        if sg.get("result") == "WIN":
+            return msnr_net_rr(sg["entry"], sg["sl"], sg["tp"])
+        if sg.get("result") == "LOSS":
+            return -1.0
+        if sg.get("result") == "TIME_EXIT":
+            return sg.get("r_net")
+        return None
+    matched, live_only, bt_only = [], [], []
+    by_sym = {}
+    for sg in sigs:
+        by_sym.setdefault(sg["symbol"], []).append(sg)
+    for sym, ss in by_sym.items():
+        bts = {t["time"]: t for t in results.get(sym) or []}
+        t0, t1 = min(x["time"] for x in ss), max(x["time"] for x in ss)
+        seen = set()
+        for sg in ss:
+            bt = bts.get(sg["time"])
+            if bt is None:
+                live_only.append(sg)
+                continue
+            seen.add(bt["time"])
+            matched.append((sg, bt))
+        bt_only += [t for tm, t in bts.items() if t0 <= tm <= t1 and tm not in seen and now - tm > iv]
+    closed_pairs = [(sg, bt) for sg, bt in matched if live_r(sg) is not None and msnr_trade_r(bt) is not None]
+    lo_closed = [sg for sg in live_only if live_r(sg) is not None]
+
+    def _sum(xs):
+        return round(sum(xs), 2) if xs else None
+    return {
+        "days": days, "live_signals": len(sigs), "matched": len(matched),
+        "matched_closed": len(closed_pairs),
+        "same_outcome": sum(1 for sg, bt in closed_pairs if sg["result"] == bt["result"]),
+        "live_r_sum": _sum([live_r(sg) for sg, _ in closed_pairs]),
+        "bt_r_sum": _sum([msnr_trade_r(bt) for _, bt in closed_pairs]),
+        "live_only": len(live_only), "live_only_closed": len(lo_closed),
+        "live_only_r_sum": _sum([live_r(sg) for sg in lo_closed]),
+        "bt_only": len(bt_only),
+        "bt_only_r_sum": _sum([msnr_trade_r(t) for t in bt_only if msnr_trade_r(t) is not None]),
+    }
+
+
 @app.route("/api/msnr/status")
 def api_msnr_status():
     """EXPERIMENTAL — see the MSNR module's own header comment."""
@@ -24153,6 +24346,8 @@ def api_msnr_status():
     return jsonify({
         "calc": calc_status("msnr"),   # v0.99.375
         "provisional": STATE.get("msnr_provisional"),   # v0.99.369
+        "pooled": STATE.get("msnr_pooled"),   # v0.99.400
+        "reconcile": msnr_live_vs_backtest(),   # v0.99.400
         "enabled": MSNR_ENABLED,
         "live_universe": live_universe,
         # v0.99.319 — diagnostics for "no MSNR signals for days": what the
@@ -26299,6 +26494,30 @@ function msnrSortBy(key) {
   refreshMsnr();
 }
 
+// v0.99.400 — MSNR: pooled honest verdict + live-vs-backtest check
+function msnrPooledHtml(p) {
+  if (!p) return '<div class="dim hint-block">Честная проверка MSNR появится после следующего бэктеста.</div>';
+  const sgn = v => v == null ? '—' : (v > 0 ? '+' : '') + v;
+  const verdict = p.passed ? '<b class="win">✓ MSNR подтверждён на тесте — автоторговля разрешена для отобранных монет</b>'
+    : '<b class="loss">✗ MSNR не подтвердился на тесте — автоторговля MSNR не идёт (сигналы лучших монет пишутся без торговли, для сверки)</b>';
+  return `<div style="background:var(--line);border:1px solid var(--line-2);border-radius:var(--r-sm);padding:8px 12px;margin:8px 0;font-size:var(--fs);">
+    ${verdict} <span class="dim">(${fmtDateTime(p.t)})</span><br>
+    Отобрано по обучению: <b>${p.picked}</b> из ${p.coins} монет (≥ ${p.min_train} сделок и плюс после комиссий на первых ${Math.round((1 - p.test_frac) * 100)}% истории).<br>
+    Их <b>тест</b> вместе: n=${p.test_n} · WR ${p.test_wr == null ? '—' : p.test_wr + '%'} · ${sgn(p.test_exp_r)}R/сделку · итого ${sgn(p.test_sum_r)}R · z=${p.test_z == null ? '—' : p.test_z} <span class="dim">(нужно n ≥ ${p.min_test} и z ≥ ${p.z_needed})</span>
+    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Параметры, плечо и выбор монет — только по обучающей части; тест ничего не подбирал. Одна позиция на монету, комиссии и проскальзывание учтены, сделка держится не дольше ${'75'} ч — дальше закрывается по рынку, как и вживую.</div>
+  </div>`;
+}
+function msnrReconcileHtml(r) {
+  if (!r || !r.live_signals) return '';
+  const sgn = v => v == null ? '—' : (v > 0 ? '+' : '') + v;
+  const same = r.matched_closed ? Math.round(100 * r.same_outcome / r.matched_closed) : null;
+  return `<div style="background:var(--inset);border:1px solid var(--line);border-radius:var(--r-sm);padding:8px 12px;margin:8px 0;font-size:var(--fs-sm);">
+    <b>Сверка: живые сигналы vs бэктест</b> <span class="dim">(последние ${r.days} дн., сигналов ${r.live_signals})</span><br>
+    Совпали с бэктестом: <b>${r.matched}</b>${r.matched_closed ? ` · закрытых ${r.matched_closed}, тот же исход у ${same}% · R вживую ${sgn(r.live_r_sum)} vs бэктест ${sgn(r.bt_r_sum)}` : ''}<br>
+    Только вживую: ${r.live_only}${r.live_only_closed ? ` (закрытых ${r.live_only_closed}, ${sgn(r.live_only_r_sum)}R)` : ''} · только в бэктесте: ${r.bt_only}${r.bt_only_r_sum != null ? ` (${sgn(r.bt_only_r_sum)}R)` : ''}
+    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Если R вживую на тех же сделках близок к бэктесту и расхождений немного — бэктесту можно верить. Часть расхождений нормальна: параметры монеты пересчитываются каждый час.</div>
+  </div>`;
+}
 async function refreshMsnr() {
   const status = await (await fetch('/api/msnr/status')).json();
   const signals = await (await fetch('/api/msnr/signals')).json();
@@ -26598,7 +26817,7 @@ async function refreshMsnr() {
     // own $ compounding simulation and is excluded from ranking/
     // autotrade entirely, not just scored lower.
     const stressSeparatorHtml = (idx > 0 && !arr[idx - 1].stress_test_failed && r.stress_test_failed)
-      ? `<tr><td colspan="14" class="loss" style="font-size:var(--fs-xs);padding:4px 0;border-top:1px solid var(--line);">\u2014 провалили $-симуляцию депозита (доход \u2264 0%) или минус на тест-части (с комиссиями), исключены из топа/автоторговли \u2014</td></tr>`
+      ? `<tr><td colspan="14" class="loss" style="font-size:var(--fs-xs);padding:4px 0;border-top:1px solid var(--line);">\u2014 провалили $-симуляцию депозита (доход \u2264 0%), исключены из топа/автоторговли \u2014</td></tr>`
       : '';
     // v0.99.141 — solo-checkpoint columns for the 2 new GLOBAL filters
     // (see MSNR_MIN_RR_FILTER_ENABLED's own comment), reading them by
@@ -26660,14 +26879,14 @@ async function refreshMsnr() {
     </tr>
     <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="15" style="padding:0;position:static;"><div class="dim" style="position:sticky;left:0;width:calc(100vw - 24px);white-space:normal;padding:8px 4px;font-size:var(--fs-sm);line-height:1.45;">${paramsTxt}${noteTxt}<br>${tradeFilterTxt(r.neuro_filter, r.neuro_filter_info, r.neuro_filter_before && `было WR ${r.neuro_filter_before.winrate}% n=${r.neuro_filter_before.trades}`)}</div><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0430...</div></td></tr>`;
   }).join('');
-  const btTableHtml = (status.top || []).length ? `
+  const btTableHtml = msnrPooledHtml(status.pooled) + msnrReconcileHtml(status.reconcile) + ((status.top || []).length ? `
     <div class="dim hint-block" style="margin-bottom:6px;"><b>\u0410\u0432\u0442\u043e\u0442\u044e\u043d\u0438\u043d\u0433 \u043f\u043e \u043c\u043e\u043d\u0435\u0442\u0430\u043c</b> (${cfg.backtest_days} \u0434\u043d\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438, \u043f\u0435\u0440\u0435\u0431\u043e\u0440 ${cfg.grid_min_leg_atr.length}\u00d7${cfg.grid_qm_zone_pct.length}\u00d7${cfg.grid_qm_lookback.length}=${cfg.grid_min_leg_atr.length*cfg.grid_qm_zone_pct.length*cfg.grid_qm_lookback.length} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432 \u043d\u0430 \u0441\u0438\u043c\u0432\u043e\u043b \u2014 \u043c\u0438\u043d. \u0438\u043c\u043f\u0443\u043b\u044c\u0441 (\u00d7ATR) / QM-\u0437\u043e\u043d\u0430 (%) / \u043e\u043a\u043d\u043e QM (\u0431\u0430\u0440\u044b), \u0442\u0430\u0431\u043b\u0438\u0446\u0430 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u0443\u0436\u0435 \u043b\u0443\u0447\u0448\u0438\u0439 \u043d\u0430\u0439\u0434\u0435\u043d\u043d\u044b\u0439 \u043a\u043e\u043c\u0431\u043e \u043f\u043e \u043a\u0430\u0436\u0434\u043e\u043c\u0443 \u0441\u0438\u043c\u0432\u043e\u043b\u0443) \u00b7 <b>score</b> \u2014 \u043d\u0438\u0436\u043d\u044f\u044f \u0434\u043e\u0432\u0435\u0440\u0438\u0442\u0435\u043b\u044c\u043d\u0430\u044f \u0433\u0440\u0430\u043d\u0438\u0446\u0430 \u0441\u0440\u0435\u0434\u043d\u0435\u0433\u043e R (\u043f\u043e \u043d\u0435\u0439 \u0438 \u0432\u044b\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044f \u043b\u0443\u0447\u0448\u0438\u0439 \u043a\u043e\u043c\u0431\u043e, \u0430 \u043d\u0435 \u043f\u043e \u0441\u044b\u0440\u043e\u043c\u0443 expectancy \u2014 \u0447\u0442\u043e\u0431\u044b \u043c\u0430\u043b\u0435\u043d\u044c\u043a\u0430\u044f \u0432\u044b\u0431\u043e\u0440\u043a\u0430 \u0441 \u0432\u0435\u0437\u0435\u043d\u0438\u0435\u043c \u043d\u0435 \u043f\u043e\u0431\u0435\u0436\u0434\u0430\u043b\u0430 \u0431\u043e\u043b\u044c\u0448\u0443\u044e \u0441\u0442\u0430\u0431\u0438\u043b\u044c\u043d\u0443\u044e) \u00b7 \u043a\u043b\u0438\u043a \u043f\u043e \u0441\u0442\u0440\u043e\u043a\u0435 \u2014 \u0440\u0430\u0441\u043a\u0440\u044b\u0442\u044c \u0441\u0434\u0435\u043b\u043a\u0438:</div>
     <div style="overflow-x:auto;">
     <table class="msnr-bt-table" style="font-size:var(--fs-sm);white-space:nowrap;">
       <thead><tr><th>Symbol</th><th>Авто</th><th style="cursor:pointer;" onclick="msnrSortBy('winrate')">WR${_msnrSortKey==='winrate' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th style="cursor:pointer;" onclick="msnrSortBy('trades')">n${_msnrSortKey==='trades' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th>W/L/T</th><th>RR</th><th>Exp</th><th>Score</th><th>RR-диапазон (соло)</th><th>Объём (соло)</th><th>После ликвидации</th><th>За ликвидацией</th><th>Тренд 4ч (соло)</th><th>Neuro-фильтр (тест)</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
-    </div>` : '<div class="dim">\u0411\u044d\u043a\u0442\u0435\u0441\u0442 \u0435\u0449\u0451 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432.</div>';
+    </div>` : '<div class="dim">\u0411\u044d\u043a\u0442\u0435\u0441\u0442 \u0435\u0449\u0451 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432.</div>');
   // v0.99.329 — informational: Neuro conditions as candidate filters for MSNR
   const nfHtml = (() => {
     const nf = status.neuro_filters;
