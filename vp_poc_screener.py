@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.395"
+APP_VERSION = "0.99.396"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -868,7 +868,11 @@ LSW_RR_MIN_TRADES = int(os.environ.get("VP_LSW_RR_MIN_TRADES", 15))  # don't tru
 LSW_MAX_BARS_TO_SWEEP = int(os.environ.get("VP_LSW_MAX_BARS_TO_SWEEP", 150))  # a confirmed equal-highs/lows level not swept within this many bars goes stale and stops being watched
 LSW_MAX_WAIT_BARS = int(os.environ.get("VP_LSW_MAX_WAIT_BARS", 200))  # same shared backtest/live TIMEOUT cutoff shape as MIRROR_MAX_WAIT_BARS
 LSW_SIGNAL_HISTORY = 300
-LSW_BACKTEST_DAYS = int(os.environ.get("VP_LSW_BACKTEST_DAYS", 90))
+LSW_BACKTEST_DAYS = int(os.environ.get("VP_LSW_BACKTEST_DAYS", 365))  # v0.99.396 — was 90: 5-15 trades per coin, far too few to tell skill from luck; Gate keeps ~416 days of 1h
+LSW_CONFIRM_FETCH_DAYS = int(os.environ.get("VP_LSW_CONFIRM_FETCH_DAYS", 30))  # v0.99.396 — 5m history for the entry-confirmation checkpoint (Gate keeps ~35 days of 5m anyway)
+LSW_MIN_TRAIN_TRADES = int(os.environ.get("VP_LSW_MIN_TRAIN_TRADES", 10))  # v0.99.396 — own train trades a coin needs to be picked
+LSW_POOLED_MIN_TEST = int(os.environ.get("VP_LSW_POOLED_MIN_TEST", 30))  # v0.99.396 — pooled test trades the strategy check needs
+LSW_POOLED_TEST_Z = float(os.environ.get("VP_LSW_POOLED_TEST_Z", 2.0))  # v0.99.396
 LSW_REFRESH_SEC = int(os.environ.get("VP_LSW_REFRESH_SEC", 3600))
 LSW_SCAN_INTERVAL_SEC = int(os.environ.get("VP_LSW_SCAN_INTERVAL_SEC", 300))
 LSW_LIVE_MIN_SAMPLE = int(os.environ.get("VP_LSW_LIVE_MIN_SAMPLE", 30))  # a symbol needs at least this many CLOSED backtest trades before its live signals are trusted — deliberately lower than MIRROR_LIVE_MIN_SAMPLE (80) since this is a brand-new module with far less accumulated real-world validation than MIRROR had by the time IT got autotrade wired; kept at 30 rather than raised to 80 on v0.99.120's autotrade wiring since the user didn't ask for that specific change — worth revisiting once real forward data accumulates
@@ -7000,7 +7004,7 @@ PERSIST_BT_KEYS = (
     "msnr_live_universe", "msnr_backtest_universe", "msnr_neuro_filters",
     "lsw_last_backtest_finished", "lsw_last_backtest_duration", "lsw_backtest_summary",
     "lsw_live_universe", "lsw_live_directions", "lsw_chosen_rr", "lsw_rr_sweep",
-    "lsw_filter_checkpoints", "lsw_neuro_filters",
+    "lsw_filter_checkpoints", "lsw_neuro_filters", "lsw_pooled",
     "snr_last_backtest_finished", "snr_filters", "snr_diag", "snr_pooled",
     "prv_last_backtest_finished", "prv_filters",
     "mirror_last_backtest_finished", "mirror_last_backtest_duration", "mirror_backtest_summary",
@@ -12619,7 +12623,7 @@ def lsw_apply_neuro_trade_filters(loop_name="lsw_neuro_filter_loop"):
                 entry["filter"] = {k: f[k] for k in ("key", "value", "mode", "label")}
                 entry["before"] = {"n": before.get("n"), "win_rate": before.get("win_rate")}
                 res[sym] = kept
-                summary = lsw_summarize_backtest(kept)
+                summary = lsw_summarize_backtest(kept, before.get("split_time"))   # v0.99.396
                 STATE["lsw_backtest_summary"][sym] = summary
                 is_live, dirs = lsw_live_decision(summary)
                 if is_live and sym not in STATE["lsw_live_universe"]:
@@ -15198,7 +15202,7 @@ def lsw_pick_best_rr(candles, htf_candles, htf_interval_sec, confirm_candles, tr
     split = int(len(candles) * train_frac)
     train_candles = candles[:split]
     if len(train_candles) < LSW_PIVOT_LEFT + LSW_PIVOT_RIGHT + 20:
-        return LSW_RR, []
+        return LSW_RR, [], None
     boundary_time = candles[split - 1]["time"] if split > 0 else candles[0]["time"]
     htf_train = [c for c in htf_candles if c["time"] <= boundary_time] if htf_candles else htf_candles
     confirm_train = [c for c in confirm_candles if c["time"] <= boundary_time] if confirm_candles else confirm_candles
@@ -15209,21 +15213,23 @@ def lsw_pick_best_rr(candles, htf_candles, htf_interval_sec, confirm_candles, tr
         raw = lsw_detect_signals(train_candles, rr=rr)
         sigs = lsw_apply_active_filter_chain(raw, train_candles, htf_train, htf_interval_sec, confirm_train)
         closed_n = wins = 0
+        net_sum = 0.0
         for sig in sigs:
             result, _ = lsw_track_outcome(train_candles, sig)
             if result in ("WIN", "LOSS"):
                 closed_n += 1
                 if result == "WIN":
                     wins += 1
+                net_sum += (rr if result == "WIN" else -1.0) - trade_fee_r(sig["entry"], sig["sl"])   # v0.99.396 — net of fees
         if closed_n < LSW_RR_MIN_TRADES:
             sweep.append({"rr": rr, "n": closed_n, "winrate": None, "expectancy_r": None})
             continue
         wr = wins / closed_n
-        expectancy = round(wr * rr - (1 - wr) * 1, 3)
+        expectancy = round(net_sum / closed_n, 3)   # v0.99.396 — was gross wr*rr-(1-wr)
         sweep.append({"rr": rr, "n": closed_n, "winrate": round(wr * 100, 1), "expectancy_r": expectancy})
         if best_score is None or expectancy > best_score:
             best_score, best_rr = expectancy, rr
-    return best_rr, sweep
+    return best_rr, sweep, boundary_time
 
 
 def lsw_backtest_core(candles, htf_candles, htf_interval_sec, confirm_candles):
@@ -15233,7 +15239,7 @@ def lsw_backtest_core(candles, htf_candles, htf_interval_sec, confirm_candles):
     # v0.99.223 — pick RR from the TRAIN portion only, BEFORE detecting the
     # real signals below, so the chosen RR gets applied consistently to
     # the full-history result that follows.
-    chosen_rr, rr_sweep = lsw_pick_best_rr(candles, htf_candles, htf_interval_sec, confirm_candles)
+    chosen_rr, rr_sweep, split_time = lsw_pick_best_rr(candles, htf_candles, htf_interval_sec, confirm_candles)
 
     raw_sigs = lsw_detect_signals(candles, rr=chosen_rr)
 
@@ -15278,27 +15284,20 @@ def lsw_backtest_core(candles, htf_candles, htf_interval_sec, confirm_candles):
 
     # The ACTUAL result, using whichever filters are really toggled on right now — now calls the SAME shared function lsw_pick_best_rr() uses (v0.99.223/224), so the two paths can never silently drift apart.
     sigs = lsw_apply_active_filter_chain(raw_sigs, candles, htf_candles, htf_interval_sec, confirm_candles)
-    # v0.99.191 — no-open-position filter: skip a new signal if the
-    # previous trade on this symbol is still OPEN (timeout not closed).
-    # Prevents piling into the same symbol while a trade is running.
-    open_times = {r["time"] for r in _track_all(raw_sigs) if r["result"] == "TIMEOUT"}
-    if open_times:
-        filtered_sigs = []
-        for sig in sigs:
-            sig_time = sig.get("time") or sig.get("entry_time")
-            # Find the most recent previous trade for this signal
-            prev_opens = [t for t in open_times if t < sig_time]
-            if prev_opens:
-                last_open = max(prev_opens)
-                # Check if that trade would still be open at signal time
-                prev_sig_matches = [r for r in _track_all(raw_sigs)
-                                    if r["time"] == last_open and r["result"] == "TIMEOUT"]
-                if prev_sig_matches:
-                    continue  # skip — previous trade still running
-            filtered_sigs.append(sig)
-        sigs = filtered_sigs
-    results = _track_all(sigs)
-    return {"results": results, "meta": {"checkpoints": checkpoints, "chosen_rr": chosen_rr, "rr_sweep": rr_sweep}}
+    # v0.99.396 — one position per coin, like live: a signal is skipped
+    # while the previous TAKEN trade is still open. The old rule (v0.99.191)
+    # skipped every signal after ANY raw signal that ever timed out (all of
+    # a coin's later trades gone after one timeout) and still counted
+    # overlapping WIN/LOSS trades live could never have opened.
+    wait_sec = LSW_MAX_WAIT_BARS * INTERVAL_SECONDS.get(LSW_INTERVAL, 3600)
+    results, busy_until = [], float("-inf")
+    for r in _track_all(sigs):
+        if r["time"] < busy_until:
+            continue
+        results.append(r)
+        busy_until = r["exit_time"] if r["exit_time"] else r["time"] + wait_sec
+    return {"results": results, "meta": {"checkpoints": checkpoints, "chosen_rr": chosen_rr, "rr_sweep": rr_sweep,
+                                         "split_time": split_time}}
 
 
 def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
@@ -15354,12 +15353,13 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
         return [], {"checkpoints": {"raw": None, "entry_confirm": None, "volume_filter": None,
                                      "fvg_filter": None, "session_filter": None, "min_touches_filter": None,
                                      "candle_structure": None, "atr_sweep": None},
-                     "chosen_rr": LSW_RR, "rr_sweep": []}
+                     "chosen_rr": LSW_RR, "rr_sweep": [], "split_time": None}
 
     htf_interval_sec = INTERVAL_SECONDS.get(LSW_HTF_INTERVAL, 14400)
     htf_fetch_start = fetch_start - LSW_HTF_EMA_PERIOD * htf_interval_sec
     htf_candles = get_candles_range(symbol, LSW_HTF_INTERVAL, htf_fetch_start, now)
-    confirm_candles = get_candles_range(symbol, LSW_ENTRY_CONFIRM_INTERVAL, fetch_start, now)
+    confirm_candles = get_candles_range(symbol, LSW_ENTRY_CONFIRM_INTERVAL,
+                                        max(fetch_start, now - LSW_CONFIRM_FETCH_DAYS * 86400), now)   # v0.99.396
 
     # v0.99.375 — the calculation runs in lsw_backtest_core() (possibly in a
     # worker process on another core)
@@ -15370,9 +15370,14 @@ def lsw_backtest_symbol(symbol, days=LSW_BACKTEST_DAYS):
 def lsw_live_decision(summary):
     """v0.99.364 — factored out of lsw_backtest_loop() unchanged: is the
     coin live-eligible, and which directions (None = no direction filter)."""
-    closed_n = summary["wins"] + summary["losses"]
-    is_live = (summary["win_rate"] is not None and summary["win_rate"] > LSW_LIVE_MIN_WINRATE
-               and closed_n >= LSW_LIVE_MIN_SAMPLE)
+    # v0.99.396 — live only when the pooled strategy check passed (see
+    # lsw_pooled_verdict()) AND this coin is one it picked on its own
+    # train part. Replaces "win rate > 50% over the whole history".
+    # plain read, no state_lock: this is also called with state_lock held
+    # (lsw_apply_neuro_trade_filters) and the lock is not re-entrant
+    pooled = STATE.get("lsw_pooled") or {}
+    tr = summary.get("train") or {}
+    is_live = bool(pooled.get("passed") and tr.get("n", 0) >= LSW_MIN_TRAIN_TRADES and (tr.get("exp_net") or 0) > 0)
     allowed_directions = None
     if is_live and LSW_DIRECTION_FILTER_ENABLED:
         allowed = []
@@ -15387,10 +15392,20 @@ def lsw_live_decision(summary):
     return is_live, allowed_directions
 
 
-def lsw_summarize_backtest(results):
+def _lsw_part_stats(ts):
+    """v0.99.396 — closed trades -> n / win rate / avg net R (after fees)."""
+    rs = [x for x in (_rr_trade_net_r(t) for t in ts) if x is not None]
+    if not rs:
+        return {"n": 0, "win_rate": None, "exp_net": None}
+    w = sum(1 for t in ts if t.get("result") == "WIN")
+    return {"n": len(rs), "win_rate": round(w / len(rs) * 100, 1), "exp_net": round(sum(rs) / len(rs), 3)}
+
+
+def lsw_summarize_backtest(results, split_time=None):
     total = len(results)
     if not total:
-        return {"n": 0, "win_rate": None, "wins": 0, "losses": 0, "timeouts": 0,
+        return {"n": 0, "win_rate": None, "wins": 0, "losses": 0, "timeouts": 0, "split_time": split_time,
+                "exp_net": None, "train": _lsw_part_stats([]), "test": _lsw_part_stats([]),
                 "by_direction": {"LONG": {"n": 0, "wins": 0, "losses": 0, "win_rate": None},
                                   "SHORT": {"n": 0, "wins": 0, "losses": 0, "win_rate": None}}}
     wins = sum(1 for r in results if r["result"] == "WIN")
@@ -15406,8 +15421,48 @@ def lsw_summarize_backtest(results):
             "n": len(d_results), "wins": d_wins, "losses": len(d_results) - d_wins,
             "win_rate": round(d_wins / len(d_results) * 100, 1) if d_results else None,
         }
+    # v0.99.396 — the honest split: the coin is PICKED on train (RR was chosen
+    # there too); test is the part nothing was fitted on. Net of fees.
+    closed_all = [r for r in results if r["result"] in ("WIN", "LOSS")]
+    train = [r for r in closed_all if split_time is not None and r["time"] <= split_time]
+    test = [r for r in closed_all if split_time is not None and r["time"] > split_time]
     return {"n": total, "win_rate": win_rate, "wins": wins, "losses": losses, "timeouts": timeouts,
-            "by_direction": by_direction}
+            "by_direction": by_direction, "split_time": split_time,
+            "exp_net": _lsw_part_stats(closed_all)["exp_net"],
+            "train": _lsw_part_stats(train), "test": _lsw_part_stats(test)}
+
+
+def lsw_pooled_verdict(results_by_sym, summaries):
+    """v0.99.396 — does the Sweep strategy work at all, honestly? Coins are
+    picked by their own TRAIN result (>= LSW_MIN_TRAIN_TRADES, net R > 0);
+    the TEST trades of all picked coins together must then be positive
+    with z >= LSW_POOLED_TEST_Z. Before, a coin went live on a >50% win
+    rate over its WHOLE history — out of ~100 coins that picks the lucky
+    ones, whose luck then ends live ("стоп на стопе")."""
+    picked, rs = [], []
+    for sym, sm in summaries.items():
+        tr = (sm or {}).get("train") or {}
+        split = (sm or {}).get("split_time")
+        if split is None or tr.get("n", 0) < LSW_MIN_TRAIN_TRADES or (tr.get("exp_net") or 0) <= 0:
+            continue
+        picked.append(sym)
+        for t in results_by_sym.get(sym) or []:
+            if t["time"] > split:
+                x = _rr_trade_net_r(t)
+                if x is not None:
+                    rs.append(x)
+    n = len(rs)
+    mean = sum(rs) / n if n else None
+    sd = math.sqrt(sum((x - mean) ** 2 for x in rs) / (n - 1)) if n > 1 else None
+    z = mean / (sd / math.sqrt(n)) if sd else None
+    train_n = sum(((summaries.get(s) or {}).get("train") or {}).get("n", 0) for s in picked)
+    wins = sum(1 for x in rs if x > 0)
+    return {"t": time.time(), "coins": len(summaries), "picked": len(picked), "picked_symbols": picked,
+            "train_n": train_n, "test_n": n, "test_wr": round(wins / n * 100, 1) if n else None,
+            "test_exp_net": round(mean, 3) if mean is not None else None,
+            "test_sum_r": round(sum(rs), 1) if n else None, "test_z": round(z, 2) if z is not None else None,
+            "passed": bool(n >= LSW_POOLED_MIN_TEST and z is not None and z >= LSW_POOLED_TEST_Z and mean > 0),
+            "min_test": LSW_POOLED_MIN_TEST, "z_needed": LSW_POOLED_TEST_Z, "min_train": LSW_MIN_TRAIN_TRADES}
 
 
 _lsw_signal_cooldowns = {}  # symbol -> last-signaled entry_time
@@ -15851,6 +15906,21 @@ def lsw_backtest_loop():
         LSW_BACKTEST_TRIGGER.clear()
 
 
+def lsw_recompute_live():
+    """v0.99.396 — rebuild the live set + directions from every stored
+    summary with the current pooled verdict."""
+    with state_lock:
+        sums = dict(STATE.get("lsw_backtest_summary") or {})
+    decided = {sym: lsw_live_decision(sm) for sym, sm in sums.items()}
+    with state_lock:
+        STATE["lsw_live_universe"] = [sym for sym, (live, _d) in decided.items() if live]
+        for sym, (live, dirs) in decided.items():
+            if dirs is not None:
+                STATE["lsw_live_directions"][sym] = dirs
+            else:
+                STATE["lsw_live_directions"].pop(sym, None)
+
+
 def _lsw_run_one_backtest_cycle(t0):
     universe = lsw_build_universe()
     with state_lock:
@@ -15904,7 +15974,7 @@ def _lsw_run_one_backtest_cycle(t0):
                         continue
                     try:
                         checkpoints = meta.get("checkpoints", {})
-                        summary = lsw_summarize_backtest(results)
+                        summary = lsw_summarize_backtest(results, meta.get("split_time"))   # v0.99.396
                         is_live, allowed_directions = lsw_live_decision(summary)   # v0.99.364 — same rule, shared
                         # Write THIS symbol's result immediately — never
                         # wait for the rest of the universe to also finish.
@@ -15932,6 +16002,15 @@ def _lsw_run_one_backtest_cycle(t0):
                 log_error("lsw_backtest: as_completed timed out waiting on a stuck symbol — keeping whatever was already written")
         finally:
             ex.shutdown(wait=False)  # never block on a stuck worker thread
+        # v0.99.396 — pooled strategy check over the fresh results, then the
+        # live set is rebuilt from it (coins above used the previous verdict)
+        with state_lock:
+            _res = {k: list(v or []) for k, v in (STATE.get("lsw_backtest_results") or {}).items()}
+            _sums = dict(STATE.get("lsw_backtest_summary") or {})
+        _verdict = lsw_pooled_verdict(_res, _sums)
+        with state_lock:
+            STATE["lsw_pooled"] = _verdict
+        lsw_recompute_live()
         with state_lock:
             STATE["lsw_last_backtest_finished"] = time.time()
             STATE["lsw_last_backtest_duration"] = round(time.time() - t0, 1)
@@ -23638,13 +23717,15 @@ def api_lsw_status():
                    chosen_rr=chosen_rr_map.get(sym, LSW_RR),
                    trade_filter=(STATE.get("lsw_trade_filters") or {}).get(sym),   # v0.99.364
                    rr_sweep=rr_sweep_map.get(sym, [])) for sym, s in summary.items()]
-    ranked.sort(key=lambda r: (r["win_rate"] or 0, r["n"]), reverse=True)
+    # v0.99.396 — live coins first, then by honest test result (net R)
+    ranked.sort(key=lambda r: (bool(r["live"]), ((r.get("test") or {}).get("exp_net") or -99), r["n"]), reverse=True)
     return jsonify({
         "calc": calc_status("lsw"),   # v0.99.375
         "enabled": LSW_ENABLED,
         "last_backtest_finished": last_backtest_finished,
         "last_backtest_duration": last_backtest_duration,
         "neuro_filters": STATE.get("lsw_neuro_filters"),   # v0.99.360 (replaced atomically)
+        "pooled": STATE.get("lsw_pooled"),   # v0.99.396
         "backtest_running": backtest_running,
         "backtest_total": backtest_total,
         "backtest_done": backtest_done,
@@ -27251,6 +27332,25 @@ async function refreshMirror() {
   });
 }
 
+// v0.99.396 — Sweep: honest per-coin split + pooled strategy verdict
+function lswSplitTxt(r) {
+  const tr = r.train || {}, te = r.test || {};
+  if (tr.n === undefined) return '<span class="dim" title="посчитано старой версией — до следующего бэктеста">—</span>';
+  const f = x => x.n ? `<span class="${x.exp_net > 0 ? 'win' : 'loss'}">${x.exp_net > 0 ? '+' : ''}${x.exp_net}R</span> <span class="dim">n=${x.n}</span>` : '<span class="dim">нет</span>';
+  return `${f(tr)} → ${f(te)}`;
+}
+function lswPooledHtml(p) {
+  if (!p) return '';
+  const sgn = v => v == null ? '—' : (v > 0 ? '+' : '') + v;
+  const verdict = p.passed ? '<b class="win">✓ Sweep подтверждён на тесте — торгуются отобранные монеты</b>'
+    : '<b class="loss">✗ Sweep не подтвердился на тесте — автоторговля Sweep ни по одной монете не идёт</b>';
+  return `<div style="background:var(--line);border:1px solid var(--line-2);border-radius:var(--r-sm);padding:8px 12px;margin:8px 0;font-size:var(--fs);">
+    ${verdict} <span class="dim">(${fmtDateTime(p.t)})</span><br>
+    Отобрано по обучению: <b>${p.picked}</b> из ${p.coins} монет (≥ ${p.min_train} сделок и плюс после комиссий).<br>
+    Их <b>тест</b> вместе: n=${p.test_n} · WR ${p.test_wr == null ? '—' : p.test_wr + '%'} · ${sgn(p.test_exp_net)}R/сделку · итого ${sgn(p.test_sum_r)}R · z=${p.test_z == null ? '—' : p.test_z} <span class="dim">(нужно n ≥ ${p.min_test} и z ≥ ${p.z_needed})</span>
+    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Монета отбирается только по первым 70% своей истории; последние 30% (тест) — честная проверка того, что такой отбор работает. Раньше в торговлю шли монеты с винрейтом > 50% на всей истории — из ~100 монет так находятся в основном везучие, и вживую везение кончается.</div>
+  </div>`;
+}
 async function refreshLsw() {
   const status = await (await fetch('/api/lsw/status')).json();
   const signals = await (await fetch('/api/lsw/signals')).json();
@@ -27359,6 +27459,7 @@ async function refreshLsw() {
       <td>${r.symbol}${liveDot}${dirFilterTxt}</td>
       <td class="dim" title="\u043f\u043e\u0434\u043e\u0431\u0440\u0430\u043d \u043d\u0430 train-\u0447\u0430\u0441\u0442\u0438 \u0438\u0441\u0442\u043e\u0440\u0438\u0438 &#10;${rrSweepTitle}">1:${(r.chosen_rr||cfg.rr).toFixed(2)}</td>
       <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
+      <td title="обучение (по нему монета отбирается) → тест (на нём ничего не подбиралось), R на сделку после комиссий">${lswSplitTxt(r)}</td>
       <td class="dim">n=${r.n}</td>
       <td class="win">${r.wins}W</td>
       <td class="loss">${r.losses}L</td>
@@ -27374,14 +27475,14 @@ async function refreshLsw() {
       <td>${tradeFilterTxt(r.trade_filter && r.trade_filter.filter, r.trade_filter && r.trade_filter.info, r.trade_filter && r.trade_filter.before && `было WR ${r.trade_filter.before.win_rate}% n=${r.trade_filter.before.n}`)}<br>${nfCoinCellHtml(status.neuro_filters, r.symbol)}</td>
     </tr>`;
   }).join('');
-  const btTableHtml = (status.top || []).length ? `
+  const btTableHtml = lswPooledHtml(status.pooled) + ((status.top || []).length ? `
     <div class="dim hint-block" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории). Колонка RR — подобран отдельно под каждую монету на первых 70% её истории (train), применён к полной истории — наведи на значение чтобы увидеть всю кривую подбора. Последние 6 колонок показывают, что даёт КАЖДЫЙ фильтр САМ ПО СЕБЕ на сырых (нефильтрованных) сигналах монеты — не в связке с остальными фильтрами. В скобках — разница с винрейтом на тех же сырых сигналах без единого фильтра (это не то же самое, что колонка WR слева, там уже применены реально включённые фильтры). Пометка [выкл] — фильтр сейчас не участвует в реальной торговле, это просто оценка "а что если включить". Тренд-фильтр и структурный кэп по-прежнему доступны в настройках, просто убраны отсюда, чтобы не мозолить глаза:</div>
     <div style="overflow-x:auto;">
     <table style="font-size:var(--fs-sm);white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>RR</th><th>WR</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th><th>Подтверждение (соло)</th><th>Объём (соло)</th><th>FVG (соло)</th><th>Сессия (соло)</th><th>Касания≥${cfg.min_touches} (соло)</th><th>Структура свечи (соло)</th><th>ATR sweep (соло)</th><th title="лучший Neuro-фильтр, только тест-часть">🏆 Neuro-фильтр (тест)</th></tr></thead>
+      <thead><tr><th>Symbol</th><th>RR</th><th>WR</th><th>обучение → тест</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th><th>Подтверждение (соло)</th><th>Объём (соло)</th><th>FVG (соло)</th><th>Сессия (соло)</th><th>Касания≥${cfg.min_touches} (соло)</th><th>Структура свечи (соло)</th><th>ATR sweep (соло)</th><th title="лучший Neuro-фильтр, только тест-часть">🏆 Neuro-фильтр (тест)</th></tr></thead>
       <tbody>${btRows}</tbody>
     </table>
-    </div>` : '<div class="dim">Бэктест ещё не готов.</div>';
+    </div>` : '<div class="dim">Бэктест ещё не готов.</div>');
   setPanelHtml(panel, headerHtml + signalsTableHtml
     + filterReportHtml(status.neuro_filters, "🧪 Neuro-фильтры для Sweep (информационно)", "считаются (≈25 мин после запуска и после каждого бэктеста Sweep)")   // v0.99.360
     + btTableHtml);

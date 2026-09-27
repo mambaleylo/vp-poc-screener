@@ -17862,3 +17862,26 @@ v0.99.395 - Neuro cards: tradeable (active) coins first, reference-only coins af
          them, total test profit orders each group (user: "перемешаны монеты
          отображаемые и активные ... на первую галочку поставить нельзя, на 5-ю
          можно"). Which coins are active is unchanged (chosen on validation).
+v0.99.396 - Sweep: honest backtest and coin selection (user: "sweep пока даёт плохие
+         результаты, стоп на стопе и очень мало сделок на бэктесте").
+         - Selection bug: a coin went live on a > 50% win rate over its WHOLE
+           history (>= 30 trades). Out of ~100 coins that picks the lucky ones
+           (synthetic random walk: the old rule put a coin live with no edge
+           at all), whose luck then ends live. Now a coin is picked on its own
+           TRAIN part only (first 70%, >= 10 trades, positive net R), and
+           autotrade runs only if the TEST part of all picked coins together
+           is positive with z >= 2 (>= 30 trades). Otherwise no Sweep coin is
+           live — the panel says so, with the pooled numbers.
+         - History 90 -> 365 days of 1h (~4x trades per coin; 5m confirmation
+           candles limited to the last 30 days).
+         - RR chosen on train by NET expectancy (fees), stats in net R.
+         - One-position rule fixed: the old one dropped every signal after any
+           raw signal that ever timed out, yet counted overlapping WIN/LOSS
+           trades live could never open. Now: skip only while the previous
+           taken trade is open.
+         - Table: "обучение → тест" column (net R, n), live coins first.
+         - tools/compare_sweep_variants.py: on real Gate data, compares base
+           vs wider ATR stop, retest limit entry, ATR-based level tolerance,
+           3+ touches, stop+retest — honest pooled test for each.
+         Verified: py_compile, pyflakes, JS check; synthetic 12 coins: 4x trades,
+         no overlapping trades, pooled test ~0R on random data -> not live.
