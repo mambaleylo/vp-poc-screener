@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.401"
+APP_VERSION = "0.99.402"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -492,7 +492,7 @@ HOURLY_STATS_INTERVAL_SEC = int(os.environ.get("VP_HOURLY_STATS_INTERVAL_SEC", 3
 # Constants placed here (before STATE) for the same reason as XAU_LG's —
 # STATE references MSNR_SIGNAL_HISTORY at construction time.
 # ============================================================================
-MSNR_ENABLED = os.environ.get("VP_MSNR_ENABLED", "1") == "1"
+MSNR_ENABLED = False  # v0.99.402 — MSNR removed (user: "удаляй mnsr тогда как свип"): the rebuilt v2 lost on real Gate data in all 32 variants (train z -2.2..-2.9 over 1500-2700 trades). Loops are not started, tab/settings are gone; the code stays dormant. Original:
 # v0.99.321 — MSNR_SYMBOLS (fixed XAU/XAUT/PAXG list) removed entirely, per
 # user request ("никаких списков не должно быть"): the backtest universe is
 # purely liquidity-ranked and the live scan is purely the backtest's own
@@ -1034,7 +1034,7 @@ SCALP_SIZE_MODE = os.environ.get("VP_SCALP_SIZE_MODE", AUTOTRADE_SIZE_MODE)
 SCALP_SIZE_VALUE = float(os.environ.get("VP_SCALP_SIZE_VALUE", AUTOTRADE_SIZE_VALUE))
 AUTOTRADE_LEVERAGE_BOUNCE = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_BOUNCE", 10))
 AUTOTRADE_LEVERAGE_BREAKOUT = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_BREAKOUT", 10))
-AUTOTRADE_ENABLED_MSNR = os.environ.get("VP_AUTOTRADE_MSNR", "0") == "1"  # off by default — same "unverified source" treatment as XAU_LG/FT5
+AUTOTRADE_ENABLED_MSNR = False  # v0.99.402 — MSNR removed. Original:  # off by default — same "unverified source" treatment as XAU_LG/FT5
 AUTOTRADE_LEVERAGE_MSNR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_MSNR", 10))
 MSNR_COMPOUND_START_BALANCE = float(os.environ.get("VP_MSNR_COMPOUND_START_BALANCE", 15.0))  # v0.99.24 — per direct user request: $ margin the backtest's compounding simulation starts with on the first closed trade. v0.99.179 — lowered 40->15 per direct user request ("принять не за 40$ а 15$").
 AUTOTRADE_ENABLED_FT5 = os.environ.get("VP_AUTOTRADE_FT5", "0") == "1"  # off by default — same reasoning as XAU_LG: unverified source, and the freqtrade backtest table this was ported from is a near-certain overfitting example (20-day 2018 window)
@@ -1093,9 +1093,9 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "prv_single_best_enabled", "snr_single_best_enabled", "neuro_autotrade_selected_only", "neuro_extra_conds_enabled", "neuro_trade_filter_enabled", "calc_workers", "calc_workers_boost", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "neuro_min_winrate", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "nq_enabled", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_neuro", "msnr_all_in_enabled", "snr_all_in_enabled", "prv_all_in_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "neuro_min_winrate", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "nq_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_mirror", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_mirror", "autotrade_neuro", "snr_all_in_enabled", "prv_all_in_enabled",
                   "autotrade_risk_pct",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
@@ -1152,13 +1152,11 @@ def get_settings():
         "neuro_display_n": NEURO_DISPLAY_N,
         "neuro_min_winrate": NEURO_MIN_WINRATE,
         "nq_enabled": NQ_ENABLED,
-        "msnr_enabled": MSNR_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
         "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
         "telegram_alerts_hourly": TELEGRAM_ALERTS_HOURLY,
         "telegram_alerts_ft5": TELEGRAM_ALERTS_FT5,
-        "telegram_alerts_msnr": TELEGRAM_ALERTS_MSNR,
         "telegram_alerts_mirror": TELEGRAM_ALERTS_MIRROR,
         "telegram_alerts_ema_bull": TELEGRAM_ALERTS_EMA_BULL,
         "telegram_alerts_amd": TELEGRAM_ALERTS_AMD,
@@ -1169,7 +1167,6 @@ def get_settings():
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
         "autotrade_risk_pct": AUTOTRADE_RISK_PCT_OF_BALANCE,
-        "msnr_all_in_enabled": MSNR_ALL_IN_ENABLED,
         "snr_all_in_enabled": SNR_ALL_IN_ENABLED,
         "prv_all_in_enabled": PRV_ALL_IN_ENABLED,
         "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
@@ -1177,7 +1174,6 @@ def get_settings():
         "autotrade_scalp": AUTOTRADE_ENABLED_SCALP,
         "scalp_martingale_enabled": SCALP_MARTINGALE_ENABLED,
         "autotrade_ft5": AUTOTRADE_ENABLED_FT5,
-        "autotrade_msnr": AUTOTRADE_ENABLED_MSNR,
         "autotrade_mirror": AUTOTRADE_ENABLED_MIRROR,
         "autotrade_neuro": AUTOTRADE_ENABLED_NEURO,
         "scalp_min_rr": SCALP_MIN_RR,
@@ -1616,7 +1612,7 @@ _credentials_lock = threading.Lock()
 # account's money.
 # Stored in their own file (chmod 600), separate from the main keys file.
 # ============================================================================
-MODULE_ACCOUNT_MODES = ("msnr", "neuro", "snr", "prv")  # v0.99.336 — same order as the tabs; v0.99.398 — Sweep removed
+MODULE_ACCOUNT_MODES = ("neuro", "snr", "prv")  # v0.99.336 — same order as the tabs; v0.99.398 — Sweep removed
 MODULE_ACCOUNT_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal"}
 MODULE_CREDENTIALS_FILE = os.environ.get(
     "VP_MODULE_CREDENTIALS_FILE",
@@ -21712,7 +21708,6 @@ def api_autotrade_status():
             "bounce": AUTOTRADE_ENABLED_BOUNCE, "breakout": AUTOTRADE_ENABLED_BREAKOUT,
             "scalp": AUTOTRADE_ENABLED_SCALP,
             "ft5": AUTOTRADE_ENABLED_FT5,
-            "msnr": AUTOTRADE_ENABLED_MSNR,
             "mirror": AUTOTRADE_ENABLED_MIRROR,
         },   # v0.99.398 — Sweep removed
     })
@@ -21918,7 +21913,6 @@ INDEX_HTML = """<!doctype html>
   .tab { flex-shrink:0; height:30px; display:inline-flex; align-items:center; padding:0 11px; border-radius:999px; background:transparent; font-size:var(--fs); font-weight:500; cursor:pointer; color:var(--tx-2); border:1px solid transparent; white-space:nowrap; }
   .tab.active { background:var(--ctl); color:var(--tx) !important; border-color:var(--line-2); font-weight:600; }
   .tab.active::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--tab-c, var(--acc)); margin-right:7px; }
-  .tab[data-tab="msnr"] { --tab-c:var(--msnr); }
   .tab[data-tab="neuro"] { --tab-c:var(--neuro); }
   .tab[data-tab="snr"] { --tab-c:var(--snr); }
   .tab[data-tab="prv"] { --tab-c:var(--prv); }
@@ -22034,7 +22028,6 @@ INDEX_HTML = """<!doctype html>
     </div>
   </div>
   <div id="hdrActions" style="display:none;">
-    <div class="hdrRow"><span class="hdrLbl">MSNR</span><button id="resetMsnrBtn" class="btnDanger">🗑 Очистить</button><button id="restartMsnrBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
     <div class="hdrRow"><span class="hdrLbl">Neuro</span><button id="resetNeuroBtn" class="btnDanger">🗑 Очистить</button><button id="restartNeuroBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
     <div class="hdrRow"><span class="hdrLbl">S/R Zones</span><button id="resetSnrBtn" class="btnDanger">🗑 Очистить</button><button id="restartSnrBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
     <div class="hdrRow"><span class="hdrLbl">Peak Rev.</span><button id="resetPrvBtn" class="btnDanger">🗑 Очистить</button><button id="restartPrvBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
@@ -22060,8 +22053,7 @@ INDEX_HTML = """<!doctype html>
   <div id="healthBanner"></div>
 </header>
 <div class="tabs">
-  <div class="tab active" data-tab="msnr">MSNR</div>
-  <div class="tab" data-tab="neuro" style="color:var(--neuro);">🧠 Neuro</div>
+  <div class="tab active" data-tab="neuro" style="color:var(--neuro);">🧠 Neuro</div>
   <div class="tab" data-tab="snr" style="color:var(--snr);">S/R Zones</div>
   <div class="tab" data-tab="prv" style="color:var(--prv);">Peak Reversal</div>
   <div class="tab" data-tab="signals">Volume</div>
@@ -22078,12 +22070,11 @@ INDEX_HTML = """<!doctype html>
   </table>
   </div>
   <div id="scalpPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
-  <div id="msnrPanel" style="display:block;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="ft5Panel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="mirrorPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="emaBullPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="amdPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
-  <div id="neuroPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="neuroPanel" style="display:block;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="snrPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="prvPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="nqPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
@@ -22175,13 +22166,6 @@ INDEX_HTML = """<!doctype html>
     </div></details>
     <details class="settingsGroup" style="--mod-color:#ff7043;" data-warn style="background:rgba(255,112,67,0.05);"><summary class="settingsGroupTitle" style="color:var(--warn);">MSNR ⚠️ Экспериментально</summary><div class="settingsGroupBody">
       
-      <div class="settingRow">
-        <div>
-          <div class="label">Сканирование MSNR</div>
-          <div class="sub">Malaysian SNR / Storyline — см. предупреждение на вкладке. Автоторговля выключена по умолчанию.</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setMsnr"><span class="switchSlider"></span></label>
-      </div>
     </div></details>
 
 
@@ -22298,13 +22282,6 @@ INDEX_HTML = """<!doctype html>
           <div class="sub" id="setTelegramSub">проверка...</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegram"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Алерты MSNR</div>
-          <div class="sub">живые сигналы MSNR</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramMsnr"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -22464,20 +22441,6 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ MSNR ⚠️</div>
-          <div class="sub">общий рубильник поверх переключателей по каждой монете (вкладка MSNR, колонка «Авто») — выключен здесь, значит не торгует НИКТО, даже если у монеты своя галочка стоит</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeMsnr"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳↳ Ва-банк (MSNR)</div>
-          <div class="sub">вместо риска N% от депо — использовать 95% депо как маржу на каждую MSNR-сделку. Плечо по-прежнему подбирается автоматически по стопу — ликвидация не становится ближе, просто в сделку идёт почти весь депозит</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setMsnrAllIn"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
           <div class="label">↳ Зеркало</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeMirror"><span class="switchSlider"></span></label>
@@ -22544,7 +22507,7 @@ const fmtTimeWithDate = (t) => {
   return d.toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'});
 };
 
-let activeTab = 'msnr';
+let activeTab = 'neuro';   // v0.99.402 — MSNR removed (was the default tab)
 
 function toggleHints() {
   const hidden = document.body.classList.toggle('hints-hidden');
@@ -22587,7 +22550,6 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('signalsTable').style.display = activeTab === 'signals' ? 'table' : 'none';
     document.getElementById('tuningPanel').style.display = activeTab === 'signals' ? 'block' : 'none';
     document.getElementById('scalpPanel').style.display = activeTab === 'scalp' ? 'block' : 'none';
-    document.getElementById('msnrPanel').style.display = activeTab === 'msnr' ? 'block' : 'none';
     document.getElementById('ft5Panel').style.display = activeTab === 'ft5' ? 'block' : 'none';
     document.getElementById('mirrorPanel').style.display = activeTab === 'mirror' ? 'block' : 'none';
     document.getElementById('emaBullPanel').style.display = activeTab === 'emabull' ? 'block' : 'none';
@@ -22600,7 +22562,6 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('simulatorPanel').style.display = activeTab === 'simulator' ? 'block' : 'none';
     if (activeTab === 'signals') refreshTuning();
     if (activeTab === 'scalp') refreshScalp();
-    if (activeTab === 'msnr') refreshMsnr();
     if (activeTab === 'ft5') refreshFt5();
     if (activeTab === 'mirror') refreshMirror();
     if (activeTab === 'emabull') refreshEmaBull();
@@ -23039,84 +23000,6 @@ async function openScalpDetail(symbol) {
   } catch (e) {
     detail.innerHTML = `<div class="dim">ошибка загрузки: ${e}</div>`;
   }
-}
-
-// ---------------- MSNR v2 (v0.99.401) — rebuilt: one strategy variant for all coins, honest pooled test ----------------
-const _msnrOpen = new Set();
-function msnrSgn(v, d) { return v == null ? '—' : (v > 0 ? '+' : '') + (d != null ? Number(v).toFixed(d) : v); }
-function msnrPartTxt(p) {
-  if (!p || !p.n) return '<span class="dim">нет сделок</span>';
-  return `n=${p.n} · WR ${p.wr}% · <span class="${p.avg_r > 0 ? 'win' : 'loss'}">${msnrSgn(p.avg_r)}R</span>/сделку · итого ${msnrSgn(p.sum_r)}R${p.z != null ? ' · z=' + p.z : ''}`;
-}
-function msnrVerdictHtml(v, cfg) {
-  if (!v) return '<div class="dim hint-block">Первый бэктест ещё не завершён.</div>';
-  const c = v.chosen || v.best_train;
-  const head = v.passed ? '<b class="win">✓ MSNR подтверждён на тесте — торгуются отобранные монеты</b>'
-    : (v.chosen ? '<b class="loss">✗ Лучший вариант прошёл обучение, но тест его не подтвердил — MSNR не торгует</b>'
-      : '<b class="loss">✗ Ни один вариант не набрал значимость на обучении — MSNR не торгует</b>');
-  const rows = (v.variants || []).map(r => `<tr${c && r.key === c.key ? ' style="background:var(--pos-bg);"' : ''}><td style="white-space:normal;">${r.label}</td><td>${r.train.n}</td><td>${msnrSgn(r.train.avg_r)}</td><td>${r.train.z ?? '—'}</td><td>${r.test.n}</td><td>${msnrSgn(r.test.avg_r)}</td><td>${r.test.z ?? '—'}</td></tr>`).join('');
-  return `<div style="background:var(--line);border:1px solid var(--line-2);border-radius:var(--r-sm);padding:8px 12px;margin:8px 0;font-size:var(--fs);">
-    ${head} <span class="dim">(${fmtDateTime(v.t)} · ${v.coins} монет)</span>
-    ${c ? `<div style="margin-top:4px;">Вариант: <b>${c.label}</b></div>
-    <div>обучение: ${msnrPartTxt(c.train)} <span class="dim">(нужно z ≥ ${v.z_needed} — поправка на ${v.n_variants} вариантов)</span></div>
-    <div><b>тест</b>: ${msnrPartTxt(c.test)} <span class="dim">(нужно n ≥ ${v.min_test}, z ≥ ${v.z_test_needed} и плюс)</span></div>` : ''}
-    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Один вариант стратегии на все монеты выбирается по первым ${Math.round(v.train_frac * 100)}% истории всех монет вместе и проверяется на последних ${Math.round((1 - v.train_frac) * 100)}% (на них ничего не подбиралось). Бэктест = живая торговля: одна позиция на монету, вход по закрытию свечи, комиссии и проскальзывание, сделка держится не дольше ${v.hold_hours} ч, потом закрывается по рынку. R — после издержек (стоп = −1R).</div>
-    ${rows ? `<details style="margin-top:4px;"><summary class="dim" style="cursor:pointer;">все варианты (лучшие по обучению)</summary><div style="overflow-x:auto;"><table style="font-size:var(--fs-xs);"><thead><tr><th>вариант</th><th>обуч. n</th><th>R</th><th>z</th><th>тест n</th><th>R</th><th>z</th></tr></thead><tbody>${rows}</tbody></table></div></details>` : ''}
-  </div>`;
-}
-function msnrReconcileHtml(r) {
-  if (!r || !r.live_signals) return '';
-  const same = r.matched_closed ? Math.round(100 * r.same_outcome / r.matched_closed) : null;
-  return `<div style="background:var(--inset);border:1px solid var(--line);border-radius:var(--r-sm);padding:8px 12px;margin:8px 0;font-size:var(--fs-sm);">
-    <b>Сверка: живые сигналы vs бэктест</b> <span class="dim">(последние ${r.days} дн., сигналов ${r.live_signals})</span><br>
-    Совпали с бэктестом: <b>${r.matched}</b>${r.matched_closed ? ` · закрытых ${r.matched_closed}, тот же исход у ${same}% · R вживую ${msnrSgn(r.live_r_sum)} vs бэктест ${msnrSgn(r.bt_r_sum)}` : ''}<br>
-    Только вживую: ${r.live_only}${r.live_only_closed ? ` (закрытых ${r.live_only_closed}, ${msnrSgn(r.live_only_r_sum)}R)` : ''} · только в бэктесте: ${r.bt_only}${r.bt_only_r_sum != null ? ` (${msnrSgn(r.bt_only_r_sum)}R)` : ''}
-    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Если на одних и тех же сделках R вживую близок к бэктесту и расхождений мало — бэктесту можно верить.</div>
-  </div>`;
-}
-async function refreshMsnr() {
-  const panel = document.getElementById('msnrPanel');
-  if (!panel) return;
-  try {
-    const [st, sigs] = await Promise.all([fetch('/api/msnr/status').then(r => r.json()), fetch('/api/msnr/signals').then(r => r.json())]);
-    const cfg = st.config || {};
-    const prog = st.msnr_backtest_running
-      ? `<div class="dim">бэктест идёт: ${st.msnr_backtest_done || 0}/${st.msnr_backtest_total || '?'} монет × ${cfg.n_variants} вариантов</div>`
-      : (st.msnr_waiting_for_slot ? '<div class="dim">⏳ бэктест ждёт свободного слота</div>'
-        : `<div class="dim">последний бэктест: ${st.msnr_last_backtest_finished ? fmtDateTime(st.msnr_last_backtest_finished) + ' (' + Math.round((st.msnr_last_backtest_duration || 0) / 60) + ' мин)' : '—'} · ${cfg.universe_n} монет, ${cfg.days} дн. 15m · автоторговля MSNR ${st.autotrade_enabled ? 'вкл' : 'выкл'}</div>`);
-    const ss = st.signals_stats || {};
-    const statsTxt = ss.total ? `<div class="dim" style="margin:4px 0;">Торгуемые сигналы: ${ss.total} · открыто ${ss.open} · закрыто: ${ss.wins}W / ${ss.losses}L / ${ss.time_exits} по времени · итого ${msnrSgn(ss.sum_r)}R</div>` : '';
-    const coinRows = (st.coins || []).map(c => {
-      const status = c.eligible ? '<span class="win">торгуется</span>' : (c.live ? '<span class="dim">сигналы пишутся</span>' : (c.picked ? '<span class="dim">отобрана</span>' : '<span class="dim">—</span>'));
-      const open = _msnrOpen.has(c.symbol);
-      return `<tr onclick="toggleMsnrCoin('${c.symbol}')" style="cursor:pointer;"><td>${open ? '▾' : '▸'} ${c.symbol.replace('_USDT', '')}</td><td>${status}</td><td>${c.train.n} · ${msnrSgn(c.train.sum_r)}R</td><td class="${(c.test.avg_r || 0) > 0 ? 'win' : 'loss'}">${c.test.n} · ${msnrSgn(c.test.avg_r)}R</td></tr>`
-        + (open ? `<tr><td colspan="4" style="padding:0;"><div id="msnrTrades_${c.symbol}" class="dim" style="padding:6px 4px;">загрузка...</div></td></tr>` : '');
-    }).join('');
-    const coinsHtml = coinRows ? `<div style="overflow-x:auto;margin:8px 0;"><table style="font-size:var(--fs-sm);"><thead><tr><th>монета</th><th>статус</th><th>обучение: n · итого R</th><th>тест: n · R/сделку</th></tr></thead><tbody>${coinRows}</tbody></table></div>` : '';
-    const sigHtml = (sigs || []).slice(0, 40).map(s => sigItemHtml(Object.assign({}, s, {pnl_r: s.r != null ? Math.round(s.r * 100) / 100 : s.pnl_r}),
-      {onclick: `openMsnrChart('${s.symbol}', ${s.time})`,
-       extra: [s.trade_intended ? (s.autotrade_fired ? 'открыта на бирже' : (s.autotrade_status ? 'автоторговля: ' + s.autotrade_status : 'торгуемый сигнал')) : 'только запись']})).join('');
-    panel.innerHTML = prog + msnrVerdictHtml(st.verdict, cfg) + msnrReconcileHtml(st.reconcile) + statsTxt + coinsHtml
-      + `<div style="margin-top:8px;"><b>Сигналы</b></div>` + (sigHtml || '<div class="dim">пока нет</div>');
-    for (const sym of _msnrOpen) loadMsnrTrades(sym);
-  } catch (e) {
-    panel.innerHTML = `<div class="dim">ошибка загрузки MSNR: ${e}</div>`;
-  }
-}
-function toggleMsnrCoin(symbol) {
-  if (_msnrOpen.has(symbol)) _msnrOpen.delete(symbol); else _msnrOpen.add(symbol);
-  refreshMsnr();
-}
-async function loadMsnrTrades(symbol) {
-  const el = document.getElementById(`msnrTrades_${symbol}`);
-  if (!el) return;
-  try {
-    const trades = await (await fetch(`/api/msnr/backtest/${symbol}`)).json();
-    if (!trades.length) { el.innerHTML = 'сделок нет'; return; }
-    el.innerHTML = `<table style="font-size:var(--fs-xs);"><thead><tr><th>время</th><th>часть</th><th>напр.</th><th>исход</th><th>R</th></tr></thead><tbody>`
-      + trades.map(t => `<tr onclick="event.stopPropagation(); openMsnrChart('${symbol}', ${t.time})" style="cursor:pointer;"><td>${fmtDateTime(t.time)}</td><td>${t.part}</td><td class="${t.direction === 'LONG' ? 'win' : 'loss'}">${t.direction}</td><td>${t.result === 'TIME_EXIT' ? '⏱ по времени' : t.result}</td><td class="${(t.r || 0) > 0 ? 'win' : 'loss'}">${t.r != null ? msnrSgn(Math.round(t.r * 100) / 100) : '—'}</td></tr>`).join('')
-      + '</tbody></table>';
-  } catch (e) { el.innerHTML = 'ошибка: ' + e; }
 }
 
 let currentMsnrData = null;
@@ -24907,7 +24790,6 @@ async function refreshAll() {
   await refreshGlobalErrors();
   if (activeTab === 'signals') await refreshTuning();
   if (activeTab === 'scalp') await refreshScalp();
-  if (activeTab === 'msnr') await refreshMsnr();
   if (activeTab === 'ft5') await refreshFt5();
   if (activeTab === 'mirror') await refreshMirror();
   if (activeTab === 'neuro') await refreshNeuro();
@@ -25080,12 +24962,6 @@ function wireResetButton(btnId, endpoint, confirmMsg, idleLabel) {
     btn.textContent = idleLabel;
   };
 }
-wireResetButton('resetMsnrBtn', '/api/reset/msnr',
-  'Удалить накопленный бэктест и сигналы MSNR? Остальное не тронет. Это необратимо.',
-  '🗑 Очистить');
-wireRestartButton('restartMsnrBacktestBtn', '/api/msnr/restart_backtest',
-  'Запустить новый цикл перебора параметров MSNR прямо сейчас, не дожидаясь расписания? Текущие результаты останутся видны, пока новый цикл не завершится.',
-  '↻ Бэктест');
 wireResetButton('resetSnrBtn', '/api/reset/snr',
   'Удалить результаты бэктеста, историю живых сигналов и отчёт фильтров S/R Zones и сразу запустить новый бэктест? Уже открытые на бирже позиции не трогаются. Это необратимо.',
   '🗑 Очистить');
@@ -25139,8 +25015,6 @@ wireResetButton('resetSimulatorBtn', '/api/simulator/reset',
 // ---------------- Settings modal ----------------
 const settingsModal = document.getElementById('settingsModal');
 const setInputs = {
-  msnr_enabled: document.getElementById('setMsnr'),
-  msnr_all_in_enabled: document.getElementById('setMsnrAllIn'),
   snr_all_in_enabled: document.getElementById('setSnrAllIn'),
   prv_all_in_enabled: document.getElementById('setPrvAllIn'),
   prv_single_best_enabled: document.getElementById('setPrvSingleBest'),
@@ -25153,7 +25027,6 @@ const setInputs = {
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
   hourly_stats_enabled: document.getElementById('setHourlyStats'),
-  telegram_alerts_msnr: document.getElementById('setTelegramMsnr'),
   telegram_alerts_ft5: document.getElementById('setTelegramFt5'),
   telegram_alerts_mirror: document.getElementById('setTelegramMirror'),
   telegram_alerts_ema_bull: document.getElementById('setTelegramEmaBull'),
@@ -25177,7 +25050,6 @@ const setInputs = {
   // because the constant wasn't checked anywhere in the real firing
   // decision back then — now it is, so the checkbox is back and genuinely
   // functional, not decorative).
-  autotrade_msnr: document.getElementById('setAutotradeMsnr'),
   autotrade_mirror: document.getElementById('setAutotradeMirror'),
   autotrade_neuro: document.getElementById('setAutotradeNeuro'),
   neuro_autotrade_selected_only: document.getElementById('setNeuroAutotradeSelectedOnly'),
@@ -25235,7 +25107,7 @@ async function loadSettings() {
 // Scalp/simulator/risk-autotune reset buttons stay always visible —
 // they aren't gated by a single module "enabled" toggle the same way.
 const HEADER_BTN_ENABLE_KEY = {
-  resetMsnrBtn: 'msnr_enabled', restartMsnrBacktestBtn: 'msnr_enabled',
+
   resetNeuroBtn: 'neuro_enabled', restartNeuroBacktestBtn: 'neuro_enabled',
   restartSnrBacktestBtn: 'snr_enabled', restartPrvBacktestBtn: 'prv_enabled',
   resetSnrBtn: 'snr_enabled', resetPrvBtn: 'prv_enabled',
@@ -26413,8 +26285,6 @@ if __name__ == "__main__":
     t.start()
     threading.Thread(target=scalp_loop, daemon=True).start()
     threading.Thread(target=hourly_stats_loop, daemon=True).start()
-    threading.Thread(target=msnr_backtest_loop, daemon=True).start()
-    threading.Thread(target=msnr_live_loop, daemon=True).start()
     threading.Thread(target=ft5_backtest_loop, daemon=True).start()
     threading.Thread(target=ft5_live_loop, daemon=True).start()
     threading.Thread(target=mirror_backtest_loop, daemon=True).start()

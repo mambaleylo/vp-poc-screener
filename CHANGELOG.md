@@ -18011,3 +18011,13 @@ v0.99.401 - MSNR rebuilt from scratch (user: "пересобери заново 
          end-to-end: cycle -> live scan bar by bar -> outcomes -> re-backtest ->
          reconcile 2/2 matched, live R = backtest R (+6.56); forced pass opens
          the order; py_compile, pyflakes, JS check, headless browser (no errors).
+v0.99.402 - MSNR removed (user: "удаляй mnsr тогда как свип"). tools/msnr_research.py
+         on real Gate data (60 coins x 90 days): all 32 rebuilt variants lost on
+         the train part (1500-2700 trades, z -2.2..-2.9); best test +0.027R z 0.37.
+         Same treatment as Sweep: tab (it was the default tab — Neuro is now),
+         header buttons, settings (scan, alerts, autotrade, all-in), module API
+         keys entry, autotrade mode listing and both loops are gone; saved
+         settings can't re-enable it. The code stays dormant.
+         Also: the "Sweep backtest hung" alert the user got came from a server
+         still running a pre-v0.99.398 build — replacing the file doesn't
+         restart the running process.
