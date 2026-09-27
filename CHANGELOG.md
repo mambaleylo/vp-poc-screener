@@ -18126,3 +18126,12 @@ v0.99.412 - RR back to max 3 (user): Neuro 1.5..3.0 step 0.25, S/R 1.5/2/3,
          in auto mode a tap while working puts the page itself into
          fullscreen once; the screensaver then covers the whole screen and
          closing it keeps the page fullscreen.
+v0.99.413 - Tabs no longer jump on the 15 s auto-refresh (user: after opening a
+         list the view shifts and I have to swipe back). Each panel's
+         innerHTML setter now skips the rebuild when the HTML is identical,
+         otherwise reopens the same lists and refills loaded trade lists
+         synchronously (the old observer did it after the rebuild), restores
+         horizontal scroll, and scrolls so the first line that was at the top
+         of the screen is at the same place again - also when content above it
+         grew or shrank. Checked: a row in an open trade list stays at the same
+         screen position through refreshes and a +400px block inserted above.

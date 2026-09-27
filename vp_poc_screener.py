@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.412"
+APP_VERSION = "0.99.413"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22964,34 +22964,9 @@ function sigListHtml(rowsHtml, first, title) {   // v0.99.387 — latest N visib
 }
 
 function setPanelHtml(panel, html) {
-  const scrollable = el => el.scrollWidth > el.clientWidth;
-  const before = Array.from(panel.querySelectorAll('*')).filter(scrollable).map(el => el.scrollLeft);
-  // v0.99.51, per direct user report ("сброс видимого окна при
-  // скролле и масштабировании, когда смотрю сделки и листаю список
-  // монет"): also save/restore the PAGE's own vertical scroll
-  // (window.scrollY) around the rebuild — v0.99.29 only preserved
-  // horizontal scrollLeft inside individual tables, never how far
-  // DOWN the page itself the person had scrolled. A full panel.
-  // innerHTML rebuild briefly changes the document's total height
-  // (an expanded coin's trade table collapses back to a "загрузка..."
-  // placeholder before loadMsnrTrades() re-fetches and repopulates
-  // it — see restoreMsnrExpansion()), and that height change during
-  // the rebuild is exactly what makes the visible viewport appear to
-  // jump even when window.scrollY itself never numerically changed:
-  // the same pixel offset now points at different content until
-  // layout settles back to its old shape. Explicitly restoring it
-  // right after the rebuild (rather than trusting the browser to
-  // leave it alone) also guards against the pinch-zoom level getting
-  // reset on some mobile browsers, which tends to happen together
-  // with an unexpected scroll jump on a large synchronous DOM
-  // replacement like this one.
-  const scrollY = window.scrollY;
+  // v0.99.413 — the view / open lists / horizontal scroll are kept by the
+  // panel's own innerHTML setter (see stablePanels)
   panel.innerHTML = html;
-  if (before.length) {
-    const after = Array.from(panel.querySelectorAll('*')).filter(scrollable);
-    before.forEach((sl, i) => { if (after[i]) after[i].scrollLeft = sl; });
-  }
-  window.scrollTo(window.scrollX, scrollY);
 }
 
 async function refreshStatus() {
@@ -25178,6 +25153,88 @@ document.querySelectorAll('.settingRow').forEach(row => {
   row.classList.add('tree' + lvl);
   lbl.textContent = t.replace(/^↳+\\s*/, '');
 });
+
+// v0.99.413 — per user ("при разворачивании списков окно смещается через
+// какое-то время и приходится свайпать до того места где я был"): every
+// tab re-renders its whole panel every 15 s. The observer above reopened
+// lists only after the rebuild, and the page scroll is a pixel offset, so
+// the view jumped whenever the height above it changed. Now each panel's
+// innerHTML setter: (1) skips the rebuild when the HTML is identical (most
+// refreshes), (2) otherwise reopens the same lists and refills loaded trade
+// lists synchronously, restores horizontal scroll, and (3) scrolls so the
+// first line that was at the top of the screen is at the same place again.
+(function stablePanels() {
+  const desc = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+  const norm = d => {
+    const sm = [...d.children].find(c => c.tagName === 'SUMMARY');
+    return sm ? sm.textContent.replace(/[\\d.,:%$+\\-−]+/g, '#').replace(/\\s+/g, ' ').trim() : '';
+  };
+  const keyed = list => {
+    const seen = {};
+    return list.map(d => { const k = norm(d); seen[k] = (seen[k] || 0) + 1; return k + '#' + seen[k]; });
+  };
+  const txtKey = e => e.tagName + '|' + (e.textContent || '').replace(/\\s+/g, ' ').trim().slice(0, 120);
+  const findAnchor = el => {
+    const r0 = el.getBoundingClientRect();
+    if (r0.bottom <= 0 || r0.top >= window.innerHeight) return null;
+    const all = el.getElementsByTagName('*');
+    for (let i = 0; i < all.length; i++) {
+      const r = all[i].getBoundingClientRect();
+      if (r.height > 0 && r.top >= 0 && r.top < window.innerHeight) {
+        const k = txtKey(all[i]);
+        let occ = 0;
+        for (let j = 0; j < i; j++) if (txtKey(all[j]) === k) occ++;
+        return { k, occ, top: r.top };
+      }
+    }
+    return null;
+  };
+  const scrollable = el => el.scrollWidth > el.clientWidth;
+  function set(el, html) {
+    if (el._vpHtml === html) return;
+    const oldD = [...el.querySelectorAll('details')];
+    const oldK = keyed(oldD);
+    const state = new Map(), boxes = new Map();
+    oldD.forEach((d, i) => {
+      state.set(oldK[i], d.open);
+      const b = d.open && d.querySelector('.btTradesBox');
+      if (b) boxes.set(oldK[i], b.innerHTML);
+    });
+    const hs = Array.from(el.querySelectorAll('*')).filter(scrollable).map(e => e.scrollLeft);
+    const anchor = findAnchor(el);
+    const sx = window.scrollX, sy = window.scrollY;
+    desc.set.call(el, html);
+    el._vpHtml = html;
+    const newD = [...el.querySelectorAll('details')];
+    keyed(newD).forEach((k, i) => {
+      if (state.has(k) && newD[i].open !== state.get(k)) newD[i].open = state.get(k);
+      const b = boxes.has(k) && newD[i].querySelector('.btTradesBox');
+      if (b) b.innerHTML = boxes.get(k);
+    });
+    if (hs.length) {
+      const after = Array.from(el.querySelectorAll('*')).filter(scrollable);
+      hs.forEach((v, i) => { if (after[i]) after[i].scrollLeft = v; });
+    }
+    window.scrollTo(sx, sy);
+    if (anchor) {
+      let occ = 0;
+      for (const e of el.getElementsByTagName('*')) {
+        if (txtKey(e) !== anchor.k) continue;
+        if (occ++ < anchor.occ) continue;
+        const dy = e.getBoundingClientRect().top - anchor.top;
+        if (Math.abs(dy) > 1) window.scrollBy(0, dy);
+        break;
+      }
+    }
+  }
+  document.querySelectorAll('[id$="Panel"]').forEach(el => {
+    Object.defineProperty(el, 'innerHTML', {
+      configurable: true,
+      get() { return desc.get.call(this); },
+      set(html) { set(this, html); },
+    });
+  });
+})();
 
 refreshAll();
 setInterval(refreshAll, 15000);
