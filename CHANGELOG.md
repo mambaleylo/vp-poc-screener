@@ -18117,3 +18117,12 @@ v0.99.411 - P/R brought to the S/R scheme (user: no S/R or P/R coin passes):
          not confirmed (a lucky train z 3.95 failed on test, z 0.91); weak
          mean reversion - only 2/30 coins pass alone, pooled confirms it
          (test z 8.1 over 524 trades).
+v0.99.412 - RR back to max 3 (user): Neuro 1.5..3.0 step 0.25, S/R 1.5/2/3,
+         P/R 1/1.5/2/3 (the S/R Bonferroni bar is recomputed from the combo
+         count; P/R is back to 216 combos, which its 3.113 bar was set for).
+         Auto screensaver: every touch / move / scroll / typing, on window and
+         document in the capture phase, restarts the 20 s timer. It now opens
+         full screen: a browser allows fullscreen only right after a tap, so
+         in auto mode a tap while working puts the page itself into
+         fullscreen once; the screensaver then covers the whole screen and
+         closing it keeps the page fullscreen.

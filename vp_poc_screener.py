@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.411"
+APP_VERSION = "0.99.412"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -13787,7 +13787,7 @@ SNR_DISPLAY_N         = int(os.environ.get("VP_SNR_DISPLAY_N", 5))  # how many g
 SNR_TF_CANDIDATES     = ["1h", "4h", "1d"]  # per direct user request ("попробовать все фреймы")
 SNR_PIVOT_CANDIDATES  = [10, 15, 20]         # matches the Pine Script's own "Pivot Length" range
 SNR_STRENGTH_CANDIDATES = [1, 2, 3]          # matches the Pine Script's own "Strength" setting (1-4, capped here at 3 for a tractable sweep)
-SNR_RR_CANDIDATES     = [1.5, 2.0, 3.0, 4.0, 5.0]   # v0.99.398 — 4 and 5 added (user); long holds are capped by max_hold_bars()
+SNR_RR_CANDIDATES     = [1.5, 2.0, 3.0]   # v0.99.412 — back to max 3 (user); v0.99.398 had added 4 and 5
 SNR_SL_ATR_MULT       = 0.5                  # SL distance beyond the zone, in ATR units
 SNR_TOO_CLOSE_ATR_MULT = 1.0 / 8              # matches the Pine Script's own tooCloseATR constant — merges pivots too close to an existing active zone
 SNR_MAX_WAIT_BARS     = 48                   # same timeout convention as every other module's own backtest
@@ -15306,7 +15306,7 @@ PRV_ENABLED           = os.environ.get("VP_PRV_ENABLED", "1") == "1"
 PRV_MA_TYPE_CANDIDATES = ["EMA", "SMA"]        # matches the Pine Script's own "MA Type" input, limited to 2 of its 5 options to keep the search space tractable
 PRV_KC_LENGTH_CANDIDATES = [14, 20, 30]        # matches the Pine Script's own "MA Length" input (default 20)
 PRV_BAND_MULT_CANDIDATES = [1.5, 2.0, 2.5]     # matches the Pine Script's own "Inner" band multiplier input (default 2) — this module always signals off the INNER band, matching the indicator's own default signalBand="Inner"
-PRV_RR_CANDIDATES     = [1.0, 1.5, 2.0, 3.0, 4.0, 5.0]   # v0.99.398 — 4 and 5 added (user); long holds are capped by max_hold_bars()   # the take-profit distance, swept like every other module's own RR — per direct user request ("процент который мы забираем по тейку нужно подбирать по типу как rr")
+PRV_RR_CANDIDATES     = [1.0, 1.5, 2.0, 3.0]   # v0.99.412 — back to max 3 (user); v0.99.398 had added 4 and 5   # the take-profit distance, swept like every other module's own RR — per direct user request ("процент который мы забираем по тейку нужно подбирать по типу как rr")
 PRV_TF_CANDIDATES     = ["1h", "4h", "1d"]
 PRV_ATR_LENGTH        = 14   # matches the Pine Script's own default "ATR Length"
 PRV_SL_ATR_MULT       = 1.0  # SL distance beyond entry, in ATR units — fixed (not swept) to keep the search space tractable, same design choice as SNR_SL_ATR_MULT
@@ -16454,7 +16454,7 @@ def neuro_cancel_thread(ident_box):
         with _neuro_cancel_lock:
             _neuro_cancelled_threads.add(ident_box[0])
 NEURO_RR             = float(os.environ.get("VP_NEURO_RR", 2.0))  # fallback/default only — see NEURO_RR_CANDIDATES below for the actual per-symbol auto-tuned value
-NEURO_RR_CANDIDATES  = [1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 5.0]   # v0.99.398 — 3.5/4/5 added (user); long holds are capped by max_hold_bars()  # v0.99.210 — small step (0.25), modest range, per direct user request ("вариативность RR, но не с гигантским шагом"). Best one picked per-symbol from TRAIN-period trades only (same walk-forward discipline as the condition mining itself), then applied to the reported trade history and live signals.
+NEURO_RR_CANDIDATES  = [1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0]   # v0.99.412 — back to max 3 (user); v0.99.398 had added 3.5/4/5  # v0.99.210 — small step (0.25), modest range, per direct user request ("вариативность RR, но не с гигантским шагом"). Best one picked per-symbol from TRAIN-period trades only (same walk-forward discipline as the condition mining itself), then applied to the reported trade history and live signals.
 NEURO_RR_MIN_TRADES  = int(os.environ.get("VP_NEURO_RR_MIN_TRADES", 15))  # don't trust an RR pick based on fewer than this many train-period trades
 NEURO_DECAY_WINDOW_DAYS = int(os.environ.get("VP_NEURO_DECAY_WINDOW_DAYS", 40))  # v0.99.220 — explicit CALENDAR-time recency window for decay detection, per direct user follow-up ("не только 40%, это не 1 месяц — ещё хотя бы за последние 40 дней"): a percentage-of-occurrences split doesn't map to any fixed real-world timeframe (a rare pattern's last 40% of occurrences could span many months; a frequent one's could be just days) — this checks an ACTUAL calendar window on top of that
 NEURO_DECAY_MIN_RECENT_N = 8  # minimum occurrences in a recency window before trusting a decay verdict from it
@@ -22483,7 +22483,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="name">Автоскринсейвер через 20 секунд</div>
-          <div class="sub">часы включаются сами, если 20 секунд не трогать экран (выход — двойное касание). Хранится на этом устройстве</div>
+          <div class="sub">часы включаются сами, если 20 секунд не трогать экран; любое касание, прокрутка или ввод откладывает их ещё на 20 секунд. Выход — двойное касание. Чтобы часы открывались на весь экран, при включённой галочке приложение по первому касанию переходит в полноэкранный режим (браузер разрешает это только после касания). Хранится на этом устройстве</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutoSs" onchange="setAutoScreensaver(this.checked)"><span class="switchSlider"></span></label>
       </div>
@@ -26513,8 +26513,8 @@ async function toggleScreensaver() {
   document.getElementById('screensaverBtn').style.color = _ssActive ? '#3ddc97' : '#5a6a7a';
   if (_ssActive) {
     overlay.style.display = 'block';
-    // Fullscreen
-    try { await overlay.requestFullscreen(); } catch(e) {}
+    // Fullscreen (v0.99.412 — not needed when the page itself already is)
+    if (!document.fullscreenElement) { try { await overlay.requestFullscreen(); } catch(e) {} }
     // Wake lock
     try {
       if ('wakeLock' in navigator) _ssWakeLock = await navigator.wakeLock.request('screen');
@@ -26532,7 +26532,7 @@ async function toggleScreensaver() {
     overlay.style.display = 'none';
     clearInterval(_ssMoveTimer);
     clearInterval(_ssPosTimer);
-    if (document.fullscreenElement) try { document.exitFullscreen(); } catch(e) {}
+    if (document.fullscreenElement === overlay) try { document.exitFullscreen(); } catch(e) {}   // v0.99.412 — the page's own fullscreen stays
     if (_ssWakeLock) { try { _ssWakeLock.release(); } catch(e) {} _ssWakeLock = null; }
   }
 }
@@ -26631,8 +26631,25 @@ function setAutoScreensaver(on) {
   try { localStorage.setItem('vp_auto_ss', on ? '1' : '0'); } catch (e) {}
   _ssAutoArm();
 }
-['pointerdown', 'keydown', 'wheel', 'touchstart', 'scroll'].forEach(ev =>
-  window.addEventListener(ev, () => { if (!_ssActive) _ssAutoArm(); }, {passive: true, capture: true}));
+// v0.99.412 — every kind of touch / scroll / typing counts as "working"
+// (window AND document, capture phase, so nothing inside a panel, modal
+// or chart can swallow it)
+['pointerdown', 'pointerup', 'pointermove', 'touchstart', 'touchmove', 'touchend', 'click', 'keydown',
+ 'input', 'wheel', 'scroll', 'focusin'].forEach(ev => {
+  const h = () => { if (!_ssActive) _ssAutoArm(); };
+  window.addEventListener(ev, h, {passive: true, capture: true});
+  document.addEventListener(ev, h, {passive: true, capture: true});
+});
+// v0.99.412 — a browser opens fullscreen only right after a tap, so the
+// screensaver that starts by itself couldn't: in auto mode a tap while
+// working puts the page itself into fullscreen once, and the screensaver
+// then opens over the whole screen
+function _ssAutoFullscreen() {
+  if (!_ssAutoOn || _ssActive || document.fullscreenElement || !document.documentElement.requestFullscreen) return;
+  try { document.documentElement.requestFullscreen().catch(() => {}); } catch (e) {}
+}
+document.addEventListener('click', _ssAutoFullscreen, {capture: true});
+document.addEventListener('touchend', _ssAutoFullscreen, {capture: true});
 (function() {
   try { _ssAutoOn = localStorage.getItem('vp_auto_ss') === '1'; } catch (e) {}
   const cb = document.getElementById('setAutoSs');
