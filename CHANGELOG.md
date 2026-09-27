@@ -18051,3 +18051,10 @@ v0.99.405 - Liquid Glass theme (on by default, switch in Settings ->
          backdrop blur, specular highlights on cards, settings groups, pills,
          buttons and switches, larger radii. Backdrop blur only on the fixed
          layers (phone GPU). Removed the empty leftover "MSNR" settings group.
+v0.99.406 - Screensaver: red outline around the clock while the phone is not
+         charging. The browser's Battery API (page opened on the phone itself)
+         reports plug/unplug as an event - instant, no polling. Otherwise the
+         page asks /api/battery once a minute while the screensaver is on
+         (termux-battery-status, cached 30 s, then /sys); unknown state = no
+         outline. Screensaver background is solid black again (the glass
+         theme made var(--bg) translucent).

@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.405"
+APP_VERSION = "0.99.406"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21588,6 +21588,50 @@ _POS_SUMMARY_CACHE = {"at": 0.0, "data": None}
 _POS_SUMMARY_TTL = 15
 
 
+# v0.99.406 — charging state for the screensaver's red outline, for browsers
+# without the Battery API. Termux:API's `termux-battery-status` first (needs
+# the Termux:API app + `pkg install termux-api`), then /sys (Linux; usually
+# closed on Android). Cached 30 s; a missing tool is not retried for 10 min.
+_battery_cache = {"ts": 0.0, "data": None, "tool_fail_ts": 0.0}
+
+
+def read_battery_state():
+    now = time.time()
+    if _battery_cache["data"] is not None and now - _battery_cache["ts"] < 30:
+        return _battery_cache["data"]
+    data = {"ok": False}
+    if now - _battery_cache["tool_fail_ts"] > 600:
+        try:
+            import subprocess
+            out = subprocess.run(["termux-battery-status"], capture_output=True, text=True, timeout=8).stdout
+            j = json.loads(out)
+            st = str(j.get("status", "")).upper()
+            plugged = str(j.get("plugged", "")).upper()
+            data = {"ok": True, "charging": st in ("CHARGING", "FULL") or (plugged not in ("", "UNPLUGGED") and st != "DISCHARGING"),
+                    "level": j.get("percentage"), "source": "termux-api"}
+        except Exception:
+            _battery_cache["tool_fail_ts"] = now
+    if not data["ok"]:
+        try:
+            base = "/sys/class/power_supply"
+            for name in sorted(os.listdir(base)):
+                path = os.path.join(base, name, "status")
+                if os.path.exists(path):
+                    st = open(path).read().strip().upper()
+                    if st:
+                        data = {"ok": True, "charging": st in ("CHARGING", "FULL"), "level": None, "source": "sys"}
+                        break
+        except Exception:
+            pass
+    _battery_cache.update(ts=now, data=data)
+    return data
+
+
+@app.route("/api/battery")
+def api_battery():
+    return jsonify(read_battery_state())
+
+
 @app.route("/api/positions/summary")
 def api_positions_summary():
     """v0.99.346 — REAL open positions on the exchange, across the main
@@ -26293,7 +26337,9 @@ async function toggleScreensaver() {
     clearInterval(_ssPosTimer);
     _ssCheckOpenPositions();   // once right away, then every 3 min
     _ssPosTimer = setInterval(_ssCheckOpenPositions, 180000);   // v0.99.348 — every 3 min (user: 20s too often)
+    _ssStartBattery();   // v0.99.406
   } else {
+    clearInterval(_ssBatTimer);
     overlay.style.display = 'none';
     clearInterval(_ssMoveTimer);
     clearInterval(_ssPosTimer);
@@ -26324,6 +26370,39 @@ async function _ssCheckOpenPositions() {
   } catch (e) {}
 }
 
+// v0.99.406 — per user: red outline around the clock while the phone is NOT
+// charging. The browser's Battery API reports plug/unplug as an event —
+// instant, and no polling at all. Browsers without it (or a page opened from
+// another device) ask the server once a minute (termux-battery-status).
+let _ssBatTimer = null, _ssBattery = null;
+function _ssSetCharging(ch) {
+  const clock = document.getElementById('screensaverClock');
+  if (ch === null) { clock.classList.remove('ssNoCharge'); return; }   // unknown: no outline
+  clock.classList.toggle('ssNoCharge', !ch);
+}
+async function _ssStartBattery() {
+  clearInterval(_ssBatTimer);
+  const local = ['localhost', '127.0.0.1', '[::1]'].includes(location.hostname);
+  if (local && navigator.getBattery) {
+    try {
+      if (!_ssBattery) {
+        _ssBattery = await navigator.getBattery();
+        _ssBattery.addEventListener('chargingchange', () => _ssSetCharging(_ssBattery.charging));
+      }
+      _ssSetCharging(_ssBattery.charging);
+      return;
+    } catch (e) {}
+  }
+  const poll = async () => {
+    try {
+      const d = await (await fetch('/api/battery')).json();
+      _ssSetCharging(d.ok ? !!d.charging : null);
+    } catch (e) {}
+  };
+  poll();
+  _ssBatTimer = setInterval(poll, 60000);
+}
+
 function _ssMove() {
   if (!_ssActive) return;
   const clock = document.getElementById('screensaverClock');
@@ -26348,8 +26427,12 @@ document.addEventListener('fullscreenchange', () => {
 
 </script>
 <!-- Screensaver overlay -->
-<div id="screensaverOverlay" style="display:none;position:fixed;inset:0;background:var(--bg);z-index:9999;cursor:pointer;" onclick="toggleScreensaver()" title="нажмите чтобы выйти">
-  <div id="screensaverClock" style="position:absolute;font-family:monospace;font-weight:100;user-select:none;transition:color 0.5s;">
+<style>
+  #screensaverClock { padding:10px 16px; border:2px solid transparent; border-radius:14px; transition:color 0.5s, border-color 0.5s; }
+  #screensaverClock.ssNoCharge { border-color:#ff3b30; }
+</style>
+<div id="screensaverOverlay" style="display:none;position:fixed;inset:0;background:#000;z-index:9999;cursor:pointer;" onclick="toggleScreensaver()" title="нажмите чтобы выйти">
+  <div id="screensaverClock" style="position:absolute;font-family:monospace;font-weight:100;user-select:none;">
     <div id="screensaverTime" style="font-size:48px;line-height:1;letter-spacing:4px;"></div>
   </div>
 </div>
