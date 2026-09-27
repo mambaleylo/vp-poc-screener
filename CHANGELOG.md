@@ -17977,3 +17977,37 @@ v0.99.400 - MSNR: backtest = live, honest go/no-go (user: "надо добить
          Also fixed while testing: the new reconcile function had been inserted
          between @app.route("/api/msnr/status") and its handler (caught before
          release; all routes audited).
+v0.99.401 - MSNR rebuilt from scratch (user: "пересобери заново этот индикатор с учетом
+         всего, убери ненужные правки фильтры и тп, короче поборемся еще за него").
+         Real-data verdict of v0.99.400: 18 coins picked, test -0.205R/trade, z -1.55.
+         Removed (~4000 lines): per-coin 27-combo grid, per-coin RR / volume /
+         hour / SL-width filters, HTF-trend and min-RR filters, add-on position,
+         MSNR Neuro trade filter, Kelly leverage, $ compounding sizing + live
+         balance, rank bounds / scores, "single best", manual open, watchdog,
+         58 constants, 6 settings (max RR, add-on, 3 filters, single best).
+         MSNR v2 — same idea (1h close-pivot A/V levels, 15m QM sweep entry,
+         stop beyond the sweep), done honestly:
+         - 32 STRATEGY variants, same for every coin: TP = opposite 4h level /
+           opposite 1h level / RR 2 / RR 3, 4h gate on/off, stop x1.0/x1.5,
+           min impulse 1.5/2.5 ATR.
+         - One variant is chosen on the pooled TRAIN part (first 70%) of all
+           coins (Bonferroni over 32 -> z >= 2.96, >= 150 trades) and must be
+           confirmed on the pooled TEST part (>= 40 trades, z >= 2, net R > 0).
+           Only then: coins with a positive own train result trade it (top 10
+           by train R). Otherwise nothing trades; the best coins are scanned and
+           their signals recorded for the live check.
+         - Backtest = live: identical detection function, one position per coin,
+           entry at the signal candle's close, fees + slippage, stops < 0.3% of
+           price skipped (costs would be >= 0.5R), 75h max hold then market
+           close (live closes the real position), SL first on a bar touching both.
+         - Sizing: the shared autotrade sizing (risk % / all-in).
+         - New MSNR tab: verdict + variants, reconcile (live vs backtest),
+           coins (train / test), signals; chart kept.
+         - tools/msnr_research.py: the same selection on real Gate data with a
+           verdict; tools/compare_msnr_honest.py removed (old API).
+         Verified (synthetic): 203 backtest signals, live reproduced all with
+         identical SL/TP, no extra; random walk 6 x 30 coins -> 0 passed;
+         strong mean reversion -> passed (test z 4.4-4.9, picks the 1h TP);
+         end-to-end: cycle -> live scan bar by bar -> outcomes -> re-backtest ->
+         reconcile 2/2 matched, live R = backtest R (+6.56); forced pass opens
+         the order; py_compile, pyflakes, JS check, headless browser (no errors).

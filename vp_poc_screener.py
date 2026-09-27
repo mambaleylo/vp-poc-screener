@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.400"
+APP_VERSION = "0.99.401"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -497,16 +497,6 @@ MSNR_ENABLED = os.environ.get("VP_MSNR_ENABLED", "1") == "1"
 # user request ("никаких списков не должно быть"): the backtest universe is
 # purely liquidity-ranked and the live scan is purely the backtest's own
 # ranked selection. No hardcoded fallback.
-MSNR_STRUCTURE_TF = os.environ.get("VP_MSNR_STRUCTURE_TF", "1h")  # timeframe the OCL / A-shape / V-shape "Storyline" levels are built on
-MSNR_HIGHER_TF = os.environ.get("VP_MSNR_HIGHER_TF", "4h")  # v0.99.305 — per direct user request, after reviewing screenshots of the strategy author's own source material showing a 4h->1h->15m cascade (this app originally shipped a deliberately-collapsed 2-stage version, see this section's own header comment): 4h now supplies the BIG-PICTURE A/V pair and the TAKE-PROFIT target — a 1h level only fires if a same-type 4h level is CURRENTLY active too (the "refined 1h point within the 4h zone" from the screenshots), and TP becomes the opposite ACTIVE 4h level instead of the opposite 1h one, matching the source's own very high R:R (10-24R) by construction. SL calculation itself is UNCHANGED (still the sweep candle's own extreme x MSNR_SL_BUFFER_MULT) — that buffer was added for a real, previously-reported reason (bare-extreme stops getting hit too often) and the user's own "стоп за хай/лоу" description matches what this already does, not a request to remove the buffer.
-MSNR_ENTRY_TF = os.environ.get("VP_MSNR_ENTRY_TF", "15m")  # v0.99.126 changed this to "1m" per the strategy author's own trade screenshot (the QM trigger is watched on M1 in the source material). v0.99.147 — reverted back to "15m", per direct user report that 1m caused a dramatic drop in backtest signal count: Gate's ~10000-candle recency floor caps 1m history to ~6.9 days (vs ~102 days at 15m), so MSNR_BACKTEST_DAYS=40 was silently giving only ~7 days of entry-TF history instead of 40, leaving most symbols with 5-7 signals instead of the expected dozens. At 15m the backtest covers the full 40 days again. Live signals are fractionally less precise (15m candle vs 1m) but the author's strategy note remains intact — a future improvement would be a separate live entry_tf, but that's a bigger change than warranted here.
-MSNR_PIVOT_LEFT = int(os.environ.get("VP_MSNR_PIVOT_LEFT", 2))
-MSNR_PIVOT_RIGHT = int(os.environ.get("VP_MSNR_PIVOT_RIGHT", 2))
-MSNR_ATR_PERIOD = int(os.environ.get("VP_MSNR_ATR_PERIOD", 14))
-MSNR_MIN_LEG_ATR = float(os.environ.get("VP_MSNR_MIN_LEG_ATR", 2.5))  # min impulsive-leg size (structure-TF ATR multiples) for a pivot to count as a real A-shape/V-shape rather than noise
-MSNR_QM_ZONE_PCT = float(os.environ.get("VP_MSNR_QM_ZONE_PCT", 0.006))  # how close (as % of price) the sweep extreme must land to the OCL level to count as testing THAT level
-MSNR_QM_LOOKBACK_BARS = int(os.environ.get("VP_MSNR_QM_LOOKBACK_BARS", 6))  # entry-TF bar cluster width the sweep and the close-back-inside confirmation are allowed to span, same idea as SESSION_MAX_THRUST_BARS
-MSNR_VOLUME_LOOKBACK_BARS = int(os.environ.get("VP_MSNR_VOLUME_LOOKBACK_BARS", 20))  # v0.99.59, per direct user request ("второй фильтр" — the volume-confirmation candidate discussed alongside the time-of-day one, v0.99.56): how many entry-TF bars BEFORE the sweep/QM candle set that candle's own volume baseline (mean of that trailing window, excluding the signal candle itself). The QM/SNR pattern's whole premise is that a sweep-and-reclaim reflects REAL institutional order flow — a sweep on genuinely low relative volume is a plausible tell that it doesn't, same reasoning already used for the time-of-day filter. Separate constant from FT5_VOLUME_AVG_PERIOD (70) rather than reusing it — that's tuned for FT5's own strategy/timeframe, no reason to assume the same window suits MSNR's typically-shorter MSNR_ENTRY_TF.
 # v0.99.141 — 2 new GLOBAL (uniform-threshold, manually toggled)
 # filters, per direct user request after voicing a real concern about
 # every existing MSNR filter above being auto-derived PER SYMBOL
@@ -521,18 +511,6 @@ MSNR_VOLUME_LOOKBACK_BARS = int(os.environ.get("VP_MSNR_VOLUME_LOOKBACK_BARS", 2
 # the person can judge "what would this do" before enabling it, same
 # principle Sweep's own optional filters already use.
 MSNR_MIN_RR_FILTER_ENABLED = os.environ.get("VP_MSNR_MIN_RR_FILTER", "0") == "1"
-MSNR_PER_SYMBOL_FILTERS_ENABLED = os.environ.get("VP_MSNR_PER_SYMBOL_FILTERS", "0") == "1"  # v0.99.165 — re-enable rr_range and volume per-symbol filters (the ones shown as red "skip rr≥N" / "skip объём<N" labels) as a single toggle; off by default
-MSNR_MIN_RR_FILTER = float(os.environ.get("VP_MSNR_MIN_RR_FILTER", 2.0))  # "a 1:2 minimum risk-to-reward filter is standard" — a UNIFORM floor, deliberately separate from msnr_symbol_rr_skip_min/max above (those derive a DIFFERENT per-symbol threshold from where THIS symbol's own trades statistically stop paying off, not a fixed global minimum)
-MSNR_HTF_FILTER_ENABLED = os.environ.get("VP_MSNR_HTF_FILTER", "0") == "1"
-MSNR_HTF_INTERVAL = os.environ.get("VP_MSNR_HTF_INTERVAL", "4h")
-MSNR_HTF_EMA_PERIOD = int(os.environ.get("VP_MSNR_HTF_EMA_PERIOD", 50))
-MSNR_HTF_TREND_BUFFER_PCT = float(os.environ.get("VP_MSNR_HTF_TREND_BUFFER_PCT", 0.1))
-MSNR_SL_BUFFER_PCT = float(os.environ.get("VP_MSNR_SL_BUFFER_PCT", 0.0015))
-MSNR_SL_BUFFER_MULT = float(os.environ.get("VP_MSNR_SL_BUFFER_MULT", 1.3))  # v0.99.104, per direct user report ("часто выбивает стоп и идёт куда надо цена"): the OLD sl_buffer_pct approach (extreme * (1 ± 0.15%)) barely widens the stop past the sweep's own extreme at all, regardless of how far that sweep actually moved — a live report of frequent premature stop-outs followed by the intended move happening anyway is the textbook symptom of a stop sitting too close to normal price noise/re-testing. Mirrors XAU_LG_SL_BUFFER_MULT's own SHAPE (see that constant's own comment): multiplies the RAW entry-to-sweep-extreme distance (already a real, price-action-derived risk measure) rather than adding a tiny fixed % on top of the bare extreme price — a stop that scales with how far the sweep itself moved, not a nudge that's nearly the same regardless. 1.3 is a starting default (30% wider than the raw sweep distance) — deliberately NOT wired into the global risk_autotune_pass() nudge system XAU_LG/SESSION/EMA/DIV use for their own SL multipliers: MSNR's own participation in that global system was disabled back in v0.99.52 in favor of its OWN, different tuning philosophy (msnr_symbol_sl_skip_min() and friends — per-symbol statistical significance tests, not a single global average-MAE nudge), and this stays consistent with that existing design rather than reintroducing the older mechanism just for this one constant. A static default, adjustable via the VP_MSNR_SL_BUFFER_MULT env var if real data suggests a different multiplier fits better.
-MSNR_FALLBACK_RR = float(os.environ.get("VP_MSNR_FALLBACK_RR", 4.0))  # used only when the opposite OCL level isn't confirmed yet (Storyline has just one side so far) — a placeholder TP, not the normal path
-MSNR_BT_SLIPPAGE_PCT = float(os.environ.get("VP_MSNR_BT_SLIPPAGE_PCT", 0.0005))  # v0.99.392 — slippage per trade (fraction of price) charged in the backtest on top of 2 x AUTOTRADE_SIM_FEE_PCT taker fees: live the entry is a market order and the stop is a stop-market, the backtest filled both exactly at the level. With MSNR's tight stops (often <1%) fees+slippage are ~0.1-0.3R per trade — ignoring them made a break-even edge look profitable.
-MSNR_OOS_TEST_FRAC = float(os.environ.get("VP_MSNR_OOS_TEST_FRAC", 0.3))  # v0.99.392 — last share of the backtest window held out: grid params are chosen on the first part only, the held-out part is the honest out-of-sample check
-MSNR_OOS_MIN_TRADES = int(os.environ.get("VP_MSNR_OOS_MIN_TRADES", 5))  # v0.99.392 — closed held-out trades needed before a negative out-of-sample result excludes the coin from top/autotrade
 AUTOTRADE_MAX_ADVERSE_DRIFT_R_MSNR = float(os.environ.get("VP_AUTOTRADE_MAX_ADVERSE_DRIFT_R_MSNR", 0.5))  # v0.99.392 — MSNR counterpart of AUTOTRADE_MAX_FAVORABLE_DRIFT_R: skip when price already moved this many R TOWARD the stop before the order. Before, only favorable drift was skipped, so live systematically dropped trades already running to TP and kept the ones running to SL (with an even tighter real stop) — a selection the backtest never had.
 # v0.99.126 — "add-on" (добір) second position, per the same direct
 # user-forwarded trade screenshot as MSNR_ENTRY_TF's own comment above:
@@ -559,17 +537,8 @@ AUTOTRADE_MAX_ADVERSE_DRIFT_R_MSNR = float(os.environ.get("VP_AUTOTRADE_MAX_ADVE
 # scan_addon_live()'s own docstring for the full mechanics (cancel-
 # and-replace the primary's old SL trigger, TP left as a harmless
 # duplicate at the same shared target price).
-MSNR_ADDON_ENABLED = os.environ.get("VP_MSNR_ADDON_ENABLED", "0") == "1"  # off by default, same "opt-in once the person has seen it work" convention as every other toggle in this file — nothing about wiring real autotrade in changes that default
-MSNR_ADDON_TF = os.environ.get("VP_MSNR_ADDON_TF", "30m")
-MSNR_MAX_RR = float(os.environ.get("VP_MSNR_MAX_RR", 8.0))  # v0.99.11 — per direct user observation (SPCX: trades with rr>6 consistently hit stop, never TP) that a genuine opposite-level TP can sit SO far away the trade is structurally unlikely to ever reach it before reversing. When the real opposite level would produce rr > this cap, msnr_detect_signals() used to fall back to fallback_rr's fixed target instead. v0.99.52, per direct user question ("а проверка... таблица... что-то даёт вообще?" -> "уберём не работу"): the pooled-RR-bucket autotune this comment used to describe (risk_autotune_pass() calling _risk_autotune_msnr_max_rr() off msnr_rr_bucket_stats()) was DISABLED (commented out, not deleted) — this value stopped changing on its own. v0.99.68, per direct user request ("в оригинале... эта стратегия ловит движения с очень большим rr, даже если winrate около 20-30, у нас так не получается"): the cap ITSELF was removed from msnr_detect_signals() — it was silently substituting MSNR_FALLBACK_RR=4.0 for any genuinely-far opposite level, preventing exactly the large-RR/low-winrate trades the strategy is designed around, and keeping msnr_symbol_rr_skip_min()'s own per-symbol statistical filter blind to that entire RR range. This constant is now fully vestigial — nothing in signal generation reads it — left defined (still wired through settings/UI) only in case a future session wants to reintroduce a cap deliberately. The rr_buckets table itself still displays in the UI, informational only.
-MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE = int(os.environ.get("VP_MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE", 15))  # v0.99.22 — per direct user request: MSNR_MAX_RR above is a single GLOBAL cap tuned off trades pooled across every symbol, which was a deliberate compromise (a single symbol's own sample is usually too small to bucket reliably) but leaves no way to catch a symbol whose OWN rr-vs-outcome pattern is bad even though the pooled average looks fine. This is the min closed-trade count a single symbol's OWN rr bucket (see msnr_rr_bucket_stats()) needs before msnr_symbol_rr_skip_min() trusts it enough to skip live signals in that range for that symbol specifically — see msnr_optimize_symbol()'s own "skip_rr_min" field and msnr_scan_symbol_live().
-MSNR_BACKTEST_DAYS = int(os.environ.get("VP_MSNR_BACKTEST_DAYS", 90))  # v0.99.400 — was 40: the honest test part (last 30%) had ~12 days, a handful of trades per coin. Gate keeps ~102 days of 15m.
-MSNR_MIN_TRAIN_TRADES = int(os.environ.get("VP_MSNR_MIN_TRAIN_TRADES", 10))  # v0.99.400 — own train trades a coin needs to be picked
-MSNR_POOLED_MIN_TEST = int(os.environ.get("VP_MSNR_POOLED_MIN_TEST", 30))  # v0.99.400 — pooled test trades the strategy check needs
-MSNR_POOLED_TEST_Z = float(os.environ.get("VP_MSNR_POOLED_TEST_Z", 2.0))  # v0.99.400  # v0.99.41 — was 30, raised per direct user request. Confirmed feasible against Gate's own ~10000-candle recency floor (get_candles_range()'s own docstring): at interval=15m that floor is ~102 days back, so 40 days (3840 candles) sits well inside it with room to spare — get_candles_range() already paginates in ~900-point/~9.4-day chunks regardless of the total span requested, so this just means ~5 chunks per symbol instead of ~4, not a new code path.
 MSNR_SIGNAL_HISTORY = 200
 MSNR_REFRESH_SEC = int(os.environ.get("VP_MSNR_REFRESH_SEC", 3600))
-MSNR_SCAN_INTERVAL_SEC = int(os.environ.get("VP_MSNR_SCAN_INTERVAL_SEC", 300))
 # v0.99.81, per direct user report ("термукс был жив, сигналы
 # работали, но бэктест не выполнялся больше 5 часов"): investigation
 # found no infinite-hang bug (every individual HTTP request/retry path
@@ -587,8 +556,6 @@ MSNR_SCAN_INTERVAL_SEC = int(os.environ.get("VP_MSNR_SCAN_INTERVAL_SEC", 300))
 # leaves a concrete log entry (which symbols were still in flight, how
 # long the cycle had been running) instead of another silent multi-
 # hour gap with nothing to diagnose from afterward.
-MSNR_BACKTEST_WATCHDOG_INTERVAL_SEC = int(os.environ.get("VP_MSNR_BACKTEST_WATCHDOG_INTERVAL_SEC", 300))  # how often the watchdog checks in — 5 min, frequent enough to catch the problem developing without being noisy
-MSNR_BACKTEST_WATCHDOG_THRESHOLD_SEC = int(os.environ.get("VP_MSNR_BACKTEST_WATCHDOG_THRESHOLD_SEC", 1200))  # 20 min — comfortably above the ~6-9 min this app's own logs have shown a normal full-universe cycle taking, so this doesn't fire on ordinary variance, only on a cycle that's genuinely running long
 # Autotune (v0.99.5), per direct user request — same grid-search +
 # confidence-bound-scoring shape as FT5's ft5_optimize_symbol()/
 # ft5_ranking_score(), adapted from "% pnl" to "R multiple" since MSNR
@@ -604,14 +571,7 @@ MSNR_BACKTEST_WATCHDOG_THRESHOLD_SEC = int(os.environ.get("VP_MSNR_BACKTEST_WATC
 # MSNR_SL_BUFFER_PCT out of the grid — changing timeframes means
 # re-fetching different candles per combo (expensive), and the SL
 # buffer only nudges risk size, not the actual mechanism being tested.
-MSNR_PARAM_GRID_MIN_LEG_ATR = [1.5, 2.5, 3.5]
-MSNR_PARAM_GRID_QM_ZONE_PCT = [0.003, 0.006, 0.010]
-MSNR_PARAM_GRID_QM_LOOKBACK = [4, 6, 9]
-MSNR_MIN_BACKTEST_TRADES = int(os.environ.get("VP_MSNR_MIN_BACKTEST_TRADES", 5))  # same bar as FT5_MIN_BACKTEST_TRADES/Volume's MIN_BACKTEST_TRADES — a combo with fewer trades in the window isn't a confident pick
-MSNR_RANK_PRIOR_TARGET = 1  # same role as FT5_RANK_PRIOR_TARGET — only a combo with 0 or 1 REAL observed loss gets synthetic -1R pseudo-losses blended in (guards against a small all-win sample looking falsely certain); 2+ real losses are trusted as-is
 MSNR_BACKTEST_UNIVERSE_SIZE = int(os.environ.get("VP_MSNR_BACKTEST_UNIVERSE_SIZE", 70))  # v0.99.9 — per direct user request: backtest the top-N most liquid symbols too (union'd with MSNR_SYMBOLS, so gold stays included), to see whether this signal logic generalizes beyond gold — explicitly backtest-only for now, msnr_live_loop still scans only MSNR_SYMBOLS, unchanged. Lowered 30->10 in v0.99.14 when the cycle was stuck "ещё не завершился" for a long time under sustained Gate.io rate-limiting; raised back up to 70 in v0.99.16 per direct follow-up request, now that get_candles_range() ALSO retries on 429 (v0.99.15 — it previously had its own separate, unretried request loop) and the panel shows live per-symbol progress instead of a binary done/not-done, so a longer cycle is at least visibly progressing rather than looking stuck. v0.99.48 — msnr_build_backtest_universe() no longer applies this cap on top of MIN_VOL_USD (per direct user request: liquidity rank was silently gating which symbols the top-10 SCORE ranking could even consider, unrelated to signal quality) — left defined, unused by default, in case a future session wants to reintroduce a cap deliberately.
-MSNR_LIVE_PROMOTE_MIN_WINRATE = float(os.environ.get("VP_MSNR_LIVE_PROMOTE_MIN_WINRATE", 50.0))  # v0.99.17 — per direct user request: a backtest-only symbol (from the wider MSNR_BACKTEST_UNIVERSE_SIZE exploration set) gets promoted into LIVE scanning once its winning combo's own closed-trade win-rate clears this bar. Union'd with MSNR_SYMBOLS (gold), never replaces it — gold stays live regardless of its own backtest numbers. v0.99.78, per direct user request ("Убери эту квалификацию... что раз просил убрать это"): the promotion rule this fed (msnr_compute_live_universe()) was retired — it now just delegates to the top-10 ranking instead. No longer read anywhere; left defined only as history/in case a future session wants a standalone promotion rule again.
-MSNR_LIVE_PROMOTE_MIN_SAMPLE = int(os.environ.get("VP_MSNR_LIVE_PROMOTE_MIN_SAMPLE", 40))  # v0.99.17 — closed trades (wins+losses, NOT the raw "trades" count which also includes timeouts that say nothing about win-rate) needed before a symbol's win-rate is trusted enough to promote it to live scanning. v0.99.78 — same retirement as MSNR_LIVE_PROMOTE_MIN_WINRATE above, no longer read anywhere.
 # v0.99.39 — per direct user request: the top-10 autotrade ranking
 # (msnr_rank_by_winrate_sample()) now uses its OWN sample floor and its
 # own sort key, deliberately separate from MSNR_LIVE_PROMOTE_MIN_SAMPLE/
@@ -619,7 +579,6 @@ MSNR_LIVE_PROMOTE_MIN_SAMPLE = int(os.environ.get("VP_MSNR_LIVE_PROMOTE_MIN_SAMP
 # live at all, unchanged) — "выборка от 35 сигналов и наибольший средний
 # RR", i.e. 35 closed trades minimum, ranked by avg_rr DESC instead of
 # the previous lower-confidence-bound score.
-MSNR_AUTOTRADE_TOP_MIN_SAMPLE = int(os.environ.get("VP_MSNR_AUTOTRADE_TOP_MIN_SAMPLE", 35))  # closed trades (wins+losses) needed before a symbol is eligible for the top-10 autotrade ranking
 # v0.99.44 - per direct user follow-up to v0.99.43's switch to a pure
 # compound_return_pct sort ("только вот топ 10 стал хуже по доходу"):
 # ranking purely by compound_return_pct backfired because the grid-
@@ -640,7 +599,6 @@ MSNR_AUTOTRADE_TOP_MIN_SAMPLE = int(os.environ.get("VP_MSNR_AUTOTRADE_TOP_MIN_SA
 # both, min-max normalized across the current candidate set, weighted
 # toward income per "больше веса надо для дохода" — NOT a 100% switch,
 # a WEIGHTED one, matching the literal request.
-MSNR_TOP10_INCOME_WEIGHT = float(os.environ.get("VP_MSNR_TOP10_INCOME_WEIGHT", 0.7))  # 0..1 — weight given to compound_return_pct in the top-10 ranking composite; the remainder (1 - this) goes to `score`. v0.99.76 — no longer read anywhere (see msnr_symbol_rank_score()'s own weights below); left defined only as history, not deleted.
 # v0.99.76, per direct user follow-up to v0.99.75 ("Так для того я и
 # написал 3 параметра, чтобы на выборку и доход тоже учитывало"):
 # v0.99.75's plain lexicographic (winrate, raw_closed_n, доход) tuple
@@ -668,10 +626,6 @@ MSNR_TOP10_INCOME_WEIGHT = float(os.environ.get("VP_MSNR_TOP10_INCOME_WEIGHT", 0
 # punishes/rewards identically, restoring genuine "all three must be
 # good" at the cost of the descending-priority ordering v0.99.76 had
 # tried to express through weight alone.
-MSNR_RANK_WINRATE_WEIGHT = float(os.environ.get("VP_MSNR_RANK_WINRATE_WEIGHT", 1.0 / 3))
-MSNR_RANK_SAMPLE_WEIGHT = float(os.environ.get("VP_MSNR_RANK_SAMPLE_WEIGHT", 1.0 / 3))
-MSNR_RANK_INCOME_WEIGHT = float(os.environ.get("VP_MSNR_RANK_INCOME_WEIGHT", 1.0 / 3))
-MSNR_RANK_INCOME_WINSORIZE_PCT = float(os.environ.get("VP_MSNR_RANK_INCOME_WINSORIZE_PCT", 0.9))  # v0.99.94 — see msnr_compute_rank_bounds()'s own docstring: caps the pool-wide income normalization ceiling at this percentile so one symbol's compounding outlier can't distort every other symbol's normalized score
 # v0.99.40 - CRITICAL FIX, per direct user report: "жму очистить msnr и
 # заново бэктэст не запускается, час ждать что-ли". Root cause: msnr_
 # backtest_loop() ends each cycle with a plain time.sleep(max(300,
@@ -690,8 +644,6 @@ MSNR_BACKTEST_TRIGGER = threading.Event()
 LSW_BACKTEST_TRIGGER = threading.Event()  # v0.99.137 — same "Очистить X doesn't wake the sleeping loop" fix as MSNR_BACKTEST_TRIGGER's own comment, applied to LSW ("Очистить Sweep"), per direct user report of the identical symptom
 MIRROR_BACKTEST_TRIGGER = threading.Event()  # v0.99.270 — same fix, found missing here while investigating the identical symptom for the new SNR module ("бэктест не идёт... кнопка перезапуска бэктеста принудительно"); "Очистить Зеркало" cleared data but never woke this loop early, same class of bug as MSNR/LSW's own
 FT5_BACKTEST_TRIGGER = threading.Event()  # same as MIRROR_BACKTEST_TRIGGER's own — "Очистить FT5" had the identical gap
-MSNR_AUTOTRADE_TOP_N = int(os.environ.get("VP_MSNR_AUTOTRADE_TOP_N", 10))  # v0.99.19 — how many non-gold symbols (by msnr_rank_by_winrate_sample()) get an individual autotrade toggle, on top of the always-eligible 3 gold ones. Raised 3->10 per direct follow-up request.
-MSNR_SINGLE_BEST_ENABLED = os.environ.get("VP_MSNR_SINGLE_BEST", "0") == "1"  # v0.99.207 — per direct user request: when on, only the ONE symbol with the highest compound_return_pct (biggest simulated $ profit) is allowed to autotrade, overriding the normal top-N pool entirely
 
 # ============================================================================
 # EXPERIMENTAL: FT5 — port of freqtrade-strategies' Strategy005 (v0.96.0)
@@ -1085,8 +1037,6 @@ AUTOTRADE_LEVERAGE_BREAKOUT = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_BREAKOUT
 AUTOTRADE_ENABLED_MSNR = os.environ.get("VP_AUTOTRADE_MSNR", "0") == "1"  # off by default — same "unverified source" treatment as XAU_LG/FT5
 AUTOTRADE_LEVERAGE_MSNR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_MSNR", 10))
 MSNR_COMPOUND_START_BALANCE = float(os.environ.get("VP_MSNR_COMPOUND_START_BALANCE", 15.0))  # v0.99.24 — per direct user request: $ margin the backtest's compounding simulation starts with on the first closed trade. v0.99.179 — lowered 40->15 per direct user request ("принять не за 40$ а 15$").
-MSNR_LIVE_BALANCE_MAX = float(os.environ.get("VP_MSNR_LIVE_BALANCE_MAX", 500.0))  # v0.99.33 — per direct user request: hard ceiling on the REAL per-symbol compounding margin (see msnr_live_balance_for_symbol()) — a symbol's live-trading balance still starts at MSNR_COMPOUND_START_BALANCE and reinvests its own result every closed trade exactly like the backtest simulation, but never sizes a real order above this cap regardless of how far the compounding would otherwise have grown it.
-MSNR_TARGET_STOP_LOSS_PCT = float(os.environ.get("VP_MSNR_TARGET_STOP_LOSS_PCT", 10.0))  # v0.99.46 — per direct user request, after a live SKHYNIX_USDT example: at the flat AUTOTRADE_LEVERAGE_MSNR (10x) on a tight sub-1%-wide stop, hitting SL barely dents the account (well under this %), wasting most of the position's real risk budget on a trade that can't move the needle either way. This is the target fraction of margin a stop-out should cost — msnr_leverage_for_stop() scales leverage UP (never down) from AUTOTRADE_LEVERAGE_MSNR for a signal whose own stop is narrower than what this target implies, capped by the contract's own exchange leverage_max and by the liquidation-safety margin.
 AUTOTRADE_ENABLED_FT5 = os.environ.get("VP_AUTOTRADE_FT5", "0") == "1"  # off by default — same reasoning as XAU_LG: unverified source, and the freqtrade backtest table this was ported from is a near-certain overfitting example (20-day 2018 window)
 AUTOTRADE_TRADE_HISTORY = 300
 
@@ -1143,9 +1093,9 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "prv_single_best_enabled", "snr_single_best_enabled", "neuro_autotrade_selected_only", "neuro_extra_conds_enabled", "neuro_trade_filter_enabled", "calc_workers", "calc_workers_boost", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "neuro_min_winrate", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "nq_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "neuro_min_winrate", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "nq_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled", "snr_all_in_enabled", "prv_all_in_enabled",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_neuro", "msnr_all_in_enabled", "snr_all_in_enabled", "prv_all_in_enabled",
                   "autotrade_risk_pct",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
@@ -1157,7 +1107,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "prv_single_best_enabled", "snr_singl
                   # plain module constants with NO persistence at all, so any
                   # manual env-var override would silently revert on restart
                   # too — now they follow the same rules as other autotune targets.
-                  "scalp_min_rr", "scalp_sl_buffer_mult", "msnr_max_rr")
+                  "scalp_min_rr", "scalp_sl_buffer_mult")
 
 
 def get_settings():
@@ -1202,12 +1152,7 @@ def get_settings():
         "neuro_display_n": NEURO_DISPLAY_N,
         "neuro_min_winrate": NEURO_MIN_WINRATE,
         "nq_enabled": NQ_ENABLED,
-        "msnr_max_rr": MSNR_MAX_RR,
         "msnr_enabled": MSNR_ENABLED,
-        "msnr_addon_enabled": MSNR_ADDON_ENABLED,
-        "msnr_min_rr_filter_enabled": MSNR_MIN_RR_FILTER_ENABLED,
-        "msnr_htf_filter_enabled": MSNR_HTF_FILTER_ENABLED,
-        "msnr_per_symbol_filters_enabled": MSNR_PER_SYMBOL_FILTERS_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
         "telegram_alerts_vp": TELEGRAM_ALERTS_VP,
@@ -1227,7 +1172,6 @@ def get_settings():
         "msnr_all_in_enabled": MSNR_ALL_IN_ENABLED,
         "snr_all_in_enabled": SNR_ALL_IN_ENABLED,
         "prv_all_in_enabled": PRV_ALL_IN_ENABLED,
-        "msnr_single_best_enabled": MSNR_SINGLE_BEST_ENABLED,
         "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
         "autotrade_breakout": AUTOTRADE_ENABLED_BREAKOUT,
         "autotrade_scalp": AUTOTRADE_ENABLED_SCALP,
@@ -1247,7 +1191,7 @@ def apply_settings(updates):
     them (scan_loop, scan_symbol, send_telegram, ...) reads the name at
     call time, not at import time, so this takes effect on the very next
     scan cycle / next alert, no restart needed."""
-    global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, FT5_HTF_FILTER_ENABLED, FT5_SESSION_FILTER_ENABLED, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, MSNR_MIN_RR_FILTER_ENABLED, MSNR_HTF_FILTER_ENABLED, MSNR_PER_SYMBOL_FILTERS_ENABLED, HOURLY_STATS_ENABLED
+    global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, FT5_HTF_FILTER_ENABLED, FT5_SESSION_FILTER_ENABLED, MSNR_ENABLED, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT, MIRROR_AUTOTUNE_TOLERANCE_ENABLED
     global MIRROR_VOLUME_FILTER_ENABLED, MIRROR_HTF_FILTER_ENABLED
     global EMA_TOUCH_ENABLED, AMD_ENABLED, NEURO_ENABLED, NEURO_TOP_N, NEURO_DISPLAY_N, NEURO_MIN_WINRATE, _neuro_active_symbols, _neuro_display_symbols, SNR_ENABLED, SNR_TOP_N, SNR_DISPLAY_N, _snr_active_symbols, _snr_display_symbols, TELEGRAM_ALERTS_SNR, AUTOTRADE_ENABLED_SNR, PRV_ENABLED, PRV_TOP_N, PRV_DISPLAY_N, _prv_active_symbols, _prv_display_symbols, TELEGRAM_ALERTS_PRV, AUTOTRADE_ENABLED_PRV, NQ_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
@@ -1255,7 +1199,7 @@ def apply_settings(updates):
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED, LSW_ATR_SWEEP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_EMA_BULL, TELEGRAM_ALERTS_AMD, TELEGRAM_ALERTS_NEURO, TELEGRAM_ALERTS_NEURO_SUMMARY, TELEGRAM_ALERTS_NQ, TELEGRAM_ALERTS_NETWORK
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, AUTOTRADE_ENABLED_NEURO, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED, MSNR_SINGLE_BEST_ENABLED, LSW_ALL_IN_ENABLED, SNR_ALL_IN_ENABLED, PRV_ALL_IN_ENABLED
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, AUTOTRADE_ENABLED_NEURO, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED, LSW_ALL_IN_ENABLED, SNR_ALL_IN_ENABLED, PRV_ALL_IN_ENABLED
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = False   # v0.99.341 — Volume removed per user ("из настроек volume можно убрать"); can't be switched back on
@@ -1551,21 +1495,6 @@ def apply_settings(updates):
         LSW_DIRECTION_FILTER_ENABLED = bool(updates["lsw_direction_filter_enabled"])
     if "msnr_enabled" in updates:
         MSNR_ENABLED = bool(updates["msnr_enabled"])
-    if "msnr_addon_enabled" in updates:
-        MSNR_ADDON_ENABLED = bool(updates["msnr_addon_enabled"])
-    if "msnr_min_rr_filter_enabled" in updates:
-        MSNR_MIN_RR_FILTER_ENABLED = bool(updates["msnr_min_rr_filter_enabled"])
-    if "msnr_htf_filter_enabled" in updates:
-        MSNR_HTF_FILTER_ENABLED = bool(updates["msnr_htf_filter_enabled"])
-    if "msnr_per_symbol_filters_enabled" in updates:
-        MSNR_PER_SYMBOL_FILTERS_ENABLED = bool(updates["msnr_per_symbol_filters_enabled"])
-    if "msnr_max_rr" in updates:
-        try:
-            v = float(updates["msnr_max_rr"])
-            if v > 0:
-                MSNR_MAX_RR = v
-        except (TypeError, ValueError):
-            pass
     if "hourly_stats_enabled" in updates:
         HOURLY_STATS_ENABLED = bool(updates["hourly_stats_enabled"])
     if "telegram_enabled" in updates:
@@ -1609,8 +1538,6 @@ def apply_settings(updates):
         SNR_ALL_IN_ENABLED = bool(updates["snr_all_in_enabled"])
     if "prv_all_in_enabled" in updates:
         PRV_ALL_IN_ENABLED = bool(updates["prv_all_in_enabled"])
-    if "msnr_single_best_enabled" in updates:
-        MSNR_SINGLE_BEST_ENABLED = bool(updates["msnr_single_best_enabled"])
     if "autotrade_bounce" in updates:
         AUTOTRADE_ENABLED_BOUNCE = bool(updates["autotrade_bounce"])
     if "autotrade_breakout" in updates:
@@ -1937,7 +1864,11 @@ STATE = {
     # EXPERIMENTAL MSNR (Malaysian SNR / Storyline gold strategy, v0.99.0) —
     # see that module's own header comment. All keys prefixed msnr_.
     "msnr_signals": deque(maxlen=MSNR_SIGNAL_HISTORY),
-    "msnr_backtest_results": {},
+    "msnr2_verdict": None,        # v0.99.401 — MSNR v2: pooled verdict (chosen variant, train/test)
+    "msnr2_coins": {},            # symbol -> train/test stats for the chosen variant, picked flag
+    "msnr2_trades": {},           # symbol -> backtest trades of the chosen variant
+    "msnr2_eligible": [],         # coins that trade (only when the verdict passed)
+    "msnr2_live_universe": [],    # coins scanned live (eligible, or best picked ones for recording)
     "msnr_backtest_results_raw": {},  # v0.99.23 — same shape, UNFILTERED by any symbol's skip_rr_min; see msnr_optimize_symbol()'s own docstring for why the pooled autotune/display needs this separate copy
     "msnr_backtest_summary": {},
     "msnr_last_backtest_finished": None,
@@ -6922,11 +6853,6 @@ def save_state():
                 "signals": list(STATE["signals"]),
                 "scalp_signals": list(STATE["scalp_signals"]),
                 "msnr_signals": list(STATE["msnr_signals"]),
-                "msnr_symbol_overrides": STATE["msnr_symbol_overrides"],
-                "msnr_autotrade_symbols": STATE["msnr_autotrade_symbols"],
-                "msnr_autotrade_top_set": STATE["msnr_autotrade_top_set"],
-                "msnr_backtest_results": STATE["msnr_backtest_results"],  # v0.99.292 — CRITICAL FIX, per direct user report ("почему результат бэктеста по sweep не пережил перезапуска? Проверь mnsr и два новых индикатора"): never persisted before — a restart silently wiped every MSNR backtest result (the discovered zone/RR settings for every symbol), forcing a full re-scan from scratch
-                "msnr_backtest_results_raw": STATE["msnr_backtest_results_raw"],
                 "ft5_signals": list(STATE["ft5_signals"]),
                 "ft5_symbol_overrides": STATE["ft5_symbol_overrides"],
                 "mirror_signals": list(STATE["mirror_signals"]),
@@ -6988,7 +6914,7 @@ def save_state():
 # MSNR/Sweep live scan watching nothing until the next backtest finished).
 PERSIST_BT_KEYS = (
     "msnr_last_backtest_finished", "msnr_last_backtest_duration", "msnr_backtest_summary",
-    "msnr_live_universe", "msnr_backtest_universe", "msnr_neuro_filters", "msnr_pooled",
+    "msnr2_verdict", "msnr2_coins", "msnr2_trades", "msnr2_eligible", "msnr2_live_universe",   # v0.99.401 — MSNR v2
     "lsw_last_backtest_finished", "lsw_last_backtest_duration", "lsw_backtest_summary",
     "lsw_live_universe", "lsw_live_directions", "lsw_chosen_rr", "lsw_rr_sweep",
     "lsw_filter_checkpoints", "lsw_neuro_filters", "lsw_pooled", "lsw_backtest_interval",
@@ -7125,11 +7051,6 @@ def load_state():
         signals = data.get("signals", [])
         scalp_signals = data.get("scalp_signals", [])
         msnr_signals = data.get("msnr_signals", [])
-        msnr_symbol_overrides = data.get("msnr_symbol_overrides", {})
-        msnr_autotrade_symbols = data.get("msnr_autotrade_symbols", {})
-        msnr_autotrade_top_set = data.get("msnr_autotrade_top_set", [])
-        msnr_backtest_results = data.get("msnr_backtest_results", {})
-        msnr_backtest_results_raw = data.get("msnr_backtest_results_raw", {})
         ft5_signals = data.get("ft5_signals", [])
         ft5_symbol_overrides = data.get("ft5_symbol_overrides", {})
         mirror_signals = data.get("mirror_signals", [])
@@ -7155,11 +7076,6 @@ def load_state():
             STATE["signals"] = deque(_backfill_mfe_mae(signals), maxlen=SIGNAL_HISTORY)
             STATE["scalp_signals"] = deque(scalp_signals, maxlen=SCALP_SIGNAL_HISTORY)
             STATE["msnr_signals"] = deque(msnr_signals, maxlen=MSNR_SIGNAL_HISTORY)
-            STATE["msnr_symbol_overrides"] = msnr_symbol_overrides
-            STATE["msnr_autotrade_symbols"] = msnr_autotrade_symbols
-            STATE["msnr_autotrade_top_set"] = msnr_autotrade_top_set
-            STATE["msnr_backtest_results"] = msnr_backtest_results
-            STATE["msnr_backtest_results_raw"] = msnr_backtest_results_raw
             STATE["ft5_signals"] = deque(_backfill_mfe_mae(ft5_signals), maxlen=FT5_SIGNAL_HISTORY)
             STATE["ft5_symbol_overrides"] = ft5_symbol_overrides
             STATE["mirror_signals"] = deque(_backfill_mfe_mae(mirror_signals), maxlen=MIRROR_SIGNAL_HISTORY)
@@ -7574,7 +7490,7 @@ def wait_beating(event, timeout, name):
 # per process, so a watchdog-restarted loop is not affected.
 _BT_STARTUP_CHECKED = set()
 _BT_RAN = set()   # modules that already finished a cycle in THIS process (core boost)
-_BT_RESULTS_KEY = {"msnr": "msnr_backtest_results", "lsw": "lsw_backtest_results",
+_BT_RESULTS_KEY = {"msnr": "msnr2_coins", "lsw": "lsw_backtest_results",
                    "snr": "snr_results", "prv": "prv_results",
                    "mirror": "mirror_backtest_results", "ft5": "ft5_symbol_overrides"}
 
@@ -7587,7 +7503,7 @@ _BT_RESULTS_KEY = {"msnr": "msnr_backtest_results", "lsw": "lsw_backtest_results
 # only: a restart starts a fresh journal.
 BT_JOURNAL = deque(maxlen=120)
 BT_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "snr": "S/R", "prv": "Peak Reversal", "neuro": "Neuro",
-             "msnr_nf": "MSNR фильтр", "lsw_nf": "Sweep фильтр", "snr_nf": "S/R фильтр", "prv_nf": "P/R фильтр"}
+             "lsw_nf": "Sweep фильтр", "snr_nf": "S/R фильтр", "prv_nf": "P/R фильтр"}
 BT_REASON_BUTTON = "кнопка «Бэктест» / «Очистить» / настройки"
 _bt_journal_lock = threading.Lock()
 _bt_next = {}      # mod -> {"at": ts, "reason": str} while a loop sleeps until its next cycle
@@ -8679,61 +8595,6 @@ def _risk_autotune_sl_mult(module, param_key, current_value, loss_mae_avg_r, sam
                         f"loss_mae_avg_r={loss_mae_avg_r:+.3f} overshoot={overshoot:+.3f}", sample_n)
 
 
-def _risk_autotune_msnr_max_rr(pooled_trades, current_max_rr, setter):
-    """MSNR-specific rule: per direct user observation (SPCX — trades
-    with rr>6 consistently hit stop) that a genuine opposite-level TP
-    can sit so far away the trade structurally rarely reaches it before
-    reversing. Uses msnr_rr_bucket_stats() (pooled across ALL symbols'
-    backtest trades — a single symbol's own sample is usually too small
-    to bucket reliably) to find the LOWEST RR bucket that's actually
-    failing its own breakeven, then steps MSNR_MAX_RR toward that
-    bucket's lower edge — not straight to it, same bounded-step
-    philosophy as every other nudge here, so one noisy pass can't swing
-    the cap wildly.
-    "Failing" means: enough closed trades in that bucket (>= RISK_
-    AUTOTUNE_MIN_SAMPLE) AND its own win-rate sits below the breakeven
-    win-rate for that bucket's own ACTUAL average realized rr (not the
-    bucket's lower boundary — caught via behavioral testing that using
-    the lower edge breaks down for the first bucket, whose lo=0 implies
-    a nonsensical 100% breakeven requirement and made the rule fire
-    almost unconditionally on realistic data).
-    If no bucket is clearly failing, leaves the cap alone — this rule
-    only ever tightens the cap off solid evidence, it doesn't guess at
-    loosening it back up (unlike the tp_extend-style rules elsewhere,
-    which nudge in both directions off MFE data): a cap that's too
-    tight just costs some upside on trades that would have won anyway,
-    a cap that's too loose keeps letting the reported problem through —
-    the two mistakes aren't symmetric, so this stays one-directional
-    on purpose."""
-    if not RISK_AUTOTUNE_ENABLED:
-        return
-    if not _risk_autotune_cooldown_ok("msnr_max_rr", RISK_AUTOTUNE_COOLDOWN_SEC):
-        return
-    buckets = msnr_rr_bucket_stats(pooled_trades)
-    failing_edges = []
-    for b in buckets:
-        if b["n"] < RISK_AUTOTUNE_MIN_SAMPLE or b["winrate"] is None or not b["avg_rr"]:
-            continue
-        breakeven = 100.0 / (1.0 + b["avg_rr"])
-        if b["winrate"] < breakeven:
-            failing_edges.append(b["lo"])
-    if not failing_edges:
-        return
-    target = min(failing_edges)
-    lo, hi = RISK_AUTOTUNE_MSNR_MAX_RR_BOUNDS
-    if current_max_rr <= target:
-        return  # already at or below the failing edge, nothing to tighten
-    step = min(RISK_AUTOTUNE_TP_STEP_RATIO * current_max_rr, current_max_rr - target)
-    new_value = round(max(lo, min(hi, current_max_rr - step)), 2)
-    if new_value == current_max_rr:
-        return
-    setter(new_value)
-    _risk_autotune_mark("msnr_max_rr")
-    _risk_autotune_log("msnr", "msnr_max_rr", current_max_rr, new_value,
-                        f"failing bucket edge={target} (winrate below breakeven, n>={RISK_AUTOTUNE_MIN_SAMPLE})",
-                        sum(b["n"] for b in buckets))
-
-
 def _risk_autotune_reverse(module, param_key, current_flag, winrate_pct, rr, sample_n, setter, avg_loss_mae_r=None):
     """Flips an *_INVERT_SIGNALS flag if the CURRENTLY active direction's
     own EV (winrate*rr - (1-winrate)*overshoot) has been solidly negative
@@ -8835,12 +8696,6 @@ def _set_scalp_sl_buffer_mult(v):
 def _set_ft5_invert(v):
     global FT5_INVERT_SIGNALS
     FT5_INVERT_SIGNALS = v
-    save_settings()
-
-
-def _set_msnr_max_rr(v):
-    global MSNR_MAX_RR
-    MSNR_MAX_RR = v
     save_settings()
 
 
@@ -8978,1559 +8833,18 @@ def risk_autotune_loop():
 # (constants are up top, see that block's own header comment for the full
 # OCL/A-shape/V-shape/SBR/RBS/QM translation from the source material)
 # ============================================================================
-def msnr_build_pivots(structure_candles, pivot_left=MSNR_PIVOT_LEFT, pivot_right=MSNR_PIVOT_RIGHT,
-                       min_leg_atr=MSNR_MIN_LEG_ATR, atr_period=MSNR_ATR_PERIOD, interval_sec=None):
-    """Single walk-forward pass over structure_candles (MSNR_STRUCTURE_TF,
-    oldest first) building confirmed OCL pivots off the CLOSE line — never
-    high/low, per the source's "Open-Close Level" definition. A close-pivot
-    at bar j only becomes confirmed once bar j+pivot_right has been seen
-    (same no-lookahead confirmation delay every other pivot-based
-    detector in this file uses). Alternates strictly A/V (a new A-shape can't follow
-    another A-shape — the intervening V is what makes it a genuine
-    impulsive leg) and only keeps a pivot whose distance from the
-    previous opposite pivot is >= min_leg_atr x ATR(atr_period) at that
-    point, i.e. a real "Storyline" leg, not chop.
-    v0.99.42 - CRITICAL FIX (lookahead): confirm_time used to be
-    structure_candles[confirm_idx]["time"] — the PIVOT BAR'S OWN
-    timestamp — even though the pivot isn't actually confirmed until
-    pivot_right MORE structure bars have printed (that's the entire
-    point of pivot_right: you can't know bar confirm_idx was a local
-    extreme until you've seen what came after it). msnr_detect_signals()
-    activates a pivot the moment entry_candles' walk reaches confirm_
-    time, so the old value let it treat a level as tradeable up to
-    pivot_right x MSNR_STRUCTURE_TF early (2h at the current 1h/
-    pivot_right=2 defaults) — both in backtesting (inflating win-rate/
-    avg-RR on trades that used information not really available yet)
-    and in live scanning (msnr_scan_symbol_live() runs this exact same
-    function), a real lookahead bug this function's own docstring
-    claimed not to have. Fixed to the close time
-    of the actual confirming bar: structure_candles[confirm_idx +
-    pivot_right]["time"] + <structure interval seconds> — matches the
-    exact "has this bar closed yet" convention msnr_scan_symbol_live()
-    itself already uses one function over (`c["time"] + s_interval_sec
-    <= now`).
-    v0.99.392 — CRITICAL FIX (lookahead, same kind as v0.99.42):
-    confirm_time always added the MSNR_STRUCTURE_TF (1h) bar length, but
-    since v0.99.305 this function also builds the 4h pivots. A 4h pivot
-    was therefore "confirmed" at its confirming bar's open + 1h — 3h
-    before that 4h bar actually closes. The backtest used those 4h
-    levels (gating + TP) up to 3h early; live only sees closed 4h bars,
-    so live could never do the same. interval_sec = the bar length of
-    the candles actually passed in (defaults to MSNR_STRUCTURE_TF).
-    Returns a list of {"type": "A"|"V", "price": close, "confirm_time": ts},
-    oldest first."""
-    n = len(structure_candles)
-    if n < atr_period + pivot_left + pivot_right + 2:
-        return []
-    closes = [c["close"] for c in structure_candles]
-    tr = _true_range_series(structure_candles)
-    atr = _atr_series(tr, atr_period)
-    structure_interval_sec = interval_sec or INTERVAL_SECONDS.get(MSNR_STRUCTURE_TF, 3600)
-    pivots = []
-    last_price = None
-    last_type = None
-    for confirm_idx in range(pivot_left, n - pivot_right):
-        cc_close = closes[confirm_idx]
-        atr_here = atr[confirm_idx] if confirm_idx < len(atr) and atr[confirm_idx] else None
-        if not atr_here:
-            continue
-        is_high = (all(cc_close >= closes[confirm_idx - j] for j in range(1, pivot_left + 1)) and
-                   all(cc_close >= closes[confirm_idx + j] for j in range(1, pivot_right + 1)))
-        is_low = (all(cc_close <= closes[confirm_idx - j] for j in range(1, pivot_left + 1)) and
-                  all(cc_close <= closes[confirm_idx + j] for j in range(1, pivot_right + 1)))
-        # v0.99.42 — see the docstring above: this is the actual moment
-        # the pivot becomes knowable, not the pivot bar's own time.
-        confirm_time = structure_candles[confirm_idx + pivot_right]["time"] + structure_interval_sec
-        if is_high and last_type != "A":
-            leg = abs(cc_close - last_price) if last_price is not None else None
-            if leg is None or leg >= min_leg_atr * atr_here:
-                pivots.append({"type": "A", "price": cc_close, "confirm_time": confirm_time})
-                last_price, last_type = cc_close, "A"
-        elif is_low and last_type != "V":
-            leg = abs(cc_close - last_price) if last_price is not None else None
-            if leg is None or leg >= min_leg_atr * atr_here:
-                pivots.append({"type": "V", "price": cc_close, "confirm_time": confirm_time})
-                last_price, last_type = cc_close, "V"
-    return pivots
 
 
-def msnr_detect_signals(structure_candles, entry_candles, higher_structure_candles=None,
-                         pivot_left=MSNR_PIVOT_LEFT, pivot_right=MSNR_PIVOT_RIGHT,
-                         min_leg_atr=MSNR_MIN_LEG_ATR, atr_period=MSNR_ATR_PERIOD,
-                         qm_zone_pct=MSNR_QM_ZONE_PCT, qm_lookback=MSNR_QM_LOOKBACK_BARS,
-                         sl_buffer_mult=MSNR_SL_BUFFER_MULT, fallback_rr=MSNR_FALLBACK_RR):
-    """Combined walk-forward pass, no lookahead — mirrors detect_session_
-    manipulation() in spirit. Builds confirmed A-
-    shape/V-shape OCL pivots off structure_candles as it goes (via
-    msnr_build_pivots(), pre-computed since it doesn't depend on
-    entry_candles at all), then walks entry_candles watching for a QM
-    (sweep through the currently-active A or V level, then close back on
-    the origin side within qm_lookback bars) — the SBR/RBS entry the
-    source actually trades. TP is the OTHER active level of the pair
-    (the "Storyline" target) ONLY if that level is still genuinely ahead
-    of price (on the correct side of entry) — a pivot confirmed long ago
-    can end up anywhere relative to current price by the time a much-
-    later signal fires, and using it regardless of side produced invalid
-    trades (TP below SL on a LONG — found via direct user chart review
-    of a backtest trade, see v0.99.4). Falls back to a fixed RR
-    (fallback_rr) whenever the paired level isn't confirmed yet OR isn't
-    on the correct side of entry.
-    v0.99.11 added, v0.99.68 REMOVED: a cap (MSNR_MAX_RR) that ALSO
-    fell back to fallback_rr whenever the paired level was valid but
-    would produce rr > max_rr. Per direct user request ("в оригинале
-    по задумке автора эта стратегия msnr ловит движения с очень
-    большим rr, даже если winrate около 20-30, у нас так не
-    получается"): that cap was silently substituting a much smaller
-    MSNR_FALLBACK_RR=4.0 target for ANY genuinely-far opposite level,
-    directly preventing the large-RR/low-winrate trades this strategy
-    was designed around — and keeping msnr_symbol_rr_skip_min()'s own
-    per-symbol statistical test (exactly the right tool for "is this
-    RR bucket actually profitable for THIS symbol despite a low
-    win-rate") blind to that entire RR range, since it never saw a
-    trade's true RR once this had already substituted a capped one.
-    Trusting that per-symbol filter fully now instead of a blanket
-    global ceiling that couldn't tell a genuinely unreachable target
-    from a genuinely rare-but-profitable one.
-    v0.99.305 — added higher_structure_candles (MSNR_HIGHER_TF, 4h by
-    default), per direct user request after reviewing the strategy
-    author's own source screenshots showing a 4h->1h->15m cascade (this
-    module originally shipped a deliberately-collapsed 2-stage version,
-    see this section's own header comment for the full "why" at intro).
-    When given, a 1h A/V level only fires a QM signal if a same-type 4h
-    level (msnr_build_pivots() on higher_structure_candles) is ALSO
-    currently active — the "1h point refining the active 4h zone" the
-    screenshots show — and TP becomes the OPPOSITE ACTIVE 4h level
-    (same "must still be genuinely ahead of price" validity check as
-    the 1h-level TP it replaces) instead of the opposite 1h level,
-    falling back to fallback_rr under the exact same conditions as
-    before. Optional and defaults to None (old two-stage 1h/15m-only
-    behavior, no 4h gating at all) so msnr_addon_backtest_symbol()'s own
-    separate call site keeps working unchanged if it's ever left as-is.
-    A level only fires once per "reign" (consumed on signal) — replaced by the next
-    confirmed pivot of that type resets it.
-    Returns (signals, pivots). signals: list of dicts with index (into
-    entry_candles), time, direction, entry, sl, tp, level, level_type."""
-    pivots = msnr_build_pivots(structure_candles, pivot_left, pivot_right, min_leg_atr, atr_period)
-    higher_pivots = (msnr_build_pivots(higher_structure_candles, pivot_left, pivot_right, min_leg_atr, atr_period,
-                                       interval_sec=INTERVAL_SECONDS.get(MSNR_HIGHER_TF, 14400))
-                     if higher_structure_candles else [])   # v0.99.392 — 4h bar length, see msnr_build_pivots()
-    use_higher_tf = higher_structure_candles is not None
-    signals = []
-    if not entry_candles:
-        return signals, pivots
-    pi = 0
-    hi = 0
-    active_a = None
-    active_v = None
-    active_higher_a = None
-    active_higher_v = None
-    a_fired = False
-    v_fired = False
-    n_p = len(pivots)
-    n_hp = len(higher_pivots)
-    for i, c in enumerate(entry_candles):
-        while pi < n_p and pivots[pi]["confirm_time"] <= c["time"]:
-            piv = pivots[pi]
-            if piv["type"] == "A":
-                if active_a is None or piv["price"] != active_a["price"]:
-                    active_a = piv
-                    a_fired = False
-            else:
-                if active_v is None or piv["price"] != active_v["price"]:
-                    active_v = piv
-                    v_fired = False
-            pi += 1
-        while hi < n_hp and higher_pivots[hi]["confirm_time"] <= c["time"]:
-            hpiv = higher_pivots[hi]
-            if hpiv["type"] == "A":
-                active_higher_a = hpiv
-            else:
-                active_higher_v = hpiv
-            hi += 1
 
-        cluster = entry_candles[max(0, i - qm_lookback + 1): i + 1]
-        # v0.99.59, per direct user request ("второй фильтр" — volume
-        # confirmation on the sweep, discussed as the more-in-the-
-        # pattern-itself alternative to the time-of-day filter):
-        # this candle's own volume relative to the MEAN volume of the
-        # MSNR_VOLUME_LOOKBACK_BARS bars immediately before it
-        # (deliberately excluding c itself — including it would let a
-        # single huge-volume sweep partially inflate its own baseline).
-        # Computed unconditionally here (once per bar, not duplicated
-        # in the A-shape/V-shape blocks below) since it only depends on
-        # i/c, not on direction — attached to whichever signal (if any)
-        # actually fires on this candle. None near the very start of
-        # the series where there's no lookback window yet, or if that
-        # window's own volumes happen to sum to zero (matches msnr_
-        # symbol_volume_skip_below()'s own "can't judge, don't touch
-        # the trade" stance for a None ratio).
-        vol_window = entry_candles[max(0, i - MSNR_VOLUME_LOOKBACK_BARS):i]
-        vol_avg = (sum(cc["volume"] for cc in vol_window) / len(vol_window)) if vol_window else None
-        volume_ratio = round(c["volume"] / vol_avg, 3) if vol_avg and vol_avg > 0 else None
 
-        if active_a is not None and not a_fired and (not use_higher_tf or active_higher_a is not None):
-            level = active_a["price"]
-            swept = [cc["high"] for cc in cluster if cc["high"] > level]
-            if swept and c["close"] < level:
-                sweep_extreme = max(swept)
-                if level > 0 and (sweep_extreme - level) / level <= qm_zone_pct:
-                    entry = c["close"]
-                    # v0.99.104 — see MSNR_SL_BUFFER_MULT's own comment for
-                    # the full "why" (frequent premature stop-outs, the old
-                    # extreme*(1±tiny_pct) formula barely widened the stop
-                    # past the sweep's own extreme at all). raw_risk is the
-                    # sweep's OWN natural entry-to-extreme distance; the
-                    # actual risk/SL scales with how far that sweep already
-                    # moved, same "multiply the real risk distance" design
-                    # XAU_LG_SL_BUFFER_MULT already uses.
-                    raw_risk = sweep_extreme - entry
-                    risk = raw_risk * sl_buffer_mult
-                    sl = entry + risk
-                    if risk > 0:
-                        # TP is the paired V-shape ONLY if it's actually still
-                        # ahead of price (below entry, for a SHORT) — a
-                        # V-shape confirmed long ago can sit anywhere price
-                        # has been since, including above the current entry
-                        # once a later uptrend leg passed it. Using a stale
-                        # level on the wrong side of entry produced nonsense
-                        # trades (TP below SL on a LONG, found via direct
-                        # user screenshot review of a backtest trade) — a
-                        # target that isn't a genuine unmet objective isn't
-                        # a valid Storyline pair, so fall back to fixed RR
-                        # instead.
-                        # v0.99.68 — REMOVED the "AND doesn't imply an rr
-                        # past the cap" half of this check, per direct user
-                        # request: "в оригинале по задумке автора эта
-                        # стратегия msnr ловит движения с очень большим rr,
-                        # даже если winrate около 20-30, у нас так не
-                        # получается." MSNR_MAX_RR (rr_cap above) used to
-                        # silently swap ANY genuinely-far opposite level for
-                        # a much smaller MSNR_FALLBACK_RR=4.0 fixed target —
-                        # directly preventing the strategy from ever taking
-                        # the large-RR/low-winrate trades it was designed
-                        # around, and — worse — keeping msnr_symbol_rr_
-                        # skip_min()'s own per-symbol statistical test (which
-                        # is exactly the right tool for "is this RR bucket
-                        # actually profitable for THIS symbol despite a low
-                        # win-rate") blind to that entire RR range, since it
-                        # never saw a trade's true RR once this had already
-                        # substituted a capped one. Full trust now placed in
-                        # that per-symbol statistical filter instead of a
-                        # blanket global ceiling — msnr_symbol_rr_skip_min()
-                        # will correctly reject a high-RR bucket for a
-                        # symbol where it's actually failing breakeven, and
-                        # correctly allow it through for one where it isn't,
-                        # which a fixed cap can never distinguish. rr_cap/
-                        # MSNR_MAX_RR itself is left fully defined (still
-                        # wired through settings/UI) in case a future
-                        # session wants to reintroduce a cap deliberately —
-                        # nothing in signal generation reads it anymore.
-                        # v0.99.305 — opp now prefers the OPPOSITE ACTIVE 4h
-                        # level (msnr_build_pivots() on higher_structure_
-                        # candles) over the 1h one, per direct user request
-                        # matching the strategy author's own source
-                        # material (TP = the 4h Storyline target, not the
-                        # 1h one) — same "must still be genuinely ahead of
-                        # price" validity check either way, same fallback_
-                        # rr when neither is valid.
-                        opp = (active_higher_v["price"] if use_higher_tf and active_higher_v is not None
-                               else (active_v["price"] if active_v is not None else None))
-                        opp_valid = opp is not None and opp < entry
-                        tp = opp if opp_valid else entry - risk * fallback_rr
-                        signals.append({
-                            "index": i, "time": c["time"], "direction": "SHORT",
-                            "entry": entry, "sl": sl, "tp": tp,
-                            "level": level, "level_type": "A",
-                            "opposite_level": opp if opp_valid else None,
-                            "volume_ratio": volume_ratio,
-                        })
-                        a_fired = True
 
-        if active_v is not None and not v_fired and (not use_higher_tf or active_higher_v is not None):
-            level = active_v["price"]
-            swept = [cc["low"] for cc in cluster if cc["low"] < level]
-            if swept and c["close"] > level:
-                sweep_extreme = min(swept)
-                if level > 0 and (level - sweep_extreme) / level <= qm_zone_pct:
-                    entry = c["close"]
-                    # v0.99.104 — mirrors the SHORT branch above, see its
-                    # own comment for the full reasoning.
-                    raw_risk = entry - sweep_extreme
-                    risk = raw_risk * sl_buffer_mult
-                    sl = entry - risk
-                    if risk > 0:
-                        # v0.99.68 — same removal as the SHORT branch above
-                        # (see its own comment for the full reasoning): no
-                        # longer checks implied RR against rr_cap, only that
-                        # the paired A-shape is still a genuine unmet target
-                        # ahead of price.
-                        # v0.99.305 — same "prefer opposite active 4h level"
-                        # change as the SHORT branch above, see its own
-                        # comment for the full reasoning.
-                        opp = (active_higher_a["price"] if use_higher_tf and active_higher_a is not None
-                               else (active_a["price"] if active_a is not None else None))
-                        opp_valid = opp is not None and opp > entry
-                        tp = opp if opp_valid else entry + risk * fallback_rr
-                        signals.append({
-                            "index": i, "time": c["time"], "direction": "LONG",
-                            "entry": entry, "sl": sl, "tp": tp,
-                            "level": level, "level_type": "V",
-                            "opposite_level": opp if opp_valid else None,
-                            "volume_ratio": volume_ratio,
-                        })
-                        v_fired = True
 
-    signals.sort(key=lambda s: s["index"])
-    return signals, pivots
 
 
-MSNR_MAX_WAIT_BARS = 300   # v0.99.400 — entry-TF bars (15m: 75h); also capped by max_hold_bars() (7 days)
 
 
-def msnr_max_hold_bars():
-    return max_hold_bars(MSNR_ENTRY_TF, MSNR_MAX_WAIT_BARS)
 
 
-def msnr_track_outcome(entry_candles, sig, max_wait_bars=None):
-    """Walks forward from sig['index']+1 looking for TP/SL touch — SL
-    checked first on any bar covering both, same conservative convention
-    as track_session_outcome().
-    v0.99.400 — a trade still open after max_wait_bars is closed at that
-    bar's close: ("TIME_EXIT", that bar's time). Live does exactly the
-    same (update_msnr_signal_outcomes() closes the real position). Before,
-    the backtest dropped such trades as TIMEOUT while live had no time
-    limit at all. "TIMEOUT" now only means the data ended first."""
-    max_wait_bars = max_wait_bars or msnr_max_hold_bars()
-    n = len(entry_candles)
-    for k in range(sig["index"] + 1, min(n, sig["index"] + 1 + max_wait_bars)):
-        c = entry_candles[k]
-        if sig["direction"] == "LONG":
-            if c["low"] <= sig["sl"]:
-                return "LOSS", c["time"]
-            if c["high"] >= sig["tp"]:
-                return "WIN", c["time"]
-        else:
-            if c["high"] >= sig["sl"]:
-                return "LOSS", c["time"]
-            if c["low"] <= sig["tp"]:
-                return "WIN", c["time"]
-    if sig["index"] + max_wait_bars <= n - 1:
-        return "TIME_EXIT", entry_candles[sig["index"] + max_wait_bars]["time"]
-    return "TIMEOUT", None
-
-
-def msnr_net_r_at(direction, entry, sl, exit_price):
-    """v0.99.400 — realized R of a trade closed at exit_price, in the same
-    net units as msnr_net_rr() (a stop-out = exactly -1)."""
-    risk = abs(entry - sl)
-    if risk <= 0:
-        return None
-    cost = abs(entry) * msnr_trade_cost_frac()
-    move = (exit_price - entry) if direction == "LONG" else (entry - exit_price)
-    return round((move - cost) / (risk + cost), 3)
-
-
-def msnr_trade_r(t):
-    """v0.99.400 — a closed MSNR trade's net R: WIN +rr, LOSS -1, TIME_EXIT
-    its realized R; None for a trade still open."""
-    res = t.get("result")
-    if res == "WIN":
-        return t.get("rr")
-    if res == "LOSS":
-        return -1.0
-    if res == "TIME_EXIT":
-        return t.get("r_net")
-    return None
-
-
-def msnr_trade_move(t):
-    """v0.99.400 — signed price move of a closed trade as a fraction of
-    entry (for the $ compounding / Kelly math), or None."""
-    e = t.get("entry")
-    if not e or e <= 0:
-        return None
-    if t.get("result") == "WIN" and t.get("tp") is not None:
-        return abs(t["tp"] - e) / e
-    if t.get("result") == "LOSS" and t.get("sl") is not None:
-        return -abs(e - t["sl"]) / e
-    if t.get("result") == "TIME_EXIT" and t.get("exit_price") is not None:
-        x = t["exit_price"]
-        return ((x - e) if t.get("direction") == "LONG" else (e - x)) / e
-    return None
-
-
-def msnr_trade_cost_frac():
-    """v0.99.392 — round-trip cost of one MSNR trade as a fraction of
-    price: taker fee on entry and exit (2 x AUTOTRADE_SIM_FEE_PCT) plus
-    MSNR_BT_SLIPPAGE_PCT."""
-    return 2 * AUTOTRADE_SIM_FEE_PCT + MSNR_BT_SLIPPAGE_PCT
-
-
-def msnr_net_rr(entry, sl, tp):
-    """v0.99.392 — reward:risk NET of msnr_trade_cost_frac(), in units of
-    what a stop-out really costs (risk + cost). Every MSNR consumer
-    scores a WIN as +rr and a LOSS as -1, so expressing rr in these units
-    makes all of them (grid score, expectancy, RR filters, ranking)
-    net of fees without touching each one: a WIN pays (reward - cost),
-    a LOSS costs (risk + cost) = exactly -1 in these units. Before,
-    rr = reward / risk — the backtest's R stats ignored fees entirely,
-    only the $ compound simulation charged them."""
-    risk = abs(entry - sl)
-    if risk <= 0:
-        return None
-    cost = abs(entry) * msnr_trade_cost_frac()
-    return round((abs(tp - entry) - cost) / (risk + cost), 2)
-
-
-def msnr_detect_addon_signals(addon_candles, primary_signals, qm_zone_pct=MSNR_QM_ZONE_PCT,
-                               qm_lookback=MSNR_QM_LOOKBACK_BARS, sl_buffer_mult=MSNR_SL_BUFFER_MULT):
-    """v0.99.126 — the "добір" (add-on) second position, per direct
-    user-forwarded trade screenshot from the strategy's own author (see
-    MSNR_ADDON_ENABLED's own comment for the full context and the
-    DETECTION/BACKTEST-ONLY caveat).
-    For each already-fired primary signal (from msnr_detect_signals(),
-    on MSNR_ENTRY_TF), scans addon_candles (coarser, MSNR_ADDON_TF) for
-    the FIRST fresh QM sweep+reject against the SAME level, occurring
-    strictly AFTER the primary signal's own time — same sweep-then-
-    close-back-inside logic as the primary detector's own A-shape/
-    V-shape branches, just replayed on the add-on timeframe and
-    restricted to one level instead of walking a live pivot stream.
-    Shares the primary signal's own tp (same Storyline target, per the
-    source's own "> Target h1 V-shape" for both positions) — only
-    entry/sl differ, from wherever the add-on's own fresh sweep
-    occurred. At most ONE add-on per primary signal (first fresh M30
-    QM found after it) — the source's own examples show exactly two
-    positions per idea, not an unbounded add-on chain.
-    Returns a list of signal dicts in the SAME shape msnr_detect_
-    signals() itself returns, plus "is_addon": True and "primary_time"
-    linking back to the primary signal it's attached to."""
-    addon_signals = []
-    for psig in primary_signals:
-        level = psig["level"]
-        level_type = psig["level_type"]
-        direction = psig["direction"]
-        after_time = psig["time"]
-        for i, c in enumerate(addon_candles):
-            if c["time"] <= after_time:
-                continue
-            cluster = addon_candles[max(0, i - qm_lookback + 1): i + 1]
-            if level_type == "A":  # SHORT add-on, mirrors msnr_detect_signals()'s own A-shape branch
-                swept = [cc["high"] for cc in cluster if cc["high"] > level]
-                if not (swept and c["close"] < level):
-                    continue
-                sweep_extreme = max(swept)
-                if not (level > 0 and (sweep_extreme - level) / level <= qm_zone_pct):
-                    continue
-                entry = c["close"]
-                risk = (sweep_extreme - entry) * sl_buffer_mult
-                sl = entry + risk
-            else:  # LONG add-on, mirrors the V-shape branch
-                swept = [cc["low"] for cc in cluster if cc["low"] < level]
-                if not (swept and c["close"] > level):
-                    continue
-                sweep_extreme = min(swept)
-                if not (level > 0 and (level - sweep_extreme) / level <= qm_zone_pct):
-                    continue
-                entry = c["close"]
-                risk = (entry - sweep_extreme) * sl_buffer_mult
-                sl = entry - risk
-            if risk <= 0:
-                continue
-            addon_signals.append({
-                "index": i, "time": c["time"], "direction": direction,
-                "entry": entry, "sl": sl, "tp": psig["tp"],
-                "level": level, "level_type": level_type,
-                "opposite_level": psig.get("opposite_level"),
-                "is_addon": True, "primary_time": after_time,
-            })
-            break  # one add-on per primary signal, first fresh M30 QM found
-    return addon_signals
-
-
-def msnr_run_backtest(structure_candles, entry_candles, higher_structure_candles=None, **params):
-    """Runs msnr_detect_signals(**params) + msnr_track_outcome() over the
-    result and returns the full per-trade list (time/direction/entry/sl/
-    tp/level/rr/result). The shared core behind both a plain single-
-    params backtest and msnr_optimize_symbol()'s grid search — params
-    are whichever of msnr_detect_signals()'s own kwargs (min_leg_atr,
-    qm_zone_pct, qm_lookback, ...) the caller wants to override; anything
-    not given keeps msnr_detect_signals()'s own module-default.
-    v0.99.305 — higher_structure_candles (MSNR_HIGHER_TF, 4h) threaded
-    through explicitly, not via **params, since it's a candle series
-    (like structure_candles/entry_candles) rather than a detect_signals
-    tuning knob."""
-    sigs, _pivots = msnr_detect_signals(structure_candles, entry_candles, higher_structure_candles, **params)
-    results = []
-    busy_until = float("-inf")
-    by_time = {c["time"]: c for c in entry_candles}
-    for sig in sigs:
-        # v0.99.400 — one position per coin, exactly like live (a new signal
-        # is ignored while the symbol has an OPEN one). Before, overlapping
-        # trades on one coin were all counted.
-        if sig["time"] <= busy_until:
-            continue
-        result, exit_time = msnr_track_outcome(entry_candles, sig)
-        risk = abs(sig["entry"] - sig["sl"])
-        reward = abs(sig["tp"] - sig["entry"])
-        rr_gross = round(reward / risk, 2) if risk > 0 else None
-        rr = msnr_net_rr(sig["entry"], sig["sl"], sig["tp"])   # v0.99.392 — net of fees + slippage
-        exit_price = sig["tp"] if result == "WIN" else (sig["sl"] if result == "LOSS" else None)
-        if result == "TIME_EXIT":
-            exit_price = by_time[exit_time]["close"]
-        r_net = (rr if result == "WIN" else (-1.0 if result == "LOSS" else
-                 (msnr_net_r_at(sig["direction"], sig["entry"], sig["sl"], exit_price) if result == "TIME_EXIT" else None)))
-        results.append({
-            "time": sig["time"], "direction": sig["direction"],
-            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
-            "level": sig["level"], "level_type": sig["level_type"],
-            "opposite_level": sig.get("opposite_level"),
-            "result": result, "exit_time": exit_time, "rr": rr, "rr_gross": rr_gross,
-            "exit_price": exit_price, "r_net": r_net,   # v0.99.400
-            "volume_ratio": sig.get("volume_ratio"),
-        })
-        busy_until = exit_time if exit_time else float("inf")
-    return results
-
-
-def msnr_backtest_symbol(symbol, days=MSNR_BACKTEST_DAYS, **params):
-    """Fetches MSNR_BACKTEST_DAYS of MSNR_STRUCTURE_TF, MSNR_ENTRY_TF, and
-    MSNR_HIGHER_TF history and runs msnr_run_backtest() over the whole
-    window. Structure candles are fetched with extra lookback (structure TF is
-    coarser, so this stays cheap) so the earliest entry-TF bars already
-    have a real A/V pair to test against. Accepts the same param
-    overrides as msnr_detect_signals — used both for a plain module-
-    defaults backtest and, via msnr_optimize_symbol(), a specific
-    symbol's autotuned params. Deliberately left untouched by the
-    v0.99.126 add-on feature (see msnr_addon_backtest_symbol() instead)
-    — this stays the primary-only path msnr_optimize_symbol()'s own
-    grid search depends on.
-    v0.99.305 — also fetches MSNR_HIGHER_TF (4h) with the SAME extra
-    lookback as structure_candles (coarser still, so this stays cheap
-    too), passed through to msnr_run_backtest() for the 4h gating/TP
-    logic — see msnr_detect_signals()'s own docstring for the full
-    "why"."""
-    now = time.time()
-    structure_start = now - (days + 20) * 86400
-    structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, now)
-    higher_candles = get_candles_range(symbol, MSNR_HIGHER_TF, structure_start, now)
-    entry_start = now - days * 86400
-    entry_candles = get_candles_range(symbol, MSNR_ENTRY_TF, entry_start, now)
-    if len(structure_candles) < MSNR_ATR_PERIOD + 10 or len(entry_candles) < 10:
-        return []
-    return msnr_run_backtest(structure_candles, entry_candles, higher_candles, **params)
-
-
-def msnr_addon_backtest_symbol(symbol, days=MSNR_BACKTEST_DAYS):
-    """v0.99.126 — separate from msnr_backtest_symbol() deliberately
-    (see that function's own docstring): fetches structure/entry/add-on
-    (MSNR_STRUCTURE_TF/MSNR_ENTRY_TF/MSNR_ADDON_TF) history over the
-    same window, runs msnr_detect_signals() for the primary trades, then
-    msnr_detect_addon_signals() for the add-on ("добір") second position
-    on each — tracking each pool's outcome on its OWN candle series
-    (primary on entry_candles, add-on on addon_candles, since an add-on
-    signal's own "index" refers into addon_candles). Returns (primary_
-    results, addon_results), same per-trade dict shape as msnr_run_
-    backtest()'s own results, each with "is_addon" already set."""
-    now = time.time()
-    structure_start = now - (days + 20) * 86400
-    structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, now)
-    higher_candles = get_candles_range(symbol, MSNR_HIGHER_TF, structure_start, now)  # v0.99.305 — see msnr_detect_signals()'s own docstring
-    entry_start = now - days * 86400
-    entry_candles = get_candles_range(symbol, MSNR_ENTRY_TF, entry_start, now)
-    addon_candles = get_candles_range(symbol, MSNR_ADDON_TF, entry_start, now)
-    if len(structure_candles) < MSNR_ATR_PERIOD + 10 or len(entry_candles) < 10:
-        return [], []
-    sigs, _pivots = msnr_detect_signals(structure_candles, entry_candles, higher_candles)
-    primary_results = []
-    for sig in sigs:
-        result, exit_time = msnr_track_outcome(entry_candles, sig)
-        rr = msnr_net_rr(sig["entry"], sig["sl"], sig["tp"])   # v0.99.392
-        primary_results.append({
-            "time": sig["time"], "direction": sig["direction"],
-            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
-            "level": sig["level"], "level_type": sig["level_type"],
-            "opposite_level": sig.get("opposite_level"),
-            "result": result, "exit_time": exit_time, "rr": rr,
-            "is_addon": False,
-        })
-    addon_results = []
-    if MSNR_ADDON_ENABLED and addon_candles and sigs:
-        addon_sigs = msnr_detect_addon_signals(addon_candles, sigs)
-        for asig in addon_sigs:
-            result, exit_time = msnr_track_outcome(addon_candles, asig)
-            rr = msnr_net_rr(asig["entry"], asig["sl"], asig["tp"])   # v0.99.392
-            addon_results.append({
-                "time": asig["time"], "direction": asig["direction"],
-                "entry": asig["entry"], "sl": asig["sl"], "tp": asig["tp"],
-                "level": asig["level"], "level_type": asig["level_type"],
-                "opposite_level": asig.get("opposite_level"),
-                "result": result, "exit_time": exit_time, "rr": rr,
-                "is_addon": True, "primary_time": asig["primary_time"],
-            })
-    return primary_results, addon_results
-
-
-def msnr_ranking_score(r_values, losses_count, z=None):
-    """Lower-confidence-bound on mean R — same technique and reasoning as
-    ft5_ranking_score() (see that function's own docstring for the full
-    multi-iteration story of why raw mean/avg_pnl isn't enough), adapted
-    from "% pnl" to "R multiple": score = mean - t_critical * stderr,
-    with max(0, MSNR_RANK_PRIOR_TARGET - losses_count) synthetic -1R
-    pseudo-losses blended in first. MSNR's structural loss is already
-    exactly -1R by construction (the stop defines what 1R even means),
-    so — unlike FT5, which needed a lookup at its fixed stoploss_pct —
-    the prior needs no external lookup at all. Guards a small all-win
-    combo (a handful of lucky signals, zero real losses YET) from
-    outranking a larger, steadier one purely because it hasn't happened
-    to lose yet; 2+ real losses are trusted as-is."""
-    n = len(r_values) if r_values else 0
-    if n == 0:
-        return -999
-    prior_n = max(0, MSNR_RANK_PRIOR_TARGET - losses_count)
-    prior_r = r_values + [-1.0] * prior_n
-    pn = len(prior_r)
-    mean = sum(prior_r) / pn
-    if pn < 2:
-        return mean
-    zz = z if z is not None else t_critical(pn - 1)
-    var = sum((r - mean) ** 2 for r in prior_r) / (pn - 1)
-    stderr = math.sqrt(var) / math.sqrt(pn)
-    return mean - zz * stderr
-
-
-def _msnr_filter_checkpoint(trades, symbol, leverage_ceiling):
-    """v0.99.86, per direct user request ("хочу видеть не только сделок
-    до и после фильтров, а так же винрейт и доход до и после, чтобы
-    понимать эффективность фильтров"): a reusable snapshot of {n,
-    winrate, income} for a given trade list, taken at each filter
-    checkpoint in msnr_optimize_symbol() below. Before this, the only
-    per-filter visibility was a trade COUNT delta (rr_filtered_count
-    etc) — no way to tell whether a filter that removed, say, 8 trades
-    actually IMPROVED the remaining set's winrate/income or just
-    shrank the sample for no real gain.
-    Income is computed the same honest way the final display number is
-    — a FRESH msnr_optimal_leverage_for_symbol() search against THIS
-    checkpoint's own trade list, not the symbol's final leverage reused
-    across every checkpoint. Reusing one fixed leverage would silently
-    conflate "did this filter change the edge" with "does the FINAL
-    leverage happen to suit this intermediate set" — using each
-    checkpoint's own best leverage answers the question actually being
-    asked: "if you traded exactly this set, on its own merits, what
-    would it look like."
-    Returns {"n": int, "winrate": float|None, "income_pct": float|None}
-    — None values propagate the same "not enough evidence" meaning
-    msnr_compound_return()/msnr_summarize_backtest() already use, not
-    a silent 0."""
-    closed = [t for t in trades if msnr_trade_r(t) is not None]   # v0.99.400 — incl. TIME_EXIT
-    if not closed:
-        return {"n": 0, "winrate": None, "income_pct": None}
-    summary = msnr_summarize_backtest(trades)
-    lev = msnr_optimal_leverage_for_symbol(trades, leverage_ceiling, symbol=symbol)
-    compound = msnr_compound_return(trades, leverage=lev)
-    return {
-        "n": len(closed),
-        "winrate": summary["win_rate"],
-        "income_pct": compound["return_pct"] if compound else None,
-    }
-
-
-def msnr_filter_by_min_rr(trades, min_rr=None):
-    """v0.99.141 — "a 1:2 minimum risk-to-reward filter is standard"
-    (repeated across independent sources researched for Sweep's own
-    filters, applies just as well here): a UNIFORM floor applied the
-    SAME way to every symbol, deliberately separate from msnr_symbol_
-    rr_skip_min/max above (those derive a per-symbol threshold from
-    where THIS symbol's own trades statistically stop paying off — a
-    different question from "is a 1:2 floor a good idea everywhere").
-    A trade with no computed rr (shouldn't normally happen) is kept —
-    nothing to judge isn't a reason to drop it."""
-    min_rr = min_rr if min_rr is not None else MSNR_MIN_RR_FILTER
-    return [t for t in trades if t.get("rr") is None or t["rr"] >= min_rr]
-
-
-def msnr_filter_by_htf_trend(trades, bias_series, htf_interval_sec):
-    """v0.99.141 — same higher-timeframe trend concept as LSW's own
-    lsw_filter_signals_by_htf_trend() (v0.99.121), reused here via the
-    shared lsw_htf_bias_at() lookup rather than duplicating that logic:
-    a LONG only survives if the HTF bias at its own entry time is UP or
-    NEUTRAL, a SHORT only survives if it's DOWN or NEUTRAL. A trade
-    whose own HTF bar hadn't closed yet (bias is None) is dropped too —
-    conservative, matching LSW's own version. Reads "time" (not
-    "entry_time" — MSNR's own trade dicts use a different key than
-    LSW's signal dicts) and "direction", both already present on every
-    MSNR trade dict."""
-    kept = []
-    for t in trades:
-        bias = lsw_htf_bias_at(bias_series, t["time"], htf_interval_sec)
-        if bias is None:
-            continue
-        if t["direction"] == "LONG" and bias == "DOWN":
-            continue
-        if t["direction"] == "SHORT" and bias == "UP":
-            continue
-        kept.append(t)
-    return kept
-
-
-def _msnr_recompute_summary_score(best, best_results):
-    """v0.99.26 — shared recompute step reused by every post-hoc filter
-    in msnr_optimize_symbol() (skip_rr_min, liquidation, skip_sl_pct_
-    min): keeps trades/wins/losses/timeouts/winrate/avg_rr/median_rr/
-    expectancy_r and score in sync with whatever subset of best_results
-    survived filtering, in ONE place instead of near-identical copies
-    at each filter step that could quietly drift apart over time."""
-    filtered_summary = msnr_summarize_backtest(best_results)
-    best["trades"] = filtered_summary["n"]
-    best["wins"] = filtered_summary["wins"]
-    best["losses"] = filtered_summary["losses"]
-    best["timeouts"] = filtered_summary["timeouts"]
-    best["winrate"] = filtered_summary["win_rate"]
-    best["avg_rr"] = filtered_summary["avg_rr"]
-    best["median_rr"] = filtered_summary["median_rr"]
-    best["expectancy_r"] = filtered_summary["expectancy_r"]
-    r_values = [r for r in (msnr_trade_r(t) for t in best_results) if r is not None]   # v0.99.400 — incl. TIME_EXIT
-    best["score"] = round(msnr_ranking_score(r_values, sum(1 for r in r_values if r < 0)), 4) if r_values else None
-
-
-def msnr_oos_split_time(entry_candles):
-    """v0.99.392 — start of the held-out (out-of-sample) part of the
-    backtest window: its last MSNR_OOS_TEST_FRAC share."""
-    t0, t1 = entry_candles[0]["time"], entry_candles[-1]["time"]
-    return t0 + (t1 - t0) * (1 - MSNR_OOS_TEST_FRAC)
-
-
-def msnr_is_train_trade(t, split_time):
-    """v0.99.392 — a closed trade that opened AND resolved before the
-    split, so choosing params on it never sees held-out prices."""
-    return (msnr_trade_r(t) is not None and t["time"] < split_time
-            and t.get("exit_time") is not None and t["exit_time"] < split_time)
-
-
-def msnr_oos_stats(trades, split_time):
-    """v0.99.392 — closed trades opened in the held-out part: n, win-rate
-    and expectancy in net R (msnr_net_rr units: WIN +rr, LOSS -1)."""
-    test = [t for t in trades if t["time"] >= split_time and msnr_trade_r(t) is not None]
-    if not test:
-        return {"n": 0, "wins": 0, "winrate": None, "expectancy_r": None}
-    wins = sum(1 for t in test if t["result"] == "WIN")
-    r_values = [msnr_trade_r(t) for t in test]   # v0.99.400 — incl. TIME_EXIT
-    return {"n": len(test), "wins": wins, "winrate": round(wins / len(test) * 100, 1),
-            "expectancy_r": round(sum(r_values) / len(r_values), 2) if r_values else None}
-
-
-def msnr_grid_core(structure_candles, entry_candles, higher_candles, now):
-    """v0.99.375 — the pure-CPU grid search of msnr_optimize_symbol():
-    returns {"best", "best_results", "tried"}.
-    v0.99.392 — the combo is picked by its score on the TRAINING part
-    only (msnr_is_train_trade(): before msnr_oos_split_time()). Before,
-    27 combos were scored on the same 40 days they were then judged on —
-    the best of 27 in-sample results is inflated by luck almost by
-    definition, which is exactly "great backtest, only stops live". The
-    held-out part is judged afterwards in msnr_optimize_symbol()."""
-    best = None
-    best_score = None
-    best_results = []
-    tried = []
-    split_time = msnr_oos_split_time(entry_candles)
-    for min_leg_atr in MSNR_PARAM_GRID_MIN_LEG_ATR:
-        for qm_zone_pct in MSNR_PARAM_GRID_QM_ZONE_PCT:
-            for qm_lookback in MSNR_PARAM_GRID_QM_LOOKBACK:
-                results = msnr_run_backtest(structure_candles, entry_candles, higher_candles,
-                                             min_leg_atr=min_leg_atr, qm_zone_pct=qm_zone_pct,
-                                             qm_lookback=qm_lookback)
-                tried.append(len(results))
-                closed = [r for r in results if msnr_is_train_trade(r, split_time)]   # v0.99.392
-                if len(closed) < MSNR_MIN_BACKTEST_TRADES:
-                    continue
-                r_values = [msnr_trade_r(r) for r in closed]   # v0.99.400 — incl. TIME_EXIT
-                losses_count = sum(1 for r in r_values if r < 0)
-                score = msnr_ranking_score(r_values, losses_count)
-                if best is None or score > best_score:
-                    summary = msnr_summarize_backtest(results)
-                    full_closed = summary["wins"] + summary["losses"]
-                    best = {
-                        "min_leg_atr": min_leg_atr, "qm_zone_pct": qm_zone_pct, "qm_lookback_bars": qm_lookback,
-                        "trades": len(results), "wins": summary["wins"], "losses": summary["losses"],
-                        "timeouts": len(results) - full_closed,
-                        "train_closed_n": len(closed), "oos_split_time": split_time,
-                        "winrate": summary["win_rate"], "avg_rr": summary["avg_rr"],
-                        "median_rr": summary["median_rr"], "expectancy_r": summary["expectancy_r"],
-                        "score": round(score, 4), "optimized_at": now, "candles_used": len(entry_candles),
-                    }
-                    best_score = score
-                    best_results = results
-    return {"best": best, "best_results": best_results, "tried": tried}
-
-
-def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
-    """Grid search over (min_leg_atr, qm_zone_pct, qm_lookback) —
-    MSNR_PARAM_GRID_MIN_LEG_ATR x MSNR_PARAM_GRID_QM_ZONE_PCT x
-    MSNR_PARAM_GRID_QM_LOOKBACK, 27 combos. Candles fetched ONCE per
-    symbol; msnr_run_backtest() is pure CPU per combo (no network calls
-    inside the grid loop), same cost shape as ft5_optimize_symbol()'s
-    36-combo search. Selected by msnr_ranking_score() rather than raw
-    win-rate or avg_rr, for the same reason FT5 needed it: a lucky small
-    sample, or wins/losses landing unevenly across RR, shouldn't
-    outrank a larger steadier combo just because its raw average looks
-    higher. Falls back to the middle of the grid (~module defaults) if
-    no combo clears MSNR_MIN_BACKTEST_TRADES closed trades.
-    Returns (override_dict, trades_list, raw_trades_list) — trades_list
-    is the winning combo's backtest with skip_rr_min-failing (v0.99.23),
-    beyond-liquidation (v0.99.26), and skip_sl_pct_min-failing (v0.99.26)
-    trades already filtered out, in that order (see below); raw_trades_
-    list is the SAME winning combo's backtest UNFILTERED, kept
-    separately for the global pooled-across-symbols MSNR_MAX_RR autotune
-    and the /api/msnr/status rr_buckets display — those deliberately
-    need the full picture (including whatever this symbol's own filters
-    just removed) since they're a different mechanism judging RR
-    badness pooled across the WHOLE universe, not this symbol alone;
-    filtering per-symbol first would quietly starve that pooled
-    evidence."""
-    now = time.time()
-    structure_start = now - (days + 20) * 86400
-    structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, now)
-    higher_candles = get_candles_range(symbol, MSNR_HIGHER_TF, structure_start, now)  # v0.99.305 — fetched once, reused across all 27 grid combos below, same reasoning as structure_candles' own comment
-    entry_start = now - days * 86400
-    entry_candles = get_candles_range(symbol, MSNR_ENTRY_TF, entry_start, now)
-    if len(structure_candles) < MSNR_ATR_PERIOD + 10 or len(entry_candles) < 10:
-        # v0.99.97, live crash report ("not enough values to unpack
-        # (expected 3, got 2)"), repeated for MRNA_USDT specifically:
-        # this early-exit path (insufficient candle history to even
-        # attempt the grid search — e.g. a newly-listed contract with
-        # too little historical data yet) had drifted out of sync with
-        # this function's own documented 3-tuple contract (override,
-        # trades_list, raw_trades_list), returning only 2 values. The
-        # sole caller, msnr_backtest_symbol(), always unpacks assuming
-        # 3 — a symbol landing here crashed that unpacking on every
-        # single backtest cycle, not a transient issue. Fixed to match
-        # the documented contract: both trade lists are empty (there's
-        # no backtest to report), not just the override.
-        return {"error": "not enough history"}, [], []
-    # v0.99.375 — the 27-combo grid runs in msnr_grid_core() (possibly in a
-    # worker process on another core); everything after it stays here.
-    _g = calc_run("msnr_grid_core", {"structure_candles": structure_candles, "entry_candles": entry_candles,
-                                     "higher_candles": higher_candles, "now": now})
-    best, best_results, tried = _g["best"], _g["best_results"], _g["tried"]
-    if best is None:
-        mid_atr = MSNR_PARAM_GRID_MIN_LEG_ATR[len(MSNR_PARAM_GRID_MIN_LEG_ATR) // 2]
-        mid_zone = MSNR_PARAM_GRID_QM_ZONE_PCT[len(MSNR_PARAM_GRID_QM_ZONE_PCT) // 2]
-        mid_lookback = MSNR_PARAM_GRID_QM_LOOKBACK[len(MSNR_PARAM_GRID_QM_LOOKBACK) // 2]
-        best_results = msnr_run_backtest(structure_candles, entry_candles, higher_candles,   # v0.99.392 — was missing: fallback ran without the 4h gate live always applies
-                                          min_leg_atr=mid_atr, qm_zone_pct=mid_zone, qm_lookback=mid_lookback)
-        raw_results = best_results
-        combos = len(MSNR_PARAM_GRID_MIN_LEG_ATR) * len(MSNR_PARAM_GRID_QM_ZONE_PCT) * len(MSNR_PARAM_GRID_QM_LOOKBACK)
-        leverage_ceiling = msnr_symbol_contract_max_leverage(symbol)
-        best = {
-            "min_leg_atr": mid_atr, "qm_zone_pct": mid_zone, "qm_lookback_bars": mid_lookback,
-            "trades": len(best_results), "wins": 0, "losses": 0, "timeouts": 0,
-            "winrate": None, "avg_rr": None, "median_rr": None, "expectancy_r": None, "score": None,
-            "optimized_at": now, "candles_used": len(entry_candles), "skip_rr_min": None,
-            "skip_rr_max": None,
-            "skip_sl_pct_min": None, "liquidation_filtered_count": 0, "skip_hours": [],
-            "raw_closed_n": 0, "rr_filtered_count": 0, "sl_filtered_count": 0, "hours_filtered_count": 0,
-            "skip_volume_below": None, "volume_filtered_count": 0,
-            "filter_checkpoints": [],
-            "effective_leverage": msnr_symbol_effective_leverage(symbol),
-            "leverage_ceiling": leverage_ceiling,
-            "optimal_leverage": msnr_optimal_leverage_for_symbol(best_results, leverage_ceiling, symbol=symbol),
-            "note": f"insufficient closed trades across all {combos} combos tried "
-                    f"(max {max(tried) if tried else 0}, need {MSNR_MIN_BACKTEST_TRADES}); "
-                    f"using middle-of-grid defaults",
-        }
-    else:
-        # v0.99.86, per direct user request ("много слабых результатов
-        # в msnr, по 50 сделок а доход околонулевой... отсечение
-        # всегда убыточного диапазона RR, как снизу так и сверху...
-        # хочу видеть винрейт и доход до и после [каждого фильтра]"):
-        # leverage_ceiling/effective_leverage moved up here (used to sit
-        # right before the liquidation filter) — every checkpoint below
-        # needs leverage_ceiling for its own Kelly search, not just the
-        # liquidation filter.
-        best["effective_leverage"] = msnr_symbol_effective_leverage(symbol)
-        best["leverage_ceiling"] = msnr_symbol_contract_max_leverage(symbol)
-        best["raw_closed_n"] = best["wins"] + best["losses"]
-        raw_results = best_results
-        # v0.99.164 — simplified to raw + solo previews + htf_trend only.
-        # All per-symbol auto-derived filters (rr_range, liquidation,
-        # sl_pct, hours, volume, min_rr) removed per direct user decision
-        # ("убрать полностью из кода, они не работают") — they were adding
-        # ~6 extra _msnr_filter_checkpoint() calls (each runs a fresh Kelly
-        # leverage search + compound sim) per symbol per backtest cycle for
-        # no benefit. Kept: solo previews for rr_range and volume so the
-        # red label info (skip rr, skip объём) is still visible as separate
-        # columns; htf_trend (the only filter that actually works).
-        checkpoints = [{"stage": "raw", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])}]
-        # RR-range filter (v0.99.165: applied when MSNR_PER_SYMBOL_FILTERS_ENABLED, solo preview always)
-        rr_floor, rr_ceiling = msnr_symbol_rr_range(best_results)
-        best["skip_rr_min"] = rr_ceiling
-        best["skip_rr_max"] = rr_floor
-        rr_filtered = [t for t in best_results if t["rr"] is None
-                        or ((rr_ceiling is None or t["rr"] < rr_ceiling)
-                            and (rr_floor is None or t["rr"] >= rr_floor))]
-        if MSNR_PER_SYMBOL_FILTERS_ENABLED:
-            before_rr = len(best_results)
-            best_results = rr_filtered
-            best["rr_filtered_count"] = before_rr - len(best_results)
-            _msnr_recompute_summary_score(best, best_results)
-            checkpoints.append({"stage": "rr_range", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
-        else:
-            best["rr_filtered_count"] = 0
-            checkpoints.append({"stage": "rr_range", **_msnr_filter_checkpoint(rr_filtered, symbol, best["leverage_ceiling"])})
-        # Volume filter (v0.99.165: applied when MSNR_PER_SYMBOL_FILTERS_ENABLED, solo preview always)
-        best["skip_volume_below"] = msnr_symbol_volume_skip_below(best_results)
-        vol_filtered = best_results
-        if best["skip_volume_below"] is not None:
-            skip_vol = best["skip_volume_below"]
-            vol_filtered = [t for t in best_results if t.get("volume_ratio") is None or t["volume_ratio"] >= skip_vol]
-        if MSNR_PER_SYMBOL_FILTERS_ENABLED:
-            before_vol = len(best_results)
-            best_results = vol_filtered
-            best["volume_filtered_count"] = before_vol - len(best_results)
-            _msnr_recompute_summary_score(best, best_results)
-            checkpoints.append({"stage": "volume", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
-        else:
-            best["volume_filtered_count"] = 0
-            checkpoints.append({"stage": "volume", **_msnr_filter_checkpoint(vol_filtered, symbol, best["leverage_ceiling"])})
-        # Fields for removed filters (backward compat)
-        best["skip_sl_pct_min"] = None
-        best["liquidation_filtered_count"] = 0
-        best["skip_hours"] = []
-        best["hours_filtered_count"] = 0
-        best["sl_filtered_count"] = 0
-        best["min_rr_filtered_count"] = 0
-        # Liquidation filter — ALWAYS applied (deterministic, not statistical):
-        # a trade whose SL is past the liquidation level can never be closed
-        # at that SL price in reality. Returned as v0.99.165 per direct user
-        # report ("AAVE вход 97, стоп 90, плечо 67x — это за зоной
-        # ликвидации"). Solo preview always computed too.
-        before_liq = len(best_results)
-        liq_filtered = [t for t in best_results
-                         if not msnr_trade_beyond_liquidation(symbol, t["direction"], t["entry"], t["sl"],
-                                                               leverage=best["effective_leverage"])]
-        liq_rejected = [t for t in best_results
-                         if msnr_trade_beyond_liquidation(symbol, t["direction"], t["entry"], t["sl"],
-                                                          leverage=best["effective_leverage"])]
-        best_results = liq_filtered
-        best["liquidation_filtered_count"] = before_liq - len(best_results)
-        if best["liquidation_filtered_count"]:
-            _msnr_recompute_summary_score(best, best_results)
-        checkpoints.append({"stage": "liquidation", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
-        # v0.99.167 — solo checkpoint for the REJECTED trades (those that
-        # failed the liquidation filter) — per direct user question: "may
-        # these trades actually be good, just with too high leverage?
-        # Could we enter them with adaptive leverage like Sweep does?"
-        # This column shows WR/n of exactly those trades, so if they have
-        # a good winrate the idea of entering them with SL-based leverage
-        # (not the fixed Kelly leverage that caused the liquidation issue)
-        # can be evaluated with actual evidence rather than guessing.
-        checkpoints.append({"stage": "liq_rejected", **_msnr_filter_checkpoint(liq_rejected, symbol, best["leverage_ceiling"])})
-        # HTF trend filter — the only filter actually applied to best_results
-        htf_candles = None
-        try:
-            htf_interval_sec = INTERVAL_SECONDS.get(MSNR_HTF_INTERVAL, 14400)
-            htf_fetch_start = now - (days + 20) * 86400
-            htf_candles = get_candles_range(symbol, MSNR_HTF_INTERVAL, htf_fetch_start, now)
-        except Exception as e:
-            log_error(f"msnr_optimize_symbol {symbol}: HTF fetch failed: {e}")
-        if htf_candles and len(htf_candles) >= MSNR_HTF_EMA_PERIOD:
-            bias_series = lsw_htf_bias_series(htf_candles, period=MSNR_HTF_EMA_PERIOD, buffer_pct=MSNR_HTF_TREND_BUFFER_PCT)
-            htf_candidates = msnr_filter_by_htf_trend(best_results, bias_series, htf_interval_sec)
-        else:
-            htf_candidates = best_results
-        if MSNR_HTF_FILTER_ENABLED:
-            before_htf = len(best_results)
-            best_results = htf_candidates if (htf_candles and len(htf_candles) >= MSNR_HTF_EMA_PERIOD) else []
-            best["htf_filtered_count"] = before_htf - len(best_results)
-            _msnr_recompute_summary_score(best, best_results)
-            checkpoints.append({"stage": "htf_trend", **_msnr_filter_checkpoint(best_results, symbol, best["leverage_ceiling"])})
-        else:
-            checkpoints.append({"stage": "htf_trend", **_msnr_filter_checkpoint(htf_candidates, symbol, best["leverage_ceiling"])})
-        best["filter_checkpoints"] = checkpoints
-
-    # v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше не
-    # стало, будто даже хуже" -> Kelly/optimal-f search instead of a
-    # fixed stop-width target): ONE flat leverage for this symbol,
-    # chosen to maximize long-run compounded growth against its OWN
-    # (already-filtered) trade history — see msnr_optimal_leverage_
-    # for_symbol()'s own docstring for the full reasoning. Computed
-    # against best_results AFTER every filter above (skip_rr_min,
-    # liquidation, skip_sl_pct_min) — the same final trade set the
-    # compound simulation right below already uses, not the raw
-    # unfiltered history.
-    # v0.99.400 — Kelly leverage is searched on the TRAIN trades only: the
-    # leverage live trades with must not be tuned on the part used to judge it
-    _split = msnr_oos_split_time(entry_candles)
-    _train = [t for t in best_results if msnr_is_train_trade(t, _split)]
-    best["optimal_leverage"] = msnr_optimal_leverage_for_symbol(_train, best.get("leverage_ceiling"), symbol=symbol)
-    # v0.99.24, per direct user request: a $ compounding simulation
-    # (start MSNR_COMPOUND_START_BALANCE, reinvest the whole balance
-    # every trade) over best_results — the FILTERED list (skip_rr_min +
-    # v0.99.26's liquidation/skip_sl_pct_min filters), matching what
-    # this symbol would actually be traded as, same reasoning as the
-    # R-multiple stats above using the filtered set rather than
-    # raw_results. v0.99.47: leverage is this symbol's own Kelly-optimal
-    # value (just computed above) — flat for the whole simulation, not
-    # varied per-trade by stop width (v0.99.46, reverted — see msnr_
-    # compound_trail()'s own docstring for why).
-    compound = msnr_compound_return(best_results, leverage=best["optimal_leverage"])
-    best["compound_final_balance"] = compound["final_balance"] if compound else None
-    best["compound_return_pct"] = compound["return_pct"] if compound else None
-    best["compound_blown_at"] = compound["blown_at_trade"] if compound else None
-    # v0.99.27, per direct user request ("просто не попадает в топ"):
-    # a hard gate, not a score penalty — a symbol whose own $ compound
-    # simulation lost money (return_pct <= 0, which trivially includes
-    # a full blow-up to 0) is unfit for ranking/autotrade regardless of
-    # how good its R-multiple score looks; msnr_rank_by_winrate_sample()
-    # excludes it outright and api_msnr_status()'s sort sinks it below
-    # every symbol that passed, so it structurally can't land near the
-    # top of the table the user actually looks at. None (not False) when
-    # there's no compound result to judge at all (e.g. zero closed
-    # trades survived filtering) — "no evidence either way" shouldn't
-    # silently read as "passed."
-    best["stress_test_failed"] = (best["compound_return_pct"] is not None
-                                   and best["compound_return_pct"] <= 0)
-    # v0.99.392 — out-of-sample check on the held-out last MSNR_OOS_TEST_FRAC
-    # of the window (params were chosen without it, see msnr_grid_core()).
-    # A coin whose held-out trades lose money net of fees is excluded from
-    # top/autotrade the same way a failed $ simulation is — its good
-    # full-window numbers are what the fitting found, not what trading got.
-    oos_split = msnr_oos_split_time(entry_candles)
-    oos = msnr_oos_stats(best_results, oos_split)
-    best["oos_split_time"] = oos_split
-    best["oos_n"] = oos["n"]
-    best["oos_winrate"] = oos["winrate"]
-    best["oos_expectancy_r"] = oos["expectancy_r"]
-    best["oos_failed"] = (oos["n"] >= MSNR_OOS_MIN_TRADES and oos["expectancy_r"] is not None
-                          and oos["expectancy_r"] <= 0)
-    best["stress_reason"] = "compound" if best["stress_test_failed"] else None
-    # v0.99.400 — the coin is PICKED on its train part only (win rate, $
-    # compounding, net R); the test part is judged for all picked coins
-    # together (msnr_pooled_verdict()). A per-coin "drop it if its test
-    # lost" gate (v0.99.392) used the test to select coins — dropped.
-    _train = [t for t in best_results if msnr_is_train_trade(t, oos_split)]
-    _tr = [msnr_trade_r(t) for t in _train]
-    best["train_n"] = len(_tr)
-    best["train_winrate"] = round(sum(1 for t in _train if t["result"] == "WIN") / len(_tr) * 100, 1) if _tr else None
-    best["train_expectancy_r"] = round(sum(_tr) / len(_tr), 3) if _tr else None
-    _tc = msnr_compound_return(_train, leverage=best["optimal_leverage"]) if _tr else None
-    best["train_compound_return_pct"] = _tc["return_pct"] if _tc else None
-    best["picked"] = bool(len(_tr) >= MSNR_MIN_TRAIN_TRADES and best["train_expectancy_r"] is not None
-                          and best["train_expectancy_r"] > 0)
-    best["cost_model"] = "net"   # v0.99.392 — rr/expectancy/score are net of fees + slippage
-    best["model"] = "v400"   # v0.99.400 — one position per coin, time exit, train-only picking
-    return best, best_results, raw_results
-
-
-def msnr_summarize_backtest(results):
-    total = len(results)
-    if not total:
-        return {"n": 0, "win_rate": None, "wins": 0, "losses": 0, "timeouts": 0,
-                "avg_rr": None, "median_rr": None, "expectancy_r": None}
-    wins = sum(1 for r in results if r["result"] == "WIN")
-    losses = sum(1 for r in results if r["result"] == "LOSS")
-    time_exits = sum(1 for r in results if r["result"] == "TIME_EXIT")   # v0.99.400
-    timeouts = sum(1 for r in results if r["result"] == "TIMEOUT") + time_exits
-    closed = wins + losses
-    win_rate = round(wins / closed * 100, 1) if closed else None
-    rrs = [r["rr"] for r in results if r["rr"] is not None]
-    avg_rr = round(sum(rrs) / len(rrs), 2) if rrs else None
-    if rrs:
-        srr = sorted(rrs)
-        mid = len(srr) // 2
-        median_rr = round(srr[mid] if len(srr) % 2 else (srr[mid - 1] + srr[mid]) / 2, 2)
-    else:
-        median_rr = None
-    # Expectancy in R, using each closed trade's OWN rr (not just avg_rr) —
-    # win contributes +its own rr, loss contributes -1, timeout excluded
-    # (no real outcome to score). This is what actually tells you whether
-    # the ~50% win-rate is sound: with real 10R+ targets, even a coin-flip
-    # win-rate should show strongly positive expectancy.
-    r_values = [x for x in (msnr_trade_r(r) for r in results) if x is not None]   # v0.99.400 — incl. TIME_EXIT
-    expectancy_r = round(sum(r_values) / len(r_values), 2) if r_values else None
-    return {"n": total, "win_rate": win_rate, "wins": wins, "losses": losses, "timeouts": timeouts,
-            "avg_rr": avg_rr, "median_rr": median_rr, "expectancy_r": expectancy_r}
-
-
-MSNR_RR_BUCKETS = [(0, 3), (3, 5), (5, 7), (7, 10), (10, float("inf"))]  # v0.99.11 — bucket boundaries for msnr_rr_bucket_stats(); chosen so the user's own reported breakpoint (rr>6 consistently failing) falls cleanly inside the 5-7 bucket, not split across two
-
-
-def msnr_rr_bucket_stats(trades, bucket_scheme=None):
-    """Buckets CLOSED trades (WIN/LOSS only — TIMEOUT has no real outcome
-    to bucket by) by their OWN realized rr into MSNR_RR_BUCKETS, computing
-    win-rate per bucket. Per direct user observation: pooled stats (avg/
-    median RR, one overall win-rate) can't reveal a pattern like "rr>6
-    trades consistently hit stop, rr<6 trades win normally" — that only
-    becomes visible once trades are actually split by their own RR rather
-    than averaged together. Feeds both the panel's own display (so the
-    pattern the user described becomes directly visible, not just
-    assumed from one example) and _risk_autotune_msnr_max_rr() below.
-    v0.99.12: returned dicts deliberately do NOT include a raw "hi" key
-    (only "lo") — CRITICAL FIX: MSNR_RR_BUCKETS' last bucket's hi is
-    float("inf"), and jsonify() happily serializes that as the literal
-    token `Infinity`, which is NOT valid JSON (RFC 8259 only allows
-    finite numbers) — the browser's JSON.parse() then throws a
-    SyntaxError on it, confirmed directly (`node -e "JSON.parse(...)"`)
-    to reproduce the exact failure. Since refreshMsnr()'s very first
-    line awaits response.json() with no try/catch around it, that parse
-    failure meant the WHOLE function threw before panel.innerHTML was
-    ever set — explaining the reported "black screen" (empty MSNR tab,
-    every other tab fine) precisely. "hi" was never actually consumed
-    anywhere (the label string already encodes both boundaries as text,
-    and _risk_autotune_msnr_max_rr() only ever reads "lo") — dropping it
-    entirely is safer than sanitizing inf->None at the jsonify boundary,
-    since it removes the whole class of "some other future numeric
-    field might also carry inf into a JSON response" risk, not just
-    this one instance of it.
-    v0.99.89 — accepts an optional `bucket_scheme` (a list of (lo, hi)
-    tuples, same shape as MSNR_RR_BUCKETS) to support msnr_symbol_rr_
-    range()'s own granularity cascade (see that function's docstring —
-    found via a direct user report, "на некоторых монетах фильтры
-    никакие не применены," after v0.99.86 shipped this filter with a
-    FIXED 5-bucket scheme and no fallback, unlike the hour/volume
-    filters which already had one since v0.99.60). Defaults to the
-    canonical MSNR_RR_BUCKETS when omitted, preserving the EXACT
-    existing behavior for the pooled/display table below, which always
-    wants the fixed 5-bucket scheme regardless of whatever granularity
-    a per-symbol filter cascade happens to be trying."""
-    scheme = bucket_scheme if bucket_scheme is not None else MSNR_RR_BUCKETS
-    buckets = []
-    for lo, hi in scheme:
-        subset = [t for t in trades if t.get("result") in ("WIN", "LOSS") and t.get("rr") is not None and lo <= t["rr"] < hi]
-        label = f"{lo}-{hi}" if hi != float("inf") else f"{lo}+"
-        if not subset:
-            buckets.append({"range": label, "lo": lo, "n": 0, "wins": 0, "losses": 0, "winrate": None, "avg_rr": None})
-            continue
-        wins = sum(1 for t in subset if t["result"] == "WIN")
-        n = len(subset)
-        avg_rr = round(sum(t["rr"] for t in subset) / n, 2)
-        buckets.append({"range": label, "lo": lo, "n": n, "wins": wins,
-                         "losses": n - wins, "winrate": round(wins / n * 100, 1), "avg_rr": avg_rr})
-    return buckets
-
-
-MSNR_RR_BUCKET_SCHEMES = [
-    MSNR_RR_BUCKETS,  # finest — v0.99.11's original 5-bucket split
-    [(0, 5), (5, 10), (10, float("inf"))],  # medium — 3 buckets
-    [(0, 7), (7, float("inf"))],  # coarsest — 2 buckets
-]  # v0.99.89, per direct user report ("на некоторых монетах фильтры никакие не применены") after v0.99.86 shipped msnr_symbol_rr_range() with ONLY the fixed 5-bucket scheme and no fallback — a modest total sample (e.g. the ~50-trade symbols the earlier report itself described) splits into ~10/bucket on average across 5 buckets, already below MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE=15 even before accounting for any real unevenness, so NONE of the 5 buckets could ever reach significance and the filter silently found nothing for those symbols. Mirrors the exact cascade shape msnr_symbol_skip_hours()/msnr_symbol_volume_skip_below() already use (MSNR_HOUR_GROUP_WIDTHS/MSNR_VOLUME_QUANTILE_GROUPS, both v0.99.60) — finest tried first, progressively coarser as fallback, first scheme that finds ANYTHING significant wins.
-
-
-def msnr_symbol_rr_range(trades):
-    """v0.99.86, per direct user request ("отсечение всегда убыточного
-    диапазона RR, как снизу так и сверху... много слабых результатов в
-    msnr, по 50 сделок а доход околонулевой, при этом винрейт от 30 до
-    50"): TWO-SIDED replacement for msnr_symbol_rr_skip_min() above
-    (v0.99.79 disabled that one-sided rule entirely, per an earlier
-    direct request to trade every RR range while more data accumulated
-    — this reintroduces filtering in a genuinely different, symmetric
-    shape, not a plain revert). The live pattern that prompted this —
-    a large, trustworthy sample (~50 trades) with a middling winrate
-    but near-zero compounded income — is exactly what a ONE-SIDED high-
-    RR cutoff can't catch: if the symbol's edge is concentrated in the
-    MIDDLE of its own RR distribution while BOTH extremes (very low RR
-    AND very high RR) drag the average down, cutting only the top
-    leaves the bad low end untouched.
-    Uses the SAME bucket-and-breakeven test every other MSNR filter
-    already uses (msnr_rr_bucket_stats(), MSNR_SYMBOL_RR_SKIP_MIN_
-    SAMPLE) — nothing new statistically, just applied from both ends:
-    - ceiling: the lowest bucket edge among sufficiently-sampled
-      buckets failing their own breakeven (unchanged from the old
-      one-sided rule) — a live signal at or above this RR is skipped.
-    - floor: scans buckets from RR=0 upward and finds the upper edge of
-      the longest CONTIGUOUS run of failing buckets starting at the
-      very bottom — a live signal below this RR is skipped. A single
-      bad low-RR bucket sets the floor to its own upper edge; several
-      consecutive bad low-RR buckets extend it further up. Buckets
-      past the first PASSING (or insufficiently-sampled) one don't
-      extend the floor, even if a later bucket also happens to fail —
-      the floor means "everything below here is bad," which a gap of
-      good buckets in between would contradict.
-    v0.99.89 — cascades MSNR_RR_BUCKET_SCHEMES from finest to coarsest
-    (see that constant's own comment for the full reasoning): tries the
-    canonical 5-bucket scheme first; if NEITHER a floor nor a ceiling
-    is found there, retries against a coarser 3-bucket, then 2-bucket
-    scheme, stopping at the first scheme that finds ANYTHING — a symbol
-    whose fine-grained buckets never individually reach the sample bar
-    still gets a shot at a coarser, still-statistically-legitimate
-    split instead of silently passing every trade through unfiltered.
-    Either side can independently be None (no statistically significant
-    unprofitable region found there, even at the coarsest tried scheme)
-    — a symbol can end up with only a ceiling, only a floor, both, or
-    neither, same "don't invent evidence from a thin sample" stance as
-    the rule this replaces.
-    Returns (floor, ceiling) — floor is the bucket's own upper edge
-    (never returns float("inf") — an open-ended top bucket can only
-    ever extend a ceiling-seeking search, not a floor-seeking one,
-    since a floor search stops at the first non-failing bucket long
-    before reaching it in any realistic RR distribution)."""
-    def _failing(b):
-        return (b["n"] >= MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE and b["winrate"] is not None
-                and b["avg_rr"] and b["winrate"] < 100.0 / (1.0 + b["avg_rr"]))
-
-    for scheme in MSNR_RR_BUCKET_SCHEMES:
-        buckets = msnr_rr_bucket_stats(trades, bucket_scheme=scheme)
-
-        # v0.99.86 fix, caught by a synthetic test with BOTH ends failing
-        # before shipping: floor is computed FIRST, and ceiling's own
-        # search only considers buckets AFTER the floor's own contiguous
-        # run — not the whole bucket list. Without this split, a failing
-        # low-RR bucket (lo=0) would itself show up as the "lowest
-        # failing edge" and get mistaken for the ceiling too, producing
-        # a nonsensical ceiling=0 that would skip literally everything
-        # instead of two genuinely separate bad regions at opposite ends.
-        floor = None
-        floor_bucket_count = 0
-        for lo, hi in scheme:
-            b = next(bb for bb in buckets if bb["lo"] == lo)
-            if _failing(b):
-                floor = hi
-                floor_bucket_count += 1
-            else:
-                break
-
-        failing_edges = [b["lo"] for i, b in enumerate(buckets) if i >= floor_bucket_count and _failing(b)]
-        ceiling = min(failing_edges) if failing_edges else None
-
-        # a floor at or above the ceiling would leave nothing tradable at
-        # all — shouldn't arise given ceiling only searches buckets past
-        # the floor's own run, but guarded explicitly rather than
-        # trusting bucket ordering to hold forever.
-        if floor is not None and ceiling is not None and floor >= ceiling:
-            floor = None
-
-        if floor is not None or ceiling is not None:
-            return floor, ceiling
-    return None, None
-
-
-def msnr_symbol_rr_skip_min(trades):
-    """v0.99.22, per direct user request: a per-SYMBOL counterpart to
-    _risk_autotune_msnr_max_rr()'s pooled-across-all-symbols cap.
-    Bucket THIS symbol's own closed backtest trades by rr (same
-    msnr_rr_bucket_stats() the pooled rule uses), and find the lowest
-    bucket that both (a) has enough of this symbol's own trades to
-    trust (>= MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE — deliberately a higher
-    single-symbol bar than the pooled rule's RISK_AUTOTUNE_MIN_SAMPLE,
-    since this is judging one symbol off its own sample rather than
-    the whole universe) and (b) is failing its own breakeven at its
-    own actual average realized rr (not the bucket's lower edge —
-    same fix as the pooled rule, since lo=0 on the first bucket implies
-    a nonsensical 100% breakeven requirement).
-    Returns that bucket's lower edge — this symbol's live scanner skips
-    any new signal whose own rr lands at or above it — or None if no
-    bucket for this symbol clears the sample bar, in which case the
-    symbol trades normally (falls through to the global MSNR_MAX_RR
-    cap same as before). Deliberately one-directional like the pooled
-    rule: this only ever adds a skip floor off solid per-symbol
-    evidence, it never widens one back out on its own."""
-    buckets = msnr_rr_bucket_stats(trades)
-    failing_edges = [b["lo"] for b in buckets
-                      if b["n"] >= MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE and b["winrate"] is not None and b["avg_rr"]
-                      and b["winrate"] < 100.0 / (1.0 + b["avg_rr"])]
-    return min(failing_edges) if failing_edges else None
-
-
-MSNR_SL_PCT_BUCKETS = [(0, 2), (2, 4), (4, 6), (6, 10), (10, float("inf"))]  # v0.99.26 — % SL-distance buckets for msnr_sl_bucket_stats(), same shape as MSNR_RR_BUCKETS but keyed on stop width instead of RR
-
-
-def msnr_sl_bucket_stats(trades, bucket_scheme=None):
-    """v0.99.26, per direct user request: SL-width counterpart to msnr_
-    rr_bucket_stats() — buckets CLOSED trades (WIN/LOSS only) by their
-    OWN SL distance as a % of entry price (not by rr) into MSNR_SL_PCT_
-    BUCKETS, computing win-rate AND avg_rr per bucket (avg_rr is needed
-    here too, same as the RR-bucket version, to judge each bucket
-    against its own breakeven). A wide stop matters independently of
-    RR: a single very-wide-stop loss can wipe a fixed-leverage
-    compounding account outright (see msnr_compound_return()) even
-    when that trade's RR looked perfectly ordinary — RR alone (reward
-    relative to risk) says nothing about how big the risk itself was
-    in absolute % terms.
-    Same "hi" key omitted (only "lo") for the same JSON-Infinity reason
-    msnr_rr_bucket_stats() already documented — the last bucket's hi is
-    float("inf") and would break jsonify().
-    v0.99.89 — accepts an optional `bucket_scheme`, same reasoning and
-    same shape as msnr_rr_bucket_stats()'s own addition: supports msnr_
-    symbol_sl_skip_min()'s own granularity cascade (MSNR_SL_PCT_BUCKET_
-    SCHEMES) without disturbing the fixed MSNR_SL_PCT_BUCKETS default
-    any other caller relies on."""
-    scheme = bucket_scheme if bucket_scheme is not None else MSNR_SL_PCT_BUCKETS
-    buckets = []
-    for lo, hi in scheme:
-        subset = []
-        for t in trades:
-            if t.get("result") not in ("WIN", "LOSS"):
-                continue
-            entry = t.get("entry")
-            sl = t.get("sl")
-            if not entry or entry <= 0 or sl is None:
-                continue
-            sl_pct = abs(entry - sl) / entry * 100
-            if lo <= sl_pct < hi:
-                subset.append(t)
-        label = f"{lo}-{hi}" if hi != float("inf") else f"{lo}+"
-        if not subset:
-            buckets.append({"range": label, "lo": lo, "n": 0, "wins": 0, "losses": 0, "winrate": None, "avg_rr": None})
-            continue
-        wins = sum(1 for t in subset if t["result"] == "WIN")
-        n = len(subset)
-        rrs = [t["rr"] for t in subset if t.get("rr") is not None]
-        avg_rr = round(sum(rrs) / len(rrs), 2) if rrs else None
-        buckets.append({"range": label, "lo": lo, "n": n, "wins": wins,
-                         "losses": n - wins, "winrate": round(wins / n * 100, 1), "avg_rr": avg_rr})
-    return buckets
-
-
-MSNR_SL_PCT_BUCKET_SCHEMES = [
-    MSNR_SL_PCT_BUCKETS,  # finest — v0.99.26's original 5-bucket split
-    [(0, 4), (4, 10), (10, float("inf"))],  # medium — 3 buckets
-    [(0, 6), (6, float("inf"))],  # coarsest — 2 buckets
-]  # v0.99.89 — same cascade reasoning/shape as MSNR_RR_BUCKET_SCHEMES above, applied to SL-width instead of RR (found via the same direct user report, "на некоторых монетах фильтры никакие не применены" — this filter had the identical fixed-scheme-no-fallback gap).
-
-
-def msnr_symbol_sl_skip_min(trades):
-    """v0.99.26, per direct user request ("фильтр по ширине стопа"):
-    SL-width counterpart to msnr_symbol_rr_skip_min() — same shape,
-    same sample bar (MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE — no reason for a
-    separate one, it's the same "trust this symbol's own bucket"
-    question either way), same one-directional-only stance, but
-    bucketed by msnr_sl_bucket_stats() instead of msnr_rr_bucket_
-    stats(). Returns this symbol's own SL% floor — live signals whose
-    OWN SL distance lands at or above it get skipped for this symbol —
-    or None if no bucket clears the sample bar at ANY tried granularity.
-    Deliberately separate from msnr_symbol_rr_skip_min(): a symbol can
-    have a fine RR distribution (good reward-to-risk ratios) while
-    still routinely getting stopped out on unusually WIDE stops in
-    absolute % terms — RR alone doesn't capture that, only the SL's
-    own size does.
-    v0.99.89 — cascades MSNR_SL_PCT_BUCKET_SCHEMES from finest to
-    coarsest, identical reasoning/shape to msnr_symbol_rr_range()'s own
-    cascade addition — a modest total sample can leave every one of the
-    fine scheme's 5 buckets under MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE even
-    when the symbol's overall trade count looks substantial."""
-    for scheme in MSNR_SL_PCT_BUCKET_SCHEMES:
-        buckets = msnr_sl_bucket_stats(trades, bucket_scheme=scheme)
-        failing_edges = [b["lo"] for b in buckets
-                          if b["n"] >= MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE and b["winrate"] is not None and b["avg_rr"]
-                          and b["winrate"] < 100.0 / (1.0 + b["avg_rr"])]
-        if failing_edges:
-            return min(failing_edges)
-    return None
-
-
-MSNR_HOUR_GROUP_WIDTHS = [1, 2, 3]  # v0.99.60, per direct user request ("оба варианта вместе" — granularity/threshold search paired with the volume filter's quantile adaptation): candidate UTC-hour group widths for msnr_hour_bucket_stats(), tried FINEST first (single-hour resolution, the original v0.99.56 behavior) then progressively wider — a symbol whose per-hour sample never clears MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE still gets a shot at a coarser, still-legitimate 2h or 3h grouping instead of the filter finding nothing at all purely from thin per-hour data.
-
-
-def msnr_hour_bucket_stats(trades, group_width=1):
-    """v0.99.56, per direct user request ("какой фильтр сигналов был бы
-    самым эффективным"): time-of-day counterpart to msnr_rr_bucket_
-    stats()/msnr_sl_bucket_stats() — buckets CLOSED trades (WIN/LOSS
-    only) by the UTC hour (0-23) of their OWN entry candle's time,
-    computing win-rate AND avg_rr per hour (avg_rr needed for the same
-    per-bucket-breakeven judgment the RR/SL bucket versions already
-    use). The whole QM/SNR pattern is a bet that a sweep-and-reclaim
-    reflects REAL institutional order flow, not noise — and that's
-    exactly the kind of thing that varies by session: London/NY open
-    genuinely has that flow behind it, thin overnight hours often
-    don't, and this app's own separate "Сессия" module already trades
-    that same premise directly. Symmetric with the RR/SL bucket
-    functions in every other way, including which hours a given
-    symbol tends to actually trade in at all being visible via which
-    buckets even have a nonzero n.
-    UTC via time.gmtime() (stdlib, already imported) — deliberately
-    NOT the app's own Moscow-fixed-offset convention the Session
-    module uses (that offset exists specifically to avoid a system
-    tzdata dependency for one fixed daily reference point, 10:00 MSK;
-    this needs the actual UTC hour of arbitrary historical timestamps
-    across 24 buckets, which time.gmtime() gives directly with no
-    timezone-database dependency either).
-    v0.99.60: `group_width` groups consecutive UTC hours together
-    (e.g. width=3 -> 0-2, 3-5, 6-8, ...) instead of always a single
-    hour per bucket — msnr_symbol_skip_hours() searches MSNR_HOUR_
-    GROUP_WIDTHS from finest to coarsest, using this parameter, so a
-    symbol whose per-HOUR sample is too thin to ever clear the
-    significance bar still gets evaluated at a coarser, still-
-    legitimate resolution instead of the filter simply finding
-    nothing. Each returned dict's "hours" field lists every individual
-    UTC hour that group covers, so a caller can expand a flagged group
-    back into the specific hours it represents."""
-    n_groups = -(-24 // group_width)  # ceiling division — width=1 -> 24 groups, width=3 -> 8 groups
-    buckets_by_group = {g: [] for g in range(n_groups)}
-    for t in trades:
-        if t.get("result") not in ("WIN", "LOSS"):
-            continue
-        if t.get("time") is None:
-            continue
-        hour = time.gmtime(t["time"])[3]
-        buckets_by_group[hour // group_width].append(t)
-    result = []
-    for g in range(n_groups):
-        lo_hour = g * group_width
-        hours = list(range(lo_hour, min(24, lo_hour + group_width)))
-        subset = buckets_by_group[g]
-        if not subset:
-            result.append({"hours": hours, "n": 0, "wins": 0, "losses": 0, "winrate": None, "avg_rr": None})
-            continue
-        wins = sum(1 for t in subset if t["result"] == "WIN")
-        n = len(subset)
-        rrs = [t["rr"] for t in subset if t.get("rr") is not None]
-        avg_rr = round(sum(rrs) / len(rrs), 2) if rrs else None
-        result.append({"hours": hours, "n": n, "wins": wins, "losses": n - wins,
-                        "winrate": round(wins / n * 100, 1), "avg_rr": avg_rr})
-    return result
-
-
-def msnr_symbol_skip_hours(trades):
-    """v0.99.56, per direct user request: hour-of-day counterpart to
-    msnr_symbol_rr_skip_min()/msnr_symbol_sl_skip_min() — same sample
-    bar (MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE), same per-bucket-breakeven
-    test, but returns a SET of specific bad hours rather than a single
-    threshold: unlike RR/SL width, hour-of-day has no natural ordering
-    where "everything past this point is bad" makes sense — a symbol
-    could easily be fine at both 2:00 and 22:00 UTC but bad specifically
-    at 14:00, and a single cutoff value couldn't express that shape.
-    v0.99.60, per direct user follow-up ("добавить вариативность...
-    оба варианта вместе"): searches MSNR_HOUR_GROUP_WIDTHS from finest
-    (single-hour) to coarsest — the first width that finds ANY group
-    clearing both the significance test and the sample bar wins; a
-    thin trade history simply never reaches the finer widths' own per-
-    group sample requirement, so it falls through to a coarser, still-
-    legitimate grouping instead of finding nothing. When a WIDER group
-    is flagged, every individual UTC hour it covers gets skipped —
-    less precise than single-hour resolution, but still statistically
-    supported, which single-hour buckets on a thin history wouldn't be.
-    Returns a sorted list of UTC hours (0-23) where this symbol's own
-    trade history shows a statistically-trustworthy losing pattern —
-    live signals whose entry candle falls in one of these hours get
-    skipped for this symbol. Empty list if nothing at any tried
-    granularity clears the sample bar (the overwhelmingly common case
-    for any symbol without a very long or very lopsided-by-hour trading
-    history)."""
-    for width in MSNR_HOUR_GROUP_WIDTHS:
-        buckets = msnr_hour_bucket_stats(trades, group_width=width)
-        bad_groups = [b for b in buckets
-                      if b["n"] >= MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE and b["winrate"] is not None and b["avg_rr"]
-                      and b["winrate"] < 100.0 / (1.0 + b["avg_rr"])]
-        if bad_groups:
-            bad_hours = set()
-            for b in bad_groups:
-                bad_hours.update(b["hours"])
-            return sorted(bad_hours)
-    return []
-
-
-MSNR_VOLUME_QUANTILE_GROUPS = [5, 4, 3]  # v0.99.60, per direct user request ("оба варианта вместе" — quantile-adaptive bucketing AND granularity/threshold search, applied together): candidate group counts for msnr_volume_quantile_buckets(), tried FINEST first (5 roughly-equal groups) then progressively coarser as a fallback — finer groups are more precise but need more of this symbol's own trades to individually clear MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE; a symbol with a thinner trade history still gets a shot at a coarser, still-significant split instead of the filter just giving up.
-
-
-def msnr_volume_quantile_buckets(trades, k):
-    """v0.99.60, per direct user follow-up to v0.99.59 ("может в первый
-    фильтр и во второй добавить некую вариативность... авто перебор
-    параметров фильтра для лучшего результата?"): REPLACES the old
-    fixed MSNR_VOLUME_RATIO_BUCKETS (0-0.5/0.5-0.8/0.8-1.2/1.2-2/2+)
-    with QUANTILE buckets computed fresh from THIS symbol's own
-    volume_ratio distribution — splits its CLOSED trades (with a known
-    volume_ratio) into k roughly-equal-SIZED groups by sorted value,
-    rather than assuming one universal set of absolute cutoffs fits
-    every symbol's typical volume behavior. A generally choppy/spiky
-    symbol and a generally calm one don't share a "normal" volume_ratio
-    range — fixed absolute buckets would leave one of them with nearly
-    all its trades crammed into a single bucket (useless — no
-    resolution) while the other's trades scatter thinly across all
-    five (useless — no bucket ever reaches significant sample size).
-    Quantile splitting sidesteps that entirely: every bucket gets
-    n/k trades by construction, regardless of the symbol's own
-    distribution shape.
-    IMPORTANT — this is explicitly NOT "search for whichever k gives
-    the best-looking result": every candidate k still goes through the
-    exact same breakeven-at-sufficient-sample test msnr_symbol_volume_
-    skip_below() already used before this change (see that function's
-    own docstring) — this only varies HOW the trades get grouped, not
-    whether a group has to prove itself significant to matter. Reusing
-    a threshold-hunting search without that same significance gate
-    would just be curve-fitting the filter itself to this backtest's
-    own noise, exactly the overfitting failure mode already found and
-    fixed elsewhere this session (the liquid-universe cap, the pooled
-    RR-bucket autotune) — the whole point of asking for "оба варианта
-    вместе" was adding flexibility WITHOUT reopening that door.
-    Returns a list of k (or fewer, if there aren't enough closed trades
-    with a volume_ratio to fill k groups) dicts: {"n", "wins", "losses",
-    "winrate", "avg_rr", "hi"} — "hi" is that group's own maximum
-    volume_ratio (the boundary msnr_symbol_volume_skip_below() treats
-    as a candidate ceiling), in ascending group order."""
-    closed = [t for t in trades if t.get("result") in ("WIN", "LOSS") and t.get("volume_ratio") is not None]
-    if len(closed) < k:
-        return []
-    closed.sort(key=lambda t: t["volume_ratio"])
-    n = len(closed)
-    buckets = []
-    for i in range(k):
-        lo_idx = i * n // k
-        hi_idx = (i + 1) * n // k
-        subset = closed[lo_idx:hi_idx]
-        if not subset:
-            continue
-        wins = sum(1 for t in subset if t["result"] == "WIN")
-        cnt = len(subset)
-        rrs = [t["rr"] for t in subset if t.get("rr") is not None]
-        avg_rr = round(sum(rrs) / len(rrs), 2) if rrs else None
-        buckets.append({"n": cnt, "wins": wins, "losses": cnt - wins,
-                         "winrate": round(wins / cnt * 100, 1), "avg_rr": avg_rr,
-                         "hi": subset[-1]["volume_ratio"]})
-    return buckets
-
-
-def msnr_symbol_volume_skip_below(trades):
-    """v0.99.59/v0.99.60, per direct user request ("второй фильтр... про
-    n как в первом не забудь" then "добавить вариативность... оба
-    варианта вместе"): volume-ratio counterpart to msnr_symbol_rr_
-    skip_min()/msnr_symbol_sl_skip_min(), same sample bar (MSNR_
-    SYMBOL_RR_SKIP_MIN_SAMPLE) and per-bucket-breakeven test — but
-    skips BELOW a ceiling instead of above a floor, the OPPOSITE
-    direction from the RR/SL filters (their hypothesis: metric too
-    HIGH is unreliable; this one's: volume too LOW is).
-    v0.99.60: searches MSNR_VOLUME_QUANTILE_GROUPS from finest to
-    coarsest (msnr_volume_quantile_buckets()) — the first k that finds
-    ANY group clearing both the significance test and the sample bar
-    wins; a thin trade history simply never reaches the finer k values'
-    own per-group sample requirement, so it falls through to a coarser,
-    still-legitimate split rather than finding nothing at all. The
-    LAST (highest-volume) group of whichever k is used is always
-    excluded from the search — taking its own "hi" as a "skip below"
-    ceiling would, in the pathological case where it still fails,
-    mean skipping literally everything, never the intended outcome.
-    Returns this symbol's own volume-ratio floor — a live signal whose
-    OWN volume_ratio lands BELOW it gets skipped for this symbol — or
-    None if nothing at any tried granularity clears the sample bar, or
-    the symbol's trades don't carry volume_ratio at all (e.g. an
-    override computed before that field existed)."""
-    for k in MSNR_VOLUME_QUANTILE_GROUPS:
-        buckets = msnr_volume_quantile_buckets(trades, k)
-        candidate_buckets = buckets[:-1] if len(buckets) > 1 else []
-        failing_edges = [b["hi"] for b in candidate_buckets
-                          if b["n"] >= MSNR_SYMBOL_RR_SKIP_MIN_SAMPLE and b["winrate"] is not None and b["avg_rr"]
-                          and b["winrate"] < 100.0 / (1.0 + b["avg_rr"])]
-        if failing_edges:
-            return max(failing_edges)
-    return None
-
-
-def msnr_symbol_effective_leverage(symbol):
-    """v0.99.26, per direct user request ("узнавать максимальное плечо
-    на бирже"): AUTOTRADE_LEVERAGE_MSNR clamped to THIS contract's own
-    exchange-enforced leverage_max — exactly the same clamp execute_
-    autotrade() already applies right before sending a real order (see
-    its own leverage_max handling), reused here so the backtest/live-
-    gate liquidation math and the compounding simulation both reflect
-    the leverage a real order would actually get, not the configured
-    setting regardless of what Gate.io allows on this specific
-    contract (altcoins often carry a much lower cap than majors)."""
-    try:
-        contract_max_lev = get_contract_spec(symbol).get("leverage_max")
-    except Exception as e:
-        log_error(f"msnr_symbol_effective_leverage {symbol}: {e}")
-        contract_max_lev = None
-    if contract_max_lev and contract_max_lev < AUTOTRADE_LEVERAGE_MSNR:
-        return contract_max_lev
-    return AUTOTRADE_LEVERAGE_MSNR
 
 
 def msnr_symbol_contract_max_leverage(symbol):
@@ -10554,203 +8868,6 @@ def msnr_symbol_contract_max_leverage(symbol):
         log_error(f"msnr_symbol_contract_max_leverage {symbol}: {e}")
         contract_max_lev = None
     return contract_max_lev if contract_max_lev else AUTOTRADE_LEVERAGE_MSNR
-
-
-def msnr_optimal_leverage_for_symbol(trades, ceiling_leverage=None, symbol=None):
-    """v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше не
-    стало, будто даже хуже" -> "давай для каждой монеты в рамках
-    автотюнинга автоматически выбирать оптимальное плечо для
-    долгосрочного роста"): REPLACES v0.99.46's msnr_leverage_for_stop()
-    — that heuristic hit its own "lose ~10% of margin on a stop-out"
-    target correctly, but a fixed target loss % scales leverage up
-    SYMMETRICALLY, amplifying the WIN side by the exact same factor as
-    the loss side. Under full-reinvestment compounding, higher
-    variance can REDUCE long-run geometric growth even at an unchanged
-    (or better) arithmetic edge — the same Kelly-criterion "over-
-    betting past optimal hurts compounded growth" point already raised
-    earlier this session about the sizing model in general. A target-%
-    heuristic has no way to know it's on the wrong side of that curve
-    for a given symbol; only actually testing against that symbol's
-    own trade history can tell.
-    Finds the single leverage L, applied FLAT to every trade in this
-    symbol's own history (not varied per-trade by stop width, unlike
-    the function this replaces), that MAXIMIZES E[log(1 + pnl_frac(L))]
-    over the symbol's own closed (WIN/LOSS) trades — the textbook
-    "optimal f" / Kelly-criterion objective for choosing bet size under
-    repeated, reinvested exposure: maximizing expected log-growth is
-    exactly what maximizes long-run COMPOUNDED wealth (a mathematical
-    consequence of the strong law of large numbers applied to a
-    sequence of multiplicative i.i.d.-ish returns, not a heuristic
-    itself). A single trade's own probability of WIN vs LOSS isn't
-    knowable in advance beyond what the symbol's pooled historical
-    distribution already implies, so — same reasoning "optimal f"
-    (Ralph Vince) already uses — this optimizes ONE leverage against
-    the whole historical distribution and applies it uniformly to
-    every future trade on this symbol, rather than trying to vary it
-    signal-by-signal off a single visible feature (stop width) the way
-    the replaced heuristic did.
-    Any candidate leverage where even ONE historical trade's own
-    pnl_frac(L) <= -1 (would have wiped the account, isolated-margin
-    nominal loss) scores negative infinity for that candidate outright
-    — ruin is absorbing; no amount of upside on other trades
-    compensates for a leverage that has already blown the account once
-    in its own visible history.
-    v0.99.70 — CRITICAL FIX, per direct user question ("получается на
-    бэктесте плечо выходящее за рамки ликвидации?"): the nominal-loss
-    ruin check above is NOT the tightest constraint. Gate's own
-    maintenance-margin liquidation price is ALWAYS at or before the
-    naive 100%-of-margin point (compute_scalp_liquidation_move_pct()'s
-    own docstring: "a non-negative MMR+fee can only ever SHRINK this
-    buffer... never enlarge it"), so a candidate leverage could pass
-    the nominal check above while still meaning some historical LOSS
-    trade's own SL sits PAST where the exchange would have actually
-    force-liquidated the position first — the exact same "trade beyond
-    liquidation" condition msnr_trade_beyond_liquidation() already
-    guards live signals against, but this search was never checking it
-    against its OWN candidate leverages. When `symbol` is given, each
-    LOSS trade's own SL distance is now ALSO checked against that
-    symbol's real liquidation buffer (compute_scalp_liquidation_move_
-    pct(), same STATE["scalp_mmr_map"]/SCALP_DEFAULT_MMR_PCT/SCALP_
-    SAFETY_MARGIN this app's other liquidation checks already use) at
-    each candidate leverage — a leverage that would have breached it
-    scores -inf too, same absorbing-ruin treatment as the nominal
-    check. Without a symbol (backward-compatible default), this check
-    is skipped — same "can't evaluate, don't penalize" stance the rest
-    of this codebase takes for missing data, not a silent widening of
-    what counts as safe.
-    Searched as a plain grid from AUTOTRADE_LEVERAGE_MSNR up to
-    ceiling_leverage in 0.5x steps rather than a smarter optimizer
-    (gradient ascent / golden-section search): this objective is
-    well-behaved (concave) for realistic win-rate/RR distributions,
-    but a grid is simpler to verify correct, and cheap enough at this
-    scale (well under a few hundred candidates even against a very
-    high exchange leverage cap) that a fancier search isn't worth the
-    risk of a subtler bug for the compute it would save.
-    Floored at AUTOTRADE_LEVERAGE_MSNR — never recommends LESS than
-    the configured default; a symbol whose own history says even the
-    default is already past Kelly-optimal is a stress_test_failed/
-    skip_sl_pct_min candidate handled elsewhere, not something this
-    function should try to further de-risk by going below the floor.
-    v0.99.71 — CRITICAL FIX, found on a direct user request for a full
-    professional-trader-style audit of every indicator: this objective
-    was computing pnl_frac with NO taker-fee deduction at all, despite
-    AUTOTRADE_SIM_FEE_PCT already existing in this codebase for exactly
-    this purpose elsewhere. Round-trip fee cost, as a fraction of
-    MARGIN (not notional), is `2 * AUTOTRADE_SIM_FEE_PCT * leverage` —
-    it scales linearly WITH leverage, because notional = margin *
-    leverage and both entry and exit each pay a taker fee on that
-    notional. A fee-blind Kelly search finds the leverage optimal in a
-    zero-fee world, which is a strict OVERESTIMATE of the true fee-
-    inclusive optimum — as leverage grows, fee drag grows right along
-    with it, pulling the real optimum lower than what this function
-    used to report. Now subtracted from every trade's pnl_frac
-    (charged regardless of WIN or LOSS — the exchange collects it
-    either way), same ruin/liquidation treatment applying on top of
-    the fee-adjusted figure.
-    Returns AUTOTRADE_LEVERAGE_MSNR if there are no valid closed trades
-    to optimize against at all."""
-    ceiling = ceiling_leverage if ceiling_leverage else AUTOTRADE_LEVERAGE_MSNR
-    mmr_pct = None
-    if symbol is not None:
-        with state_lock:
-            mmr_map = STATE.get("scalp_mmr_map", {})
-        mmr_pct = mmr_map.get(symbol, SCALP_DEFAULT_MMR_PCT)
-    # v0.99.400 — every closed trade (incl. TIME_EXIT at its real exit
-    # price); the liquidation check uses each trade's own STOP distance,
-    # since any trade could have been stopped out
-    moves = []
-    for t in trades:
-        mv = msnr_trade_move(t)
-        if mv is None or t.get("sl") is None:
-            continue
-        moves.append((mv, abs(t["entry"] - t["sl"]) / t["entry"], t.get("direction")))
-    if not moves:
-        return AUTOTRADE_LEVERAGE_MSNR
-
-    def _log_growth(lev):
-        total = 0.0
-        fee_frac = msnr_trade_cost_frac() * lev   # v0.99.392 — fees + slippage
-        for move, sl_pct, direction in moves:
-            if mmr_pct is not None and direction:
-                liq_buffer_pct = compute_scalp_liquidation_move_pct(direction, lev, mmr_pct)
-                if liq_buffer_pct is not None and sl_pct * 100 * SCALP_SAFETY_MARGIN > liq_buffer_pct:
-                    return float("-inf")
-            pnl_frac = move * lev - fee_frac
-            if pnl_frac <= -1.0:
-                return float("-inf")
-            total += math.log(1 + pnl_frac)
-        return total / len(moves)
-
-    best_lev = AUTOTRADE_LEVERAGE_MSNR
-    best_score = _log_growth(best_lev)
-    lev = AUTOTRADE_LEVERAGE_MSNR + 0.5
-    while lev <= ceiling:
-        score = _log_growth(lev)
-        if score > best_score:
-            best_score = score
-            best_lev = lev
-        lev += 0.5
-    return round(best_lev, 1)
-
-
-def msnr_live_balance_for_symbol(symbol):
-    """v0.99.33, per direct user request: "40 долларов для первой
-    сделки, размер второй сделки зависит от исхода первой, по сути как
-    на бэктесте... начинать с 40" — the REAL per-symbol compounding
-    margin used to size actual live autotrade orders, mirroring msnr_
-    compound_trail()'s backtest math exactly, but tracked against real
-    outcomes (update_msnr_signal_outcomes()) instead of historical
-    ones. A symbol with no stored balance yet (STATE["msnr_live_
-    balance"] missing that key) has never had an autotrade-fired live
-    trade — starts at MSNR_COMPOUND_START_BALANCE, same $40 the
-    backtest simulation starts at. Always clamped to [0, MSNR_LIVE_
-    BALANCE_MAX] on read as well as on write (defensive: covers the
-    cap being lowered via settings after a balance already grew past
-    the new, smaller ceiling)."""
-    with state_lock:
-        balance = STATE["msnr_live_balance"].get(symbol)
-    if balance is None:
-        balance = MSNR_COMPOUND_START_BALANCE
-    return max(0.0, min(balance, MSNR_LIVE_BALANCE_MAX))
-
-
-def msnr_update_live_balance(symbol, result, entry, sl, tp, leverage):
-    """v0.99.33 — updates this symbol's REAL live compounding balance
-    (see msnr_live_balance_for_symbol()) after an autotrade-fired
-    signal actually closes WIN or LOSS. Deliberately the EXACT same
-    per-trade P&L formula msnr_compound_trail() uses for the backtest
-    simulation (price move % from entry/sl/tp, scaled by `leverage`,
-    isolated-margin floor at -100% for a single loss) — this is
-    supposed to be the live counterpart of that same math, not a
-    parallel implementation that could quietly drift from it. Result
-    is additionally capped at MSNR_LIVE_BALANCE_MAX (the hard $ ceiling
-    the backtest simulation doesn't have, since compounding an actual
-    account isn't supposed to run away unbounded) and floored at 0 (a
-    wiped symbol simply prices future orders at $0 margin, which
-    compute_position_size() already skips rather than sending a doomed
-    order — same passive-stop behavior the backtest's own blown-to-
-    zero trail already has, no separate "disable autotrade" step
-    needed).
-    Called only for WIN/LOSS — a TIMEOUT or still-OPEN signal has no
-    realized P&L to compound with, exactly like msnr_compound_trail()
-    already treats a TIMEOUT trade."""
-    if not entry or entry <= 0 or sl is None or tp is None:
-        return  # malformed signal — leave the balance untouched rather than guess
-    if result == "WIN":
-        move_pct = abs(tp - entry) / entry
-        pnl_frac = move_pct * leverage
-    elif result == "LOSS":
-        move_pct = abs(entry - sl) / entry
-        pnl_frac = -move_pct * leverage
-    else:
-        return
-    pnl_frac = max(pnl_frac, -1.0)
-    with state_lock:
-        current = STATE["msnr_live_balance"].get(symbol)
-        if current is None:
-            current = MSNR_COMPOUND_START_BALANCE
-        new_balance = max(0.0, min(current * (1 + pnl_frac), MSNR_LIVE_BALANCE_MAX))
-        STATE["msnr_live_balance"][symbol] = round(new_balance, 2)
 
 
 def msnr_trade_beyond_liquidation(symbol, direction, entry, sl, leverage=None):
@@ -10786,7 +8903,7 @@ def msnr_trade_beyond_liquidation(symbol, direction, entry, sl, leverage=None):
     cases) rather than blocking on incomplete data."""
     if not entry or entry <= 0 or sl is None:
         return False
-    leverage = leverage if leverage is not None else msnr_symbol_effective_leverage(symbol)
+    leverage = leverage if leverage is not None else AUTOTRADE_LEVERAGE_MSNR   # v0.99.401 — old per-symbol leverage lookup removed with the old MSNR
     with state_lock:
         mmr_map = STATE.get("scalp_mmr_map", {})
         tiers_by_symbol = STATE.get("scalp_risk_tiers", {})
@@ -10818,183 +8935,6 @@ def msnr_trade_beyond_liquidation(symbol, direction, entry, sl, leverage=None):
 _msnr_signal_cooldowns = {}  # symbol -> last signaled entry-candle time
 _msnr_signal_cooldowns_lock = threading.Lock()
 _msnr_addon_cooldowns = {}  # v0.99.126 — symbol -> last add-on signaled candle time, same dedup shape
-
-
-def msnr_symbol_params(symbol):
-    """This symbol's autotuned (min_leg_atr, qm_zone_pct, qm_lookback)
-    from STATE["msnr_symbol_overrides"], falling back to the module
-    defaults for any not yet optimized (or for a symbol whose optimize
-    run errored, e.g. not enough history yet) — same fallback shape as
-    ft5_scan_symbol_live()'s override.get(..., grid-middle) pattern.
-    Used by BOTH the live scanner and the chart endpoint, so a chart
-    always reflects the exact params that actually produced whatever
-    signal it's showing."""
-    with state_lock:
-        override = STATE["msnr_symbol_overrides"].get(symbol) or {}
-    return {
-        "min_leg_atr": override.get("min_leg_atr", MSNR_MIN_LEG_ATR),
-        "qm_zone_pct": override.get("qm_zone_pct", MSNR_QM_ZONE_PCT),
-        "qm_lookback": override.get("qm_lookback_bars", MSNR_QM_LOOKBACK_BARS),
-    }
-
-
-def msnr_symbol_skip_rr_min(symbol):
-    """v0.99.22 — this symbol's own live-signal RR-skip floor (see
-    msnr_symbol_rr_skip_min()), kept as a SEPARATE lookup from msnr_
-    symbol_params() rather than folded into that dict: msnr_symbol_
-    params()'s return value gets spread as **params straight into msnr_
-    detect_signals() at three call sites, whose signature has no skip_
-    rr_min kwarg — adding it there would throw a TypeError at every one
-    of those call sites, not just the live scanner that actually needs
-    it."""
-    with state_lock:
-        override = STATE["msnr_symbol_overrides"].get(symbol) or {}
-    return override.get("skip_rr_min")
-
-
-def msnr_symbol_skip_rr_max(symbol):
-    """v0.99.86 — the FLOOR counterpart to msnr_symbol_skip_rr_min()
-    above, added alongside msnr_symbol_rr_range()'s own two-sided
-    redesign. Named "_max" (not "_min", despite being a floor) for
-    symmetry with the existing "_min" naming: both mean "skip signals
-    past THIS edge, in the direction away from the tradeable middle" —
-    skip_rr_min is the ceiling (skip rr >= this), skip_rr_max is the
-    floor (skip rr < this)."""
-    with state_lock:
-        override = STATE["msnr_symbol_overrides"].get(symbol) or {}
-    return override.get("skip_rr_max")
-
-
-def msnr_symbol_skip_sl_min(symbol):
-    """v0.99.26 — SL-width counterpart to msnr_symbol_skip_rr_min(),
-    same reasoning for being a separate lookup (msnr_symbol_params()'s
-    return value gets spread as **params into msnr_detect_signals(),
-    which has no skip_sl_pct_min kwarg either)."""
-    with state_lock:
-        override = STATE["msnr_symbol_overrides"].get(symbol) or {}
-    return override.get("skip_sl_pct_min")
-
-
-def msnr_symbol_skip_hours_live(symbol):
-    """v0.99.56 — hour-of-day counterpart to msnr_symbol_skip_rr_min()/
-    msnr_symbol_skip_sl_min(), same separate-lookup reasoning. Returns
-    this symbol's own set of statistically-bad UTC hours (msnr_symbol_
-    skip_hours()) as a plain list — empty (not None) when no hour has
-    been flagged, so callers can use it directly as `hour in skip_
-    hours` without a None-check first."""
-    with state_lock:
-        override = STATE["msnr_symbol_overrides"].get(symbol) or {}
-    return override.get("skip_hours") or []
-
-
-def msnr_symbol_skip_volume_below(symbol):
-    """v0.99.59 — volume-ratio counterpart to msnr_symbol_skip_rr_min()/
-    msnr_symbol_skip_sl_min()/msnr_symbol_skip_hours_live(), same
-    separate-lookup reasoning (msnr_symbol_params()'s return value gets
-    spread as **params into msnr_detect_signals(), which has no
-    skip_volume_below kwarg either). Returns this symbol's own volume-
-    ratio floor (msnr_symbol_volume_skip_below()) — a live signal whose
-    OWN volume_ratio lands below it gets skipped for this symbol — or
-    None when no low-volume bucket has been flagged."""
-    with state_lock:
-        override = STATE["msnr_symbol_overrides"].get(symbol) or {}
-    return override.get("skip_volume_below")
-
-
-def msnr_symbol_optimal_leverage(symbol):
-    """v0.99.47 — this symbol's own Kelly-optimal leverage (msnr_
-    optimal_leverage_for_symbol(), computed once per backtest cycle in
-    msnr_optimize_symbol() against this symbol's own filtered trade
-    history), looked up for live signal firing. Same separate-lookup
-    reasoning msnr_symbol_skip_rr_min()/msnr_symbol_skip_sl_min()
-    already documented — this isn't threaded through msnr_symbol_
-    params() either. Falls back to AUTOTRADE_LEVERAGE_MSNR if this
-    symbol has no override yet (e.g. its very first backtest cycle
-    hasn't completed)."""
-    with state_lock:
-        override = STATE["msnr_symbol_overrides"].get(symbol) or {}
-    optimal = override.get("optimal_leverage")
-    return optimal if optimal is not None else AUTOTRADE_LEVERAGE_MSNR
-
-
-def msnr_compound_trail(trades, start_balance=None, leverage=None):
-    """v0.99.25, per direct user follow-up to msnr_compound_return():
-    the SAME walk, but returns one entry per actually-compounded CLOSED
-    trade instead of collapsing straight to a final number — so the
-    compounding math can be checked trade-by-trade (used to annotate
-    /api/msnr/backtest/<symbol>'s expanded per-trade UI) rather than
-    just trusted as a single end figure. msnr_compound_return() below
-    is now a thin reduction over this same trail, so the per-trade
-    display and the summary "доход" figure can never silently disagree
-    about the underlying math — one calculation, two views of it.
-    v0.99.46 briefly varied leverage PER TRADE off that trade's own
-    stop width — reverted in v0.99.47, per direct user follow-up
-    ("чёт лучше не стало, будто даже хуже"): that scaled the WIN side
-    up by the exact same factor as the loss side on every tight-stop
-    trade, and under full-reinvestment compounding, the resulting
-    higher variance reduced long-run geometric growth for some symbols
-    even though each individual trade's own edge hadn't changed — see
-    msnr_optimal_leverage_for_symbol()'s own docstring for the
-    Kelly-criterion reasoning. Back to ONE flat `leverage` for the
-    whole walk, same as before v0.99.46 — callers now pass the
-    symbol's own Kelly-optimal value (msnr_optimal_leverage_for_
-    symbol()) instead of a stop-width-derived one. Resolves to
-    AUTOTRADE_LEVERAGE_MSNR when not given, same default this
-    parameter always had.
-    TIMEOUT trades and malformed records (missing/invalid entry/sl/tp)
-    are skipped entirely — absent from the trail, not shown at some
-    placeholder balance — same skip conditions msnr_compound_return()
-    already documented. Stops (trail simply ends) once a trade drives
-    the balance to 0; a trade that would come after that in time never
-    actually happened for this account, so it isn't in the trail.
-    Returns a list of dicts in chronological order: {"time",
-    "direction", "result", "leverage", "pnl_pct", "balance_before",
-    "balance_after"} — direction included alongside time so callers
-    matching trail rows back to trade records (e.g. api_msnr_backtest_
-    trades()) have a collision-safe key: an A-shape and V-shape level
-    can structurally resolve on the exact same entry candle, and time
-    alone wouldn't disambiguate that pair. `leverage` echoes the flat
-    value used for the whole trail (kept per-row, not just once, so
-    the UI's existing per-trade rendering doesn't need special-casing
-    for "one value vs per-trade" between backtest and live views).
-    v0.99.71 — CRITICAL FIX, found on a direct user request for a full
-    professional-trader-style audit of every indicator: pnl_frac had NO
-    taker-fee deduction at all, despite AUTOTRADE_SIM_FEE_PCT already
-    existing in this codebase for exactly this purpose. Round-trip fee,
-    as a fraction of MARGIN, is `2 * AUTOTRADE_SIM_FEE_PCT * leverage`
-    — scales linearly with leverage since fees are charged on notional
-    (margin * leverage), both entry and exit. At leverage=30x and the
-    0.05%/side default, that's already 3% of margin gone to fees alone
-    on EVERY trade, win or lose — compounding multiplicatively across a
-    trail the same way returns do. The displayed "доход $40→$Y" figure
-    was systematically overstated by ignoring this. Now subtracted from
-    every trade's pnl_frac (same as msnr_optimal_leverage_for_symbol()'s
-    own matching fix — see that function's docstring), charged
-    regardless of WIN or LOSS, same isolated-margin floor applying on
-    top of the fee-adjusted figure."""
-    start_balance = start_balance if start_balance is not None else MSNR_COMPOUND_START_BALANCE
-    leverage = leverage if leverage is not None else AUTOTRADE_LEVERAGE_MSNR
-    fee_frac = msnr_trade_cost_frac() * leverage   # v0.99.392 — fees + slippage
-    closed = [t for t in trades if msnr_trade_move(t) is not None]   # v0.99.400 — incl. TIME_EXIT
-    trail = []
-    balance = start_balance
-    for t in closed:
-        if balance <= 0:
-            break
-        pnl_frac = msnr_trade_move(t) * leverage - fee_frac   # v0.99.400 — real exit price (WIN tp / LOSS sl / TIME_EXIT close)
-        pnl_frac = max(pnl_frac, -1.0)  # isolated-margin floor — can't lose more than the margin risked
-        balance_before = balance
-        balance = balance * (1 + pnl_frac)
-        if balance <= 0:
-            balance = 0.0
-        trail.append({
-            "time": t["time"], "direction": t.get("direction"), "result": t["result"],
-            "leverage": round(leverage, 1),
-            "pnl_pct": round(pnl_frac * 100, 1),
-            "balance_before": round(balance_before, 2),
-            "balance_after": round(balance, 2),
-        })
-    return trail
 
 
 def rr_compound_annotate(trades, symbol=None, start_balance=None):
@@ -11086,574 +9026,491 @@ def rr_compound_annotate(trades, symbol=None, start_balance=None):
     return out
 
 
-def msnr_compound_return(trades, start_balance=None, leverage=None):
-    """Per direct user request: a compounding $ P&L simulation over one
-    symbol's backtest — deliberately separate from msnr_summarize_
-    backtest()'s R-multiple stats, which measure the STRATEGY's edge
-    independent of position sizing. This measures what actually
-    happens to a real account: start with start_balance USD margin
-    (default MSNR_COMPOUND_START_BALANCE) on the FIRST closed (WIN/
-    LOSS) trade in chronological order, then reinvests the ENTIRE
-    resulting balance into the next closed trade, and so on through
-    every closed trade in the list passed in — literally "va-bank" the
-    whole account every single trade, per the user's own description.
-    v0.99.47: `leverage` is a single flat value again (msnr_optimal_
-    leverage_for_symbol()'s own Kelly-optimal choice for this symbol,
-    typically) — see msnr_compound_trail()'s own docstring for why
-    v0.99.46's per-trade stop-width variant was reverted.
-    v0.99.25: a thin reduction over msnr_compound_trail() (see its own
-    docstring for the full per-trade mechanics — TIMEOUT handling, the
-    isolated-margin loss floor, why entry/sl/tp drive the math instead
-    of the stored rr field) rather than its own separate walk, so this
-    summary and the per-trade trail can never drift apart.
-    Returns {"final_balance", "return_pct", "trades_compounded",
-    "blown_at_trade"} (blown_at_trade is the 1-based position WITHIN
-    the trail — i.e. among trades actually compounded, not raw
-    position in the input list, since a malformed trade is skipped
-    without consuming a slot), or None if there are no closed trades
-    to compound over at all."""
-    start_balance = start_balance if start_balance is not None else MSNR_COMPOUND_START_BALANCE
-    closed = [t for t in trades if msnr_trade_move(t) is not None]   # v0.99.400 — incl. TIME_EXIT
-    if not closed:
+# ============================================================================
+# MSNR v2 (v0.99.401) — rebuilt from scratch (user: "пересобери заново этот
+# индикатор с учетом всего, убери ненужные правки фильтры и тп").
+#
+# The idea is unchanged: "Storyline" levels are close-price swing pivots
+# (A-shape = high, V-shape = low) on the structure TF (1h); on the entry TF
+# (15m) a QM — price sweeps an active level and closes back on the origin
+# side — is traded against the sweep, stop beyond the sweep's extreme.
+#
+# Everything that made the old module unreliable is gone: no per-coin
+# parameter grid, no per-coin RR / volume / hour / SL-width filters, no
+# add-on, no Neuro trade filter, no Kelly / compounding sizing, no in-sample
+# ranking. Instead:
+#   * a small set of STRATEGY variants (TP mode x 4h gate x stop size x
+#     minimum impulse) — the same variant for every coin;
+#   * backtest = live: one position per coin, entry at the signal candle's
+#     close, fees + slippage, max holding time (then closed at market), no
+#     lookahead (a pivot exists only after its confirming bar CLOSED);
+#   * the variant is chosen on the TRAIN part (first 70%) of all coins pooled
+#     (Bonferroni over the variants) and must be confirmed on the pooled TEST
+#     part (last 30%, never used for any choice). Only then does anything
+#     trade: the coins whose own train result is positive, best first.
+#   * sizing is the shared autotrade sizing (risk % of balance / all-in).
+# ============================================================================
+
+MSNR2_UNIVERSE_N = int(os.environ.get("VP_MSNR_UNIVERSE_N", 60))      # most liquid coins backtested / scanned
+MSNR2_DAYS = int(os.environ.get("VP_MSNR_DAYS", 90))                  # entry-TF history (Gate keeps ~102 days of 15m)
+MSNR2_STRUCT_EXTRA_DAYS = 20                                          # extra structure / higher TF history so the first entry bars already have levels
+MSNR2_TRAIN_FRAC = 0.7
+MSNR2_PIVOT_LR = 2                                                    # close-pivot confirmation: 2 bars left, 2 right
+MSNR2_ATR_PERIOD = 14
+MSNR2_QM_LOOKBACK = 6                                                 # entry bars the sweep + close-back may span
+MSNR2_QM_ZONE_PCT = 0.006                                             # sweep extreme must stay within 0.6% beyond the level
+MSNR2_MIN_RISK_PCT = 0.003                                            # stops tighter than 0.3% of price are skipped: fees+slippage (0.15%) would be >= 0.5R
+MSNR2_FALLBACK_RR = 3.0                                               # TP when the opposite level isn't valid (not confirmed / not ahead of price)
+MSNR2_MAX_WAIT_BARS = 300                                             # 15m bars = 75h, then closed at market (also capped by max_hold_bars())
+MSNR2_SLIPPAGE_PCT = float(os.environ.get("VP_MSNR_SLIPPAGE_PCT", 0.0005))
+MSNR2_MIN_POOLED_TRAIN = 150                                          # pooled train trades a variant needs to be considered
+MSNR2_MIN_POOLED_TEST = 40                                            # pooled test trades the confirmation needs
+MSNR2_TEST_Z = 2.0
+MSNR2_MIN_COIN_TRAIN = 5                                              # a coin trades the variant only with >= this many own train trades, positive in total
+MSNR2_TOP_N = int(os.environ.get("VP_MSNR_TOP_N", 10))                # coins traded at most (best own train total R first)
+
+MSNR2_VARIANTS = [{"tp": tp, "gate": gate, "sl_mult": slm, "min_leg": ml}
+                  for tp in ("opp4h", "opp1h", "rr2", "rr3")
+                  for gate in (True, False)
+                  for slm in (1.0, 1.5)
+                  for ml in (1.5, 2.5)]
+MSNR2_Z_CRITICAL = round(statistics.NormalDist().inv_cdf(1 - 0.05 / len(MSNR2_VARIANTS)), 2)   # 32 variants -> 2.95
+MSNR2_TP_LABELS = {"opp4h": "тейк: противоположный уровень 4h", "opp1h": "тейк: противоположный уровень 1h",
+                   "rr2": "тейк: RR 2", "rr3": "тейк: RR 3"}
+
+
+def msnr2_vkey(v):
+    return f"{v['tp']}|{'g' if v['gate'] else '-'}|{v['sl_mult']}|{v['min_leg']}"
+
+
+def msnr2_vlabel(v):
+    return (f"{MSNR2_TP_LABELS[v['tp']]} · фильтр 4h {'вкл' if v['gate'] else 'выкл'} · "
+            f"стоп ×{v['sl_mult']} · импульс ≥{v['min_leg']} ATR")
+
+
+def msnr2_cost_frac():
+    """Round trip: taker fee in and out + slippage, as a fraction of price."""
+    return 2 * AUTOTRADE_SIM_FEE_PCT + MSNR2_SLIPPAGE_PCT
+
+
+def msnr2_r(direction, entry, sl, exit_price):
+    """Net R of a trade closed at exit_price, in units of what a stop-out
+    really costs (risk + costs): a stop-out is exactly -1."""
+    risk = abs(entry - sl)
+    if risk <= 0:
         return None
-    trail = msnr_compound_trail(trades, start_balance, leverage)
-    if not trail:
-        return {"final_balance": round(start_balance, 2), "return_pct": 0.0,
-                "trades_compounded": 0, "blown_at_trade": None}
-    final_balance = trail[-1]["balance_after"]
-    blown_at = len(trail) if final_balance <= 0 else None
-    return {
-        "final_balance": final_balance,
-        "return_pct": round((final_balance / start_balance - 1) * 100, 1) if start_balance else None,
-        "trades_compounded": len(trail),
-        "blown_at_trade": blown_at,
-    }
+    cost = entry * msnr2_cost_frac()
+    move = (exit_price - entry) if direction == "LONG" else (entry - exit_price)
+    return round((move - cost) / (risk + cost), 4)
 
 
-def msnr_scan_symbol_live(symbol):
-    """Live counterpart to msnr_backtest_symbol() — fetches recent
-    structure + entry history, runs the SAME detector (with this
-    symbol's autotuned params, see msnr_symbol_params()), and fires only
-    if the LAST entry candle produced a brand-new signal not already
-    seen for this symbol.
-    v0.99.305 — also fetches MSNR_HIGHER_TF (4h) history, same "why" as
-    msnr_backtest_symbol()'s own comment."""
-    if not MSNR_ENABLED:
-        return
+def msnr2_hold_bars():
+    return max_hold_bars("15m", MSNR2_MAX_WAIT_BARS)
+
+
+def msnr2_pivots(candles, interval_sec, min_leg_atr):
+    """Confirmed close-price pivots, strictly alternating A/V, each at least
+    min_leg_atr x ATR away from the previous one. A pivot at bar j becomes
+    known only when bar j+PIVOT_LR has CLOSED: confirm_time = that bar's
+    open + interval_sec. Returns [{"type", "price", "confirm_time"}]."""
+    lr = MSNR2_PIVOT_LR
+    n = len(candles)
+    if n < MSNR2_ATR_PERIOD + 2 * lr + 2:
+        return []
+    closes = [c["close"] for c in candles]
+    atr = neuro_atr_series(candles, MSNR2_ATR_PERIOD)
+    out, last_price, last_type = [], None, None
+    for j in range(lr, n - lr):
+        a = atr[j]
+        if not a:
+            continue
+        c = closes[j]
+        is_high = all(c >= closes[j - k] for k in range(1, lr + 1)) and all(c >= closes[j + k] for k in range(1, lr + 1))
+        is_low = all(c <= closes[j - k] for k in range(1, lr + 1)) and all(c <= closes[j + k] for k in range(1, lr + 1))
+        typ = "A" if is_high and last_type != "A" else ("V" if is_low and last_type != "V" else None)
+        if typ is None:
+            continue
+        if last_price is not None and abs(c - last_price) < min_leg_atr * a:
+            continue
+        out.append({"type": typ, "price": c, "confirm_time": candles[j + lr]["time"] + interval_sec})
+        last_price, last_type = c, typ
+    return out
+
+
+def msnr2_detect(struct_candles, entry_candles, higher_candles, v):
+    """Walk the entry candles, activating pivots at their confirm time, and
+    emit a QM signal when a bar closes back across an active level that the
+    last MSNR2_QM_LOOKBACK bars swept (by at most MSNR2_QM_ZONE_PCT). A level
+    fires once. Returns signals (oldest first): index, time, direction,
+    entry, sl, tp, level, level_type."""
+    s_iv = INTERVAL_SECONDS.get("1h", 3600)
+    h_iv = INTERVAL_SECONDS.get("4h", 14400)
+    piv = msnr2_pivots(struct_candles, s_iv, v["min_leg"])
+    hpiv = msnr2_pivots(higher_candles, h_iv, v["min_leg"]) if higher_candles else []
+    act = {"A": None, "V": None}
+    hact = {"A": None, "V": None}
+    fired = {"A": False, "V": False}
+    pi = hi = 0
+    sigs = []
+    for i, c in enumerate(entry_candles):
+        while pi < len(piv) and piv[pi]["confirm_time"] <= c["time"]:
+            p = piv[pi]
+            if act[p["type"]] is None or act[p["type"]]["price"] != p["price"]:
+                act[p["type"]] = p
+                fired[p["type"]] = False
+            pi += 1
+        while hi < len(hpiv) and hpiv[hi]["confirm_time"] <= c["time"]:
+            hact[hpiv[hi]["type"]] = hpiv[hi]
+            hi += 1
+        cluster = entry_candles[max(0, i - MSNR2_QM_LOOKBACK + 1): i + 1]
+        for typ in ("A", "V"):
+            lvl = act[typ]
+            if lvl is None or fired[typ] or (v["gate"] and hact[typ] is None):
+                continue
+            level = lvl["price"]
+            if typ == "A":   # swept above resistance, closed back below -> SHORT
+                swept = [x["high"] for x in cluster if x["high"] > level]
+                if not swept or c["close"] >= level:
+                    continue
+                extreme = max(swept)
+                if (extreme - level) / level > MSNR2_QM_ZONE_PCT:
+                    continue
+                direction, entry = "SHORT", c["close"]
+                risk = (extreme - entry) * v["sl_mult"]
+                sl = entry + risk
+            else:            # swept below support, closed back above -> LONG
+                swept = [x["low"] for x in cluster if x["low"] < level]
+                if not swept or c["close"] <= level:
+                    continue
+                extreme = min(swept)
+                if (level - extreme) / level > MSNR2_QM_ZONE_PCT:
+                    continue
+                direction, entry = "LONG", c["close"]
+                risk = (entry - extreme) * v["sl_mult"]
+                sl = entry - risk
+            fired[typ] = True   # consumed even if skipped below, as live
+            if risk <= 0 or risk / entry < MSNR2_MIN_RISK_PCT:
+                continue
+            opp_type = "V" if typ == "A" else "A"
+            opp = None
+            if v["tp"] == "opp4h" and hact[opp_type] is not None:
+                opp = hact[opp_type]["price"]
+            elif v["tp"] == "opp1h" and act[opp_type] is not None:
+                opp = act[opp_type]["price"]
+            ahead = opp is not None and ((opp < entry) if direction == "SHORT" else (opp > entry))
+            rr = {"rr2": 2.0, "rr3": 3.0}.get(v["tp"])
+            if rr is None:
+                tp = opp if ahead else None
+                if tp is None:
+                    rr = MSNR2_FALLBACK_RR
+            if rr is not None:
+                tp = entry - risk * rr if direction == "SHORT" else entry + risk * rr
+            sigs.append({"index": i, "time": c["time"], "direction": direction, "entry": entry,
+                         "sl": sl, "tp": tp, "level": level, "level_type": typ})
+    return sigs
+
+
+def msnr2_simulate(entry_candles, sigs):
+    """Outcomes with the live rules: one position per coin (a signal while a
+    trade is open is ignored), SL checked first on a bar touching both,
+    closed at market after msnr2_hold_bars(). Returns closed and open trades."""
+    hold = msnr2_hold_bars()
+    n = len(entry_candles)
+    trades, busy_until = [], -1
+    for s in sigs:
+        i = s["index"]
+        if i <= busy_until:
+            continue
+        result, exit_price, exit_i = None, None, None
+        for k in range(i + 1, min(n, i + 1 + hold)):
+            b = entry_candles[k]
+            if s["direction"] == "LONG":
+                if b["low"] <= s["sl"]:
+                    result, exit_price, exit_i = "LOSS", s["sl"], k
+                    break
+                if b["high"] >= s["tp"]:
+                    result, exit_price, exit_i = "WIN", s["tp"], k
+                    break
+            else:
+                if b["high"] >= s["sl"]:
+                    result, exit_price, exit_i = "LOSS", s["sl"], k
+                    break
+                if b["low"] <= s["tp"]:
+                    result, exit_price, exit_i = "WIN", s["tp"], k
+                    break
+        if result is None and i + hold <= n - 1:
+            result, exit_price, exit_i = "TIME_EXIT", entry_candles[i + hold]["close"], i + hold
+        t = {"time": s["time"], "direction": s["direction"], "entry": s["entry"], "sl": s["sl"], "tp": s["tp"],
+             "level": s["level"], "level_type": s["level_type"],
+             "result": result or "OPEN", "exit_price": exit_price,
+             "exit_time": entry_candles[exit_i]["time"] if exit_i is not None else None,
+             "rr": msnr2_r(s["direction"], s["entry"], s["sl"], s["tp"]),
+             "r": msnr2_r(s["direction"], s["entry"], s["sl"], exit_price) if result else None}
+        trades.append(t)
+        busy_until = exit_i if exit_i is not None else n
+    return trades
+
+
+def msnr2_fetch(symbol, now=None):
+    now = now or time.time()
+    e_start = now - MSNR2_DAYS * 86400
+    s_start = e_start - MSNR2_STRUCT_EXTRA_DAYS * 86400
+    entry = get_candles_range(symbol, "15m", e_start, now)
+    struct = get_candles_range(symbol, "1h", s_start, now)
+    higher = get_candles_range(symbol, "4h", s_start, now)
+    # closed bars only (a backtest that ends with a still-forming bar would
+    # judge the last signal on a candle live can't have seen yet)
+    entry = [c for c in entry if c["time"] + 900 <= now]
+    struct = [c for c in struct if c["time"] + 3600 <= now]
+    higher = [c for c in higher if c["time"] + 14400 <= now]
+    return entry, struct, higher
+
+
+def msnr2_symbol_all_variants(entry, struct, higher):
+    """Every variant on one coin -> {vkey: {"split": t, "trades": [...]}}."""
+    if len(entry) < 500 or len(struct) < 60:
+        return {}
+    split = entry[int(len(entry) * MSNR2_TRAIN_FRAC)]["time"]
+    out = {}
+    for v in MSNR2_VARIANTS:
+        sigs = msnr2_detect(struct, entry, higher, v)
+        out[msnr2_vkey(v)] = {"split": split, "trades": msnr2_simulate(entry, sigs)}
+    return out
+
+
+def msnr2_part(trades, split, train):
+    """Closed trades of one side of the split. Train trades must also have
+    CLOSED before the split, so choosing on them never sees test prices."""
+    if train:
+        return [t for t in trades if t["r"] is not None and t["time"] < split and t["exit_time"] < split]
+    return [t for t in trades if t["r"] is not None and t["time"] >= split]
+
+
+def msnr2_stats(ts):
+    n = len(ts)
+    if not n:
+        return {"n": 0, "wr": None, "avg_r": None, "sum_r": 0.0, "z": None}
+    rs = [t["r"] for t in ts]
+    s = sum(rs)
+    return {"n": n, "wr": round(sum(1 for t in ts if t["result"] == "WIN") / n * 100, 1),
+            "avg_r": round(s / n, 3), "sum_r": round(s, 2),
+            "z": (lambda z: round(z, 2) if z is not None else None)(_t_from_sums(n, s, sum(r * r for r in rs), var_floor=1.0))}
+
+
+def msnr2_select(per_coin):
+    """per_coin: {symbol: {vkey: {"split", "trades"}}}. Pools every coin's
+    train trades per variant, picks the best train t-statistic (it must
+    clear MSNR2_Z_CRITICAL, the Bonferroni bar for all variants), and
+    confirms it on the pooled test trades. Returns the verdict dict."""
+    rows = []
+    for v in MSNR2_VARIANTS:
+        k = msnr2_vkey(v)
+        tr, te = [], []
+        for sym, vv in per_coin.items():
+            d = vv.get(k)
+            if d:
+                tr += msnr2_part(d["trades"], d["split"], True)
+                te += msnr2_part(d["trades"], d["split"], False)
+        st_tr, st_te = msnr2_stats(tr), msnr2_stats(te)
+        rows.append({"key": k, "label": msnr2_vlabel(v), "variant": v, "train": st_tr, "test": st_te})
+    ok = [r for r in rows if r["train"]["n"] >= MSNR2_MIN_POOLED_TRAIN and r["train"]["z"] is not None]
+    ok.sort(key=lambda r: -r["train"]["z"])
+    rows.sort(key=lambda r: -(r["train"]["z"] if r["train"]["z"] is not None else -99))
+    best = ok[0] if ok else None
+    chosen = best if best and best["train"]["z"] >= MSNR2_Z_CRITICAL else None
+    te = chosen["test"] if chosen else None
+    passed = bool(te and te["n"] >= MSNR2_MIN_POOLED_TEST and te["z"] is not None
+                  and te["z"] >= MSNR2_TEST_Z and te["avg_r"] > 0)
+    return {"t": time.time(), "passed": passed, "chosen": chosen, "best_train": best,
+            "variants": rows[:10], "n_variants": len(MSNR2_VARIANTS), "coins": len(per_coin),
+            "z_needed": MSNR2_Z_CRITICAL, "z_test_needed": MSNR2_TEST_Z,
+            "min_train": MSNR2_MIN_POOLED_TRAIN, "min_test": MSNR2_MIN_POOLED_TEST,
+            "train_frac": MSNR2_TRAIN_FRAC, "hold_hours": round(msnr2_hold_bars() * 0.25, 1)}
+
+
+def msnr2_coin_table(per_coin, vkey):
+    """Per coin for one variant: train / test stats, picked flag, trades."""
+    coins = {}
+    for sym, vv in per_coin.items():
+        d = vv.get(vkey)
+        if not d:
+            continue
+        tr = msnr2_stats(msnr2_part(d["trades"], d["split"], True))
+        te = msnr2_stats(msnr2_part(d["trades"], d["split"], False))
+        coins[sym] = {"train": tr, "test": te, "split": d["split"],
+                      "picked": tr["n"] >= MSNR2_MIN_COIN_TRAIN and tr["sum_r"] > 0,
+                      "open_now": sum(1 for t in d["trades"] if t["result"] == "OPEN")}
+    return coins
+
+
+def msnr2_run_cycle():
+    """One full backtest cycle: all coins x all variants, pooled selection,
+    coin table + eligible set, stored in STATE."""
     try:
-        params = msnr_symbol_params(symbol)
-        # v0.99.392 — much longer history than before (264 / 264 / ~206
-        # bars): the pivot chain is path-dependent (strict A/V alternation,
-        # leg size vs the previous pivot) and "level already fired" lives
-        # only inside one msnr_detect_signals() call, so a short live window
-        # built different levels than the backtest's 60-day one and could
-        # re-fire a level the backtest had already consumed.
-        structure_candles = get_candles(symbol, interval=MSNR_STRUCTURE_TF, limit=900)
-        higher_candles = get_candles(symbol, interval=MSNR_HIGHER_TF, limit=400)
-        entry_candles = get_candles(symbol, interval=MSNR_ENTRY_TF, limit=900)
-        now = time.time()
-        s_interval_sec = INTERVAL_SECONDS.get(MSNR_STRUCTURE_TF, 3600)
-        h_interval_sec = INTERVAL_SECONDS.get(MSNR_HIGHER_TF, 14400)
-        e_interval_sec = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
-        structure_candles = [c for c in structure_candles if c["time"] + s_interval_sec <= now]
-        higher_candles = [c for c in higher_candles if c["time"] + h_interval_sec <= now]
-        entry_candles = [c for c in entry_candles if c["time"] + e_interval_sec <= now]
-        if len(structure_candles) < MSNR_ATR_PERIOD + 10 or len(entry_candles) < 10:
-            return
-        sigs, _pivots = msnr_detect_signals(structure_candles, entry_candles, higher_candles, **params)
-        if not sigs:
-            return
-        sig = sigs[-1]
-        if sig["index"] != len(entry_candles) - 1:
-            return  # most recent signal isn't off the latest closed entry-TF candle — stale
-        # v0.99.392 — a level fires once per reign in the backtest; live,
-        # one that already produced a logged signal earlier (possibly
-        # before this fetch window) must not fire a second time.
-        with state_lock:
-            if any(s["symbol"] == symbol and s.get("level") == sig["level"]
-                   and s.get("level_type") == sig["level_type"] and (s.get("time") or 0) < sig["time"]
-                   for s in STATE["msnr_signals"]):
-                return
-        # v0.99.22, per direct user request: skip firing if THIS symbol's
-        # own backtest showed its rr bucket at-or-above skip_rr_min
-        # failing breakeven — see msnr_symbol_rr_skip_min(). Computed
-        # from entry/sl/tp directly (same formula msnr_run_backtest()
-        # uses), not stored on sig, since msnr_detect_signals() itself
-        # doesn't compute rr.
-        # v0.99.79 disabled this entirely, per direct user request
-        # ("Skip RR>3, давай подобную проверку тоже уберем, пока важно
-        # все RR торговать"). v0.99.86 RE-ENABLES it, per a direct
-        # follow-up request after live data showed the cost of no RR
-        # filtering at all ("много слабых результатов в msnr, по 50
-        # сделок а доход околонулевой") — but as msnr_symbol_rr_range()'s
-        # two-sided replacement, checking BOTH a ceiling (skip_rr_min,
-        # unchanged meaning) AND a floor (skip_rr_max, new) rather than
-        # just reverting to the old one-sided rule.
-        skip_rr_min = msnr_symbol_skip_rr_min(symbol)
-        skip_rr_max = msnr_symbol_skip_rr_max(symbol)
-        if skip_rr_min is not None or skip_rr_max is not None:
-            sig_rr = msnr_net_rr(sig["entry"], sig["sl"], sig["tp"])   # v0.99.392 — same net rr the backtest thresholds were derived from
-            if sig_rr is not None:
-                if skip_rr_min is not None and sig_rr >= skip_rr_min:
-                    return  # this symbol's own history says rr this high fails here — skip, don't fire
-                if skip_rr_max is not None and sig_rr < skip_rr_max:
-                    return  # this symbol's own history says rr this low ALSO fails here — skip, don't fire
-        # v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше
-        # не стало, будто даже хуже" -> Kelly/optimal-f search instead
-        # of a fixed stop-width target): this signal uses THIS symbol's
-        # own Kelly-optimal leverage (msnr_symbol_optimal_leverage(),
-        # computed once per backtest cycle against the symbol's whole
-        # trade history — msnr_optimal_leverage_for_symbol()'s own
-        # docstring has the full reasoning) — a single flat value per
-        # symbol, not derived from this one signal's own stop width the
-        # way v0.99.46 did. Computed BEFORE the liquidation check below
-        # so that check evaluates the leverage this trade will ACTUALLY
-        # use.
-        dyn_leverage = msnr_symbol_optimal_leverage(symbol)
-        # v0.99.26, per direct user request ("иногда стоп будет за
-        # ликвидацией и просто избегать этого"): deterministic check —
-        # if this signal's own SL sits past where Gate.io would force-
-        # liquidate the position at the leverage this trade would
-        # actually use, skip firing regardless of any statistics. Same
-        # check the backtest filter (msnr_optimize_symbol()) and
-        # execute_autotrade()'s own v0.70.0 order-time gate both use —
-        # a signal that fails here would also get SKIPPED at order time
-        # anyway, this just avoids ever showing it as a live signal in
-        # the first place.
-        # v0.99.46: walks dyn_leverage DOWN in 0.5x steps (never below
-        # AUTOTRADE_LEVERAGE_MSNR) until the liquidation-safety margin
-        # clears, since the symbol's own optimal leverage has no
-        # awareness of THIS signal's live MMR at firing time — only
-        # after exhausting that headroom does a still-failing check
-        # mean skip the signal entirely.
-        while dyn_leverage > AUTOTRADE_LEVERAGE_MSNR and msnr_trade_beyond_liquidation(
-                symbol, sig["direction"], sig["entry"], sig["sl"], leverage=dyn_leverage):
-            dyn_leverage = max(AUTOTRADE_LEVERAGE_MSNR, dyn_leverage - 0.5)
-        if msnr_trade_beyond_liquidation(symbol, sig["direction"], sig["entry"], sig["sl"], leverage=dyn_leverage):
-            return
-        # v0.99.26, per direct user request ("фильтр по ширине стопа"):
-        # SL-width counterpart to the skip_rr_min check above — see
-        # msnr_symbol_sl_skip_min().
-        skip_sl_min = msnr_symbol_skip_sl_min(symbol)
-        if skip_sl_min is not None and sig["entry"]:
-            sig_sl_pct = abs(sig["entry"] - sig["sl"]) / sig["entry"] * 100
-            if sig_sl_pct >= skip_sl_min:
-                return  # this symbol's own history says a stop this wide fails here — skip, don't fire
-        # v0.99.56, per direct user request ("какой фильтр сигналов был
-        # бы самым эффективным для внедрения" -> time-of-day): hour-of-
-        # day counterpart to the RR/SL-width checks above — see msnr_
-        # symbol_skip_hours()'s own docstring for why this is a SET of
-        # specific hours rather than a single threshold.
-        skip_hours = msnr_symbol_skip_hours_live(symbol)
-        if skip_hours and time.gmtime(sig["time"])[3] in skip_hours:
-            return  # this symbol's own history says this UTC hour fails here — skip, don't fire
-        # v0.99.59, per direct user request ("второй фильтр... про n
-        # как в первом не забудь" — volume confirmation on the sweep):
-        # LOW relative volume counterpart to the checks above — see
-        # msnr_symbol_volume_skip_below()'s own docstring for why this
-        # skips BELOW a ceiling rather than above a floor (opposite
-        # direction from skip_rr_min/skip_sl_pct_min). sig.get(
-        # "volume_ratio") can genuinely be None (no lookback window yet
-        # near the very start of fetched history, or a zero-volume
-        # baseline) — a None ratio means "can't judge this signal on
-        # volume," not "reject it," so this only skips when there's an
-        # actual number to compare.
-        skip_volume_below = msnr_symbol_skip_volume_below(symbol)
-        if skip_volume_below is not None and sig.get("volume_ratio") is not None:
-            if sig["volume_ratio"] < skip_volume_below:
-                return  # this symbol's own history says a sweep this quiet fails here — skip, don't fire
-        with _msnr_signal_cooldowns_lock:
-            if _msnr_signal_cooldowns.get(symbol) == sig["time"]:
-                return
-            _msnr_signal_cooldowns[symbol] = sig["time"]
-        # v0.99.50 — BUG FOUND ON LIVE REPORT ("почему-то 2 раза одна и
-        # та же сделка в живых"): the cooldown check right above is
-        # this function's ONLY internal dedup against re-firing the
-        # exact same signal, and it's a plain in-memory dict — NOT part
-        # of STATE, never written by save_state()/restored by load_
-        # state(). A process restart (this app has a documented history
-        # of those, from Gate.io rate-limit pressure to Android killing
-        # the background Termux process during idle screen-off time —
-        # see the earlier watchdog discussion) wipes it back to empty,
-        # while STATE["msnr_signals"] itself (the actual persisted
-        # record of what already fired) survives the restart intact.
-        # If the same active V-shape/A-shape level is still the most
-        # recent qualifying signal after restart (nothing about the
-        # market needed to change for that — msnr_detect_signals() has
-        # no memory between calls, v_fired/a_fired are local variables
-        # reset every single call), the freshly-empty cooldown dict has
-        # no record of having already fired it, and it fires again —
-        # a second, genuinely duplicate OPEN record for a symbol that
-        # already has one, exactly the two identical TIA_USDT rows
-        # reported live. has_open_signal_any_module() above doesn't
-        # catch this either: it deliberately EXCLUDES msnr_signals from
-        # its own check (see that function's own docstring — each
-        # module is expected to check its OWN list itself, this is only
-        # the cross-module veto), and MSNR never had that self-check at
-        # all until now. Checking STATE directly (persisted, survives
-        # restart) instead of only the fragile in-memory cooldown closes
-        # the gap regardless of WHY the time-based cooldown alone
-        # failed to catch it.
-        with state_lock:
-            if any(s["symbol"] == symbol and s.get("status") == "OPEN" for s in STATE["msnr_signals"]):
-                return
-            if signal_already_logged(STATE["msnr_signals"], symbol, sig["time"]):   # v0.99.386
-                return
-        if has_open_signal_any_module(symbol, exclude="msnr_signals"):
-            return
-        record = {
-            "symbol": symbol, "direction": sig["direction"],
-            "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
-            "level": sig["level"], "level_type": sig["level_type"],
-            "opposite_level": sig["opposite_level"], "time": sig["time"],
-            "detected_at": time.time(), "status": "OPEN", "result": None,
-            "exit_price": None, "exit_time": None, "app_version": APP_VERSION,
-            # v0.99.33 — see msnr_live_balance_for_symbol()'s own docstring.
-            # autotrade_fired/leverage_used are what msnr_update_live_
-            # balance() (called from update_msnr_signal_outcomes() once
-            # this signal closes WIN/LOSS) needs to know whether/how to
-            # update this symbol's real compounding balance — a signal
-            # nobody actually traded (autotrade off, or not eligible)
-            # has no real P&L to compound with, so it must NOT move the
-            # balance just because the price happened to hit TP/SL.
-            "autotrade_fired": False, "live_size_usd": None, "leverage_used": None,
-            # v0.99.126 — sl_order_id needed so msnr_scan_addon_live()
-            # can cancel THIS order once an add-on stacks onto the same
-            # position and a new combined SL is placed (see that
-            # function's own docstring). addon_fired stops a second
-            # add-on ever firing on top of the first — the source's own
-            # examples show exactly two positions per idea, not a chain.
-            "sl_order_id": None, "addon_fired": False,
-        }
-        with state_lock:
-            STATE["msnr_signals"].appendleft(record)
-            autotrade_symbols = dict(STATE["msnr_autotrade_symbols"])
-            overrides_snapshot = dict(STATE["msnr_symbol_overrides"])
-        # v0.99.18: replaced the old single AUTOTRADE_ENABLED_MSNR gate
-        # with a per-symbol toggle, per direct user request for exactly
-        # 6 individually-toggleable fields (3 gold + current top 3 non-
-        # gold by msnr_rank_by_winrate_sample()). Re-checks CURRENT
-        # eligibility here, not just the saved toggle — a symbol that
-        # was toggled on while eligible, then later fell out of the
-        # top-N (or its backtest started erroring, or it flipped to
-        # stress_test_failed), should NOT keep autotrading just because
-        # its old toggle value is still True — this is the safety net
-        # for the GAP between backtest cycles: msnr_backtest_loop()'s
-        # own auto-off logic (v0.99.108) only runs once per cycle, so a
-        # symbol that just fell out of top-N moments ago could still
-        # have a stale True toggle sitting in STATE until the next
-        # cycle catches up and flips it off.
-        # v0.99.108, per direct user request ("Ручное управление можно
-        # убрать"): now checks against the NARROWER msnr_autotrade_
-        # eligible_symbols() (top-N by score) — the broader msnr_
-        # manual_toggle_allowed_symbols() (any valid, non-stress_test_
-        # failed backtest) existed specifically to let a manually-
-        # toggled non-top-10 symbol fire; with manual toggling removed
-        # entirely (the toggle is now ONLY ever set by auto-management,
-        # which only ever turns it on for genuine top-N members), using
-        # the broader set here would leave exactly the gap the user
-        # asked to close: a symbol that fell out of top-N between
-        # backtest cycles would still pass this broader check and could
-        # still fire.
-        # v0.99.304 — CRITICAL DIAGNOSTIC FIX, per direct user report
-        # ("Сделки по Мsnr не открываются. в истории сигналов я их вижу
-        # ... в списке автоторговли сигналов самих нет. Галочки все
-        # стоят в настройках"): this three-part gate silently recorded
-        # the signal (above) but did NOTHING ELSE if it failed — no log
-        # entry, no field on the record explaining why — leaving no way
-        # to tell "autotrade correctly declined this one" from "autotrade
-        # is broken". The per-symbol toggle and the eligibility re-check
-        # are BOTH re-evaluated fresh at THIS exact moment, not read from
-        # whatever the settings/status page showed the user earlier —
-        # a symbol's ranking can shift between the two. Now records
-        # exactly which of the three checks failed on the signal itself
-        # (visible in the signal history) whenever the gate doesn't pass.
-        gate_enabled = AUTOTRADE_ENABLED_MSNR
-        gate_symbol_on = bool(autotrade_symbols.get(symbol))
-        gate_eligible_now = symbol in msnr_autotrade_eligible_symbols(overrides_snapshot)
-        # v0.99.364 — the coin's accepted Neuro filter applies live too
-        _nf = (overrides_snapshot.get(symbol) or {}).get("neuro_filter")
-        _nf_keep, _nf_val = neuro_filter_live_check(symbol, _nf, sig["time"])
-        if not _nf_keep:
-            record["neuro_filtered"] = _nf["label"]
-            gate_eligible_now = False
-        # v0.99.333 — per user ("если сделка пропущена из-за нехватки баланса
-        # или ещё чего — я всё равно должен видеть её в живых сигналах,
-        # статистика должна быть честной, не важно что открылось на аккаунте"):
-        # the STRATEGY picked this trade (coin selected + eligible right now);
-        # whether the account then opened it (global autotrade switch,
-        # dry-run, balance, min lot, liquidation, exchange error) no longer
-        # decides whether it counts.
-        record["trade_intended"] = bool(gate_symbol_on and gate_eligible_now)
-        if gate_enabled and gate_symbol_on and gate_eligible_now:
-            # v0.99.33, per direct user request: real order sizing now
-            # compounds off THIS symbol's own live trade history — $40
-            # on the very first autotrade-fired trade, then the whole
-            # resulting balance (same math as the backtest simulation,
-            # msnr_compound_trail()) on every trade after, hard-capped
-            # at MSNR_LIVE_BALANCE_MAX — instead of the shared AUTOTRADE_
-            # SIZE_MODE/VALUE every other mode uses.
-            # v0.99.47: leverage is dyn_leverage — this symbol's own
-            # Kelly-optimal value (msnr_symbol_optimal_leverage()),
-            # resolved BEFORE this block and walked back down against
-            # the liquidation-safety check (see that check's own
-            # comment above), not the old v0.99.46 stop-width-derived
-            # value. Reusing the SAME already-checked value here
-            # (rather than re-deriving it) guarantees the leverage this
-            # order actually places at is the exact one the liquidation
-            # check above already verified is safe.
-            live_leverage = dyn_leverage
-            live_size = msnr_live_balance_for_symbol(symbol)
-            # v0.99.45 — BUG FOUND ON AUDIT (per direct user request to
-            # review recent MSNR changes for bugs): execute_autotrade()'s
-            # return value was being discarded here, and record[
-            # "autotrade_fired"] was set to True unconditionally right
-            # after the call — regardless of whether a real order
-            # actually opened. execute_autotrade() can legitimately
-            # return without opening anything: status "SKIPPED" (its own
-            # order-time liquidation-safety re-check, or compute_
-            # position_size() rejecting the size/margin), "ERROR" (a
-            # network/API failure), or "DRY_RUN" (AUTOTRADE_DRY_RUN mode
-            # — no real capital moved at all). With the old code, any of
-            # those still set autotrade_fired=True, and once this signal
-            # later resolved WIN/LOSS, msnr_update_live_balance() would
-            # have compounded real P&L math onto this symbol's tracked
-            # live balance for a trade that was NEVER ACTUALLY PLACED —
-            # silently corrupting the exact number the NEXT real order's
-            # size_value comes from. Only "OPENED" and "OPENED_TP_SL_
-            # FAILED" (the position itself DID open, even if the TP/SL
-            # orders had trouble — the risk is real either way) now
-            # count as fired.
-            autotrade_result = execute_autotrade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"],
-                                                  sig["tp"],
-                                                  all_in_margin_pct=MSNR_ALL_IN_MARGIN_PCT if MSNR_ALL_IN_ENABLED else None)
-            order_opened = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
-            record["autotrade_status"] = autotrade_result.get("status")          # v0.99.333 — shown in the list
-            record["autotrade_detail"] = str(autotrade_result.get("detail") or "")[:200]
-            # v0.99.134 — same cooldown-release-on-ERROR fix as LSW's own
-            # (see that module's own call site comment for the full
-            # incident): a bare network ERROR shouldn't permanently burn
-            # this signal's one-and-only chance to fire.
-            if autotrade_result.get("status") == "ERROR":
-                with _msnr_signal_cooldowns_lock:
-                    if _msnr_signal_cooldowns.get(symbol) == sig["time"]:
-                        del _msnr_signal_cooldowns[symbol]
-            # v0.99.34, per direct user follow-up ("как добавить сигналы
-            # по msnr в симулятор"): sim_execute_trade() already gets
-            # called for every autotrade-fired MSNR signal (same design
-            # every other module uses — the paper simulator mirrors
-            # real autotrade, not a shadow-mode for every signal
-            # unconditionally, confirmed intentional back in v0.99.7),
-            # but this call was missed when v0.99.33 wired the new per-
-            # symbol live-balance sizing into the REAL order above —
-            # left defaulting to the shared AUTOTRADE_SIZE_MODE/VALUE,
-            # meaning the paper simulator would silently disagree with
-            # what the real order actually risked. Passing the same
-            # size_mode="fixed"/size_value=live_size here closes that gap.
-            # v0.99.45 — now gated on order_opened, same reasoning as
-            # autotrade_fired below: a real order that got SKIPPED/
-            # ERRORed shouldn't leave a paper trade behind pretending it
-            # went through either, for the same "mirrors what actually
-            # happened" reason the simulator exists in the first place.
-            if order_opened:
-                sim_execute_trade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
-                                   live_leverage, record, size_mode="fixed", size_value=live_size)
-                record["autotrade_fired"] = True
-                record["live_size_usd"] = live_size
-                record["leverage_used"] = live_leverage
-                record["sl_order_id"] = autotrade_result.get("sl_order_id")
-            # v0.99.187 — mark balance_skipped on the MSNR signal record
-            # (not just on the autotrade_log entry) so /api/msnr/signals
-            # shows it and the user can see the params. The signal was
-            # already written to STATE["msnr_signals"] before execute_autotrade
-            # was called, so we update it in-place here.
-            if autotrade_result.get("balance_skipped"):
-                record["balance_skipped"] = True
-        else:
-            # v0.99.304 — see this block's own opening comment for the
-            # full incident. Records exactly why the gate didn't pass,
-            # right on the signal itself, so it's visible without
-            # needing to cross-reference the autotrade log (which never
-            # gets an entry at all when the gate fails before execute_
-            # autotrade() is even called).
-            reasons = []
-            if not gate_enabled:
-                reasons.append("автоторговля MSNR выключена в настройках")
-            if not gate_symbol_on:
-                reasons.append("для этой монеты автоторговля сейчас выключена автоматическим управлением (не в топ-N по винрейту, либо винрейт упал ниже 50%)")
-            if gate_symbol_on and not gate_eligible_now:
-                reasons.append("монета была в топ-N на момент последней проверки, но перестала быть eligible именно сейчас — рейтинг сместился между обновлениями")
-            record["autotrade_skip_reason"] = "; ".join(reasons) if reasons else "неизвестная причина"
-        arrow = "\u2b06\ufe0f LONG" if sig["direction"] == "LONG" else "\u2b07\ufe0f SHORT"
-        level_txt = "A-shape (resist)" if sig["level_type"] == "A" else "V-shape (support)"
-        # v0.99.74, per direct user request ("мне не нужны уведомления
-        # в тг по монетам, которые не в автоторговле"): notification now
-        # ONLY fires when a real order actually opened — record[
-        # "autotrade_fired"] is set True (alongside leverage_used/
-        # live_size_usd) only inside the order_opened branch above, so
-        # checking it here is the exact same condition, not a separate
-        # approximation. Before this, v0.99.55 had every detected
-        # signal notify regardless of whether real money was ever at
-        # risk, with a "плечо (реком.)" fallback label specifically for
-        # the not-autotraded case — that fallback (and the whole
-        # notification) is now skipped entirely for those signals
-        # instead of sent with a qualifier. The signal itself is still
-        # logged and tracked toward WIN/LOSS either way (record[
-        # "status"]="OPEN" above runs unconditionally, same as always —
-        # see v0.99.73's own "OPEN (сигнал)" UI label for that exact
-        # tracked-but-not-traded distinction) — only the Telegram
-        # message is now conditional, not the underlying statistics.
-        if record.get("autotrade_fired"):
-            leverage_txt = f"плечо: {record['leverage_used']}x"
-            send_telegram(
-                f"{arrow} {symbol} (MSNR QM off {level_txt})\n"
-                f"entry: {sig['entry']:.6g}\n"
-                f"SL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n"
-                f"{leverage_txt}",
-                category="msnr",
-            )
+        universe = msnr_build_backtest_universe()[:MSNR2_UNIVERSE_N]
     except Exception as e:
-        log_error(f"msnr_live {symbol}: {e}")
-
-
-def msnr_scan_addon_live(symbol):
-    """v0.99.126 — the "добір" (add-on) second position, per direct
-    user-forwarded trade screenshot and direct follow-up request ("да
-    нет, сразу делай с автоторговлей"). Fires a REAL stacking order —
-    see MSNR_ADDON_ENABLED's own comment and execute_autotrade()'s own
-    allow_stack docstring for the full context.
-    Only runs if this symbol currently has an OPEN, autotrade-fired
-    primary MSNR signal with no add-on yet. Scans MSNR_ADDON_TF (30m)
-    candles for a fresh QM sweep+reject against that SAME level (via
-    msnr_detect_addon_signals()) — if the latest closed add-on-TF
-    candle produced one, stacks a real order onto the already-open
-    position (execute_autotrade(..., allow_stack=True) — Gate merges
-    same-direction orders on one contract into a single blended
-    position, there's no such thing as two independently-tracked
-    positions on one symbol there).
-    SL handling: per direct user decision when the reference material
-    didn't specify this (the strategy's own author manages "two
-    positions" mentally/on paper, not through an exchange that merges
-    them, so this mechanical question genuinely has no answer in the
-    source) — the MORE CONSERVATIVE of the primary's own already-live
-    SL and the add-on's own fresh SL governs the WHOLE merged position
-    (further from price = wider stop), consistent with this exact
-    module's own MSNR_SL_BUFFER_MULT lesson (v0.99.104: premature
-    stop-outs on stops sitting too close to normal price noise). The
-    primary's OLD SL trigger order is cancelled and replaced by a new
-    one at the chosen final_sl — otherwise the narrower of the two
-    could still fire first regardless of which one is meant to govern.
-    TP is left untouched: primary and add-on share the exact same
-    target (both aim at the same opposite Storyline level), so
-    execute_autotrade() placing a second TP trigger at the same price
-    is a harmless duplicate — whichever fires first closes the whole
-    position, and reconcile_positions_and_orders() cleans up the
-    orphaned remainder either way, same as any other TP/SL pair."""
-    if not (MSNR_ENABLED and MSNR_ADDON_ENABLED and AUTOTRADE_ENABLED_MSNR):
-        return
+        log_error(f"msnr2 universe: {e}")
+        universe = []
+    with state_lock:
+        STATE["msnr_backtest_running"] = True
+        STATE["msnr_backtest_started_at"] = time.time()
+        STATE["msnr_backtest_total"] = len(universe)
+        STATE["msnr_backtest_done"] = 0
+    per_coin = {}
     try:
-        with state_lock:
-            primary = next((s for s in STATE["msnr_signals"]
-                             if s["symbol"] == symbol and s.get("status") == "OPEN"
-                             and s.get("autotrade_fired") and not s.get("addon_fired")), None)
-        if primary is None:
-            return
-        addon_candles = get_candles(symbol, interval=MSNR_ADDON_TF, limit=MSNR_QM_LOOKBACK_BARS + 100)
         now = time.time()
-        addon_interval_sec = INTERVAL_SECONDS.get(MSNR_ADDON_TF, 1800)
-        addon_candles = [c for c in addon_candles if c["time"] + addon_interval_sec <= now]
-        if len(addon_candles) < 10:
-            return
-        addon_sigs = msnr_detect_addon_signals(addon_candles, [primary])
-        if not addon_sigs:
-            return
-        asig = addon_sigs[-1]
-        if asig["index"] != len(addon_candles) - 1:
-            return  # not off the latest closed add-on-TF candle — stale
-        with _msnr_signal_cooldowns_lock:  # reusing the same lock, tiny bit of shared state
-            if _msnr_addon_cooldowns.get(symbol) == asig["time"]:
-                return
-            _msnr_addon_cooldowns[symbol] = asig["time"]
-        direction = primary["direction"]
-        final_sl = min(primary["sl"], asig["sl"]) if direction == "LONG" else max(primary["sl"], asig["sl"])
-        autotrade_result = execute_autotrade("msnr", symbol, direction, asig["entry"], final_sl, asig["tp"],
-                                              extra={"is_addon": True, "primary_time": primary["time"]},
-                                              allow_stack=True,
-                                              all_in_margin_pct=MSNR_ALL_IN_MARGIN_PCT if MSNR_ALL_IN_ENABLED else None)
-        order_opened = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
-        if not order_opened:
-            # v0.99.134 — same cooldown-release-on-ERROR fix as every
-            # other module's own real-order call site (see LSW's own
-            # for the full incident): a bare network ERROR shouldn't
-            # permanently burn this add-on's one-and-only chance.
-            if autotrade_result.get("status") == "ERROR":
-                with _msnr_signal_cooldowns_lock:
-                    if _msnr_addon_cooldowns.get(symbol) == asig["time"]:
-                        del _msnr_addon_cooldowns[symbol]
-            return
-        with state_lock:
-            primary["addon_fired"] = True
-        # v0.99.132 — BUG FOUND (per direct user report, "Не всё что
-        # открывается на бирже у меня по автоторговле отображается в
-        # симуляторе, только часть сделок"): every OTHER real-order call
-        # site in this file pairs execute_autotrade() with a matching
-        # sim_execute_trade() call, but this one — the MSNR add-on,
-        # v0.99.126 — never had one at all. A real add-on stack opened
-        # correctly on the exchange but was completely invisible to the
-        # paper simulator. Reuses `primary` as the signal_record (it
-        # already represents the WHOLE merged position from here on —
-        # see this function's own docstring), and the same leverage/
-        # size derivation the primary open itself uses, so the
-        # simulator's own math stays consistent with what a real second
-        # stack actually looks like size-wise.
-        addon_leverage = msnr_symbol_optimal_leverage(symbol)
-        addon_size = msnr_live_balance_for_symbol(symbol)
-        sim_execute_trade("msnr", symbol, direction, asig["entry"], final_sl, asig["tp"],
-                           addon_leverage, primary, size_mode="fixed", size_value=addon_size)
-        old_sl_order_id = primary.get("sl_order_id")
-        new_sl_order_id = autotrade_result.get("sl_order_id")
-        if old_sl_order_id and old_sl_order_id != new_sl_order_id:
+        for sym in universe:
+            heartbeat("msnr_backtest_loop")
             try:
-                with using_account("msnr"):   # v0.99.331
-                    cancel_price_order(old_sl_order_id)
+                entry, struct, higher = msnr2_fetch(sym, now)
+                r = msnr2_symbol_all_variants(entry, struct, higher)
+                if r:
+                    per_coin[sym] = r
             except Exception as e:
-                log_error(f"msnr_scan_addon_live {symbol}: failed to cancel primary's old SL {old_sl_order_id} after add-on stacked — position may have TWO live SL orders now, check manually: {e}")
+                log_error(f"msnr2 backtest {sym}: {e}")
+            with state_lock:
+                STATE["msnr_backtest_done"] += 1
+        verdict = msnr2_select(per_coin)
+        ref = verdict["chosen"] or verdict["best_train"]
+        coins = msnr2_coin_table(per_coin, ref["key"]) if ref else {}
+        trades = {sym: vv[ref["key"]]["trades"] for sym, vv in per_coin.items() if ref and ref["key"] in vv}
+        ranked = sorted((s for s, c in coins.items() if c["picked"]), key=lambda s: -coins[s]["train"]["sum_r"])
+        eligible = ranked[:MSNR2_TOP_N] if verdict["passed"] else []
         with state_lock:
-            primary["sl_order_id"] = new_sl_order_id
-            primary["sl"] = final_sl  # this record now describes the WHOLE merged position's own governing stop
-        arrow = "\u2b06\ufe0f LONG" if direction == "LONG" else "\u2b07\ufe0f SHORT"
-        send_telegram(
-            f"{arrow} {symbol} (MSNR ДОБІР — доложились к открытой позиции)\n"
-            f"entry (add-on): {asig['entry']:.6g}\n"
-            f"итоговый SL (на всю позицию): {final_sl:.6g}  TP: {asig['tp']:.6g}",
-            category="msnr",
-        )
-    except Exception as e:
-        log_error(f"msnr_scan_addon_live {symbol}: {e}")
+            STATE["msnr2_verdict"] = verdict
+            STATE["msnr2_coins"] = coins
+            STATE["msnr2_trades"] = trades
+            STATE["msnr2_eligible"] = eligible
+            # nothing passed: the best picked coins are still scanned (signals
+            # recorded, never traded) for the live-vs-backtest check
+            STATE["msnr2_live_universe"] = ranked[:MSNR2_TOP_N]
+            STATE["msnr_last_backtest_finished"] = time.time()
+            STATE["msnr_last_backtest_duration"] = round(time.time() - STATE["msnr_backtest_started_at"], 1)
+        return verdict
+    finally:
+        with state_lock:
+            STATE["msnr_backtest_running"] = False
+
+
+def msnr_backtest_loop():
+    bt_startup_skip("msnr", MSNR_BACKTEST_TRIGGER, max(300, MSNR_REFRESH_SEC), "msnr_backtest_loop")
+    while True:
+        heartbeat("msnr_backtest_loop")
+        failed = False
+        if not MSNR_ENABLED:
+            bt_wait("msnr", MSNR_BACKTEST_TRIGGER, 300, "msnr_backtest_loop")
+            MSNR_BACKTEST_TRIGGER.clear()
+            continue
+        try:
+            with state_lock:
+                STATE["msnr_waiting_for_slot"] = True
+            acquire_backtest_slot("msnr_backtest_loop")
+            with state_lock:
+                STATE["msnr_waiting_for_slot"] = False
+            bt_log_start("msnr")
+            try:
+                v = msnr2_run_cycle()
+                c = v.get("chosen") or v.get("best_train") or {}
+                bt_log_end("msnr", note=("подтверждён" if v["passed"] else "не подтверждён") +
+                           (f", тест {c['test']['avg_r']:+.3f}R n={c['test']['n']}" if c.get("test", {}).get("n") else ""))
+                save_state()
+            except Exception as e:
+                failed = True
+                bt_log_end("msnr", ok=False, note=str(e)[:80])
+                log_error(f"msnr_backtest_loop: {e}")
+            finally:
+                BACKTEST_CONCURRENCY_SEMAPHORE.release()
+        except Exception as e:
+            failed = True
+            log_error(f"msnr_backtest_loop outer: {e}")
+        with state_lock:
+            STATE["msnr_waiting_for_slot"] = False
+        bt_wait("msnr", MSNR_BACKTEST_TRIGGER, BACKTEST_RETRY_AFTER_ERROR_SEC if failed else max(300, MSNR_REFRESH_SEC),
+                "msnr_backtest_loop", failed=failed)
+        MSNR_BACKTEST_TRIGGER.clear()
+
+
+_msnr_signal_cooldowns = {}
+_msnr_signal_cooldowns_lock = threading.Lock()
+
+
+def msnr2_scan_symbol(symbol, v, eligible):
+    """Live: the same msnr2_detect() on recent CLOSED bars; fires only for a
+    signal on the latest closed 15m bar, then applies the live rules."""
+    now = time.time()
+    entry = [c for c in get_candles(symbol, interval="15m", limit=900) if c["time"] + 900 <= now]
+    struct = [c for c in get_candles(symbol, interval="1h", limit=900) if c["time"] + 3600 <= now]
+    higher = [c for c in get_candles(symbol, interval="4h", limit=400) if c["time"] + 14400 <= now]
+    if len(entry) < 50 or len(struct) < 60:
+        return
+    sigs = msnr2_detect(struct, entry, higher, v)
+    if not sigs or sigs[-1]["index"] != len(entry) - 1:
+        return
+    sig = sigs[-1]
+    with _msnr_signal_cooldowns_lock:
+        if _msnr_signal_cooldowns.get(symbol) == sig["time"]:
+            return
+        _msnr_signal_cooldowns[symbol] = sig["time"]
+    with state_lock:
+        log = STATE["msnr_signals"]
+        if any(s["symbol"] == symbol and s.get("status") == "OPEN" for s in log):
+            return   # one position per coin — the backtest skips the same signal
+        if signal_already_logged(log, symbol, sig["time"]):
+            return
+        if any(s["symbol"] == symbol and s.get("level") == sig["level"] and s.get("level_type") == sig["level_type"]
+               for s in log):
+            return   # a level fires once
+    if has_open_signal_any_module(symbol, exclude="msnr_signals"):
+        return
+    intended = symbol in eligible
+    record = {"symbol": symbol, "direction": sig["direction"], "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
+              "level": sig["level"], "level_type": sig["level_type"], "time": sig["time"], "detected_at": now,
+              "status": "OPEN", "result": None, "exit_price": None, "exit_time": None,
+              "rr": msnr2_r(sig["direction"], sig["entry"], sig["sl"], sig["tp"]),
+              "variant": msnr2_vkey(v), "trade_intended": intended, "autotrade_fired": False,
+              "app_version": APP_VERSION}
+    if not intended:
+        record["autotrade_skip_reason"] = ("MSNR не подтверждён на тесте — сигнал только записан"
+                                           if not (STATE.get("msnr2_verdict") or {}).get("passed")
+                                           else "монета не в списке торгуемых")
+    with state_lock:
+        STATE["msnr_signals"].appendleft(record)
+    if intended and AUTOTRADE_ENABLED_MSNR:
+        res = execute_autotrade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                                all_in_margin_pct=MSNR_ALL_IN_MARGIN_PCT if MSNR_ALL_IN_ENABLED else None)
+        record["autotrade_status"] = res.get("status")
+        record["autotrade_detail"] = str(res.get("detail") or "")[:200]
+        if res.get("status") in ("OPENED", "OPENED_TP_SL_FAILED"):
+            record["autotrade_fired"] = True
+            record["leverage_used"] = res.get("leverage")
+            sim_execute_trade("msnr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                              res.get("leverage") or AUTOTRADE_LEVERAGE_MSNR, record)
+        elif res.get("status") == "ERROR":
+            with _msnr_signal_cooldowns_lock:
+                _msnr_signal_cooldowns.pop(symbol, None)
+    if record["autotrade_fired"]:
+        arrow = "⬆️ LONG" if sig["direction"] == "LONG" else "⬇️ SHORT"
+        send_telegram(f"{arrow} {symbol} (MSNR)\nentry: {sig['entry']:.6g}\nSL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n"
+                      f"плечо: {record.get('leverage_used')}x", category="msnr")
 
 
 def update_msnr_signal_outcomes():
+    """OPEN MSNR signals: SL / TP / max holding time (then the REAL position
+    is closed at market), exactly as msnr2_simulate() decides in the backtest."""
     now = time.time()
+    hold = msnr2_hold_bars()
     with state_lock:
         open_signals = [s for s in STATE["msnr_signals"] if s["status"] == "OPEN"]
-    hold = msnr_max_hold_bars()   # v0.99.400
-    # enough bars to cover a signal's whole allowed life (was a fixed 400:
-    # an older signal's hit could fall out of the window and it stayed OPEN
-    # forever, blocking the coin)
-    all_candles = fetch_candles_concurrent([(s["symbol"], MSNR_ENTRY_TF, min(1500, hold + 120)) for s in open_signals])
-    msnr_interval_sec = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
+    if not open_signals:
+        return
+    all_candles = fetch_candles_concurrent([(s["symbol"], "15m", min(1500, hold + 120)) for s in open_signals])
     for sig, candles in zip(open_signals, all_candles):
         try:
             if candles is None:
                 continue
-            candles = [c for c in candles if c["time"] + msnr_interval_sec <= now]
-            future = [c for c in candles if c["time"] > sig["time"]]
-            result = None
-            exit_price = None
-            exit_time = None
-            bars_seen = 0
-            for c in future:
-                bars_seen += 1
+            future = [c for c in candles if c["time"] + 900 <= now and c["time"] > sig["time"]]
+            result = exit_price = exit_time = None
+            for k, c in enumerate(future, start=1):
                 if sig["direction"] == "LONG":
                     if c["low"] <= sig["sl"]:
                         result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
@@ -11668,59 +9525,104 @@ def update_msnr_signal_outcomes():
                     if c["low"] <= sig["tp"]:
                         result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
                         break
-                if bars_seen >= hold:   # v0.99.400 — max holding time, same as the backtest
+                if k >= hold:
                     result, exit_price, exit_time = "TIME_EXIT", c["close"], c["time"]
                     break
-            if not result and future and (now - sig["time"]) > (hold + 2) * msnr_interval_sec:
-                # older than its whole allowed life but the window no longer
-                # reaches back to it (a signal left OPEN by an older version):
-                # close it now at the latest price
+            if not result and future and now - sig["time"] > (hold + 2) * 900:
+                # older than its allowed life but no longer in the window
+                # (e.g. left OPEN by an older version): close at the latest price
                 result, exit_price, exit_time = "TIME_EXIT", future[-1]["close"], future[-1]["time"]
+            if not result:
+                continue
             if result == "TIME_EXIT" and sig.get("autotrade_fired"):
                 log_error(f"msnr time exit {sig['symbol']}: {close_position_for_mode('msnr', sig['symbol'], sig['direction'])}")
             with state_lock:
-                if result:
-                    sig["status"] = "CLOSED"
-                    sig["result"] = result
-                    sig["exit_price"] = exit_price
-                    sig["exit_time"] = exit_time
-                    if result == "TIME_EXIT":
-                        sig["r_net"] = msnr_net_r_at(sig["direction"], sig["entry"], sig["sl"], exit_price)
-            # v0.99.33, per direct user request: this signal's REAL
-            # per-symbol live compounding balance only moves for a
-            # signal an actual autotrade order was placed for — see
-            # this record's own "autotrade_fired" flag, set at signal
-            # time in msnr_scan_symbol_live(). Called OUTSIDE the
-            # state_lock block above: msnr_update_live_balance() takes
-            # its own lock internally, and state_lock isn't reentrant.
-            if result and sig.get("autotrade_fired") and sig.get("leverage_used"):
-                if result == "TIME_EXIT":   # v0.99.400 — same P&L formula, at the real exit price
-                    gain = (exit_price - sig["entry"]) if sig["direction"] == "LONG" else (sig["entry"] - exit_price)
-                    msnr_update_live_balance(sig["symbol"], "WIN" if gain >= 0 else "LOSS", sig["entry"],
-                                              exit_price, exit_price, sig["leverage_used"])
-                else:
-                    msnr_update_live_balance(sig["symbol"], result, sig["entry"], sig["sl"], sig["tp"],
-                                              sig["leverage_used"])
+                sig["status"] = "CLOSED"
+                sig["result"] = result
+                sig["exit_price"] = exit_price
+                sig["exit_time"] = exit_time
+                sig["r"] = msnr2_r(sig["direction"], sig["entry"], sig["sl"], exit_price)
         except Exception as e:
             log_error(f"msnr_outcome {sig['symbol']}: {e}")
 
 
 def compute_msnr_signal_stats():
-    # v0.99.189 — count W/L for ALL signals that were intended to trade
-    # (autotrade_fired OR balance_skipped). Per user: "надо считать все
-    # равно, то что не хватило баланса мои проблемы".
     with state_lock:
-        signals = [s for s in STATE["msnr_signals"]
-                   if s.get("autotrade_fired") or s.get("balance_skipped") or s.get("trade_intended")]  # v0.99.333
-    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS", "TIME_EXIT")]   # v0.99.400
+        signals = [s for s in STATE["msnr_signals"] if s.get("trade_intended")]
+    closed = [s for s in signals if s["status"] == "CLOSED" and s.get("r") is not None]
     wins = sum(1 for s in closed if s["result"] == "WIN")
-    losses = sum(1 for s in closed if s["result"] == "LOSS")
-    timeouts = sum(1 for s in signals if s.get("result") == "TIMEOUT")
-    open_n = sum(1 for s in signals if s["status"] == "OPEN")
-    total_closed = len(closed)
-    winrate = round(wins / total_closed * 100, 1) if total_closed else None
-    return {"total": len(signals), "wins": wins, "losses": losses, "timeouts": timeouts,
-            "open": open_n, "winrate": winrate}
+    return {"total": len(signals), "wins": wins, "losses": sum(1 for s in closed if s["result"] == "LOSS"),
+            "time_exits": sum(1 for s in closed if s["result"] == "TIME_EXIT"),
+            "open": sum(1 for s in signals if s["status"] == "OPEN"),
+            "winrate": round(wins / len(closed) * 100, 1) if closed else None,
+            "sum_r": round(sum(s["r"] for s in closed), 2) if closed else None}
+
+
+def msnr_live_loop():
+    while True:
+        heartbeat("msnr_live_loop")
+        try:
+            if MSNR_ENABLED:
+                with state_lock:
+                    verdict = STATE.get("msnr2_verdict") or {}
+                    universe = list(STATE.get("msnr2_live_universe") or [])
+                    eligible = set(STATE.get("msnr2_eligible") or [])
+                ref = verdict.get("chosen") or verdict.get("best_train")
+                if ref and universe:
+                    v = ref["variant"]
+                    ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(universe)))
+                    try:
+                        futs = {ex.submit(msnr2_scan_symbol, s, v, eligible): s for s in universe}
+                        for fut in as_completed(futs, timeout=(HTTP_TIMEOUT * 3 + 30) * math.ceil(len(universe) / WORKERS)):
+                            try:
+                                fut.result()
+                            except Exception as e:
+                                log_error(f"msnr_live_loop {futs[fut]}: {e}")
+                    except (TimeoutError, FutureTimeoutError):
+                        log_error("msnr_live_loop: a symbol scan timed out — keeping what was gathered")
+                    finally:
+                        ex.shutdown(wait=False)
+                update_msnr_signal_outcomes()
+        except Exception as e:
+            log_error(f"msnr_live_loop: {e}")
+        now = time.time()
+        time.sleep((900 - now % 900) + 3)   # right after each 15m candle closes
+
+
+def msnr_live_vs_backtest(days=30):
+    """Every live signal of the last `days` days against the CURRENT
+    backtest's trade on the same coin and the same 15m candle."""
+    now = time.time()
+    with state_lock:
+        sigs = [dict(s) for s in STATE["msnr_signals"] if (s.get("time") or 0) >= now - days * 86400]
+        results = {k: list(v or []) for k, v in (STATE.get("msnr2_trades") or {}).items()}
+    matched, live_only, bt_only = [], [], []
+    by_sym = {}
+    for sg in sigs:
+        by_sym.setdefault(sg["symbol"], []).append(sg)
+    for sym, ss in by_sym.items():
+        bts = {t["time"]: t for t in results.get(sym) or []}
+        t0, t1 = min(x["time"] for x in ss), max(x["time"] for x in ss)
+        seen = set()
+        for sg in ss:
+            bt = bts.get(sg["time"])
+            if bt is None:
+                live_only.append(sg)
+            else:
+                seen.add(bt["time"])
+                matched.append((sg, bt))
+        bt_only += [t for tm, t in bts.items() if t0 <= tm <= t1 and tm not in seen]
+    pairs = [(sg, bt) for sg, bt in matched if sg.get("r") is not None and bt.get("r") is not None]
+    lo = [sg for sg in live_only if sg.get("r") is not None]
+
+    def _sum(xs):
+        return round(sum(xs), 2) if xs else None
+    return {"days": days, "live_signals": len(sigs), "matched": len(matched), "matched_closed": len(pairs),
+            "same_outcome": sum(1 for sg, bt in pairs if sg["result"] == bt["result"]),
+            "live_r_sum": _sum([sg["r"] for sg, _ in pairs]), "bt_r_sum": _sum([bt["r"] for _, bt in pairs]),
+            "live_only": len(live_only), "live_only_closed": len(lo), "live_only_r_sum": _sum([sg["r"] for sg in lo]),
+            "bt_only": len(bt_only), "bt_only_r_sum": _sum([t["r"] for t in bt_only if t.get("r") is not None])}
+
 
 def msnr_build_backtest_universe():
     """Backtest-only universe: MSNR_SYMBOLS (the original gold-only live-
@@ -11783,375 +9685,6 @@ def msnr_build_backtest_universe():
     return list(dict.fromkeys(top_liquid))  # v0.99.321 — no forced gold list
 
 
-def msnr_compute_live_universe(overrides, bounds=None):
-    """v0.99.78, per direct user request ("Убери эту квалификацию с
-    вирейтоп 50 и выборкой 40, что раз просил убрать это, технически"):
-    the standalone MSNR_LIVE_PROMOTE_MIN_WINRATE/MIN_SAMPLE promotion
-    rule is RETIRED — it was the exact mechanism behind the original
-    live report this whole ranking redesign started from ("зелёные
-    точки не могут стоять не в монетах не из топ 10, если не стоит
-    галочка принудительно"): a symbol could earn the live-scan dot
-    purely by clearing 50% winrate / 40 closed trades, with no top-10
-    standing and no manual checkbox at all. v0.99.75 already removed
-    gold's forced inclusion from this rule but left the rule itself
-    still running — a symbol could (and, per the live TRX_USDT report,
-    did) still get promoted through it alone. This time the rule itself
-    is gone, not just gold's special case within it.
-    Now simply delegates to msnr_autotrade_eligible_symbols() — the
-    current top MSNR_AUTOTRADE_TOP_N by msnr_symbol_rank_score() (see
-    that function's own docstring for the winrate/sample/доход
-    geometric-mean ranking). A symbol earns the live-scan dot ONLY by
-    landing in the top 10, or via msnr_effective_live_universe()'s own
-    SEPARATE toggled-on union (v0.99.108 — auto-managed toggles only,
-    manual toggling of non-top-10 symbols removed entirely) — exactly
-    the two paths the original request described, nothing else.
-    `bounds` (from msnr_compute_rank_bounds()) is passed through
-    unchanged so this stays consistent with whatever else in the same
-    request/cycle is using the same ranking — see msnr_compute_rank_
-    bounds()'s own docstring for why sharing it matters."""
-    eligible = msnr_autotrade_eligible_symbols(overrides, bounds=bounds)
-    if eligible:
-        return eligible
-    # v0.99.400 — pooled test not passed: nothing trades, but the top
-    # train-picked coins are still scanned so live signals keep being
-    # recorded (never traded: they are not autotrade-eligible) for the
-    # live-vs-backtest check
-    picked = [(sym, ov) for sym, ov in overrides.items() if ov and not ov.get("error") and ov.get("picked")]
-    picked.sort(key=lambda p: -(p[1].get("train_compound_return_pct") or float("-inf")))
-    return [sym for sym, _ in picked[:MSNR_AUTOTRADE_TOP_N]]
-
-
-def msnr_compute_rank_bounds(overrides):
-    """v0.99.76 — computes min/max bounds for winrate, raw_closed_n,
-    and compound_return_pct across every non-errored symbol (the
-    broadest sensible population — deliberately INCLUDING stress_test_
-    failed symbols in the bounds computation itself, even though they
-    get hard-excluded from actually ranking; excluding them here could
-    skew the min/max away from the true observed range). This is the
-    SINGLE canonical normalization reference — both msnr_rank_by_
-    winrate_sample() (top-10 selection) and api_msnr_status()'s own
-    overall table sort call this once and reuse the SAME bounds dict,
-    rather than each independently normalizing over its own (different-
-    sized) candidate subset. Computing separate bounds per view would
-    let the exact same symbol's composite score DIFFER depending on
-    which view asked for it — reintroducing the "не плавное убывание"
-    discontinuity this whole ranking redesign (v0.99.75) exists to fix,
-    just moved from "two different sort keys" to "two different
-    normalizations of the same key."
-    v0.99.94, per direct user report ("монета делает 3000% по ней,
-    проходит следующий бэктест, монета даёт уже 10 процентов, улетает
-    из топа"): доход's raw max is now WINSORIZED at the pool's own 90th
-    percentile before being used as the normalization ceiling — a
-    single symbol's compounding outlier (a rare, extreme-RR trade
-    sequence one cycle, gone the next — the exact instability already
-    flagged as a known open issue) was setting the ENTIRE POOL's income
-    normalization ceiling, meaning that ONE symbol's noisy compounding
-    result was silently compressing every OTHER symbol's normalized
-    income toward 0 that cycle, then springing back the next cycle once
-    the outlier faded — a systemic ranking instability affecting the
-    whole pool, not just the volatile symbol's own score. Nothing below
-    the 90th percentile is affected at all (msnr_symbol_rank_score()'s
-    own _norm() already clamps any value ABOVE the (now-capped) ceiling
-    to income_norm=1.0 rather than letting it exceed 1.0 — several
-    genuinely-strong symbols tying at "very good" is the correct
-    outcome, not a bug). Deliberately percentile-based rather than a
-    fixed number (e.g. tied to MSNR_LIVE_BALANCE_MAX's own $40->$500
-    growth ceiling) — self-adjusting to whatever the pool's overall
-    performance level happens to be this cycle (bull/bear conditions,
-    strategy-wide edge shifts) rather than a magic constant that would
-    itself eventually need re-tuning.
-    Returns {"winrate": (lo, hi), "sample": (lo, hi), "income": (lo,
-    hi)} — a metric with zero symbols reporting it falls back to
-    (0.0, 1.0), an arbitrary but harmless range (msnr_symbol_rank_
-    score() only ever evaluates it against symbols that also lack the
-    metric in that case, since nothing WITH it could exist and be
-    excluded from these bounds)."""
-    winrates, samples, incomes = [], [], []
-    for ov in overrides.values():
-        if not ov or ov.get("error"):
-            continue
-        if ov.get("winrate") is not None:
-            winrates.append(ov["winrate"])
-        raw_closed_n = ov.get("raw_closed_n")
-        if raw_closed_n is None:
-            raw_closed_n = (ov.get("wins", 0) or 0) + (ov.get("losses", 0) or 0)
-        samples.append(raw_closed_n)
-        if ov.get("compound_return_pct") is not None:
-            incomes.append(ov["compound_return_pct"])
-
-    def _bounds(vals):
-        return (min(vals), max(vals)) if vals else (0.0, 1.0)
-
-    income_bounds = (0.0, 1.0)
-    if incomes:
-        lo = min(incomes)
-        hi_capped = _percentile(sorted(incomes), MSNR_RANK_INCOME_WINSORIZE_PCT)
-        # a capped ceiling at or below the floor (tiny/degenerate pools,
-        # or every value identical) would make _norm()'s own hi-lo<1e-12
-        # branch return 0.5 for everyone — harmless, but fall back to
-        # the true max in that case so a real, meaningful spread isn't
-        # accidentally discarded for a pool too small to have a
-        # sensible 90th percentile distinct from its own minimum.
-        income_bounds = (lo, hi_capped) if hi_capped > lo else _bounds(incomes)
-
-    return {"winrate": _bounds(winrates), "sample": _bounds(samples), "income": income_bounds}
-
-
-def msnr_symbol_rank_score(ov, bounds):
-    """v0.99.76, per direct user follow-up to v0.99.75's plain
-    lexicographic tuple ("Так для того я и написал 3 параметра, чтобы
-    на выборку и доход тоже учитывало" — "that's exactly why I wrote 3
-    parameters, so sample size and income would ALSO be factored in"):
-    a lexicographic sort checks its first key almost to the exclusion
-    of the rest (the later keys only ever matter on an exact tie, rare
-    with continuous values) — that's not "all three factors," that's
-    "winrate alone in practice."
-    v0.99.77, per direct further follow-up ("Все три компонента должны
-    быть хорошими" — "all three components must be good"): a WEIGHTED
-    ARITHMETIC sum (v0.99.76's own first attempt) doesn't actually
-    guarantee that either — addition lets a large value on one metric
-    COMPENSATE for a weak one on another; with an unbounded metric like
-    доход (compound_return_pct has no natural ceiling the way winrate
-    does), there's always some extreme-enough income figure that offsets
-    a mediocre winrate/sample, no matter how the weights are tuned. What
-    "all three must be good" actually calls for mathematically is a
-    WEIGHTED GEOMETRIC MEAN (product, not sum) of the three normalized
-    factors: winrate_norm^w1 * sample_norm^w2 * income_norm^w3 (weights
-    still MSNR_RANK_WINRATE_WEIGHT/SAMPLE_WEIGHT/INCOME_WEIGHT, still
-    summing to 1, still descending 0.5/0.3/0.2 by default, matching "эти
-    параметре по убыванию главные"). A product structurally CANNOT be
-    rescued by strength elsewhere: if any one normalized factor is 0,
-    the whole composite is 0, full stop, regardless of how good the
-    other two are — this is the actual mathematical shape of "must be
-    good on all three," not something weight-tuning under addition could
-    ever fully guarantee.
-    Known, accepted consequence of switching to a product: min-max
-    normalization gives the single WORST symbol in the current pool on
-    any one metric an exact 0.0 on that term — under a product, that
-    symbol's WHOLE composite collapses to 0 even if its other two
-    metrics are otherwise fine, which can look harsh for a symbol that's
-    only marginally the pool's worst on one axis (e.g. barely the
-    lowest winrate in a tightly-clustered group). Left as-is rather than
-    softening it (e.g. a floor above 0) — softening would just be a
-    smaller-scale reintroduction of the same compensation this whole
-    change exists to remove, and for RANKING purposes (only relative
-    order matters, mainly who clears the top 10) collapsing the current
-    worst-on-some-axis symbol toward the bottom is the intended
-    behavior, not a bug.
-    min-max normalizes winrate/raw_closed_n/compound_return_pct each to
-    [0, 1] using msnr_compute_rank_bounds()'s own SHARED bounds (see
-    that function's docstring for why shared, not per-view) exactly as
-    before — only the combination step (product vs sum) changed.
-    A symbol missing a given metric scores 0.0 (worst) on that metric's
-    normalized term rather than being skipped or defaulting to the
-    population average — "no data" isn't evidence of average quality,
-    and under a product this now ALSO zeroes the whole composite,
-    consistent with "all three must be good": a metric you can't even
-    verify isn't "good."
-    v0.99.80 — CRITICAL FIX, per direct user report with a live example
-    (a symbol at 2% доход over 52 closed trades still scored ~0.49,
-    nearly half the maximum possible, comfortably inside top-10):
-    v0.99.76-79's DESCENDING weights (0.5/0.3/0.2) turned out to break
-    "all three must be good" in a subtle way specific to geometric
-    means — raising a value x∈[0,1] to a SMALL exponent w COMPRESSES it
-    toward 1 no matter how bad x is (0.061^0.2 ≈ 0.57, nowhere near 0),
-    so доход's low weight meant its badness barely dragged the
-    composite down, even though that same low weight was ALSO meant to
-    convey "доход matters less." A weight in a geometric mean sets both
-    of those at once — how much a GOOD value on that factor helps AND
-    how much a BAD value hurts — they can't be tuned independently, so
-    "доход matters least" and "доход must still be good" were
-    mathematically in tension the entire time, not just an edge case.
-    Per direct user choice ("Равные веса — настоящее «all must be
-    good», без приоритета") over adding a separate hard floor on
-    доход: MSNR_RANK_WINRATE_WEIGHT/SAMPLE_WEIGHT/INCOME_WEIGHT are now
-    all 1/3 — every factor punishes and rewards identically, restoring
-    genuine "all three must be good" at the cost of the descending-
-    priority ordering v0.99.76 had tried (and, per this report, failed)
-    to express through weight alone.
-    Returns a single float composite (higher = better), NOT a tuple —
-    callers sort by this directly."""
-    def _norm(val, lo, hi):
-        if val is None:
-            return 0.0
-        if hi - lo < 1e-12:
-            return 0.5
-        return max(0.0, min(1.0, (val - lo) / (hi - lo)))
-
-    raw_closed_n = ov.get("raw_closed_n")
-    if raw_closed_n is None:
-        raw_closed_n = (ov.get("wins", 0) or 0) + (ov.get("losses", 0) or 0)
-    winrate_norm = _norm(ov.get("winrate"), *bounds["winrate"])
-    sample_norm = _norm(raw_closed_n, *bounds["sample"])
-    income_norm = _norm(ov.get("compound_return_pct"), *bounds["income"])
-    return ((winrate_norm ** MSNR_RANK_WINRATE_WEIGHT) *
-            (sample_norm ** MSNR_RANK_SAMPLE_WEIGHT) *
-            (income_norm ** MSNR_RANK_INCOME_WEIGHT))
-
-
-def msnr_pooled_verdict(overrides, results):
-    """v0.99.400 — does MSNR work, honestly? The TEST trades (last
-    MSNR_OOS_TEST_FRAC of the window — params, leverage and the coin
-    choice never saw them) of every coin picked on its train part,
-    together: autotrade is allowed only if they are positive with
-    z >= MSNR_POOLED_TEST_Z over >= MSNR_POOLED_MIN_TEST trades."""
-    picked = [s for s, ov in overrides.items() if ov and not ov.get("error") and ov.get("picked")]
-    rs = []
-    for sym in picked:
-        split = overrides[sym].get("oos_split_time")
-        for t in results.get(sym) or []:
-            if split and t["time"] >= split:
-                r = msnr_trade_r(t)
-                if r is not None:
-                    rs.append(r)
-    n = len(rs)
-    z = _t_from_sums(n, sum(rs), sum(r * r for r in rs), var_floor=1.0) if n else None
-    mean = sum(rs) / n if n else None
-    return {"t": time.time(), "coins": sum(1 for ov in overrides.values() if ov and not ov.get("error")),
-            "picked": len(picked), "test_n": n, "test_exp_r": round(mean, 3) if mean is not None else None,
-            "test_sum_r": round(sum(rs), 1) if n else None,
-            "test_wr": round(sum(1 for r in rs if r > 0) / n * 100, 1) if n else None,
-            "test_z": round(z, 2) if z is not None else None,
-            "passed": bool(n >= MSNR_POOLED_MIN_TEST and z is not None and z >= MSNR_POOLED_TEST_Z and mean > 0),
-            "min_test": MSNR_POOLED_MIN_TEST, "z_needed": MSNR_POOLED_TEST_Z, "min_train": MSNR_MIN_TRAIN_TRADES,
-            "test_frac": MSNR_OOS_TEST_FRAC}
-
-
-def msnr_rank_by_winrate_sample(overrides, exclude=None, bounds=None):
-    """Ranks symbols (excluding `exclude`, if given) by msnr_symbol_
-    rank_score() against `bounds` (from msnr_compute_rank_bounds()) —
-    see those two functions' own docstrings for the exact weighted-
-    composite design and why the bounds must be shared across every
-    caller, not recomputed per view. `bounds` defaults to computing
-    fresh from `overrides` itself when not given (a convenience for a
-    caller — tests, mainly — that only needs this one ranking and
-    doesn't already have bounds computed from a wider population);
-    api_msnr_status() passes its own already-computed bounds explicitly
-    so the overall table's sort and this function's top-10 selection
-    are guaranteed to agree.
-    v0.99.27, per direct user request ("просто не попадает в топ"):
-    excludes any symbol with stress_test_failed=True (see msnr_
-    optimize_symbol()'s own docstring) — a symbol whose own $
-    compounding simulation lost money is unfit to rank/autotrade no
-    matter how good its other numbers look; this is a hard gate, not
-    part of the ranking score, so it can't be outweighed by strong
-    winrate/sample/income values the way a mere penalty could be.
-    v0.99.75 dropped the MSNR_AUTOTRADE_TOP_MIN_SAMPLE floor that used
-    to sit here — per that same request's own "плавное убывание...
-    продолжение вне списка": a hard sample-size exclusion would create
-    a GAP in the ranking instead of a smooth decline, and sample size
-    is now one of the ranking's own weighted factors anyway, so a thin
-    sample naturally pulls a symbol's composite down rather than
-    excluding it from the list outright.
-    Returns a list of (symbol, override_dict) tuples, already sorted,
-    highest-ranked first.
-    v0.99.95, per direct user request ("сортировку msnr индикатора
-    сделай только по депозиту, топ 10 с винрейтом не ниже 45"): ranking
-    no longer uses msnr_symbol_rank_score()'s winrate/sample/доход
-    geometric-mean composite. Candidates now need winrate >= 45 to even
-    qualify (a hard gate, same treatment as the existing stress_test_
-    failed exclusion), and among those that qualify the sort is purely
-    by compound_return_pct (доход/deposit growth), descending — no
-    blending with sample size or winrate beyond that 45 floor. `bounds`
-    is accepted for call-signature compatibility with existing callers
-    but is no longer read here."""
-    # v0.99.400 — honest version of the same rule: nothing is ranked unless
-    # the pooled test passed (msnr_pooled_verdict()); a coin must be picked
-    # on its train part; the >= 45 win-rate floor and the $ sort use the
-    # TRAIN part (they used the whole window, test included). Plain read of
-    # STATE (callers may hold state_lock, which is not re-entrant).
-    if not (STATE.get("msnr_pooled") or {}).get("passed"):
-        return []
-    exclude = exclude or set()
-    candidates = [(sym, ov) for sym, ov in overrides.items()
-                  if ov and not ov.get("error") and sym not in exclude and ov.get("picked")
-                  and not ov.get("stress_test_failed")
-                  and (ov.get("train_winrate") or 0) >= 45]
-    candidates.sort(key=lambda pair: (pair[1].get("train_compound_return_pct")
-                                       if pair[1].get("train_compound_return_pct") is not None
-                                       else float("-inf")),
-                     reverse=True)
-    return candidates
-
-
-def msnr_autotrade_eligible_symbols(overrides, bounds=None):
-    """The symbols eligible for an individual autotrade toggle: the
-    current top MSNR_AUTOTRADE_TOP_N symbols by msnr_rank_by_winrate_
-    sample() — see that function's own docstring, and msnr_symbol_
-    rank_score()'s, for the exact ranking criteria. Per direct user
-    request: "включать автоторговлю не только по золоту, но и по топ 3
-    после сортировки не считая золота" (v0.99.18), raised to top 10 in
-    v0.99.19.
-    `bounds` (from msnr_compute_rank_bounds()) is passed through to
-    msnr_rank_by_winrate_sample() unchanged — api_msnr_status() computes
-    it once and passes the SAME dict here and to its own overall table
-    sort, so a symbol's ranking is identical whichever one is asking;
-    see msnr_compute_rank_bounds()'s own docstring for why that sharing
-    matters. Defaults to None (fresh per-call bounds) for a caller that
-    only needs this one ranking in isolation.
-    v0.99.75, per direct user request ("золото принудительно пока
-    убираем"): gold (MSNR_SYMBOLS) is no longer unconditionally
-    prepended to this set regardless of its own numbers — it now
-    competes for a top-10 slot on the exact same footing as every other
-    symbol, via the same ranking. It can still end up in the top 10
-    (or not) purely on its own merit; nothing about gold's own
-    detection/backtesting changed, only this forced-inclusion special
-    case.
-    This set can change between backtest cycles as rankings shift — see
-    _set_msnr_autotrade_symbol()'s own docstring for what happens to a
-    symbol's saved toggle state when it falls out of the top N."""
-    ranked = msnr_rank_by_winrate_sample(overrides, bounds=bounds)
-    return [sym for sym, _ov in ranked[:MSNR_AUTOTRADE_TOP_N]]
-
-
-def _msnr_backtest_one_symbol(symbol):
-    """Fetch + optimize + summarize for a single symbol — factored out
-    so msnr_backtest_loop() can run it concurrently across the whole
-    backtest universe instead of sequentially, same reasoning (and the
-    same real-world trigger — Gate.io rate-limit pressure under a
-    sequential loop) as VGI's own v0.98.4 fix: with up to 30+ symbols
-    now instead of 3, a sequential loop would be meaningfully slower
-    and more exposed to exactly the 429 pile-up this session already
-    diagnosed and fixed at the get_candles() retry level — concurrency
-    here is the other half of that same fix, applied proactively rather
-    than waiting for a live report to force it. Exceptions are caught
-    here (not propagated) so one bad/slow symbol can't take down the
-    whole batch, matching every other per-symbol worker in this app.
-    v0.99.15: marks itself "in flight" in STATE for the duration of its
-    own work, so the panel's progress bar can show which symbols are
-    currently being fetched/optimized right now, not just a done/total
-    count — per direct user request for visibility into exactly this
-    kind of long-running cycle, after a report that a cycle appeared
-    stuck with no way to tell what was actually happening."""
-    with state_lock:
-        STATE["msnr_backtest_in_flight"].append(symbol)
-    try:
-        override, results, raw_results = msnr_optimize_symbol(symbol)
-        return symbol, override, results, raw_results, msnr_summarize_backtest(results)
-    except Exception as e:
-        log_error(f"msnr_backtest {symbol}: {e}")
-        return None
-    finally:
-        with state_lock:
-            if symbol in STATE["msnr_backtest_in_flight"]:
-                STATE["msnr_backtest_in_flight"].remove(symbol)
-            STATE["msnr_backtest_done"] += 1
-
-
-
-# ============================================================================
-# v0.99.329 — Neuro conditions as candidate FILTERS for MSNR (informational),
-# per user request: run every MSNR backtest trade through Neuro's condition
-# set and report which single filter raises winrate the most while cutting
-# the fewest trades, and — the user's hard requirement — improves (never
-# worsens) EVERY coin. Nothing is applied to MSNR's trades or live signals.
-# Honesty guards: a filter is PICKED on the first 70% of each coin's trades
-# (train) and JUDGED on the last 30% (test) it never saw; the per-coin
-# "no coin worse" check and the displayed numbers are test-only. Avg R is
-# shown next to winrate so a filter that buys winrate by dropping the rare
-# big-RR winners is visible.
-# ============================================================================
-MSNR_NF_TRIGGER = threading.Event()
 LSW_NF_TRIGGER = threading.Event()   # v0.99.360 — Sweep's Neuro-filter report
 MSNR_NF_TRAIN_FRAC = 0.7
 MSNR_NF_MIN_KEEP = float(os.environ.get("VP_MSNR_NF_MIN_KEEP", 0.5))   # filter must keep >= 50% of test trades
@@ -12178,8 +9711,15 @@ NEURO_COND_LABELS = {
 
 
 def _msnr_nf_trade_r(t):
-    r = msnr_trade_r(t)   # v0.99.400 — incl. TIME_EXIT
-    return float(r) if r is not None else None
+    """Net R of a closed trade (Neuro-filter reports; shared with Sweep's
+    old records)."""
+    if t.get("r") is not None:
+        return float(t["r"])
+    if t.get("result") == "WIN" and t.get("rr") is not None:
+        return float(t["rr"])
+    if t.get("result") == "LOSS":
+        return -1.0
+    return None
 
 
 def _msnr_nf_stats(rows):
@@ -12653,56 +10193,6 @@ def _apply_filter_to_trades(symbol, trades, f):
     return [t for t in trades if not t.get("time") or neuro_filter_pass(f, cm.get(int(t["time"])))]
 
 
-def msnr_apply_neuro_trade_filters(loop_name="msnr_neuro_filter_loop"):
-    """v0.99.364 — per coin: pick a Neuro filter on the first 70% of MSNR's
-    backtest trades, accept it only if the last 30% gets better net R (see
-    neuro_split_filter_for_trades). Accepted -> the coin's trade list and
-    summary/score are recomputed on the filtered trades (so ranking, the
-    live universe and autotrade eligibility use them), and live signals
-    that fail it are recorded but not traded."""
-    with state_lock:
-        results = dict(STATE.get("msnr_backtest_results") or {})
-        overrides = dict(STATE.get("msnr_symbol_overrides") or {})
-    changed = {}
-    for sym, trades in results.items():
-        ov = overrides.get(sym) or {}
-        if "neuro_filter_info" in ov or not trades:
-            continue   # already decided for this backtest (the flag lives in the override itself)
-        heartbeat(loop_name)
-        info = {"status": "мало сделок"}
-        f = None
-        try:
-            split = _filter_split_time(trades)
-            if split is not None:
-                f, info = neuro_split_filter_for_trades(sym, trades, split, _rr_trade_net_r)
-        except Exception as e:
-            log_error(f"msnr neuro trade filter {sym}: {e}")
-            continue
-        kept = _apply_filter_to_trades(sym, trades, f) if f else None
-        changed[sym] = (trades, f, info, kept)
-    if not changed:
-        return
-    with state_lock:
-        res = STATE["msnr_backtest_results"]
-        ovs = STATE["msnr_symbol_overrides"]
-        summ = STATE.get("msnr_backtest_summary") or {}
-        for sym, (trades, f, info, kept) in changed.items():
-            if res.get(sym) is not trades or sym not in ovs:
-                continue   # a newer backtest replaced it meanwhile
-            ov = dict(ovs[sym])
-            ov["neuro_filter_info"] = info
-            if f:
-                ov["neuro_filter"] = {k: f[k] for k in ("key", "value", "mode", "label")}
-                ov["neuro_filter_before"] = {"trades": ov.get("trades"), "winrate": ov.get("winrate"),
-                                             "expectancy_r": ov.get("expectancy_r")}
-                _msnr_recompute_summary_score(ov, kept)
-                res[sym] = kept
-                summ[sym] = msnr_summarize_backtest(kept)
-            ovs[sym] = ov
-        STATE["msnr_live_universe"] = msnr_compute_live_universe(ovs, bounds=msnr_compute_rank_bounds(ovs))
-    save_state()
-
-
 def lsw_apply_neuro_trade_filters(loop_name="lsw_neuro_filter_loop"):
     """v0.99.364 — same as msnr_apply_neuro_trade_filters() for Sweep: the
     accepted filter rewrites the coin's trade list + summary, and its live
@@ -12752,20 +10242,6 @@ def lsw_apply_neuro_trade_filters(loop_name="lsw_neuro_filter_loop"):
                     STATE["lsw_live_directions"][sym] = dirs
             fm[sym] = entry
     save_state()
-
-
-def msnr_neuro_filter_analysis():
-    with state_lock:
-        results = {k: list(v or []) for k, v in (STATE.get("msnr_backtest_results") or {}).items()}
-    rows_by_sym = neuro_filter_rows_by_sym(results, "msnr_neuro_filter_loop", "msnr_neuro_filter_analysis")
-    if rows_by_sym is None:
-        return None
-    out = strategy_filter_report(rows_by_sym, rule="v2")   # v0.99.381 — MSNR: the rethought rule
-    if out is None:
-        return None
-    with state_lock:
-        STATE["msnr_neuro_filters"] = out
-    return out
 
 
 def lsw_neuro_filter_analysis():
@@ -12846,456 +10322,6 @@ def neuro_filter_rows_by_sym(results, loop_name, err_name):
     return rows_by_sym
 
 
-def msnr_neuro_filter_loop():
-    nf_startup_wait(MSNR_NF_TRIGGER, 900, "msnr_neuro_filters", "msnr_neuro_filter_loop", "msnr")   # v0.99.385
-    while True:
-        MSNR_NF_TRIGGER.clear()
-        _nf_on = MSNR_ENABLED
-        if _nf_on:
-            bt_log_start("msnr_nf")   # v0.99.393
-        _nf_ok, _nf_err = True, None
-        try:
-            if MSNR_ENABLED:
-                msnr_neuro_filter_analysis()
-                if NEURO_TRADE_FILTER_ENABLED:
-                    msnr_apply_neuro_trade_filters()   # v0.99.364
-        except Exception as e:
-            _nf_ok, _nf_err = False, str(e)[:80]
-            log_error(f"msnr_neuro_filter_loop: {e}")
-        if _nf_on:
-            bt_log_end("msnr_nf", ok=_nf_ok, note=_nf_err)   # v0.99.393
-        # v0.99.393 — only after the next backtest (trigger); was also every
-        # 6h on unchanged trades
-        bt_wait("msnr_nf", MSNR_NF_TRIGGER, NF_IDLE_SEC, "msnr_neuro_filter_loop", trigger_reason="после бэктеста", scheduled=False)   # re-run after every MSNR backtest (trigger) or 6h
-
-def msnr_backtest_loop():
-    # v0.99.267 -- staggered backtest-cycle startup, per direct user
-    # request ("посмотри чтобы бэктесты не мешали друг другу... не хочу
-    # чтобы сигналы задерживались"): EVERY module's own backtest loop
-    # used to start its first cycle immediately at app boot with zero
-    # delay -- on every restart, all 7 backtest loops piled onto the
-    # SAME shared 10-slot GLOBAL_HTTP_SEMAPHORE at once, right when a
-    # live signal is most likely to also need a free slot. This module
-    # starts first (no delay) -- see the other 6 backtest loops' own
-    # comments for their own staggered offsets (90s apart).
-    _prev_cycle_fut = None   # v0.99.352
-    bt_startup_skip("msnr", MSNR_BACKTEST_TRIGGER, max(300, MSNR_REFRESH_SEC), "msnr_backtest_loop")   # v0.99.385
-    while True:
-        heartbeat("msnr_backtest_loop")  # v0.99.322 — see system_health_watchdog()
-        _cycle_failed = False
-        try:
-            if not MSNR_ENABLED:
-                time.sleep(60)
-                continue
-            t0 = time.time()
-            # v0.99.194 — CRITICAL FIX to v0.99.181's own hard-ceiling fix:
-            # `with ThreadPoolExecutor(...) as ex:` calls ex.shutdown(wait=True)
-            # on exit, which BLOCKS until the inner thread actually finishes —
-            # even after .result(timeout=...) already gave up and raised
-            # TimeoutError. If the cycle is truly stuck forever, the "with"
-            # block's own __exit__ hangs forever too, and the except clause
-            # below never runs — silently defeating the whole point of the
-            # ceiling. Fix: no "with", explicit shutdown(wait=False) so the
-            # outer loop moves on immediately, abandoning the stuck thread.
-            # v0.99.352 — fixed MAX_CYCLE_SEC removed: see wait_cycle_future() (stall-based, 4h hard cap)
-            # v0.99.268 — per direct user follow-up ("а потом повторные?"):
-            # the v0.99.267 startup stagger only separates the very FIRST
-            # cycle after a restart; real cycle duration isn't fixed in the
-            # code at all (it depends on real-time universe size/network
-            # conditions, only measured AFTER the fact), so relative phase
-            # between modules can drift and collide again later purely by
-            # chance. This acquires a shared, capped semaphore (default 2
-            # of the app's 7 backtest loops at once) for the ENTIRE cycle's
-            # lifetime, released in `finally` no matter how the cycle ends
-            # — bounds concurrent backtest activity on the shared HTTP
-            # semaphore for the whole life of the process, not just at
-            # startup.
-            with state_lock:
-                STATE["msnr_waiting_for_slot"] = True  # v0.99.322 — visible in /api/health
-            wait_previous_cycle(_prev_cycle_fut, "msnr_backtest_loop")   # v0.99.352 — no overlapping cycles
-            acquire_backtest_slot("msnr_backtest_loop")  # v0.99.325 — beats while queued
-            with state_lock:
-                STATE["msnr_waiting_for_slot"] = False
-            bt_log_start("msnr")   # v0.99.393
-            try:
-                _cycle_ex = ThreadPoolExecutor(max_workers=1)
-                _cycle_fut = _cycle_ex.submit(_calc_boosted, "msnr", bt_first_run("msnr"),
-                                              _msnr_run_one_backtest_cycle, t0)   # v0.99.375
-                _prev_cycle_fut = _cycle_fut
-                try:
-                    wait_cycle_future(_cycle_fut, "msnr_backtest_loop", "msnr_backtest_done")   # v0.99.352 — abandon only on a real stall
-                    _cycle_ex.shutdown(wait=False)
-                    _BT_RAN.add("msnr")   # v0.99.385
-                    save_state()   # v0.99.385 — persist the finished cycle right away
-                    bt_log_end("msnr")   # v0.99.393
-                except (TimeoutError, FutureTimeoutError):
-                    _cycle_failed = True
-                    bt_log_end("msnr", ok=False, note="завис, брошен")   # v0.99.393
-                    log_error("msnr_backtest_loop: cycle stalled (no progress for 15 min or over 4h) — aborting, retry in 30 min")
-                    with state_lock:
-                        STATE["msnr_backtest_running"] = False
-                    _cycle_ex.shutdown(wait=False)
-                except Exception as e:
-                    _cycle_failed = True
-                    bt_log_end("msnr", ok=False, note=str(e)[:80])   # v0.99.393
-                    log_error(f"msnr_backtest_loop cycle: {e}")
-                    with state_lock:
-                        STATE["msnr_backtest_running"] = False
-                    _cycle_ex.shutdown(wait=False)
-            finally:
-                BACKTEST_CONCURRENCY_SEMAPHORE.release()
-        except Exception as e:
-            _cycle_failed = True
-            log_error(f"msnr_backtest_loop outer: {e}")
-        with state_lock:
-            STATE["msnr_waiting_for_slot"] = False
-        # v0.99.322 — failed/timed-out cycle retries in 30 min, not a full interval later
-        bt_wait("msnr", MSNR_BACKTEST_TRIGGER, BACKTEST_RETRY_AFTER_ERROR_SEC if _cycle_failed else max(300, MSNR_REFRESH_SEC), "msnr_backtest_loop", failed=_cycle_failed)  # v0.99.325 — beats while idle; v0.99.393 — journaled
-        MSNR_BACKTEST_TRIGGER.clear()
-
-
-def _msnr_run_one_backtest_cycle(t0):
-    universe = msnr_build_backtest_universe()
-    results_by_symbol = {}
-    raw_results_by_symbol = {}
-    summary_by_symbol = {}
-    overrides_by_symbol = {}
-    with state_lock:
-        STATE["msnr_backtest_total"] = len(universe)
-        STATE["msnr_backtest_done"] = 0
-        STATE["msnr_backtest_in_flight"] = []
-        STATE["msnr_backtest_running"] = True
-        STATE["msnr_backtest_started_at"] = t0
-    try:
-        # Autotune (v0.99.5): grid-search each symbol's own
-        # (min_leg_atr, qm_zone_pct, qm_lookback) instead of always
-        # backtesting the module-default params — see msnr_optimize_
-        # symbol()'s own docstring. The winning combo's trades ARE
-        # the backtest shown/drilled-into in the UI; no separate
-        # un-tuned backtest run needed.
-        # v0.99.195 — same "with ThreadPoolExecutor(...) as ex" fix as LSW's
-        # own v0.99.195: a single truly-stuck symbol would otherwise block
-        # ex.__exit__ -> shutdown(wait=True) forever, preventing the merge
-        # below from ever running even though every other symbol finished.
-        ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(universe) or 1))
-        try:
-            futs = [ex.submit(_msnr_backtest_one_symbol, s) for s in universe]
-            # v0.99.168 — per direct user report (backtest showed
-            # "2.6ч назад" despite taking only ~8min normally):
-            # as_completed() with no timeout can block indefinitely
-            # if a single symbol's HTTP request hangs at the TCP
-            # level (no data arriving, so HTTP_TIMEOUT never fires).
-            # Per-future timeout = HTTP_TIMEOUT * 3 retries * 3
-            # fetches per symbol + margin = 3 min ceiling per symbol.
-            # A symbol that exceeds it is logged and skipped (same
-            # outcome as an exception — keeps last-known-good data).
-            PER_SYMBOL_TIMEOUT = HTTP_TIMEOUT * 3 * 3 + 60
-            try:
-                for fut in as_completed(futs, timeout=PER_SYMBOL_TIMEOUT * math.ceil(len(universe) / WORKERS)):
-                    try:
-                        res = fut.result(timeout=PER_SYMBOL_TIMEOUT)
-                    except (TimeoutError, FutureTimeoutError):
-                        log_error(f"msnr_backtest: a symbol timed out after {PER_SYMBOL_TIMEOUT}s — skipping")
-                        continue
-                    if res is None:
-                        continue
-                    symbol, override, results, raw_results, summary = res
-                    overrides_by_symbol[symbol] = override
-                    msnr_provisional_top(overrides_by_symbol)   # v0.99.369
-                    results_by_symbol[symbol] = results
-                    raw_results_by_symbol[symbol] = raw_results
-                    summary_by_symbol[symbol] = summary
-            except (TimeoutError, FutureTimeoutError):
-                log_error("msnr_backtest: as_completed timed out waiting on a stuck symbol — flushing partial results")
-        finally:
-            ex.shutdown(wait=False)  # never block on a stuck worker thread
-        with state_lock:
-            # v0.99.36 - CRITICAL FIX: this used to overwrite
-            # STATE["msnr_backtest_results"]/_raw/_summary/
-            # _symbol_overrides wholesale with only THIS cycle's
-            # results_by_symbol etc. _msnr_backtest_one_symbol()
-            # returns None on any exception (timeout, Gate.io
-            # 429, transient fetch failure) and such symbols are
-            # simply skipped when building results_by_symbol —
-            # they never make it in. Under a 200+ symbol universe
-            # scanned concurrently, some symbols hitting a
-            # transient error per cycle is close to guaranteed,
-            # so every cycle was silently dropping a chunk of
-            # PREVIOUSLY-successful backtest data (and, via
-            # msnr_compute_live_universe() being fed that same
-            # incomplete dict, dropping those symbols out of live
-            # scanning too) — from the outside this looked
-            # exactly like "выполнил бэктест, через час бэктест
-            # прогоняется заново и всё слетает, будто прогона не
-            # было", per direct user report.
-            # Fix: merge this cycle's results into the existing
-            # STATE dicts instead of replacing them, so a symbol
-            # that failed just THIS cycle keeps its last-known-
-            # good data. Only symbols no longer in the current
-            # `universe` (e.g. fell out of the top-liquid ranking)
-            # are actually dropped, not ones that merely errored.
-            merged_results = dict(STATE.get("msnr_backtest_results") or {})
-            merged_raw = dict(STATE.get("msnr_backtest_results_raw") or {})
-            merged_summary = dict(STATE.get("msnr_backtest_summary") or {})
-            merged_overrides = dict(STATE.get("msnr_symbol_overrides") or {})
-            merged_results.update(results_by_symbol)
-            merged_raw.update(raw_results_by_symbol)
-            merged_summary.update(summary_by_symbol)
-            merged_overrides.update(overrides_by_symbol)
-            universe_set = set(universe)
-            for d in (merged_results, merged_raw, merged_summary, merged_overrides):
-                for sym in list(d.keys()):
-                    if sym not in universe_set:
-                        del d[sym]
-            STATE["msnr_backtest_results"] = merged_results
-            STATE["msnr_backtest_results_raw"] = merged_raw
-            MSNR_NF_TRIGGER.set()   # v0.99.329 — refresh the Neuro-filter report on fresh MSNR trades
-            STATE["msnr_backtest_summary"] = merged_summary
-            STATE["msnr_symbol_overrides"] = merged_overrides
-            STATE["msnr_backtest_universe"] = universe
-            STATE["msnr_pooled"] = msnr_pooled_verdict(merged_overrides, merged_results)   # v0.99.400 — before any ranking
-            # v0.99.78 — bounds computed here (once, off the just-
-            # merged overrides) and threaded through so this
-            # cycle's live-universe promotion uses the SAME
-            # ranking reference api_msnr_status() will compute
-            # fresh for itself moments later — see msnr_compute_
-            # rank_bounds()'s own docstring for why sharing
-            # bounds (not just the formula) matters for staying
-            # consistent across callers.
-            msnr_rank_bounds = msnr_compute_rank_bounds(merged_overrides)
-            STATE["msnr_live_universe"] = msnr_compute_live_universe(merged_overrides, bounds=msnr_rank_bounds)
-            # v0.99.108, per direct user request ("монеты попавшие
-            # в топ список и винрейт больше 50 помечаются галочкой
-            # авто торговли, если потом такая монета вылетела из
-            # топа то галочку автоматом снимать"): auto-manages
-            # the per-symbol autotrade toggle for the top-N pool —
-            # auto-ON any symbol newly qualifying (in the eligible
-            # top-N AND win_rate > 50), auto-OFF any symbol that
-            # stops qualifying (either condition), but ONLY among
-            # symbols that were themselves part of the auto-
-            # managed pool as of the LAST cycle (msnr_autotrade_
-            # top_set) — critically, this scoping means a symbol
-            # the user manually toggled ON via msnr_manual_toggle_
-            # allowed_symbols()'s own broader "вне топ-10, на свой
-            # страх и риск" feature is NEVER touched by this auto-
-            # off logic, since it never enters msnr_autotrade_
-            # top_set unless it also separately earns a genuine
-            # top-N spot. Symmetric with the entry condition
-            # (falling below EITHER top-N membership or the >50%
-            # winrate bar turns it off, matching how it turned on)
-            # rather than only reacting to ranking changes.
-            eligible_now = set(msnr_autotrade_eligible_symbols(merged_overrides, bounds=msnr_rank_bounds))
-            # v0.99.207 — "single best coin" mode, per direct user request:
-            # when enabled, collapse the whole eligible pool down to just the
-            # ONE symbol with the highest compound_return_pct (biggest
-            # simulated $ profit) among symbols that also clear the normal
-            # winrate>=50 bar — everything else is treated as ineligible this
-            # cycle, same as if it had fallen out of the top-N.
-            if MSNR_SINGLE_BEST_ENABLED and eligible_now:
-                candidates = [s for s in eligible_now   # v0.99.400 — train-part numbers
-                              if (merged_overrides.get(s) or {}).get("train_winrate") is not None
-                              and merged_overrides[s]["train_winrate"] >= 50
-                              and merged_overrides[s].get("train_compound_return_pct") is not None]
-                if candidates:
-                    best_symbol = max(candidates, key=lambda s: merged_overrides[s]["train_compound_return_pct"])
-                    eligible_now = {best_symbol}
-                else:
-                    eligible_now = set()
-            prev_top_set = set(STATE.get("msnr_autotrade_top_set") or [])
-            autotrade_symbols = STATE["msnr_autotrade_symbols"]
-            for sym in eligible_now:
-                wr = (merged_overrides.get(sym) or {}).get("train_winrate")   # v0.99.400 — train part
-                if wr is not None and wr >= 50 and not autotrade_symbols.get(sym):
-                    autotrade_symbols[sym] = True
-            for sym in prev_top_set:
-                if not autotrade_symbols.get(sym):
-                    continue
-                wr = (merged_overrides.get(sym) or {}).get("train_winrate")   # v0.99.400 — train part
-                still_qualifies = sym in eligible_now and wr is not None and wr >= 50
-                if not still_qualifies:
-                    autotrade_symbols[sym] = False
-            STATE["msnr_autotrade_top_set"] = sorted(eligible_now)
-            STATE["msnr_last_backtest_finished"] = time.time()
-            STATE["msnr_last_backtest_duration"] = round(time.time() - t0, 1)
-    finally:
-        # v0.99.15 — always clears "running" even if the cycle
-        # above raised partway through
-        with state_lock:
-            STATE["msnr_backtest_running"] = False
-            STATE["msnr_backtest_in_flight"] = []
-            STATE["msnr_provisional"] = None   # v0.99.369
-
-
-def msnr_backtest_watchdog():
-    """v0.99.81, per direct user report ("термукс был жив, сигналы
-    работали, но бэктест не выполнялся больше 5 часов"): diagnostics-
-    only, per direct user choice ("Только диагностика... ничего не
-    менять") — does NOT touch msnr_backtest_loop()'s own completion-
-    waiting behavior, timeouts, or retry logic in any way. Runs as its
-    own lightweight daemon thread, independent of the backtest loop
-    itself (so it keeps checking in even if that loop really were stuck
-    on something this watchdog can't see into). Every MSNR_BACKTEST_
-    WATCHDOG_INTERVAL_SEC, checks whether a cycle has been running
-    (STATE["msnr_backtest_running"]) longer than MSNR_BACKTEST_
-    WATCHDOG_THRESHOLD_SEC — if so, logs the CURRENT STATE["msnr_
-    backtest_in_flight"] list (the same field _msnr_backtest_one_
-    symbol() already appends/removes itself from at start/end, no new
-    tracking needed) plus done/total progress, so a repeat of this
-    incident leaves a concrete trail of exactly which symbol(s) were
-    still pending and how far the cycle had gotten — instead of
-    another silent multi-hour gap with nothing to diagnose from
-    afterward. Only logs ONCE per threshold-crossing per cycle (a
-    symbol still stuck 5 minutes later doesn't need a second nearly-
-    identical log line — `warned_this_cycle` resets the moment the
-    loop next observes the cycle NOT running, i.e. it finished or gave
-    up, ready to warn again on the next cycle if that one also runs
-    long)."""
-    # v0.99.349 — per user ("что за уведы? будто бесполезные"): it used to
-    # log an "error" whenever a cycle simply ran longer than 20 min, even
-    # while making steady progress (95/236 coins). Now it only reports a
-    # REAL stall: the done-counter hasn't moved for 10 minutes.
-    warned_this_cycle = False
-    last_done, last_progress_at = None, time.time()
-    while True:
-        time.sleep(MSNR_BACKTEST_WATCHDOG_INTERVAL_SEC)
-        try:
-            with state_lock:
-                running = STATE.get("msnr_backtest_running")
-                started_at = STATE.get("msnr_backtest_started_at")
-                in_flight = list(STATE.get("msnr_backtest_in_flight") or [])
-                done = STATE.get("msnr_backtest_done")
-                total = STATE.get("msnr_backtest_total")
-            if not running or not started_at:
-                warned_this_cycle = False
-                last_done, last_progress_at = None, time.time()
-                continue
-            if done != last_done:
-                last_done, last_progress_at = done, time.time()
-                continue
-            stalled = time.time() - last_progress_at
-            if stalled > 600 and not warned_this_cycle:
-                log_error(
-                    f"msnr_backtest_watchdog: no progress for {round(stalled / 60)} min "
-                    f"(stuck at {done}/{total}), in flight: {in_flight}"
-                )
-                warned_this_cycle = True
-        except Exception as e:
-            log_error(f"msnr_backtest_watchdog: {e}")
-
-
-def msnr_live_loop():
-    while True:
-        heartbeat("msnr_live_loop")  # v0.99.322 — see system_health_watchdog()
-        try:
-            if not MSNR_ENABLED:
-                time.sleep(60)
-                continue
-            # v0.99.17: scans STATE["msnr_live_universe"] (MSNR_SYMBOLS
-            # union'd with any backtest-qualifying symbol — see msnr_
-            # compute_live_universe()), not the static MSNR_SYMBOLS
-            # constant directly, per direct user request. Falls back to
-            # MSNR_SYMBOLS itself if the backtest hasn't populated this
-            # yet (e.g. right after a fresh restart) — gold is always
-            # correct to scan regardless of backtest state, so this
-            # fallback can't ever leave live scanning empty.
-            with state_lock:
-                live_universe = list(STATE["msnr_live_universe"])  # v0.99.321 — no gold fallback; empty until the first backtest ranks symbols
-                autotrade_symbols = dict(STATE["msnr_autotrade_symbols"])
-                overrides_snapshot = dict(STATE["msnr_symbol_overrides"])
-            # v0.99.32, per direct user request ("топ 10 плюс галочка,
-            # доп условий не нужно"): union in any symbol the person has
-            # explicitly toggled autotrade ON for AND that's currently
-            # autotrade-eligible (top-MSNR_AUTOTRADE_TOP_N by score, not
-            # stress_test_failed) — msnr_live_universe above is a
-            # SEPARATE, older promotion criterion (>50% winrate AND >40
-            # closed trades, msnr_compute_live_universe()) that a
-            # top-10-by-score symbol can easily fail even while ranking
-            # well by score (score is a lower-confidence-bound on mean
-            # R, not raw winrate — the two measure different things, so
-            # nothing guarantees a symbol clearing one also clears the
-            # other). Without this union, checking a top-10 symbol's own
-            # autotrade box did literally nothing whenever that symbol's
-            # winrate sat at or below 50%: msnr_scan_symbol_live() would
-            # never even get CALLED for it — no signal recorded, no
-            # Telegram notification, no order, ever, regardless of the
-            # checkbox — which is exactly what a live report described
-            # ("был сигнал, но ни уведомления, ни авто-открытия").
-            # v0.99.35 — this union now lives in msnr_effective_live_
-            # universe() (shared with api_msnr_status()'s own "live" dot,
-            # which had drifted out of sync with this exact union — see
-            # that function's own docstring) instead of being built
-            # inline here a second time.
-            live_universe = msnr_effective_live_universe(live_universe, overrides_snapshot, autotrade_symbols)
-            # v0.99.241 — same no-with-block hang fix as lsw_live_loop's own
-            # (see that fix's comment for the full mechanism): both this
-            # primary scan and the add-on scan below had NO per-item bound
-            # at all (bare `for _ in as_completed(futs): pass`, not even the
-            # timeout param), on top of the same with-block shutdown(wait=
-            # True) issue — a single stuck symbol could hang this loop
-            # (which runs far more often than msnr_backtest_loop, already
-            # fixed for this exact issue back in v0.99.194/195) forever.
-            if live_universe:
-                PER_SYM_TO = HTTP_TIMEOUT * 3 + 30
-                ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe)))
-                try:
-                    futs = {ex.submit(msnr_scan_symbol_live, s): s for s in live_universe}
-                    try:
-                        for fut in as_completed(futs, timeout=PER_SYM_TO * math.ceil(len(live_universe) / WORKERS)):
-                            symbol = futs[fut]
-                            try:
-                                fut.result(timeout=PER_SYM_TO)
-                            except (TimeoutError, FutureTimeoutError):
-                                log_error(f"msnr_live_loop: {symbol} timed out after {PER_SYM_TO}s — skipping")
-                            except Exception as e:
-                                log_error(f"msnr_live_loop {symbol}: {e}")
-                    except (TimeoutError, FutureTimeoutError):
-                        log_error("msnr_live_loop: as_completed timed out waiting on a stuck symbol — keeping whatever was gathered")
-                finally:
-                    ex.shutdown(wait=False)
-            # v0.99.126 — add-on ("добір") scan, AFTER the primary scan
-            # above so a primary signal that just fired this exact cycle
-            # is already in STATE["msnr_signals"] for msnr_scan_addon_
-            # live() to find. Runs over the SAME live_universe — an
-            # add-on can only ever fire for a symbol that already has an
-            # open, autotrade-fired primary (checked inside the function
-            # itself), so scanning symbols with no open primary is just
-            # a cheap no-op there, not wasted real risk.
-            if MSNR_ADDON_ENABLED and live_universe:
-                PER_SYM_TO = HTTP_TIMEOUT * 3 + 30
-                ex = ThreadPoolExecutor(max_workers=min(WORKERS, len(live_universe)))
-                try:
-                    futs = {ex.submit(msnr_scan_addon_live, s): s for s in live_universe}
-                    try:
-                        for fut in as_completed(futs, timeout=PER_SYM_TO * math.ceil(len(live_universe) / WORKERS)):
-                            symbol = futs[fut]
-                            try:
-                                fut.result(timeout=PER_SYM_TO)
-                            except (TimeoutError, FutureTimeoutError):
-                                log_error(f"msnr_live_loop addon: {symbol} timed out after {PER_SYM_TO}s — skipping")
-                            except Exception as e:
-                                log_error(f"msnr_live_loop addon {symbol}: {e}")
-                    except (TimeoutError, FutureTimeoutError):
-                        log_error("msnr_live_loop addon: as_completed timed out waiting on a stuck symbol — keeping whatever was gathered")
-                finally:
-                    ex.shutdown(wait=False)
-            update_msnr_signal_outcomes()
-        except Exception as e:
-            log_error(f"msnr_live_loop: {e}")
-        # v0.99.152 — sync to candle close (same fix as lsw_live_loop)
-        interval_sec = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
-        now = time.time()
-        sleep_sec = (interval_sec - now % interval_sec) + 3
-        time.sleep(sleep_sec)
-
-
-# ============================================================================
-# END EXPERIMENTAL: MSNR
-# ============================================================================
-
-
-# ============================================================================
-# EXPERIMENTAL: FT5 — port of freqtrade-strategies' Strategy005 — loops
-# ============================================================================
 def ft5_backtest_loop():
     # v0.99.267 -- staggered backtest-cycle startup, see msnr_backtest_
     # loop()'s own comment for the full reasoning. This module's first
@@ -17409,18 +14435,6 @@ def provisional_top(state, key, all_results, n):
         state[key] = {"t": time.time(), "passed": len(all_results), "rows": rows}
 
 
-def msnr_provisional_top(overrides_by_symbol):
-    """v0.99.369 — MSNR: best coins so far in the running cycle (by the
-    same score MSNR ranks on), compact, display only."""
-    ok = [(s, o) for s, o in list(overrides_by_symbol.items())
-          if o and not o.get("error") and o.get("score") is not None and not o.get("stress_test_failed")]
-    ok.sort(key=lambda kv: -(kv[1].get("score") or 0))
-    rows = [{"symbol": s, "winrate": o.get("winrate"), "trades": o.get("trades"), "wins": o.get("wins"),
-             "losses": o.get("losses"), "expectancy_r": o.get("expectancy_r"), "score": o.get("score")} for s, o in ok[:10]]
-    with state_lock:
-        STATE["msnr_provisional"] = {"t": time.time(), "done": len(overrides_by_symbol), "rows": rows}
-
-
 def _variant_trades(c, f):
     """Closed trades of a candidate combo, with the Neuro filter applied."""
     if not f:
@@ -19136,7 +16150,7 @@ def run_pool_with_progress(fn, items, workers, loop_name, on_result, on_stop, st
 # ============================================================================
 CALC_WORKERS = int(os.environ.get("VP_CALC_WORKERS", 3))
 CALC_FUNCS = ("snr_optimize_core", "prv_optimize_core", "neuro_backtest_core", "neuro_conditions_core",
-              "msnr_grid_core", "lsw_backtest_core")
+              "lsw_backtest_core")
 # settings that can change at runtime are sent with every task, so a worker
 # always computes with the main process's current values
 CALC_CONST_PREFIXES = ("SNR_", "PRV_", "NEURO_", "MSNR_", "LSW_", "AUTOTRADE_SIM_FEE_PCT")
@@ -19151,7 +16165,7 @@ _calc_boost = set()        # modules currently in a first / post-reset run
 _calc_busy_by = {}         # v0.99.372 — module -> worker processes it is using right now
 _CALC_FN_MODULE = {"snr_optimize_core": "snr", "prv_optimize_core": "prv",
                    "neuro_backtest_core": "neuro", "neuro_conditions_core": "cond",
-                   "msnr_grid_core": "msnr", "lsw_backtest_core": "lsw"}
+                   "lsw_backtest_core": "lsw"}
 
 
 def calc_status(mod):
@@ -23190,23 +20204,6 @@ def api_snr_chart(symbol):
         return jsonify({"error": str(e)}), 500
 
 
-@app.route("/api/msnr/restart_backtest", methods=["POST"])
-def api_msnr_restart_backtest():
-    """v0.99.306 — per direct user report ("У некоторых индикаторов нет
-    кнопки вверху перезапустить бэктест"): MSNR_BACKTEST_TRIGGER already
-    existed (added back in v0.99.137's own reset-doesn't-wake-the-loop
-    fix) but was only ever .set() from inside api_reset_msnr() — there
-    was no NON-destructive "just restart, keep existing results visible
-    until the new cycle finishes" endpoint, unlike Neuro/S&R Zones/Peak
-    Reversal, which all already had one. Same pattern as those three."""
-    try:
-        MSNR_BACKTEST_TRIGGER.set()
-        return jsonify({"ok": True})
-    except Exception as e:
-        log_error(f"api_msnr_restart_backtest: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
 @app.route("/api/lsw/restart_backtest", methods=["POST"])
 def api_lsw_restart_backtest():
     """v0.99.306 — same fix as api_msnr_restart_backtest()'s own, for
@@ -24148,30 +21145,92 @@ def api_reset_mirror():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
-def msnr_effective_live_universe(live_universe, overrides, autotrade_symbols):
-    """v0.99.35, per direct user question after the green ● dot didn't
-    line up with which symbols the checkbox/eligible list suggested
-    were actually trading: the REAL set msnr_live_loop() scans is
-    msnr_compute_live_universe()'s own promoted set (gold + winrate>
-    MSNR_LIVE_PROMOTE_MIN_WINRATE with sample>MSNR_LIVE_PROMOTE_MIN_
-    SAMPLE) UNION'd with whatever's toggled autotrade-ON. v0.99.32
-    built the underlying union, but built it INLINE inside msnr_live_
-    loop() itself rather than as a reusable function, so api_msnr_
-    status()'s own "live" flag (the dot the person actually sees) kept
-    reading the narrower msnr_live_universe alone. Pulled out into its
-    own function so both call sites share one definition and can't
-    drift apart on this again.
-    v0.99.108, per direct user request ("Ручное управление можно
-    убрать"): now unions against msnr_autotrade_eligible_symbols() (the
-    NARROWER top-N set), not the old msnr_manual_toggle_allowed_symbols()
-    — the toggle is now ONLY ever set by msnr_backtest_loop()'s own
-    auto-management (top-N + win_rate>50), so it can never legitimately
-    be True for a symbol outside the top-N in the first place; the
-    broader set existed purely to support manual toggling of non-top-10
-    symbols, which no longer exists."""
-    allowed_now = msnr_autotrade_eligible_symbols(overrides)
-    toggled_on_allowed = [sym for sym, on in autotrade_symbols.items() if on and sym in allowed_now]
-    return list(dict.fromkeys(list(live_universe) + toggled_on_allowed))
+@app.route("/api/msnr/status")
+def api_msnr_status():
+    with state_lock:
+        verdict = STATE.get("msnr2_verdict")
+        coins = dict(STATE.get("msnr2_coins") or {})
+        eligible = list(STATE.get("msnr2_eligible") or [])
+        live_universe = list(STATE.get("msnr2_live_universe") or [])
+        info = {k: STATE.get(k) for k in ("msnr_backtest_running", "msnr_backtest_done", "msnr_backtest_total",
+                                           "msnr_backtest_started_at", "msnr_last_backtest_finished",
+                                           "msnr_last_backtest_duration", "msnr_waiting_for_slot")}
+    rows = [dict(c, symbol=s, eligible=s in eligible, live=s in live_universe) for s, c in coins.items()]
+    rows.sort(key=lambda r: (not r["eligible"], not r["picked"], -(r["train"]["sum_r"] or 0)))
+    return jsonify({"enabled": MSNR_ENABLED, "autotrade_enabled": AUTOTRADE_ENABLED_MSNR, **info,
+                    "verdict": verdict, "coins": rows, "eligible": eligible, "live_universe": live_universe,
+                    "signals_stats": compute_msnr_signal_stats(), "reconcile": msnr_live_vs_backtest(),
+                    "config": {"universe_n": MSNR2_UNIVERSE_N, "days": MSNR2_DAYS, "top_n": MSNR2_TOP_N,
+                               "n_variants": len(MSNR2_VARIANTS), "hold_hours": round(msnr2_hold_bars() * 0.25, 1),
+                               "refresh_sec": MSNR_REFRESH_SEC}})
+
+
+@app.route("/api/msnr/signals")
+def api_msnr_signals():
+    with state_lock:
+        return jsonify([dict(s) for s in list(STATE["msnr_signals"])[:150]])
+
+
+@app.route("/api/msnr/backtest/<symbol>")
+def api_msnr_backtest_trades(symbol):
+    with state_lock:
+        trades = [dict(t) for t in (STATE.get("msnr2_trades") or {}).get(symbol, [])]
+        split = ((STATE.get("msnr2_coins") or {}).get(symbol) or {}).get("split")
+    for t in trades:
+        t["part"] = "обучение" if split and t["time"] < split else "тест"
+    return jsonify(trades[::-1])
+
+
+@app.route("/api/msnr/chart/<symbol>")
+def api_msnr_chart(symbol):
+    try:
+        t_arg = request.args.get("time")
+        sig = None
+        with state_lock:
+            verdict = STATE.get("msnr2_verdict") or {}
+            if t_arg:
+                t = float(t_arg)
+                sig = next((dict(s) for s in STATE["msnr_signals"] if s["symbol"] == symbol and abs(s["time"] - t) < 900), None)
+                if sig is None:
+                    sig = next((dict(x) for x in (STATE.get("msnr2_trades") or {}).get(symbol, []) if abs(x["time"] - t) < 900), None)
+        ref = verdict.get("chosen") or verdict.get("best_train") or {}
+        min_leg = (ref.get("variant") or {}).get("min_leg", 2.5)
+        now = time.time()
+        center = sig["time"] if sig else now
+        end = min(now, (sig.get("exit_time") or center) + 40 * 900) if sig else now
+        start = center - 160 * 900
+        candles = [c for c in get_candles_range(symbol, "15m", start, end) if c["time"] + 900 <= now]
+        struct = get_candles_range(symbol, "1h", start - 30 * 86400, end)
+        pivots = [p for p in msnr2_pivots(struct, 3600, min_leg) if p["confirm_time"] >= start - 20 * 3600]
+        return jsonify({"symbol": symbol, "candles": candles, "pivots": pivots, "signal": sig,
+                        "result": sig.get("result") if sig else None, "exit_time": sig.get("exit_time") if sig else None,
+                        "exit_price": sig.get("exit_price") if sig else None, "chart_source": "msnr", "tf": "15m"})
+    except Exception as e:
+        log_error(f"api_msnr_chart {symbol}: {e}")
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/msnr/restart_backtest", methods=["POST"])
+def api_msnr_restart_backtest():
+    MSNR_BACKTEST_TRIGGER.set()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/reset/msnr", methods=["POST"])
+def api_reset_msnr():
+    try:
+        with state_lock:
+            for k in ("msnr2_verdict", "msnr2_coins", "msnr2_trades", "msnr2_eligible", "msnr2_live_universe"):
+                STATE[k] = None if k == "msnr2_verdict" else ({} if k in ("msnr2_coins", "msnr2_trades") else [])
+            STATE["msnr_last_backtest_finished"] = None
+            STATE["msnr_last_backtest_duration"] = None
+            STATE["msnr_signals"].clear()
+        save_state()
+        MSNR_BACKTEST_TRIGGER.set()
+        return jsonify({"ok": True})
+    except Exception as e:
+        log_error(f"api_reset_msnr: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/health")
@@ -24188,457 +21247,6 @@ def api_health():
                     "backtest_slots": BACKTEST_CONCURRENCY_LIMIT,
                     "exchange_load": exchange_load_summary(),
                     "bt": bt_journal_snapshot()})   # v0.99.393
-
-
-def msnr_live_vs_backtest(days=30):
-    """v0.99.400 — the check that matters before trusting MSNR: every live
-    signal of the last `days` days (traded or only recorded) against the
-    CURRENT backtest's trade on the same coin and the same 15m candle.
-    Matched pairs: same outcome? live R vs backtest R. Live-only signals
-    and backtest-only trades (in the span that coin was being scanned)
-    show where live and backtest disagree on WHICH trades happen. Params
-    can change between backtest cycles, so some mismatch is normal; a
-    systematic gap (live R far below backtest R on the same trades, or
-    many live-only losers) is the red flag."""
-    now = time.time()
-    with state_lock:
-        sigs = [dict(s) for s in STATE["msnr_signals"] if (s.get("time") or 0) >= now - days * 86400]
-        results = {k: list(v or []) for k, v in (STATE.get("msnr_backtest_results") or {}).items()}
-    iv = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
-
-    def live_r(sg):
-        if sg.get("result") == "WIN":
-            return msnr_net_rr(sg["entry"], sg["sl"], sg["tp"])
-        if sg.get("result") == "LOSS":
-            return -1.0
-        if sg.get("result") == "TIME_EXIT":
-            return sg.get("r_net")
-        return None
-    matched, live_only, bt_only = [], [], []
-    by_sym = {}
-    for sg in sigs:
-        by_sym.setdefault(sg["symbol"], []).append(sg)
-    for sym, ss in by_sym.items():
-        bts = {t["time"]: t for t in results.get(sym) or []}
-        t0, t1 = min(x["time"] for x in ss), max(x["time"] for x in ss)
-        seen = set()
-        for sg in ss:
-            bt = bts.get(sg["time"])
-            if bt is None:
-                live_only.append(sg)
-                continue
-            seen.add(bt["time"])
-            matched.append((sg, bt))
-        bt_only += [t for tm, t in bts.items() if t0 <= tm <= t1 and tm not in seen and now - tm > iv]
-    closed_pairs = [(sg, bt) for sg, bt in matched if live_r(sg) is not None and msnr_trade_r(bt) is not None]
-    lo_closed = [sg for sg in live_only if live_r(sg) is not None]
-
-    def _sum(xs):
-        return round(sum(xs), 2) if xs else None
-    return {
-        "days": days, "live_signals": len(sigs), "matched": len(matched),
-        "matched_closed": len(closed_pairs),
-        "same_outcome": sum(1 for sg, bt in closed_pairs if sg["result"] == bt["result"]),
-        "live_r_sum": _sum([live_r(sg) for sg, _ in closed_pairs]),
-        "bt_r_sum": _sum([msnr_trade_r(bt) for _, bt in closed_pairs]),
-        "live_only": len(live_only), "live_only_closed": len(lo_closed),
-        "live_only_r_sum": _sum([live_r(sg) for sg in lo_closed]),
-        "bt_only": len(bt_only),
-        "bt_only_r_sum": _sum([msnr_trade_r(t) for t in bt_only if msnr_trade_r(t) is not None]),
-    }
-
-
-@app.route("/api/msnr/status")
-def api_msnr_status():
-    """EXPERIMENTAL — see the MSNR module's own header comment."""
-    with state_lock:
-        overrides = dict(STATE["msnr_symbol_overrides"])
-        backtest_universe = list(STATE["msnr_backtest_universe"])
-        backtest_results_raw = dict(STATE["msnr_backtest_results_raw"])
-        live_universe = list(STATE["msnr_live_universe"])  # v0.99.321 — no gold fallback; empty until the first backtest ranks symbols
-        autotrade_symbols = dict(STATE["msnr_autotrade_symbols"])
-        last_backtest_finished = STATE["msnr_last_backtest_finished"]
-        last_backtest_duration = STATE["msnr_last_backtest_duration"]
-        backtest_total = STATE["msnr_backtest_total"]
-        backtest_done = STATE["msnr_backtest_done"]
-        backtest_in_flight = list(STATE["msnr_backtest_in_flight"])
-        backtest_running = STATE["msnr_backtest_running"]
-        backtest_started_at = STATE["msnr_backtest_started_at"]
-        waiting_for_slot = bool(STATE.get("msnr_waiting_for_slot"))   # v0.99.359
-    # Ranked by msnr_ranking_score() (a lower-confidence-bound on mean R,
-    # v0.99.5 — see msnr_ranking_score()'s own docstring), not raw
-    # win-rate — same reasoning as FT5's api_ft5_status(): a lucky small
-    # sample or unevenly-distributed wins/losses across RR shouldn't
-    # outrank a larger, steadier combo just because its raw average
-    # looks better. Symbols with an error or no result sort last.
-    # v0.99.17: "live" now checks the DYNAMIC promoted set (live_universe),
-    # not the static MSNR_SYMBOLS constant — a symbol can be live because
-    # it's gold OR because it earned promotion via win-rate/sample.
-    # v0.99.18: autotrade_eligible (exactly the 6 symbols — gold + current
-    # top 3 by msnr_rank_by_winrate_sample()) and each entry's own
-    # autotrade_on state, so the panel can render exactly 6 checkboxes,
-    # correctly pre-checked, without a separate round-trip.
-    # v0.99.76 — computed ONCE here and passed to both eligibility and
-    # the overall table sort below, so a symbol's ranking is identical
-    # whichever one reads it — see msnr_compute_rank_bounds()'s own
-    # docstring for why that sharing matters.
-    msnr_rank_bounds = msnr_compute_rank_bounds(overrides)
-    autotrade_eligible = msnr_autotrade_eligible_symbols(overrides, bounds=msnr_rank_bounds)
-    # v0.99.49, per direct user request ("хочу иметь возможность
-    # автоторговли и не по топ-10, на свой страх и риск"): a SEPARATE,
-    # v0.99.35 — the dot shown per row now uses the SAME effective set
-    # msnr_live_loop() actually scans (msnr_effective_live_universe()),
-    # not the narrower promoted-only live_universe — see that function's
-    # own docstring for why those two had drifted apart since v0.99.32.
-    effective_live_universe = msnr_effective_live_universe(live_universe, overrides, autotrade_symbols)
-    ranked = [dict(v, symbol=sym, live=(sym in effective_live_universe),
-                   autotrade_eligible=(sym in autotrade_eligible),
-                   autotrade_on=bool(autotrade_symbols.get(sym)))
-              for sym, v in overrides.items() if v and not v.get("error")]
-    # v0.99.75/76, per direct user request ("плавное убывание в топ 10
-    # и последующее продолжение убывание вне списка", then "чтобы на
-    # выборку и доход тоже учитывало"): this table's own display order
-    # uses the EXACT same msnr_symbol_rank_score() (against the SAME
-    # msnr_rank_bounds computed once above) that msnr_rank_by_winrate_
-    # sample() uses to pick the top 10 — before v0.99.75 these were two
-    # DIFFERENT sorts (this one by `score` alone, top-10 membership by
-    # a weighted income/score composite), which is exactly what
-    # produced the discontinuity the request describes: a symbol's
-    # position in the full table didn't necessarily track its own
-    # top-10 standing. Now they're the same score computed against the
-    # same bounds, so scrolling from #1 through #10 into "the rest" is
-    # one continuous ordering, not two different ones stitched
-    # together — see msnr_compute_rank_bounds()'s own docstring for why
-    # sharing the bounds (not just the formula) matters just as much.
-    # v0.99.27, per direct user request ("просто не попадает в топ"):
-    # stress_test_failed symbols (see msnr_optimize_symbol()'s own
-    # docstring — a losing $ compound simulation) still sort BELOW every
-    # symbol that passed, regardless of rank score — `not stress_test_
-    # failed` stays the primary grouping (True > False, so passing
-    # symbols come first under reverse=True), msnr_symbol_rank_score()
-    # is the secondary key within each group. A hard sort-order gate,
-    # not part of the ranking score itself — msnr_rank_by_winrate_
-    # sample() (autotrade eligibility) already excludes these outright;
-    # this keeps the general table's own visual order consistent with
-    # that instead of a failed symbol still floating near the top on
-    # winrate alone.
-    # v0.99.95, per direct user request ("сортировку msnr индикатора
-    # сделай только по депозиту"): table order now sorts purely by
-    # compound_return_pct (доход/deposit growth) instead of msnr_
-    # symbol_rank_score()'s winrate/sample/доход composite. The
-    # stress_test_failed grouping stays — that's a hard pass/fail gate,
-    # independent of whatever metric ranks the passing symbols.
-    ranked.sort(key=lambda r: (not r.get("stress_test_failed"),
-                                r.get("compound_return_pct") if r.get("compound_return_pct") is not None else float("-inf")),
-                reverse=True)
-    # v0.99.11: RR-bucket win-rate, pooled across every symbol's own
-    # backtest trades — per direct user observation (SPCX: rr>6 trades
-    # consistently hit stop) that a pooled avg/median RR can't reveal
-    # this kind of pattern on its own. Same pooling MSNR_MAX_RR's own
-    # autotune rule uses, so what's displayed matches what's actually
-    # driving the cap. v0.99.23: reads msnr_backtest_results_raw (pre-
-    # skip-filter), not msnr_backtest_results — the latter now has each
-    # symbol's own skip_rr_min-failing trades already removed, which
-    # would silently understate exactly the badness this pooled bucket
-    # view exists to surface.
-    pooled_trades = [t for sym_trades in backtest_results_raw.values() for t in sym_trades]
-    rr_buckets = msnr_rr_bucket_stats(pooled_trades)
-    return jsonify({
-        "calc": calc_status("msnr"),   # v0.99.375
-        "provisional": STATE.get("msnr_provisional"),   # v0.99.369
-        "pooled": STATE.get("msnr_pooled"),   # v0.99.400
-        "reconcile": msnr_live_vs_backtest(),   # v0.99.400
-        "enabled": MSNR_ENABLED,
-        "live_universe": live_universe,
-        # v0.99.319 — diagnostics for "no MSNR signals for days": what the
-        # live loop ACTUALLY scans, and how many backtested symbols clear
-        # msnr_rank_by_winrate_sample()'s hard winrate>=45% bar (the gate
-        # that feeds the live universe).
-        "effective_live_universe": effective_live_universe,
-        "wr_floor_pass_n": sum(1 for ov in overrides.values()
-                               if ov and not ov.get("error") and not ov.get("stress_test_failed")
-                               and (ov.get("winrate") or 0) >= 45),
-        "backtested_n": sum(1 for ov in overrides.values() if ov and not ov.get("error")),
-        "autotrade_eligible": autotrade_eligible,
-        "backtest_universe_size": len(backtest_universe),
-        "last_backtest_finished": last_backtest_finished,
-        "last_backtest_duration": last_backtest_duration,
-        "backtest_running": backtest_running, "waiting_for_slot": waiting_for_slot,
-        "backtest_total": backtest_total,
-        "backtest_done": backtest_done,
-        "backtest_in_flight": backtest_in_flight,
-        "backtest_started_at": backtest_started_at,
-        "signals_stats": compute_msnr_signal_stats(),
-        "rr_buckets": rr_buckets,
-        "config": {
-            "structure_tf": MSNR_STRUCTURE_TF, "entry_tf": MSNR_ENTRY_TF,
-            "pivot_left": MSNR_PIVOT_LEFT, "pivot_right": MSNR_PIVOT_RIGHT,
-            "min_leg_atr": MSNR_MIN_LEG_ATR, "qm_zone_pct": MSNR_QM_ZONE_PCT,
-            "qm_lookback_bars": MSNR_QM_LOOKBACK_BARS, "backtest_days": MSNR_BACKTEST_DAYS, "oos_test_frac": MSNR_OOS_TEST_FRAC,
-            "max_rr": MSNR_MAX_RR,
-            "grid_min_leg_atr": MSNR_PARAM_GRID_MIN_LEG_ATR, "grid_qm_zone_pct": MSNR_PARAM_GRID_QM_ZONE_PCT,
-            "grid_qm_lookback": MSNR_PARAM_GRID_QM_LOOKBACK,
-            "compound_start_balance": MSNR_COMPOUND_START_BALANCE, "compound_leverage": AUTOTRADE_LEVERAGE_MSNR,
-            "refresh_sec": MSNR_REFRESH_SEC,
-            "autotrade_enabled": AUTOTRADE_ENABLED_MSNR,
-            "min_rr_filter_enabled": MSNR_MIN_RR_FILTER_ENABLED, "min_rr_filter": MSNR_MIN_RR_FILTER,
-            "htf_filter_enabled": MSNR_HTF_FILTER_ENABLED, "htf_interval": MSNR_HTF_INTERVAL,
-        },
-        "top": ranked,
-        "neuro_filters": STATE.get("msnr_neuro_filters"),  # v0.99.329 (read without lock: replaced atomically)
-    })
-
-
-@app.route("/api/msnr/signals")
-def api_msnr_signals():
-    # v0.99.162 — filter to autotrade symbols only for tracking-only signals.
-    # v0.99.170 — BUT always show OPEN signals regardless of galochka: a
-    # real position is open on the exchange and must be visible even if the
-    # symbol's checkbox was auto-removed after the position opened (e.g.
-    # symbol fell out of top-N between backtest cycles). Per direct user
-    # report: "открытых: 1" but "Живых сигналов пока нет" — the open
-    # position became invisible because its symbol lost its checkbox.
-    with state_lock:
-        autotrade_symbols = dict(STATE["msnr_autotrade_symbols"])
-        signals = [s for s in STATE["msnr_signals"]
-                   if autotrade_symbols.get(s["symbol"]) or s.get("status") == "OPEN" or s.get("balance_skipped")
-                   or s.get("trade_intended")]  # v0.99.333
-    return jsonify(signals)
-
-
-@app.route("/api/msnr/backtest/<symbol>")
-def api_msnr_backtest_trades(symbol):
-    """Full per-trade backtest list for one symbol (the summary table only
-    shows aggregates) — each trade's `time` can be fed straight into
-    /api/msnr/chart/<symbol>?time=... to see exactly how that A/V pair
-    and QM trigger were derived.
-    v0.99.25, per direct user request after noticing a symbol that
-    compounds to $0 (APR_USDT) still ranked near the top of the table
-    by score: each trade is now also annotated with the compounding
-    balance immediately before/after it (msnr_compound_trail()), so
-    the "доход" figure in the summary row can be checked trade-by-
-    trade instead of trusted as a single opaque number — exactly what
-    was asked for, before deciding whether/how the ranking itself
-    needs to account for this kind of blow-up risk. Matched to each
-    trade by `time` (the trail is computed in chronological order,
-    this endpoint's own list is sorted newest-first for display, so a
-    plain zip() would pair the wrong rows). TIMEOUT trades and any
-    trade after the account already hit $0 have no trail entry —
-    balance_before/after come back None for those, same "wasn't
-    actually reached" reasoning the compounding functions use."""
-    with state_lock:
-        trades = list(STATE["msnr_backtest_results"].get(symbol, []))
-        optimal_leverage = (STATE["msnr_symbol_overrides"].get(symbol) or {}).get("optimal_leverage")
-    # v0.99.25: keyed by (time, direction), not time alone — an A-shape
-    # and a V-shape level can structurally both resolve on the exact
-    # same entry candle (rare, but msnr_detect_signals() checks them in
-    # separate if-blocks, not elif), which would collide on a time-only
-    # key and silently misattribute one trade's balance to the other.
-    # v0.99.47: passes this symbol's own Kelly-optimal leverage through
-    # so the trail's per-trade pnl_pct matches what the summary row's
-    # own "доход" figure was computed with (msnr_optimize_symbol() now
-    # resolves the SAME value for its own msnr_compound_return() call)
-    # — leaving this at the flat default would make the expanded
-    # per-trade view silently disagree with the summary above it.
-    trail_by_key = {(row["time"], row.get("direction")): row
-                     for row in msnr_compound_trail(trades, leverage=optimal_leverage)}
-    for t in trades:
-        row = trail_by_key.get((t["time"], t.get("direction")))
-        t["compound_balance_before"] = row["balance_before"] if row else None
-        t["compound_balance_after"] = row["balance_after"] if row else None
-        t["compound_pnl_pct"] = row["pnl_pct"] if row else None
-        t["compound_leverage"] = row["leverage"] if row else None
-    trades.sort(key=lambda t: t["time"], reverse=True)
-    return jsonify(trades)
-
-
-@app.route("/api/msnr/chart/<symbol>")
-def api_msnr_chart(symbol):
-    """Draws a signal — backtest trade or live signal — using its OWN
-    already-recorded entry/sl/tp/direction/level data directly when
-    `time` matches one, rather than blindly re-deriving via a fresh
-    msnr_detect_signals() call with the symbol's CURRENT live params.
-    v0.99.10: that re-derivation was the original design (still used as
-    the fallback below, for browsing the current live Storyline with no
-    specific historical signal in mind) — but it broke for backtest
-    trades specifically, confirmed from a direct user report (chart for
-    a QQQX_USDT backtest trade said "нет подтверждённого QM-сигнала").
-    Root cause: msnr_symbol_params(symbol) fetches the CURRENT override
-    — if a newer backtest/autotune cycle has run since the clicked
-    trade was originally found (very plausible right after v0.99.9
-    expanded MSNR to 30+ symbols, meaning fresh optimize passes for
-    many of them), the winning (min_leg_atr, qm_zone_pct, qm_lookback)
-    combo can differ from whatever combo actually produced that trade —
-    different params can easily fail to re-detect the same signal
-    entirely. Since every stored trade (msnr_run_backtest()'s own
-    return shape) and every live signal record already carries its own
-    complete entry/sl/tp/direction/level/result/exit_time, there was
-    never a need to re-derive anything for an already-known signal —
-    same principle FT5's api_ft5_chart() already uses its own stored
-    trade data for, rather than re-deriving with live-mutable params."""
-    try:
-        sig_time = request.args.get("time")
-        now = time.time()
-        found_sig = None
-        found_result = None
-        found_exit_time = None
-        found_exit_price = None
-        if sig_time:
-            target = float(sig_time)
-            e_interval_sec = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
-            with state_lock:
-                live_match = next((s for s in STATE["msnr_signals"]
-                                    if s["symbol"] == symbol and abs(s["time"] - target) < e_interval_sec), None)
-                bt_trades = list(STATE["msnr_backtest_results"].get(symbol, []))
-            if live_match:
-                found_sig = {"time": live_match["time"], "direction": live_match["direction"],
-                              "entry": live_match["entry"], "sl": live_match["sl"], "tp": live_match["tp"],
-                              "level": live_match["level"], "level_type": live_match["level_type"],
-                              "opposite_level": live_match.get("opposite_level")}
-                found_result = live_match.get("result")
-                found_exit_time = live_match.get("exit_time")
-                found_exit_price = live_match.get("exit_price")
-            else:
-                bt_match = next((t for t in bt_trades if abs(t["time"] - target) < e_interval_sec), None)
-                if bt_match:
-                    found_sig = {"time": bt_match["time"], "direction": bt_match["direction"],
-                                  "entry": bt_match["entry"], "sl": bt_match["sl"], "tp": bt_match["tp"],
-                                  "level": bt_match["level"], "level_type": bt_match["level_type"],
-                                  "opposite_level": bt_match.get("opposite_level")}
-                    found_result = bt_match.get("result")
-                    found_exit_time = bt_match.get("exit_time")
-                    if found_result == "WIN":
-                        found_exit_price = bt_match["tp"]
-                    elif found_result == "LOSS":
-                        found_exit_price = bt_match["sl"]
-
-        anchor = float(sig_time) if sig_time else now
-        e_interval_sec = INTERVAL_SECONDS.get(MSNR_ENTRY_TF, 900)
-        s_interval_sec = INTERVAL_SECONDS.get(MSNR_STRUCTURE_TF, 3600)
-        h_interval_sec = INTERVAL_SECONDS.get(MSNR_HIGHER_TF, 14400)
-        # v0.99.314 — per direct user request ("может по умолчанию для
-        # msnr графиков отображать часовой таймфрейм?"): the actual QM-
-        # trigger detection/backtest logic is UNCHANGED — still MSNR_
-        # ENTRY_TF (15m) throughout, via entry_candles below. This only
-        # controls what candles get DRAWN on the chart, defaulting to
-        # 1h (less visually noisy than 15m for eyeballing a signal) —
-        # ?display_tf=15m in the URL still gets the old view if wanted.
-        display_tf = request.args.get("display_tf", "1h")
-        if display_tf not in INTERVAL_SECONDS:
-            display_tf = "1h"
-        d_interval_sec = INTERVAL_SECONDS.get(display_tf, 3600)
-        entry_end = min(now, anchor + 60 * e_interval_sec)
-        entry_start = anchor - 220 * e_interval_sec
-        display_end = min(now, anchor + 60 * d_interval_sec)
-        display_start = anchor - 220 * d_interval_sec
-        structure_start = anchor - 260 * s_interval_sec
-        structure_end = min(now, anchor + 60 * e_interval_sec)
-        higher_start = anchor - 260 * h_interval_sec  # v0.99.305 — see msnr_detect_signals()'s own docstring
-        entry_candles = get_candles_range(symbol, MSNR_ENTRY_TF, entry_start, entry_end)
-        display_candles = entry_candles if display_tf == MSNR_ENTRY_TF else get_candles_range(symbol, display_tf, display_start, display_end)
-
-        if found_sig:
-            structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, structure_end)
-            higher_candles = get_candles_range(symbol, MSNR_HIGHER_TF, higher_start, structure_end)
-            params = msnr_symbol_params(symbol)
-            _sigs, pivots = msnr_detect_signals(structure_candles, entry_candles, higher_candles, **params)
-            window_start = display_candles[0]["time"] if display_candles else structure_start
-            visible_pivots = [p for p in pivots if p["confirm_time"] >= window_start - 30 * s_interval_sec]
-            return jsonify({
-                "symbol": symbol, "candles": display_candles, "pivots": visible_pivots,
-                "signal": found_sig, "result": found_result, "exit_time": found_exit_time,
-                "exit_price": found_exit_price, "chart_source": "msnr", "tf": display_tf,
-            })
-
-        # Fallback: no stored signal/trade matched `time` (or none was
-        # given at all) — browse the CURRENT live Storyline instead,
-        # same behavior this endpoint always had for that case.
-        params = msnr_symbol_params(symbol)
-        structure_candles = get_candles_range(symbol, MSNR_STRUCTURE_TF, structure_start, structure_end)
-        higher_candles = get_candles_range(symbol, MSNR_HIGHER_TF, higher_start, structure_end)
-        sigs, pivots = msnr_detect_signals(structure_candles, entry_candles, higher_candles, **params)
-        sig = None
-        if sig_time:
-            target = float(sig_time)
-            sig = next((s for s in sigs if abs(s["time"] - target) < e_interval_sec), None)
-        elif sigs:
-            sig = sigs[-1]
-        result = None
-        exit_time = None
-        exit_price = None
-        if sig:
-            result, exit_time = msnr_track_outcome(entry_candles, sig)
-            if result == "WIN":
-                exit_price = sig["tp"]
-            elif result == "LOSS":
-                exit_price = sig["sl"]
-        # Only pivots confirmed within the returned display-candle window are
-        # worth drawing — older ones would just be off-screen level clutter.
-        window_start = display_candles[0]["time"] if display_candles else structure_start
-        visible_pivots = [p for p in pivots if p["confirm_time"] >= window_start - 30 * s_interval_sec]
-        return jsonify({
-            "symbol": symbol, "candles": display_candles, "pivots": visible_pivots,
-            "signal": sig, "result": result, "exit_time": exit_time, "exit_price": exit_price,
-            "chart_source": "msnr", "tf": display_tf,
-        })
-    except Exception as e:
-        log_error(f"api_msnr_chart {symbol}: {e}")
-        return jsonify({"error": str(e)}), 500
-
-
-@app.route("/api/reset/msnr", methods=["POST"])
-def api_reset_msnr():
-    try:
-        with state_lock:
-            STATE["msnr_backtest_results"] = {}
-            STATE["msnr_backtest_results_raw"] = {}
-            STATE["msnr_backtest_summary"] = {}
-            STATE["msnr_symbol_overrides"] = {}
-            STATE["msnr_live_universe"] = []  # v0.99.18: stale derived data, same reasoning as clearing overrides above — (v0.99.321: no gold fallback any more) msnr_live_loop() scans nothing until the next backtest cycle repopulates it
-            STATE["msnr_last_backtest_finished"] = None
-            STATE["msnr_last_backtest_duration"] = None
-            STATE["msnr_signals"].clear()
-        save_state()  # v0.99.301 — same CRITICAL FIX as api_reset_lsw()'s own — see that function's own comment for the full incident
-        # v0.99.40 — per direct user report ("жму очистить msnr и заново
-        # бэктэст не запускается, час ждать что-ли"): wakes msnr_
-        # backtest_loop() immediately instead of leaving it asleep for
-        # up to MSNR_REFRESH_SEC (1h default) — see MSNR_BACKTEST_
-        # TRIGGER's own docstring. Clearing the display without also
-        # kicking off a fresh cycle was the actual bug; this makes
-        # "Очистить MSNR" mean "clear AND re-run now", matching what the
-        # button visibly implies.
-        MSNR_BACKTEST_TRIGGER.set()
-        return jsonify({"ok": True})
-    except Exception as e:
-        log_error(f"api_reset_msnr: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
-
-
-@app.route("/api/msnr/manual_open", methods=["POST"])
-def api_msnr_manual_open():
-    """v0.99.158 — manual trade open for MSNR signals that were
-    skipped (e.g. insufficient balance) or not auto-traded. Accepts
-    symbol/direction/entry/sl/tp from the frontend confirmation dialog
-    and calls execute_autotrade() exactly as the live scanner would."""
-    try:
-        data = request.get_json(force=True) or {}
-        symbol = data.get("symbol")
-        direction = data.get("direction")
-        entry = float(data.get("entry", 0))
-        sl = float(data.get("sl", 0))
-        tp = float(data.get("tp", 0))
-        if not symbol or not direction or not entry:
-            return jsonify({"ok": False, "error": "symbol/direction/entry обязательны"}), 400
-        if not AUTOTRADE_ENABLED_MSNR:
-            return jsonify({"ok": False, "error": "автоторговля MSNR выключена"}), 400
-        result = execute_autotrade("msnr", symbol, direction, entry, sl, tp,
-                                   extra={"manual": True},
-                                   all_in_margin_pct=MSNR_ALL_IN_MARGIN_PCT if MSNR_ALL_IN_ENABLED else None)
-        ok = result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED", "DRY_RUN")
-        return jsonify({"ok": ok, "status": result.get("status"), "detail": result.get("detail", "")})
-    except Exception as e:
-        log_error(f"api_msnr_manual_open: {e}")
-        return jsonify({"ok": False, "error": str(e)}), 500
 
 
 @app.route("/api/ft5/status")
@@ -24867,7 +21475,6 @@ def api_reset_risk_autotune():
         _set_scalp_min_rr(0.5)
         _set_scalp_sl_buffer_mult(0.25)
         _set_ft5_invert(False)
-        _set_msnr_max_rr(8.0)
         with state_lock:
             STATE["risk_autotune_log"].clear()
             STATE["risk_autotune_last_change"] = {}
@@ -25574,41 +22181,6 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">Malaysian SNR / Storyline — см. предупреждение на вкладке. Автоторговля выключена по умолчанию.</div>
         </div>
         <label class="switch"><input type="checkbox" id="setMsnr"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Добор (add-on) <span style="color:var(--warn);">⚠️ реальный ордер</span></div>
-          <div class="sub">вторая доливка к уже открытой позиции при свежем QM на M30 по тому же уровню (h1/m30 SBR &gt; m1 QM + m30 добір). На Gate это сливается в одну позицию с усреднённой ценой — итоговый стоп берётся более консервативный (дальше от цены) из старого и нового</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setMsnrAddon"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Только топ-1 монета (MSNR)</div>
-          <div class="sub">торговать только ОДНУ монету — ту у которой сейчас самая большая симулированная $ прибыль (compound_return_pct), при этом винрейт ≥50%. Остальные монеты из топа автоматически выключаются из автоторговли пока включена эта галочка</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setMsnrSingleBest"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Минимальный RR (глобальный)</div>
-          <div class="sub">единый порог 1:2 для всех монет одинаково — не подбирается индивидуально под каждую (в отличие от остальных фильтров выше), поэтому результат честнее проверяет саму идею, а не удачную подгонку под конкретную монету</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setMsnrMinRrFilter"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Фильтр по тренду (4ч, глобальный)</div>
-          <div class="sub">LONG только если тренд на 4ч вверх/нейтральный, SHORT только если вниз/нейтральный — та же логика, что у Sweep, единая для всех монет</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setMsnrHtfFilter"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Фильтры по RR-диапазону и объёму</div>
-          <div class="sub">применять авто-подбираемые per-symbol фильтры skip rr≥N и skip объём&lt;N к реальному бэктесту (не только как соло-превью в колонках). Выключено по умолчанию — на большинстве монет не улучшают результат</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setMsnrPerSymbolFilters"><span class="switchSlider"></span></label>
       </div>
     </div></details>
 
@@ -26469,569 +23041,85 @@ async function openScalpDetail(symbol) {
   }
 }
 
-// ---------------- MSNR — Malaysian SNR / Storyline gold strategy (EXPERIMENTAL, v0.99.0) ----------------
-// v0.99.18: sort state for the backtest leaderboard table — lives
-// OUTSIDE refreshMsnr() for the same reason _msnrExpanded does (survives
-// the panel's full re-render on every auto-refresh tick). Switches to
-// winrate or trades(n) on header click, per direct user request:
-// "сделай сортировку по винрейту и количеству сигналов бектеста."
-// v0.99.75, per direct user request ("плавное убывание в топ 10 и
-// последующее продолжение убывание вне списка"): default changed from
-// 'score' to null ("no column override — trust the backend's own
-// order"). The backend's /api/msnr/status now already returns `top`
-// pre-sorted by msnr_symbol_rank_score() (a weighted blend of winrate,
-// raw_closed_n, and доход — the exact same score that decides top-10
-// membership), so a client-side re-sort by a DIFFERENT single field
-// (score) by default was silently undoing that continuity the moment
-// the table rendered — exactly what produced the "не плавное
-// убывание" the request describes. Clicking a column header still
-// overrides with a single-field sort as before (see the comparator
-// below) — this only changes what happens with NO click yet.
-let _msnrSortKey = null;
-let _msnrSortDir = -1;  // -1 = descending (best first), 1 = ascending
-function msnrSortBy(key) {
-  if (_msnrSortKey === key) { _msnrSortDir *= -1; } else { _msnrSortKey = key; _msnrSortDir = -1; }
-  refreshMsnr();
+// ---------------- MSNR v2 (v0.99.401) — rebuilt: one strategy variant for all coins, honest pooled test ----------------
+const _msnrOpen = new Set();
+function msnrSgn(v, d) { return v == null ? '—' : (v > 0 ? '+' : '') + (d != null ? Number(v).toFixed(d) : v); }
+function msnrPartTxt(p) {
+  if (!p || !p.n) return '<span class="dim">нет сделок</span>';
+  return `n=${p.n} · WR ${p.wr}% · <span class="${p.avg_r > 0 ? 'win' : 'loss'}">${msnrSgn(p.avg_r)}R</span>/сделку · итого ${msnrSgn(p.sum_r)}R${p.z != null ? ' · z=' + p.z : ''}`;
 }
-
-// v0.99.400 — MSNR: pooled honest verdict + live-vs-backtest check
-function msnrPooledHtml(p) {
-  if (!p) return '<div class="dim hint-block">Честная проверка MSNR появится после следующего бэктеста.</div>';
-  const sgn = v => v == null ? '—' : (v > 0 ? '+' : '') + v;
-  const verdict = p.passed ? '<b class="win">✓ MSNR подтверждён на тесте — автоторговля разрешена для отобранных монет</b>'
-    : '<b class="loss">✗ MSNR не подтвердился на тесте — автоторговля MSNR не идёт (сигналы лучших монет пишутся без торговли, для сверки)</b>';
+function msnrVerdictHtml(v, cfg) {
+  if (!v) return '<div class="dim hint-block">Первый бэктест ещё не завершён.</div>';
+  const c = v.chosen || v.best_train;
+  const head = v.passed ? '<b class="win">✓ MSNR подтверждён на тесте — торгуются отобранные монеты</b>'
+    : (v.chosen ? '<b class="loss">✗ Лучший вариант прошёл обучение, но тест его не подтвердил — MSNR не торгует</b>'
+      : '<b class="loss">✗ Ни один вариант не набрал значимость на обучении — MSNR не торгует</b>');
+  const rows = (v.variants || []).map(r => `<tr${c && r.key === c.key ? ' style="background:var(--pos-bg);"' : ''}><td style="white-space:normal;">${r.label}</td><td>${r.train.n}</td><td>${msnrSgn(r.train.avg_r)}</td><td>${r.train.z ?? '—'}</td><td>${r.test.n}</td><td>${msnrSgn(r.test.avg_r)}</td><td>${r.test.z ?? '—'}</td></tr>`).join('');
   return `<div style="background:var(--line);border:1px solid var(--line-2);border-radius:var(--r-sm);padding:8px 12px;margin:8px 0;font-size:var(--fs);">
-    ${verdict} <span class="dim">(${fmtDateTime(p.t)})</span><br>
-    Отобрано по обучению: <b>${p.picked}</b> из ${p.coins} монет (≥ ${p.min_train} сделок и плюс после комиссий на первых ${Math.round((1 - p.test_frac) * 100)}% истории).<br>
-    Их <b>тест</b> вместе: n=${p.test_n} · WR ${p.test_wr == null ? '—' : p.test_wr + '%'} · ${sgn(p.test_exp_r)}R/сделку · итого ${sgn(p.test_sum_r)}R · z=${p.test_z == null ? '—' : p.test_z} <span class="dim">(нужно n ≥ ${p.min_test} и z ≥ ${p.z_needed})</span>
-    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Параметры, плечо и выбор монет — только по обучающей части; тест ничего не подбирал. Одна позиция на монету, комиссии и проскальзывание учтены, сделка держится не дольше ${'75'} ч — дальше закрывается по рынку, как и вживую.</div>
+    ${head} <span class="dim">(${fmtDateTime(v.t)} · ${v.coins} монет)</span>
+    ${c ? `<div style="margin-top:4px;">Вариант: <b>${c.label}</b></div>
+    <div>обучение: ${msnrPartTxt(c.train)} <span class="dim">(нужно z ≥ ${v.z_needed} — поправка на ${v.n_variants} вариантов)</span></div>
+    <div><b>тест</b>: ${msnrPartTxt(c.test)} <span class="dim">(нужно n ≥ ${v.min_test}, z ≥ ${v.z_test_needed} и плюс)</span></div>` : ''}
+    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Один вариант стратегии на все монеты выбирается по первым ${Math.round(v.train_frac * 100)}% истории всех монет вместе и проверяется на последних ${Math.round((1 - v.train_frac) * 100)}% (на них ничего не подбиралось). Бэктест = живая торговля: одна позиция на монету, вход по закрытию свечи, комиссии и проскальзывание, сделка держится не дольше ${v.hold_hours} ч, потом закрывается по рынку. R — после издержек (стоп = −1R).</div>
+    ${rows ? `<details style="margin-top:4px;"><summary class="dim" style="cursor:pointer;">все варианты (лучшие по обучению)</summary><div style="overflow-x:auto;"><table style="font-size:var(--fs-xs);"><thead><tr><th>вариант</th><th>обуч. n</th><th>R</th><th>z</th><th>тест n</th><th>R</th><th>z</th></tr></thead><tbody>${rows}</tbody></table></div></details>` : ''}
   </div>`;
 }
 function msnrReconcileHtml(r) {
   if (!r || !r.live_signals) return '';
-  const sgn = v => v == null ? '—' : (v > 0 ? '+' : '') + v;
   const same = r.matched_closed ? Math.round(100 * r.same_outcome / r.matched_closed) : null;
   return `<div style="background:var(--inset);border:1px solid var(--line);border-radius:var(--r-sm);padding:8px 12px;margin:8px 0;font-size:var(--fs-sm);">
     <b>Сверка: живые сигналы vs бэктест</b> <span class="dim">(последние ${r.days} дн., сигналов ${r.live_signals})</span><br>
-    Совпали с бэктестом: <b>${r.matched}</b>${r.matched_closed ? ` · закрытых ${r.matched_closed}, тот же исход у ${same}% · R вживую ${sgn(r.live_r_sum)} vs бэктест ${sgn(r.bt_r_sum)}` : ''}<br>
-    Только вживую: ${r.live_only}${r.live_only_closed ? ` (закрытых ${r.live_only_closed}, ${sgn(r.live_only_r_sum)}R)` : ''} · только в бэктесте: ${r.bt_only}${r.bt_only_r_sum != null ? ` (${sgn(r.bt_only_r_sum)}R)` : ''}
-    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Если R вживую на тех же сделках близок к бэктесту и расхождений немного — бэктесту можно верить. Часть расхождений нормальна: параметры монеты пересчитываются каждый час.</div>
+    Совпали с бэктестом: <b>${r.matched}</b>${r.matched_closed ? ` · закрытых ${r.matched_closed}, тот же исход у ${same}% · R вживую ${msnrSgn(r.live_r_sum)} vs бэктест ${msnrSgn(r.bt_r_sum)}` : ''}<br>
+    Только вживую: ${r.live_only}${r.live_only_closed ? ` (закрытых ${r.live_only_closed}, ${msnrSgn(r.live_only_r_sum)}R)` : ''} · только в бэктесте: ${r.bt_only}${r.bt_only_r_sum != null ? ` (${msnrSgn(r.bt_only_r_sum)}R)` : ''}
+    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Если на одних и тех же сделках R вживую близок к бэктесту и расхождений мало — бэктесту можно верить.</div>
   </div>`;
 }
 async function refreshMsnr() {
-  const status = await (await fetch('/api/msnr/status')).json();
-  const signals = await (await fetch('/api/msnr/signals')).json();
   const panel = document.getElementById('msnrPanel');
-  const cfg = status.config || {};
-  const ss = status.signals_stats || {};
-  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `<span class="${ss.winrate >= 50 ? 'win' : 'loss'}">${ss.winrate}%</span>` : '<span class="dim">-</span>';
-  const buildTxt = status.backtest_running
-    ? `бэктест выполняется: ${status.backtest_done||0}/${status.backtest_total||'?'} монет${status.backtest_started_at ? ' · идёт ' + Math.round((Date.now()/1000 - status.backtest_started_at)) + 'с' : ''}${coresTxt(status.calc)}`
-    : (status.last_backtest_finished
-      ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) \u00b7 история ${fmtMonths(cfg.backtest_days)}` +
-        // v0.99.319 — what the live scanner actually watches
-        (status.effective_live_universe ? ` · живой скан: ${status.effective_live_universe.length} монет (${status.effective_live_universe.map(x => x.replace('_USDT','')).join(', ') || '—'}) · WR≥45%: ${status.wr_floor_pass_n}/${status.backtested_n}` : '')
-      : 'бэктест ещё не запускался');
-  // v0.99.58, per direct user report ("ночью несколько часов прошло а
-  // ребэктеста не было давно" — the exact scenario this session's own
-  // earlier watchdog discussion predicted, at the time left unfixed
-  // per direct user choice): a prominent warning when the last
-  // completed cycle is much older than a normal gap between cycles
-  // should ever be. Threshold is 2.5x MSNR_REFRESH_SEC (via cfg.
-  // refresh_sec) with a 1h floor — generous enough that one genuinely
-  // slow cycle (this app's own backtest universe grew substantially in
-  // v0.99.48, dropping the old 70-symbol cap) doesn't false-positive,
-  // but still catches a multi-hour stall like the one reported. This
-  // is detection, not a fix — the app can't restart its own OS process
-  // from inside itself, and the most likely real cause (Android
-  // suspending/killing the background Termux process during idle
-  // screen-off time) isn't something code here can prevent; this at
-  // least makes the person SEE it happened instead of discovering it
-  // by chance days later.
-  const staleSec = (!status.backtest_running && status.last_backtest_finished)
-    ? (Date.now()/1000 - status.last_backtest_finished) : null;
-  const staleThresholdSec = Math.max(3600, (cfg.refresh_sec || 3600) * 2.5);
-  // v0.99.359 — queued behind other backtests is not a hang: say so plainly
-  const queuedInfoHtml = (staleSec !== null && staleSec > staleThresholdSec && status.waiting_for_slot) ? `
-    <div style="background:var(--line);border:1px solid var(--line-2);border-radius:var(--r-sm);padding:8px 12px;margin-bottom:10px;">
-      <b style="color:var(--money);">\u23f3 Бэктест MSNR в очереди — последний был ${Math.round(staleSec/3600*10)/10} ч назад</b><br>
-      <span style="font-size:var(--fs-sm);color:var(--tx-2);">Это не зависание: одновременно идут не больше 2 бэктестов, MSNR ждёт свободного места. Neuro уступает место между монетами, так что очередь скоро дойдёт.</span>
-    </div>` : '';
-  const staleWarnHtml = queuedInfoHtml || ((staleSec !== null && staleSec > staleThresholdSec) ? `
-    <div style="background:var(--neg-bg);border:1px solid var(--neg);border-radius:var(--r-sm);padding:8px 12px;margin-bottom:10px;">
-      <b style="color:var(--neg);">\u26a0\ufe0f \u041f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0439 \u0431\u044d\u043a\u0442\u0435\u0441\u0442 \u0431\u044b\u043b ${Math.round(staleSec/3600*10)/10} \u0447 \u043d\u0430\u0437\u0430\u0434</b><br>
-      <span style="font-size:var(--fs-sm);color:var(--neg);">\u0426\u0438\u043a\u043b \u043c\u043e\u0433 \u0437\u0430\u0432\u0438\u0441\u043d\u0443\u0442\u044c \u0438\u043b\u0438 \u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u0435 \u0431\u044b\u043b\u043e \u043f\u0440\u0438\u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u043e (\u043d\u0430\u043f\u0440\u0438\u043c\u0435\u0440, Android \u043c\u043e\u0433 \u0443\u0431\u0438\u0442\u044c \u0444\u043e\u043d\u043e\u0432\u044b\u0439 Termux \u043f\u0440\u0438 \u043f\u0440\u043e\u0441\u0442\u043e\u0435 \u0441 \u0432\u044b\u043a\u043b\u044e\u0447\u0435\u043d\u043d\u044b\u043c \u044d\u043a\u0440\u0430\u043d\u043e\u043c). \u041f\u0440\u043e\u0432\u0435\u0440\u044c\u0442\u0435, \u0447\u0442\u043e \u043f\u0440\u0438\u043b\u043e\u0436\u0435\u043d\u0438\u0435 \u0436\u0438\u0432\u043e, \u0438\u043b\u0438 \u043e\u0442\u043a\u0440\u043e\u0439\u0442\u0435 \u0437\u0430\u043d\u043e\u0432\u043e.</span>
-    </div>` : '');
-  const progressPct = status.backtest_total ? Math.round((status.backtest_done||0) / status.backtest_total * 100) : 0;
-  const progressBarHtml = status.backtest_running ? `
-    <div style="margin:6px 0 8px;">
-      <div style="background:var(--line);border-radius:var(--r-xs);height:8px;overflow:hidden;">
-        <div style="background:var(--pos);height:100%;width:${progressPct}%;transition:width 0.4s;"></div>
-      </div>
-      <div class="dim" style="font-size:var(--fs-sm);margin-top:3px;">
-        ${progressPct}% · сейчас: ${(status.backtest_in_flight||[]).slice(0,6).join(', ') || '—'}${(status.backtest_in_flight||[]).length > 6 ? ` +${status.backtest_in_flight.length-6}` : ''}
-      </div>
-    </div>` : '';
-  // v0.99.58, per direct user request ("актуализировать описание,
-  // сделать его коротким содержательным и более тезисным"): replaced
-  // the old two-paragraph prose block (methodology + full config
-  // dump in running sentences) with a short bulleted list — same
-  // facts, none of the connective-tissue wording. Also fixed a stale
-  // framing bug while rewriting: "топ-N ликвидных монет" implied a
-  // liquidity-rank CUTOFF still exists, but v0.99.48 removed that cap
-  // — every symbol clearing MIN_VOL_USD gets backtested now, not just
-  // the top N by volume, so this now says "N ликвидных монет" without
-  // the misleading "топ-" prefix. The live-scan symbol list is
-  // truncated to the first 8 with a "+N ещё" tail (same pattern the
-  // progress bar's own in-flight list already used above) since it
-  // can grow arbitrarily long as more symbols qualify.
-  const liveSymbols = status.live_universe || [];
-  const liveSymbolsTxt = liveSymbols.slice(0, 8).join(', ') + (liveSymbols.length > 8 ? ` +${liveSymbols.length - 8}` : '');
-  const warnHtml = `
-    <div class="dim hint-block" style="font-size:var(--fs);margin-bottom:10px;">
-      <b>MSNR / Malaysian SNR</b> (@xaubymedovyk): OCL-уровни по закрытиям, A/V-shape пивоты, вход — QM (ложный вынос + возврат), сигнал 1ч только при активном уровне того же типа на 4ч, тейк — противоположный активный уровень 4ч (высокий R:R от природы паттерна). Бэктест честный, без заглядывания вперёд.
-    </div>`;
-  const headerHtml = `
-    <div class="dim hint-block" style="margin-bottom:4px;font-size:var(--fs);">
-      <ul style="margin:0 0 6px 18px;padding:0;">
-        <li>Живой скан: квалифицированные монеты (${liveSymbolsTxt || '—'}) — только монеты, отобранные бэктестом, никаких фиксированных списков</li>
-        <li>Квалификация в живой скан: топ-10 по совместной оценке (винрейт, выборка, доход) среди монет с винрейтом ≥45% и без провала стресс-теста, или ручная галочка</li>
-        <li>Бэктест: ${status.backtest_universe_size || '?'} ликвидных монет · структура ${cfg.structure_tf} (L${cfg.pivot_left}/R${cfg.pivot_right}) · вход ${cfg.entry_tf}</li>
-        <li>Параметры (импульс/QM-зона/окно) автотюнятся отдельно на каждую монету — нажмите на монету в таблице, чтобы увидеть их</li>
-        <li>TP всегда реальный уровень пары (без потолка RR) — двусторонний фильтр по RR (снизу и сверху) на каждую монету отдельно, по её собственной статистике</li>
-        <li>Автоторговля (если включена в настройках) — по всем монетам живого скана</li>
-      </ul>
-      <div class="dim hint-block" style="font-size:var(--fs-sm);margin:0 0 6px 0;">Топ-10 и таблица ниже отсортированы одной и той же оценкой — произведением нормализованных винрейта/выборки(до фильтров)/дохода с равными весами: слабость по любому из трёх параметров обнуляет итог, сильные стороны не компенсируют — без разрыва между топ-10 и остальными.</div>
-    </div>
-    <div class="dim" style="margin-bottom:8px;font-size:var(--fs);">
-      ${staleWarnHtml}
-      ${buildTxt}<br>
-      ${progressBarHtml}
-      ${provisionalHtml(status.provisional, status.backtest_running, 'msnr')}
-      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L, timeout ${ss.timeouts||0}) · всего: ${ss.total||0}<span class="hint-block"> · клик по строке — график</span>
-    </div>`;
-  const rrBuckets = status.rr_buckets || [];
-  const rrBucketRows = rrBuckets.map(b => {
-    const wrClass = b.winrate === null ? 'dim' : (b.winrate >= 50 ? 'win' : 'loss');
-    return `<tr>
-      <td>${b.range}</td>
-      <td class="${wrClass}">${b.winrate !== null ? b.winrate + '%' : '-'}</td>
-      <td class="dim">n=${b.n}</td>
-      <td class="win">${b.wins}W</td>
-      <td class="loss">${b.losses}L</td>
-    </tr>`;
-  }).join('');
-  const rrBucketsHtml = rrBuckets.some(b => b.n > 0) ? `
-    <div class="dim hint-block" style="margin:8px 0 6px;"><b>Винрейт по диапазонам RR</b> (все монеты вместе, по факту закрытых сделок) — здесь видно, если один диапазон RR систематически проваливается, даже если пул усреднённых цифр этого не показывает:</div>
-    <div style="overflow-x:auto;margin-bottom:14px;">
-    <table style="font-size:var(--fs-sm);white-space:nowrap;">
-      <thead><tr><th>RR</th><th>Win-rate</th><th>n</th><th>W</th><th>L</th></tr></thead>
-      <tbody>${rrBucketRows}</tbody>
-    </table>
-    </div>` : '';
-  const signalsRows = signals
-    .filter(s => s.autotrade_fired || s.trade_intended || s.status !== 'OPEN')  // v0.99.333: strategy-picked trades stay visible even if the account didn't open them  // v0.99.158: hide OPEN signals without autotrade — they're tracking-only, not real positions
-    .map((s, idx) => {
-    const dirClass = s.direction === 'LONG' ? 'long' : 'short';
-    let statusHtml;
-    if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
-    else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
-    else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
-    else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
-    const levelTxt = s.level_type === 'A' ? 'A-shape' : 'V-shape';
-    // v0.99.158: show leverage even when autotrade_fired=false (SKIPPED/ERROR),
-    // so the user can see what leverage would have been used.
-    // Manual open button for SKIPPED/ERROR signals (e.g. insufficient balance at the time)
-    // v0.99.333 — why the account didn't open a strategy-picked trade
-    const notOpenedTxt = (!s.autotrade_fired && s.autotrade_status && s.autotrade_status !== 'OPENED')
-      ? ` <span class="dim" style="font-size:var(--fs-xs);" title="${String(s.autotrade_detail || '').replace(/"/g, '&quot;')}">(${s.autotrade_status === 'DRY_RUN' ? 'dry-run' : (s.autotrade_status === 'SKIPPED' ? 'не открыта' : 'ошибка')}${s.autotrade_detail ? ': ' + String(s.autotrade_detail).slice(0, 40).replace(/</g, '&lt;') + (String(s.autotrade_detail).length > 40 ? '…' : '') : ''})</span>`
-      : '';
-    const sizeTxt = s.autotrade_fired
-      ? `<span title="\u043f\u043b\u0435\u0447\u043e \u043d\u0430 \u043c\u043e\u043c\u0435\u043d\u0442 \u0441\u0440\u0430\u0431\u0430\u0442\u044b\u0432\u0430\u043d\u0438\u044f \u044d\u0442\u043e\u0433\u043e \u0441\u0438\u0433\u043d\u0430\u043b\u0430 \u2014 \u043c\u043e\u0433\u043b\u043e \u043e\u0442\u043b\u0438\u0447\u0430\u0442\u044c\u0441\u044f \u043e\u0442 \u0442\u0435\u043a\u0443\u0449\u0435\u0439 Kelly-\u0440\u0435\u043a\u043e\u043c\u0435\u043d\u0434\u0430\u0446\u0438\u0438 \u0432 \u0442\u0430\u0431\u043b\u0438\u0446\u0435 \u043d\u0438\u0436\u0435 \u2014 \u043e\u043d\u0430 \u043e\u0431\u043d\u043e\u0432\u043b\u044f\u0435\u0442\u0441\u044f \u043a\u0430\u0436\u0434\u044b\u0439 \u0446\u0438\u043a\u043b, \u0438\u043b\u0438 \u0435\u0451 \u0441\u043f\u0435\u0446\u0438\u0430\u043b\u044c\u043d\u043e \u0434\u043e\u0436\u0430\u043b\u0438 \u0432\u043d\u0438\u0437 \u0438\u0437-\u0437\u0430 \u0448\u0438\u0440\u0438\u043d\u044b \u0441\u0442\u043e\u043f\u0430 \u044d\u0442\u043e\u0439 \u0441\u0434\u0435\u043b\u043a\u0438">${s.live_size_usd != null ? '$' + s.live_size_usd : ''}${s.leverage_used ? (s.live_size_usd != null ? ' @ ' : '') + s.leverage_used + 'x' : ''}${s.live_size_usd == null && !s.leverage_used ? '\u2014' : ''}</span>`
-      : (s.autotrade_skip_reason
-          ? `<span class="dim" title="\u043f\u043e\u0447\u0435\u043c\u0443 \u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u043d\u0435 \u0441\u0440\u0430\u0431\u043e\u0442\u0430\u043b\u0430 \u043d\u0430 \u044d\u0442\u043e\u043c \u0441\u0438\u0433\u043d\u0430\u043b\u0435: ${s.autotrade_skip_reason}">\u26a0\ufe0f \u043d\u0435 \u043e\u0442\u043a\u0440\u044b\u0442\u043e</span>`
-          : (s.leverage_used ? `<span class="dim">${s.leverage_used}x</span>` : '<span class="dim">\u2014</span>'));
-    // Manual open button — shown for closed/skipped signals where autotrade_fired=false
-    // and autotrade is globally enabled for MSNR
-    const canManualOpen = !s.autotrade_fired && s.status === 'OPEN' && cfg.autotrade_enabled;
-    const manualBtn = canManualOpen
-      ? `<button onclick="event.stopPropagation();msnrManualOpen('${s.symbol}',${s.time},'${s.direction}',${s.entry},${s.sl},${s.tp})" style="font-size:var(--fs-xs);padding:2px 6px;background:var(--pos-bg);border:1px solid var(--pos);color:var(--pos);border-radius:var(--r-xs);cursor:pointer;margin-left:4px;" title="Открыть сделку вручную (с подтверждением)">▶ открыть</button>`
-      : '';
-    void statusHtml; void dirClass;   // v0.99.387 — compact list row
-    return sigItemHtml(s, {onclick: `openMsnrChart('${s.symbol}', ${s.time})`,
-      extra: [levelTxt, sizeTxt, (s.exit_price && s.status !== 'OPEN') ? `выход ${fmt(s.exit_price)}${s.exit_time ? ' в ' + fmtTime(s.exit_time) : ''}` : '',
-              (notOpenedTxt + manualBtn) || '']});
-  });
-  const signalsTableHtml = signalsRows.length ? sigListHtml(signalsRows)
-    : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
-  const btRows = [...(status.top || [])].sort((a, b) => {
-    // v0.99.19: autotrade-eligible rows (the ones with a checkbox) are
-    // grouped to the TOP of the table first, regardless of the active
-    // sort key — per direct user report that checked/eligible coins
-    // were scattered throughout the list, easy to lose track of among
-    // dozens of backtest-only rows. Within each group (eligible /
-    // not-eligible), the normal sort key still applies.
-    if (a.autotrade_eligible !== b.autotrade_eligible) return a.autotrade_eligible ? -1 : 1;
-    // v0.99.27, per direct user request ("просто не попадает в топ"):
-    // stress_test_failed rows (a losing $ compound simulation, see
-    // msnr_optimize_symbol()'s own docstring) sink BELOW every row
-    // that passed, regardless of the active sort key — same reasoning
-    // as the eligible/not-eligible split above, one tier lower. Can't
-    // collide with the eligible check: msnr_rank_by_winrate_sample()
-    // already excludes stress_test_failed symbols from eligibility
-    // entirely, so this only ever matters within the non-eligible
-    // group, which is exactly where it needs to matter.
-    if (!!a.stress_test_failed !== !!b.stress_test_failed) return a.stress_test_failed ? 1 : -1;
-    // v0.99.75 — null means "no column clicked yet, trust the backend's
-    // own already-sorted order" (see _msnrSortKey's own comment above).
-    // Returning 0 here preserves the array's existing order rather than
-    // comparing a field that isn't being overridden to anything.
-    if (_msnrSortKey === null) return 0;
-    const av = a[_msnrSortKey], bv = b[_msnrSortKey];
-    if (av === null || av === undefined) return 1;
-    if (bv === null || bv === undefined) return -1;
-    return av < bv ? -_msnrSortDir : (av > bv ? _msnrSortDir : 0);
-  }).map((r, idx, arr) => {
-    const wrClass = (r.winrate === null || r.winrate === undefined) ? 'dim' : (r.winrate >= 50 ? 'win' : 'loss');
-    const expClass = (r.expectancy_r === null || r.expectancy_r === undefined) ? 'dim' : (r.expectancy_r > 0 ? 'win' : 'loss');
-    // v0.99.392 — out-of-sample line: the held-out last part of the window, params were chosen without it
-    const oosTxt = (r.oos_n === undefined) ? '<br><span class="dim" title="посчитано старой версией — до следующего бэктеста">тест: —</span>'
-      : (!r.oos_n ? '<br><span class="dim">тест: нет сделок</span>'
-      : `<br><span class="${(r.oos_expectancy_r || 0) > 0 ? 'win' : 'loss'}" title="последние ${Math.round((cfg.oos_test_frac || 0.3) * 100)}% истории: параметры подбирались без них, с комиссиями и проскальзыванием">тест: ${r.oos_expectancy_r > 0 ? '+' : ''}${r.oos_expectancy_r}R · WR ${r.oos_winrate}% · n=${r.oos_n}</span>`);
-    // v0.99.86 — skip_rr_max (the new floor side) shown alongside the
-    // existing ceiling; both share rr_filtered_count since a single
-    // combined pass removes trades on either side (see msnr_optimize_
-    // symbol()'s own rr_range filtering step).
-    const skipTxt = (r.skip_rr_min !== null && r.skip_rr_min !== undefined) ? ` \u00b7 <span class="loss">skip rr\u2265${r.skip_rr_min}${r.rr_filtered_count ? ` (${r.rr_filtered_count})` : ''}</span>` : '';
-    const skipRrMaxTxt = (r.skip_rr_max !== null && r.skip_rr_max !== undefined) ? ` \u00b7 <span class="loss">skip rr<${r.skip_rr_max}</span>` : '';
-    const skipSlTxt = (r.skip_sl_pct_min !== null && r.skip_sl_pct_min !== undefined) ? ` \u00b7 <span class="loss">skip SL\u2265${r.skip_sl_pct_min}%${r.sl_filtered_count ? ` (${r.sl_filtered_count})` : ''}</span>` : '';
-    // v0.99.86, per direct user request ("хочу видеть... винрейт и
-    // доход до и после [фильтров], чтобы понимать эффективность
-    // фильтров"): a compact before->after summary built from best_
-    // results' own filter_checkpoints chain — the "raw" (pre-filter)
-    // checkpoint vs the FINAL checkpoint (after every filter that
-    // actually ran), since a per-stage breakdown for every row would
-    // be too dense for this already-packed cell; the full chain is
-    // still available in r.filter_checkpoints for anyone who wants the
-    // per-stage detail (e.g. via the browser console) even though this
-    // summary line doesn't render every stage individually.
-    let filterImpactTxt = '';
-    if (r.filter_checkpoints && r.filter_checkpoints.length > 1) {
-      const before = r.filter_checkpoints[0];
-      const after = r.filter_checkpoints[r.filter_checkpoints.length - 1];
-      const fmtWr = v => (v === null || v === undefined) ? '?' : `${v}%`;
-      const fmtInc = v => (v === null || v === undefined) ? '?' : `${v > 0 ? '+' : ''}${v}%`;
-      filterImpactTxt = ` \u00b7 <span class="dim" title="винрейт/доход до всех фильтров \u2192 после">фильтры: ${before.n}\u2192${after.n} \u00b7 WR ${fmtWr(before.winrate)}\u2192${fmtWr(after.winrate)} \u00b7 доход ${fmtInc(before.income_pct)}\u2192${fmtInc(after.income_pct)}</span>`;
-    }
-    // v0.99.56, per direct user request ("какой фильтр сигналов был
-    // бы самым эффективным"): shows the specific bad UTC hours (if
-    // any) this symbol's own history flagged — same loss-red styling
-    // as the other skip indicators, kept short (just the hour list,
-    // no "UTC" repeated per-hour) since a symbol can have several.
-    // v0.99.57: each skip indicator above now also shows the COUNT of
-    // trades it actually excluded, in parens — per direct user request
-    // ("просто писать сколько сделок отмечено по такой-то причине")
-    // after noticing the sample-size gate itself was being unfairly
-    // shrunk by these same filters (see msnr_optimize_symbol()'s own
-    // docstring) — the gate is fixed at raw_closed_n now, this is
-    // purely the informational breakdown of why the DISPLAYED n is
-    // smaller than that.
-    const skipHoursTxt = (r.skip_hours && r.skip_hours.length)
-      ? ` \u00b7 <span class="loss">skip \u0447\u0430\u0441\u044b(UTC) ${r.skip_hours.join(',')}${r.hours_filtered_count ? ` (${r.hours_filtered_count})` : ''}</span>`
-      : '';
-    // v0.99.59, per direct user request ("второй фильтр" — volume
-    // confirmation on the sweep): shows the volume-ratio FLOOR (below
-    // which this symbol's history says a sweep is unreliable), same
-    // count-in-parens pattern as the other skip indicators.
-    const skipVolumeTxt = (r.skip_volume_below !== null && r.skip_volume_below !== undefined)
-      ? ` \u00b7 <span class="loss">skip \u043e\u0431\u044a\u0451\u043c<${r.skip_volume_below}${r.volume_filtered_count ? ` (${r.volume_filtered_count})` : ''}</span>`
-      : '';
-    const liqTxt = r.liquidation_filtered_count ? ` \u00b7 <span class="loss">${r.liquidation_filtered_count} \u0437\u0430 \u043b\u0438\u043a\u0432\u0438\u0434\u0430\u0446\u0438\u0435\u0439</span>` : '';
-    // v0.99.47, per direct user follow-up to v0.99.46 ("чёт лучше не
-    // стало, будто даже хуже" -> Kelly/optimal-f search): leverage is
-    // back to ONE flat value per symbol — msnr_optimal_leverage_for_
-    // symbol()'s own choice, maximizing long-run compounded growth
-    // against this symbol's own trade history, not a stop-width-
-    // derived value. Shown plainly, with a "Kelly-оптимум" note only
-    // when it's ABOVE the configured default (meaning the symbol's own
-    // history justified more than the default, not just hitting the
-    // floor). The exchange-cap note is now separate from the leverage
-    // value itself — msnr_optimal_leverage_for_symbol() already search-
-    // bounds against leverage_ceiling internally, so a low exchange cap
-    // shows up as optLev sitting at or near it, but the raw ceiling is
-    // still useful context on its own (this symbol simply can't ever
-    // exceed it, regardless of what the optimizer would otherwise pick).
-    const defLev = cfg.compound_leverage;
-    const optLev = r.optimal_leverage;
-    const ceilLev = r.leverage_ceiling;
-    let levTxt = '';
-    if (optLev !== null && optLev !== undefined) {
-      levTxt = ` \u00b7 <span class="dim">\u043f\u043b\u0435\u0447\u043e ${optLev}x${optLev > defLev ? ' (Kelly-\u043e\u043f\u0442\u0438\u043c\u0443\u043c)' : ''}</span>`;
-    }
-    if (ceilLev !== null && ceilLev !== undefined && ceilLev < defLev) {
-      levTxt += ` \u00b7 <span class="dim">\u043b\u0438\u043c\u0438\u0442 \u0431\u0438\u0440\u0436\u0438 ${ceilLev}x</span>`;
-    }
-    const compClass = (r.compound_return_pct === null || r.compound_return_pct === undefined) ? 'dim' : (r.compound_return_pct > 0 ? 'win' : 'loss');
-    const compBlownTxt = r.compound_blown_at ? ` (\u0441\u043b\u0438\u0432 \u043d\u0430 #${r.compound_blown_at})` : '';
-    const compTxt = (r.compound_return_pct !== null && r.compound_return_pct !== undefined)
-      ? ` \u00b7 <span class="${compClass}">\u0434\u043e\u0445\u043e\u0434 ${r.compound_return_pct > 0 ? '+' : ''}${r.compound_return_pct}% ($${cfg.compound_start_balance}\u2192$${Math.trunc(r.compound_final_balance)})${compBlownTxt}</span>`
-      : '';
-    const paramsTxt = `${r.min_leg_atr}\u00d7ATR / ${(r.qm_zone_pct*100).toFixed(2)}% / ${r.qm_lookback_bars}\u0431${skipTxt}${skipRrMaxTxt}${skipSlTxt}${skipHoursTxt}${skipVolumeTxt}${liqTxt}${levTxt}${compTxt}${filterImpactTxt}`;
-    const noteTxt = r.note ? ` \u26a0\ufe0f ${r.note}` : '';
-    // v0.99.49, per direct user request ("хочу иметь возможность
-    // автоторговли и не по топ-10, на свой страх и риск как
-    // эксперимент"): checkbox now renders for every manual_toggle_
-    // allowed row, not just the auto-ranked top-10 (autotrade_
-    // eligible) — a manually-checked row outside the top-10 gets a
-    // distinct orange outline + warning title so it's visually clear
-    // this one isn't auto-ranked, it's a deliberate manual pick.
-    // stress_test_failed rows still get no checkbox at all (excluded
-    // from manual_toggle_allowed too — see that function's own
-    // docstring for why that particular gate isn't bypassable here).
-    // v0.99.108, per direct user request ("Ручное управление можно
-    // убрать"): now purely a read-only indicator, not a clickable
-    // control — autotrade state for the top-N pool is fully automatic
-    // (msnr_backtest_loop() auto-toggles based on top-N membership +
-    // win_rate > 50, see that loop's own comment). The old "manual,
-    // outside top-10, на свой страх и риск" feature is gone entirely
-    // along with the click handler — a symbol either currently
-    // qualifies (shown checked/green) or it doesn't (shown unchecked/
-    // dim), nothing left to click.
-    const autotradeCell = r.autotrade_eligible
-      ? `<span class="${r.autotrade_on ? 'win' : 'dim'}" style="font-size:var(--fs-md);" title="${r.autotrade_on ? 'авто-включено: в топе и WR>50%' : 'в топе, но WR не выше 50% — авто-выключено'}">${r.autotrade_on ? '\u2713' : '\u2014'}</span>`
-      : '<span class="dim" style="font-size:var(--fs-xs);">\u2014</span>';
-    // v0.99.19: a visible separator row exactly at the eligible/rest
-    // boundary — the sort above already groups eligible rows first,
-    // this makes that grouping obvious at a glance instead of relying
-    // on the reader to notice checkboxes stop appearing partway down.
-    // v0.99.49: wording updated — autotrade is no longer unavailable
-    // past this line, just not auto-ranked; a checkbox still renders
-    // for any manual_toggle_allowed row below it.
-    const separatorHtml = (idx > 0 && arr[idx - 1].autotrade_eligible && !r.autotrade_eligible)
-      ? `<tr><td colspan="14" class="dim" style="font-size:var(--fs-xs);padding:4px 0;border-top:1px solid var(--line);">\u2014 \u043e\u0441\u0442\u0430\u043b\u044c\u043d\u044b\u0435 (\u0432\u043d\u0435 \u0442\u043e\u043f-10, \u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u044f \u0432\u0440\u0443\u0447\u043d\u0443\u044e \u2014 \u043d\u0430 \u0441\u0432\u043e\u0439 \u0440\u0438\u0441\u043a) \u2014</td></tr>`
-      : '';
-    // v0.99.27, per direct user request: same idea, one tier lower —
-    // a visible separator exactly where stress_test_failed rows begin
-    // (they're already sunk to the bottom by the sort above), so it's
-    // obvious at a glance that everything past this line failed its
-    // own $ compounding simulation and is excluded from ranking/
-    // autotrade entirely, not just scored lower.
-    const stressSeparatorHtml = (idx > 0 && !arr[idx - 1].stress_test_failed && r.stress_test_failed)
-      ? `<tr><td colspan="14" class="loss" style="font-size:var(--fs-xs);padding:4px 0;border-top:1px solid var(--line);">\u2014 провалили $-симуляцию депозита (доход \u2264 0%), исключены из топа/автоторговли \u2014</td></tr>`
-      : '';
-    // v0.99.141 — solo-checkpoint columns for the 2 new GLOBAL filters
-    // (see MSNR_MIN_RR_FILTER_ENABLED's own comment), reading them by
-    // "stage" name out of the SAME filter_checkpoints chain the compact
-    // filterImpactTxt summary above already draws from — matching
-    // Sweep's own fmtCheckpoint style (isolated solo result + delta vs
-    // the "raw" pre-filter checkpoint, not vs the final chained result).
-    const fcList = r.filter_checkpoints || [];
-    const rawCp = fcList.find(c => c.stage === 'raw');
-    const fmtMsnrSolo = (stage, label) => {
-      const cp = fcList.find(c => c.stage === stage);
-      if (!cp || !cp.n) return '<span class="dim">нет данных</span>';
-      let deltaTxt = '';
-      if (rawCp && rawCp.winrate !== null && rawCp.winrate !== undefined && cp.winrate !== null && cp.winrate !== undefined) {
-        const delta = Math.round((cp.winrate - rawCp.winrate) * 10) / 10;
-        const deltaCls = delta > 0 ? 'win' : (delta < 0 ? 'loss' : 'dim');
-        deltaTxt = ` <span class="${deltaCls}">(${delta > 0 ? '+' : ''}${delta}%)</span>`;
-      }
-      const nTxt = (rawCp && rawCp.n && rawCp.n !== cp.n) ? `${rawCp.n}→${cp.n}` : `${cp.n}`;
-      return `<span class="dim" title="если бы применили ТОЛЬКО этот фильтр к сырым сигналам">${cp.winrate}% (n=${nTxt})${deltaTxt}</span>`;
-    };
-    const rrSoloTxt = fmtMsnrSolo('rr_range', 'RR-диапазон');
-    const volSoloTxt = fmtMsnrSolo('volume', 'Объём');
-    const liqSoloTxt = fmtMsnrSolo('liquidation', 'Ликвидация');
-    const liqRejTxt = (() => {
-      const cp = fcList.find(c => c.stage === 'liq_rejected');
-      if (!cp || !cp.n) return '<span class="dim">нет</span>';
-      const wrCls = cp.winrate !== null && cp.winrate >= 50 ? 'win' : 'loss';
-      return `<span class="${wrCls}" title="WR/n сделок отсеянных фильтром ликвидации — если высокий, возможно стоит торговать их с адаптивным плечом">${cp.winrate}% (n=${cp.n})</span>`;
-    })();
-    const htfSoloTxt = fmtMsnrSolo('htf_trend', 'Тренд 4ч');
-    // v0.99.329 — best Neuro filter's effect on THIS coin (test part only)
-    const nfTxt = (() => {
-      const nf = status.neuro_filters && status.neuro_filters.top && status.neuro_filters.top[0] && status.neuro_filters.top[0].all_coins_ok ? status.neuro_filters.top[0] : null;   // v0.99.380
-      const pc = nf && nf.per_coin && nf.per_coin[r.symbol];
-      if (!pc) return '<span class="dim">—</span>';
-      if (!pc.n_b) return '<span class="dim">нет тест-сделок</span>';
-      if (pc.n_a === pc.n_b) return `<span class="dim" title="фильтр не убрал ни одной сделки этой монеты">без изменений (n=${pc.n_b})</span>`;
-      if (!pc.n_a) return `<span class="loss">убрал все ${pc.n_b}</span>`;
-      const d = Math.round((pc.wr_a - pc.wr_b) * 10) / 10;
-      const dCls = d > 0 ? 'win' : (d < 0 ? 'loss' : 'dim');
-      return `<span class="dim" title="тест-часть: до → после фильтра «${nf.label}»">${pc.wr_b}%→${pc.wr_a}% (n=${pc.n_b}→${pc.n_a})</span> <span class="${dCls}">(${d > 0 ? '+' : ''}${d}%)</span>`;
-    })();
-    return separatorHtml + stressSeparatorHtml + `<tr onclick="toggleMsnrBacktestTrades('${r.symbol}')" style="cursor:pointer;">
-      <td>${_msnrExpanded.has(r.symbol) ? '\u25be' : '\u25b8'} ${r.symbol}${r.live ? ' <span style="color:var(--pos);" title="торгуется вживую">\u25cf</span>' : ' <span class="dim" title="только бэктест, не торгуется">\u25cb</span>'}</td>
-      <td onclick="event.stopPropagation();">${autotradeCell}</td>
-      <td class="${wrClass}">${r.winrate !== null && r.winrate !== undefined ? r.winrate+'%' : '-'}</td>
-      <td class="dim">n=${r.trades}${(r.raw_closed_n !== null && r.raw_closed_n !== undefined && r.raw_closed_n > r.trades) ? ` <span title="исходная выборка до фильтров — именно её смотрит отбор в топ/live">(было ${r.raw_closed_n})</span>` : ''}</td>
-      <td class="dim"><span class="win">${r.wins}W</span>/<span class="loss">${r.losses}L</span>/<span class="status-timeout">${r.timeouts}T</span></td>
-      <td class="dim" title="med ${r.median_rr ?? '-'}R">avg ${r.avg_rr ?? '-'}R</td>
-      <td class="${expClass}">${r.expectancy_r !== null && r.expectancy_r !== undefined ? (r.expectancy_r > 0 ? '+' : '') + r.expectancy_r + 'R' : '-'}${oosTxt}</td>
-      <td class="dim">${r.score !== null && r.score !== undefined ? r.score : '-'}</td>
-      <td>${rrSoloTxt}</td>
-      <td>${volSoloTxt}</td>
-      <td>${liqSoloTxt}</td>
-      <td title="винрейт сделок за зоной ликвидации — если высокий, возможно стоит торговать их с адаптивным плечом">${liqRejTxt}</td>
-      <td>${htfSoloTxt}</td>
-      <td>${nfTxt}</td>
-    </tr>
-    <tr id="msnrTrades_${r.symbol}" style="display:none;"><td colspan="15" style="padding:0;position:static;"><div class="dim" style="position:sticky;left:0;width:calc(100vw - 24px);white-space:normal;padding:8px 4px;font-size:var(--fs-sm);line-height:1.45;">${paramsTxt}${noteTxt}<br>${tradeFilterTxt(r.neuro_filter, r.neuro_filter_info, r.neuro_filter_before && `было WR ${r.neuro_filter_before.winrate}% n=${r.neuro_filter_before.trades}`)}</div><div id="msnrTradesBody_${r.symbol}" class="dim" style="padding:6px 0;">\u0437\u0430\u0433\u0440\u0443\u0437\u043a\u0430...</div></td></tr>`;
-  }).join('');
-  const btTableHtml = msnrPooledHtml(status.pooled) + msnrReconcileHtml(status.reconcile) + ((status.top || []).length ? `
-    <div class="dim hint-block" style="margin-bottom:6px;"><b>\u0410\u0432\u0442\u043e\u0442\u044e\u043d\u0438\u043d\u0433 \u043f\u043e \u043c\u043e\u043d\u0435\u0442\u0430\u043c</b> (${cfg.backtest_days} \u0434\u043d\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438, \u043f\u0435\u0440\u0435\u0431\u043e\u0440 ${cfg.grid_min_leg_atr.length}\u00d7${cfg.grid_qm_zone_pct.length}\u00d7${cfg.grid_qm_lookback.length}=${cfg.grid_min_leg_atr.length*cfg.grid_qm_zone_pct.length*cfg.grid_qm_lookback.length} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439 \u043f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432 \u043d\u0430 \u0441\u0438\u043c\u0432\u043e\u043b \u2014 \u043c\u0438\u043d. \u0438\u043c\u043f\u0443\u043b\u044c\u0441 (\u00d7ATR) / QM-\u0437\u043e\u043d\u0430 (%) / \u043e\u043a\u043d\u043e QM (\u0431\u0430\u0440\u044b), \u0442\u0430\u0431\u043b\u0438\u0446\u0430 \u043f\u043e\u043a\u0430\u0437\u044b\u0432\u0430\u0435\u0442 \u0443\u0436\u0435 \u043b\u0443\u0447\u0448\u0438\u0439 \u043d\u0430\u0439\u0434\u0435\u043d\u043d\u044b\u0439 \u043a\u043e\u043c\u0431\u043e \u043f\u043e \u043a\u0430\u0436\u0434\u043e\u043c\u0443 \u0441\u0438\u043c\u0432\u043e\u043b\u0443) \u00b7 <b>score</b> \u2014 \u043d\u0438\u0436\u043d\u044f\u044f \u0434\u043e\u0432\u0435\u0440\u0438\u0442\u0435\u043b\u044c\u043d\u0430\u044f \u0433\u0440\u0430\u043d\u0438\u0446\u0430 \u0441\u0440\u0435\u0434\u043d\u0435\u0433\u043e R (\u043f\u043e \u043d\u0435\u0439 \u0438 \u0432\u044b\u0431\u0438\u0440\u0430\u0435\u0442\u0441\u044f \u043b\u0443\u0447\u0448\u0438\u0439 \u043a\u043e\u043c\u0431\u043e, \u0430 \u043d\u0435 \u043f\u043e \u0441\u044b\u0440\u043e\u043c\u0443 expectancy \u2014 \u0447\u0442\u043e\u0431\u044b \u043c\u0430\u043b\u0435\u043d\u044c\u043a\u0430\u044f \u0432\u044b\u0431\u043e\u0440\u043a\u0430 \u0441 \u0432\u0435\u0437\u0435\u043d\u0438\u0435\u043c \u043d\u0435 \u043f\u043e\u0431\u0435\u0436\u0434\u0430\u043b\u0430 \u0431\u043e\u043b\u044c\u0448\u0443\u044e \u0441\u0442\u0430\u0431\u0438\u043b\u044c\u043d\u0443\u044e) \u00b7 \u043a\u043b\u0438\u043a \u043f\u043e \u0441\u0442\u0440\u043e\u043a\u0435 \u2014 \u0440\u0430\u0441\u043a\u0440\u044b\u0442\u044c \u0441\u0434\u0435\u043b\u043a\u0438:</div>
-    <div style="overflow-x:auto;">
-    <table class="msnr-bt-table" style="font-size:var(--fs-sm);white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>Авто</th><th style="cursor:pointer;" onclick="msnrSortBy('winrate')">WR${_msnrSortKey==='winrate' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th style="cursor:pointer;" onclick="msnrSortBy('trades')">n${_msnrSortKey==='trades' ? (_msnrSortDir===-1?' \u25be':' \u25b4') : ''}</th><th>W/L/T</th><th>RR</th><th>Exp</th><th>Score</th><th>RR-диапазон (соло)</th><th>Объём (соло)</th><th>После ликвидации</th><th>За ликвидацией</th><th>Тренд 4ч (соло)</th><th>Neuro-фильтр (тест)</th></tr></thead>
-      <tbody>${btRows}</tbody>
-    </table>
-    </div>` : '<div class="dim">\u0411\u044d\u043a\u0442\u0435\u0441\u0442 \u0435\u0449\u0451 \u043d\u0435 \u0433\u043e\u0442\u043e\u0432.</div>');
-  // v0.99.329 — informational: Neuro conditions as candidate filters for MSNR
-  const nfHtml = (() => {
-    const nf = status.neuro_filters;
-    if (!nf) return `<details style="margin:8px 0;"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">🧪 Neuro-фильтры для MSNR — считаются (≈15 мин после запуска и после каждого бэктеста MSNR)</summary></details>`;
-    const b = nf.base || {};
-    const rowsHtml = (nf.top || []).slice(0, 8).map((f, i) => {
-      const dWr = Math.round((f.wr_a - f.wr_b) * 10) / 10;
-      const rCls = (f.r_a ?? 0) >= (f.r_b ?? 0) ? 'win' : 'loss';
-      const coins = f.all_coins_ok   // v0.99.379 — "passed the test" (majority of coins better, removed trades clearly worse)
-        ? `<span class="win">✅ ${f.coins_better} лучше / ${f.coins_worse} хуже</span>`
-        : `<span class="${f.coins_better > f.coins_worse ? 'dim' : 'loss'}">${f.coins_better} лучше / ${f.coins_worse} хуже</span>`;
-      const tTxt = `<td class="dim" title="t: насколько убранные сделки хуже оставшихся (train — где фильтр выбран, test — проверка; проверяются 3 лучших по train, для прохода нужно test ≥ 2)">${f.train_t ?? '—'} → ${f.test_t ?? '—'}</td>`;
-      return `<tr${i === 0 && f.all_coins_ok ? ' style="background:var(--card);"' : ''}><td>${i === 0 && f.all_coins_ok ? '🏆' : i + 1}</td><td style="white-space:normal;min-width:160px;">${f.label}</td>
-        <td class="dim">${f.n_b}→${f.n_a} (${f.kept_pct}%)</td>
-        <td>${f.wr_b}%→<b class="${dWr >= 0 ? 'win' : 'loss'}">${f.wr_a}%</b> <span class="${dWr >= 0 ? 'win' : 'loss'}">(${dWr >= 0 ? '+' : ''}${dWr})</span></td>
-        <td class="${rCls}">${f.r_b}→${f.r_a}R</td>${tTxt}<td>${coins}</td></tr>`;
+  if (!panel) return;
+  try {
+    const [st, sigs] = await Promise.all([fetch('/api/msnr/status').then(r => r.json()), fetch('/api/msnr/signals').then(r => r.json())]);
+    const cfg = st.config || {};
+    const prog = st.msnr_backtest_running
+      ? `<div class="dim">бэктест идёт: ${st.msnr_backtest_done || 0}/${st.msnr_backtest_total || '?'} монет × ${cfg.n_variants} вариантов</div>`
+      : (st.msnr_waiting_for_slot ? '<div class="dim">⏳ бэктест ждёт свободного слота</div>'
+        : `<div class="dim">последний бэктест: ${st.msnr_last_backtest_finished ? fmtDateTime(st.msnr_last_backtest_finished) + ' (' + Math.round((st.msnr_last_backtest_duration || 0) / 60) + ' мин)' : '—'} · ${cfg.universe_n} монет, ${cfg.days} дн. 15m · автоторговля MSNR ${st.autotrade_enabled ? 'вкл' : 'выкл'}</div>`);
+    const ss = st.signals_stats || {};
+    const statsTxt = ss.total ? `<div class="dim" style="margin:4px 0;">Торгуемые сигналы: ${ss.total} · открыто ${ss.open} · закрыто: ${ss.wins}W / ${ss.losses}L / ${ss.time_exits} по времени · итого ${msnrSgn(ss.sum_r)}R</div>` : '';
+    const coinRows = (st.coins || []).map(c => {
+      const status = c.eligible ? '<span class="win">торгуется</span>' : (c.live ? '<span class="dim">сигналы пишутся</span>' : (c.picked ? '<span class="dim">отобрана</span>' : '<span class="dim">—</span>'));
+      const open = _msnrOpen.has(c.symbol);
+      return `<tr onclick="toggleMsnrCoin('${c.symbol}')" style="cursor:pointer;"><td>${open ? '▾' : '▸'} ${c.symbol.replace('_USDT', '')}</td><td>${status}</td><td>${c.train.n} · ${msnrSgn(c.train.sum_r)}R</td><td class="${(c.test.avg_r || 0) > 0 ? 'win' : 'loss'}">${c.test.n} · ${msnrSgn(c.test.avg_r)}R</td></tr>`
+        + (open ? `<tr><td colspan="4" style="padding:0;"><div id="msnrTrades_${c.symbol}" class="dim" style="padding:6px 4px;">загрузка...</div></td></tr>` : '');
     }).join('');
-    const okN = nf.all_coins_ok_n || 0;
-    return `<details style="margin:8px 0;"><summary style="cursor:pointer;font-size:var(--fs);">🧪 Neuro-фильтры для MSNR (информационно): ${okN ? `<span class="win">${okN} прошли проверку</span>` : '<span class="dim">ни один не прошёл проверку</span>'} · ${nf.coins} монет · тест-сделок ${b.n}, WR ${b.wr}%</summary>
-      <div class="dim hint-block" style="font-size:var(--fs-sm);margin:4px 0 6px;">Один общий фильтр для всех монет. Каждое условие Neuro на момент входа пробуется как «убрать» / «только». <b>Выбор и порядок — только по train-части</b> (первые 70% сделок каждой монеты): насколько убранные сделки хуже оставшихся (t). <b>Test-часть</b>, которую фильтр не видел, только проверяет: проверяются только 3 лучших по train (иначе среди сотен вариантов какой-то «пройдёт» случайно); фильтр проходит, если на test убранные сделки тоже явно хуже (t ≥ 2), средний R вырос и монет стало лучше больше, чем хуже. 🏆 — лучший по train из прошедших. Оставляют не меньше 50% сделок. Раньше требовалось «ни одна монета не хуже» — при десятках монет с парой тест-сделок это почти невозможно. Свой фильтр для каждой монеты подбирается отдельно в самом бэктесте (настройка «Фильтр Neuro в бэктесте»). Этот общий отчёт к сделкам MSNR не применяется. Колонка «Neuro-фильтр (тест)» в таблице ниже — эффект фильтра №1 по каждой монете. Посчитано ${fmtTime(nf.computed_at)}.</div>
-      <div style="overflow-x:auto;"><table style="font-size:var(--fs-sm);white-space:nowrap;"><thead><tr><th>#</th><th>Фильтр</th><th>Сделок</th><th>WR до→после</th><th>Средний R</th><th>t train→test</th><th>Монеты</th></tr></thead><tbody>${rowsHtml || '<tr><td colspan="7" class="dim">подходящих фильтров не найдено</td></tr>'}</tbody></table></div>
-    </details>`;
-  })();
-  setPanelHtml(panel, warnHtml + headerHtml + rrBucketsHtml + signalsTableHtml + nfHtml + btTableHtml);
-  restoreMsnrExpansion();
-}
-
-// Expanded-row state lives OUTSIDE refreshMsnr()'s panel.innerHTML rebuild
-// on purpose — the whole panel gets re-rendered from scratch on every
-// auto-refresh tick, which was wiping out both which rows were open AND
-// the stale-fetch guard (that guard used to live keyed off a flag that
-// survived the rebuild while the DOM/content didn't, so a re-opened row
-// after a refresh tick would skip fetching entirely and hang on
-// "загрузка..." forever). _msnrExpanded is the single source of truth
-// for "should this row be open", restoreMsnrExpansion() re-applies it
-// (and re-fetches, since the row's body content is always fresh
-// "загрузка..." right after a rebuild) after every refreshMsnr() call.
-const _msnrExpanded = new Set();
-
-function toggleMsnrBacktestTrades(symbol) {
-  const row = document.getElementById(`msnrTrades_${symbol}`);
-  if (!row) return;
-  if (_msnrExpanded.has(symbol)) {
-    _msnrExpanded.delete(symbol);
-    row.style.display = 'none';
-  } else {
-    _msnrExpanded.add(symbol);
-    row.style.display = 'table-row';
-    loadMsnrTrades(symbol);
+    const coinsHtml = coinRows ? `<div style="overflow-x:auto;margin:8px 0;"><table style="font-size:var(--fs-sm);"><thead><tr><th>монета</th><th>статус</th><th>обучение: n · итого R</th><th>тест: n · R/сделку</th></tr></thead><tbody>${coinRows}</tbody></table></div>` : '';
+    const sigHtml = (sigs || []).slice(0, 40).map(s => sigItemHtml(Object.assign({}, s, {pnl_r: s.r != null ? Math.round(s.r * 100) / 100 : s.pnl_r}),
+      {onclick: `openMsnrChart('${s.symbol}', ${s.time})`,
+       extra: [s.trade_intended ? (s.autotrade_fired ? 'открыта на бирже' : (s.autotrade_status ? 'автоторговля: ' + s.autotrade_status : 'торгуемый сигнал')) : 'только запись']})).join('');
+    panel.innerHTML = prog + msnrVerdictHtml(st.verdict, cfg) + msnrReconcileHtml(st.reconcile) + statsTxt + coinsHtml
+      + `<div style="margin-top:8px;"><b>Сигналы</b></div>` + (sigHtml || '<div class="dim">пока нет</div>');
+    for (const sym of _msnrOpen) loadMsnrTrades(sym);
+  } catch (e) {
+    panel.innerHTML = `<div class="dim">ошибка загрузки MSNR: ${e}</div>`;
   }
 }
-
-function restoreMsnrExpansion() {
-  for (const symbol of _msnrExpanded) {
-    const row = document.getElementById(`msnrTrades_${symbol}`);
-    if (!row) continue;  // symbol no longer in the (re-rendered) top list
-    row.style.display = 'table-row';
-    loadMsnrTrades(symbol);
-  }
+function toggleMsnrCoin(symbol) {
+  if (_msnrOpen.has(symbol)) _msnrOpen.delete(symbol); else _msnrOpen.add(symbol);
+  refreshMsnr();
 }
-
 async function loadMsnrTrades(symbol) {
-  const body = document.getElementById(`msnrTradesBody_${symbol}`);
-  if (!body) return;
-  // v0.99.51, per direct user report ("сброс видимого окна при
-  // скролле и масштабировании, когда смотрю сделки и листаю список
-  // монет"): only show the "загрузка..." placeholder the FIRST time
-  // this coin is expanded (body still empty). restoreMsnrExpansion()
-  // re-calls this for every already-expanded coin on EVERY 15s
-  // refresh tick — unconditionally blanking an already-populated
-  // trade table back to one short line of text before the fetch
-  // resolves made the page's total height oscillate on every single
-  // tick, which is exactly what made the visible viewport look like
-  // it kept "resetting" even after setPanelHtml() started restoring
-  // window.scrollY (restoring a scroll position doesn't help if the
-  // content AT that position keeps disappearing and reappearing).
-  // Keeping the OLD table visible while the new one loads in the
-  // background removes that height flicker entirely for the by-far
-  // most common case — a routine refresh of an already-expanded coin.
-  const hasContent = body.querySelector('table') !== null;
-  if (!hasContent) body.textContent = 'загрузка...';
+  const el = document.getElementById(`msnrTrades_${symbol}`);
+  if (!el) return;
   try {
     const trades = await (await fetch(`/api/msnr/backtest/${symbol}`)).json();
-    if (!trades.length) { body.textContent = 'сделок нет'; return; }
-    const rows = trades.map(t => {
-      const dirClass = t.direction === 'LONG' ? 'long' : 'short';
-      const resClass = t.result === 'WIN' ? 'win' : (t.result === 'LOSS' ? 'loss' : 'status-timeout');
-      const levelTxt = t.level_type === 'A' ? 'A-shape' : 'V-shape';
-      // v0.99.25, per direct user request: show the compounding balance
-      // right next to each trade, not just the summary "доход" figure —
-      // so the compounding math can be checked trade-by-trade. Null
-      // means this trade was never reached by the simulation (a
-      // TIMEOUT, or the account already hit $0 on an earlier trade —
-      // see msnr_compound_trail()'s own docstring), shown as a dim
-      // dash rather than a misleading $0.
-      const compTxt = (t.compound_balance_after !== null && t.compound_balance_after !== undefined)
-        ? `<span class="bal">$${Math.trunc(t.compound_balance_after)}</span> <span class="${t.compound_pnl_pct >= 0 ? 'win' : 'loss'}">(${t.compound_pnl_pct >= 0 ? '+' : ''}${t.compound_pnl_pct}%)</span>`
-        : '<span class="dim">\u2014</span>';
-      // v0.99.46, per direct user request ("рядом с каждой монетой ещё
-      // и вычислять плечо"): this specific trade's OWN resolved
-      // leverage (msnr_leverage_for_stop(), scaled up from the default
-      // for a tight stop) — same null-means-unreached reasoning as
-      // compTxt above, since a trade with no trail entry never had a
-      // leverage resolved for it either.
-      const levTxt = (t.compound_leverage !== null && t.compound_leverage !== undefined)
-        ? `${t.compound_leverage}x`
-        : '<span class="dim">\u2014</span>';
-      return `<tr onclick="event.stopPropagation(); openMsnrChart('${symbol}', ${t.time})" style="cursor:pointer;">
-        <td class="dim">${fmtDateTime(t.time)}</td>
-        <td class="${dirClass}">${t.direction}</td>
-        <td class="dim">${levelTxt}</td>
-        <td>${fmt(t.entry)}</td><td class="dim">${fmt(t.sl)}</td><td class="dim">${fmt(t.tp)}</td>
-        <td class="dim">${t.rr ?? '-'}R</td>
-        <td class="dim">${levTxt}</td>
-        <td class="${resClass}">${t.result}</td>
-        <td>${compTxt}</td>
-      </tr>`;
-    }).join('');
-    body.innerHTML = `<div style="overflow-x:auto;"><table style="font-size:var(--fs-sm);white-space:nowrap;width:100%;">
-      <thead><tr><th>Время</th><th>Dir</th><th>Уровень</th><th>Entry</th><th>SL</th><th>TP</th><th>RR</th><th>Плечо</th><th>Result</th><th>Баланс</th></tr></thead>
-      <tbody>${rows}</tbody>
-    </table></div>`;
-  } catch (e) {
-    body.textContent = 'ошибка загрузки';
-    console.error(e);
-  }
+    if (!trades.length) { el.innerHTML = 'сделок нет'; return; }
+    el.innerHTML = `<table style="font-size:var(--fs-xs);"><thead><tr><th>время</th><th>часть</th><th>напр.</th><th>исход</th><th>R</th></tr></thead><tbody>`
+      + trades.map(t => `<tr onclick="event.stopPropagation(); openMsnrChart('${symbol}', ${t.time})" style="cursor:pointer;"><td>${fmtDateTime(t.time)}</td><td>${t.part}</td><td class="${t.direction === 'LONG' ? 'win' : 'loss'}">${t.direction}</td><td>${t.result === 'TIME_EXIT' ? '⏱ по времени' : t.result}</td><td class="${(t.r || 0) > 0 ? 'win' : 'loss'}">${t.r != null ? msnrSgn(Math.round(t.r * 100) / 100) : '—'}</td></tr>`).join('')
+      + '</tbody></table>';
+  } catch (e) { el.innerHTML = 'ошибка: ' + e; }
 }
 
 let currentMsnrData = null;
-
-async function msnrManualOpen(symbol, sigTime, direction, entry, sl, tp) {
-  if (!confirm(`Открыть ${direction} по ${symbol}?\nEntry: ${entry}, SL: ${sl}, TP: ${tp}\n\nСделка будет открыта на бирже за реальные деньги.`)) return;
-  const r = await fetch(`/api/msnr/manual_open`, {
-    method: 'POST',
-    headers: {'Content-Type': 'application/json'},
-    body: JSON.stringify({symbol, sig_time: sigTime, direction, entry, sl, tp}),
-  });
-  const d = await r.json();
-  if (d.ok) {
-    alert(`✅ Открыто: ${d.detail || 'сделка отправлена'}`);
-  } else {
-    alert(`❌ Ошибка: ${d.error || 'неизвестная ошибка'}`);
-  }
-  await refreshMsnr();
-}
 
 async function openMsnrChart(symbol, sigTime) {
   document.getElementById('msnrModalTitle').textContent = symbol;
@@ -29052,16 +25140,11 @@ wireResetButton('resetSimulatorBtn', '/api/simulator/reset',
 const settingsModal = document.getElementById('settingsModal');
 const setInputs = {
   msnr_enabled: document.getElementById('setMsnr'),
-  msnr_addon_enabled: document.getElementById('setMsnrAddon'),
   msnr_all_in_enabled: document.getElementById('setMsnrAllIn'),
   snr_all_in_enabled: document.getElementById('setSnrAllIn'),
   prv_all_in_enabled: document.getElementById('setPrvAllIn'),
-  msnr_single_best_enabled: document.getElementById('setMsnrSingleBest'),
   prv_single_best_enabled: document.getElementById('setPrvSingleBest'),
   snr_single_best_enabled: document.getElementById('setSnrSingleBest'),
-  msnr_min_rr_filter_enabled: document.getElementById('setMsnrMinRrFilter'),
-  msnr_htf_filter_enabled: document.getElementById('setMsnrHtfFilter'),
-  msnr_per_symbol_filters_enabled: document.getElementById('setMsnrPerSymbolFilters'),
   neuro_enabled: document.getElementById('setNeuro'),
   neuro_extra_conds_enabled: document.getElementById('setNeuroExtra'),
   neuro_trade_filter_enabled: document.getElementById('setNeuroTradeFilter'),
@@ -30331,9 +26414,7 @@ if __name__ == "__main__":
     threading.Thread(target=scalp_loop, daemon=True).start()
     threading.Thread(target=hourly_stats_loop, daemon=True).start()
     threading.Thread(target=msnr_backtest_loop, daemon=True).start()
-    threading.Thread(target=msnr_neuro_filter_loop, daemon=True).start()  # v0.99.329
     threading.Thread(target=msnr_live_loop, daemon=True).start()
-    threading.Thread(target=msnr_backtest_watchdog, daemon=True).start()
     threading.Thread(target=ft5_backtest_loop, daemon=True).start()
     threading.Thread(target=ft5_live_loop, daemon=True).start()
     threading.Thread(target=mirror_backtest_loop, daemon=True).start()
