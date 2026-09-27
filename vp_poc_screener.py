@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.403"
+APP_VERSION = "0.99.404"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -18512,51 +18512,11 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
     8-of-10 coins "hanging". Falls back to self-fetching when not
     supplied (e.g. for a standalone/manual call)."""
     try:
-        now = int(time.time())
-        start_ts = now - NEURO_HISTORY_DAYS * 86400
-        candles = get_candles_range(symbol, NEURO_TF, start_ts, now)
-        if not candles or len(candles) < 500:
+        with _neuro_fetch_phase():   # v0.99.404 — counted for the UI ("скачивают данные")
+            fetched = _neuro_backtest_fetch(symbol, precomputed_btc_candles, precomputed_eth_candles)
+        if fetched is None:
             return [], [], {}
-
-        htf_candles = get_candles_range(symbol, "4h", start_ts, now) or []
-        d1_candles = get_candles_range(symbol, "1d", start_ts, now) or []
-        neuro_set_index_context(symbol, start_ts, now)   # v0.99.330 — premium_zone
-        # v0.99.257 — CRITICAL FIX, per direct user report (screenshot of
-        # the new global errors panel showing repeated "neuro_fetch_
-        # funding_rate ...: 400 Client Error" across many symbols, every
-        # mining cycle). Root cause: this call reused `start_ts` — the
-        # SAME start of the FULL NEURO_HISTORY_DAYS (1500-day, ~4.1-year)
-        # candle-fetch window — for the funding-rate request too, and
-        # Gate's own funding_rate endpoint appears to reject a range that
-        # wide outright with a flat 400.
-        # v0.99.258 — per direct user follow-up ("лучше же больше дней
-        # для бэктеста"): rather than permanently settling for v0.99.257's
-        # own guessed-conservative 60-day compromise, passes the FULL
-        # start_ts back here and lets neuro_fetch_funding_rate() itself
-        # adaptively halve the window on a 400 until it finds the actual
-        # widest range Gate allows — see that function's own docstring.
-        # neuro_align_funding_rate() already degrades gracefully for bars
-        # outside whatever range ends up actually returned (plain None,
-        # not a crash).
-        funding_records = neuro_fetch_funding_rate(symbol, start_ts, now)
-        oi_records = []
-        try:
-            oi_records = get_contract_stats(symbol, interval="1h", limit=999)
-        except Exception as e:
-            log_error(f"neuro_backtest_symbol {symbol} OI: {e}")
-        if symbol == "BTC_USDT":
-            btc_candles = None
-        elif precomputed_btc_candles is not None:
-            btc_candles = precomputed_btc_candles
-        else:
-            btc_candles = get_candles_range("BTC_USDT", NEURO_TF, start_ts, now) or []
-        if symbol == "ETH_USDT":
-            eth_candles = None
-        elif precomputed_eth_candles is not None:
-            eth_candles = precomputed_eth_candles
-        else:
-            eth_candles = get_candles_range("ETH_USDT", NEURO_TF, start_ts, now) or []
-
+        candles, htf_candles, d1_candles, funding_records, oi_records, btc_candles, eth_candles = fetched
         neuro_check_cancel()   # v0.99.357 — abandoned while fetching? stop before the heavy part
         # v0.99.371 — the heavy part runs in neuro_backtest_core() (possibly in
         # a worker process on another core); the $15 compounding needs the
@@ -18573,6 +18533,70 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
     except Exception as e:
         log_error(f"neuro_backtest_symbol {symbol}: {e}")
         return [], [], {}
+
+
+_neuro_fetching = [0]   # v0.99.404 — coins downloading their history right now
+
+
+class _neuro_fetch_phase:
+    def __enter__(self):
+        with _neuro_state_lock:
+            _neuro_fetching[0] += 1
+
+    def __exit__(self, *exc):
+        with _neuro_state_lock:
+            _neuro_fetching[0] = max(0, _neuro_fetching[0] - 1)
+        return False
+
+
+def _neuro_backtest_fetch(symbol, precomputed_btc_candles=None, precomputed_eth_candles=None):
+    """v0.99.404 — the exchange part of neuro_backtest_symbol() (network,
+    not CPU): the coin's 1h/4h/1d history, index price, funding, OI."""
+    now = int(time.time())
+    start_ts = now - NEURO_HISTORY_DAYS * 86400
+    candles = get_candles_range(symbol, NEURO_TF, start_ts, now)
+    if not candles or len(candles) < 500:
+        return None
+
+    htf_candles = get_candles_range(symbol, "4h", start_ts, now) or []
+    d1_candles = get_candles_range(symbol, "1d", start_ts, now) or []
+    neuro_set_index_context(symbol, start_ts, now)   # v0.99.330 — premium_zone
+    # v0.99.257 — CRITICAL FIX, per direct user report (screenshot of
+    # the new global errors panel showing repeated "neuro_fetch_
+    # funding_rate ...: 400 Client Error" across many symbols, every
+    # mining cycle). Root cause: this call reused `start_ts` — the
+    # SAME start of the FULL NEURO_HISTORY_DAYS (1500-day, ~4.1-year)
+    # candle-fetch window — for the funding-rate request too, and
+    # Gate's own funding_rate endpoint appears to reject a range that
+    # wide outright with a flat 400.
+    # v0.99.258 — per direct user follow-up ("лучше же больше дней
+    # для бэктеста"): rather than permanently settling for v0.99.257's
+    # own guessed-conservative 60-day compromise, passes the FULL
+    # start_ts back here and lets neuro_fetch_funding_rate() itself
+    # adaptively halve the window on a 400 until it finds the actual
+    # widest range Gate allows — see that function's own docstring.
+    # neuro_align_funding_rate() already degrades gracefully for bars
+    # outside whatever range ends up actually returned (plain None,
+    # not a crash).
+    funding_records = neuro_fetch_funding_rate(symbol, start_ts, now)
+    oi_records = []
+    try:
+        oi_records = get_contract_stats(symbol, interval="1h", limit=999)
+    except Exception as e:
+        log_error(f"neuro_backtest_symbol {symbol} OI: {e}")
+    if symbol == "BTC_USDT":
+        btc_candles = None
+    elif precomputed_btc_candles is not None:
+        btc_candles = precomputed_btc_candles
+    else:
+        btc_candles = get_candles_range("BTC_USDT", NEURO_TF, start_ts, now) or []
+    if symbol == "ETH_USDT":
+        eth_candles = None
+    elif precomputed_eth_candles is not None:
+        eth_candles = precomputed_eth_candles
+    else:
+        eth_candles = get_candles_range("ETH_USDT", NEURO_TF, start_ts, now) or []
+    return candles, htf_candles, d1_candles, funding_records, oi_records, btc_candles, eth_candles
 
 
 def neuro_scan_live(symbol, confirmed_patterns, rr=None, precomputed_btc_candles=None, precomputed_eth_candles=None):
@@ -19153,15 +19177,24 @@ def neuro_mining_loop():
                         # v0.99.373 — batch size re-read every batch, so a change of
                         # the cores setting applies mid-cycle
                         _nw = max(1, calc_limit())
-                        _batch = _order[_bi:_bi + _nw]
+                        # v0.99.404 — per user ("идёт майнинг, а ядер 0 из 8, 1 из 8"):
+                        # a batch of exactly N coins spent most of its time
+                        # downloading history (network, not cores) and then
+                        # waited for its slowest coin with the cores idle. Now
+                        # more coins are in flight than cores: while some
+                        # download, others compute (a coin waits for a free
+                        # core in calc_run, so cores never exceed the limit),
+                        # and a chunk of 3N coins leaves far fewer idle tails.
+                        _batch = _order[_bi:_bi + 3 * _nw]
                         _bi += len(_batch)
+                        _nthreads = min(len(_batch), _nw + max(2, _nw // 2))
                         with _neuro_state_lock:
-                            _neuro_mining_current_symbol = ", ".join(_batch)
+                            _neuro_mining_current_symbol = ", ".join(x.replace("_USDT", "") for x in _batch[:6]) + (f" +{len(_batch) - 6}" if len(_batch) > 6 else "")
                             _neuro_mining_progress_ts = time.time()
                             heartbeat("neuro_mining_loop")
                         run_pool_with_progress(
                             lambda s_: neuro_backtest_symbol(s_, shared_btc_candles, shared_eth_candles),
-                            _batch, _nw, "neuro_mining_loop", _nm_done, _nm_stop,
+                            _batch, _nthreads, "neuro_mining_loop", _nm_done, _nm_stop,
                             stall_sec=NEURO_STALL_SEC, hard_sec=NEURO_PER_SYMBOL_HARD_MAX_SEC,
                             on_tick=_neuro_waiting_beat)
                         # v0.99.359 — a Neuro cycle can run for hours; holding a
@@ -19526,6 +19559,7 @@ def api_neuro_status():
     return jsonify({
         "autotrade_selected": sorted(_neuro_autotrade_selected),   # v0.99.384
         "stale_results": _neuro_results_algo < NEURO_ALGO_VERSION,   # v0.99.403
+        "mining_fetching": _neuro_fetching[0],   # v0.99.404
         "single_best": NEURO_SINGLE_BEST_ENABLED, "best_symbol": active_symbols[0] if active_symbols else None,   # v0.99.403
         "autotrade_enabled": AUTOTRADE_ENABLED_NEURO,
         "calc": calc_status("neuro"), "calc_cond": calc_status("cond"),   # v0.99.372
@@ -23471,6 +23505,7 @@ async function refreshNeuro() {
     const lastMined = data.last_mined ? fmtDateTime(data.last_mined) : '\u2014';
     const miningTxt = data.mining_running
       ? `<span class="dim">\u043c\u0430\u0439\u043d\u0438\u043d\u0433: ${data.mining_done||0}/${data.mining_total||coins.length||10} \u2014 \u0441\u0435\u0439\u0447\u0430\u0441 ${data.mining_current_symbol||'?'}</span>${coresTxt(data.calc)}`
+        + (data.mining_fetching ? ` <span class="dim" title="эти монеты сейчас скачивают историю с биржи — это сеть, а не ядра; ядра заняты только расчётом">· 📥 скачивают данные: ${data.mining_fetching}</span>` : '')
         + (data.waiting_slot_since ? ` <span style="color:var(--warn);">· ⏸ пауза с ${fmtDateTime(data.waiting_slot_since)}: уступил слот другому бэктесту, продолжит после него</span>` : '')
       : (data.waiting_slot_since
         ? `<span style="color:var(--warn);">⏳ ждёт свободного слота бэктеста с ${fmtDateTime(data.waiting_slot_since)} (одновременно идут не больше 2 бэктестов) · последний майнинг: ${lastMined}</span>`

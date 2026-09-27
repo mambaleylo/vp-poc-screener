@@ -18038,3 +18038,10 @@ v0.99.403 - Neuro: all cards always shown, ranked by average daily % of the
          part went from +0.26R/trade (fake edge) to -0.06R. Saved results
          from older versions are marked stale, not traded, and re-mined at
          once (NEURO_ALGO_VERSION).
+v0.99.404 - Neuro mining used few cores ("ядер: 0 из 8, 1 из 8"): the core
+         counter only counts coins being computed, and each batch of exactly
+         N coins spent most of its time downloading history (network) and
+         then waited for its slowest coin with cores idle. Now 3N-coin chunks
+         run with N + N/2 threads, so some coins download while others
+         compute (a coin waits for a free core, the cores limit still holds).
+         The status line shows "📥 скачивают данные: K" next to the cores.
