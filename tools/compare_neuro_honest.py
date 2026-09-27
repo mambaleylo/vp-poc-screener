@@ -104,11 +104,11 @@ def main():
     print(f"монеты: {', '.join(symbols)}\n")
     tot = {"old_claim": [], "old_last20": [], "new_hold": []}
     for sym in symbols:
-        t0 = time.time()
+        t0 = time.perf_counter()
         oc, ot, osum = old.neuro_backtest_symbol(sym)
-        t1 = time.time()
+        t1 = time.perf_counter()
         nc, nt, nsum = new.neuro_backtest_symbol(sym)
-        t2 = time.time()
+        t2 = time.perf_counter()
         sp = nsum.get("split") or {}
         ve = sp.get("valid_end")
         print(f"=== {sym}   (старый {t1 - t0:.0f} с, новый {t2 - t1:.0f} с)")
