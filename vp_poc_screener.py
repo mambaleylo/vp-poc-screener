@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.391"
+APP_VERSION = "0.99.392"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -529,6 +529,10 @@ MSNR_HTF_TREND_BUFFER_PCT = float(os.environ.get("VP_MSNR_HTF_TREND_BUFFER_PCT",
 MSNR_SL_BUFFER_PCT = float(os.environ.get("VP_MSNR_SL_BUFFER_PCT", 0.0015))
 MSNR_SL_BUFFER_MULT = float(os.environ.get("VP_MSNR_SL_BUFFER_MULT", 1.3))  # v0.99.104, per direct user report ("часто выбивает стоп и идёт куда надо цена"): the OLD sl_buffer_pct approach (extreme * (1 ± 0.15%)) barely widens the stop past the sweep's own extreme at all, regardless of how far that sweep actually moved — a live report of frequent premature stop-outs followed by the intended move happening anyway is the textbook symptom of a stop sitting too close to normal price noise/re-testing. Mirrors XAU_LG_SL_BUFFER_MULT's own SHAPE (see that constant's own comment): multiplies the RAW entry-to-sweep-extreme distance (already a real, price-action-derived risk measure) rather than adding a tiny fixed % on top of the bare extreme price — a stop that scales with how far the sweep itself moved, not a nudge that's nearly the same regardless. 1.3 is a starting default (30% wider than the raw sweep distance) — deliberately NOT wired into the global risk_autotune_pass() nudge system XAU_LG/SESSION/EMA/DIV use for their own SL multipliers: MSNR's own participation in that global system was disabled back in v0.99.52 in favor of its OWN, different tuning philosophy (msnr_symbol_sl_skip_min() and friends — per-symbol statistical significance tests, not a single global average-MAE nudge), and this stays consistent with that existing design rather than reintroducing the older mechanism just for this one constant. A static default, adjustable via the VP_MSNR_SL_BUFFER_MULT env var if real data suggests a different multiplier fits better.
 MSNR_FALLBACK_RR = float(os.environ.get("VP_MSNR_FALLBACK_RR", 4.0))  # used only when the opposite OCL level isn't confirmed yet (Storyline has just one side so far) — a placeholder TP, not the normal path
+MSNR_BT_SLIPPAGE_PCT = float(os.environ.get("VP_MSNR_BT_SLIPPAGE_PCT", 0.0005))  # v0.99.392 — slippage per trade (fraction of price) charged in the backtest on top of 2 x AUTOTRADE_SIM_FEE_PCT taker fees: live the entry is a market order and the stop is a stop-market, the backtest filled both exactly at the level. With MSNR's tight stops (often <1%) fees+slippage are ~0.1-0.3R per trade — ignoring them made a break-even edge look profitable.
+MSNR_OOS_TEST_FRAC = float(os.environ.get("VP_MSNR_OOS_TEST_FRAC", 0.3))  # v0.99.392 — last share of the backtest window held out: grid params are chosen on the first part only, the held-out part is the honest out-of-sample check
+MSNR_OOS_MIN_TRADES = int(os.environ.get("VP_MSNR_OOS_MIN_TRADES", 5))  # v0.99.392 — closed held-out trades needed before a negative out-of-sample result excludes the coin from top/autotrade
+AUTOTRADE_MAX_ADVERSE_DRIFT_R_MSNR = float(os.environ.get("VP_AUTOTRADE_MAX_ADVERSE_DRIFT_R_MSNR", 0.5))  # v0.99.392 — MSNR counterpart of AUTOTRADE_MAX_FAVORABLE_DRIFT_R: skip when price already moved this many R TOWARD the stop before the order. Before, only favorable drift was skipped, so live systematically dropped trades already running to TP and kept the ones running to SL (with an even tighter real stop) — a selection the backtest never had.
 # v0.99.126 — "add-on" (добір) second position, per the same direct
 # user-forwarded trade screenshot as MSNR_ENTRY_TF's own comment above:
 # "m1 QM + m30 fresh (добір)" — the source takes a SECOND position on
@@ -5283,6 +5287,25 @@ def _execute_autotrade_impl(mode, symbol, direction, entry, sl, tp, extra=None, 
                         with state_lock:
                             STATE["autotrade_log"].appendleft(record)
                         return record
+                    # v0.99.392 — MSNR: the mirror-image skip. With only the
+                    # favorable-drift skip above, live kept every trade that
+                    # had already drifted toward the stop (tighter real stop,
+                    # lower TP odds) and dropped the ones already running to
+                    # TP — a one-sided selection against us that the backtest
+                    # (entry exactly at the signal close) never had.
+                    if mode == "msnr" and -drift_r > AUTOTRADE_MAX_ADVERSE_DRIFT_R_MSNR:
+                        record["status"] = "SKIPPED"
+                        record["detail"] = (f"цена ({current_price}) уже прошла {-drift_r:.2f}R в сторону стопа "
+                                             f"к моменту открытия (лимит {AUTOTRADE_MAX_ADVERSE_DRIFT_R_MSNR}R) — "
+                                             f"сделка не открыта, реальный стоп был бы сильно уже расчётного")
+                        send_telegram(
+                            f"⚠️ {symbol} ({mode}): сигнал устарел — цена {current_price:.6g} уже прошла "
+                            f"{-drift_r:.2f}R к стопу, не открыта",
+                            category=None,
+                        )
+                        with state_lock:
+                            STATE["autotrade_log"].appendleft(record)
+                        return record
 
                 # v0.99.295 — CRITICAL FIX, per direct user follow-up
                 # ("если в сделку автооткрытие входит спустя 2 часа
@@ -8888,7 +8911,7 @@ def risk_autotune_loop():
 # OCL/A-shape/V-shape/SBR/RBS/QM translation from the source material)
 # ============================================================================
 def msnr_build_pivots(structure_candles, pivot_left=MSNR_PIVOT_LEFT, pivot_right=MSNR_PIVOT_RIGHT,
-                       min_leg_atr=MSNR_MIN_LEG_ATR, atr_period=MSNR_ATR_PERIOD):
+                       min_leg_atr=MSNR_MIN_LEG_ATR, atr_period=MSNR_ATR_PERIOD, interval_sec=None):
     """Single walk-forward pass over structure_candles (MSNR_STRUCTURE_TF,
     oldest first) building confirmed OCL pivots off the CLOSE line — never
     high/low, per the source's "Open-Close Level" definition. A close-pivot
@@ -8918,6 +8941,14 @@ def msnr_build_pivots(structure_candles, pivot_left=MSNR_PIVOT_LEFT, pivot_right
     exact "has this bar closed yet" convention msnr_scan_symbol_live()
     itself already uses one function over (`c["time"] + s_interval_sec
     <= now`).
+    v0.99.392 — CRITICAL FIX (lookahead, same kind as v0.99.42):
+    confirm_time always added the MSNR_STRUCTURE_TF (1h) bar length, but
+    since v0.99.305 this function also builds the 4h pivots. A 4h pivot
+    was therefore "confirmed" at its confirming bar's open + 1h — 3h
+    before that 4h bar actually closes. The backtest used those 4h
+    levels (gating + TP) up to 3h early; live only sees closed 4h bars,
+    so live could never do the same. interval_sec = the bar length of
+    the candles actually passed in (defaults to MSNR_STRUCTURE_TF).
     Returns a list of {"type": "A"|"V", "price": close, "confirm_time": ts},
     oldest first."""
     n = len(structure_candles)
@@ -8926,7 +8957,7 @@ def msnr_build_pivots(structure_candles, pivot_left=MSNR_PIVOT_LEFT, pivot_right
     closes = [c["close"] for c in structure_candles]
     tr = _true_range_series(structure_candles)
     atr = _atr_series(tr, atr_period)
-    structure_interval_sec = INTERVAL_SECONDS.get(MSNR_STRUCTURE_TF, 3600)
+    structure_interval_sec = interval_sec or INTERVAL_SECONDS.get(MSNR_STRUCTURE_TF, 3600)
     pivots = []
     last_price = None
     last_type = None
@@ -9012,7 +9043,9 @@ def msnr_detect_signals(structure_candles, entry_candles, higher_structure_candl
     Returns (signals, pivots). signals: list of dicts with index (into
     entry_candles), time, direction, entry, sl, tp, level, level_type."""
     pivots = msnr_build_pivots(structure_candles, pivot_left, pivot_right, min_leg_atr, atr_period)
-    higher_pivots = msnr_build_pivots(higher_structure_candles, pivot_left, pivot_right, min_leg_atr, atr_period) if higher_structure_candles else []
+    higher_pivots = (msnr_build_pivots(higher_structure_candles, pivot_left, pivot_right, min_leg_atr, atr_period,
+                                       interval_sec=INTERVAL_SECONDS.get(MSNR_HIGHER_TF, 14400))
+                     if higher_structure_candles else [])   # v0.99.392 — 4h bar length, see msnr_build_pivots()
     use_higher_tf = higher_structure_candles is not None
     signals = []
     if not entry_candles:
@@ -9203,6 +9236,29 @@ def msnr_track_outcome(entry_candles, sig, max_wait_bars=300):
     return "TIMEOUT", None
 
 
+def msnr_trade_cost_frac():
+    """v0.99.392 — round-trip cost of one MSNR trade as a fraction of
+    price: taker fee on entry and exit (2 x AUTOTRADE_SIM_FEE_PCT) plus
+    MSNR_BT_SLIPPAGE_PCT."""
+    return 2 * AUTOTRADE_SIM_FEE_PCT + MSNR_BT_SLIPPAGE_PCT
+
+
+def msnr_net_rr(entry, sl, tp):
+    """v0.99.392 — reward:risk NET of msnr_trade_cost_frac(), in units of
+    what a stop-out really costs (risk + cost). Every MSNR consumer
+    scores a WIN as +rr and a LOSS as -1, so expressing rr in these units
+    makes all of them (grid score, expectancy, RR filters, ranking)
+    net of fees without touching each one: a WIN pays (reward - cost),
+    a LOSS costs (risk + cost) = exactly -1 in these units. Before,
+    rr = reward / risk — the backtest's R stats ignored fees entirely,
+    only the $ compound simulation charged them."""
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return None
+    cost = abs(entry) * msnr_trade_cost_frac()
+    return round((abs(tp - entry) - cost) / (risk + cost), 2)
+
+
 def msnr_detect_addon_signals(addon_candles, primary_signals, qm_zone_pct=MSNR_QM_ZONE_PCT,
                                qm_lookback=MSNR_QM_LOOKBACK_BARS, sl_buffer_mult=MSNR_SL_BUFFER_MULT):
     """v0.99.126 — the "добір" (add-on) second position, per direct
@@ -9286,13 +9342,14 @@ def msnr_run_backtest(structure_candles, entry_candles, higher_structure_candles
         result, exit_time = msnr_track_outcome(entry_candles, sig)
         risk = abs(sig["entry"] - sig["sl"])
         reward = abs(sig["tp"] - sig["entry"])
-        rr = round(reward / risk, 2) if risk > 0 else None
+        rr_gross = round(reward / risk, 2) if risk > 0 else None
+        rr = msnr_net_rr(sig["entry"], sig["sl"], sig["tp"])   # v0.99.392 — net of fees + slippage
         results.append({
             "time": sig["time"], "direction": sig["direction"],
             "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
             "level": sig["level"], "level_type": sig["level_type"],
             "opposite_level": sig.get("opposite_level"),
-            "result": result, "exit_time": exit_time, "rr": rr,
+            "result": result, "exit_time": exit_time, "rr": rr, "rr_gross": rr_gross,
             "volume_ratio": sig.get("volume_ratio"),
         })
     return results
@@ -9350,9 +9407,7 @@ def msnr_addon_backtest_symbol(symbol, days=MSNR_BACKTEST_DAYS):
     primary_results = []
     for sig in sigs:
         result, exit_time = msnr_track_outcome(entry_candles, sig)
-        risk = abs(sig["entry"] - sig["sl"])
-        reward = abs(sig["tp"] - sig["entry"])
-        rr = round(reward / risk, 2) if risk > 0 else None
+        rr = msnr_net_rr(sig["entry"], sig["sl"], sig["tp"])   # v0.99.392
         primary_results.append({
             "time": sig["time"], "direction": sig["direction"],
             "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
@@ -9366,9 +9421,7 @@ def msnr_addon_backtest_symbol(symbol, days=MSNR_BACKTEST_DAYS):
         addon_sigs = msnr_detect_addon_signals(addon_candles, sigs)
         for asig in addon_sigs:
             result, exit_time = msnr_track_outcome(addon_candles, asig)
-            risk = abs(asig["entry"] - asig["sl"])
-            reward = abs(asig["tp"] - asig["entry"])
-            rr = round(reward / risk, 2) if risk > 0 else None
+            rr = msnr_net_rr(asig["entry"], asig["sl"], asig["tp"])   # v0.99.392
             addon_results.append({
                 "time": asig["time"], "direction": asig["direction"],
                 "entry": asig["entry"], "sl": asig["sl"], "tp": asig["tp"],
@@ -9503,13 +9556,47 @@ def _msnr_recompute_summary_score(best, best_results):
     best["score"] = round(msnr_ranking_score(r_values, filtered_summary["losses"]), 4) if r_values else None
 
 
+def msnr_oos_split_time(entry_candles):
+    """v0.99.392 — start of the held-out (out-of-sample) part of the
+    backtest window: its last MSNR_OOS_TEST_FRAC share."""
+    t0, t1 = entry_candles[0]["time"], entry_candles[-1]["time"]
+    return t0 + (t1 - t0) * (1 - MSNR_OOS_TEST_FRAC)
+
+
+def msnr_is_train_trade(t, split_time):
+    """v0.99.392 — a closed trade that opened AND resolved before the
+    split, so choosing params on it never sees held-out prices."""
+    return (t.get("result") in ("WIN", "LOSS") and t["time"] < split_time
+            and t.get("exit_time") is not None and t["exit_time"] < split_time)
+
+
+def msnr_oos_stats(trades, split_time):
+    """v0.99.392 — closed trades opened in the held-out part: n, win-rate
+    and expectancy in net R (msnr_net_rr units: WIN +rr, LOSS -1)."""
+    test = [t for t in trades if t["time"] >= split_time and t.get("result") in ("WIN", "LOSS")]
+    if not test:
+        return {"n": 0, "wins": 0, "winrate": None, "expectancy_r": None}
+    wins = sum(1 for t in test if t["result"] == "WIN")
+    r_values = [t["rr"] for t in test if t["result"] == "WIN" and t.get("rr") is not None]
+    r_values += [-1.0] * (len(test) - wins)
+    return {"n": len(test), "wins": wins, "winrate": round(wins / len(test) * 100, 1),
+            "expectancy_r": round(sum(r_values) / len(r_values), 2) if r_values else None}
+
+
 def msnr_grid_core(structure_candles, entry_candles, higher_candles, now):
-    """v0.99.375 — the pure-CPU grid search of msnr_optimize_symbol(),
-    unchanged logic: returns {"best", "best_results", "tried"}."""
+    """v0.99.375 — the pure-CPU grid search of msnr_optimize_symbol():
+    returns {"best", "best_results", "tried"}.
+    v0.99.392 — the combo is picked by its score on the TRAINING part
+    only (msnr_is_train_trade(): before msnr_oos_split_time()). Before,
+    27 combos were scored on the same 40 days they were then judged on —
+    the best of 27 in-sample results is inflated by luck almost by
+    definition, which is exactly "great backtest, only stops live". The
+    held-out part is judged afterwards in msnr_optimize_symbol()."""
     best = None
     best_score = None
     best_results = []
     tried = []
+    split_time = msnr_oos_split_time(entry_candles)
     for min_leg_atr in MSNR_PARAM_GRID_MIN_LEG_ATR:
         for qm_zone_pct in MSNR_PARAM_GRID_QM_ZONE_PCT:
             for qm_lookback in MSNR_PARAM_GRID_QM_LOOKBACK:
@@ -9517,7 +9604,7 @@ def msnr_grid_core(structure_candles, entry_candles, higher_candles, now):
                                              min_leg_atr=min_leg_atr, qm_zone_pct=qm_zone_pct,
                                              qm_lookback=qm_lookback)
                 tried.append(len(results))
-                closed = [r for r in results if r["result"] in ("WIN", "LOSS")]
+                closed = [r for r in results if msnr_is_train_trade(r, split_time)]   # v0.99.392
                 if len(closed) < MSNR_MIN_BACKTEST_TRADES:
                     continue
                 wins = sum(1 for r in closed if r["result"] == "WIN")
@@ -9527,10 +9614,12 @@ def msnr_grid_core(structure_candles, entry_candles, higher_candles, now):
                 score = msnr_ranking_score(r_values, losses_count)
                 if best is None or score > best_score:
                     summary = msnr_summarize_backtest(results)
+                    full_closed = summary["wins"] + summary["losses"]
                     best = {
                         "min_leg_atr": min_leg_atr, "qm_zone_pct": qm_zone_pct, "qm_lookback_bars": qm_lookback,
-                        "trades": len(results), "wins": wins, "losses": losses_count,
-                        "timeouts": len(results) - len(closed),
+                        "trades": len(results), "wins": summary["wins"], "losses": summary["losses"],
+                        "timeouts": len(results) - full_closed,
+                        "train_closed_n": len(closed), "oos_split_time": split_time,
                         "winrate": summary["win_rate"], "avg_rr": summary["avg_rr"],
                         "median_rr": summary["median_rr"], "expectancy_r": summary["expectancy_r"],
                         "score": round(score, 4), "optimized_at": now, "candles_used": len(entry_candles),
@@ -9593,7 +9682,7 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
         mid_atr = MSNR_PARAM_GRID_MIN_LEG_ATR[len(MSNR_PARAM_GRID_MIN_LEG_ATR) // 2]
         mid_zone = MSNR_PARAM_GRID_QM_ZONE_PCT[len(MSNR_PARAM_GRID_QM_ZONE_PCT) // 2]
         mid_lookback = MSNR_PARAM_GRID_QM_LOOKBACK[len(MSNR_PARAM_GRID_QM_LOOKBACK) // 2]
-        best_results = msnr_run_backtest(structure_candles, entry_candles,
+        best_results = msnr_run_backtest(structure_candles, entry_candles, higher_candles,   # v0.99.392 — was missing: fallback ran without the 4h gate live always applies
                                           min_leg_atr=mid_atr, qm_zone_pct=mid_zone, qm_lookback=mid_lookback)
         raw_results = best_results
         combos = len(MSNR_PARAM_GRID_MIN_LEG_ATR) * len(MSNR_PARAM_GRID_QM_ZONE_PCT) * len(MSNR_PARAM_GRID_QM_LOOKBACK)
@@ -9763,6 +9852,23 @@ def msnr_optimize_symbol(symbol, days=MSNR_BACKTEST_DAYS):
     # silently read as "passed."
     best["stress_test_failed"] = (best["compound_return_pct"] is not None
                                    and best["compound_return_pct"] <= 0)
+    # v0.99.392 — out-of-sample check on the held-out last MSNR_OOS_TEST_FRAC
+    # of the window (params were chosen without it, see msnr_grid_core()).
+    # A coin whose held-out trades lose money net of fees is excluded from
+    # top/autotrade the same way a failed $ simulation is — its good
+    # full-window numbers are what the fitting found, not what trading got.
+    oos_split = msnr_oos_split_time(entry_candles)
+    oos = msnr_oos_stats(best_results, oos_split)
+    best["oos_split_time"] = oos_split
+    best["oos_n"] = oos["n"]
+    best["oos_winrate"] = oos["winrate"]
+    best["oos_expectancy_r"] = oos["expectancy_r"]
+    best["oos_failed"] = (oos["n"] >= MSNR_OOS_MIN_TRADES and oos["expectancy_r"] is not None
+                          and oos["expectancy_r"] <= 0)
+    best["stress_reason"] = ("oos" if best["oos_failed"] else None) if not best["stress_test_failed"] else "compound"
+    if best["oos_failed"]:
+        best["stress_test_failed"] = True
+    best["cost_model"] = "net"   # v0.99.392 — rr/expectancy/score are net of fees + slippage
     return best, best_results, raw_results
 
 
@@ -10418,7 +10524,7 @@ def msnr_optimal_leverage_for_symbol(trades, ceiling_leverage=None, symbol=None)
 
     def _log_growth(lev):
         total = 0.0
-        fee_frac = 2 * AUTOTRADE_SIM_FEE_PCT * lev
+        fee_frac = msnr_trade_cost_frac() * lev   # v0.99.392 — fees + slippage
         for sign, move_pct, direction in moves:
             if sign == -1 and mmr_pct is not None and direction:
                 liq_buffer_pct = compute_scalp_liquidation_move_pct(direction, lev, mmr_pct)
@@ -10723,7 +10829,7 @@ def msnr_compound_trail(trades, start_balance=None, leverage=None):
     top of the fee-adjusted figure."""
     start_balance = start_balance if start_balance is not None else MSNR_COMPOUND_START_BALANCE
     leverage = leverage if leverage is not None else AUTOTRADE_LEVERAGE_MSNR
-    fee_frac = 2 * AUTOTRADE_SIM_FEE_PCT * leverage
+    fee_frac = msnr_trade_cost_frac() * leverage   # v0.99.392 — fees + slippage
     closed = [t for t in trades if t.get("result") in ("WIN", "LOSS")]
     trail = []
     balance = start_balance
@@ -10901,9 +11007,15 @@ def msnr_scan_symbol_live(symbol):
         return
     try:
         params = msnr_symbol_params(symbol)
-        structure_candles = get_candles(symbol, interval=MSNR_STRUCTURE_TF, limit=MSNR_ATR_PERIOD + 250)
-        higher_candles = get_candles(symbol, interval=MSNR_HIGHER_TF, limit=MSNR_ATR_PERIOD + 250)
-        entry_candles = get_candles(symbol, interval=MSNR_ENTRY_TF, limit=params["qm_lookback"] + 200)
+        # v0.99.392 — much longer history than before (264 / 264 / ~206
+        # bars): the pivot chain is path-dependent (strict A/V alternation,
+        # leg size vs the previous pivot) and "level already fired" lives
+        # only inside one msnr_detect_signals() call, so a short live window
+        # built different levels than the backtest's 60-day one and could
+        # re-fire a level the backtest had already consumed.
+        structure_candles = get_candles(symbol, interval=MSNR_STRUCTURE_TF, limit=900)
+        higher_candles = get_candles(symbol, interval=MSNR_HIGHER_TF, limit=400)
+        entry_candles = get_candles(symbol, interval=MSNR_ENTRY_TF, limit=900)
         now = time.time()
         s_interval_sec = INTERVAL_SECONDS.get(MSNR_STRUCTURE_TF, 3600)
         h_interval_sec = INTERVAL_SECONDS.get(MSNR_HIGHER_TF, 14400)
@@ -10919,6 +11031,14 @@ def msnr_scan_symbol_live(symbol):
         sig = sigs[-1]
         if sig["index"] != len(entry_candles) - 1:
             return  # most recent signal isn't off the latest closed entry-TF candle — stale
+        # v0.99.392 — a level fires once per reign in the backtest; live,
+        # one that already produced a logged signal earlier (possibly
+        # before this fetch window) must not fire a second time.
+        with state_lock:
+            if any(s["symbol"] == symbol and s.get("level") == sig["level"]
+                   and s.get("level_type") == sig["level_type"] and (s.get("time") or 0) < sig["time"]
+                   for s in STATE["msnr_signals"]):
+                return
         # v0.99.22, per direct user request: skip firing if THIS symbol's
         # own backtest showed its rr bucket at-or-above skip_rr_min
         # failing breakeven — see msnr_symbol_rr_skip_min(). Computed
@@ -10937,9 +11057,7 @@ def msnr_scan_symbol_live(symbol):
         skip_rr_min = msnr_symbol_skip_rr_min(symbol)
         skip_rr_max = msnr_symbol_skip_rr_max(symbol)
         if skip_rr_min is not None or skip_rr_max is not None:
-            risk = abs(sig["entry"] - sig["sl"])
-            reward = abs(sig["tp"] - sig["entry"])
-            sig_rr = reward / risk if risk > 0 else None
+            sig_rr = msnr_net_rr(sig["entry"], sig["sl"], sig["tp"])   # v0.99.392 — same net rr the backtest thresholds were derived from
             if sig_rr is not None:
                 if skip_rr_min is not None and sig_rr >= skip_rr_min:
                     return  # this symbol's own history says rr this high fails here — skip, don't fire
@@ -23624,7 +23742,7 @@ def api_msnr_status():
             "structure_tf": MSNR_STRUCTURE_TF, "entry_tf": MSNR_ENTRY_TF,
             "pivot_left": MSNR_PIVOT_LEFT, "pivot_right": MSNR_PIVOT_RIGHT,
             "min_leg_atr": MSNR_MIN_LEG_ATR, "qm_zone_pct": MSNR_QM_ZONE_PCT,
-            "qm_lookback_bars": MSNR_QM_LOOKBACK_BARS, "backtest_days": MSNR_BACKTEST_DAYS,
+            "qm_lookback_bars": MSNR_QM_LOOKBACK_BARS, "backtest_days": MSNR_BACKTEST_DAYS, "oos_test_frac": MSNR_OOS_TEST_FRAC,
             "max_rr": MSNR_MAX_RR,
             "grid_min_leg_atr": MSNR_PARAM_GRID_MIN_LEG_ATR, "grid_qm_zone_pct": MSNR_PARAM_GRID_QM_ZONE_PCT,
             "grid_qm_lookback": MSNR_PARAM_GRID_QM_LOOKBACK,
@@ -26040,6 +26158,10 @@ async function refreshMsnr() {
   }).map((r, idx, arr) => {
     const wrClass = (r.winrate === null || r.winrate === undefined) ? 'dim' : (r.winrate >= 50 ? 'win' : 'loss');
     const expClass = (r.expectancy_r === null || r.expectancy_r === undefined) ? 'dim' : (r.expectancy_r > 0 ? 'win' : 'loss');
+    // v0.99.392 — out-of-sample line: the held-out last part of the window, params were chosen without it
+    const oosTxt = (r.oos_n === undefined) ? '<br><span class="dim" title="посчитано старой версией — до следующего бэктеста">тест: —</span>'
+      : (!r.oos_n ? '<br><span class="dim">тест: нет сделок</span>'
+      : `<br><span class="${(r.oos_expectancy_r || 0) > 0 ? 'win' : 'loss'}" title="последние ${Math.round((cfg.oos_test_frac || 0.3) * 100)}% истории: параметры подбирались без них, с комиссиями и проскальзыванием">тест: ${r.oos_expectancy_r > 0 ? '+' : ''}${r.oos_expectancy_r}R · WR ${r.oos_winrate}% · n=${r.oos_n}</span>`);
     // v0.99.86 — skip_rr_max (the new floor side) shown alongside the
     // existing ceiling; both share rr_filtered_count since a single
     // combined pass removes trades on either side (see msnr_optimize_
@@ -26159,7 +26281,7 @@ async function refreshMsnr() {
     // own $ compounding simulation and is excluded from ranking/
     // autotrade entirely, not just scored lower.
     const stressSeparatorHtml = (idx > 0 && !arr[idx - 1].stress_test_failed && r.stress_test_failed)
-      ? `<tr><td colspan="14" class="loss" style="font-size:var(--fs-xs);padding:4px 0;border-top:1px solid var(--line);">\u2014 \u043f\u0440\u043e\u0432\u0430\u043b\u0438\u043b\u0438 $-\u0441\u0438\u043c\u0443\u043b\u044f\u0446\u0438\u044e \u0434\u0435\u043f\u043e\u0437\u0438\u0442\u0430 (\u0434\u043e\u0445\u043e\u0434 \u2264 0%), \u0438\u0441\u043a\u043b\u044e\u0447\u0435\u043d\u044b \u0438\u0437 \u0442\u043e\u043f\u0430/\u0430\u0432\u0442\u043e\u0442\u043e\u0440\u0433\u043e\u0432\u043b\u0438 \u2014</td></tr>`
+      ? `<tr><td colspan="14" class="loss" style="font-size:var(--fs-xs);padding:4px 0;border-top:1px solid var(--line);">\u2014 провалили $-симуляцию депозита (доход \u2264 0%) или минус на тест-части (с комиссиями), исключены из топа/автоторговли \u2014</td></tr>`
       : '';
     // v0.99.141 — solo-checkpoint columns for the 2 new GLOBAL filters
     // (see MSNR_MIN_RR_FILTER_ENABLED's own comment), reading them by
@@ -26210,7 +26332,7 @@ async function refreshMsnr() {
       <td class="dim">n=${r.trades}${(r.raw_closed_n !== null && r.raw_closed_n !== undefined && r.raw_closed_n > r.trades) ? ` <span title="исходная выборка до фильтров — именно её смотрит отбор в топ/live">(было ${r.raw_closed_n})</span>` : ''}</td>
       <td class="dim"><span class="win">${r.wins}W</span>/<span class="loss">${r.losses}L</span>/<span class="status-timeout">${r.timeouts}T</span></td>
       <td class="dim" title="med ${r.median_rr ?? '-'}R">avg ${r.avg_rr ?? '-'}R</td>
-      <td class="${expClass}">${r.expectancy_r !== null && r.expectancy_r !== undefined ? (r.expectancy_r > 0 ? '+' : '') + r.expectancy_r + 'R' : '-'}</td>
+      <td class="${expClass}">${r.expectancy_r !== null && r.expectancy_r !== undefined ? (r.expectancy_r > 0 ? '+' : '') + r.expectancy_r + 'R' : '-'}${oosTxt}</td>
       <td class="dim">${r.score !== null && r.score !== undefined ? r.score : '-'}</td>
       <td>${rrSoloTxt}</td>
       <td>${volSoloTxt}</td>

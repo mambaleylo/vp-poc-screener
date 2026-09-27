@@ -17790,3 +17790,31 @@ v0.99.391 - "Инвертировать открытие" removed for Sweep, Neu
          торговли"): the four settings are gone from the UI and from the
          settings file; real orders always open in the signal's own direction,
          even if an old settings file had inversion on.
+v0.99.392 - MSNR: backtest made honest, live aligned with it (user: "почему mnsr
+         даёт хороший результат по бэктесту, но одни стопы по факту?").
+         - Lookahead fix: 4h pivots were "confirmed" at the confirming bar's
+           open + 1h (the 1h bar length) — 3h before that 4h bar closes. The
+           backtest used 4h levels (gate + TP) early; live never could.
+           msnr_build_pivots() now takes the real bar length.
+         - Costs: rr is now NET of 2 x taker fee + MSNR_BT_SLIPPAGE_PCT (0.05%),
+           in units of what a stop-out really costs, so the grid score,
+           expectancy, RR filters and ranking all count fees (before only the
+           $ simulation did). Kelly/compound also charge the slippage.
+         - Out-of-sample: grid params are chosen on the first 70% of the window
+           only (trades opened and closed before the split); the last 30% is
+           the test. A coin with >= MSNR_OOS_MIN_TRADES (5) test trades and
+           test expectancy <= 0 is excluded from top/autotrade (same gate as a
+           failed $ simulation). Table shows "тест: ±R · WR · n".
+         - Fallback grid path ran without the 4h gate — fixed.
+         - Live scan fetches 900 x 1h / 400 x 4h / 900 x 15m (was 264/264/~206)
+           and never re-fires a level that already produced a logged signal.
+           Synthetic check: with the old window live missed 16 and ADDED 34
+           signals vs 145 backtest ones; now 0 / 0.
+         - Autotrade: MSNR also skips when price already moved > 0.5R toward
+           the stop before the order (before only favorable drift was skipped —
+           live kept the trades running to SL and dropped those running to TP).
+         - tools/compare_msnr_honest.py: old vs new on real Gate data.
+         Verified: py_compile (-W error), pyflakes, JS check; random-walk data:
+         old reported +0.2..+0.5R expectancy (no edge exists), new ~0 / negative
+         and the one coin old put in the top is excluded by its test part;
+         backtest signals now all reproducible from closed-candle live views.
