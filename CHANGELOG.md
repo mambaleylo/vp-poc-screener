@@ -17781,3 +17781,7 @@ v0.99.389 - Neuro: honest backtest (branch neuro-honest; user: "погнали" 
          Verified: py_compile (-W error), pyflakes, runtime, JS check; random-
          walk data: most coins 0-4 dependencies (was 2600-6700), test-part R
          ~0 / negative as it must be; workers == in-process.
+v0.99.390 - Neuro cards sorted best first (user: "сортировку, чтобы первыми шли
+         лучшие монеты"): by the honest test result (avg R net of fees), coins
+         without test trades last, old-format results after the new ones.
+         Display order only — trading selection still uses validation.
