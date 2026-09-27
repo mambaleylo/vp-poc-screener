@@ -17785,3 +17785,8 @@ v0.99.390 - Neuro cards sorted best first (user: "сортировку, чтоб
          лучшие монеты"): by the honest test result (avg R net of fees), coins
          without test trades last, old-format results after the new ones.
          Display order only — trading selection still uses validation.
+v0.99.391 - "Инвертировать открытие" removed for Sweep, Neuro, S/R and Peak
+         Reversal (user: "надо вообще убрать эти обратные стороны для
+         торговли"): the four settings are gone from the UI and from the
+         settings file; real orders always open in the signal's own direction,
+         even if an old settings file had inversion on.

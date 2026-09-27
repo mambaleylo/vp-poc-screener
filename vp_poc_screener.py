@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.390"
+APP_VERSION = "0.99.391"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -873,19 +873,19 @@ AUTOTRADE_ENABLED_LSW = os.environ.get("VP_AUTOTRADE_LSW", "0") == "1"  # v0.99.
 AUTOTRADE_LEVERAGE_LSW = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_LSW", 10))  # only used by sim_execute_trade()'s own separate paper-balance simulator (deliberately left on its own old leverage/size system, same as every other module) — execute_autotrade() itself computes real leverage automatically per-trade, same risk-based sizing every module shares (see execute_autotrade()'s own docstring)
 AUTOTRADE_ENABLED_NEURO = os.environ.get("VP_AUTOTRADE_NEURO", "0") == "1"  # v0.99.245, per direct user request ("надо сделать как в свип, настройки такие же, процент из настроек, расчет до ликвидации и ТП все так же") — same off-by-default, opt-in pattern as every other module's own toggle
 AUTOTRADE_LEVERAGE_NEURO = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_NEURO", 10))  # same role as AUTOTRADE_LEVERAGE_LSW — only the paper simulator's own fallback leverage, real orders go through execute_autotrade()'s automatic risk-based sizing
-AUTOTRADE_INVERT_LSW = os.environ.get("VP_AUTOTRADE_INVERT_LSW", "0") == "1"  # v0.99.263, per direct user request ("галочку инвертированного открытия сделок... разница будет только на бирже, стоп станет тейком а тейк стопом") — off by default; see execute_autotrade()'s own docstring for the exact mechanics
+AUTOTRADE_INVERT_LSW = False  # v0.99.391 — feature removed, always off  # v0.99.263, per direct user request ("галочку инвертированного открытия сделок... разница будет только на бирже, стоп станет тейком а тейк стопом") — off by default; see execute_autotrade()'s own docstring for the exact mechanics
 LSW_ALL_IN_ENABLED = os.environ.get("VP_LSW_ALL_IN", "0") == "1"  # v0.99.294 — per direct user request ("добавь / проверь на галочку вабанк... торгуется на весь депо"), same mechanism as MSNR_ALL_IN_ENABLED's own (v0.99.157) — ignores AUTOTRADE_RISK_PCT_OF_BALANCE, uses LSW_ALL_IN_MARGIN_PCT of total equity as margin instead. Leverage is still auto-computed from the signal's own SL distance (same liquidation safety). Off by default.
 LSW_ALL_IN_MARGIN_PCT = float(os.environ.get("VP_LSW_ALL_IN_MARGIN_PCT", 95.0))
-AUTOTRADE_INVERT_NEURO = os.environ.get("VP_AUTOTRADE_INVERT_NEURO", "0") == "1"  # same as AUTOTRADE_INVERT_LSW, for Neuro
+AUTOTRADE_INVERT_NEURO = False  # v0.99.391 — feature removed, always off  # same as AUTOTRADE_INVERT_LSW, for Neuro
 AUTOTRADE_ENABLED_SNR = os.environ.get("VP_AUTOTRADE_SNR", "0") == "1"  # v0.99.271, per direct user request for live signals — same off-by-default, opt-in pattern as every other module's own toggle
 AUTOTRADE_LEVERAGE_SNR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SNR", 10))  # only the paper simulator's own fallback leverage, real orders go through execute_autotrade()'s automatic risk-based sizing
-AUTOTRADE_INVERT_SNR = os.environ.get("VP_AUTOTRADE_INVERT_SNR", "0") == "1"  # same as AUTOTRADE_INVERT_LSW/NEURO, for S/R Zones
+AUTOTRADE_INVERT_SNR = False  # v0.99.391 — feature removed, always off  # same as AUTOTRADE_INVERT_LSW/NEURO, for S/R Zones
 SNR_ALL_IN_ENABLED = os.environ.get("VP_SNR_ALL_IN", "0") == "1"  # v0.99.294 — same mechanism as MSNR_ALL_IN_ENABLED/LSW_ALL_IN_ENABLED's own, for S/R Zones. Off by default.
 SNR_ALL_IN_MARGIN_PCT = float(os.environ.get("VP_SNR_ALL_IN_MARGIN_PCT", 95.0))
 TELEGRAM_ALERTS_SNR = os.environ.get("VP_TG_ALERTS_SNR", "1") == "1"
 AUTOTRADE_ENABLED_PRV = os.environ.get("VP_AUTOTRADE_PRV", "0") == "1"  # v0.99.280, per direct user request for Peak Reversal live trading — same off-by-default, opt-in pattern as every other module's own toggle
 AUTOTRADE_LEVERAGE_PRV = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_PRV", 10))  # only the paper simulator's own fallback leverage, real orders go through execute_autotrade()'s automatic risk-based sizing
-AUTOTRADE_INVERT_PRV = os.environ.get("VP_AUTOTRADE_INVERT_PRV", "0") == "1"  # same as AUTOTRADE_INVERT_LSW/NEURO/SNR
+AUTOTRADE_INVERT_PRV = False  # v0.99.391 — feature removed, always off  # same as AUTOTRADE_INVERT_LSW/NEURO/SNR
 PRV_ALL_IN_ENABLED = os.environ.get("VP_PRV_ALL_IN", "0") == "1"  # v0.99.294 — same mechanism as MSNR_ALL_IN_ENABLED/LSW_ALL_IN_ENABLED/SNR_ALL_IN_ENABLED's own, for Peak Reversal. Off by default.
 PRV_ALL_IN_MARGIN_PCT = float(os.environ.get("VP_PRV_ALL_IN_MARGIN_PCT", 95.0))
 TELEGRAM_ALERTS_PRV = os.environ.get("VP_TG_ALERTS_PRV", "1") == "1"
@@ -1131,9 +1131,9 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "prv_single_best_enabled", "snr_single_best_enabled", "neuro_autotrade_selected_only", "neuro_extra_conds_enabled", "neuro_trade_filter_enabled", "calc_workers", "calc_workers_boost", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "neuro_min_winrate", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "autotrade_invert_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "autotrade_invert_prv", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "neuro_min_winrate", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "autotrade_invert_lsw", "autotrade_invert_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled", "lsw_all_in_enabled", "snr_all_in_enabled", "prv_all_in_enabled",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled", "lsw_all_in_enabled", "snr_all_in_enabled", "prv_all_in_enabled",
                   "autotrade_risk_pct",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   "lsw_rr", "lsw_equal_tolerance_pct",
@@ -1181,14 +1181,12 @@ def get_settings():
         "snr_display_n": SNR_DISPLAY_N,
         "telegram_alerts_snr": TELEGRAM_ALERTS_SNR,
         "autotrade_snr": AUTOTRADE_ENABLED_SNR,
-        "autotrade_invert_snr": AUTOTRADE_INVERT_SNR,
         "prv_enabled": PRV_ENABLED,
         "prv_top_n": PRV_TOP_N,
         "prv_single_best_enabled": PRV_SINGLE_BEST_ENABLED,
         "prv_display_n": PRV_DISPLAY_N,
         "telegram_alerts_prv": TELEGRAM_ALERTS_PRV,
         "autotrade_prv": AUTOTRADE_ENABLED_PRV,
-        "autotrade_invert_prv": AUTOTRADE_INVERT_PRV,
         "neuro_top_n": NEURO_TOP_N,
         "neuro_display_n": NEURO_DISPLAY_N,
         "neuro_min_winrate": NEURO_MIN_WINRATE,
@@ -1243,8 +1241,6 @@ def get_settings():
         "autotrade_mirror": AUTOTRADE_ENABLED_MIRROR,
         "autotrade_lsw": AUTOTRADE_ENABLED_LSW,
         "autotrade_neuro": AUTOTRADE_ENABLED_NEURO,
-        "autotrade_invert_lsw": AUTOTRADE_INVERT_LSW,
-        "autotrade_invert_neuro": AUTOTRADE_INVERT_NEURO,
         "scalp_min_rr": SCALP_MIN_RR,
         "scalp_sl_buffer_mult": SCALP_SL_BUFFER_MULT,
     }
@@ -1259,12 +1255,12 @@ def apply_settings(updates):
     global VOLUME_PROFILE_ENABLED, BOUNCE_ENABLED, BREAKOUT_ENABLED, SCALP_ENABLED, SCALP_SIGNALS_ENABLED, FT5_ENABLED, FT5_INVERT_SIGNALS, FT5_HTF_FILTER_ENABLED, FT5_SESSION_FILTER_ENABLED, MSNR_ENABLED, MSNR_MAX_RR, MSNR_ADDON_ENABLED, MSNR_MIN_RR_FILTER_ENABLED, MSNR_HTF_FILTER_ENABLED, MSNR_PER_SYMBOL_FILTERS_ENABLED, HOURLY_STATS_ENABLED
     global MIRROR_ENABLED, MIRROR_RR, MIRROR_TOUCH_TOLERANCE_PCT, MIRROR_PATTERN_TOLERANCE_PCT, MIRROR_AUTOTUNE_TOLERANCE_ENABLED
     global MIRROR_VOLUME_FILTER_ENABLED, MIRROR_HTF_FILTER_ENABLED
-    global EMA_TOUCH_ENABLED, AMD_ENABLED, NEURO_ENABLED, NEURO_TOP_N, NEURO_DISPLAY_N, NEURO_MIN_WINRATE, _neuro_active_symbols, _neuro_display_symbols, SNR_ENABLED, SNR_TOP_N, SNR_DISPLAY_N, _snr_active_symbols, _snr_display_symbols, TELEGRAM_ALERTS_SNR, AUTOTRADE_ENABLED_SNR, AUTOTRADE_INVERT_SNR, PRV_ENABLED, PRV_TOP_N, PRV_DISPLAY_N, _prv_active_symbols, _prv_display_symbols, TELEGRAM_ALERTS_PRV, AUTOTRADE_ENABLED_PRV, AUTOTRADE_INVERT_PRV, NQ_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
+    global EMA_TOUCH_ENABLED, AMD_ENABLED, NEURO_ENABLED, NEURO_TOP_N, NEURO_DISPLAY_N, NEURO_MIN_WINRATE, _neuro_active_symbols, _neuro_display_symbols, SNR_ENABLED, SNR_TOP_N, SNR_DISPLAY_N, _snr_active_symbols, _snr_display_symbols, TELEGRAM_ALERTS_SNR, AUTOTRADE_ENABLED_SNR, PRV_ENABLED, PRV_TOP_N, PRV_DISPLAY_N, _prv_active_symbols, _prv_display_symbols, TELEGRAM_ALERTS_PRV, AUTOTRADE_ENABLED_PRV, NQ_ENABLED, LSW_ENABLED, LSW_RR, LSW_EQUAL_TOLERANCE_PCT, LSW_HTF_FILTER_ENABLED
     global LSW_STRUCTURAL_CAP_ENABLED, LSW_ENTRY_CONFIRM_ENABLED, LSW_DIRECTION_FILTER_ENABLED, LSW_VOLUME_FILTER_ENABLED
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED, LSW_ATR_SWEEP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_EMA_BULL, TELEGRAM_ALERTS_AMD, TELEGRAM_ALERTS_NEURO, TELEGRAM_ALERTS_NEURO_SUMMARY, TELEGRAM_ALERTS_NQ, TELEGRAM_ALERTS_NETWORK
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, AUTOTRADE_ENABLED_NEURO, AUTOTRADE_INVERT_LSW, AUTOTRADE_INVERT_NEURO, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED, MSNR_SINGLE_BEST_ENABLED, LSW_ALL_IN_ENABLED, SNR_ALL_IN_ENABLED, PRV_ALL_IN_ENABLED
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, AUTOTRADE_ENABLED_NEURO, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED, MSNR_SINGLE_BEST_ENABLED, LSW_ALL_IN_ENABLED, SNR_ALL_IN_ENABLED, PRV_ALL_IN_ENABLED
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = False   # v0.99.341 — Volume removed per user ("из настроек volume можно убрать"); can't be switched back on
@@ -1342,8 +1338,6 @@ def apply_settings(updates):
         TELEGRAM_ALERTS_SNR = bool(updates["telegram_alerts_snr"])
     if "autotrade_snr" in updates:
         AUTOTRADE_ENABLED_SNR = bool(updates["autotrade_snr"])
-    if "autotrade_invert_snr" in updates:
-        AUTOTRADE_INVERT_SNR = bool(updates["autotrade_invert_snr"])
     if "neuro_autotrade_selected_only" in updates:   # v0.99.384
         globals()["NEURO_AUTOTRADE_SELECTED_ONLY"] = bool(updates["neuro_autotrade_selected_only"])
     if "snr_single_best_enabled" in updates:   # v0.99.382
@@ -1388,8 +1382,6 @@ def apply_settings(updates):
         TELEGRAM_ALERTS_PRV = bool(updates["telegram_alerts_prv"])
     if "autotrade_prv" in updates:
         AUTOTRADE_ENABLED_PRV = bool(updates["autotrade_prv"])
-    if "autotrade_invert_prv" in updates:
-        AUTOTRADE_INVERT_PRV = bool(updates["autotrade_invert_prv"])
     if "prv_single_best_enabled" in updates:   # v0.99.379
         globals()["PRV_SINGLE_BEST_ENABLED"] = bool(updates["prv_single_best_enabled"])
     if "prv_top_n" in updates:
@@ -1642,10 +1634,6 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_LSW = bool(updates["autotrade_lsw"])
     if "autotrade_neuro" in updates:
         AUTOTRADE_ENABLED_NEURO = bool(updates["autotrade_neuro"])
-    if "autotrade_invert_lsw" in updates:
-        AUTOTRADE_INVERT_LSW = bool(updates["autotrade_invert_lsw"])
-    if "autotrade_invert_neuro" in updates:
-        AUTOTRADE_INVERT_NEURO = bool(updates["autotrade_invert_neuro"])
     if "telegram_alerts_hourly" in updates:
         TELEGRAM_ALERTS_HOURLY = bool(updates["telegram_alerts_hourly"])
     if "scalp_min_rr" in updates:
@@ -4938,8 +4926,10 @@ def _execute_autotrade_impl(mode, symbol, direction, entry, sl, tp, extra=None, 
     # Reversal silently did nothing at all — the setting saved fine,
     # the checkbox showed as on, but every real order still went out
     # in the ORIGINAL (non-inverted) direction.
-    inverted = ((mode == "lsw" and AUTOTRADE_INVERT_LSW) or (mode == "neuro" and AUTOTRADE_INVERT_NEURO)
-                or (mode == "snr" and AUTOTRADE_INVERT_SNR) or (mode == "prv" and AUTOTRADE_INVERT_PRV))
+    # v0.99.391 — "Инвертировать открытие" removed (user: "надо вообще убрать
+    # эти обратные стороны для торговли"): real orders always go in the
+    # signal's own direction, whatever an old settings file says.
+    inverted = False
     if inverted:
         direction = "SHORT" if direction == "LONG" else "LONG"
         sl, tp = tp, sl
@@ -25282,13 +25272,6 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeLsw"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳↳ Инвертировать открытие (Sweep)</div>
-          <div class="sub">анализ, сигналы, статистика — всё остаётся как есть. Только на бирже реально открывается обратное направление, старый стоп становится тейком и наоборот</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeInvertLsw"><span class="switchSlider"></span></label>
-      </div>
       <div class="settingRow">
         <div>
           <div class="label">↳↳ Ва-банк (Sweep)</div>
@@ -25310,26 +25293,12 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setNeuroAutotradeSelectedOnly"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳↳ Инвертировать открытие (Neuro)</div>
-          <div class="sub">то же самое, что и для Sweep выше — на бирже реально открывается обратное направление, старый стоп становится тейком и наоборот</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeInvertNeuro"><span class="switchSlider"></span></label>
-      </div>
       <div class="settingRow">
         <div>
           <div class="label">↳ S/R Zones</div>
           <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча и размера позиции, что и у остальных режимов</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeSnr"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳↳ Инвертировать открытие (S/R)</div>
-          <div class="sub">то же самое, что и для Sweep/Neuro выше — на бирже реально открывается обратное направление, старый стоп становится тейком и наоборот</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeInvertSnr"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -25344,13 +25313,6 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча и размера позиции, что и у остальных режимов</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradePrv"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳↳ Инвертировать открытие (Peak Reversal)</div>
-          <div class="sub">то же самое, что и для Sweep/Neuro/S&R выше — на бирже реально открывается обратное направление, старый стоп становится тейком и наоборот</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeInvertPrv"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -28601,12 +28563,8 @@ const setInputs = {
   autotrade_lsw: document.getElementById('setAutotradeLsw'),
   autotrade_neuro: document.getElementById('setAutotradeNeuro'),
   neuro_autotrade_selected_only: document.getElementById('setNeuroAutotradeSelectedOnly'),
-  autotrade_invert_lsw: document.getElementById('setAutotradeInvertLsw'),
-  autotrade_invert_neuro: document.getElementById('setAutotradeInvertNeuro'),
   autotrade_snr: document.getElementById('setAutotradeSnr'),
-  autotrade_invert_snr: document.getElementById('setAutotradeInvertSnr'),
   autotrade_prv: document.getElementById('setAutotradePrv'),
-  autotrade_invert_prv: document.getElementById('setAutotradeInvertPrv'),
 };
 
 const setValueInputs = {
