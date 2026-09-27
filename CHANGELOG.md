@@ -18058,3 +18058,7 @@ v0.99.406 - Screensaver: red outline around the clock while the phone is not
          (termux-battery-status, cached 30 s, then /sys); unknown state = no
          outline. Screensaver background is solid black again (the glass
          theme made var(--bg) translucent).
+v0.99.407 - Screensaver: "Автоскринсейвер через 20 секунд" switch in
+         Settings -> Оформление (per device): the clock starts by itself after
+         20 s without touching the screen. Exit now needs a double tap (two
+         taps within 0.45 s), so a stray touch doesn't close it.

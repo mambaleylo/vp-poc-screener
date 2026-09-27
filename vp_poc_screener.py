@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.406"
+APP_VERSION = "0.99.407"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22288,6 +22288,13 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setGlassTheme" onchange="setGlassTheme(this.checked)"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingRow">
+        <div>
+          <div class="name">Автоскринсейвер через 20 секунд</div>
+          <div class="sub">часы включаются сами, если 20 секунд не трогать экран (выход — двойное касание). Хранится на этом устройстве</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutoSs" onchange="setAutoScreensaver(this.checked)"><span class="switchSlider"></span></label>
+      </div>
     </div></details>
 
 
@@ -26340,12 +26347,22 @@ async function toggleScreensaver() {
     _ssStartBattery();   // v0.99.406
   } else {
     clearInterval(_ssBatTimer);
+    setTimeout(_ssAutoArm, 0);   // v0.99.407
     overlay.style.display = 'none';
     clearInterval(_ssMoveTimer);
     clearInterval(_ssPosTimer);
     if (document.fullscreenElement) try { document.exitFullscreen(); } catch(e) {}
     if (_ssWakeLock) { try { _ssWakeLock.release(); } catch(e) {} _ssWakeLock = null; }
   }
+}
+
+// v0.99.407 — per user: exit on a DOUBLE tap only, so a stray touch
+// doesn't close the screensaver
+let _ssLastTap = 0;
+function _ssTap() {
+  const now = Date.now();
+  if (now - _ssLastTap < 450) { _ssLastTap = 0; if (_ssActive) toggleScreensaver(); }
+  else _ssLastTap = now;
 }
 
 function _ssTick() {
@@ -26416,7 +26433,34 @@ function _ssMove() {
   clock.style.top  = y + 'px';
 }
 
+// v0.99.407 — auto screensaver after 20 s without touching the screen
+// (per device). Started without a tap, the browser won't allow fullscreen —
+// the overlay still covers the whole page and keeps the screen awake.
+const SS_AUTO_MS = 20000;
+let _ssAutoOn = false, _ssAutoTimer = null;
+function _ssAutoArm() {
+  clearTimeout(_ssAutoTimer);
+  if (!_ssAutoOn || _ssActive) return;
+  _ssAutoTimer = setTimeout(() => {
+    if (_ssAutoOn && !_ssActive && document.visibilityState === 'visible') toggleScreensaver();
+  }, SS_AUTO_MS);
+}
+function setAutoScreensaver(on) {
+  _ssAutoOn = !!on;
+  try { localStorage.setItem('vp_auto_ss', on ? '1' : '0'); } catch (e) {}
+  _ssAutoArm();
+}
+['pointerdown', 'keydown', 'wheel', 'touchstart', 'scroll'].forEach(ev =>
+  window.addEventListener(ev, () => { if (!_ssActive) _ssAutoArm(); }, {passive: true, capture: true}));
+(function() {
+  try { _ssAutoOn = localStorage.getItem('vp_auto_ss') === '1'; } catch (e) {}
+  const cb = document.getElementById('setAutoSs');
+  if (cb) cb.checked = _ssAutoOn;
+  _ssAutoArm();
+})();
+
 document.addEventListener('visibilitychange', async () => {
+  if (document.visibilityState === 'visible') _ssAutoArm();   // v0.99.407
   if (_ssActive && document.visibilityState === 'visible' && !_ssWakeLock) {
     try { _ssWakeLock = await navigator.wakeLock.request('screen'); } catch(e) {}
   }
@@ -26431,7 +26475,7 @@ document.addEventListener('fullscreenchange', () => {
   #screensaverClock { padding:10px 16px; border:2px solid transparent; border-radius:14px; transition:color 0.5s, border-color 0.5s; }
   #screensaverClock.ssNoCharge { border-color:#ff3b30; }
 </style>
-<div id="screensaverOverlay" style="display:none;position:fixed;inset:0;background:#000;z-index:9999;cursor:pointer;" onclick="toggleScreensaver()" title="нажмите чтобы выйти">
+<div id="screensaverOverlay" style="display:none;position:fixed;inset:0;background:#000;z-index:9999;cursor:pointer;touch-action:manipulation;user-select:none;" onclick="_ssTap()" title="двойное касание — выход">
   <div id="screensaverClock" style="position:absolute;font-family:monospace;font-weight:100;user-select:none;">
     <div id="screensaverTime" style="font-size:48px;line-height:1;letter-spacing:4px;"></div>
   </div>
