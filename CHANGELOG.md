@@ -18045,3 +18045,9 @@ v0.99.404 - Neuro mining used few cores ("ядер: 0 из 8, 1 из 8"): the co
          run with N + N/2 threads, so some coins download while others
          compute (a coin waits for a free core, the cores limit still holds).
          The status line shows "📥 скачивают данные: K" next to the cores.
+v0.99.405 - Liquid Glass theme (on by default, switch in Settings ->
+         "🎨 Оформление", stored per device): translucent colour tokens over a
+         fixed blurred colour field, glass header / floating tab capsule with
+         backdrop blur, specular highlights on cards, settings groups, pills,
+         buttons and switches, larger radii. Backdrop blur only on the fixed
+         layers (phone GPU). Removed the empty leftover "MSNR" settings group.

@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.404"
+APP_VERSION = "0.99.405"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22027,6 +22027,81 @@ INDEX_HTML = """<!doctype html>
   input:checked + .switchSlider:before { transform:translateX(18px); }
   input:disabled + .switchSlider { opacity:.4; }
 
+  /* ---------- v0.99.405 — Liquid Glass theme (body.glass) ----------
+     Translucent layers over a fixed colour field: the colour tokens become
+     semi-transparent, so every inline-styled card follows automatically.
+     Real backdrop blur only on the few fixed layers (header, tabs, modal
+     bars) — blurring every card is too heavy for a phone GPU, and over the
+     already-soft background it would look the same. */
+  body.glass {
+    --bg:rgba(8,10,20,.72); --bg-2:rgba(255,255,255,.05);
+    --card:rgba(255,255,255,.065); --inset:rgba(255,255,255,.04);
+    --ctl:rgba(255,255,255,.10); --ctl-2:rgba(255,255,255,.17);
+    --line:rgba(255,255,255,.09); --line-2:rgba(255,255,255,.16);
+    --tx:#f3f5fa; --tx-2:#b9c2d3; --tx-3:#8390a6;
+    --r-xs:8px; --r-sm:12px; --r:16px; --r-lg:22px;
+    --glass-hi:inset 0 1px 0 rgba(255,255,255,.22), inset 0 -1px 0 rgba(255,255,255,.05);
+    --glass-sh:0 10px 30px rgba(0,0,0,.35);
+    background:#060812;
+  }
+  body.glass::before {
+    content:""; position:fixed; inset:-20%; z-index:-1; pointer-events:none;
+    background:
+      radial-gradient(38% 30% at 18% 12%, rgba(183,148,255,.42), transparent 70%),
+      radial-gradient(34% 28% at 88% 22%, rgba(46,197,217,.34), transparent 70%),
+      radial-gradient(40% 32% at 70% 78%, rgba(255,169,77,.26), transparent 70%),
+      radial-gradient(36% 30% at 12% 82%, rgba(124,177,255,.30), transparent 70%),
+      #060812;
+    filter:blur(30px) saturate(140%);
+  }
+  body.glass header {
+    margin:6px 6px 0; border:1px solid var(--line-2); border-radius:var(--r-lg);
+    background:linear-gradient(135deg, rgba(255,255,255,.12), rgba(255,255,255,.04));
+    backdrop-filter:blur(22px) saturate(170%); -webkit-backdrop-filter:blur(22px) saturate(170%);
+    box-shadow:var(--glass-hi), var(--glass-sh);
+  }
+  body.glass .tabs {
+    margin:6px 6px 0; top:6px; border:1px solid var(--line-2); border-radius:999px;
+    background:linear-gradient(135deg, rgba(255,255,255,.14), rgba(255,255,255,.05)), rgba(12,14,28,.72);
+    backdrop-filter:blur(22px) saturate(170%); -webkit-backdrop-filter:blur(22px) saturate(170%);
+    box-shadow:var(--glass-hi), var(--glass-sh);
+  }
+  body.glass .tab.active {
+    background:linear-gradient(180deg, rgba(255,255,255,.26), rgba(255,255,255,.10));
+    border-color:rgba(255,255,255,.28); box-shadow:inset 0 1px 0 rgba(255,255,255,.35), 0 2px 8px rgba(0,0,0,.25);
+  }
+  body.glass .panel { padding:6px 8px 24px; }
+  /* cards / panels that use the card or inset token inline */
+  body.glass [style*="background:var(--card)"], body.glass .sigList, body.glass .settingsGroup,
+  body.glass div.hint-block, body.glass #hdrActions {
+    background:linear-gradient(135deg, rgba(255,255,255,.10), rgba(255,255,255,.035)) !important;
+    border-color:var(--line-2) !important;
+    box-shadow:var(--glass-hi), 0 6px 20px rgba(0,0,0,.28);
+  }
+  body.glass [style*="background:var(--inset)"] { box-shadow:inset 0 1px 0 rgba(255,255,255,.08); }
+  body.glass #hdrBtns button, body.glass .pill, body.glass #globalErrorsBox > summary, body.glass #riskAutotuneBox > summary,
+  body.glass #closeBtn, body.glass #msnrCloseBtn, body.glass #ft5CloseBtn, body.glass #vgiCloseBtn, body.glass #settingsCloseBtn, body.glass #optimizeBtn {
+    background-image:linear-gradient(180deg, rgba(255,255,255,.16), rgba(255,255,255,.04));
+    box-shadow:inset 0 1px 0 rgba(255,255,255,.25);
+  }
+  body.glass #hdrBtns button, body.glass #closeBtn, body.glass #settingsCloseBtn { border-radius:999px; }
+  body.glass #modal, body.glass #msnrModal, body.glass #ft5Modal, body.glass #vgiModal, body.glass #settingsModal {
+    background:rgba(6,8,18,.86); backdrop-filter:blur(30px) saturate(160%); -webkit-backdrop-filter:blur(26px) saturate(160%);
+  }
+  body.glass #modalHeader, body.glass #msnrModalHeader, body.glass #ft5ModalHeader, body.glass #vgiModalHeader, body.glass #settingsModalHeader {
+    background:linear-gradient(180deg, rgba(255,255,255,.10), rgba(255,255,255,.03));
+    box-shadow:inset 0 -1px 0 rgba(255,255,255,.06);
+  }
+  body.glass #settingsSearchWrap { background:transparent; backdrop-filter:blur(18px); -webkit-backdrop-filter:blur(18px); }
+  body.glass .switchSlider { background:rgba(255,255,255,.16); box-shadow:inset 0 1px 2px rgba(0,0,0,.35); }
+  body.glass .switchSlider:before { background:linear-gradient(180deg,#fff,#e6e9f0); box-shadow:0 2px 6px rgba(0,0,0,.35), inset 0 -1px 0 rgba(0,0,0,.08); }
+  body.glass input:checked + .switchSlider { background:linear-gradient(180deg, #4ade9f, #22b07d); }
+  body.glass th { background:rgba(10,12,24,.85); }
+  body.glass canvas { background:rgba(0,0,0,.28); }
+  @media (max-width: 640px) {
+    body.glass th:first-child, body.glass td:first-child { background:rgba(12,14,26,.92); }
+  }
+
   /* ---------- phone ---------- */
   @media (max-width: 640px) {
     header { padding:8px 8px 6px; }
@@ -22161,6 +22236,15 @@ INDEX_HTML = """<!doctype html>
     <div id="settingsSearchWrap">
       <input type="text" id="settingsSearch" placeholder="Поиск по настройкам…">
     </div>
+    <details class="settingsGroup" style="--mod-color:var(--acc);" open><summary class="settingsGroupTitle">🎨 Оформление</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="name">Liquid Glass</div>
+          <div class="sub">полупрозрачные «стеклянные» панели и карточки с бликами поверх цветного фона. Выкл — прежний тёмный вид. Хранится на этом устройстве</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setGlassTheme" onchange="setGlassTheme(this.checked)"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
 
 
     <details class="settingsGroup" style="--mod-color:var(--neuro);"><summary class="settingsGroupTitle">⚙️ Производительность и фильтр Neuro</summary><div class="settingsGroupBody">
@@ -22185,9 +22269,6 @@ INDEX_HTML = """<!doctype html>
         </div>
         <input type="number" id="setCalcWorkersBoost" min="0" max="8" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
-    </div></details>
-    <details class="settingsGroup" style="--mod-color:#ff7043;" data-warn style="background:rgba(255,112,67,0.05);"><summary class="settingsGroupTitle" style="color:var(--warn);">MSNR ⚠️ Экспериментально</summary><div class="settingsGroupBody">
-      
     </div></details>
 
 
@@ -22515,6 +22596,18 @@ function toggleHints() {
   document.getElementById('hintsToggleBtn').style.opacity = hidden ? '0.4' : '1';
   localStorage.setItem('vp_hints_hidden', hidden ? '1' : '0');
 }
+// v0.99.405 — Liquid Glass theme, per device (on by default)
+function setGlassTheme(on) {
+  document.body.classList.toggle('glass', !!on);
+  try { localStorage.setItem('vp_glass', on ? '1' : '0'); } catch (e) {}
+}
+(function() {
+  let on = true;
+  try { on = localStorage.getItem('vp_glass') !== '0'; } catch (e) {}
+  document.body.classList.toggle('glass', on);
+  const cb = document.getElementById('setGlassTheme');
+  if (cb) cb.checked = on;
+})();
 // restore preference on load
 (function() {
   if (localStorage.getItem('vp_hints_hidden') === '1') {
