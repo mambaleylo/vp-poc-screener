@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Sweep: какие изменения стратегии реально помогают — на РЕАЛЬНЫХ данных Gate.
 
-Запуск (в Termux, из папки где лежит vp_poc_screener.py):
-    python tools/compare_sweep_variants.py [МОНЕТА ...]
+Запуск (в Termux): положите файл рядом с vp_poc_screener.py и
+    python compare_sweep_variants.py [МОНЕТА ...]
 
 Без списка монет берутся 30 самых ликвидных фьючерсов Gate. Ничего не торгует
 и не пишет в состояние сервера. 1h, 365 дней, одна позиция на монету.
@@ -30,9 +30,11 @@ import sys
 import time
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-MAIN = os.path.join(HERE, "..", "vp_poc_screener.py")
-if not os.path.exists(MAIN):
-    MAIN = os.path.join(os.getcwd(), "vp_poc_screener.py")
+# vp_poc_screener.py next to this script, one folder up (repo layout), or in the current folder
+MAIN = next((p for p in (os.path.join(HERE, "vp_poc_screener.py"), os.path.join(HERE, "..", "vp_poc_screener.py"),
+                         os.path.join(os.getcwd(), "vp_poc_screener.py")) if os.path.exists(p)), None)
+if MAIN is None:
+    sys.exit("не найден vp_poc_screener.py — положите этот скрипт в ту же папку, где он лежит")
 
 DAYS = 365
 TRAIN_FRAC = 0.7
