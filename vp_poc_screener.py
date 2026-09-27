@@ -21,6 +21,7 @@ import os
 import json
 import time
 import math
+import statistics   # v0.99.398 — NormalDist for the S/R Bonferroni z
 import re
 import struct
 import sys
@@ -58,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.397"
+APP_VERSION = "0.99.398"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -844,7 +845,7 @@ MIRROR_LIVE_MIN_WINRATE = float(os.environ.get("VP_MIRROR_LIVE_MIN_WINRATE", 38.
 # торговлю как и везде, тоже с риском 2%") — same execute_autotrade()/
 # sim_execute_trade() pattern, same 2% base risk (AUTOTRADE_RISK_PCT_
 # OF_BALANCE), every other module already uses. Off by default either way.
-LSW_ENABLED = os.environ.get("VP_LSW_ENABLED", "0") == "1"  # off by default, same reasoning as every other new module here — user opts in after seeing real backtest numbers
+LSW_ENABLED = False  # v0.99.398 — Sweep removed (user: "выключи, убери из программы"): every tested variant lost on real Gate data (1h: z -3..-8; 4h: ~0). Loops are not started and its settings/UI are gone; the functions stay because MSNR shares lsw_htf_bias_series() and old signal records reference them. Original:  # off by default, same reasoning as every other new module here — user opts in after seeing real backtest numbers
 LSW_INTERVAL = os.environ.get("VP_LSW_INTERVAL", "4h")  # v0.99.397 — was 1h: on real Gate data (tools/compare_sweep_variants.py, 29 coins x 365 days) every 1h variant lost on the honest test (all coins -0.10..-0.34R/trade after fees, z -3..-8) — the tight wick stop made fees a big share of R. User: "давай совсем тогда выполним переход на 4h, текущий вариант уберем"
 LSW_PIVOT_LEFT = int(os.environ.get("VP_LSW_PIVOT_LEFT", 3))
 LSW_PIVOT_RIGHT = int(os.environ.get("VP_LSW_PIVOT_RIGHT", 3))
@@ -877,7 +878,7 @@ LSW_REFRESH_SEC = int(os.environ.get("VP_LSW_REFRESH_SEC", 3600))
 LSW_SCAN_INTERVAL_SEC = int(os.environ.get("VP_LSW_SCAN_INTERVAL_SEC", 300))
 LSW_LIVE_MIN_SAMPLE = int(os.environ.get("VP_LSW_LIVE_MIN_SAMPLE", 30))  # a symbol needs at least this many CLOSED backtest trades before its live signals are trusted — deliberately lower than MIRROR_LIVE_MIN_SAMPLE (80) since this is a brand-new module with far less accumulated real-world validation than MIRROR had by the time IT got autotrade wired; kept at 30 rather than raised to 80 on v0.99.120's autotrade wiring since the user didn't ask for that specific change — worth revisiting once real forward data accumulates
 LSW_LIVE_MIN_WINRATE = float(os.environ.get("VP_LSW_LIVE_MIN_WINRATE", 50.0))  # raised 35->50, v0.99.138, per direct user request ("Подними порог для авто торговли 50% для монеты")
-AUTOTRADE_ENABLED_LSW = os.environ.get("VP_AUTOTRADE_LSW", "0") == "1"  # v0.99.120, per direct user request ("надо живые сигналы сделать и авто торговлю как и везде, тоже с риском 2%") — off by default like every other module's own autotrade toggle, opt-in via settings
+AUTOTRADE_ENABLED_LSW = False  # v0.99.398 — Sweep removed. Original:  # v0.99.120, per direct user request ("надо живые сигналы сделать и авто торговлю как и везде, тоже с риском 2%") — off by default like every other module's own autotrade toggle, opt-in via settings
 AUTOTRADE_LEVERAGE_LSW = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_LSW", 10))  # only used by sim_execute_trade()'s own separate paper-balance simulator (deliberately left on its own old leverage/size system, same as every other module) — execute_autotrade() itself computes real leverage automatically per-trade, same risk-based sizing every module shares (see execute_autotrade()'s own docstring)
 AUTOTRADE_ENABLED_NEURO = os.environ.get("VP_AUTOTRADE_NEURO", "0") == "1"  # v0.99.245, per direct user request ("надо сделать как в свип, настройки такие же, процент из настроек, расчет до ликвидации и ТП все так же") — same off-by-default, opt-in pattern as every other module's own toggle
 AUTOTRADE_LEVERAGE_NEURO = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_NEURO", 10))  # same role as AUTOTRADE_LEVERAGE_LSW — only the paper simulator's own fallback leverage, real orders go through execute_autotrade()'s automatic risk-based sizing
@@ -1139,12 +1140,11 @@ CREDENTIALS_FILE = os.environ.get(
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_credentials.json"),
 )
 SETTINGS_KEYS = ("volume_profile_enabled", "prv_single_best_enabled", "snr_single_best_enabled", "neuro_autotrade_selected_only", "neuro_extra_conds_enabled", "neuro_trade_filter_enabled", "calc_workers", "calc_workers_boost", "bounce_enabled", "breakout_enabled",
-                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "neuro_min_winrate", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "nq_enabled", "lsw_enabled", "lsw_htf_filter_enabled", "lsw_structural_cap_enabled", "lsw_volume_filter_enabled", "lsw_fvg_filter_enabled", "lsw_session_filter_enabled", "lsw_min_touches_enabled", "lsw_candle_structure_filter_enabled", "lsw_atr_sweep_enabled", "lsw_entry_confirm_enabled", "lsw_direction_filter_enabled", "hourly_stats_enabled", "telegram_enabled",
-                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_lsw", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_lsw", "autotrade_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled", "lsw_all_in_enabled", "snr_all_in_enabled", "prv_all_in_enabled",
+                  "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "msnr_enabled", "msnr_addon_enabled", "msnr_min_rr_filter_enabled", "msnr_htf_filter_enabled", "msnr_per_symbol_filters_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "neuro_top_n", "neuro_display_n", "neuro_min_winrate", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "nq_enabled", "hourly_stats_enabled", "telegram_enabled",
+                  "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_msnr", "telegram_alerts_mirror", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_msnr", "autotrade_mirror", "autotrade_neuro", "msnr_all_in_enabled", "msnr_single_best_enabled", "snr_all_in_enabled", "prv_all_in_enabled",
                   "autotrade_risk_pct",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
-                  "lsw_rr", "lsw_equal_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
                   # same save_settings() path everything else already uses,
@@ -1199,19 +1199,6 @@ def get_settings():
         "neuro_display_n": NEURO_DISPLAY_N,
         "neuro_min_winrate": NEURO_MIN_WINRATE,
         "nq_enabled": NQ_ENABLED,
-        "lsw_enabled": LSW_ENABLED,
-        "lsw_rr": LSW_RR,
-        "lsw_equal_tolerance_pct": LSW_EQUAL_TOLERANCE_PCT,
-        "lsw_htf_filter_enabled": LSW_HTF_FILTER_ENABLED,
-        "lsw_structural_cap_enabled": LSW_STRUCTURAL_CAP_ENABLED,
-        "lsw_volume_filter_enabled": LSW_VOLUME_FILTER_ENABLED,
-        "lsw_fvg_filter_enabled": LSW_FVG_FILTER_ENABLED,
-        "lsw_session_filter_enabled": LSW_SESSION_FILTER_ENABLED,
-        "lsw_min_touches_enabled": LSW_MIN_TOUCHES_ENABLED,
-        "lsw_candle_structure_filter_enabled": LSW_CANDLE_STRUCTURE_FILTER_ENABLED,
-        "lsw_atr_sweep_enabled": LSW_ATR_SWEEP_ENABLED,
-        "lsw_entry_confirm_enabled": LSW_ENTRY_CONFIRM_ENABLED,
-        "lsw_direction_filter_enabled": LSW_DIRECTION_FILTER_ENABLED,
         "msnr_max_rr": MSNR_MAX_RR,
         "msnr_enabled": MSNR_ENABLED,
         "msnr_addon_enabled": MSNR_ADDON_ENABLED,
@@ -1225,7 +1212,6 @@ def get_settings():
         "telegram_alerts_ft5": TELEGRAM_ALERTS_FT5,
         "telegram_alerts_msnr": TELEGRAM_ALERTS_MSNR,
         "telegram_alerts_mirror": TELEGRAM_ALERTS_MIRROR,
-        "telegram_alerts_lsw": TELEGRAM_ALERTS_LSW,
         "telegram_alerts_ema_bull": TELEGRAM_ALERTS_EMA_BULL,
         "telegram_alerts_amd": TELEGRAM_ALERTS_AMD,
         "telegram_alerts_neuro": TELEGRAM_ALERTS_NEURO,
@@ -1236,7 +1222,6 @@ def get_settings():
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
         "autotrade_risk_pct": AUTOTRADE_RISK_PCT_OF_BALANCE,
         "msnr_all_in_enabled": MSNR_ALL_IN_ENABLED,
-        "lsw_all_in_enabled": LSW_ALL_IN_ENABLED,
         "snr_all_in_enabled": SNR_ALL_IN_ENABLED,
         "prv_all_in_enabled": PRV_ALL_IN_ENABLED,
         "msnr_single_best_enabled": MSNR_SINGLE_BEST_ENABLED,
@@ -1247,7 +1232,6 @@ def get_settings():
         "autotrade_ft5": AUTOTRADE_ENABLED_FT5,
         "autotrade_msnr": AUTOTRADE_ENABLED_MSNR,
         "autotrade_mirror": AUTOTRADE_ENABLED_MIRROR,
-        "autotrade_lsw": AUTOTRADE_ENABLED_LSW,
         "autotrade_neuro": AUTOTRADE_ENABLED_NEURO,
         "scalp_min_rr": SCALP_MIN_RR,
         "scalp_sl_buffer_mult": SCALP_SL_BUFFER_MULT,
@@ -1702,7 +1686,7 @@ _credentials_lock = threading.Lock()
 # account's money.
 # Stored in their own file (chmod 600), separate from the main keys file.
 # ============================================================================
-MODULE_ACCOUNT_MODES = ("msnr", "neuro", "snr", "prv", "lsw")  # v0.99.336 — same order as the tabs
+MODULE_ACCOUNT_MODES = ("msnr", "neuro", "snr", "prv")  # v0.99.336 — same order as the tabs; v0.99.398 — Sweep removed
 MODULE_ACCOUNT_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal"}
 MODULE_CREDENTIALS_FILE = os.environ.get(
     "VP_MODULE_CREDENTIALS_FILE",
@@ -16740,7 +16724,7 @@ SNR_DISPLAY_N         = int(os.environ.get("VP_SNR_DISPLAY_N", 5))  # how many g
 SNR_TF_CANDIDATES     = ["1h", "4h", "1d"]  # per direct user request ("попробовать все фреймы")
 SNR_PIVOT_CANDIDATES  = [10, 15, 20]         # matches the Pine Script's own "Pivot Length" range
 SNR_STRENGTH_CANDIDATES = [1, 2, 3]          # matches the Pine Script's own "Strength" setting (1-4, capped here at 3 for a tractable sweep)
-SNR_RR_CANDIDATES     = [1.5, 2.0, 3.0]
+SNR_RR_CANDIDATES     = [1.5, 2.0, 3.0, 4.0, 5.0]   # v0.99.398 — 4 and 5 added (user); long holds are capped by max_hold_bars()
 SNR_SL_ATR_MULT       = 0.5                  # SL distance beyond the zone, in ATR units
 SNR_TOO_CLOSE_ATR_MULT = 1.0 / 8              # matches the Pine Script's own tooCloseATR constant — merges pivots too close to an existing active zone
 SNR_MAX_WAIT_BARS     = 48                   # same timeout convention as every other module's own backtest
@@ -16791,7 +16775,7 @@ SNR_POOLED_ENABLED    = os.environ.get("VP_SNR_POOLED", "1") == "1"
 SNR_POOLED_MIN_TRAIN  = int(os.environ.get("VP_SNR_POOLED_MIN_TRAIN", 100))    # pooled train trades a combo needs to be considered
 SNR_POOLED_MIN_TEST   = int(os.environ.get("VP_SNR_POOLED_MIN_TEST", 40))      # pooled test trades needed for the confirmation
 SNR_POOLED_MIN_COIN_TRAIN = int(os.environ.get("VP_SNR_POOLED_MIN_COIN_TRAIN", 5))   # a coin trades the combo only with >= this many own train trades and a positive own train result
-SNR_Z_CRITICAL        = 3.23  # v0.99.277 — Bonferroni-corrected one-tailed z-critical for SNR_N_COMBOS=81 independent comparisons at overall alpha=0.05 (alpha/81 per comparison ≈ 0.000617 -> z≈3.23, computed via the standard normal inverse CDF — hardcoded rather than adding scipy as a dependency, same "no scipy on a phone via Termux" reasoning _T_CRITICAL_TABLE's own comment already documents elsewhere in this file). See snr_optimize_symbol()'s own docstring for why a plain "average > 0" bar wasn't enough.
+SNR_Z_CRITICAL        = round(statistics.NormalDist().inv_cdf(1 - 0.05 / SNR_N_COMBOS), 2)  # v0.99.398 — computed from the combo count (135 with RR 4/5 -> ~3.37; was hardcoded 3.23 for 81). Original note: v0.99.277 — v0.99.277 — Bonferroni-corrected one-tailed z-critical for SNR_N_COMBOS=81 independent comparisons at overall alpha=0.05 (alpha/81 per comparison ≈ 0.000617 -> z≈3.23, computed via the standard normal inverse CDF — hardcoded rather than adding scipy as a dependency, same "no scipy on a phone via Termux" reasoning _T_CRITICAL_TABLE's own comment already documents elsewhere in this file). See snr_optimize_symbol()'s own docstring for why a plain "average > 0" bar wasn't enough.
 SNR_PER_SYMBOL_MAX_SEC = int(os.environ.get("VP_SNR_PER_SYMBOL_MAX_SEC", 300))  # v0.99.271 — hard ceiling per symbol now that the universe can be much bigger than 3 fixed coins, same "one stuck symbol can't block the whole cycle" discipline as every other module
 SNR_BACKTEST_TRIGGER  = threading.Event()  # v0.99.270 — per direct user request ("бэктест не идёт по индикатору, добавь кнопку перезапуска бэктеста принудительно как для нейро") — same "Очистить X doesn't wake the sleeping loop" fix as every other module's own trigger event
 _snr_active_symbols   = []  # v0.99.321 — filled only by the backtest ranking (no seed list)
@@ -16988,6 +16972,10 @@ def snr_simulate_trades(candles, pivot_length, min_strength, rr, sl_atr_mult=SNR
                     result, exit_price, exit_time, exit_j = "WIN", tp, b["time"], j
                     break
         pnl_r = rr if result == "WIN" else (-1.0 if result == "LOSS" else None)
+        if result == "TIMEOUT" and idx + max_wait_bars <= len(candles) - 1:   # v0.99.398 — max holding time: close at market
+            b = candles[idx + max_wait_bars]
+            result, exit_price, exit_time, exit_j = "TIME_EXIT", b["close"], b["time"], idx + max_wait_bars
+            pnl_r = round(time_exit_r(direction, entry, sl, b["close"]), 4)
         fee_r = trade_fee_r(entry, sl)   # v0.99.363
         trades.append({"time": candles[idx]["time"], "entry_time": entry_bar["time"], "fee_r": fee_r,
                         "pnl_r_net": round(pnl_r - fee_r, 4) if pnl_r is not None else None,
@@ -17009,24 +16997,70 @@ def trade_fee_r(entry, sl, fee_pct=None):
 
 
 def _z_vs_breakeven_with_fees(trades, rr):
-    """v0.99.363 — same binomial z-test as _snr_z_score_vs_breakeven(), but
-    against the breakeven win rate AFTER fees: a win pays rr-f, a loss
-    costs 1+f, so breakeven p0 = (1+f)/(1+rr) with f = the sample's mean
-    fee in R. A combo only passes if it beats that, not the fee-free one."""
-    n = len(trades)
-    if n <= 0 or rr <= 0:
+    """How many standard errors the trades' mean NET R (after fees) sits
+    above zero (one-sample t-statistic).
+    v0.99.398 — was a binomial test of the win rate vs the fee-adjusted
+    breakeven, which only works when every trade is exactly +rr or -1.
+    Trades closed by the max-holding-time exit (TIME_EXIT, see
+    max_hold_bars()) have any R in between, so the test is now on the R
+    values themselves; for pure +rr/-1 trades the two agree closely."""
+    rs = [_net_r(t) for t in trades]
+    rs = [r for r in rs if r is not None]
+    return _t_from_sums(len(rs), sum(rs), sum(r * r for r in rs)) if rs else None
+
+
+def _t_from_sums(n, s, q):
+    """v0.99.398 — t-statistic of the mean from n, sum and sum of squares."""
+    if n < 2:
         return None
-    wins = sum(1 for t in trades if t["result"] == "WIN")
-    f = sum(t.get("fee_r") or 0.0 for t in trades) / n
-    p0 = (1.0 + f) / (1.0 + rr)
-    if p0 >= 1.0:
-        return -99.0   # fees eat the whole target: can never be profitable
-    se = math.sqrt(p0 * (1 - p0) / n)
-    return (wins / n - p0) / se if se > 0 else None
+    mean = s / n
+    var = max(0.0, (q - s * s / n) / (n - 1))
+    return mean / math.sqrt(var / n) if var > 0 else None
+
+
+# v0.99.398 — per user ("при большем rr огромный шанс висеть в сделке
+# неделю, надо это учесть"): no trade is held longer than this. Backtests
+# close it at that bar's close (result TIME_EXIT, real partial R, counted
+# in every stat); live, the REAL position is closed at market at the same
+# point (before, live only marked the signal "TIMEOUT" and the exchange
+# position kept hanging until its SL/TP, and backtests dropped those trades).
+STRATEGY_MAX_HOLD_DAYS = float(os.environ.get("VP_MAX_HOLD_DAYS", 7))
+
+
+def max_hold_bars(tf, bars):
+    """The module's own max-wait bars, capped at STRATEGY_MAX_HOLD_DAYS."""
+    sec = INTERVAL_SECONDS.get(tf, 3600)
+    return max(1, min(int(bars), int(STRATEGY_MAX_HOLD_DAYS * 86400 // sec)))
+
+
+def time_exit_r(direction, entry, sl, price):
+    d = abs(entry - sl)
+    if d <= 0:
+        return 0.0
+    return ((price - entry) if direction == "LONG" else (entry - price)) / d
+
+
+def close_position_for_mode(mode, symbol, direction):
+    """v0.99.398 — max-holding-time exit: close the REAL position of this
+    module's account on `symbol`, only if it is open in the signal's own
+    direction (never touches anything else)."""
+    try:
+        with using_account(mode):
+            pos = next((p for p in (get_open_positions() or []) if p.get("contract") == symbol), None)
+            size = float((pos or {}).get("size", 0) or 0)
+            if not size or ("LONG" if size > 0 else "SHORT") != direction:
+                return {"ok": False, "reason": "no open position in this direction"}
+            return neuro_close_position_early(symbol, direction)
+    except Exception as e:
+        log_error(f"close_position_for_mode {mode} {symbol}: {e}")
+        return {"ok": False, "reason": str(e)}
 
 
 def _net_r(t):
-    return t["pnl_r_net"] if t.get("pnl_r_net") is not None else t["pnl_r"]
+    return t["pnl_r_net"] if t.get("pnl_r_net") is not None else t.get("pnl_r")
+
+
+CLOSED_RESULTS = ("WIN", "LOSS", "TIME_EXIT")   # v0.99.398 — trades with a real R (TIME_EXIT: closed by max holding time)
 
 
 def _snr_z_score_vs_breakeven(wins, n, rr):
@@ -17087,8 +17121,9 @@ def _snr_rebuild_cand(symbol, p):
     if not candles or len(candles) < 200:
         return None
     split = int(len(candles) * SNR_TRAIN_FRAC)
-    trades = snr_simulate_trades(candles, p["pl"], p["ms"], p["rr"], atr=neuro_atr_series(candles, 14))
-    return {**p, "closed": [t for t in trades if t["result"] in ("WIN", "LOSS")], "boundary": candles[split - 1]["time"],
+    trades = snr_simulate_trades(candles, p["pl"], p["ms"], p["rr"], atr=neuro_atr_series(candles, 14),
+                                 max_wait_bars=max_hold_bars(p["tf"], SNR_MAX_WAIT_BARS))   # v0.99.398
+    return {**p, "closed": [t for t in trades if t["result"] in CLOSED_RESULTS], "boundary": candles[split - 1]["time"],
             "span": (candles[0]["time"], candles[-1]["time"])}
 
 
@@ -17099,8 +17134,9 @@ def _prv_rebuild_cand(symbol, p):
         return None
     split = int(len(candles) * PRV_TRAIN_FRAC)
     trades = prv_simulate_trades(candles, p["ma_type"], p["kc_length"], p["band_mult"], p["rr"],
-                                 atr=neuro_atr_series(candles, PRV_ATR_LENGTH), basis=prv_ma_series(candles, p["ma_type"], p["kc_length"]))
-    return {**p, "closed": [t for t in trades if t["result"] in ("WIN", "LOSS")], "boundary": candles[split - 1]["time"],
+                                 atr=neuro_atr_series(candles, PRV_ATR_LENGTH), basis=prv_ma_series(candles, p["ma_type"], p["kc_length"]),
+                                 max_wait_bars=max_hold_bars(p["tf"], PRV_MAX_WAIT_BARS))   # v0.99.398
+    return {**p, "closed": [t for t in trades if t["result"] in CLOSED_RESULTS], "boundary": candles[split - 1]["time"],
             "span": (candles[0]["time"], candles[-1]["time"])}
 
 
@@ -17337,17 +17373,6 @@ def snr_combo_key(tf, pl, ms, rr):
     return f"{tf}|{pl}|{ms}|{rr}"
 
 
-def _z_counts_vs_breakeven(n, wins, fee_sum, rr):
-    """v0.99.394 — _z_vs_breakeven_with_fees() from counts (pooled test)."""
-    if n <= 0 or rr <= 0:
-        return None
-    p0 = (1.0 + fee_sum / n) / (1.0 + rr)
-    if p0 >= 1.0:
-        return -99.0
-    se = math.sqrt(p0 * (1 - p0) / n)
-    return (wins / n - p0) / se if se > 0 else None
-
-
 def snr_pooled_select(parts):
     """v0.99.394 — the strategy-level test over ALL coins (see
     SNR_POOLED_ENABLED). parts: {symbol: {combo key: counts}}. The combo
@@ -17369,8 +17394,8 @@ def snr_pooled_select(parts):
         rr = float(rr)
         if a[0] < SNR_POOLED_MIN_TRAIN:
             continue
-        tz = _z_counts_vs_breakeven(a[0], a[1], a[2], rr)
-        sz = _z_counts_vs_breakeven(a[4], a[5], a[6], rr) if a[4] else None
+        tz = _t_from_sums(a[0], a[3], a[2])   # v0.99.398 — t-test on net R (TIME_EXIT trades have any R)
+        sz = _t_from_sums(a[4], a[7], a[6]) if a[4] else None
         rows.append({"tf": tf, "pivot_length": int(pl), "min_strength": int(ms), "rr": rr, "coins": a[8],
                      "train_n": a[0], "train_wr": round(a[1] / a[0] * 100, 1), "train_avg_pnl_r": round(a[3] / a[0], 3),
                      "train_z": round(tz, 2) if tz is not None else None,
@@ -17383,7 +17408,8 @@ def snr_pooled_select(parts):
     passed = bool(chosen and chosen["test_n"] >= SNR_POOLED_MIN_TEST and chosen["test_z"] is not None
                   and chosen["test_z"] >= SNR_TEST_Z and (chosen["test_avg_pnl_r"] or 0) > 0)
     return {"t": time.time(), "passed": passed, "chosen": chosen, "best_train": top, "top": rows[:8],
-            "coins": len(parts), "combos": len(rows), "z_needed": SNR_Z_CRITICAL, "z_test_needed": SNR_TEST_Z,
+            "coins": len(parts), "combos": len(rows), "combos_total": SNR_N_COMBOS,
+            "z_needed": SNR_Z_CRITICAL, "z_test_needed": SNR_TEST_Z,
             "min_train": SNR_POOLED_MIN_TRAIN, "min_test": SNR_POOLED_MIN_TEST}
 
 
@@ -17492,7 +17518,7 @@ def snr_optimize_core(candles_by_tf):
     errors = []
     diag = {"bars": {}, "combos_enough": 0, "near": None}   # v0.99.362 — why a coin fails
     passing, near = [], []   # v0.99.364 — candidates for the Neuro filter
-    pool = {}   # v0.99.394 — combo key -> (train n, wins, fee R sum, net R sum, test n, wins, fee R sum, net R sum)
+    pool = {}   # v0.99.394 — combo key -> (train n, wins, net R^2 sum, net R sum, test n, wins, net R^2 sum, net R sum)
     for tf in SNR_TF_CANDIDATES:
         if tf not in candles_by_tf:
             continue   # download failed (already logged)
@@ -17510,15 +17536,16 @@ def snr_optimize_core(candles_by_tf):
                 for ms in SNR_STRENGTH_CANDIDATES:
                     for rr in SNR_RR_CANDIDATES:
                         neuro_check_cancel()   # v0.99.362 — progress + stop point
-                        trades = snr_simulate_trades(candles, pl, ms, rr, atr=atr)
-                        closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
+                        trades = snr_simulate_trades(candles, pl, ms, rr, atr=atr,
+                                                     max_wait_bars=max_hold_bars(tf, SNR_MAX_WAIT_BARS))   # v0.99.398
+                        closed = [t for t in trades if t["result"] in CLOSED_RESULTS]
                         train = [t for t in closed if t["time"] <= boundary_time]
                         test = [t for t in closed if t["time"] > boundary_time]
                         pool[snr_combo_key(tf, pl, ms, rr)] = (
                             len(train), sum(1 for t in train if t["result"] == "WIN"),
-                            sum(t.get("fee_r") or 0.0 for t in train), sum(_net_r(t) for t in train),
+                            sum(_net_r(t) ** 2 for t in train), sum(_net_r(t) for t in train),
                             len(test), sum(1 for t in test if t["result"] == "WIN"),
-                            sum(t.get("fee_r") or 0.0 for t in test), sum(_net_r(t) for t in test))   # v0.99.394
+                            sum(_net_r(t) ** 2 for t in test), sum(_net_r(t) for t in test))   # v0.99.394; v0.99.398 — [2]/[6] = sum of squared net R (t-test)
                         if len(train) < SNR_MIN_TRAIN_TRADES or len(test) < SNR_MIN_TEST_TRADES:
                             continue
                         train_z = _z_vs_breakeven_with_fees(train, rr)   # v0.99.363 — breakeven incl. fees
@@ -18088,14 +18115,16 @@ def snr_track_signal_outcomes():
                     if c["low"] <= sig["tp"]:
                         result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
                         break
-                if bars_seen >= SNR_MAX_WAIT_BARS:
-                    result, exit_price, exit_time = "TIMEOUT", c["close"], c["time"]
+                if bars_seen >= max_hold_bars(sig["timeframe"], SNR_MAX_WAIT_BARS):   # v0.99.398
+                    result, exit_price, exit_time = "TIME_EXIT", c["close"], c["time"]
                     break
             if result:
                 pnl_r = None
                 if exit_price is not None:
                     raw = (exit_price - entry) / risk if direction == "LONG" else (entry - exit_price) / risk
                     pnl_r = round(raw if result != "LOSS" else -abs(raw), 3)
+                if result == "TIME_EXIT" and AUTOTRADE_ENABLED_SNR:   # v0.99.398 — really close the position at market
+                    log_error(f"snr time exit {sig['symbol']}: {close_position_for_mode('snr', sig['symbol'], direction)}")
                 with state_lock:
                     sig["status"] = "CLOSED"
                     sig["result"] = result
@@ -18218,7 +18247,7 @@ PRV_ENABLED           = os.environ.get("VP_PRV_ENABLED", "1") == "1"
 PRV_MA_TYPE_CANDIDATES = ["EMA", "SMA"]        # matches the Pine Script's own "MA Type" input, limited to 2 of its 5 options to keep the search space tractable
 PRV_KC_LENGTH_CANDIDATES = [14, 20, 30]        # matches the Pine Script's own "MA Length" input (default 20)
 PRV_BAND_MULT_CANDIDATES = [1.5, 2.0, 2.5]     # matches the Pine Script's own "Inner" band multiplier input (default 2) — this module always signals off the INNER band, matching the indicator's own default signalBand="Inner"
-PRV_RR_CANDIDATES     = [1.0, 1.5, 2.0, 3.0]   # the take-profit distance, swept like every other module's own RR — per direct user request ("процент который мы забираем по тейку нужно подбирать по типу как rr")
+PRV_RR_CANDIDATES     = [1.0, 1.5, 2.0, 3.0, 4.0, 5.0]   # v0.99.398 — 4 and 5 added (user); long holds are capped by max_hold_bars()   # the take-profit distance, swept like every other module's own RR — per direct user request ("процент который мы забираем по тейку нужно подбирать по типу как rr")
 PRV_TF_CANDIDATES     = ["1h", "4h", "1d"]
 PRV_ATR_LENGTH        = 14   # matches the Pine Script's own default "ATR Length"
 PRV_SL_ATR_MULT       = 1.0  # SL distance beyond entry, in ATR units — fixed (not swept) to keep the search space tractable, same design choice as SNR_SL_ATR_MULT
@@ -18373,6 +18402,10 @@ def prv_simulate_trades(candles, ma_type, kc_length, band_mult, rr, atr_length=P
                     result, exit_price, exit_time, exit_j = "WIN", tp, b["time"], j
                     break
         pnl_r = rr if result == "WIN" else (-1.0 if result == "LOSS" else None)
+        if result == "TIMEOUT" and i + max_wait_bars <= len(candles) - 1:   # v0.99.398 — max holding time: close at market
+            b = candles[i + max_wait_bars]
+            result, exit_price, exit_time, exit_j = "TIME_EXIT", b["close"], b["time"], i + max_wait_bars
+            pnl_r = round(time_exit_r(direction, entry, sl, b["close"]), 4)
         fee_r = trade_fee_r(entry, sl)   # v0.99.363
         trades.append({"time": c["time"], "entry_time": entry_bar["time"], "direction": direction, "fee_r": fee_r,
                         "pnl_r_net": round(pnl_r - fee_r, 4) if pnl_r is not None else None,
@@ -18449,8 +18482,9 @@ def prv_optimize_core(candles_by_tf):
                     for band_mult in PRV_BAND_MULT_CANDIDATES:
                         for rr in PRV_RR_CANDIDATES:
                             neuro_check_cancel()   # v0.99.362 — progress + stop point
-                            trades = prv_simulate_trades(candles, ma_type, kc_length, band_mult, rr, atr=atr, basis=basis)
-                            closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
+                            trades = prv_simulate_trades(candles, ma_type, kc_length, band_mult, rr, atr=atr, basis=basis,
+                                                         max_wait_bars=max_hold_bars(tf, PRV_MAX_WAIT_BARS))   # v0.99.398
+                            closed = [t for t in trades if t["result"] in CLOSED_RESULTS]
                             train = [t for t in closed if t["time"] <= boundary_time]
                             test = [t for t in closed if t["time"] > boundary_time]
                             if len(train) < PRV_MIN_TRAIN_TRADES or len(test) < PRV_MIN_TEST_TRADES:
@@ -18676,14 +18710,16 @@ def prv_track_signal_outcomes():
                     if c["low"] <= sig["tp"]:
                         result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
                         break
-                if bars_seen >= PRV_MAX_WAIT_BARS:
-                    result, exit_price, exit_time = "TIMEOUT", c["close"], c["time"]
+                if bars_seen >= max_hold_bars(sig["timeframe"], PRV_MAX_WAIT_BARS):   # v0.99.398
+                    result, exit_price, exit_time = "TIME_EXIT", c["close"], c["time"]
                     break
             if result:
                 pnl_r = None
                 if exit_price is not None:
                     raw = (exit_price - entry) / risk if direction == "LONG" else (entry - exit_price) / risk
                     pnl_r = round(raw if result != "LOSS" else -abs(raw), 3)
+                if result == "TIME_EXIT" and AUTOTRADE_ENABLED_PRV:   # v0.99.398 — really close the position at market
+                    log_error(f"prv time exit {sig['symbol']}: {close_position_for_mode('prv', sig['symbol'], direction)}")
                 with state_lock:
                     sig["status"] = "CLOSED"
                     sig["result"] = result
@@ -19178,7 +19214,7 @@ def neuro_cancel_thread(ident_box):
         with _neuro_cancel_lock:
             _neuro_cancelled_threads.add(ident_box[0])
 NEURO_RR             = float(os.environ.get("VP_NEURO_RR", 2.0))  # fallback/default only — see NEURO_RR_CANDIDATES below for the actual per-symbol auto-tuned value
-NEURO_RR_CANDIDATES  = [1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0]  # v0.99.210 — small step (0.25), modest range, per direct user request ("вариативность RR, но не с гигантским шагом"). Best one picked per-symbol from TRAIN-period trades only (same walk-forward discipline as the condition mining itself), then applied to the reported trade history and live signals.
+NEURO_RR_CANDIDATES  = [1.5, 1.75, 2.0, 2.25, 2.5, 2.75, 3.0, 3.5, 4.0, 5.0]   # v0.99.398 — 3.5/4/5 added (user); long holds are capped by max_hold_bars()  # v0.99.210 — small step (0.25), modest range, per direct user request ("вариативность RR, но не с гигантским шагом"). Best one picked per-symbol from TRAIN-period trades only (same walk-forward discipline as the condition mining itself), then applied to the reported trade history and live signals.
 NEURO_RR_MIN_TRADES  = int(os.environ.get("VP_NEURO_RR_MIN_TRADES", 15))  # don't trust an RR pick based on fewer than this many train-period trades
 NEURO_DECAY_WINDOW_DAYS = int(os.environ.get("VP_NEURO_DECAY_WINDOW_DAYS", 40))  # v0.99.220 — explicit CALENDAR-time recency window for decay detection, per direct user follow-up ("не только 40%, это не 1 месяц — ещё хотя бы за последние 40 дней"): a percentage-of-occurrences split doesn't map to any fixed real-world timeframe (a rare pattern's last 40% of occurrences could span many months; a frequent one's could be just days) — this checks an ACTUAL calendar window on top of that
 NEURO_DECAY_MIN_RECENT_N = 8  # minimum occurrences in a recency window before trusting a decay verdict from it
@@ -20948,7 +20984,8 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
         tp = entry + sl_dist * rr if direction == "LONG" else entry - sl_dist * rr
 
         result = "TIMEOUT"; exit_price = exit_time = None
-        exit_j = min(i + NEURO_MAX_WAIT_BARS, len(candles) - 1)  # default: occupied through the timeout bar even if the loop below never finds an explicit SL/TP hit
+        _hold = max_hold_bars(NEURO_TF, NEURO_MAX_WAIT_BARS)   # v0.99.398
+        exit_j = min(i + _hold, len(candles) - 1)  # default: occupied through the timeout bar even if the loop below never finds an explicit SL/TP hit
         # v0.99.260 — measure the max adverse/favorable excursion (in R)
         # within the first NEURO_EARLY_EXIT_K bars, purely as DATA on
         # every trade — neuro_find_early_exit_rule() decides afterward,
@@ -20956,7 +20993,7 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
         # predicts eventual outcome; this loop never acts on it itself.
         mae_at_k = mfe_at_k = 0.0
         close_at_k_pnl = None
-        for j in range(i + 1, min(i + 1 + NEURO_MAX_WAIT_BARS, len(candles))):
+        for j in range(i + 1, min(i + 1 + _hold, len(candles))):
             b = candles[j]
             if j - i <= NEURO_EARLY_EXIT_K:
                 if direction == "LONG":
@@ -20984,6 +21021,9 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
                 if b["low"] <= tp:
                     result, exit_price, exit_time = "WIN", tp, b["time"]; exit_j = j; break
 
+        if result == "TIMEOUT" and i + _hold <= len(candles) - 1:   # v0.99.398 — max holding time: close at market
+            b = candles[i + _hold]
+            result, exit_price, exit_time, exit_j = "TIME_EXIT", b["close"], b["time"], i + _hold
         pnl_r = None
         if exit_price:
             raw = (exit_price - entry) / sl_dist if direction == "LONG" else (entry - exit_price) / sl_dist
@@ -21070,16 +21110,21 @@ def neuro_pick_best_rr(train_candles, confirmed_patterns, htf_candles=None, fund
                                         funding_records=funding_records, btc_candles=btc_candles,
                                         d1_candles=d1_candles, oi_records=oi_records,
                                         eth_candles=eth_candles, rr=rr)
-        closed = [t for t in trades if t["result"] in ("WIN", "LOSS")]
+        closed = [t for t in trades if t["result"] in CLOSED_RESULTS]
         if len(closed) < NEURO_RR_MIN_TRADES:
             sweep.append({"rr": rr, "n": len(closed), "winrate": None, "avg_pnl_r": None})
             continue
         wins = sum(1 for t in closed if t["result"] == "WIN")
         wr = round(wins / len(closed) * 100, 1)
-        avg_pnl = round(sum(t["pnl_r"] for t in closed) / len(closed), 3)
-        sweep.append({"rr": rr, "n": len(closed), "winrate": wr, "avg_pnl_r": avg_pnl})
-        if best_score is None or avg_pnl > best_score:
-            best_score, best_rr = avg_pnl, rr
+        total = sum(_net_r(t) for t in closed)
+        avg_pnl = round(total / len(closed), 3)
+        sweep.append({"rr": rr, "n": len(closed), "winrate": wr, "avg_pnl_r": avg_pnl, "total_r": round(total, 1)})
+        # v0.99.398 — pick by TOTAL net R over the train period, not R per
+        # trade: one position per coin, so an RR whose trades sit for days
+        # takes fewer trades in the same time — per-trade R alone would
+        # reward long holds; the total over the same period doesn't.
+        if best_score is None or total > best_score:
+            best_score, best_rr = total, rr
     return best_rr, sweep
 
 
@@ -21153,7 +21198,7 @@ def neuro_check_aggregate_decay(trades, chosen_rr):
     this symbol, regardless of which specific pattern produced each one.
     Catches a regime shift that drags down many different patterns a
     little each — something no single pattern's own decay flag would."""
-    closed = [t for t in trades if t["result"] in ("WIN", "LOSS", "LOSS_EARLY")]  # v0.99.260 — count early-exited losses too, same as the main summary
+    closed = [t for t in trades if t["result"] in ("WIN", "LOSS", "LOSS_EARLY", "TIME_EXIT")]  # v0.99.260 — count early-exited losses too, same as the main summary
     recent = closed[-NEURO_AGG_DECAY_WINDOW:]
     if len(recent) < NEURO_AGG_DECAY_MIN_N:
         return {"n": len(recent), "wr": None, "avg_pnl_r": None, "underperforming": False}
@@ -21177,7 +21222,7 @@ def neuro_find_culprit_patterns(trades, window=None):
     least 3 of its own trades within the window before judging a pattern
     (a single bad trade shouldn't condemn it)."""
     window = window or NEURO_AGG_DECAY_WINDOW
-    closed = [t for t in trades if t["result"] in ("WIN", "LOSS", "LOSS_EARLY")]  # v0.99.260 — count early-exited losses too, same as the main summary
+    closed = [t for t in trades if t["result"] in ("WIN", "LOSS", "LOSS_EARLY", "TIME_EXIT")]  # v0.99.260 — count early-exited losses too, same as the main summary
     recent = closed[-window:]
     by_pattern = {}
     for t in recent:
@@ -21291,7 +21336,7 @@ def neuro_backtest_core(candles, htf_candles, d1_candles, funding_records, oi_re
                     t["exit_time"] = k_bar["time"]
 
         def _stats(ts):
-            cl = [t for t in ts if t["result"] in ("WIN", "LOSS", "LOSS_EARLY")]
+            cl = [t for t in ts if t["result"] in ("WIN", "LOSS", "LOSS_EARLY", "TIME_EXIT")]
             w = sum(1 for t in cl if t["result"] == "WIN")
             return {"n": len(cl), "wins": w, "losses": len(cl) - w,
                     "timeouts": sum(1 for t in ts if t["result"] == "TIMEOUT"), "total": len(ts),
@@ -21677,14 +21722,16 @@ def neuro_track_signal_outcomes():
                     if c["low"] <= sig["tp"]:
                         result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
                         break
-                if bars_seen >= NEURO_MAX_WAIT_BARS:
-                    result, exit_price, exit_time = "TIMEOUT", c["close"], c["time"]
+                if bars_seen >= max_hold_bars(NEURO_TF, NEURO_MAX_WAIT_BARS):   # v0.99.398
+                    result, exit_price, exit_time = "TIME_EXIT", c["close"], c["time"]
                     break
             if result:
                 pnl_r = None
                 if exit_price is not None:
                     raw = (exit_price - entry) / risk if direction == "LONG" else (entry - exit_price) / risk
                     pnl_r = round(raw if result != "LOSS" else -abs(raw), 3)
+                if result == "TIME_EXIT" and not is_shadow and AUTOTRADE_ENABLED_NEURO:   # v0.99.398 — really close at market
+                    log_error(f"neuro time exit {sig['symbol']}: {close_position_for_mode('neuro', sig['symbol'], direction)}")
                 with _neuro_signal_log_lock:
                     if is_shadow:
                         sig["would_have_been_result"] = result
@@ -21704,7 +21751,7 @@ def neuro_compute_signal_stats(active_symbols=None):
     active_symbols = active_symbols if active_symbols is not None else NEURO_COINS
     with _neuro_signal_log_lock:
         signals = list(_neuro_signal_log)
-    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS", "LOSS_EARLY")]  # v0.99.261 — count early-exited losses too
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS", "LOSS_EARLY", "TIME_EXIT")]  # v0.99.261 — count early-exited losses too
     wins = sum(1 for s in closed if s["result"] == "WIN")
     losses = len(closed) - wins
     open_n = sum(1 for s in signals if s["status"] == "OPEN")
@@ -23064,7 +23111,7 @@ def snr_compute_signal_stats(active_symbols=None):
         active_symbols = active_symbols if active_symbols is not None else list(_snr_active_symbols)
         all_signals = list(STATE["snr_signals"])
     signals = [s for s in all_signals if s["symbol"] in active_symbols and not s.get("neuro_filtered")]   # v0.99.364
-    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in CLOSED_RESULTS]   # v0.99.398
     wins = sum(1 for s in closed if s["result"] == "WIN")
     losses = len(closed) - wins
     open_n = sum(1 for s in signals if s["status"] == "OPEN")
@@ -23154,7 +23201,7 @@ def prv_compute_signal_stats(active_symbols=None):
         active_symbols = active_symbols if active_symbols is not None else list(_prv_active_symbols)
         all_signals = list(STATE["prv_signals"])
     signals = [s for s in all_signals if s["symbol"] in active_symbols and not s.get("neuro_filtered")]   # v0.99.364
-    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in ("WIN", "LOSS")]
+    closed = [s for s in signals if s["status"] == "CLOSED" and s["result"] in CLOSED_RESULTS]   # v0.99.398
     wins = sum(1 for s in closed if s["result"] == "WIN")
     losses = len(closed) - wins
     open_n = sum(1 for s in signals if s["status"] == "OPEN")
@@ -24859,8 +24906,7 @@ def api_autotrade_status():
             "ft5": AUTOTRADE_ENABLED_FT5,
             "msnr": AUTOTRADE_ENABLED_MSNR,
             "mirror": AUTOTRADE_ENABLED_MIRROR,
-            "lsw": AUTOTRADE_ENABLED_LSW,
-        },
+        },   # v0.99.398 — Sweep removed
     })
 
 
@@ -25068,7 +25114,6 @@ INDEX_HTML = """<!doctype html>
   .tab[data-tab="neuro"] { --tab-c:var(--neuro); }
   .tab[data-tab="snr"] { --tab-c:var(--snr); }
   .tab[data-tab="prv"] { --tab-c:var(--prv); }
-  .tab[data-tab="lsw"] { --tab-c:var(--lsw); }
   #hintsToggleBtn { flex-shrink:0; height:30px; display:inline-flex; align-items:center; padding:0 8px !important; }
 
   /* ---------- panels ---------- */
@@ -25182,7 +25227,6 @@ INDEX_HTML = """<!doctype html>
   </div>
   <div id="hdrActions" style="display:none;">
     <div class="hdrRow"><span class="hdrLbl">MSNR</span><button id="resetMsnrBtn" class="btnDanger">🗑 Очистить</button><button id="restartMsnrBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
-    <div class="hdrRow"><span class="hdrLbl">Sweep</span><button id="resetLswBtn" class="btnDanger">🗑 Очистить</button><button id="restartLswBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
     <div class="hdrRow"><span class="hdrLbl">Neuro</span><button id="resetNeuroBtn" class="btnDanger">🗑 Очистить</button><button id="restartNeuroBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
     <div class="hdrRow"><span class="hdrLbl">S/R Zones</span><button id="resetSnrBtn" class="btnDanger">🗑 Очистить</button><button id="restartSnrBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
     <div class="hdrRow"><span class="hdrLbl">Peak Rev.</span><button id="resetPrvBtn" class="btnDanger">🗑 Очистить</button><button id="restartPrvBacktestBtn" class="btnNeutral">↻ Бэктест</button></div>
@@ -25212,7 +25256,6 @@ INDEX_HTML = """<!doctype html>
   <div class="tab" data-tab="neuro" style="color:var(--neuro);">🧠 Neuro</div>
   <div class="tab" data-tab="snr" style="color:var(--snr);">S/R Zones</div>
   <div class="tab" data-tab="prv" style="color:var(--prv);">Peak Reversal</div>
-  <div class="tab" data-tab="lsw">Sweep</div>
   <div class="tab" data-tab="signals">Volume</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
@@ -25230,7 +25273,6 @@ INDEX_HTML = """<!doctype html>
   <div id="msnrPanel" style="display:block;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="ft5Panel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="mirrorPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
-  <div id="lswPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="emaBullPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="amdPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="neuroPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
@@ -25303,14 +25345,14 @@ INDEX_HTML = """<!doctype html>
     <details class="settingsGroup" style="--mod-color:var(--neuro);"><summary class="settingsGroupTitle">⚙️ Производительность и фильтр Neuro</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
-          <div class="name">Фильтр Neuro в бэктесте MSNR / S/R / P/R / Sweep</div>
+          <div class="name">Фильтр Neuro в бэктесте MSNR / S/R / P/R</div>
           <div class="sub">для каждой монеты подбирается одно условие Neuro («убрать X» / «только X») — только по обучающей части; проверочная решает, принять ли его. Принятый фильтр применяется и к живым сигналам (отсеянный сигнал записывается с пометкой 🧪 и не торгуется). Действует со следующего бэктеста</div>
         </div>
         <label class="switch"><input type="checkbox" id="setNeuroTradeFilter"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
-          <div class="name">Процессы для расчёта бэктестов (MSNR, Neuro, S/R, P/R, Sweep)</div>
+          <div class="name">Процессы для расчёта бэктестов (MSNR, Neuro, S/R, P/R)</div>
           <div class="sub">сколько ядер процессора использовать для расчёта (каждый процесс ≈85 МБ памяти). 0 — считать как раньше, в одном процессе. Результаты одинаковые, меняется только скорость и нагрузка</div>
         </div>
         <input type="number" id="setCalcWorkers" min="0" max="8" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
@@ -25474,100 +25516,6 @@ INDEX_HTML = """<!doctype html>
       </div>
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:var(--snr);"><summary class="settingsGroupTitle">Sweep (Liquidity Sweep)</summary><div class="settingsGroupBody">
-      
-      <div class="settingRow">
-        <div>
-          <div class="label">Сканирование</div>
-          <div class="sub">снятие ликвидности с равных хаёв/лоу (2+ близких свинга) — вход на развороте после того, как фитиль пробил уровень, а закрытие вернулось обратно. Автоторговля включается отдельным переключателем ниже (группа «Автоторговля»)</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setLsw"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ RR (тейк-профит)</div>
-          <div class="sub">фиксированное соотношение тейк:стоп от стопа за экстремумом свипа</div>
-        </div>
-        <input type="number" id="setLswRR" min="0.5" max="20" step="0.5" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Допуск "равных" уровней</div>
-          <div class="sub">насколько близко должны быть два свинг-хая (или два свинг-лоу) друг к другу, чтобы считаться одним и тем же уровнем ликвидности (% от цены) — именно это делает уровень "равными хаями/лоу", а не просто одиночным свингом</div>
-        </div>
-        <input type="number" id="setLswEqualTolerance" min="0.01" max="2" step="0.01" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Фильтр по тренду (4ч)</div>
-          <div class="sub">снятие равных лоу → LONG только если тренд на 4ч вверх/нейтральный; снятие равных хаёв → SHORT только если вниз/нейтральный. Отсекает сделки против старшего тренда</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setLswHtfFilter"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Структурный кэп</div>
-          <div class="sub">не входить LONG выше последнего значимого структурного максимума / SHORT ниже структурного минимума — не гнаться за ценой, когда некуда бежать</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setLswStructuralCap"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Подтверждение входа (5м)</div>
-          <div class="sub">вход не сразу по закрытию часовой свечи снятия, а только после подтверждения на 5м: слом структуры (BOS), поглощение или мини-снятие (инверсия) в течение часа. Если подтверждения нет — сделка не открывается</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setLswEntryConfirm"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Фильтр по объёму</div>
-          <div class="sub">свеча снятия должна показать объём минимум в 1.5× выше среднего за предыдущие 20 баров — отсекает низкообъёмные фитили без реального участия толпы (не настоящий каскад стопов)</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setLswVolumeFilter"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Фильтр по FVG</div>
-          <div class="sub">свеча снятия должна оставить за собой ценовой разрыв (fair value gap) — знак, что движение было достаточно резким, а не просто фитиль без импульса</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setLswFvgFilter"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Фильтр по сессии</div>
-          <div class="sub">торговать только в часы 07:00–21:00 UTC (примерно пересечение европейской и американской сессий) — вне этого окна сигналы пропускаются как "мёртвая" сессия</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setLswSessionFilter"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Минимум касаний уровня</div>
-          <div class="sub">торговать только уровни с 3+ касаниями вместо базовых 2 — больше касаний, по опыту, повышают шанс на реальное снятие ликвидности</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setLswMinTouches"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ ATR-фильтр размера свипа</div>
-          <div class="sub">торговать только свипы где фитиль ≥ 0.5×ATR(14) — отсекает мелкие/шумные снятия ликвидности в пользу более выраженных</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setLswAtrSweep"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Структура свечи снятия</div>
-          <div class="sub">фитиль свечи снятия должен быть минимум в 2× длиннее тела И покрывать не менее 30% полного диапазона hi-lo — настоящее снятие: большой фитиль (резкий отскок) + маленькое тело (закрылась внутри уровня). Большое тело — это уже импульс, а не снятие</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setLswCandleStructureFilter"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Фильтр по направлению</div>
-          <div class="sub">⚠️ мягкий подгон под прошлые данные — риск переоценить случайную разницу на малой выборке. Тот же порог винрейта, что и у общего допуска, применяется к LONG и SHORT каждой монеты отдельно; если сторона не набрала нужный винрейт и объём сделок — она не торгуется живьём (не выбор "победившей" стороны задним числом, а единый порог для всех)</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setLswDirectionFilter"><span class="switchSlider"></span></label>
-      </div>
-    </div></details>
 
     <details class="settingsGroup" style="--mod-color:#26a5e4;"><summary class="settingsGroupTitle">Telegram</summary><div class="settingsGroupBody">
       
@@ -25598,13 +25546,6 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">открытие и закрытие сигналов</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramMirror"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Алерты Sweep</div>
-          <div class="sub">открытие и закрытие сигналов</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramLsw"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -25770,20 +25711,6 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Sweep</div>
-          <div class="sub">риск 2% от баланса на сделку, тот же автоматический расчёт плеча/размера позиции, что и у остальных режимов</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeLsw"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳↳ Ва-банк (Sweep)</div>
-          <div class="sub">вместо риска N% от депо — использовать 95% депо как маржу на каждую Sweep-сделку. Плечо по-прежнему подбирается автоматически по стопу — ликвидация не становится ближе, просто в сделку идёт почти весь депозит</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setLswAllIn"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
           <div class="label">↳ Neuro</div>
           <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча под безопасное расстояние до ликвидации и размера позиции, что и у Sweep/остальных режимов</div>
         </div>
@@ -25890,7 +25817,6 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('msnrPanel').style.display = activeTab === 'msnr' ? 'block' : 'none';
     document.getElementById('ft5Panel').style.display = activeTab === 'ft5' ? 'block' : 'none';
     document.getElementById('mirrorPanel').style.display = activeTab === 'mirror' ? 'block' : 'none';
-    document.getElementById('lswPanel').style.display = activeTab === 'lsw' ? 'block' : 'none';
     document.getElementById('emaBullPanel').style.display = activeTab === 'emabull' ? 'block' : 'none';
     document.getElementById('amdPanel').style.display = activeTab === 'amd' ? 'block' : 'none';
     document.getElementById('neuroPanel').style.display = activeTab === 'neuro' ? 'block' : 'none';
@@ -25904,7 +25830,6 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'msnr') refreshMsnr();
     if (activeTab === 'ft5') refreshFt5();
     if (activeTab === 'mirror') refreshMirror();
-    if (activeTab === 'lsw') refreshLsw();
     if (activeTab === 'emabull') refreshEmaBull();
     if (activeTab === 'amd') refreshAmd();
     if (activeTab === 'neuro') refreshNeuro();
@@ -25945,6 +25870,7 @@ function sigStatusShort(s) {
   if (s.result === 'WIN') return `<span class="win">WIN${rTxt}</span>`;
   if (s.result === 'LOSS' || s.result === 'LOSS_EARLY') return `<span class="loss">${s.result === 'LOSS_EARLY' ? 'выход' : 'LOSS'}${rTxt}</span>`;
   if (s.result === 'TIMEOUT') return `<span class="${r == null ? 'status-timeout' : (r >= 0 ? 'win' : 'loss')}">тайм-аут${rTxt}</span>`;
+  if (s.result === 'TIME_EXIT') return `<span class="${r == null ? 'status-timeout' : (r >= 0 ? 'win' : 'loss')}" title="закрыта по рынку: истёк максимальный срок удержания">⏱ по времени${rTxt}</span>`;   // v0.99.398
   return `<span class="dim">${s.result || '—'}</span>`;
 }
 function sigItemHtml(s, o) {
@@ -27344,165 +27270,6 @@ async function refreshMirror() {
   });
 }
 
-// v0.99.396 — Sweep: honest per-coin split + pooled strategy verdict
-function lswSplitTxt(r) {
-  const tr = r.train || {}, te = r.test || {};
-  if (tr.n === undefined) return '<span class="dim" title="посчитано старой версией — до следующего бэктеста">—</span>';
-  const f = x => x.n ? `<span class="${x.exp_net > 0 ? 'win' : 'loss'}">${x.exp_net > 0 ? '+' : ''}${x.exp_net}R</span> <span class="dim">n=${x.n}</span>` : '<span class="dim">нет</span>';
-  return `${f(tr)} → ${f(te)}`;
-}
-function lswPooledHtml(p) {
-  if (!p) return '';
-  const sgn = v => v == null ? '—' : (v > 0 ? '+' : '') + v;
-  const verdict = p.passed ? '<b class="win">✓ Sweep подтверждён на тесте — торгуются отобранные монеты</b>'
-    : '<b class="loss">✗ Sweep не подтвердился на тесте — автоторговля Sweep ни по одной монете не идёт</b>';
-  return `<div style="background:var(--line);border:1px solid var(--line-2);border-radius:var(--r-sm);padding:8px 12px;margin:8px 0;font-size:var(--fs);">
-    ${verdict} <span class="dim">(${fmtDateTime(p.t)})</span><br>
-    Отобрано по обучению: <b>${p.picked}</b> из ${p.coins} монет (≥ ${p.min_train} сделок и плюс после комиссий).<br>
-    Их <b>тест</b> вместе: n=${p.test_n} · WR ${p.test_wr == null ? '—' : p.test_wr + '%'} · ${sgn(p.test_exp_net)}R/сделку · итого ${sgn(p.test_sum_r)}R · z=${p.test_z == null ? '—' : p.test_z} <span class="dim">(нужно n ≥ ${p.min_test} и z ≥ ${p.z_needed})</span>
-    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Монета отбирается только по первым 70% своей истории; последние 30% (тест) — честная проверка того, что такой отбор работает. Раньше в торговлю шли монеты с винрейтом > 50% на всей истории — из ~100 монет так находятся в основном везучие, и вживую везение кончается.</div>
-  </div>`;
-}
-async function refreshLsw() {
-  const status = await (await fetch('/api/lsw/status')).json();
-  const signals = await (await fetch('/api/lsw/signals')).json();
-  const panel = document.getElementById('lswPanel');
-  const cfg = status.config || {};
-  const ss = status.signals_stats || {};
-  const ssWr = ss.winrate !== null && ss.winrate !== undefined ? `<span class="${ss.winrate >= 50 ? 'win' : 'loss'}">${ss.winrate}%</span>` : '<span class="dim">-</span>';
-  const levelTypeLabels = {high: 'снятие хаёв', low: 'снятие лоу'};
-  const byLevelTxt = Object.entries(ss.by_level_type || {}).map(([lt, s]) => {
-    const wr = s.winrate !== null && s.winrate !== undefined ? `${s.winrate}%` : '-';
-    return `${levelTypeLabels[lt] || lt}: ${wr} (n=${s.n})`;
-  }).join(' · ');
-  const buildTxt = status.backtest_running
-    ? `бэктест выполняется (начат ${status.backtest_started_at ? fmtTime(status.backtest_started_at) : '?'}): ${status.backtest_done||0}/${status.backtest_total||'?'} монет${status.backtest_started_at ? ' · идёт ' + Math.round((Date.now()/1000 - status.backtest_started_at)) + 'с' : ''}${coresTxt(status.calc)}`
-    : status.last_backtest_finished
-    ? `последний бэктест: ${fmtTime(status.last_backtest_finished)} (${status.last_backtest_duration}s) · история ${fmtMonths(cfg.backtest_days)} · в живом скане: ${(status.live_universe||[]).length}/${(status.top||[]).length} монет (винрейт > ${cfg.live_min_winrate}%)`
-    : 'бэктест ещё не завершился — живой скан новых сигналов на паузе, чтобы не показывать неотфильтрованные монеты';
-  const progressPct = status.backtest_total ? Math.round((status.backtest_done||0) / status.backtest_total * 100) : 0;
-  const progressBarHtml = status.backtest_running ? `
-    <div style="margin:6px 0 8px;">
-      <div style="background:var(--line);border-radius:var(--r-xs);height:8px;overflow:hidden;">
-        <div style="background:var(--pos);height:100%;width:${progressPct}%;transition:width 0.4s;"></div>
-      </div>
-      <div class="dim" style="font-size:var(--fs-sm);margin-top:3px;">
-        ${progressPct}% · сейчас: ${(status.backtest_in_flight||[]).slice(0,6).join(', ') || '—'}${(status.backtest_in_flight||[]).length > 6 ? ` +${status.backtest_in_flight.length-6}` : ''}
-      </div>
-    </div>` : '';
-  const headerHtml = `
-    <div class="dim hint-block" style="margin-bottom:4px;">
-      <b>Liquidity Sweep</b> — снятие ликвидности с равных хаёв/лоу (2+ близких максимума/минимума считаются одним уровнем); сигнал — когда свеча фитилём пробивает уровень, но закрывается обратно внутри (не пробой, а именно снятие стопов). Автоторговля и её риск настраиваются в общей вкладке «Автоторговля».</div>
-    <div class="dim" style="margin-bottom:8px;">
-      ТФ ${cfg.interval} · RR ${cfg.rr} · допуск равенства уровней ${cfg.equal_tolerance_pct}% · буфер стопа ${cfg.sl_buffer_pct}% · ${buildTxt}<br>
-      ${progressBarHtml}
-      ${(() => {   // v0.99.387 — only the filters that are ON (the full on/off list is in Settings)
-        const on = [[cfg.htf_filter_enabled, `тренд ${cfg.htf_interval}`], [cfg.structural_cap_enabled, 'структурный кэп'],
-          [cfg.entry_confirm_enabled, `подтверждение ${cfg.entry_confirm_interval}`], [cfg.volume_filter_enabled, 'объём'],
-          [cfg.fvg_filter_enabled, 'FVG'], [cfg.session_filter_enabled, 'сессия'], [cfg.min_touches_enabled, 'мин. касаний'],
-          [cfg.direction_filter_enabled, 'направление']].filter(x => x[0]).map(x => x[1]);
-        return 'Фильтры: ' + (on.length ? `<span class="win">${on.join(', ')}</span>` : '<span class="dim">все выключены</span>');
-      })()}<br>
-      <b>Живые сигналы</b>: ${ssWr} (${ss.wins||0}W/${ss.losses||0}L) · открытых: ${ss.open||0} · всего: ${ss.total||0}<br>
-      ${byLevelTxt ? `<span style="font-size:var(--fs-sm);">По типу уровня: ${byLevelTxt}</span><br>` : ''}
-      <span class="hint-block" style="font-size:var(--fs-sm);">Зелёная точка — монета сейчас в живом скане. Клик по строке сигнала открывает график входа/выхода.</span>
-    </div>`;
-  const signalsRows = signals.map(s => {
-    let statusHtml;
-    if (s.status === 'OPEN') statusHtml = '<span class="status-open">OPEN</span>';
-    else if (s.result === 'WIN') statusHtml = `<span class="win">WIN @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
-    else if (s.result === 'LOSS') statusHtml = `<span class="loss">LOSS @ ${fmt(s.exit_price)}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
-    else if (s.result === 'TIMEOUT') {
-      const r = s.timeout_pnl_r;
-      const rCls = (r === null || r === undefined) ? 'status-timeout' : (r >= 0 ? 'win' : 'loss');
-      const rTxt = (r === null || r === undefined) ? '' : ` (${r > 0 ? '+' : ''}${r}R)`;
-      statusHtml = `<span class="${rCls}">TIMEOUT @ ${fmt(s.exit_price)}${rTxt}${s.exit_time ? ' ('+fmtTime(s.exit_time)+')' : ''}</span>`;
-    } else statusHtml = '<span class="status-timeout">TIMEOUT</span>';
-    const dirClass = s.direction === 'SHORT' ? 'short' : 'long';
-    const confirmLabels = {BOS: 'BOS', ABSORPTION: 'поглощение', INVERSION: 'инверсия'};
-    const confirmTxt = s.confirm_method ? (confirmLabels[s.confirm_method] || s.confirm_method) : '-';
-    void statusHtml; void dirClass;   // v0.99.387 — compact list row
-    return sigItemHtml(s, {attrs: `data-symbol="${s.symbol}" data-time="${s.time}"`,
-      extra: [`${levelTypeLabels[s.level_type] || s.level_type} ×${s.level_touches || '?'}`, confirmTxt !== '-' ? confirmTxt : '', s.rr ? `RR ${s.rr}` : '',
-              (s.exit_price && s.status !== 'OPEN') ? `выход ${fmt(s.exit_price)}${s.exit_time ? ' в ' + fmtTime(s.exit_time) : ''}` : '']});
-  });
-  const signalsTableHtml = signalsRows.length ? sigListHtml(signalsRows)
-    : '<div class="dim" style="margin-bottom:14px;">Живых сигналов пока нет.</div>';
-  const btRows = (status.top || []).map(r => {
-    const wrClass = (r.win_rate || 0) >= 50 ? 'win' : 'loss';
-    const liveDot = r.live ? ' <span style="color:var(--pos);" title="в живом скане">●</span>' : '';
-    const bd = r.by_direction || {};
-    const fmtWr = v => (v === null || v === undefined) ? '?' : `${v}%`;
-    const byDirTxt = (bd.LONG || bd.SHORT)
-      ? `<span class="dim" title="винрейт по направлению">L: ${fmtWr(bd.LONG && bd.LONG.win_rate)} (n=${bd.LONG ? bd.LONG.n : 0}) · S: ${fmtWr(bd.SHORT && bd.SHORT.win_rate)} (n=${bd.SHORT ? bd.SHORT.n : 0})</span>`
-      : '<span class="dim">-</span>';
-    let dirFilterTxt = '';
-    if (cfg.direction_filter_enabled && r.live_directions) {
-      const labels = {LONG: 'только LONG', SHORT: 'только SHORT'};
-      dirFilterTxt = r.live_directions.length === 2 ? ' <span class="dim">(обе стороны)</span>'
-        : r.live_directions.length === 1 ? ` <span class="win">(${labels[r.live_directions[0]]})</span>`
-        : ' <span class="loss">(ни одна сторона)</span>';
-    }
-    const fc = r.filter_checkpoints || {};
-    const fmtCheckpoint = (cp, filterEnabled) => {
-      if (!cp || cp.n === 0 || cp.winrate === null || cp.winrate === undefined) {
-        return '<span class="dim">нет данных</span>';
-      }
-      const raw = fc.raw;
-      let deltaTxt = '';
-      if (raw && raw.winrate !== null && raw.winrate !== undefined) {
-        const delta = Math.round((cp.winrate - raw.winrate) * 10) / 10;
-        const deltaCls = delta > 0 ? 'win' : (delta < 0 ? 'loss' : 'dim');
-        deltaTxt = ` <span class="${deltaCls}">(${delta > 0 ? '+' : ''}${delta}%)</span>`;
-      }
-      const nTxt = (raw && raw.n && raw.n !== cp.n) ? `${raw.n}→${cp.n}` : `${cp.n}`;
-      const onOff = filterEnabled ? '' : ' <span class="dim">[выкл]</span>';
-      return `<span class="dim" title="если применить ТОЛЬКО этот фильтр к сырым сигналам, без остальных">${cp.winrate}% (n=${nTxt})${deltaTxt}${onOff}</span>`;
-    };
-    const confirmTxt2 = fmtCheckpoint(fc.entry_confirm, cfg.entry_confirm_enabled);
-    const volumeTxt = fmtCheckpoint(fc.volume_filter, cfg.volume_filter_enabled);
-    const fvgTxt = fmtCheckpoint(fc.fvg_filter, cfg.fvg_filter_enabled);
-    const sessionTxt = fmtCheckpoint(fc.session_filter, cfg.session_filter_enabled);
-    const touchesTxt = fmtCheckpoint(fc.min_touches_filter, cfg.min_touches_enabled);
-    const structureTxt = fmtCheckpoint(fc.candle_structure, cfg.candle_structure_filter_enabled);
-    const atrSweepTxt = fmtCheckpoint(fc.atr_sweep, cfg.atr_sweep_enabled);
-    const rrSweepTitle = (r.rr_sweep || []).map(s => `RR${s.rr}: ${s.winrate!=null?s.winrate+'%':'?'} (n=${s.n}) exp=${s.expectancy_r!=null?s.expectancy_r:'?'}`).join(' | ');
-    return `<tr>
-      <td>${r.symbol}${liveDot}${dirFilterTxt}</td>
-      <td class="dim" title="\u043f\u043e\u0434\u043e\u0431\u0440\u0430\u043d \u043d\u0430 train-\u0447\u0430\u0441\u0442\u0438 \u0438\u0441\u0442\u043e\u0440\u0438\u0438 &#10;${rrSweepTitle}">1:${(r.chosen_rr||cfg.rr).toFixed(2)}</td>
-      <td class="${wrClass}">${r.win_rate !== null && r.win_rate !== undefined ? r.win_rate+'%' : '-'}</td>
-      <td title="обучение (по нему монета отбирается) → тест (на нём ничего не подбиралось), R на сделку после комиссий">${lswSplitTxt(r)}</td>
-      <td class="dim">n=${r.n}</td>
-      <td class="win">${r.wins}W</td>
-      <td class="loss">${r.losses}L</td>
-      <td class="dim">${r.timeouts}T</td>
-      <td>${byDirTxt}</td>
-      <td>${confirmTxt2}</td>
-      <td>${volumeTxt}</td>
-      <td>${fvgTxt}</td>
-      <td>${sessionTxt}</td>
-      <td>${touchesTxt}</td>
-      <td>${structureTxt}</td>
-      <td>${atrSweepTxt}</td>
-      <td>${tradeFilterTxt(r.trade_filter && r.trade_filter.filter, r.trade_filter && r.trade_filter.info, r.trade_filter && r.trade_filter.before && `было WR ${r.trade_filter.before.win_rate}% n=${r.trade_filter.before.n}`)}<br>${nfCoinCellHtml(status.neuro_filters, r.symbol)}</td>
-    </tr>`;
-  }).join('');
-  const btTableHtml = lswPooledHtml(status.pooled) + ((status.top || []).length ? `
-    <div class="dim hint-block" style="margin-bottom:6px;"><b>Бэктест по монетам</b> (${cfg.backtest_days} дней истории). Колонка RR — подобран отдельно под каждую монету на первых 70% её истории (train), применён к полной истории — наведи на значение чтобы увидеть всю кривую подбора. Последние 6 колонок показывают, что даёт КАЖДЫЙ фильтр САМ ПО СЕБЕ на сырых (нефильтрованных) сигналах монеты — не в связке с остальными фильтрами. В скобках — разница с винрейтом на тех же сырых сигналах без единого фильтра (это не то же самое, что колонка WR слева, там уже применены реально включённые фильтры). Пометка [выкл] — фильтр сейчас не участвует в реальной торговле, это просто оценка "а что если включить". Тренд-фильтр и структурный кэп по-прежнему доступны в настройках, просто убраны отсюда, чтобы не мозолить глаза:</div>
-    <div style="overflow-x:auto;">
-    <table style="font-size:var(--fs-sm);white-space:nowrap;">
-      <thead><tr><th>Symbol</th><th>RR</th><th>WR</th><th>обучение → тест</th><th>n</th><th>W</th><th>L</th><th>T</th><th>По направлению</th><th>Подтверждение (соло)</th><th>Объём (соло)</th><th>FVG (соло)</th><th>Сессия (соло)</th><th>Касания≥${cfg.min_touches} (соло)</th><th>Структура свечи (соло)</th><th>ATR sweep (соло)</th><th title="лучший Neuro-фильтр, только тест-часть">🏆 Neuro-фильтр (тест)</th></tr></thead>
-      <tbody>${btRows}</tbody>
-    </table>
-    </div>` : '<div class="dim">Бэктест ещё не готов.</div>');
-  setPanelHtml(panel, headerHtml + signalsTableHtml
-    + filterReportHtml(status.neuro_filters, "🧪 Neuro-фильтры для Sweep (информационно)", "считаются (≈25 мин после запуска и после каждого бэктеста Sweep)")   // v0.99.360
-    + btTableHtml);
-  panel.querySelectorAll('.sig[data-time], tbody tr[data-time]').forEach(tr => {
-    tr.onclick = () => openLswChart(tr.dataset.symbol, tr.dataset.time);
-  });
-}
-
 let _neuroCanvasAnimId = null;
 
 async function neuroAutotradeSelect(symbol, on) {   // v0.99.384
@@ -27697,6 +27464,8 @@ async function refreshNeuro() {
           ? `<span class="loss">LOSS @ ${fmtNum(t.exit_price)}</span>`
           : t.result==='LOSS_EARLY'
           ? `<span class="loss"${whbTxt}>\u2702\ufe0f \u0440\u0430\u043d\u043d\u0438\u0439 \u0432\u044b\u0445\u043e\u0434 @ ${fmtNum(t.exit_price)}</span>`
+          : t.result==='TIME_EXIT'
+          ? `<span class="${(t.pnl_r||0)>=0?'win':'loss'}" title="закрыта по рынку: истёк максимальный срок удержания">⏱ по времени ${(t.pnl_r>0?'+':'')+t.pnl_r}R</span>`
           : '<span class="dim">TIMEOUT</span>';
         return `<tr onclick="openNeuroChart('${c.symbol}', ${t.time})" style="cursor:pointer;">
           <td class="dim">${fmtDateTime(t.entry_time)}</td>
@@ -28828,7 +28597,6 @@ async function refreshAll() {
   if (activeTab === 'msnr') await refreshMsnr();
   if (activeTab === 'ft5') await refreshFt5();
   if (activeTab === 'mirror') await refreshMirror();
-  if (activeTab === 'lsw') await refreshLsw();
   if (activeTab === 'neuro') await refreshNeuro();
   if (activeTab === 'snr') await refreshSnr();
   if (activeTab === 'prv') await refreshPrv();
@@ -28944,7 +28712,7 @@ async function refreshHealth() {
       parts.push(`<div id="btJournal" data-open="${wasBtOpen ? 1 : 0}" style="display:${wasBtOpen ? 'block' : 'none'};font-size:var(--fs-xs);line-height:1.5;margin-top:6px;">`
         + `<b>Сейчас</b>${run || '<div class="dim">ничего не считается</div>'}`
         + `<b>Дальше по расписанию</b>${nxt || '<div class="dim">—</div>'}`
-        + `<div class="dim">фильтры (Neuro-фильтр MSNR/Sweep, фильтры S/R, P/R) считаются только сразу после своего бэктеста</div>`
+        + `<div class="dim">фильтры (Neuro-фильтр MSNR, фильтры S/R, P/R) считаются только сразу после своего бэктеста</div>`
         + `<b>Журнал</b> <span class="dim">(с последнего запуска сервера)</span>${jr || '<div class="dim">пока пусто</div>'}</div>`);
     }
     el.innerHTML = parts.join('');
@@ -29005,12 +28773,6 @@ wireResetButton('resetMsnrBtn', '/api/reset/msnr',
 wireRestartButton('restartMsnrBacktestBtn', '/api/msnr/restart_backtest',
   'Запустить новый цикл перебора параметров MSNR прямо сейчас, не дожидаясь расписания? Текущие результаты останутся видны, пока новый цикл не завершится.',
   '↻ Бэктест');
-wireResetButton('resetLswBtn', '/api/reset/lsw',
-  'Удалить накопленный бэктест и сигналы Sweep? Остальное не тронет. Это необратимо.',
-  '🗑 Очистить');
-wireRestartButton('restartLswBacktestBtn', '/api/lsw/restart_backtest',
-  'Запустить новый цикл перебора параметров Sweep прямо сейчас, не дожидаясь расписания? Текущие результаты останутся видны, пока новый цикл не завершится.',
-  '↻ Бэктест');
 wireResetButton('resetSnrBtn', '/api/reset/snr',
   'Удалить результаты бэктеста, историю живых сигналов и отчёт фильтров S/R Zones и сразу запустить новый бэктест? Уже открытые на бирже позиции не трогаются. Это необратимо.',
   '🗑 Очистить');
@@ -29067,7 +28829,6 @@ const setInputs = {
   msnr_enabled: document.getElementById('setMsnr'),
   msnr_addon_enabled: document.getElementById('setMsnrAddon'),
   msnr_all_in_enabled: document.getElementById('setMsnrAllIn'),
-  lsw_all_in_enabled: document.getElementById('setLswAllIn'),
   snr_all_in_enabled: document.getElementById('setSnrAllIn'),
   prv_all_in_enabled: document.getElementById('setPrvAllIn'),
   msnr_single_best_enabled: document.getElementById('setMsnrSingleBest'),
@@ -29076,29 +28837,17 @@ const setInputs = {
   msnr_min_rr_filter_enabled: document.getElementById('setMsnrMinRrFilter'),
   msnr_htf_filter_enabled: document.getElementById('setMsnrHtfFilter'),
   msnr_per_symbol_filters_enabled: document.getElementById('setMsnrPerSymbolFilters'),
-  lsw_enabled: document.getElementById('setLsw'),
   neuro_enabled: document.getElementById('setNeuro'),
   neuro_extra_conds_enabled: document.getElementById('setNeuroExtra'),
   neuro_trade_filter_enabled: document.getElementById('setNeuroTradeFilter'),
   snr_enabled: document.getElementById('setSnr'),
   prv_enabled: document.getElementById('setPrv'),
-  lsw_htf_filter_enabled: document.getElementById('setLswHtfFilter'),
-  lsw_structural_cap_enabled: document.getElementById('setLswStructuralCap'),
-  lsw_volume_filter_enabled: document.getElementById('setLswVolumeFilter'),
-  lsw_fvg_filter_enabled: document.getElementById('setLswFvgFilter'),
-  lsw_session_filter_enabled: document.getElementById('setLswSessionFilter'),
-  lsw_min_touches_enabled: document.getElementById('setLswMinTouches'),
-  lsw_atr_sweep_enabled: document.getElementById('setLswAtrSweep'),
-  lsw_candle_structure_filter_enabled: document.getElementById('setLswCandleStructureFilter'),
-  lsw_entry_confirm_enabled: document.getElementById('setLswEntryConfirm'),
-  lsw_direction_filter_enabled: document.getElementById('setLswDirectionFilter'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
   hourly_stats_enabled: document.getElementById('setHourlyStats'),
   telegram_alerts_msnr: document.getElementById('setTelegramMsnr'),
   telegram_alerts_ft5: document.getElementById('setTelegramFt5'),
   telegram_alerts_mirror: document.getElementById('setTelegramMirror'),
-  telegram_alerts_lsw: document.getElementById('setTelegramLsw'),
   telegram_alerts_ema_bull: document.getElementById('setTelegramEmaBull'),
   telegram_alerts_amd: document.getElementById('setTelegramAmd'),
   telegram_alerts_neuro: document.getElementById('setTelegramNeuro'),
@@ -29122,7 +28871,6 @@ const setInputs = {
   // functional, not decorative).
   autotrade_msnr: document.getElementById('setAutotradeMsnr'),
   autotrade_mirror: document.getElementById('setAutotradeMirror'),
-  autotrade_lsw: document.getElementById('setAutotradeLsw'),
   autotrade_neuro: document.getElementById('setAutotradeNeuro'),
   neuro_autotrade_selected_only: document.getElementById('setNeuroAutotradeSelectedOnly'),
   autotrade_snr: document.getElementById('setAutotradeSnr'),
@@ -29130,8 +28878,6 @@ const setInputs = {
 };
 
 const setValueInputs = {
-  lsw_rr: document.getElementById('setLswRR'),
-  lsw_equal_tolerance_pct: document.getElementById('setLswEqualTolerance'),
   autotrade_risk_pct: document.getElementById('setAutotradeRiskPct'),
   neuro_top_n: document.getElementById('setNeuroTopN'),
   neuro_display_n: document.getElementById('setNeuroDisplayN'),
@@ -29182,7 +28928,7 @@ async function loadSettings() {
 // they aren't gated by a single module "enabled" toggle the same way.
 const HEADER_BTN_ENABLE_KEY = {
   resetMsnrBtn: 'msnr_enabled', restartMsnrBacktestBtn: 'msnr_enabled',
-  resetLswBtn: 'lsw_enabled', restartLswBacktestBtn: 'lsw_enabled', resetNeuroBtn: 'neuro_enabled', restartNeuroBacktestBtn: 'neuro_enabled',
+  resetNeuroBtn: 'neuro_enabled', restartNeuroBacktestBtn: 'neuro_enabled',
   restartSnrBacktestBtn: 'snr_enabled', restartPrvBacktestBtn: 'prv_enabled',
   resetSnrBtn: 'snr_enabled', resetPrvBtn: 'prv_enabled',
 };
@@ -29827,7 +29573,7 @@ function snrPooledHtml(p) {
     ${c ? `<div style="margin-top:4px;">Комбинация: <b>${combo(c)}</b> (лучшая по обучению из ${p.combos})</div>
     <div>${line('обучение', c.train_n, c.train_wr, c.train_avg_pnl_r, c.train_z, p.z_needed)}</div>
     <div>${line('<b>тест</b>', c.test_n, c.test_wr, c.test_avg_pnl_r, c.test_z, p.z_test_needed)}${c.test_n < p.min_test ? ` <span class="dim">· нужно ≥ ${p.min_test} сделок</span>` : ''}</div>` : `<div class="dim">ни у одной комбинации нет ≥ ${p.min_train} сделок на обучении</div>`}
-    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Правило: одна комбинация на всю стратегию выбирается по обучающей части всех монет (z ≥ ${p.z_needed} — поправка на перебор 81 комбинации) и подтверждается на их тестовой части (z ≥ ${p.z_test_needed}, результат после комиссий в плюсе). Если подтвердилась — торгуют монеты, у которых эта комбинация в плюсе на их собственном обучении. Суммы R — после комиссий. Монеты двигаются вместе, поэтому z на общем пуле немного завышен.</div>
+    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Правило: одна комбинация на всю стратегию выбирается по обучающей части всех монет (z ≥ ${p.z_needed} — поправка на перебор ${p.combos_total || 81} комбинаций) и подтверждается на их тестовой части (z ≥ ${p.z_test_needed}, результат после комиссий в плюсе). Если подтвердилась — торгуют монеты, у которых эта комбинация в плюсе на их собственном обучении. Суммы R — после комиссий; сделка держится не дольше 7 дней, потом закрывается по рынку. Монеты двигаются вместе, поэтому z на общем пуле немного завышен.</div>
     ${rows ? `<details style="margin-top:4px;"><summary class="dim" style="cursor:pointer;">лучшие комбинации (по обучению)</summary><div style="overflow-x:auto;"><table style="font-size:var(--fs-xs);white-space:nowrap;"><thead><tr><th>комбинация</th><th>монет</th><th>train n</th><th>R</th><th>z</th><th>test n</th><th>R</th><th>z</th></tr></thead><tbody>${rows}</tbody></table></div></details>` : ''}
   </div>`;
 }
@@ -30361,15 +30107,12 @@ if __name__ == "__main__":
     threading.Thread(target=hourly_stats_loop, daemon=True).start()
     threading.Thread(target=msnr_backtest_loop, daemon=True).start()
     threading.Thread(target=msnr_neuro_filter_loop, daemon=True).start()  # v0.99.329
-    threading.Thread(target=lsw_neuro_filter_loop, daemon=True).start()   # v0.99.360
     threading.Thread(target=msnr_live_loop, daemon=True).start()
     threading.Thread(target=msnr_backtest_watchdog, daemon=True).start()
     threading.Thread(target=ft5_backtest_loop, daemon=True).start()
     threading.Thread(target=ft5_live_loop, daemon=True).start()
     threading.Thread(target=mirror_backtest_loop, daemon=True).start()
     threading.Thread(target=mirror_live_loop, daemon=True).start()
-    threading.Thread(target=lsw_backtest_loop, daemon=True).start()
-    threading.Thread(target=lsw_live_loop, daemon=True).start()
     threading.Thread(target=ema_bull_loop, daemon=True).start()
     threading.Thread(target=amd_loop, daemon=True).start()
     threading.Thread(target=amd_backtest_loop, daemon=True).start()

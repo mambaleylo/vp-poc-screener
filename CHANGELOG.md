@@ -17899,3 +17899,31 @@ v0.99.397 - Sweep moved to 4h, 1h dropped (user: "давай совсем тог
            with the results), so they are never shown or traded as 4h.
          - Autotrade still needs the pooled honest test (v0.99.396) to pass.
          - compare_sweep_variants.py follows LSW_INTERVAL / LSW_BACKTEST_DAYS.
+v0.99.398 - RR 4-5 with a real max holding time; Sweep removed.
+         - Max holding time (user: "при большем rr огромный шанс висеть в
+           сделке неделю, надо это учесть"): no Neuro / S/R / P/R trade is held
+           longer than its max-wait bars AND 7 days (VP_MAX_HOLD_DAYS): 1h 48
+           bars, 4h 42, 1d 7 (was 48 bars = 48 days on 1d). Backtests close it
+           at that bar's close (TIME_EXIT, real partial R, counted everywhere);
+           before, such trades were silently dropped. Live, the REAL position
+           is now closed at market (module account, only if open in the
+           signal's direction) — before, the signal was only marked "TIMEOUT"
+           and the exchange position kept hanging until SL/TP.
+         - RR candidates: Neuro + 3.5/4/5, S/R + 4/5, P/R + 4/5. Neuro picks RR
+           by TOTAL net R over the train period (not per trade), so long holds
+           that block later trades are paid for. S/R Bonferroni z is computed
+           from the combo count (135 -> 3.37; was hardcoded 3.23 for 81).
+         - Significance tests (S/R, P/R, pooled S/R) are t-tests on net R now
+           (TIME_EXIT trades can have any R; for pure +rr/-1 trades the old
+           binomial test and this agree).
+         - UI: "⏱ по времени ±R" for such trades.
+         - Sweep removed (user: "выключи, убери из программы настройки и
+           остальное"): real-data tests lost on 1h (z -3..-8) and were ~0 on 4h.
+           Tab, header buttons, settings group, alerts / autotrade / all-in
+           switches, module API keys entry and its loops are gone; saved
+           settings can't re-enable it. The functions stay (MSNR shares
+           lsw_htf_bias_series(); old signal records reference them).
+         Verified: py_compile, pyflakes, JS check; headless browser: no JS
+         errors on every tab, no Sweep in the UI; synthetic: S/R random walk
+         fails / weak edge passes with RR 4-5 + time exits, Neuro sweep picks
+         RR by total R (RR 5: 347 trades vs 997 at RR 1.5 on the same period).
