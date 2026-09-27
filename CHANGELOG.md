@@ -17750,3 +17750,7 @@ v0.99.387 - Mobile-first redesign (user: "переосмысли дизайн с
          Verified: py_compile (-W error), pyflakes, runtime (/ = 200), JS check,
          Playwright at 393x852 on demo data for every tab + settings: no page
          errors; jsdom Neuro checkbox test.
+v0.99.388 - Design: everything ~8% smaller (type scale 10.5-19 px, body 13 px),
+         tighter spacing (header, tabs 30 px, cards, settings rows, signal
+         rows); tables no longer stretch to full width (no big gaps between
+         columns), cell padding 5 px on the phone. Display only.

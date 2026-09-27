@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.387"
+APP_VERSION = "0.99.388"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24431,13 +24431,13 @@ INDEX_HTML = """<!doctype html>
     --warn:#fbbf24; --warn-bg:rgba(251,191,36,.12); --warn-line:rgba(251,191,36,.35);
     --money:#ffd166;
     --neuro:#b794ff; --snr:#2ec5d9; --prv:#ffa94d; --lsw:#f58fb0; --msnr:#7cb1ff;
-    --fs-xs:11px; --fs-sm:12px; --fs:13px; --fs-md:15px; --fs-lg:17px; --fs-xl:21px;
+    --fs-xs:10.5px; --fs-sm:11.5px; --fs:12.5px; --fs-md:14px; --fs-lg:16px; --fs-xl:19px;
     --r-xs:6px; --r-sm:8px; --r:12px; --r-lg:16px;
     --font: Roboto, -apple-system, "Segoe UI", system-ui, sans-serif;
   }
   * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
   html { -webkit-text-size-adjust:100%; }
-  body { margin:0; background:var(--bg); color:var(--tx); font-family:var(--font); font-size:14px; line-height:1.4; }
+  body { margin:0; background:var(--bg); color:var(--tx); font-family:var(--font); font-size:13px; line-height:1.38; }
   body.hints-hidden .hint-block { display:none !important; }
   div.hint-block { background:var(--inset); border:1px solid var(--line); border-radius:var(--r); padding:10px 12px; color:var(--tx-2); font-size:var(--fs-sm) !important; line-height:1.5; }
   div.hint-block ul { margin:6px 0; padding-left:18px; }
@@ -24456,12 +24456,12 @@ INDEX_HTML = """<!doctype html>
   .empty { padding:32px 16px; text-align:center; color:var(--tx-3); font-size:var(--fs); }
 
   /* ---------- header ---------- */
-  header { padding:10px 12px 8px; background:var(--bg-2); border-bottom:1px solid var(--line); }
+  header { padding:8px 10px 6px; background:var(--bg-2); border-bottom:1px solid var(--line); }
   #headerTop { display:flex; justify-content:space-between; align-items:center; gap:8px; }
   header h1 { font-size:var(--fs-lg); font-weight:700; letter-spacing:-.01em; margin:0; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; min-width:0; }
   header h1 .ver { font-size:var(--fs-xs); font-weight:500; color:var(--tx-3); margin-left:6px; letter-spacing:0; }
   #hdrBtns { display:flex; gap:6px; align-items:center; flex-shrink:0; }
-  #hdrBtns button { height:34px; min-width:34px; padding:0 10px; border:1px solid var(--line-2); background:var(--ctl); border-radius:var(--r-sm); font-size:var(--fs); white-space:nowrap; display:inline-flex; align-items:center; gap:4px; }
+  #hdrBtns button { height:30px; min-width:30px; padding:0 9px; border:1px solid var(--line-2); background:var(--ctl); border-radius:var(--r-sm); font-size:var(--fs); white-space:nowrap; display:inline-flex; align-items:center; gap:4px; }
   #hdrBtns button:active { background:var(--ctl-2); }
   #settingsBtn { color:var(--tx); }
   #screensaverBtn { color:var(--tx-3); }
@@ -24476,9 +24476,9 @@ INDEX_HTML = """<!doctype html>
   #hdrActions button:active { filter:brightness(1.25); }
   #status { font-size:var(--fs-xs); color:var(--tx-3); }
   #status:empty { display:none; }
-  #hdrChips { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; align-items:center; }
+  #hdrChips { display:flex; flex-wrap:wrap; gap:5px; margin-top:6px; align-items:center; }
   #hdrChips:empty { display:none; }
-  .pill { display:inline-flex; align-items:center; gap:5px; height:24px; padding:0 9px; border-radius:999px; font-size:var(--fs-xs); font-weight:600; white-space:nowrap; background:var(--ctl); color:var(--tx-2); border:1px solid var(--line-2); }
+  .pill { display:inline-flex; align-items:center; gap:5px; height:22px; padding:0 8px; border-radius:999px; font-size:var(--fs-xs); font-weight:600; white-space:nowrap; background:var(--ctl); color:var(--tx-2); border:1px solid var(--line-2); }
   .pill.neg { background:var(--neg-bg); color:var(--neg); border-color:rgba(248,113,113,.35); }
   .pill.pos { background:var(--pos-bg); color:var(--pos); border-color:rgba(52,211,153,.3); }
   .pill.warn { background:var(--warn-bg); color:var(--warn); border-color:var(--warn-line); }
@@ -24492,15 +24492,15 @@ INDEX_HTML = """<!doctype html>
   header details > summary { list-style:none; }
   header details > summary::-webkit-details-marker { display:none; }
   #globalErrorsBox, #riskAutotuneBox { margin-top:0 !important; }
-  #globalErrorsBox > summary, #riskAutotuneBox > summary { display:inline-flex; align-items:center; gap:5px; height:24px; padding:0 9px; border-radius:999px; font-size:var(--fs-xs); font-weight:600; background:var(--ctl); border:1px solid var(--line-2); color:var(--tx-2); }
+  #globalErrorsBox > summary, #riskAutotuneBox > summary { display:inline-flex; align-items:center; gap:5px; height:22px; padding:0 8px; border-radius:999px; font-size:var(--fs-xs); font-weight:600; background:var(--ctl); border:1px solid var(--line-2); color:var(--tx-2); }
   #globalErrorsBox > summary.loss { background:var(--neg-bg); color:var(--neg); border-color:rgba(248,113,113,.35); }
   #globalErrorsBox[open], #riskAutotuneBox[open] { flex-basis:100%; }
   #globalErrorsList, #riskAutotuneLog { background:var(--inset); border:1px solid var(--line); border-radius:var(--r-sm); padding:8px 10px; }
 
   /* ---------- tabs ---------- */
-  .tabs { display:flex; gap:4px; padding:8px 10px; position:sticky; top:0; z-index:6; background:rgba(7,9,13,.92); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); border-bottom:1px solid var(--line); overflow-x:auto; scrollbar-width:none; -webkit-overflow-scrolling:touch; }
+  .tabs { display:flex; gap:2px; padding:6px 8px; position:sticky; top:0; z-index:6; background:rgba(7,9,13,.92); backdrop-filter:blur(8px); -webkit-backdrop-filter:blur(8px); border-bottom:1px solid var(--line); overflow-x:auto; scrollbar-width:none; -webkit-overflow-scrolling:touch; }
   .tabs::-webkit-scrollbar { display:none; }
-  .tab { flex-shrink:0; height:34px; display:inline-flex; align-items:center; padding:0 13px; border-radius:999px; background:transparent; font-size:var(--fs); font-weight:500; cursor:pointer; color:var(--tx-2); border:1px solid transparent; white-space:nowrap; }
+  .tab { flex-shrink:0; height:30px; display:inline-flex; align-items:center; padding:0 11px; border-radius:999px; background:transparent; font-size:var(--fs); font-weight:500; cursor:pointer; color:var(--tx-2); border:1px solid transparent; white-space:nowrap; }
   .tab.active { background:var(--ctl); color:var(--tx) !important; border-color:var(--line-2); font-weight:600; }
   .tab.active::before { content:""; width:6px; height:6px; border-radius:50%; background:var(--tab-c, var(--acc)); margin-right:7px; }
   .tab[data-tab="msnr"] { --tab-c:var(--msnr); }
@@ -24508,10 +24508,10 @@ INDEX_HTML = """<!doctype html>
   .tab[data-tab="snr"] { --tab-c:var(--snr); }
   .tab[data-tab="prv"] { --tab-c:var(--prv); }
   .tab[data-tab="lsw"] { --tab-c:var(--lsw); }
-  #hintsToggleBtn { flex-shrink:0; height:34px; display:inline-flex; align-items:center; padding:0 8px !important; }
+  #hintsToggleBtn { flex-shrink:0; height:30px; display:inline-flex; align-items:center; padding:0 8px !important; }
 
   /* ---------- panels ---------- */
-  .panel { padding:4px 8px 28px; }
+  .panel { padding:2px 6px 24px; }
   .panel > div[id$="Panel"] { font-size:var(--fs) !important; }
   .panel details { margin:4px 0; }
   .panel details > summary { padding:5px 0; list-style:none; display:block; }
@@ -24520,8 +24520,8 @@ INDEX_HTML = """<!doctype html>
   .panel details[open] > summary::before { transform:rotate(90deg); }
 
   /* ---------- tables ---------- */
-  table { width:100%; border-collapse:separate; border-spacing:0; font-size:var(--fs-sm); font-variant-numeric:tabular-nums; }
-  th, td { padding:8px 8px; text-align:right; border-bottom:1px solid var(--line); white-space:nowrap; }
+  table { width:auto; min-width:60%; border-collapse:separate; border-spacing:0; font-size:var(--fs-sm); font-variant-numeric:tabular-nums; }
+  th, td { padding:6px 7px; text-align:right; border-bottom:1px solid var(--line); white-space:nowrap; }
   th:first-child, td:first-child { text-align:left; }
   th { color:var(--tx-3); font-weight:600; font-size:10.5px; letter-spacing:.04em; text-transform:uppercase; background:var(--bg); }
   tbody tr:last-child td { border-bottom:none; }
@@ -24531,7 +24531,7 @@ INDEX_HTML = """<!doctype html>
 
   /* ---------- signal list (replaces wide signal tables on the phone) ---------- */
   .sigList { border:1px solid var(--line); border-radius:var(--r); background:var(--card); overflow:hidden; margin-bottom:14px; }
-  .sig { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:3px 10px; padding:10px 12px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .sig { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:2px 8px; padding:8px 10px; border-bottom:1px solid var(--line); cursor:pointer; }
   .sig:last-child { border-bottom:none; }
   .sig:active { background:var(--ctl); }
   .sig .s-top { display:flex; gap:7px; align-items:center; min-width:0; font-size:var(--fs); }
@@ -24579,7 +24579,7 @@ INDEX_HTML = """<!doctype html>
   details[open] > .settingsGroupTitle { border-bottom:1px solid var(--line); }
   details[open] > .settingsGroupTitle::after { transform:rotate(90deg); }
   details[data-warn] > .settingsGroupTitle { color:var(--warn); }
-  .settingRow { display:flex; justify-content:space-between; align-items:center; gap:12px; padding:12px 14px 12px 16px; border-bottom:1px solid var(--line); }
+  .settingRow { display:flex; justify-content:space-between; align-items:center; gap:10px; padding:10px 12px 10px 14px; border-bottom:1px solid var(--line); }
   .settingsGroup .settingRow:last-child { border-bottom:none; }
   .settingRow > div:first-child { min-width:0; flex:1; }
   .settingRow .label, .settingRow .name { font-size:var(--fs-md); font-weight:500; color:var(--tx); line-height:1.3; }
@@ -24599,8 +24599,8 @@ INDEX_HTML = """<!doctype html>
 
   /* ---------- phone ---------- */
   @media (max-width: 640px) {
-    header { padding:10px 10px 8px; }
-    th, td { padding:7px 6px; }
+    header { padding:8px 8px 6px; }
+    th, td { padding:5px 5px; }
     th:first-child, td:first-child { position:sticky; left:0; z-index:2; background:var(--bg); }
     tr:active td:first-child { background:var(--ctl); }
     .msnr-bt-table th:first-child, .msnr-bt-table td:first-child { width:96px; min-width:96px; max-width:96px; overflow:hidden; text-overflow:ellipsis; }
@@ -27172,8 +27172,8 @@ async function refreshNeuro() {
       // looking identical to an actively-traded one.
       const isActive = c.is_active !== false;
       const cardStyle = isActive
-        ? 'margin-bottom:12px;padding:14px;background:var(--card);border-radius:var(--r-lg);border:1px solid var(--line);'
-        : 'margin-bottom:12px;padding:14px;background:var(--inset);border-radius:var(--r-lg);border:1px dashed var(--line-2);opacity:0.6;';
+        ? 'margin-bottom:10px;padding:12px;background:var(--card);border-radius:var(--r-lg);border:1px solid var(--line);'
+        : 'margin-bottom:10px;padding:12px;background:var(--inset);border-radius:var(--r-lg);border:1px dashed var(--line-2);opacity:0.6;';
       const inactiveBadge = isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:var(--ctl);border-radius:var(--r-xs);">
         <span class="dim" style="font-size:var(--fs-xs);">\u26aa \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0441\u043f\u0440\u0430\u0432\u043a\u0438 \u2014 \u043d\u0435 \u0442\u043e\u0440\u0433\u0443\u0435\u0442\u0441\u044f \u0438 \u043d\u0435 \u0441\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442\u0441\u044f \u0432\u0436\u0438\u0432\u0443\u044e</span>
       </div>`;
@@ -27261,8 +27261,8 @@ async function refreshSnr() {
     const cards = coins.map(c => {
       const isActive = c.is_active !== false;
       const cardStyle = isActive
-        ? 'margin-bottom:12px;padding:14px;background:var(--card);border-radius:var(--r-lg);border:1px solid var(--line);'
-        : 'margin-bottom:12px;padding:14px;background:var(--inset);border-radius:var(--r-lg);border:1px dashed var(--line-2);opacity:0.6;';
+        ? 'margin-bottom:10px;padding:12px;background:var(--card);border-radius:var(--r-lg);border:1px solid var(--line);'
+        : 'margin-bottom:10px;padding:12px;background:var(--inset);border-radius:var(--r-lg);border:1px dashed var(--line-2);opacity:0.6;';
       const bestBadge = (data.single_best && c.symbol === data.best_symbol)
         ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-xs);"><span style="font-size:var(--fs-xs);color:var(--money);">⭐ торгуется (только лучшая карточка)</span></div>`
         : (data.single_best && isActive ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:var(--line);border-radius:var(--r-xs);"><span class="dim" style="font-size:var(--fs-xs);">только сигналы — торгуется лучшая карточка</span></div>` : '');
@@ -27369,8 +27369,8 @@ async function refreshPrv() {
     const cards = coins.map(c => {
       const isActive = c.is_active !== false;
       const cardStyle = isActive
-        ? 'margin-bottom:12px;padding:14px;background:var(--card);border-radius:var(--r-lg);border:1px solid var(--line);'
-        : 'margin-bottom:12px;padding:14px;background:var(--inset);border-radius:var(--r-lg);border:1px dashed var(--line-2);opacity:0.6;';
+        ? 'margin-bottom:10px;padding:12px;background:var(--card);border-radius:var(--r-lg);border:1px solid var(--line);'
+        : 'margin-bottom:10px;padding:12px;background:var(--inset);border-radius:var(--r-lg);border:1px dashed var(--line-2);opacity:0.6;';
       const bestBadge = (data.single_best && c.symbol === data.best_symbol)
         ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-xs);"><span style="font-size:var(--fs-xs);color:var(--money);">⭐ торгуется (только лучшая карточка)</span></div>`
         : (data.single_best && isActive ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:var(--line);border-radius:var(--r-xs);"><span class="dim" style="font-size:var(--fs-xs);">только сигналы — торгуется лучшая карточка</span></div>` : '');
