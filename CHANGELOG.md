@@ -18062,3 +18062,26 @@ v0.99.407 - Screensaver: "Автоскринсейвер через 20 секу�
          Settings -> Оформление (per device): the clock starts by itself after
          20 s without touching the screen. Exit now needs a double tap (two
          taps within 0.45 s), so a stray touch doesn't close it.
+v0.99.408 - Simulator audit (user: wrong balance, trades opened by the
+         auto-trader missing):
+         * restart dropped every open Neuro / S/R / P/R paper trade (only old
+           modules were in the re-link list; Neuro's log also loads after the
+           main state) - their entry fees stayed deducted, the result never
+           came. Trades now carry module + coin + signal time and are re-linked
+           by that on the next settle pass; nothing is dropped any more.
+         * sizing used the long-obsolete AUTOTRADE_SIZE_MODE/VALUE (a fixed
+           share of the balance as margin, whatever the stop). Now like the
+           real order, on the simulator's balance: risk % at the stop incl.
+           round-trip fees at the real order's leverage; va-bank modes use
+           their % of the balance as margin; capped at 98% of the balance.
+         * a paper trade was recorded even when the real auto-trade SKIPPED
+           or failed; now only for OPENED / OPENED_TP_SL_FAILED / DRY_RUN.
+         * settling ran only at the end of the main scan cycle; now its own
+           thread every minute. Exit fee on the exit notional.
+         * W/L by money result - early exits and time exits were in no
+           bucket; open trades' margin shown; trades listed newest first as
+           a phone list with the exit type and sizing.
+         * hint rewritten; /api/autotrade/status "enabled" listed the removed
+           Bounce/Breakout/Scalp/FT5/Mirror instead of Neuro/S/R/P/R.
+         Screensaver: Apple lock-screen style - SF Pro / system font, thin
+         large tabular digits, weekday and date above the time.
