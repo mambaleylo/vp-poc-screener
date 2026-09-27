@@ -17754,3 +17754,30 @@ v0.99.388 - Design: everything ~8% smaller (type scale 10.5-19 px, body 13 px),
          tighter spacing (header, tabs 30 px, cards, settings rows, signal
          rows); tables no longer stretch to full width (no big gaps between
          columns), cell padding 5 px on the phone. Display only.
+v0.99.389 - Neuro: honest backtest (branch neuro-honest; user: "погнали" after the
+         audit showed that on pure random-walk prices the old Neuro backtest
+         reported WR 35%, +0.3R/trade and $15->$1900: the patterns found there
+         earn ~0R on fresh random data).
+         - Three-way split: mining 60% / validation 20% / TEST 20%. The test
+           part is never used for any choice; the card's WR, avg R and $15 are
+           now the test part only, NET of fees (0.05%+0.05% taker).
+         - Validation is a real test: occurrences thinned so forward windows
+           don't overlap, excess return over the validation period's own drift
+           in the dependency's direction (and positive in absolute terms),
+           one-sided t-test, Benjamini-Hochberg FDR 10% over all candidates.
+           Mined dependencies whose z disagrees with their direction dropped.
+         - One signal rule for backtest AND live: every matching non-decaying
+           dependency (veto filter passed) votes |z| in its direction, signal
+           when |sum| >= 2.5. Before, the backtest traded the single best
+           match while live used the sum — and live summed SIGNED z, so a
+           SHORT dependency voted LONG (live direction bug).
+         - RR, veto filters and the early-exit rule are chosen on mining +
+           validation only; coins are ranked / filtered (min WR, trades,
+           positive validation R) on validation — never on the test part.
+         - Card: "WINRATE · тест", "P&L · тест" and a box: test / validation /
+           mining numbers, how many of N candidates passed. Old-format results
+           show a "старый расчёт, завышен" note until the next mining.
+         - tools/compare_neuro_honest.py: old vs new on real Gate data.
+         Verified: py_compile (-W error), pyflakes, runtime, JS check; random-
+         walk data: most coins 0-4 dependencies (was 2600-6700), test-part R
+         ~0 / negative as it must be; workers == in-process.

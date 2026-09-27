@@ -58,7 +58,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.388"
+APP_VERSION = "0.99.389"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -18343,7 +18343,23 @@ NEURO_TF             = os.environ.get("VP_NEURO_TF", "1h")
 NEURO_FORWARD_BARS   = int(os.environ.get("VP_NEURO_FORWARD_BARS", 12))   # measure forward return over next N bars
 NEURO_MIN_SAMPLE     = int(os.environ.get("VP_NEURO_MIN_SAMPLE", 30))     # min occurrences per bucket to trust it
 NEURO_Z_THRESHOLD    = float(os.environ.get("VP_NEURO_Z_THRESHOLD", 1.8))
-NEURO_TRAIN_FRAC     = float(os.environ.get("VP_NEURO_TRAIN_FRAC", 0.7))  # walk-forward split
+NEURO_TRAIN_FRAC     = float(os.environ.get("VP_NEURO_TRAIN_FRAC", 0.7))  # walk-forward split (pre-v0.99.389; kept for other callers)
+# v0.99.389 — honest three-way split (user: "погнали" on the Neuro audit: on
+# pure random-walk prices the old backtest showed +0.3R/trade and $15->$2000,
+# because (1) stats covered the whole history incl. the part the patterns
+# were mined on, (2) "confirmation" was only "same sign of the mean",
+# (3) overlapping forward returns inflated every z-score).
+#   A = first NEURO_MINE_FRAC      : mining (candidate dependencies)
+#   B = next NEURO_VALID_FRAC      : validation — a real significance test on
+#       NON-overlapping occurrences + Benjamini-Hochberg FDR over all
+#       candidates; also RR / veto / early-exit rule / coin ranking
+#   C = the rest (holdout)         : never used for any choice — the ONLY
+#       numbers shown as the coin's result (WR, R net of fees, $15)
+NEURO_MINE_FRAC      = float(os.environ.get("VP_NEURO_MINE_FRAC", 0.6))
+NEURO_VALID_FRAC     = float(os.environ.get("VP_NEURO_VALID_FRAC", 0.2))
+NEURO_FDR_Q          = float(os.environ.get("VP_NEURO_FDR_Q", 0.10))   # expected share of false dependencies among the accepted ones
+NEURO_VALID_MIN_N    = 8        # non-overlapping occurrences in B needed to test a dependency
+NEURO_VALID_MIN_TRADES = 10     # closed trades in B needed to rank a coin
 NEURO_HISTORY_DAYS   = int(os.environ.get("VP_NEURO_HISTORY_DAYS", 1500))  # ask for as much as possible; exchange will just return what it has
 NEURO_REFRESH_SEC    = int(os.environ.get("VP_NEURO_REFRESH_SEC", 24 * 3600))  # v0.99.236 — raised 4h->24h per direct user request: with the universe now 120 coins instead of a fixed 20, a full cycle takes MUCH longer, and re-mining more than once a day added little value anyway (the underlying ~13-month rolling window barely shifts hour to hour — established during an earlier session discussion)
 NEURO_MINING_TRIGGER = threading.Event()  # v0.99.212 — same "Очистить X doesn't wake the sleeping loop" fix as LSW/MSNR's own trigger events, for the new "Очистить Neuro" button
@@ -20172,128 +20188,132 @@ def neuro_mine(candles, forward_bars=None, min_sample=None, z_threshold=None,
     return discovered
 
 
+def _neuro_norm_sf(t):
+    """one-sided P(Z >= t) for a standard normal"""
+    return 0.5 * math.erfc(t / math.sqrt(2.0))
+
+
 def neuro_walk_forward(candles, forward_bars=None, min_sample=None, z_threshold=None, train_frac=None,
                         htf_candles=None, funding_records=None, btc_candles=None,
-                        d1_candles=None, oi_records=None, eth_candles=None):
-    """Mine on the first train_frac of history, confirm only what still points
-    the same direction on the held-out remainder — never trust in-sample-only
-    stats, per the same discipline already applied to MSNR/LSW backtests."""
+                        d1_candles=None, oi_records=None, eth_candles=None, valid_end=None):
+    """v0.99.389 — mine on candles[:split] (split = train_frac, default
+    NEURO_MINE_FRAC), VALIDATE on candles[split:valid_end] (default: to the
+    end). A dependency is confirmed only if, on the validation part:
+      - its occurrences, thinned so no two forward windows overlap (the old
+        test counted 24 overlapping 24-bar returns as 24 independent
+        samples), number >= NEURO_VALID_MIN_N,
+      - their mean forward return points the mined direction with a
+        one-sided t-test p-value that survives Benjamini-Hochberg at
+        NEURO_FDR_Q across ALL candidates tested (thousands of candidates
+        -> without this almost every "confirmation" is luck),
+      - and its mined z agrees in sign with its direction (a "LONG" that is
+        only less bad than a falling baseline is not a long edge).
+    Everything after valid_end is untouched here."""
     min_sample = min_sample or NEURO_MIN_SAMPLE
     z_threshold = z_threshold if z_threshold is not None else NEURO_Z_THRESHOLD
-    train_frac = train_frac or NEURO_TRAIN_FRAC
+    train_frac = train_frac or NEURO_MINE_FRAC
 
     split = int(len(candles) * train_frac)
-    train, test = candles[:split], candles[split:]
+    valid_end = len(candles) if valid_end is None else valid_end
+    train, test = candles[:split], candles[split:valid_end]
+    if not train or not test:
+        return []
+    boundary_time = candles[split - 1]["time"] if split > 0 else candles[0]["time"]
+    end_time = candles[valid_end - 1]["time"]
 
-    def _slice_extra(extra, split_idx):
+    def _cut(extra):
         if not extra:
             return None, None
-        # extra candles are on their own timescale; split by TIME at the
-        # train/test boundary instead of by index count
-        boundary_time = candles[split_idx - 1]["time"] if split_idx > 0 else candles[0]["time"]
-        tr = [c for c in extra if c["time"] <= boundary_time]
-        te = [c for c in extra if c["time"] > boundary_time]
-        return tr, te
+        return ([c for c in extra if c["time"] <= boundary_time],
+                [c for c in extra if boundary_time < c["time"] <= end_time])
 
-    htf_train, htf_test = _slice_extra(htf_candles, split)
-    d1_train, d1_test = _slice_extra(d1_candles, split)
-    fr_train, fr_test = (None, None)
-    if funding_records:
-        boundary_time = candles[split - 1]["time"] if split > 0 else candles[0]["time"]
-        fr_train = [f for f in funding_records if f["time"] <= boundary_time]
-        fr_test = [f for f in funding_records if f["time"] > boundary_time]
-    oi_train, oi_test = (None, None)
-    if oi_records:
-        boundary_time = candles[split - 1]["time"] if split > 0 else candles[0]["time"]
-        oi_train = [o for o in oi_records if o["time"] <= boundary_time]
-        oi_test = [o for o in oi_records if o["time"] > boundary_time]
-    btc_train, btc_test = _slice_extra(btc_candles, split)
-    eth_train, eth_test = _slice_extra(eth_candles, split)
+    htf_train, htf_test = _cut(htf_candles)
+    d1_train, d1_test = _cut(d1_candles)
+    fr_train, fr_test = _cut(funding_records)
+    oi_train, oi_test = _cut(oi_records)
+    btc_train, btc_test = _cut(btc_candles)
+    eth_train, eth_test = _cut(eth_candles)
 
     train_patterns = neuro_mine(train, None, min_sample, z_threshold,
                                  htf_candles=htf_train, funding_records=fr_train, btc_candles=btc_train,
                                  d1_candles=d1_train, oi_records=oi_train, eth_candles=eth_train)
+    train_patterns = [p for p in train_patterns if (p["z"] > 0) == (p["direction"] == "LONG")]
     if not train_patterns:
         return []
 
     test_conds = neuro_compute_conditions(test, htf_test, fr_test, btc_test, d1_test, oi_test, eth_test)
-    confirmed = []
-    # Group train patterns by horizon so we only compute test forward-returns
-    # once per distinct horizon actually used.
     by_horizon = {}
     for pat in train_patterns:
         by_horizon.setdefault(pat["horizon"], []).append(pat)
 
+    tested = []   # (p_value, pattern, extra fields)
     for horizon, pats in by_horizon.items():
         test_fwd = neuro_forward_returns(test, horizon)
         valid_test_idx = [i for i in range(len(test)) if test_fwd[i] is not None]
         latest_test_time = test[valid_test_idx[-1]]["time"] if valid_test_idx else 0
         day_cutoff = latest_test_time - NEURO_DECAY_WINDOW_DAYS * 86400
-        # v0.99.323 — speed: _neuro_pattern_value() depends only on the
-        # pattern's type (+ is_combo), so bucket every test bar by value
-        # once per type, then each pattern is a dict lookup instead of a
-        # full scan (thousands of patterns x thousands of bars). Lists keep
-        # ascending bar order, so matched_idx is identical to before.
+        # the validation part's own drift: a dependency must beat simply
+        # holding in its direction, not just ride whatever trend the
+        # validation months happened to have
+        base = (sum(test_fwd[i] for i in valid_test_idx) / len(valid_test_idx)) if valid_test_idx else 0.0
         _val_index = {}
         for pat in pats:
-            neuro_check_cancel()   # v0.99.357
+            neuro_check_cancel()
             _vk = (pat["type"], bool(pat.get("is_combo")))
             if _vk not in _val_index:
                 _d = {}
                 for i in valid_test_idx:
                     _d.setdefault(_neuro_pattern_value(pat, test_conds[i]), []).append(i)
                 _val_index[_vk] = _d
-            matched_idx = list(_val_index[_vk].get(pat["value"], ()))
-            test_rets = [test_fwd[i] for i in matched_idx]
-            depth = pat.get("combo_depth", 1) if pat.get("is_combo") else 1
-            min_needed = max(10, int(min_sample * (NEURO_COMBO_MIN_SAMPLE_MULT * max(depth - 1, 1) if pat.get("is_combo") else 1) // 3))
-            if len(test_rets) < min_needed:
+            matched_idx = _val_index[_vk].get(pat["value"], ())
+            thin, last = [], -10**9
+            for i in matched_idx:          # ascending: non-overlapping forward windows only
+                if i - last >= horizon:
+                    thin.append(i)
+                    last = i
+            if len(thin) < NEURO_VALID_MIN_N:
                 continue
-            test_mean = sum(test_rets) / len(test_rets)
-            if (test_mean > 0) == (pat["mean_fwd_return"] > 0):
-                # v0.99.219/220 — RECENCY CHECK, per direct user follow-up
-                # ("не только 40%, это не 1 месяц — ещё хотя бы за
-                # последние 40 дней"). test_rets is already chronological
-                # (matched_idx iterates increasing bar index over `test`,
-                # itself time-ordered), but a percentage-of-occurrences
-                # split doesn't map to any fixed real-world timeframe — a
-                # rarely-firing pattern's last 40% could span many months,
-                # a frequent one's could be just days. Two INDEPENDENT
-                # recency lenses, either one sufficient to flag decay:
-                #  (a) last 40% of occurrences BY COUNT (catches drift for
-                #      patterns too rare for a clean calendar window)
-                #  (b) last NEURO_DECAY_WINDOW_DAYS (40) CALENDAR days —
-                #      an explicit, fixed real-world "lately" window,
-                #      independent of how often the pattern happens to fire
-                # A pattern can pass the overall train-vs-test confirmation
-                # above yet still be actively decaying RIGHT NOW; that's
-                # what should stop it firing new live signals, without
-                # rewriting the honest historical trade record
-                # (neuro_simulate_trades still uses the FULL confirmed list
-                # unfiltered — only neuro_scan_live excludes decaying
-                # patterns going forward).
-                split_i = max(1, int(len(test_rets) * 0.6))
-                recent_pct_rets = test_rets[split_i:]
-                recent_days_rets = [test_fwd[i] for i in matched_idx if test[i]["time"] >= day_cutoff]
+            rets = [test_fwd[i] for i in thin]
+            n = len(rets)
+            mean = sum(rets) / n
+            var = sum((r - mean) ** 2 for r in rets) / (n - 1) if n > 1 else 0.0
+            sd = math.sqrt(var)
+            sign = 1.0 if pat["direction"] == "LONG" else -1.0
+            exc = sign * (mean - base)
+            t = exc / (sd / math.sqrt(n)) if sd > 0 else (float("inf") if exc > 0 else float("-inf"))
+            pval = _neuro_norm_sf(t) if math.isfinite(t) else (0.0 if t > 0 else 1.0)
+            if sign * mean <= 0:
+                pval = 1.0   # beats the drift but still loses money in its own direction
 
-                def _decay_check(rets):
-                    if len(rets) < NEURO_DECAY_MIN_RECENT_N:
-                        return None, False
-                    m = sum(rets) / len(rets)
-                    sign_flipped = (m > 0) != (pat["mean_fwd_return"] > 0)
-                    weakened_badly = abs(test_mean) > 1e-12 and abs(m) < 0.3 * abs(test_mean)
-                    return round(m, 5), (sign_flipped or weakened_badly)
+            split_i = max(1, int(n * 0.6))
+            recent_pct = rets[split_i:]
+            recent_days = [test_fwd[i] for i in thin if test[i]["time"] >= day_cutoff]
 
-                recent_mean, decay_by_pct = _decay_check(recent_pct_rets)
-                recent_days_mean, decay_by_days = _decay_check(recent_days_rets)
-                decaying = decay_by_pct or decay_by_days
-                confirmed.append({**pat, "test_n": len(test_rets),
-                                  "test_mean_fwd_return": round(test_mean, 5), "held_up": True,
-                                  "recent_test_n": len(recent_pct_rets),
-                                  "recent_test_mean_fwd_return": recent_mean,
-                                  "recent_days_n": len(recent_days_rets),
-                                  "recent_days_mean_fwd_return": recent_days_mean,
-                                  "decaying": decaying})
+            def _decay(rr_):
+                if len(rr_) < NEURO_DECAY_MIN_RECENT_N:
+                    return None, False
+                m = sum(rr_) / len(rr_)
+                flipped = (m > 0) != (pat["mean_fwd_return"] > 0)
+                weak = abs(mean) > 1e-12 and abs(m) < 0.3 * abs(mean)
+                return round(m, 5), (flipped or weak)
+            rp_mean, d1_ = _decay(recent_pct)
+            rd_mean, d2_ = _decay(recent_days)
+            tested.append((pval, pat, {
+                "test_n": n, "test_n_raw": len(matched_idx), "test_base_fwd_return": round(base, 5),
+                "test_mean_fwd_return": round(mean, 5), "test_t": round(t, 2) if math.isfinite(t) else None,
+                "test_p": round(pval, 5), "held_up": True,
+                "recent_test_n": len(recent_pct), "recent_test_mean_fwd_return": rp_mean,
+                "recent_days_n": len(recent_days), "recent_days_mean_fwd_return": rd_mean,
+                "decaying": bool(d1_ or d2_)}))
+
+    # Benjamini-Hochberg over every candidate that could be tested
+    m_tests = len(tested)
+    tested.sort(key=lambda x: x[0])
+    k_max = 0
+    for k, (pv, _, _) in enumerate(tested, 1):
+        if pv <= NEURO_FDR_Q * k / m_tests:
+            k_max = k
+    confirmed = [{**pat, **extra, "fdr_tested": m_tests} for pv, pat, extra in tested[:k_max]]
     confirmed.sort(key=lambda d: -abs(d["z"]))
     return confirmed
 
@@ -20339,6 +20359,49 @@ def _neuro_best_match_at(groups, cond_bucket):
     return matched
 
 
+def _neuro_signal_groups(confirmed_patterns):
+    """v0.99.389 — [(representative, {value: [patterns]})] per pattern type,
+    ALL patterns kept (several horizons of the same condition each vote, as
+    in the live scan)."""
+    groups = {}
+    for p in confirmed_patterns:
+        if p.get("value") is None:
+            continue
+        g = groups.setdefault((p["type"], bool(p.get("is_combo"))), [p, {}])
+        g[1].setdefault(p["value"], []).append(p)
+    return list(groups.values())
+
+
+def _neuro_signal_at(groups, cond):
+    """v0.99.389 — THE signal rule, shared by the backtest and the live scan
+    (before, the backtest traded the single strongest matching dependency
+    while live required the combined score, and live summed signed z so a
+    SHORT dependency voted LONG). Every matching, non-decaying dependency
+    whose veto filter (if any) passes votes |z| in its own direction; a
+    signal needs |score| >= NEURO_MIN_AGREE_Z. Returns (direction, score,
+    matched list) or None."""
+    score = 0.0
+    matched = []
+    for rep_pat, by_val in groups:
+        v = _neuro_pattern_value(rep_pat, cond)
+        if v is None:
+            continue
+        lst = by_val.get(v)
+        if not lst:
+            continue
+        for p in lst:
+            if p.get("decaying"):
+                continue
+            veto = p.get("veto_filter")
+            if veto and cond.get(veto["key"]) != veto["value"]:
+                continue
+            score += abs(p["z"]) if p["direction"] == "LONG" else -abs(p["z"])
+            matched.append(p)
+    if not matched or abs(score) < NEURO_MIN_AGREE_Z:
+        return None
+    return ("LONG" if score > 0 else "SHORT"), score, matched
+
+
 def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding_records=None, btc_candles=None,
                            d1_candles=None, oi_records=None, eth_candles=None, rr=None, return_conds=False):
     """Turn confirmed dependencies into an actual trade history: whenever a
@@ -20366,19 +20429,25 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
     # object — the cache holds references, so ids can't be recycled).
     _inputs = (candles, confirmed_patterns, htf_candles, funding_records, btc_candles,
                d1_candles, oi_records, eth_candles)
+    # v0.99.389 — the per-bar signal cache is keyed by the pattern set AND
+    # its veto/decay state (vetoes are attached between two simulations)
+    _pkey = (len(confirmed_patterns), sum(1 for p in confirmed_patterns if p.get("veto_filter")),
+             sum(1 for p in confirmed_patterns if p.get("decaying")))
     _c = getattr(_neuro_sim_cache, "entry", None)
-    if (_c is not None and _c["n_pat"] == len(confirmed_patterns)
-            and all(a is b for a, b in zip(_c["inputs"], _inputs))):
-        conds, atr14, _best = _c["conds"], _c["atr14"], _c["best"]
+    if _c is not None and all(a is b for a, b in zip(_c["inputs"], _inputs)):
+        conds, atr14 = _c["conds"], _c["atr14"]
+        if _c["pkey"] != _pkey:
+            _c["pkey"] = _pkey
+            _c["best"] = [_NEURO_UNSET] * max(len(candles) - 1, 0)
+            _c["groups"] = _neuro_signal_groups(confirmed_patterns)
+        _best = _c["best"]
     else:
         conds = neuro_compute_conditions(candles, htf_candles, funding_records, btc_candles, d1_candles, oi_records, eth_candles)
         atr14 = neuro_atr_series(candles, 14)
-        # lazy: filled only for bars a simulation actually visits (bars
-        # inside an open trade are skipped), shared across RR candidates
         _best = [_NEURO_UNSET] * max(len(candles) - 1, 0)
-        _neuro_sim_cache.entry = {"inputs": _inputs, "n_pat": len(confirmed_patterns),
+        _neuro_sim_cache.entry = {"inputs": _inputs, "pkey": _pkey,
                                   "conds": conds, "atr14": atr14, "best": _best,
-                                  "groups": _neuro_pattern_groups(confirmed_patterns)}
+                                  "groups": _neuro_signal_groups(confirmed_patterns)}
     _groups = _neuro_sim_cache.entry["groups"]
     neuro_check_cancel()   # v0.99.357
     trades = []
@@ -20402,18 +20471,19 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
         neuro_check_cancel()   # v0.99.357
         if i < occupied_until_i:
             continue  # previous trade on this symbol hasn't resolved yet
-        matched = _best[i]
-        if matched is _NEURO_UNSET:
-            matched = _best[i] = _neuro_best_match_at(_groups, conds[i])
-        if not matched or not atr14[i]:
+        sig = _best[i]
+        if sig is _NEURO_UNSET:
+            sig = _best[i] = _neuro_signal_at(_groups, conds[i])
+        if not sig or not atr14[i]:
             continue
+        direction, score, _m = sig
+        matched = max(_m, key=lambda p: abs(p["z"]))   # strongest vote — for attribution / veto search
         entry_bar = candles[i + 1]
         entry = entry_bar["open"]
         atr = atr14[i]
         sl_dist = NEURO_SL_ATR_MULT * atr
         if sl_dist <= 0:
             continue
-        direction = matched["direction"]
         sl = entry - sl_dist if direction == "LONG" else entry + sl_dist
         tp = entry + sl_dist * rr if direction == "LONG" else entry - sl_dist * rr
 
@@ -20466,8 +20536,11 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
             "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8), "rr": rr,
             "direction": direction, "pattern_type": matched["type"], "pattern_value": str(matched["value"]),
             "z": matched["z"], "is_combo": matched.get("is_combo", False), "result": result,
+            "score": round(score, 2), "n_votes": len(_m),
             "exit_price": round(exit_price, 8) if exit_price else None,
             "exit_time": exit_time, "pnl_r": pnl_r,
+            "fee_r": trade_fee_r(entry, sl),   # v0.99.389 — round-trip taker fee in R
+            "pnl_r_net": round(pnl_r - trade_fee_r(entry, sl), 3) if pnl_r is not None else None,
             # v0.99.260 — see NEURO_EARLY_EXIT_K's own comment. survived_k
             # is False when the trade already resolved AT or BEFORE the
             # checkpoint bar — there's no "early exit decision" to have
@@ -20550,6 +20623,29 @@ def neuro_pick_best_rr(train_candles, confirmed_patterns, htf_candles=None, fund
     return best_rr, sweep
 
 
+def _neuro_sel(summary):
+    """v0.99.389 — the stats coins are SELECTED by: the validation part
+    (the holdout shown on the card is never used to pick anything)."""
+    if summary.get("method") == "holdout":
+        return (summary.get("split") or {}).get("valid") or {}
+    return summary
+
+
+def neuro_eligible(summary):
+    """v0.99.389 — top-N eligibility: enough validation trades, enough trades
+    outside the mining part, a positive validation result net of fees, and
+    the user's win-rate floor (on validation)."""
+    if summary.get("method") != "holdout":
+        return ((summary.get("n") or 0) >= NEURO_TOP_N_MIN_TRADES and summary.get("avg_pnl_r") is not None
+                and (neuro_effective_winrate(summary) or 0) >= NEURO_MIN_WINRATE)
+    v = _neuro_sel(summary)
+    return ((summary.get("patterns_confirmed") or 0) > 0
+            and (v.get("n") or 0) >= NEURO_VALID_MIN_TRADES
+            and (v.get("n") or 0) + (summary.get("n") or 0) >= NEURO_TOP_N_MIN_TRADES
+            and v.get("avg_pnl_r") is not None and v["avg_pnl_r"] > 0
+            and (neuro_effective_winrate(summary) or 0) >= NEURO_MIN_WINRATE)
+
+
 def neuro_effective_winrate(summary):
     """v0.99.298 winrate floor input — see the v0.99.316 note below:
     now min(full-history WR, recent-window WR when trustworthy)."""
@@ -20561,6 +20657,10 @@ def neuro_effective_winrate(summary):
     # Now the floor takes the LOWER of the two: a coin must clear the
     # minimum both overall (what the card shows) and recently (the
     # original v0.99.298 protection against a coin that's gone bad).
+    # v0.99.389 — honest (holdout) summaries: the VALIDATION win rate (the
+    # holdout on the card must not be used for any choice).
+    if summary.get("method") == "holdout":
+        return _neuro_sel(summary).get("winrate")
     full = summary.get("winrate")
     agg = summary.get("aggregate_recent") or {}
     recent = agg.get("wr") if agg.get("n", 0) >= NEURO_AGG_DECAY_MIN_N else None
@@ -20579,6 +20679,8 @@ def neuro_rank_metric(summary):
     are enough of them to trust (NEURO_AGG_DECAY_MIN_N), falling back to
     the full-history figure only when a coin doesn't have enough recent
     trades yet for the recent verdict to be meaningful."""
+    if summary.get("method") == "holdout":   # v0.99.389 — validation avg R, net of fees
+        return _neuro_sel(summary).get("avg_pnl_r")
     agg = summary.get("aggregate_recent") or {}
     if agg.get("n", 0) >= NEURO_AGG_DECAY_MIN_N and agg.get("avg_pnl_r") is not None:
         return agg["avg_pnl_r"]
@@ -20676,61 +20778,44 @@ def neuro_backtest_core(candles, htf_candles, d1_candles, funding_records, oi_re
     _neuro_ctx.index_close = {int(k): v for k, v in (index_close or {}).items()}
     try:
         neuro_check_cancel()   # v0.99.357 — abandoned while fetching? stop before the heavy part
+        # v0.99.389 — honest three-way split, see NEURO_MINE_FRAC
+        n_c = len(candles)
+        a_end = max(1, int(n_c * NEURO_MINE_FRAC))
+        b_end = max(a_end + 1, min(n_c, int(n_c * (NEURO_MINE_FRAC + NEURO_VALID_FRAC))))
+        mine_end_time = candles[a_end - 1]["time"]
+        valid_end_time = candles[b_end - 1]["time"]
         confirmed = neuro_walk_forward(candles, htf_candles=htf_candles, funding_records=funding_records,
                                         btc_candles=btc_candles, d1_candles=d1_candles, oi_records=oi_records,
-                                        eth_candles=eth_candles)
+                                        eth_candles=eth_candles, train_frac=NEURO_MINE_FRAC, valid_end=b_end)
 
-        # Pick RR using ONLY the same train slice neuro_walk_forward used
-        # internally for mining — recomputed here since that split isn't
-        # exposed outside the function, but uses the identical boundary
-        # (NEURO_TRAIN_FRAC applied to the same candles list).
-        split = int(len(candles) * NEURO_TRAIN_FRAC)
-        train_candles = candles[:split]
-        boundary_time = candles[split - 1]["time"] if split > 0 else candles[0]["time"]
-
-        def _train_slice(extra):
-            return [c for c in extra if c["time"] <= boundary_time] if extra else extra
+        def _upto(extra):
+            return [c for c in extra if c["time"] <= valid_end_time] if extra else extra
+        # RR chosen on mining + validation (never on the holdout)
         chosen_rr, rr_sweep = neuro_pick_best_rr(
-            train_candles, confirmed, htf_candles=_train_slice(htf_candles),
-            funding_records=_train_slice(funding_records), btc_candles=_train_slice(btc_candles),
-            d1_candles=_train_slice(d1_candles), oi_records=_train_slice(oi_records),
-            eth_candles=_train_slice(eth_candles))
+            candles[:b_end], confirmed, htf_candles=_upto(htf_candles),
+            funding_records=_upto(funding_records), btc_candles=_upto(btc_candles),
+            d1_candles=_upto(d1_candles), oi_records=_upto(oi_records),
+            eth_candles=_upto(eth_candles))
 
-        trades, full_conds = neuro_simulate_trades(candles, confirmed, htf_candles=htf_candles, funding_records=funding_records,
-                                                    btc_candles=btc_candles, d1_candles=d1_candles, oi_records=oi_records,
-                                                    eth_candles=eth_candles, rr=chosen_rr, return_conds=True)
+        def _sim():
+            return neuro_simulate_trades(candles, confirmed, htf_candles=htf_candles, funding_records=funding_records,
+                                         btc_candles=btc_candles, d1_candles=d1_candles, oi_records=oi_records,
+                                         eth_candles=eth_candles, rr=chosen_rr, return_conds=True)
+        trades, full_conds = _sim()
 
-        # v0.99.255 -- "veto filter" second-layer, per direct user request
-        # (see neuro_find_veto_filters()'s own docstring for the full
-        # train/test discipline this follows).
-        # v0.99.261 -- CRITICAL PERFORMANCE FIX, per direct user report of
-        # neuro_mining_loop hitting its own 480s per-symbol ceiling on
-        # real hardware for multiple symbols in one cycle: full_conds
-        # used to be computed a SECOND time here from scratch (the exact
-        # same 47-condition series neuro_simulate_trades() already
-        # computes internally) purely because that function didn't
-        # expose it back -- doubling condition-computation cost on every
-        # single symbol. Now reused directly via neuro_simulate_trades()'s
-        # own return_conds=True -- no behavior change, same conditions,
-        # just computed once instead of twice.
-        neuro_check_cancel()   # v0.99.357
-        veto_filters = neuro_find_veto_filters(confirmed, trades, full_conds, boundary_time)
+        neuro_check_cancel()
+        # veto filters: found on the mining part, confirmed on validation —
+        # holdout trades are not shown to the search at all
+        pre_holdout = [t for t in trades if t["time"] <= valid_end_time]
+        veto_filters = neuro_find_veto_filters(confirmed, pre_holdout, full_conds, mine_end_time)
         if veto_filters:
             for pat in confirmed:
                 vf = veto_filters.get((pat["type"], str(pat["value"])))
                 if vf:
                     pat["veto_filter"] = vf
+            trades, full_conds = _sim()   # vetoes are part of the signal rule (as live)
 
-        # v0.99.260 — apply the validated early-exit rule (if one was
-        # found) to the actual trade history: a matching trade's result/
-        # pnl_r are REWRITTEN to reflect exiting at the checkpoint bar's
-        # close instead of waiting for full resolution, but the ORIGINAL
-        # outcome is kept in would_have_been_result/would_have_been_pnl_r
-        # — per direct user request ("писать статистику для таких
-        # сигналов, закрытых раньше времени, чтобы знать его исход") —
-        # so the honest counterfactual stays visible rather than being
-        # silently discarded.
-        early_exit_rule = neuro_find_early_exit_rule(trades, boundary_time)
+        early_exit_rule = neuro_find_early_exit_rule([t for t in trades if t["time"] <= valid_end_time], mine_end_time)
         if early_exit_rule:
             for t in trades:
                 if not t["survived_k"] or t["result"] not in ("WIN", "LOSS"):
@@ -20741,25 +20826,23 @@ def neuro_backtest_core(candles, htf_candles, d1_candles, funding_records, oi_re
                     t["would_have_been_pnl_r"] = t["pnl_r"]
                     t["result"] = "LOSS_EARLY"
                     t["pnl_r"] = t["close_at_k_pnl"] if t["close_at_k_pnl"] is not None else t["pnl_r"]
+                    t["pnl_r_net"] = round(t["pnl_r"] - (t.get("fee_r") or 0), 3) if t["pnl_r"] is not None else None
                     t["exit_price"] = round(k_bar["close"], 8)
                     t["exit_time"] = k_bar["time"]
 
-        closed = [t for t in trades if t["result"] in ("WIN", "LOSS", "LOSS_EARLY")]
-        wins = sum(1 for t in closed if t["result"] == "WIN")
-        losses = len(closed) - wins
-        wr = round(wins / len(closed) * 100, 1) if closed else None
-        avg_pnl = round(sum(t["pnl_r"] for t in closed if t.get("pnl_r") is not None) / len(closed), 2) if closed else None
+        def _stats(ts):
+            cl = [t for t in ts if t["result"] in ("WIN", "LOSS", "LOSS_EARLY")]
+            w = sum(1 for t in cl if t["result"] == "WIN")
+            return {"n": len(cl), "wins": w, "losses": len(cl) - w,
+                    "timeouts": sum(1 for t in ts if t["result"] == "TIMEOUT"), "total": len(ts),
+                    "winrate": round(w / len(cl) * 100, 1) if cl else None,
+                    "avg_pnl_r": round(sum(_net_r(t) for t in cl) / len(cl), 3) if cl else None,
+                    "avg_pnl_r_gross": round(sum(t["pnl_r"] for t in cl) / len(cl), 3) if cl else None}
+        st_mine = _stats([t for t in trades if t["time"] <= mine_end_time])
+        st_valid = _stats([t for t in trades if mine_end_time < t["time"] <= valid_end_time])
+        holdout_trades = [t for t in trades if t["time"] > valid_end_time]
+        st_hold = _stats(holdout_trades)
 
-        # v0.99.222 — per direct user follow-up ("убирать конкретные
-        # зависимости, виновные в плохой серии, из списка подтверждённых
-        # целиком, а не просто глушить сигналы"): when the aggregate
-        # recent window is underperforming, PURGE the specific patterns
-        # that were net-losing within it from `confirmed` — this is what
-        # actually gets used for live signals and shown as "currently
-        # confirmed" going forward. `trades` above (the historical record)
-        # was already generated from the FULL pre-purge confirmed list and
-        # stays exactly as it happened — purging only affects what's
-        # trusted from here on, never rewrites the honest past.
         aggregate_recent = neuro_check_aggregate_decay(trades, chosen_rr)
         culprits_removed = 0
         if aggregate_recent.get("underperforming"):
@@ -20769,17 +20852,24 @@ def neuro_backtest_core(candles, htf_candles, d1_candles, funding_records, oi_re
                 confirmed = [p for p in confirmed if (p["type"], p["value"]) not in culprits]
                 culprits_removed = before - len(confirmed)
 
-        summary = {"n": len(closed), "wins": wins, "losses": losses,
-                   "timeouts": sum(1 for t in trades if t["result"] == "TIMEOUT"),
-                   "winrate": wr, "avg_pnl_r": avg_pnl, "total": len(trades),
+        # the card's headline numbers = the HOLDOUT only (net of fees)
+        summary = {"n": st_hold["n"], "wins": st_hold["wins"], "losses": st_hold["losses"],
+                   "timeouts": st_hold["timeouts"], "winrate": st_hold["winrate"],
+                   "avg_pnl_r": st_hold["avg_pnl_r"], "total": st_hold["total"],
+                   "method": "holdout", "fees_included": True,
+                   "split": {"mine": st_mine, "valid": st_valid, "holdout": st_hold,
+                             "mine_end": mine_end_time, "valid_end": valid_end_time,
+                             "holdout_days": round((candles[-1]["time"] - valid_end_time) / 86400, 1),
+                             "valid_days": round((valid_end_time - mine_end_time) / 86400, 1),
+                             "fdr_q": NEURO_FDR_Q,
+                             "fdr_tested": confirmed[0].get("fdr_tested") if confirmed else None},
                    "patterns_confirmed": len(confirmed), "history_bars": len(candles),
                    "combos_confirmed": sum(1 for p in confirmed if p.get("is_combo")),
                    "decaying_confirmed": sum(1 for p in confirmed if p.get("decaying")),
                    "chosen_rr": chosen_rr, "rr_sweep": rr_sweep,
                    "aggregate_recent": aggregate_recent, "culprits_removed": culprits_removed,
                    "early_exit_rule": early_exit_rule,
-                   }   # $15 va-bank fields are added by the caller (network)
-
+                   }   # $15 va-bank fields are added by the caller (network), from holdout trades
         return {"confirmed": confirmed, "trades": trades, "summary": summary}
     finally:
         _neuro_ctx.index_close = {}
@@ -20858,7 +20948,9 @@ def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_
             "btc_candles": btc_candles, "eth_candles": eth_candles,
             "index_close": {str(k): v for k, v in (getattr(_neuro_ctx, "index_close", None) or {}).items()}})
         confirmed, trades, summary = out["confirmed"], out["trades"], out["summary"]
-        summary.update(rr_compound_annotate(trades, symbol))   # v0.99.318 — $15 va-bank simulation
+        # v0.99.389 — $15 va-bank over the HOLDOUT trades only
+        _ve = (summary.get("split") or {}).get("valid_end")
+        summary.update(rr_compound_annotate([t for t in trades if _ve is None or t["time"] > _ve], symbol))
         return confirmed, trades, summary
     except Exception as e:
         log_error(f"neuro_backtest_symbol {symbol}: {e}")
@@ -20926,34 +21018,14 @@ def neuro_scan_live(symbol, confirmed_patterns, rr=None, precomputed_btc_candles
         if not atr:
             return None
 
-        matched = []
-        for p in confirmed_patterns:
-            if p.get("decaying"):
-                continue  # v0.99.219 — a pattern whose recent test-period
-                # performance has flipped sign or collapsed vs its overall
-                # test average doesn't get to fire NEW live signals, even
-                # though it still passed the overall train-vs-test
-                # confirmation gate. Kept in the full patterns list (and in
-                # neuro_simulate_trades' historical record) for transparency
-                # — only excluded from acting on it going forward.
-            cur_val = _neuro_pattern_value(p, last)
-            if cur_val is not None and cur_val == p["value"]:
-                veto = p.get("veto_filter")
-                if veto and last.get(veto["key"]) != veto["value"]:
-                    continue  # v0.99.255 — this pattern's own confirmed
-                    # veto-filter condition isn't satisfied right now,
-                    # so the extra layer that predicted win-vs-loss for
-                    # ITS OWN past trades says this specific firing looks
-                    # more like its historical losses than its wins —
-                    # skip it, same as a decaying pattern, without
-                    # dropping it from the confirmed list entirely.
-                matched.append(p)
-        if not matched:
+        # v0.99.389 — the SAME rule as the backtest (_neuro_signal_at): the
+        # old inline loop summed signed z, so a SHORT dependency (negative
+        # z) pushed the score towards LONG. Decaying dependencies and ones
+        # whose veto condition isn't met don't vote (as before).
+        sig = _neuro_signal_at(_neuro_signal_groups(confirmed_patterns), last)
+        if not sig:
             return None
-        score = sum(p["z"] if p["direction"] == "LONG" else -p["z"] for p in matched)
-        if abs(score) < NEURO_MIN_AGREE_Z:
-            return None
-        direction = "LONG" if score > 0 else "SHORT"
+        direction, score, matched = sig
         price = closed_candles[-1]["close"]
         sl_dist = NEURO_SL_ATR_MULT * atr
         sl = price - sl_dist if direction == "LONG" else price + sl_dist
@@ -21506,10 +21578,7 @@ def neuro_mining_loop():
             # trades floor (NEURO_TOP_N_MIN_TRADES, on the FULL history)
             # stays as the base eligibility gate — per the user's own
             # earlier request, unchanged.
-            eligible = [(sym, res) for sym, res in all_results.items()
-                        if (res[2].get("n") or 0) >= NEURO_TOP_N_MIN_TRADES
-                        and res[2].get("avg_pnl_r") is not None
-                        and (neuro_effective_winrate(res[2]) or 0) >= NEURO_MIN_WINRATE]
+            eligible = [(sym, res) for sym, res in all_results.items() if neuro_eligible(res[2])]   # v0.99.389
             eligible.sort(key=lambda item: -neuro_rank_metric(item[1][2]))
             # v0.99.262 — per direct user request ("не количество топ для
             # авто торговли, а ещё и для просто отображения... остальные
@@ -26956,6 +27025,22 @@ async function neuroAutotradeSelect(symbol, on) {   // v0.99.384
   refreshNeuro();
 }
 
+// v0.99.389 — what the card's numbers mean: holdout ("тест") vs the parts
+// used for searching (обучение) and selecting (проверка)
+function neuroSplitHtml(s) {
+  const sp = s.split;
+  if (s.method !== 'holdout' || !sp) {
+    return '<div class="dim" style="font-size:var(--fs-xs);margin-bottom:8px;color:var(--warn);">⚠ старый расчёт: цифры по всей истории, включая ту, на которой искались зависимости — завышены. Обновится после следующего майнинга.</div>';
+  }
+  const f = (x) => x && x.n ? `WR ${x.winrate}% · ${x.avg_pnl_r > 0 ? '+' : ''}${x.avg_pnl_r}R · n=${x.n}` : 'нет сделок';
+  const bad = sp.holdout && sp.holdout.n && sp.holdout.avg_pnl_r <= 0;
+  return `<div style="font-size:var(--fs-xs);margin-bottom:8px;line-height:1.5;padding:7px 9px;border-radius:var(--r-sm);background:var(--inset);border:1px solid ${bad ? 'rgba(248,113,113,.35)' : 'var(--line)'};">
+    <b>Тест</b> — последние ${Math.round(sp.holdout_days)} дн., поиск их не видел, с комиссиями: <b class="${bad ? 'loss' : 'win'}">${f(sp.holdout)}</b><br>
+    <span class="dim">Проверка (${Math.round(sp.valid_days)} дн., по ней отбор): ${f(sp.valid)} · обучение (подгонка, не показатель): ${f(sp.mine)}</span><br>
+    <span class="dim">зависимости: ${s.patterns_confirmed || 0} из ${sp.fdr_tested || '?'} кандидатов прошли проверку (доля ложных ≤ ${Math.round((sp.fdr_q || 0.1) * 100)}%)</span>
+  </div>`;
+}
+
 async function refreshNeuro() {
   const panel = document.getElementById('neuroPanel');
   try {
@@ -27013,11 +27098,11 @@ async function refreshNeuro() {
         <div style="display:flex;gap:0;margin:10px 0;background:var(--inset);border-radius:var(--r-sm);overflow:hidden;">
           <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid var(--line);">
             <div style="font-size:var(--fs-xl);font-weight:700;" class="${wrCls}">${s.winrate}%</div>
-            <div class="dim" style="font-size:var(--fs-xs);">WINRATE</div>
+            <div class="dim" style="font-size:var(--fs-xs);">WINRATE${s.method === 'holdout' ? ' · тест' : ''}</div>
           </div>
           <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid var(--line);">
             <div style="font-size:var(--fs-xl);font-weight:700;" class="${pnlCls}">${s.avg_pnl_r>0?'+':''}${s.avg_pnl_r}R</div>
-            <div class="dim" style="font-size:var(--fs-xs);">\u0421\u0420. P&L</div>
+            <div class="dim" style="font-size:var(--fs-xs);">\u0421\u0420. P&L${s.method === 'holdout' ? ' · тест' : ''}</div>
           </div>
           <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid var(--line);">
             <div style="font-size:var(--fs-xl);font-weight:700;color:var(--tx);">1:${(s.chosen_rr||cfg.rr||2).toFixed(2)}</div>
@@ -27033,6 +27118,7 @@ async function refreshNeuro() {
         <div class="dim" style="font-size:var(--fs-xs);margin-bottom:10px;">
           ${s.patterns_confirmed||0} \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043e (\u0438\u0437 \u043d\u0438\u0445 ${s.combos_confirmed||0} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439${s.decaying_confirmed ? `, <span style="color:var(--warn);">${s.decaying_confirmed} \u043e\u0441\u043b\u0430\u0431\u0435\u0432\u0430\u044e\u0442</span>` : ''}) \u00b7 ${s.history_bars||0} \u0447\u0430\u0441\u043e\u0432\u044b\u0445 \u0441\u0432\u0435\u0447\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438 (${fmtMonths((s.history_bars||0)/24)})
         </div>
+        ${neuroSplitHtml(s)}
         ${compoundSummaryHtml(s)}
         ${(s.rr_sweep && s.rr_sweep.length) ? `<details style="margin-bottom:8px;">
           <summary style="cursor:pointer;font-size:var(--fs-sm);color:var(--tx-2);">\u043f\u043e\u0434\u0431\u043e\u0440 RR (\u043d\u0430 train-\u0447\u0430\u0441\u0442\u0438)</summary>
