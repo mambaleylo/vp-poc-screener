@@ -18021,3 +18021,20 @@ v0.99.402 - MSNR removed (user: "удаляй mnsr тогда как свип").
          Also: the "Sweep backtest hung" alert the user got came from a server
          still running a pre-v0.99.398 build — replacing the file doesn't
          restart the running process.
+v0.99.403 - Neuro: all cards always shown, ranked by average daily % of the
+         $15 va-bank run over validation + test (geometric per-day growth, so
+         a 3-month and a 6-month history compare fairly). Removed the
+         top-N / display-N / min-winrate settings and the "selected only"
+         switch. New "Neuro: только лучшая карточка": on - only the best
+         card trades; off - ticked "🤖 торговать" cards that pass the check
+         trade. Telegram note when a ticked card drops in rank or stops
+         passing after a re-mine.
+         LOOKAHEAD FIX: h4_rsi_zone, htf_trend / daily_trend and daily_streak
+         read the still-forming 4h / 1d candle (its future close). Now only
+         candles closed by the 1h bar's close are used; pdhl_zone and
+         weekly/monthly open no longer depend on whether today's daily
+         candle is in the data. Verified: conditions on truncated vs full
+         data now match on every key; on a synthetic random walk the test
+         part went from +0.26R/trade (fake edge) to -0.06R. Saved results
+         from older versions are marked stale, not traded, and re-mined at
+         once (NEURO_ALGO_VERSION).
