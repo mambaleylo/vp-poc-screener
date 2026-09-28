@@ -18151,3 +18151,11 @@ v0.99.415 - False "Зависло: MSNR / Sweep ... нет отклика" alert
          listed loop once - so after their gap the watchdog reported them as
          hung. Removed from the watched list. (This, not an old server copy,
          was also behind the earlier MSNR-hang notifications.)
+v0.99.416 - Neuro: test gate (user: a coin with 0 wins in 14 test trades was #1
+         on a lucky 10-trade validation). A coin passes only if, after the
+         validation-based choice, its test part (never seen by the search)
+         has >= 10 trades and a positive result after fees - a single
+         pass/fail gate, it doesn't rank (same scheme as S/R and P/R).
+         Validation minimum 10 -> 15 trades. Ranking by daily % over
+         validation + test stays, among passing coins only. The saved active
+         list is re-checked on start; the card shows why a coin fails.

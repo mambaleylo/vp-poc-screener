@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.415"
+APP_VERSION = "0.99.416"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6729,7 +6729,10 @@ def load_neuro_state():
                 restored_active = []
                 _neuro_active_symbols = []
             if restored_active:
-                _neuro_active_symbols = restored_active
+                # v0.99.416 — the saved list is re-checked with the current rule
+                # (test gate), so a coin that fails it stops trading right away
+                _neuro_active_symbols = [s_ for s_ in restored_active
+                                         if neuro_eligible(_neuro_summary.get(s_) or {})]
             # v0.99.262 — restored_display falls back to restored_active
             # for a state file saved BEFORE this feature existed, so an
             # upgrade doesn't lose the active symbols' own visibility.
@@ -16165,7 +16168,8 @@ NEURO_MINE_FRAC      = float(os.environ.get("VP_NEURO_MINE_FRAC", 0.6))
 NEURO_VALID_FRAC     = float(os.environ.get("VP_NEURO_VALID_FRAC", 0.2))
 NEURO_FDR_Q          = float(os.environ.get("VP_NEURO_FDR_Q", 0.10))   # expected share of false dependencies among the accepted ones
 NEURO_VALID_MIN_N    = 8        # non-overlapping occurrences in B needed to test a dependency
-NEURO_VALID_MIN_TRADES = 10     # closed trades in B needed to rank a coin
+NEURO_VALID_MIN_TRADES = int(os.environ.get("VP_NEURO_VALID_MIN_TRADES", 15))   # closed trades in B needed to rank a coin; v0.99.416 — 10 -> 15 (user: 3-4 lucky RR-4 wins put a coin on top)
+NEURO_TEST_MIN_TRADES = int(os.environ.get("VP_NEURO_TEST_MIN_TRADES", 10))   # v0.99.416 — test trades needed for the test gate
 NEURO_HISTORY_DAYS   = int(os.environ.get("VP_NEURO_HISTORY_DAYS", 1500))  # ask for as much as possible; exchange will just return what it has
 NEURO_REFRESH_SEC    = int(os.environ.get("VP_NEURO_REFRESH_SEC", 24 * 3600))  # v0.99.236 — raised 4h->24h per direct user request: with the universe now 120 coins instead of a fixed 20, a full cycle takes MUCH longer, and re-mining more than once a day added little value anyway (the underlying ~13-month rolling window barely shifts hour to hour — established during an earlier session discussion)
 NEURO_MINING_TRIGGER = threading.Event()  # v0.99.212 — same "Очистить X doesn't wake the sleeping loop" fix as LSW/MSNR's own trigger events, for the new "Очистить Neuro" button
@@ -18469,17 +18473,35 @@ def _neuro_sel(summary):
     return summary
 
 
-def neuro_eligible(summary):
-    """v0.99.389 — top-N eligibility: enough validation trades, enough trades
-    outside the mining part, a positive validation result net of fees, and
-    the user's win-rate floor (on validation)."""
+def neuro_fail_reason(summary):
+    """v0.99.416 — why a coin does NOT pass (None = passes). Validation
+    decides the choice; the test is one pass/fail gate after it (user: a
+    coin with test 0 wins / 14 trades was #1 on a lucky 10-trade
+    validation) — the same scheme as S/R and P/R: the test never ranks,
+    it only removes what didn't hold up on data the search never saw."""
     if summary.get("method") != "holdout":
-        return ((summary.get("n") or 0) >= NEURO_TOP_N_MIN_TRADES and summary.get("avg_pnl_r") is not None)
+        return None if ((summary.get("n") or 0) >= NEURO_TOP_N_MIN_TRADES and summary.get("avg_pnl_r") is not None) else "старый расчёт"
     v = _neuro_sel(summary)
-    return ((summary.get("patterns_confirmed") or 0) > 0
-            and (v.get("n") or 0) >= NEURO_VALID_MIN_TRADES
-            and (v.get("n") or 0) + (summary.get("n") or 0) >= NEURO_TOP_N_MIN_TRADES
-            and v.get("avg_pnl_r") is not None and v["avg_pnl_r"] > 0)
+    h = (summary.get("split") or {}).get("holdout") or {}
+    if not (summary.get("patterns_confirmed") or 0) > 0:
+        return "нет подтверждённых зависимостей"
+    if (v.get("n") or 0) < NEURO_VALID_MIN_TRADES:
+        return f"мало сделок на проверке ({v.get('n') or 0}, нужно ≥ {NEURO_VALID_MIN_TRADES})"
+    if (v.get("n") or 0) + (summary.get("n") or 0) < NEURO_TOP_N_MIN_TRADES:
+        return f"мало сделок (нужно ≥ {NEURO_TOP_N_MIN_TRADES})"
+    if v.get("avg_pnl_r") is None or v["avg_pnl_r"] <= 0:
+        return "проверка в минусе"
+    if (h.get("n") or 0) < NEURO_TEST_MIN_TRADES:
+        return f"мало сделок на тесте ({h.get('n') or 0}, нужно ≥ {NEURO_TEST_MIN_TRADES})"
+    if h.get("avg_pnl_r") is None or h["avg_pnl_r"] <= 0:
+        return "тест не подтвердил (в минусе после комиссий)"
+    return None
+
+
+def neuro_eligible(summary):
+    """v0.99.389 — top-N eligibility (see neuro_fail_reason). v0.99.416 —
+    plus the test gate and >= 15 validation trades."""
+    return neuro_fail_reason(summary) is None
 
 
 def neuro_effective_winrate(summary):
@@ -19806,6 +19828,7 @@ def api_neuro_status():
         coins.append({
             "symbol": symbol,
             "is_active": symbol in active_set,  # v0.99.403 — passes the check (can trade if ticked / best)
+            "fail_reason": None if symbol in active_set else neuro_fail_reason(summary.get(symbol, {})),   # v0.99.416
             "rank": len(coins) + 1,
             "trading": symbol in trade_set,
             "summary": summary.get(symbol, {}),
@@ -19815,6 +19838,11 @@ def api_neuro_status():
             "live_signal_stats": signal_stats["by_symbol"].get(symbol),
             "recent_live_signals": recent_live_signals,
         })
+    # v0.99.416 — passing coins first (a coin that fails the new test gate
+    # may still sit high in the order saved by the last mining)
+    coins.sort(key=lambda c: not c["is_active"])
+    for i, c in enumerate(coins):
+        c["rank"] = i + 1
     return jsonify({
         "autotrade_selected": sorted(_neuro_autotrade_selected),   # v0.99.384
         "stale_results": _neuro_results_algo < NEURO_ALGO_VERSION,   # v0.99.403
@@ -24102,7 +24130,7 @@ async function refreshNeuro() {
         ? 'margin-bottom:10px;padding:12px;background:var(--card);border-radius:var(--r-lg);border:1px solid ' + (c.trading ? 'var(--pos)' : 'var(--line)') + ';'
         : 'margin-bottom:10px;padding:12px;background:var(--inset);border-radius:var(--r-lg);border:1px dashed var(--line-2);opacity:0.6;';
       const inactiveBadge = isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:var(--ctl);border-radius:var(--r-xs);">
-        <span class="dim" style="font-size:var(--fs-xs);">⚪ не проходит проверку — не торгуется даже с галочкой</span>
+        <span class="dim" style="font-size:var(--fs-xs);">⚪ не проходит проверку${c.fail_reason ? ': ' + c.fail_reason : ''} — не торгуется даже с галочкой</span>
       </div>`;
       const bestBadge = (isActive && c.symbol === data.best_symbol)
         ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-xs);"><span style="font-size:var(--fs-xs);color:var(--money);">⭐ лучшая карточка${data.single_best ? ' · торгуется' : ''}</span></div>` : '';
