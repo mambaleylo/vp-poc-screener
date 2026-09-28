@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.416"
+APP_VERSION = "0.99.417"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16164,7 +16164,9 @@ NEURO_TRAIN_FRAC     = float(os.environ.get("VP_NEURO_TRAIN_FRAC", 0.7))  # walk
 #       candidates; also RR / veto / early-exit rule / coin ranking
 #   C = the rest (holdout)         : never used for any choice — the ONLY
 #       numbers shown as the coin's result (WR, R net of fees, $15)
-NEURO_MINE_FRAC      = float(os.environ.get("VP_NEURO_MINE_FRAC", 0.6))
+NEURO_MINE_FRAC      = float(os.environ.get("VP_NEURO_MINE_FRAC", 0.5))   # v0.99.417 — 0.6 -> 0.5: A (mining) 50% / B (fitting) 20% / V (clean check) 15% / C (test) 15%
+NEURO_CHECK_FRAC     = float(os.environ.get("VP_NEURO_CHECK_FRAC", 0.15))   # v0.99.417 — V: the part no choice ever saw; coins are chosen and ranked on it
+NEURO_MIN_HISTORY_DAYS = int(os.environ.get("VP_NEURO_MIN_HISTORY_DAYS", 180))   # v0.99.417 — shorter history -> V and C too short to judge
 NEURO_VALID_FRAC     = float(os.environ.get("VP_NEURO_VALID_FRAC", 0.2))
 NEURO_FDR_Q          = float(os.environ.get("VP_NEURO_FDR_Q", 0.10))   # expected share of false dependencies among the accepted ones
 NEURO_VALID_MIN_N    = 8        # non-overlapping occurrences in B needed to test a dependency
@@ -18074,7 +18076,16 @@ def neuro_walk_forward(candles, forward_bars=None, min_sample=None, z_threshold=
     if not train_patterns:
         return []
 
-    test_conds = neuro_compute_conditions(test, htf_test, fr_test, btc_test, d1_test, oi_test, eth_test)
+    # v0.99.417 — conditions of the validation bars computed over the whole
+    # series up to its end and then sliced: indicators (EMA200, RSI...) are
+    # warmed up exactly as in the simulation and live, instead of restarting
+    # from zero at the start of the validation part. Causal indicators ->
+    # no look-ahead.
+    def _upto_end(extra):
+        return [c for c in extra if c["time"] <= end_time] if extra else None
+    test_conds = neuro_compute_conditions(candles[:valid_end], _upto_end(htf_candles), _upto_end(funding_records),
+                                          _upto_end(btc_candles), _upto_end(d1_candles), _upto_end(oi_records),
+                                          _upto_end(eth_candles))[split:valid_end]
     by_horizon = {}
     for pat in train_patterns:
         by_horizon.setdefault(pat["horizon"], []).append(pat)
@@ -18466,10 +18477,11 @@ def neuro_pick_best_rr(train_candles, confirmed_patterns, htf_candles=None, fund
 
 
 def _neuro_sel(summary):
-    """v0.99.389 — the stats coins are SELECTED by: the validation part
-    (the holdout shown on the card is never used to pick anything)."""
+    """v0.99.389 — the stats coins are SELECTED by. v0.99.417 — the clean
+    check part V (no choice saw it); older results: the validation part."""
     if summary.get("method") == "holdout":
-        return (summary.get("split") or {}).get("valid") or {}
+        sp = summary.get("split") or {}
+        return sp.get("check") or sp.get("valid") or {}
     return summary
 
 
@@ -18482,7 +18494,12 @@ def neuro_fail_reason(summary):
     if summary.get("method") != "holdout":
         return None if ((summary.get("n") or 0) >= NEURO_TOP_N_MIN_TRADES and summary.get("avg_pnl_r") is not None) else "старый расчёт"
     v = _neuro_sel(summary)
-    h = (summary.get("split") or {}).get("holdout") or {}
+    sp = summary.get("split") or {}
+    h = sp.get("holdout") or {}
+    if "check" not in sp:
+        return "старый расчёт — пересчитается при следующем майнинге"   # v0.99.417
+    if (sp.get("history_days") or 0) < NEURO_MIN_HISTORY_DAYS:
+        return f"история {round(sp.get('history_days') or 0)} дн. — нужно ≥ {NEURO_MIN_HISTORY_DAYS}"
     if not (summary.get("patterns_confirmed") or 0) > 0:
         return "нет подтверждённых зависимостей"
     if (v.get("n") or 0) < NEURO_VALID_MIN_TRADES:
@@ -18527,24 +18544,22 @@ def neuro_effective_winrate(summary):
 
 
 def neuro_rank_metric(summary):
-    """v0.99.253 — shared ranking metric for BOTH neuro_mining_loop()'s
-    own top-N cut and apply_settings()'s manual neuro_top_n trim — factored
-    out after finding the two had drifted apart (v0.99.252 fixed the
-    former to rank by recent-30 avg_pnl_r, but left the latter still
-    ranking by the old full-history figure, exactly the same class of
-    stale-average problem being fixed). Prefers aggregate_recent's own
-    avg_pnl_r (last NEURO_AGG_DECAY_WINDOW closed trades) whenever there
-    are enough of them to trust (NEURO_AGG_DECAY_MIN_N), falling back to
-    the full-history figure only when a coin doesn't have enough recent
-    trades yet for the recent verdict to be meaningful."""
-    d = summary.get("daily_pct") if summary.get("daily_pct") is not None else neuro_daily_pct(summary)
-    if d is not None:   # v0.99.403 — $15 va-bank % per day over validation + test (user)
-        return d
-    if summary.get("method") == "holdout":   # v0.99.389 — validation avg R, net of fees
+    """v0.99.417 — ranking score (user: "делай как предлагаешь"): the sum of
+    net R over the clean check + test parts divided by sqrt(trades) —
+    average R per trade weighted by how many trades back it (a t-like
+    score: 20 trades at +0.3R beat 3 lucky trades at +1R). The $15
+    va-bank % per day stays on the card for information: with leverage it
+    swings wildly on one or two trades, so it no longer orders the cards."""
+    sp = summary.get("split") or {}
+    if summary.get("method") == "holdout" and "check" in sp:
+        n = r = 0.0
+        for part in (sp.get("check") or {}, sp.get("holdout") or {}):
+            pn = part.get("n") or 0
+            n += pn
+            r += part.get("sum_r") if part.get("sum_r") is not None else (part.get("avg_pnl_r") or 0) * pn
+        return round(r / math.sqrt(n), 3) if n else None
+    if summary.get("method") == "holdout":
         return _neuro_sel(summary).get("avg_pnl_r")
-    agg = summary.get("aggregate_recent") or {}
-    if agg.get("n", 0) >= NEURO_AGG_DECAY_MIN_N and agg.get("avg_pnl_r") is not None:
-        return agg["avg_pnl_r"]
     return summary.get("avg_pnl_r")
 
 
@@ -18631,27 +18646,44 @@ def neuro_build_universe():
 
 def neuro_backtest_core(candles, htf_candles, d1_candles, funding_records, oi_records,
                         btc_candles, eth_candles, index_close):
-    """v0.99.371 — the pure-CPU part of neuro_backtest_symbol(), unchanged
-    logic, no network: mining + walk-forward, RR choice, trade simulation,
-    veto filters, early-exit rule, culprit removal, summary (without the
-    $15 fields). index_close ({time: close}, keys as strings for JSON) is
-    the premium_zone context the caller fetched."""
+    """v0.99.371 — the pure-CPU part of neuro_backtest_symbol(), no network:
+    mining + walk-forward, RR choice, trade simulation, veto filters,
+    early-exit rule, culprit removal, summary (without the $15 fields).
+    index_close ({time: close}, keys as strings for JSON) is the
+    premium_zone context the caller fetched.
+
+    v0.99.417 — four parts (user asked to walk through the logic and fix it):
+      A mining (50%)  — dependencies are searched here;
+      B fitting (20%) — dependencies confirmed (FDR), RR, veto filters,
+                        early-exit rule and culprit removal are all chosen
+                        on A+B. Before, the part coins were then SELECTED
+                        and RANKED by was this same B, which every one of
+                        those choices had been tuned to -> its numbers were
+                        good by construction (e.g. +1.29R on B, -0.25R on
+                        the test);
+      V check (15%)   — no choice ever saw it: coins are chosen and ranked
+                        on it;
+      C test (15%)    — a single pass/fail gate at the very end.
+    Culprit removal used to look at the latest trades = the test part and
+    changed the live pattern set after the stats were computed; now it
+    uses trades up to the end of B, and the trades are re-simulated with
+    the final rule set, so the card describes exactly what trades live."""
     _neuro_ctx.index_close = {int(k): v for k, v in (index_close or {}).items()}
     try:
         neuro_check_cancel()   # v0.99.357 — abandoned while fetching? stop before the heavy part
-        # v0.99.389 — honest three-way split, see NEURO_MINE_FRAC
         n_c = len(candles)
         a_end = max(1, int(n_c * NEURO_MINE_FRAC))
         b_end = max(a_end + 1, min(n_c, int(n_c * (NEURO_MINE_FRAC + NEURO_VALID_FRAC))))
+        v_end = max(b_end + 1, min(n_c, int(n_c * (NEURO_MINE_FRAC + NEURO_VALID_FRAC + NEURO_CHECK_FRAC))))
         mine_end_time = candles[a_end - 1]["time"]
-        valid_end_time = candles[b_end - 1]["time"]
+        valid_end_time = candles[b_end - 1]["time"]   # end of B (fitting)
+        check_end_time = candles[min(v_end, n_c) - 1]["time"]   # end of V (clean check)
         confirmed = neuro_walk_forward(candles, htf_candles=htf_candles, funding_records=funding_records,
                                         btc_candles=btc_candles, d1_candles=d1_candles, oi_records=oi_records,
                                         eth_candles=eth_candles, train_frac=NEURO_MINE_FRAC, valid_end=b_end)
 
         def _upto(extra):
             return [c for c in extra if c["time"] <= valid_end_time] if extra else extra
-        # RR chosen on mining + validation (never on the holdout)
         chosen_rr, rr_sweep = neuro_pick_best_rr(
             candles[:b_end], confirmed, htf_candles=_upto(htf_candles),
             funding_records=_upto(funding_records), btc_candles=_upto(btc_candles),
@@ -18665,16 +18697,26 @@ def neuro_backtest_core(candles, htf_candles, d1_candles, funding_records, oi_re
         trades, full_conds = _sim()
 
         neuro_check_cancel()
-        # veto filters: found on the mining part, confirmed on validation —
-        # holdout trades are not shown to the search at all
-        pre_holdout = [t for t in trades if t["time"] <= valid_end_time]
-        veto_filters = neuro_find_veto_filters(confirmed, pre_holdout, full_conds, mine_end_time)
+        fit = [t for t in trades if t["time"] <= valid_end_time]   # A+B only
+        veto_filters = neuro_find_veto_filters(confirmed, fit, full_conds, mine_end_time)
         if veto_filters:
             for pat in confirmed:
                 vf = veto_filters.get((pat["type"], str(pat["value"])))
                 if vf:
                     pat["veto_filter"] = vf
             trades, full_conds = _sim()   # vetoes are part of the signal rule (as live)
+
+        # culprit removal — on A+B trades only (v0.99.417), then re-simulate
+        culprits_removed = 0
+        fit = [t for t in trades if t["time"] <= valid_end_time]
+        if neuro_check_aggregate_decay(fit, chosen_rr).get("underperforming"):
+            culprits = neuro_find_culprit_patterns(fit)
+            if culprits:
+                before = len(confirmed)
+                confirmed = [p for p in confirmed if (p["type"], p["value"]) not in culprits]
+                culprits_removed = before - len(confirmed)
+                if culprits_removed:
+                    trades, full_conds = _sim()
 
         early_exit_rule = neuro_find_early_exit_rule([t for t in trades if t["time"] <= valid_end_time], mine_end_time)
         if early_exit_rule:
@@ -18698,30 +18740,24 @@ def neuro_backtest_core(candles, htf_candles, d1_candles, funding_records, oi_re
                     "timeouts": sum(1 for t in ts if t["result"] == "TIMEOUT"), "total": len(ts),
                     "winrate": round(w / len(cl) * 100, 1) if cl else None,
                     "avg_pnl_r": round(sum(_net_r(t) for t in cl) / len(cl), 3) if cl else None,
+                    "sum_r": round(sum(_net_r(t) for t in cl), 3) if cl else 0.0,
                     "avg_pnl_r_gross": round(sum(t["pnl_r"] for t in cl) / len(cl), 3) if cl else None}
         st_mine = _stats([t for t in trades if t["time"] <= mine_end_time])
         st_valid = _stats([t for t in trades if mine_end_time < t["time"] <= valid_end_time])
-        holdout_trades = [t for t in trades if t["time"] > valid_end_time]
-        st_hold = _stats(holdout_trades)
+        st_check = _stats([t for t in trades if valid_end_time < t["time"] <= check_end_time])
+        st_hold = _stats([t for t in trades if t["time"] > check_end_time])
+        aggregate_recent = neuro_check_aggregate_decay(trades, chosen_rr)   # display only (latest trades)
 
-        aggregate_recent = neuro_check_aggregate_decay(trades, chosen_rr)
-        culprits_removed = 0
-        if aggregate_recent.get("underperforming"):
-            culprits = neuro_find_culprit_patterns(trades)
-            if culprits:
-                before = len(confirmed)
-                confirmed = [p for p in confirmed if (p["type"], p["value"]) not in culprits]
-                culprits_removed = before - len(confirmed)
-
-        # the card's headline numbers = the HOLDOUT only (net of fees)
         summary = {"n": st_hold["n"], "wins": st_hold["wins"], "losses": st_hold["losses"],
                    "timeouts": st_hold["timeouts"], "winrate": st_hold["winrate"],
                    "avg_pnl_r": st_hold["avg_pnl_r"], "total": st_hold["total"],
-                   "method": "holdout", "fees_included": True,
-                   "split": {"mine": st_mine, "valid": st_valid, "holdout": st_hold,
-                             "mine_end": mine_end_time, "valid_end": valid_end_time,
-                             "holdout_days": round((candles[-1]["time"] - valid_end_time) / 86400, 1),
+                   "method": "holdout", "fees_included": True, "split_version": 4,
+                   "split": {"mine": st_mine, "valid": st_valid, "check": st_check, "holdout": st_hold,
+                             "mine_end": mine_end_time, "valid_end": valid_end_time, "check_end": check_end_time,
+                             "holdout_days": round((candles[-1]["time"] - check_end_time) / 86400, 1),
+                             "check_days": round((check_end_time - valid_end_time) / 86400, 1),
                              "valid_days": round((valid_end_time - mine_end_time) / 86400, 1),
+                             "history_days": round((candles[-1]["time"] - candles[0]["time"]) / 86400, 1),
                              "fdr_q": NEURO_FDR_Q,
                              "fdr_tested": confirmed[0].get("fdr_tested") if confirmed else None},
                    "patterns_confirmed": len(confirmed), "history_bars": len(candles),
@@ -18730,7 +18766,7 @@ def neuro_backtest_core(candles, htf_candles, d1_candles, funding_records, oi_re
                    "chosen_rr": chosen_rr, "rr_sweep": rr_sweep,
                    "aggregate_recent": aggregate_recent, "culprits_removed": culprits_removed,
                    "early_exit_rule": early_exit_rule,
-                   }   # $15 va-bank fields are added by the caller (network), from holdout trades
+                   }   # $15 va-bank fields are added by the caller (network)
         return {"confirmed": confirmed, "trades": trades, "summary": summary}
     finally:
         _neuro_ctx.index_close = {}
@@ -18755,9 +18791,14 @@ def neuro_compound_fields(trades, summary, symbol):
     simulation over the trades AFTER the mining part (validation + test —
     none of them was used to find the dependencies), and its daily %."""
     sp = summary.get("split") or {}
-    me = sp.get("mine_end")
+    if "check" in sp:   # v0.99.417 — the clean check part V + test C (no choice saw them)
+        me = sp.get("valid_end")
+        days = (sp.get("check_days") or 0) + (sp.get("holdout_days") or 0)
+    else:
+        me = sp.get("mine_end")
+        days = (sp.get("valid_days") or 0) + (sp.get("holdout_days") or 0)
     comp = rr_compound_annotate([t for t in trades if me is None or t["time"] > me], symbol)
-    comp["compound_days"] = round((sp.get("valid_days") or 0) + (sp.get("holdout_days") or 0), 1) if me else None
+    comp["compound_days"] = round(days, 1) if me else None
     comp["compound_period"] = "проверка + тест" if me else "вся история"
     comp["daily_pct"] = neuro_daily_pct({**summary, **comp})
     return comp
@@ -18973,7 +19014,7 @@ _neuro_live_signals = {}  # symbol -> latest live signal or None
 _neuro_last_mined = None
 # v0.99.403 — bumped when a fix changes what mining produces (here: the
 # 4h/1d lookahead fix); older saved results are not traded and get re-mined
-NEURO_ALGO_VERSION = 403
+NEURO_ALGO_VERSION = 417   # v0.99.417 — 4-part split; was 403 (HTF lookahead fix)
 _neuro_results_algo = NEURO_ALGO_VERSION
 _neuro_startup_checked = False   # v0.99.383
 # v0.99.384 — per user ("для нейро автоторговлю только выбранных монет с помощью
@@ -19829,6 +19870,7 @@ def api_neuro_status():
             "symbol": symbol,
             "is_active": symbol in active_set,  # v0.99.403 — passes the check (can trade if ticked / best)
             "fail_reason": None if symbol in active_set else neuro_fail_reason(summary.get(symbol, {})),   # v0.99.416
+            "score": neuro_rank_metric(summary.get(symbol, {})),   # v0.99.417 — what the cards are ordered by
             "rank": len(coins) + 1,
             "trading": symbol in trade_set,
             "summary": summary.get(symbol, {}),
@@ -23898,7 +23940,9 @@ function neuroSplitHtml(s) {
   const bad = sp.holdout && sp.holdout.n && sp.holdout.avg_pnl_r <= 0;
   return `<div style="font-size:var(--fs-xs);margin-bottom:8px;line-height:1.5;padding:7px 9px;border-radius:var(--r-sm);background:var(--inset);border:1px solid ${bad ? 'rgba(248,113,113,.35)' : 'var(--line)'};">
     <b>Тест</b> — последние ${Math.round(sp.holdout_days)} дн., поиск их не видел, с комиссиями: <b class="${bad ? 'loss' : 'win'}">${f(sp.holdout)}</b><br>
-    <span class="dim">Проверка (${Math.round(sp.valid_days)} дн., по ней отбор): ${f(sp.valid)} · обучение (подгонка, не показатель): ${f(sp.mine)}</span><br>
+    ${sp.check ? `<b>Проверка</b> — ${Math.round(sp.check_days)} дн. перед тестом, её тоже не видел ни один выбор, по ней отбор: <b class="${sp.check.n && sp.check.avg_pnl_r > 0 ? 'win' : 'loss'}">${f(sp.check)}</b><br>
+    <span class="dim">Подбор (${Math.round(sp.valid_days)} дн.: подтверждение зависимостей, RR, вето, ранний выход — подогнано, не показатель): ${f(sp.valid)} · поиск (${f(sp.mine)})</span><br>`
+    : `<span class="dim">Проверка (${Math.round(sp.valid_days)} дн., по ней отбор): ${f(sp.valid)} · обучение (подгонка, не показатель): ${f(sp.mine)}</span><br>`}
     <span class="dim">зависимости: ${s.patterns_confirmed || 0} из ${sp.fdr_tested || '?'} кандидатов прошли проверку (доля ложных ≤ ${Math.round((sp.fdr_q || 0.1) * 100)}%)</span>
   </div>`;
 }
@@ -23985,6 +24029,7 @@ async function refreshNeuro() {
           ${s.patterns_confirmed||0} \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0435\u0439 \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0435\u043d\u043e (\u0438\u0437 \u043d\u0438\u0445 ${s.combos_confirmed||0} \u043a\u043e\u043c\u0431\u0438\u043d\u0430\u0446\u0438\u0439${s.decaying_confirmed ? `, <span style="color:var(--warn);">${s.decaying_confirmed} \u043e\u0441\u043b\u0430\u0431\u0435\u0432\u0430\u044e\u0442</span>` : ''}) \u00b7 ${s.history_bars||0} \u0447\u0430\u0441\u043e\u0432\u044b\u0445 \u0441\u0432\u0435\u0447\u0435\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438 (${fmtMonths((s.history_bars||0)/24)})
         </div>
         ${neuroSplitHtml(s)}
+        ${c.score != null ? `<div style="font-size:var(--fs-sm);margin:4px 0 2px;">🏁 оценка для сортировки: <b class="${c.score > 0 ? 'win' : 'loss'}">${c.score > 0 ? '+' : ''}${c.score}</b> <span class="dim">· сумма R ÷ √сделок за проверку + тест (средний результат с учётом числа сделок)</span></div>` : ''}
         ${neuroDailyHtml(s)}
         ${compoundSummaryHtml(s)}
         ${(s.rr_sweep && s.rr_sweep.length) ? `<details style="margin-bottom:8px;">
@@ -24164,11 +24209,11 @@ async function refreshNeuro() {
 
     panel.innerHTML = `
       <div class="dim hint-block" style="margin-bottom:10px;">
-        <b>🧠 Neuro</b> — самообучающаяся система поиска зависимостей. Каждый цикл проверяет до ${cfg.universe_size||120} ликвидных монет и показывает ВСЕ карточки: сверху прошедшие проверку, внутри — по среднему доходу в день (ва-банк $15, проверка + тест, с комиссиями), так монеты с разной длиной истории сравниваются честно. Торгуется ${data.single_best ? 'только лучшая карточка ⭐' : 'то, что отмечено «🤖 торговать» (и проходит проверку)'}. \u041f\u043e \u043c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u043e \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438 (\u0447\u0430\u0441\u043e\u0432\u044b\u0435 \u0441\u0432\u0435\u0447\u0438), \u043f\u0435\u0440\u0435\u0431\u0438\u0440\u0430\u0435\u0442 \u0432\u0441\u0435\u0432\u043e\u0437\u043c\u043e\u0436\u043d\u044b\u0435 \u0443\u0441\u043b\u043e\u0432\u0438\u044f
+        <b>🧠 Neuro</b> — самообучающаяся система поиска зависимостей. Каждый цикл проверяет до ${cfg.universe_size||120} ликвидных монет и показывает ВСЕ карточки: сверху прошедшие проверку, внутри — по оценке «сумма R ÷ √сделок» за проверку + тест (части истории, которых не видел ни один выбор). История делится на поиск 50% / подбор 20% / проверку 15% / тест 15%; монета проходит, если проверка и тест в плюсе после комиссий. Торгуется ${data.single_best ? 'только лучшая карточка ⭐' : 'то, что отмечено «🤖 торговать» (и проходит проверку)'}. \u041f\u043e \u043c\u0430\u043a\u0441\u0438\u043c\u0430\u043b\u044c\u043d\u043e \u0434\u043e\u0441\u0442\u0443\u043f\u043d\u043e\u0439 \u0438\u0441\u0442\u043e\u0440\u0438\u0438 (\u0447\u0430\u0441\u043e\u0432\u044b\u0435 \u0441\u0432\u0435\u0447\u0438), \u043f\u0435\u0440\u0435\u0431\u0438\u0440\u0430\u0435\u0442 \u0432\u0441\u0435\u0432\u043e\u0437\u043c\u043e\u0436\u043d\u044b\u0435 \u0443\u0441\u043b\u043e\u0432\u0438\u044f
         (\u0447\u0430\u0441 \u0434\u043d\u044f, \u0434\u0435\u043d\u044c \u043d\u0435\u0434\u0435\u043b\u0438, RSI, EMA, MACD, Bollinger, \u043e\u0431\u044a\u0451\u043c, funding rate, \u043a\u043e\u0440\u0440\u0435\u043b\u044f\u0446\u0438\u044f \u0441 BTC \u0438 \u0434\u0440.) \u0438 \u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0435\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u0442\u043e,
         \u0447\u0442\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0435\u0442\u0441\u044f \u043d\u0430 \u043e\u0442\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0445 \u0434\u0430\u043d\u043d\u044b\u0445 (walk-forward). \u041a\u0430\u0440\u0442\u043e\u0447\u043a\u0430 \u043a\u0430\u0436\u0434\u043e\u0439 \u043c\u043e\u043d\u0435\u0442\u044b: \u0436\u0438\u0432\u043e\u0439 \u0441\u0438\u0433\u043d\u0430\u043b \u0441\u0432\u0435\u0440\u0445\u0443, \u0437\u0430\u0442\u0435\u043c WINRATE/P&L/RR/W-L-T, \u043f\u043e\u0442\u043e\u043c \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0438 \u0438 \u0441\u0434\u0435\u043b\u043a\u0438 (\u0440\u0430\u0441\u043a\u0440\u044b\u0432\u0430\u044e\u0442\u0441\u044f). \u041a\u043b\u0438\u043a \u043f\u043e \u0441\u0434\u0435\u043b\u043a\u0435 \u2014 \u0433\u0440\u0430\u0444\u0438\u043a. \u041f\u0435\u0440\u0435\u043c\u0430\u0439\u043d\u0438\u0432\u0430\u0435\u0442 \u043a\u0430\u0436\u0434\u044b\u0435 ${Math.round((cfg.refresh_sec||14400)/3600)}\u0447.
       </div>
-      ${data.stale_results ? '<div style="padding:8px 10px;margin-bottom:8px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-sm);font-size:var(--fs-sm);">⚠️ карточки ниже посчитаны старой версией с ошибкой (заглядывание в будущее по 4h/1d свечам) — не торгуются, идёт пересчёт</div>' : ''}
+      ${data.stale_results ? '<div style="padding:8px 10px;margin-bottom:8px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-sm);font-size:var(--fs-sm);">⚠️ карточки ниже посчитаны старой версией расчёта — не торгуются до пересчёта (идёт майнинг)</div>' : ''}
       <div style="margin-bottom:4px;">${miningTxt}</div>
       ${progressBarHtml}
       <div id="neuroCanvasWrap" style="width:100%;height:220px;background:var(--inset);border-radius:var(--r);overflow:hidden;margin-bottom:14px;position:relative;">
@@ -26064,7 +26109,7 @@ function fmtUsdCompact(v) {
 function neuroDailyHtml(x) {
   if (!x || x.daily_pct == null) return '';
   const d = x.daily_pct, cls = d >= 0 ? 'win' : 'loss';
-  return `<div style="font-size:var(--fs-sm);margin:4px 0 2px;">📈 <b class="${cls}">${d > 0 ? '+' : ''}${d}% в день</b> <span class="dim">· ва-банк $15 · ${x.compound_period || 'проверка + тест'}${x.compound_days ? ', ' + Math.round(x.compound_days) + ' дн.' : ''} · по этому числу отсортированы карточки</span></div>`;
+  return `<div style="font-size:var(--fs-sm);margin:4px 0 2px;">📈 <b class="${cls}">${d > 0 ? '+' : ''}${d}% в день</b> <span class="dim">· ва-банк $15 · ${x.compound_period || 'проверка + тест'}${x.compound_days ? ', ' + Math.round(x.compound_days) + ' дн.' : ''} · для информации: с плечом сильно зависит от 1–2 сделок</span></div>`;
 }
 function compoundSummaryHtml(x) {
   if (x && x.compound_final_balance === undefined) {

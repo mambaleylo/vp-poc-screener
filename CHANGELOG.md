@@ -18159,3 +18159,22 @@ v0.99.416 - Neuro: test gate (user: a coin with 0 wins in 14 test trades was #1
          Validation minimum 10 -> 15 trades. Ranking by daily % over
          validation + test stays, among passing coins only. The saved active
          list is re-checked on start; the card shows why a coin fails.
+v0.99.417 - Neuro logic reworked after a step-by-step review (user):
+         * four parts: A mining 50% / B fitting 20% (dependencies confirmed,
+           RR, veto, early exit, culprit removal - all chosen on A+B) / V clean
+           check 15% (no choice saw it: coins are chosen and ranked on it) /
+           C test 15% (single pass/fail gate). Before, coins were selected and
+           ranked on B, which every choice had been tuned to.
+         * culprit removal used the latest trades = the test part and changed
+           the live pattern set after the stats; now on A+B trades, then the
+           trades are re-simulated, so the card matches what trades live.
+         * validation conditions computed over the whole series up to its end
+           (indicators warmed up as in the simulation and live) instead of
+           restarting at the validation start.
+         * min history 180 days; ranking by sum of net R / sqrt(trades) over
+           V+C; the $15 va-bank % per day stays as information.
+         * old results are marked stale (NEURO_ALGO_VERSION 417), not traded
+           and re-mined.
+         Synthetic check, 6 random walks: 4 confirm nothing; 2 get a burst of
+         correlated "dependencies" (22 and 1590) that looked good on B (+0.54R,
+         +0.27R) - both rejected now (V -0.17R; V +0.35R but test -0.14R).
