@@ -18208,3 +18208,17 @@ v0.99.420 - Auto-trade fixes (user: a manual re-open from the auto-trade tab
            liquidation math; this closes the gap to the exchange's own number.
 v0.99.421 - Backtest trade list header said "старт: $15 ва-банк" regardless of
          the sizing mode; now points to the actual mode shown in the 💰 line.
+v0.99.422 - Per-coin best % ("Авто-риск", user: best risk % for max profit over
+         the long run). Live the settings' % is the share of the balance put in
+         as MARGIN (v0.99.297 caps margin at %, and at the max safe leverage the
+         cap always binds), so a stop costs % x leverage x stop distance - less
+         than %. For each coin the growth-optimal share is found on its CLEAN
+         trades (test part; Neuro: check + test): mean log growth maximised over
+         a 0.5% grid with every trade's net R lowered by one standard error,
+         then halved, clamped 1..50%. Shown on every card; with the switch on,
+         live orders (automatic and the retry button), the simulator and the
+         $15 column use it instead of the settings' %; va-bank stays va-bank.
+         Also: the $15 column (v0.99.418) treated the % as the loss at the stop;
+         it now applies the same margin cap as the live order, so backtest and
+         live match (a stop at 30% / lev 42 / stop 1.16% costs ~16%, not 30%).
+         Settings text for the % corrected accordingly.
