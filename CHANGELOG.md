@@ -18145,3 +18145,9 @@ v0.99.414 - S/R and P/R coins keep their accepted Neuro filter through the next
          the filter phase may find it anew. S/R only in per-coin mode (pooled
          mode has no per-coin filters). Card: "↺ удержана вместе со своим
          фильтром Neuro" when below the strict bar.
+v0.99.415 - False "Зависло: MSNR / Sweep ... нет отклика" alerts (banner and
+         Telegram): their loops no longer run since v0.99.398/402, but they
+         were still in LOOP_MAX_GAP_SEC, and the start-up seed beat every
+         listed loop once - so after their gap the watchdog reported them as
+         hung. Removed from the watched list. (This, not an old server copy,
+         was also behind the earlier MSNR-hang notifications.)

@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.414"
+APP_VERSION = "0.99.415"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7274,10 +7274,11 @@ def format_leverage_txt(autotrade_result, autotrade_enabled, planned=None):
 _loop_heartbeats = {}          # name -> last beat (unix ts)
 _loop_stall_alerted = set()    # names already alerted for the current stall
 LOOP_MAX_GAP_SEC = {
+    # v0.99.415 — MSNR and Sweep entries removed: their loops no longer run,
+    # but the start-up seed below beat them once, so after their gap the
+    # watchdog reported them as hung ("Зависло: MSNR ... нет отклика 10 ч")
     # live / fast loops
     "scan_loop": 30 * 60,
-    "msnr_live_loop": 60 * 60,
-    "lsw_live_loop": 3 * 3600,
     "snr_live_loop": 60 * 60,
     "prv_live_loop": 60 * 60,
     "neuro_live_loop": 60 * 60,
@@ -7287,8 +7288,6 @@ LOOP_MAX_GAP_SEC = {
     # WORK — MSNR/Sweep: their own hard cycle ceiling (1h / 2h) + slack;
     # S/R, Peak, Neuro beat after every finished symbol (per-symbol
     # ceilings 300s / 720s), so an hour of silence there is a real stall.
-    "msnr_backtest_loop": 90 * 60,
-    "lsw_backtest_loop": 150 * 60,
     "snr_backtest_loop": 60 * 60,
     "prv_backtest_loop": 60 * 60,
     "neuro_mining_loop": 60 * 60,
