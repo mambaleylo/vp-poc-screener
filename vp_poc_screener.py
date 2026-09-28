@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.417"
+APP_VERSION = "0.99.418"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -846,6 +846,8 @@ AUTOTRADE_LEVERAGE_SNR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SNR", 10))  #
 AUTOTRADE_INVERT_SNR = False  # v0.99.391 — feature removed, always off  # same as AUTOTRADE_INVERT_LSW/NEURO, for S/R Zones
 SNR_ALL_IN_ENABLED = os.environ.get("VP_SNR_ALL_IN", "0") == "1"  # v0.99.294 — same mechanism as MSNR_ALL_IN_ENABLED/LSW_ALL_IN_ENABLED's own, for S/R Zones. Off by default.
 SNR_ALL_IN_MARGIN_PCT = float(os.environ.get("VP_SNR_ALL_IN_MARGIN_PCT", 95.0))
+NEURO_ALL_IN_ENABLED = os.environ.get("VP_NEURO_ALL_IN", "0") == "1"   # v0.99.418 — same va-bank mode as S/R / P/R, for Neuro (user)
+NEURO_ALL_IN_MARGIN_PCT = float(os.environ.get("VP_NEURO_ALL_IN_MARGIN_PCT", 95.0))
 TELEGRAM_ALERTS_SNR = os.environ.get("VP_TG_ALERTS_SNR", "1") == "1"
 AUTOTRADE_ENABLED_PRV = os.environ.get("VP_AUTOTRADE_PRV", "0") == "1"  # v0.99.280, per direct user request for Peak Reversal live trading — same off-by-default, opt-in pattern as every other module's own toggle
 AUTOTRADE_LEVERAGE_PRV = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_PRV", 10))  # only the paper simulator's own fallback leverage, real orders go through execute_autotrade()'s automatic risk-based sizing
@@ -1095,7 +1097,7 @@ CREDENTIALS_FILE = os.environ.get(
 SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_single_best_enabled", "snr_single_best_enabled", "neuro_extra_conds_enabled", "neuro_trade_filter_enabled", "calc_workers", "calc_workers_boost", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "nq_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_mirror", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_mirror", "autotrade_neuro", "snr_all_in_enabled", "prv_all_in_enabled",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_mirror", "autotrade_neuro", "snr_all_in_enabled", "prv_all_in_enabled", "neuro_all_in_enabled",
                   "autotrade_risk_pct",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
@@ -1165,6 +1167,7 @@ def get_settings():
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
         "autotrade_risk_pct": AUTOTRADE_RISK_PCT_OF_BALANCE,
         "snr_all_in_enabled": SNR_ALL_IN_ENABLED,
+        "neuro_all_in_enabled": NEURO_ALL_IN_ENABLED,   # v0.99.418
         "prv_all_in_enabled": PRV_ALL_IN_ENABLED,
         "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
         "autotrade_breakout": AUTOTRADE_ENABLED_BREAKOUT,
@@ -1425,6 +1428,8 @@ def apply_settings(updates):
         LSW_ALL_IN_ENABLED = bool(updates["lsw_all_in_enabled"])
     if "snr_all_in_enabled" in updates:
         SNR_ALL_IN_ENABLED = bool(updates["snr_all_in_enabled"])
+    if "neuro_all_in_enabled" in updates:   # v0.99.418
+        globals()["NEURO_ALL_IN_ENABLED"] = bool(updates["neuro_all_in_enabled"])
     if "prv_all_in_enabled" in updates:
         PRV_ALL_IN_ENABLED = bool(updates["prv_all_in_enabled"])
     if "autotrade_bounce" in updates:
@@ -8841,7 +8846,121 @@ _msnr_signal_cooldowns_lock = threading.Lock()
 _msnr_addon_cooldowns = {}  # v0.99.126 — symbol -> last add-on signaled candle time, same dedup shape
 
 
-def rr_compound_annotate(trades, symbol=None, start_balance=None):
+def refresh_result_compound(mod):
+    """v0.99.418 — after the va-bank switch or the risk % changes, the $15
+    column of S/R / P/R results is recomputed once (lazily, from the status
+    API) instead of waiting for the next backtest."""
+    sig = compound_sig(mod)
+    with state_lock:
+        items = [(s_, r) for s_, r in (STATE.get(f"{mod}_results") or {}).items()
+                 if isinstance(r, dict) and r.get("all_trades") and r.get("compound_sig") != sig]
+    for sym, r in items:
+        try:
+            trades_ = list(r["all_trades"])
+            comp = rr_compound_annotate(trades_, sym, mod=mod)
+            by_t = {t.get("time"): t for t in trades_}
+            for rt in r.get("recent_trades") or []:
+                src = by_t.get(rt.get("time"))
+                if src is not None and src is not rt:
+                    rt["compound_balance_after"] = src.get("compound_balance_after")
+                    rt["compound_pnl_pct"] = src.get("compound_pnl_pct")
+            with state_lock:
+                r.update(comp)
+        except Exception as e:
+            log_error(f"refresh_result_compound {mod} {sym}: {e}")
+
+
+def compound_sizing(mod):
+    """v0.99.418 — how the auto-trader of this module sizes an order right
+    now: ("all_in", margin %) when its va-bank switch is on, else
+    ("risk", % of balance risked at the stop)."""
+    ai = {"neuro": ("NEURO_ALL_IN_ENABLED", "NEURO_ALL_IN_MARGIN_PCT"),
+          "snr": ("SNR_ALL_IN_ENABLED", "SNR_ALL_IN_MARGIN_PCT"),
+          "prv": ("PRV_ALL_IN_ENABLED", "PRV_ALL_IN_MARGIN_PCT")}.get(mod)
+    if ai and globals().get(ai[0]):
+        return ("all_in", float(globals().get(ai[1]) or 95.0))
+    return ("risk", float(AUTOTRADE_RISK_PCT_OF_BALANCE))
+
+
+def compound_sig(mod):
+    m, v = compound_sizing(mod)
+    return f"{m}:{v:g}"
+
+
+def rr_compound_live_sizing(trades, symbol, mod, start_balance=None):
+    """v0.99.418 — the $15 simulation sized exactly like the module's
+    auto-trader (user: "если галочка ва-банк — считать как ва-банк, если
+    стоит процент — по проценту, со сложным процентом"): every trade gets
+    its own maximum SAFE leverage for its stop (compute_max_safe_leverage,
+    contract cap, worst-tier MMR), then
+      risk mode: notional = balance x risk% / (stop% + 2 x fee) — a stop
+                 costs exactly risk% of the balance incl. fees; a trade
+                 whose margin would exceed 98% of the balance is skipped
+                 (the real order is skipped too);
+      va-bank:   margin = balance x %, notional = margin x leverage.
+    The balance carries from trade to trade (compounding). Before, one
+    growth-optimal leverage for ALL trades on the whole balance was used —
+    nothing like the real orders."""
+    start_balance = start_balance if start_balance is not None else MSNR_COMPOUND_START_BALANCE
+    mode, val = compound_sizing(mod)
+    trades = sorted([t for t in trades if isinstance(t, dict)], key=lambda t: t.get("time") or 0)
+    cap = msnr_symbol_contract_max_leverage(symbol) if symbol else AUTOTRADE_LEVERAGE_MSNR
+    with state_lock:
+        mmr = STATE.get("scalp_mmr_map", {}).get(symbol, SCALP_DEFAULT_MMR_PCT)
+        tiers = (STATE.get("scalp_risk_tiers") or {}).get(symbol)
+    if tiers:
+        mmr = max(t[1] for t in tiers)
+        cap = min(cap, min(t[2] for t in tiers)) if cap else min(t[2] for t in tiers)
+    fee = AUTOTRADE_SIM_FEE_PCT
+    balance, n, levs, skipped = start_balance, 0, [], 0
+    out = {"compound_start": start_balance, "compound_final_balance": start_balance, "compound_return_pct": 0.0,
+           "compound_leverage": None, "compound_trades": 0, "compound_blown_at": None,
+           "compound_mode": (f"ва-банк {val:g}%" if mode == "all_in" else f"риск {val:g}%"),
+           "compound_sig": f"{mode}:{val:g}", "compound_skipped": 0}
+    for t in trades:
+        t["compound_balance_after"] = None
+        t["compound_pnl_pct"] = None
+        pr, entry, sl = t.get("pnl_r"), t.get("entry"), t.get("sl")
+        if pr is None or not entry or entry <= 0 or sl is None or balance <= 0:
+            continue
+        sl_pct = abs(entry - sl) / entry
+        if sl_pct <= 0:
+            continue
+        lev = compute_max_safe_leverage(t.get("direction") or "LONG", sl_pct * 100, mmr, cap)
+        if not lev:
+            skipped += 1
+            continue
+        if mode == "all_in":
+            margin = balance * val / 100.0
+            notional = margin * lev
+        else:
+            notional = balance * val / 100.0 / (sl_pct + 2 * fee)
+            margin = notional / lev
+            if margin > balance * 0.98:
+                skipped += 1
+                continue
+        move = pr * sl_pct
+        pnl = notional * move - notional * fee - notional * (1 + move) * fee
+        pnl = max(pnl, -margin)   # isolated margin: can't lose more than the margin
+        before = balance
+        balance = max(balance + pnl, 0.0)
+        n += 1
+        levs.append(lev)
+        t["compound_balance_after"] = round(balance, 2)
+        t["compound_pnl_pct"] = round((balance / before - 1) * 100, 1)
+        if balance <= 0 and out["compound_blown_at"] is None:
+            out["compound_blown_at"] = n
+    levs.sort()
+    out.update({"compound_final_balance": round(balance, 2),
+                "compound_return_pct": round((balance / start_balance - 1) * 100, 1),
+                "compound_leverage": levs[len(levs) // 2] if levs else None,
+                "compound_trades": n, "compound_skipped": skipped})
+    return out
+
+
+def rr_compound_annotate(trades, symbol=None, start_balance=None, mod=None):
+    if mod in ("neuro", "snr", "prv"):   # v0.99.418 — sized like the live auto-trader
+        return rr_compound_live_sizing(trades, symbol, mod, start_balance)
     """v0.99.318 — per user request ("везде где есть список сделок на
     бэктесте писать предполагаемую прибыль если бы я начинал с 15$ ...
     заходил бы всегда на весь депозит, как в msnr"): the MSNR va-bank
@@ -14263,7 +14382,7 @@ def strategy_carry_filters(mod, old_results, loop_name):
             f.update(_train_z=tz, _test_z=sz)
             best = _strategy_best_dict(c, f, params)
             _all = best.pop("_all_closed")
-            best.update(rr_compound_annotate(_all, sym))
+            best.update(rr_compound_annotate(_all, sym, mod=mod))
             best["all_trades"] = _all[::-1]
             best["filter_carried"] = True
             best["kept"] = not (tz >= zc and sz >= tcrit)
@@ -14317,7 +14436,7 @@ def strategy_filter_phase(mod):
                   {"timeframe": c["tf"], "ma_type": c["ma_type"], "kc_length": c["kc_length"], "band_mult": c["band_mult"], "rr": c["rr"]})
         best = _strategy_best_dict(c, f, params)
         _all = best.pop("_all_closed")
-        best.update(rr_compound_annotate(_all, sym))
+        best.update(rr_compound_annotate(_all, sym, mod=mod))
         best["all_trades"] = _all[::-1]
         return best
 
@@ -14562,7 +14681,7 @@ def snr_pooled_results(chosen, symbols, loop_name="snr_backtest_loop"):
             c["test_z"] = _z_vs_breakeven_with_fees(te, p["rr"]) or 0.0
             best = _strategy_best_dict(c, None, params)
             _all = best.pop("_all_closed")
-            best.update(rr_compound_annotate(_all, sym))
+            best.update(rr_compound_annotate(_all, sym, mod="snr"))
             best["all_trades"] = _all[::-1]
             best["pooled"] = True
             out[sym] = best
@@ -14623,7 +14742,7 @@ def snr_optimize_symbol(symbol):
         # v0.99.318 — $15 va-bank compounding over the winning combo's full history
         try:
             _all = best.pop("_all_closed")
-            best.update(rr_compound_annotate(_all, symbol))
+            best.update(rr_compound_annotate(_all, symbol, mod="snr"))
             best["all_trades"] = _all[::-1]   # v0.99.334 — full backtest trade list (newest first), served by /api/<mod>/trades/<symbol>
         except Exception as e:
             best.pop("_all_closed", None)
@@ -15595,7 +15714,7 @@ def prv_optimize_symbol(symbol):
         # v0.99.318 — $15 va-bank compounding over the winning combo's full history
         try:
             _all = best.pop("_all_closed")
-            best.update(rr_compound_annotate(_all, symbol))
+            best.update(rr_compound_annotate(_all, symbol, mod="prv"))
             best["all_trades"] = _all[::-1]   # v0.99.334 — full backtest trade list (newest first), served by /api/<mod>/trades/<symbol>
         except Exception as e:
             best.pop("_all_closed", None)
@@ -15798,7 +15917,7 @@ def prv_pooled_results(chosen, symbols, loop_name="prv_backtest_loop"):
             c["test_z"] = _z_vs_breakeven_with_fees(te, p["rr"]) or 0.0
             best = _strategy_best_dict(c, None, params)
             _all = best.pop("_all_closed")
-            best.update(rr_compound_annotate(_all, sym))
+            best.update(rr_compound_annotate(_all, sym, mod="prv"))
             best["all_trades"] = _all[::-1]
             best["pooled"] = True
             out[sym] = best
@@ -18797,7 +18916,7 @@ def neuro_compound_fields(trades, summary, symbol):
     else:
         me = sp.get("mine_end")
         days = (sp.get("valid_days") or 0) + (sp.get("holdout_days") or 0)
-    comp = rr_compound_annotate([t for t in trades if me is None or t["time"] > me], symbol)
+    comp = rr_compound_annotate([t for t in trades if me is None or t["time"] > me], symbol, mod="neuro")
     comp["compound_days"] = round(days, 1) if me else None
     comp["compound_period"] = "проверка + тест" if me else "вся история"
     comp["daily_pct"] = neuro_daily_pct({**summary, **comp})
@@ -19815,10 +19934,12 @@ def neuro_live_loop():
                     # separate reimplementation, so it can never drift out
                     # of sync with LSW's own behavior the way past copy-
                     # pasted sizing logic has.
-                    autotrade_result = execute_autotrade("neuro", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"])
+                    _neuro_all_in = NEURO_ALL_IN_MARGIN_PCT if NEURO_ALL_IN_ENABLED else None   # v0.99.418
+                    autotrade_result = execute_autotrade("neuro", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                                                          all_in_margin_pct=_neuro_all_in)
                     sim_execute_trade("neuro", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                        autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_NEURO, record,
-                                       autotrade_result=autotrade_result)
+                                       autotrade_result=autotrade_result, all_in_margin_pct=_neuro_all_in)
             _neuro_prev_signal_keys = {(s, t) for s, t in new_keys.items()}
             neuro_track_signal_outcomes()
             save_neuro_state()  # v0.99.240 — persist any new fired signal / outcome update from this pass
@@ -19852,7 +19973,8 @@ def api_neuro_status():
     # (Neuro re-mines only every 24h): compute it once now and cache it
     # into the stored summary so it isn't recomputed on every poll.
     for symbol in display_symbols:
-        if trades.get(symbol) and "daily_pct" not in summary.get(symbol, {}):
+        if trades.get(symbol) and ("daily_pct" not in summary.get(symbol, {})
+                                   or summary.get(symbol, {}).get("compound_sig") != compound_sig("neuro")):   # v0.99.418
             try:
                 comp = neuro_compound_fields(trades[symbol], summary.get(symbol, {}), symbol)   # v0.99.403
             except Exception as e:
@@ -20642,6 +20764,7 @@ def api_prv_trades(symbol):
 
 @app.route("/api/snr/status")
 def api_snr_status():
+    refresh_result_compound("snr")   # v0.99.418
     with state_lock:
         results = dict(STATE["snr_results"])
         results = {k: ({kk: vv for kk, vv in v.items() if kk != "all_trades"} | {"all_trades_n": len(v.get("all_trades") or v.get("recent_trades") or [])})
@@ -20714,6 +20837,7 @@ def prv_compute_signal_stats(active_symbols=None):
 
 @app.route("/api/prv/status")
 def api_prv_status():
+    refresh_result_compound("prv")   # v0.99.418
     with state_lock:
         results = dict(STATE["prv_results"])
         results = {k: ({kk: vv for kk, vv in v.items() if kk != "all_trades"} | {"all_trades_n": len(v.get("all_trades") or v.get("recent_trades") or [])})
@@ -22920,9 +23044,16 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow subRow">
         <div>
           <div class="label">↳↳ Neuro: только лучшая карточка</div>
-          <div class="sub">вкл — торгуется только первая карточка (лучший среднедневной доход ва-банк $15 на проверке + тесте). Выкл — торгуются монеты, отмеченные галочкой «🤖 торговать»; если отмеченная монета перестала проходить проверку или опустилась в рейтинге — придёт уведомление</div>
+          <div class="sub">вкл — торгуется только первая карточка (лучшая оценка «сумма R ÷ √сделок» на проверке + тесте). Выкл — торгуются монеты, отмеченные галочкой «🤖 торговать»; если отмеченная монета перестала проходить проверку или опустилась в рейтинге — придёт уведомление</div>
         </div>
         <label class="switch"><input type="checkbox" id="setNeuroSingleBest"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳↳ Ва-банк (Neuro)</div>
+          <div class="sub">вместо риска N% от депо — 95% депо как маржа на каждую сделку Neuro. Плечо по-прежнему подбирается по стопу каждой сделки — ликвидация не ближе стопа, просто в сделку идёт почти весь депозит. Расчёт «с $15» на карточках считается так же</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setNeuroAllIn"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -24192,7 +24323,7 @@ async function refreshNeuro() {
         </label>`;
       const _dp = s.daily_pct;
       const dailyHead = _dp != null
-        ? `<span class="${_dp >= 0 ? 'win' : 'loss'}" style="font-size:var(--fs);font-weight:700;margin-left:8px;" title="средний доход в день, ва-банк $15, проверка + тест">${_dp > 0 ? '+' : ''}${_dp}%/день</span>` : '';
+        ? `<span class="${_dp >= 0 ? 'win' : 'loss'}" style="font-size:var(--fs);font-weight:700;margin-left:8px;" title="средний доход в день с $15, размер как у автоторговли, проверка + тест">${_dp > 0 ? '+' : ''}${_dp}%/день</span>` : '';
       return `<div style="${cardStyle}">
         <div style="font-size:var(--fs-md);font-weight:700;color:var(--neuro);margin-bottom:4px;"><span class="dim" style="font-weight:400;">#${c.rank}</span> ${c.symbol.replace('_USDT','')}${dailyHead}</div>
         ${selBox}
@@ -25540,6 +25671,7 @@ wireResetButton('resetSimulatorBtn', '/api/simulator/reset',
 const settingsModal = document.getElementById('settingsModal');
 const setInputs = {
   snr_all_in_enabled: document.getElementById('setSnrAllIn'),
+  neuro_all_in_enabled: document.getElementById('setNeuroAllIn'),
   prv_all_in_enabled: document.getElementById('setPrvAllIn'),
   prv_single_best_enabled: document.getElementById('setPrvSingleBest'),
   snr_single_best_enabled: document.getElementById('setSnrSingleBest'),
@@ -26109,7 +26241,7 @@ function fmtUsdCompact(v) {
 function neuroDailyHtml(x) {
   if (!x || x.daily_pct == null) return '';
   const d = x.daily_pct, cls = d >= 0 ? 'win' : 'loss';
-  return `<div style="font-size:var(--fs-sm);margin:4px 0 2px;">📈 <b class="${cls}">${d > 0 ? '+' : ''}${d}% в день</b> <span class="dim">· ва-банк $15 · ${x.compound_period || 'проверка + тест'}${x.compound_days ? ', ' + Math.round(x.compound_days) + ' дн.' : ''} · для информации: с плечом сильно зависит от 1–2 сделок</span></div>`;
+  return `<div style="font-size:var(--fs-sm);margin:4px 0 2px;">📈 <b class="${cls}">${d > 0 ? '+' : ''}${d}% в день</b> <span class="dim">· с $15 как автоторговля · ${x.compound_period || 'проверка + тест'}${x.compound_days ? ', ' + Math.round(x.compound_days) + ' дн.' : ''} · для информации</span></div>`;
 }
 function compoundSummaryHtml(x) {
   if (x && x.compound_final_balance === undefined) {
@@ -26121,7 +26253,10 @@ function compoundSummaryHtml(x) {
   const cls = pct >= 0 ? 'win' : 'loss';
   const blown = x.compound_blown_at ? ` · <span class="loss">слит на сделке #${x.compound_blown_at}</span>` : '';
   const pctTxt = Math.abs(pct) >= 1e6 ? '×' + (pct / 100 + 1).toExponential(1) : (pct >= 0 ? '+' : '') + pct + '%';
-  return `<div style="font-size:var(--fs-sm);margin:4px 0 8px;">💰 <span class="dim">с $${x.compound_start} ва-банк:</span> <span class="bal">${fmtUsdCompact(x.compound_final_balance)}</span> <span class="${cls}">(${pctTxt})</span> <span class="dim">· плечо ${x.compound_leverage}x · ${x.compound_trades} сделок · с комиссиями</span>${blown}</div>`;
+  const how = x.compound_mode   // v0.99.418 — sized like the live auto-trader
+    ? `как автоторговля (${x.compound_mode}):</span> <span class="bal">${fmtUsdCompact(x.compound_final_balance)}</span> <span class="${cls}">(${pctTxt})</span> <span class="dim">· плечо своё под стоп каждой сделки, обычно ~${x.compound_leverage}x · ${x.compound_trades} сделок · со сложным процентом и комиссиями${x.compound_skipped ? ` · ${x.compound_skipped} пропущено (автоторговля бы не открыла)` : ''}`
+    : `ва-банк:</span> <span class="bal">${fmtUsdCompact(x.compound_final_balance)}</span> <span class="${cls}">(${pctTxt})</span> <span class="dim">· плечо ${x.compound_leverage}x · ${x.compound_trades} сделок · с комиссиями`;
+  return `<div style="font-size:var(--fs-sm);margin:4px 0 8px;">💰 <span class="dim">с $${x.compound_start} ${how}</span>${blown}</div>`;
 }
 function compoundCellTxt(t) {
   if (t.compound_balance_after == null) return '<span class="dim">—</span>';

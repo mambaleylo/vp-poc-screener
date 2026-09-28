@@ -18178,3 +18178,16 @@ v0.99.417 - Neuro logic reworked after a step-by-step review (user):
          Synthetic check, 6 random walks: 4 confirm nothing; 2 get a burst of
          correlated "dependencies" (22 and 1590) that looked good on B (+0.54R,
          +0.27R) - both rejected now (V -0.17R; V +0.35R but test -0.14R).
+v0.99.418 - The "$15" column / balance on Neuro, S/R and P/R cards is sized like
+         the module's auto-trader (user): each trade gets its own max SAFE
+         leverage for its stop (contract cap, worst-tier MMR); risk mode -
+         notional so a stop costs exactly the settings' risk % of the balance
+         incl. fees (a trade the real order would skip for margin is skipped);
+         va-bank mode - margin = the module's % of the balance. Balance
+         compounds trade to trade. Before: one growth-optimal leverage for all
+         trades on the whole balance, unlike any real order. Changing the
+         risk % or a va-bank switch recomputes the column on the next status
+         poll (S/R, P/R results and Neuro).
+         New "Ва-банк (Neuro)" switch (live orders + simulator + the column),
+         same as S/R / P/R; without it live Neuro orders keep risking the
+         settings' % as before.
