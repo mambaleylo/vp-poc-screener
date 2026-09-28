@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.420"
+APP_VERSION = "0.99.421"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -26330,7 +26330,7 @@ async function loadBtTrades(det, mod, sym, stamp) {
     const chron = [...d.trades].sort((a, b) => a.time - b.time);
     const split = d.test_start_time;
     let html = d.full
-      ? `<div class="dim" style="font-size:var(--fs-xs);padding:3px 0;">старт: $15 ва-банк · сначала train-часть (на ней подбирались параметры), потом тест</div>`
+      ? `<div class="dim" style="font-size:var(--fs-xs);padding:3px 0;">старт: $15, размер каждой сделки как у автоторговли (режим — в строке 💰 выше) · сначала train-часть (на ней подбирались параметры), потом тест</div>`
       : '<div class="dim" style="font-size:var(--fs-xs);">у этого результата сохранены только последние 40 сделок (без начала истории, поэтому баланс не с $15) — полный список появится после следующего бэктеста</div>';
     let dividerDone = !split;
     for (const t of chron) {

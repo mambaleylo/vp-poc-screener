@@ -18206,3 +18206,5 @@ v0.99.420 - Auto-trade fixes (user: a manual re-open from the auto-trade tab
            moment without a stop), with a Telegram note and the log detail.
            The pre-order leverage checks are our own estimate of Gate's
            liquidation math; this closes the gap to the exchange's own number.
+v0.99.421 - Backtest trade list header said "старт: $15 ва-банк" regardless of
+         the sizing mode; now points to the actual mode shown in the 💰 line.
