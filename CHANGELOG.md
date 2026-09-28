@@ -18191,3 +18191,6 @@ v0.99.418 - The "$15" column / balance on Neuro, S/R and P/R cards is sized like
          New "Ва-банк (Neuro)" switch (live orders + simulator + the column),
          same as S/R / P/R; without it live Neuro orders keep risking the
          settings' % as before.
+v0.99.419 - Neuro scheme shows only the coins that actually trade (user: all
+         124 coin labels piled on top of each other). Its height follows the
+         count; with nothing trading a one-line hint replaces it.

@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.418"
+APP_VERSION = "0.99.419"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24086,6 +24086,7 @@ async function refreshNeuro() {
     // v0.99.403 — server order: coins passing the check first, then by the
     // average DAILY % of the $15 va-bank run over validation + test.
     const coins = data.coins || [];
+    const _tradingCoins = coins.filter(c => c.trading);   // v0.99.419 — the scheme shows only these (user: "всё в кучу")
     const lastMined = data.last_mined ? fmtDateTime(data.last_mined) : '\u2014';
     const miningTxt = data.mining_running
       ? `<span class="dim">\u043c\u0430\u0439\u043d\u0438\u043d\u0433: ${data.mining_done||0}/${data.mining_total||coins.length||10} \u2014 \u0441\u0435\u0439\u0447\u0430\u0441 ${data.mining_current_symbol||'?'}</span>${coresTxt(data.calc)}`
@@ -24347,14 +24348,15 @@ async function refreshNeuro() {
       ${data.stale_results ? '<div style="padding:8px 10px;margin-bottom:8px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-sm);font-size:var(--fs-sm);">⚠️ карточки ниже посчитаны старой версией расчёта — не торгуются до пересчёта (идёт майнинг)</div>' : ''}
       <div style="margin-bottom:4px;">${miningTxt}</div>
       ${progressBarHtml}
-      <div id="neuroCanvasWrap" style="width:100%;height:220px;background:var(--inset);border-radius:var(--r);overflow:hidden;margin-bottom:14px;position:relative;">
+      ${_tradingCoins.length ? `<div class="dim" style="font-size:var(--fs-xs);margin-bottom:4px;">торгуются сейчас: ${_tradingCoins.length}</div>
+      <div id="neuroCanvasWrap" style="width:100%;height:${Math.max(160, Math.min(420, 70 + _tradingCoins.length * 40))}px;background:var(--inset);border-radius:var(--r);overflow:hidden;margin-bottom:14px;position:relative;">
         <canvas id="neuroCanvas" style="width:100%;height:100%;display:block;"></canvas>
-      </div>
+      </div>` : `<div class="dim" style="font-size:var(--fs-sm);padding:10px 12px;margin-bottom:14px;background:var(--inset);border-radius:var(--r);">🤖 сейчас ничего не торгуется — отметьте «торговать» на прошедших проверку карточках или включите «Neuro: только лучшая карточка» в настройках</div>`}
       <div class="dim" style="font-size:var(--fs-sm);font-weight:700;margin-bottom:2px;">\u0416\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b \u0432\u0441\u0435\u0433\u043e \u043f\u043e \u0441\u0438\u0441\u0442\u0435\u043c\u0435 (\u0440\u0435\u0430\u043b\u044c\u043d\u044b\u0439 \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442, \u043d\u0435 \u0431\u044d\u043a\u0442\u0435\u0441\u0442)</div>
       ${lstatsHtml}
       ${cards}
     `;
-    _neuroDrawNetwork(coins);
+    if (_tradingCoins.length) _neuroDrawNetwork(_tradingCoins);   // v0.99.419 — only the coins that actually trade
   } catch(e) {
     panel.innerHTML = `<div class="dim">\u041e\u0448\u0438\u0431\u043a\u0430: ${e}</div>`;
   }
