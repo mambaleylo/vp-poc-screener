@@ -18194,3 +18194,15 @@ v0.99.418 - The "$15" column / balance on Neuro, S/R and P/R cards is sized like
 v0.99.419 - Neuro scheme shows only the coins that actually trade (user: all
          124 coin labels piled on top of each other). Its height follows the
          count; with nothing trading a one-line hint replaces it.
+v0.99.420 - Auto-trade fixes (user: a manual re-open from the auto-trade tab
+         opened at ~30% with va-bank on, and with the stop beyond liquidation):
+         * the retry button called execute_autotrade() without the module's
+           va-bank setting, so it sized by the risk % instead of 95%; now the
+           same rule as the automatic open (compound_sizing()).
+         * after every real open (automatic and manual) the position's REAL
+           liquidation price is read from the exchange; if the stop is at or
+           past it, a new stop is placed 80% of the way from the fill to the
+           liquidation price FIRST, then the old one is cancelled (never a
+           moment without a stop), with a Telegram note and the log detail.
+           The pre-order leverage checks are our own estimate of Gate's
+           liquidation math; this closes the gap to the exchange's own number.

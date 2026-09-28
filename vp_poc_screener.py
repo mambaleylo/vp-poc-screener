@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.419"
+APP_VERSION = "0.99.420"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5386,6 +5386,39 @@ def _execute_autotrade_impl(mode, symbol, direction, entry, sl, tp, extra=None, 
                         f"Проверь вручную немедленно.",
                         category=None,
                     )
+            # v0.99.420 — per user (a real trade opened with its stop beyond the
+            # liquidation price): every size/leverage check above is our own
+            # estimate before the order. After the fill, read the position's
+            # REAL liquidation price from the exchange; if the stop sits at or
+            # past it, place a new stop 80% of the way from the fill to the
+            # liquidation price FIRST, then cancel the old one (never a moment
+            # without a stop), and report it.
+            if record.get("sl_order_id") and not record.get("emergency_sl") and sl_rounded:
+                try:
+                    pos = next((p_ for p_ in get_open_positions() if p_.get("contract") == symbol), None)
+                    liq = float((pos or {}).get("liq_price") or 0)
+                    ep = fill_price or float((pos or {}).get("entry_price") or 0) or entry
+                    record["liq_price"] = liq or None
+                    past = liq > 0 and ((direction == "LONG" and liq >= sl_rounded) or (direction == "SHORT" and liq <= sl_rounded))
+                    if past and ep:
+                        new_sl = ep + (liq - ep) * 0.8
+                        new_sl = round_to_tick_directional(new_sl, tick, round_up=(direction == "LONG"))
+                        sl_rule = 2 if direction == "LONG" else 1
+                        new_order = place_close_trigger_order(symbol, direction, new_sl, sl_rule, tick)
+                        old_id = record.get("sl_order_id")
+                        record["sl_order_id"] = new_order.get("id") if isinstance(new_order, dict) else None
+                        try:
+                            if old_id:
+                                cancel_price_order(old_id)
+                        except Exception as e:
+                            log_error(f"execute_autotrade {symbol}: old SL cancel after the liquidation fix failed ({e})")
+                        record["sl_moved_before_liq"] = {"liq_price": liq, "old_sl": sl_rounded, "new_sl": new_sl}
+                        record["leverage_note"] = ((record.get("leverage_note") + "; ") if record.get("leverage_note") else "") + (
+                            f"стоп {sl_rounded} был за реальной ликвидацией {liq} — перенесён на {new_sl}")
+                        send_telegram(f"⚠️ {symbol} ({mode}): стоп {sl_rounded} оказался за реальной ценой ликвидации "
+                                      f"{liq} (по данным биржи) — стоп перенесён на {new_sl}, до ликвидации.", category=None)
+                except Exception as e:
+                    log_error(f"execute_autotrade {symbol}: liquidation check after open failed ({e})")
             if tp_sl_errors:
                 record["status"] = "OPENED_TP_SL_FAILED"
                 record["detail"] = f"позиция открыта, но TP/SL не выставились: {tp_sl_errors} — проверьте вручную"
@@ -22204,7 +22237,12 @@ def api_autotrade_retry():
         tp = body.get("tp")
         if not all([mode, symbol, direction]) or entry is None or sl is None or tp is None:
             return jsonify({"ok": False, "error": "не хватает данных сделки для повтора"}), 400
-        result = execute_autotrade(mode, symbol, direction, float(entry), float(sl), float(tp))
+        # v0.99.420 — per user: the retry ignored the module's va-bank switch
+        # (opened on the risk % instead of 95%); now the same sizing rule as
+        # the automatic open
+        _m, _v = compound_sizing(mode)
+        result = execute_autotrade(mode, symbol, direction, float(entry), float(sl), float(tp),
+                                   all_in_margin_pct=_v if _m == "all_in" else None)
         return jsonify({"ok": True, "result": result})
     except Exception as e:
         log_error(f"api_autotrade_retry: {e}")
