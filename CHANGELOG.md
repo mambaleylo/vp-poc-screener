@@ -18286,3 +18286,20 @@ v0.99.428 - S/R Zones rule fixes (user: no coin ever passed the check):
          backtest's trades 40/40, random walks pass 0/8 per coin and pooled.
          Saved S/R results (old rule) are dropped on load and the S/R backtest
          runs again right after the start.
+v0.99.429 - Saving Neuro and S/R (user: "надо спасать и тот и тот"):
+         Neuro: a card whose $15 simulation over check + test, sized like the
+         live orders at the CURRENT risk, ends below $15 is not traded and
+         can't be the best card (neuro_money_ok; recomputed when the risk
+         settings change). Its card says why ("💸 ... уменьшите риск или
+         включите «Авто-риск»"). Example: ALGO, +0.18R/trade on test but
+         WR 29% at RR 3 -> $15 -> $0 at 30% risk (its Kelly risk is 1%).
+         S/R: a second trade mode, the BREAKOUT of a zone (a close through a
+         zone retested >= min_strength times; entry next open in the break
+         direction, stop back on the other side of the zone, same 1% minimum),
+         tried next to the bounce. Why: the bounce lost on 559 coins
+         (test -0.126R/trade, WR 25% at RR 1.5 — price went through zones far
+         more often than it bounced). 108 combinations now (2 modes), so the
+         train bar is z 3.31. Cards and the pooled block show the mode.
+         Verified: live detection matches the backtest 40/40 in both modes,
+         random walks pass 0/6 per coin and pooled. Saved S/R results are
+         dropped on load (SNR_ALGO_VERSION 429) and the S/R backtest re-runs.

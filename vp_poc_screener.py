@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.428"
+APP_VERSION = "0.99.429"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14034,7 +14034,8 @@ SNR_RR_CANDIDATES     = [1.5, 2.0, 3.0]   # v0.99.412 — back to max 3 (user); 
 SNR_SL_ATR_MULT       = 0.5                  # SL distance beyond the zone, in ATR units
 SNR_MIN_STOP_PCT      = 1.0                  # v0.99.428 — the stop is at least this far from the entry (fees <= 0.1R per trade)
 SNR_FLIP_ZONES        = True                 # v0.99.428 — a broken zone lives on with the opposite role (resistance -> support)
-SNR_ALGO_VERSION      = 428                  # saved S/R results of an older rule set are dropped on load
+SNR_ALGO_VERSION      = 429                  # saved S/R results of an older rule set are dropped on load
+SNR_MODES             = ["bounce", "breakout"]   # v0.99.429 — trade the bounce off a zone, or its break (the bounce lost: WR 25% at RR 1.5 — price went through zones far more often)
 SNR_TOO_CLOSE_ATR_MULT = 1.0 / 8              # matches the Pine Script's own tooCloseATR constant — merges pivots too close to an existing active zone
 SNR_MAX_WAIT_BARS     = 48                   # same timeout convention as every other module's own backtest
 SNR_MIN_TRAIN_TRADES  = 15                   # minimum TRAIN closed trades before trusting a (tf, pivot, strength, rr) candidate at all
@@ -14071,7 +14072,7 @@ SNR_EXCLUDED_STABLES  = {  # v0.99.287 — per direct user report ("даже с�
     "EURT", "EURC", "USTC", "UST", "FRAX", "LUSD", "SUSD", "USDE", "USDJ",
     "HUSD", "USDN", "OUSD", "MIM", "USDX", "CUSD", "RSV",
 }
-SNR_N_COMBOS          = len(SNR_TF_CANDIDATES) * len(SNR_PIVOT_CANDIDATES) * len(SNR_STRENGTH_CANDIDATES) * len(SNR_RR_CANDIDATES)  # v0.99.277 — 81 total combinations tried per symbol (3 tf x 3 pivot x 3 strength x 3 rr)
+SNR_N_COMBOS          = len(SNR_TF_CANDIDATES) * len(SNR_PIVOT_CANDIDATES) * len(SNR_STRENGTH_CANDIDATES) * len(SNR_RR_CANDIDATES) * len(SNR_MODES)  # v0.99.277 — 81 total combinations tried per symbol (3 tf x 3 pivot x 3 strength x 3 rr)
 SNR_TEST_Z            = float(os.environ.get("VP_SNR_TEST_Z", 2.0))   # v0.99.382 — one confirmation of the chosen combo on test
 # v0.99.394 — POOLED test (user: "по s/r zone нет ни одной монеты прошедшей
 # проверку ... что можно сделать?" -> variant A). Per coin, 15-50 train and
@@ -14251,7 +14252,7 @@ def snr_trade_levels(direction, entry, zone_price, atr_val, rr, sl_atr_mult=SNR_
 
 
 def snr_simulate_trades(candles, pivot_length, min_strength, rr, sl_atr_mult=SNR_SL_ATR_MULT,
-                         max_wait_bars=SNR_MAX_WAIT_BARS, atr=None):
+                         max_wait_bars=SNR_MAX_WAIT_BARS, atr=None, mode="bounce"):
     """The trading rule DESIGNED on top of the Pine Script's own zone
     detection (the indicator itself has no entry/SL/TP logic — see this
     section's own header comment): trade the BOUNCE off an intact zone
@@ -14266,22 +14267,26 @@ def snr_simulate_trades(candles, pivot_length, min_strength, rr, sl_atr_mult=SNR
     zones = snr_build_zones(candles, atr, pivot_length)
     events = []
     for z in zones:
+        if mode == "breakout":   # v0.99.429 — a close through a zone tested >= min_strength times
+            if z["break_idx"] is not None:
+                events.append((z["break_idx"], z, 1 + len(z["retest_idxs"]),
+                               "LONG" if z["type"] == "resistance" else "SHORT"))
+            continue
         cum_strength = 1
         for ridx in z["retest_idxs"]:
             cum_strength += 1
             if z["break_idx"] is not None and ridx >= z["break_idx"]:
                 continue
-            events.append((ridx, z, cum_strength))
+            events.append((ridx, z, cum_strength, "LONG" if z["type"] == "support" else "SHORT"))
     events.sort(key=lambda e: e[0])
 
     trades = []
     occupied_until = -10 ** 9
-    for idx, z, cum_strength in events:
+    for idx, z, cum_strength, direction in events:
         if idx < occupied_until or cum_strength < min_strength:
             continue
         if idx + 1 >= len(candles) or not atr[idx]:
             continue
-        direction = "LONG" if z["type"] == "support" else "SHORT"
         entry_bar = candles[idx + 1]
         entry = entry_bar["open"]
         lv = snr_trade_levels(direction, entry, z["price"], atr[idx], rr, sl_atr_mult)   # v0.99.428
@@ -14322,7 +14327,7 @@ def snr_simulate_trades(candles, pivot_length, min_strength, rr, sl_atr_mult=SNR
         trades.append({"time": candles[idx]["time"], "entry_time": entry_bar["time"], "fee_r": fee_r,
                         "pnl_r_net": round(pnl_r - fee_r, 4) if pnl_r is not None else None,
                         "direction": direction, "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8),
-                        "zone_price": round(z["price"], 8), "zone_strength": cum_strength,
+                        "zone_price": round(z["price"], 8), "zone_strength": cum_strength, "mode": mode,
                         "result": result, "exit_price": round(exit_price, 8) if exit_price else None,
                         "exit_time": exit_time, "pnl_r": pnl_r})
         occupied_until = exit_j
@@ -14470,7 +14475,8 @@ def _snr_rebuild_cand(symbol, p):
         return None
     split = int(len(candles) * SNR_TRAIN_FRAC)
     trades = snr_simulate_trades(candles, p["pl"], p["ms"], p["rr"], atr=neuro_atr_series(candles, 14),
-                                 max_wait_bars=max_hold_bars(p["tf"], SNR_MAX_WAIT_BARS))   # v0.99.398
+                                 max_wait_bars=max_hold_bars(p["tf"], SNR_MAX_WAIT_BARS),   # v0.99.398
+                                 mode=p.get("mode", "bounce"))   # v0.99.429
     return {**p, "closed": [t for t in trades if t["result"] in CLOSED_RESULTS], "boundary": candles[split - 1]["time"],
             "span": (candles[0]["time"], candles[-1]["time"])}
 
@@ -14511,8 +14517,8 @@ def strategy_carry_filters(mod, old_results, loop_name):
         heartbeat(loop_name)
         try:
             if snr:
-                p = {"tf": r["timeframe"], "pl": r["pivot_length"], "ms": r["min_strength"], "rr": r["rr"]}
-                params = {"timeframe": p["tf"], "pivot_length": p["pl"], "min_strength": p["ms"], "rr": p["rr"]}
+                p = {"tf": r["timeframe"], "pl": r["pivot_length"], "ms": r["min_strength"], "rr": r["rr"], "mode": r.get("mode", "bounce")}
+                params = {"timeframe": p["tf"], "pivot_length": p["pl"], "min_strength": p["ms"], "rr": p["rr"], "mode": p["mode"]}
             else:
                 p = {"tf": r["timeframe"], "ma_type": r["ma_type"], "kc_length": r["kc_length"],
                      "band_mult": r["band_mult"], "rr": r["rr"]}
@@ -14590,7 +14596,7 @@ def strategy_filter_phase(mod):
         if not variants:
             return None
         c, f = max(variants, key=_variant_train_z)
-        params = ({"timeframe": c["tf"], "pivot_length": c["pl"], "min_strength": c["ms"], "rr": c["rr"]} if mod == "snr" else
+        params = ({"timeframe": c["tf"], "pivot_length": c["pl"], "min_strength": c["ms"], "rr": c["rr"], "mode": c.get("mode", "bounce")} if mod == "snr" else
                   {"timeframe": c["tf"], "ma_type": c["ma_type"], "kc_length": c["kc_length"], "band_mult": c["band_mult"], "rr": c["rr"]})
         best = _strategy_best_dict(c, f, params)
         _all = best.pop("_all_closed")
@@ -14768,8 +14774,8 @@ def _strategy_best_dict(c, f, params):
     return best
 
 
-def snr_combo_key(tf, pl, ms, rr):
-    return f"{tf}|{pl}|{ms}|{rr}"
+def snr_combo_key(tf, pl, ms, rr, mode="bounce"):
+    return f"{tf}|{pl}|{ms}|{rr}" + ("" if mode == "bounce" else f"|{mode}")
 
 
 def snr_pooled_select(parts):
@@ -14789,13 +14795,14 @@ def snr_pooled_select(parts):
                 a[8] += 1
     rows = []
     for k, a in agg.items():
-        tf, pl, ms, rr = k.split("|")
+        tf, pl, ms, rr, *_m = k.split("|")
         rr = float(rr)
+        mode = _m[0] if _m else "bounce"   # v0.99.429
         if a[0] < SNR_POOLED_MIN_TRAIN:
             continue
         tz = _t_from_sums(a[0], a[3], a[2], var_floor=rr)   # v0.99.398 — t-test on net R (TIME_EXIT trades have any R)
         sz = _t_from_sums(a[4], a[7], a[6], var_floor=rr) if a[4] else None
-        rows.append({"tf": tf, "pivot_length": int(pl), "min_strength": int(ms), "rr": rr, "coins": a[8],
+        rows.append({"tf": tf, "pivot_length": int(pl), "min_strength": int(ms), "rr": rr, "mode": mode, "coins": a[8],
                      "train_n": a[0], "train_wr": round(a[1] / a[0] * 100, 1), "train_avg_pnl_r": round(a[3] / a[0], 3),
                      "train_z": round(tz, 2) if tz is not None else None,
                      "test_n": a[4], "test_wr": round(a[5] / a[4] * 100, 1) if a[4] else None,
@@ -14818,9 +14825,10 @@ def snr_pooled_results(chosen, symbols, loop_name="snr_backtest_loop"):
     train result (chosen on train only; the coin's test part stays
     honest). Same result dict as a per-coin pass, so live scan, cards and
     the trade list work unchanged."""
-    key = snr_combo_key(chosen["tf"], chosen["pivot_length"], chosen["min_strength"], chosen["rr"])
-    p = {"tf": chosen["tf"], "pl": chosen["pivot_length"], "ms": chosen["min_strength"], "rr": chosen["rr"]}
-    params = {"timeframe": p["tf"], "pivot_length": p["pl"], "min_strength": p["ms"], "rr": p["rr"]}
+    mode = chosen.get("mode", "bounce")   # v0.99.429
+    key = snr_combo_key(chosen["tf"], chosen["pivot_length"], chosen["min_strength"], chosen["rr"], mode)
+    p = {"tf": chosen["tf"], "pl": chosen["pivot_length"], "ms": chosen["min_strength"], "rr": chosen["rr"], "mode": mode}
+    params = {"timeframe": p["tf"], "pivot_length": p["pl"], "min_strength": p["ms"], "rr": p["rr"], "mode": mode}
     out = {}
     for sym in symbols:
         heartbeat(loop_name)
@@ -14931,16 +14939,15 @@ def snr_optimize_core(candles_by_tf):
             boundary_time = candles[split - 1]["time"]
             span = (candles[0]["time"], candles[-1]["time"])
 
-            for pl in SNR_PIVOT_CANDIDATES:
-                for ms in SNR_STRENGTH_CANDIDATES:
-                    for rr in SNR_RR_CANDIDATES:
+            for mode, pl, ms, rr in ((md, a, b, c) for md in SNR_MODES for a in SNR_PIVOT_CANDIDATES
+                                     for b in SNR_STRENGTH_CANDIDATES for c in SNR_RR_CANDIDATES):   # v0.99.429 — + mode
                         neuro_check_cancel()   # v0.99.362 — progress + stop point
-                        trades = snr_simulate_trades(candles, pl, ms, rr, atr=atr,
+                        trades = snr_simulate_trades(candles, pl, ms, rr, atr=atr, mode=mode,
                                                      max_wait_bars=max_hold_bars(tf, SNR_MAX_WAIT_BARS))   # v0.99.398
                         closed = [t for t in trades if t["result"] in CLOSED_RESULTS]
                         train = [t for t in closed if t["time"] <= boundary_time]
                         test = [t for t in closed if t["time"] > boundary_time]
-                        pool[snr_combo_key(tf, pl, ms, rr)] = (
+                        pool[snr_combo_key(tf, pl, ms, rr, mode)] = (
                             len(train), sum(1 for t in train if t["result"] == "WIN"),
                             sum(_net_r(t) ** 2 for t in train), sum(_net_r(t) for t in train),
                             len(test), sum(1 for t in test if t["result"] == "WIN"),
@@ -14954,10 +14961,10 @@ def snr_optimize_core(candles_by_tf):
                         diag["combos_enough"] += 1
                         mz = min(train_z, test_z)
                         if diag["near"] is None or mz > diag["near"]["min_z"]:
-                            diag["near"] = {"min_z": round(mz, 2), "tf": tf, "pivot_length": pl, "min_strength": ms, "rr": rr,
+                            diag["near"] = {"min_z": round(mz, 2), "tf": tf, "pivot_length": pl, "min_strength": ms, "rr": rr, "mode": mode,
                                             "train_n": len(train), "train_wr": round(sum(1 for t in train if t["result"] == "WIN") / len(train) * 100, 1),
                                             "test_n": len(test), "test_wr": round(sum(1 for t in test if t["result"] == "WIN") / len(test) * 100, 1)}
-                        cand = {"tf": tf, "pl": pl, "ms": ms, "rr": rr, "closed": closed, "boundary": boundary_time,
+                        cand = {"tf": tf, "pl": pl, "ms": ms, "rr": rr, "mode": mode, "closed": closed, "boundary": boundary_time,
                                 "span": span, "train_z": train_z, "test_z": test_z}
                         if train_z >= SNR_Z_CRITICAL:
                             passing.append(cand)   # v0.99.382 — train-qualified; the test decides below
@@ -14976,7 +14983,7 @@ def snr_optimize_core(candles_by_tf):
     # z >= SNR_TEST_Z. If it fails, the coin fails — no trying the next combo
     # on test (that would let the test part pick).
     chosen = passing[0] if passing else None
-    diag["chosen"] = ({"tf": chosen["tf"], "pivot_length": chosen["pl"], "min_strength": chosen["ms"], "rr": chosen["rr"],
+    diag["chosen"] = ({"tf": chosen["tf"], "pivot_length": chosen["pl"], "min_strength": chosen["ms"], "rr": chosen["rr"], "mode": chosen["mode"],
                        "train_z": round(chosen["train_z"], 2), "test_z": round(chosen["test_z"], 2)} if chosen else None)
     if chosen is not None and chosen["test_z"] >= SNR_TEST_Z:
         variants = [(chosen, None)]
@@ -14986,10 +14993,10 @@ def snr_optimize_core(candles_by_tf):
             near = ([chosen] + near)[:NEURO_TF_NEAR_K + 1]   # still a filter candidate
     # v0.99.365 — the Neuro filter is tried AFTER the cycle (strategy_filter_phase);
     # only the candidates' params are kept here.
-    filter_cands = [{k: c[k] for k in ("tf", "pl", "ms", "rr", "train_z")} for c in (passing[:1] if variants else []) + near]
+    filter_cands = [{k: c[k] for k in ("tf", "pl", "ms", "rr", "mode", "train_z")} for c in (passing[:1] if variants else []) + near]
     if variants:
         c, f = max(variants, key=lambda v: _variant_train_z(v))
-        best = _strategy_best_dict(c, f, {"timeframe": c["tf"], "pivot_length": c["pl"], "min_strength": c["ms"], "rr": c["rr"]})
+        best = _strategy_best_dict(c, f, {"timeframe": c["tf"], "pivot_length": c["pl"], "min_strength": c["ms"], "rr": c["rr"], "mode": c["mode"]})
     diag["filter_used"] = bool(best and best.get("neuro_filter"))
     return {"best": best, "diag": diag, "filter_cands": filter_cands, "errors": errors, "pool": pool}
 
@@ -15446,7 +15453,7 @@ def snr_scan_symbol_live(symbol):
         closed = [c for c in candles if c["time"] + interval_sec <= now] if candles else []
         if len(closed) < 100:
             return None
-        sig = snr_detect_live_signal(closed, pivot_length, min_strength, rr)
+        sig = snr_detect_live_signal(closed, pivot_length, min_strength, rr, result.get("mode", "bounce"))
         if sig:
             sig["timeframe"] = tf
         return sig
@@ -15455,7 +15462,7 @@ def snr_scan_symbol_live(symbol):
         return None
 
 
-def snr_detect_live_signal(closed, pivot_length, min_strength, rr):
+def snr_detect_live_signal(closed, pivot_length, min_strength, rr, mode="bounce"):
     """v0.99.315 — pure detection core split out of snr_scan_symbol_live()
     so it can be verified directly against snr_simulate_trades()'s own
     event set (no network). Returns a signal dict if the LAST bar of
@@ -15466,18 +15473,24 @@ def snr_detect_live_signal(closed, pivot_length, min_strength, rr):
     if not atr[last_idx]:
         return None
     for z in zones:
-        if z["break_idx"] is not None:
-            continue
-        if z["retest_idxs"] and z["retest_idxs"][-1] == last_idx and z["strength"] >= min_strength:
-            direction = "LONG" if z["type"] == "support" else "SHORT"
-            entry = closed[-1]["close"]
-            lv = snr_trade_levels(direction, entry, z["price"], atr[last_idx], rr)   # v0.99.428 — same rule as the backtest
-            if lv is None:
+        if mode == "breakout":   # v0.99.429 — the LAST bar closed through a zone tested >= min_strength times
+            if z["break_idx"] != last_idx or 1 + len(z["retest_idxs"]) < min_strength:
                 continue
-            sl, tp = lv
-            return {"direction": direction, "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8),
-                    "zone_price": round(z["price"], 8), "zone_strength": z["strength"],
-                    "time": closed[-1]["time"]}
+            direction = "LONG" if z["type"] == "resistance" else "SHORT"
+        elif z["break_idx"] is not None:
+            continue
+        elif z["retest_idxs"] and z["retest_idxs"][-1] == last_idx and z["strength"] >= min_strength:
+            direction = "LONG" if z["type"] == "support" else "SHORT"
+        else:
+            continue
+        entry = closed[-1]["close"]
+        lv = snr_trade_levels(direction, entry, z["price"], atr[last_idx], rr)   # v0.99.428 — same rule as the backtest
+        if lv is None:
+            continue
+        sl, tp = lv
+        return {"direction": direction, "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8),
+                "zone_price": round(z["price"], 8), "zone_strength": z["strength"], "mode": mode,
+                "time": closed[-1]["time"]}
     return None
 
 
@@ -19082,12 +19095,38 @@ def neuro_compound_fields(trades, summary, symbol):
     return comp
 
 
+def neuro_money_ok(symbol):
+    """v0.99.429 — per user (the "best" card ALGO: +0.18R/trade on test but
+    $15 -> $0 at the 30% risk): False when the $15 simulation over check +
+    test, sized like the live orders at the CURRENT risk settings, ends below
+    its start. Such a card isn't traded and can't be the best card. Recomputed
+    here when the risk settings changed since (compound_sig)."""
+    with _neuro_state_lock:
+        sm = dict(_neuro_summary.get(symbol) or {})
+        tr = list(_neuro_trades.get(symbol) or [])
+    if tr and sm.get("compound_sig") != compound_sig("neuro"):
+        try:
+            comp = neuro_compound_fields(tr, sm, symbol)
+            with _neuro_state_lock:
+                if symbol in _neuro_summary:
+                    _neuro_summary[symbol].update(comp)
+            sm.update(comp)
+        except Exception as e:
+            log_error(f"neuro_money_ok {symbol}: {e}")
+            return True
+    fb, st = sm.get("compound_final_balance"), sm.get("compound_start")
+    if fb is None or not st or not sm.get("compound_trades"):
+        return True
+    return fb > st
+
+
 def neuro_trade_symbols():
     """v0.99.403 — the coins Neuro actually trades (and scans live): the
     best card only when "только лучшая карточка" is on, otherwise the cards
     ticked "🤖 торговать" — in both cases only coins that pass the check
-    (_neuro_active_symbols = passing coins, best daily % first)."""
-    act = list(_neuro_active_symbols)
+    (_neuro_active_symbols = passing coins, best daily % first).
+    v0.99.429 — and whose $15 simulation at the current risk makes money."""
+    act = [s for s in list(_neuro_active_symbols) if neuro_money_ok(s)]
     if NEURO_SINGLE_BEST_ENABLED:
         return act[:1]
     return [s for s in act if _neuro_autotrade_selected.get(s)]
@@ -20152,6 +20191,7 @@ def api_neuro_status():
             "symbol": symbol,
             "is_active": symbol in active_set,  # v0.99.403 — passes the check (can trade if ticked / best)
             "fail_reason": None if symbol in active_set else neuro_fail_reason(summary.get(symbol, {})),   # v0.99.416
+            "money_blocked": symbol in active_set and not neuro_money_ok(symbol),   # v0.99.429
             "score": neuro_rank_metric(summary.get(symbol, {})),   # v0.99.417 — what the cards are ordered by
             "rank": len(coins) + 1,
             "trading": symbol in trade_set,
@@ -20171,7 +20211,8 @@ def api_neuro_status():
         "autotrade_selected": sorted(_neuro_autotrade_selected),   # v0.99.384
         "stale_results": _neuro_results_algo < NEURO_ALGO_VERSION,   # v0.99.403
         "mining_fetching": _neuro_fetching[0],   # v0.99.404
-        "single_best": NEURO_SINGLE_BEST_ENABLED, "best_symbol": active_symbols[0] if active_symbols else None,   # v0.99.403
+        "single_best": NEURO_SINGLE_BEST_ENABLED,
+        "best_symbol": next((s_ for s_ in active_symbols if neuro_money_ok(s_)), None),   # v0.99.403; v0.99.429 — first card that makes money at the current risk
         "autotrade_enabled": AUTOTRADE_ENABLED_NEURO,
         "calc": calc_status("neuro"), "calc_cond": calc_status("cond"),   # v0.99.372
         "coins": coins, "last_mined": last_mined, "mining_running": running,
@@ -24461,6 +24502,8 @@ async function refreshNeuro() {
       const inactiveBadge = isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:var(--ctl);border-radius:var(--r-xs);">
         <span class="dim" style="font-size:var(--fs-xs);">⚪ не проходит проверку${c.fail_reason ? ': ' + c.fail_reason : ''} — не торгуется даже с галочкой</span>
       </div>`;
+      const moneyBadge = (isActive && c.money_blocked)   // v0.99.429
+        ? `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:var(--ctl);border-radius:var(--r-xs);"><span class="loss" style="font-size:var(--fs-xs);">💸 при текущем риске симуляция $15 в минусе — не торгуется (уменьшите риск или включите «Авто-риск»)</span></div>` : '';
       const bestBadge = (isActive && c.symbol === data.best_symbol)
         ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-xs);"><span style="font-size:var(--fs-xs);color:var(--money);">⭐ лучшая карточка${data.single_best ? ' · торгуется' : ''}</span></div>` : '';
       const _selSet = new Set(data.autotrade_selected || []);
@@ -24482,6 +24525,7 @@ async function refreshNeuro() {
         ${selBox}
         ${bestBadge}
         ${inactiveBadge}
+        ${moneyBadge}
         ${underperformBadge}
         ${liveBadge}
         ${bigStats}
@@ -24512,6 +24556,10 @@ async function refreshNeuro() {
   } catch(e) {
     panel.innerHTML = `<div class="dim">\u041e\u0448\u0438\u0431\u043a\u0430: ${e}</div>`;
   }
+}
+
+function snrModeTxt(m) {   // v0.99.429
+  return m === 'breakout' ? 'пробой' : 'отбой';
 }
 
 async function refreshSnr() {
@@ -24578,7 +24626,7 @@ async function refreshSnr() {
         <div style="font-size:var(--fs-md);font-weight:700;color:var(--snr);margin-bottom:4px;">${c.symbol.replace('_USDT','')}</div>
         ${inactiveBadge}
         <div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">
-          \u0442\u0430\u0439\u043c\u0444\u0440\u0435\u0439\u043c ${r.timeframe}${r.history_days ? ` \u00b7 бэктест ${fmtMonths(r.history_days)}${r.test_days ? ` (тест ${fmtMonths(r.test_days)})` : ""}` : ""} \u00b7 pivot ${r.pivot_length} \u00b7 \u0441\u0438\u043b\u0430\u2265${r.min_strength} \u00b7 RR${r.rr}
+          \u0442\u0430\u0439\u043c\u0444\u0440\u0435\u0439\u043c ${r.timeframe}${r.history_days ? ` \u00b7 бэктест ${fmtMonths(r.history_days)}${r.test_days ? ` (тест ${fmtMonths(r.test_days)})` : ""}` : ""} \u00b7 ${snrModeTxt(r.mode)} \u00b7 pivot ${r.pivot_length} \u00b7 \u0441\u0438\u043b\u0430\u2265${r.min_strength} \u00b7 RR${r.rr}
         </div>
         <div style="display:flex;flex-wrap:wrap;gap:4px 16px;margin-bottom:8px;">
           <div><div class="dim" style="font-size:var(--fs-xs);">TRAIN (n=${r.train_n})</div><div>WR ${r.train_wr}% \u00b7 ${r.train_avg_pnl_r>0?'+':''}${r.train_avg_pnl_r}R \u00b7 z=${r.train_z}</div></div>
@@ -26558,7 +26606,7 @@ function snrPooledHtml(p) {
   const sgn = v => v == null ? '—' : (v > 0 ? '+' : '') + v;
   const line = (lbl, n, wr, r, z, need) => `${lbl}: n=${n} · WR ${wr == null ? '—' : wr + '%'} · ${sgn(r)}R/сделку · z=${z == null ? '—' : z}${need ? ` <span class="dim">(нужно ≥ ${need})</span>` : ''}`;
   const combo = c => c.ma_type ? `${c.tf}, ${c.ma_type}${c.kc_length}, полоса×${c.band_mult}, RR ${c.rr}`   // v0.99.411 — P/R
-    : `${c.tf}, пивот ${c.pivot_length}, сила ${c.min_strength}, RR ${c.rr}`;
+    : `${c.tf}, ${snrModeTxt(c.mode)}, пивот ${c.pivot_length}, сила ${c.min_strength}, RR ${c.rr}`;
   const c = p.chosen || p.best_train;
   const verdict = p.passed
     ? `<b class="win">✓ Стратегия подтверждена на всех монетах вместе</b>`
@@ -26577,12 +26625,12 @@ function snrPooledHtml(p) {
 // v0.99.362 — why S/R has no coins: shown right after a cycle where nothing passed
 function snrDiagHtml(d) {
   if (!d || d.passed) return '';
-  const near = (d.near || []).map(n => `<div>${n.symbol.replace('_USDT','')}: z=${n.min_z} (нужно ${d.z_needed}) · ${n.tf}, пивот ${n.pivot_length}, сила ${n.min_strength}, RR ${n.rr} · train ${n.train_wr}% (n=${n.train_n}), test ${n.test_wr}% (n=${n.test_n})</div>`).join('');
+  const near = (d.near || []).map(n => `<div>${n.symbol.replace('_USDT','')}: z=${n.min_z} (нужно ${d.z_needed}) · ${n.tf}, ${snrModeTxt(n.mode)}, пивот ${n.pivot_length}, сила ${n.min_strength}, RR ${n.rr} · train ${n.train_wr}% (n=${n.train_n}), test ${n.test_wr}% (n=${n.test_n})</div>`).join('');
   return `<div style="background:var(--line);border:1px solid var(--line-2);border-radius:var(--r-sm);padding:8px 12px;margin:8px 0;font-size:var(--fs);">
     <b style="color:var(--money);">Бэктест S/R прошёл, но ни одна монета не прошла проверку значимости</b> <span class="dim">(${fmtDateTime(d.t)})</span><br>
     <span class="dim">Проверено ${d.checked} из ${d.universe}: без данных ${d.no_data} · мало сделок (нужно ≥${d.min_train} train и ≥${d.min_test} test) ${d.few_trades} · результат есть, но недостаточно значимый ${d.not_significant}.
     ${d.z_test_needed ? `Правило: лучшая из 81 комбинации по train должна иметь z ≥ ${d.z_needed} (поправка на перебор), и затем один раз подтвердиться на test с z ≥ ${d.z_test_needed}. Прошли train, но не подтвердились на test: ${d.train_ok_test_fail || 0}.` : `Монета проходит, только если z ≥ ${d.z_needed} и на train, и на test — это защита от случайной удачи среди 81 проверенной комбинации.`}</span>
-    ${(d.chosen_fail || []).length ? `<div style="margin-top:4px;"><span class="dim">Прошли train, test не подтвердил:</span>${d.chosen_fail.map(c => `<div>${c.symbol.replace('_USDT','')}: train z=${c.train_z}, test z=${c.test_z} (нужно ${d.z_test_needed}) · ${c.tf}, пивот ${c.pivot_length}, сила ${c.min_strength}, RR ${c.rr}</div>`).join('')}</div>` : ''}
+    ${(d.chosen_fail || []).length ? `<div style="margin-top:4px;"><span class="dim">Прошли train, test не подтвердил:</span>${d.chosen_fail.map(c => `<div>${c.symbol.replace('_USDT','')}: train z=${c.train_z}, test z=${c.test_z} (нужно ${d.z_test_needed}) · ${c.tf}, ${snrModeTxt(c.mode)}, пивот ${c.pivot_length}, сила ${c.min_strength}, RR ${c.rr}</div>`).join('')}</div>` : ''}
     ${near ? `<div style="margin-top:4px;"><span class="dim">Ближе всех (меньший из z train/test):</span>${near}</div>` : ''}
   </div>`;
 }
