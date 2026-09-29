@@ -18231,3 +18231,10 @@ v0.99.423 - Back to sizing by risk (user: "возвращаемся в мето�
          (margin > 98%) is skipped, live and in the $15 column alike. The
          per-coin auto risk (Kelly) is back in "loss at the stop" units.
          Settings text updated.
+v0.99.424 - Va-bank switches removed for Neuro, S/R and P/R (user): with sizing
+         by risk (v0.99.423) va-bank was just "risk ~45-55%, floating per trade".
+         The saved switches are ignored; live orders, the retry button, the
+         simulator and the $15 column all size by the risk % (or the per-coin
+         auto risk). The risk % is clamped to 0.1..50 on the server too, and
+         its settings hint lists the range with what N stops in a row cost.
+         The $15 columns recompute by themselves (settings signature changed).

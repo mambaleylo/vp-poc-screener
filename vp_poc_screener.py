@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.423"
+APP_VERSION = "0.99.424"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -844,18 +844,18 @@ AUTOTRADE_INVERT_NEURO = False  # v0.99.391 — feature removed, always off  # s
 AUTOTRADE_ENABLED_SNR = os.environ.get("VP_AUTOTRADE_SNR", "0") == "1"  # v0.99.271, per direct user request for live signals — same off-by-default, opt-in pattern as every other module's own toggle
 AUTOTRADE_LEVERAGE_SNR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SNR", 10))  # only the paper simulator's own fallback leverage, real orders go through execute_autotrade()'s automatic risk-based sizing
 AUTOTRADE_INVERT_SNR = False  # v0.99.391 — feature removed, always off  # same as AUTOTRADE_INVERT_LSW/NEURO, for S/R Zones
-SNR_ALL_IN_ENABLED = os.environ.get("VP_SNR_ALL_IN", "0") == "1"  # v0.99.294 — same mechanism as MSNR_ALL_IN_ENABLED/LSW_ALL_IN_ENABLED's own, for S/R Zones. Off by default.
+SNR_ALL_IN_ENABLED = False   # v0.99.424 — va-bank removed (user): with sizing by risk (v0.99.423) it was just "risk ~50%, floating per trade"
 SNR_ALL_IN_MARGIN_PCT = float(os.environ.get("VP_SNR_ALL_IN_MARGIN_PCT", 95.0))
 AUTO_RISK_ENABLED = os.environ.get("VP_AUTO_RISK", "0") == "1"   # v0.99.422 — per-coin growth-optimal risk (cautious ½ Kelly) instead of the settings' %
 AUTO_RISK_MAX_PCT = float(os.environ.get("VP_AUTO_RISK_MAX_PCT", 50.0))   # hard safety cap
 AUTO_RISK_MIN_PCT = float(os.environ.get("VP_AUTO_RISK_MIN_PCT", 1.0))
-NEURO_ALL_IN_ENABLED = os.environ.get("VP_NEURO_ALL_IN", "0") == "1"   # v0.99.418 — same va-bank mode as S/R / P/R, for Neuro (user)
+NEURO_ALL_IN_ENABLED = False   # v0.99.424 — va-bank removed (user): with sizing by risk (v0.99.423) it was just "risk ~50%, floating per trade"
 NEURO_ALL_IN_MARGIN_PCT = float(os.environ.get("VP_NEURO_ALL_IN_MARGIN_PCT", 95.0))
 TELEGRAM_ALERTS_SNR = os.environ.get("VP_TG_ALERTS_SNR", "1") == "1"
 AUTOTRADE_ENABLED_PRV = os.environ.get("VP_AUTOTRADE_PRV", "0") == "1"  # v0.99.280, per direct user request for Peak Reversal live trading — same off-by-default, opt-in pattern as every other module's own toggle
 AUTOTRADE_LEVERAGE_PRV = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_PRV", 10))  # only the paper simulator's own fallback leverage, real orders go through execute_autotrade()'s automatic risk-based sizing
 AUTOTRADE_INVERT_PRV = False  # v0.99.391 — feature removed, always off  # same as AUTOTRADE_INVERT_LSW/NEURO/SNR
-PRV_ALL_IN_ENABLED = os.environ.get("VP_PRV_ALL_IN", "0") == "1"  # v0.99.294 — same mechanism as MSNR_ALL_IN_ENABLED/LSW_ALL_IN_ENABLED/SNR_ALL_IN_ENABLED's own, for Peak Reversal. Off by default.
+PRV_ALL_IN_ENABLED = False   # v0.99.424 — va-bank removed (user): with sizing by risk (v0.99.423) it was just "risk ~50%, floating per trade"
 PRV_ALL_IN_MARGIN_PCT = float(os.environ.get("VP_PRV_ALL_IN_MARGIN_PCT", 95.0))
 TELEGRAM_ALERTS_PRV = os.environ.get("VP_TG_ALERTS_PRV", "1") == "1"
 TELEGRAM_ALERTS_LSW = os.environ.get("VP_TG_ALERTS_LSW", "1") == "1"
@@ -1100,7 +1100,7 @@ CREDENTIALS_FILE = os.environ.get(
 SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_single_best_enabled", "snr_single_best_enabled", "neuro_extra_conds_enabled", "neuro_trade_filter_enabled", "calc_workers", "calc_workers_boost", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "nq_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_mirror", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_mirror", "autotrade_neuro", "snr_all_in_enabled", "prv_all_in_enabled", "neuro_all_in_enabled", "auto_risk_enabled",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_mirror", "autotrade_neuro", "auto_risk_enabled",
                   "autotrade_risk_pct",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
@@ -1169,10 +1169,7 @@ def get_settings():
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
         "autotrade_risk_pct": AUTOTRADE_RISK_PCT_OF_BALANCE,
-        "snr_all_in_enabled": SNR_ALL_IN_ENABLED,
-        "neuro_all_in_enabled": NEURO_ALL_IN_ENABLED,   # v0.99.418
         "auto_risk_enabled": AUTO_RISK_ENABLED,   # v0.99.422
-        "prv_all_in_enabled": PRV_ALL_IN_ENABLED,
         "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
         "autotrade_breakout": AUTOTRADE_ENABLED_BREAKOUT,
         "autotrade_scalp": AUTOTRADE_ENABLED_SCALP,
@@ -1199,7 +1196,7 @@ def apply_settings(updates):
     global LSW_FVG_FILTER_ENABLED, LSW_SESSION_FILTER_ENABLED, LSW_MIN_TOUCHES_ENABLED, LSW_CANDLE_STRUCTURE_FILTER_ENABLED, LSW_ATR_SWEEP_ENABLED
     global TELEGRAM_ENABLED, TELEGRAM_ALERTS_VP, TELEGRAM_ALERTS_HOURLY
     global TELEGRAM_ALERTS_FT5, TELEGRAM_ALERTS_MSNR, TELEGRAM_ALERTS_MIRROR, TELEGRAM_ALERTS_LSW, TELEGRAM_ALERTS_EMA_BULL, TELEGRAM_ALERTS_AMD, TELEGRAM_ALERTS_NEURO, TELEGRAM_ALERTS_NEURO_SUMMARY, TELEGRAM_ALERTS_NQ, TELEGRAM_ALERTS_NETWORK
-    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, AUTOTRADE_ENABLED_NEURO, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED, LSW_ALL_IN_ENABLED, SNR_ALL_IN_ENABLED, PRV_ALL_IN_ENABLED
+    global AUTOTRADE_DRY_RUN, AUTOTRADE_ENABLED_BOUNCE, AUTOTRADE_ENABLED_BREAKOUT, AUTOTRADE_ENABLED_SCALP, AUTOTRADE_ENABLED_FT5, AUTOTRADE_ENABLED_MSNR, AUTOTRADE_ENABLED_MIRROR, AUTOTRADE_ENABLED_LSW, AUTOTRADE_ENABLED_NEURO, SCALP_MARTINGALE_ENABLED, AUTOTRADE_RISK_PCT_OF_BALANCE, MSNR_ALL_IN_ENABLED, LSW_ALL_IN_ENABLED
     global SCALP_MIN_RR, SCALP_SL_BUFFER_MULT
     if "volume_profile_enabled" in updates:
         VOLUME_PROFILE_ENABLED = False   # v0.99.341 — Volume removed per user ("из настроек volume можно убрать"); can't be switched back on
@@ -1423,21 +1420,15 @@ def apply_settings(updates):
         try:
             v = float(updates["autotrade_risk_pct"])
             if v > 0:
-                AUTOTRADE_RISK_PCT_OF_BALANCE = v
+                AUTOTRADE_RISK_PCT_OF_BALANCE = min(max(v, 0.1), 50.0)   # v0.99.424 — same 0.1..50 range as the input
         except (TypeError, ValueError):
             pass
     if "msnr_all_in_enabled" in updates:
         MSNR_ALL_IN_ENABLED = bool(updates["msnr_all_in_enabled"])
     if "lsw_all_in_enabled" in updates:
         LSW_ALL_IN_ENABLED = bool(updates["lsw_all_in_enabled"])
-    if "snr_all_in_enabled" in updates:
-        SNR_ALL_IN_ENABLED = bool(updates["snr_all_in_enabled"])
     if "auto_risk_enabled" in updates:   # v0.99.422
         globals()["AUTO_RISK_ENABLED"] = bool(updates["auto_risk_enabled"])
-    if "neuro_all_in_enabled" in updates:   # v0.99.418
-        globals()["NEURO_ALL_IN_ENABLED"] = bool(updates["neuro_all_in_enabled"])
-    if "prv_all_in_enabled" in updates:
-        PRV_ALL_IN_ENABLED = bool(updates["prv_all_in_enabled"])
     if "autotrade_bounce" in updates:
         AUTOTRADE_ENABLED_BOUNCE = bool(updates["autotrade_bounce"])
     if "autotrade_breakout" in updates:
@@ -8965,12 +8956,7 @@ def compound_sizing(mod, auto_pct=None):
     now: ("all_in", margin %) when its va-bank switch is on, else
     ("risk", % of balance risked at the stop). v0.99.422 — ("auto", the
     coin's own cautious-Kelly %) when "Авто-риск" is on and it is known."""
-    ai = {"neuro": ("NEURO_ALL_IN_ENABLED", "NEURO_ALL_IN_MARGIN_PCT"),
-          "snr": ("SNR_ALL_IN_ENABLED", "SNR_ALL_IN_MARGIN_PCT"),
-          "prv": ("PRV_ALL_IN_ENABLED", "PRV_ALL_IN_MARGIN_PCT")}.get(mod)
-    if ai and globals().get(ai[0]):
-        return ("all_in", float(globals().get(ai[1]) or 95.0))
-    if AUTO_RISK_ENABLED and auto_pct:
+    if AUTO_RISK_ENABLED and auto_pct:   # v0.99.424 — va-bank removed
         return ("auto", float(auto_pct))
     return ("risk", float(AUTOTRADE_RISK_PCT_OF_BALANCE))
 
@@ -23130,14 +23116,14 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">Риск на сделку</div>
-          <div class="sub">% от баланса, который теряется при срабатывании стопа (с комиссиями) — общий для Neuro, S/R Zones, Peak Reversal. Плечо — максимально безопасное под стоп конкретного сигнала, маржа — сколько нужно для этого риска (если не хватает свободного баланса — сделка пропускается)</div>
+          <div class="sub">% от баланса, который теряется при срабатывании стопа (с комиссиями) — общий для Neuro, S/R Zones, Peak Reversal. Плечо — максимально безопасное под стоп конкретного сигнала, маржа — сколько нужно для этого риска (если не хватает свободного баланса — сделка пропускается)<br>Допустимо от 0.1% до 50%. Ориентиры: 1–2% — консервативно (10 стопов подряд ≈ −10…−18%); 5% — умеренно (5 стопов ≈ −23%); 10–20% — агрессивно (3 стопа ≈ −27…−49%); 30% — очень агрессивно (2 стопа ≈ −51%); 50% — максимум, примерно как бывший ва-банк (2 стопа ≈ −75%)</div>
         </div>
         <input type="number" id="setAutotradeRiskPct" min="0.1" max="50" step="0.5" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
       <div class="settingRow subRow">
         <div>
           <div class="label">↳↳ Авто-риск (лучший % для каждой монеты)</div>
-          <div class="sub">вместо % выше каждая монета Neuro / S/R / P/R торгуется со своим риском на сделку — тем, при котором счёт растёт быстрее всего на длинной дистанции (Келли), осторожно: по сделкам теста (их не видел выбор настроек), с пессимистичной поправкой на малую выборку и половиной от оптимума. Не больше 50%. Ва-банк, если включён у модуля, остаётся ва-банком. Бэктест «с $15» считает так же</div>
+          <div class="sub">вместо % выше каждая монета Neuro / S/R / P/R торгуется со своим риском на сделку — тем, при котором счёт растёт быстрее всего на длинной дистанции (Келли), осторожно: по сделкам теста (их не видел выбор настроек), с пессимистичной поправкой на малую выборку и половиной от оптимума. Не больше 50%. Бэктест «с $15» считает так же</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutoRisk"><span class="switchSlider"></span></label>
       </div>
@@ -23192,13 +23178,6 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setNeuroSingleBest"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow subRow">
-        <div>
-          <div class="label">↳↳ Ва-банк (Neuro)</div>
-          <div class="sub">вместо риска N% от депо — 95% депо как маржа на каждую сделку Neuro. Плечо по-прежнему подбирается по стопу каждой сделки — ликвидация не ближе стопа, просто в сделку идёт почти весь депозит. Расчёт «с $15» на карточках считается так же</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setNeuroAllIn"><span class="switchSlider"></span></label>
-      </div>
       <div class="settingRow">
         <div>
           <div class="label">↳ S/R Zones</div>
@@ -23208,24 +23187,10 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳↳ Ва-банк (S/R)</div>
-          <div class="sub">вместо риска N% от депо — использовать 95% депо как маржу на каждую сделку S/R Zones. Плечо по-прежнему подбирается автоматически по стопу — ликвидация не становится ближе, просто в сделку идёт почти весь депозит</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setSnrAllIn"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
           <div class="label">↳ Peak Reversal</div>
           <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча и размера позиции, что и у остальных режимов</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradePrv"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳↳ Ва-банк (Peak Reversal)</div>
-          <div class="sub">вместо риска N% от депо — использовать 95% депо как маржу на каждую сделку Peak Reversal. Плечо по-прежнему подбирается автоматически по стопу — ликвидация не становится ближе, просто в сделку идёт почти весь депозит</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setPrvAllIn"><span class="switchSlider"></span></label>
       </div>
     </div></details>
 
@@ -25444,7 +25409,7 @@ async function refreshSimulator() {
   const headerHtml = `
     <div class="dim hint-block" style="margin-bottom:10px;">
       Симулятор — бумажная копия <b>автоторговли</b>: сюда попадает каждая сделка, которую автоторговля реально открыла${status.dry_run ? ' (сейчас режим dry-run — те, что открыла бы)' : ''}. Пропущенные автоторговлей (позиция уже открыта, мало баланса, небезопасное плечо и т.п.) сюда не попадают.<br>
-      Размер — как у настоящей сделки, но от баланса симулятора: риск ${status.risk_pct}% баланса до стопа (с комиссиями), плечо то же, что у реальной сделки; в режиме ва-банк — указанный % баланса как маржа. Закрытие — по фактическому выходу сигнала (тейк, стоп, ранний выход или по времени), комиссия ${(status.fee_pct*100).toFixed(3)}% на вход и на выход.<br>
+      Размер — как у настоящей сделки, но от баланса симулятора: риск ${status.risk_pct}% баланса до стопа (с комиссиями), плечо то же, что у реальной сделки (с «Авто-риском» — свой % каждой монеты). Закрытие — по фактическому выходу сигнала (тейк, стоп, ранний выход или по времени), комиссия ${(status.fee_pct*100).toFixed(3)}% на вход и на выход.<br>
       Автоторговля: ${modesTxt}
     </div>
     <div style="margin-bottom:10px;">
@@ -25816,10 +25781,7 @@ wireResetButton('resetSimulatorBtn', '/api/simulator/reset',
 // ---------------- Settings modal ----------------
 const settingsModal = document.getElementById('settingsModal');
 const setInputs = {
-  snr_all_in_enabled: document.getElementById('setSnrAllIn'),
-  neuro_all_in_enabled: document.getElementById('setNeuroAllIn'),
   auto_risk_enabled: document.getElementById('setAutoRisk'),
-  prv_all_in_enabled: document.getElementById('setPrvAllIn'),
   prv_single_best_enabled: document.getElementById('setPrvSingleBest'),
   snr_single_best_enabled: document.getElementById('setSnrSingleBest'),
   neuro_enabled: document.getElementById('setNeuro'),
@@ -26409,7 +26371,7 @@ function compoundSummaryHtml(x) {
 }
 function compoundCellTxt(t) {
   if (t.compound_balance_after == null) return '<span class="dim">—</span>';
-  return `<span class="bal" title="баланс после этой сделки (старт $15, ва-банк, с комиссиями)">${fmtUsdCompact(t.compound_balance_after)}</span>`;   // v0.99.368 — own colour
+  return `<span class="bal" title="баланс после этой сделки (старт $15, размер как у автоторговли, с комиссиями)">${fmtUsdCompact(t.compound_balance_after)}</span>`;   // v0.99.368 — own colour
 }
 // v0.99.334 — full backtest trade lists for S/R and Peak, loaded on open
 function snrTradeRowHtml(sym, t) {
