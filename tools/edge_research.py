@@ -3,6 +3,7 @@
 
 Запуск (в Termux, файл рядом с vp_poc_screener.py):
     python edge_research.py [число монет, по умолчанию 40]
+    python edge_research.py 60 --skip 40      # только фандинг, монеты с 41-й по 100-ю (не участвовали в 1-м прогоне)
 
 Ничего не торгует и не пишет в состояние сервера. Свечи 4ч за 2 года и история
 фандинга; первый запуск 5-10 минут, повторный быстрее (свечи в кэше).
@@ -166,7 +167,7 @@ def funding_study(data, fund):
 
         for hold_h in HOLDS_H:
             nb = hold_h * 3600 // BAR
-            busy_until = {"short": 0, "long": 0}
+            busy_until = {"short": 0, "long": 0, "long_hi": 0}
             for j, (ft, rate) in enumerate(fr):
                 if thr[j] is None:
                     continue
@@ -186,6 +187,11 @@ def funding_study(data, fund):
                 if rate > hi and rate > F_SHORT_ABS and ft >= busy_until["short"]:
                     res.setdefault(("short", hold_h), []).append((ft, -ret + fs - cost))
                     busy_until["short"] = cs[i + nb]["time"]
+                # found AFTER the first run (shorts after high funding lost: price kept rising) —
+                # to be judged only on coins that were NOT in that run (--skip)
+                if rate > hi and rate > F_SHORT_ABS and ft >= busy_until["long_hi"]:
+                    res.setdefault(("long_hi", hold_h), []).append((ft, ret - fs - cost))
+                    busy_until["long_hi"] = cs[i + nb]["time"]
                 if rate < lo and rate < F_LONG_ABS and ft >= busy_until["long"]:
                     res.setdefault(("long", hold_h), []).append((ft, ret - fs - cost))
                     busy_until["long"] = cs[i + nb]["time"]
@@ -246,7 +252,7 @@ def pairs_study(data, syms):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    args = [a for i, a in enumerate(sys.argv[1:], 1) if not a.startswith("--") and sys.argv[i - 1] != "--skip"]
     spec = importlib.util.spec_from_file_location("vp", MAIN)
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
@@ -264,7 +270,9 @@ def main():
             vols[name] = float(t.get("volume_24h_quote") or t.get("volume_24h_settle") or 0)
         except (TypeError, ValueError):
             pass
-    syms = [s for s, _ in sorted(vols.items(), key=lambda kv: -kv[1])[:n]]
+    skip = int(sys.argv[sys.argv.index("--skip") + 1]) if "--skip" in sys.argv else 0
+    ranked = [s for s, _ in sorted(vols.items(), key=lambda kv: -kv[1])]
+    syms = ranked[skip:skip + n]
     now = time.time()
     start = now - DAYS * 86400
     t0 = time.time()
@@ -287,14 +295,21 @@ def main():
 
     say("\n=== 1. ЭКСТРЕМАЛЬНЫЙ ФАНДИНГ (цена + фандинг - комиссии, на сумму позиции) ===")
     res, base = funding_study(data, fund)
-    for side, title in (("short", "ШОРТ после очень высокого фандинга"), ("long", "ЛОНГ после сильно отрицательного")):
+    for side, title in (("short", "ШОРТ после очень высокого фандинга"), ("long", "ЛОНГ после сильно отрицательного"),
+                        ("long_hi", "ЛОНГ после очень высокого фандинга (гипотеза из 1-го прогона — судить только с --skip)")):
         say(f"  {title}:")
         for h in HOLDS_H:
             lbl = f"{h // 24} дн." if h >= 24 else f"{h} ч"
             say(f"    держать {lbl:6s} сигнал: {fmt(summary(res.get((side, h), [])))}")
-            say(f"    {'':13s} без сигнала: {fmt(summary(base.get((side, h), [])))}")
+            say(f"    {'':13s} без сигнала: {fmt(summary(base.get(("long" if side == "long_hi" else side, h), [])))}")
     say("  сигнал имеет смысл, только если он заметно лучше строки «без сигнала» и отмечен ✓")
 
+    if skip:
+        say(f"\n(монеты с {skip + 1}-й по {skip + len(syms)}-ю по объёму; пары пропущены)")
+        say(f"\nвремя: {time.time() - t0:.0f} с")
+        with open(os.path.join(os.getcwd(), "edge_report.txt"), "w", encoding="utf-8") as f:
+            f.write("\n".join(OUT) + "\n")
+        return
     say(f"\n=== 2. ПАРЫ МОНЕТ (топ-{P_TOP} по объёму, корреляция >= {P_CORR_MIN}, вход |z| >= {P_Z_IN}) ===")
     ptr = pairs_study(data, syms[:P_TOP])
     s2 = summary([(t, p) for t, p, _ in ptr])
