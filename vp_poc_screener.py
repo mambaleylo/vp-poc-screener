@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.422"
+APP_VERSION = "0.99.423"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4087,9 +4087,13 @@ def compute_risk_based_position(direction, entry, sl, leverage_cap, mmr_pct, tot
     # what the risk_pct setting means to the person who set it.
     # Leverage itself is untouched — still the same value already
     # confirmed safe for this SL distance.
-    max_margin = total_equity * risk_pct / 100.0
-    if margin_usd > max_margin:
-        margin_usd = max_margin
+    # v0.99.423 — per user ("возвращаемся в методу подбора плеча исходя из
+    # риска из выбранного процента"): the v0.99.297 cap (margin <= risk % of
+    # equity) is removed. At the max safe leverage it always bound, so a stop
+    # cost only % x leverage x stop distance — far less than the setting.
+    # Now the stop costs exactly risk % (fees included); the margin is what
+    # that needs, and the affordability check in execute_autotrade() (98% of
+    # the free balance) still skips a trade the account can't carry.
     return margin_usd, leverage, None
 
 
@@ -8912,10 +8916,9 @@ def refresh_result_compound(mod):
 def kelly_risk(pairs):
     """v0.99.422 — the setting's % that maximises long-run growth for this
     coin (user: "лучший процент риска для максимизации прибыли на
-    дистанции"). Live, the % is the share of the balance put in as MARGIN
-    (v0.99.297: margin is capped at %, and at the max safe leverage the cap
-    always binds), so a trade changes the balance by  % x lev x stop% x R.
-    pairs: [(net R, lev x stop fraction)] of the coin's CLEAN trades only
+    дистанции"). The % is the loss at the stop (v0.99.423), so a trade
+    changes the balance by % x R.
+    pairs: [(net R, 1.0)] of the coin's CLEAN trades only
     (test part; Neuro: check + test). Made cautious for a small sample:
       - every trade's net R is lowered by one standard error of the mean
         (25 trades at WR 64% could really be ~45%);
@@ -9031,14 +9034,14 @@ def rr_compound_live_sizing(trades, symbol, mod, start_balance=None, clean_after
             continue
         lv, slp = _lev(t)
         if lv and t.get("pnl_r") is not None:
-            _pairs.append((float(_net_r(t)), lv * slp))
+            _pairs.append((float(_net_r(t)), 1.0))   # v0.99.423 — a stop costs exactly the % again
     kel = kelly_risk(_pairs)
     mode, val = compound_sizing(mod, kel.get("auto_risk_pct"))
     balance, n, levs, skipped = start_balance, 0, [], 0
     out = {"compound_start": start_balance, "compound_final_balance": start_balance, "compound_return_pct": 0.0,
            "compound_leverage": None, "compound_trades": 0, "compound_blown_at": None,
            "compound_mode": (f"ва-банк {val:g}%" if mode == "all_in" else
-                             f"авто-риск {val:g}% депо (½ Келли)" if mode == "auto" else f"{val:g}% депо на сделку"),
+                             f"авто-риск {val:g}% (½ Келли)" if mode == "auto" else f"риск {val:g}%"),
            "compound_sig": compound_sig(mod), "compound_skipped": 0,
            "auto_risk_pct": None, "auto_risk_full_pct": None, "auto_risk_n": None}
     out.update(kel)
@@ -9061,14 +9064,7 @@ def rr_compound_live_sizing(trades, symbol, mod, start_balance=None, clean_after
         else:
             notional = balance * val / 100.0 / (sl_pct + 2 * fee)
             margin = notional / lev
-            # v0.99.422 — same cap as compute_risk_based_position(): margin never
-            # above the risk amount (an isolated position can't lose more than
-            # the risk % even if liquidated); with a low leverage cap / wide stop
-            # the position is then smaller and the stop costs less than risk %
-            if margin > balance * val / 100.0:
-                margin = balance * val / 100.0
-                notional = margin * lev
-            if margin > balance * 0.98:
+            if margin > balance * 0.98:   # same skip as the live affordability check
                 skipped += 1
                 continue
         move = pr * sl_pct
@@ -23134,14 +23130,14 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">Риск на сделку</div>
-          <div class="sub">% от баланса счёта, который идёт маржой в одну сделку (не больше — даже при ликвидации теряется не больше этого) — общий для Neuro, S/R Zones, Peak Reversal. Плечо подбирается максимально безопасное под стоп конкретного сигнала, поэтому при срабатывании стопа теряется меньше: этот % × плечо × расстояние до стопа</div>
+          <div class="sub">% от баланса, который теряется при срабатывании стопа (с комиссиями) — общий для Neuro, S/R Zones, Peak Reversal. Плечо — максимально безопасное под стоп конкретного сигнала, маржа — сколько нужно для этого риска (если не хватает свободного баланса — сделка пропускается)</div>
         </div>
         <input type="number" id="setAutotradeRiskPct" min="0.1" max="50" step="0.5" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
       <div class="settingRow subRow">
         <div>
           <div class="label">↳↳ Авто-риск (лучший % для каждой монеты)</div>
-          <div class="sub">вместо % выше каждая монета Neuro / S/R / P/R торгуется со своим % депо на сделку — тем, при котором счёт растёт быстрее всего на длинной дистанции (Келли), осторожно: по сделкам теста (их не видел выбор настроек), с пессимистичной поправкой на малую выборку и половиной от оптимума. Не больше 50%. Ва-банк, если включён у модуля, остаётся ва-банком. Бэктест «с $15» считает так же</div>
+          <div class="sub">вместо % выше каждая монета Neuro / S/R / P/R торгуется со своим риском на сделку — тем, при котором счёт растёт быстрее всего на длинной дистанции (Келли), осторожно: по сделкам теста (их не видел выбор настроек), с пессимистичной поправкой на малую выборку и половиной от оптимума. Не больше 50%. Ва-банк, если включён у модуля, остаётся ва-банком. Бэктест «с $15» считает так же</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutoRisk"><span class="switchSlider"></span></label>
       </div>
@@ -26408,7 +26404,7 @@ function compoundSummaryHtml(x) {
     ? `как автоторговля (${x.compound_mode}):</span> <span class="bal">${fmtUsdCompact(x.compound_final_balance)}</span> <span class="${cls}">(${pctTxt})</span> <span class="dim">· плечо своё под стоп каждой сделки, обычно ~${x.compound_leverage}x · ${x.compound_trades} сделок · со сложным процентом и комиссиями${x.compound_skipped ? ` · ${x.compound_skipped} пропущено (автоторговля бы не открыла)` : ''}`
     : `ва-банк:</span> <span class="bal">${fmtUsdCompact(x.compound_final_balance)}</span> <span class="${cls}">(${pctTxt})</span> <span class="dim">· плечо ${x.compound_leverage}x · ${x.compound_trades} сделок · с комиссиями`;
   const kel = x.auto_risk_pct != null   // v0.99.422
-    ? `<div style="font-size:var(--fs-sm);margin:-4px 0 8px;">🎯 <span class="dim">лучший % депо на сделку для этой монеты:</span> <b>${x.auto_risk_pct}%</b> <span class="dim">(½ осторожного Келли по ${x.auto_risk_n} сделкам, которых не видел выбор настроек; без осторожности и целиком было бы ${x.auto_risk_full_pct}%) ${(x.compound_mode || '').startsWith('авто-риск') ? '· используется' : '· включите «Авто-риск» в настройках, чтобы торговать с ним'}</span></div>` : '';
+    ? `<div style="font-size:var(--fs-sm);margin:-4px 0 8px;">🎯 <span class="dim">лучший риск на сделку для этой монеты:</span> <b>${x.auto_risk_pct}%</b> <span class="dim">(½ осторожного Келли по ${x.auto_risk_n} сделкам, которых не видел выбор настроек; без осторожности и целиком было бы ${x.auto_risk_full_pct}%) ${(x.compound_mode || '').startsWith('авто-риск') ? '· используется' : '· включите «Авто-риск» в настройках, чтобы торговать с ним'}</span></div>` : '';
   return `<div style="font-size:var(--fs-sm);margin:4px 0 8px;">💰 <span class="dim">с $${x.compound_start} ${how}</span>${blown}</div>` + kel;
 }
 function compoundCellTxt(t) {

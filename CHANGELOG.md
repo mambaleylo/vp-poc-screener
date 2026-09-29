@@ -18222,3 +18222,12 @@ v0.99.422 - Per-coin best % ("Авто-риск", user: best risk % for max prof
          it now applies the same margin cap as the live order, so backtest and
          live match (a stop at 30% / lev 42 / stop 1.16% costs ~16%, not 30%).
          Settings text for the % corrected accordingly.
+v0.99.423 - Back to sizing by risk (user: "возвращаемся в методу подбора плеча
+         исходя из риска из выбранного процента"): the v0.99.297 cap (margin <=
+         risk % of equity) is removed - at the max safe leverage it always bound,
+         so a stop cost only % x leverage x stop distance. Now a stop costs
+         exactly the settings' % (fees included) at the max safe leverage; the
+         margin is what that needs, and a trade the free balance can't carry
+         (margin > 98%) is skipped, live and in the $15 column alike. The
+         per-coin auto risk (Kelly) is back in "loss at the stop" units.
+         Settings text updated.
