@@ -18260,3 +18260,12 @@ v0.99.426 - Trend removed (user: "восстанови версию до trend")
          coin by past backtest lost money (-0.33R/trade). tools/trend_research.py
          removed with it. Saved trend_* keys in the state/settings files are
          ignored.
+v0.99.427 - Neuro: funding data was never loaded. neuro_fetch_funding_rate asked
+         Gate for `limit` together with a from/to range and halved the range
+         on every 400; the user's real-data run (tools/edge_research.py) got
+         0 records for all 40 coins that way, while the plain request (limit
+         only) worked for 100 of 100. So the funding conditions of Neuro (and
+         of the S/R / P/R Neuro filters) never had data. Now: the newest 1000
+         records first, older pages with from/to and no limit while Gate
+         answers, refusals logged. NEURO_ALGO_VERSION 427: saved Neuro results
+         are marked stale and re-mined with the funding data.

@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.426"
+APP_VERSION = "0.99.427"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -18638,44 +18638,44 @@ def neuro_simulate_trades(candles, confirmed_patterns, htf_candles=None, funding
 
 def neuro_fetch_funding_rate(symbol, start_ts, end_ts, limit=1000):
     """GET /futures/usdt/funding_rate — Gate.io's historical funding rate.
-    v0.99.258 — per direct user follow-up to the v0.99.257 fix ("лучше же
-    больше дней для бэктеста"): rather than permanently settling for a
-    guessed-conservative fixed window (v0.99.257's own 60-day compromise,
-    chosen only by analogy with OTHER Gate.io endpoints' documented "30
-    days at most" limits — this endpoint's own real limit was never
-    directly confirmed), this now tries the CALLER's full requested range
-    first and, on a 400 (the range exceeds whatever undocumented max Gate
-    enforces here), HALVES the window and retries — up to 6 times — so it
-    automatically discovers close to the actual maximum the exchange
-    allows instead of leaving usable history on the table if the true
-    limit turns out to be bigger than a fixed guess."""
-    range_start = start_ts
-    last_error = None
-    for attempt in range(6):
+    v0.99.427 — per the user's real-data check (tools/edge_research.py on
+    the phone): the old form (limit together with from/to, halving the range
+    on a 400) returned NOTHING for all 40 coins tried — every attempt was
+    refused and the function silently gave up, so Neuro's funding
+    conditions never had data. The plain request (limit only, newest
+    records) worked for 100 of 100 coins. Now: the newest `limit` records
+    first, then older pages with from/to and no limit while Gate answers;
+    a refusal is logged, never hidden. Returns records in [start_ts, end_ts]."""
+    out = {}
+    params = {"contract": symbol, "limit": limit}
+    for page in range(8):
         try:
-            r = requests.get(
-                f"{GATE_BASE}/futures/usdt/funding_rate",
-                params={"contract": symbol, "limit": limit, "from": range_start, "to": end_ts},
-                timeout=HTTP_TIMEOUT,
-            )
-            if r.status_code == 400 and range_start < end_ts - 86400:
-                range_start = end_ts - (end_ts - range_start) // 2
-                continue
-            r.raise_for_status()
-            out = []
-            for row in r.json():
-                try:
-                    out.append({"time": int(row.get("t", row.get("time", 0))), "rate": float(row.get("r", row.get("rate", 0)))})
-                except (TypeError, ValueError):
-                    continue
-            out.sort(key=lambda x: x["time"])
-            return out
+            r = requests.get(f"{GATE_BASE}/futures/usdt/funding_rate", params=params, timeout=HTTP_TIMEOUT)
+            if r.status_code != 200:
+                if page == 0:
+                    log_error(f"neuro_fetch_funding_rate {symbol}: HTTP {r.status_code} {r.text[:120]}")
+                break
+            rows = r.json()
         except Exception as e:
-            last_error = e
+            if page == 0:
+                log_error(f"neuro_fetch_funding_rate {symbol}: {e}")
             break
-    if last_error:
-        log_error(f"neuro_fetch_funding_rate {symbol}: {last_error}")
-    return []
+        new = 0
+        for row in rows:
+            try:
+                t_ = int(row.get("t", row.get("time", 0)))
+                v = float(row.get("r", row.get("rate", 0)))
+            except (TypeError, ValueError):
+                continue
+            if t_ not in out:
+                out[t_] = v
+                new += 1
+        if not new or min(out) <= start_ts:
+            break
+        # older page: a from/to window WITHOUT limit (Gate refuses the two together)
+        earliest = min(out)
+        params = {"contract": symbol, "from": max(int(start_ts), earliest - 90 * 86400), "to": earliest - 1}
+    return [{"time": t_, "rate": v} for t_, v in sorted(out.items()) if start_ts <= t_ <= end_ts]
 
 
 def neuro_pick_best_rr(train_candles, confirmed_patterns, htf_candles=None, funding_records=None,
@@ -19249,7 +19249,7 @@ _neuro_live_signals = {}  # symbol -> latest live signal or None
 _neuro_last_mined = None
 # v0.99.403 — bumped when a fix changes what mining produces (here: the
 # 4h/1d lookahead fix); older saved results are not traded and get re-mined
-NEURO_ALGO_VERSION = 417   # v0.99.417 — 4-part split; was 403 (HTF lookahead fix)
+NEURO_ALGO_VERSION = 427   # v0.99.427 — funding data actually loaded (was always empty); 417: 4-part split; 403: HTF lookahead fix
 _neuro_results_algo = NEURO_ALGO_VERSION
 _neuro_startup_checked = False   # v0.99.383
 # v0.99.384 — per user ("для нейро автоторговлю только выбранных монет с помощью
