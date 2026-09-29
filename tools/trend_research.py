@@ -45,6 +45,7 @@ VARIANTS = [
     {"name": "BTC выше SMA200 (оценка)", "btc_sma": 200},
 ]
 
+PF_VARIANTS = ("голосов 3 из 9", "быстрые 5..60, 3 из 5")
 OUT = []
 
 
@@ -99,6 +100,39 @@ def run(m, data, v, btc_ok):
             trades = [t for t in trades if ok.get(t["time"], False)]
         out[s] = trades
     return out
+
+
+def portfolio(trades, risk_pct):
+    """All coins on ONE balance, as the auto-trader would run them: each
+    entry risks risk_pct of the balance at that moment, the result lands at
+    the exit. Returns (final x, worst drawdown %, most positions at once)."""
+    ev = []
+    for t in trades:
+        ev.append((t["entry_time"], 1, t))
+        ev.append((t["exit_time"], 0, t))
+    ev.sort(key=lambda e: (e[0], e[1]))
+    bal = peak = 1.0
+    dd = 0.0
+    risk, open_n, max_open = {}, 0, 0
+    for _, kind, t in ev:
+        if kind == 1:
+            risk[id(t)] = bal * risk_pct / 100
+            open_n += 1
+            max_open = max(max_open, open_n)
+        else:
+            bal = max(bal + risk.pop(id(t), 0.0) * t["pnl_r_net"], 0.0)
+            open_n -= 1
+            peak = max(peak, bal)
+            dd = max(dd, (1 - bal / peak) * 100 if peak > 0 else 100)
+    return bal, dd, max_open
+
+
+def pf_line(trades):
+    out = []
+    for rp in (0.5, 1, 2):
+        b, dd, mo = portfolio(trades, rp)
+        out.append(f"риск {rp:g}%: x{b:.2f}, просадка {dd:.0f}%")
+    return " · ".join(out) + f" · позиций одновременно до {mo}"
 
 
 def btc_filter(btc, n):
@@ -184,6 +218,15 @@ def main():
         say(f"  {name:28s} {line(cal)}")
         if show_holdout:
             say(f"  {'   └ последний год':28s} {line(hold)}")
+    say("\n=== ОДИН СЧЁТ НА ВСЕ МОНЕТЫ (как автоторговля: риск % от баланса на сделку) ===")
+    say(f"  основной, вся история: {pf_line(allt)}")
+    for name in PF_VARIANTS:
+        v = next(x for x in VARIANTS if x["name"] == name)
+        ts = [t for x in run(m, data, v, btc_ok).values() for t in x]
+        if not show_holdout:
+            ts = [t for t in ts if t["entry_time"] < cut]
+        say(f"  {name}, {'вся история' if show_holdout else 'до последнего года'}: {pf_line(ts)}")
+    say("  (без учёта маржи: при многих позициях сразу часть сделок не хватило бы денег открыть)")
     if not show_holdout:
         say("  последний год скрыт. Выберите вариант по этой таблице, потом ОДИН раз: --holdout")
     say(f"\nвремя: {time.time() - t0:.0f} с")
