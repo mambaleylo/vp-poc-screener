@@ -111,7 +111,9 @@ def portfolio(trades, risk_pct):
     for t in trades:
         ev.append((t["entry_time"], 1, t))
         ev.append((t["exit_time"], 0, t))
-    ev.sort(key=lambda e: (e[0], e[1]))
+    # at one moment: exits of earlier trades (free margin) -> entries -> exits of trades
+    # stopped out the same day they opened (their entry must come first)
+    ev.sort(key=lambda e: (e[0], e[1] if e[1] == 1 else (2 if e[2]["exit_time"] <= e[2]["entry_time"] else 0)))
     bal = peak = 1.0
     dd = 0.0
     risk, open_n, max_open = {}, 0, 0
@@ -180,7 +182,9 @@ def money_sim(trades, specs, risk_pct, start=100.0, fee=0.0005):
     for t in trades:
         ev.append((t["entry_time"], 1, t))
         ev.append((t["exit_time"], 0, t))
-    ev.sort(key=lambda e: (e[0], e[1]))
+    # at one moment: exits of earlier trades (free margin) -> entries -> exits of trades
+    # stopped out the same day they opened (their entry must come first)
+    ev.sort(key=lambda e: (e[0], e[1] if e[1] == 1 else (2 if e[2]["exit_time"] <= e[2]["entry_time"] else 0)))
     bal, peak, dd, used, skipped = start, start, 0.0, 0.0, 0
     pos, months = {}, {}
     for ts, kind, t in ev:
