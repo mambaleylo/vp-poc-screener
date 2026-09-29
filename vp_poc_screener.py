@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.427"
+APP_VERSION = "0.99.428"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6870,6 +6870,7 @@ def save_state():
                 "lsw_signals": list(STATE["lsw_signals"]),
                 "lsw_backtest_results": STATE["lsw_backtest_results"],
                 "lsw_trade_filters": STATE.get("lsw_trade_filters") or {},   # v0.99.364  # v0.99.292 — CRITICAL FIX, same incident as msnr_backtest_results' own — never persisted before, a restart silently wiped every LSW backtest result
+                "snr_algo": SNR_ALGO_VERSION,   # v0.99.428
                 "snr_results": STATE["snr_results"],  # v0.99.271 — CRITICAL FIX: this and snr_signals/active/display symbols were never actually persisted (save_state() builds an explicit key list, not a generic STATE dump), so a restart would silently wipe every S/R Zones backtest result and live signal
                 "snr_signals": list(STATE["snr_signals"]),
                 "snr_active_symbols": list(_snr_active_symbols),
@@ -7010,6 +7011,9 @@ def load_state():
         snr_signals = data.get("snr_signals", [])
         snr_active_symbols = data.get("snr_active_symbols")
         snr_display_symbols = data.get("snr_display_symbols")
+        _snr_stale = (data.get("snr_algo") or 0) < SNR_ALGO_VERSION   # v0.99.428 — results of the old stop rule
+        if _snr_stale:
+            snr_results, snr_active_symbols, snr_display_symbols = {}, None, None
         prv_results = data.get("prv_results", {})
         prv_signals = data.get("prv_signals", [])
         prv_active_symbols = data.get("prv_active_symbols")
@@ -7042,6 +7046,10 @@ def load_state():
                 if isinstance(_cur, (dict, list)) and not isinstance(_v, type(_cur)):
                     continue   # shape changed between versions — keep the default
                 STATE[_k] = _v
+            if _snr_stale:   # v0.99.428 — re-run the S/R backtest right away
+                STATE["snr_last_backtest_finished"] = None
+                STATE["snr_pooled"] = None
+                STATE["snr_diag"] = {}
             STATE["snr_results"] = snr_results
             STATE["snr_signals"] = deque(snr_signals, maxlen=500)
             if snr_active_symbols:
@@ -14019,11 +14027,14 @@ SNR_UNIVERSE_SIZE     = int(os.environ.get("VP_SNR_UNIVERSE_SIZE", 30))  # v0.99
 SNR_TOP_N             = int(os.environ.get("VP_SNR_TOP_N", 3))     # how many survive the full sweep AND are actually live-scanned/traded, ranked by TEST avg_pnl_r
 SNR_SINGLE_BEST_ENABLED = os.environ.get("VP_SNR_SINGLE_BEST", "0") == "1"   # v0.99.382 — autotrade only the first S/R card
 SNR_DISPLAY_N         = int(os.environ.get("VP_SNR_DISPLAY_N", 5))  # how many get kept/shown — always clamped to at least SNR_TOP_N, same semantics as NEURO_DISPLAY_N (v0.99.262)
-SNR_TF_CANDIDATES     = ["1h", "4h", "1d"]  # per direct user request ("попробовать все фреймы")
+SNR_TF_CANDIDATES     = ["4h", "1d"]  # v0.99.428 — 1h dropped: a stop of a fraction of 1h ATR cost 0.2-0.3R in fees per trade (was ["1h", "4h", "1d"], "попробовать все фреймы")
 SNR_PIVOT_CANDIDATES  = [10, 15, 20]         # matches the Pine Script's own "Pivot Length" range
 SNR_STRENGTH_CANDIDATES = [1, 2, 3]          # matches the Pine Script's own "Strength" setting (1-4, capped here at 3 for a tractable sweep)
 SNR_RR_CANDIDATES     = [1.5, 2.0, 3.0]   # v0.99.412 — back to max 3 (user); v0.99.398 had added 4 and 5
 SNR_SL_ATR_MULT       = 0.5                  # SL distance beyond the zone, in ATR units
+SNR_MIN_STOP_PCT      = 1.0                  # v0.99.428 — the stop is at least this far from the entry (fees <= 0.1R per trade)
+SNR_FLIP_ZONES        = True                 # v0.99.428 — a broken zone lives on with the opposite role (resistance -> support)
+SNR_ALGO_VERSION      = 428                  # saved S/R results of an older rule set are dropped on load
 SNR_TOO_CLOSE_ATR_MULT = 1.0 / 8              # matches the Pine Script's own tooCloseATR constant — merges pivots too close to an existing active zone
 SNR_MAX_WAIT_BARS     = 48                   # same timeout convention as every other module's own backtest
 SNR_MIN_TRAIN_TRADES  = 15                   # minimum TRAIN closed trades before trusting a (tf, pivot, strength, rr) candidate at all
@@ -14185,12 +14196,14 @@ def snr_build_zones(candles, atr, pivot_length, too_close_atr_mult=SNR_TOO_CLOSE
                 zones.append(z)
                 active.append(z)
         c = candles[i]
+        flipped = []
         for z in active:
             if z["break_idx"] is not None or i <= z["start_idx"]:
                 continue
             if z["type"] == "resistance":
                 if c["close"] > z["price"]:
                     z["break_idx"] = i
+                    flipped.append(z)
                 elif c["high"] >= z["price"] and c["close"] <= z["price"]:
                     if not z["retest_idxs"] or z["retest_idxs"][-1] != i:
                         z["strength"] += 1
@@ -14198,11 +14211,43 @@ def snr_build_zones(candles, atr, pivot_length, too_close_atr_mult=SNR_TOO_CLOSE
             else:
                 if c["close"] < z["price"]:
                     z["break_idx"] = i
+                    flipped.append(z)
                 elif c["low"] <= z["price"] and c["close"] >= z["price"]:
                     if not z["retest_idxs"] or z["retest_idxs"][-1] != i:
                         z["strength"] += 1
                         z["retest_idxs"].append(i)
+        if SNR_FLIP_ZONES:   # v0.99.428 — role reversal: counts retests from the NEXT bar on
+            for z in flipped:
+                if z.get("flipped"):
+                    continue   # one role change only: a flipped zone that breaks again is gone
+                nz = {"type": "support" if z["type"] == "resistance" else "resistance", "price": z["price"],
+                      "start_idx": i, "break_idx": None, "strength": 1, "retest_idxs": [], "flipped": True}
+                zones.append(nz)
+                active.append(nz)
     return zones
+
+
+def snr_trade_levels(direction, entry, zone_price, atr_val, rr, sl_atr_mult=SNR_SL_ATR_MULT):
+    """v0.99.428 — (sl, tp) of an S/R trade, shared by the backtest and the
+    live scan. The stop sits BEYOND THE ZONE (zone price -/+ sl_atr_mult x
+    ATR) — before, it was measured from the entry, so a long's stop was often
+    above the very support it traded and the zone never mattered — and at
+    least SNR_MIN_STOP_PCT from the entry. None if the entry is already past
+    the stop (price left the zone behind before the entry)."""
+    if not entry or entry <= 0 or not atr_val or atr_val <= 0:
+        return None
+    min_dist = entry * SNR_MIN_STOP_PCT / 100
+    if direction == "LONG":
+        sl = zone_price - atr_val * sl_atr_mult
+        if sl >= entry:
+            return None
+        sl = min(sl, entry - min_dist)
+        return sl, entry + (entry - sl) * rr
+    sl = zone_price + atr_val * sl_atr_mult
+    if sl <= entry:
+        return None
+    sl = max(sl, entry + min_dist)
+    return sl, entry - (sl - entry) * rr
 
 
 def snr_simulate_trades(candles, pivot_length, min_strength, rr, sl_atr_mult=SNR_SL_ATR_MULT,
@@ -14239,11 +14284,10 @@ def snr_simulate_trades(candles, pivot_length, min_strength, rr, sl_atr_mult=SNR
         direction = "LONG" if z["type"] == "support" else "SHORT"
         entry_bar = candles[idx + 1]
         entry = entry_bar["open"]
-        sl_dist = atr[idx] * sl_atr_mult
-        if sl_dist <= 0:
+        lv = snr_trade_levels(direction, entry, z["price"], atr[idx], rr, sl_atr_mult)   # v0.99.428
+        if lv is None:
             continue
-        sl = entry - sl_dist if direction == "LONG" else entry + sl_dist
-        tp = entry + sl_dist * rr if direction == "LONG" else entry - sl_dist * rr
+        sl, tp = lv
         result, exit_time, exit_price = "TIMEOUT", None, None
         # v0.99.338 — BUG FIX: the scan used to start at idx+2, i.e. it
         # skipped the ENTRY bar itself (entry is at its open), so a stop or
@@ -15427,11 +15471,10 @@ def snr_detect_live_signal(closed, pivot_length, min_strength, rr):
         if z["retest_idxs"] and z["retest_idxs"][-1] == last_idx and z["strength"] >= min_strength:
             direction = "LONG" if z["type"] == "support" else "SHORT"
             entry = closed[-1]["close"]
-            sl_dist = atr[last_idx] * SNR_SL_ATR_MULT
-            if sl_dist <= 0:
+            lv = snr_trade_levels(direction, entry, z["price"], atr[last_idx], rr)   # v0.99.428 — same rule as the backtest
+            if lv is None:
                 continue
-            sl = entry - sl_dist if direction == "LONG" else entry + sl_dist
-            tp = entry + sl_dist * rr if direction == "LONG" else entry - sl_dist * rr
+            sl, tp = lv
             return {"direction": direction, "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8),
                     "zone_price": round(z["price"], 8), "zone_strength": z["strength"],
                     "time": closed[-1]["time"]}

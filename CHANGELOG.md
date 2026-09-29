@@ -18269,3 +18269,20 @@ v0.99.427 - Neuro: funding data was never loaded. neuro_fetch_funding_rate asked
          records first, older pages with from/to and no limit while Gate
          answers, refusals logged. NEURO_ALGO_VERSION 427: saved Neuro results
          are marked stale and re-mined with the funding data.
+v0.99.428 - S/R Zones rule fixes (user: no coin ever passed the check):
+         1. The stop now sits BEYOND THE ZONE (zone -/+ 0.5 ATR), as the
+            description always said; the code measured 0.5 ATR from the entry
+            (next bar's open), so a long's stop was often above the support it
+            traded and the zone never mattered. A trade whose entry is already
+            past that stop is skipped.
+         2. The stop is at least 1% from the entry (fees <= 0.1R per trade).
+         3. 1h dropped (4h and 1d stay): a fraction-of-1h-ATR stop cost
+            0.2-0.3R in fees per trade. 54 combinations instead of 81, so the
+            selection bar is a bit lower (z 3.11 instead of 3.23).
+         4. Role reversal: a broken zone lives on once with the opposite role
+            (resistance -> support and back), counting retests from the next bar.
+         The pass bars are unchanged. Backtest and live scan share the level
+         rule (snr_trade_levels); verified: live detection matches the
+         backtest's trades 40/40, random walks pass 0/8 per coin and pooled.
+         Saved S/R results (old rule) are dropped on load and the S/R backtest
+         runs again right after the start.
