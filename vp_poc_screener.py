@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.429"
+APP_VERSION = "0.99.430"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -19323,7 +19323,7 @@ def neuro_scan_live(symbol, confirmed_patterns, rr=None, precomputed_btc_candles
         return None
 
 
-_neuro_state_lock = threading.Lock()
+_neuro_state_lock = threading.RLock()   # v0.99.430 — re-entrant: neuro_money_ok() may run under it
 _neuro_patterns = {}     # symbol -> confirmed patterns list
 _neuro_trades = {}       # symbol -> trades list
 _neuro_summary = {}      # symbol -> summary dict
@@ -20028,7 +20028,7 @@ def neuro_live_loop():
             with _neuro_state_lock:
                 patterns_snapshot = dict(_neuro_patterns)
                 summary_snapshot = dict(_neuro_summary)
-                active_symbols = neuro_trade_symbols()   # v0.99.403 — ticked (or the best) passing coins only
+            active_symbols = neuro_trade_symbols()   # v0.99.403 — ticked (or the best) passing coins only; v0.99.430 — outside the lock
             # v0.99.253 — same shared BTC/ETH prefetch already applied to
             # the mining loop back in v0.99.216, found still missing here
             # during a full audit: with only ~5 active symbols this isn't
@@ -20084,8 +20084,7 @@ def neuro_live_loop():
                 arrow = "\u2b06\ufe0f" if sig["direction"] == "LONG" else "\u2b07\ufe0f"
                 pat_txt = ", ".join(f"{p['type']}={p['value']}(z={p['z']})" for p in sig["patterns"][:3])
                 # v0.99.384 — "только отмеченные монеты"
-                with _neuro_state_lock:
-                    _sel_ok = symbol in neuro_trade_symbols()   # v0.99.403
+                _sel_ok = symbol in neuro_trade_symbols()   # v0.99.403; v0.99.430 — outside the lock
                 send_telegram(
                     f"{arrow} NEURO {symbol} ({sig['direction']}, score {sig['score']})\n"
                     f"entry: {sig['entry']}, SL: {sig['sl']}, TP: {sig['tp']}\n"
@@ -20113,8 +20112,7 @@ def neuro_live_loop():
                     # this pass is still scanning, re-check current
                     # membership right before spending real money — the
                     # signal stays logged either way.
-                    with _neuro_state_lock:
-                        still_active = symbol in neuro_trade_symbols()   # v0.99.403
+                    still_active = symbol in neuro_trade_symbols()   # v0.99.403; v0.99.430 — outside the lock
                     if not still_active:
                         log_error(f"neuro_live_loop {symbol}: signal fired but symbol was dropped from _neuro_active_symbols mid-scan — signal logged, real trade skipped")
                         continue

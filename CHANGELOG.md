@@ -18303,3 +18303,10 @@ v0.99.429 - Saving Neuro and S/R (user: "надо спасать и тот и т
          Verified: live detection matches the backtest 40/40 in both modes,
          random walks pass 0/6 per coin and pooled. Saved S/R results are
          dropped on load (SNR_ALGO_VERSION 429) and the S/R backtest re-runs.
+v0.99.430 - Fix: black screen on Neuro and S/R after 0.99.429 (user). The Neuro
+         live loop called neuro_trade_symbols() while holding _neuro_state_lock,
+         and the new neuro_money_ok() takes the same (non-reentrant) lock: the
+         loop deadlocked with the lock held, and everything reading Neuro state
+         (the Neuro status, the loop-health block every tab polls, saving the
+         Neuro state) waited forever. The lock is now re-entrant and the three
+         calls in the live loop run outside it.
