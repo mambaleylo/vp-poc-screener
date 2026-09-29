@@ -301,7 +301,7 @@ def main():
         for h in HOLDS_H:
             lbl = f"{h // 24} дн." if h >= 24 else f"{h} ч"
             say(f"    держать {lbl:6s} сигнал: {fmt(summary(res.get((side, h), [])))}")
-            say(f"    {'':13s} без сигнала: {fmt(summary(base.get(("long" if side == "long_hi" else side, h), [])))}")
+            say(f"    {'':13s} без сигнала: {fmt(summary(base.get(('long' if side == 'long_hi' else side, h), [])))}")
     say("  сигнал имеет смысл, только если он заметно лучше строки «без сигнала» и отмечен ✓")
 
     if skip:
