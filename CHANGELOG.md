@@ -18251,3 +18251,12 @@ v0.99.425 - New module "Trend" (user asked for an indicator backed by research):
          placed before the old one is cancelled); 1h lows close touched stops.
          Own tab, settings (on/off, Telegram, autotrade - off by default), the
          $15 column and per-coin auto risk sized like live orders.
+v0.99.426 - Trend removed (user: "восстанови версию до trend"): the program is
+         0.99.424 again, only the version number moved on so the update is
+         picked up. Why: on real Gate data 2022-2026 the rules passed in R
+         (+0.2R/trade, t=2.0), but a $100 account with Gate's minimum lots,
+         margin, fees and funding made ~+10%/year with a 40% drawdown at 0.5%
+         risk (2023: -38%), and worse at higher risk; trading only the best
+         coin by past backtest lost money (-0.33R/trade). tools/trend_research.py
+         removed with it. Saved trend_* keys in the state/settings files are
+         ignored.
