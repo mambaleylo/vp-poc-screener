@@ -135,6 +135,36 @@ def pf_line(trades):
     return " · ".join(out) + f" · позиций одновременно до {mo}"
 
 
+def pick_best(per, score, top, start, step_days=7, min_n=5):
+    """Walk-forward, as the program would trade ONE coin: every step_days the
+    coins are ranked by score() of their trades CLOSED before that moment
+    (nothing from the future), and until the next re-pick only the top
+    coin(s) may open trades. A coin with a score <= 0 is never picked."""
+    out, m_ = [], start
+    now = time.time()
+    while m_ < now:
+        sc = []
+        for s, ts in per.items():
+            past = [t for t in ts if t["exit_time"] < m_]
+            if len(past) >= min_n:
+                v = score(past, m_)
+                if v is not None and v > 0:
+                    sc.append((v, s))
+        chosen = {s for _, s in sorted(sc, reverse=True)[:top]}
+        end = m_ + step_days * 86400
+        for s in chosen:
+            out += [t for t in per[s] if m_ <= t["entry_time"] < end]
+        m_ = end
+    return sorted(out, key=lambda t: t["entry_time"])
+
+
+SCORES = (
+    ("сумма R за всё время", lambda past, m_: sum(t["pnl_r_net"] for t in past)),
+    ("сумма R за последний год", lambda past, m_: sum(t["pnl_r_net"] for t in past if t["exit_time"] >= m_ - 365 * 86400) or None),
+    ("t за всё время", lambda past, m_: tstat([t["pnl_r_net"] for t in past])),
+)
+
+
 def btc_filter(btc, n):
     closes, ok = [c["close"] for c in btc], {}
     for i, c in enumerate(btc):
@@ -204,6 +234,25 @@ def main():
     say(f"\n  ВЕРДИКТ ПРОГРАММЫ: {'ПРОШЁЛ — оставляем' if passed else 'НЕ прошёл'} "
         f"(нужно n ≥ {m.TREND_MIN_TRADES}, t ≥ {m.TREND_PASS_T}, плюс в обеих половинах)")
     say("  монеты двигаются вместе, t немного завышен — смотрите и на годы, и на число монет в плюсе")
+
+    # 1b. trading ONE coin: the best by its own backtest, re-picked weekly
+    start = first + 365 * 86400
+    base_after = [t for t in allt if t["entry_time"] >= start]
+    say(f"\n=== ОДНА МОНЕТА — ЛУЧШАЯ ПО БЭКТЕСТУ (выбор раз в неделю только по прошлому, с {time.strftime('%Y-%m-%d', time.gmtime(start))}) ===")
+    say(f"  для сравнения, все монеты:  {line(stats(base_after))}")
+    for name, fn in SCORES:
+        for top in ((1, 3) if name == SCORES[0][0] else (1,)):
+            ts = pick_best(per, fn, top, start)
+            say(f"  топ-{top}, {name}:")
+            say(f"      {line(stats(ts))}")
+            if top == 1:
+                yrs = {}
+                for t in ts:
+                    yrs.setdefault(time.gmtime(t["entry_time"]).tm_year, []).append(t["pnl_r_net"])
+                say("      по годам: " + " · ".join(f"{y}: {sum(v):+.1f}R/{len(v)}" for y, v in sorted(yrs.items())))
+                say("      один счёт: " + " · ".join(
+                    f"риск {rp:g}%: x{portfolio(ts, rp)[0]:.2f}, просадка {portfolio(ts, rp)[1]:.0f}%" for rp in (2, 5, 10, 30)))
+    say("  если «лучшая монета» не лучше «все монеты» на сделку — выбор по бэктесту не помогает, это удача прошлого")
 
     # 2. calibration: variants on everything BEFORE the last year
     say(f"\n=== ВАРИАНТЫ: калибровка (только до {time.strftime('%Y-%m-%d', time.gmtime(cut))}) ===")
