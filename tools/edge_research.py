@@ -94,20 +94,35 @@ def fmt(s):
             f"половины {s['h1'] * 100:+.2f}% / {s['h2'] * 100:+.2f}%{'  ✓' if ok else ''}")
 
 
+FUND_DIAG = []
+
+
 def funding_history(m, sym, start, end):
-    out, to = {}, end
-    for _ in range(40):
-        rows = m.neuro_fetch_funding_rate(sym, max(start, to - 300 * 86400), to)
-        new = [r for r in rows if r["time"] not in out]
-        if not new:
+    """Latest 1000 records without a date range (the form Gate always
+    accepts), then page back with `to`; any refusal is recorded, not hidden."""
+    out, params = {}, {"contract": sym, "limit": 1000}
+    for _ in range(12):
+        try:
+            r = m.requests.get(f"{m.GATE_BASE}/futures/usdt/funding_rate", params=params, timeout=m.HTTP_TIMEOUT)
+        except Exception as e:
+            FUND_DIAG.append(f"{sym}: {e}")
             break
-        for r in new:
-            out[r["time"]] = r["rate"]
-        earliest = min(r["time"] for r in new)
-        if earliest <= start:
+        if r.status_code != 200:
+            FUND_DIAG.append(f"{sym} {'страница назад' if 'to' in params else 'первый запрос'}: HTTP {r.status_code} {r.text[:120]}")
             break
-        to = earliest - 1
-    return sorted(out.items())
+        new = 0
+        for row in r.json():
+            try:
+                t_, v = int(row.get("t", 0)), float(row.get("r", 0))
+            except (TypeError, ValueError):
+                continue
+            if t_ not in out:
+                out[t_] = v
+                new += 1
+        if not new or min(out) <= start:
+            break
+        params = {"contract": sym, "limit": 1000, "to": min(out) - 1}
+    return sorted((t_, v) for t_, v in out.items() if t_ >= start)
 
 
 def funding_study(data, fund):
@@ -266,7 +281,9 @@ def main():
         if i % 5 == 0:
             print(f"  ...скачано {i}/{len(syms)} ({time.time() - t0:.0f} с)")
     fdays = [(f[-1][0] - f[0][0]) / 86400 for f in fund.values() if len(f) > 1]
-    say(f"свечи есть у {len(data)} монет · история фандинга: в среднем {sum(fdays) / max(1, len(fdays)):.0f} дн.")
+    say(f"свечи есть у {len(data)} монет · фандинг есть у {len(fdays)} монет, история в среднем {sum(fdays) / max(1, len(fdays)):.0f} дн.")
+    for d in FUND_DIAG[:3]:
+        say(f"  ответ Gate по фандингу: {d}")
 
     say("\n=== 1. ЭКСТРЕМАЛЬНЫЙ ФАНДИНГ (цена + фандинг - комиссии, на сумму позиции) ===")
     res, base = funding_study(data, fund)
