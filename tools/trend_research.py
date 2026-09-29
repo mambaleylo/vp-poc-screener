@@ -4,6 +4,7 @@
 Запуск (в Termux, файл рядом с vp_poc_screener.py):
     python trend_research.py [число монет, по умолчанию 60]
     python trend_research.py 60 --holdout     # второй запуск: открыть последний год для вариантов
+    python trend_research.py 60 --money       # сколько с $100: по годам и месяцам, с лотами Gate и фандингом
 
 Ничего не торгует и не пишет в состояние сервера. Свечи берутся через кэш
 программы, повторный запуск быстрый. Отчёт печатается и сохраняется в
@@ -165,6 +166,109 @@ SCORES = (
 )
 
 
+FUNDING_PER_DAY = 0.0003   # longs pay ~0.01% every 8h on average — not in the R backtest, charged here
+
+
+def money_sim(trades, specs, risk_pct, start=100.0, fee=0.0005):
+    """$ simulation of ONE account trading every coin, sized like the live
+    auto-trader: loss at the stop = risk_pct of the balance (fees included),
+    whole contracts only (same rule as live: round up to the minimum lot only
+    if it is <= 1.5x the wanted size, else skip), leverage ~ the safe one for
+    the stop, margin of all open positions <= the balance, funding charged.
+    Returns (final, month-end balances {(y, m): bal}, max drawdown %, skipped)."""
+    ev = []
+    for t in trades:
+        ev.append((t["entry_time"], 1, t))
+        ev.append((t["exit_time"], 0, t))
+    ev.sort(key=lambda e: (e[0], e[1]))
+    bal, peak, dd, used, skipped = start, start, 0.0, 0.0, 0
+    pos, months = {}, {}
+    for ts, kind, t in ev:
+        ym = time.gmtime(ts)[:2]
+        months[ym] = bal
+        if kind == 1:
+            sp = specs.get(t["symbol"])
+            e, sl = t["entry"], t["sl"]
+            stop = (e - sl) / e
+            if not sp or stop <= 0 or bal <= 0:
+                skipped += 1
+                continue
+            want = bal * risk_pct / 100 / (stop + 2 * fee)
+            lot = sp["mult"] * e * sp["min"]
+            if want < lot:
+                if lot > want * 1.5:
+                    skipped += 1
+                    continue
+                notional = lot
+            else:
+                notional = math.floor(want / lot) * lot
+            lev = max(1, min(sp["lev"], int(0.8 / stop)))
+            margin = notional / lev
+            if used + margin > bal * 0.98:
+                skipped += 1
+                continue
+            used += margin
+            pos[id(t)] = (notional, margin)
+        else:
+            if id(t) not in pos:
+                continue
+            notional, margin = pos.pop(id(t))
+            used -= margin
+            move = (t["exit_price"] - t["entry"]) / t["entry"]
+            pnl = notional * move - notional * fee * (2 + move) - notional * FUNDING_PER_DAY * t["hold_days"]
+            bal = max(bal + max(pnl, -margin), 0.0)
+            peak = max(peak, bal)
+            dd = max(dd, (1 - bal / peak) * 100 if peak > 0 else 100)
+        months[ym] = bal
+    # every calendar month, carrying the balance through months with no exits
+    full, y, mo, last = {}, *time.gmtime(ev[0][0])[:2], start
+    end = time.gmtime()[:2]
+    while (y, mo) <= end:
+        last = months.get((y, mo), last)
+        full[(y, mo)] = last
+        y, mo = (y + 1, 1) if mo == 12 else (y, mo + 1)
+    return bal, full, dd, skipped
+
+
+def money_block(m, per):
+    say("\n=== СКОЛЬКО С $100 (все монеты, размер как у автоторговли, целые контракты, маржа, комиссии, фандинг) ===")
+    specs = {}
+    for s in per:
+        try:
+            sp = m.get_contract_spec(s)
+            specs[s] = {"mult": sp["quanto_multiplier"], "min": sp["order_size_min"] or 1,
+                        "lev": int(sp.get("leverage_max") or 20)}
+        except Exception as e:
+            print(f"  спецификация {s}: {e}")
+    trades = [dict(t, symbol=s) for s, ts in per.items() for t in ts]
+    first = min(t["entry_time"] for t in trades)
+    for rp in (0.5, 1, 2, 3, 5):
+        fin, months, dd, skipped = money_sim(trades, specs, rp)
+        keys = sorted(months)
+        years = (time.time() - first) / (365 * 86400)
+        yr = (fin / 100) ** (1 / years) - 1 if fin > 0 else -1
+        rets, prev = [], 100.0
+        for k in keys:
+            rets.append(months[k] / prev - 1 if prev > 0 else 0)
+            prev = months[k]
+        by_year = {}
+        for k in keys:
+            by_year[k[0]] = months[k]
+        yline, prev = [], 100.0
+        for y in sorted(by_year):
+            yline.append(f"{y}: {(by_year[y] / prev - 1) * 100:+.0f}%")
+            prev = by_year[y]
+        srt = sorted(rets)
+        neg = sum(1 for r in rets if r < 0)
+        say(f"  риск {rp:g}%: $100 → ${fin:,.0f} за {years:.1f} г. · в среднем {yr * 100:+.0f}%/год "
+            f"({((1 + yr) ** (1 / 12) - 1) * 100:+.1f}%/мес) · худшая просадка {dd:.0f}%")
+        say(f"      по годам: {' · '.join(yline)}")
+        if srt:
+            say(f"      месяцы: в минусе {neg} из {len(rets)} · медиана {srt[len(srt) // 2] * 100:+.1f}% · "
+                f"худший {srt[0] * 100:+.0f}% · лучший {srt[-1] * 100:+.0f}% · пропущено сделок {skipped} из {len(trades)}")
+    say("  пропущено = минимальный лот Gate больше нужного размера или не хватило маржи (на $100 это часто)")
+
+
 def btc_filter(btc, n):
     closes, ok = [c["close"] for c in btc], {}
     for i, c in enumerate(btc):
@@ -234,6 +338,13 @@ def main():
     say(f"\n  ВЕРДИКТ ПРОГРАММЫ: {'ПРОШЁЛ — оставляем' if passed else 'НЕ прошёл'} "
         f"(нужно n ≥ {m.TREND_MIN_TRADES}, t ≥ {m.TREND_PASS_T}, плюс в обеих половинах)")
     say("  монеты двигаются вместе, t немного завышен — смотрите и на годы, и на число монет в плюсе")
+
+    if "--money" in sys.argv:
+        money_block(m, per)
+        say(f"\nвремя: {time.time() - t0:.0f} с")
+        with open(os.path.join(os.getcwd(), "trend_report.txt"), "w", encoding="utf-8") as f:
+            f.write("\n".join(OUT) + "\n")
+        return
 
     # 1b. trading ONE coin: the best by its own backtest, re-picked weekly
     start = first + 365 * 86400
