@@ -18238,3 +18238,16 @@ v0.99.424 - Va-bank switches removed for Neuro, S/R and P/R (user): with sizing
          auto risk). The risk % is clamped to 0.1..50 on the server too, and
          its settings hint lists the range with what N stops in a row cost.
          The $15 columns recompute by themselves (settings signature changed).
+v0.99.425 - New module "Trend" (user asked for an indicator backed by research):
+         daily Donchian-ensemble trend following after "Catching Crypto Trends"
+         (Zarattini, Pagani, Barbon, 2025). 30 most liquid coins, longs only;
+         9 Donchian channels (5..360 days) vote, entry at the next open when
+         >= 5 of 9 are in trend, stop = the level where the majority is lost,
+         raised after every daily close (never lowered), no take-profit, no
+         time limit. Nothing is fitted, so the whole history is one honest
+         test: autotrade is allowed only if all coins together give >= 30
+         trades, t >= 2 and a profit in both halves of the period. The live
+         loop opens orders without TP and moves the exchange stop up (new stop
+         placed before the old one is cancelled); 1h lows close touched stops.
+         Own tab, settings (on/off, Telegram, autotrade - off by default), the
+         $15 column and per-coin auto risk sized like live orders.

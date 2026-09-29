@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.424"
+APP_VERSION = "0.99.425"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1100,7 +1100,7 @@ CREDENTIALS_FILE = os.environ.get(
 SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_single_best_enabled", "snr_single_best_enabled", "neuro_extra_conds_enabled", "neuro_trade_filter_enabled", "calc_workers", "calc_workers_boost", "bounce_enabled", "breakout_enabled",
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "nq_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_mirror", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
-                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_mirror", "autotrade_neuro", "auto_risk_enabled",
+                  "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_mirror", "autotrade_neuro", "auto_risk_enabled", "trend_enabled", "autotrade_trend", "telegram_alerts_trend",
                   "autotrade_risk_pct",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
@@ -1170,6 +1170,8 @@ def get_settings():
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
         "autotrade_risk_pct": AUTOTRADE_RISK_PCT_OF_BALANCE,
         "auto_risk_enabled": AUTO_RISK_ENABLED,   # v0.99.422
+        "trend_enabled": TREND_ENABLED, "autotrade_trend": AUTOTRADE_ENABLED_TREND,   # v0.99.425
+        "telegram_alerts_trend": TELEGRAM_ALERTS_TREND,
         "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
         "autotrade_breakout": AUTOTRADE_ENABLED_BREAKOUT,
         "autotrade_scalp": AUTOTRADE_ENABLED_SCALP,
@@ -1427,6 +1429,10 @@ def apply_settings(updates):
         MSNR_ALL_IN_ENABLED = bool(updates["msnr_all_in_enabled"])
     if "lsw_all_in_enabled" in updates:
         LSW_ALL_IN_ENABLED = bool(updates["lsw_all_in_enabled"])
+    for _key, _glob in (("trend_enabled", "TREND_ENABLED"), ("autotrade_trend", "AUTOTRADE_ENABLED_TREND"),
+                        ("telegram_alerts_trend", "TELEGRAM_ALERTS_TREND")):   # v0.99.425
+        if _key in updates:
+            globals()[_glob] = bool(updates[_key])
     if "auto_risk_enabled" in updates:   # v0.99.422
         globals()["AUTO_RISK_ENABLED"] = bool(updates["auto_risk_enabled"])
     if "autotrade_bounce" in updates:
@@ -1507,8 +1513,8 @@ _credentials_lock = threading.Lock()
 # account's money.
 # Stored in their own file (chmod 600), separate from the main keys file.
 # ============================================================================
-MODULE_ACCOUNT_MODES = ("neuro", "snr", "prv")  # v0.99.336 — same order as the tabs; v0.99.398 — Sweep removed
-MODULE_ACCOUNT_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal"}
+MODULE_ACCOUNT_MODES = ("neuro", "snr", "prv", "trend")   # v0.99.425 — Trend added  # v0.99.336 — same order as the tabs; v0.99.398 — Sweep removed
+MODULE_ACCOUNT_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "trend": "Trend"}
 MODULE_CREDENTIALS_FILE = os.environ.get(
     "VP_MODULE_CREDENTIALS_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_module_credentials.json"),
@@ -4210,10 +4216,11 @@ def place_tp_sl_orders(symbol, direction, tp_price, sl_price, tick=None, price_t
         tp_rule, sl_rule = 2, 1
     errors = []
     tp_order = sl_order = None
-    try:
-        tp_order = place_close_trigger_order(symbol, direction, tp_price, tp_rule, tick, price_type)
-    except Exception as e:
-        errors.append(("tp", str(e)))
+    if tp_price is not None:   # v0.99.425 — Trend trades have no TP
+        try:
+            tp_order = place_close_trigger_order(symbol, direction, tp_price, tp_rule, tick, price_type)
+        except Exception as e:
+            errors.append(("tp", str(e)))
     try:
         sl_order = place_close_trigger_order(symbol, direction, sl_price, sl_rule, tick, price_type)
     except Exception as e:
@@ -4482,6 +4489,12 @@ def find_open_signal_sl(symbol):
     # v0.99.331 — only modules trading on the account being reconciled
     _list_mode = {"signals": "bounce", "scalp_signals": "scalp", "ft5_signals": "ft5",
                   "msnr_signals": "msnr", "mirror_signals": "mirror", "lsw_signals": "lsw"}
+    # v0.99.425 — the live modules too (their positions' lost stops were
+    # never restored: only the long-removed modules were searched)
+    lists.update({"snr_signals": STATE["snr_signals"], "prv_signals": STATE["prv_signals"],
+                  "trend_signals": STATE.get("trend_signals") or [],
+                  "neuro_log": list(_neuro_signal_log)})
+    _list_mode.update({"snr_signals": "snr", "prv_signals": "prv", "trend_signals": "trend", "neuro_log": "neuro"})
     _acc = current_account_id()
     lists = {k: v for k, v in lists.items() if account_id_for_mode(_list_mode[k]) == _acc}
     with state_lock:
@@ -5330,7 +5343,7 @@ def _execute_autotrade_impl(mode, symbol, direction, entry, sl, tp, extra=None, 
             # docstring for why nearest-rounding can flip a valid SL
             # trigger to the wrong side of last_price and get it
             # rejected by Gate, leaving a real position unprotected.
-            tp_rounded = round_to_tick_directional(tp, tick, round_up=(direction == "LONG"))
+            tp_rounded = round_to_tick_directional(tp, tick, round_up=(direction == "LONG")) if tp is not None else None   # v0.99.425 — Trend: no TP (trailing stop only)
             sl_rounded = round_to_tick_directional(sl, tick, round_up=(direction == "SHORT"))
             record["tp_rounded"] = tp_rounded
             record["sl_rounded"] = sl_rounded
@@ -5512,7 +5525,7 @@ def _sim_signal_list(mode):
     if mode == "neuro":
         with _neuro_signal_log_lock:
             return list(_neuro_signal_log)
-    key = {"snr": "snr_signals", "prv": "prv_signals", "msnr": "msnr_signals", "mirror": "mirror_signals",
+    key = {"snr": "snr_signals", "prv": "prv_signals", "trend": "trend_signals", "msnr": "msnr_signals", "mirror": "mirror_signals",
            "lsw": "lsw_signals", "ft5": "ft5_signals", "scalp": "scalp_signals",
            "bounce": "signals", "breakout": "signals"}.get(mode)
     if not key:
@@ -6927,6 +6940,7 @@ PERSIST_BT_KEYS = (
     "lsw_filter_checkpoints", "lsw_neuro_filters", "lsw_pooled", "lsw_backtest_interval",
     "snr_last_backtest_finished", "snr_filters", "snr_diag", "snr_pooled",
     "prv_last_backtest_finished", "prv_filters", "prv_keep", "prv_pooled",   # v0.99.410, v0.99.411
+    "trend_results", "trend_verdict", "trend_signals", "trend_last_backtest_finished", "trend_last_daily",   # v0.99.425
     "mirror_last_backtest_finished", "mirror_last_backtest_duration", "mirror_backtest_summary",
     "mirror_tuned_tolerances",
     "ft5_last_backtest_finished", "ft5_last_backtest_duration", "ft5_universe", "ft5_live_universe",
@@ -7333,6 +7347,7 @@ LOOP_MAX_GAP_SEC = {
     "snr_backtest_loop": 60 * 60,
     "prv_backtest_loop": 60 * 60,
     "neuro_mining_loop": 60 * 60,
+    "trend_backtest_loop": 90 * 60, "trend_live_loop": 60 * 60,   # v0.99.425
 }
 LOOP_LABELS = {
     "scan_loop": "Volume скан", "msnr_live_loop": "MSNR живой скан",
@@ -7342,6 +7357,7 @@ LOOP_LABELS = {
     "msnr_backtest_loop": "MSNR бэктест", "lsw_backtest_loop": "Sweep бэктест",
     "snr_backtest_loop": "S/R бэктест", "prv_backtest_loop": "Peak Reversal бэктест",
     "neuro_mining_loop": "Neuro майнинг",
+    "trend_backtest_loop": "Trend бэктест", "trend_live_loop": "Trend живой скан",
 }
 BACKTEST_RETRY_AFTER_ERROR_SEC = int(os.environ.get("VP_BACKTEST_RETRY_AFTER_ERROR_SEC", 1800))  # v0.99.322 — failed backtest cycles retry in 30 min, not a full refresh interval later
 
@@ -7446,7 +7462,7 @@ _BT_RESULTS_KEY = {"msnr": "msnr2_coins", "lsw": "lsw_backtest_results",
 # only: a restart starts a fresh journal.
 BT_JOURNAL = deque(maxlen=120)
 BT_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "snr": "S/R", "prv": "Peak Reversal", "neuro": "Neuro",
-             "lsw_nf": "Sweep фильтр", "snr_nf": "S/R фильтр", "prv_nf": "P/R фильтр"}
+             "lsw_nf": "Sweep фильтр", "snr_nf": "S/R фильтр", "prv_nf": "P/R фильтр", "trend": "Trend"}
 BT_REASON_BUTTON = "кнопка «Бэктест» / «Очистить» / настройки"
 _bt_journal_lock = threading.Lock()
 _bt_next = {}      # mod -> {"at": ts, "reason": str} while a loop sleeps until its next cycle
@@ -7667,6 +7683,8 @@ def send_telegram(text, category=None):
     if category == "snr" and not TELEGRAM_ALERTS_SNR:
         return
     if category == "prv" and not TELEGRAM_ALERTS_PRV:
+        return
+    if category == "trend" and not globals().get("TELEGRAM_ALERTS_TREND", True):   # v0.99.425
         return
     if category == "nq" and not TELEGRAM_ALERTS_NQ:
         return
@@ -9073,7 +9091,7 @@ def rr_compound_live_sizing(trades, symbol, mod, start_balance=None, clean_after
 
 
 def rr_compound_annotate(trades, symbol=None, start_balance=None, mod=None, clean_after=None):
-    if mod in ("neuro", "snr", "prv"):   # v0.99.418 — sized like the live auto-trader
+    if mod in ("neuro", "snr", "prv", "trend"):   # v0.99.418 — sized like the live auto-trader (trend: v0.99.425)
         return rr_compound_live_sizing(trades, symbol, mod, start_balance, clean_after=clean_after)
     """v0.99.318 — per user request ("везде где есть список сделок на
     бэктесте писать предполагаемую прибыль если бы я начинал с 15$ ...
@@ -22485,7 +22503,7 @@ INDEX_HTML = """<!doctype html>
     --neg:#f87171; --neg-bg:rgba(248,113,113,.12);
     --warn:#fbbf24; --warn-bg:rgba(251,191,36,.12); --warn-line:rgba(251,191,36,.35);
     --money:#ffd166;
-    --neuro:#b794ff; --snr:#2ec5d9; --prv:#ffa94d; --lsw:#f58fb0; --msnr:#7cb1ff;
+    --neuro:#b794ff; --snr:#2ec5d9; --prv:#ffa94d; --trend:#6ee7b7; --lsw:#f58fb0; --msnr:#7cb1ff;
     --fs-xs:10.5px; --fs-sm:11.5px; --fs:12.5px; --fs-md:14px; --fs-lg:16px; --fs-xl:19px;
     --r-xs:6px; --r-sm:8px; --r:12px; --r-lg:16px;
     --font: Roboto, -apple-system, "Segoe UI", system-ui, sans-serif;
@@ -22561,6 +22579,7 @@ INDEX_HTML = """<!doctype html>
   .tab[data-tab="neuro"] { --tab-c:var(--neuro); }
   .tab[data-tab="snr"] { --tab-c:var(--snr); }
   .tab[data-tab="prv"] { --tab-c:var(--prv); }
+  .tab[data-tab="trend"] { --tab-c:var(--trend); }
   #hintsToggleBtn { flex-shrink:0; height:30px; display:inline-flex; align-items:center; padding:0 8px !important; }
 
   /* ---------- panels ---------- */
@@ -22776,6 +22795,7 @@ INDEX_HTML = """<!doctype html>
   <div class="tab active" data-tab="neuro" style="color:var(--neuro);">🧠 Neuro</div>
   <div class="tab" data-tab="snr" style="color:var(--snr);">S/R Zones</div>
   <div class="tab" data-tab="prv" style="color:var(--prv);">Peak Reversal</div>
+  <div class="tab" data-tab="trend" style="color:var(--trend);">Trend</div>
   <div class="tab" data-tab="signals">Volume</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
@@ -22797,6 +22817,7 @@ INDEX_HTML = """<!doctype html>
   <div id="neuroPanel" style="display:block;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="snrPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="prvPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="trendPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="nqPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="simulatorPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
@@ -22954,6 +22975,23 @@ INDEX_HTML = """<!doctype html>
         <label class="switch"><input type="checkbox" id="setSnrSingleBest"><span class="switchSlider"></span></label>
       </div>
     </div></details>
+    <details class="settingsGroup" style="--mod-color:var(--trend);"><summary class="settingsGroupTitle">📈 Trend (тренд по каналам Дончиана)</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (бэктест + живые сигналы)</div>
+          <div class="sub">дневные свечи, 30 самых ликвидных монет, только лонги: вход, когда пробито большинство из 9 каналов (5…360 дней), выход по стопу, который подтягивается каждый день; тейка нет</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTrend"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">Уведомления в Telegram</div>
+          <div class="sub">вход, выход по стопу</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramTrend"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
+
     <details class="settingsGroup" style="--mod-color:#ffa726;"><summary class="settingsGroupTitle">Peak Reversal (Keltner Channel)</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
@@ -23192,6 +23230,13 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradePrv"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Trend</div>
+          <div class="sub">риск % из настроек (или авто-риск) на стоп каждой сделки; стоп на бирже переносится вверх после каждого дневного закрытия. Открывает сделки только если бэктест стратегии подтвердил преимущество</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeTrend"><span class="switchSlider"></span></label>
+      </div>
     </div></details>
 
     <div class="dim hint-block" style="font-size:var(--fs);margin-top:16px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
@@ -23274,6 +23319,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('neuroPanel').style.display = activeTab === 'neuro' ? 'block' : 'none';
     document.getElementById('snrPanel').style.display = activeTab === 'snr' ? 'block' : 'none';
     document.getElementById('prvPanel').style.display = activeTab === 'prv' ? 'block' : 'none';
+    document.getElementById('trendPanel').style.display = activeTab === 'trend' ? 'block' : 'none';
     document.getElementById('nqPanel').style.display = activeTab === 'nq' ? 'block' : 'none';
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
     document.getElementById('simulatorPanel').style.display = activeTab === 'simulator' ? 'block' : 'none';
@@ -23286,6 +23332,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'neuro') refreshNeuro();
     if (activeTab === 'snr') refreshSnr();
     if (activeTab === 'prv') refreshPrv();
+    if (activeTab === 'trend') refreshTrend();
     if (activeTab === 'nq') refreshNq();
     if (activeTab === 'autotrade') refreshAutotrade();
     if (activeTab === 'simulator') refreshSimulator();
@@ -23328,7 +23375,7 @@ function sigItemHtml(s, o) {
   o = o || {};
   const dir = s.direction === 'SHORT' ? 'short' : 'long';
   const t = s.detected_at || s.time;
-  const parts = [`вход ${fmtNum(s.entry)}`, `SL ${fmtNum(s.sl)}`, `TP ${fmtNum(s.tp)}`].concat(o.extra || []);
+  const parts = [`вход ${fmtNum(s.entry)}`, `SL ${fmtNum(s.sl)}`, s.tp != null ? `TP ${fmtNum(s.tp)}` : 'без тейка'].concat(o.extra || []);
   return `<div class="sig"${o.attrs ? ' ' + o.attrs : ''}${o.onclick ? ` onclick="${o.onclick}"` : ''}>
     <div class="s-top"><span class="s-sym">${s.symbol}</span><span class="dirb ${dir}">${s.direction}</span><span class="s-time">${t ? fmtDateTime(t) : ''}</span></div>
     <div class="s-st">${o.statusHtml || sigStatusShort(s)}</div>
@@ -24471,6 +24518,59 @@ async function refreshNeuro() {
   }
 }
 
+// v0.99.425 — Trend: daily Donchian-ensemble trend following
+async function refreshTrend() {
+  const panel = document.getElementById('trendPanel');
+  try {
+    const d = await (await fetch('/api/trend/status')).json();
+    const v = d.verdict, cfg = d.config || {};
+    const sgn = x => x == null ? '—' : (x > 0 ? '+' : '') + x;
+    const stLine = (lbl, st) => st && st.n ? `${lbl}: ${st.n} сделок · WR ${st.winrate}% · ${sgn(st.avg_r)}R/сделку · итого ${sgn(st.sum_r)}R${st.t != null ? ' · t=' + st.t : ''}` : `${lbl}: нет сделок`;
+    const hint = `<div class="dim hint-block" style="margin-bottom:10px;"><b>📈 Trend</b> — следование тренду по исследованию «Catching Crypto Trends» (Zarattini, Pagani, Barbon, 2025). Дневные свечи, ${cfg.universe_n || 30} самых ликвидных монет, только лонги. 9 каналов Дончиана (${(cfg.lookbacks || []).join(', ')} дней): канал «в тренде», когда закрытие пробило максимум своих дней. Вход, когда в тренде большинство — ${cfg.entry_votes || 5} из 9. Стоп — уровень, ниже которого большинство теряется; каждый день после закрытия он подтягивается вверх (вниз — никогда). Тейка и ограничения по времени нет: прибыль растёт, пока идёт тренд. Правила не подбираются, поэтому бэктест — одна честная проверка. Ждите мало сделок, винрейт 35–45% и редкие крупные выигрыши.</div>`;
+    const verdictHtml = v ? `<div style="background:var(--line);border:1px solid var(--line-2);border-radius:var(--r-sm);padding:8px 12px;margin:8px 0;font-size:var(--fs);">
+        ${v.passed ? '<b class="win">✓ Стратегия подтверждена на истории — автоторговля разрешена</b>' : '<b class="loss">✗ Преимущество на истории не подтверждено — только сигналы, автоторговля сделки не открывает</b>'}
+        <span class="dim">(${fmtDateTime(v.t)} · ${v.coins} монет, после комиссий)</span>
+        <div style="margin-top:4px;">${stLine('все сделки', v.all)}${v.all && v.all.n ? ` · в сделке в среднем ${v.all.avg_hold_days} дн. · лучшая ${sgn(v.all.best_r)}R` : ''}</div>
+        <div class="dim">${stLine('первая половина периода', v.first_half)}<br>${stLine('вторая половина', v.second_half)}</div>
+        <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Правило: нужно ≥ ${v.min_trades} сделок всех монет вместе, t ≥ ${v.t_needed} и плюс в обеих половинах периода (не только в одном бычьем рынке). Монеты двигаются вместе, поэтому t немного завышен.</div></div>`
+      : '<div class="dim" style="margin:8px 0;">бэктест ещё не завершён</div>';
+    const prog = d.backtest_running && d.progress ? `<div class="dim" style="font-size:var(--fs-sm);margin:4px 0;">бэктест: ${d.progress[0]}/${d.progress[1]} монет</div>` : '';
+    const coinBy = {}; (d.coins || []).forEach(c => coinBy[c.symbol] = c);
+    const opens = (d.signals || []).filter(s => s.status === 'OPEN');
+    const openHtml = opens.length ? `<div class="secTitle">Открытые позиции · ${opens.length}</div><div class="sigList">${opens.map(s => {
+        const c = coinBy[s.symbol] || {}, risk = s.entry - s.sl0;
+        const ur = c.last_close && risk > 0 ? Math.round((c.last_close - s.entry) / risk * 100) / 100 : null;
+        const days = Math.max(0, Math.round((Date.now() / 1000 - (s.entry_time || s.time)) / 86400));
+        return sigItemHtml(s, {statusHtml: ur != null ? `<span class="${ur >= 0 ? 'win' : 'loss'}">${sgn(ur)}R сейчас</span>` : '<span class="stOpen">в позиции</span>',
+          extra: [`стоп подтянут ${(s.sl_history || []).length} раз`, `${days} дн.`, s.autotrade_status ? `автоторговля: ${s.autotrade_status}` : 'только сигнал']});
+      }).join('')}</div>` : '<div class="dim" style="margin:8px 0;">открытых позиций нет</div>';
+    const closed = (d.signals || []).filter(s => s.status === 'CLOSED');
+    const ls = d.live_stats || {};
+    const liveHtml = closed.length ? `<div class="secTitle">Живые сделки · закрыто ${closed.length}${ls.n ? ` · WR ${ls.winrate}% · ${sgn(ls.avg_r)}R/сделку` : ''}</div>` + sigListHtml(closed.map(s => sigItemHtml(s, {
+        statusHtml: `<span class="${(s.pnl_r_net || 0) >= 0 ? 'win' : 'loss'}">${sgn(s.pnl_r_net)}R</span>`, extra: [`выход ${fmtNum(s.exit_price)}`]})), 8, 'Закрытые') : '';
+    const cards = (d.coins || []).map(c => {
+      const st = c.stats || {}, inPos = (d.open || []).includes(c.symbol);
+      const bar = `<span style="display:inline-block;width:90px;height:6px;background:var(--line);border-radius:3px;overflow:hidden;vertical-align:middle;"><span style="display:block;height:100%;width:${Math.round((c.votes || 0) / 9 * 100)}%;background:${(c.votes || 0) >= (cfg.entry_votes || 5) ? 'var(--pos)' : 'var(--tx-3)'};"></span></span>`;
+      const rows = (c.recent_trades || []).map(t => `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--line);font-size:var(--fs-sm);"><span class="dim">${fmtDateTime(t.entry_time)} → ${fmtDateTime(t.exit_time)} · ${t.hold_days} дн. · вход ${fmtNum(t.entry)}</span><span><span class="${t.pnl_r_net >= 0 ? 'win' : 'loss'}">${sgn(t.pnl_r_net)}R</span> ${compoundCellTxt(t)}</span></div>`).join('');
+      return `<div style="margin-bottom:10px;padding:12px;background:var(--card);border-radius:var(--r-lg);border:1px solid ${inPos ? 'var(--pos)' : 'var(--line)'};">
+        <div style="font-size:var(--fs-md);font-weight:700;color:var(--trend);">${c.symbol.replace('_USDT', '')} ${inPos ? '<span class="win" style="font-size:var(--fs-sm);">· в позиции</span>' : ''}</div>
+        <div class="dim" style="font-size:var(--fs-sm);margin:4px 0;">каналов в тренде: <b>${c.votes || 0} из 9</b> ${bar}${c.majority_stop ? ` · уровень стопа большинства ${fmtNum(c.majority_stop)}` : ''} · история ${fmtMonths(c.history_days || 0)}</div>
+        <div style="font-size:var(--fs-sm);">${st.n ? `бэктест: ${st.n} сделок · WR ${st.winrate}% · ${sgn(st.avg_r)}R/сделку · итого ${sgn(st.sum_r)}R · лучшая ${sgn(st.best_r)}R · в сделке ~${st.avg_hold_days} дн.` : '<span class="dim">сделок в бэктесте нет</span>'}</div>
+        ${compoundSummaryHtml(c)}
+        ${rows ? `<details><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">последние сделки бэктеста (${c.trades_n})</summary>${rows}</details>` : ''}
+      </div>`;
+    }).join('');
+    panel.innerHTML = `${hint}
+      <div class="dim" style="margin-bottom:6px;">последний бэктест: ${d.last_backtest_finished ? fmtDateTime(d.last_backtest_finished) : '—'} · сигналы проверяются после каждого дневного закрытия (00:00 UTC)
+        <button onclick="fetch('/api/trend/restart_backtest',{method:'POST'}).then(()=>refreshTrend())" style="margin-left:6px;height:26px;padding:0 10px;border:1px solid var(--line-2);background:var(--ctl);border-radius:var(--r-sm);">↻ Бэктест</button></div>
+      ${prog}${verdictHtml}${openHtml}${liveHtml}
+      <div class="secTitle">Монеты · ${(d.coins || []).length}</div>
+      ${cards || '<div class="dim">пока нет данных</div>'}`;
+  } catch (e) {
+    panel.innerHTML = `<div class="dim">Ошибка: ${e}</div>`;
+  }
+}
+
 async function refreshSnr() {
   const panel = document.getElementById('snrPanel');
   try {
@@ -25479,6 +25579,7 @@ async function refreshAll() {
   if (activeTab === 'neuro') await refreshNeuro();
   if (activeTab === 'snr') await refreshSnr();
   if (activeTab === 'prv') await refreshPrv();
+  if (activeTab === 'trend') await refreshTrend();
   if (activeTab === 'autotrade') await refreshAutotrade();
   if (activeTab === 'simulator') await refreshSimulator();
 }
@@ -25789,6 +25890,7 @@ const setInputs = {
   neuro_trade_filter_enabled: document.getElementById('setNeuroTradeFilter'),
   snr_enabled: document.getElementById('setSnr'),
   prv_enabled: document.getElementById('setPrv'),
+  trend_enabled: document.getElementById('setTrend'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
   hourly_stats_enabled: document.getElementById('setHourlyStats'),
@@ -25801,6 +25903,7 @@ const setInputs = {
   telegram_alerts_nq: document.getElementById('setTelegramNq'),
   telegram_alerts_snr: document.getElementById('setTelegramSnr'),
   telegram_alerts_prv: document.getElementById('setTelegramPrv'),
+  telegram_alerts_trend: document.getElementById('setTelegramTrend'),
   telegram_alerts_network: document.getElementById('setTelegramNetwork'),
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
   autotrade_bounce: document.getElementById('setAutotradeBounce'),
@@ -25820,6 +25923,7 @@ const setInputs = {
   neuro_single_best_enabled: document.getElementById('setNeuroSingleBest'),
   autotrade_snr: document.getElementById('setAutotradeSnr'),
   autotrade_prv: document.getElementById('setAutotradePrv'),
+  autotrade_trend: document.getElementById('setAutotradeTrend'),
 };
 
 const setValueInputs = {
@@ -27142,6 +27246,446 @@ def index():
 # ----------------------------------------------------------------------------
 # Entrypoint
 # ----------------------------------------------------------------------------
+# ============================================================================
+# Trend (v0.99.425) — daily Donchian-ensemble trend following, after
+# Zarattini, Pagani & Barbon, "Catching Crypto Trends; A Tactical Approach
+# for Bitcoin and Altcoins" (2025): an ensemble of Donchian channels over
+# 5..360 days, long only, a trailing stop at the channel midpoint, no take
+# profit. Fixed, pre-registered rules (nothing is fitted), so the backtest
+# is ONE hypothesis: pooled over all coins, net of fees.
+#
+# Adapted to this app's one-position-per-coin, risk-%-sized orders:
+#   - each lookback L is a sub-model: it goes long when the daily close
+#     breaks above the highest close of the previous L days; its stop is
+#     the midpoint of the highest/lowest close of the last L days, only
+#     ever raised; it exits on a daily close below that stop;
+#   - a trade opens (next day's open) when a MAJORITY (5 of 9) sub-models
+#     are long — freshly, or on a new closing high after the last exit;
+#   - its stop is the price at which the majority would be lost (the 5th
+#     lowest of the active sub-model stops), raised every day, never
+#     lowered; it is a real stop order on the exchange (touch = exit), so
+#     the loss is known up front and sized by the settings' risk %;
+#   - no take profit and no holding-time limit: the stop follows the trend.
+# ============================================================================
+TREND_ENABLED = os.environ.get("VP_TREND_ENABLED", "1") == "1"
+AUTOTRADE_ENABLED_TREND = os.environ.get("VP_AUTOTRADE_TREND", "0") == "1"
+TELEGRAM_ALERTS_TREND = os.environ.get("VP_TG_ALERTS_TREND", "1") == "1"
+TREND_LOOKBACKS = (5, 10, 20, 30, 60, 90, 150, 250, 360)
+TREND_ENTRY_VOTES = 5
+TREND_UNIVERSE_N = int(os.environ.get("VP_TREND_UNIVERSE_N", 30))
+TREND_HISTORY_DAYS = int(os.environ.get("VP_TREND_HISTORY_DAYS", 1500))
+TREND_MIN_TRADES = 30          # pooled closed trades needed for a verdict
+TREND_MIN_STOP_PCT = 1.0       # the initial stop is at least this far below the entry: a closer "majority" stop on DAILY candles is noise, and live it would need a position the account can't carry
+TREND_PASS_T = 2.0             # pooled t of net R, one hypothesis
+TREND_REFRESH_SEC = int(os.environ.get("VP_TREND_REFRESH_SEC", 12 * 3600))
+TREND_BACKTEST_TRIGGER = threading.Event()
+TREND_LIVE_WAKE = threading.Event()
+for _k, _v in (("trend_results", {}), ("trend_verdict", None), ("trend_signals", []),
+               ("trend_last_backtest_finished", None), ("trend_last_daily", None),
+               ("trend_backtest_running", False), ("trend_progress", [0, 0])):
+    STATE.setdefault(_k, _v)
+
+
+def trend_ensemble(candles):
+    """Per closed daily candle i: (votes[i], majority_stop[i]) after its
+    close. votes = sub-models long; majority_stop = the price below which
+    fewer than TREND_ENTRY_VOTES would stay long (None when fewer are long).
+    Only candles up to i are used for day i (no look-ahead)."""
+    closes = [c["close"] for c in candles]
+    n = len(closes)
+    k_n = len(TREND_LOOKBACKS)
+    long_ = [False] * k_n
+    stop = [None] * k_n
+    votes, maj = [0] * n, [None] * n
+    for i in range(n):
+        for k, L in enumerate(TREND_LOOKBACKS):
+            if i < L:
+                continue
+            if not long_[k]:
+                if closes[i] > max(closes[i - L:i]):
+                    w = closes[i - L + 1:i + 1]
+                    long_[k], stop[k] = True, (max(w) + min(w)) / 2
+            else:
+                w = closes[i - L + 1:i + 1]
+                stop[k] = max(stop[k], (max(w) + min(w)) / 2)
+                if closes[i] < stop[k]:
+                    long_[k], stop[k] = False, None
+        act = sorted((stop[k] for k in range(k_n) if long_[k]), reverse=True)
+        votes[i] = len(act)
+        if len(act) >= TREND_ENTRY_VOTES:
+            maj[i] = act[len(act) - TREND_ENTRY_VOTES]
+    return votes, maj
+
+
+def trend_entry_ok(i, closes, votes, last_exit_i):
+    """Enter after day i's close: a majority is long AND either it has just
+    formed or the close is a new high since the last exit (no instant
+    re-entry after a stop-out inside the same move)."""
+    if votes[i] < TREND_ENTRY_VOTES:
+        return False
+    if i == 0 or votes[i - 1] < TREND_ENTRY_VOTES:
+        return True
+    if last_exit_i is not None and last_exit_i < i:
+        return closes[i] >= max(closes[last_exit_i:i + 1])
+    return False
+
+
+def trend_simulate(candles):
+    """Trades on closed daily candles (entry at the next day's open, exit
+    when the day's low touches the stop — at the stop, or at the open if it
+    gapped below). Returns (closed trades, open trade or None)."""
+    if len(candles) < TREND_LOOKBACKS[2] + 2:
+        return [], None
+    votes, maj = trend_ensemble(candles)
+    closes = [c["close"] for c in candles]
+    trades, pos, last_exit = [], None, None
+    for i in range(len(candles) - 1):
+        neuro_check_cancel()
+        if pos is None:
+            if trend_entry_ok(i, closes, votes, last_exit) and maj[i] is not None:
+                e = candles[i + 1]["open"]
+                if maj[i] < e:
+                    sl0 = min(maj[i], e * (1 - TREND_MIN_STOP_PCT / 100))
+                    pos = {"time": candles[i]["time"], "entry_time": candles[i + 1]["time"], "entry": e,
+                           "sl0": sl0, "sl": sl0, "direction": "LONG", "votes": votes[i]}
+            continue
+        c = candles[i]
+        if c["time"] < pos["entry_time"]:
+            continue
+        if c["low"] <= pos["sl"]:
+            px = c["open"] if c["open"] <= pos["sl"] else pos["sl"]
+            trades.append(trend_close_trade(pos, px, c["time"]))
+            pos, last_exit = None, i
+            continue
+        if maj[i] is not None:
+            pos["sl"] = max(pos["sl"], maj[i])
+        elif votes[i] < TREND_ENTRY_VOTES:
+            px = candles[i + 1]["open"]
+            trades.append(trend_close_trade(pos, px, candles[i + 1]["time"]))
+            pos, last_exit = None, i
+    if pos is not None:   # the last candle may still stop it
+        c = candles[-1]
+        if c["time"] >= pos["entry_time"] and c["low"] <= pos["sl"]:
+            px = c["open"] if c["open"] <= pos["sl"] else pos["sl"]
+            trades.append(trend_close_trade(pos, px, c["time"]))
+            pos = None
+        elif maj[-1] is not None:
+            pos["sl"] = max(pos["sl"], maj[-1])
+    return trades, pos
+
+
+def trend_close_trade(pos, px, t_exit):
+    risk = pos["entry"] - pos["sl0"]
+    pnl_r = round((px - pos["entry"]) / risk, 4) if risk > 0 else 0.0
+    fee_r = trade_fee_r(pos["entry"], pos["sl0"])
+    net = round(pnl_r - fee_r, 4)
+    return {"time": pos["time"], "entry_time": pos["entry_time"], "direction": "LONG",
+            "entry": round(pos["entry"], 8), "sl": round(pos["sl0"], 8), "tp": None,
+            "exit_price": round(px, 8), "exit_time": t_exit, "final_stop": round(pos["sl"], 8),
+            "result": "WIN" if net > 0 else "LOSS", "pnl_r": pnl_r, "fee_r": fee_r, "pnl_r_net": net,
+            "hold_days": round((t_exit - pos["entry_time"]) / 86400, 1)}
+
+
+def trend_stats(trades):
+    rs = [t["pnl_r_net"] for t in trades if t.get("pnl_r_net") is not None]
+    n = len(rs)
+    if not n:
+        return {"n": 0}
+    w = sum(1 for r in rs if r > 0)
+    t = _tstat(rs)
+    return {"n": n, "wins": w, "winrate": round(w / n * 100, 1), "avg_r": round(sum(rs) / n, 3),
+            "sum_r": round(sum(rs), 2), "t": round(t, 2) if t is not None else None,
+            "best_r": round(max(rs), 2), "worst_r": round(min(rs), 2),
+            "avg_hold_days": round(sum(t_.get("hold_days") or 0 for t_ in trades) / n, 1)}
+
+
+def trend_verdict(per_coin):
+    """ONE pooled test (the rules are fixed, nothing was chosen): all coins'
+    closed trades, net of fees. Passes with >= TREND_MIN_TRADES trades,
+    t >= TREND_PASS_T and BOTH halves of the period (by entry time) in the
+    plus — a trend system that only worked in one bull run doesn't count.
+    Coins trend together, so the pooled t is somewhat optimistic."""
+    allt = sorted((t for r in per_coin.values() for t in r.get("trades", [])), key=lambda t: t["entry_time"])
+    st = trend_stats(allt)
+    half = len(allt) // 2
+    h1, h2 = trend_stats(allt[:half]), trend_stats(allt[half:])
+    passed = bool(st.get("n", 0) >= TREND_MIN_TRADES and (st.get("t") or 0) >= TREND_PASS_T
+                  and (h1.get("avg_r") or 0) > 0 and (h2.get("avg_r") or 0) > 0)
+    return {"t": time.time(), "passed": passed, "all": st, "first_half": h1, "second_half": h2,
+            "coins": len(per_coin), "min_trades": TREND_MIN_TRADES, "t_needed": TREND_PASS_T,
+            "split_time": allt[half]["entry_time"] if allt and half < len(allt) else None}
+
+
+def trend_build_universe():
+    try:
+        tickers = get_tickers()
+    except Exception as e:
+        log_error(f"trend_build_universe: {e}")
+        return []
+    vols = {}
+    for t in tickers:
+        name = t.get("contract", "")
+        if not name.endswith("_USDT") or name[:-5] in SNR_EXCLUDED_STABLES:
+            continue
+        try:
+            v = float(t.get("volume_24h_quote") or t.get("volume_24h_settle") or 0)
+        except (TypeError, ValueError):
+            v = 0.0
+        vols[name] = max(v, vols.get(name, 0.0))
+    return [s for s, _ in sorted(vols.items(), key=lambda kv: -kv[1])[:TREND_UNIVERSE_N]]
+
+
+def trend_daily_candles(symbol, days=None):
+    now = time.time()
+    cs = get_candles_range(symbol, "1d", now - (days or TREND_HISTORY_DAYS) * 86400, now) or []
+    return [c for c in cs if c["time"] + 86400 <= now]   # closed days only
+
+
+def trend_backtest_symbol(symbol):
+    candles = trend_daily_candles(symbol)
+    if len(candles) < 60:
+        return None
+    trades, open_pos = trend_simulate(candles)
+    votes, maj = trend_ensemble(candles)
+    res = {"symbol": symbol, "trades": trades, "stats": trend_stats(trades), "history_days": len(candles),
+           "votes": votes[-1], "majority_stop": maj[-1], "last_close": candles[-1]["close"],
+           "last_day": candles[-1]["time"],
+           "open_trade": ({k: (round(v, 8) if isinstance(v, float) else v) for k, v in open_pos.items()}
+                          if open_pos else None)}
+    try:
+        res.update(rr_compound_annotate(trades, symbol, mod="trend"))   # nothing fitted: every trade is clean
+    except Exception as e:
+        log_error(f"trend compound {symbol}: {e}")
+    return res
+
+
+def trend_backtest_loop():
+    _trig = TREND_BACKTEST_TRIGGER.wait(timeout=810)
+    TREND_BACKTEST_TRIGGER.clear()
+    bt_startup_skip("trend", TREND_BACKTEST_TRIGGER, TREND_REFRESH_SEC, "trend_backtest_loop", _trig)
+    while True:
+        heartbeat("trend_backtest_loop")
+        failed = False
+        try:
+            if not TREND_ENABLED:
+                wait_beating(TREND_BACKTEST_TRIGGER, 600, "trend_backtest_loop")
+                TREND_BACKTEST_TRIGGER.clear()
+                continue
+            bt_log_start("trend")
+            universe = trend_build_universe()
+            with state_lock:
+                STATE["trend_backtest_running"] = True
+                STATE["trend_progress"] = [0, len(universe)]
+            per = {}
+            for sym in universe:
+                heartbeat("trend_backtest_loop")
+                try:
+                    r = trend_backtest_symbol(sym)
+                    if r:
+                        per[sym] = r
+                except Exception as e:
+                    log_error(f"trend_backtest {sym}: {e}")
+                with state_lock:
+                    STATE["trend_progress"][0] += 1
+            if per:
+                v = trend_verdict(per)
+                with state_lock:
+                    STATE["trend_results"] = per
+                    STATE["trend_verdict"] = v
+                    STATE["trend_last_backtest_finished"] = time.time()
+                save_state()
+            else:
+                failed = True
+            bt_log_end("trend", ok=not failed, note=f"монет: {len(per)}" if per else "нет данных")
+        except Exception as e:
+            failed = True
+            log_error(f"trend_backtest_loop: {e}")
+            if "trend" in _bt_started:
+                bt_log_end("trend", ok=False, note=str(e)[:80])
+        finally:
+            with state_lock:
+                STATE["trend_backtest_running"] = False
+        bt_wait("trend", TREND_BACKTEST_TRIGGER, BACKTEST_RETRY_AFTER_ERROR_SEC if failed else TREND_REFRESH_SEC,
+                "trend_backtest_loop", failed=failed)
+        TREND_BACKTEST_TRIGGER.clear()
+
+
+def trend_move_exchange_stop(symbol, old_id, new_sl):
+    """Raise the real stop: place the new one FIRST, then cancel the old
+    (never a moment without a stop). Returns the new order id or None."""
+    with using_account("trend"):
+        try:
+            tick = get_contract_spec(symbol).get("order_price_round")
+        except Exception:
+            tick = None
+        px = round_to_tick_directional(new_sl, tick, round_up=False)
+        try:
+            o = place_close_trigger_order(symbol, "LONG", px, 2, tick)
+        except Exception as e:
+            log_error(f"trend stop move {symbol}: new stop {px} failed ({e}) — the old one stays")
+            return None
+        if old_id:
+            try:
+                cancel_price_order(old_id)
+            except Exception as e:
+                log_error(f"trend stop move {symbol}: old stop cancel failed ({e})")
+        return o.get("id") if isinstance(o, dict) else None
+
+
+def trend_track_open():
+    """Close OPEN records whose stop was touched (1h lows since the last
+    check). The real position is closed by its exchange stop order."""
+    with state_lock:
+        opens = [s for s in STATE["trend_signals"] if s.get("status") == "OPEN"]
+    for s in opens:
+        try:
+            since = s.get("checked_until") or s.get("entry_time") or s["time"]
+            now = time.time()
+            hs = [c for c in (get_candles_range(s["symbol"], "1h", since, now) or [])
+                  if c["time"] >= since and c["time"] + 3600 <= now]
+            hit = next((c for c in hs if c["low"] <= s["sl"]), None)
+            with state_lock:
+                if hit:
+                    px = hit["open"] if hit["open"] <= s["sl"] else s["sl"]
+                    risk = s["entry"] - s["sl0"]
+                    s["status"], s["exit_price"], s["exit_time"] = "CLOSED", round(px, 8), hit["time"]
+                    s["pnl_r"] = round((px - s["entry"]) / risk, 3) if risk > 0 else 0.0
+                    s["pnl_r_net"] = round(s["pnl_r"] - trade_fee_r(s["entry"], s["sl0"]), 3)
+                    s["result"] = "WIN" if s["pnl_r_net"] > 0 else "LOSS"
+                elif hs:
+                    s["checked_until"] = hs[-1]["time"] + 3600
+            if hit:
+                send_telegram(f"🏁 Trend {s['symbol']}: вышел по стопу {s['exit_price']:.6g} — "
+                              f"{s['pnl_r_net']:+.2f}R после комиссий", category="trend")
+        except Exception as e:
+            log_error(f"trend_track_open {s.get('symbol')}: {e}")
+
+
+def trend_daily_pass():
+    """After a new daily close: raise the stops of open trades, open new
+    ones. Trading only when the pooled backtest verdict passed."""
+    with state_lock:
+        verdict = STATE.get("trend_verdict") or {}
+        universe = list((STATE.get("trend_results") or {}).keys())
+        opens = {s["symbol"]: s for s in STATE["trend_signals"] if s.get("status") == "OPEN"}
+    for sym in sorted(set(universe) | set(opens)):
+        heartbeat("trend_live_loop")
+        try:
+            cs = trend_daily_candles(sym, days=420)
+            if len(cs) < 30:
+                continue
+            votes, maj = trend_ensemble(cs)
+            closes = [c["close"] for c in cs]
+            rec = opens.get(sym)
+            if rec:
+                if maj[-1] is not None and maj[-1] > rec["sl"]:
+                    new_sl = round(maj[-1], 8)
+                    new_id = None
+                    if rec.get("sl_order_id"):
+                        new_id = trend_move_exchange_stop(sym, rec["sl_order_id"], new_sl)
+                    with state_lock:
+                        rec.setdefault("sl_history", []).append([cs[-1]["time"], new_sl])
+                        rec["sl"] = new_sl
+                        if new_id:
+                            rec["sl_order_id"] = new_id
+                continue
+            with state_lock:
+                exits = [s.get("exit_time") for s in STATE["trend_signals"]
+                         if s.get("symbol") == sym and s.get("exit_time")]
+            last_exit_i = None
+            if exits:
+                le = max(exits)
+                last_exit_i = next((i for i, c in enumerate(cs) if c["time"] >= le), None)
+            i = len(cs) - 1
+            if not trend_entry_ok(i, closes, votes, last_exit_i) or maj[i] is None or maj[i] >= closes[i]:
+                continue
+            with state_lock:
+                if any(s.get("symbol") == sym and s.get("time") == cs[i]["time"] for s in STATE["trend_signals"]):
+                    continue
+            entry = closes[i]
+            sl = round(min(maj[i], entry * (1 - TREND_MIN_STOP_PCT / 100)), 8)
+            rec = {"symbol": sym, "direction": "LONG", "entry": entry, "sl": sl, "sl0": sl, "tp": None,
+                   "time": cs[i]["time"], "entry_time": cs[i]["time"] + 86400, "detected_at": time.time(),
+                   "votes": votes[i], "status": "OPEN", "result": None, "exit_price": None, "exit_time": None,
+                   "pnl_r": None}
+            with state_lock:
+                STATE["trend_signals"].insert(0, rec)
+                del STATE["trend_signals"][300:]
+            res = None
+            if AUTOTRADE_ENABLED_TREND and verdict.get("passed"):
+                res = execute_autotrade("trend", sym, "LONG", entry, sl, None,
+                                        risk_pct_override=auto_risk_for("trend", sym))
+                with state_lock:
+                    rec["autotrade_status"] = res.get("status")
+                    rec["sl_order_id"] = res.get("sl_order_id")
+                sim_execute_trade("trend", sym, "LONG", entry, sl, None, res.get("leverage") or 1, rec,
+                                  autotrade_result=res)
+            note = ("" if verdict.get("passed") else "\n⚪ не торгуется: бэктест стратегии не подтвердил преимущество")
+            send_telegram(f"📈 Trend {sym}: LONG — {votes[i]} из {len(TREND_LOOKBACKS)} каналов в тренде\n"
+                          f"вход ~{entry:.6g}, стоп {sl:.6g} ({(entry - sl) / entry * 100:.1f}%), тейка нет — стоп подтягивается каждый день"
+                          + (f"\nавтоторговля: {res.get('status')}" if res else "") + note, category="trend")
+        except Exception as e:
+            log_error(f"trend_daily_pass {sym}: {e}")
+
+
+def trend_live_loop():
+    while True:
+        heartbeat("trend_live_loop")
+        try:
+            if TREND_ENABLED:
+                trend_track_open()
+                day = int(time.time() // 86400) * 86400   # the last daily close (UTC)
+                with state_lock:
+                    done = STATE.get("trend_last_daily") == day
+                if not done and time.time() - day > 120:
+                    trend_daily_pass()
+                    with state_lock:
+                        STATE["trend_last_daily"] = day
+                    save_state()
+                sweep_sim_trades()
+        except Exception as e:
+            log_error(f"trend_live_loop: {e}")
+        wait_beating(TREND_LIVE_WAKE, 600, "trend_live_loop")
+        TREND_LIVE_WAKE.clear()
+
+
+@app.route("/api/trend/status")
+def api_trend_status():
+    # the $15 columns follow the current risk settings (as S/R / P/R)
+    sig_ = compound_sig("trend")
+    with state_lock:
+        stale = [(k, v) for k, v in (STATE.get("trend_results") or {}).items() if v.get("compound_sig") != sig_]
+    for sym, r in stale:
+        try:
+            comp = rr_compound_annotate(list(r.get("trades") or []), sym, mod="trend")
+            with state_lock:
+                r.update(comp)
+        except Exception as e:
+            log_error(f"trend compound refresh {sym}: {e}")
+    with state_lock:
+        results = {k: {kk: vv for kk, vv in v.items() if kk != "trades"} | {"trades_n": len(v.get("trades") or []),
+                                                                            "recent_trades": (v.get("trades") or [])[-30:][::-1]}
+                   for k, v in (STATE.get("trend_results") or {}).items()}
+        sigs = [dict(s) for s in STATE["trend_signals"][:100]]
+        info = {"verdict": STATE.get("trend_verdict"), "last_backtest_finished": STATE.get("trend_last_backtest_finished"),
+                "backtest_running": STATE.get("trend_backtest_running"), "progress": list(STATE.get("trend_progress") or [0, 0])}
+    open_syms = {s["symbol"] for s in sigs if s.get("status") == "OPEN"}
+    coins = sorted(results.values(), key=lambda r: (r["symbol"] not in open_syms, -(r.get("votes") or 0),
+                                                    -((r.get("stats") or {}).get("sum_r") or 0)))
+    closed = [s for s in sigs if s.get("status") == "CLOSED" and s.get("pnl_r_net") is not None]
+    return jsonify({**info, "enabled": TREND_ENABLED, "autotrade_enabled": AUTOTRADE_ENABLED_TREND,
+                    "coins": coins, "signals": sigs, "open": sorted(open_syms),
+                    "live_stats": trend_stats(closed) if closed else {"n": 0},
+                    "config": {"lookbacks": list(TREND_LOOKBACKS), "entry_votes": TREND_ENTRY_VOTES,
+                               "universe_n": TREND_UNIVERSE_N, "refresh_sec": TREND_REFRESH_SEC}})
+
+
+@app.route("/api/trend/restart_backtest", methods=["POST"])
+def api_trend_restart_backtest():
+    TREND_BACKTEST_TRIGGER.set()
+    return jsonify({"ok": True})
+
+
 def stop_previous_instances():
     """v0.99.410 — per user ("у меня 404 версия и ругается на зависший msnr"):
     a server started before an update kept running next to the new one and
@@ -27221,6 +27765,8 @@ if __name__ == "__main__":
     threading.Thread(target=snr_live_loop, daemon=True).start()
     threading.Thread(target=prv_backtest_loop, daemon=True).start()
     threading.Thread(target=prv_live_loop, daemon=True).start()
+    threading.Thread(target=trend_backtest_loop, daemon=True).start()   # v0.99.425
+    threading.Thread(target=trend_live_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
     for _n in LOOP_MAX_GAP_SEC:  # v0.99.322 — seed so startup delays (up to 12 min) don't read as stalls
         heartbeat(_n)
