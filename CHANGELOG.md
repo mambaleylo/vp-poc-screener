@@ -18330,3 +18330,8 @@ v0.99.433 - S/R and P/R live signals right after a restart (user): both scans
          signal is acted on only within 30 min of its bar's close
          (live_signal_fresh, LIVE_SIGNAL_MAX_AGE_SEC); the scan runs every
          15 min, so a real signal is never missed.
+v0.99.434 - The backtest money column starts from $500 instead of $15 (user),
+         for Neuro, S/R and P/R alike, sized like the live orders at the
+         current risk. The start balance is part of compound_sig, so the saved
+         columns recompute by themselves. UI texts "$15" -> "$500". (The
+         simulator tab keeps its own start balance.)
