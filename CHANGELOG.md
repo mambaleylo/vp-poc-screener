@@ -18335,3 +18335,9 @@ v0.99.434 - The backtest money column starts from $500 instead of $15 (user),
          current risk. The start balance is part of compound_sig, so the saved
          columns recompute by themselves. UI texts "$15" -> "$500". (The
          simulator tab keeps its own start balance.)
+v0.99.435 - Own risk % per module (user): Neuro, S/R and P/R each have their own
+         "Риск" field (0.1-100%; empty = the common "Риск на сделку"). Live
+         orders, the retry button, the simulator and each module's $500
+         backtest column use the module's own % ("Авто-риск", when on and
+         known, still wins). The 50% cap is gone: the common % and the module
+         ones go up to 100%.

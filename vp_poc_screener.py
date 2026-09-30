@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.434"
+APP_VERSION = "0.99.435"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1101,7 +1101,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "scalp_enabled", "scalp_signals_enabled", "ft5_enabled", "ft5_invert_signals", "ft5_htf_filter_enabled", "ft5_session_filter_enabled", "mirror_enabled", "mirror_autotune_tolerance_enabled", "mirror_volume_filter_enabled", "mirror_htf_filter_enabled", "ema_touch_enabled", "amd_enabled", "neuro_enabled", "snr_enabled", "snr_top_n", "snr_display_n", "telegram_alerts_snr", "autotrade_snr", "prv_enabled", "prv_top_n", "prv_display_n", "telegram_alerts_prv", "autotrade_prv", "nq_enabled", "hourly_stats_enabled", "telegram_enabled",
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_mirror", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_mirror", "autotrade_neuro", "auto_risk_enabled",
-                  "autotrade_risk_pct",
+                  "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
@@ -1169,6 +1169,8 @@ def get_settings():
         "telegram_configured": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID),
         "autotrade_dry_run": AUTOTRADE_DRY_RUN,
         "autotrade_risk_pct": AUTOTRADE_RISK_PCT_OF_BALANCE,
+        "risk_pct_neuro": MODULE_RISK_PCT["neuro"], "risk_pct_snr": MODULE_RISK_PCT["snr"],   # v0.99.435
+        "risk_pct_prv": MODULE_RISK_PCT["prv"],
         "auto_risk_enabled": AUTO_RISK_ENABLED,   # v0.99.422
         "autotrade_bounce": AUTOTRADE_ENABLED_BOUNCE,
         "autotrade_breakout": AUTOTRADE_ENABLED_BREAKOUT,
@@ -1420,9 +1422,17 @@ def apply_settings(updates):
         try:
             v = float(updates["autotrade_risk_pct"])
             if v > 0:
-                AUTOTRADE_RISK_PCT_OF_BALANCE = min(max(v, 0.1), 50.0)   # v0.99.424 — same 0.1..50 range as the input
+                AUTOTRADE_RISK_PCT_OF_BALANCE = min(max(v, 0.1), 100.0)   # v0.99.435 — 0.1..100 (was up to 50)
         except (TypeError, ValueError):
             pass
+    for _mod in ("neuro", "snr", "prv"):   # v0.99.435 — own risk % per module; empty / 0 = the common one
+        _key = f"risk_pct_{_mod}"
+        if _key in updates:
+            try:
+                v = float(updates[_key]) if updates[_key] not in (None, "") else 0.0
+            except (TypeError, ValueError):
+                continue
+            MODULE_RISK_PCT[_mod] = min(max(v, 0.1), 100.0) if v > 0 else None
     if "msnr_all_in_enabled" in updates:
         MSNR_ALL_IN_ENABLED = bool(updates["msnr_all_in_enabled"])
     if "lsw_all_in_enabled" in updates:
@@ -8959,6 +8969,17 @@ def kelly_risk(pairs):
             "auto_risk_n": n, "auto_risk_avg_r": round(mean, 3), "auto_risk_cautious_r": round(mean - se, 3)}
 
 
+MODULE_RISK_PCT = {"neuro": None, "snr": None, "prv": None}   # v0.99.435 — own risk % per module (None = the common one)
+RISK_PCT_MAX = 100.0   # v0.99.435 — user: "не ограничивай 50%"
+
+
+def module_risk_pct(mod):
+    """v0.99.435 — the risk % a module's order uses when "Авто-риск" gives
+    none: the module's own setting, else the common "Риск на сделку"."""
+    own = MODULE_RISK_PCT.get(mod)
+    return float(own) if own else float(AUTOTRADE_RISK_PCT_OF_BALANCE)
+
+
 def compound_sizing(mod, auto_pct=None):
     """v0.99.418 — how the auto-trader of this module sizes an order right
     now: ("all_in", margin %) when its va-bank switch is on, else
@@ -8966,7 +8987,7 @@ def compound_sizing(mod, auto_pct=None):
     coin's own cautious-Kelly %) when "Авто-риск" is on and it is known."""
     if AUTO_RISK_ENABLED and auto_pct:   # v0.99.424 — va-bank removed
         return ("auto", float(auto_pct))
-    return ("risk", float(AUTOTRADE_RISK_PCT_OF_BALANCE))
+    return ("risk", module_risk_pct(mod))   # v0.99.435 — the module's own %
 
 
 def compound_sig(mod):
@@ -8978,17 +8999,21 @@ def compound_sig(mod):
 
 def auto_risk_for(mod, symbol):
     """v0.99.422 — the risk % a live order of this coin uses, when
-    "Авто-риск" is on (None = the settings' %, or va-bank)."""
-    if not AUTO_RISK_ENABLED or compound_sizing(mod)[0] == "all_in":
-        return None
+    "Авто-риск" is on (None = the settings' %, or va-bank).
+    v0.99.435 — otherwise the module's own risk % (None only for modules
+    without one: they use the common %)."""
+    own = MODULE_RISK_PCT.get(mod)
+    own = float(own) if own else None
+    if not AUTO_RISK_ENABLED:
+        return own
     try:
         if mod == "neuro":
             with _neuro_state_lock:
-                return (_neuro_summary.get(symbol) or {}).get("auto_risk_pct")
+                return (_neuro_summary.get(symbol) or {}).get("auto_risk_pct") or own
         with state_lock:
-            return ((STATE.get(f"{mod}_results") or {}).get(symbol) or {}).get("auto_risk_pct")
+            return ((STATE.get(f"{mod}_results") or {}).get(symbol) or {}).get("auto_risk_pct") or own
     except Exception:
-        return None
+        return own
 
 
 def rr_compound_live_sizing(trades, symbol, mod, start_balance=None, clean_after=None):
@@ -23226,9 +23251,20 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">Риск на сделку</div>
-          <div class="sub">% от баланса, который теряется при срабатывании стопа (с комиссиями) — общий для Neuro, S/R Zones, Peak Reversal. Плечо — максимально безопасное под стоп конкретного сигнала, маржа — сколько нужно для этого риска (если не хватает свободного баланса — сделка пропускается)<br>Допустимо от 0.1% до 50%. Ориентиры: 1–2% — консервативно (10 стопов подряд ≈ −10…−18%); 5% — умеренно (5 стопов ≈ −23%); 10–20% — агрессивно (3 стопа ≈ −27…−49%); 30% — очень агрессивно (2 стопа ≈ −51%); 50% — максимум, примерно как бывший ва-банк (2 стопа ≈ −75%)</div>
+          <div class="sub">% от баланса, который теряется при срабатывании стопа (с комиссиями) — общий: для модулей ниже, у которых своё поле пустое. Плечо — максимально безопасное под стоп конкретного сигнала, маржа — сколько нужно для этого риска (если не хватает свободного баланса — сделка пропускается)<br>Допустимо от 0.1% до 100%. Ориентиры: 1–2% — консервативно (10 стопов подряд ≈ −10…−18%); 5% — умеренно (5 стопов ≈ −23%); 10–20% — агрессивно (3 стопа ≈ −27…−49%); 30% — очень агрессивно (2 стопа ≈ −51%); 50% — 2 стопа ≈ −75%; 100% — один стоп обнуляет счёт</div>
         </div>
-        <input type="number" id="setAutotradeRiskPct" min="0.1" max="50" step="0.5" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
+        <input type="number" id="setAutotradeRiskPct" min="0.1" max="100" step="0.5" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ Риск Neuro · S/R · P/R</div>
+          <div class="sub">свой % для каждого модуля (0.1–100); пустое поле — общий % выше. Бэктест «с $500» каждого модуля считает со своим %</div>
+        </div>
+        <div style="display:flex;gap:6px;align-items:center;">
+          <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro" title="Neuro" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctSnr" min="0.1" max="100" step="0.5" placeholder="S/R" title="S/R Zones" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctPrv" min="0.1" max="100" step="0.5" placeholder="P/R" title="Peak Reversal" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+        </div>
       </div>
       <div class="settingRow subRow">
         <div>
@@ -25941,6 +25977,9 @@ const setInputs = {
 
 const setValueInputs = {
   autotrade_risk_pct: document.getElementById('setAutotradeRiskPct'),
+  risk_pct_neuro: document.getElementById('setRiskPctNeuro'),   // v0.99.435
+  risk_pct_snr: document.getElementById('setRiskPctSnr'),
+  risk_pct_prv: document.getElementById('setRiskPctPrv'),
   snr_top_n: document.getElementById('setSnrTopN'),
   snr_display_n: document.getElementById('setSnrDisplayN'),
   prv_top_n: document.getElementById('setPrvTopN'),
