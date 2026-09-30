@@ -11,10 +11,10 @@ X% в нужную сторону раньше, чем Y% против. Пров
 Как устроено (всё задано заранее, ничего не подбирается под результат):
 - 1ч свечи, условия — те же, что считает Neuro на каждой свече (RSI, тренды
   4ч/1д, фандинг, BTC/ETH, серии, объём, сессия, закрытие дня и т.д.) и их пары.
-- Вход — открытие следующей свечи. Цель +TP% и стоп -SL% (для шорта наоборот):
-  TP из {0.5, 1, 1.5, 2}%, SL из {0.5, 1, 2, 3}%; если за 48 свечей не
-  случилось ни того, ни другого — «таймаут». Если в одной свече задеты оба —
-  считается стоп (осторожно).
+- Вход — открытие следующей свечи. Цель +TP% и стоп -SL% (для шорта наоборот),
+  TP и SL — каждый из {0.3, 0.5, 0.75, 1, 1.5, 2, 3, 5}% (64 пары x 2 стороны);
+  если за 72 свечи не случилось ни того, ни другого — «таймаут». Если в одной
+  свече задеты оба — считается стоп (осторожно).
 - Связка — условие на ВСЕХ монетах вместе (устойчиво, если работает на многих).
   Повторы одной связки на монете ближе 24 свечей не считаются (одна сделка).
 - ВАЖНО: вероятность сравнивается с базой — той же целью/стопом у ЛЮБОЙ свечи
@@ -23,7 +23,10 @@ X% в нужную сторону раньше, чем Y% против. Пров
 - История каждой монеты делится по времени: поиск 60% / проверка 20% / тест 20%.
   Поиск: вероятность выше базы (поправка Бенджамини-Хохберга на число
   перебранных связок), плюс после комиссий. Проверка отбирает (выше базы с
-  z >= 2 и плюс). Тест ничего не выбирает — только показывает, держится ли.
+  t >= 2 и плюс). Тест ничего не выбирает — только показывает, держится ли.
+- Значимость на проверке и тесте считается ПО ДНЯМ: сделки разных монет в один
+  день усредняются (монеты ходят вместе; календарное условие вроде «вторник»
+  иначе выглядит в десятки раз надёжнее, чем есть).
 - «% на сделку» = вероятность x TP - доля стопов x SL - комиссии 0.1%
   (таймаут считается нулём).
 """
@@ -40,10 +43,11 @@ MAIN = next((p for p in (os.path.join(HERE, "vp_poc_screener.py"), os.path.join(
 if MAIN is None:
     sys.exit("не найден vp_poc_screener.py — положите этот скрипт в ту же папку")
 
-TPS = (0.5, 1.0, 1.5, 2.0)
-SLS = (0.5, 1.0, 2.0, 3.0)
+TPS = (0.3, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0)
+SLS = (0.3, 0.5, 0.75, 1.0, 1.5, 2.0, 3.0, 5.0)
+LEVELS = tuple(sorted(set(TPS) | set(SLS)))
 DIRS = ("LONG", "SHORT")
-HOLD = 48
+HOLD = 72
 THIN = 24
 FEE_PCT = 0.1
 SPLIT = (0.6, 0.8)
@@ -51,9 +55,10 @@ MIN_N_MINE, MIN_N_VALID = 100, 30
 FDR_Q = 0.05
 VALID_Z = 2.0
 TOP_KEYS_FOR_PAIRS = 15
-MAX_TO_VALIDATE = 60
+MAX_TO_VALIDATE = 150
+TEST_T = 1.65       # test: day-clustered t, one-sided 5%
 PAIR_GAIN = 0.02    # a pair is kept only if its probability beats each own condition by >= 2 points
-TARGETS = [(d, tp, sl) for d in DIRS for tp in TPS for sl in SLS]   # 32 bits
+TARGETS = [(d, tp, sl) for d in DIRS for tp in TPS for sl in SLS]   # 128 bits
 
 OUT = []
 
@@ -72,27 +77,26 @@ def first_hits(c, i):
     e = c[i + 1]["open"]
     if not e or e <= 0:
         return None
-    up = {tp: None for tp in TPS}
-    dn = {sl: None for sl in SLS}      # long: price down by sl; short: price down by tp
-    up_sl = {sl: None for sl in SLS}   # short stop: price up by sl
-    dn_tp = {tp: None for tp in TPS}   # short target: price down by tp
+    # first bar where the price is >= level% above / below the entry; the levels
+    # are sorted, so one pointer per side walks up as the running extreme grows
+    up, dn = {}, {}
+    ui = di = 0
+    nl = len(LEVELS)
     for j in range(1, HOLD + 1):
         b = c[i + j]
         hi = (b["high"] / e - 1) * 100
         lo = (1 - b["low"] / e) * 100
-        for tp in TPS:
-            if up[tp] is None and hi >= tp:
-                up[tp] = j
-            if dn_tp[tp] is None and lo >= tp:
-                dn_tp[tp] = j
-        for sl in SLS:
-            if dn[sl] is None and lo >= sl:
-                dn[sl] = j
-            if up_sl[sl] is None and hi >= sl:
-                up_sl[sl] = j
+        while ui < nl and hi >= LEVELS[ui]:
+            up[LEVELS[ui]] = j
+            ui += 1
+        while di < nl and lo >= LEVELS[di]:
+            dn[LEVELS[di]] = j
+            di += 1
+        if ui == nl and di == nl:
+            break
     succ = fail = 0
     for k, (d, tp, sl) in enumerate(TARGETS):
-        t_hit, s_hit = (up[tp], dn[sl]) if d == "LONG" else (dn_tp[tp], up_sl[sl])
+        t_hit, s_hit = (up.get(tp), dn.get(sl)) if d == "LONG" else (dn.get(tp), up.get(sl))
         if t_hit is not None and (s_hit is None or t_hit < s_hit):
             succ |= 1 << k
         elif s_hit is not None:
@@ -101,10 +105,10 @@ def first_hits(c, i):
 
 
 def tally(masks):
-    """masks: list of (succ, fail) -> (n, [succ count per target], [fail count per target])"""
+    """masks: list of (succ, fail[, day]) -> (n, [succ count per target], [fail count per target])"""
     n = len(masks)
     sc, fc = [0] * len(TARGETS), [0] * len(TARGETS)
-    for (s, f), cnt in Counter(masks).items():
+    for (s, f), cnt in Counter(m_[:2] for m_ in masks).items():
         k = 0
         while s >> k:
             if (s >> k) & 1:
@@ -129,6 +133,21 @@ def z_vs(p, p0, n):
 
 def norm_sf(z):
     return 0.5 * math.erfc(z / math.sqrt(2.0))
+
+
+def day_t(occ, k, p0):
+    """Day-clustered t of (hit - p0) for target k: occurrences of one calendar
+    day (all coins) are averaged first. Returns (t, number of days)."""
+    days = {}
+    for s, _f, d in occ:
+        days.setdefault(d, []).append(((s >> k) & 1) - p0)
+    xs = [sum(v) / len(v) for v in days.values()]
+    nd = len(xs)
+    if nd < 2:
+        return None, nd
+    mu = sum(xs) / nd
+    sd = math.sqrt(sum((x - mu) ** 2 for x in xs) / (nd - 1))
+    return (mu / (sd / math.sqrt(nd)) if sd > 0 else None), nd
 
 
 def main():
@@ -203,7 +222,7 @@ def main():
                 if fh is None:
                     continue
                 part = 0 if i < b1 else (1 if i < b2 else 2)
-                bars.append((ci, i, part, fh[0], fh[1], conds[i]))
+                bars.append((ci, i, part, fh[0], fh[1], conds[i], h1[i]["time"] // 86400))
         except Exception as e:
             print(f"  {s}: {e}")
         print(f"  ...{ci + 1}/{len(syms)} ({time.time() - t0:.0f} с)")
@@ -217,13 +236,13 @@ def main():
         """(succ, fail) per part for bars where pred(conds) holds, thinned per coin"""
         per = {0: [], 1: [], 2: []}
         last = {}
-        for ci, i, part, sm, fm, cd in bars:
+        for ci, i, part, sm, fm, cd, day in bars:
             if not pred(cd):
                 continue
             if i < last.get(ci, -10 ** 9) + THIN:
                 continue
             last[ci] = i
-            per[part].append((sm, fm))
+            per[part].append((sm, fm, day))
         return per
 
     if check:   # one fixed situation, nothing searched: the whole period is a clean test
@@ -239,9 +258,10 @@ def main():
             say("  ни одного случая")
         else:
             p, p0 = sc[k] / n, bsc[k] / bn
-            z = z_vs(p, p0, n)
+            z, nd = day_t(allm, k, p0)
             ev = ev_pct(k, n, sc, fc)
-            say(f"  весь период: {p * 100:.0f}% (база {p0 * 100:.0f}%) · z={z:.2f} · {ev:+.2f}%/сделку · n={n}")
+            say(f"  весь период: {p * 100:.0f}% (база {p0 * 100:.0f}%) · t по дням={z if z is None else round(z, 2)} "
+                f"({nd} дн.) · {ev:+.2f}%/сделку · n={n}")
             for part, lbl in ((0, "первые 60%"), (1, "следующие 20%"), (2, "последние 20%")):
                 pn, psc, pfc = tally(per[part])
                 bpn, bpsc, _ = base[part]
@@ -250,7 +270,7 @@ def main():
                         f"{ev_pct(k, pn, psc, pfc):+.2f}%/сделку · n={pn}")
             ok = (z or 0) >= 2 and ev > 0
             say(f"  ВЕРДИКТ: {'подтвердилась на других монетах' if ok else 'не подтвердилась'} "
-                f"(нужно: выше базы с z >= 2 и плюс после комиссий)")
+                f"(нужно: выше базы с t по дням >= 2 и плюс после комиссий)")
         say(f"\nвремя: {time.time() - t0:.0f} с")
         with open(os.path.join(os.getcwd(), "prob_report.txt"), "w", encoding="utf-8") as f:
             f.write("\n".join(OUT) + "\n")
@@ -325,12 +345,13 @@ def main():
             return {"n": 0}
         k = c["k"]
         p, p0 = sc[k] / n, bsc[k] / bn
-        return {"n": n, "p": p, "p0": p0, "z": z_vs(p, p0, n), "ev": ev_pct(k, n, sc, fc),
+        t, nd = day_t(c["per"][part], k, p0)   # clustered by calendar day
+        return {"n": n, "p": p, "p0": p0, "z": t, "days": nd, "ev": ev_pct(k, n, sc, fc),
                 "to": 1 - (sc[k] + fc[k]) / n}
 
     to_validate, per_cond = [], Counter()
-    for c in passed:   # best by mining z, at most 4 targets per situation (variety)
-        if per_cond[c["cond"]] < 4:
+    for c in passed:   # best by mining z, at most 3 targets per situation (variety)
+        if per_cond[c["cond"]] < 3:
             per_cond[c["cond"]] += 1
             to_validate.append(c)
         if len(to_validate) >= MAX_TO_VALIDATE:
@@ -356,24 +377,27 @@ def main():
         if not s.get("n"):
             return "нет сделок"
         to = f" · таймаут {s['to'] * 100:.0f}%" if s.get("to") else ""
-        return f"{s['p'] * 100:.0f}% (база {s['p0'] * 100:.0f}%) · {s['ev']:+.2f}%/сделку · n={s['n']}{to}"
+        tz = f" · t(дни)={s['z']:.1f} ({s['days']} дн.)" if s.get("days") and s.get("z") is not None else ""
+        return f"{s['p'] * 100:.0f}% (база {s['p0'] * 100:.0f}%) · {s['ev']:+.2f}%/сделку · n={s['n']}{tz}{to}"
 
-    say(f"\n=== ПРОШЛИ ПРОВЕРКУ: {len(confirmed)} (из {min(len(passed), MAX_TO_VALIDATE)} лучших по поиску) ===")
+    def held_ok(te):
+        return te.get("n", 0) >= 20 and (te.get("z") or 0) >= TEST_T and (te.get("ev") or 0) > 0
+
+    say(f"\n=== ПРОШЛИ ПРОВЕРКУ: {len(confirmed)} (из {len(to_validate)} лучших по поиску) ===")
     if not confirmed:
         say("  ни одна связка не удержала вероятность выше базы на проверке — устойчивых связок нет")
-    held = 0
-    for c in confirmed[:15]:
+    shown = sorted(confirmed, key=lambda c: (not held_ok(c["test"]), -c["valid"]["p"]))[:20]
+    held = sum(1 for c in confirmed if held_ok(c["test"]))
+    for c in shown:
         d, tp, sl = TARGETS[c["k"]]
         te = c["test"]
-        ok = te.get("n", 0) >= 20 and (te.get("p") or 0) > (te.get("p0") or 1) and (te.get("ev") or 0) > 0
-        held += ok
-        say(f"\n  {'✓' if ok else '✗'} {d} +{tp}% раньше −{sl}%  ·  {cond_txt(c['cond'])}")
+        say(f"\n  {'✓' if held_ok(te) else '✗'} {d} +{tp}% раньше −{sl}%  ·  {cond_txt(c['cond'])}")
         say(f"     поиск:    {st({'n': c['n'], 'p': c['p'], 'p0': c['p0'], 'ev': c['ev']})}")
         say(f"     проверка: {st(c['valid'])}")
         say(f"     ТЕСТ:     {st(te)}")
     if confirmed:
-        say(f"\n  на тесте удержались (выше базы и в плюсе): {held} из {min(15, len(confirmed))}")
-    say("  ✓ = на тесте (его не видел ни поиск, ни проверка) вероятность выше базы и плюс после комиссий")
+        say(f"\n  на тесте удержались: {held} из {len(confirmed)}")
+    say(f"  ✓ = на тесте (его не видел ни поиск, ни проверка): выше базы с t по дням >= {TEST_T} и плюс после комиссий")
     say(f"\nвремя: {time.time() - t0:.0f} с")
     try:
         with open(os.path.join(os.getcwd(), "prob_report.txt"), "w", encoding="utf-8") as f:
