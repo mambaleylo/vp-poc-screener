@@ -156,6 +156,9 @@ def main():
     while i < len(argv):
         if argv[i] == "--skip":
             skip, i = int(argv[i + 1]), i + 2
+        elif argv[i] == "--best":   # --best "roc_zone=strong_down": every TP/SL for one situation
+            check = ([tuple(x.split("=", 1)) for x in argv[i + 1].split(",")], None, None, None)
+            i += 2
         elif argv[i] == "--check":   # --check "dow=1,dom_third=late" SHORT 0.5 0.5
             check = ([tuple(x.split("=", 1)) for x in argv[i + 1].split(",")], argv[i + 2].upper(),
                      float(argv[i + 3]), float(argv[i + 4]))
@@ -244,6 +247,40 @@ def main():
             last[ci] = i
             per[part].append((sm, fm, day))
         return per
+
+    if check and check[1] is None:   # --best: which TP/SL makes the most of one situation
+        conds_req = check[0]
+        per = occurrences(lambda cd: all(str(cd.get(kk)) == vv for kk, vv in conds_req))
+        allm = per[0] + per[1] + per[2]
+        n, sc, fc = tally(allm)
+        bn, bsc, _ = tally([(b[3], b[4]) for b in bars])
+        say(f"\n=== ВСЕ ЦЕЛИ/СТОПЫ ДЛЯ СВЯЗКИ (монеты с {skip + 1}-й по {skip + len(syms)}-ю, весь период) ===")
+        say("  " + " + ".join(f"{labels.get(kk, kk)} = {vv}" for kk, vv in conds_req) + f" · случаев {n}")
+        if not n:
+            say("  ни одного случая")
+        else:
+            rows = []
+            for k, (d, tp, sl) in enumerate(TARGETS):
+                p0 = bsc[k] / bn
+                t, nd = day_t(allm, k, p0)
+                rows.append((ev_pct(k, n, sc, fc), d, tp, sl, sc[k] / n, p0, t, 1 - (sc[k] + fc[k]) / n))
+            # the auto-trader sizes by the risk at the stop, so the result that
+            # matters is in R: % per trade / stop %
+            ok = sorted((r for r in rows if (r[6] or 0) >= 2), key=lambda r: -(r[0] / r[3]))
+            say("  лучшие по R на сделку (результат / стоп; среди выше базы с t по дням >= 2):")
+            for ev, d, tp, sl, p, p0, t, to in ok[:12]:
+                say(f"    {d} +{tp}% раньше −{sl}%: {p * 100:.0f}% (база {p0 * 100:.0f}%) · t={t:.1f} · "
+                    f"{ev / sl:+.2f}R ({ev:+.2f}%) на сделку · таймаут {to * 100:.0f}%")
+            if ok:
+                ev, d, tp, sl = ok[0][:4]
+                say(f"\n  ВЫБОР (правило: максимум R на сделку): {d} +{tp}% раньше −{sl}%")
+                say(f"  проверка на других монетах: --check \"{','.join(f'{kk}={vv}' for kk, vv in conds_req)}\" {d} {tp} {sl}")
+            else:
+                say("  ни один вариант не выше базы с t >= 2")
+        say(f"\nвремя: {time.time() - t0:.0f} с")
+        with open(os.path.join(os.getcwd(), "prob_report.txt"), "w", encoding="utf-8") as f:
+            f.write("\n".join(OUT) + "\n")
+        return
 
     if check:   # one fixed situation, nothing searched: the whole period is a clean test
         conds_req, d, tp, sl = check
