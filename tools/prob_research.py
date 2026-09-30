@@ -57,6 +57,7 @@ VALID_Z = 2.0
 TOP_KEYS_FOR_PAIRS = 15
 MAX_TO_VALIDATE = 150
 TEST_T = 1.65       # test: day-clustered t, one-sided 5%
+BEST_MIN_SL = 1.0   # --best chooses only among stops >= 1%
 PAIR_GAIN = 0.02    # a pair is kept only if its probability beats each own condition by >= 2 points
 TARGETS = [(d, tp, sl) for d in DIRS for tp in TPS for sl in SLS]   # 128 bits
 
@@ -266,8 +267,10 @@ def main():
                 rows.append((ev_pct(k, n, sc, fc), d, tp, sl, sc[k] / n, p0, t, 1 - (sc[k] + fc[k]) / n))
             # the auto-trader sizes by the risk at the stop, so the result that
             # matters is in R: % per trade / stop %
-            ok = sorted((r for r in rows if (r[6] or 0) >= 2), key=lambda r: -(r[0] / r[3]))
-            say("  лучшие по R на сделку (результат / стоп; среди выше базы с t по дням >= 2):")
+            # stops under 1%: slippage/spread at the stop are a big share of the risk and
+            # the backtest fills exactly at the stop — too optimistic, not chosen
+            ok = sorted((r for r in rows if (r[6] or 0) >= 2 and r[3] >= BEST_MIN_SL), key=lambda r: -(r[0] / r[3]))
+            say(f"  лучшие по R на сделку (результат / стоп; стоп от {BEST_MIN_SL}%; выше базы с t по дням >= 2):")
             for ev, d, tp, sl, p, p0, t, to in ok[:12]:
                 say(f"    {d} +{tp}% раньше −{sl}%: {p * 100:.0f}% (база {p0 * 100:.0f}%) · t={t:.1f} · "
                     f"{ev / sl:+.2f}R ({ev:+.2f}%) на сделку · таймаут {to * 100:.0f}%")
