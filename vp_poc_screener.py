@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.431"
+APP_VERSION = "0.99.432"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16463,6 +16463,7 @@ NEURO_FDR_Q          = float(os.environ.get("VP_NEURO_FDR_Q", 0.10))   # expecte
 NEURO_VALID_MIN_N    = 8        # non-overlapping occurrences in B needed to test a dependency
 NEURO_VALID_MIN_TRADES = int(os.environ.get("VP_NEURO_VALID_MIN_TRADES", 15))   # closed trades in B needed to rank a coin; v0.99.416 — 10 -> 15 (user: 3-4 lucky RR-4 wins put a coin on top)
 NEURO_TEST_MIN_TRADES = int(os.environ.get("VP_NEURO_TEST_MIN_TRADES", 10))   # v0.99.416 — test trades needed for the test gate
+NEURO_MINE_MIN_R = float(os.environ.get("VP_NEURO_MINE_MIN_R", 0.1))   # v0.99.432 — net R/trade the dependencies must make on the mining part itself
 NEURO_HISTORY_DAYS   = int(os.environ.get("VP_NEURO_HISTORY_DAYS", 1500))  # ask for as much as possible; exchange will just return what it has
 NEURO_REFRESH_SEC    = int(os.environ.get("VP_NEURO_REFRESH_SEC", 24 * 3600))  # v0.99.236 — raised 4h->24h per direct user request: with the universe now 120 coins instead of a fixed 20, a full cycle takes MUCH longer, and re-mining more than once a day added little value anyway (the underlying ~13-month rolling window barely shifts hour to hour — established during an earlier session discussion)
 NEURO_MINING_TRIGGER = threading.Event()  # v0.99.212 — same "Очистить X doesn't wake the sleeping loop" fix as LSW/MSNR's own trigger events, for the new "Очистить Neuro" button
@@ -18793,6 +18794,13 @@ def neuro_fail_reason(summary):
         return f"история {round(sp.get('history_days') or 0)} дн. — нужно ≥ {NEURO_MIN_HISTORY_DAYS}"
     if not (summary.get("patterns_confirmed") or 0) > 0:
         return "нет подтверждённых зависимостей"
+    # v0.99.432 — per user (the #1 card: +0.023R/trade on the very part its
+    # dependencies were found on): a dependency that doesn't make money where it
+    # was found makes money elsewhere only by luck
+    mn = sp.get("mine") or {}
+    if mn.get("avg_pnl_r") is None or mn["avg_pnl_r"] < NEURO_MINE_MIN_R:
+        return (f"на поиске, где нашли зависимости, {mn.get('avg_pnl_r') if mn.get('avg_pnl_r') is not None else '—'}R"
+                f"/сделку — нужно ≥ +{NEURO_MINE_MIN_R}R")
     if (v.get("n") or 0) < NEURO_VALID_MIN_TRADES:
         return f"мало сделок на проверке ({v.get('n') or 0}, нужно ≥ {NEURO_VALID_MIN_TRADES})"
     if (v.get("n") or 0) + (summary.get("n") or 0) < NEURO_TOP_N_MIN_TRADES:

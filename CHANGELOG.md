@@ -18314,3 +18314,10 @@ v0.99.431 - Label fix: the Neuro condition "dom_third" (day of the month: early
          1-10 / mid / late 21+) was shown as "доминация"; now "треть месяца".
          tools/prob_research.py: --skip N (other coins) and --check "k=v,..."
          DIR TP SL (one fixed situation, nothing searched).
+v0.99.432 - Neuro pass gate (user: the #1 card was "trash"): the dependencies
+         must make >= +0.1R net per trade on the MINING part, where they were
+         found (NEURO_MINE_MIN_R). The #1 card made +0.023R there, so its
+         +0.15R on the check and +0.29R on the test (18 and 27 trades) were
+         most likely luck. A failing card shows the reason ("на поиске, где
+         нашли зависимости, ...R/сделку — нужно ≥ +0.1R"). Applied to the saved
+         results on load, no re-mining needed.
