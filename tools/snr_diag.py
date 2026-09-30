@@ -71,8 +71,57 @@ def day_t(pairs):
     return mu / (sd / math.sqrt(n)) if sd > 0 else None
 
 
+TRADE_TF, TRADE_STOP_ATR, TRADE_BARS, FEE_PCT = "4h", 3.0, 42, 0.1
+
+
+def trade_check(m, data):
+    """ONE pre-set variant (chosen from the first run's 4h breakout drift, so
+    judged only on OTHER coins, --skip): 4h breakout, stop 3 ATR from the
+    entry, no take-profit, exit at the close 42 bars later; fees included."""
+    rs = []   # (entry time, day, R)
+    for (s, tf), cs in data.items():
+        if tf != TRADE_TF:
+            continue
+        atr = m.neuro_atr_series(cs, 14)
+        seen, busy = set(), -1
+        evs = sorted({e for pv in PIVOTS for e in events(m, cs, atr, pv, "breakout")})
+        for idx, d in evs:
+            if idx in seen or idx <= busy or idx + TRADE_BARS + 1 >= len(cs) or not atr[idx]:
+                continue
+            seen.add(idx)
+            e = cs[idx + 1]["open"]
+            stop_d = TRADE_STOP_ATR * atr[idx]
+            if stop_d <= 0 or e <= 0:
+                continue
+            exit_px, j_end = cs[idx + TRADE_BARS]["close"], idx + TRADE_BARS
+            for j in range(idx + 1, idx + TRADE_BARS + 1):
+                b = cs[j]
+                if (d > 0 and b["low"] <= e - stop_d) or (d < 0 and b["high"] >= e + stop_d):
+                    exit_px, j_end = e - d * stop_d, j
+                    break
+            r = d * (exit_px - e) / stop_d - 2 * FEE_PCT / 100 * e / stop_d
+            rs.append((cs[idx]["time"], cs[idx]["time"] // 86400, r))
+            busy = j_end   # one position per coin at a time, like the auto-trader
+    say(f"\n=== ПРОВЕРКА ВАРИАНТА: {TRADE_TF} пробой · стоп {TRADE_STOP_ATR:g} ATR · без тейка · выход через "
+        f"{TRADE_BARS} свечей ===")
+    if len(rs) < 20:
+        say(f"  мало сделок ({len(rs)})")
+        return
+    rs.sort()
+    half = len(rs) // 2
+    avg = lambda p: sum(x[2] for x in p) / len(p)
+    t = day_t([(x[1], x[2]) for x in rs])
+    wr = sum(1 for x in rs if x[2] > 0) / len(rs) * 100
+    say(f"  сделок {len(rs)} · WR {wr:.0f}% · {avg(rs):+.3f}R/сделку · итого {sum(x[2] for x in rs):+.1f}R · "
+        f"t по дням={t if t is None else round(t, 2)}")
+    say(f"  1-я половина: {avg(rs[:half]):+.3f}R/сделку · 2-я половина: {avg(rs[half:]):+.3f}R/сделку")
+    ok = avg(rs) > 0 and (t or 0) >= 2 and avg(rs[:half]) > 0 and avg(rs[half:]) > 0
+    say(f"  ВЕРДИКТ: {'ПОДТВЕРДИЛСЯ' if ok else 'не подтвердился'} (нужно: плюс, t по дням >= 2, плюс в обеих половинах)")
+
+
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    args = [a for i, a in enumerate(sys.argv[1:], 1) if not a.startswith("--") and sys.argv[i - 1] != "--skip"]
+    skip = int(sys.argv[sys.argv.index("--skip") + 1]) if "--skip" in sys.argv else 0
     n_coins = int(args[0]) if args else 40
     spec = importlib.util.spec_from_file_location("vp", MAIN)
     m = importlib.util.module_from_spec(spec)
@@ -90,7 +139,7 @@ def main():
             vols[name] = float(t.get("volume_24h_quote") or t.get("volume_24h_settle") or 0)
         except (TypeError, ValueError):
             pass
-    syms = [s for s, _ in sorted(vols.items(), key=lambda kv: -kv[1])[:n_coins]]
+    syms = [s for s, _ in sorted(vols.items(), key=lambda kv: -kv[1])][skip:skip + n_coins]
     now = int(time.time())
     t0 = time.time()
     say(f"монет: {len(syms)} · ТФ {', '.join(TFS)} · пивот {PIVOTS} · сила >= {MIN_STRENGTH} · горизонты {HORIZONS} свечей")
@@ -107,6 +156,14 @@ def main():
                 print(f"  {s} {tf}: {e}")
         if i % 10 == 0:
             print(f"  ...{i}/{len(syms)} ({time.time() - t0:.0f} с)")
+
+    if "--trade" in sys.argv:
+        say(f"монеты с {skip + 1}-й по {skip + len(syms)}-ю")
+        trade_check(m, data)
+        say(f"\nвремя: {time.time() - t0:.0f} с")
+        with open(os.path.join(os.getcwd(), "snr_diag_report.txt"), "w", encoding="utf-8") as f:
+            f.write("\n".join(OUT) + "\n")
+        return
 
     for tf in TFS:
         # market drift per horizon (mean % move of every bar, entry at next open)
