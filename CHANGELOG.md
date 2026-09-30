@@ -18310,3 +18310,7 @@ v0.99.430 - Fix: black screen on Neuro and S/R after 0.99.429 (user). The Neuro
          (the Neuro status, the loop-health block every tab polls, saving the
          Neuro state) waited forever. The lock is now re-entrant and the three
          calls in the live loop run outside it.
+v0.99.431 - Label fix: the Neuro condition "dom_third" (day of the month: early
+         1-10 / mid / late 21+) was shown as "доминация"; now "треть месяца".
+         tools/prob_research.py: --skip N (other coins) and --check "k=v,..."
+         DIR TP SL (one fixed situation, nothing searched).

@@ -132,7 +132,18 @@ def norm_sf(z):
 
 
 def main():
-    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    argv, args, skip, check = sys.argv[1:], [], 0, None
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--skip":
+            skip, i = int(argv[i + 1]), i + 2
+        elif argv[i] == "--check":   # --check "dow=1,dom_third=late" SHORT 0.5 0.5
+            check = ([tuple(x.split("=", 1)) for x in argv[i + 1].split(",")], argv[i + 2].upper(),
+                     float(argv[i + 3]), float(argv[i + 4]))
+            i += 5
+        else:
+            args.append(argv[i])
+            i += 1
     n_coins = int(args[0]) if args else 20
     days = int(args[1]) if len(args) > 1 else 365
     spec = importlib.util.spec_from_file_location("vp", MAIN)
@@ -152,7 +163,7 @@ def main():
             vols[name] = float(t.get("volume_24h_quote") or t.get("volume_24h_settle") or 0)
         except (TypeError, ValueError):
             pass
-    syms = [s for s, _ in sorted(vols.items(), key=lambda kv: -kv[1])[:n_coins]]
+    syms = [s for s, _ in sorted(vols.items(), key=lambda kv: -kv[1])][skip:skip + n_coins]
     now = int(time.time())
     start = now - days * 86400
     warm = start - 60 * 86400   # indicator warm-up (EMA200 etc.) before the studied period
@@ -214,6 +225,36 @@ def main():
             last[ci] = i
             per[part].append((sm, fm))
         return per
+
+    if check:   # one fixed situation, nothing searched: the whole period is a clean test
+        conds_req, d, tp, sl = check
+        k = TARGETS.index((d, tp, sl))
+        per = occurrences(lambda cd: all(str(cd.get(kk)) == vv for kk, vv in conds_req))
+        say(f"\n=== ПРОВЕРКА ОДНОЙ СВЯЗКИ (монеты с {skip + 1}-й по {skip + len(syms)}-ю) ===")
+        say(f"  {d} +{tp}% раньше −{sl}%  ·  " + " + ".join(f"{labels.get(kk, kk)} = {vv}" for kk, vv in conds_req))
+        allm = per[0] + per[1] + per[2]
+        n, sc, fc = tally(allm)
+        bn, bsc, _ = tally([(b[3], b[4]) for b in bars])
+        if not n:
+            say("  ни одного случая")
+        else:
+            p, p0 = sc[k] / n, bsc[k] / bn
+            z = z_vs(p, p0, n)
+            ev = ev_pct(k, n, sc, fc)
+            say(f"  весь период: {p * 100:.0f}% (база {p0 * 100:.0f}%) · z={z:.2f} · {ev:+.2f}%/сделку · n={n}")
+            for part, lbl in ((0, "первые 60%"), (1, "следующие 20%"), (2, "последние 20%")):
+                pn, psc, pfc = tally(per[part])
+                bpn, bpsc, _ = base[part]
+                if pn:
+                    say(f"    {lbl}: {psc[k] / pn * 100:.0f}% (база {bpsc[k] / bpn * 100:.0f}%) · "
+                        f"{ev_pct(k, pn, psc, pfc):+.2f}%/сделку · n={pn}")
+            ok = (z or 0) >= 2 and ev > 0
+            say(f"  ВЕРДИКТ: {'подтвердилась на других монетах' if ok else 'не подтвердилась'} "
+                f"(нужно: выше базы с z >= 2 и плюс после комиссий)")
+        say(f"\nвремя: {time.time() - t0:.0f} с")
+        with open(os.path.join(os.getcwd(), "prob_report.txt"), "w", encoding="utf-8") as f:
+            f.write("\n".join(OUT) + "\n")
+        return
 
     # --- mining: single conditions
     keys = [k for k in m.NEURO_CONDITION_KEYS if k not in ("hour", "streak", "daily_streak")]

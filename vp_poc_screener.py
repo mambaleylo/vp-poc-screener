@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.430"
+APP_VERSION = "0.99.431"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9841,7 +9841,7 @@ NEURO_COND_LABELS = {
     "macd_hist": "MACD гист.", "bb_pctb": "Боллинджер %B", "vol_zone": "объём", "vol_regime": "волатильность",
     "range_zone": "положение в диапазоне", "dd_zone": "просадка от хая", "htf_trend": "тренд 4ч",
     "daily_trend": "тренд 1д", "funding_zone": "фандинг", "btc_agree": "согласие с BTC",
-    "oi_trend": "OI", "dom_third": "доминация", "eth_agree": "согласие с ETH", "h4_rsi_zone": "RSI 4ч",
+    "oi_trend": "OI", "dom_third": "треть месяца", "eth_agree": "согласие с ETH", "h4_rsi_zone": "RSI 4ч",
     "williams_zone": "Williams %R", "adx_zone": "ADX", "vwap_side": "цена vs VWAP", "ichimoku": "Ишимоку",
     "roc_zone": "ROC", "wick_dominance": "тени", "atr_trend": "тренд ATR", "lsw_sweep": "сигнал Sweep",
     "mirror_signal": "сигнал Mirror", "bb_width_zone": "ширина Боллинджера", "obv_trend": "OBV",
