@@ -18321,3 +18321,12 @@ v0.99.432 - Neuro pass gate (user: the #1 card was "trash"): the dependencies
          most likely luck. A failing card shows the reason ("на поиске, где
          нашли зависимости, ...R/сделку — нужно ≥ +0.1R"). Applied to the saved
          results on load, no re-mining needed.
+v0.99.433 - S/R and P/R live signals right after a restart (user): both scans
+         look at the LAST closed bar, which on 4h/1d stays the same for hours,
+         and the "already fired" memory lived only in RAM. After a restart a
+         signal of a bar closed hours ago (e.g. one skipped earlier because the
+         coin had a position open) fired again, entering far from the
+         backtest's price (the backtest enters right after the close). Now a
+         signal is acted on only within 30 min of its bar's close
+         (live_signal_fresh, LIVE_SIGNAL_MAX_AGE_SEC); the scan runs every
+         15 min, so a real signal is never missed.

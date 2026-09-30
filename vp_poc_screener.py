@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.432"
+APP_VERSION = "0.99.433"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -14386,6 +14386,23 @@ def max_hold_bars(tf, bars):
     return max(1, min(int(bars), int(STRATEGY_MAX_HOLD_DAYS * 86400 // sec)))
 
 
+LIVE_SIGNAL_MAX_AGE_SEC = int(os.environ.get("VP_LIVE_SIGNAL_MAX_AGE_SEC", 1800))
+
+
+def live_signal_fresh(sig, max_age=None):
+    """v0.99.433 — per user ("после рестарта сразу же находится живой сигнал"):
+    S/R and P/R live scans look at the LAST closed bar, which on 4h/1d stays
+    the same for hours. The already-fired memory lives only in RAM, so after a
+    restart a signal of a bar that closed hours ago (e.g. one skipped earlier
+    because the coin had a position open) fired again, entering at a price far
+    from the backtest's (which enters right after the close). Now a signal is
+    acted on only within max_age seconds of its bar's close; the regular scan
+    runs every 15 min, so a live signal is always seen in time."""
+    max_age = LIVE_SIGNAL_MAX_AGE_SEC if max_age is None else max_age
+    close_t = (sig.get("time") or 0) + INTERVAL_SECONDS.get(sig.get("timeframe"), 3600)
+    return time.time() - close_t <= max_age
+
+
 def time_exit_r(direction, entry, sl, price):
     d = abs(entry - sl)
     if d <= 0:
@@ -15572,7 +15589,8 @@ def snr_live_loop():
                 STATE["snr_last_live_scan"] = time.time()
                 STATE["snr_last_live_scanned"] = len(active_symbols)
             new_keys = {s: sig["time"] for s, sig in new_signals.items()}
-            fired = {s: t for s, t in new_keys.items() if (s, t) not in _snr_prev_signal_keys}
+            fired = {s: t for s, t in new_keys.items()
+                     if (s, t) not in _snr_prev_signal_keys and live_signal_fresh(new_signals[s])}   # v0.99.433
             for symbol, sig_time in fired.items():
                 sig = new_signals[symbol]
                 # v0.99.251-style no-open-position guard, same discipline
@@ -16347,7 +16365,8 @@ def prv_live_loop():
                 if sig:
                     new_signals[symbol] = sig
             new_keys = {s: sig["time"] for s, sig in new_signals.items()}
-            fired = {s: t for s, t in new_keys.items() if (s, t) not in _prv_prev_signal_keys}
+            fired = {s: t for s, t in new_keys.items()
+                     if (s, t) not in _prv_prev_signal_keys and live_signal_fresh(new_signals[s])}   # v0.99.433
             for symbol, sig_time in fired.items():
                 sig = new_signals[symbol]
                 with state_lock:
