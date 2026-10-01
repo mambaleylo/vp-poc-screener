@@ -3,7 +3,7 @@
 
 Запуск (в Termux, файл рядом с vp_poc_screener.py):
     python gold_research.py
-    python gold_research.py --stooq     # дневные схемы на истории спотового золота XAUUSD с stooq.com (десятки лет)
+    python gold_research.py --stooq     # дневные схемы на длинной истории: stooq XAUUSD → Yahoo GC=F (с 2000) → Binance PAXG (с 2020)
 
 Ничего не торгует. Схемы заданы заранее, параметры не подбираются:
  1. ТРЕНД 12 МЕСЯЦЕВ (Moskowitz, Ooi, Pedersen 2012): каждые 30 дней лонг, если
@@ -216,17 +216,18 @@ def keltner_mr(h):
 
 
 STOOQ_URL = "https://stooq.com/q/d/l/?s=xauusd&i=d"
+YAHOO_URL = "https://query1.finance.yahoo.com/v8/finance/chart/GC=F?range=max&interval=1d"
+BINANCE_URL = "https://data-api.binance.vision/api/v3/klines"
+UA = {"User-Agent": "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/124 Mobile Safari/537.36"}
+
+
+def _bar(t, o, h, l, c):
+    return {"time": int(t), "open": float(o), "high": float(h), "low": float(l), "close": float(c), "volume": 0}
 
 
 def stooq_daily(m):
-    """Long daily spot-gold history (XAUUSD) from stooq.com — Gate's own gold
-    contracts are too young for the daily systems; XAU_USDT tracks spot gold."""
-    try:
-        r = m.requests.get(STOOQ_URL, timeout=30)
-        rows = r.text.strip().splitlines()
-    except Exception as e:
-        say(f"stooq: {e}")
-        return []
+    r = m.requests.get(STOOQ_URL, timeout=30, headers=UA)
+    rows = r.text.strip().splitlines()
     out = []
     for line in rows[1:]:
         p = line.split(",")
@@ -234,12 +235,60 @@ def stooq_daily(m):
             continue
         try:
             t = int(time.mktime(time.strptime(p[0], "%Y-%m-%d"))) - time.timezone
-            o, h, l, c = (float(x) for x in p[1:5])
+            out.append(_bar(t, *p[1:5]))
         except ValueError:
             continue
-        out.append({"time": t, "open": o, "high": h, "low": l, "close": c, "volume": 0})
-    out.sort(key=lambda x: x["time"])
+    if not out:
+        raise ValueError(f"ответ без данных: {r.text[:80]!r}")
     return out
+
+
+def yahoo_daily(m):
+    """Gold futures GC=F (COMEX), daily since 2000."""
+    r = m.requests.get(YAHOO_URL, timeout=30, headers=UA)
+    res = r.json()["chart"]["result"][0]
+    q = res["indicators"]["quote"][0]
+    out = []
+    for i, t in enumerate(res["timestamp"]):
+        vals = (q["open"][i], q["high"][i], q["low"][i], q["close"][i])
+        if None not in vals and min(vals) > 0:
+            out.append(_bar(t, *vals))
+    return out
+
+
+def binance_daily(m):
+    """PAXG/USDT spot on Binance, daily since 2020 (pages of 1000)."""
+    out, start = [], 0
+    while True:
+        r = m.requests.get(BINANCE_URL, timeout=30, headers=UA,
+                           params={"symbol": "PAXGUSDT", "interval": "1d", "startTime": start, "limit": 1000})
+        ks = r.json()
+        if not isinstance(ks, list) or not ks:
+            break
+        out += [_bar(k[0] // 1000, k[1], k[2], k[3], k[4]) for k in ks]
+        if len(ks) < 1000:
+            break
+        start = ks[-1][0] + 1
+    return out
+
+
+def long_daily(m):
+    """Long daily gold history — Gate's own gold contracts are too young for the
+    daily systems. Tries several free sources; first one with > 500 days wins."""
+    now = time.time()
+    for name, fn in (("XAUUSD (stooq)", stooq_daily), ("золото GC=F (Yahoo)", yahoo_daily),
+                     ("PAXG_USDT (Binance)", binance_daily)):
+        try:
+            cs = sorted(fn(m), key=lambda x: x["time"])
+            cs = [c for c in cs if c["time"] + 86400 <= now]
+        except Exception as e:
+            say(f"{name}: не получилось — {str(e)[:120]}")
+            continue
+        if len(cs) > 500:
+            say(f"{name} 1d: {len(cs)} свечей с {time.strftime('%Y-%m-%d', time.gmtime(cs[0]['time']))}")
+            return name, cs
+        say(f"{name}: мало данных ({len(cs)} свечей)")
+    return None, []
 
 
 def main():
@@ -248,13 +297,14 @@ def main():
     spec.loader.exec_module(m)
     now = int(time.time())
     best = {}
+    long_ok = False
     if "--stooq" in sys.argv:
-        sd_ = stooq_daily(m)
-        if len(sd_) > 500:
-            say(f"stooq XAUUSD 1d: {len(sd_)} свечей с {time.strftime('%Y-%m-%d', time.gmtime(sd_[0]['time']))}")
-            best["1d"] = ("XAUUSD (stooq)", sd_)
+        name, sd_ = long_daily(m)
+        if sd_:
+            best["1d"] = (name, sd_)
+            long_ok = True
         else:
-            say(f"stooq: не удалось получить историю ({len(sd_)} строк) — дневные схемы по данным Gate")
+            say("длинную историю получить не удалось — дневные схемы по данным Gate")
     for tf, days in (("1d", 3000), ("1h", 420)):
         for s in SYMBOLS:
             try:
@@ -266,7 +316,7 @@ def main():
             cs = [c for c in cs if c["time"] + sec <= now]
             if cs:
                 say(f"{s} {tf}: {len(cs)} свечей с {time.strftime('%Y-%m-%d', time.gmtime(cs[0]['time']))}")
-            if cs and len(cs) > len(best.get(tf, ("", []))[1]) and not (tf == "1d" and "stooq" in best.get("1d", ("",))[0]):
+            if cs and len(cs) > len(best.get(tf, ("", []))[1]) and not (tf == "1d" and long_ok):
                 best[tf] = (s, cs)
     if "1d" not in best:
         sys.exit("нет данных по золоту")
