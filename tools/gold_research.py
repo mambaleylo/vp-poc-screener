@@ -3,6 +3,7 @@
 
 Запуск (в Termux, файл рядом с vp_poc_screener.py):
     python gold_research.py
+    python gold_research.py --stooq     # дневные схемы на истории спотового золота XAUUSD с stooq.com (десятки лет)
 
 Ничего не торгует. Схемы заданы заранее, параметры не подбираются:
  1. ТРЕНД 12 МЕСЯЦЕВ (Moskowitz, Ooi, Pedersen 2012): каждые 30 дней лонг, если
@@ -214,12 +215,46 @@ def keltner_mr(h):
     return out
 
 
+STOOQ_URL = "https://stooq.com/q/d/l/?s=xauusd&i=d"
+
+
+def stooq_daily(m):
+    """Long daily spot-gold history (XAUUSD) from stooq.com — Gate's own gold
+    contracts are too young for the daily systems; XAU_USDT tracks spot gold."""
+    try:
+        r = m.requests.get(STOOQ_URL, timeout=30)
+        rows = r.text.strip().splitlines()
+    except Exception as e:
+        say(f"stooq: {e}")
+        return []
+    out = []
+    for line in rows[1:]:
+        p = line.split(",")
+        if len(p) < 5:
+            continue
+        try:
+            t = int(time.mktime(time.strptime(p[0], "%Y-%m-%d"))) - time.timezone
+            o, h, l, c = (float(x) for x in p[1:5])
+        except ValueError:
+            continue
+        out.append({"time": t, "open": o, "high": h, "low": l, "close": c, "volume": 0})
+    out.sort(key=lambda x: x["time"])
+    return out
+
+
 def main():
     spec = importlib.util.spec_from_file_location("vp", MAIN)
     m = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m)
     now = int(time.time())
     best = {}
+    if "--stooq" in sys.argv:
+        sd_ = stooq_daily(m)
+        if len(sd_) > 500:
+            say(f"stooq XAUUSD 1d: {len(sd_)} свечей с {time.strftime('%Y-%m-%d', time.gmtime(sd_[0]['time']))}")
+            best["1d"] = ("XAUUSD (stooq)", sd_)
+        else:
+            say(f"stooq: не удалось получить историю ({len(sd_)} строк) — дневные схемы по данным Gate")
     for tf, days in (("1d", 3000), ("1h", 420)):
         for s in SYMBOLS:
             try:
@@ -231,7 +266,7 @@ def main():
             cs = [c for c in cs if c["time"] + sec <= now]
             if cs:
                 say(f"{s} {tf}: {len(cs)} свечей с {time.strftime('%Y-%m-%d', time.gmtime(cs[0]['time']))}")
-            if cs and len(cs) > len(best.get(tf, ("", []))[1]):
+            if cs and len(cs) > len(best.get(tf, ("", []))[1]) and not (tf == "1d" and "stooq" in best.get("1d", ("",))[0]):
                 best[tf] = (s, cs)
     if "1d" not in best:
         sys.exit("нет данных по золоту")
