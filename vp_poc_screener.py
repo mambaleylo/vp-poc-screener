@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.435"
+APP_VERSION = "0.99.436"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1443,16 +1443,19 @@ def apply_settings(updates):
         AUTOTRADE_ENABLED_BOUNCE = bool(updates["autotrade_bounce"])
     if "autotrade_breakout" in updates:
         AUTOTRADE_ENABLED_BREAKOUT = bool(updates["autotrade_breakout"])
+    # v0.99.436 — scalp / martingale / FT5 / mirror have no switches in the UI
+    # any more (modules removed from tabs), so a value saved long ago must not
+    # keep trading invisibly: always off
     if "autotrade_scalp" in updates:
-        AUTOTRADE_ENABLED_SCALP = bool(updates["autotrade_scalp"])
+        AUTOTRADE_ENABLED_SCALP = False
     if "scalp_martingale_enabled" in updates:
-        SCALP_MARTINGALE_ENABLED = bool(updates["scalp_martingale_enabled"])
+        SCALP_MARTINGALE_ENABLED = False
     if "autotrade_ft5" in updates:
-        AUTOTRADE_ENABLED_FT5 = bool(updates["autotrade_ft5"])
+        AUTOTRADE_ENABLED_FT5 = False
     if "autotrade_msnr" in updates:
         AUTOTRADE_ENABLED_MSNR = bool(updates["autotrade_msnr"])
     if "autotrade_mirror" in updates:
-        AUTOTRADE_ENABLED_MIRROR = bool(updates["autotrade_mirror"])
+        AUTOTRADE_ENABLED_MIRROR = False
     if "autotrade_lsw" in updates:
         AUTOTRADE_ENABLED_LSW = bool(updates["autotrade_lsw"])
     if "autotrade_neuro" in updates:
@@ -8994,7 +8997,7 @@ def compound_sig(mod):
     """Settings signature: when it changes, the $15 columns are recomputed."""
     m, v = compound_sizing(mod)
     return (f"{m}:{v:g}|auto:{int(AUTO_RISK_ENABLED)}:{AUTO_RISK_MAX_PCT:g}:{AUTO_RISK_MIN_PCT:g}"
-            f"|start:{MSNR_COMPOUND_START_BALANCE:g}")   # v0.99.434 — a new start balance recomputes the columns
+            f"|start:{MSNR_COMPOUND_START_BALANCE:g}|tier:436")   # v0.99.434 — a new start balance recomputes the columns; v0.99.436 — per-trade tier
 
 
 def auto_risk_for(mod, symbol):
@@ -9036,10 +9039,23 @@ def rr_compound_live_sizing(trades, symbol, mod, start_balance=None, clean_after
     with state_lock:
         mmr = STATE.get("scalp_mmr_map", {}).get(symbol, SCALP_DEFAULT_MMR_PCT)
         tiers = (STATE.get("scalp_risk_tiers") or {}).get(symbol)
+    # v0.99.436 — the tier is looked up per trade by its own notional, like
+    # compute_risk_based_position() does for the real order. Before, the
+    # WORST tier (the one for huge positions, often 1-3x) was applied to
+    # every trade: on a tight stop the margin then exceeded the balance,
+    # every trade was "skipped" and the card had no $ line at all
+    tiers_map = {symbol: tiers} if tiers else None
     if tiers:
-        mmr = max(t[1] for t in tiers)
-        cap = min(cap, min(t[2] for t in tiers)) if cap else min(t[2] for t in tiers)
+        mmr = tiers[0][1]
+        cap = min(cap, tiers[0][2]) if cap else tiers[0][2]
     fee = AUTOTRADE_SIM_FEE_PCT
+
+    def _tier(notional):
+        if not tiers_map:
+            return mmr, cap
+        t_mmr, t_lev = lookup_risk_tier_for_notional(symbol, notional, tiers_map)
+        return (t_mmr if t_mmr is not None else mmr,
+                (min(cap, t_lev) if cap else t_lev) if t_lev is not None else cap)
 
     def _lev(t):
         e, sl_ = t.get("entry"), t.get("sl")
@@ -9074,15 +9090,20 @@ def rr_compound_live_sizing(trades, symbol, mod, start_balance=None, clean_after
         sl_pct = abs(entry - sl) / entry
         if sl_pct <= 0:
             continue
-        lev = compute_max_safe_leverage(t.get("direction") or "LONG", sl_pct * 100, mmr, cap)
-        if not lev:
-            skipped += 1
-            continue
         if mode == "all_in":
+            lev = compute_max_safe_leverage(t.get("direction") or "LONG", sl_pct * 100, mmr, cap)
+            if not lev:
+                skipped += 1
+                continue
             margin = balance * val / 100.0
             notional = margin * lev
         else:
             notional = balance * val / 100.0 / (sl_pct + 2 * fee)
+            t_mmr, t_cap = _tier(notional)
+            lev = compute_max_safe_leverage(t.get("direction") or "LONG", sl_pct * 100, t_mmr, t_cap)
+            if not lev:
+                skipped += 1
+                continue
             margin = notional / lev
             if margin > balance * 0.98:   # same skip as the live affordability check
                 skipped += 1
@@ -15581,7 +15602,7 @@ def snr_track_signal_outcomes():
                 if exit_price is not None:
                     raw = (exit_price - entry) / risk if direction == "LONG" else (entry - exit_price) / risk
                     pnl_r = round(raw if result != "LOSS" else -abs(raw), 3)
-                if result == "TIME_EXIT" and AUTOTRADE_ENABLED_SNR:   # v0.99.398 — really close the position at market
+                if result == "TIME_EXIT" and AUTOTRADE_ENABLED_SNR and sig.get("autotrade_fired", True):   # v0.99.398 — really close the position at market
                     log_error(f"snr time exit {sig['symbol']}: {close_position_for_mode('snr', sig['symbol'], direction)}")
                 with state_lock:
                     sig["status"] = "CLOSED"
@@ -15632,7 +15653,7 @@ def snr_live_loop():
                 record = {"symbol": symbol, "direction": sig["direction"], "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
                           "zone_price": sig["zone_price"], "zone_strength": sig["zone_strength"], "timeframe": sig["timeframe"],
                           "time": sig["time"], "detected_at": time.time(), "status": "OPEN", "result": None,
-                          "exit_price": None, "exit_time": None, "pnl_r": None}
+                          "exit_price": None, "exit_time": None, "pnl_r": None, "autotrade_fired": False}
                 # v0.99.364 — the coin's accepted Neuro filter applies live too:
                 # a filtered-out signal is recorded (and tracked) but not traded
                 with state_lock:
@@ -15656,6 +15677,7 @@ def snr_live_loop():
                         autotrade_result = execute_autotrade("snr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                                               all_in_margin_pct=SNR_ALL_IN_MARGIN_PCT if SNR_ALL_IN_ENABLED else None,
                                                               risk_pct_override=auto_risk_for("snr", symbol))   # v0.99.422
+                        record["autotrade_fired"] = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")   # v0.99.436
                         sim_execute_trade("snr", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                            autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_SNR, record,
                                            autotrade_result=autotrade_result,
@@ -16363,7 +16385,7 @@ def prv_track_signal_outcomes():
                 if exit_price is not None:
                     raw = (exit_price - entry) / risk if direction == "LONG" else (entry - exit_price) / risk
                     pnl_r = round(raw if result != "LOSS" else -abs(raw), 3)
-                if result == "TIME_EXIT" and AUTOTRADE_ENABLED_PRV:   # v0.99.398 — really close the position at market
+                if result == "TIME_EXIT" and AUTOTRADE_ENABLED_PRV and sig.get("autotrade_fired", True):   # v0.99.436 — only the position THIS signal opened (a shared account could hold another module's trade on the coin)
                     log_error(f"prv time exit {sig['symbol']}: {close_position_for_mode('prv', sig['symbol'], direction)}")
                 with state_lock:
                     sig["status"] = "CLOSED"
@@ -16405,7 +16427,8 @@ def prv_live_loop():
                 arrow = "\u2b06\ufe0f" if sig["direction"] == "LONG" else "\u2b07\ufe0f"
                 record = {"symbol": symbol, "direction": sig["direction"], "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
                           "timeframe": sig["timeframe"], "time": sig["time"], "detected_at": time.time(),
-                          "status": "OPEN", "result": None, "exit_price": None, "exit_time": None, "pnl_r": None}
+                          "status": "OPEN", "result": None, "exit_price": None, "exit_time": None, "pnl_r": None,
+                          "autotrade_fired": False}
                 # v0.99.364 — the coin's accepted Neuro filter applies live too:
                 # a filtered-out signal is recorded (and tracked) but not traded
                 with state_lock:
@@ -16429,6 +16452,7 @@ def prv_live_loop():
                         autotrade_result = execute_autotrade("prv", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                                               all_in_margin_pct=PRV_ALL_IN_MARGIN_PCT if PRV_ALL_IN_ENABLED else None,
                                                               risk_pct_override=auto_risk_for("prv", symbol))   # v0.99.422
+                        record["autotrade_fired"] = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")   # v0.99.436
                         sim_execute_trade("prv", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                            autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_PRV, record,
                                            autotrade_result=autotrade_result,
@@ -19562,7 +19586,7 @@ def neuro_track_signal_outcomes():
                 if exit_price is not None:
                     raw = (exit_price - entry) / risk if direction == "LONG" else (entry - exit_price) / risk
                     pnl_r = round(raw if result != "LOSS" else -abs(raw), 3)
-                if result == "TIME_EXIT" and not is_shadow and AUTOTRADE_ENABLED_NEURO:   # v0.99.398 — really close at market
+                if result == "TIME_EXIT" and not is_shadow and AUTOTRADE_ENABLED_NEURO and sig.get("autotrade_fired", True):   # v0.99.398 — really close at market
                     log_error(f"neuro time exit {sig['symbol']}: {close_position_for_mode('neuro', sig['symbol'], direction)}")
                 with _neuro_signal_log_lock:
                     if is_shadow:
@@ -20153,6 +20177,7 @@ def neuro_live_loop():
                         "time": sig_time, "detected_at": time.time(),
                         "status": "OPEN", "result": None,
                         "exit_price": None, "exit_time": None, "pnl_r": None,
+                        "autotrade_fired": False,
                     }
                     if not _sel_ok:
                         record["not_selected"] = True   # v0.99.384
@@ -20187,6 +20212,7 @@ def neuro_live_loop():
                     autotrade_result = execute_autotrade("neuro", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                                           all_in_margin_pct=_neuro_all_in,
                                                           risk_pct_override=auto_risk_for("neuro", symbol))   # v0.99.422
+                    record["autotrade_fired"] = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")   # v0.99.436
                     sim_execute_trade("neuro", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                        autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_NEURO, record,
                                        autotrade_result=autotrade_result, all_in_margin_pct=_neuro_all_in)
@@ -22994,7 +23020,7 @@ INDEX_HTML = """<!doctype html>
     <div id="settingsSearchWrap">
       <input type="text" id="settingsSearch" placeholder="Поиск по настройкам…">
     </div>
-    <details class="settingsGroup" style="--mod-color:var(--acc);" open><summary class="settingsGroupTitle">🎨 Оформление</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--acc);"><summary class="settingsGroupTitle">🎨 Оформление</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="name">Liquid Glass</div>
@@ -23132,34 +23158,6 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Алерты FT5 ⚠️</div>
-          <div class="sub">экспериментально — открытие и закрытие сигналов</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramFt5"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Алерты Зеркала</div>
-          <div class="sub">открытие и закрытие сигналов</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramMirror"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Алерты EMA Bull</div>
-          <div class="sub">новые сигналы пробоя EMA на недельном</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramEmaBull"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Алерты AMD</div>
-          <div class="sub">новые сигналы AMD Cycle (Accumulation/Manipulation/Distribution)</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramAmd"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
           <div class="label">↳ Алерты Neuro</div>
           <div class="sub">новые живые сигналы самообучающейся системы зависимостей (топ-N монет, см. настройку выше)</div>
         </div>
@@ -23171,13 +23169,6 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">краткая сводка по топ-N монетам после каждого полного цикла бэктеста — по одной строке на монету, например "BTC-45%-RR2" (винрейт и подобранный RR — те же цифры что и на карточке монеты)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramNeuroSummary"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Алерты NQ Model</div>
-          <div class="sub">новые сигналы Previous Day High/Low + CISD на NAS100_USDT</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setTelegramNq"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -23275,40 +23266,15 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Bounce</div>
+          <div class="label">↳ Volume: отскок (Bounce)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeBounce"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Breakout</div>
+          <div class="label">↳ Volume: пробой (Breakout)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeBreakout"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Скальпинг</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeScalp"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳↳ Мартингейл после стопа ⚠️</div>
-          <div class="sub">после стопа следующая сделка по ТОЙ ЖЕ монете риском ×2, снова стоп — ×4, ×8 (потолок, дальше не растёт) — победа сбрасывает обратно к базовому риску. Реальный риск потери денег растёт экспоненциально при серии стопов подряд</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setScalpMartingaleEnabled"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ FT5 ⚠️</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeFt5"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Зеркало</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeMirror"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -25945,30 +25911,14 @@ const setInputs = {
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
   hourly_stats_enabled: document.getElementById('setHourlyStats'),
-  telegram_alerts_ft5: document.getElementById('setTelegramFt5'),
-  telegram_alerts_mirror: document.getElementById('setTelegramMirror'),
-  telegram_alerts_ema_bull: document.getElementById('setTelegramEmaBull'),
-  telegram_alerts_amd: document.getElementById('setTelegramAmd'),
   telegram_alerts_neuro: document.getElementById('setTelegramNeuro'),
   telegram_alerts_neuro_summary: document.getElementById('setTelegramNeuroSummary'),
-  telegram_alerts_nq: document.getElementById('setTelegramNq'),
   telegram_alerts_snr: document.getElementById('setTelegramSnr'),
   telegram_alerts_prv: document.getElementById('setTelegramPrv'),
   telegram_alerts_network: document.getElementById('setTelegramNetwork'),
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
   autotrade_bounce: document.getElementById('setAutotradeBounce'),
   autotrade_breakout: document.getElementById('setAutotradeBreakout'),
-  autotrade_scalp: document.getElementById('setAutotradeScalp'),
-  autotrade_ft5: document.getElementById('setAutotradeFt5'),
-  scalp_martingale_enabled: document.getElementById('setScalpMartingaleEnabled'),
-  // v0.99.105 — see this same key's own note in Python's apply_settings():
-  // AUTOTRADE_ENABLED_MSNR is a genuine master switch layered ON TOP of the
-  // 6 individual per-symbol toggles in the MSNR panel itself, not a
-  // replacement for them (v0.99.18 removed the checkbox HERE specifically
-  // because the constant wasn't checked anywhere in the real firing
-  // decision back then — now it is, so the checkbox is back and genuinely
-  // functional, not decorative).
-  autotrade_mirror: document.getElementById('setAutotradeMirror'),
   autotrade_neuro: document.getElementById('setAutotradeNeuro'),
   neuro_single_best_enabled: document.getElementById('setNeuroSingleBest'),
   autotrade_snr: document.getElementById('setAutotradeSnr'),
@@ -26513,7 +26463,10 @@ function compoundSummaryHtml(x) {
     // v0.99.327 — result computed by a version before the $15 simulation existed
     return `<div class="dim" style="font-size:var(--fs-sm);margin:4px 0 8px;">💰 расчёт с $500 появится после следующего бэктеста этого модуля (или 🛠 → «↻ Бэктест»)</div>`;
   }
-  if (!x || x.compound_final_balance == null || !x.compound_trades) return '';
+  if (!x || x.compound_final_balance == null) return '';
+  if (!x.compound_trades) {   // v0.99.436 — say why instead of hiding the line
+    return `<div class="dim" style="font-size:var(--fs-sm);margin:4px 0 8px;">💰 с $${x.compound_start || 500}: ни одна сделка не открылась бы${x.compound_skipped ? ` — все ${x.compound_skipped} пропущены: при риске ${x.compound_mode || ''} нужной маржи больше, чем баланса (снизьте риск модуля)` : ' — у сделок нет цены входа/стопа'}</div>`;
+  }
   const pct = x.compound_return_pct;
   const cls = pct >= 0 ? 'win' : 'loss';
   const blown = x.compound_blown_at ? ` · <span class="loss">слит на сделке #${x.compound_blown_at}</span>` : '';

@@ -18341,3 +18341,25 @@ v0.99.435 - Own risk % per module (user): Neuro, S/R and P/R each have their own
          backtest column use the module's own % ("Авто-риск", when on and
          known, still wins). The 50% cap is gone: the common % and the module
          ones go up to 100%.
+v0.99.436 - settings + P/R audit (user: "в настройках авто торговли
+         есть несуществующие индикаторы, раздел оформления всегда
+         развернут, в p/r не для всех карточек считается прибыль в
+         долларах, проверь на критические ошибки p/r"):
+         - Settings: Scalp / Martingale / FT5 / Mirror autotrade switches
+           removed (their tabs are gone); saved values for them are
+           ignored (always off) so nothing trades invisibly. Bounce /
+           Breakout kept, relabelled "Volume: отскок / пробой". Dead
+           Telegram alert rows (FT5, Mirror, EMA Bull, AMD, NQ) removed.
+           "Оформление" group starts collapsed like the others.
+         - $500 simulation (Neuro / S/R / P/R): the risk-limit tier is now
+           looked up per trade by its own notional, like the real order.
+           Before, the worst tier (meant for huge positions, often 1-3x)
+           was applied to every trade, so on tight stops the margin
+           exceeded the balance, every trade was skipped and the card had
+           no $ line. A card with 0 simulated trades now says why.
+         - CRITICAL: the max-holding-time exit of S/R / P/R / Neuro closed
+           ANY position on the coin in that direction on the module's
+           account — with a shared account that could be another module's
+           trade, or a position when this signal was filtered and never
+           traded. Now only a position this signal itself opened is
+           closed (signals from before this version: as before).
