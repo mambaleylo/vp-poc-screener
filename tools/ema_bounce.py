@@ -3,6 +3,7 @@
 
 Запуск (в Termux, файл рядом с vp_poc_screener.py):
     python ema_bounce.py [число монет, по умолчанию 100] [--skip 0]
+    python ema_bounce.py 100 --skip 100 --check "1н,20,S,касание,*,2,0.5; 1д,12,L,закол,по тренду,2,1"
 
 EMA: 9, 12, 20, 21, 26, 34, 50, 55, 89, 100, 144, 200 (по закрытиям ТФ).
 Таймфреймы: 1д, 1н (с понедельника), 1м — недели и месяцы собираются из дневок.
@@ -271,6 +272,41 @@ def load(m, syms, now, rng, label):
     return out
 
 
+def check_mode(m, syms, skip, spec_txt):
+    """Pre-chosen variants only, e.g. "1н,20,S,касание,*,2,0.5; 1д,12,L,закол,по тренду,2,1"
+    (ТФ, EMA, L/S, закол|касание|*, по тренду|против тренда|*, тейк, стоп) — each is
+    one hypothesis on coins the search never saw: no multiple-testing correction."""
+    keys = []
+    for part in spec_txt.split(";"):
+        f = [x.strip() for x in part.split(",")]
+        if len(f) != 7:
+            continue
+        tf, L, sd, kind, slope, tp, sl = f
+        xi = EXITS.index((float(tp), float(sl)))
+        keys.append((tf, int(L), 1 if sd.upper().startswith("L") else -1, kind, slope, xi))
+    if not keys:
+        sys.exit("не разобрал варианты: ТФ,EMA,L/S,вид,тренд,тейк,стоп через ;")
+    now = int(time.time())
+    t0 = time.time()
+    say(f"ПРОВЕРКА {len(keys)} вариантов на монетах с {skip + 1}-й по {skip + len(syms)}-ю")
+    R = collect(load(m, syms, now, random.Random(9), "проверка"))
+    good = []
+    for k in keys:
+        rows = R.get(k) or []
+        if len(rows) < 20:
+            say(f"  {kname(k)}: мало сделок ({len(rows)})")
+            continue
+        s = stats(rows)
+        ok = s["ex"] > 0 and (s["t"] or 0) >= CONFIRM_T and s["r"] > 0 and s["h1"] > 0 and s["h2"] > 0
+        say(fmt(k, s) + ("  ✓ ПОДТВЕРДИЛОСЬ" if ok else ""))
+        if ok:
+            good.append(k)
+    say(f"\nИТОГ: подтвердились {len(good)} из {len(keys)} (нужно: сделка в плюсе, превышение > 0, t >= {CONFIRM_T}, "
+        f"плюс в обеих половинах) · время {time.time() - t0:.0f} с")
+    with open(os.path.join(os.getcwd(), "ema_bounce_check.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(OUT) + "\n")
+
+
 def main():
     args = [a for i, a in enumerate(sys.argv[1:], 1) if not a.startswith("--") and sys.argv[i - 1] != "--skip"]
     skip = int(sys.argv[sys.argv.index("--skip") + 1]) if "--skip" in sys.argv else 0
@@ -293,6 +329,8 @@ def main():
             pass
     syms = [s for s, _ in sorted(vols.items(), key=lambda kv: -kv[1])][skip:skip + n_coins]
     disc, conf = syms[0::2], syms[1::2]
+    if "--check" in sys.argv:
+        return check_mode(m, syms, skip, sys.argv[sys.argv.index("--check") + 1])
     now = int(time.time())
     rng = random.Random(9)
     t0 = time.time()
