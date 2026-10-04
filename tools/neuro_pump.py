@@ -3,6 +3,7 @@
 
 Запуск (в Termux, файл рядом с vp_poc_screener.py):
     python neuro_pump.py [число монет, по умолчанию 60] [--skip 10] [--pump 15]
+    python neuro_pump.py 60 --skip 70 --check "streak = red4 + Supertrend = below; ..."   # только эти состояния (как в ИТОГ)
 
 Условия — те же, что Neuro считает на каждой часовой свече (neuro_compute_conditions):
 RSI, Stoch, MACD, Боллинджер, ADX, Ишимоку, CCI, OBV, Supertrend, EMA, тренды 4ч/1д,
@@ -167,6 +168,85 @@ def load(m, syms, btc, eth, warm, start, now, pump, label):
     return out
 
 
+def parse_states(txt):
+    """'streak = red4 + Supertrend = below; ...' (the ИТОГ line, labels or raw keys) -> cells"""
+    rev = {v.lower(): k for k, v in LABELS.items()}
+    cells = []
+    for part in txt.replace("\n", " ").split(";"):
+        part = part.strip().rstrip(".")
+        if not part:
+            continue
+        kv = []
+        for item in part.split(" + "):
+            if " = " not in item:
+                continue
+            k, v = item.rsplit(" = ", 1)
+            k = k.strip()
+            kv.append((rev.get(k.lower(), k), v.strip()))
+        kv.sort()
+        if kv:
+            cells.append(tuple(x for pair in kv for x in pair))
+    return cells
+
+
+def check_mode(m, syms, skip, pump, txt):
+    """Pre-chosen states only (e.g. the ones confirmed by a previous run), on
+    another coin set: each state, and 'any of them' as one signal."""
+    cells = parse_states(txt)
+    if not cells:
+        sys.exit("не разобрал состояния — передайте их как в строке ИТОГ, через ;")
+    now = int(time.time())
+    start = now - DAYS * 86400
+    warm = start - 60 * 86400
+    t0 = time.time()
+    btc = m.get_candles_range("BTC_USDT", "1h", warm, now) or []
+    eth = m.get_candles_range("ETH_USDT", "1h", warm, now) or []
+    say(f"ПРОВЕРКА {len(cells)} состояний на монетах с {skip + 1}-й по {skip + len(syms)}-ю · памп +{pump * 100:g}% · "
+        f"сделка: тейк +{pump * 100:g}%, стоп −{STOP * 100:g}%, {H}ч")
+    C = load(m, syms, btc, eth, warm, start, now, pump, "проверка")
+    allC = [r for rows in C for r in rows]
+    if not allC:
+        sys.exit("нет данных")
+    base = sum(1 for r in allC if r[2]) / len(allC)
+    want = set(cells)
+    keys = set(k for c in cells for k in c[0::2])
+    res = evaluate(C, keys)
+    any_rows = []
+    for rows in C:   # "any of them": one signal per coin per 24h when at least one state holds
+        if not rows:
+            continue
+        mean_tr = sum(r[3] for r in rows) / len(rows)
+        last = None
+        for t, items, pumped, tr in rows:
+            d = dict(items)
+            hit = any(all(d.get(c[i]) == c[i + 1] for i in range(0, len(c), 2)) for c in want)
+            if hit and (last is None or t - last >= COOLDOWN):
+                last = t
+                any_rows.append((t, pumped, tr, tr - mean_tr))
+    good = []
+    for c in cells:
+        rows = res.get(c) or []
+        if len(rows) < 30:
+            say(f"  {cname(c)}: мало сигналов ({len(rows)})")
+            continue
+        s = stats(rows, base)
+        ok = s["ex"] > 0 and (s["t"] or 0) >= CONFIRM_T and s["tr"] > 0 and s["h1"] > 0 and s["h2"] > 0
+        say(fmt(c, s) + ("  ✓ ПОДТВЕРДИЛОСЬ" if ok else ""))
+        if ok:
+            good.append(c)
+    if len(any_rows) >= 30:
+        s = stats(any_rows, base)
+        ok = s["ex"] > 0 and (s["t"] or 0) >= CONFIRM_T and s["tr"] > 0 and s["h1"] > 0 and s["h2"] > 0
+        td = "—" if s["t"] is None else f"{s['t']:+.2f}"
+        say(f"\n  ЛЮБОЕ ИЗ НИХ (одна сделка на монету в сутки): сигналов {s['n']} · сделка {s['tr'] * 100:+.2f}% · "
+            f"превыш. {s['ex'] * 100:+.2f}% · t={td} · половины {s['h1'] * 100:+.2f}/{s['h2'] * 100:+.2f}%"
+            + ("  ✓ ПОДТВЕРДИЛОСЬ" if ok else ""))
+    say(f"\nИТОГ: подтвердились {len(good)} из {len(cells)} (нужно: сделка в плюсе, превышение > 0, t >= {CONFIRM_T}, "
+        f"плюс в обеих половинах) · время {time.time() - t0:.0f} с")
+    with open(os.path.join(os.getcwd(), "neuro_pump_check.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(OUT) + "\n")
+
+
 def main():
     global LABELS
     args = [a for i, a in enumerate(sys.argv[1:], 1)
@@ -194,6 +274,8 @@ def main():
     syms = [s for s, _ in sorted(vols.items(), key=lambda kv: -kv[1])
             if s not in ("BTC_USDT", "ETH_USDT")][skip:skip + n_coins]
     disc, conf = syms[0::2], syms[1::2]
+    if "--check" in sys.argv:
+        return check_mode(m, syms, skip, pump, sys.argv[sys.argv.index("--check") + 1])
     now = int(time.time())
     start = now - DAYS * 86400
     warm = start - 60 * 86400
