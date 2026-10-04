@@ -4,6 +4,7 @@
 Запуск (в Termux, файл рядом с vp_poc_screener.py):
     python setup_scan.py [число монет, по умолчанию 60]
     python setup_scan.py 60 --skip 60      # совсем другие монеты (с 61-й по 120-ю)
+    python setup_scan.py 60 --skip 60 --check "13:4h,6:1h"   # только заранее выбранные сетапы (номер:ТФ)
 
 Ничего не торгует. Свечи 15м (~100 дней), 1ч (~400 дней), 4ч (~4 года),
 кэшируются тем же кэшем, что у бота. Первый запуск 10-20 минут.
@@ -52,6 +53,7 @@ BASE_SAMPLES = 150
 FDR_Q = 0.10
 CONFIRM_T = 2.0
 OUT = []
+CHECK = None   # --check "13:4h,6:1h" -> {"13": {"4h"}, "6": {"1h"}}
 
 
 def say(s=""):
@@ -518,6 +520,8 @@ def run_series(c, tf, rng):
             base[(side, rr)] = sum(rs) / len(rs)
     res = {}
     for name, fn in SETUPS:
+        if CHECK is not None and tf not in CHECK.get(name.split()[0], ()):
+            continue
         try:
             sigs = sorted(set(fn(x)))
         except Exception as e:
@@ -568,6 +572,8 @@ def collect(m, syms, now, rng, label):
     t0 = time.time()
     for k, s in enumerate(syms, 1):
         for tf, days in TFS.items():
+            if CHECK is not None and not any(tf in v for v in CHECK.values()):
+                continue
             try:
                 cs = m.get_candles_range(s, tf, now - days * 86400, now) or []
                 sec = m.INTERVAL_SECONDS.get(tf, 3600)
@@ -588,6 +594,34 @@ def fmt(name, tf, rr, s, n_coins):
     per_day = s["n"] / max(s["span"], 1) / max(n_coins, 1)
     return (f"  {name:<24} {tf:>3} RR{rr:g}: n={s['n']:5d} (~{per_day:.2f}/день на монету) WR {s['wr']:3.0f}% · "
             f"сделка {s['raw']:+.3f}R · превыш. {s['ex']:+.3f}R · t={td} · половины {s['h1']:+.3f}/{s['h2']:+.3f}")
+
+
+def check_mode(m, syms, skip, spec_txt):
+    """Pre-chosen setups only (e.g. a near-miss of a previous search), on
+    a coin set of your choice — one hypothesis each, no search, so no
+    multiple-testing correction: needs excess > 0, t >= 2 and a positive
+    trade, and positive excess in both halves."""
+    global CHECK
+    CHECK = {}
+    for part in spec_txt.split(","):
+        num, tf = part.strip().split(":")
+        CHECK.setdefault(num, set()).add(tf)
+    now = int(time.time())
+    t0 = time.time()
+    say(f"ПРОВЕРКА {spec_txt} на монетах с {skip + 1}-й по {skip + len(syms)}-ю ({len(syms)} шт.)")
+    agg = collect(m, syms, now, random.Random(11), "проверка")
+    good = []
+    for key in sorted(agg):
+        s = stats(agg[key])
+        ok = s["ex"] > 0 and (s["t"] or 0) >= CONFIRM_T and s["raw"] > 0 and s["h1"] > 0 and s["h2"] > 0
+        say(fmt(*key, s, len(syms)) + ("  ✓ ПОДТВЕРДИЛСЯ" if ok else ""))
+        if ok:
+            good.append(key)
+    say(f"\nИТОГ: {'подтвердились — ' + '; '.join(f'{k[0]} {k[1]} RR{k[2]:g}' for k in good) if good else 'не подтвердился ни один'}"
+        f" (нужно: сделка в плюсе, превышение над случайным > 0 и t >= {CONFIRM_T}, плюс в обеих половинах)")
+    say(f"время: {time.time() - t0:.0f} с")
+    with open(os.path.join(os.getcwd(), "setup_check_report.txt"), "w", encoding="utf-8") as f:
+        f.write("\n".join(OUT) + "\n")
 
 
 def main():
@@ -612,6 +646,8 @@ def main():
             pass
     syms = [s for s, _ in sorted(vols.items(), key=lambda kv: -kv[1])][skip:skip + n_coins]
     disc, conf = syms[0::2], syms[1::2]
+    if "--check" in sys.argv:
+        return check_mode(m, syms, skip, sys.argv[sys.argv.index("--check") + 1])
     now = int(time.time())
     rng = random.Random(11)
     t0 = time.time()
