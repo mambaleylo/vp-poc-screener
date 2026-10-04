@@ -107,7 +107,7 @@ def outcomes(path, times, start_t, side, a, hold):
     if path[-1]["time"] < end_t - 86400:
         return None   # not enough future
     e = path[k]["open"]
-    if e <= 0:
+    if e <= 0 or a < e * 0.001:   # flat market: ATR ~0 blows the fee in R up to -inf
         return None
     fav, adv = {}, {}
     fi = ai = 0

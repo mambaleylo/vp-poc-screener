@@ -90,7 +90,7 @@ def outcomes(h1, k, side, atr):
     if k + HOLD > len(h1) or atr <= 0:
         return None
     e = h1[k]["open"]
-    if e <= 0:
+    if e <= 0 or atr < e * 0.001:   # flat market: ATR ~0 blows the fee in R up to -inf
         return None
     fav, adv = {}, {}
     fi = ai = 0
