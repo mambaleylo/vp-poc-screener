@@ -59,7 +59,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.436"
+APP_VERSION = "0.99.437"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1439,10 +1439,10 @@ def apply_settings(updates):
         LSW_ALL_IN_ENABLED = bool(updates["lsw_all_in_enabled"])
     if "auto_risk_enabled" in updates:   # v0.99.422
         globals()["AUTO_RISK_ENABLED"] = bool(updates["auto_risk_enabled"])
-    if "autotrade_bounce" in updates:
-        AUTOTRADE_ENABLED_BOUNCE = bool(updates["autotrade_bounce"])
+    if "autotrade_bounce" in updates:   # v0.99.437 — Volume module retired (v0.99.341): no switch, always off
+        AUTOTRADE_ENABLED_BOUNCE = False
     if "autotrade_breakout" in updates:
-        AUTOTRADE_ENABLED_BREAKOUT = bool(updates["autotrade_breakout"])
+        AUTOTRADE_ENABLED_BREAKOUT = False
     # v0.99.436 — scalp / martingale / FT5 / mirror have no switches in the UI
     # any more (modules removed from tabs), so a value saved long ago must not
     # keep trading invisibly: always off
@@ -23266,18 +23266,6 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">↳ Volume: отскок (Bounce)</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeBounce"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="label">↳ Volume: пробой (Breakout)</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="setAutotradeBreakout"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
           <div class="label">↳ Neuro</div>
           <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча под безопасное расстояние до ликвидации и размера позиции, что и у Sweep/остальных режимов</div>
         </div>
@@ -25917,8 +25905,6 @@ const setInputs = {
   telegram_alerts_prv: document.getElementById('setTelegramPrv'),
   telegram_alerts_network: document.getElementById('setTelegramNetwork'),
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
-  autotrade_bounce: document.getElementById('setAutotradeBounce'),
-  autotrade_breakout: document.getElementById('setAutotradeBreakout'),
   autotrade_neuro: document.getElementById('setAutotradeNeuro'),
   neuro_single_best_enabled: document.getElementById('setNeuroSingleBest'),
   autotrade_snr: document.getElementById('setAutotradeSnr'),

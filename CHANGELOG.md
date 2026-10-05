@@ -18363,3 +18363,7 @@ v0.99.436 - settings + P/R audit (user: "в настройках авто тор
            trade, or a position when this signal was filtered and never
            traded. Now only a position this signal itself opened is
            closed (signals from before this version: as before).
+v0.99.437 - Settings: the Volume module's autotrade switches (Bounce / Breakout) are
+         removed — the module itself was retired in v0.99.341 and its tab is
+         hidden (user: "Volume индикатора уже лет в обед нет, а в настройках
+         есть"). Saved "on" values for them are ignored (always off).
