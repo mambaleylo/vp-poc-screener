@@ -18486,3 +18486,13 @@ v0.99.448 - Зоны: the group is read through the user's own Telegram account
          git-ignored) and is never returned by the API; the /api/zones/ut/*
          endpoints answer only to 127.0.0.1, since the server listens on every
          address. "выйти" logs the session out in Telegram too.
+v0.99.449 - Зоны OCR (PEPE screenshot: "метка 0 не сходится со шкалой — взял 0",
+         one of two levels lost): the drawn line runs into the price axis for
+         ~25 px before its label and that piece was taken for the label box —
+         now the widest dark piece is the box, and pieces cut apart by the gaps
+         between digits are glued back. The y→price fit takes points within 3 px
+         (0.6% of the price was ~30 px on a narrow axis and let wrong readings
+         bend the fit, which then "corrected" right labels by a digit). The
+         axis' usual number of decimals comes from labels and ticks; a price
+         taken from the line keeps at least 5 significant digits (it was
+         rounded to 0 decimals = 0).

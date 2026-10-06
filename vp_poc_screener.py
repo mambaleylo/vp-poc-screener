@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.448"
+APP_VERSION = "0.99.449"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21311,7 +21311,9 @@ def _zocr_fix_by_line(lb, pred, px_price, notes, full_dec=None):
             notes.append(f"метка {lb['v']:g} → {best[1]:g} (по положению линии)")
         return best[1]
     if abs(lb["v"] - pred) > 0.03 * abs(pred):
-        notes.append(f"метка {lb['v']:g} не сходится со шкалой — взял {round(pred, dec):g}")
+        if pred > 0:   # never round a small price away: keep at least 5 significant digits
+            dec = max(dec, 4 - math.floor(math.log10(pred)))
+        notes.append(f"метка {lb['v']:g} не сходится со шкалой — взял {round(pred, dec):g} (по положению линии)")
         return round(pred, dec)
     return lb["v"]
 
@@ -21430,10 +21432,19 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                 curs = None
         if curs:
             segs.append(curs)
-        segs = [g for g in segs if g[1] - g[0] >= 20]
+        glued = []   # a box cut by the gaps between its digits (a taller dark run) is one box
+        for g in segs:
+            if glued and g[0] - glued[-1][1] <= 3:
+                glued[-1] = [glued[-1][0], g[1]]
+            else:
+                glued.append(list(g))
+        segs = [g for g in glued if g[1] - g[0] >= 20]
         if not segs:
             continue
-        bx0, bx1 = segs[0][0], segs[0][1] + 1
+        # the label box is the widest dark piece: a drawn line runs into the axis for
+        # ~25 px before its label and must not be taken for it (PEPE: read as "0")
+        seg = max(segs, key=lambda g: g[1] - g[0])
+        bx0, bx1 = seg[0], seg[1] + 1
         br = [sum(1 for x in range(bx0 + 1, bx1 - 1) if gp[x, yy] > 150) for yy in range(s, e)]
         bands, i = [], 0
         while i < len(br):
@@ -21519,7 +21530,8 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                 if k >= 0:
                     continue   # price must fall as y grows
                 c0 = a["v"] - k * a["y"]
-                inl = [p for p in pts if abs(c0 + k * p["y"] - p["v"]) <= 0.006 * abs(p["v"]) + 1e-12]
+                # within 3 px of the line (a % of the price is tens of px on a narrow axis: PEPE)
+                inl = [p for p in pts if abs(c0 + k * p["y"] - p["v"]) <= min(0.006 * abs(p["v"]), 3 * abs(k)) + 1e-12]
                 if best is None or len(inl) > len(best[2]):
                     best = (k, c0, inl)
         if best and len(best[2]) >= 3:
@@ -21598,8 +21610,8 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
     # labels are stacked (shifted) by TradingView when lines are close, but keep their order:
     # pair them with lines in order, nearest first
     free = sorted(labels, key=lambda lb: lb["y"])
-    _decs = [lb["dec"] for lb in labels]
-    full_dec = max(set(_decs), key=_decs.count) if _decs else None   # the axis' usual number of decimals
+    _decs = [p_["dec"] for p_ in labels + ticks if p_["dec"] > 0] or [lb["dec"] for lb in labels]
+    full_dec = max(set(_decs), key=lambda d_: (_decs.count(d_), d_)) if _decs else None   # the axis' usual decimals
     line_px = []
     for ly in sorted(lines):
         cand = [lb for lb in free if abs(lb["y"] - ly) <= 22]
@@ -21610,13 +21622,15 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                                   full_dec=full_dec)
             line_px.append((ly, v))
         elif price_at:
-            line_px.append((ly, round(price_at(ly), dec)))
+            pl = price_at(ly)
+            line_px.append((ly, round(pl, max(dec, 4 - math.floor(math.log10(pl))) if pl > 0 else dec)))
     zones = []
     for r in merged:
         lv = sorted({round(v, 10) for ly, v in line_px if r["y0"] - 5 <= ly <= r["y1"] + 5})
         if len(lv) < 2 and price_at:
             for yy in (r["y0"], r["y1"]):
-                p = round(price_at(yy), dec)
+                p = price_at(yy)
+                p = round(p, max(dec, 4 - math.floor(math.log10(p))) if p > 0 else dec)
                 if all(abs(p - q) > 0.002 * p for q in lv):
                     lv.append(p)
             lv.sort()
