@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.472"
+APP_VERSION = "0.99.473"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -25925,8 +25925,12 @@ INDEX_HTML = """<!doctype html>
 <html lang="ru">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>VP-POC Screener</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<meta name="theme-color" content="#000000">
+<meta name="mobile-web-app-capable" content="yes">
+<link rel="icon" href="/app-icon-192.png">
 <style>
   /* v0.99.387 — mobile-first redesign (user: "переосмысли дизайн сайта,
      каждый элемент, с расчётом на телефон"). One design system: colour
@@ -28404,6 +28408,8 @@ async function selfUpdate() {
   };
   wait();
 }
+// v0.99.473 — installable as an app (fullscreen without a touch)
+if ('serviceWorker' in navigator) { try { navigator.serviceWorker.register('/sw.js').catch(() => {}); } catch (e) {} }
 // v0.99.469 — the bot restarted (/update, /restart, the button, by hand): the
 // page reloads itself with the new code; the open tab and a running
 // screensaver come back. Not while a dialog or the settings are open.
@@ -30868,7 +30874,16 @@ let _ssLastTap = 0;
 function _ssTap() {
   const now = Date.now();
   if (now - _ssLastTap < 450) { _ssLastTap = 0; if (_ssActive) toggleScreensaver(); }
-  else _ssLastTap = now;
+  else {
+    _ssLastTap = now;
+    // v0.99.473 — a screensaver started without a touch (after the page reloaded
+    // itself, or the 20 s auto start) can't go fullscreen: the browser allows it
+    // only from a touch. One tap now makes it fullscreen.
+    const overlay = document.getElementById('screensaverOverlay');
+    if (_ssActive && overlay && !document.fullscreenElement && overlay.requestFullscreen) {
+      overlay.requestFullscreen().catch(() => {});
+    }
+  }
 }
 
 function _ssTick() {
@@ -31016,6 +31031,60 @@ document.addEventListener('fullscreenchange', () => {
 @app.route("/")
 def index():
     return Response(INDEX_HTML, mimetype="text/html")
+
+
+# v0.99.473 — installable as an app ("Добавить на главный экран" / "Установить
+# приложение" in Chrome): it then always opens fullscreen — also after the page
+# reloads itself — which a plain page can't do (the browser allows fullscreen
+# only from a touch).
+def _app_icon_png(size):
+    """a plain PNG icon built without Pillow: dark square, green ring"""
+    import zlib
+    rows = []
+    c, r_out, r_in = size / 2, size * 0.36, size * 0.24
+    for y in range(size):
+        row = bytearray([0])
+        for x in range(size):
+            d = ((x - c) ** 2 + (y - c) ** 2) ** 0.5
+            row += bytes((61, 220, 151) if r_in <= d <= r_out else (12, 14, 18))
+        rows.append(bytes(row))
+    raw = b"".join(rows)
+
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data) & 0xffffffff)
+    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+            + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b""))
+
+
+_APP_ICONS = {}
+
+
+@app.route("/app-icon-<int:size>.png")
+def app_icon(size):
+    if size not in (192, 512):
+        return Response(status=404)
+    if size not in _APP_ICONS:
+        _APP_ICONS[size] = _app_icon_png(size)
+    return Response(_APP_ICONS[size], mimetype="image/png")
+
+
+@app.route("/manifest.webmanifest")
+def app_manifest():
+    return Response(json.dumps({
+        "name": "WickFill — VP-POC Screener", "short_name": "WickFill",
+        "start_url": "/", "scope": "/", "display": "fullscreen", "display_override": ["fullscreen", "standalone"],
+        "orientation": "portrait", "background_color": "#000000", "theme_color": "#000000",
+        "icons": [{"src": "/app-icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+                  {"src": "/app-icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}],
+    }, ensure_ascii=False), mimetype="application/manifest+json")
+
+
+@app.route("/sw.js")
+def app_sw():
+    # a pass-through worker: only so the browser offers to install the app
+    return Response("self.addEventListener('install', e => self.skipWaiting());\n"
+                    "self.addEventListener('activate', e => self.clients.claim());\n"
+                    "self.addEventListener('fetch', e => {});\n", mimetype="application/javascript")
 
 
 # ----------------------------------------------------------------------------

@@ -18683,3 +18683,11 @@ v0.99.472 - Restart (/update, /restart, the 🛠 button) crashed on the phone:
          the userbot's asyncio loop died with EBADF, then "Aborted". Now the
          descriptors are only marked close-on-exec and the kernel closes them
          at the exec itself; the port is freed the same way.
+v0.99.473 - Fullscreen: the page is installable as an app (web manifest with
+         display: fullscreen, icons generated without Pillow, a pass-through
+         service worker). Installed via Chrome's "Установить приложение" /
+         "Добавить на главный экран", it always opens fullscreen — also after
+         the page reloads itself after a bot restart; a browser tab can't go
+         fullscreen without a touch. In a tab: a screensaver that started
+         without a touch (after a reload, the 20 s auto start) goes fullscreen
+         on one tap; a double tap still closes it.
