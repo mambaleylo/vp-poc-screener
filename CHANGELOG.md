@@ -18612,3 +18612,6 @@ v0.99.461 - Зоны / history: "все" in the days prompt (now the default) lo
          (~400 days) or 4h (~4 years) instead of 15m (~100 days) — before, their
          outcome could not be computed at all; inside one coarse candle stop
          and take = stop (conservative).
+v0.99.462 - Зоны / history: a small form instead of the text prompt — "вся
+         история" checkbox (on by default) clears and locks the days field;
+         untick it to type the days. Its state survives the tab's refresh.

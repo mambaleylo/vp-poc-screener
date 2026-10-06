@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.461"
+APP_VERSION = "0.99.462"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28085,6 +28085,7 @@ function zutHtml(u) {
     ${u.error ? `<div class="loss">${u.error}</div>` : ''}
     ${hTxt ? `<div>${hTxt}</div>` : ''}
     <div><button onclick="zutDialogs()" style="${btn}">${u.chat_id ? 'сменить группу' : '📋 выбрать группу'}</button>${u.chat_id ? `<button onclick="zutHistory()" style="${btn}">📚 забрать историю (обучение)</button>` : ''}<button onclick="zutLogout()" style="${btn}color:var(--neg);">выйти</button></div>
+    ${u.chat_id && window._zutHistForm && !(h && h.running) ? zutHistFormHtml() : ''}
     ${dl ? `<div style="margin-top:6px;">Выберите группу с постами:<br>${dl}</div>` : ''}</div>`;
 }
 async function zutPostJson(url, body) {
@@ -28140,11 +28141,46 @@ async function zutPick(i) {
   if (r.ok) { window._zutDialogs = null; alert(`Слежу за «${g.title}»: новые скрины будут распознаваться сами. Старые посты можно забрать кнопкой «забрать историю».`); }
   refreshZones();
 }
-async function zutHistory() {
-  const v = prompt('За сколько дней забрать старые посты? Число дней или «все» — вся история группы. Они пойдут только в обучение (без слежения и сделок). Каждая картинка распознаётся ~10–30 с; остановить можно в любой момент, повторный запуск пропустит уже взятые.', 'все');
-  if (!v) return;
-  const all = /^\s*(все|всё|all|0)\s*$/i.test(v);
-  await zutPostJson('/api/zones/ut/history', {days: all ? 'все' : +v});
+// v0.99.462 — a small form instead of a text prompt: "вся история" checkbox
+// (on by default) clears and locks the days field. Its state lives in window
+// so the tab's 15 s refresh keeps it.
+function zutHistFormHtml() {
+  const all = window._zutHistAll !== false;
+  const days = all ? '' : (window._zutHistDays || '');
+  return `<div style="margin-top:6px;padding:8px;background:var(--card);border-radius:var(--r-sm);">
+    <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+      <label style="display:flex;gap:6px;align-items:center;cursor:pointer;"><input type="checkbox" id="zutHistAll" ${all ? 'checked' : ''} onchange="zutHistAllChange(this.checked)"> вся история</label>
+      <span>или за</span>
+      <input type="number" id="zutHistDays" min="1" max="3650" placeholder="дней" value="${days}" ${all ? 'disabled' : ''} oninput="window._zutHistDays = this.value"
+        style="width:80px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:5px 8px;border-radius:var(--r-xs);${all ? 'opacity:.4;' : ''}">
+      <span>дней</span>
+    </div>
+    <div class="dim" style="font-size:var(--fs-sm);margin-top:4px;">посты пойдут только в обучение (без слежения и сделок) · картинка ~10–30 с · уже взятые пропускаются · остановить можно в любой момент</div>
+    <div style="margin-top:6px;"><button onclick="zutHistoryGo()" style="background:var(--acc);color:#000;border:none;padding:5px 12px;border-radius:var(--r-xs);">▶ загрузить</button>
+      <button onclick="window._zutHistForm = false; refreshZones();" style="background:var(--ctl);border:none;color:var(--tx);padding:5px 12px;border-radius:var(--r-xs);">отмена</button></div>
+  </div>`;
+}
+function zutHistAllChange(on) {
+  window._zutHistAll = on;
+  const inp = document.getElementById('zutHistDays');
+  if (inp) {
+    if (on) { inp.value = ''; window._zutHistDays = ''; }
+    inp.disabled = on;
+    inp.style.opacity = on ? '.4' : '1';
+    if (!on) inp.focus();
+  }
+}
+function zutHistory() {
+  window._zutHistForm = true;
+  if (window._zutHistAll === undefined) window._zutHistAll = true;
+  refreshZones();
+}
+async function zutHistoryGo() {
+  const all = window._zutHistAll !== false;
+  const d = parseInt(window._zutHistDays, 10);
+  if (!all && !(d >= 1)) return alert('впишите число дней или поставьте галочку «вся история»');
+  window._zutHistForm = false;
+  await zutPostJson('/api/zones/ut/history', {days: all ? 'все' : d});
   refreshZones();
 }
 async function zutHistoryStop() {
