@@ -18367,3 +18367,31 @@ v0.99.437 - Settings: the Volume module's autotrade switches (Bounce / Breakout)
          removed — the module itself was retired in v0.99.341 and its tab is
          hidden (user: "Volume индикатора уже лет в обед нет, а в настройках
          есть"). Saved "on" values for them are ignored (always off).
+v0.99.438 - New module «🎯 Зоны» (user: a Telegram group posts TradingView screenshots
+         with zones to expect a reaction from; "черные линии это 2 точки входа";
+         automate it, notify when the price reaches an entry, trade it and learn
+         the stop / take over time):
+         - Intake: posts forwarded to the bot in Telegram (getUpdates long-poll,
+           only from TELEGRAM_CHAT_ID; photo or image file; the original post
+           time from forward_origin), or a screenshot uploaded in the tab.
+         - Local recognition (Pillow + tesseract, in Termux:
+           pkg install tesseract python-pillow): ticker from the legend, the
+           labelled horizontal lines (label boxes on the price axis, paired
+           in order with the drawn lines because TradingView stacks close
+           labels), a robust price-scale fit that catches misread digits,
+           green rectangles = long zones, red = short; decimal scale fixed by
+           the live Gate price. Everything can be corrected in the tab
+           (edit levels, flip side, delete, add manually).
+         - Live watch every 20 s: a message for every line reached, entry when
+           the chosen line is reached (stop beyond the far line, take %),
+           "broken" when the price goes through the zone, archive after N days.
+           Auto-trade through execute_autotrade("zones") with its own toggle,
+           risk field and optional sub-account; paper simulator included.
+         - Old posts are replayed on candles at once: a zone already played is
+           history (learning only), never traded late.
+         - Learning: every finished zone is replayed with a grid (entry line
+           1/2 x stop 0.3-2.5% beyond the zone x take 2-10%); from 8 zones with
+           an entry the best average R becomes the live rules. The user's own
+           take % (settings) overrides the learned one. Stats in the tab: how
+           often the 1st line is reached, how deep the usual false pierce is,
+           how far the price runs after the touch.
