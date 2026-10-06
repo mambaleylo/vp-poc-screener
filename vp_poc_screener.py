@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.477"
+APP_VERSION = "0.99.478"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22593,6 +22593,12 @@ def zones_recognize_post(post, data):
         post["pending"] = {"zones": rec["zones"], "ref": rec.get("ref")}   # waiting for the coin from the user
         if rec.get("tick_cands"):
             post["notes"].append("возможно: " + ", ".join(c["symbol"].replace("_USDT", "") for c in rec["tick_cands"][:5]))
+    # v0.99.478 — no colour zone at all = not a zones screenshot (another chart, a
+    # meme, an index…): skipped quietly, kept apart from the real failures
+    post.pop("skipped", None)
+    if rec and not rec.get("zones") and not post.get("not_listed"):
+        post["skipped"] = True
+        post["notes"] = ["не похоже на скрин с зонами: цветных зон нет"]
     post["notes"] = list(dict.fromkeys(post["notes"]))   # no repeated notes
     post["ok"] = bool(new)
     return new
@@ -24280,6 +24286,8 @@ def api_own_scan():
 
 def zones_post_summary(post, new):
     when = time.strftime("%d.%m %H:%M", time.localtime(post["post_time"]))
+    if not new and post.get("skipped"):
+        return f"⏭ Пост от {when}: не похоже на скрин с зонами (цветных зон нет) — пропущен."
     if not new and post.get("index_read"):
         return (f"⏭ Пост от {when}: {post['index_read']} — индекс (например, доминация BTC), а не монета: "
                 f"торговать нечего, скрин пропущен.")
@@ -28271,7 +28279,14 @@ async function refreshZones() {
   const trn = pub.filter(z => z.train && !(z.status === 'watch' || z.status === 'in_trade'));
   const arch = pub.filter(z => !z.train && !(z.status === 'watch' || z.status === 'in_trade'));
   window._zTrain = !!d.train_mode;
-  const bad = (d.posts || []).filter(x => !x.ok).slice(0, 10).map(x => `<div style="font-size:var(--fs-sm);margin-bottom:4px;">⚠️ пост ${zdate(x.post_time)}${x.symbol ? ' · ' + x.symbol.replace('_USDT', '') : ''}: ${[...new Set(x.notes || [])].join('; ') || 'не распознан'} · <a href="#" onclick="zoneShot('${x.id}');return false;" style="color:var(--acc);">скрин</a> · <a href="#" onclick="zonesAdd('${x.id}', '${x.symbol || ''}');return false;" style="color:var(--acc);">добавить зону</a> ${x.pending ? ` · <a href="#" onclick="zonesSetSym('${x.id}');return false;" style="color:var(--pos);font-weight:700;">указать монету (зон: ${x.pending.zones.length})</a>` : ''} · <a href="#" onclick="zonesReparse('${x.id}');return false;" style="color:var(--acc);">↻ распознать заново</a> · <a href="#" onclick="zonesDelPost('${x.id}');return false;" style="color:var(--neg);">удалить</a></div>`).join('');
+  // v0.99.478 — real failures and skipped posts (not a zones screenshot / coin not
+  // on Gate / an index) in two collapsed lists
+  const isSkip = x => x.skipped || x.not_listed || (!x.pending && (x.notes || []).some(n => n.includes('цветные зоны не найдены')));
+  const badPosts = (d.posts || []).filter(x => !x.ok && !isSkip(x));
+  const skipPosts = (d.posts || []).filter(x => !x.ok && isSkip(x));
+  const postRow = x => `<div style="font-size:var(--fs-sm);margin-bottom:4px;">${isSkip(x) ? '⏭' : '⚠️'} пост ${zdate(x.post_time)}${x.symbol ? ' · ' + x.symbol.replace('_USDT', '') : ''}: ${[...new Set(x.notes || [])].join('; ') || 'не распознан'} · <a href="#" onclick="zoneShot('${x.id}');return false;" style="color:var(--acc);">скрин</a> · <a href="#" onclick="zonesAdd('${x.id}', '${x.symbol || ''}');return false;" style="color:var(--acc);">добавить зону</a> ${x.pending ? ` · <a href="#" onclick="zonesSetSym('${x.id}');return false;" style="color:var(--pos);font-weight:700;">указать монету (зон: ${x.pending.zones.length})</a>` : ''} · <a href="#" onclick="zonesReparse('${x.id}');return false;" style="color:var(--acc);">↻ распознать заново</a> · <a href="#" onclick="zonesDelPost('${x.id}');return false;" style="color:var(--neg);">удалить</a></div>`;
+  const bad = (badPosts.length ? `<details style="margin-bottom:6px;"><summary style="cursor:pointer;font-size:var(--fs-sm);">⚠️ распознано не полностью — ${badPosts.length} (нужна монета или проверка)</summary>${badPosts.slice(0, 40).map(postRow).join('')}</details>` : '')
+    + (skipPosts.length ? `<details style="margin-bottom:6px;"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">⏭ пропущено, не по шаблону — ${skipPosts.length}</summary>${skipPosts.slice(0, 40).map(postRow).join('')}</details>` : '');
   setPanelHtml(panel, `${warn}
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
       <label onclick="window._zUp = Date.now()" style="background:var(--acc);color:#000;padding:8px 12px;border-radius:var(--r-sm);cursor:pointer;">📷 Загрузить скрин<input type="file" accept="image/*" onchange="zonesUpload(this)" style="display:none;"></label>

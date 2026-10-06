@@ -18714,3 +18714,10 @@ v0.99.477 - Зоны OCR: a second, independent source of the ticker — the cur
          The legend's single text lines also get a Latin-capitals-only pass.
          Tested with the legend OCR forced to fail: W, WLD and PEPE read from
          the tag.
+v0.99.478 - Зоны: a picture without any colour zone is not a zones screenshot
+         (another chart, a meme, an index) — skipped quietly: no Telegram
+         message from the group reader (a forwarded one gets one line), kept
+         apart from the real failures. In the tab two collapsed lists: "⚠️
+         распознано не полностью — N" (zones found, the coin or a check is
+         needed) and "⏭ пропущено, не по шаблону — N" (no zones, coin not on
+         Gate, an index); older posts are sorted the same way by their notes.
