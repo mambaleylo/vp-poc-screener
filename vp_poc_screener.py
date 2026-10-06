@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.439"
+APP_VERSION = "0.99.440"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21267,22 +21267,39 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
     notes = []
 
     # ---- ticker (top-left legend) ----
-    symbol, header_close = None, None
-    for box in ((0, int(H * 0.02), W // 2, int(H * 0.07)), (0, 0, W, int(H * 0.035))):
-        c = gray.crop(box)
-        if sum(c.getdata()) / max(1, c.size[0] * c.size[1]) < 110:
-            c = ImageOps.invert(c)
-        c = c.resize((c.size[0] * 3, c.size[1] * 3), Image.LANCZOS)
-        txt = _zocr_tesseract(c, 7).upper().replace(" ", "")
-        mt = re.search(r"([A-Z0-9]{2,15})USDT", txt)
-        if mt and not symbol:
-            base = mt.group(1)
-            cands = [base[i:] for i in range(0, max(1, len(base) - 1))]   # OCR glues icon marks in front: 'IZEN'
-            symbol = next((c + "_USDT" for c in cands if symbols and c + "_USDT" in symbols), None) \
-                or (None if symbols else base + "_USDT")
-            mc = re.search(r"(?:3AKP|ЗАКР|C)(\d[\d.,]*)", txt)
-            if mc:
-                header_close = _zocr_num(mc.group(1))[0]
+    # several crops / scales / binarisations; OCR slips like USOT, U5DT, USD T are
+    # accepted; a candidate must exist on the exchange when the list is known
+    symbol, header_close, header_txt = None, None, ""
+    _trans = str.maketrans({"О": "O", "С": "C", "Т": "T", "Е": "E", "А": "A", "Р": "P", "Н": "H", "К": "K",
+                            "М": "M", "В": "B", "Х": "X", "У": "Y"})
+    tick_re = re.compile(r"([A-Z0-9]{2,15})[\s.]*U[\s.]*[S5$][\s.]*[DO0Q][\s.]*[T7]")
+    found = []
+    for box in ((0, int(H * 0.02), W // 2, int(H * 0.075)), (0, 0, W // 2, int(H * 0.05)),
+                (0, int(H * 0.03), W // 3, int(H * 0.065))):
+        base_c = gray.crop(box)
+        if sum(base_c.getdata()) / max(1, base_c.size[0] * base_c.size[1]) < 110:
+            base_c = ImageOps.invert(base_c)
+        for scale in (3, 2, 4):
+            c = base_c.resize((base_c.size[0] * scale, base_c.size[1] * scale), Image.LANCZOS)
+            for img in (c, c.point(lambda v: 0 if v < 150 else 255)):
+                txt = _zocr_tesseract(img, 7).upper().translate(_trans)
+                if not header_txt and txt.strip():
+                    header_txt = txt.strip()[:80]
+                for mt in tick_re.finditer(txt.replace(" ", "")):
+                    base = mt.group(1)
+                    found += [base[i:] for i in range(0, max(1, len(base) - 1))]   # OCR glues icon marks in front: 'IZEN'
+                    if header_close is None:
+                        mc = re.search(r"(?:3AKP|ЗАКР|C)(\d[\d.,]*)", txt.replace(" ", ""))
+                        if mc:
+                            header_close = _zocr_num(mc.group(1))[0]
+            if symbols and any(f + "_USDT" in symbols for f in found):
+                break
+        if symbols and any(f + "_USDT" in symbols for f in found):
+            break
+    if symbols:
+        symbol = next((f + "_USDT" for f in found if f + "_USDT" in symbols), None)
+    elif found:
+        symbol = found[0] + "_USDT"
 
     # ---- price axis: dark label boxes (levels) ----
     ax0 = W - max(90, W // 12)
@@ -21490,14 +21507,14 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
         zones.append({"side": side, "levels": sorted(lv, reverse=(side == "long"))})
 
     # ---- decimal scale from the live price ----
+    ref = header_close or (price_at(cur_y) if (price_at and cur_y is not None) else None) \
+        or (sorted(lb["v"] for lb in labels)[len(labels) // 2] if labels else None)
     if symbol and live_price_fn and (labels or zones):
         live = None
         try:
             live = live_price_fn(symbol)
         except Exception:
             live = None
-        ref = header_close or (price_at(cur_y) if (price_at and cur_y is not None) else None) \
-            or sorted(lb["v"] for lb in labels)[len(labels) // 2] if labels else None
         if live and ref and ref > 0:
             k = round(math.log10(live / ref))
             if k:
@@ -21506,10 +21523,10 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                     z["levels"] = [round(v * f, 12) for v in z["levels"]]
                 notes.append(f"масштаб цен x{f:g} (по текущей цене {live:g})")
     if not symbol:
-        notes.append("тикер не распознан")
+        notes.append(f"тикер не распознан (прочитал: «{header_txt[:40]}»)" if header_txt else "тикер не распознан")
     if not zones:
         notes.append("цветные зоны не найдены")
-    return {"symbol": symbol, "zones": zones, "notes": notes,
+    return {"symbol": symbol, "zones": zones, "notes": notes, "ref": ref,
             "levels_seen": [lb["v"] for lb in labels]}
 
 
@@ -21743,11 +21760,46 @@ def zones_recognize_post(post, data):
         if m_ and (m_.group(1) + "_USDT") in prices:
             post["symbol"] = m_.group(1) + "_USDT"
     new = []
+    post.pop("pending", None)
     if rec and post["symbol"]:
         for zr in rec["zones"]:
             new.append(zones_make(post, zr["side"], zr["levels"]))
+    elif rec and rec["zones"]:
+        post["pending"] = {"zones": rec["zones"], "ref": rec.get("ref")}   # waiting for the coin from the user
     post["ok"] = bool(new)
     return new
+
+
+def zones_set_symbol(post, sym_txt):
+    """The user named the coin of a post whose ticker was not recognised:
+    create its zones (decimal scale fixed by that coin's live price)."""
+    base = re.sub(r"[^A-Z0-9]", "", (sym_txt or "").upper().replace("USDT", "").replace(".P", ""))
+    if not base:
+        return None, "пустой тикер"
+    prices = _zones_symbols_and_prices()
+    sym = base + "_USDT"
+    if sym not in prices:
+        return None, f"{sym} нет на Gate"
+    pend = post.get("pending") or {}
+    if not pend.get("zones"):
+        return None, "у поста нет распознанных зон"
+    f = 1.0
+    live, ref = prices.get(sym), pend.get("ref")
+    if live and ref and ref > 0:
+        k = round(math.log10(live / ref))
+        f = 10.0 ** k
+    post["symbol"] = sym
+    new = [zones_make(post, zr["side"], [round(v * f, 12) for v in zr["levels"]]) for zr in pend["zones"]]
+    post.pop("pending", None)
+    post["ok"] = bool(new)
+    post["notes"] = [n for n in post.get("notes", []) if not n.startswith("тикер не распознан")]
+    with _zones_lock:
+        ZONES["zones"] = new + ZONES["zones"]
+    for z in new:
+        zones_replay_past(z)
+    zones_save()
+    _zones_learn_event.set()
+    return new, None
 
 
 def zones_make(post, side, levels):
@@ -21936,6 +21988,17 @@ def zones_tg_loop():
                 msg = u.get("message") or {}
                 if str((msg.get("chat") or {}).get("id")) != str(TELEGRAM_CHAT_ID):
                     continue
+                txt = (msg.get("text") or "").strip()
+                if txt and not msg.get("photo") and len(txt) <= 20 and not txt.startswith("/"):
+                    with _zones_lock:
+                        waiting = next((p_ for p_ in ZONES["posts"] if p_.get("pending")), None)
+                    if waiting:
+                        try:
+                            new, err = zones_set_symbol(waiting, txt)
+                            zones_notify(zones_post_summary(waiting, new) if new else f"⚠️ {err} — пришлите тикер ещё раз")
+                        except Exception as e:
+                            zones_notify(f"⚠️ Зоны: {e}")
+                    continue
                 file_id = None
                 if msg.get("photo"):
                     file_id = max(msg["photo"], key=lambda ph: ph.get("file_size", 0) or ph.get("width", 0))["file_id"]
@@ -21963,6 +22026,11 @@ def zones_tg_loop():
 
 def zones_post_summary(post, new):
     when = time.strftime("%d.%m %H:%M", time.localtime(post["post_time"]))
+    if not new and post.get("pending"):
+        zl = "\n".join(f"• {'лонг' if z['side'] == 'long' else 'шорт'} " + " / ".join(f"{v:.6g}" for v in z["levels"])
+                       for z in post["pending"]["zones"])
+        return (f"❓ Пост от {when}: зоны нашёл, а монету не прочитал.\n{zl}\n"
+                f"Ответьте одним словом — тикер монеты (например ZEN), и я начну следить.")
     if not new:
         return (f"⚠️ Зоны: пост от {when} — не распознал{(' (' + post['symbol'] + ')') if post.get('symbol') else ''}. "
                 f"{'; '.join(post['notes'][:3])}")
@@ -22083,6 +22151,22 @@ def api_zones_reparse():
     zones_save()
     _zones_learn_event.set()
     return jsonify({"ok": True, "posts": done, "zones": found})
+
+
+@app.route("/api/zones/set_symbol", methods=["POST"])
+def api_zones_set_symbol():
+    b = request.get_json(force=True, silent=True) or {}
+    with _zones_lock:
+        post = next((p_ for p_ in ZONES["posts"] if p_["id"] == b.get("post_id")), None)
+    if post is None:
+        return jsonify({"ok": False, "error": "нет такого поста"}), 404
+    try:
+        new, err = zones_set_symbol(post, b.get("symbol"))
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    if err:
+        return jsonify({"ok": False, "error": err}), 400
+    return jsonify({"ok": True, "zones": len(new)})
 
 
 @app.route("/api/zones/post_delete", methods=["POST"])
@@ -25772,7 +25856,7 @@ async function refreshZones() {
   const zs = d.zones || [];
   const act = zs.filter(z => z.status === 'watch' || z.status === 'in_trade');
   const arch = zs.filter(z => !(z.status === 'watch' || z.status === 'in_trade'));
-  const bad = (d.posts || []).filter(x => !x.ok).slice(0, 10).map(x => `<div style="font-size:var(--fs-sm);margin-bottom:4px;">⚠️ пост ${zdate(x.post_time)}${x.symbol ? ' · ' + x.symbol.replace('_USDT', '') : ''}: ${(x.notes || []).join('; ') || 'не распознан'} · <a href="/api/zones/img/${x.id}" target="_blank" style="color:var(--acc);">скрин</a> · <a href="#" onclick="zonesAdd('${x.id}', '${x.symbol || ''}');return false;" style="color:var(--acc);">добавить зону</a> · <a href="#" onclick="zonesReparse('${x.id}');return false;" style="color:var(--acc);">↻ распознать заново</a> · <a href="#" onclick="zonesDelPost('${x.id}');return false;" style="color:var(--neg);">удалить</a></div>`).join('');
+  const bad = (d.posts || []).filter(x => !x.ok).slice(0, 10).map(x => `<div style="font-size:var(--fs-sm);margin-bottom:4px;">⚠️ пост ${zdate(x.post_time)}${x.symbol ? ' · ' + x.symbol.replace('_USDT', '') : ''}: ${(x.notes || []).join('; ') || 'не распознан'} · <a href="/api/zones/img/${x.id}" target="_blank" style="color:var(--acc);">скрин</a> · <a href="#" onclick="zonesAdd('${x.id}', '${x.symbol || ''}');return false;" style="color:var(--acc);">добавить зону</a> ${x.pending ? ` · <a href="#" onclick="zonesSetSym('${x.id}');return false;" style="color:var(--win);font-weight:700;">указать монету (зон: ${x.pending.zones.length})</a>` : ''} · <a href="#" onclick="zonesReparse('${x.id}');return false;" style="color:var(--acc);">↻ распознать заново</a> · <a href="#" onclick="zonesDelPost('${x.id}');return false;" style="color:var(--neg);">удалить</a></div>`).join('');
   setPanelHtml(panel, `${warn}
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
       <label onclick="window._zUp = Date.now()" style="background:var(--acc);color:#000;padding:8px 12px;border-radius:var(--r-sm);cursor:pointer;">📷 Загрузить скрин<input type="file" accept="image/*" onchange="zonesUpload(this)" style="display:none;"></label>
@@ -25815,6 +25899,10 @@ function zonesSide(id, side) { zonesPost('/api/zones/zone', {id, side}); }
 function zonesDel(id) { if (confirm('Удалить зону?')) zonesPost('/api/zones/zone', {id, delete: true}); }
 function zonesDelPost(pid) { if (confirm('Удалить пост и его зоны?')) zonesPost('/api/zones/post_delete', {post_id: pid}); }
 function zonesRelearn() { zonesPost('/api/zones/relearn', {}); }
+function zonesSetSym(pid) {
+  const s = prompt('Тикер монеты (например ZEN)', '');
+  if (s) zonesPost('/api/zones/set_symbol', {post_id: pid, symbol: s});
+}
 function zonesReparse(pid) { zonesPost('/api/zones/reparse', pid ? {post_id: pid} : {}); }
 function zonesAdd(postId, sym) {
   const s = prompt('Монета (например ZEN)', (sym || '').replace('_USDT', ''));

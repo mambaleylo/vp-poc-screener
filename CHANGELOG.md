@@ -18399,3 +18399,11 @@ v0.99.439 - Зоны: «↻ распознать заново» for posts that w
          before tesseract / Pillow were installed) — runs the recognition on the
          stored screenshot, no need to forward the post again. Clearer message
          about installing the recognition in Termux.
+v0.99.440 - Зоны: the ticker of a forwarded screenshot was not read on the phone and the
+         whole post (with correctly read levels) was dropped. Now:
+         - ticker OCR tries several crops / scales / binarisations and accepts
+           typical slips (USOT, U5DT, "USD T", Cyrillic look-alikes); the text it
+           read is shown when it still fails;
+         - zones found without a ticker are kept and the bot asks for the coin —
+           reply with one word (e.g. ZEN) in the bot chat, or «указать монету» in
+           the tab; the decimal scale is then fixed by that coin's live price.
