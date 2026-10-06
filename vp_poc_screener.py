@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.438"
+APP_VERSION = "0.99.439"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21706,7 +21706,22 @@ def zones_add_post(data, post_time=None, source="web", caption=""):
     with open(img_path, "wb") as f:
         f.write(data)
     post = {"id": pid, "created": now, "post_time": post_time, "source": source, "symbol": None,
-            "notes": [], "ok": False}
+            "notes": [], "ok": False, "caption": caption}
+    new = zones_recognize_post(post, data)
+    with _zones_lock:
+        ZONES["posts"].insert(0, post)
+        ZONES["zones"] = new + ZONES["zones"]
+    for z in new:
+        zones_replay_past(z)
+    zones_save()
+    _zones_learn_event.set()
+    return post, new
+
+
+def zones_recognize_post(post, data):
+    """Recognise one stored post's screenshot -> its new zones (post is updated in place)."""
+    caption = post.get("caption") or ""
+    post["notes"], post["symbol"] = [], None
     prices = {}
     try:
         prices = _zones_symbols_and_prices()
@@ -21715,7 +21730,7 @@ def zones_add_post(data, post_time=None, source="web", caption=""):
     rec = None
     deps = zones_deps()
     if not deps["ok"]:
-        post["notes"].append("распознавание не установлено: pkg install tesseract python-pillow — пока добавьте зоны вручную")
+        post["notes"].append("распознавание не установлено: в Termux выполните pkg install tesseract python-pillow, перезапустите бота и нажмите «↻ распознать заново» во вкладке «Зоны»")
     else:
         try:
             rec = zones_recognize(data, live_price_fn=lambda s: prices.get(s), symbols=set(prices) or None)
@@ -21732,14 +21747,7 @@ def zones_add_post(data, post_time=None, source="web", caption=""):
         for zr in rec["zones"]:
             new.append(zones_make(post, zr["side"], zr["levels"]))
     post["ok"] = bool(new)
-    with _zones_lock:
-        ZONES["posts"].insert(0, post)
-        ZONES["zones"] = new + ZONES["zones"]
-    for z in new:
-        zones_replay_past(z)
-    zones_save()
-    _zones_learn_event.set()
-    return post, new
+    return new
 
 
 def zones_make(post, side, levels):
@@ -21957,7 +21965,7 @@ def zones_post_summary(post, new):
     when = time.strftime("%d.%m %H:%M", time.localtime(post["post_time"]))
     if not new:
         return (f"⚠️ Зоны: пост от {when} — не распознал{(' (' + post['symbol'] + ')') if post.get('symbol') else ''}. "
-                f"{'; '.join(post['notes'][:3])}\nДобавьте зоны вручную во вкладке «Зоны».")
+                f"{'; '.join(post['notes'][:3])}")
     lines = [f"📥 {post['symbol']} · пост от {when} · зон: {len(new)}"]
     for z in new:
         st = {"watch": "слежу", "old": "уже отработала (в статистику)"}.get(z["status"], z["status"])
@@ -22043,6 +22051,38 @@ def api_zones_zone():
     except Exception as e:
         log_error(f"api_zones_zone: {e}")
         return jsonify({"ok": False, "error": str(e)}), 500
+
+
+@app.route("/api/zones/reparse", methods=["POST"])
+def api_zones_reparse():
+    """Run the recognition again on stored posts (all not recognised ones, or one)."""
+    b = request.get_json(force=True, silent=True) or {}
+    with _zones_lock:
+        if b.get("post_id"):
+            posts = [p for p in ZONES["posts"] if p["id"] == b["post_id"]]
+        else:
+            posts = [p for p in ZONES["posts"] if not p.get("ok")]
+    done, found = 0, 0
+    for post in posts:
+        path = os.path.join(ZONES_IMG_DIR, post["id"] + ".jpg")
+        if not os.path.exists(path):
+            continue
+        with open(path, "rb") as f:
+            data = f.read()
+        new = zones_recognize_post(post, data)
+        with _zones_lock:
+            for z in ZONES["zones"]:
+                if z["post_id"] == post["id"] and z.get("status") in ("watch",) and new:
+                    z["status"] = "deleted"   # replaced by the new recognition
+            ZONES["zones"] = new + ZONES["zones"]
+        for z in new:
+            zones_replay_past(z)
+        done += 1
+        found += len(new)
+        zones_notify(zones_post_summary(post, new))
+    zones_save()
+    _zones_learn_event.set()
+    return jsonify({"ok": True, "posts": done, "zones": found})
 
 
 @app.route("/api/zones/post_delete", methods=["POST"])
@@ -25716,7 +25756,7 @@ async function refreshZones() {
   try { d = await (await fetch('/api/zones/status')).json(); } catch (e) { return; }
   const p = d.params || {}, st = d.stats || {}, lr = d.learned || {};
   const deps = d.deps || {};
-  const warn = deps.ok ? '' : `<div style="padding:8px;margin-bottom:8px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-sm);">⚠️ Распознавание скринов не установлено${deps.tesseract ? '' : ' (нет tesseract)'}${deps.pillow ? '' : ' (нет Pillow)'}. В Termux: <b>pkg install tesseract python-pillow</b>, потом перезапустите бота. Пока зоны можно добавлять вручную.</div>`;
+  const warn = deps.ok ? '' : `<div style="padding:8px;margin-bottom:8px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-sm);">⚠️ Распознавание скринов не установлено${deps.tesseract ? '' : ' (нет tesseract)'}${deps.pillow ? '' : ' (нет Pillow)'}. В Termux: <b>pkg install tesseract python-pillow</b>, потом перезапустите бота. Пока зоны можно добавлять вручную. <button onclick="zonesReparse('')" style="background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);">↻ распознать все заново</button></div>`;
   const tg = d.tg ? `перешлите пост со скрином боту в Telegram — он распознает и пришлёт, что нашёл${d.tg_error ? ` <span class="loss">(ошибка Telegram: ${d.tg_error})</span>` : ''}` : '<span class="loss">Telegram не настроен — только загрузка здесь</span>';
   const rules = `<div style="padding:8px 10px;margin-bottom:8px;background:var(--inset);border-radius:var(--r-sm);">
     <b>Правила сейчас</b> (${p.source || '—'}): вход от <b>${(p.entry || 0) + 1}-й</b> линии · стоп <b>${p.buf}%</b> за дальней линией зоны · тейк <b>+${p.tp}%</b>${d.tp_user ? ' (свой, из настроек)' : ''}
@@ -25732,7 +25772,7 @@ async function refreshZones() {
   const zs = d.zones || [];
   const act = zs.filter(z => z.status === 'watch' || z.status === 'in_trade');
   const arch = zs.filter(z => !(z.status === 'watch' || z.status === 'in_trade'));
-  const bad = (d.posts || []).filter(x => !x.ok).slice(0, 10).map(x => `<div style="font-size:var(--fs-sm);margin-bottom:4px;">⚠️ пост ${zdate(x.post_time)}${x.symbol ? ' · ' + x.symbol.replace('_USDT', '') : ''}: ${(x.notes || []).join('; ') || 'не распознан'} · <a href="/api/zones/img/${x.id}" target="_blank" style="color:var(--acc);">скрин</a> · <a href="#" onclick="zonesAdd('${x.id}', '${x.symbol || ''}');return false;" style="color:var(--acc);">добавить зону</a> · <a href="#" onclick="zonesDelPost('${x.id}');return false;" style="color:var(--neg);">удалить</a></div>`).join('');
+  const bad = (d.posts || []).filter(x => !x.ok).slice(0, 10).map(x => `<div style="font-size:var(--fs-sm);margin-bottom:4px;">⚠️ пост ${zdate(x.post_time)}${x.symbol ? ' · ' + x.symbol.replace('_USDT', '') : ''}: ${(x.notes || []).join('; ') || 'не распознан'} · <a href="/api/zones/img/${x.id}" target="_blank" style="color:var(--acc);">скрин</a> · <a href="#" onclick="zonesAdd('${x.id}', '${x.symbol || ''}');return false;" style="color:var(--acc);">добавить зону</a> · <a href="#" onclick="zonesReparse('${x.id}');return false;" style="color:var(--acc);">↻ распознать заново</a> · <a href="#" onclick="zonesDelPost('${x.id}');return false;" style="color:var(--neg);">удалить</a></div>`).join('');
   setPanelHtml(panel, `${warn}
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
       <label onclick="window._zUp = Date.now()" style="background:var(--acc);color:#000;padding:8px 12px;border-radius:var(--r-sm);cursor:pointer;">📷 Загрузить скрин<input type="file" accept="image/*" onchange="zonesUpload(this)" style="display:none;"></label>
@@ -25775,6 +25815,7 @@ function zonesSide(id, side) { zonesPost('/api/zones/zone', {id, side}); }
 function zonesDel(id) { if (confirm('Удалить зону?')) zonesPost('/api/zones/zone', {id, delete: true}); }
 function zonesDelPost(pid) { if (confirm('Удалить пост и его зоны?')) zonesPost('/api/zones/post_delete', {post_id: pid}); }
 function zonesRelearn() { zonesPost('/api/zones/relearn', {}); }
+function zonesReparse(pid) { zonesPost('/api/zones/reparse', pid ? {post_id: pid} : {}); }
 function zonesAdd(postId, sym) {
   const s = prompt('Монета (например ZEN)', (sym || '').replace('_USDT', ''));
   if (!s) return;

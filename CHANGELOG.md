@@ -18395,3 +18395,7 @@ v0.99.438 - New module «🎯 Зоны» (user: a Telegram group posts TradingVi
            take % (settings) overrides the learned one. Stats in the tab: how
            often the 1st line is reached, how deep the usual false pierce is,
            how far the price runs after the touch.
+v0.99.439 - Зоны: «↻ распознать заново» for posts that were not recognised (e.g. sent
+         before tesseract / Pillow were installed) — runs the recognition on the
+         stored screenshot, no need to forward the post again. Clearer message
+         about installing the recognition in Termux.
