@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.457"
+APP_VERSION = "0.99.458"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22847,6 +22847,10 @@ def zones_tg_loop():
                 if str((msg.get("chat") or {}).get("id")) != str(TELEGRAM_CHAT_ID):
                     continue
                 txt = (msg.get("text") or "").strip()
+                if txt.startswith("/") and not msg.get("photo"):
+                    zones_save()   # the offset is past this command: a restart never repeats it
+                    if bot_command(txt):
+                        continue
                 if txt.lower().lstrip("/") in ("обучение вкл", "обучение выкл", "обучение", "train"):
                     with _zones_lock:
                         on = ("выкл" not in txt.lower()) if " " in txt else not ZONES.get("train_mode")
@@ -23195,30 +23199,58 @@ def api_self_update():
     if request.remote_addr not in ("127.0.0.1", "::1"):
         return jsonify({"ok": False, "error": "только с этого телефона (http://127.0.0.1)"}), 403
     try:
+        new_version = self_update_download()
+    except RuntimeError as e:
+        return jsonify({"ok": False, "error": str(e)}), 502
+    self_restart("update", 1.5)
+    return jsonify({"ok": True, "old_version": APP_VERSION, "new_version": new_version,
+                    "same": new_version == APP_VERSION})
+
+
+RESTART_NOTE_FILE = os.environ.get("VP_RESTART_NOTE_FILE", "vp_restart_note.json")
+_PROC_START = time.time()
+
+
+def self_update_download():
+    """Fresh file from GitHub main, checked (a whole, compiling bot), swapped in
+    place of this one (old kept as .bak). Returns the new version; RuntimeError
+    with a human message otherwise — the current file then stays."""
+    try:
         r = requests.get(SELF_UPDATE_URL, params={"nocache": int(time.time())}, timeout=60)
         r.raise_for_status()
         code = r.content
-        m_ = re.search(rb'^APP_VERSION = "([^"]+)"', code, re.M)
-        if not m_ or b"app.run(" not in code or len(code) < 100000:
-            return jsonify({"ok": False, "error": "скачанный файл не похож на бота — оставил текущую версию"}), 502
-        compile(code, "vp_poc_screener.py", "exec")   # a broken download never replaces a working bot
-        new_version = m_.group(1).decode()
-        me = os.path.abspath(__file__)
-        tmp = me + ".new"
-        with open(tmp, "wb") as f:
-            f.write(code)
-        try:
-            shutil.copy2(me, me + ".bak")
-        except OSError:
-            pass
-        os.replace(tmp, me)
-    except SyntaxError as e:
-        return jsonify({"ok": False, "error": f"в скачанной версии ошибка ({e}) — оставил текущую"}), 502
     except Exception as e:
-        return jsonify({"ok": False, "error": f"не скачал: {e}"}), 502
+        raise RuntimeError(f"не скачал: {e}")
+    m_ = re.search(rb'^APP_VERSION = "([^"]+)"', code, re.M)
+    if not m_ or b"app.run(" not in code or len(code) < 100000:
+        raise RuntimeError("скачанный файл не похож на бота — оставил текущую версию")
+    try:
+        compile(code, "vp_poc_screener.py", "exec")   # a broken download never replaces a working bot
+    except SyntaxError as e:
+        raise RuntimeError(f"в скачанной версии ошибка ({e}) — оставил текущую")
+    me = os.path.abspath(__file__)
+    tmp = me + ".new"
+    with open(tmp, "wb") as f:
+        f.write(code)
+    try:
+        shutil.copy2(me, me + ".bak")
+    except OSError:
+        pass
+    os.replace(tmp, me)
+    return m_.group(1).decode()
+
+
+def self_restart(why, delay=1.5):
+    """Restart this same process (same arguments and environment); the next
+    start reports itself in Telegram (RESTART_NOTE_FILE)."""
+    try:
+        with open(RESTART_NOTE_FILE, "w") as f:
+            json.dump({"t": time.time(), "old": APP_VERSION, "why": why}, f)
+    except OSError:
+        pass
 
     def _restart():
-        time.sleep(1.5)   # let this answer reach the page
+        time.sleep(delay)   # let the answer reach the page / Telegram
         try:
             zones_save()
         except Exception:
@@ -23228,8 +23260,72 @@ def api_self_update():
         os.closerange(3, 65536)
         os.execv(sys.executable, [sys.executable] + sys.argv)
     threading.Thread(target=_restart, daemon=True).start()
-    return jsonify({"ok": True, "old_version": APP_VERSION, "new_version": new_version,
-                    "same": new_version == APP_VERSION})
+
+
+def restart_note_on_start():
+    """After a restart from the button or a Telegram command: 'back in work'."""
+    try:
+        if not os.path.exists(RESTART_NOTE_FILE):
+            return
+        with open(RESTART_NOTE_FILE) as f:
+            d = json.load(f)
+        os.remove(RESTART_NOTE_FILE)
+        took = int(time.time() - d.get("t", time.time()))
+        old = d.get("old")
+        tg_outbox_push(f"✅ Бот снова в работе: v{APP_VERSION}"
+                       + (f" (было v{old})" if old and old != APP_VERSION else " (версия та же)")
+                       + f", перезапуск занял {took} с")
+    except Exception as e:
+        log_error(f"restart note: {e}")
+
+
+def bot_status_text():
+    up = int(time.time() - _PROC_START)
+    with _zones_lock:
+        zs = [z for z in ZONES["zones"] if z.get("status") in ("watch", "in_trade")]
+    pub = [z for z in zs if not z.get("own")]
+    tr = [z for z in zs if z.get("status") == "in_trade"]
+    with _zones_outbox_lock:
+        queued = len(_zones_outbox)
+    on = lambda b: "вкл" if b else "выкл"
+    return (f"🤖 v{APP_VERSION} · работает {up // 86400} д {up % 86400 // 3600} ч {up % 3600 // 60} мин\n"
+            f"Зоны: слежу {len(pub)}, наш поиск {len(zs) - len(pub)}, в сделке {len(tr)}\n"
+            f"Автоторговля: Neuro {on(AUTOTRADE_ENABLED_NEURO)} · S/R {on(AUTOTRADE_ENABLED_SNR)} · "
+            f"P/R {on(AUTOTRADE_ENABLED_PRV)} · Зоны {on(AUTOTRADE_ENABLED_ZONES)}"
+            f"{' · бумажная (dry-run)' if AUTOTRADE_DRY_RUN else ''}"
+            + (f"\nв очереди на отправку: {queued}" if queued > 1 else ""))
+
+
+BOT_COMMANDS_HELP = ("Команды бота:\n/update — скачать новую версию с GitHub и перезапустить\n"
+                     "/restart — перезапустить\n/status — версия, время работы, зоны и сделки\n"
+                     "/help — эта подсказка\nобучение вкл / обучение выкл — режим обучения зон")
+
+
+def bot_command(txt):
+    """v0.99.458 — commands from the user's own chat (TELEGRAM_CHAT_ID only).
+    A fixed list — never an arbitrary shell command."""
+    cmd = txt.strip().split()[0].lower().split("@")[0]
+    if cmd in ("/start", "/help"):
+        tg_outbox_push(BOT_COMMANDS_HELP)
+    elif cmd == "/status":
+        tg_outbox_push(bot_status_text())
+    elif cmd == "/restart":
+        tg_outbox_push(f"🔄 Перезапускаю (v{APP_VERSION})…")
+        zones_save()
+        self_restart("restart", 3)
+    elif cmd == "/update":
+        tg_outbox_push("⬇️ Скачиваю новую версию с GitHub…")
+        try:
+            nv = self_update_download()
+        except RuntimeError as e:
+            tg_outbox_push(f"⚠️ Обновление не удалось: {e}")
+            return True
+        tg_outbox_push(f"🔄 {'Уже последняя версия v' + nv if nv == APP_VERSION else f'Обновление v{APP_VERSION} → v{nv}'}, перезапускаю…")
+        zones_save()
+        self_restart("update", 3)
+    else:
+        return False
+    return True
 
 
 @app.route("/api/zones/ut/status")
@@ -30695,6 +30791,7 @@ if __name__ == "__main__":
     threading.Thread(target=prv_live_loop, daemon=True).start()
     zones_load()   # v0.99.438
     zones_outbox_load()   # v0.99.455 — unsent zone messages from before the restart
+    restart_note_on_start()   # v0.99.458 — "back in work" after /update, /restart or the button
     threading.Thread(target=zones_tg_loop, daemon=True).start()
     threading.Thread(target=zones_outbox_loop, daemon=True).start()   # v0.99.455 — messages survive no-network / restarts
     threading.Thread(target=zut_start, daemon=True).start()            # v0.99.448 — group via the user's account

@@ -18587,3 +18587,11 @@ v0.99.457 - Telegram: the result of every closed trade — Neuro, S/R, P/R, Зо
          through the disk queue, so no network only delays them. Settings →
          Telegram: "↳ Итоги сделок (тейк / стоп)" and "↳↳ только реальные
          сделки". The zones' own close messages are these now.
+v0.99.458 - Telegram commands (only from the configured chat, a fixed list, never
+         a shell): /update — download the new version from GitHub (checked as
+         before) and restart; /restart; /status — version, uptime, zones and
+         trades, autotrade switches; /help. After a restart from a command or
+         the 🛠 button the bot reports "✅ Бот снова в работе: vX (было vY),
+         перезапуск занял N с". The Telegram offset is saved before a restart,
+         so a command is never repeated. Shared download / restart code for the
+         button and the commands.

@@ -7,3 +7,4 @@ __pycache__/
 vp_zones_outbox.json
 vp_zones_outbox.json.tmp
 vp_zones_state.json.bak
+vp_restart_note.json
