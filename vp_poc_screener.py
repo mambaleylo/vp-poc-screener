@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.466"
+APP_VERSION = "0.99.467"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1442,7 +1442,8 @@ def apply_settings(updates):
                 AUTOTRADE_RISK_PCT_OF_BALANCE = min(max(v, 0.1), 100.0)   # v0.99.435 — 0.1..100 (was up to 50)
         except (TypeError, ValueError):
             pass
-    if ("autotrade_risk_pct" in updates or "risk_pct_zones" in updates) and globals().get("_zones_learn_event"):
+    if ("autotrade_risk_pct" in updates or "risk_pct_zones" in updates or "auto_risk_enabled" in updates) \
+            and globals().get("_zones_learn_event"):
         globals()["_zones_learn_event"].set()   # v0.99.465 — the zones' stop / take are re-chosen for the new risk at once
     if "autotrade_zones" in updates:   # v0.99.438
         globals()["AUTOTRADE_ENABLED_ZONES"] = bool(updates["autotrade_zones"])
@@ -9062,6 +9063,13 @@ def auto_risk_for(mod, symbol):
     own = float(own) if own else None
     if not AUTO_RISK_ENABLED:
         return own
+    if mod == "zones":   # v0.99.467 — one risk for all zones, chosen with the rules (half Kelly, checked)
+        try:
+            with _zones_lock:
+                ar = (ZONES.get("learned") or {}).get("auto_risk")
+            return float(ar) if ar else own
+        except Exception:
+            return own
     try:
         if mod == "neuro":
             with _neuro_state_lock:
@@ -22019,19 +22027,34 @@ def zones_learn():
     avg = lambda xs: round(sum(xs) / len(xs), 3) if xs else None
     rf = _zones_risk_frac()
 
-    def growth(xs):
+    auto = bool(AUTO_RISK_ENABLED)   # v0.99.467 — "Авто-риск": the risk is chosen together with the rules
+
+    def growth(xs, f_=None):
         """v0.99.464 — account growth per trade (%) at the risk actually used:
         the mean of log(1 + risk x R); a stop at 50% risk halves the account,
         so rare big wins can't hide long losing streaks"""
         if not xs:
             return None
-        lg = sum(math.log(max(1e-6, 1 + rf * x)) for x in xs) / len(xs)
+        f_ = rf if f_ is None else f_
+        lg = sum(math.log(max(1e-6, 1 + f_ * x)) for x in xs) / len(xs)
         return round((math.exp(lg) - 1) * 100, 3)
+
+    def half_kelly(xs):
+        """half of the risk that grows the account most on these trades (<= 50%)"""
+        if not xs:
+            return None
+        gl = lambda f_: sum(math.log(max(1e-9, 1 + f_ * x)) for x in xs) / len(xs)
+        fb = max((i / 200 for i in range(1, 191)), key=gl)
+        return min(0.5, fb / 2) if gl(fb) > 1e-6 else None
     for r in rows:
         k = (r["entry"], r["buf"], r["tp"])
         f, c = grid_fit.get(k, []), grid_chk.get(k, [])
+        fu = None
+        if auto:   # the risk comes from the earlier zones only — the check stays honest
+            fu = half_kelly(f) or 0.0
+            r["auto_risk"] = round(fu * 100, 1)
         r.update({"fit_n": len(f), "fit_r": avg(f), "chk_n": len(c), "chk_r": avg(c),
-                  "fit_g": growth(f), "chk_g": growth(c), "all_g": growth(grid.get(k, []))})
+                  "fit_g": growth(f, fu), "chk_g": growth(c, fu), "all_g": growth(grid.get(k, []), fu)})
         ls, run_ = 0, 0   # the longest losing streak in time order
         for x in grid.get(k, []):
             run_ = run_ + 1 if x < 0 else 0
@@ -22048,7 +22071,7 @@ def zones_learn():
     # chosen on the earlier zones only, by account growth at the risk in use
     pick = max(ok, key=lambda r: (r["fit_g"], r["fit_r"], -r["buf"])) if ok else None
     best, verdict = None, None
-    risk_txt = f"при риске {rf * 100:g}% на сделку"
+    risk_txt = (f"при авто-риске {pick.get('auto_risk', 0):g}% на сделку" if (auto and pick) else f"при риске {rf * 100:g}% на сделку")
     if pick:
         dg = (dflt or {}).get("chk_g")
         if pick["chk_n"] < 5:
@@ -22089,7 +22112,12 @@ def zones_learn():
                      "g_full": round((math.exp(g_at(fbest)) - 1) * 100, 3),
                      "g_half": round((math.exp(g_at(fbest / 2)) - 1) * 100, 3),
                      "g_now": round((math.exp(g_at(rf)) - 1) * 100, 3), "edge": g_at(fbest) > 1e-6}
-    learned = {"at": now, "n": best["n"] if best else 0, "best": best, "default": dflt, "pick": pick, "risk": rf * 100,
+    auto_risk = None
+    if auto:
+        src_rule = best or dflt
+        auto_risk = (src_rule or {}).get("auto_risk") or None   # None/0 = no edge: the settings' % stays
+    learned = {"at": now, "n": best["n"] if best else 0, "best": best, "default": dflt, "pick": pick,
+               "risk": (auto_risk if auto and auto_risk else rf * 100), "auto": auto, "auto_risk": auto_risk,
                "kelly": kelly,
                "verdict": verdict, "fit_zones": n_fit, "chk_zones": len(finished) - n_fit,
                "top": sorted(ok, key=lambda r: -(r["fit_r"] or -99))[:6]}
@@ -26507,7 +26535,7 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow subRow">
         <div>
-          <div class="label">↳↳ Авто-риск (лучший % для каждой монеты)</div>
+          <div class="label">↳↳ Авто-риск (лучший % для каждой монеты; у Зон — один на все, вместе с тейком и стопом)</div>
           <div class="sub">вместо % выше каждая монета Neuro / S/R / P/R торгуется со своим риском на сделку — тем, при котором счёт растёт быстрее всего на длинной дистанции (Келли), осторожно: по сделкам теста (их не видел выбор настроек), с пессимистичной поправкой на малую выборку и половиной от оптимума. Не больше 50%. Бэктест «с $500» считает так же</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutoRisk"><span class="switchSlider"></span></label>
@@ -28028,6 +28056,7 @@ async function refreshZones() {
     <div class="dim" style="font-size:var(--fs-sm);">автоторговля зон: ${d.autotrade ? '<span class="win">вкл</span>' : 'выкл (Настройки → Автоторговля → Зоны)'} · зона ждёт ${d.max_days} дн. · обученные правила включаются с ${d.learn_min} отработанных зон</div>
     ${(() => { const k = (d.learned || {}).kelly, rk = (d.learned || {}).risk; if (!k) return '';
       if (!k.edge) return `<div style="margin-top:4px;">Риск: сейчас ${rk}% · по истории (${k.n} сделок) <span class="loss">ни при каком риске счёт не растёт</span> — лучше не торговать на деньги, пока статистика не изменится</div>`;
+      if ((d.learned || {}).auto) return `<div style="margin-top:4px;">Риск: <b>авто-риск ${d.learned.auto_risk ? d.learned.auto_risk + '%' : '— нет перевеса, остаётся % из настроек'}</b> на сделку (половина от лучшего по истории, подобрана вместе с тейком и стопом на ранних зонах и проверена на поздних)</div>`;
       return `<div style="margin-top:4px;">Риск: сейчас <b>${rk}%</b> (счёт ${k.g_now > 0 ? '+' : ''}${k.g_now}% за сделку по истории) · максимум роста при ~${k.full}% (${k.g_full > 0 ? '+' : ''}${k.g_full}%) · <b>разумно ~${k.half}%</b> (${k.g_half > 0 ? '+' : ''}${k.g_half}%) — половина: будущее обычно хуже истории, а выше максимума риск только вредит</div>`; })()}</div>`;
   let stats = '';
   if (st.finished) {

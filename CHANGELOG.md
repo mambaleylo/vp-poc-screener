@@ -18643,3 +18643,11 @@ v0.99.466 - Зоны / наш поиск: the author-vs-us result is compared on
          entry (R depends on it: a narrower band = a closer stop = more R per
          win, and more stop-outs), the best trade; with the note that under
          ~50 zones a difference may be chance. Old comparisons are recomputed.
+v0.99.467 - Зоны + "Авто-риск": the switch now works for the zones too (before it
+         only covered Neuro / S/R / P/R per coin; the zones kept the settings'
+         %). One risk for all zones, chosen together with the stop / take: for
+         each rule set, half of the risk that would have grown the account most
+         on the earlier zones (<= 50%); the rule set with the best growth there
+         wins; the later zones check it at that same risk. Live zone orders use
+         it; with no edge found, the settings' % stays. Toggling the switch
+         re-chooses at once; the tab says which risk is in use.
