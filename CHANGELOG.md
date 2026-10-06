@@ -18666,3 +18666,13 @@ v0.99.470 - S/R Zones removed (user's request): no tab, its settings group, aler
          stop / time exit (and their result message). Its sub-account row is
          shown only if keys were saved for it. The code stays dormant, like
          MSNR's.
+v0.99.471 - Зоны OCR (WUSDT screenshot: coin not read, 5 zones instead of 1):
+         - the legend is also read line by line (a tall crop made OCR glue the
+           "WUSDT.P · 15 · Binance" line with the "VRVP …" line under it);
+           one-letter tickers (W) are accepted — they must exist on Gate, and a
+           one-letter read alone never skips a post as "not on the exchange";
+         - a colour zone must be a filled rectangle (tall enough, rows next to
+           each other, mostly filled): the author's hand-drawn red frame and
+           scenario curve are no longer short zones;
+         - pieces of one rectangle cut by a drawn curve are glued back
+           (side-by-side pieces too), and the same zone is never listed twice.

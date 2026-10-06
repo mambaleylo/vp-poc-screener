@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.470"
+APP_VERSION = "0.99.471"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21443,10 +21443,29 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
     symbol, header_close, header_txt, header_all = None, None, "", []
     _trans = str.maketrans({"О": "O", "С": "C", "Т": "T", "Е": "E", "А": "A", "Р": "P", "Н": "H", "К": "K",
                             "М": "M", "В": "B", "Х": "X", "У": "Y"})
-    tick_re = re.compile(r"([A-Z0-9]{2,15})[\s.]*U[\s.]*[S5$][\s.]*[DO0Q][\s.]*[T7]")
+    # v0.99.471 — one-letter tickers too (W); they must exist on the exchange
+    tick_re = re.compile(r"([A-Z0-9]{1,15})[\s.]*U[\s.]*[S5$][\s.]*[DO0Q][\s.]*[T7]")
     found, words_read = [], {}
-    for box in ((0, int(H * 0.02), W // 2, int(H * 0.075)), (0, 0, W // 2, int(H * 0.05)),
-                (0, int(H * 0.03), W // 3, int(H * 0.065))):
+    # v0.99.471 — the legend's text lines one by one (a tall crop made OCR glue
+    # the ticker line with the indicator line under it: "VRVP …" instead of WUSDT)
+    line_boxes = []
+    hx1 = int(W * 0.6)
+    ink_rows = []
+    for yy in range(0, int(H * 0.12)):
+        row = [gp[x, yy] for x in range(0, hx1, 2)]
+        bg = sorted(row)[len(row) // 2]
+        ink_rows.append(sum(1 for v in row if abs(v - bg) >= 60) >= 3)
+    yy = 0
+    while yy < len(ink_rows):
+        if ink_rows[yy]:
+            y0 = yy
+            while yy < len(ink_rows) and ink_rows[yy]:
+                yy += 1
+            if 6 <= yy - y0 <= 40:
+                line_boxes.append((0, max(0, y0 - 3), hx1, min(H, yy + 3)))
+        yy += 1
+    for box in line_boxes[:4] + [(0, int(H * 0.02), W // 2, int(H * 0.075)), (0, 0, W // 2, int(H * 0.05)),
+                                 (0, int(H * 0.03), W // 3, int(H * 0.065))]:
         base_c = gray.crop(box)
         if sum(base_c.getdata()) / max(1, base_c.size[0] * base_c.size[1]) < 110:
             base_c = ImageOps.invert(base_c)
@@ -21457,7 +21476,7 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                 if not header_txt and txt.strip():
                     header_txt = txt.strip()[:80]
                 header_all.append(txt)
-                for mt in re.finditer(r"(?:^|[^A-Z0-9])([A-Z0-9]{2,15})[.]?U[S5$][DO0Q][T7]", txt):
+                for mt in re.finditer(r"(?:^|[^A-Z0-9])([A-Z0-9]{1,15})[.]?U[S5$][DO0Q][T7]", txt):
                     words_read[mt.group(1)] = words_read.get(mt.group(1), 0) + 1   # the word as written (spaces kept)
                 for mt in tick_re.finditer(txt.replace(" ", "")):
                     base = mt.group(1)
@@ -21476,8 +21495,9 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
     # the coin is not on the exchange — the caller skips the screenshot, no guessing
     not_listed = None
     if not symbol and symbols and found:
-        if words_read:
-            not_listed = max(words_read, key=lambda w: (words_read[w], len(w)))
+        wr = {w: n for w, n in words_read.items() if len(w) >= 2}   # one letter alone is too weak to skip a post
+        if wr:
+            not_listed = max(wr, key=lambda w: (wr[w], len(w)))
         else:
             cnt = {}
             for f in found:
@@ -21709,19 +21729,42 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                 # the filled rectangle = rows almost as wide as the widest one (drops arrows / labels glued to it)
                 wmax = max(per_row.values())
                 core = [ry for ry, w in per_row.items() if w >= 0.6 * wmax]
-                if wmax * step >= 50 and core:
+                # v0.99.471 — a filled rectangle only: tall enough, rows of it next to
+                # each other and mostly filled (hand-drawn lines / frames / curves are not zones)
+                core_h = (max(core) - min(core) + 1) if core else 0
+                solid = core and core_h * step >= 8 and len(core) >= 0.7 * core_h \
+                    and sum(per_row[ry] for ry in core) >= 0.6 * wmax * len(core)
+                if wmax * step >= 50 and solid:
                     rects.append({"kind": kd, "x0": xs0 * step, "x1": xs1 * step,
                                   "y0": min(core) * step, "y1": max(core) * step + step})
     # merge pieces of one rectangle split by a drawn line
-    rects.sort(key=lambda r: (r["kind"], r["y0"]))
-    merged = []
-    for r in rects:
-        m = merged[-1] if merged else None
-        if m and m["kind"] == r["kind"] and r["y0"] - m["y1"] <= 7 and min(m["x1"], r["x1"]) - max(m["x0"], r["x0"]) > 20:
-            m["y0"], m["y1"] = min(m["y0"], r["y0"]), max(m["y1"], r["y1"])
-            m["x0"], m["x1"] = min(m["x0"], r["x0"]), max(m["x1"], r["x1"])
-        else:
-            merged.append(dict(r))
+    # (stacked pieces, and v0.99.471 side-by-side pieces cut by a hand-drawn curve)
+    merged = [dict(r) for r in rects]
+
+    def _mergeable(a, b):
+        if a["kind"] != b["kind"]:
+            return False
+        x_ov = min(a["x1"], b["x1"]) - max(a["x0"], b["x0"])
+        y_ov = min(a["y1"], b["y1"]) - max(a["y0"], b["y0"])
+        hmin = max(1, min(a["y1"] - a["y0"], b["y1"] - b["y0"]))
+        stacked = x_ov > 20 and -7 <= y_ov
+        beside = y_ov >= 0.5 * hmin and x_ov >= -40
+        return stacked or beside
+    changed_m = True
+    while changed_m:
+        changed_m = False
+        for i in range(len(merged)):
+            for j in range(i + 1, len(merged)):
+                a, b = merged[i], merged[j]
+                if _mergeable(a, b):
+                    a["y0"], a["y1"] = min(a["y0"], b["y0"]), max(a["y1"], b["y1"])
+                    a["x0"], a["x1"] = min(a["x0"], b["x0"]), max(a["x1"], b["x1"])
+                    merged.pop(j)
+                    changed_m = True
+                    break
+            if changed_m:
+                break
+    merged.sort(key=lambda r: (r["kind"], r["y0"]))
     # horizontal drawn lines: thin rows dark across most of the chart
     # v0.99.453: a drawn line is solid — the dotted current-price line is not one
     def _is_line_row(yy):
@@ -21775,7 +21818,11 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
         if len(lv) < 1:
             continue
         side = "long" if r["kind"] == 1 else "short"
-        zones.append({"side": side, "levels": sorted(lv, reverse=(side == "long"))})
+        lv = sorted(lv, reverse=(side == "long"))
+        if any(z_["side"] == side and len(z_["levels"]) == len(lv)
+               and all(abs(a_ - b_) <= 0.001 * abs(b_) for a_, b_ in zip(z_["levels"], lv)) for z_ in zones):
+            continue   # v0.99.471 — the same zone twice
+        zones.append({"side": side, "levels": lv})
 
     # ---- decimal scale from the live price ----
     cur_price = price_at(cur_y) if (price_at and cur_y is not None) else None
