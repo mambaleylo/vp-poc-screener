@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.444"
+APP_VERSION = "0.99.445"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -26279,26 +26279,51 @@ async function refreshSnr() {
 const ZONE_ST = {watch: '👀 слежу', in_trade: '🤖 в сделке', closed: '✔ закрыта', broken: '💥 пробита', expired: '⌛ истекла', old: '📜 уже отработала'};
 const zfmt = v => v == null ? '—' : String(+(+v).toPrecision(6));
 const zdate = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
-function zoneCardHtml(z) {
+function zoneRowHtml(z) {
   const long = z.side === 'long';
   const lv = z.levels.map((v, i) => `<span style="${z.touched && z.touched[i] ? 'color:var(--win);font-weight:700;' : ''}">${i + 1}) ${zfmt(v)}${z.touched && z.touched[i] ? ' ✓' : ''}</span>`).join(' · ');
   const tr = z.trade;
   const trTxt = tr ? `<div class="dim" style="font-size:var(--fs-sm);">вход ${zfmt(tr.entry)} · SL ${zfmt(tr.sl)} · TP ${zfmt(tr.tp)}${tr.autotrade ? ' · биржа: ' + tr.autotrade.status + (tr.autotrade.leverage ? ' ' + tr.autotrade.leverage + 'x' : '') : ''}${tr.result ? ` · <b class="${tr.result === 'WIN' ? 'win' : 'loss'}">${tr.result} ${tr.pnl_r > 0 ? '+' : ''}${tr.pnl_r}R</b>` : ''}</div>` : '';
   const hist = z.status === 'old' && z.result ? `<div class="dim" style="font-size:var(--fs-sm);">по истории: ${z.result.result} ${z.result.r > 0 ? '+' : ''}${z.result.r}R</div>` : '';
-  return `<div style="margin-bottom:8px;padding:10px;background:var(--card);border-radius:var(--r-lg);border:1px solid var(--line);border-left:4px solid ${long ? '#4caf50' : '#ef5350'};">
-    <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;">
-      <div><b>${(z.symbol || '?').replace('_USDT', '')}</b> <span class="${long ? 'win' : 'loss'}">${long ? 'лонг' : 'шорт'}</span> <span class="dim">· ${ZONE_ST[z.status] || z.status} · пост ${zdate(z.post_time)}</span></div>
+  const btn = 'background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);';
+  return `<div style="margin-top:8px;padding:6px 0 0 8px;border-left:3px solid ${long ? '#4caf50' : '#ef5350'};">
+    <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">
+      <div><span class="${long ? 'win' : 'loss'}" style="font-weight:700;">${long ? 'лонг' : 'шорт'}</span> <span class="dim">· ${ZONE_ST[z.status] || z.status}</span></div>
       <div style="white-space:nowrap;">
-        <a href="/api/zones/img/${z.post_id}" target="_blank" style="color:var(--acc);font-size:var(--fs-sm);">скрин</a>
-        <button onclick="zonesEdit('${z.id}', '${z.levels.join(' ')}')" style="background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);margin-left:4px;">✏️</button>
-        <button onclick="zonesSide('${z.id}', '${long ? 'short' : 'long'}')" title="поменять сторону" style="background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);">⇅</button>
-        <button onclick="zonesCoin('${z.id}', '${(z.symbol || '').replace('_USDT', '')}')" title="сменить монету (для всего поста)" style="background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);">🪙</button>
-        <button onclick="zonesReparse('${z.post_id}')" title="распознать пост заново" style="background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);">↻</button>
-        <button onclick="zonesDel('${z.id}')" style="background:var(--neg-bg);border:none;color:var(--neg);padding:3px 8px;border-radius:var(--r-xs);">🗑</button>
+        <button onclick="zonesEdit('${z.id}', '${z.levels.join(' ')}')" title="уровни" style="${btn}">✏️</button>
+        <button onclick="zonesSide('${z.id}', '${long ? 'short' : 'long'}')" title="поменять сторону" style="${btn}">⇅</button>
+        <button onclick="zonesDel('${z.id}')" title="удалить зону" style="background:var(--neg-bg);border:none;color:var(--neg);padding:3px 8px;border-radius:var(--r-xs);">🗑</button>
       </div>
     </div>
     <div style="margin-top:4px;">${lv}</div>${trTxt}${hist}
   </div>`;
+}
+// v0.99.445 — all zones of one screenshot in one block: coin, post time and the
+// post-wide buttons (screenshot, coin, re-recognise, delete post) once on top
+function zonePostBlocks(list) {
+  const groups = new Map();
+  for (const z of list) {
+    const k = z.post_id || z.id;
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(z);
+  }
+  const btn = 'background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);';
+  return [...groups.values()].sort((a, b) => (b[0].post_time || 0) - (a[0].post_time || 0)).map(g => {
+    const z0 = g[0], coin = (z0.symbol || '?').replace('_USDT', '');
+    g.sort((a, b) => (a.side === b.side ? 0 : a.side === 'short' ? -1 : 1) || (b.levels[0] || 0) - (a.levels[0] || 0));
+    return `<div style="margin-bottom:10px;padding:10px;background:var(--card);border-radius:var(--r-lg);border:1px solid var(--line);">
+      <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">
+        <div><b>${coin}</b> <span class="dim">· пост ${zdate(z0.post_time)} · зон: ${g.length}</span></div>
+        <div style="white-space:nowrap;">
+          ${z0.post_id ? `<a href="/api/zones/img/${z0.post_id}" target="_blank" style="color:var(--acc);font-size:var(--fs-sm);">скрин</a>` : ''}
+          <button onclick="zonesCoin('${z0.id}', '${(z0.symbol || '').replace('_USDT', '')}')" title="сменить монету поста" style="${btn}margin-left:4px;">🪙</button>
+          ${z0.post_id ? `<button onclick="zonesReparse('${z0.post_id}')" title="распознать пост заново" style="${btn}">↻</button>
+          <button onclick="zonesDelPost('${z0.post_id}')" title="удалить пост и все его зоны" style="background:var(--neg-bg);border:none;color:var(--neg);padding:3px 8px;border-radius:var(--r-xs);">🗑</button>` : ''}
+        </div>
+      </div>
+      ${g.map(zoneRowHtml).join('')}
+    </div>`;
+  }).join('');
 }
 async function refreshZones() {
   const panel = document.getElementById('zonesPanel');
@@ -26331,7 +26356,7 @@ async function refreshZones() {
   const zs = d.zones || [];
   const act = zs.filter(z => z.status === 'watch' || z.status === 'in_trade');
   const arch = zs.filter(z => !(z.status === 'watch' || z.status === 'in_trade'));
-  const bad = (d.posts || []).filter(x => !x.ok).slice(0, 10).map(x => `<div style="font-size:var(--fs-sm);margin-bottom:4px;">⚠️ пост ${zdate(x.post_time)}${x.symbol ? ' · ' + x.symbol.replace('_USDT', '') : ''}: ${(x.notes || []).join('; ') || 'не распознан'} · <a href="/api/zones/img/${x.id}" target="_blank" style="color:var(--acc);">скрин</a> · <a href="#" onclick="zonesAdd('${x.id}', '${x.symbol || ''}');return false;" style="color:var(--acc);">добавить зону</a> ${x.pending ? ` · <a href="#" onclick="zonesSetSym('${x.id}');return false;" style="color:var(--win);font-weight:700;">указать монету (зон: ${x.pending.zones.length})</a>` : ''} · <a href="#" onclick="zonesReparse('${x.id}');return false;" style="color:var(--acc);">↻ распознать заново</a> · <a href="#" onclick="zonesDelPost('${x.id}');return false;" style="color:var(--neg);">удалить</a></div>`).join('');
+  const bad = (d.posts || []).filter(x => !x.ok).slice(0, 10).map(x => `<div style="font-size:var(--fs-sm);margin-bottom:4px;">⚠️ пост ${zdate(x.post_time)}${x.symbol ? ' · ' + x.symbol.replace('_USDT', '') : ''}: ${[...new Set(x.notes || [])].join('; ') || 'не распознан'} · <a href="/api/zones/img/${x.id}" target="_blank" style="color:var(--acc);">скрин</a> · <a href="#" onclick="zonesAdd('${x.id}', '${x.symbol || ''}');return false;" style="color:var(--acc);">добавить зону</a> ${x.pending ? ` · <a href="#" onclick="zonesSetSym('${x.id}');return false;" style="color:var(--win);font-weight:700;">указать монету (зон: ${x.pending.zones.length})</a>` : ''} · <a href="#" onclick="zonesReparse('${x.id}');return false;" style="color:var(--acc);">↻ распознать заново</a> · <a href="#" onclick="zonesDelPost('${x.id}');return false;" style="color:var(--neg);">удалить</a></div>`).join('');
   setPanelHtml(panel, `${warn}
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
       <label onclick="window._zUp = Date.now()" style="background:var(--acc);color:#000;padding:8px 12px;border-radius:var(--r-sm);cursor:pointer;">📷 Загрузить скрин<input type="file" accept="image/*" onchange="zonesUpload(this)" style="display:none;"></label>
@@ -26340,8 +26365,8 @@ async function refreshZones() {
     <div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>
     ${rules}${stats}${bad ? `<div style="margin-bottom:8px;">${bad}</div>` : ''}
     <div style="font-weight:700;margin:6px 0;">Активные (${act.length})</div>
-    ${act.length ? act.map(zoneCardHtml).join('') : '<div class="dim">нет — перешлите пост боту или загрузите скрин</div>'}
-    <details style="margin-top:8px;"><summary class="dim" style="cursor:pointer;">архив (${arch.length})</summary>${arch.map(zoneCardHtml).join('')}</details>`);
+    ${act.length ? zonePostBlocks(act) : '<div class="dim">нет — перешлите пост боту или загрузите скрин</div>'}
+    <details style="margin-top:8px;"><summary class="dim" style="cursor:pointer;">архив (${arch.length})</summary>${zonePostBlocks(arch)}</details>`);
 }
 async function zonesPost(url, body) {
   try {

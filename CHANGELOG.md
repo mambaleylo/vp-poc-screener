@@ -18456,3 +18456,9 @@ v0.99.444 - Зоны: if the ticker read on the screenshot (the word right befor
          collapsed (and the search cleared) each time ⚙️ Настройки opens; the
          per-module risk row puts its text above the four inputs instead of
          squeezing it into a narrow column.
+v0.99.445 - Zones tab: all zones of one screenshot are shown in one block — coin,
+         post time, zone count and the post-wide buttons (скрин, 🪙 coin, ↻
+         re-recognise, 🗑 delete post) once on top; each zone below as a row
+         with its side, status, levels and its own ✏️ / ⇅ / 🗑. Blocks newest
+         post first, the archive grouped the same way. Repeated notes of a
+         failed post are shown once.
