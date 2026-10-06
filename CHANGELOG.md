@@ -18619,3 +18619,14 @@ v0.99.463 - Зоны / learned rules: they replace the defaults only when clearl
          better on the later (check) zones — by at least +0.1R per trade; a
          smaller difference keeps the defaults (no switching for a difference
          that may be chance), said so in the tab.
+v0.99.464 - Зоны / learned rules: chosen by the account's growth per trade at
+         the risk really used (the zones' own % or the common one): the mean of
+         log(1 + risk × R). At a high risk a stop halves the account, so rules
+         with a low win rate and rare big takes no longer win just on average R
+         (at 50% the pick moves to high win-rate takes; at 2% big takes can win).
+         The check on the later zones and the +0.5% margin over the defaults
+         use the same measure. Shown: growth per trade, R, win rate and the
+         longest losing streak. Stats fixed: the wick beyond the 1st line is
+         measured until the reaction (+2% back), not over all 14 days (that gave
+         "17%" wicks); "beyond the far line" likewise; the run is the best move
+         over the window, labelled so.

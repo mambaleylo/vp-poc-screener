@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.463"
+APP_VERSION = "0.99.464"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21196,6 +21196,17 @@ ZONES_GRID_ENTRY = (0, 1)
 ZONES_GRID_BUF = (0.3, 0.6, 1.0, 1.5, 2.5)
 ZONES_GRID_TP = (2.0, 3.0, 4.0, 5.0, 7.0, 10.0, 15.0, 20.0)   # v0.99.460 — up to +20%
 ZONES_SWITCH_MARGIN_R = 0.1   # v0.99.463 — learned rules replace the defaults only when clearly better on the check
+ZONES_SWITCH_MARGIN_G = 0.5   # v0.99.464 — the same in account growth: +0.5% per trade at the risk in use
+
+
+def _zones_risk_frac():
+    """the risk per trade the zones really use (their own % or the common one)"""
+    v = MODULE_RISK_PCT.get("zones") if isinstance(MODULE_RISK_PCT, dict) else None
+    v = v if v else AUTOTRADE_RISK_PCT_OF_BALANCE
+    try:
+        return min(0.95, max(0.001, float(v) / 100))
+    except (TypeError, ValueError):
+        return 0.02
 ZONES_LEARN_MIN = 8          # finished zones with an entry needed before the learned values replace the defaults
 ZONES_FEE = 0.001
 ZONES_POLL_SEC = 20
@@ -21928,11 +21939,16 @@ def zone_sim(cs, z, entry_idx, buf, tp, start, end):
 def zone_path_stats(cs, z, start, end):
     """How the price behaved at the zone: reached the 1st line? how deep it went
     beyond it before turning, how far it ran in the zone's direction after."""
+    # v0.99.464 — the wick is measured only until the reaction (+2% back from
+    # the 1st line in the zone's direction), the bounce only after the deepest
+    # point of that wick; before, both were 14-day extremes (17% "wicks")
     s = _zones_side(z)
     first, far = z["levels"][0], z["levels"][-1]
+    react = first * (1 + s * 0.02)
     touched = None
     deepest = None
     best = None
+    reacted = False
     for c in cs:
         if c["time"] < start or c["time"] >= end:
             continue
@@ -21942,11 +21958,14 @@ def zone_path_stats(cs, z, start, end):
             else:
                 continue
         lo, hi = (c["low"], c["high"]) if s > 0 else (c["high"], c["low"])
-        deepest = lo if deepest is None else (min(deepest, lo) if s > 0 else max(deepest, lo))
+        if not reacted:
+            deepest = lo if deepest is None else (min(deepest, lo) if s > 0 else max(deepest, lo))
+            if (s > 0 and hi >= react) or (s < 0 and hi <= react):
+                reacted = True
         best = hi if best is None else (max(best, hi) if s > 0 else min(best, hi))
     if touched is None:
         return {"touched": False}
-    depth = s * (first - deepest) / first * 100
+    depth = max(0.0, s * (first - deepest) / first * 100)
     run = s * (best - first) / first * 100
     broke = (deepest < far) if s > 0 else (deepest > far)
     return {"touched": True, "depth_pct": round(depth, 3), "run_pct": round(run, 3), "beyond_far": broke}
@@ -21996,10 +22015,26 @@ def zones_learn():
     else:
         rows_sel = rows
     avg = lambda xs: round(sum(xs) / len(xs), 3) if xs else None
+    rf = _zones_risk_frac()
+
+    def growth(xs):
+        """v0.99.464 — account growth per trade (%) at the risk actually used:
+        the mean of log(1 + risk x R); a stop at 50% risk halves the account,
+        so rare big wins can't hide long losing streaks"""
+        if not xs:
+            return None
+        lg = sum(math.log(max(1e-6, 1 + rf * x)) for x in xs) / len(xs)
+        return round((math.exp(lg) - 1) * 100, 3)
     for r in rows:
         k = (r["entry"], r["buf"], r["tp"])
         f, c = grid_fit.get(k, []), grid_chk.get(k, [])
-        r.update({"fit_n": len(f), "fit_r": avg(f), "chk_n": len(c), "chk_r": avg(c)})
+        r.update({"fit_n": len(f), "fit_r": avg(f), "chk_n": len(c), "chk_r": avg(c),
+                  "fit_g": growth(f), "chk_g": growth(c), "all_g": growth(grid.get(k, []))})
+        ls, run_ = 0, 0   # the longest losing streak in time order
+        for x in grid.get(k, []):
+            run_ = run_ + 1 if x < 0 else 0
+            ls = max(ls, run_)
+        r["max_ls"] = ls
         a = sorted(after.get(k, []))
         if a:
             r["after_med"] = round(a[len(a) // 2], 2)
@@ -22008,23 +22043,24 @@ def zones_learn():
     d = ZONES_DEFAULT
     dflt = next((r for r in rows if r["entry"] == d["entry"] and r["buf"] == d["buf"] and r["tp"] == d["tp"]), None)
     ok = [r for r in rows_sel if r["fit_n"] >= ZONES_LEARN_MIN]
-    pick = max(ok, key=lambda r: (r["fit_r"], -r["buf"])) if ok else None   # chosen without the check part
+    # chosen on the earlier zones only, by account growth at the risk in use
+    pick = max(ok, key=lambda r: (r["fit_g"], r["fit_r"], -r["buf"])) if ok else None
     best, verdict = None, None
+    risk_txt = f"при риске {rf * 100:g}% на сделку"
     if pick:
-        dchk = (dflt or {}).get("chk_r")
+        dg = (dflt or {}).get("chk_g")
         if pick["chk_n"] < 5:
             verdict = f"подобрано на {pick['fit_n']} зонах, на проверке пока мало зон ({pick['chk_n']} из 5) — работают правила по умолчанию"
-        elif pick["chk_r"] is not None and pick["chk_r"] > 0 and dchk is not None and dchk > 0 \
-                and pick["chk_r"] < dchk + ZONES_SWITCH_MARGIN_R:
-            verdict = (f"подобранные правила на проверке {pick['chk_r']:+.2f}R, по умолчанию {dchk:+.2f}R — разница меньше "
-                       f"{ZONES_SWITCH_MARGIN_R}R, остаются правила по умолчанию (менять ради случайной разницы не стоит)")
-        elif pick["chk_r"] is not None and pick["chk_r"] > 0 and (dchk is None or pick["chk_r"] >= dchk + ZONES_SWITCH_MARGIN_R):
-            best = pick
-            verdict = f"подтвердилось на проверке: {pick['chk_r']:+.2f}R на {pick['chk_n']} более поздних зонах" \
-                + (f" (по умолчанию {dchk:+.2f}R)" if dchk is not None else "")
+        elif pick["chk_g"] is None or pick["chk_g"] <= 0:
+            verdict = (f"не подтвердилось на проверке: счёт {pick['chk_g']:+.2f}% за сделку {risk_txt} на {pick['chk_n']} зонах"
+                       + (f", по умолчанию {dg:+.2f}%" if dg is not None else "") + " — работают правила по умолчанию")
+        elif dg is not None and pick["chk_g"] < dg + ZONES_SWITCH_MARGIN_G:
+            verdict = (f"на проверке {pick['chk_g']:+.2f}% за сделку {risk_txt}, по умолчанию {dg:+.2f}% — разница меньше "
+                       f"{ZONES_SWITCH_MARGIN_G}%, остаются правила по умолчанию")
         else:
-            verdict = (f"не подтвердилось на проверке ({pick['chk_r']:+.2f}R на {pick['chk_n']} зонах"
-                       + (f", по умолчанию {dchk:+.2f}R" if dchk is not None else "") + ") — работают правила по умолчанию")
+            best = pick
+            verdict = (f"подтвердилось на проверке: счёт {pick['chk_g']:+.2f}% за сделку {risk_txt} на {pick['chk_n']} "
+                       f"более поздних зонах" + (f" (по умолчанию {dg:+.2f}%)" if dg is not None else ""))
     touched = [p for p in paths if p.get("touched")]
     med = lambda xs: sorted(xs)[len(xs) // 2] if xs else None
     stats = {
@@ -22036,7 +22072,7 @@ def zones_learn():
                   for x in (2, 3, 5, 10)},
         "beyond_far": round(sum(1 for p in touched if p["beyond_far"]) / len(touched) * 100, 1) if touched else None,
     }
-    learned = {"at": now, "n": best["n"] if best else 0, "best": best, "default": dflt, "pick": pick,
+    learned = {"at": now, "n": best["n"] if best else 0, "best": best, "default": dflt, "pick": pick, "risk": rf * 100,
                "verdict": verdict, "fit_zones": n_fit, "chk_zones": len(finished) - n_fit,
                "top": sorted(ok, key=lambda r: -(r["fit_r"] or -99))[:6]}
     with _zones_lock:
@@ -27953,9 +27989,11 @@ async function refreshZones() {
   if (st.finished) {
     const r = st.reach || {};
     stats = `<div style="padding:8px 10px;margin-bottom:8px;background:var(--inset);border-radius:var(--r-sm);font-size:var(--fs-sm);">
-      <b>Статистика</b> по ${st.finished} отработанным зонам: цена дошла до 1-й линии в ${st.touched} · закол за 1-ю линию: медиана ${st.depth_median}%, у 80% не глубже ${st.depth_p80}% · дальнюю линию пробивала в ${st.beyond_far}% · ход в сторону зоны после касания: медиана +${st.run_median}%, +2% — ${r['2']}%, +3% — ${r['3']}%, +5% — ${r['5']}%, +10% — ${r['10']}% случаев
+      <b>Статистика</b> по ${st.finished} отработанным зонам: цена дошла до 1-й линии в ${st.touched} · закол за 1-ю линию до разворота: медиана ${st.depth_median}%, у 80% не глубже ${st.depth_p80}% · дальнюю линию пробивала до разворота в ${st.beyond_far}% · лучший ход в сторону зоны за ${d.max_days} дн. после касания: медиана +${st.run_median}%, +2% — ${r['2']}%, +3% — ${r['3']}%, +5% — ${r['5']}%, +10% — ${r['10']}% случаев
       ${(lr.pick || lr.best) ? (() => { const b = lr.pick || lr.best, sg = v => v == null ? '—' : (v > 0 ? '+' : '') + v + 'R';
-        return `<div style="margin-top:4px;">подбор (ранние ${lr.fit_zones} зон): линия ${b.entry + 1}, стоп ${b.buf}%, тейк +${b.tp}% → <b>${sg(b.fit_r)}</b> (${b.fit_n} сделок) · проверка (поздние ${lr.chk_zones}): <b class="${(b.chk_r || 0) > 0 ? 'win' : 'loss'}">${sg(b.chk_r)}</b> (${b.chk_n})${lr.default ? ` · по умолчанию на проверке: ${sg(lr.default.chk_r)}` : ''}</div>
+        const gp = v => v == null ? '—' : (v > 0 ? '+' : '') + v + '%';
+        return `<div style="margin-top:4px;">подбор под рост счёта при риске ${lr.risk}% (ранние ${lr.fit_zones} зон): линия ${b.entry + 1}, стоп ${b.buf}%, тейк +${b.tp}% → счёт <b>${gp(b.fit_g)}</b> за сделку, ${sg(b.fit_r)}, WR ${b.wr}%, худшая серия стопов ${b.max_ls} (${b.fit_n} сделок)</div>
+        <div>проверка (поздние ${lr.chk_zones} зон): счёт <b class="${(b.chk_g || 0) > 0 ? 'win' : 'loss'}">${gp(b.chk_g)}</b> за сделку, ${sg(b.chk_r)} (${b.chk_n})${lr.default ? ` · по умолчанию: ${gp(lr.default.chk_g)}, ${sg(lr.default.chk_r)}` : ''}</div>
         <div>${lr.verdict || ''}</div>
         ${b.after_med != null ? `<div>после тейка цена шла дальше: медиана +${b.after_med}% · ещё +2% и больше — в ${b.after_2}% сделок, +5% — в ${b.after_5}%</div>` : ''}`; })() : '<div class="dim">для подбора правил пока мало зон со входом</div>'}
       <button onclick="zonesRelearn()" style="margin-top:6px;background:var(--ctl);border:none;color:var(--tx);padding:4px 10px;border-radius:var(--r-xs);">↻ пересчитать</button></div>`;
