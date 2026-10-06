@@ -18730,3 +18730,6 @@ v0.99.480 - Зоны tab: the "➕ Зона вручную" and "📚 Режим
          mode is forced off on start (new posts are always live) and the
          "обучение вкл/выкл" Telegram command is gone. The history import still
          loads old posts as training ones, separately.
+v0.99.481 - Screensaver: not charging = no red frame any more; the clock keeps
+         its colour (green with open positions) and its digits get a thin red
+         outline.

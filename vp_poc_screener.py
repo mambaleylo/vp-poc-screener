@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.480"
+APP_VERSION = "0.99.481"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -31221,7 +31221,11 @@ document.addEventListener('fullscreenchange', () => {
     font-family:-apple-system, "SF Pro Display", BlinkMacSystemFont, "Helvetica Neue", Roboto, system-ui, sans-serif;
     font-variant-numeric:tabular-nums; -webkit-font-smoothing:antialiased; transition:color 0.5s, border-color 0.5s; }
   #screensaverTime { font-size:48px; font-weight:200; line-height:1; letter-spacing:1px; }
-  #screensaverClock.ssNoCharge { border-color:#ff3b30; }
+  /* v0.99.481 — not charging: no frame any more; the digits keep their colour
+     and get a thin red outline */
+  #screensaverClock.ssNoCharge #screensaverTime {
+    text-shadow: 1px 0 0 #ff3b30, -1px 0 0 #ff3b30, 0 1px 0 #ff3b30, 0 -1px 0 #ff3b30,
+                 1px 1px 0 #ff3b30, -1px -1px 0 #ff3b30, 1px -1px 0 #ff3b30, -1px 1px 0 #ff3b30; }
 </style>
 <div id="screensaverOverlay" style="display:none;position:fixed;inset:0;background:#000;z-index:9999;cursor:pointer;touch-action:manipulation;user-select:none;" onclick="_ssTap()" title="двойное касание — выход">
   <div id="screensaverClock" style="position:absolute;user-select:none;">
