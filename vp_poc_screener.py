@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.453"
+APP_VERSION = "0.99.454"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1107,7 +1107,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_mirror", "autotrade_neuro", "auto_risk_enabled",
                   "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones",
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
-                  "zones_own_scan", "autotrade_zones_own",
+                  "zones_own_scan", "autotrade_zones_own", "telegram_alerts_zones_own",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
@@ -1181,6 +1181,7 @@ def get_settings():
         "autotrade_zones": AUTOTRADE_ENABLED_ZONES,
         "autotrade_zones_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
         "zones_own_scan": ZONES_OWN_SCAN, "autotrade_zones_own": AUTOTRADE_ENABLED_ZONES_OWN,   # v0.99.452
+        "telegram_alerts_zones_own": TELEGRAM_ALERTS_ZONES_OWN,   # v0.99.454
         "telegram_alerts_zones": TELEGRAM_ALERTS_ZONES,
         "zones_tp_pct": ZONES_TP_PCT,
         "zones_max_days": ZONES_MAX_DAYS,
@@ -1446,6 +1447,8 @@ def apply_settings(updates):
         globals()["ZONES_OWN_SCAN"] = bool(updates["zones_own_scan"])
     if "autotrade_zones_own" in updates:
         globals()["AUTOTRADE_ENABLED_ZONES_OWN"] = bool(updates["autotrade_zones_own"])
+    if "telegram_alerts_zones_own" in updates:   # v0.99.454
+        globals()["TELEGRAM_ALERTS_ZONES_OWN"] = bool(updates["telegram_alerts_zones_own"])
     if "telegram_alerts_zones" in updates:
         globals()["TELEGRAM_ALERTS_ZONES"] = bool(updates["telegram_alerts_zones"])
     if "zones_tp_pct" in updates:
@@ -22362,6 +22365,16 @@ def zones_notify(text):
     send_telegram(text, category="zones")
 
 
+def zones_znotify(z, text, important=False):
+    """v0.99.454 — a zone's own message. Our finder's zones stay quiet in
+    Telegram while it is still learning (the tab shows everything); once
+    trained only their trades open / close are sent (touches, breaks and
+    expiries of our zones are tab-only), and the switch can mute them all."""
+    if z.get("own") and not (important and _own_tg_ok()):
+        return
+    zones_notify(text)
+
+
 def _zones_open_trade(z, price, p):
     s = _zones_side(z)
     direction = "LONG" if s > 0 else "SHORT"
@@ -22386,7 +22399,7 @@ def _zones_open_trade(z, price, p):
             log_error(f"zones autotrade {z['symbol']}: {e}")
     plan = planned_leverage(z["symbol"], direction, price, sl)
     lev_txt = format_leverage_txt(res, AUTOTRADE_ENABLED_ZONES, plan)
-    zones_notify(f"{'⬆️' if s > 0 else '⬇️'} Зона {z['symbol']} ({zones_fmt(z)}): вход {direction} по {price:.6g}\n"
+    zones_znotify(z, f"{'⬆️' if s > 0 else '⬇️'} Зона {z['symbol']} ({zones_fmt(z)}): вход {direction} по {price:.6g}\n"
                  f"SL {sl:.6g} · TP {tp:.6g} (+{p['tp']:g}%) · плечо {lev_txt}\n"
                  f"правила: линия {p['entry'] + 1}, стоп {p['buf']:g}% за зоной ({p['source']})")
     return tr
@@ -22421,7 +22434,7 @@ def _zones_track_trade(z):
                    "pnl_pct": round(pct, 2)})
         z["status"] = "closed"
         z["result"] = {"result": res, "r": round(r, 3), "pct": round(pct, 2)}
-    zones_notify(f"{'✅' if res == 'WIN' else ('❌' if res == 'LOSS' else '⏱')} Зона {z['symbol']}: {res} "
+    zones_znotify(z, f"{'✅' if res == 'WIN' else ('❌' if res == 'LOSS' else '⏱')} Зона {z['symbol']}: {res} "
                  f"{r:+.2f}R · {pct:+.2f}% чистыми (вход {tr['entry']:.6g} → {px:.6g})")
     _zones_learn_event.set()
     return True
@@ -22462,14 +22475,14 @@ def zones_monitor_tick(last_track=0.0):
             with _zones_lock:
                 z["status"] = "expired"
             changed = True
-            zones_notify(f"⌛ Зона {z['symbol']} ({zones_fmt(z)}) — {ZONES_MAX_DAYS} дн. без входа, в архив")
+            zones_znotify(z, f"⌛ Зона {z['symbol']} ({zones_fmt(z)}) — {ZONES_MAX_DAYS} дн. без входа, в архив")
             continue
         for i, lvl in enumerate(z["levels"]):
             if z["touched"][i] is None and ((s > 0 and price <= lvl) or (s < 0 and price >= lvl)):
                 with _zones_lock:
                     z["touched"][i] = int(now)
                 changed = True
-                zones_notify(f"🎯 {z['symbol']}: цена {price:.6g} дошла до {i + 1}-й линии ({lvl:.6g}) "
+                zones_znotify(z, f"🎯 {z['symbol']}: цена {price:.6g} дошла до {i + 1}-й линии ({lvl:.6g}) "
                              f"зоны {zones_fmt(z)}")
         e_idx = min(p["entry"], len(z["levels"]) - 1)
         far_stop = z["levels"][-1] * (1 - s * p["buf"] / 100)
@@ -22477,7 +22490,7 @@ def zones_monitor_tick(last_track=0.0):
             with _zones_lock:
                 z["status"] = "broken"
             changed = True
-            zones_notify(f"💥 Зона {z['symbol']} ({zones_fmt(z)}) пробита: цена {price:.6g}")
+            zones_znotify(z, f"💥 Зона {z['symbol']} ({zones_fmt(z)}) пробита: цена {price:.6g}")
             continue
         if z["touched"][e_idx] is not None and z.get("trade") is None:
             with _zones_lock:
@@ -23153,6 +23166,14 @@ def own_candidates(cs, price=None):
     return out
 
 
+TELEGRAM_ALERTS_ZONES_OWN = os.environ.get("VP_TG_ZONES_OWN", "1") == "1"
+_OWN_TRAINED = [False]   # refreshed on every scan / exam
+
+
+def _own_tg_ok():
+    return TELEGRAM_ALERTS_ZONES_OWN and _OWN_TRAINED[0]
+
+
 def _own_vec(f):
     return [float(f.get(k, 0.0)) for k in _OWN_FEATS]
 
@@ -23165,10 +23186,12 @@ def _own_prior(x):
     return 1 / (1 + math.exp(-max(-30, min(30, s))))
 
 
-def own_fit(samples):
+def own_fit(samples, mark=False):
     """Logistic regression (pure Python, standardised features, L2) on
     [(x, y)]. None until there are enough matched zones to beat the prior."""
     pos = sum(1 for _, y in samples if y)
+    if mark:
+        _OWN_TRAINED[0] = pos >= 15 and len(samples) - pos >= 15
     if pos < 15 or len(samples) - pos < 15:
         return None
     d = len(_OWN_FEATS)
@@ -23359,7 +23382,7 @@ def own_scan_once():
     """One pass over the liquid coins: our best new zones -> watched like the
     public's ones (virtual trades; real ones only with their own switch)."""
     now = time.time()
-    model = own_fit(_own_samples_before(now + 1))
+    model = own_fit(_own_samples_before(now + 1), mark=True)
     thr = 0.5
     try:
         tick = get_tickers()
@@ -23408,6 +23431,8 @@ def own_scan_once():
         with _zones_lock:
             ZONES["zones"].insert(0, z)
         made += 1
+        if model is None or score < 0.7 or not _own_tg_ok():
+            continue   # learning stage / weak zone: tab only, no Telegram
         zones_notify(f"🔎 Наш поиск: {sym.replace('_USDT', '')} {zones_fmt(z).replace('🔎 ', '')} (оценка {score:.2f}"
                      f"{', модель на ' + str(model['n']) + ' примерах' if model else ', правила по умолчанию'})"
                      + ("" if AUTOTRADE_ENABLED_ZONES_OWN else " — без сделок, только наблюдение"))
@@ -25737,6 +25762,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">раз в час проверяет 40 самых ликвидных монет Gate по часовым свечам и присылает зоны, от которых ждёт реакции; учится на постах паблика (каждый пост — проверка: нашли бы мы эту зону сами)</div>
         </div>
         <label class="switch"><input type="checkbox" id="setZonesOwnScan"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳ 🔎 Наш поиск в Telegram</div>
+          <div class="sub">пока поиск учится (меньше 15 совпавших с пабликом зон) — в Telegram ничего не шлёт, всё видно во вкладке «Зоны». После обучения — только сильные новые зоны (оценка от 0.7) и открытие/закрытие сделок по ним, без касаний и пробоев</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgZonesOwn"><span class="switchSlider"></span></label>
       </div>
     </div></details>
 
@@ -28850,6 +28882,7 @@ const setInputs = {
   autotrade_zones_approach: document.getElementById('setAutotradeZonesAppr'),
   autotrade_zones_own: document.getElementById('setAutotradeZonesOwn'),
   zones_own_scan: document.getElementById('setZonesOwnScan'),
+  telegram_alerts_zones_own: document.getElementById('setTgZonesOwn'),
 };
 
 const setValueInputs = {

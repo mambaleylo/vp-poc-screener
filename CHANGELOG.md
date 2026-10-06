@@ -18542,3 +18542,10 @@ v0.99.453 - Зоны OCR: the current-price tag (white on black like a level lab
          height (ink measured against the row's background, so a light-grey
          dotted line counts), or its value equal to the legend's close (one-digit
          OCR slips allowed) with no solid line there.
+v0.99.454 - Зоны / наш поиск: no Telegram spam while it learns. Until the scorer
+         is trained (15 zones matched with the public) the finder sends nothing
+         — new zones, touches, breaks, expiries and virtual trades of our zones
+         are tab-only. After training: only strong new zones (score >= 0.7) and
+         their trades opening / closing; touches, breaks and expiries of our
+         zones stay tab-only. New switch "↳ 🔎 Наш поиск в Telegram" mutes it
+         completely. Public posts' messages are unchanged.
