@@ -18510,3 +18510,26 @@ v0.99.451 - Зоны: next to the result in R the net price move in % is shown
          +3.90%" in the tab, in the post summaries and in the live trade's close
          message. Finished history zones from before get it once on start
          (replayed with the current rules).
+v0.99.452 - Зоны: our own zone finder ("🔎 Наш поиск"). Every hour the 40 most
+         liquid Gate coins are scanned on closed 1h candles (20 days) for
+         candidate zones: tight boxes the price later left by > 1 ATR, clusters
+         of turns (fractal highs/lows within 0.35 ATR), volume nodes; near-
+         identical bands merged. Each band gets features (distance and width in
+         ATR, touches, volume share, box/turns/volume flags, rank by distance,
+         last touch age, reaction after touches) and a score: a pure-Python
+         logistic regression trained on the public's posts once 15 matched
+         zones exist (default rules before). Every public post is an exam: the
+         candidates are rebuilt from candles strictly before the post time, the
+         scorer is trained on earlier posts only (walk-forward); "found" =
+         a band of the same side overlapping the author's zone by half its
+         width (0.5–2× as wide) among our top-3. The Telegram summary of a post
+         says whether we would have found each zone, its rank, the level
+         difference and whether it was in our scan before the post; finished
+         matched zones are replayed with the same rules to compare the author's
+         R with ours. New own zones (max 5 per scan, no duplicates) are alerted
+         and watched like the public's, real trades only with the new
+         "↳↳ Зоны: свои (наш поиск)" switch (off by default); they are left out
+         of the public rules' learning. The tab shows the progress: training
+         bar, recall with its curve over the exams, level difference, author vs
+         our R, own zones' results and the last exams. Settings: on/off switch
+         for the scan. Also fixed the touched-level highlight colour.
