@@ -18704,3 +18704,13 @@ v0.99.476 - Зоны: "скрин" opens the picture over the page instead of a 
          page — in the installed app, Back closed that page and the whole app.
          Now Back (button or gesture), a tap beside the picture or ✕ close just
          the picture; pinch-zoom works.
+v0.99.477 - Зоны OCR: a second, independent source of the ticker — the current
+         price tag on the axis ("WUSDT.P 0,014346 08:09"), read when the legend
+         gives nothing (the phone's tesseract read WUSDT differently than the
+         server's). The tag's edges are found by its dark background (also a
+         two-part ticker | price tag and the part left of the axis), OCR'd
+         strictly inside it (the chart around turned into a black frame that
+         made OCR read nothing) and with a margin, as one row and as a block.
+         The legend's single text lines also get a Latin-capitals-only pass.
+         Tested with the legend OCR forced to fail: W, WLD and PEPE read from
+         the tag.

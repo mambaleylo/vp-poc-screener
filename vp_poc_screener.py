@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.476"
+APP_VERSION = "0.99.477"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21323,6 +21323,9 @@ def _zocr_tesseract(img, psm, whitelist=None):
             pass
 
 
+_ZOCR_TICKER_WL = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789."
+
+
 def _zocr_num(tok):
     """'10,304' / '9.973' / '62,500.5' -> float with the separator read as a decimal
     point when there is only one (the scale is fixed later by the live price)."""
@@ -21469,10 +21472,16 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
         base_c = gray.crop(box)
         if sum(base_c.getdata()) / max(1, base_c.size[0] * base_c.size[1]) < 110:
             base_c = ImageOps.invert(base_c)
+        is_line = box in line_boxes
         for scale in (3, 2, 4):
             c = base_c.resize((base_c.size[0] * scale, base_c.size[1] * scale), Image.LANCZOS)
+            reads_ = []
             for img in (c, c.point(lambda v: 0 if v < 150 else 255)):
-                txt = _zocr_tesseract(img, 7).upper().translate(_trans)
+                reads_.append(_zocr_tesseract(img, 7))
+                if is_line:   # v0.99.477 — Latin capitals / digits only: fewer odd readings of W etc.
+                    reads_.append(_zocr_tesseract(img, 7, _ZOCR_TICKER_WL))
+            for raw_ in reads_:
+                txt = raw_.upper().translate(_trans)
                 if not header_txt and txt.strip():
                     header_txt = txt.strip()[:80]
                 header_all.append(txt)
@@ -21520,6 +21529,7 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                 runs.append((s, y))
         y += 1
     labels, cur_y, box_x0 = [], None, W
+    tag_boxes = []   # v0.99.477 — the current-price tag: its ticker is a second source
     for s, e in runs:
         segs, curs = [], None
         for x in range(ax0, W):
@@ -21574,6 +21584,7 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
             nums = [(yy, rd) for yy, rd in toks if rd and sum(1 for t in rd if ":" in t) * 2 < len(rd)]
             if nums:
                 cur_y = nums[0][0]
+            tag_boxes.append((s, e, bx0, bx1))
             continue
         for yy, rd in toks:
             vals = [(v, dec) for v, dec in (_zocr_num(t) for t in rd) if v is not None]
@@ -21629,10 +21640,66 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
             if (wide and ln != "solid") or ln == "dotted" or at_close:
                 if cur_y is None:
                     cur_y = lb["y"]
+                tag_boxes.append((int(lb["y"]) - 10, int(lb["y"]) + 10, lb["bx0"], lb["bx0"] + lb["w"]))
                 continue
             keep.append(lb)
         labels = keep
         box_x0 = min([lb["bx0"] for lb in labels] + [W])
+
+    # ---- v0.99.477: ticker not read in the legend -> read it in the current-price
+    # tag on the axis ("WUSDT.P 0,014346 08:09"): the tag box is found by walking
+    # left along its dark background, then OCR'd as black-on-white ----
+    if not symbol and symbols and tag_boxes:
+        for (ty0, ty1, tx0, tx1) in tag_boxes[:2]:
+            ty0, ty1 = max(0, int(ty0)), min(H - 1, int(ty1))
+            # the whole tag: it may have a ticker row above the price / timer rows and
+            # start left of the axis; its dark background tells its edges
+            left = tx0
+            for yy_ in range(max(0, ty0 - 20), ty1 + 1):   # the farthest a dark background row reaches
+                x_, gap = tx0, 0
+                while x_ > 0 and gap <= 3:   # a thin light seam between the ticker and the price parts
+                    if gp[x_ - 1, yy_] < 90:
+                        gap = 0
+                    else:
+                        gap += 1
+                    x_ -= 1
+                x_ += gap
+                if tx0 - x_ > 8:
+                    left = min(left, x_)
+            mid = (left + tx1) // 2
+            dark_row = lambda yy_: sum(1 for x_ in range(left + 1, max(left + 2, tx1 - 1)) if gp[x_, yy_] < 90) \
+                >= 0.5 * max(1, tx1 - left - 2)
+            top, bot = ty0, ty1
+            while top > 0 and ty0 - top < 16 and dark_row(top - 1):
+                top -= 1
+            while bot < H - 1 and bot - ty1 < 16 and dark_row(bot + 1):
+                bot += 1
+            # strictly inside the tag: the chart around it would turn into a black
+            # frame after inverting, and OCR then reads nothing
+            crops_ = [ImageOps.invert(gray.crop((left + 1, top, max(left + 2, tx1 - 1), bot + 1))),
+                      ImageOps.invert(gray.crop((max(0, left - 3), max(0, top - 4), min(W, tx1 + 2), min(H, bot + 3))))]
+            if tx0 - left > 20:   # the ticker part alone (a two-part tag: ticker | price)
+                crops_.insert(0, ImageOps.invert(gray.crop((left + 1, top, tx0 - 2, bot + 1))))
+            for cb, scale in [(cb_, sc_) for cb_ in crops_ for sc_ in (4, 3, 5)]:
+                c = cb.resize((cb.size[0] * scale, cb.size[1] * scale), Image.LANCZOS).point(lambda v: 0 if v < 140 else 255)
+                pad = Image.new("L", (c.size[0] + 40, c.size[1] + 40), 255)
+                pad.paste(c, (20, 20))
+                for wl, psm_ in ((_ZOCR_TICKER_WL, 7), (_ZOCR_TICKER_WL, 6), (None, 6)):   # one row / 2-3 rows
+                    txt = _zocr_tesseract(pad, psm_, wl).upper().translate(_trans)
+                    header_all.append(txt)
+                    for mt in tick_re.finditer(txt.replace(" ", "")):
+                        base = mt.group(1)
+                        found += [base[i:] for i in range(0, max(1, len(base) - 1))]
+                        if "VV" in base:
+                            found.append(base.replace("VV", "W"))
+                sym2 = _zocr_pick_ticker(found, symbols)
+                if sym2:
+                    symbol = sym2
+                    not_listed = None
+                    notes.append(f"тикер прочитан на шкале цен ({sym2.replace('_USDT', '')})")
+                    break
+            if symbol:
+                break
 
     # ---- axis ticks (plain numbers), label boxes painted out ----
     strip = gray.crop((ax0, 0, W, H)).copy()
