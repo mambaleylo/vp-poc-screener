@@ -18574,3 +18574,9 @@ v0.99.455 - Зоны survive restarts and lost network (a lift, the road):
          - A real order that failed with ERROR (network at that moment): the
            exchange is checked — a position that did open is adopted; if none
            and the price is still at the line within 10 min, one more try.
+v0.99.456 - Зоны / история группы: "⏹ остановить" (what is loaded stays; a rerun
+         goes on with the posts not taken yet), time left shown while loading,
+         Telegram's own download limit (FloodWait) waited out and the same post
+         taken again, no network = wait and retry the same post instead of
+         skipping it. The days prompt suggests 30 and says the cost (~10–30 s a
+         picture).

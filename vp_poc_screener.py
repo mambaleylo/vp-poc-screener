@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.455"
+APP_VERSION = "0.99.456"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23066,15 +23066,35 @@ async def _zut_history(days):
             if _zut_is_image(m):
                 msgs.append(m)
         h["total"] = len(msgs)
+        import asyncio
+        from telethon.errors import FloodWaitError
+        t_work = time.time()
         for m in msgs:
+            if _ZUT.get("hist_stop"):   # v0.99.456 — "⏹ остановить": what is done stays, a rerun goes on
+                h["stopped"] = True
+                break
             h["seen"] += 1
             if time.time() - m.date.timestamp() < 3600:   # the last hour is live, not history
                 continue
-            try:
-                res = await _zut_handle(m, train=True, quiet=True)
-            except Exception as e:
-                res = None
-                log_error(f"zones userbot history {m.id}: {e}")
+            res = None
+            for attempt in range(6):
+                try:
+                    res = await _zut_handle(m, train=True, quiet=True)
+                    break
+                except FloodWaitError as e:   # Telegram's own limit on downloads: wait as told, same post again
+                    h["wait"] = f"Telegram просит подождать {e.seconds} с"
+                    await asyncio.sleep(e.seconds + 1)
+                    h["wait"] = None
+                except (ConnectionError, OSError, asyncio.TimeoutError) as e:   # no network: wait, same post again
+                    h["wait"] = "нет связи — жду"
+                    await asyncio.sleep(min(300, 15 * (attempt + 1)))
+                    h["wait"] = None
+                except Exception as e:
+                    log_error(f"zones userbot history {m.id}: {e}")
+                    break
+            done_n = h["seen"]
+            if done_n:
+                h["eta_min"] = round((time.time() - t_work) / done_n * (h["total"] - done_n) / 60)
             if res is None:
                 h["skipped"] += 1
                 continue
@@ -23084,7 +23104,8 @@ async def _zut_history(days):
         with _zones_lock:
             done = [z for z in ZONES["zones"] if z.get("train") and z.get("status") == "old" and z.get("result")]
         rs = [z["result"]["r"] for z in done]
-        zones_notify(f"📚 История группы за {days} дн.: картинок {h.get('total', 0)}, постов с зонами {h['posts']}, "
+        zones_notify(f"📚 История группы за {days} дн.{' (остановлено)' if h.get('stopped') else ''}: картинок {h.get('total', 0)}, "
+                     f"обработано {h['seen']}, постов с зонами {h['posts']}, "
                      f"зон {h['zones']} (пропущено {h['skipped']}: уже были, не скрин с зонами или монеты нет на Gate). "
                      + (f"Зон обучения с итогом: {len(rs)}, средний результат {sum(rs) / len(rs):+.2f}R."
                         if rs else "Итогов пока нет — досчитаю по графику."))
@@ -23283,8 +23304,15 @@ def api_zut_history():
     except ValueError:
         days = 60
     import asyncio
+    _ZUT["hist_stop"] = False
     _ZUT["hist"] = {"running": True, "days": days, "seen": 0, "posts": 0, "zones": 0, "skipped": 0}
     asyncio.run_coroutine_threadsafe(_zut_history(days), _zut_loop())
+    return jsonify({"ok": True})
+
+
+@app.route("/api/zones/ut/history_stop", methods=["POST"])
+def api_zut_history_stop():
+    _ZUT["hist_stop"] = True
     return jsonify({"ok": True})
 
 
@@ -27833,7 +27861,7 @@ function zutHtml(u) {
     ${u.error ? `<div class="loss">${u.error}</div>` : ''}
     <button onclick="zutLogin()" style="${btn}">🔑 Войти</button>${u.login_step === 'code' ? `<button onclick="zutCode()" style="${btn}">ввести код</button>` : ''}${u.login_step === 'password' ? `<button onclick="zutPassword()" style="${btn}">ввести пароль 2FA</button>` : ''}</div>`;
   const h = u.hist;
-  const hTxt = h ? (h.running ? `📚 загружаю историю за ${h.days} дн.: ${h.seen}/${h.total == null ? '…' : h.total} картинок, постов с зонами ${h.posts}, зон ${h.zones}`
+  const hTxt = h ? (h.running ? `📚 загружаю историю за ${h.days} дн.: ${h.seen}/${h.total == null ? '…' : h.total} картинок, постов с зонами ${h.posts}, зон ${h.zones}${h.eta_min != null ? ` · осталось ~${h.eta_min >= 60 ? Math.floor(h.eta_min / 60) + ' ч ' : ''}${h.eta_min % 60} мин` : ''}${h.wait ? ` · <span class="loss">${h.wait}</span>` : ''} <button onclick="zutHistoryStop()" style="background:var(--neg-bg);border:none;color:var(--neg);padding:3px 8px;border-radius:var(--r-xs);">⏹ остановить</button>`
     : `📚 история за ${h.days} дн. загружена: постов ${h.posts}, зон ${h.zones}, пропущено ${h.skipped}${h.error ? ' · <span class="loss">' + h.error + '</span>' : ''}`) : '';
   const dl = (window._zutDialogs || []).map((g, i) => `<button onclick="zutPick(${i})" style="${btn}">${String(g.title).replace(/</g, '&lt;')}</button>`).join('');
   return `<div style="${box}">📡 <b>Группа через мой аккаунт</b>: ${u.connected ? '<span class="win">подключено</span>' : '<span class="loss">нет связи</span>'}${u.me ? ' · ' + u.me : ''}
@@ -27897,9 +27925,14 @@ async function zutPick(i) {
   refreshZones();
 }
 async function zutHistory() {
-  const v = prompt('За сколько дней забрать старые посты? Они пойдут только в обучение (без слежения и сделок).', '60');
+  const v = prompt('За сколько дней забрать старые посты? Они пойдут только в обучение (без слежения и сделок). Каждая картинка распознаётся ~10–30 с — начните с 30 дней; остановить можно в любой момент, повторный запуск пропустит уже взятые.', '30');
   if (!v) return;
   await zutPostJson('/api/zones/ut/history', {days: +v});
+  refreshZones();
+}
+async function zutHistoryStop() {
+  if (!confirm('Остановить загрузку истории? Уже загруженное останется; повторный запуск продолжит с непройденных постов.')) return;
+  await zutPostJson('/api/zones/ut/history_stop', {});
   refreshZones();
 }
 async function zutLogout() {
