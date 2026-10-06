@@ -18606,3 +18606,9 @@ v0.99.460 - Зоны / learned stop & take: honest now. The rules (entry line ×
          added). For each rule: how far the price went on after the take
          (median, share of trades with +2% / +5% more); the tab shows the pick,
          its check, the defaults' check and the verdict.
+v0.99.461 - Зоны / history: "все" in the days prompt (now the default) loads the
+         whole history of the chosen channel or group. Gate keeps only ~10000
+         candles of a timeframe, so zones of older posts are replayed on 1h
+         (~400 days) or 4h (~4 years) instead of 15m (~100 days) — before, their
+         outcome could not be computed at all; inside one coarse candle stop
+         and take = stop (conservative).
