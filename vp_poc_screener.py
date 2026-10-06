@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.479"
+APP_VERSION = "0.99.480"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21280,6 +21280,7 @@ def zones_load():
                           "own_last_scan", "monitor_ok"):
                     if k in d:
                         ZONES[k] = d[k]
+                ZONES["train_mode"] = False   # v0.99.480 — the switch is gone: new posts are always live
             if path != ZONES_FILE:
                 log_error(f"zones_load: main file damaged — restored from {path}")
             return
@@ -23135,7 +23136,7 @@ def zones_tg_loop():
                     zones_save()   # the offset is past this command: a restart never repeats it
                     if bot_command(txt):
                         continue
-                if txt.lower().lstrip("/") in ("обучение вкл", "обучение выкл", "обучение", "train"):
+                if False and txt.lower().lstrip("/") in ("обучение вкл", "обучение выкл", "обучение", "train"):   # v0.99.480 — removed
                     with _zones_lock:
                         on = ("выкл" not in txt.lower()) if " " in txt else not ZONES.get("train_mode")
                         ZONES["train_mode"] = on
@@ -23601,7 +23602,7 @@ def bot_status_text():
 
 BOT_COMMANDS_HELP = ("Команды бота:\n/update — скачать новую версию с GitHub и перезапустить\n"
                      "/restart — перезапустить\n/status — версия, время работы, зоны и сделки\n"
-                     "/help — эта подсказка\nобучение вкл / обучение выкл — режим обучения зон")
+                     "/help — эта подсказка")
 
 
 def bot_command(txt):
@@ -28290,10 +28291,7 @@ async function refreshZones() {
   setPanelHtml(panel, `${warn}
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
       <label onclick="window._zUp = Date.now()" style="background:var(--acc);color:#000;padding:8px 12px;border-radius:var(--r-sm);cursor:pointer;">📷 Загрузить скрин<input type="file" accept="image/*" onchange="zonesUpload(this)" style="display:none;"></label>
-      <button onclick="zonesAdd('', '')" style="background:var(--ctl);border:none;color:var(--tx);padding:8px 12px;border-radius:var(--r-sm);">➕ Зона вручную</button>
-      <button onclick="zonesTrainMode(${d.train_mode ? 'false' : 'true'})" style="background:${d.train_mode ? 'var(--warn-bg)' : 'var(--ctl)'};border:${d.train_mode ? '1px solid var(--warn-line)' : 'none'};color:var(--tx);padding:8px 12px;border-radius:var(--r-sm);">📚 Режим обучения: <b>${d.train_mode ? 'ВКЛ' : 'выкл'}</b></button>
     </div>
-    ${d.train_mode ? `<div style="padding:8px 10px;margin-bottom:8px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-sm);font-size:var(--fs-sm);">📚 <b>Режим обучения включён</b>: новые скрины идут только в статистику — бот не следит за их зонами, не шлёт уведомлений и не торгует. Нужна дата поста: при пересылке из группы она берётся из поста, при загрузке здесь — спрошу. Не забудьте выключить, когда начнёте пересылать свежие посты.</div>` : ''}
     <div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>
     ${zutHtml(ut)}
     ${ownHtml(d, ownZ)}

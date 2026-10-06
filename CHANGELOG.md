@@ -18725,3 +18725,8 @@ v0.99.479 - Зоны / screenshot: its own zoom (the browser's doesn't work in t
          installed app): two fingers zoom around the fingers, a double tap zooms
          in / back, one finger moves the zoomed picture; mouse wheel and double
          click on a computer. A pinch or a moving finger never counts as a tap.
+v0.99.480 - Зоны tab: the "➕ Зона вручную" and "📚 Режим обучения" buttons (and
+         the training-mode banner) removed by the user's request; the training
+         mode is forced off on start (new posts are always live) and the
+         "обучение вкл/выкл" Telegram command is gone. The history import still
+         loads old posts as training ones, separately.
