@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.481"
+APP_VERSION = "0.99.483"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24359,6 +24359,53 @@ def api_zones_train_mode():
     return jsonify({"ok": True, "train_mode": ZONES["train_mode"]})
 
 
+@app.route("/api/zones/chart/<zid>")
+def api_zones_chart(zid):
+    """v0.99.482 — one zone on its candles: from a day before the post to the
+    exit (take / stop / time) or now; the live trade as it was, a history zone
+    replayed with the current rules."""
+    with _zones_lock:
+        z = next((dict(x) for x in ZONES["zones"] if x["id"] == zid), None)
+    if not z or not z.get("symbol"):
+        return jsonify({"ok": False, "error": "нет такой зоны"}), 404
+    now = time.time()
+    start = z["post_time"]
+    end = min(now, start + ZONES_MAX_DAYS * 86400)
+    p = zones_params()
+    tr, src = None, None
+    t = z.get("trade")
+    if t:
+        tr = {"t_in": t.get("time"), "fill": t.get("entry"), "sl": t.get("sl"), "tp": t.get("tp"),
+              "t_out": t.get("exit_time"), "exit": t.get("exit_price"), "result": t.get("result"),
+              "r": t.get("pnl_r"), "pct": t.get("pnl_pct"), "real": bool(t.get("autotrade_fired"))}
+        src = "живая сделка"
+    else:
+        cs_all = zones_candles(z["symbol"], start, end)
+        r = zone_sim(cs_all, z, p["entry"], p["buf"], p["tp"], start, end) if cs_all else None
+        if r:
+            ex = r["tp"] if r["result"] == "WIN" else (r["sl"] if r["result"] == "LOSS" else None)
+            if ex is None:
+                last = [c for c in cs_all if c["time"] <= r["t_out"]]
+                ex = last[-1]["close"] if last else r["fill"]
+            tr = {"t_in": r["t_in"], "fill": r["fill"], "sl": r["sl"], "tp": r["tp"], "t_out": r["t_out"], "exit": ex,
+                  "result": r["result"], "r": round(r["r"], 3), "pct": round(r["pct"], 2), "real": False}
+        src = f"по текущим правилам: вход от {p['entry'] + 1}-й линии, стоп {p['buf']:g}% за зоной, тейк +{p['tp']:g}%"
+    v0 = start - 86400
+    v1 = min(now, (tr["t_out"] + 12 * 3600) if (tr and tr.get("t_out")) else end)
+    cs = zones_candles(z["symbol"], v0, v1)
+    if len(cs) > 360:   # thin out to ~360 candles (merge neighbours)
+        k = math.ceil(len(cs) / 360)
+        merged = []
+        for i in range(0, len(cs), k):
+            g = cs[i:i + k]
+            merged.append({"time": g[0]["time"], "open": g[0]["open"], "high": max(c["high"] for c in g),
+                           "low": min(c["low"] for c in g), "close": g[-1]["close"]})
+        cs = merged
+    return jsonify({"ok": True, "symbol": z["symbol"], "side": z["side"], "levels": z["levels"], "post_time": start,
+                    "status": z.get("status"), "trade": tr, "source": src,
+                    "candles": [[c["time"], c["open"], c["high"], c["low"], c["close"]] for c in cs]})
+
+
 @app.route("/api/zones/upload", methods=["POST"])
 def api_zones_upload():
     try:
@@ -28199,8 +28246,7 @@ function zoneRowHtml(z) {
     <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">
       <div><span class="${long ? 'win' : 'loss'}" style="font-weight:700;">${long ? 'лонг' : 'шорт'}</span> <span class="dim">· ${stTxt}</span></div>
       <div style="white-space:nowrap;">
-        <button onclick="zonesEdit('${z.id}', '${z.levels.join(' ')}')" title="уровни" style="${btn}">✏️</button>
-        <button onclick="zonesSide('${z.id}', '${long ? 'short' : 'long'}')" title="поменять сторону" style="${btn}">⇅</button>
+        <button onclick="zoneChart('${z.id}')" title="график: свечи, зона, вход и выход" style="${btn}">📈</button>
         <button onclick="zonesDel('${z.id}')" title="удалить зону" style="background:var(--neg-bg);border:none;color:var(--neg);padding:3px 8px;border-radius:var(--r-xs);">🗑</button>
       </div>
     </div>
@@ -28225,7 +28271,7 @@ function zonePostBlocks(list) {
         <div><b>${coin}</b> <span class="dim">· пост ${zdate(z0.post_time)} · зон: ${g.length}</span></div>
         <div style="white-space:nowrap;">
           ${z0.own ? `<span class="dim">🔎 наш поиск · оценка ${z0.own_score}</span>` : `${z0.post_id ? `<a href="#" onclick="zoneShot('${z0.post_id}');return false;" style="color:var(--acc);font-size:var(--fs-sm);">скрин</a>` : ''}
-          <button onclick="zonesCoin('${z0.id}', '${(z0.symbol || '').replace('_USDT', '')}')" title="сменить монету поста" style="${btn}margin-left:4px;">🪙</button>`}
+`}
           ${z0.post_id && !z0.own ? `<button onclick="zonesReparse('${z0.post_id}')" title="распознать пост заново" style="${btn}">↻</button>
           <button onclick="zonesDelPost('${z0.post_id}')" title="удалить пост и все его зоны" style="background:var(--neg-bg);border:none;color:var(--neg);padding:3px 8px;border-radius:var(--r-xs);">🗑</button>` : ''}
         </div>
@@ -28278,19 +28324,19 @@ async function refreshZones() {
   const pub = zs.filter(z => !z.own);
   const act = pub.filter(z => z.status === 'watch' || z.status === 'in_trade');
   const trn = pub.filter(z => z.train && !(z.status === 'watch' || z.status === 'in_trade'));
-  const arch = pub.filter(z => !z.train && !(z.status === 'watch' || z.status === 'in_trade'));
+  const closedTr = pub.filter(z => z.trade && z.trade.result);   // v0.99.482 — finished live trades, like P/R's list
+  const arch = pub.filter(z => !z.train && !(z.status === 'watch' || z.status === 'in_trade') && !(z.trade && z.trade.result));
   window._zTrain = !!d.train_mode;
   // v0.99.478 — real failures and skipped posts (not a zones screenshot / coin not
   // on Gate / an index) in two collapsed lists
   const isSkip = x => x.skipped || x.not_listed || (!x.pending && (x.notes || []).some(n => n.includes('цветные зоны не найдены')));
   const badPosts = (d.posts || []).filter(x => !x.ok && !isSkip(x));
   const skipPosts = (d.posts || []).filter(x => !x.ok && isSkip(x));
-  const postRow = x => `<div style="font-size:var(--fs-sm);margin-bottom:4px;">${isSkip(x) ? '⏭' : '⚠️'} пост ${zdate(x.post_time)}${x.symbol ? ' · ' + x.symbol.replace('_USDT', '') : ''}: ${[...new Set(x.notes || [])].join('; ') || 'не распознан'} · <a href="#" onclick="zoneShot('${x.id}');return false;" style="color:var(--acc);">скрин</a> · <a href="#" onclick="zonesAdd('${x.id}', '${x.symbol || ''}');return false;" style="color:var(--acc);">добавить зону</a> ${x.pending ? ` · <a href="#" onclick="zonesSetSym('${x.id}');return false;" style="color:var(--pos);font-weight:700;">указать монету (зон: ${x.pending.zones.length})</a>` : ''} · <a href="#" onclick="zonesReparse('${x.id}');return false;" style="color:var(--acc);">↻ распознать заново</a> · <a href="#" onclick="zonesDelPost('${x.id}');return false;" style="color:var(--neg);">удалить</a></div>`;
+  const postRow = x => `<div style="font-size:var(--fs-sm);margin-bottom:4px;">${isSkip(x) ? '⏭' : '⚠️'} пост ${zdate(x.post_time)}${x.symbol ? ' · ' + x.symbol.replace('_USDT', '') : ''}: ${[...new Set(x.notes || [])].join('; ') || 'не распознан'} · <a href="#" onclick="zoneShot('${x.id}');return false;" style="color:var(--acc);">скрин</a> ${x.pending ? ` · <a href="#" onclick="zonesSetSym('${x.id}');return false;" style="color:var(--pos);font-weight:700;">указать монету (зон: ${x.pending.zones.length})</a>` : ''} · <a href="#" onclick="zonesReparse('${x.id}');return false;" style="color:var(--acc);">↻ распознать заново</a> · <a href="#" onclick="zonesDelPost('${x.id}');return false;" style="color:var(--neg);">удалить</a></div>`;
   const bad = (badPosts.length ? `<details style="margin-bottom:6px;"><summary style="cursor:pointer;font-size:var(--fs-sm);">⚠️ распознано не полностью — ${badPosts.length} (нужна монета или проверка)</summary>${badPosts.slice(0, 40).map(postRow).join('')}</details>` : '')
     + (skipPosts.length ? `<details style="margin-bottom:6px;"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">⏭ пропущено, не по шаблону — ${skipPosts.length}</summary>${skipPosts.slice(0, 40).map(postRow).join('')}</details>` : '');
   setPanelHtml(panel, `${warn}
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
-      <label onclick="window._zUp = Date.now()" style="background:var(--acc);color:#000;padding:8px 12px;border-radius:var(--r-sm);cursor:pointer;">📷 Загрузить скрин<input type="file" accept="image/*" onchange="zonesUpload(this)" style="display:none;"></label>
     </div>
     <div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>
     ${zutHtml(ut)}
@@ -28299,6 +28345,7 @@ async function refreshZones() {
     <div style="font-weight:700;margin:6px 0;">Активные (${act.length})</div>
     ${act.length ? zonePostBlocks(act) : '<div class="dim">нет — перешлите пост боту или загрузите скрин</div>'}
     ${trn.length ? `<details style="margin-top:8px;"><summary class="dim" style="cursor:pointer;">📚 обучение (${trn.length}, ждут итога: ${trn.filter(z => z.status === 'train').length})</summary>${zonePostBlocks(trn)}</details>` : ''}
+    ${zoneTradesHtml(closedTr)}
     <details style="margin-top:8px;"><summary class="dim" style="cursor:pointer;">архив (${arch.length})</summary>${zonePostBlocks(arch)}</details>`);
 }
 async function zonesPost(url, body) {
@@ -28635,6 +28682,106 @@ function _zsZoomInit(img) {
   img.addEventListener('dblclick', e => { e.preventDefault(); _zsZoomAt(_zs.s > 1.2 ? 1 : 2.5, e.clientX, e.clientY); });   // mouse
   img.addEventListener('wheel', e => { e.preventDefault(); _zsZoomAt(_zs.s * (e.deltaY < 0 ? 1.2 : 1 / 1.2), e.clientX, e.clientY); }, {passive: false});
 }
+// v0.99.482 — finished trades of the zones (like P/R): result, R, %, a chart each
+function zoneTradesHtml(list) {
+  if (!list.length) return '';
+  list = list.slice().sort((a, b) => (b.trade.exit_time || 0) - (a.trade.exit_time || 0));
+  const rs = list.map(z => z.trade.pnl_r || 0);
+  const wins = rs.filter(r => r > 0).length, sum = rs.reduce((a, b) => a + b, 0);
+  const rows = list.map(z => { const t = z.trade, w = t.result === 'WIN';
+    return `<div onclick="zoneChart('${z.id}')" style="cursor:pointer;padding:6px 8px;margin-top:4px;background:var(--card);border-radius:var(--r-sm);border-left:3px solid ${w ? '#4caf50' : (t.result === 'LOSS' ? '#ef5350' : '#e0a030')};font-size:var(--fs-sm);">
+      <b>${(z.symbol || '').replace('_USDT', '')}</b> ${t.direction === 'LONG' ? 'лонг' : 'шорт'} · <b class="${(t.pnl_r || 0) > 0 ? 'win' : 'loss'}">${t.result === 'WIN' ? 'тейк' : t.result === 'LOSS' ? 'стоп' : 'по времени'} ${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R${t.pnl_pct != null ? ` · ${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct}%` : ''}</b>
+      <span class="dim">· ${zfmt(t.entry)} → ${zfmt(t.exit_price)} · ${zdate(t.exit_time || t.time)}${t.autotrade_fired ? ' · 💰 биржа' : ''} · 📈</span></div>`; }).join('');
+  return `<details style="margin-top:8px;"><summary style="cursor:pointer;">💼 Сделки по зонам: ${list.length} · WR ${Math.round(100 * wins / list.length)}% · итого ${sum > 0 ? '+' : ''}${sum.toFixed(2)}R</summary>${rows}</details>`;
+}
+// v0.99.482 — a zone on its candles: the zone, its lines, entry ▲/▼, exit ●,
+// stop / take, the post's moment; opens over the page, Back / ✕ close it
+async function zoneChart(zid) {
+  let box = document.getElementById('zoneChartBox');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'zoneChartBox';
+    box.style.cssText = 'position:fixed;inset:0;z-index:10000;background:#0b0d12;display:flex;flex-direction:column;padding:10px;box-sizing:border-box;';
+    box.innerHTML = '<div style="display:flex;justify-content:space-between;align-items:flex-start;gap:8px;"><div id="zoneChartTitle" style="font-size:var(--fs-sm);color:#dfe3ea;"></div>'
+      + '<button onclick="zoneChartClose()" style="background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:20px;width:40px;height:40px;font-size:20px;flex-shrink:0;">✕</button></div>'
+      + '<canvas id="zoneChartCanvas" style="flex:1;width:100%;margin-top:8px;"></canvas>';
+    document.body.appendChild(box);
+  }
+  box.style.display = 'flex';
+  window._zUp = Date.now();
+  try { history.pushState({zoneChart: 1}, ''); } catch (e) {}
+  document.getElementById('zoneChartTitle').textContent = 'загрузка…';
+  let d;
+  try { d = await (await fetch('/api/zones/chart/' + zid)).json(); } catch (e) { d = {ok: false, error: 'нет связи'}; }
+  if (!d.ok) { document.getElementById('zoneChartTitle').textContent = d.error || 'не получилось'; return; }
+  const t = d.trade, sg = v => (v > 0 ? '+' : '') + v;
+  document.getElementById('zoneChartTitle').innerHTML = `<b>${d.symbol.replace('_USDT', '')}</b> ${d.side === 'long' ? 'лонг' : 'шорт'} ${d.levels.map(zfmt).join(' / ')}`
+    + (t ? ` · <b style="color:${(t.r || 0) > 0 ? '#3ddc97' : '#ff6b6b'}">${t.result === 'WIN' ? 'тейк' : t.result === 'LOSS' ? 'стоп' : t.result ? 'по времени' : 'в сделке'}${t.r != null ? ' ' + sg(t.r) + 'R' : ''}${t.pct != null ? ' · ' + sg(t.pct) + '%' : ''}</b>` : ' · входа не было')
+    + `<div style="color:#8a93a3;margin-top:2px;">${d.source}${t && t.real ? ' · 💰 сделка на бирже' : ''}</div>`;
+  drawZoneChart(d);
+}
+function drawZoneChart(d) {
+  const cv = document.getElementById('zoneChartCanvas');
+  const dpr = window.devicePixelRatio || 1;
+  const W = cv.clientWidth, H = cv.clientHeight;
+  cv.width = W * dpr; cv.height = H * dpr;
+  const ctx = cv.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  const cs = d.candles, t = d.trade;
+  if (!cs.length) { ctx.fillStyle = '#8a93a3'; ctx.fillText('нет свечей', 10, 20); return; }
+  const axisW = 62, padT = 10, padB = 18, plotW = W - axisW, plotH = H - padT - padB;
+  let lo = Math.min(...cs.map(c => c[3]), ...d.levels), hi = Math.max(...cs.map(c => c[2]), ...d.levels);
+  if (t) { for (const v of [t.sl, t.tp, t.fill, t.exit]) if (v) { lo = Math.min(lo, v); hi = Math.max(hi, v); } }
+  const pad = (hi - lo) * 0.05 || hi * 0.01; lo -= pad; hi += pad;
+  const t0 = cs[0][0], t1 = cs[cs.length - 1][0], step = cs.length > 1 ? (t1 - t0) / (cs.length - 1) : 900;
+  const X = tm => (tm - t0) / Math.max(1, t1 - t0 + step) * plotW;
+  const Y = v => padT + (hi - v) / (hi - lo) * plotH;
+  const cw = Math.max(1, plotW / cs.length * 0.7);
+  // the zone, from the post onwards
+  const long = d.side === 'long', zc = long ? '76,175,80' : '239,83,80';
+  const zt = Math.max(...d.levels), zb = Math.min(...d.levels), xp = X(d.post_time);
+  ctx.fillStyle = `rgba(${zc},0.18)`; ctx.fillRect(xp, Y(zt), plotW - xp, Math.max(2, Y(zb) - Y(zt)));
+  ctx.strokeStyle = 'rgba(255,255,255,0.75)'; ctx.lineWidth = 1;
+  for (const v of d.levels) { ctx.beginPath(); ctx.moveTo(xp, Y(v)); ctx.lineTo(plotW, Y(v)); ctx.stroke(); }
+  // the post's moment
+  ctx.strokeStyle = 'rgba(138,147,163,0.6)'; ctx.setLineDash([3, 3]);
+  ctx.beginPath(); ctx.moveTo(xp, padT); ctx.lineTo(xp, padT + plotH); ctx.stroke(); ctx.setLineDash([]);
+  ctx.fillStyle = '#8a93a3'; ctx.font = '11px sans-serif'; ctx.fillText('пост', xp + 3, padT + 11);
+  // candles
+  for (const c of cs) {
+    const x = X(c[0]) + cw / 2, up = c[4] >= c[1];
+    ctx.strokeStyle = ctx.fillStyle = up ? '#3ddc97' : '#ff6b6b';
+    ctx.beginPath(); ctx.moveTo(x, Y(c[2])); ctx.lineTo(x, Y(c[3])); ctx.stroke();
+    ctx.fillRect(x - cw / 2, Math.min(Y(c[1]), Y(c[4])), cw, Math.max(1, Math.abs(Y(c[1]) - Y(c[4]))));
+  }
+  // stop / take, entry and exit
+  if (t && t.t_in) {
+    const xi = X(t.t_in) + cw / 2, xo = t.t_out ? X(t.t_out) + cw / 2 : plotW;
+    const hl = (v, col, txt) => { if (!v) return; ctx.strokeStyle = col; ctx.setLineDash([5, 4]); ctx.beginPath(); ctx.moveTo(xi, Y(v)); ctx.lineTo(xo, Y(v)); ctx.stroke(); ctx.setLineDash([]);
+      ctx.fillStyle = col; ctx.fillText(txt, Math.min(xo, plotW - 40) + 3, Y(v) - 3); };
+    hl(t.tp, '#3ddc97', 'TP'); hl(t.sl, '#ff6b6b', 'SL');
+    const tri = (x, y, upw, col) => { ctx.fillStyle = col; ctx.beginPath(); const s = 7;
+      if (upw) { ctx.moveTo(x, y - s); ctx.lineTo(x - s, y + s); ctx.lineTo(x + s, y + s); } else { ctx.moveTo(x, y + s); ctx.lineTo(x - s, y - s); ctx.lineTo(x + s, y - s); }
+      ctx.closePath(); ctx.fill(); ctx.strokeStyle = '#000'; ctx.stroke(); };
+    tri(xi, Y(t.fill) + (long ? 9 : -9), long, '#ffd166');
+    if (t.t_out && t.exit) { ctx.fillStyle = (t.r || 0) > 0 ? '#3ddc97' : '#ff6b6b'; ctx.beginPath(); ctx.arc(xo, Y(t.exit), 6, 0, 7); ctx.fill(); ctx.strokeStyle = '#000'; ctx.stroke(); }
+  }
+  // price axis
+  ctx.fillStyle = '#8a93a3'; ctx.font = '11px sans-serif';
+  for (let i = 0; i <= 5; i++) { const v = hi - (hi - lo) * i / 5; ctx.fillText(zfmt(v), plotW + 4, Y(v) + 4); }
+  // dates at the bottom
+  const fd = tm => { const x = new Date(tm * 1000); return `${String(x.getDate()).padStart(2, '0')}.${String(x.getMonth() + 1).padStart(2, '0')}`; };
+  for (let i = 0; i <= 3; i++) { const tm = t0 + (t1 - t0) * i / 3; ctx.fillText(fd(tm), Math.min(X(tm), plotW - 30), H - 4); }
+}
+function zoneChartClose(fromBack) {
+  const box = document.getElementById('zoneChartBox');
+  if (!box || box.style.display === 'none') return;
+  box.style.display = 'none';
+  window._zUp = 0;
+  if (!fromBack) { try { if (history.state && history.state.zoneChart) history.back(); } catch (e) {} }
+}
+window.addEventListener('popstate', () => zoneChartClose(true));
 function zoneShotClose(fromBack) {
   const box = document.getElementById('zoneShotBox');
   if (!box || box.style.display === 'none') return;

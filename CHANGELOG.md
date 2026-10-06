@@ -18733,3 +18733,16 @@ v0.99.480 - Зоны tab: the "➕ Зона вручную" and "📚 Режим
 v0.99.481 - Screensaver: not charging = no red frame any more; the clock keeps
          its colour (green with open positions) and its digits get a thin red
          outline.
+v0.99.482 - Зоны: 📈 on every zone opens its chart over the page — candles from a
+         day before the post to the exit (+12 h) or now, the zone and its lines
+         from the post on, the post's moment, entry ▲/▼, exit ● (green take /
+         red stop), SL and TP lines; a live trade as it really went, a history
+         or archive zone replayed with the current rules (said in the title).
+         Back / ✕ close it. "💼 Сделки по зонам" — the finished live trades in
+         their own list (like P/R): result, R, %, entry → exit, exchange mark,
+         count, win rate and total R; a tap opens the chart. The "📷 Загрузить
+         скрин" button is removed.
+v0.99.483 - Зоны: manual editing removed (the user improves the recognition
+         instead): no ✏️ levels, ⇅ side, 🪙 coin of a post, "добавить зону".
+         Left: 📈 chart, ↻ recognise again, 🗑 delete, and "указать монету" for a
+         post whose coin was not read.
