@@ -18759,3 +18759,10 @@ v0.99.485 - The page froze after an update / on the Zones tab: every 15 s refres
          the samples stay on the server (~37 KB, instant). The auto-reload after
          a restart shows "бот перезапущен — обновляю страницу…" and waits 6 s
          for the fresh bot to finish starting.
+v0.99.486 - Restarts lose nothing: before /update, /restart or the 🛠 button, and
+         on SIGTERM (pkill in the manual Termux command, or a new copy starting),
+         every module's state is written (main state with Neuro/P/R signals and
+         the simulator, Neuro, NQ, settings, zones, the zones' outbox) and the
+         in-memory Telegram queue is drained (up to 10 s / 5 s on SIGTERM); the
+         modules otherwise save at their own moments, so a change since the
+         last save could be lost.

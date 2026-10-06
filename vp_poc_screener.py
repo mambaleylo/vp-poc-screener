@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.485"
+APP_VERSION = "0.99.486"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23531,6 +23531,33 @@ def self_update_download():
     return m_.group(1).decode()
 
 
+def save_everything_before_exit(wait_tg=10.0):
+    """v0.99.486 — before any restart / stop: every module's state to disk (the
+    modules save at their own moments; a change since the last save would be
+    lost) and the in-memory Telegram queue drained (up to wait_tg seconds); the
+    zones' own messages are on disk anyway."""
+    for fn in (save_state, save_neuro_state, save_nq_state, save_settings, zones_save, _zones_outbox_save):
+        try:
+            fn()
+        except Exception as e:
+            log_error(f"save before exit {getattr(fn, '__name__', fn)}: {e}")
+    t_end = time.time() + wait_tg
+    while time.time() < t_end and not _telegram_send_queue.empty():
+        time.sleep(0.2)
+    if wait_tg:
+        time.sleep(1.2)   # the message being sent right now
+
+
+def _on_sigterm(signum, frame):
+    """v0.99.486 — pkill from Termux (the manual update command) or another copy
+    starting: save everything, then leave"""
+    try:
+        print("stopping: saving state…", flush=True)
+        save_everything_before_exit(wait_tg=5.0)
+    finally:
+        os._exit(0)
+
+
 def self_restart(why, delay=1.5):
     """Restart this same process (same arguments and environment); the next
     start reports itself in Telegram (RESTART_NOTE_FILE)."""
@@ -23542,10 +23569,7 @@ def self_restart(why, delay=1.5):
 
     def _restart():
         time.sleep(delay)   # let the answer reach the page / Telegram
-        try:
-            zones_save()
-        except Exception:
-            pass
+        save_everything_before_exit()
         # the web server's listening socket is inheritable and would keep the port
         # taken in the new process. v0.99.472 — NOT closed by hand: Android's fdsan
         # aborts the process when a descriptor owned by someone else (a FILE*, the
@@ -31547,6 +31571,11 @@ if __name__ == "__main__":
         calc_worker_main()
         sys.exit(0)
     stop_previous_instances()   # v0.99.410
+    try:   # v0.99.486 — a stop by pkill / another copy saves everything first
+        import signal as _signal
+        _signal.signal(_signal.SIGTERM, _on_sigterm)
+    except Exception as e:
+        log_error(f"SIGTERM handler: {e}")
     load_state()
     load_neuro_state()
     load_nq_state()
