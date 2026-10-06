@@ -18676,3 +18676,10 @@ v0.99.471 - Зоны OCR (WUSDT screenshot: coin not read, 5 zones instead of 1)
            scenario curve are no longer short zones;
          - pieces of one rectangle cut by a drawn curve are glued back
            (side-by-side pieces too), and the same zone is never listed twice.
+v0.99.472 - Restart (/update, /restart, the 🛠 button) crashed on the phone:
+         Android's fdsan aborts a process that closes a descriptor owned by
+         someone else, and before the exec every descriptor was closed by hand
+         (os.closerange) — "fdsan: attempted to close file descriptor …",
+         the userbot's asyncio loop died with EBADF, then "Aborted". Now the
+         descriptors are only marked close-on-exec and the kernel closes them
+         at the exec itself; the port is freed the same way.

@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.471"
+APP_VERSION = "0.99.472"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23451,9 +23451,22 @@ def self_restart(why, delay=1.5):
             zones_save()
         except Exception:
             pass
-        # the web server's listening socket is inheritable: close every descriptor
-        # but stdin/out/err, or the new process finds its own port taken
-        os.closerange(3, 65536)
+        # the web server's listening socket is inheritable and would keep the port
+        # taken in the new process. v0.99.472 — NOT closed by hand: Android's fdsan
+        # aborts the process when a descriptor owned by someone else (a FILE*, the
+        # asyncio selector) is closed under it ("fdsan: attempted to close …",
+        # "Aborted"). Every descriptor is only marked close-on-exec; the kernel
+        # closes them at the exec itself, which fdsan does not watch.
+        try:
+            fds = [int(x) for x in os.listdir("/proc/self/fd")]
+        except OSError:
+            fds = list(range(3, 4096))
+        for fd in fds:
+            if fd > 2:
+                try:
+                    os.set_inheritable(fd, False)
+                except OSError:
+                    pass
         os.execv(sys.executable, [sys.executable] + sys.argv)
     threading.Thread(target=_restart, daemon=True).start()
 
