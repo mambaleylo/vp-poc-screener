@@ -18533,3 +18533,12 @@ v0.99.452 - Зоны: our own zone finder ("🔎 Наш поиск"). Every hour
          bar, recall with its curve over the exams, level difference, author vs
          our R, own zones' results and the last exams. Settings: on/off switch
          for the scan. Also fixed the touched-level highlight colour.
+v0.99.453 - Зоны OCR: the current-price tag (white on black like a level label,
+         with a dotted line) was sometimes taken for a zone border. A drawn line
+         now has to be solid (a dark run over 15% of the chart width), so the
+         dotted current-price line is no line. The tag is dropped from the
+         labels even when its timer row is not read: a wider box starting left
+         of the other labels (the ticker is printed in it), a dotted line at its
+         height (ink measured against the row's background, so a light-grey
+         dotted line counts), or its value equal to the legend's close (one-digit
+         OCR slips allowed) with no solid line there.

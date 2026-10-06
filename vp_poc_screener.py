@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.452"
+APP_VERSION = "0.99.453"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21490,8 +21490,56 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
             for v, dec in vals:
                 votes[(v, dec)] = votes.get((v, dec), 0) + 1
             (v, dec), _n = max(votes.items(), key=lambda kv: kv[1])
-            labels.append({"y": yy, "v": v, "dec": dec, "votes": votes})
+            labels.append({"y": yy, "v": v, "dec": dec, "votes": votes, "bx0": bx0, "w": bx1 - bx0})
             box_x0 = min(box_x0, bx0)
+
+    # ---- v0.99.453: the current-price tag is not a level. Its timer row is not
+    # always read, so it is also known by: a wider box reaching past the axis
+    # (the ticker is printed in it), a dotted line (zone lines are solid), or
+    # its value = the legend's close with no solid line at that height ----
+    def _row_runs(yy):
+        """(ink share, longest ink run) of a chart row left of the axis; ink =
+        far from the row's background (a light-grey dotted line counts too)"""
+        xe = max(10, ax0 - 2)
+        row = [gp[x, yy] for x in range(0, xe)]
+        bg = sorted(row)[len(row) // 2]
+        dk, best, cur_run = 0, 0, 0
+        for v in row:
+            if abs(v - bg) >= 60:
+                dk += 1
+                cur_run += 1
+                best = max(best, cur_run)
+            else:
+                cur_run = 0
+        return dk / xe, best / xe
+
+    def _line_at(yy):
+        """'solid' / 'dotted' / None for the rows around yy"""
+        kind = None
+        for dy in range(-3, 4):
+            if 0 <= int(yy) + dy < H:
+                share, run = _row_runs(int(yy) + dy)
+                if run >= 0.15:
+                    return "solid"
+                if share >= 0.12 and run < 0.03:
+                    kind = "dotted"
+        return kind
+    if labels:
+        wmed = sorted(lb["w"] for lb in labels)[len(labels) // 2]
+        xmed = sorted(lb["bx0"] for lb in labels)[len(labels) // 2]
+        keep = []
+        for lb in labels:
+            ln = _line_at(lb["y"])
+            wide = lb["w"] > 1.25 * wmed and lb["bx0"] < xmed - 10   # starts left of the others: ticker inside
+            at_close = bool(header_close) and ln != "solid" and any(
+                abs(c - header_close) <= 0.001 * abs(header_close) for c in _zocr_variants(lb["v"], lb["dec"]))
+            if (wide and ln != "solid") or ln == "dotted" or at_close:
+                if cur_y is None:
+                    cur_y = lb["y"]
+                continue
+            keep.append(lb)
+        labels = keep
+        box_x0 = min([lb["bx0"] for lb in labels] + [W])
 
     # ---- axis ticks (plain numbers), label boxes painted out ----
     strip = gray.crop((ax0, 0, W, H)).copy()
@@ -21604,11 +21652,24 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
         else:
             merged.append(dict(r))
     # horizontal drawn lines: thin rows dark across most of the chart
+    # v0.99.453: a drawn line is solid — the dotted current-price line is not one
+    def _is_line_row(yy):
+        if sum(1 for x in range(0, plot_x1, 2) if gp[x, yy] < 120) < 0.3 * plot_x1 / 2:
+            return False
+        best = cur_run = 0
+        for x in range(0, plot_x1):
+            if gp[x, yy] < 120:
+                cur_run += 1
+                if cur_run > best:
+                    best = cur_run
+            else:
+                cur_run = 0
+        return best >= 0.15 * plot_x1
     lines, y = [], 0
     while y < H:
-        if sum(1 for x in range(0, plot_x1, 2) if gp[x, y] < 120) >= 0.3 * plot_x1 / 2:
+        if _is_line_row(y):
             s0 = y
-            while y < H and sum(1 for x in range(0, plot_x1, 2) if gp[x, y] < 120) >= 0.3 * plot_x1 / 2:
+            while y < H and _is_line_row(y):
                 y += 1
             if y - s0 <= 4:
                 lines.append((s0 + y - 1) / 2)
