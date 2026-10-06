@@ -18423,3 +18423,20 @@ v0.99.441 - Зоны: «движение к зоне» (user: when the screensho
            default), only for posts younger than 1 h; before the zone's own
            entry the move trade is closed if still open (one position per coin).
          - The tab shows the reach rate and each stop's result.
+v0.99.442 - Зоны, recognition accuracy (user: "цену уровней почти все правильно
+         распознали, но не все цифры"; the ticker was not read on the phone):
+         - every price label is read 5 times (scales / thresholds / page modes)
+           and voted on;
+         - the drawn line's own position gives its price to ~1 px: among the
+           readings and their one-digit OCR confusions (5<->9, 3<->8, 1<->7, 6<->5,
+           0<->8 ...) the one matching the line is taken ("5.927" -> 5.527);
+           readings with the axis' usual number of decimals win over shortened
+           ones ("9.97" -> 9.973 when any pass read it); a label that lost its
+           integer part gets it back from the line ("304" -> 10.304);
+         - ticker not read: candidate coins = name similar to what the legend OCR
+           read, or live price within 25% of the chart's price (current-price
+           tag, or the legend's OHLC values); each is confirmed by its Gate price
+           AT THE POST TIME (the screenshot may be old or from Binance): within
+           2% with a similar name, or 0.6% and the only coin fitting — two coins
+           fitting by price alone means asking instead of guessing; candidates
+           are listed when it stays open.

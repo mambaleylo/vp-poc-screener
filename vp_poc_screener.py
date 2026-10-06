@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.441"
+APP_VERSION = "0.99.442"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21263,6 +21263,58 @@ def _zocr_num(tok):
         return None, 0
 
 
+_ZOCR_CONFUSE = {"9": "58", "5": "963", "3": "85", "8": "3605", "1": "74", "7": "1", "6": "58", "0": "86", "4": "1"}
+
+
+def _zocr_variants(v, dec):
+    """The value and every one-digit OCR confusion of it (5<->9, 3<->8, 1<->7, ...)."""
+    txt = f"{v:.{dec}f}"
+    out = {v}
+    for i, ch in enumerate(txt):
+        for alt in _ZOCR_CONFUSE.get(ch, ""):
+            try:
+                out.add(float(txt[:i] + alt + txt[i + 1:]))
+            except ValueError:
+                pass
+    return out
+
+
+def _zocr_fix_by_line(lb, pred, px_price, notes, full_dec=None):
+    """The drawn line's own position gives its price to ~1 px; among the OCR
+    readings of its label (and their one-digit confusions) take the one that
+    matches it. Real readings win ties over invented variants; readings with
+    the axis' usual number of decimals win over shortened ones ("9.97" for
+    9.973); a label that lost its integer part ("304" for 10.304) gets it back
+    from the line, keeping the digits it did read."""
+    if pred is None or not px_price:
+        return lb["v"]
+    dec = lb["dec"] if full_dec is None else full_dec
+    best = None
+    for (v, d_), n in (lb.get("votes") or {(lb["v"], lb["dec"]): 1}).items():
+        short = 0.8 if (full_dec is not None and d_ < full_dec) else 0.0
+        cands = [(c, 0 if c == v else 1.0) for c in _zocr_variants(v, d_)]
+        if full_dec:
+            digits = re.sub(r"\D", "", f"{v:.{d_}f}")
+            if len(digits) >= full_dec:
+                tail = int(digits[-full_dec:]) / 10 ** full_dec
+                for ip in (math.floor(pred) - 1, math.floor(pred), math.floor(pred) + 1):
+                    cands.append((round(ip + tail, full_dec), 1.2))
+        for cand, pen in cands:
+            err_px = abs(cand - pred) / px_price
+            d_c = d_ if pen < 1.2 else full_dec
+            score = err_px + pen + (short if d_c == d_ else 0.0) - 0.3 * n
+            if best is None or score < best[0]:
+                best = (score, cand, err_px, cand == v)
+    if best and best[2] <= 2.5:
+        if best[1] != lb["v"]:
+            notes.append(f"метка {lb['v']:g} → {best[1]:g} (по положению линии)")
+        return best[1]
+    if abs(lb["v"] - pred) > 0.03 * abs(pred):
+        notes.append(f"метка {lb['v']:g} не сходится со шкалой — взял {round(pred, dec):g}")
+        return round(pred, dec)
+    return lb["v"]
+
+
 def zones_recognize(data, live_price_fn=None, symbols=None):
     """TradingView screenshot -> {"symbol", "zones": [{"side", "levels"}], "notes"}.
     live_price_fn(symbol) -> float fixes the decimal scale; symbols = set of tradable
@@ -21280,7 +21332,7 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
     # ---- ticker (top-left legend) ----
     # several crops / scales / binarisations; OCR slips like USOT, U5DT, USD T are
     # accepted; a candidate must exist on the exchange when the list is known
-    symbol, header_close, header_txt = None, None, ""
+    symbol, header_close, header_txt, header_all = None, None, "", []
     _trans = str.maketrans({"О": "O", "С": "C", "Т": "T", "Е": "E", "А": "A", "Р": "P", "Н": "H", "К": "K",
                             "М": "M", "В": "B", "Х": "X", "У": "Y"})
     tick_re = re.compile(r"([A-Z0-9]{2,15})[\s.]*U[\s.]*[S5$][\s.]*[DO0Q][\s.]*[T7]")
@@ -21296,6 +21348,7 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                 txt = _zocr_tesseract(img, 7).upper().translate(_trans)
                 if not header_txt and txt.strip():
                     header_txt = txt.strip()[:80]
+                header_all.append(txt)
                 for mt in tick_re.finditer(txt.replace(" ", "")):
                     base = mt.group(1)
                     found += [base[i:] for i in range(0, max(1, len(base) - 1))]   # OCR glues icon marks in front: 'IZEN'
@@ -21355,21 +21408,33 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                 i += 1
         toks = []
         for b0, b1 in bands:
-            c = ImageOps.invert(gray.crop((bx0, max(0, b0 - 2), bx1, min(H, b1 + 2))))
-            c = c.resize((c.size[0] * 5, c.size[1] * 5), Image.LANCZOS).point(lambda v: 0 if v < 140 else 255)
-            pad = Image.new("L", (c.size[0] + 40, c.size[1] + 40), 255)
-            pad.paste(c, (20, 20))
-            toks.append(((b0 + b1) / 2, _zocr_tesseract(pad, 7, "0123456789.,:").strip()))
-        if any(":" in t for _, t in toks):      # current-price tag (price + candle timer)
-            nums = [(yy, t) for yy, t in toks if ":" not in t]
+            base_c = ImageOps.invert(gray.crop((bx0, max(0, b0 - 2), bx1, min(H, b1 + 2))))
+            reads = []
+            # several scales / thresholds / page modes — the label value is voted on later
+            for scale, thr, psm in ((5, 140, 7), (4, 128, 7), (6, 150, 7), (5, 110, 13), (3, 140, 7)):
+                c = base_c.resize((base_c.size[0] * scale, base_c.size[1] * scale), Image.LANCZOS)
+                c = c.point(lambda v, t=thr: 0 if v < t else 255)
+                pad = Image.new("L", (c.size[0] + 40, c.size[1] + 40), 255)
+                pad.paste(c, (20, 20))
+                t = _zocr_tesseract(pad, psm, "0123456789.,:").strip()
+                if t:
+                    reads.append(t)
+            toks.append(((b0 + b1) / 2, reads))
+        if any(sum(1 for t in rd if ":" in t) * 2 >= len(rd) > 0 for _, rd in toks):   # current-price tag (+ timer)
+            nums = [(yy, rd) for yy, rd in toks if rd and sum(1 for t in rd if ":" in t) * 2 < len(rd)]
             if nums:
                 cur_y = nums[0][0]
             continue
-        for yy, t in toks:
-            v, dec = _zocr_num(t)
-            if v is not None:
-                labels.append({"y": yy, "v": v, "dec": dec})
-                box_x0 = min(box_x0, bx0)
+        for yy, rd in toks:
+            vals = [(v, dec) for v, dec in (_zocr_num(t) for t in rd) if v is not None]
+            if not vals:
+                continue
+            votes = {}
+            for v, dec in vals:
+                votes[(v, dec)] = votes.get((v, dec), 0) + 1
+            (v, dec), _n = max(votes.items(), key=lambda kv: kv[1])
+            labels.append({"y": yy, "v": v, "dec": dec, "votes": votes})
+            box_x0 = min(box_x0, bx0)
 
     # ---- axis ticks (plain numbers), label boxes painted out ----
     strip = gray.crop((ax0, 0, W, H)).copy()
@@ -21433,8 +21498,7 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
         if price_at:
             pred = price_at(lb["y"])
             if abs(lb["v"] - pred) > 0.03 * abs(pred):
-                notes.append(f"метка {lb['v']:g} не сходится со шкалой — взял {round(pred, dec):g}")
-                lb["v"] = round(pred, dec)
+                lb["off_scale"] = True   # fixed against its own line below
 
     # ---- colored zones in the chart area ----
     plot_x1 = min(box_x0, ax0) - 2
@@ -21494,13 +21558,17 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
     # labels are stacked (shifted) by TradingView when lines are close, but keep their order:
     # pair them with lines in order, nearest first
     free = sorted(labels, key=lambda lb: lb["y"])
+    _decs = [lb["dec"] for lb in labels]
+    full_dec = max(set(_decs), key=_decs.count) if _decs else None   # the axis' usual number of decimals
     line_px = []
     for ly in sorted(lines):
         cand = [lb for lb in free if abs(lb["y"] - ly) <= 22]
         if cand:
             lb = min(cand, key=lambda q: q["y"])   # labels keep the lines' order even when stacked
             free.remove(lb)
-            line_px.append((ly, lb["v"]))
+            v = _zocr_fix_by_line(lb, price_at(ly) if price_at else None, abs(fit[1]) if fit else None, notes,
+                                  full_dec=full_dec)
+            line_px.append((ly, v))
         elif price_at:
             line_px.append((ly, round(price_at(ly), dec)))
     zones = []
@@ -21518,8 +21586,54 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
         zones.append({"side": side, "levels": sorted(lv, reverse=(side == "long"))})
 
     # ---- decimal scale from the live price ----
-    ref = header_close or (price_at(cur_y) if (price_at and cur_y is not None) else None) \
+    cur_price = price_at(cur_y) if (price_at and cur_y is not None) else None
+    # OHLC values of the legend line (ОТКР/МАКС/МИН/ЗАКР, OCR'd as OTKP/MAKC/MMH/3AKP)
+    hdr_nums = []
+    for txt in header_all:
+        t_ = txt.upper().replace(" ", "")
+        for mo in re.finditer(r"(?:OTKP|ОТКР|MAKC|МАКС|MMH|MИH|МИН|3AKP|ЗАКР|OPEN|HIGH|LOW|CLOSE)[^\d]{0,2}(\d[\d.,]*\d)", t_):
+            v_, _d = _zocr_num(mo.group(1))
+            if v_:
+                hdr_nums.append(v_)
+    ref = header_close or cur_price \
         or (sorted(lb["v"] for lb in labels)[len(labels) // 2] if labels else None)
+
+    # ---- ticker not read: candidate coins (name similar to what the legend OCR
+    # read, or live price near the chart's price); the caller confirms them by the
+    # price at the post time (the screenshot may be old / from another exchange) ----
+    chart_px = header_close or cur_price or (sorted(hdr_nums)[len(hdr_nums) // 2] if hdr_nums else None)
+    tick_cands = []
+    if not symbol and symbols:
+        import difflib
+        legend = re.sub(r"[^A-Z0-9]", "", " ".join(header_all).upper())
+
+        def name_sim(sym):
+            base = sym.replace("_USDT", "")
+            if not legend or not base:
+                return 0.0
+            if base in legend:
+                return 1.0
+            n = len(base)
+            return max((difflib.SequenceMatcher(None, base, legend[i:i + n + w]).ratio()
+                        for w in (-1, 0, 1) for i in range(0, max(1, len(legend) - n + 1))), default=0.0)
+        for sym in symbols:
+            sim = name_sim(sym)
+            err = None
+            if chart_px and live_price_fn:
+                try:
+                    lp = live_price_fn(sym)
+                except Exception:
+                    lp = None
+                if lp and lp > 0:
+                    k = round(math.log10(lp / chart_px))
+                    err = abs(lp - chart_px * 10.0 ** k) / lp
+            if sim >= 0.5 or (err is not None and err <= 0.25):   # the post may be old: confirmed later by its own time
+                tick_cands.append({"symbol": sym, "sim": round(sim, 3), "live_err": None if err is None else round(err, 4)})
+        named = sorted((c for c in tick_cands if c["sim"] >= 0.5), key=lambda c: -c["sim"])[:6]
+        by_px = sorted((c for c in tick_cands if c["sim"] < 0.5 and c["live_err"] is not None),
+                       key=lambda c: c["live_err"])[:10]
+        tick_cands = named + by_px
+
     if symbol and live_price_fn and (labels or zones):
         live = None
         try:
@@ -21537,7 +21651,7 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
         notes.append(f"тикер не распознан (прочитал: «{header_txt[:40]}»)" if header_txt else "тикер не распознан")
     if not zones:
         notes.append("цветные зоны не найдены")
-    return {"symbol": symbol, "zones": zones, "notes": notes, "ref": ref,
+    return {"symbol": symbol, "zones": zones, "notes": notes, "ref": ref, "chart_px": chart_px, "tick_cands": tick_cands,
             "levels_seen": [lb["v"] for lb in labels]}
 
 
@@ -21967,6 +22081,17 @@ def zones_recognize_post(post, data):
             post["notes"].append(f"не распознал: {e}")
     if rec:
         post["symbol"], post["notes"] = rec["symbol"], post["notes"] + rec["notes"]
+        if not post["symbol"] and rec.get("tick_cands") and rec.get("chart_px"):
+            pick = zones_pick_by_post_price(rec["tick_cands"], rec["chart_px"], post["post_time"])
+            if pick:
+                sym, px_post, err = pick
+                f = 10.0 ** round(math.log10(px_post / rec["chart_px"])) if rec["chart_px"] else 1.0
+                for zr in rec["zones"]:
+                    zr["levels"] = [round(v * f, 12) for v in zr["levels"]]
+                post["symbol"] = sym
+                post["notes"] = [n for n in post["notes"] if not n.startswith("тикер не распознан")]
+                post["notes"].append(f"тикер прочитан неточно — по цене на момент поста ({px_post:.6g}, расхождение "
+                                     f"{err * 100:.1f}%) и названию это {sym}, проверьте")
     if not post["symbol"] and caption:
         m_ = re.search(r"\b([A-Z0-9]{2,15})(?:[/_-]?USDT)?\b", caption.upper())
         if m_ and (m_.group(1) + "_USDT") in prices:
@@ -21978,8 +22103,43 @@ def zones_recognize_post(post, data):
             new.append(zones_make(post, zr["side"], zr["levels"]))
     elif rec and rec["zones"]:
         post["pending"] = {"zones": rec["zones"], "ref": rec.get("ref")}   # waiting for the coin from the user
+        if rec.get("tick_cands"):
+            post["notes"].append("возможно: " + ", ".join(c["symbol"].replace("_USDT", "") for c in rec["tick_cands"][:5]))
     post["ok"] = bool(new)
     return new
+
+
+def zones_pick_by_post_price(cands, chart_px, post_time):
+    """Among candidate coins (most similar name first) the one whose Gate price at
+    the post time matches the chart's price within 2% (any decimal scale; the
+    screenshot can be from another exchange). Name evidence wins over price luck:
+    a weakly similar name needs a tighter price match."""
+    best, hits = None, []
+    t0 = int(post_time)
+    for c in cands[:16]:
+        try:
+            cs = get_candles_range(c["symbol"], "15m", t0 - 1800, t0 + 1800) or []
+        except Exception:
+            cs = []
+        if not cs:
+            continue
+        near = min(cs, key=lambda x: abs(x["time"] - t0))
+        px = near["close"]
+        if not px or px <= 0:
+            continue
+        k = round(math.log10(px / chart_px))
+        err = abs(px - chart_px * 10.0 ** k) / px
+        tol = 0.02 if c["sim"] >= 0.6 else 0.006
+        if err <= tol:
+            hits.append(c)
+            score = (c["sim"], -err)
+            if best is None or score > best[0]:
+                best = (score, c["symbol"], px, err)
+    if best is None:
+        return None
+    if best[0][0] < 0.6 and len(hits) > 1:
+        return None   # two coins fit the price and neither name matches: ask instead of guessing
+    return best[1], best[2], best[3]
 
 
 def zones_set_symbol(post, sym_txt):
