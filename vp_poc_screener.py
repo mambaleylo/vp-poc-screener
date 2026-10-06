@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.473"
+APP_VERSION = "0.99.474"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23852,8 +23852,23 @@ TELEGRAM_ALERTS_ZONES_OWN = os.environ.get("VP_TG_ZONES_OWN", "1") == "1"
 _OWN_TRAINED = [False]   # refreshed on every scan / exam
 
 
+ZONES_OWN_PROVEN_N = 30   # v0.99.474 — our zones finished before the finder may talk in Telegram
+
+
+def _own_proven():
+    """v0.99.474 — the finder has shown it works: at least 30 of its own zones
+    finished, with a positive average result"""
+    try:
+        with _zones_lock:
+            rs = [z["result"]["r"] for z in ZONES["zones"] if z.get("own") and z.get("result")
+                  and z.get("status") in ("closed", "old") and z["result"].get("r") is not None]
+        return len(rs) >= ZONES_OWN_PROVEN_N and sum(rs) / len(rs) > 0
+    except Exception:
+        return False
+
+
 def _own_tg_ok():
-    return TELEGRAM_ALERTS_ZONES_OWN and _OWN_TRAINED[0]
+    return TELEGRAM_ALERTS_ZONES_OWN and _OWN_TRAINED[0] and _own_proven()
 
 
 def _own_vec(f):
@@ -26474,7 +26489,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow subRow">
         <div>
           <div class="label">↳ 🔎 Наш поиск в Telegram</div>
-          <div class="sub">пока поиск учится (меньше 15 совпавших с пабликом зон) — в Telegram ничего не шлёт, всё видно во вкладке «Зоны». После обучения — только сильные новые зоны (оценка от 0.7) и открытие/закрытие сделок по ним, без касаний и пробоев</div>
+          <div class="sub">пока поиск не доказал, что работает (меньше 30 его отработавших зон или средний результат не в плюсе), — в Telegram ничего не шлёт, всё видно во вкладке «Зоны». Потом — только сильные новые зоны (оценка от 0.7) и открытие/закрытие сделок по ним, без касаний и пробоев</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTgZonesOwn"><span class="switchSlider"></span></label>
       </div>

@@ -18691,3 +18691,7 @@ v0.99.473 - Fullscreen: the page is installable as an app (web manifest with
          fullscreen without a touch. In a tab: a screensaver that started
          without a touch (after a reload, the 20 s auto start) goes fullscreen
          on one tap; a double tap still closes it.
+v0.99.474 - Зоны / наш поиск: its Telegram messages (new zones, trades) start
+         only once it has proven itself — at least 30 of its own zones finished
+         with a positive average result — not just once the scorer is trained;
+         until then everything is in the tab only.
