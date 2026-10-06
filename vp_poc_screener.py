@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.474"
+APP_VERSION = "0.99.475"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21481,6 +21481,8 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                 for mt in tick_re.finditer(txt.replace(" ", "")):
                     base = mt.group(1)
                     found += [base[i:] for i in range(0, max(1, len(base) - 1))]   # OCR glues icon marks in front: 'IZEN'
+                    if "VV" in base:   # v0.99.475 — OCR reads W as VV (WUSDT -> VVUSDT)
+                        found.append(base.replace("VV", "W"))
                     if header_close is None:
                         mc = re.search(r"(?:3AKP|ЗАКР|C)(\d[\d.,]*)", txt.replace(" ", ""))
                         if mc:
@@ -21842,7 +21844,19 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
     # price at the post time (the screenshot may be old / from another exchange) ----
     chart_px = header_close or cur_price or (sorted(hdr_nums)[len(hdr_nums) // 2] if hdr_nums else None)
     tick_cands = []
-    if not symbol and symbols and not not_listed:
+    # v0.99.475 — an index, not a coin (BTC.D = Bitcoin dominance ~59%, TOTAL,
+    # TOTAL2/3, USDT.D, OTHERS.D…): nothing to trade — the post is skipped instead
+    # of guessing a coin by name and a x1000-scaled price (BTC.D 59 ~ BTC 59 000)
+    index_read = None
+    if not symbol and not not_listed:
+        for txt in header_all:
+            t_ = " " + txt.upper().translate(_trans) + " "
+            mi = re.search(r"[^A-Z0-9](BTC|ETH|USDT|USDC|USD|OTHERS|STABLE|ALT|TOTAL[23]?)[.,·]\s?D[^A-Z0-9]", t_) \
+                or re.search(r"[^A-Z0-9](TOTAL[23]?(?:ES)?|OTHERS|BTCDOM|DXY|SPX|NDX|US500|NAS100)[^A-Z0-9]", t_)
+            if mi:
+                index_read = mi.group(0).strip(" ·.,:|").replace(",", ".").replace("·", ".").replace(" ", "")
+                break
+    if not symbol and symbols and not not_listed and not index_read:
         import difflib
 
         def name_sim(sym):
@@ -21892,12 +21906,14 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                 notes.append(f"масштаб цен x{f:g} (по текущей цене {live:g})")
     if not_listed:
         notes.append(f"{not_listed} нет на фьючерсах Gate — скрин пропущен")
+    elif index_read:
+        notes.append(f"{index_read} — индекс, а не монета: торговать нечего, скрин пропущен")
     elif not symbol:
         notes.append(f"тикер не распознан (прочитал: «{header_txt[:40]}»)" if header_txt else "тикер не распознан")
     if not zones:
         notes.append("цветные зоны не найдены")
     return {"symbol": symbol, "zones": zones, "notes": notes, "ref": ref, "chart_px": chart_px, "tick_cands": tick_cands,
-            "not_listed": not_listed, "levels_seen": [lb["v"] for lb in labels]}
+            "not_listed": not_listed, "index_read": index_read, "levels_seen": [lb["v"] for lb in labels]}
 
 
 
@@ -22461,6 +22477,7 @@ def zones_recognize_post(post, data):
     caption = post.get("caption") or ""
     post["notes"], post["symbol"] = [], None
     post.pop("not_listed", None)
+    post.pop("index_read", None)
     prices = {}
     try:
         prices = _zones_symbols_and_prices()
@@ -22478,7 +22495,11 @@ def zones_recognize_post(post, data):
     if rec:
         post["symbol"], post["notes"] = rec["symbol"], post["notes"] + rec["notes"]
         post["not_listed"] = rec.get("not_listed")
-        if post["not_listed"]:
+        post["index_read"] = rec.get("index_read")
+        if post["index_read"] and not post["not_listed"]:
+            post["not_listed"] = post["index_read"]   # skipped the same way: no zones, no asking for a coin
+            post["notes"] = [n for n in post["notes"] if "индекс" in n]
+        elif post["not_listed"]:
             post["notes"] = [n for n in post["notes"] if "нет на фьючерсах" in n]
         if not post["symbol"] and not post["not_listed"] and rec.get("tick_cands") and rec.get("chart_px"):
             pick = zones_pick_by_post_price(rec["tick_cands"], rec["chart_px"], post["post_time"])
@@ -24192,6 +24213,9 @@ def api_own_scan():
 
 def zones_post_summary(post, new):
     when = time.strftime("%d.%m %H:%M", time.localtime(post["post_time"]))
+    if not new and post.get("index_read"):
+        return (f"⏭ Пост от {when}: {post['index_read']} — индекс (например, доминация BTC), а не монета: "
+                f"торговать нечего, скрин пропущен.")
     if not new and post.get("not_listed"):
         return f"⏭ Пост от {when}: {post['not_listed']} нет на фьючерсах Gate — скрин пропущен."
     if not new and post.get("pending"):

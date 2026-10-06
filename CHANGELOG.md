@@ -18695,3 +18695,8 @@ v0.99.474 - Зоны / наш поиск: its Telegram messages (new zones, trad
          only once it has proven itself — at least 30 of its own zones finished
          with a positive average result — not just once the scorer is trained;
          until then everything is in the tab only.
+v0.99.475 - Зоны OCR: an index in the legend (BTC.D — Bitcoin dominance, USDT.D,
+         TOTAL / TOTAL2 / TOTAL3, OTHERS.D, BTCDOM, DXY…) is recognised and the
+         post skipped with a message; before, the coin was guessed by name and a
+         price scaled ×1000 (BTC.D ~59 matched BTC ~59 000). W read as "VV" is
+         tried as W too.
