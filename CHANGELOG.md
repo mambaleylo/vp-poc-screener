@@ -18407,3 +18407,19 @@ v0.99.440 - Зоны: the ticker of a forwarded screenshot was not read on the p
          - zones found without a ticker are kept and the bot asks for the coin —
            reply with one word (e.g. ZEN) in the bot chat, or «указать монету» in
            the tab; the decimal scale is then fixed by that coin's live price.
+v0.99.441 - Зоны: «движение к зоне» (user: when the screenshot has only a support zone,
+         how often does the price reach it after the post — catch that move too;
+         when the statistics are good, say at the top of the signal that one can
+         enter right after the post, take at the first line on the way).
+         - A post whose zones are all on one side of the price: the move toward
+           the nearest line (supports below -> short, resistances above -> long).
+         - Every recognised post is replayed: how often the price reached that
+           line within the zone's waiting time, and the trade from the post with
+           the take 0.15% before the line and a stop of 1/2/3/5/8% — the best
+           stop by average R (fees included) from 8 posts.
+         - Signal: "🚀 Можно заходить по ходу движения к зоне ..." first line when
+           that is in plus; otherwise an info line with the current numbers.
+         - Optional auto-trade (Автоторговля -> «Зоны: движение к зоне», off by
+           default), only for posts younger than 1 h; before the zone's own
+           entry the move trade is closed if still open (one position per coin).
+         - The tab shows the reach rate and each stop's result.

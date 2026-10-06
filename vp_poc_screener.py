@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.440"
+APP_VERSION = "0.99.441"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1106,7 +1106,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_mirror", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_mirror", "autotrade_neuro", "auto_risk_enabled",
                   "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones",
-                  "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days",
+                  "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
@@ -1178,6 +1178,7 @@ def get_settings():
         "risk_pct_prv": MODULE_RISK_PCT["prv"],
         "risk_pct_zones": MODULE_RISK_PCT["zones"],   # v0.99.438
         "autotrade_zones": AUTOTRADE_ENABLED_ZONES,
+        "autotrade_zones_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
         "telegram_alerts_zones": TELEGRAM_ALERTS_ZONES,
         "zones_tp_pct": ZONES_TP_PCT,
         "zones_max_days": ZONES_MAX_DAYS,
@@ -1437,6 +1438,8 @@ def apply_settings(updates):
             pass
     if "autotrade_zones" in updates:   # v0.99.438
         globals()["AUTOTRADE_ENABLED_ZONES"] = bool(updates["autotrade_zones"])
+    if "autotrade_zones_approach" in updates:   # v0.99.441
+        globals()["AUTOTRADE_ENABLED_ZONES_APPROACH"] = bool(updates["autotrade_zones_approach"])
     if "telegram_alerts_zones" in updates:
         globals()["TELEGRAM_ALERTS_ZONES"] = bool(updates["telegram_alerts_zones"])
     if "zones_tp_pct" in updates:
@@ -21172,14 +21175,22 @@ ZONES_GRID_TP = (2.0, 3.0, 4.0, 5.0, 7.0, 10.0)
 ZONES_LEARN_MIN = 8          # finished zones with an entry needed before the learned values replace the defaults
 ZONES_FEE = 0.001
 ZONES_POLL_SEC = 20
+# v0.99.441 — "движение к зоне": a post with zones only on one side of the price
+# (e.g. only supports below) -> trade the move TO the nearest line right after the
+# post (short toward supports / long toward resistances), take just before that line
+AUTOTRADE_ENABLED_ZONES_APPROACH = os.environ.get("VP_AUTOTRADE_ZONES_APPROACH", "0") == "1"
+ZONES_APPR_SL = (1.0, 2.0, 3.0, 5.0, 8.0)   # stop, % against the move from the entry
+ZONES_APPR_FRONT = 0.15                     # take this % before the line (filled before the zone's own entry)
+ZONES_APPR_FRESH_SEC = 3600                 # a post older than this at intake is not entered live
+ZONES_APPR_MIN_DIST = 0.5                   # % — closer than this to the line: nothing to take
 _zones_lock = threading.RLock()
 _zones_learn_event = threading.Event()
-ZONES = {"posts": [], "zones": [], "tg_offset": 0, "learned": None, "stats": None, "tg_last_error": None}
+ZONES = {"posts": [], "zones": [], "tg_offset": 0, "learned": None, "stats": None, "tg_last_error": None, "approach": None}
 
 
 def zones_save():
     with _zones_lock:
-        data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats")}, default=str)
+        data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach")}, default=str)
     try:
         tmp = ZONES_FILE + ".tmp"
         with open(tmp, "w") as f:
@@ -21195,7 +21206,7 @@ def zones_load():
             with open(ZONES_FILE) as f:
                 d = json.load(f)
             with _zones_lock:
-                for k in ("posts", "zones", "tg_offset", "learned", "stats"):
+                for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach"):
                     if k in d:
                         ZONES[k] = d[k]
     except Exception as e:
@@ -21700,11 +21711,210 @@ def zones_learn():
     return learned
 
 
+def zones_approach_target(levels_by_zone, price):
+    """All lines on one side of the price -> the move toward the nearest one.
+    {"dir": +1 long / -1 short, "target": line} or None (zones on both sides,
+    price inside a zone, or too close to the line)."""
+    if not price or not levels_by_zone:
+        return None
+    allv = [v for lv in levels_by_zone for v in lv]
+    if any(min(lv) <= price <= max(lv) for lv in levels_by_zone if lv):
+        return None
+    below = [v for v in allv if v < price]
+    above = [v for v in allv if v > price]
+    if below and not above:
+        d, target = -1, max(below)
+    elif above and not below:
+        d, target = 1, min(above)
+    else:
+        return None
+    dist = abs(target - price) / price * 100
+    if dist < ZONES_APPR_MIN_DIST:
+        return None
+    return {"dir": d, "target": target, "dist_pct": round(dist, 2)}
+
+
+def zones_approach_tp(target, d):
+    return target * (1 - d * ZONES_APPR_FRONT / 100)
+
+
+def zones_approach_sim(cs, d, target, sl_pct, start, end):
+    """Enter at the first candle after the post, take just before the line, stop
+    sl_pct% against. None = no full entry (already past the take)."""
+    after = [c for c in cs if start <= c["time"] < end]
+    if not after:
+        return None
+    e = after[0]["open"]
+    tp = zones_approach_tp(target, d)
+    if (d > 0 and e >= tp) or (d < 0 and e <= tp):
+        return None
+    sl = e * (1 - d * sl_pct / 100)
+    risk = abs(e - sl)
+    for c in after:
+        if (d > 0 and c["low"] <= sl) or (d < 0 and c["high"] >= sl):
+            return {"r": -1 - ZONES_FEE * e / risk, "result": "LOSS", "t_out": c["time"]}
+        if (d > 0 and c["high"] >= tp) or (d < 0 and c["low"] <= tp):
+            return {"r": d * (tp - e) / risk - ZONES_FEE * e / risk, "result": "WIN", "t_out": c["time"]}
+    return {"r": d * (after[-1]["close"] - e) / risk - ZONES_FEE * e / risk, "result": "TIME_EXIT",
+            "t_out": after[-1]["time"], "open": True}
+
+
+def zones_post_levels(post):
+    with _zones_lock:
+        return [list(z["levels"]) for z in ZONES["zones"]
+                if z.get("post_id") == post["id"] and z.get("status") != "deleted" and z.get("levels")]
+
+
+def zones_approach_learn(cache=None):
+    """Every post with zones on one side of the price at the moment of the post:
+    how often the price then reached the nearest line, and the stop that made
+    the move-to-the-zone trade pay best."""
+    now = time.time()
+    cache = {} if cache is None else cache
+    with _zones_lock:
+        posts = [dict(p_) for p_ in ZONES["posts"] if p_.get("ok") and p_.get("symbol")]
+    rows = {sl: [] for sl in ZONES_APPR_SL}
+    reach, elig = 0, 0
+    for post in posts:
+        end = min(now, post["post_time"] + ZONES_MAX_DAYS * 86400)
+        window_over = now >= post["post_time"] + ZONES_MAX_DAYS * 86400
+        key = (post["symbol"], int(post["post_time"]) // 3600, int(end) // 3600)
+        if key not in cache:
+            cache[key] = zones_candles(post["symbol"], post["post_time"], end)
+        cs = [c for c in cache[key] if c["time"] >= post["post_time"]]
+        if not cs:
+            continue
+        ap = zones_approach_target(zones_post_levels(post), cs[0]["open"])
+        if not ap:
+            continue
+        tp = zones_approach_tp(ap["target"], ap["dir"])
+        touched = any((ap["dir"] > 0 and c["high"] >= tp) or (ap["dir"] < 0 and c["low"] <= tp) for c in cs)
+        if touched or window_over:
+            elig += 1
+            reach += 1 if touched else 0
+        for sl in ZONES_APPR_SL:
+            r = zones_approach_sim(cs, ap["dir"], ap["target"], sl, post["post_time"], end)
+            if r is not None and (not r.get("open") or window_over):
+                rows[sl].append(r)
+    out_rows = []
+    for sl, rs in rows.items():
+        if rs:
+            out_rows.append({"sl": sl, "n": len(rs), "wr": round(sum(1 for x in rs if x["result"] == "WIN") / len(rs) * 100, 1),
+                             "avg_r": round(sum(x["r"] for x in rs) / len(rs), 3)})
+    ok = [r for r in out_rows if r["n"] >= ZONES_LEARN_MIN]
+    best = max(ok, key=lambda r: r["avg_r"]) if ok else None
+    res = {"at": now, "posts": elig, "reach_pct": round(reach / elig * 100, 1) if elig else None,
+           "rows": out_rows, "best": best, "good": bool(best and best["avg_r"] > 0)}
+    with _zones_lock:
+        ZONES["approach"] = res
+    return res
+
+
+def zones_approach_on_new_post(post):
+    """Right after a post is recognised: the move toward its zones. Returns the
+    text line for the signal ('' when there is none); opens the trade when the
+    post is fresh, the statistics are good and the switch is on."""
+    now = time.time()
+    if not post.get("symbol") or now - post["post_time"] > ZONES_APPR_FRESH_SEC:
+        return ""
+    try:
+        price = _zones_symbols_and_prices().get(post["symbol"])
+    except Exception:
+        price = None
+    ap = zones_approach_target(zones_post_levels(post), price)
+    if not ap:
+        return ""
+    with _zones_lock:
+        st = dict(ZONES.get("approach") or {})
+    d = ap["dir"]
+    word = "ШОРТ" if d < 0 else "ЛОНГ"
+    tp = zones_approach_tp(ap["target"], d)
+    post["approach"] = {"dir": d, "target": ap["target"], "tp": tp, "ref": price, "dist_pct": ap["dist_pct"]}
+    best = st.get("best")
+    if not (st.get("good") and best):
+        n = max([r["n"] for r in st.get("rows") or []] + [0])
+        return (f"ℹ️ движение к зоне ({word} → {ap['target']:.6g}, {ap['dist_pct']:g}%): статистика "
+                + (f"пока не в плюсе (доходит в {st.get('reach_pct')}%)" if n >= ZONES_LEARN_MIN else f"копится ({n} из {ZONES_LEARN_MIN})"))
+    sl = price * (1 - d * best["sl"] / 100)
+    line = (f"🚀 Можно заходить по ходу движения к зоне: {word} от {price:.6g} → тейк {tp:.6g} "
+            f"(перед 1-й линией {ap['target']:.6g}, {ap['dist_pct']:g}%), стоп {sl:.6g} ({best['sl']:g}%)\n"
+            f"   по истории: цена доходит в {st.get('reach_pct')}% постов · с этим стопом WR {best['wr']}%, "
+            f"{best['avg_r']:+.2f}R на сделку ({best['n']} постов)")
+    if AUTOTRADE_ENABLED_ZONES_APPROACH:
+        tr = {"symbol": post["symbol"], "direction": "LONG" if d > 0 else "SHORT", "time": int(now), "entry": price,
+              "sl": sl, "tp": tp, "status": "OPEN", "result": None, "exit_price": None, "exit_time": None,
+              "pnl_r": None, "autotrade_fired": False, "autotrade": None, "kind": "approach"}
+        try:
+            res = execute_autotrade("zones", post["symbol"], tr["direction"], price, sl, tp, extra={"approach": post["id"]},
+                                    risk_pct_override=auto_risk_for("zones", post["symbol"]))
+            tr["autotrade"] = {"status": res.get("status"), "detail": str(res.get("detail") or "")[:200],
+                               "leverage": res.get("leverage")}
+            tr["autotrade_fired"] = res.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
+            sim_execute_trade("zones", post["symbol"], tr["direction"], price, sl, tp, res.get("leverage") or 10, tr,
+                              autotrade_result=res)
+            line += f"\n   🤖 автосделка: {res.get('status')}" + (f" {res.get('leverage')}x" if res.get("leverage") else "") \
+                + (f" — {str(res.get('detail'))[:120]}" if res.get("status") not in ("OPENED", "OPENED_TP_SL_FAILED") and res.get("detail") else "")
+        except Exception as e:
+            log_error(f"zones approach autotrade {post['symbol']}: {e}")
+        post["appr_trade"] = tr
+    return line
+
+
+def _zones_close_approach(post, price, reason):
+    """The zone's own entry is due while the move-to-the-zone trade is still open
+    (one position per coin on the exchange): close it first."""
+    tr = post.get("appr_trade")
+    if not tr or tr.get("status") != "OPEN":
+        return
+    if AUTOTRADE_ENABLED_ZONES_APPROACH and tr.get("autotrade_fired"):
+        log_error(f"zones approach close {post['symbol']} ({reason}): "
+                  f"{close_position_for_mode('zones', post['symbol'], tr['direction'])}")
+    d = 1 if tr["direction"] == "LONG" else -1
+    risk = abs(tr["entry"] - tr["sl"]) or 1e-12
+    r = d * (price - tr["entry"]) / risk
+    with _zones_lock:
+        tr.update({"status": "CLOSED", "result": "WIN" if r > 0 else "LOSS", "exit_price": price,
+                   "exit_time": int(time.time()), "pnl_r": round(r, 3)})
+
+
+def _zones_track_approach(post):
+    tr = post["appr_trade"]
+    cs = zones_candles(post["symbol"], tr["time"], time.time())
+    d = 1 if tr["direction"] == "LONG" else -1
+    res = px = None
+    for c in cs:
+        if c["time"] + 900 <= tr["time"]:
+            continue
+        if (d > 0 and c["low"] <= tr["sl"]) or (d < 0 and c["high"] >= tr["sl"]):
+            res, px = "LOSS", tr["sl"]
+            break
+        if (d > 0 and c["high"] >= tr["tp"]) or (d < 0 and c["low"] <= tr["tp"]):
+            res, px = "WIN", tr["tp"]
+            break
+    if res is None and time.time() >= post["post_time"] + ZONES_MAX_DAYS * 86400:
+        res, px = "TIME_EXIT", (cs[-1]["close"] if cs else tr["entry"])
+        if AUTOTRADE_ENABLED_ZONES_APPROACH and tr.get("autotrade_fired"):
+            log_error(f"zones approach time exit {post['symbol']}: "
+                      f"{close_position_for_mode('zones', post['symbol'], tr['direction'])}")
+    if res is None:
+        return False
+    risk = abs(tr["entry"] - tr["sl"]) or 1e-12
+    r = d * (px - tr["entry"]) / risk
+    with _zones_lock:
+        tr.update({"status": "CLOSED", "result": res, "exit_price": px, "exit_time": int(time.time()), "pnl_r": round(r, 3)})
+    zones_notify(f"{'✅' if res == 'WIN' else ('❌' if res == 'LOSS' else '⏱')} Движение к зоне {post['symbol']}: {res} "
+                 f"{r:+.2f}R ({tr['direction']} {tr['entry']:.6g} → {px:.6g})")
+    _zones_learn_event.set()
+    return True
+
+
 def zones_learn_loop():
     while True:
         heartbeat("zones_learn_loop")
         try:
             zones_learn()
+            zones_approach_learn()
+            zones_save()
         except Exception as e:
             log_error(f"zones_learn: {e}")
         _zones_learn_event.wait(1800)
@@ -21730,6 +21940,8 @@ def zones_add_post(data, post_time=None, source="web", caption=""):
         ZONES["zones"] = new + ZONES["zones"]
     for z in new:
         zones_replay_past(z)
+    if new:
+        post["approach_txt"] = zones_approach_on_new_post(post)
     zones_save()
     _zones_learn_event.set()
     return post, new
@@ -21797,6 +22009,8 @@ def zones_set_symbol(post, sym_txt):
         ZONES["zones"] = new + ZONES["zones"]
     for z in new:
         zones_replay_past(z)
+    if new:
+        post["approach_txt"] = zones_approach_on_new_post(post)
     zones_save()
     _zones_learn_event.set()
     return new, None
@@ -21899,7 +22113,8 @@ def zones_monitor_tick(last_track=0.0):
     """One pass over the live zones; returns the time of the last trade check."""
     with _zones_lock:
         active = [z for z in ZONES["zones"] if z.get("status") in ("watch", "in_trade") and z.get("symbol")]
-    if not active:
+        any_appr = any((p_.get("appr_trade") or {}).get("status") == "OPEN" for p_ in ZONES["posts"])
+    if not active and not any_appr:
         return last_track
     prices = _zones_symbols_and_prices()
     now = time.time()
@@ -21932,6 +22147,10 @@ def zones_monitor_tick(last_track=0.0):
             zones_notify(f"💥 Зона {z['symbol']} ({zones_fmt(z)}) пробита: цена {price:.6g}")
             continue
         if z["touched"][e_idx] is not None and z.get("trade") is None:
+            with _zones_lock:
+                post = next((p_ for p_ in ZONES["posts"] if p_["id"] == z.get("post_id")), None)
+            if post:
+                _zones_close_approach(post, price, "вход от зоны")
             tr = _zones_open_trade(z, price, p)
             with _zones_lock:
                 if tr is not None:
@@ -21940,6 +22159,13 @@ def zones_monitor_tick(last_track=0.0):
             changed = True
     if now - last_track >= 120:
         last_track = now
+        with _zones_lock:
+            appr = [p_ for p_ in ZONES["posts"] if (p_.get("appr_trade") or {}).get("status") == "OPEN"]
+        for post in appr:
+            try:
+                changed = _zones_track_approach(post) or changed
+            except Exception as e:
+                log_error(f"zones approach track {post.get('symbol')}: {e}")
         for z in active:
             if z.get("status") == "in_trade" and z.get("trade"):
                 try:
@@ -22034,10 +22260,13 @@ def zones_post_summary(post, new):
     if not new:
         return (f"⚠️ Зоны: пост от {when} — не распознал{(' (' + post['symbol'] + ')') if post.get('symbol') else ''}. "
                 f"{'; '.join(post['notes'][:3])}")
-    lines = [f"📥 {post['symbol']} · пост от {when} · зон: {len(new)}"]
+    lines = ([post["approach_txt"]] if (post.get("approach_txt") or "").startswith("🚀") else []) \
+        + [f"📥 {post['symbol']} · пост от {when} · зон: {len(new)}"]
     for z in new:
         st = {"watch": "слежу", "old": "уже отработала (в статистику)"}.get(z["status"], z["status"])
         lines.append(f"• {zones_fmt(z)} — {st}")
+    if (post.get("approach_txt") or "").startswith("ℹ️"):
+        lines.append(post["approach_txt"])
     if post["notes"]:
         lines.append("⚠️ " + "; ".join(post["notes"][:3]))
     lines.append("Проверьте уровни во вкладке «Зоны».")
@@ -22050,7 +22279,10 @@ def api_zones_status():
         posts = [dict(p) for p in ZONES["posts"][:200]]
         zones = [dict(z) for z in ZONES["zones"] if z.get("status") != "deleted"][:600]
         learned, stats, tg_err = ZONES.get("learned"), ZONES.get("stats"), ZONES.get("tg_last_error")
+    with _zones_lock:
+        approach = ZONES.get("approach")
     return jsonify({"posts": posts, "zones": zones, "learned": learned, "stats": stats, "params": zones_params(),
+                    "approach": approach, "autotrade_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
                     "deps": zones_deps(), "tg": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID), "tg_error": tg_err,
                     "autotrade": AUTOTRADE_ENABLED_ZONES, "max_days": ZONES_MAX_DAYS, "tp_user": ZONES_TP_PCT,
                     "learn_min": ZONES_LEARN_MIN})
@@ -24413,6 +24645,13 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradeZones"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳↳ Зоны: движение к зоне</div>
+          <div class="sub">если на скрине зоны только с одной стороны от цены — сразу после поста сделка по ходу движения к ближайшей линии (к поддержкам — шорт, к сопротивлениям — лонг), тейк чуть раньше линии; открывается, только когда по истории постов это в плюсе; стоп — лучший по истории</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeZonesAppr"><span class="switchSlider"></span></label>
+      </div>
     </div></details>
 
     <div class="dim hint-block" style="font-size:var(--fs);margin-top:16px;">Изменения применяются сразу, без перезапуска, и сохраняются на диск. Здесь только общие переключатели — детальные параметры (RR, буферы, пороги фильтров) настраиваются через переменные окружения при запуске.</div>
@@ -25853,6 +26092,14 @@ async function refreshZones() {
       ${lr.best ? `<div style="margin-top:4px;">лучшие правила: линия ${lr.best.entry + 1}, стоп ${lr.best.buf}%, тейк +${lr.best.tp}% → <b class="${lr.best.avg_r > 0 ? 'win' : 'loss'}">${lr.best.avg_r > 0 ? '+' : ''}${lr.best.avg_r}R</b> на сделку, WR ${lr.best.wr}% (${lr.best.n} сделок)${lr.default ? ` · правила по умолчанию: ${lr.default.avg_r > 0 ? '+' : ''}${lr.default.avg_r}R (${lr.default.n})` : ''}</div>` : '<div class="dim">для подбора правил пока мало зон со входом</div>'}
       <button onclick="zonesRelearn()" style="margin-top:6px;background:var(--ctl);border:none;color:var(--tx);padding:4px 10px;border-radius:var(--r-xs);">↻ пересчитать</button></div>`;
   }
+  const ap = d.approach || {};
+  if (ap.posts || (ap.rows || []).length) {
+    const rowsTxt = (ap.rows || []).map(r => `стоп ${r.sl}%: WR ${r.wr}% · ${r.avg_r > 0 ? '+' : ''}${r.avg_r}R (${r.n})`).join(' · ');
+    stats += `<div style="padding:8px 10px;margin-bottom:8px;background:var(--inset);border-radius:var(--r-sm);font-size:var(--fs-sm);">
+      <b>Движение к зоне</b> (посты с зонами только с одной стороны от цены): цена доходит до ближайшей линии в <b>${ap.reach_pct == null ? '—' : ap.reach_pct + '%'}</b> из ${ap.posts} постов
+      <div class="dim">${rowsTxt || 'сделок пока нет'}</div>
+      <div>${ap.good && ap.best ? `<span class="win">в плюсе</span> — в сигнале будет «можно заходить», стоп ${ap.best.sl}%` : `пока ${ap.best ? 'не в плюсе' : 'мало постов (нужно ' + d.learn_min + ')'} — в сигнале только справка`} · автосделки: ${d.autotrade_approach ? '<span class="win">вкл</span>' : 'выкл'}</div></div>`;
+  }
   const zs = d.zones || [];
   const act = zs.filter(z => z.status === 'watch' || z.status === 'in_trade');
   const arch = zs.filter(z => !(z.status === 'watch' || z.status === 'in_trade'));
@@ -27139,6 +27386,7 @@ const setInputs = {
   autotrade_snr: document.getElementById('setAutotradeSnr'),
   autotrade_prv: document.getElementById('setAutotradePrv'),
   autotrade_zones: document.getElementById('setAutotradeZones'),
+  autotrade_zones_approach: document.getElementById('setAutotradeZonesAppr'),
 };
 
 const setValueInputs = {
