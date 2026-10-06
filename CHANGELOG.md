@@ -18615,3 +18615,7 @@ v0.99.461 - Зоны / history: "все" in the days prompt (now the default) lo
 v0.99.462 - Зоны / history: a small form instead of the text prompt — "вся
          история" checkbox (on by default) clears and locks the days field;
          untick it to type the days. Its state survives the tab's refresh.
+v0.99.463 - Зоны / learned rules: they replace the defaults only when clearly
+         better on the later (check) zones — by at least +0.1R per trade; a
+         smaller difference keeps the defaults (no switching for a difference
+         that may be chance), said so in the tab.

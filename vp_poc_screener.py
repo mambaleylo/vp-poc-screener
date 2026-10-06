@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.462"
+APP_VERSION = "0.99.463"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21195,6 +21195,7 @@ ZONES_DEFAULT = {"entry": 0, "buf": 1.0, "tp": 4.0}    # 1st line, stop 1% beyon
 ZONES_GRID_ENTRY = (0, 1)
 ZONES_GRID_BUF = (0.3, 0.6, 1.0, 1.5, 2.5)
 ZONES_GRID_TP = (2.0, 3.0, 4.0, 5.0, 7.0, 10.0, 15.0, 20.0)   # v0.99.460 — up to +20%
+ZONES_SWITCH_MARGIN_R = 0.1   # v0.99.463 — learned rules replace the defaults only when clearly better on the check
 ZONES_LEARN_MIN = 8          # finished zones with an entry needed before the learned values replace the defaults
 ZONES_FEE = 0.001
 ZONES_POLL_SEC = 20
@@ -22013,9 +22014,14 @@ def zones_learn():
         dchk = (dflt or {}).get("chk_r")
         if pick["chk_n"] < 5:
             verdict = f"подобрано на {pick['fit_n']} зонах, на проверке пока мало зон ({pick['chk_n']} из 5) — работают правила по умолчанию"
-        elif pick["chk_r"] is not None and pick["chk_r"] > 0 and (dchk is None or pick["chk_r"] >= dchk):
+        elif pick["chk_r"] is not None and pick["chk_r"] > 0 and dchk is not None and dchk > 0 \
+                and pick["chk_r"] < dchk + ZONES_SWITCH_MARGIN_R:
+            verdict = (f"подобранные правила на проверке {pick['chk_r']:+.2f}R, по умолчанию {dchk:+.2f}R — разница меньше "
+                       f"{ZONES_SWITCH_MARGIN_R}R, остаются правила по умолчанию (менять ради случайной разницы не стоит)")
+        elif pick["chk_r"] is not None and pick["chk_r"] > 0 and (dchk is None or pick["chk_r"] >= dchk + ZONES_SWITCH_MARGIN_R):
             best = pick
-            verdict = f"подтвердилось на проверке: {pick['chk_r']:+.2f}R на {pick['chk_n']} более поздних зонах"
+            verdict = f"подтвердилось на проверке: {pick['chk_r']:+.2f}R на {pick['chk_n']} более поздних зонах" \
+                + (f" (по умолчанию {dchk:+.2f}R)" if dchk is not None else "")
         else:
             verdict = (f"не подтвердилось на проверке ({pick['chk_r']:+.2f}R на {pick['chk_n']} зонах"
                        + (f", по умолчанию {dchk:+.2f}R" if dchk is not None else "") + ") — работают правила по умолчанию")
