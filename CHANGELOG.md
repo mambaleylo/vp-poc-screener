@@ -18549,3 +18549,28 @@ v0.99.454 - Зоны / наш поиск: no Telegram spam while it learns. Unti
          their trades opening / closing; touches, breaks and expiries of our
          zones stay tab-only. New switch "↳ 🔎 Наш поиск в Telegram" mutes it
          completely. Public posts' messages are unchanged.
+v0.99.455 - Зоны survive restarts and lost network (a lift, the road):
+         - Telegram messages of the zones go through a queue kept on disk
+           (vp_zones_outbox.json): no network or a restart only delays them;
+           sent in order when it is back, marked "⏳ с опозданием N мин (не было
+           связи), событие в HH:MM". Before: 3 tries in 15 s, then lost.
+         - The state file is fsync'ed and copied to .bak after every save; a
+           damaged file is restored from the copy and kept aside (.corrupt-…),
+           never overwritten with an empty state.
+         - Posts forwarded to the bot: a picture that could not be downloaded
+           (no network) is fetched again later instead of being lost; a post is
+           never taken twice (after a restart mid-batch).
+         - The group via the account: posts published while the bot was off or
+           offline are caught up (after the last seen message, oldest first)
+           on connect and every minute; reconnect checked every minute.
+         - The monitor remembers its last good tick; after a gap the 1m candles
+           of the gap mark the lines touched and the zones broken meanwhile.
+           An entry is taken only while the price is still at the line (<= 0.3%
+           past it): no chasing a price that ran away while offline.
+         - A real position is marked closed only when the exchange confirmed
+           the close (time exits, the move-to-zone trade before the zone's
+           entry); otherwise it stays open and the close is retried; the zone's
+           entry waits for the approach position to be really closed.
+         - A real order that failed with ERROR (network at that moment): the
+           exchange is checked — a position that did open is adopted; if none
+           and the price is still at the line within 10 min, one more try.

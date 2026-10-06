@@ -4,3 +4,6 @@ vp_zones_state.json
 vp_zones_state.json.tmp
 zones_img/
 __pycache__/
+vp_zones_outbox.json
+vp_zones_outbox.json.tmp
+vp_zones_state.json.bak

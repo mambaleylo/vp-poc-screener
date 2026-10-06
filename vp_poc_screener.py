@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.454"
+APP_VERSION = "0.99.455"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21200,27 +21200,50 @@ ZONES = {"posts": [], "zones": [], "tg_offset": 0, "learned": None, "stats": Non
 
 def zones_save():
     with _zones_lock:
-        data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode", "own_last_scan") if k in ZONES}, default=str)
-    try:
+        data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode", "own_last_scan", "monitor_ok") if k in ZONES}, default=str)
+    try:   # v0.99.455 — written to disk for sure; the previous state kept as .bak
         tmp = ZONES_FILE + ".tmp"
         with open(tmp, "w") as f:
             f.write(data)
-        os.replace(tmp, ZONES_FILE)
+            f.flush()
+            os.fsync(f.fileno())
+        with _zones_save_lock:
+            os.replace(tmp, ZONES_FILE)
+            try:   # the copy = this latest good state
+                shutil.copyfile(ZONES_FILE, ZONES_FILE + ".bak.tmp")
+                os.replace(ZONES_FILE + ".bak.tmp", ZONES_FILE + ".bak")
+            except OSError:
+                pass
     except Exception as e:
         log_error(f"zones_save: {e}")
 
 
+_zones_save_lock = threading.Lock()
+
+
 def zones_load():
-    try:
-        if os.path.exists(ZONES_FILE):
-            with open(ZONES_FILE) as f:
+    """The saved state; a damaged file (the phone died while writing) falls
+    back to the previous copy (.bak) and is kept aside, never overwritten."""
+    for path in (ZONES_FILE, ZONES_FILE + ".bak"):
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path) as f:
                 d = json.load(f)
             with _zones_lock:
-                for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode", "own_last_scan"):
+                for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode",
+                          "own_last_scan", "monitor_ok"):
                     if k in d:
                         ZONES[k] = d[k]
-    except Exception as e:
-        log_error(f"zones_load: {e}")
+            if path != ZONES_FILE:
+                log_error(f"zones_load: main file damaged — restored from {path}")
+            return
+        except Exception as e:
+            log_error(f"zones_load {path}: {e}")
+            try:
+                shutil.copyfile(path, f"{path}.corrupt-{int(time.time())}")
+            except OSError:
+                pass
 
 
 def zones_deps():
@@ -22106,21 +22129,34 @@ def zones_approach_on_new_post(post):
     return line
 
 
+def _zones_close_real(symbol, direction, why):
+    """v0.99.455 — close the real position; True only when the exchange
+    confirmed it (or there is no such position). A network failure returns
+    False so the caller keeps the trade open and tries again."""
+    r = close_position_for_mode("zones", symbol, direction) or {}
+    ok = bool(r.get("ok")) or any(k in str(r.get("reason", "")) for k in ("no open position", "size is zero"))
+    if not ok:
+        log_error(f"zones close {symbol} ({why}) failed, will retry: {r}")
+    return ok
+
+
 def _zones_close_approach(post, price, reason):
     """The zone's own entry is due while the move-to-the-zone trade is still open
-    (one position per coin on the exchange): close it first."""
+    (one position per coin on the exchange): close it first. False = the
+    exchange did not confirm (no network) — the zone's entry waits."""
     tr = post.get("appr_trade")
     if not tr or tr.get("status") != "OPEN":
-        return
+        return True
     if AUTOTRADE_ENABLED_ZONES_APPROACH and tr.get("autotrade_fired"):
-        log_error(f"zones approach close {post['symbol']} ({reason}): "
-                  f"{close_position_for_mode('zones', post['symbol'], tr['direction'])}")
+        if not _zones_close_real(post["symbol"], tr["direction"], reason):
+            return False
     d = 1 if tr["direction"] == "LONG" else -1
     risk = abs(tr["entry"] - tr["sl"]) or 1e-12
     r = d * (price - tr["entry"]) / risk
     with _zones_lock:
         tr.update({"status": "CLOSED", "result": "WIN" if r > 0 else "LOSS", "exit_price": price,
                    "exit_time": int(time.time()), "pnl_r": round(r, 3)})
+    return True
 
 
 def _zones_track_approach(post):
@@ -22140,8 +22176,8 @@ def _zones_track_approach(post):
     if res is None and time.time() >= post["post_time"] + ZONES_MAX_DAYS * 86400:
         res, px = "TIME_EXIT", (cs[-1]["close"] if cs else tr["entry"])
         if AUTOTRADE_ENABLED_ZONES_APPROACH and tr.get("autotrade_fired"):
-            log_error(f"zones approach time exit {post['symbol']}: "
-                      f"{close_position_for_mode('zones', post['symbol'], tr['direction'])}")
+            if not _zones_close_real(post["symbol"], tr["direction"], "approach time exit"):
+                return False   # not confirmed by the exchange: retried next round
     if res is None:
         return False
     risk = abs(tr["entry"] - tr["sl"]) or 1e-12
@@ -22361,8 +22397,105 @@ def zones_replay_past(z):
             z["history"] = path
 
 
+ZONES_OUTBOX_FILE = os.environ.get("VP_ZONES_OUTBOX_FILE", "vp_zones_outbox.json")
+_zones_outbox = []
+_zones_outbox_lock = threading.Lock()
+_zones_outbox_event = threading.Event()
+
+
+def _zones_outbox_save():
+    with _zones_outbox_lock:
+        data = json.dumps(_zones_outbox)
+    try:
+        tmp = ZONES_OUTBOX_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, ZONES_OUTBOX_FILE)
+    except Exception as e:
+        log_error(f"zones outbox save: {e}")
+
+
 def zones_notify(text):
-    send_telegram(text, category="zones")
+    """v0.99.455 — the zones' messages go through a queue kept on disk: no
+    network (a lift, the road) or a restart only delays them, never loses
+    them; they are sent in order once the network is back, marked as late."""
+    zones_outbox_load()
+    if not (TELEGRAM_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID and TELEGRAM_ALERTS_ZONES):
+        return
+    with _zones_outbox_lock:
+        _zones_outbox.append({"t": time.time(), "text": text})
+        del _zones_outbox[:-300]
+    _zones_outbox_save()
+    _zones_outbox_event.set()
+
+
+_zones_outbox_loaded = [False]
+
+
+def zones_outbox_load():
+    """once, at start (before anything is queued): unsent messages from disk"""
+    if _zones_outbox_loaded[0]:
+        return
+    _zones_outbox_loaded[0] = True
+    try:
+        if os.path.exists(ZONES_OUTBOX_FILE):
+            with open(ZONES_OUTBOX_FILE) as f:
+                old = json.load(f) or []
+            with _zones_outbox_lock:
+                _zones_outbox[:0] = [m for m in old if isinstance(m, dict) and m.get("text")]
+    except Exception as e:
+        log_error(f"zones outbox load: {e}")
+
+
+def zones_outbox_loop():
+    zones_outbox_load()
+    delay = 5
+    while True:
+        with _zones_outbox_lock:
+            item = _zones_outbox[0] if _zones_outbox else None
+        if item is None or not (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+            _zones_outbox_event.wait(30)
+            _zones_outbox_event.clear()
+            continue
+        late = time.time() - item["t"]
+        text = item["text"]
+        if late > 120:
+            mins = int(late // 60)
+            text = (f"⏳ с опозданием {mins // 60} ч {mins % 60} мин" if mins >= 60 else f"⏳ с опозданием {mins} мин") \
+                + f" (не было связи), событие в {time.strftime('%H:%M', time.localtime(item['t']))}\n" + text
+        try:
+            body = {"chat_id": TELEGRAM_CHAT_ID, "text": text[:4000]}
+            if not item.get("plain"):
+                body["parse_mode"] = "HTML"
+            r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json=body, timeout=15)
+            if r.ok or r.status_code == 403:
+                with _zones_outbox_lock:
+                    if _zones_outbox and _zones_outbox[0] is item:
+                        _zones_outbox.pop(0)
+                _zones_outbox_save()
+                delay = 5
+                continue
+            if r.status_code == 400 and not item.get("plain"):
+                item["plain"] = True   # bad HTML in the text: send it as plain text
+                continue
+            if r.status_code == 400:
+                with _zones_outbox_lock:
+                    if _zones_outbox and _zones_outbox[0] is item:
+                        _zones_outbox.pop(0)
+                _zones_outbox_save()
+                log_error(f"zones outbox: dropped unsendable message ({r.text[:120]})")
+                continue
+            if r.status_code == 429:
+                try:
+                    delay = int(r.json().get("parameters", {}).get("retry_after", 5)) + 1
+                except Exception:
+                    delay = 10
+        except Exception:
+            pass   # no network: keep it, try again
+        time.sleep(delay)
+        delay = min(delay * 2, 120)
 
 
 def zones_znotify(z, text, important=False):
@@ -22423,7 +22556,8 @@ def _zones_track_trade(z):
         last = cs[-1]["close"] if cs else tr["entry"]
         res, px, tx = "TIME_EXIT", last, int(time.time())
         if AUTOTRADE_ENABLED_ZONES and tr.get("autotrade_fired"):
-            log_error(f"zones time exit {z['symbol']}: {close_position_for_mode('zones', z['symbol'], tr['direction'])}")
+            if not _zones_close_real(z["symbol"], tr["direction"], "time exit"):
+                return False   # no confirmation from the exchange: the trade stays open, retried next round
     if res is None:
         return False
     risk = abs(tr["entry"] - tr["sl"]) or 1e-12
@@ -22441,6 +22575,81 @@ def _zones_track_trade(z):
 
 
 _zones_train_check = [0.0]
+ZONES_NEAR_ENTRY = 0.3   # % past the entry line still taken (a price that ran further is not chased)
+
+
+def _zones_near_entry(z, price, p):
+    s = _zones_side(z)
+    ent = z["levels"][min(p["entry"], len(z["levels"]) - 1)]
+    stop = z["levels"][-1] * (1 - s * p["buf"] / 100)
+    if s > 0:
+        return stop < price <= ent * (1 + ZONES_NEAR_ENTRY / 100)
+    return stop > price >= ent * (1 - ZONES_NEAR_ENTRY / 100)
+
+
+def _zones_gap_check(z, t0, t1, p):
+    """v0.99.455 — after a gap (no network, bot off): 1m candles of the gap
+    tell which lines were touched and whether the zone was broken meanwhile.
+    The entry itself is then taken only if the price is still at the line."""
+    t0 = max(t0, t1 - 3 * 86400)
+    cs = get_candles_range(z["symbol"], "1m", int(t0) - 60, int(t1)) or []
+    s = _zones_side(z)
+    far_stop = z["levels"][-1] * (1 - s * p["buf"] / 100)
+    changed = False
+    for c in cs:
+        if c["time"] + 60 <= t0 or c["time"] < z["post_time"]:
+            continue
+        lo, hi = c["low"], c["high"]
+        for i, lvl in enumerate(z["levels"]):
+            if z["touched"][i] is None and ((s > 0 and lo <= lvl) or (s < 0 and hi >= lvl)):
+                with _zones_lock:
+                    z["touched"][i] = int(c["time"])
+                changed = True
+                zones_znotify(z, f"🎯 {z['symbol']}: пока не было связи ({time.strftime('%H:%M', time.localtime(c['time']))}) "
+                                 f"цена дошла до {i + 1}-й линии ({lvl:.6g}) зоны {zones_fmt(z)}")
+        if (s > 0 and lo <= far_stop) or (s < 0 and hi >= far_stop):
+            with _zones_lock:
+                z["status"] = "broken"
+            zones_znotify(z, f"💥 Зона {z['symbol']} ({zones_fmt(z)}) пробита, пока не было связи "
+                             f"({time.strftime('%H:%M', time.localtime(c['time']))})")
+            return True
+    return changed
+
+
+def _zones_recheck_open(z, price, p):
+    """v0.99.455 — the real order failed (status ERROR, e.g. the network died
+    at that moment): maybe it went through anyway — look at the exchange; if
+    the position is there, adopt it; if not and the price is still at the
+    line within 10 minutes, try once more. Never a second position."""
+    tr = z["trade"]
+    at = tr.get("autotrade") or {}
+    if not AUTOTRADE_ENABLED_ZONES or at.get("status") != "ERROR" or tr.get("autotrade_fired") or tr.get("err_done"):
+        return False
+    if z.get("own") and not AUTOTRADE_ENABLED_ZONES_OWN:
+        return False
+    with using_account("zones"):
+        pos = next((x for x in (get_open_positions() or []) if x.get("contract") == z["symbol"]), None)
+    size = float((pos or {}).get("size", 0) or 0)
+    if size and ("LONG" if size > 0 else "SHORT") == tr["direction"]:
+        tr["autotrade_fired"], tr["err_done"] = True, True
+        at["status"] = "OPENED"
+        at["detail"] = "позиция найдена на бирже после сбоя связи"
+        zones_znotify(z, f"✅ {z['symbol']}: после сбоя связи позиция по зоне {zones_fmt(z)} найдена на бирже — веду её",
+                      important=True)
+        return True
+    if time.time() - tr["time"] <= 600 and price and _zones_near_entry(z, price, p) and not tr.get("retried"):
+        tr["retried"] = True
+        res = execute_autotrade("zones", z["symbol"], tr["direction"], price, tr["sl"], tr["tp"],
+                                extra={"zone": z["id"], "retry": True},
+                                risk_pct_override=auto_risk_for("zones", z["symbol"]))
+        tr["autotrade"] = {"status": res.get("status"), "detail": str(res.get("detail") or "")[:200],
+                           "leverage": res.get("leverage")}
+        tr["autotrade_fired"] = res.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
+        if tr["autotrade_fired"]:
+            zones_znotify(z, f"✅ {z['symbol']}: со второй попытки открыл сделку по зоне {zones_fmt(z)}", important=True)
+        return True
+    tr["err_done"] = True
+    return True
 
 
 def zones_monitor_tick(last_track=0.0):
@@ -22466,6 +22675,15 @@ def zones_monitor_tick(last_track=0.0):
     now = time.time()
     p = zones_params()
     changed = False
+    with _zones_lock:
+        last_ok = ZONES.get("monitor_ok") or 0
+    if last_ok and now - last_ok > 90:   # v0.99.455 — no network / bot off: what happened meanwhile
+        for z in active:
+            if z.get("status") == "watch":
+                try:
+                    changed = _zones_gap_check(z, last_ok, now, p) or changed
+                except Exception as e:
+                    log_error(f"zones gap check {z.get('symbol')}: {e}")
     for z in active:
         price = prices.get(z["symbol"])
         if z["status"] == "in_trade" or not price:
@@ -22493,18 +22711,30 @@ def zones_monitor_tick(last_track=0.0):
             zones_znotify(z, f"💥 Зона {z['symbol']} ({zones_fmt(z)}) пробита: цена {price:.6g}")
             continue
         if z["touched"][e_idx] is not None and z.get("trade") is None:
+            if not _zones_near_entry(z, price, p):
+                continue   # the price left the line (e.g. while there was no network): no chasing, wait for a return
             with _zones_lock:
                 post = next((p_ for p_ in ZONES["posts"] if p_["id"] == z.get("post_id")), None)
-            if post:
-                _zones_close_approach(post, price, "вход от зоны")
+            if post and not _zones_close_approach(post, price, "вход от зоны"):
+                continue   # the approach position is not confirmed closed yet
             tr = _zones_open_trade(z, price, p)
             with _zones_lock:
                 if tr is not None:
                     z["trade"] = tr
                     z["status"] = "in_trade"
             changed = True
+    with _zones_lock:
+        ZONES["monitor_ok"] = now
+    if now - last_ok > 60:
+        changed = True   # keep the last good tick on disk (a restart knows how long it was off)
     if now - last_track >= 120:
         last_track = now
+        for z in active:
+            if z.get("status") == "in_trade" and z.get("trade"):
+                try:
+                    changed = _zones_recheck_open(z, prices.get(z["symbol"]), p) or changed
+                except Exception as e:
+                    log_error(f"zones open recheck {z['symbol']}: {e}")
         with _zones_lock:
             appr = [p_ for p_ in ZONES["posts"] if (p_.get("appr_trade") or {}).get("status") == "OPEN"]
         for post in appr:
@@ -22595,12 +22825,23 @@ def zones_tg_loop():
                     zones_notify("📚 Режим обучения: у картинки нет даты поста — перешлите оригинальный пост из группы "
                                  "(не сохранённую копию), иначе непонятно, с какого момента считать движение. Пропущено.")
                     continue
+                ref = f"bot:{(msg.get('chat') or {}).get('id')}:{msg.get('message_id')}"
+                if _zut_seen(ref):
+                    continue   # already taken (a restart before the offset was saved)
                 try:
                     fr = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile",
                                       params={"file_id": file_id}, timeout=30).json()
                     path = fr["result"]["file_path"]
-                    data = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{path}", timeout=60).content
-                    post, new = zones_add_post(data, post_time=post_time, source="tg", caption=msg.get("caption") or "")
+                    rd = requests.get(f"https://api.telegram.org/file/bot{TELEGRAM_BOT_TOKEN}/{path}", timeout=60)
+                    rd.raise_for_status()
+                    data = rd.content
+                except RETRYABLE_NETWORK_EXCEPTIONS + (requests.exceptions.HTTPError,):
+                    with _zones_lock:
+                        ZONES["tg_offset"] = u["update_id"]   # v0.99.455 — no network: this post again later
+                    raise
+                try:
+                    post, new = zones_add_post(data, post_time=post_time, source="tg", caption=msg.get("caption") or "",
+                                               src_ref=ref)
                     zones_notify(zones_post_summary(post, new))
                 except Exception as e:
                     log_error(f"zones_tg photo: {e}")
@@ -22609,6 +22850,7 @@ def zones_tg_loop():
         except Exception as e:
             with _zones_lock:
                 ZONES["tg_last_error"] = str(e)[:200]
+            zones_save()
             time.sleep(15)
 
 
@@ -22687,8 +22929,18 @@ async def _zut_handle(msg, train, quiet):
     import asyncio
     chat_id = _ZUT["cfg"].get("chat_id")
     ref = f"{chat_id}:{msg.id}"
-    if not _zut_is_image(msg) or _zut_seen(ref):
+    busy = _ZUT.setdefault("busy", set())
+    if not _zut_is_image(msg) or _zut_seen(ref) or ref in busy:
         return None
+    busy.add(ref)   # the live handler and the catch-up may meet on one message
+    try:
+        return await _zut_handle_one(msg, train, quiet, ref)
+    finally:
+        busy.discard(ref)
+
+
+async def _zut_handle_one(msg, train, quiet, ref):
+    import asyncio
     data = await msg.download_media(file=bytes)
     if not data:
         return None
@@ -22721,6 +22973,7 @@ async def _zut_start_client():
             try:
                 if not _ZUT["cfg"].get("chat_id") or event.chat_id != _ZUT["cfg"]["chat_id"]:
                     return
+                _zut_mark_seen_id(event.message.id)
                 res = await _zut_handle(event.message, train=False, quiet=False)
                 if res:
                     _ZUT["live_n"] += 1
@@ -22734,6 +22987,39 @@ async def _zut_start_client():
     _ZUT["me"] = " ".join(x for x in (getattr(me, "first_name", ""), getattr(me, "last_name", "")) if x) or str(me.id)
     await _ZUT["client"].get_dialogs(limit=300)   # fills the entity cache: the group id resolves after a restart
     _ZUT["error"] = None
+    await _zut_catch_up()
+
+
+def _zut_mark_seen_id(mid):
+    if mid and mid > (_ZUT["cfg"].get("last_id") or 0):
+        _ZUT["cfg"]["last_id"] = mid
+        _zut_cfg_save()
+
+
+async def _zut_catch_up():
+    """v0.99.455 — posts published while the bot was off or without network:
+    everything after the last message seen, oldest first, handled like live
+    ones (an entry already reached by now is history, never traded late)."""
+    client, chat_id = _ZUT["client"], _ZUT["cfg"].get("chat_id")
+    if not client or not chat_id:
+        return
+    last = _ZUT["cfg"].get("last_id")
+    if not last:   # first time with this group: start from now
+        async for m in client.iter_messages(chat_id, limit=1):
+            _zut_mark_seen_id(m.id)
+        return
+    async for m in client.iter_messages(chat_id, min_id=last, reverse=True, limit=200):
+        try:
+            res = await _zut_handle(m, train=False, quiet=False)
+            if res:
+                _ZUT["live_n"] += 1
+                post, new = res
+                if new or post.get("pending") or post.get("not_listed"):
+                    zones_notify(zones_post_summary(post, new))
+        except Exception as e:
+            log_error(f"zones userbot catch-up {m.id}: {e}")
+            return   # the network again: the rest on the next round
+        _zut_mark_seen_id(m.id)
 
 
 def zut_start():
@@ -22749,15 +23035,19 @@ def zut_start():
 
 
 def zut_keepalive_loop():
-    """Telethon reconnects by itself; this restarts it after a hard failure."""
+    """Telethon reconnects by itself; this restarts it after a hard failure and
+    every minute picks up posts that came while there was no network."""
     while True:
-        time.sleep(300)
+        time.sleep(60)
         try:
             c = _ZUT["client"]
             if _ZUT["cfg"].get("session") and (c is None or not c.is_connected()):
                 if c is not None:
                     _ZUT["client"] = None
                 _zut_run(_zut_start_client(), timeout=120)
+            elif c is not None and _ZUT["cfg"].get("chat_id"):
+                _zut_run(_zut_catch_up(), timeout=600)
+                _ZUT["error"] = None
         except Exception as e:
             _ZUT["error"] = f"переподключение: {e}"[:200]
 
@@ -22976,6 +23266,7 @@ def api_zut_chat():
     except (TypeError, ValueError):
         return jsonify({"ok": False, "error": "нет id"}), 400
     _ZUT["cfg"]["chat_title"] = str(b.get("title") or "")[:120]
+    _ZUT["cfg"].pop("last_id", None)   # a new group: its catch-up starts from now
     _zut_cfg_save()
     return jsonify({"ok": True})
 
@@ -30298,7 +30589,9 @@ if __name__ == "__main__":
     threading.Thread(target=prv_backtest_loop, daemon=True).start()
     threading.Thread(target=prv_live_loop, daemon=True).start()
     zones_load()   # v0.99.438
+    zones_outbox_load()   # v0.99.455 — unsent zone messages from before the restart
     threading.Thread(target=zones_tg_loop, daemon=True).start()
+    threading.Thread(target=zones_outbox_loop, daemon=True).start()   # v0.99.455 — messages survive no-network / restarts
     threading.Thread(target=zut_start, daemon=True).start()            # v0.99.448 — group via the user's account
     threading.Thread(target=zut_keepalive_loop, daemon=True).start()
     threading.Thread(target=zones_monitor_loop, daemon=True).start()
