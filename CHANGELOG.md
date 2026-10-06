@@ -18721,3 +18721,7 @@ v0.99.478 - Зоны: a picture without any colour zone is not a zones screensho
          распознано не полностью — N" (zones found, the coin or a check is
          needed) and "⏭ пропущено, не по шаблону — N" (no zones, coin not on
          Gate, an index); older posts are sorted the same way by their notes.
+v0.99.479 - Зоны / screenshot: its own zoom (the browser's doesn't work in the
+         installed app): two fingers zoom around the fingers, a double tap zooms
+         in / back, one finger moves the zoomed picture; mouse wheel and double
+         click on a computer. A pinch or a moving finger never counts as a tap.

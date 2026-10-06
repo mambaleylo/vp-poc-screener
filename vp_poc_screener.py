@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.478"
+APP_VERSION = "0.99.479"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28569,15 +28569,73 @@ function zoneShot(pid) {
     box = document.createElement('div');
     box.id = 'zoneShotBox';
     box.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.92);display:flex;align-items:center;justify-content:center;overflow:auto;';
-    box.innerHTML = '<img id="zoneShotImg" style="max-width:100%;max-height:100%;object-fit:contain;touch-action:pinch-zoom;">'
+    box.innerHTML = '<img id="zoneShotImg" style="max-width:100%;max-height:100%;object-fit:contain;touch-action:none;transform-origin:0 0;will-change:transform;">'
       + '<button onclick="zoneShotClose()" style="position:fixed;top:12px;right:12px;background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:20px;width:40px;height:40px;font-size:20px;">✕</button>';
     box.addEventListener('click', e => { if (e.target === box) zoneShotClose(); });
     document.body.appendChild(box);
+    _zsZoomInit(document.getElementById('zoneShotImg'));
   }
+  _zsReset();
   document.getElementById('zoneShotImg').src = '/api/zones/img/' + pid;
   box.style.display = 'flex';
   window._zUp = Date.now();   // no tab rebuild under the picture
   try { history.pushState({zoneShot: 1}, ''); } catch (e) {}
+}
+// v0.99.479 — own zoom for the picture: two fingers = zoom, double tap = zoom in
+// / back, one finger while zoomed = move (the browser's zoom doesn't work in the app)
+const _zs = {s: 1, x: 0, y: 0};
+function _zsApply() {
+  const img = document.getElementById('zoneShotImg');
+  if (img) img.style.transform = `translate(${_zs.x}px, ${_zs.y}px) scale(${_zs.s})`;
+}
+function _zsReset() { _zs.s = 1; _zs.x = 0; _zs.y = 0; _zsApply(); }
+function _zsZoomAt(newS, cx, cy) {   // keep the point (cx, cy) on screen in place
+  const img = document.getElementById('zoneShotImg');
+  const r = img.getBoundingClientRect();
+  newS = Math.max(1, Math.min(8, newS));
+  const px = (cx - r.left) / _zs.s, py = (cy - r.top) / _zs.s;   // the point in image units
+  _zs.x += (cx - r.left) - px * newS;
+  _zs.y += (cy - r.top) - py * newS;
+  _zs.s = newS;
+  if (_zs.s === 1) { _zs.x = 0; _zs.y = 0; }
+  _zsApply();
+}
+function _zsZoomInit(img) {
+  let pinch = null, pan = null, lastTap = 0;
+  const dist = t => Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  img.addEventListener('touchstart', e => {
+    e.preventDefault();
+    if (e.touches.length === 2) {
+      pinch = {d: dist(e.touches), s: _zs.s};
+      pan = null;
+      lastTap = 0;   // a pinch is not a tap
+    } else if (e.touches.length === 1) {
+      const t = e.touches[0], now = Date.now();
+      if (now - lastTap < 300) {   // double tap
+        lastTap = 0;
+        _zsZoomAt(_zs.s > 1.2 ? 1 : 2.5, t.clientX, t.clientY);
+        return;
+      }
+      lastTap = now;
+      pan = {x: t.clientX, y: t.clientY, ox: _zs.x, oy: _zs.y};
+    }
+  }, {passive: false});
+  img.addEventListener('touchmove', e => {
+    e.preventDefault();
+    lastTap = 0;   // a moving finger is not a tap
+    if (pinch && e.touches.length === 2) {
+      const cx = (e.touches[0].clientX + e.touches[1].clientX) / 2, cy = (e.touches[0].clientY + e.touches[1].clientY) / 2;
+      _zsZoomAt(pinch.s * dist(e.touches) / pinch.d, cx, cy);
+    } else if (pan && e.touches.length === 1 && _zs.s > 1) {
+      const t = e.touches[0];
+      _zs.x = pan.ox + (t.clientX - pan.x);
+      _zs.y = pan.oy + (t.clientY - pan.y);
+      _zsApply();
+    }
+  }, {passive: false});
+  img.addEventListener('touchend', e => { if (e.touches.length < 2) pinch = null; if (!e.touches.length) pan = null; });
+  img.addEventListener('dblclick', e => { e.preventDefault(); _zsZoomAt(_zs.s > 1.2 ? 1 : 2.5, e.clientX, e.clientY); });   // mouse
+  img.addEventListener('wheel', e => { e.preventDefault(); _zsZoomAt(_zs.s * (e.deltaY < 0 ? 1.2 : 1 / 1.2), e.clientX, e.clientY); }, {passive: false});
 }
 function zoneShotClose(fromBack) {
   const box = document.getElementById('zoneShotBox');
