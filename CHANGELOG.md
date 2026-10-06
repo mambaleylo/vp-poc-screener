@@ -18440,3 +18440,10 @@ v0.99.442 - Зоны, recognition accuracy (user: "цену уровней по�
            2% with a similar name, or 0.6% and the only coin fitting — two coins
            fitting by price alone means asking instead of guessing; candidates
            are listed when it stays open.
+v0.99.443 - Зоны: ZEN was taken for SHENHUA (OCR read "2ENUSDT"; the loose name
+         similarity matched 3 letters of a long name, and the Shenhua stock happened
+         to cost ~7 too). Now OCR-swappable characters are equal (Z/2, S/5, O/0,
+         I/1, B/8, G/6), only the whole word read right before USDT is compared
+         (length must match), "similar name" needs 0.66 to be a candidate and 0.8
+         to be accepted on a 2% price match. In the tab: 🪙 changes the coin of a
+         whole post, ↻ re-recognises a post (also an already recognised one).

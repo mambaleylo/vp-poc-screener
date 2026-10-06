@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.442"
+APP_VERSION = "0.99.443"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21315,6 +21315,34 @@ def _zocr_fix_by_line(lb, pred, px_price, notes, full_dec=None):
     return lb["v"]
 
 
+_ZOCR_CANON = str.maketrans({"Z": "2", "S": "5", "O": "0", "Q": "0", "D": "0", "I": "1", "L": "1", "|": "1",
+                              "B": "8", "G": "6", "T": "7"})
+
+
+def _zocr_canon(t):
+    """letters / digits that OCR swaps (Z/2, S/5, O/0, I/1, B/8, G/6) mapped to one form"""
+    return (t or "").upper().translate(_ZOCR_CANON)
+
+
+def _zocr_pick_ticker(found, symbols):
+    """found = OCR'd bases read right before USDT (longest first, with the leading
+    characters trimmed one by one: icons get glued in front). Exact match first,
+    then a match with OCR-swappable characters (2EN = ZEN) — only when unique."""
+    if not symbols:
+        return (found[0] + "_USDT") if found else None
+    for f in found:
+        if f + "_USDT" in symbols:
+            return f + "_USDT"
+    index = {}
+    for sym in symbols:
+        index.setdefault(_zocr_canon(sym[:-5]), []).append(sym)
+    for f in found:
+        hit = index.get(_zocr_canon(f))
+        if hit and len(hit) == 1:
+            return hit[0]
+    return None
+
+
 def zones_recognize(data, live_price_fn=None, symbols=None):
     """TradingView screenshot -> {"symbol", "zones": [{"side", "levels"}], "notes"}.
     live_price_fn(symbol) -> float fixes the decimal scale; symbols = set of tradable
@@ -21356,14 +21384,12 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                         mc = re.search(r"(?:3AKP|ЗАКР|C)(\d[\d.,]*)", txt.replace(" ", ""))
                         if mc:
                             header_close = _zocr_num(mc.group(1))[0]
-            if symbols and any(f + "_USDT" in symbols for f in found):
+            if symbols and _zocr_pick_ticker(found, symbols):
                 break
-        if symbols and any(f + "_USDT" in symbols for f in found):
+        if symbols and _zocr_pick_ticker(found, symbols):
             break
-    if symbols:
-        symbol = next((f + "_USDT" for f in found if f + "_USDT" in symbols), None)
-    elif found:
-        symbol = found[0] + "_USDT"
+    symbol = _zocr_pick_ticker(found, symbols)
+    read_bases = [f for f in found]
 
     # ---- price axis: dark label boxes (levels) ----
     ax0 = W - max(90, W // 12)
@@ -21605,17 +21631,21 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
     tick_cands = []
     if not symbol and symbols:
         import difflib
-        legend = re.sub(r"[^A-Z0-9]", "", " ".join(header_all).upper())
 
         def name_sim(sym):
-            base = sym.replace("_USDT", "")
-            if not legend or not base:
+            """the coin's name vs the word OCR read right before USDT (and its
+            trimmed forms), whole word, OCR-swappable characters equal; no
+            loose substring matching (a long name sharing 3 letters is not it)"""
+            base = _zocr_canon(sym.replace("_USDT", ""))
+            if not base or not read_bases:
                 return 0.0
-            if base in legend:
-                return 1.0
-            n = len(base)
-            return max((difflib.SequenceMatcher(None, base, legend[i:i + n + w]).ratio()
-                        for w in (-1, 0, 1) for i in range(0, max(1, len(legend) - n + 1))), default=0.0)
+            best_r = 0.0
+            for rb in read_bases:
+                r_ = difflib.SequenceMatcher(None, base, _zocr_canon(rb)).ratio()
+                if abs(len(rb) - len(base)) > 1:
+                    r_ *= 0.6
+                best_r = max(best_r, r_)
+            return best_r
         for sym in symbols:
             sim = name_sim(sym)
             err = None
@@ -21627,10 +21657,10 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                 if lp and lp > 0:
                     k = round(math.log10(lp / chart_px))
                     err = abs(lp - chart_px * 10.0 ** k) / lp
-            if sim >= 0.5 or (err is not None and err <= 0.25):   # the post may be old: confirmed later by its own time
+            if sim >= 0.66 or (err is not None and err <= 0.25):   # the post may be old: confirmed later by its own time
                 tick_cands.append({"symbol": sym, "sim": round(sim, 3), "live_err": None if err is None else round(err, 4)})
-        named = sorted((c for c in tick_cands if c["sim"] >= 0.5), key=lambda c: -c["sim"])[:6]
-        by_px = sorted((c for c in tick_cands if c["sim"] < 0.5 and c["live_err"] is not None),
+        named = sorted((c for c in tick_cands if c["sim"] >= 0.66), key=lambda c: -c["sim"])[:6]
+        by_px = sorted((c for c in tick_cands if c["sim"] < 0.66 and c["live_err"] is not None),
                        key=lambda c: c["live_err"])[:10]
         tick_cands = named + by_px
 
@@ -22084,14 +22114,15 @@ def zones_recognize_post(post, data):
         if not post["symbol"] and rec.get("tick_cands") and rec.get("chart_px"):
             pick = zones_pick_by_post_price(rec["tick_cands"], rec["chart_px"], post["post_time"])
             if pick:
-                sym, px_post, err = pick
+                sym, px_post, err, sim = pick
                 f = 10.0 ** round(math.log10(px_post / rec["chart_px"])) if rec["chart_px"] else 1.0
                 for zr in rec["zones"]:
                     zr["levels"] = [round(v * f, 12) for v in zr["levels"]]
                 post["symbol"] = sym
                 post["notes"] = [n for n in post["notes"] if not n.startswith("тикер не распознан")]
                 post["notes"].append(f"тикер прочитан неточно — по цене на момент поста ({px_post:.6g}, расхождение "
-                                     f"{err * 100:.1f}%) и названию это {sym}, проверьте")
+                                     f"{err * 100:.1f}%){' и названию' if sim >= 0.8 else ''} это {sym}, проверьте "
+                                     f"(сменить — 🪙 во вкладке «Зоны»)")
     if not post["symbol"] and caption:
         m_ = re.search(r"\b([A-Z0-9]{2,15})(?:[/_-]?USDT)?\b", caption.upper())
         if m_ and (m_.group(1) + "_USDT") in prices:
@@ -22129,7 +22160,7 @@ def zones_pick_by_post_price(cands, chart_px, post_time):
             continue
         k = round(math.log10(px / chart_px))
         err = abs(px - chart_px * 10.0 ** k) / px
-        tol = 0.02 if c["sim"] >= 0.6 else 0.006
+        tol = 0.02 if c["sim"] >= 0.8 else 0.006
         if err <= tol:
             hits.append(c)
             score = (c["sim"], -err)
@@ -22137,9 +22168,9 @@ def zones_pick_by_post_price(cands, chart_px, post_time):
                 best = (score, c["symbol"], px, err)
     if best is None:
         return None
-    if best[0][0] < 0.6 and len(hits) > 1:
+    if best[0][0] < 0.8 and len(hits) > 1:
         return None   # two coins fit the price and neither name matches: ask instead of guessing
-    return best[1], best[2], best[3]
+    return best[1], best[2], best[3], best[0][0]
 
 
 def zones_set_symbol(post, sym_txt):
@@ -22489,8 +22520,16 @@ def api_zones_zone():
                         z["side"] = b["side"]
                         s = 1 if z["side"] == "long" else -1
                         z["levels"] = sorted(z["levels"], reverse=(s > 0))
-                    if b.get("symbol"):
-                        z["symbol"] = b["symbol"].upper().replace("USDT", "").strip("_ /") + "_USDT"
+                    if b.get("symbol"):   # the coin is the post's: change it for all of the post's zones
+                        new_sym = re.sub(r"[^A-Z0-9]", "", b["symbol"].upper().replace("USDT", "").replace(".P", "")) + "_USDT"
+                        for z2 in ZONES["zones"]:
+                            if z2.get("post_id") == z.get("post_id") and z2.get("status") in ("watch", "old", "expired"):
+                                z2["symbol"] = new_sym
+                                z2["status"], z2["touched"], z2["result"] = "watch", [None] * len(z2["levels"]), None
+                        for p_ in ZONES["posts"]:
+                            if p_["id"] == z.get("post_id"):
+                                p_["symbol"] = new_sym
+                                p_["notes"] = [n for n in p_.get("notes", []) if "тикер" not in n]
             else:
                 post = next((p for p in ZONES["posts"] if p["id"] == b.get("post_id")), None)
                 if post is None:
@@ -22505,6 +22544,11 @@ def api_zones_zone():
                 ZONES["zones"].insert(0, z)
         if not b.get("delete") and not b.get("id"):
             zones_replay_past(z)
+        if b.get("id") and b.get("symbol"):
+            with _zones_lock:
+                same = [z2 for z2 in ZONES["zones"] if z2.get("post_id") == z.get("post_id") and z2.get("status") == "watch"]
+            for z2 in same:
+                zones_replay_past(z2)
         zones_save()
         _zones_learn_event.set()
         return jsonify({"ok": True})
@@ -22532,7 +22576,7 @@ def api_zones_reparse():
         new = zones_recognize_post(post, data)
         with _zones_lock:
             for z in ZONES["zones"]:
-                if z["post_id"] == post["id"] and z.get("status") in ("watch",) and new:
+                if z["post_id"] == post["id"] and z.get("status") in ("watch", "old", "expired") and new:
                     z["status"] = "deleted"   # replaced by the new recognition
             ZONES["zones"] = new + ZONES["zones"]
         for z in new:
@@ -26226,6 +26270,8 @@ function zoneCardHtml(z) {
         <a href="/api/zones/img/${z.post_id}" target="_blank" style="color:var(--acc);font-size:var(--fs-sm);">скрин</a>
         <button onclick="zonesEdit('${z.id}', '${z.levels.join(' ')}')" style="background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);margin-left:4px;">✏️</button>
         <button onclick="zonesSide('${z.id}', '${long ? 'short' : 'long'}')" title="поменять сторону" style="background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);">⇅</button>
+        <button onclick="zonesCoin('${z.id}', '${(z.symbol || '').replace('_USDT', '')}')" title="сменить монету (для всего поста)" style="background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);">🪙</button>
+        <button onclick="zonesReparse('${z.post_id}')" title="распознать пост заново" style="background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);">↻</button>
         <button onclick="zonesDel('${z.id}')" style="background:var(--neg-bg);border:none;color:var(--neg);padding:3px 8px;border-radius:var(--r-xs);">🗑</button>
       </div>
     </div>
@@ -26303,6 +26349,10 @@ function zonesEdit(id, cur) {
   zonesPost('/api/zones/zone', {id, levels: lv});
 }
 function zonesSide(id, side) { zonesPost('/api/zones/zone', {id, side}); }
+function zonesCoin(id, cur) {
+  const s = prompt('Монета этого поста (например ZEN)', cur || '');
+  if (s) zonesPost('/api/zones/zone', {id, symbol: s});
+}
 function zonesDel(id) { if (confirm('Удалить зону?')) zonesPost('/api/zones/zone', {id, delete: true}); }
 function zonesDelPost(pid) { if (confirm('Удалить пост и его зоны?')) zonesPost('/api/zones/post_delete', {post_id: pid}); }
 function zonesRelearn() { zonesPost('/api/zones/relearn', {}); }
