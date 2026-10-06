@@ -18659,3 +18659,10 @@ v0.99.469 - The page reloads itself after the bot restarted (/update, /restart,
          time = reload with the new code. The open tab and a running
          screensaver come back after the reload; it waits while the settings or
          a file dialog are open.
+v0.99.470 - S/R Zones removed (user's request): no tab, its settings group, alert,
+         autotrade and risk rows hidden, the 🛠 S/R row hidden; snr_enabled /
+         autotrade_snr forced off whatever an old settings file says; no new
+         signals or backtests. Trades still open are followed to their take /
+         stop / time exit (and their result message). Its sub-account row is
+         shown only if keys were saved for it. The code stays dormant, like
+         MSNR's.

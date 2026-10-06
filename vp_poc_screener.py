@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.469"
+APP_VERSION = "0.99.470"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -845,7 +845,7 @@ AUTOTRADE_INVERT_LSW = False  # v0.99.391 — feature removed, always off  # v0.
 LSW_ALL_IN_ENABLED = os.environ.get("VP_LSW_ALL_IN", "0") == "1"  # v0.99.294 — per direct user request ("добавь / проверь на галочку вабанк... торгуется на весь депо"), same mechanism as MSNR_ALL_IN_ENABLED's own (v0.99.157) — ignores AUTOTRADE_RISK_PCT_OF_BALANCE, uses LSW_ALL_IN_MARGIN_PCT of total equity as margin instead. Leverage is still auto-computed from the signal's own SL distance (same liquidation safety). Off by default.
 LSW_ALL_IN_MARGIN_PCT = float(os.environ.get("VP_LSW_ALL_IN_MARGIN_PCT", 95.0))
 AUTOTRADE_INVERT_NEURO = False  # v0.99.391 — feature removed, always off  # same as AUTOTRADE_INVERT_LSW, for Neuro
-AUTOTRADE_ENABLED_SNR = os.environ.get("VP_AUTOTRADE_SNR", "0") == "1"  # v0.99.271, per direct user request for live signals — same off-by-default, opt-in pattern as every other module's own toggle
+AUTOTRADE_ENABLED_SNR = False   # v0.99.470 — S/R removed  # v0.99.271, per direct user request for live signals — same off-by-default, opt-in pattern as every other module's own toggle
 AUTOTRADE_LEVERAGE_SNR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SNR", 10))  # only the paper simulator's own fallback leverage, real orders go through execute_autotrade()'s automatic risk-based sizing
 AUTOTRADE_INVERT_SNR = False  # v0.99.391 — feature removed, always off  # same as AUTOTRADE_INVERT_LSW/NEURO, for S/R Zones
 SNR_ALL_IN_ENABLED = False   # v0.99.424 — va-bank removed (user): with sizing by risk (v0.99.423) it was just "risk ~50%, floating per trade"
@@ -1289,12 +1289,12 @@ def apply_settings(updates):
         except (TypeError, ValueError):
             pass
         calc_apply_limit()
-    if "snr_enabled" in updates:
-        SNR_ENABLED = bool(updates["snr_enabled"])
+    # v0.99.470 — S/R Zones removed: snr_enabled / autotrade_snr stay off whatever
+    # an old settings file says
+    SNR_ENABLED = False
+    AUTOTRADE_ENABLED_SNR = False
     if "telegram_alerts_snr" in updates:
         TELEGRAM_ALERTS_SNR = bool(updates["telegram_alerts_snr"])
-    if "autotrade_snr" in updates:
-        AUTOTRADE_ENABLED_SNR = bool(updates["autotrade_snr"])
     if "snr_single_best_enabled" in updates:   # v0.99.382
         globals()["SNR_SINGLE_BEST_ENABLED"] = bool(updates["snr_single_best_enabled"])
     if "snr_top_n" in updates:
@@ -14129,7 +14129,7 @@ def amd_loop():
 # солану"), scoped to a small fixed symbol list rather than a dynamic
 # volume-ranked universe — much simpler, no universe-builder needed.
 # ============================================================================
-SNR_ENABLED           = os.environ.get("VP_SNR_ENABLED", "1") == "1"
+SNR_ENABLED           = False   # v0.99.470 — S/R Zones removed (user: "вырезать s/r zone из вкладок и настроек"); the code stays dormant, open trades are still tracked to the end
 # v0.99.321 — SNR_SEED_SYMBOLS (XAU/BTC/SOL seed list) removed per user request ("никаких списков не должно быть"): nothing is live-scanned/traded until the first backtest ranks symbols.
 SNR_UNIVERSE_SIZE     = int(os.environ.get("VP_SNR_UNIVERSE_SIZE", 30))  # v0.99.271 — no longer used to cap the universe (see snr_build_universe()'s own v0.99.276 comment); kept defined only in case a future session wants to reintroduce a cap deliberately
 SNR_TOP_N             = int(os.environ.get("VP_SNR_TOP_N", 3))     # how many survive the full sweep AND are actually live-scanned/traded, ranked by TEST avg_pnl_r
@@ -15683,7 +15683,16 @@ def snr_live_loop():
         heartbeat("snr_live_loop")  # v0.99.322 — see system_health_watchdog()
         try:
             if not SNR_ENABLED:
-                time.sleep(900)
+                # v0.99.470 — removed module: no new signals, but trades still open
+                # are followed to their take / stop / time exit
+                try:
+                    with state_lock:
+                        still_open = any(sg.get("status") == "OPEN" for sg in (STATE.get("snr_signals") or []))
+                    if still_open:
+                        snr_track_signal_outcomes()
+                except Exception as e:
+                    log_error(f"snr dormant tracking: {e}")
+                time.sleep(300)
                 continue
             with state_lock:
                 active_symbols = list(_snr_active_symbols)
@@ -26165,7 +26174,6 @@ INDEX_HTML = """<!doctype html>
   <div class="tab active" data-tab="prv" style="color:var(--prv);">Peak Reversal</div>
   <div class="tab" data-tab="zones" style="color:#4caf50;">🎯 Зоны</div>
   <div class="tab" data-tab="neuro" style="color:var(--neuro);">🧠 Neuro</div>
-  <div class="tab" data-tab="snr" style="color:var(--snr);">S/R Zones</div>
   <div class="tab" data-tab="signals">Volume</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
@@ -26271,14 +26279,14 @@ INDEX_HTML = """<!doctype html>
     <details class="settingsGroup" style="--mod-color:var(--neuro);"><summary class="settingsGroupTitle">⚙️ Производительность и фильтр Neuro</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
-          <div class="name">Фильтр Neuro в бэктесте MSNR / S/R / P/R</div>
+          <div class="name">Фильтр Neuro в бэктесте P/R</div>
           <div class="sub">для каждой монеты подбирается одно условие Neuro («убрать X» / «только X») — только по обучающей части; проверочная решает, принять ли его. Принятый фильтр применяется и к живым сигналам (отсеянный сигнал записывается с пометкой 🧪 и не торгуется). Действует со следующего бэктеста</div>
         </div>
         <label class="switch"><input type="checkbox" id="setNeuroTradeFilter"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
-          <div class="name">Процессы для расчёта бэктестов (MSNR, Neuro, S/R, P/R)</div>
+          <div class="name">Процессы для расчёта бэктестов (Neuro, P/R)</div>
           <div class="sub">сколько ядер процессора использовать для расчёта (каждый процесс ≈85 МБ памяти). 0 — считать как раньше, в одном процессе. Результаты одинаковые, меняется только скорость и нагрузка</div>
         </div>
         <input type="number" id="setCalcWorkers" min="0" max="8" step="1" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
@@ -26315,7 +26323,7 @@ INDEX_HTML = """<!doctype html>
 
     </div></details>
 
-    <details class="settingsGroup" style="--mod-color:var(--snr);"><summary class="settingsGroupTitle">S/R Zones (Flux Charts)</summary><div class="settingsGroupBody">
+    <details class="settingsGroup" style="--mod-color:var(--snr);display:none;"><summary class="settingsGroupTitle">S/R Zones (Flux Charts)</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
           <div class="label">Работа (бэктест + живые сигналы)</div>
@@ -26431,7 +26439,7 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramNeuroSummary"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow">
+      <div class="settingRow" style="display:none;">
         <div>
           <div class="label">↳ Алерты S/R Zones</div>
           <div class="sub">новые живые сигналы отскока от зон поддержки/сопротивления</div>
@@ -26455,7 +26463,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">↳ Итоги сделок (тейк / стоп)</div>
-          <div class="sub">сообщение о каждой закрытой сделке Neuro, S/R, P/R и Зон: тейк, стоп или выход по времени, вход → выход, результат в R и % движения, реальная она или виртуальная. Не теряются без сети — придут, когда связь вернётся</div>
+          <div class="sub">сообщение о каждой закрытой сделке Neuro, P/R и Зон: тейк, стоп или выход по времени, вход → выход, результат в R и % движения, реальная она или виртуальная. Не теряются без сети — придут, когда связь вернётся</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTgTradeResults"><span class="switchSlider"></span></label>
       </div>
@@ -26530,20 +26538,20 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow subRow" style="flex-wrap:wrap;">
         <div style="flex:1 1 100%;">
-          <div class="label">↳ Риск Neuro · S/R · P/R · Зоны</div>
+          <div class="label">↳ Риск Neuro · P/R · Зоны</div>
           <div class="sub">свой % для каждого модуля (0.1–100); пустое поле — общий % выше. Бэктест «с $500» каждого модуля считает со своим %</div>
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
           <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro" title="Neuro" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
-          <input type="number" id="setRiskPctSnr" min="0.1" max="100" step="0.5" placeholder="S/R" title="S/R Zones" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctSnr" min="0.1" max="100" step="0.5" placeholder="S/R" title="S/R Zones" style="display:none;width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctPrv" min="0.1" max="100" step="0.5" placeholder="P/R" title="Peak Reversal" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctZones" min="0.1" max="100" step="0.5" placeholder="Зоны" title="Зоны" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
         </div>
       </div>
       <div class="settingRow subRow">
         <div>
-          <div class="label">↳↳ Авто-риск (лучший % для каждой монеты; у Зон — один на все, вместе с тейком и стопом)</div>
-          <div class="sub">вместо % выше каждая монета Neuro / S/R / P/R торгуется со своим риском на сделку — тем, при котором счёт растёт быстрее всего на длинной дистанции (Келли), осторожно: по сделкам теста (их не видел выбор настроек), с пессимистичной поправкой на малую выборку и половиной от оптимума. Не больше 50%. Бэктест «с $500» считает так же</div>
+          <div class="label">↳↳ Авто-риск (лучший % для каждой монеты Neuro / P/R; у Зон — один на все, вместе с тейком и стопом)</div>
+          <div class="sub">вместо % выше каждая монета Neuro / P/R торгуется со своим риском на сделку — тем, при котором счёт растёт быстрее всего на длинной дистанции (Келли), осторожно: по сделкам теста (их не видел выбор настроек), с пессимистичной поправкой на малую выборку и половиной от оптимума. Не больше 50%. Бэктест «с $500» считает так же</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutoRisk"><span class="switchSlider"></span></label>
       </div>
@@ -26561,7 +26569,7 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setNeuroSingleBest"><span class="switchSlider"></span></label>
       </div>
-      <div class="settingRow">
+      <div class="settingRow" style="display:none;">
         <div>
           <div class="label">↳ S/R Zones</div>
           <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча и размера позиции, что и у остальных режимов</div>
@@ -26616,7 +26624,7 @@ const fmtTimeWithDate = (t) => {
   return d.toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'});
 };
 
-let activeTab = 'prv';   // v0.99.459 — tab order: P/R, Зоны, Neuro, S/R… (the first one opens)
+let activeTab = 'prv';   // v0.99.459 — tab order: P/R, Зоны, Neuro… (the first one opens); v0.99.470 — S/R removed
 
 function toggleHints() {
   const hidden = document.body.classList.toggle('hints-hidden');
@@ -29832,7 +29840,7 @@ async function refreshModuleAccounts() {
   if (!box) return;
   try {
     const m = await (await fetch('/api/credentials/modules')).json();
-    box.innerHTML = Object.entries(m).map(([mode, a]) => `
+    box.innerHTML = Object.entries(m).filter(([mode, a]) => mode !== 'snr' || a.configured).map(([mode, a]) => `
       <details style="margin:4px 0;"><summary style="cursor:pointer;font-size:var(--fs);">${a.label}: ${a.configured ? `<span class="win">свой суб-аккаунт</span> <span class="dim">key ${a.key_suffix}</span>` : '<span class="dim">основной счёт</span>'}</summary>
         <div style="display:flex;flex-direction:column;gap:6px;margin:6px 0;">
           <input type="text" id="macKey_${mode}" onchange="autoSaveModuleAccount('${mode}')" placeholder="${a.configured ? `сохранён: key ${a.key_suffix} — впиши новый, чтобы заменить` : 'API Key суб-аккаунта'}" style="background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:7px 9px;border-radius:var(--r-sm);font-size:var(--fs);">
