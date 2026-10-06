@@ -18462,3 +18462,13 @@ v0.99.445 - Zones tab: all zones of one screenshot are shown in one block — co
          with its side, status, levels and its own ✏️ / ⇅ / 🗑. Blocks newest
          post first, the archive grouped the same way. Repeated notes of a
          failed post are shown once.
+v0.99.446 - Зоны: training mode (📚 button in the tab, or "обучение вкл" /
+         "обучение выкл" to the bot in Telegram). While it is on, every new
+         screenshot only feeds the statistics: its zones get status "train" —
+         never watched, alerted or traded, no "движение к зоне" signal; the
+         outcome is replayed on Gate 15m candles from the post time (right
+         away, and every 15 min for zones still without one), then the zone
+         becomes "old" and counts in the learning. The post time is required:
+         a forwarded post carries it; a picture without a forward date is
+         refused in this mode; a web upload asks for "дд.мм.гггг чч:мм".
+         Training posts are listed in their own "📚 обучение" section.

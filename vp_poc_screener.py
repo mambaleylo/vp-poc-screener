@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.445"
+APP_VERSION = "0.99.446"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21185,12 +21185,13 @@ ZONES_APPR_FRESH_SEC = 3600                 # a post older than this at intake i
 ZONES_APPR_MIN_DIST = 0.5                   # % — closer than this to the line: nothing to take
 _zones_lock = threading.RLock()
 _zones_learn_event = threading.Event()
-ZONES = {"posts": [], "zones": [], "tg_offset": 0, "learned": None, "stats": None, "tg_last_error": None, "approach": None}
+ZONES = {"posts": [], "zones": [], "tg_offset": 0, "learned": None, "stats": None, "tg_last_error": None, "approach": None,
+         "train_mode": False}
 
 
 def zones_save():
     with _zones_lock:
-        data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach")}, default=str)
+        data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode")}, default=str)
     try:
         tmp = ZONES_FILE + ".tmp"
         with open(tmp, "w") as f:
@@ -21206,7 +21207,7 @@ def zones_load():
             with open(ZONES_FILE) as f:
                 d = json.load(f)
             with _zones_lock:
-                for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach"):
+                for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode"):
                     if k in d:
                         ZONES[k] = d[k]
     except Exception as e:
@@ -21974,7 +21975,7 @@ def zones_approach_on_new_post(post):
     text line for the signal ('' when there is none); opens the trade when the
     post is fresh, the statistics are good and the switch is on."""
     now = time.time()
-    if not post.get("symbol") or now - post["post_time"] > ZONES_APPR_FRESH_SEC:
+    if not post.get("symbol") or post.get("train") or now - post["post_time"] > ZONES_APPR_FRESH_SEC:
         return ""
     try:
         price = _zones_symbols_and_prices().get(post["symbol"])
@@ -22080,11 +22081,16 @@ def zones_learn_loop():
         _zones_learn_event.clear()
 
 
-def zones_add_post(data, post_time=None, source="web", caption=""):
+def zones_add_post(data, post_time=None, source="web", caption="", train=None):
     """Store a screenshot, recognise it, create its zones. Old posts are
     replayed at once: a zone already reached before now is history only
-    (learning), never traded live."""
+    (learning), never traded live. train=True (the training mode): the post
+    only feeds the statistics — no watching, alerts or trades at all; its
+    zones still waiting for an outcome are re-checked on the chart later."""
     now = time.time()
+    if train is None:
+        with _zones_lock:
+            train = bool(ZONES.get("train_mode"))
     post_time = float(post_time or now)
     pid = f"p{int(now * 1000)}"
     os.makedirs(ZONES_IMG_DIR, exist_ok=True)
@@ -22092,7 +22098,7 @@ def zones_add_post(data, post_time=None, source="web", caption=""):
     with open(img_path, "wb") as f:
         f.write(data)
     post = {"id": pid, "created": now, "post_time": post_time, "source": source, "symbol": None,
-            "notes": [], "ok": False, "caption": caption}
+            "notes": [], "ok": False, "caption": caption, "train": bool(train)}
     new = zones_recognize_post(post, data)
     with _zones_lock:
         ZONES["posts"].insert(0, post)
@@ -22232,7 +22238,7 @@ def zones_make(post, side, levels):
     lv = sorted({float(v) for v in levels if v and float(v) > 0}, reverse=(s > 0))
     return {"id": f"z{int(time.time() * 1e6)}{len(lv)}", "post_id": post["id"], "symbol": post["symbol"],
             "side": side, "levels": lv, "post_time": post["post_time"], "created": time.time(),
-            "status": "watch", "touched": [None] * len(lv), "trade": None, "result": None}
+            "status": "train" if post.get("train") else "watch", "train": bool(post.get("train")), "touched": [None] * len(lv), "trade": None, "result": None}
 
 
 def zones_replay_past(z):
@@ -22320,8 +22326,23 @@ def _zones_track_trade(z):
     return True
 
 
+_zones_train_check = [0.0]
+
+
 def zones_monitor_tick(last_track=0.0):
     """One pass over the live zones; returns the time of the last trade check."""
+    if time.time() - _zones_train_check[0] >= 900:   # training zones: outcome from the chart, no alerts
+        _zones_train_check[0] = time.time()
+        with _zones_lock:
+            tz = [z for z in ZONES["zones"] if z.get("status") == "train" and z.get("symbol")]
+        for z in tz:
+            try:
+                zones_replay_past(z)
+            except Exception as e:
+                log_error(f"zones train replay {z.get('symbol')}: {e}")
+        if any(z.get("status") != "train" for z in tz):
+            zones_save()
+            _zones_learn_event.set()
     with _zones_lock:
         active = [z for z in ZONES["zones"] if z.get("status") in ("watch", "in_trade") and z.get("symbol")]
         any_appr = any((p_.get("appr_trade") or {}).get("status") == "OPEN" for p_ in ZONES["posts"])
@@ -22426,6 +22447,15 @@ def zones_tg_loop():
                 if str((msg.get("chat") or {}).get("id")) != str(TELEGRAM_CHAT_ID):
                     continue
                 txt = (msg.get("text") or "").strip()
+                if txt.lower().lstrip("/") in ("обучение вкл", "обучение выкл", "обучение", "train"):
+                    with _zones_lock:
+                        on = ("выкл" not in txt.lower()) if " " in txt else not ZONES.get("train_mode")
+                        ZONES["train_mode"] = on
+                    zones_save()
+                    zones_notify("📚 Режим обучения ВКЛ: пересланные скрины идут только в статистику — без слежения, "
+                                 "уведомлений и сделок. Выключить: «обучение выкл»." if on else
+                                 "📚 Режим обучения ВЫКЛ: пересланные скрины снова отслеживаются и торгуются.")
+                    continue
                 if txt and not msg.get("photo") and len(txt) <= 20 and not txt.startswith("/"):
                     with _zones_lock:
                         waiting = next((p_ for p_ in ZONES["posts"] if p_.get("pending")), None)
@@ -22443,7 +22473,14 @@ def zones_tg_loop():
                     file_id = msg["document"]["file_id"]
                 if not file_id:
                     continue
-                post_time = ((msg.get("forward_origin") or {}).get("date") or msg.get("forward_date") or msg.get("date"))
+                fwd_time = (msg.get("forward_origin") or {}).get("date") or msg.get("forward_date")
+                post_time = fwd_time or msg.get("date")
+                with _zones_lock:
+                    train_on = bool(ZONES.get("train_mode"))
+                if train_on and not fwd_time:
+                    zones_notify("📚 Режим обучения: у картинки нет даты поста — перешлите оригинальный пост из группы "
+                                 "(не сохранённую копию), иначе непонятно, с какого момента считать движение. Пропущено.")
+                    continue
                 try:
                     fr = requests.get(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/getFile",
                                       params={"file_id": file_id}, timeout=30).json()
@@ -22473,10 +22510,20 @@ def zones_post_summary(post, new):
     if not new:
         return (f"⚠️ Зоны: пост от {when} — не распознал{(' (' + post['symbol'] + ')') if post.get('symbol') else ''}. "
                 f"{'; '.join(post['notes'][:3])}")
+    if post.get("train"):
+        lines = [f"📚 Обучение · {post['symbol']} · пост от {when} · зон: {len(new)} (не слежу и не торгую)"]
+        for z in new:
+            r_ = z.get("result")
+            st = ("отработала: " + (f"{r_['result']} {r_['r']:+g}R" if r_ else "входа не было")) if z["status"] == "old" \
+                else "итога ещё нет — досчитаю по графику, когда будет"
+            lines.append(f"• {zones_fmt(z)} — {st}")
+        if post["notes"]:
+            lines.append("⚠️ " + "; ".join(post["notes"][:3]))
+        return "\n".join(lines)
     lines = ([post["approach_txt"]] if (post.get("approach_txt") or "").startswith("🚀") else []) \
         + [f"📥 {post['symbol']} · пост от {when} · зон: {len(new)}"]
     for z in new:
-        st = {"watch": "слежу", "old": "уже отработала (в статистику)"}.get(z["status"], z["status"])
+        st = {"watch": "слежу", "old": "уже отработала (в статистику)", "train": "обучение: жду итога"}.get(z["status"], z["status"])
         lines.append(f"• {zones_fmt(z)} — {st}")
     if (post.get("approach_txt") or "").startswith("ℹ️"):
         lines.append(post["approach_txt"])
@@ -22498,7 +22545,16 @@ def api_zones_status():
                     "approach": approach, "autotrade_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
                     "deps": zones_deps(), "tg": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID), "tg_error": tg_err,
                     "autotrade": AUTOTRADE_ENABLED_ZONES, "max_days": ZONES_MAX_DAYS, "tp_user": ZONES_TP_PCT,
-                    "learn_min": ZONES_LEARN_MIN})
+                    "learn_min": ZONES_LEARN_MIN, "train_mode": bool(ZONES.get("train_mode"))})
+
+
+@app.route("/api/zones/train_mode", methods=["POST"])
+def api_zones_train_mode():
+    b = request.get_json(force=True, silent=True) or {}
+    with _zones_lock:
+        ZONES["train_mode"] = bool(b.get("on"))
+    zones_save()
+    return jsonify({"ok": True, "train_mode": ZONES["train_mode"]})
 
 
 @app.route("/api/zones/upload", methods=["POST"])
@@ -22514,7 +22570,13 @@ def api_zones_upload():
                 post_time = float(pt)
             except ValueError:
                 post_time = None
-        post, new = zones_add_post(f.read(), post_time=post_time, source="web")
+        train = request.form.get("train")
+        train = None if train is None else train in ("1", "true", "on")
+        with _zones_lock:
+            train_eff = bool(ZONES.get("train_mode")) if train is None else train
+        if train_eff and not post_time:
+            return jsonify({"ok": False, "error": "для обучения укажите дату и время поста"}), 400
+        post, new = zones_add_post(f.read(), post_time=post_time, source="web", train=train_eff)
         return jsonify({"ok": True, "post": post, "zones": new, "summary": zones_post_summary(post, new)})
     except Exception as e:
         log_error(f"api_zones_upload: {e}")
@@ -22545,9 +22607,10 @@ def api_zones_zone():
                     if b.get("symbol"):   # the coin is the post's: change it for all of the post's zones
                         new_sym = re.sub(r"[^A-Z0-9]", "", b["symbol"].upper().replace("USDT", "").replace(".P", "")) + "_USDT"
                         for z2 in ZONES["zones"]:
-                            if z2.get("post_id") == z.get("post_id") and z2.get("status") in ("watch", "old", "expired"):
+                            if z2.get("post_id") == z.get("post_id") and z2.get("status") in ("watch", "old", "expired", "train"):
                                 z2["symbol"] = new_sym
-                                z2["status"], z2["touched"], z2["result"] = "watch", [None] * len(z2["levels"]), None
+                                z2["status"] = "train" if z2.get("train") else "watch"
+                                z2["touched"], z2["result"] = [None] * len(z2["levels"]), None
                         for p_ in ZONES["posts"]:
                             if p_["id"] == z.get("post_id"):
                                 p_["symbol"] = new_sym
@@ -22568,7 +22631,7 @@ def api_zones_zone():
             zones_replay_past(z)
         if b.get("id") and b.get("symbol"):
             with _zones_lock:
-                same = [z2 for z2 in ZONES["zones"] if z2.get("post_id") == z.get("post_id") and z2.get("status") == "watch"]
+                same = [z2 for z2 in ZONES["zones"] if z2.get("post_id") == z.get("post_id") and z2.get("status") in ("watch", "train")]
             for z2 in same:
                 zones_replay_past(z2)
         zones_save()
@@ -22598,7 +22661,7 @@ def api_zones_reparse():
         new = zones_recognize_post(post, data)
         with _zones_lock:
             for z in ZONES["zones"]:
-                if z["post_id"] == post["id"] and z.get("status") in ("watch", "old", "expired") and new:
+                if z["post_id"] == post["id"] and z.get("status") in ("watch", "old", "expired", "train") and new:
                     z["status"] = "deleted"   # replaced by the new recognition
             ZONES["zones"] = new + ZONES["zones"]
         for z in new:
@@ -26276,7 +26339,7 @@ async function refreshSnr() {
 }
 
 // v0.99.438 — «Зоны»: posts with zones from Telegram screenshots
-const ZONE_ST = {watch: '👀 слежу', in_trade: '🤖 в сделке', closed: '✔ закрыта', broken: '💥 пробита', expired: '⌛ истекла', old: '📜 уже отработала'};
+const ZONE_ST = {watch: '👀 слежу', in_trade: '🤖 в сделке', closed: '✔ закрыта', broken: '💥 пробита', expired: '⌛ истекла', old: '📜 уже отработала', train: '📚 обучение: жду итога'};
 const zfmt = v => v == null ? '—' : String(+(+v).toPrecision(6));
 const zdate = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
 function zoneRowHtml(z) {
@@ -26355,17 +26418,22 @@ async function refreshZones() {
   }
   const zs = d.zones || [];
   const act = zs.filter(z => z.status === 'watch' || z.status === 'in_trade');
-  const arch = zs.filter(z => !(z.status === 'watch' || z.status === 'in_trade'));
+  const trn = zs.filter(z => z.train && !(z.status === 'watch' || z.status === 'in_trade'));
+  const arch = zs.filter(z => !z.train && !(z.status === 'watch' || z.status === 'in_trade'));
+  window._zTrain = !!d.train_mode;
   const bad = (d.posts || []).filter(x => !x.ok).slice(0, 10).map(x => `<div style="font-size:var(--fs-sm);margin-bottom:4px;">⚠️ пост ${zdate(x.post_time)}${x.symbol ? ' · ' + x.symbol.replace('_USDT', '') : ''}: ${[...new Set(x.notes || [])].join('; ') || 'не распознан'} · <a href="/api/zones/img/${x.id}" target="_blank" style="color:var(--acc);">скрин</a> · <a href="#" onclick="zonesAdd('${x.id}', '${x.symbol || ''}');return false;" style="color:var(--acc);">добавить зону</a> ${x.pending ? ` · <a href="#" onclick="zonesSetSym('${x.id}');return false;" style="color:var(--win);font-weight:700;">указать монету (зон: ${x.pending.zones.length})</a>` : ''} · <a href="#" onclick="zonesReparse('${x.id}');return false;" style="color:var(--acc);">↻ распознать заново</a> · <a href="#" onclick="zonesDelPost('${x.id}');return false;" style="color:var(--neg);">удалить</a></div>`).join('');
   setPanelHtml(panel, `${warn}
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
       <label onclick="window._zUp = Date.now()" style="background:var(--acc);color:#000;padding:8px 12px;border-radius:var(--r-sm);cursor:pointer;">📷 Загрузить скрин<input type="file" accept="image/*" onchange="zonesUpload(this)" style="display:none;"></label>
       <button onclick="zonesAdd('', '')" style="background:var(--ctl);border:none;color:var(--tx);padding:8px 12px;border-radius:var(--r-sm);">➕ Зона вручную</button>
+      <button onclick="zonesTrainMode(${d.train_mode ? 'false' : 'true'})" style="background:${d.train_mode ? 'var(--warn-bg)' : 'var(--ctl)'};border:${d.train_mode ? '1px solid var(--warn-line)' : 'none'};color:var(--tx);padding:8px 12px;border-radius:var(--r-sm);">📚 Режим обучения: <b>${d.train_mode ? 'ВКЛ' : 'выкл'}</b></button>
     </div>
+    ${d.train_mode ? `<div style="padding:8px 10px;margin-bottom:8px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-sm);font-size:var(--fs-sm);">📚 <b>Режим обучения включён</b>: новые скрины идут только в статистику — бот не следит за их зонами, не шлёт уведомлений и не торгует. Нужна дата поста: при пересылке из группы она берётся из поста, при загрузке здесь — спрошу. Не забудьте выключить, когда начнёте пересылать свежие посты.</div>` : ''}
     <div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>
     ${rules}${stats}${bad ? `<div style="margin-bottom:8px;">${bad}</div>` : ''}
     <div style="font-weight:700;margin:6px 0;">Активные (${act.length})</div>
     ${act.length ? zonePostBlocks(act) : '<div class="dim">нет — перешлите пост боту или загрузите скрин</div>'}
+    ${trn.length ? `<details style="margin-top:8px;"><summary class="dim" style="cursor:pointer;">📚 обучение (${trn.length}, ждут итога: ${trn.filter(z => z.status === 'train').length})</summary>${zonePostBlocks(trn)}</details>` : ''}
     <details style="margin-top:8px;"><summary class="dim" style="cursor:pointer;">архив (${arch.length})</summary>${zonePostBlocks(arch)}</details>`);
 }
 async function zonesPost(url, body) {
@@ -26381,6 +26449,17 @@ async function zonesUpload(inp) {
   if (!f) return;
   const fd = new FormData();
   fd.append('file', f);
+  if (window._zTrain) {
+    const v = prompt('Обучение: дата и время поста (дд.мм.гггг чч:мм)', '');
+    if (v === null) { inp.value = ''; return; }
+    const m = v.trim().match(/^(\\d{1,2})\\.(\\d{1,2})\\.(\\d{2,4})(?:\\s+(\\d{1,2})[:.](\\d{2}))?$/);
+    if (!m) { inp.value = ''; return alert('не понял дату — пример: 05.10.2026 21:27'); }
+    const yr = +m[3] < 100 ? 2000 + +m[3] : +m[3];
+    const t = new Date(yr, +m[2] - 1, +m[1], +(m[4] || 12), +(m[5] || 0)).getTime() / 1000;
+    if (!(t > 0) || t > Date.now() / 1000) { inp.value = ''; return alert('дата в будущем или неверная'); }
+    fd.append('post_time', String(t));
+    fd.append('train', '1');
+  }
   try {
     const r = await (await fetch('/api/zones/upload', {method: 'POST', body: fd})).json();
     alert(r.ok ? r.summary : (r.error || 'не получилось'));
@@ -26399,6 +26478,10 @@ function zonesSide(id, side) { zonesPost('/api/zones/zone', {id, side}); }
 function zonesCoin(id, cur) {
   const s = prompt('Монета этого поста (например ZEN)', cur || '');
   if (s) zonesPost('/api/zones/zone', {id, symbol: s});
+}
+async function zonesTrainMode(on) {
+  if (on && !confirm('Режим обучения: новые скрины (пересланные и загруженные) пойдут только в статистику — без слежения, уведомлений и сделок. Включить?')) return;
+  zonesPost('/api/zones/train_mode', {on});
 }
 function zonesDel(id) { if (confirm('Удалить зону?')) zonesPost('/api/zones/zone', {id, delete: true}); }
 function zonesDelPost(pid) { if (confirm('Удалить пост и его зоны?')) zonesPost('/api/zones/post_delete', {post_id: pid}); }
