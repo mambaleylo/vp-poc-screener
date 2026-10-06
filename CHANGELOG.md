@@ -18630,3 +18630,9 @@ v0.99.464 - Зоны / learned rules: chosen by the account's growth per trade a
          measured until the reaction (+2% back), not over all 14 days (that gave
          "17%" wicks); "beyond the far line" likewise; the run is the best move
          over the window, labelled so.
+v0.99.465 - Зоны: a change of the risk % (the zones' own or the common one)
+         re-chooses the stop / take at once (before: within 30 min). The tab
+         shows the risk advice for the rules in use, from the history: the risk
+         % at which the account would have grown most (Kelly) and half of it as
+         the sensible one, with the growth per trade at the current, the best
+         and the half risk; if no risk grows the account — said so.
