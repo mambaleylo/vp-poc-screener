@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.467"
+APP_VERSION = "0.99.468"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -9063,7 +9063,7 @@ def auto_risk_for(mod, symbol):
     own = float(own) if own else None
     if not AUTO_RISK_ENABLED:
         return own
-    if mod == "zones":   # v0.99.467 — one risk for all zones, chosen with the rules (half Kelly, checked)
+    if mod == "zones":   # v0.99.467 — one risk for all zones, chosen with the rules (v0.99.468: full Kelly <= 50%, checked)
         try:
             with _zones_lock:
                 ar = (ZONES.get("learned") or {}).get("auto_risk")
@@ -22039,19 +22039,20 @@ def zones_learn():
         lg = sum(math.log(max(1e-6, 1 + f_ * x)) for x in xs) / len(xs)
         return round((math.exp(lg) - 1) * 100, 3)
 
-    def half_kelly(xs):
-        """half of the risk that grows the account most on these trades (<= 50%)"""
+    def best_risk(xs):
+        """v0.99.468 — the risk that grows the account most on these trades
+        (full Kelly, by the user's choice; capped at 50% like the other modules)"""
         if not xs:
             return None
         gl = lambda f_: sum(math.log(max(1e-9, 1 + f_ * x)) for x in xs) / len(xs)
-        fb = max((i / 200 for i in range(1, 191)), key=gl)
-        return min(0.5, fb / 2) if gl(fb) > 1e-6 else None
+        fb = max((i / 200 for i in range(1, 101)), key=gl)   # 0.5% .. 50%
+        return fb if gl(fb) > 1e-6 else None
     for r in rows:
         k = (r["entry"], r["buf"], r["tp"])
         f, c = grid_fit.get(k, []), grid_chk.get(k, [])
         fu = None
         if auto:   # the risk comes from the earlier zones only — the check stays honest
-            fu = half_kelly(f) or 0.0
+            fu = best_risk(f) or 0.0
             r["auto_risk"] = round(fu * 100, 1)
         r.update({"fit_n": len(f), "fit_r": avg(f), "chk_n": len(c), "chk_r": avg(c),
                   "fit_g": growth(f, fu), "chk_g": growth(c, fu), "all_g": growth(grid.get(k, []), fu)})
@@ -28056,7 +28057,7 @@ async function refreshZones() {
     <div class="dim" style="font-size:var(--fs-sm);">автоторговля зон: ${d.autotrade ? '<span class="win">вкл</span>' : 'выкл (Настройки → Автоторговля → Зоны)'} · зона ждёт ${d.max_days} дн. · обученные правила включаются с ${d.learn_min} отработанных зон</div>
     ${(() => { const k = (d.learned || {}).kelly, rk = (d.learned || {}).risk; if (!k) return '';
       if (!k.edge) return `<div style="margin-top:4px;">Риск: сейчас ${rk}% · по истории (${k.n} сделок) <span class="loss">ни при каком риске счёт не растёт</span> — лучше не торговать на деньги, пока статистика не изменится</div>`;
-      if ((d.learned || {}).auto) return `<div style="margin-top:4px;">Риск: <b>авто-риск ${d.learned.auto_risk ? d.learned.auto_risk + '%' : '— нет перевеса, остаётся % из настроек'}</b> на сделку (половина от лучшего по истории, подобрана вместе с тейком и стопом на ранних зонах и проверена на поздних)</div>`;
+      if ((d.learned || {}).auto) return `<div style="margin-top:4px;">Риск: <b>авто-риск ${d.learned.auto_risk ? d.learned.auto_risk + '%' : '— нет перевеса, остаётся % из настроек'}</b> на сделку (лучший по истории, не больше 50%; подобран вместе с тейком и стопом на ранних зонах и проверен на поздних)</div>`;
       return `<div style="margin-top:4px;">Риск: сейчас <b>${rk}%</b> (счёт ${k.g_now > 0 ? '+' : ''}${k.g_now}% за сделку по истории) · максимум роста при ~${k.full}% (${k.g_full > 0 ? '+' : ''}${k.g_full}%) · <b>разумно ~${k.half}%</b> (${k.g_half > 0 ? '+' : ''}${k.g_half}%) — половина: будущее обычно хуже истории, а выше максимума риск только вредит</div>`; })()}</div>`;
   let stats = '';
   if (st.finished) {

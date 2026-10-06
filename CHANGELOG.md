@@ -18651,3 +18651,6 @@ v0.99.467 - Зоны + "Авто-риск": the switch now works for the zones t
          wins; the later zones check it at that same risk. Live zone orders use
          it; with no edge found, the settings' % stays. Toggling the switch
          re-chooses at once; the tab says which risk is in use.
+v0.99.468 - Зоны auto-risk: the full growth-optimal risk (Kelly) on the earlier
+         zones instead of half of it, by the user's request; still capped at 50%
+         and still checked on the later zones at that risk.
