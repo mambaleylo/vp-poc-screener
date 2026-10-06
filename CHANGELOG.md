@@ -18475,3 +18475,14 @@ v0.99.446 - Зоны: training mode (📚 button in the tab, or "обучени�
 v0.99.447 - Зоны: an "уже отработала" zone shows its outcome in R right in the
          status ("📜 отработала: +0.97R", or "входа не было"), in the tab and in
          the Telegram summary of a post.
+v0.99.448 - Зоны: the group is read through the user's own Telegram account
+         (Telethon; `pip install telethon`). In the tab: 🔑 Войти (api_id and
+         api_hash from my.telegram.org, phone, login code, 2FA password when
+         set), pick the group, then every new picture there is recognised by
+         itself with the post's own time (a message is never taken twice,
+         pictures without zones stay silent). "📚 забрать историю" imports the
+         last N days as training posts (statistics only) with one summary at
+         the end. The session string stays in vp_zones_tg_user.json (mode 600,
+         git-ignored) and is never returned by the API; the /api/zones/ut/*
+         endpoints answer only to 127.0.0.1, since the server listens on every
+         address. "выйти" logs the session out in Telegram too.

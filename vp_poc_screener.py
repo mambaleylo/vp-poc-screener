@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.447"
+APP_VERSION = "0.99.448"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22081,7 +22081,7 @@ def zones_learn_loop():
         _zones_learn_event.clear()
 
 
-def zones_add_post(data, post_time=None, source="web", caption="", train=None):
+def zones_add_post(data, post_time=None, source="web", caption="", train=None, src_ref=None, quiet=False):
     """Store a screenshot, recognise it, create its zones. Old posts are
     replayed at once: a zone already reached before now is history only
     (learning), never traded live. train=True (the training mode): the post
@@ -22099,6 +22099,10 @@ def zones_add_post(data, post_time=None, source="web", caption="", train=None):
         f.write(data)
     post = {"id": pid, "created": now, "post_time": post_time, "source": source, "symbol": None,
             "notes": [], "ok": False, "caption": caption, "train": bool(train)}
+    if src_ref:
+        post["src_ref"] = src_ref   # "<chat>:<message>" of the group post: never taken twice
+    if quiet:
+        post["quiet"] = True        # history import: a missing coin is not asked for in Telegram
     new = zones_recognize_post(post, data)
     with _zones_lock:
         ZONES["posts"].insert(0, post)
@@ -22458,7 +22462,7 @@ def zones_tg_loop():
                     continue
                 if txt and not msg.get("photo") and len(txt) <= 20 and not txt.startswith("/"):
                     with _zones_lock:
-                        waiting = next((p_ for p_ in ZONES["posts"] if p_.get("pending")), None)
+                        waiting = next((p_ for p_ in ZONES["posts"] if p_.get("pending") and not p_.get("quiet")), None)
                     if waiting:
                         try:
                             new, err = zones_set_symbol(waiting, txt)
@@ -22496,6 +22500,362 @@ def zones_tg_loop():
             with _zones_lock:
                 ZONES["tg_last_error"] = str(e)[:200]
             time.sleep(15)
+
+
+# ---- v0.99.448: reading the group with the user's own Telegram account ----
+# (Telethon "userbot"). The bot API cannot read a group the bot is not in; the
+# user's account can. Login (api_id/api_hash from my.telegram.org + phone + code
+# [+ 2FA password]) is done from the Zones tab; the session string stays only
+# in ZONES_UT_FILE on this device and is never sent back by the API.
+ZONES_UT_FILE = os.environ.get("VP_ZONES_UT_FILE", "vp_zones_tg_user.json")
+_ZUT = {"loop": None, "client": None, "cfg": {}, "login": None, "me": None, "error": None,
+        "hist": None, "live_n": 0, "started": False}
+_zut_lock = threading.Lock()
+
+
+def zut_deps():
+    try:
+        import telethon  # noqa: F401
+        return True
+    except ImportError:
+        return False
+
+
+def _zut_cfg_load():
+    try:
+        if os.path.exists(ZONES_UT_FILE):
+            with open(ZONES_UT_FILE) as f:
+                _ZUT["cfg"] = json.load(f) or {}
+    except Exception as e:
+        log_error(f"zut cfg load: {e}")
+
+
+def _zut_cfg_save():
+    try:
+        tmp = ZONES_UT_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(_ZUT["cfg"], f)
+        os.replace(tmp, ZONES_UT_FILE)
+        try:
+            os.chmod(ZONES_UT_FILE, 0o600)
+        except OSError:
+            pass
+    except Exception as e:
+        log_error(f"zut cfg save: {e}")
+
+
+def _zut_loop():
+    """The asyncio loop all Telethon calls run on (one background thread)."""
+    with _zut_lock:
+        if _ZUT["loop"] is None:
+            import asyncio
+            loop = asyncio.new_event_loop()
+            threading.Thread(target=loop.run_forever, daemon=True, name="zones_ut_loop").start()
+            _ZUT["loop"] = loop
+        return _ZUT["loop"]
+
+
+def _zut_run(coro, timeout=60):
+    import asyncio
+    return asyncio.run_coroutine_threadsafe(coro, _zut_loop()).result(timeout)
+
+
+def _zut_is_image(msg):
+    if getattr(msg, "photo", None):
+        return True
+    doc = getattr(msg, "document", None)
+    return bool(doc and (getattr(doc, "mime_type", "") or "").startswith("image/"))
+
+
+def _zut_seen(ref):
+    with _zones_lock:
+        return any(p_.get("src_ref") == ref for p_ in ZONES["posts"])
+
+
+async def _zut_handle(msg, train, quiet):
+    """One group message with a picture -> a post (skipped when already taken)."""
+    import asyncio
+    chat_id = _ZUT["cfg"].get("chat_id")
+    ref = f"{chat_id}:{msg.id}"
+    if not _zut_is_image(msg) or _zut_seen(ref):
+        return None
+    data = await msg.download_media(file=bytes)
+    if not data:
+        return None
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, lambda: zones_add_post(
+        data, post_time=msg.date.timestamp(), source="tg_user", caption=msg.message or "",
+        train=train, src_ref=ref, quiet=quiet))
+
+
+async def _zut_start_client():
+    """Connect with the saved session, resolve the chosen group, listen."""
+    from telethon import TelegramClient, events
+    from telethon.sessions import StringSession
+    cfg = _ZUT["cfg"]
+    if not (cfg.get("session") and cfg.get("api_id") and cfg.get("api_hash")):
+        return
+    if _ZUT["client"] is None:
+        client = TelegramClient(StringSession(cfg["session"]), int(cfg["api_id"]), cfg["api_hash"])
+        await client.connect()
+        if not await client.is_user_authorized():
+            _ZUT["error"] = "сессия больше не действует — войдите заново"
+            cfg.pop("session", None)
+            _zut_cfg_save()
+            await client.disconnect()
+            return
+        _ZUT["client"] = client
+
+        @client.on(events.NewMessage())
+        async def _on_new(event):
+            try:
+                if not _ZUT["cfg"].get("chat_id") or event.chat_id != _ZUT["cfg"]["chat_id"]:
+                    return
+                res = await _zut_handle(event.message, train=False, quiet=False)
+                if res:
+                    _ZUT["live_n"] += 1
+                    post, new = res
+                    if new or post.get("pending") or post.get("not_listed"):   # a picture without zones: silent
+                        zones_notify(zones_post_summary(post, new))
+            except Exception as e:
+                _ZUT["error"] = f"новый пост: {e}"[:200]
+                log_error(f"zones userbot new message: {e}")
+    me = await _ZUT["client"].get_me()
+    _ZUT["me"] = " ".join(x for x in (getattr(me, "first_name", ""), getattr(me, "last_name", "")) if x) or str(me.id)
+    await _ZUT["client"].get_dialogs(limit=300)   # fills the entity cache: the group id resolves after a restart
+    _ZUT["error"] = None
+
+
+def zut_start():
+    """Startup: connect when a session is saved (no-op without Telethon)."""
+    _zut_cfg_load()
+    if not zut_deps() or not _ZUT["cfg"].get("session"):
+        return
+    try:
+        _zut_run(_zut_start_client(), timeout=120)
+    except Exception as e:
+        _ZUT["error"] = f"не подключился: {e}"[:200]
+        log_error(f"zones userbot start: {e}")
+
+
+def zut_keepalive_loop():
+    """Telethon reconnects by itself; this restarts it after a hard failure."""
+    while True:
+        time.sleep(300)
+        try:
+            c = _ZUT["client"]
+            if _ZUT["cfg"].get("session") and (c is None or not c.is_connected()):
+                if c is not None:
+                    _ZUT["client"] = None
+                _zut_run(_zut_start_client(), timeout=120)
+        except Exception as e:
+            _ZUT["error"] = f"переподключение: {e}"[:200]
+
+
+async def _zut_history(days):
+    """All pictures of the chosen group for the last `days` days, oldest first,
+    as training posts (statistics only, never traded); one summary at the end."""
+    import datetime as _dt
+    client, chat_id = _ZUT["client"], _ZUT["cfg"].get("chat_id")
+    since = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(days=days)
+    h = _ZUT["hist"] = {"running": True, "days": days, "seen": 0, "posts": 0, "zones": 0, "skipped": 0,
+                        "started": time.time(), "error": None}
+    try:
+        msgs = []
+        async for m in client.iter_messages(chat_id, offset_date=since, reverse=True):
+            if _zut_is_image(m):
+                msgs.append(m)
+        h["total"] = len(msgs)
+        for m in msgs:
+            h["seen"] += 1
+            if time.time() - m.date.timestamp() < 3600:   # the last hour is live, not history
+                continue
+            try:
+                res = await _zut_handle(m, train=True, quiet=True)
+            except Exception as e:
+                res = None
+                log_error(f"zones userbot history {m.id}: {e}")
+            if res is None:
+                h["skipped"] += 1
+                continue
+            post, new = res
+            h["posts"] += 1
+            h["zones"] += len(new)
+        with _zones_lock:
+            done = [z for z in ZONES["zones"] if z.get("train") and z.get("status") == "old" and z.get("result")]
+        rs = [z["result"]["r"] for z in done]
+        zones_notify(f"📚 История группы за {days} дн.: картинок {h.get('total', 0)}, постов с зонами {h['posts']}, "
+                     f"зон {h['zones']} (пропущено {h['skipped']}: уже были, не скрин с зонами или монеты нет на Gate). "
+                     + (f"Зон обучения с итогом: {len(rs)}, средний результат {sum(rs) / len(rs):+.2f}R."
+                        if rs else "Итогов пока нет — досчитаю по графику."))
+        _zones_learn_event.set()
+    except Exception as e:
+        h["error"] = str(e)[:200]
+        log_error(f"zones userbot history: {e}")
+    finally:
+        h["running"] = False
+        h["finished"] = time.time()
+
+
+@app.before_request
+def _zut_local_only():
+    """The account endpoints answer only to this phone itself (127.0.0.1): the
+    web server listens on every address, and nobody else on the same Wi-Fi may
+    start a login, read the status or change the group."""
+    if request.path.startswith("/api/zones/ut/") and request.remote_addr not in ("127.0.0.1", "::1"):
+        return jsonify({"ok": False, "error": "только с этого телефона (http://127.0.0.1)"}), 403
+
+
+@app.route("/api/zones/ut/status")
+def api_zut_status():
+    cfg = _ZUT["cfg"]
+    login = _ZUT["login"] or {}
+    return jsonify({"deps": zut_deps(), "has_api": bool(cfg.get("api_id") and cfg.get("api_hash")),
+                    "logged_in": bool(cfg.get("session")), "me": _ZUT["me"], "chat_id": cfg.get("chat_id"),
+                    "chat_title": cfg.get("chat_title"), "error": _ZUT["error"], "hist": _ZUT["hist"],
+                    "live_n": _ZUT["live_n"], "connected": bool(_ZUT["client"] and _ZUT["client"].is_connected()),
+                    "login_step": login.get("step")})
+
+
+@app.route("/api/zones/ut/send_code", methods=["POST"])
+def api_zut_send_code():
+    """Step 1: api_id + api_hash + phone -> Telegram sends a login code."""
+    if not zut_deps():
+        return jsonify({"ok": False, "error": "нет Telethon: в Termux выполните pip install telethon и перезапустите бота"}), 400
+    b = request.get_json(force=True, silent=True) or {}
+    try:
+        api_id = int(str(b.get("api_id", "")).strip())
+    except ValueError:
+        return jsonify({"ok": False, "error": "api_id — это число с my.telegram.org"}), 400
+    api_hash = str(b.get("api_hash", "")).strip()
+    phone = re.sub(r"[^\d+]", "", str(b.get("phone", "")))
+    if not api_hash or len(phone) < 8:
+        return jsonify({"ok": False, "error": "нужны api_hash и телефон в формате +375…"}), 400
+
+    async def go():
+        from telethon import TelegramClient
+        from telethon.sessions import StringSession
+        old = (_ZUT["login"] or {}).get("client")
+        if old is not None:
+            await old.disconnect()
+        client = TelegramClient(StringSession(), api_id, api_hash)
+        await client.connect()
+        sent = await client.send_code_request(phone)
+        _ZUT["login"] = {"client": client, "phone": phone, "hash": sent.phone_code_hash, "step": "code",
+                         "api_id": api_id, "api_hash": api_hash}
+    try:
+        _zut_run(go(), timeout=60)
+        return jsonify({"ok": True})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Telegram: {e}"}), 400
+
+
+async def _zut_finish_login():
+    lg = _ZUT["login"]
+    client = lg["client"]
+    if _ZUT["client"] is not None and _ZUT["client"] is not client:
+        await _ZUT["client"].disconnect()
+        _ZUT["client"] = None
+    _ZUT["cfg"].update({"api_id": lg["api_id"], "api_hash": lg["api_hash"], "session": client.session.save()})
+    _zut_cfg_save()
+    await client.disconnect()
+    _ZUT["login"] = None
+    await _zut_start_client()
+
+
+@app.route("/api/zones/ut/sign_in", methods=["POST"])
+def api_zut_sign_in():
+    """Step 2: the code (and, when the account has one, the 2FA password)."""
+    b = request.get_json(force=True, silent=True) or {}
+    lg = _ZUT["login"]
+    if not lg:
+        return jsonify({"ok": False, "error": "сначала запросите код"}), 400
+
+    async def go():
+        from telethon.errors import SessionPasswordNeededError
+        client = lg["client"]
+        if b.get("password"):
+            await client.sign_in(password=str(b["password"]))
+        else:
+            try:
+                await client.sign_in(lg["phone"], re.sub(r"\D", "", str(b.get("code", ""))), phone_code_hash=lg["hash"])
+            except SessionPasswordNeededError:
+                lg["step"] = "password"
+                return "password"
+        await _zut_finish_login()
+        return "ok"
+    try:
+        r = _zut_run(go(), timeout=90)
+        return jsonify({"ok": True, "need_password": r == "password"})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Telegram: {e}"}), 400
+
+
+@app.route("/api/zones/ut/dialogs")
+def api_zut_dialogs():
+    """Groups and channels of the account, to pick the one with the posts."""
+    if not _ZUT["client"]:
+        return jsonify({"ok": False, "error": "не подключено"}), 400
+
+    async def go():
+        out = []
+        async for d in _ZUT["client"].iter_dialogs(limit=300):
+            if d.is_group or d.is_channel:
+                out.append({"id": d.id, "title": d.name or str(d.id)})
+        return out
+    try:
+        return jsonify({"ok": True, "dialogs": _zut_run(go(), timeout=90)})
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 400
+
+
+@app.route("/api/zones/ut/chat", methods=["POST"])
+def api_zut_chat():
+    b = request.get_json(force=True, silent=True) or {}
+    try:
+        _ZUT["cfg"]["chat_id"] = int(b.get("id"))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "нет id"}), 400
+    _ZUT["cfg"]["chat_title"] = str(b.get("title") or "")[:120]
+    _zut_cfg_save()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/zones/ut/history", methods=["POST"])
+def api_zut_history():
+    b = request.get_json(force=True, silent=True) or {}
+    if not _ZUT["client"] or not _ZUT["cfg"].get("chat_id"):
+        return jsonify({"ok": False, "error": "сначала войдите и выберите группу"}), 400
+    if (_ZUT["hist"] or {}).get("running"):
+        return jsonify({"ok": False, "error": "уже загружаю"}), 400
+    try:
+        days = max(1, min(365, int(b.get("days") or 60)))
+    except ValueError:
+        days = 60
+    import asyncio
+    _ZUT["hist"] = {"running": True, "days": days, "seen": 0, "posts": 0, "zones": 0, "skipped": 0}
+    asyncio.run_coroutine_threadsafe(_zut_history(days), _zut_loop())
+    return jsonify({"ok": True})
+
+
+@app.route("/api/zones/ut/logout", methods=["POST"])
+def api_zut_logout():
+    async def go():
+        if _ZUT["client"] is not None:
+            try:
+                await _ZUT["client"].log_out()   # also ends the session in Telegram's device list
+            except Exception:
+                await _ZUT["client"].disconnect()
+        _ZUT["client"] = None
+    try:
+        if zut_deps():
+            _zut_run(go(), timeout=30)
+    except Exception as e:
+        log_error(f"zut logout: {e}")
+    _ZUT["cfg"].pop("session", None)
+    _ZUT["me"] = None
+    _zut_cfg_save()
+    return jsonify({"ok": True})
 
 
 def zones_post_summary(post, new):
@@ -26400,6 +26760,8 @@ async function refreshZones() {
   if (!panel || Date.now() - (window._zUp || 0) < 120000) return;   // a file dialog is open: don't rebuild the panel under it
   let d;
   try { d = await (await fetch('/api/zones/status')).json(); } catch (e) { return; }
+  let ut = null;
+  try { ut = await (await fetch('/api/zones/ut/status')).json(); } catch (e) { ut = null; }
   const p = d.params || {}, st = d.stats || {}, lr = d.learned || {};
   const deps = d.deps || {};
   const warn = deps.ok ? '' : `<div style="padding:8px;margin-bottom:8px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-sm);">⚠️ Распознавание скринов не установлено${deps.tesseract ? '' : ' (нет tesseract)'}${deps.pillow ? '' : ' (нет Pillow)'}. В Termux: <b>pkg install tesseract python-pillow</b>, потом перезапустите бота. Пока зоны можно добавлять вручную. <button onclick="zonesReparse('')" style="background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);">↻ распознать все заново</button></div>`;
@@ -26437,6 +26799,7 @@ async function refreshZones() {
     </div>
     ${d.train_mode ? `<div style="padding:8px 10px;margin-bottom:8px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-sm);font-size:var(--fs-sm);">📚 <b>Режим обучения включён</b>: новые скрины идут только в статистику — бот не следит за их зонами, не шлёт уведомлений и не торгует. Нужна дата поста: при пересылке из группы она берётся из поста, при загрузке здесь — спрошу. Не забудьте выключить, когда начнёте пересылать свежие посты.</div>` : ''}
     <div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>
+    ${zutHtml(ut)}
     ${rules}${stats}${bad ? `<div style="margin-bottom:8px;">${bad}</div>` : ''}
     <div style="font-weight:700;margin:6px 0;">Активные (${act.length})</div>
     ${act.length ? zonePostBlocks(act) : '<div class="dim">нет — перешлите пост боту или загрузите скрин</div>'}
@@ -26485,6 +26848,92 @@ function zonesSide(id, side) { zonesPost('/api/zones/zone', {id, side}); }
 function zonesCoin(id, cur) {
   const s = prompt('Монета этого поста (например ZEN)', cur || '');
   if (s) zonesPost('/api/zones/zone', {id, symbol: s});
+}
+// v0.99.448 — the group read through the user's own Telegram account
+function zutHtml(u) {
+  const box = 'padding:8px 10px;margin-bottom:8px;background:var(--inset);border-radius:var(--r-sm);font-size:var(--fs-sm);';
+  const btn = 'background:var(--ctl);border:none;color:var(--tx);padding:4px 10px;border-radius:var(--r-xs);margin:4px 4px 0 0;';
+  if (!u) return '';
+  if (u.ok === false) return `<div style="${box}">📡 Группа через мой аккаунт: ${u.error || 'недоступно'}</div>`;
+  if (!u.deps) return `<div style="${box}">📡 <b>Автозабор постов из группы</b> (через ваш аккаунт Telegram): в Termux выполните <b>pip install telethon</b> и перезапустите бота.</div>`;
+  if (!u.logged_in) return `<div style="${box}">📡 <b>Автозабор постов из группы</b> через ваш аккаунт Telegram — не нужно пересылать вручную.
+    <div class="dim">Нужны api_id и api_hash: my.telegram.org → API development tools (один раз). Сессия хранится только на этом телефоне.</div>
+    ${u.error ? `<div class="loss">${u.error}</div>` : ''}
+    <button onclick="zutLogin()" style="${btn}">🔑 Войти</button>${u.login_step === 'code' ? `<button onclick="zutCode()" style="${btn}">ввести код</button>` : ''}${u.login_step === 'password' ? `<button onclick="zutPassword()" style="${btn}">ввести пароль 2FA</button>` : ''}</div>`;
+  const h = u.hist;
+  const hTxt = h ? (h.running ? `📚 загружаю историю за ${h.days} дн.: ${h.seen}/${h.total == null ? '…' : h.total} картинок, постов с зонами ${h.posts}, зон ${h.zones}`
+    : `📚 история за ${h.days} дн. загружена: постов ${h.posts}, зон ${h.zones}, пропущено ${h.skipped}${h.error ? ' · <span class="loss">' + h.error + '</span>' : ''}`) : '';
+  const dl = (window._zutDialogs || []).map((g, i) => `<button onclick="zutPick(${i})" style="${btn}">${String(g.title).replace(/</g, '&lt;')}</button>`).join('');
+  return `<div style="${box}">📡 <b>Группа через мой аккаунт</b>: ${u.connected ? '<span class="win">подключено</span>' : '<span class="loss">нет связи</span>'}${u.me ? ' · ' + u.me : ''}
+    · группа: <b>${u.chat_title ? String(u.chat_title).replace(/</g, '&lt;') : 'не выбрана'}</b>${u.chat_id ? ` · новых постов взято: ${u.live_n}` : ''}
+    ${u.error ? `<div class="loss">${u.error}</div>` : ''}
+    ${hTxt ? `<div>${hTxt}</div>` : ''}
+    <div><button onclick="zutDialogs()" style="${btn}">${u.chat_id ? 'сменить группу' : '📋 выбрать группу'}</button>${u.chat_id ? `<button onclick="zutHistory()" style="${btn}">📚 забрать историю (обучение)</button>` : ''}<button onclick="zutLogout()" style="${btn}color:var(--neg);">выйти</button></div>
+    ${dl ? `<div style="margin-top:6px;">Выберите группу с постами:<br>${dl}</div>` : ''}</div>`;
+}
+async function zutPostJson(url, body) {
+  try {
+    const r = await (await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body || {})})).json();
+    if (!r.ok) alert(r.error || 'не получилось');
+    return r;
+  } catch (e) { alert('ошибка сети'); return {ok: false}; }
+}
+async function zutLogin() {
+  window._zUp = Date.now();
+  const api_id = prompt('api_id (число с my.telegram.org → API development tools)', '');
+  if (!api_id) { window._zUp = 0; return; }
+  const api_hash = prompt('api_hash (строка оттуда же)', '');
+  if (!api_hash) { window._zUp = 0; return; }
+  const phone = prompt('Телефон аккаунта, например +375291234567', '');
+  if (!phone) { window._zUp = 0; return; }
+  const r = await zutPostJson('/api/zones/ut/send_code', {api_id, api_hash, phone});
+  if (r.ok) await zutCode(); else window._zUp = 0;
+}
+async function zutCode() {
+  window._zUp = Date.now();
+  const code = prompt('Код входа — пришёл в Telegram (чат «Telegram»). Никому его не пересылайте.', '');
+  if (!code) { window._zUp = 0; refreshZones(); return; }
+  const r = await zutPostJson('/api/zones/ut/sign_in', {code});
+  if (r.ok && r.need_password) return zutPassword();
+  window._zUp = 0;
+  if (r.ok) { alert('Вошёл. Теперь выберите группу с постами.'); await zutDialogs(); }
+  refreshZones();
+}
+async function zutPassword() {
+  window._zUp = Date.now();
+  const password = prompt('На аккаунте включён облачный пароль (2FA) — введите его', '');
+  if (!password) { window._zUp = 0; refreshZones(); return; }
+  const r = await zutPostJson('/api/zones/ut/sign_in', {password});
+  window._zUp = 0;
+  if (r.ok) { alert('Вошёл. Теперь выберите группу с постами.'); await zutDialogs(); }
+  refreshZones();
+}
+async function zutDialogs() {
+  try {
+    const r = await (await fetch('/api/zones/ut/dialogs')).json();
+    if (!r.ok) return alert(r.error || 'не получилось');
+    window._zutDialogs = r.dialogs;
+    if (!r.dialogs.length) alert('групп и каналов не нашёл');
+  } catch (e) { alert('ошибка сети'); }
+  refreshZones();
+}
+async function zutPick(i) {
+  const g = (window._zutDialogs || [])[i];
+  if (!g) return;
+  const r = await zutPostJson('/api/zones/ut/chat', {id: g.id, title: g.title});
+  if (r.ok) { window._zutDialogs = null; alert(`Слежу за «${g.title}»: новые скрины будут распознаваться сами. Старые посты можно забрать кнопкой «забрать историю».`); }
+  refreshZones();
+}
+async function zutHistory() {
+  const v = prompt('За сколько дней забрать старые посты? Они пойдут только в обучение (без слежения и сделок).', '60');
+  if (!v) return;
+  await zutPostJson('/api/zones/ut/history', {days: +v});
+  refreshZones();
+}
+async function zutLogout() {
+  if (!confirm('Выйти из аккаунта? Сессия будет завершена и в Telegram (Настройки → Устройства).')) return;
+  await zutPostJson('/api/zones/ut/logout', {});
+  refreshZones();
 }
 async function zonesTrainMode(on) {
   if (on && !confirm('Режим обучения: новые скрины (пересланные и загруженные) пойдут только в статистику — без слежения, уведомлений и сделок. Включить?')) return;
@@ -29150,6 +29599,8 @@ if __name__ == "__main__":
     threading.Thread(target=prv_live_loop, daemon=True).start()
     zones_load()   # v0.99.438
     threading.Thread(target=zones_tg_loop, daemon=True).start()
+    threading.Thread(target=zut_start, daemon=True).start()            # v0.99.448 — group via the user's account
+    threading.Thread(target=zut_keepalive_loop, daemon=True).start()
     threading.Thread(target=zones_monitor_loop, daemon=True).start()
     threading.Thread(target=zones_learn_loop, daemon=True).start()
     threading.Thread(target=reconcile_loop, daemon=True).start()
