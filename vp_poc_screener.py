@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.465"
+APP_VERSION = "0.99.466"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23897,7 +23897,7 @@ def own_compare_loop_step():
         zmap = {z["id"]: z for z in ZONES["zones"]}
     for post in posts:
         for it in post["own"]["zones"]:
-            if "cmp" in it or not it.get("ours") or not it.get("hit"):
+            if (it.get("cmp") or {}).get("v") == 2 or not it.get("ours") or not it.get("hit"):
                 continue
             z = zmap.get(it["zone"])
             if not z or now < z["post_time"] + ZONES_MAX_DAYS * 86400 and z.get("status") in ("watch", "in_trade", "train"):
@@ -23908,8 +23908,15 @@ def own_compare_loop_step():
                 continue
             ra = zone_sim(cs, z, p["entry"], p["buf"], p["tp"], z["post_time"], end)
             ro = zone_sim(cs, dict(z, levels=it["ours"]), p["entry"], p["buf"], p["tp"], z["post_time"], end)
-            it["cmp"] = {"author": None if ra is None else round(ra["r"], 3),
-                         "ours": None if ro is None else round(ro["r"], 3)}
+            # v0.99.466 — the same zones for both: no entry = 0 (no trade); % move too,
+            # since R depends on the stop width (a narrower band = a closer stop = more R per win)
+            it["cmp"] = {"v": 2, "author": 0.0 if ra is None else round(ra["r"], 3),
+                         "ours": 0.0 if ro is None else round(ro["r"], 3),
+                         "author_pct": 0.0 if ra is None else round(ra["pct"], 3),
+                         "ours_pct": 0.0 if ro is None else round(ro["pct"], 3),
+                         "author_in": ra is not None, "ours_in": ro is not None,
+                         "author_stop": round(abs(ra["fill"] - ra["sl"]) / ra["fill"] * 100, 2) if ra else None,
+                         "ours_stop": round(abs(ro["fill"] - ro["sl"]) / ro["fill"] * 100, 2) if ro else None}
 
 
 def own_stats():
@@ -23919,14 +23926,30 @@ def own_stats():
     n = len(items)
     hits = [it for it in items if it["hit"]]
     errs = sorted(it["err_pct"] for it in hits if it.get("err_pct") is not None)
-    cmp_ = [it["cmp"] for it in hits if it.get("cmp")]
-    a = [c["author"] for c in cmp_ if c["author"] is not None]
-    o = [c["ours"] for c in cmp_ if c["ours"] is not None]
+    cmp_ = [it["cmp"] for it in hits if (it.get("cmp") or {}).get("v") == 2]   # the same zones for both
+    a = [c["author"] for c in cmp_]
+    o = [c["ours"] for c in cmp_]
+
+    def side(key, pk, ink, sk):
+        rs = [c[key] for c in cmp_]
+        if not rs:
+            return None
+        ins = [c for c in cmp_ if c[ink]]
+        md = sorted(rs)[len(rs) // 2]
+        stops = sorted(c[sk] for c in ins if c.get(sk) is not None)
+        return {"avg_r": round(sum(rs) / len(rs), 3), "med_r": round(md, 3),
+                "avg_pct": round(sum(c[pk] for c in cmp_) / len(rs), 3),
+                "wr": round(100 * sum(1 for c in ins if c[key] > 0) / len(ins), 1) if ins else None,
+                "entries": len(ins), "stop_med": stops[len(stops) // 2] if stops else None,
+                "best_r": round(max(rs), 2)}
+    cmp_detail = {"n": len(cmp_), "author": side("author", "author_pct", "author_in", "author_stop"),
+                  "ours": side("ours", "ours_pct", "ours_in", "ours_stop")}
     fin = [z["result"]["r"] for z in own_z if z.get("result") and z.get("status") in ("closed", "old")]
     return {"exams": n, "hits": len(hits), "recall": round(100 * len(hits) / n, 1) if n else None,
             "early": sum(1 for it in hits if it.get("before_h") is not None),
             "err_median": errs[len(errs) // 2] if errs else None,
-            "cmp_n": len(cmp_), "author_avg_r": round(sum(a) / len(a), 3) if a else None, "author_n": len(a),
+            "cmp_n": len(cmp_), "cmp": cmp_detail,
+            "author_avg_r": round(sum(a) / len(a), 3) if a else None, "author_n": len(a),
             "ours_avg_r": round(sum(o) / len(o), 3) if o else None, "ours_n": len(o),
             "own_active": sum(1 for z in own_z if z.get("status") in ("watch", "in_trade")),
             "own_done": len(fin), "own_avg_r": round(sum(fin) / len(fin), 3) if fin else None,
@@ -28119,7 +28142,10 @@ function ownHtml(d, ownZ) {
     <div>Совпадения с пабликом: <b>${o.recall == null ? '—' : o.recall + '%'}</b> (${o.hits || 0} из ${o.exams || 0} зон, наш топ-3)${o.err_median != null ? ` · разница уровней (медиана) ${o.err_median}%` : ''}${o.early ? ` · нашли раньше поста: ${o.early}` : ''}</div>
     ${o.recall != null ? bar(o.recall, 'var(--pos)') : ''}
     ${ownSpark(ex.curve)}
-    <div>Результат на совпавших зонах (те же правила входа/стопа/тейка): автор <b>${sgn(o.author_avg_r)}</b> (${o.author_n || 0}) · мы <b>${sgn(o.ours_avg_r)}</b> (${o.ours_n || 0})</div>
+    ${(() => { const c = o.cmp; if (!c || !c.n || !c.author || !c.ours) return '<div>Результат на совпавших зонах: пока нет отработанных</div>';
+      const row = (nm, x) => `<div>${nm}: <b>${sgn(x.avg_r)}</b> в среднем, медиана ${sgn(x.med_r)} · ${x.avg_pct > 0 ? '+' : ''}${x.avg_pct}% движения · входов ${x.entries}, WR ${x.wr == null ? '—' : x.wr + '%'} · стоп от входа ~${x.stop_med == null ? '—' : x.stop_med + '%'} · лучшая ${sgn(x.best_r)}</div>`;
+      return `<div style="margin-top:4px;">Результат на одних и тех же ${c.n} совпавших зонах (те же правила; нет входа = 0):</div>${row('автор', c.author)}${row('мы', c.ours)}
+        <div class="dim" style="font-size:var(--fs-sm);">R зависит от ширины зоны: у более узкой зоны стоп ближе, поэтому тот же тейк даёт больше R — но и выбивает чаще. Меньше ~50 зон — разница может быть случайной.</div>`; })()}
     <div>Наши зоны со сканера: активных ${o.own_active || 0} · отработало ${o.own_done || 0}${o.own_avg_r != null ? ` · средний ${sgn(o.own_avg_r)}, WR ${o.own_wr}%` : ''} · ${d.autotrade_own ? '<span class="win">реальные сделки вкл</span>' : 'только наблюдение'}</div>
     <div class="dim">${scan} <button onclick="ownScanNow()" style="background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);">🔎 сканировать сейчас</button></div>
     ${last ? `<details style="margin-top:4px;"><summary class="dim" style="cursor:pointer;">последние проверки по постам</summary>${last}</details>` : ''}

@@ -18636,3 +18636,10 @@ v0.99.465 - Зоны: a change of the risk % (the zones' own or the common one)
          % at which the account would have grown most (Kelly) and half of it as
          the sensible one, with the growth per trade at the current, the best
          and the half risk; if no risk grows the account — said so.
+v0.99.466 - Зоны / наш поиск: the author-vs-us result is compared on the same
+         matched zones (no entry = 0 for that side; before, each side averaged
+         only its own entries — 16 vs 18 different trades). Shown per side: mean
+         and median R, % move, entries, win rate, the stop's distance from the
+         entry (R depends on it: a narrower band = a closer stop = more R per
+         win, and more stop-outs), the best trade; with the note that under
+         ~50 zones a difference may be chance. Old comparisons are recomputed.
