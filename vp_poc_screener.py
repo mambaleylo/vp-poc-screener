@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.456"
+APP_VERSION = "0.99.457"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1108,6 +1108,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones",
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
                   "zones_own_scan", "autotrade_zones_own", "telegram_alerts_zones_own",
+                  "telegram_alerts_trade_results", "telegram_trade_results_real_only",
                   "mirror_rr", "mirror_touch_tolerance_pct", "mirror_pattern_tolerance_pct",
                   # v0.93.0 — moved into the settings system specifically so
                   # auto_tune_pass() can persist adjustments to these via the
@@ -1182,6 +1183,8 @@ def get_settings():
         "autotrade_zones_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
         "zones_own_scan": ZONES_OWN_SCAN, "autotrade_zones_own": AUTOTRADE_ENABLED_ZONES_OWN,   # v0.99.452
         "telegram_alerts_zones_own": TELEGRAM_ALERTS_ZONES_OWN,   # v0.99.454
+        "telegram_alerts_trade_results": TELEGRAM_ALERTS_TRADE_RESULTS,   # v0.99.457
+        "telegram_trade_results_real_only": TELEGRAM_TRADE_RESULTS_REAL_ONLY,
         "telegram_alerts_zones": TELEGRAM_ALERTS_ZONES,
         "zones_tp_pct": ZONES_TP_PCT,
         "zones_max_days": ZONES_MAX_DAYS,
@@ -1447,6 +1450,10 @@ def apply_settings(updates):
         globals()["ZONES_OWN_SCAN"] = bool(updates["zones_own_scan"])
     if "autotrade_zones_own" in updates:
         globals()["AUTOTRADE_ENABLED_ZONES_OWN"] = bool(updates["autotrade_zones_own"])
+    if "telegram_alerts_trade_results" in updates:   # v0.99.457
+        globals()["TELEGRAM_ALERTS_TRADE_RESULTS"] = bool(updates["telegram_alerts_trade_results"])
+    if "telegram_trade_results_real_only" in updates:
+        globals()["TELEGRAM_TRADE_RESULTS_REAL_ONLY"] = bool(updates["telegram_trade_results_real_only"])
     if "telegram_alerts_zones_own" in updates:   # v0.99.454
         globals()["TELEGRAM_ALERTS_ZONES_OWN"] = bool(updates["telegram_alerts_zones_own"])
     if "telegram_alerts_zones" in updates:
@@ -15654,6 +15661,8 @@ def snr_track_signal_outcomes():
                     sig["exit_price"] = exit_price
                     sig["exit_time"] = exit_time
                     sig["pnl_r"] = pnl_r
+                notify_trade_result("snr", sig["symbol"], direction, entry, exit_price, result, pnl_r,
+                                    real=bool(AUTOTRADE_ENABLED_SNR and sig.get("autotrade_fired")))
         except Exception as e:
             log_error(f"snr_outcome {sig['symbol']}: {e}")
 
@@ -16437,6 +16446,8 @@ def prv_track_signal_outcomes():
                     sig["exit_price"] = exit_price
                     sig["exit_time"] = exit_time
                     sig["pnl_r"] = pnl_r
+                notify_trade_result("prv", sig["symbol"], direction, entry, exit_price, result, pnl_r,
+                                    real=bool(AUTOTRADE_ENABLED_PRV and sig.get("autotrade_fired")))
         except Exception as e:
             log_error(f"prv_outcome {sig['symbol']}: {e}")
 
@@ -19643,6 +19654,9 @@ def neuro_track_signal_outcomes():
                         sig["exit_price"] = exit_price
                         sig["exit_time"] = exit_time
                         sig["pnl_r"] = pnl_r
+                if not is_shadow:
+                    notify_trade_result("neuro", sig["symbol"], direction, entry, exit_price, result, pnl_r,
+                                        real=bool(AUTOTRADE_ENABLED_NEURO and sig.get("autotrade_fired")))
         except Exception as e:
             log_error(f"neuro_outcome {sig['symbol']}: {e}")
 
@@ -22156,6 +22170,9 @@ def _zones_close_approach(post, price, reason):
     with _zones_lock:
         tr.update({"status": "CLOSED", "result": "WIN" if r > 0 else "LOSS", "exit_price": price,
                    "exit_time": int(time.time()), "pnl_r": round(r, 3)})
+    notify_trade_result("zones_appr", post["symbol"], tr["direction"], tr["entry"], price, tr["result"], r,
+                        real=bool(AUTOTRADE_ENABLED_ZONES_APPROACH and tr.get("autotrade_fired")),
+                        note="закрыта перед входом от самой зоны")
     return True
 
 
@@ -22184,8 +22201,8 @@ def _zones_track_approach(post):
     r = d * (px - tr["entry"]) / risk
     with _zones_lock:
         tr.update({"status": "CLOSED", "result": res, "exit_price": px, "exit_time": int(time.time()), "pnl_r": round(r, 3)})
-    zones_notify(f"{'✅' if res == 'WIN' else ('❌' if res == 'LOSS' else '⏱')} Движение к зоне {post['symbol']}: {res} "
-                 f"{r:+.2f}R ({tr['direction']} {tr['entry']:.6g} → {px:.6g})")
+    notify_trade_result("zones_appr", post["symbol"], tr["direction"], tr["entry"], px, res, r,
+                        real=bool(AUTOTRADE_ENABLED_ZONES_APPROACH and tr.get("autotrade_fired")))
     _zones_learn_event.set()
     return True
 
@@ -22417,6 +22434,43 @@ def _zones_outbox_save():
         log_error(f"zones outbox save: {e}")
 
 
+TELEGRAM_ALERTS_TRADE_RESULTS = os.environ.get("VP_TG_TRADE_RESULTS", "1") == "1"            # v0.99.457
+TELEGRAM_TRADE_RESULTS_REAL_ONLY = os.environ.get("VP_TG_TRADE_RESULTS_REAL", "0") == "1"
+_TRADE_MOD_NAMES = {"neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "zones": "Зоны",
+                    "zones_own": "Зоны · 🔎 наш поиск", "zones_appr": "Зоны · движение к зоне"}
+
+
+def tg_outbox_push(text):
+    """any message through the disk queue (no network / restart = later, not lost)"""
+    if not (TELEGRAM_ENABLED and TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID):
+        return
+    zones_outbox_load()
+    with _zones_outbox_lock:
+        _zones_outbox.append({"t": time.time(), "text": text})
+        del _zones_outbox[:-300]
+    _zones_outbox_save()
+    _zones_outbox_event.set()
+
+
+def notify_trade_result(module, symbol, direction, entry, exit_price, result, r=None, real=False, note=""):
+    """v0.99.457 — every closed trade of every module (take, stop, time exit)
+    in Telegram, switch "Итоги сделок"; optionally only the real ones."""
+    try:
+        if not TELEGRAM_ALERTS_TRADE_RESULTS or (TELEGRAM_TRADE_RESULTS_REAL_ONLY and not real):
+            return
+        head = {"WIN": "✅ ТЕЙК", "LOSS": "❌ СТОП", "TIME_EXIT": "⏱ выход по времени", "TIMEOUT": "⏱ выход по времени",
+                "LOSS_EARLY": "✂️ ранний выход"}.get(result, str(result))
+        d = 1 if str(direction).upper() == "LONG" else -1
+        pct = d * (exit_price - entry) / entry * 100 if entry and exit_price is not None else None
+        nums = " · ".join(x for x in (f"{r:+.2f}R" if r is not None else "",
+                                      f"{pct:+.2f}% движения" if pct is not None else "") if x)
+        tg_outbox_push(f"{head} · {_TRADE_MOD_NAMES.get(module, module)} · {str(symbol).replace('_USDT', '')} {direction}\n"
+                       f"вход {entry:.6g} → выход {exit_price:.6g}" + (f" · {nums}" if nums else "") + "\n"
+                       + ("💰 реальная сделка на бирже" if real else "🧪 виртуальная (без биржи)") + (f"\n{note}" if note else ""))
+    except Exception as e:
+        log_error(f"notify_trade_result {module} {symbol}: {e}")
+
+
 def zones_notify(text):
     """v0.99.455 — the zones' messages go through a queue kept on disk: no
     network (a lift, the road) or a restart only delays them, never loses
@@ -22568,8 +22622,10 @@ def _zones_track_trade(z):
                    "pnl_pct": round(pct, 2)})
         z["status"] = "closed"
         z["result"] = {"result": res, "r": round(r, 3), "pct": round(pct, 2)}
-    zones_znotify(z, f"{'✅' if res == 'WIN' else ('❌' if res == 'LOSS' else '⏱')} Зона {z['symbol']}: {res} "
-                 f"{r:+.2f}R · {pct:+.2f}% чистыми (вход {tr['entry']:.6g} → {px:.6g})")
+    if not z.get("own") or _own_tg_ok():   # our finder stays quiet while it learns
+        notify_trade_result("zones_own" if z.get("own") else "zones", z["symbol"], tr["direction"], tr["entry"], px, res,
+                            r, real=bool(AUTOTRADE_ENABLED_ZONES and tr.get("autotrade_fired")),
+                            note=f"зона {zones_fmt(z)} · чистыми {pct:+.2f}% (с комиссией)")
     _zones_learn_event.set()
     return True
 
@@ -26131,9 +26187,23 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow">
         <div>
           <div class="label">↳ Алерты Зон</div>
-          <div class="sub">распознанный пост, цена дошла до линии, вход, пробой зоны, итог сделки</div>
+          <div class="sub">распознанный пост, цена дошла до линии, вход, пробой зоны</div>
         </div>
         <label class="switch"><input type="checkbox" id="setTelegramZones"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Итоги сделок (тейк / стоп)</div>
+          <div class="sub">сообщение о каждой закрытой сделке Neuro, S/R, P/R и Зон: тейк, стоп или выход по времени, вход → выход, результат в R и % движения, реальная она или виртуальная. Не теряются без сети — придут, когда связь вернётся</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgTradeResults"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow subRow">
+        <div>
+          <div class="label">↳↳ только реальные сделки</div>
+          <div class="sub">присылать итоги только сделок, открытых на бирже (без виртуальных сигналов)</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTgTradeResultsReal"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -29196,6 +29266,8 @@ const setInputs = {
   telegram_alerts_snr: document.getElementById('setTelegramSnr'),
   telegram_alerts_prv: document.getElementById('setTelegramPrv'),
   telegram_alerts_zones: document.getElementById('setTelegramZones'),
+  telegram_alerts_trade_results: document.getElementById('setTgTradeResults'),
+  telegram_trade_results_real_only: document.getElementById('setTgTradeResultsReal'),
   telegram_alerts_network: document.getElementById('setTelegramNetwork'),
   autotrade_dry_run: document.getElementById('setAutotradeDryRun'),
   autotrade_neuro: document.getElementById('setAutotradeNeuro'),

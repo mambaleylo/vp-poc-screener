@@ -18580,3 +18580,10 @@ v0.99.456 - Зоны / история группы: "⏹ остановить" (
          taken again, no network = wait and retry the same post instead of
          skipping it. The days prompt suggests 30 and says the cost (~10–30 s a
          picture).
+v0.99.457 - Telegram: the result of every closed trade — Neuro, S/R, P/R, Зоны
+         (also our finder's once it is trained, and the move-to-zone trades):
+         "✅ ТЕЙК / ❌ СТОП / ⏱ выход по времени · module · coin direction",
+         entry → exit, R and % move, real (on the exchange) or virtual. Sent
+         through the disk queue, so no network only delays them. Settings →
+         Telegram: "↳ Итоги сделок (тейк / стоп)" and "↳↳ только реальные
+         сделки". The zones' own close messages are these now.
