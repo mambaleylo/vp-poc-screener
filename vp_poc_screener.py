@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.484"
+APP_VERSION = "0.99.485"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24027,6 +24027,25 @@ def own_matches(c, side, levels, atr):
     return ov >= 0.5 * min(wa, wc) and 0.5 <= wc / wa <= 2.0
 
 
+_OWN_MODEL_CACHE = {"key": None, "model": None}
+
+
+def own_model_all(mark=False):
+    """v0.99.485 — the scorer on all posts, fitted once per set of posts (it was
+    re-fitted on every refresh of the tab: seconds of pure Python on a phone,
+    every 15 s, and the whole bot slowed down with it)"""
+    with _zones_lock:
+        key = tuple((p_["id"], len(p_["own"]["samples"])) for p_ in ZONES["posts"]
+                    if p_.get("own") and p_["own"].get("samples"))
+    if _OWN_MODEL_CACHE["key"] != key:
+        _OWN_MODEL_CACHE["model"] = own_fit(_own_samples_before(time.time() + 1), mark=True)
+        _OWN_MODEL_CACHE["key"] = key
+    elif mark:
+        m_ = _OWN_MODEL_CACHE["model"]
+        _OWN_TRAINED[0] = bool(m_)
+    return _OWN_MODEL_CACHE["model"]
+
+
 def _own_samples_before(t):
     with _zones_lock:
         posts = [p_ for p_ in ZONES["posts"] if p_.get("own") and p_["own"].get("samples") and p_["post_time"] < t]
@@ -24168,7 +24187,7 @@ def own_stats():
             "own_active": sum(1 for z in own_z if z.get("status") in ("watch", "in_trade")),
             "own_done": len(fin), "own_avg_r": round(sum(fin) / len(fin), 3) if fin else None,
             "own_wr": round(100 * sum(1 for r in fin if r > 0) / len(fin), 1) if fin else None,
-            "model": (lambda m: {"n": m["n"], "pos": m["pos"]} if m else None)(own_fit(_own_samples_before(time.time() + 1))),
+            "model": (lambda m: {"n": m["n"], "pos": m["pos"]} if m else None)(own_model_all()),
             "pos": sum(1 for _, y in _own_samples_before(time.time() + 1) if y), "pos_need": 15,
             "last_scan": ZONES.get("own_last_scan"), "scan_on": ZONES_OWN_SCAN}
 
@@ -24197,7 +24216,7 @@ def own_scan_once():
     """One pass over the liquid coins: our best new zones -> watched like the
     public's ones (virtual trades; real ones only with their own switch)."""
     now = time.time()
-    model = own_fit(_own_samples_before(now + 1), mark=True)
+    model = own_model_all(mark=True)
     thr = 0.5
     try:
         tick = get_tickers()
@@ -24338,6 +24357,10 @@ def zones_post_summary(post, new):
 def api_zones_status():
     with _zones_lock:
         posts = [dict(p) for p in ZONES["posts"][:200]]
+    for p_ in posts:   # v0.99.485 — the page doesn't need the learning samples (hundreds of KB every 15 s)
+        if p_.get("own"):
+            p_["own"] = {k: v for k, v in p_["own"].items() if k != "samples"}
+    with _zones_lock:
         zones = [dict(z) for z in ZONES["zones"] if z.get("status") != "deleted"][:600]
         learned, stats, tg_err = ZONES.get("learned"), ZONES.get("stats"), ZONES.get("tg_last_error")
     with _zones_lock:
@@ -28602,11 +28625,21 @@ if ('serviceWorker' in navigator) { try { navigator.serviceWorker.register('/sw.
     try { r = await (await fetch('/api/boot', {cache: 'no-store'})).json(); } catch (e) { return; }   // still restarting
     if (boot === null) { boot = r.boot; return; }
     if (r.boot !== boot && !busy()) {
+      boot = r.boot;
+      // v0.99.485 — let the fresh bot finish starting before loading the page from it
+      let note = document.getElementById('vpReloadNote');
+      if (!note) {
+        note = document.createElement('div');
+        note.id = 'vpReloadNote';
+        note.style.cssText = 'position:fixed;left:50%;bottom:16px;transform:translateX(-50%);z-index:10001;background:#1f2633;color:#dfe3ea;padding:8px 14px;border-radius:18px;font-size:13px;box-shadow:0 2px 10px rgba(0,0,0,.5);';
+        document.body.appendChild(note);
+      }
+      note.textContent = `бот перезапущен (v${r.version}) — обновляю страницу…`;
       try {
         sessionStorage.setItem('vp_tab_restore', activeTab);
         sessionStorage.setItem('vp_ss_restore', (typeof _ssActive !== 'undefined' && _ssActive) ? '1' : '0');
       } catch (e) {}
-      location.reload();
+      setTimeout(() => location.reload(), 6000);
     }
   }
   check();

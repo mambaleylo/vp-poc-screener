@@ -18752,3 +18752,10 @@ v0.99.484 - Зоны / chart: the timeframe in the title (15м / 30м (свеч�
          went after the stop / take); the price scale follows the candles, the
          zone and entry / stop / exit — a far take (e.g. +20%) no longer squeezes
          the candles into a strip, it gets a "TP … ↓ (за краем)" label.
+v0.99.485 - The page froze after an update / on the Zones tab: every 15 s refresh
+         re-fitted our finder's scorer (pure Python, seconds on a phone, and the
+         whole bot waited for it) and sent every post's learning samples
+         (~230 KB). Now the scorer is fitted once per set of posts and cached,
+         the samples stay on the server (~37 KB, instant). The auto-reload after
+         a restart shows "бот перезапущен — обновляю страницу…" and waits 6 s
+         for the fresh bot to finish starting.
