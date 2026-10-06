@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.468"
+APP_VERSION = "0.99.469"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23345,6 +23345,12 @@ RESTART_NOTE_FILE = os.environ.get("VP_RESTART_NOTE_FILE", "vp_restart_note.json
 _PROC_START = time.time()
 
 
+@app.route("/api/boot")
+def api_boot():
+    """v0.99.469 — the page reloads itself when this changes (a restart / update)"""
+    return jsonify({"boot": _PROC_START, "version": APP_VERSION})
+
+
 def self_update_download():
     """Fresh file from GitHub main, checked (a whole, compiling bot), swapped in
     place of this one (old kept as .bak). Returns the new version; RuntimeError
@@ -28330,6 +28336,35 @@ async function selfUpdate() {
   };
   wait();
 }
+// v0.99.469 — the bot restarted (/update, /restart, the button, by hand): the
+// page reloads itself with the new code; the open tab and a running
+// screensaver come back. Not while a dialog or the settings are open.
+(function autoReloadOnRestart() {
+  let boot = null;
+  const busy = () => (Date.now() - (window._zUp || 0) < 120000)
+    || (document.getElementById('settingsModal') || {classList: {contains: () => false}}).classList.contains('open');
+  async function check() {
+    let r;
+    try { r = await (await fetch('/api/boot', {cache: 'no-store'})).json(); } catch (e) { return; }   // still restarting
+    if (boot === null) { boot = r.boot; return; }
+    if (r.boot !== boot && !busy()) {
+      try {
+        sessionStorage.setItem('vp_tab_restore', activeTab);
+        sessionStorage.setItem('vp_ss_restore', (typeof _ssActive !== 'undefined' && _ssActive) ? '1' : '0');
+      } catch (e) {}
+      location.reload();
+    }
+  }
+  check();
+  setInterval(check, 20000);
+  setTimeout(() => {   // after a reload: the same tab, the screensaver back on
+    let tab = null, ss = null;
+    try { tab = sessionStorage.getItem('vp_tab_restore'); ss = sessionStorage.getItem('vp_ss_restore');
+          sessionStorage.removeItem('vp_tab_restore'); sessionStorage.removeItem('vp_ss_restore'); } catch (e) {}
+    if (tab && tab !== activeTab) { const t = document.querySelector(`.tab[data-tab="${tab}"]`); if (t) t.click(); }
+    if (ss === '1' && typeof toggleScreensaver === 'function' && !(typeof _ssActive !== 'undefined' && _ssActive)) toggleScreensaver();
+  }, 1500);
+})();
 async function zonesTrainMode(on) {
   if (on && !confirm('Режим обучения: новые скрины (пересланные и загруженные) пойдут только в статистику — без слежения, уведомлений и сделок. Включить?')) return;
   zonesPost('/api/zones/train_mode', {on});

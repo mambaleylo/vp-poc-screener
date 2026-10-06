@@ -18654,3 +18654,8 @@ v0.99.467 - Зоны + "Авто-риск": the switch now works for the zones t
 v0.99.468 - Зоны auto-risk: the full growth-optimal risk (Kelly) on the earlier
          zones instead of half of it, by the user's request; still capped at 50%
          and still checked on the later zones at that risk.
+v0.99.469 - The page reloads itself after the bot restarted (/update, /restart,
+         the 🛠 button or by hand): every 20 s it asks /api/boot; a new start
+         time = reload with the new code. The open tab and a running
+         screensaver come back after the reload; it waits while the settings or
+         a file dialog are open.
