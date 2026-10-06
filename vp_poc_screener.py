@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.450"
+APP_VERSION = "0.99.451"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21789,14 +21789,16 @@ def zone_sim(cs, z, entry_idx, buf, tp, start, end):
             continue
         risk = abs(fill - sl)
         return {"r": s * (px - fill) / risk - ZONES_FEE * fill / risk, "fill": fill, "sl": sl, "tp": tpp,
-                "t_in": t_in, "t_out": c["time"], "result": res}
+                "t_in": t_in, "t_out": c["time"], "result": res,
+                "pct": (s * (px - fill) / fill - ZONES_FEE) * 100}
     if fill is None:
         return None
     last = [c for c in cs if start <= c["time"] < end]
     px = last[-1]["close"] if last else fill
     risk = abs(fill - sl)
     return {"r": s * (px - fill) / risk - ZONES_FEE * fill / risk, "fill": fill, "sl": sl, "tp": tpp,
-            "t_in": t_in, "t_out": last[-1]["time"] if last else t_in, "result": "TIME_EXIT"}
+            "t_in": t_in, "t_out": last[-1]["time"] if last else t_in, "result": "TIME_EXIT",
+            "pct": (s * (px - fill) / fill - ZONES_FEE) * 100}
 
 
 def zone_path_stats(cs, z, start, end):
@@ -22083,6 +22085,16 @@ def _zones_track_approach(post):
 
 
 def zones_learn_loop():
+    try:   # v0.99.451 — finished history zones from before the net % existed get it
+        with _zones_lock:
+            todo = [z for z in ZONES["zones"] if z.get("status") == "old" and z.get("result")
+                    and z["result"].get("pct") is None and z.get("symbol")]
+        for z in todo:
+            zones_replay_past(z)
+        if todo:
+            zones_save()
+    except Exception as e:
+        log_error(f"zones pct backfill: {e}")
     while True:
         heartbeat("zones_learn_loop")
         try:
@@ -22273,7 +22285,7 @@ def zones_replay_past(z):
     with _zones_lock:
         if r is not None or path.get("touched") or now >= z["post_time"] + ZONES_MAX_DAYS * 86400:
             z["status"] = "old"
-            z["result"] = ({"result": r["result"], "r": round(r["r"], 3)} if r else None)
+            z["result"] = ({"result": r["result"], "r": round(r["r"], 3), "pct": round(r["pct"], 2)} if r else None)
             z["history"] = path
 
 
@@ -22334,12 +22346,14 @@ def _zones_track_trade(z):
         return False
     risk = abs(tr["entry"] - tr["sl"]) or 1e-12
     r = s * (px - tr["entry"]) / risk
+    pct = (s * (px - tr["entry"]) / tr["entry"] - ZONES_FEE) * 100   # net price move, round-trip fee taken off
     with _zones_lock:
-        tr.update({"status": "CLOSED", "result": res, "exit_price": px, "exit_time": tx, "pnl_r": round(r, 3)})
+        tr.update({"status": "CLOSED", "result": res, "exit_price": px, "exit_time": tx, "pnl_r": round(r, 3),
+                   "pnl_pct": round(pct, 2)})
         z["status"] = "closed"
-        z["result"] = {"result": res, "r": round(r, 3)}
+        z["result"] = {"result": res, "r": round(r, 3), "pct": round(pct, 2)}
     zones_notify(f"{'✅' if res == 'WIN' else ('❌' if res == 'LOSS' else '⏱')} Зона {z['symbol']}: {res} "
-                 f"{r:+.2f}R (вход {tr['entry']:.6g} → {px:.6g})")
+                 f"{r:+.2f}R · {pct:+.2f}% чистыми (вход {tr['entry']:.6g} → {px:.6g})")
     _zones_learn_event.set()
     return True
 
@@ -22937,7 +22951,8 @@ def zones_post_summary(post, new):
         lines = [f"📚 Обучение · {post['symbol']} · пост от {when} · зон: {len(new)} (не слежу и не торгую)"]
         for z in new:
             r_ = z.get("result")
-            st = ("отработала: " + (f"{r_['result']} {r_['r']:+g}R" if r_ else "входа не было")) if z["status"] == "old" \
+            st = ("отработала: " + (f"{r_['result']} {r_['r']:+g}R" + (f" · {r_['pct']:+.2f}%" if r_.get("pct") is not None else "")
+                                     if r_ else "входа не было")) if z["status"] == "old" \
                 else "итога ещё нет — досчитаю по графику, когда будет"
             lines.append(f"• {zones_fmt(z)} — {st}")
         if post["notes"]:
@@ -22949,7 +22964,8 @@ def zones_post_summary(post, new):
         st = {"watch": "слежу", "old": "уже отработала (в статистику)", "train": "обучение: жду итога"}.get(z["status"], z["status"])
         if z["status"] == "old":
             r_ = z.get("result")
-            st = f"уже отработала: {r_['r']:+g}R" if r_ else "уже отработала: входа не было"
+            st = (f"уже отработала: {r_['r']:+g}R" + (f" · {r_['pct']:+.2f}%" if r_.get("pct") is not None else "")) \
+                if r_ else "уже отработала: входа не было"
         lines.append(f"• {zones_fmt(z)} — {st}")
     if (post.get("approach_txt") or "").startswith("ℹ️"):
         lines.append(post["approach_txt"])
@@ -26773,11 +26789,11 @@ function zoneRowHtml(z) {
   const long = z.side === 'long';
   const lv = z.levels.map((v, i) => `<span style="${z.touched && z.touched[i] ? 'color:var(--win);font-weight:700;' : ''}">${i + 1}) ${zfmt(v)}${z.touched && z.touched[i] ? ' ✓' : ''}</span>`).join(' · ');
   const tr = z.trade;
-  const trTxt = tr ? `<div class="dim" style="font-size:var(--fs-sm);">вход ${zfmt(tr.entry)} · SL ${zfmt(tr.sl)} · TP ${zfmt(tr.tp)}${tr.autotrade ? ' · биржа: ' + tr.autotrade.status + (tr.autotrade.leverage ? ' ' + tr.autotrade.leverage + 'x' : '') : ''}${tr.result ? ` · <b class="${tr.result === 'WIN' ? 'win' : 'loss'}">${tr.result} ${tr.pnl_r > 0 ? '+' : ''}${tr.pnl_r}R</b>` : ''}</div>` : '';
+  const trTxt = tr ? `<div class="dim" style="font-size:var(--fs-sm);">вход ${zfmt(tr.entry)} · SL ${zfmt(tr.sl)} · TP ${zfmt(tr.tp)}${tr.autotrade ? ' · биржа: ' + tr.autotrade.status + (tr.autotrade.leverage ? ' ' + tr.autotrade.leverage + 'x' : '') : ''}${tr.result ? ` · <b class="${tr.result === 'WIN' ? 'win' : 'loss'}">${tr.result} ${tr.pnl_r > 0 ? '+' : ''}${tr.pnl_r}R${tr.pnl_pct != null ? ` · ${tr.pnl_pct > 0 ? '+' : ''}${tr.pnl_pct}%` : ''}</b>` : ''}</div>` : '';
   const hist = '';
   // v0.99.447 — "уже отработала" shows its outcome in R right in the status
   const stTxt = z.status === 'old'
-    ? (z.result ? `📜 отработала: <b class="${z.result.r > 0 ? 'win' : 'loss'}">${z.result.r > 0 ? '+' : ''}${z.result.r}R</b>` : '📜 отработала: входа не было')
+    ? (z.result ? `📜 отработала: <b class="${z.result.r > 0 ? 'win' : 'loss'}">${z.result.r > 0 ? '+' : ''}${z.result.r}R${z.result.pct != null ? ` · ${z.result.pct > 0 ? '+' : ''}${z.result.pct}%` : ''}</b>` : '📜 отработала: входа не было')
     : (ZONE_ST[z.status] || z.status);
   const btn = 'background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);';
   return `<div style="margin-top:8px;padding:6px 0 0 8px;border-left:3px solid ${long ? '#4caf50' : '#ef5350'};">

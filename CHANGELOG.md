@@ -18505,3 +18505,8 @@ v0.99.450 - 🛠 menu → "Бот: ⬇️ Обновить и перезапус
          port busy). On start the bot waits up to 30 s for its port. The page
          polls every 3 s and reloads itself when the bot answers again. Only
          from the phone itself (127.0.0.1).
+v0.99.451 - Зоны: next to the result in R the net price move in % is shown
+         (entry → exit, the 0.1% round-trip fee taken off): "отработала: +0.97R ·
+         +3.90%" in the tab, in the post summaries and in the live trade's close
+         message. Finished history zones from before get it once on start
+         (replayed with the current rules).
