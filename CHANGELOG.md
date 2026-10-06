@@ -18472,3 +18472,6 @@ v0.99.446 - Зоны: training mode (📚 button in the tab, or "обучени�
          a forwarded post carries it; a picture without a forward date is
          refused in this mode; a web upload asks for "дд.мм.гггг чч:мм".
          Training posts are listed in their own "📚 обучение" section.
+v0.99.447 - Зоны: an "уже отработала" zone shows its outcome in R right in the
+         status ("📜 отработала: +0.97R", or "входа не было"), in the tab and in
+         the Telegram summary of a post.

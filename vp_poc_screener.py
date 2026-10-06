@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.446"
+APP_VERSION = "0.99.447"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22524,6 +22524,9 @@ def zones_post_summary(post, new):
         + [f"📥 {post['symbol']} · пост от {when} · зон: {len(new)}"]
     for z in new:
         st = {"watch": "слежу", "old": "уже отработала (в статистику)", "train": "обучение: жду итога"}.get(z["status"], z["status"])
+        if z["status"] == "old":
+            r_ = z.get("result")
+            st = f"уже отработала: {r_['r']:+g}R" if r_ else "уже отработала: входа не было"
         lines.append(f"• {zones_fmt(z)} — {st}")
     if (post.get("approach_txt") or "").startswith("ℹ️"):
         lines.append(post["approach_txt"])
@@ -26347,11 +26350,15 @@ function zoneRowHtml(z) {
   const lv = z.levels.map((v, i) => `<span style="${z.touched && z.touched[i] ? 'color:var(--win);font-weight:700;' : ''}">${i + 1}) ${zfmt(v)}${z.touched && z.touched[i] ? ' ✓' : ''}</span>`).join(' · ');
   const tr = z.trade;
   const trTxt = tr ? `<div class="dim" style="font-size:var(--fs-sm);">вход ${zfmt(tr.entry)} · SL ${zfmt(tr.sl)} · TP ${zfmt(tr.tp)}${tr.autotrade ? ' · биржа: ' + tr.autotrade.status + (tr.autotrade.leverage ? ' ' + tr.autotrade.leverage + 'x' : '') : ''}${tr.result ? ` · <b class="${tr.result === 'WIN' ? 'win' : 'loss'}">${tr.result} ${tr.pnl_r > 0 ? '+' : ''}${tr.pnl_r}R</b>` : ''}</div>` : '';
-  const hist = z.status === 'old' && z.result ? `<div class="dim" style="font-size:var(--fs-sm);">по истории: ${z.result.result} ${z.result.r > 0 ? '+' : ''}${z.result.r}R</div>` : '';
+  const hist = '';
+  // v0.99.447 — "уже отработала" shows its outcome in R right in the status
+  const stTxt = z.status === 'old'
+    ? (z.result ? `📜 отработала: <b class="${z.result.r > 0 ? 'win' : 'loss'}">${z.result.r > 0 ? '+' : ''}${z.result.r}R</b>` : '📜 отработала: входа не было')
+    : (ZONE_ST[z.status] || z.status);
   const btn = 'background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);';
   return `<div style="margin-top:8px;padding:6px 0 0 8px;border-left:3px solid ${long ? '#4caf50' : '#ef5350'};">
     <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">
-      <div><span class="${long ? 'win' : 'loss'}" style="font-weight:700;">${long ? 'лонг' : 'шорт'}</span> <span class="dim">· ${ZONE_ST[z.status] || z.status}</span></div>
+      <div><span class="${long ? 'win' : 'loss'}" style="font-weight:700;">${long ? 'лонг' : 'шорт'}</span> <span class="dim">· ${stTxt}</span></div>
       <div style="white-space:nowrap;">
         <button onclick="zonesEdit('${z.id}', '${z.levels.join(' ')}')" title="уровни" style="${btn}">✏️</button>
         <button onclick="zonesSide('${z.id}', '${long ? 'short' : 'long'}')" title="поменять сторону" style="${btn}">⇅</button>
