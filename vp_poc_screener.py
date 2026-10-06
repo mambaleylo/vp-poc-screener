@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.483"
+APP_VERSION = "0.99.484"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24390,9 +24390,20 @@ def api_zones_chart(zid):
             tr = {"t_in": r["t_in"], "fill": r["fill"], "sl": r["sl"], "tp": r["tp"], "t_out": r["t_out"], "exit": ex,
                   "result": r["result"], "r": round(r["r"], 3), "pct": round(r["pct"], 2), "real": False}
         src = f"по текущим правилам: вход от {p['entry'] + 1}-й линии, стоп {p['buf']:g}% за зоной, тейк +{p['tp']:g}%"
-    v0 = start - 86400
-    v1 = min(now, (tr["t_out"] + 12 * 3600) if (tr and tr.get("t_out")) else end)
+    # v0.99.484 — a little before the post (~15% of the width), more after the exit
+    # (how the price went on after the stop / take)
+    if tr and tr.get("t_out"):
+        v1 = min(now, tr["t_out"] + max(86400, 0.6 * (tr["t_out"] - start)))
+    else:
+        v1 = end
+    v0 = start - max(3 * 3600, 0.18 * (v1 - start))
     cs = zones_candles(z["symbol"], v0, v1)
+    base_sec = 900
+    if v0 < now - 9700 * 3600:
+        base_sec = 14400
+    elif v0 < now - 9700 * 900:
+        base_sec = 3600
+    k = 1
     if len(cs) > 360:   # thin out to ~360 candles (merge neighbours)
         k = math.ceil(len(cs) / 360)
         merged = []
@@ -24401,7 +24412,10 @@ def api_zones_chart(zid):
             merged.append({"time": g[0]["time"], "open": g[0]["open"], "high": max(c["high"] for c in g),
                            "low": min(c["low"] for c in g), "close": g[-1]["close"]})
         cs = merged
+    tf_sec = base_sec * k
+    tf_txt = (f"{tf_sec // 86400}д" if tf_sec % 86400 == 0 else f"{tf_sec // 3600}ч" if tf_sec % 3600 == 0 else f"{tf_sec // 60}м")
     return jsonify({"ok": True, "symbol": z["symbol"], "side": z["side"], "levels": z["levels"], "post_time": start,
+                    "tf": tf_txt + (f" (свеча = {k}×{base_sec // 60 if base_sec < 3600 else base_sec // 3600}{'м' if base_sec < 3600 else 'ч'})" if k > 1 else ""),
                     "status": z.get("status"), "trade": tr, "source": src,
                     "candles": [[c["time"], c["open"], c["high"], c["low"], c["close"]] for c in cs]})
 
@@ -28715,7 +28729,7 @@ async function zoneChart(zid) {
   try { d = await (await fetch('/api/zones/chart/' + zid)).json(); } catch (e) { d = {ok: false, error: 'нет связи'}; }
   if (!d.ok) { document.getElementById('zoneChartTitle').textContent = d.error || 'не получилось'; return; }
   const t = d.trade, sg = v => (v > 0 ? '+' : '') + v;
-  document.getElementById('zoneChartTitle').innerHTML = `<b>${d.symbol.replace('_USDT', '')}</b> ${d.side === 'long' ? 'лонг' : 'шорт'} ${d.levels.map(zfmt).join(' / ')}`
+  document.getElementById('zoneChartTitle').innerHTML = `<b>${d.symbol.replace('_USDT', '')}</b> · <b>${d.tf || ''}</b> · ${d.side === 'long' ? 'лонг' : 'шорт'} ${d.levels.map(zfmt).join(' / ')}`
     + (t ? ` · <b style="color:${(t.r || 0) > 0 ? '#3ddc97' : '#ff6b6b'}">${t.result === 'WIN' ? 'тейк' : t.result === 'LOSS' ? 'стоп' : t.result ? 'по времени' : 'в сделке'}${t.r != null ? ' ' + sg(t.r) + 'R' : ''}${t.pct != null ? ' · ' + sg(t.pct) + '%' : ''}</b>` : ' · входа не было')
     + `<div style="color:#8a93a3;margin-top:2px;">${d.source}${t && t.real ? ' · 💰 сделка на бирже' : ''}</div>`;
   drawZoneChart(d);
@@ -28731,8 +28745,13 @@ function drawZoneChart(d) {
   const cs = d.candles, t = d.trade;
   if (!cs.length) { ctx.fillStyle = '#8a93a3'; ctx.fillText('нет свечей', 10, 20); return; }
   const axisW = 62, padT = 10, padB = 18, plotW = W - axisW, plotH = H - padT - padB;
+  // v0.99.484 — the scale from the candles, the zone, entry / stop / exit; a take
+  // far away (e.g. +20%) doesn't squeeze the candles — it gets a label at the edge
   let lo = Math.min(...cs.map(c => c[3]), ...d.levels), hi = Math.max(...cs.map(c => c[2]), ...d.levels);
-  if (t) { for (const v of [t.sl, t.tp, t.fill, t.exit]) if (v) { lo = Math.min(lo, v); hi = Math.max(hi, v); } }
+  if (t) { for (const v of [t.sl, t.fill, t.exit]) if (v) { lo = Math.min(lo, v); hi = Math.max(hi, v); } }
+  const span0 = hi - lo;
+  const tpIn = t && t.tp && t.tp >= lo - span0 * 0.35 && t.tp <= hi + span0 * 0.35;
+  if (tpIn) { lo = Math.min(lo, t.tp); hi = Math.max(hi, t.tp); }
   const pad = (hi - lo) * 0.05 || hi * 0.01; lo -= pad; hi += pad;
   const t0 = cs[0][0], t1 = cs[cs.length - 1][0], step = cs.length > 1 ? (t1 - t0) / (cs.length - 1) : 900;
   const X = tm => (tm - t0) / Math.max(1, t1 - t0 + step) * plotW;
@@ -28760,7 +28779,9 @@ function drawZoneChart(d) {
     const xi = X(t.t_in) + cw / 2, xo = t.t_out ? X(t.t_out) + cw / 2 : plotW;
     const hl = (v, col, txt) => { if (!v) return; ctx.strokeStyle = col; ctx.setLineDash([5, 4]); ctx.beginPath(); ctx.moveTo(xi, Y(v)); ctx.lineTo(xo, Y(v)); ctx.stroke(); ctx.setLineDash([]);
       ctx.fillStyle = col; ctx.fillText(txt, Math.min(xo, plotW - 40) + 3, Y(v) - 3); };
-    hl(t.tp, '#3ddc97', 'TP'); hl(t.sl, '#ff6b6b', 'SL');
+    if (tpIn) hl(t.tp, '#3ddc97', 'TP');
+    else if (t.tp) { ctx.fillStyle = '#3ddc97'; const up = t.tp > hi; ctx.fillText(`TP ${zfmt(t.tp)} ${up ? '↑' : '↓'} (за краем)`, xi + 4, up ? padT + 12 : padT + plotH - 4); }
+    hl(t.sl, '#ff6b6b', 'SL');
     const tri = (x, y, upw, col) => { ctx.fillStyle = col; ctx.beginPath(); const s = 7;
       if (upw) { ctx.moveTo(x, y - s); ctx.lineTo(x - s, y + s); ctx.lineTo(x + s, y + s); } else { ctx.moveTo(x, y + s); ctx.lineTo(x - s, y - s); ctx.lineTo(x + s, y - s); }
       ctx.closePath(); ctx.fill(); ctx.strokeStyle = '#000'; ctx.stroke(); };

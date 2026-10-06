@@ -18746,3 +18746,9 @@ v0.99.483 - Зоны: manual editing removed (the user improves the recognition
          instead): no ✏️ levels, ⇅ side, 🪙 coin of a post, "добавить зону".
          Left: 📈 chart, ↻ recognise again, 🗑 delete, and "указать монету" for a
          post whose coin was not read.
+v0.99.484 - Зоны / chart: the timeframe in the title (15м / 30м (свеча = 2×15м) /
+         1ч / 4ч…); it starts a little before the post (~15% of the width
+         instead of a whole day) and goes on well after the exit (how the price
+         went after the stop / take); the price scale follows the candles, the
+         zone and entry / stop / exit — a far take (e.g. +20%) no longer squeezes
+         the candles into a strip, it gets a "TP … ↓ (за краем)" label.
