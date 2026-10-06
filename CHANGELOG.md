@@ -18447,3 +18447,12 @@ v0.99.443 - Зоны: ZEN was taken for SHENHUA (OCR read "2ENUSDT"; the loose n
          (length must match), "similar name" needs 0.66 to be a candidate and 0.8
          to be accepted on a 2% price match. In the tab: 🪙 changes the coin of a
          whole post, ↻ re-recognises a post (also an already recognised one).
+v0.99.444 - Зоны: if the ticker read on the screenshot (the word right before
+         USDT) is not a Gate futures contract, the post is skipped with
+         "ZEN нет на фьючерсах Gate — скрин пропущен" — no guessing of similar
+         coins (it offered BEN/WEN/ENJ for ZEN) and no asking for the coin; the
+         price/name candidate search remains only when the ticker was not read
+         at all. Repeated post notes are removed. Settings: every section is
+         collapsed (and the search cleared) each time ⚙️ Настройки opens; the
+         per-module risk row puts its text above the four inputs instead of
+         squeezing it into a narrow column.

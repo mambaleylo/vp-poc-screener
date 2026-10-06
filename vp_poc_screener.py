@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.443"
+APP_VERSION = "0.99.444"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21364,7 +21364,7 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
     _trans = str.maketrans({"О": "O", "С": "C", "Т": "T", "Е": "E", "А": "A", "Р": "P", "Н": "H", "К": "K",
                             "М": "M", "В": "B", "Х": "X", "У": "Y"})
     tick_re = re.compile(r"([A-Z0-9]{2,15})[\s.]*U[\s.]*[S5$][\s.]*[DO0Q][\s.]*[T7]")
-    found = []
+    found, words_read = [], {}
     for box in ((0, int(H * 0.02), W // 2, int(H * 0.075)), (0, 0, W // 2, int(H * 0.05)),
                 (0, int(H * 0.03), W // 3, int(H * 0.065))):
         base_c = gray.crop(box)
@@ -21377,6 +21377,8 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                 if not header_txt and txt.strip():
                     header_txt = txt.strip()[:80]
                 header_all.append(txt)
+                for mt in re.finditer(r"(?:^|[^A-Z0-9])([A-Z0-9]{2,15})[.]?U[S5$][DO0Q][T7]", txt):
+                    words_read[mt.group(1)] = words_read.get(mt.group(1), 0) + 1   # the word as written (spaces kept)
                 for mt in tick_re.finditer(txt.replace(" ", "")):
                     base = mt.group(1)
                     found += [base[i:] for i in range(0, max(1, len(base) - 1))]   # OCR glues icon marks in front: 'IZEN'
@@ -21390,6 +21392,17 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
             break
     symbol = _zocr_pick_ticker(found, symbols)
     read_bases = [f for f in found]
+    # the ticker WAS read (a word right before USDT) but no such futures contract:
+    # the coin is not on the exchange — the caller skips the screenshot, no guessing
+    not_listed = None
+    if not symbol and symbols and found:
+        if words_read:
+            not_listed = max(words_read, key=lambda w: (words_read[w], len(w)))
+        else:
+            cnt = {}
+            for f in found:
+                cnt[f] = cnt.get(f, 0) + 1
+            not_listed = max((f for f in cnt if len(f) >= 3), key=lambda f: (cnt[f], len(f)), default=found[0])
 
     # ---- price axis: dark label boxes (levels) ----
     ax0 = W - max(90, W // 12)
@@ -21629,7 +21642,7 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
     # price at the post time (the screenshot may be old / from another exchange) ----
     chart_px = header_close or cur_price or (sorted(hdr_nums)[len(hdr_nums) // 2] if hdr_nums else None)
     tick_cands = []
-    if not symbol and symbols:
+    if not symbol and symbols and not not_listed:
         import difflib
 
         def name_sim(sym):
@@ -21677,12 +21690,14 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                 for z in zones:
                     z["levels"] = [round(v * f, 12) for v in z["levels"]]
                 notes.append(f"масштаб цен x{f:g} (по текущей цене {live:g})")
-    if not symbol:
+    if not_listed:
+        notes.append(f"{not_listed} нет на фьючерсах Gate — скрин пропущен")
+    elif not symbol:
         notes.append(f"тикер не распознан (прочитал: «{header_txt[:40]}»)" if header_txt else "тикер не распознан")
     if not zones:
         notes.append("цветные зоны не найдены")
     return {"symbol": symbol, "zones": zones, "notes": notes, "ref": ref, "chart_px": chart_px, "tick_cands": tick_cands,
-            "levels_seen": [lb["v"] for lb in labels]}
+            "not_listed": not_listed, "levels_seen": [lb["v"] for lb in labels]}
 
 
 
@@ -22095,6 +22110,7 @@ def zones_recognize_post(post, data):
     """Recognise one stored post's screenshot -> its new zones (post is updated in place)."""
     caption = post.get("caption") or ""
     post["notes"], post["symbol"] = [], None
+    post.pop("not_listed", None)
     prices = {}
     try:
         prices = _zones_symbols_and_prices()
@@ -22111,7 +22127,10 @@ def zones_recognize_post(post, data):
             post["notes"].append(f"не распознал: {e}")
     if rec:
         post["symbol"], post["notes"] = rec["symbol"], post["notes"] + rec["notes"]
-        if not post["symbol"] and rec.get("tick_cands") and rec.get("chart_px"):
+        post["not_listed"] = rec.get("not_listed")
+        if post["not_listed"]:
+            post["notes"] = [n for n in post["notes"] if "нет на фьючерсах" in n]
+        if not post["symbol"] and not post["not_listed"] and rec.get("tick_cands") and rec.get("chart_px"):
             pick = zones_pick_by_post_price(rec["tick_cands"], rec["chart_px"], post["post_time"])
             if pick:
                 sym, px_post, err, sim = pick
@@ -22123,7 +22142,7 @@ def zones_recognize_post(post, data):
                 post["notes"].append(f"тикер прочитан неточно — по цене на момент поста ({px_post:.6g}, расхождение "
                                      f"{err * 100:.1f}%){' и названию' if sim >= 0.8 else ''} это {sym}, проверьте "
                                      f"(сменить — 🪙 во вкладке «Зоны»)")
-    if not post["symbol"] and caption:
+    if not post["symbol"] and caption and not post.get("not_listed"):
         m_ = re.search(r"\b([A-Z0-9]{2,15})(?:[/_-]?USDT)?\b", caption.upper())
         if m_ and (m_.group(1) + "_USDT") in prices:
             post["symbol"] = m_.group(1) + "_USDT"
@@ -22132,10 +22151,11 @@ def zones_recognize_post(post, data):
     if rec and post["symbol"]:
         for zr in rec["zones"]:
             new.append(zones_make(post, zr["side"], zr["levels"]))
-    elif rec and rec["zones"]:
+    elif rec and rec["zones"] and not post.get("not_listed"):
         post["pending"] = {"zones": rec["zones"], "ref": rec.get("ref")}   # waiting for the coin from the user
         if rec.get("tick_cands"):
             post["notes"].append("возможно: " + ", ".join(c["symbol"].replace("_USDT", "") for c in rec["tick_cands"][:5]))
+    post["notes"] = list(dict.fromkeys(post["notes"]))   # no repeated notes
     post["ok"] = bool(new)
     return new
 
@@ -22443,6 +22463,8 @@ def zones_tg_loop():
 
 def zones_post_summary(post, new):
     when = time.strftime("%d.%m %H:%M", time.localtime(post["post_time"]))
+    if not new and post.get("not_listed"):
+        return f"⏭ Пост от {when}: {post['not_listed']} нет на фьючерсах Gate — скрин пропущен."
     if not new and post.get("pending"):
         zl = "\n".join(f"• {'лонг' if z['side'] == 'long' else 'шорт'} " + " / ".join(f"{v:.6g}" for v in z["levels"])
                        for z in post["pending"]["zones"])
@@ -24795,12 +24817,12 @@ INDEX_HTML = """<!doctype html>
         </div>
         <input type="number" id="setAutotradeRiskPct" min="0.1" max="100" step="0.5" style="width:60px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 8px;border-radius:var(--r-xs);font-size:var(--fs);">
       </div>
-      <div class="settingRow subRow">
-        <div>
+      <div class="settingRow subRow" style="flex-wrap:wrap;">
+        <div style="flex:1 1 100%;">
           <div class="label">↳ Риск Neuro · S/R · P/R · Зоны</div>
           <div class="sub">свой % для каждого модуля (0.1–100); пустое поле — общий % выше. Бэктест «с $500» каждого модуля считает со своим %</div>
         </div>
-        <div style="display:flex;gap:6px;align-items:center;">
+        <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
           <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro" title="Neuro" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctSnr" min="0.1" max="100" step="0.5" placeholder="S/R" title="S/R Zones" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctPrv" min="0.1" max="100" step="0.5" placeholder="P/R" title="Peak Reversal" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
@@ -27723,6 +27745,10 @@ if (settingsSearchInput) {
 }
 
 document.getElementById('settingsBtn').onclick = async () => {
+  // every section starts collapsed (and the search is cleared) on each opening
+  if (settingsSearchInput && settingsSearchInput.value) { settingsSearchInput.value = ''; settingsSearchInput.oninput(); }
+  document.querySelectorAll('#settingsBody details').forEach(d => { d.open = false; });
+  const sb = document.getElementById('settingsBody'); if (sb) sb.scrollTop = 0;
   settingsModal.classList.add('open');
   await loadSettings();
   await refreshGateApiStatus();
