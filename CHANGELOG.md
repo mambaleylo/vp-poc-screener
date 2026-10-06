@@ -18597,3 +18597,12 @@ v0.99.458 - Telegram commands (only from the configured chat, a fixed list, neve
          button and the commands.
 v0.99.459 - Tab order: Peak Reversal, 🎯 Зоны, 🧠 Neuro, S/R Zones, Volume,
          Автоторговля, Симулятор; the page opens on Peak Reversal (the first).
+v0.99.460 - Зоны / learned stop & take: honest now. The rules (entry line × stop
+         beyond the zone × take) are chosen on the earlier 2/3 of the finished
+         zones (by post time) and checked on the later 1/3; they replace the
+         defaults only when the check is positive and not worse than the
+         defaults on the same zones (before: the best of the grid on all zones
+         at once, from 8 zones — an over-fitted pick). Takes up to +20% (15, 20
+         added). For each rule: how far the price went on after the take
+         (median, share of trades with +2% / +5% more); the tab shows the pick,
+         its check, the defaults' check and the verdict.

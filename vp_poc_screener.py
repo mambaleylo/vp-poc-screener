@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.459"
+APP_VERSION = "0.99.460"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21194,7 +21194,7 @@ ZONES_IMG_DIR = os.path.join(os.path.dirname(ZONES_FILE), "zones_img")
 ZONES_DEFAULT = {"entry": 0, "buf": 1.0, "tp": 4.0}    # 1st line, stop 1% beyond the far line, take +4%
 ZONES_GRID_ENTRY = (0, 1)
 ZONES_GRID_BUF = (0.3, 0.6, 1.0, 1.5, 2.5)
-ZONES_GRID_TP = (2.0, 3.0, 4.0, 5.0, 7.0, 10.0)
+ZONES_GRID_TP = (2.0, 3.0, 4.0, 5.0, 7.0, 10.0, 15.0, 20.0)   # v0.99.460 — up to +20%
 ZONES_LEARN_MIN = 8          # finished zones with an entry needed before the learned values replace the defaults
 ZONES_FEE = 0.001
 ZONES_POLL_SEC = 20
@@ -21895,9 +21895,17 @@ def zone_sim(cs, z, entry_idx, buf, tp, start, end):
         else:
             continue
         risk = abs(fill - sl)
+        after = None
+        if res == "WIN":   # v0.99.460 — how far it went on after our take (till the window ends)
+            rest = [x for x in cs if c["time"] < x["time"] < end]
+            if rest:
+                ext = max(x["high"] for x in rest) if s > 0 else min(x["low"] for x in rest)
+                after = max(0.0, s * (ext - tpp) / fill * 100)
+            else:
+                after = 0.0
         return {"r": s * (px - fill) / risk - ZONES_FEE * fill / risk, "fill": fill, "sl": sl, "tp": tpp,
                 "t_in": t_in, "t_out": c["time"], "result": res,
-                "pct": (s * (px - fill) / fill - ZONES_FEE) * 100}
+                "pct": (s * (px - fill) / fill - ZONES_FEE) * 100, "after": after}
     if fill is None:
         return None
     last = [c for c in cs if start <= c["time"] < end]
@@ -21943,8 +21951,12 @@ def zones_learn():
         zs = [dict(z) for z in ZONES["zones"] if z.get("status") != "deleted" and not z.get("own")]
     finished = [z for z in zs if z.get("status") in ("old", "closed", "broken", "expired")
                 or now >= z["post_time"] + ZONES_MAX_DAYS * 86400]
+    finished.sort(key=lambda z: z["post_time"])
+    n_fit = (len(finished) * 2) // 3   # v0.99.460 — rules chosen on the earlier 2/3, checked on the later 1/3
+    fit_ids = {id(z) for z in finished[:n_fit]}
     cache = {}
     grid = {}
+    grid_fit, grid_chk, after = {}, {}, {}
     paths = []
     for z in finished:
         end = min(now, z["post_time"] + ZONES_MAX_DAYS * 86400)
@@ -21963,6 +21975,9 @@ def zones_learn():
                     r = zone_sim(cs, z, e, b, tp, z["post_time"], end)
                     if r is not None:
                         grid.setdefault((e, b, tp), []).append(r["r"])
+                        (grid_fit if id(z) in fit_ids else grid_chk).setdefault((e, b, tp), []).append(r["r"])
+                        if r.get("after") is not None:
+                            after.setdefault((e, b, tp), []).append(r["after"])
     rows = []
     for (e, b, tp), rs in grid.items():
         rows.append({"entry": e, "buf": b, "tp": tp, "n": len(rs), "avg_r": round(sum(rs) / len(rs), 3),
@@ -21971,10 +21986,31 @@ def zones_learn():
         rows_sel = [r for r in rows if abs(r["tp"] - float(ZONES_TP_PCT)) < 1e-9] or rows
     else:
         rows_sel = rows
-    ok = [r for r in rows_sel if r["n"] >= ZONES_LEARN_MIN]
-    best = max(ok, key=lambda r: (r["avg_r"], -r["buf"])) if ok else None
+    avg = lambda xs: round(sum(xs) / len(xs), 3) if xs else None
+    for r in rows:
+        k = (r["entry"], r["buf"], r["tp"])
+        f, c = grid_fit.get(k, []), grid_chk.get(k, [])
+        r.update({"fit_n": len(f), "fit_r": avg(f), "chk_n": len(c), "chk_r": avg(c)})
+        a = sorted(after.get(k, []))
+        if a:
+            r["after_med"] = round(a[len(a) // 2], 2)
+            r["after_2"] = round(100 * sum(1 for x in a if x >= 2) / len(a), 1)
+            r["after_5"] = round(100 * sum(1 for x in a if x >= 5) / len(a), 1)
     d = ZONES_DEFAULT
     dflt = next((r for r in rows if r["entry"] == d["entry"] and r["buf"] == d["buf"] and r["tp"] == d["tp"]), None)
+    ok = [r for r in rows_sel if r["fit_n"] >= ZONES_LEARN_MIN]
+    pick = max(ok, key=lambda r: (r["fit_r"], -r["buf"])) if ok else None   # chosen without the check part
+    best, verdict = None, None
+    if pick:
+        dchk = (dflt or {}).get("chk_r")
+        if pick["chk_n"] < 5:
+            verdict = f"подобрано на {pick['fit_n']} зонах, на проверке пока мало зон ({pick['chk_n']} из 5) — работают правила по умолчанию"
+        elif pick["chk_r"] is not None and pick["chk_r"] > 0 and (dchk is None or pick["chk_r"] >= dchk):
+            best = pick
+            verdict = f"подтвердилось на проверке: {pick['chk_r']:+.2f}R на {pick['chk_n']} более поздних зонах"
+        else:
+            verdict = (f"не подтвердилось на проверке ({pick['chk_r']:+.2f}R на {pick['chk_n']} зонах"
+                       + (f", по умолчанию {dchk:+.2f}R" if dchk is not None else "") + ") — работают правила по умолчанию")
     touched = [p for p in paths if p.get("touched")]
     med = lambda xs: sorted(xs)[len(xs) // 2] if xs else None
     stats = {
@@ -21986,8 +22022,9 @@ def zones_learn():
                   for x in (2, 3, 5, 10)},
         "beyond_far": round(sum(1 for p in touched if p["beyond_far"]) / len(touched) * 100, 1) if touched else None,
     }
-    learned = {"at": now, "n": best["n"] if best else 0, "best": best, "default": dflt,
-               "top": sorted(ok, key=lambda r: -r["avg_r"])[:6]}
+    learned = {"at": now, "n": best["n"] if best else 0, "best": best, "default": dflt, "pick": pick,
+               "verdict": verdict, "fit_zones": n_fit, "chk_zones": len(finished) - n_fit,
+               "top": sorted(ok, key=lambda r: -(r["fit_r"] or -99))[:6]}
     with _zones_lock:
         ZONES["learned"], ZONES["stats"] = learned, stats
     zones_save()
@@ -27901,7 +27938,10 @@ async function refreshZones() {
     const r = st.reach || {};
     stats = `<div style="padding:8px 10px;margin-bottom:8px;background:var(--inset);border-radius:var(--r-sm);font-size:var(--fs-sm);">
       <b>Статистика</b> по ${st.finished} отработанным зонам: цена дошла до 1-й линии в ${st.touched} · закол за 1-ю линию: медиана ${st.depth_median}%, у 80% не глубже ${st.depth_p80}% · дальнюю линию пробивала в ${st.beyond_far}% · ход в сторону зоны после касания: медиана +${st.run_median}%, +2% — ${r['2']}%, +3% — ${r['3']}%, +5% — ${r['5']}%, +10% — ${r['10']}% случаев
-      ${lr.best ? `<div style="margin-top:4px;">лучшие правила: линия ${lr.best.entry + 1}, стоп ${lr.best.buf}%, тейк +${lr.best.tp}% → <b class="${lr.best.avg_r > 0 ? 'win' : 'loss'}">${lr.best.avg_r > 0 ? '+' : ''}${lr.best.avg_r}R</b> на сделку, WR ${lr.best.wr}% (${lr.best.n} сделок)${lr.default ? ` · правила по умолчанию: ${lr.default.avg_r > 0 ? '+' : ''}${lr.default.avg_r}R (${lr.default.n})` : ''}</div>` : '<div class="dim">для подбора правил пока мало зон со входом</div>'}
+      ${(lr.pick || lr.best) ? (() => { const b = lr.pick || lr.best, sg = v => v == null ? '—' : (v > 0 ? '+' : '') + v + 'R';
+        return `<div style="margin-top:4px;">подбор (ранние ${lr.fit_zones} зон): линия ${b.entry + 1}, стоп ${b.buf}%, тейк +${b.tp}% → <b>${sg(b.fit_r)}</b> (${b.fit_n} сделок) · проверка (поздние ${lr.chk_zones}): <b class="${(b.chk_r || 0) > 0 ? 'win' : 'loss'}">${sg(b.chk_r)}</b> (${b.chk_n})${lr.default ? ` · по умолчанию на проверке: ${sg(lr.default.chk_r)}` : ''}</div>
+        <div>${lr.verdict || ''}</div>
+        ${b.after_med != null ? `<div>после тейка цена шла дальше: медиана +${b.after_med}% · ещё +2% и больше — в ${b.after_2}% сделок, +5% — в ${b.after_5}%</div>` : ''}`; })() : '<div class="dim">для подбора правил пока мало зон со входом</div>'}
       <button onclick="zonesRelearn()" style="margin-top:6px;background:var(--ctl);border:none;color:var(--tx);padding:4px 10px;border-radius:var(--r-xs);">↻ пересчитать</button></div>`;
   }
   const ap = d.approach || {};
