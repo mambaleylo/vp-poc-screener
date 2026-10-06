@@ -18595,3 +18595,5 @@ v0.99.458 - Telegram commands (only from the configured chat, a fixed list, neve
          перезапуск занял N с". The Telegram offset is saved before a restart,
          so a command is never repeated. Shared download / restart code for the
          button and the commands.
+v0.99.459 - Tab order: Peak Reversal, 🎯 Зоны, 🧠 Neuro, S/R Zones, Volume,
+         Автоторговля, Симулятор; the page opens on Peak Reversal (the first).

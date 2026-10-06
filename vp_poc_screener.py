@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.458"
+APP_VERSION = "0.99.459"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -25997,10 +25997,10 @@ INDEX_HTML = """<!doctype html>
   <div id="healthBanner"></div>
 </header>
 <div class="tabs">
-  <div class="tab active" data-tab="neuro" style="color:var(--neuro);">🧠 Neuro</div>
-  <div class="tab" data-tab="snr" style="color:var(--snr);">S/R Zones</div>
-  <div class="tab" data-tab="prv" style="color:var(--prv);">Peak Reversal</div>
+  <div class="tab active" data-tab="prv" style="color:var(--prv);">Peak Reversal</div>
   <div class="tab" data-tab="zones" style="color:#4caf50;">🎯 Зоны</div>
+  <div class="tab" data-tab="neuro" style="color:var(--neuro);">🧠 Neuro</div>
+  <div class="tab" data-tab="snr" style="color:var(--snr);">S/R Zones</div>
   <div class="tab" data-tab="signals">Volume</div>
   <div class="tab" data-tab="autotrade">Автоторговля</div>
   <div class="tab" data-tab="simulator">Симулятор</div>
@@ -26019,9 +26019,9 @@ INDEX_HTML = """<!doctype html>
   <div id="mirrorPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="emaBullPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="amdPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
-  <div id="neuroPanel" style="display:block;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="neuroPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="snrPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
-  <div id="prvPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="prvPanel" style="display:block;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="zonesPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="nqPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
@@ -26451,7 +26451,7 @@ const fmtTimeWithDate = (t) => {
   return d.toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'});
 };
 
-let activeTab = 'neuro';   // v0.99.402 — MSNR removed (was the default tab)
+let activeTab = 'prv';   // v0.99.459 — tab order: P/R, Зоны, Neuro, S/R… (the first one opens)
 
 function toggleHints() {
   const hidden = document.body.classList.toggle('hints-hidden');
