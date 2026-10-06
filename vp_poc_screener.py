@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.449"
+APP_VERSION = "0.99.450"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22720,6 +22720,55 @@ def _zut_local_only():
         return jsonify({"ok": False, "error": "только с этого телефона (http://127.0.0.1)"}), 403
 
 
+SELF_UPDATE_URL = "https://raw.githubusercontent.com/mambaleylo/vp-poc-screener/main/vp_poc_screener.py"
+
+
+@app.route("/api/self_update", methods=["POST"])
+def api_self_update():
+    """v0.99.450 — the button version of the Termux command: download the main
+    file from GitHub, check that it is a whole, compiling bot, swap it in place
+    of this file (the old one kept as .bak) and restart this same process with
+    the same arguments and environment. Only from this phone (127.0.0.1)."""
+    if request.remote_addr not in ("127.0.0.1", "::1"):
+        return jsonify({"ok": False, "error": "только с этого телефона (http://127.0.0.1)"}), 403
+    try:
+        r = requests.get(SELF_UPDATE_URL, params={"nocache": int(time.time())}, timeout=60)
+        r.raise_for_status()
+        code = r.content
+        m_ = re.search(rb'^APP_VERSION = "([^"]+)"', code, re.M)
+        if not m_ or b"app.run(" not in code or len(code) < 100000:
+            return jsonify({"ok": False, "error": "скачанный файл не похож на бота — оставил текущую версию"}), 502
+        compile(code, "vp_poc_screener.py", "exec")   # a broken download never replaces a working bot
+        new_version = m_.group(1).decode()
+        me = os.path.abspath(__file__)
+        tmp = me + ".new"
+        with open(tmp, "wb") as f:
+            f.write(code)
+        try:
+            shutil.copy2(me, me + ".bak")
+        except OSError:
+            pass
+        os.replace(tmp, me)
+    except SyntaxError as e:
+        return jsonify({"ok": False, "error": f"в скачанной версии ошибка ({e}) — оставил текущую"}), 502
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"не скачал: {e}"}), 502
+
+    def _restart():
+        time.sleep(1.5)   # let this answer reach the page
+        try:
+            zones_save()
+        except Exception:
+            pass
+        # the web server's listening socket is inheritable: close every descriptor
+        # but stdin/out/err, or the new process finds its own port taken
+        os.closerange(3, 65536)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+    threading.Thread(target=_restart, daemon=True).start()
+    return jsonify({"ok": True, "old_version": APP_VERSION, "new_version": new_version,
+                    "same": new_version == APP_VERSION})
+
+
 @app.route("/api/zones/ut/status")
 def api_zut_status():
     cfg = _ZUT["cfg"]
@@ -24900,6 +24949,7 @@ INDEX_HTML = """<!doctype html>
     <div class="hdrRow"><span class="hdrLbl">Симулятор</span><button id="resetSimulatorBtn" class="btnDanger">🗑 Сбросить</button></div>
     <div class="hdrRow"><span class="hdrLbl">Авто-тюнинг</span><button id="resetRiskAutotuneBtn" class="btnDanger">🗑 Сбросить</button></div>
     <div class="hdrRow"><span class="hdrLbl">Ошибки</span><button id="clearErrorsBtn" class="btnDanger">🗑 Очистить</button></div>
+    <div class="hdrRow"><span class="hdrLbl">Бот</span><button onclick="selfUpdate()" class="btnNeutral">⬇️ Обновить и перезапустить</button></div>
   </div>
   <div id="status"></div>
   <div id="overview" class="dim" style="margin-top:4px;"></div>
@@ -26948,6 +26998,22 @@ async function zutLogout() {
   if (!confirm('Выйти из аккаунта? Сессия будет завершена и в Telegram (Настройки → Устройства).')) return;
   await zutPostJson('/api/zones/ut/logout', {});
   refreshZones();
+}
+// v0.99.450 — the same as the Termux command: fresh file from GitHub, then restart
+async function selfUpdate() {
+  if (!confirm('Скачать последнюю версию с GitHub и перезапустить бота? Страница обновится сама примерно через 20–40 секунд.')) return;
+  let r;
+  try { r = await (await fetch('/api/self_update', {method: 'POST'})).json(); } catch (e) { return alert('ошибка сети'); }
+  if (!r.ok) return alert(r.error || 'не получилось');
+  alert(r.same ? `Уже последняя версия (${r.new_version}) — перезапускаю.` : `Обновление ${r.old_version} → ${r.new_version}, перезапускаю.`);
+  const t0 = Date.now();
+  const wait = async () => {
+    await new Promise(res => setTimeout(res, 3000));
+    try { const x = await fetch('/', {cache: 'no-store'}); if (x.ok) return location.reload(); } catch (e) {}
+    if (Date.now() - t0 < 180000) return wait();
+    alert('Бот не поднялся за 3 минуты — посмотрите Termux.');
+  };
+  wait();
 }
 async function zonesTrainMode(on) {
   if (on && !confirm('Режим обучения: новые скрины (пересланные и загруженные) пойдут только в статистику — без слежения, уведомлений и сделок. Включить?')) return;
@@ -29625,4 +29691,15 @@ if __name__ == "__main__":
     port = int(os.environ.get("VP_PORT", 8080))
     tg_status = "настроен" if (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) else "не настроен"
     print(f"VP-POC Screener v{APP_VERSION} — http://127.0.0.1:{port} — Telegram: {tg_status}")
+    import socket as _socket
+    for _i in range(30):   # v0.99.450 — after a restart the old process may hold the port a moment longer
+        _t = _socket.socket(_socket.AF_INET, _socket.SOCK_STREAM)
+        _t.setsockopt(_socket.SOL_SOCKET, _socket.SO_REUSEADDR, 1)
+        try:
+            _t.bind(("0.0.0.0", port))
+            break
+        except OSError:
+            time.sleep(1)
+        finally:
+            _t.close()
     app.run(host="0.0.0.0", port=port, threaded=True)

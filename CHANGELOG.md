@@ -18496,3 +18496,12 @@ v0.99.449 - Зоны OCR (PEPE screenshot: "метка 0 не сходится �
          axis' usual number of decimals comes from labels and ticks; a price
          taken from the line keeps at least 5 significant digits (it was
          rounded to 0 decimals = 0).
+v0.99.450 - 🛠 menu → "Бот: ⬇️ Обновить и перезапустить" — the button version of
+         the Termux update command: downloads vp_poc_screener.py from GitHub
+         main, checks it is a whole compiling bot (APP_VERSION, app.run, size,
+         compile()), keeps the old file as .bak, replaces itself and restarts
+         the same process (same arguments and environment) via execv after
+         closing every inherited descriptor (the server socket would keep the
+         port busy). On start the bot waits up to 30 s for its port. The page
+         polls every 3 s and reloads itself when the bot answers again. Only
+         from the phone itself (127.0.0.1).
