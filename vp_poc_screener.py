@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.475"
+APP_VERSION = "0.99.476"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -28148,7 +28148,7 @@ function zonePostBlocks(list) {
       <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">
         <div><b>${coin}</b> <span class="dim">· пост ${zdate(z0.post_time)} · зон: ${g.length}</span></div>
         <div style="white-space:nowrap;">
-          ${z0.own ? `<span class="dim">🔎 наш поиск · оценка ${z0.own_score}</span>` : `${z0.post_id ? `<a href="/api/zones/img/${z0.post_id}" target="_blank" style="color:var(--acc);font-size:var(--fs-sm);">скрин</a>` : ''}
+          ${z0.own ? `<span class="dim">🔎 наш поиск · оценка ${z0.own_score}</span>` : `${z0.post_id ? `<a href="#" onclick="zoneShot('${z0.post_id}');return false;" style="color:var(--acc);font-size:var(--fs-sm);">скрин</a>` : ''}
           <button onclick="zonesCoin('${z0.id}', '${(z0.symbol || '').replace('_USDT', '')}')" title="сменить монету поста" style="${btn}margin-left:4px;">🪙</button>`}
           ${z0.post_id && !z0.own ? `<button onclick="zonesReparse('${z0.post_id}')" title="распознать пост заново" style="${btn}">↻</button>
           <button onclick="zonesDelPost('${z0.post_id}')" title="удалить пост и все его зоны" style="background:var(--neg-bg);border:none;color:var(--neg);padding:3px 8px;border-radius:var(--r-xs);">🗑</button>` : ''}
@@ -28204,7 +28204,7 @@ async function refreshZones() {
   const trn = pub.filter(z => z.train && !(z.status === 'watch' || z.status === 'in_trade'));
   const arch = pub.filter(z => !z.train && !(z.status === 'watch' || z.status === 'in_trade'));
   window._zTrain = !!d.train_mode;
-  const bad = (d.posts || []).filter(x => !x.ok).slice(0, 10).map(x => `<div style="font-size:var(--fs-sm);margin-bottom:4px;">⚠️ пост ${zdate(x.post_time)}${x.symbol ? ' · ' + x.symbol.replace('_USDT', '') : ''}: ${[...new Set(x.notes || [])].join('; ') || 'не распознан'} · <a href="/api/zones/img/${x.id}" target="_blank" style="color:var(--acc);">скрин</a> · <a href="#" onclick="zonesAdd('${x.id}', '${x.symbol || ''}');return false;" style="color:var(--acc);">добавить зону</a> ${x.pending ? ` · <a href="#" onclick="zonesSetSym('${x.id}');return false;" style="color:var(--pos);font-weight:700;">указать монету (зон: ${x.pending.zones.length})</a>` : ''} · <a href="#" onclick="zonesReparse('${x.id}');return false;" style="color:var(--acc);">↻ распознать заново</a> · <a href="#" onclick="zonesDelPost('${x.id}');return false;" style="color:var(--neg);">удалить</a></div>`).join('');
+  const bad = (d.posts || []).filter(x => !x.ok).slice(0, 10).map(x => `<div style="font-size:var(--fs-sm);margin-bottom:4px;">⚠️ пост ${zdate(x.post_time)}${x.symbol ? ' · ' + x.symbol.replace('_USDT', '') : ''}: ${[...new Set(x.notes || [])].join('; ') || 'не распознан'} · <a href="#" onclick="zoneShot('${x.id}');return false;" style="color:var(--acc);">скрин</a> · <a href="#" onclick="zonesAdd('${x.id}', '${x.symbol || ''}');return false;" style="color:var(--acc);">добавить зону</a> ${x.pending ? ` · <a href="#" onclick="zonesSetSym('${x.id}');return false;" style="color:var(--pos);font-weight:700;">указать монету (зон: ${x.pending.zones.length})</a>` : ''} · <a href="#" onclick="zonesReparse('${x.id}');return false;" style="color:var(--acc);">↻ распознать заново</a> · <a href="#" onclick="zonesDelPost('${x.id}');return false;" style="color:var(--neg);">удалить</a></div>`).join('');
   setPanelHtml(panel, `${warn}
     <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
       <label onclick="window._zUp = Date.now()" style="background:var(--acc);color:#000;padding:8px 12px;border-radius:var(--r-sm);cursor:pointer;">📷 Загрузить скрин<input type="file" accept="image/*" onchange="zonesUpload(this)" style="display:none;"></label>
@@ -28478,6 +28478,33 @@ if ('serviceWorker' in navigator) { try { navigator.serviceWorker.register('/sw.
     if (ss === '1' && typeof toggleScreensaver === 'function' && !(typeof _ssActive !== 'undefined' && _ssActive)) toggleScreensaver();
   }, 1500);
 })();
+// v0.99.476 — the screenshot opens over the page (not a separate page): in the
+// installed app, Back used to close that page and the whole app with it. Now
+// Back / a tap / ✕ close just the picture.
+function zoneShot(pid) {
+  let box = document.getElementById('zoneShotBox');
+  if (!box) {
+    box = document.createElement('div');
+    box.id = 'zoneShotBox';
+    box.style.cssText = 'position:fixed;inset:0;z-index:10000;background:rgba(0,0,0,.92);display:flex;align-items:center;justify-content:center;overflow:auto;';
+    box.innerHTML = '<img id="zoneShotImg" style="max-width:100%;max-height:100%;object-fit:contain;touch-action:pinch-zoom;">'
+      + '<button onclick="zoneShotClose()" style="position:fixed;top:12px;right:12px;background:rgba(255,255,255,.15);color:#fff;border:none;border-radius:20px;width:40px;height:40px;font-size:20px;">✕</button>';
+    box.addEventListener('click', e => { if (e.target === box) zoneShotClose(); });
+    document.body.appendChild(box);
+  }
+  document.getElementById('zoneShotImg').src = '/api/zones/img/' + pid;
+  box.style.display = 'flex';
+  window._zUp = Date.now();   // no tab rebuild under the picture
+  try { history.pushState({zoneShot: 1}, ''); } catch (e) {}
+}
+function zoneShotClose(fromBack) {
+  const box = document.getElementById('zoneShotBox');
+  if (!box || box.style.display === 'none') return;
+  box.style.display = 'none';
+  window._zUp = 0;
+  if (!fromBack) { try { if (history.state && history.state.zoneShot) history.back(); } catch (e) {} }
+}
+window.addEventListener('popstate', () => zoneShotClose(true));
 async function zonesTrainMode(on) {
   if (on && !confirm('Режим обучения: новые скрины (пересланные и загруженные) пойдут только в статистику — без слежения, уведомлений и сделок. Включить?')) return;
   zonesPost('/api/zones/train_mode', {on});

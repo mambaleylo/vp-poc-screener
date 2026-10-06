@@ -18700,3 +18700,7 @@ v0.99.475 - Зоны OCR: an index in the legend (BTC.D — Bitcoin dominance, U
          post skipped with a message; before, the coin was guessed by name and a
          price scaled ×1000 (BTC.D ~59 matched BTC ~59 000). W read as "VV" is
          tried as W too.
+v0.99.476 - Зоны: "скрин" opens the picture over the page instead of a separate
+         page — in the installed app, Back closed that page and the whole app.
+         Now Back (button or gesture), a tap beside the picture or ✕ close just
+         the picture; pinch-zoom works.
