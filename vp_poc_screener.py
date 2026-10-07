@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.504"
+APP_VERSION = "0.99.505"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -29532,13 +29532,17 @@ function zonesCoin(id, cur) {
   if (s) zonesPost('/api/zones/zone', {id, symbol: s});
 }
 // v0.99.452 — our own zone finder: learning progress and the exam vs the public's posts
-function ownSpark(curve) {
+function ownSpark(curve) {   // v0.99.505 — full width, with its scale and a caption
   if (!curve || curve.length < 2) return '';
-  const w = 220, h = 40, n = curve.length;
+  const w = 300, h = 60, n = curve.length;
   const pts = curve.map((v, i) => `${(i / (n - 1) * w).toFixed(1)},${(h - v / 100 * h).toFixed(1)}`).join(' ');
-  return `<svg width="${w}" height="${h}" viewBox="0 0 ${w} ${h}" style="display:block;margin:4px 0;background:var(--card);border-radius:4px;">
-    <line x1="0" y1="${h / 2}" x2="${w}" y2="${h / 2}" stroke="var(--line)" stroke-dasharray="3 3"/>
-    <polyline points="${pts}" fill="none" stroke="var(--acc)" stroke-width="2"/></svg>`;
+  return `<div style="margin:8px 0 2px;" class="dim">Как менялась доля совпадений по мере обучения (слева — первые посты, справа — сейчас):</div>
+    <div style="position:relative;"><svg viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" style="display:block;width:100%;height:70px;background:var(--card);border-radius:4px;">
+    <line x1="0" y1="${h / 2}" x2="${w}" y2="${h / 2}" stroke="var(--line-2)" stroke-dasharray="3 3" vector-effect="non-scaling-stroke"/>
+    <polyline points="${pts}" fill="none" stroke="var(--acc)" stroke-width="2" vector-effect="non-scaling-stroke"/></svg>
+    <span class="dim" style="position:absolute;right:4px;top:2px;font-size:var(--fs-xs);">100%</span>
+    <span class="dim" style="position:absolute;right:4px;top:28px;font-size:var(--fs-xs);">50%</span>
+    <span class="dim" style="position:absolute;right:4px;bottom:2px;font-size:var(--fs-xs);">0%</span></div>`;
 }
 function ownHtml(d, ownZ) {
   const o = d.own || {}, ex = d.own_exams || {};
@@ -29551,10 +29555,11 @@ function ownHtml(d, ownZ) {
   const scan = o.last_scan ? `последний скан ${zdate(o.last_scan.t)}: ${o.last_scan.coins} монет, новых зон ${o.last_scan.new}` : 'скан ещё не запускался';
   return `<div class="zcard" style="font-size:var(--fs-sm);">
     <div class="zh">🔎 Наш поиск зон</div> ${o.scan_on ? '' : '<span class="loss">(выключен в настройках)</span>'}
-    <div style="margin-top:4px;">Обучение: ${o.model ? `<span class="win">модель обучена</span> на ${o.model.n} примерах (совпадений с пабликом ${o.model.pos})` : `набрано совпавших зон ${o.pos || 0} из ${need} — до этого правила по умолчанию`}</div>
-    ${bar(learnPct, 'var(--acc)')}
+    <div class="dim" style="margin-top:2px;">Бот сам ищет зоны по свечам 40 монет и учится находить такие же, как у автора: перед каждым постом автора он смотрит, были ли зоны автора среди его лучших трёх кандидатов.</div>
+    <div style="margin-top:6px;">Обучение: ${o.model ? `<span class="win">модель обучена</span> на ${o.model.n} примерах (совпадений с пабликом ${o.model.pos})` : `набрано совпавших зон ${o.pos || 0} из ${need} — до этого правила по умолчанию`}</div>
+    ${bar(learnPct, 'var(--acc)')}<div class="dim" style="font-size:var(--fs-xs);margin-top:-2px;">↑ готовность модели (нужно ${need} совпавших зон, дальше она дообучается на каждом новом посте)</div>
     <div>Совпадения с пабликом: <b>${o.recall == null ? '—' : o.recall + '%'}</b> (${o.hits || 0} из ${o.exams || 0} зон, наш топ-3)${o.err_median != null ? ` · разница уровней (медиана) ${o.err_median}%` : ''}${o.early ? ` · нашли раньше поста: ${o.early}` : ''}</div>
-    ${o.recall != null ? bar(o.recall, 'var(--pos)') : ''}
+    ${o.recall != null ? bar(o.recall, 'var(--pos)') + '<div class="dim" style="font-size:var(--fs-xs);margin-top:-2px;">↑ доля зон автора, которые бот нашёл сам до поста (честный экзамен: модель не видела этот пост)</div>' : ''}
     ${ownSpark(ex.curve)}
     ${(() => { const c = o.cmp; if (!c || !c.n || !c.author || !c.ours) return '<div>Результат на совпавших зонах: пока нет отработанных</div>';
       const row = (nm, x) => `<div>${nm}: <b>${sgn(x.avg_r)}</b> в среднем, медиана ${sgn(x.med_r)} · ${x.avg_pct > 0 ? '+' : ''}${x.avg_pct}% движения · входов ${x.entries}, WR ${x.wr == null ? '—' : x.wr + '%'} · стоп от входа ~${x.stop_med == null ? '—' : x.stop_med + '%'} · лучшая ${sgn(x.best_r)}</div>`;

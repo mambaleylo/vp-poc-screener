@@ -18913,3 +18913,7 @@ v0.99.504 - Зоны: whether the whole group has been studied is remembered on 
          only N days, or that there is no record yet (loads made before this version) with
          the advice to run "все" once — posts already taken are skipped without
          downloading them again.
+v0.99.505 - Зоны, "Наш поиск зон": the card explains itself — what the finder does, the
+         blue bar = the model's readiness, the green bar = the share of the author's zones
+         found before the post (the honest exam), and the recall curve is full width with
+         a 0 / 50 / 100% scale and a caption (it was a 220 px sparkline without labels).
