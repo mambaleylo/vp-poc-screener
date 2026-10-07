@@ -18814,3 +18814,17 @@ v0.99.492 - Зоны: an open limit locks margin on Gate (user: "лимитки 
          next limit — twice the coin's near-worst 1-minute range of the last 2 days
          (99.9th pct), 0.5–5% — and taken off when it leaves twice as far with nothing
          filled; placed again on the next approach (only the limits not yet taken).
+v0.99.493 - Зоны: restart safety and a "Состояние" block (user: "после перезапуска бот
+         ничего не терял... все действия сопровождались надписями... чтобы я понимал
+         что он живой"). The ladder's state (fills, real order ids, stop / take ids,
+         candle checkpoint) is saved right after real orders are placed and resumes
+         after a restart without duplicates (checked by a kill-and-reload test). Our
+         limits on the exchange that no saved ladder knows (a crash between placing and
+         saving, a timed-out request that did go through) are cancelled at the start and
+         hourly. A position whose stop the exchange refuses because the price is already
+         past it (a limit filled while the bot was off) is closed at the market. The tab
+         shows: the bot alive / the last price check, what came back from the disk after
+         the start, the history recount with its stage and progress bar (the tab
+         refreshes every 3 s meanwhile; "пересчитать" answers at once), the ladders
+         waiting / in a position / on the exchange / waiting for the price, the stray
+         orders check.

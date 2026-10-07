@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.492"
+APP_VERSION = "0.99.493"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22212,6 +22212,17 @@ def zone_path_stats(cs, z, start, end):
     return {"touched": True, "depth_pct": round(depth, 3), "run_pct": round(run, 3), "beyond_far": broke}
 
 
+ZONES_ACT = {}   # v0.99.493 — what the zones part is doing right now, for the tab (in memory)
+
+
+def zones_act(key, **kw):
+    """v0.99.493 — record a step of work so the tab can say the bot is alive and busy"""
+    with _zones_lock:
+        d = ZONES_ACT.setdefault(key, {})
+        d.update(kw)
+        d["t"] = time.time()
+
+
 def zones_learn():
     """v0.99.490 — no rule search any more (user: "проверку на зонах уберем,
     стоп будет всегда просто за зоной, тейк такой, который достигается в
@@ -22226,7 +22237,10 @@ def zones_learn():
                 or now >= z["post_time"] + ZONES_MAX_DAYS * 86400]
     finished.sort(key=lambda z: z["post_time"])
     cache, paths, runs = {}, [], []
-    for z in finished:
+    zones_act("learn", running=True, started=now, stage="свечи и статистика зон", done=0, total=len(finished))
+    for i_, z in enumerate(finished):
+        if i_ % 5 == 0:
+            zones_act("learn", done=i_)
         end = min(now, z["post_time"] + ZONES_MAX_DAYS * 86400)
         key = (z["symbol"], int(z["post_time"]) // 3600, int(end) // 3600)
         if key not in cache:
@@ -22259,7 +22273,10 @@ def zones_learn():
     for z in finished:
         groups.setdefault(zones_group_key(z), []).append(z)
     rs, aft, wins, stops, fills, legs = [], [], 0, 0, 0, 0
-    for g in sorted(groups.values(), key=lambda g: g[0]["post_time"]):
+    zones_act("learn", stage="лесенки лимиток по постам", done=0, total=len(groups))
+    for i_, g in enumerate(sorted(groups.values(), key=lambda g: g[0]["post_time"])):
+        if i_ % 5 == 0:
+            zones_act("learn", done=i_)
         z0 = g[0]
         end = min(now, z0["post_time"] + ZONES_MAX_DAYS * 86400)
         key = (z0["symbol"], int(z0["post_time"]) // 3600, int(end) // 3600)
@@ -22319,6 +22336,8 @@ def zones_learn():
     with _zones_lock:
         ZONES["learned"], ZONES["stats"] = learned, stats
     zones_save()
+    zones_act("learn", running=False, finished=time.time(), took=round(time.time() - now, 1),
+              stage=None, summary=f"{res['n']} сделок, средний {res['avg_r'] if res['avg_r'] is not None else '—'}R")
     return learned
 
 
@@ -22541,7 +22560,8 @@ def zones_learn_loop():
         with _zones_lock:
             todo = [z for z in ZONES["zones"] if z.get("status") == "old" and z.get("result")
                     and z["result"].get("pct") is None and z.get("symbol")]
-        for z in todo:
+        for i_, z in enumerate(todo):
+            zones_act("learn", running=True, stage="дозаполняю историю зон", done=i_, total=len(todo), started=time.time())
             zones_replay_past(z)
         if todo:
             zones_save()
@@ -22551,10 +22571,13 @@ def zones_learn_loop():
         heartbeat("zones_learn_loop")
         try:
             zones_learn()
+            zones_act("learn", running=True, stage="движение к зоне", done=None, total=None)
             zones_approach_learn()
             zones_save()
+            zones_act("learn", running=False, stage=None, error=None)
         except Exception as e:
             log_error(f"zones_learn: {e}")
+            zones_act("learn", running=False, stage=None, error=str(e)[:200])
         _zones_learn_event.clear()
         # v0.99.488 — relearn when the rules were learned with another risk setting
         for _ in range(180):
@@ -23267,6 +23290,13 @@ def _zones_real_step(tr, pos_map):
                     r["sl_id"], changed = (o or {}).get("id"), True
                 except Exception as e:
                     log_error(f"zones ladder SL {sym}: {e}")
+                    # v0.99.493 — the price is already past the stop (e.g. a limit filled while
+                    # the bot was off): the exchange won't take the stop — close at the market
+                    px_ = (pos_map.get("_px") or {}).get(sym)
+                    if px_ and ((s > 0 and px_ <= tr["sl"]) or (s < 0 and px_ >= tr["sl"])):
+                        if _zones_close_real(sym, direction, "price past the stop"):
+                            zones_notify(f"🛑 {sym}: цена уже за стопом, стоп-ордер биржа не приняла — позиция закрыта по рынку")
+                            changed = True
             if avg:
                 tp = avg * (1 + s * tr["tp_pct"] / 100)
                 if not r.get("tp_id") or abs(tp - (r.get("tp_px") or 0)) / tp > 0.0005:
@@ -23366,6 +23396,7 @@ def _zones_ladder_tick(group, now, p, pos_map):
             rec = _zones_real_place(tr)
             if not tr.get("real"):
                 tr["arm_skip_at"] = now   # skipped / failed: not again for 10 minutes
+            zones_save()   # v0.99.493 — the order ids on disk at once
             tr["arm_dist"] = round(arm, 2)
             changed = True
         elif r and not r.get("seen") and not r.get("done") and dist > 2 * arm \
@@ -23531,14 +23562,51 @@ def zones_monitor_tick(last_track=0.0):
     return last_track
 
 
+def zones_orphan_sweep():
+    """v0.99.493 — limits of ours on the exchange that no saved ladder knows
+    (the bot died between placing and saving, or a timed-out request did go
+    through): cancelled, so nothing opens a position without a stop."""
+    with _zones_lock:
+        known = {str(l.get("id")) for z in ZONES["zones"] for l in (((z.get("trade") or {}).get("real") or {}).get("legs") or [])}
+    n = 0
+    with using_account("zones"):
+        for o in gate_signed_request("GET", "/futures/usdt/orders", query_string="status=open") or []:
+            if str(o.get("text") or "").startswith("t-vpzones") and str(o.get("id")) not in known:
+                try:
+                    gate_signed_request("DELETE", f"/futures/usdt/orders/{o['id']}")
+                    n += 1
+                except Exception as e:
+                    log_error(f"zones orphan cancel {o.get('contract')}: {e}")
+    zones_act("orphans", n=n, checked=time.time())
+    if n:
+        zones_notify(f"🧹 Зоны: снял {n} лимиток на бирже, о которых бот не знал (остались после сбоя)")
+    return n
+
+
 def zones_monitor_loop():
-    last_track = 0.0
+    last_track, last_sweep = 0.0, 0.0
+    with _zones_lock:   # v0.99.493 — what came back from the disk after the start
+        zs = ZONES["zones"]
+        lad = [z for z in zs if (z.get("trade") or {}).get("legs") and z["trade"].get("status") in ("PENDING", "OPEN")]
+        zones_act_boot = {"version": APP_VERSION, "zones": sum(1 for z in zs if z.get("status") in ("watch", "in_trade")),
+                          "ladders": len(lad), "positions": sum(1 for z in lad if z["trade"]["status"] == "OPEN"),
+                          "real": sum(1 for z in lad if (z["trade"].get("real") or {}).get("legs") and not z["trade"]["real"].get("done")),
+                          "posts": len(ZONES["posts"])}
+    zones_act("boot", **zones_act_boot)
     while True:
         heartbeat("zones_monitor_loop")
         try:
             last_track = zones_monitor_tick(last_track)
+            zones_act("monitor", ok=True, error=None)
         except Exception as e:
             log_error(f"zones_monitor_loop: {e}")
+            zones_act("monitor", ok=False, error=str(e)[:200])
+        if time.time() - last_sweep >= 3600 and GATE_API_KEY:
+            last_sweep = time.time()
+            try:
+                zones_orphan_sweep()
+            except Exception as e:
+                log_error(f"zones orphan sweep: {e}")
         time.sleep(ZONES_POLL_SEC)
 
 
@@ -24826,7 +24894,21 @@ def api_zones_status():
         learned, stats, tg_err = ZONES.get("learned"), ZONES.get("stats"), ZONES.get("tg_last_error")
     with _zones_lock:
         approach = ZONES.get("approach")
+        act = json.loads(json.dumps(ZONES_ACT, default=str))
+        mon_ok = ZONES.get("monitor_ok")
+    # v0.99.493 — what the ladders are doing now, for the "Состояние" block
+    lad = [z["trade"] for z in zones if (z.get("trade") or {}).get("legs")]
+    live = [t for t in lad if t.get("status") in ("PENDING", "OPEN")]
+    act["ladders"] = {"pending": sum(1 for t in live if t["status"] == "PENDING"),
+                      "open": sum(1 for t in live if t["status"] == "OPEN"),
+                      "on_exchange": sum(1 for t in live if (t.get("real") or {}).get("legs") and not t["real"].get("done")),
+                      "limits": sum(1 for t in live for l in ((t.get("real") or {}).get("legs") or []) if not l.get("done")),
+                      "waiting": sum(1 for t in live if not t.get("real") and not t.get("no_auto")),
+                      "no_auto": sum(1 for t in live if t.get("no_auto"))}
+    act["monitor_age"] = round(time.time() - mon_ok) if mon_ok else None
+    act["now"] = time.time()
     return jsonify({"posts": posts, "zones": zones, "learned": learned, "stats": stats, "params": zones_params(),
+                    "act": act,
                     "approach": approach, "autotrade_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
                     "deps": zones_deps(), "tg": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID), "tg_error": tg_err,
                     "autotrade": AUTOTRADE_ENABLED_ZONES, "max_days": ZONES_MAX_DAYS, "tp_user": ZONES_TP_PCT,
@@ -25067,6 +25149,7 @@ def api_zones_img(pid):
 
 @app.route("/api/zones/relearn", methods=["POST"])
 def api_zones_relearn():
+    zones_act("learn", running=True, stage="запуск пересчёта", done=None, total=None, error=None)   # v0.99.493
     _zones_learn_event.set()
     return jsonify({"ok": True})
 
@@ -26663,6 +26746,8 @@ INDEX_HTML = """<!doctype html>
   .pill.warn { background:var(--warn-bg); color:var(--warn); border-color:var(--warn-line); }
   .pill .dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
   /* v0.99.489 — Zones tab cards */
+  .zspin { display:inline-block; animation: zspin 1.2s linear infinite; }
+  @keyframes zspin { to { transform: rotate(360deg); } }
   .zsec { font-weight:700; font-size:var(--fs-md); margin:14px 0 8px; }
   .zcard { background:var(--inset); border:1px solid var(--line); border-radius:var(--r-sm); padding:10px 12px; margin-bottom:10px; font-size:var(--fs); line-height:1.45; }
   .zcard .zh { font-weight:700; font-size:var(--fs-md); margin-bottom:8px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
@@ -28809,6 +28894,35 @@ function zonePostBlocks(list) {
     </div>`;
   }).join('');
 }
+// v0.99.493 — "Состояние": the bot is alive, what it is doing right now
+function zStatusHtml(d) {
+  const a = d.act || {}, now = a.now || Date.now() / 1000;
+  const ago = t => { if (!t) return '—'; const s = Math.max(0, Math.round(now - t)); return s < 60 ? s + ' с назад' : s < 3600 ? Math.round(s / 60) + ' мин назад' : Math.round(s / 3600) + ' ч назад'; };
+  const hm = t => t ? new Date(t * 1000).toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'}) : '—';
+  const row = (icon, html) => `<div style="display:flex;gap:8px;align-items:flex-start;margin-top:5px;"><span style="width:18px;flex-shrink:0;text-align:center;">${icon}</span><div style="min-width:0;">${html}</div></div>`;
+  const out = [];
+  const m = a.monitor || {};
+  const mAge = m.t ? now - m.t : null;
+  if (mAge == null) out.push(row('⏳', 'мониторинг зон запускается…'));
+  else if (m.ok === false) out.push(row('🔴', `<span class="loss">мониторинг: ошибка</span> — ${m.error || ''} (повторяю каждые 20 с)`));
+  else if (mAge > 120) out.push(row('🔴', `<span class="loss">мониторинг молчит ${ago(m.t)}</span> — бот завис или выключен`));
+  else out.push(row('🟢', `бот работает · проверка цен ${ago(m.t)}`));
+  const b = a.boot;
+  if (b) out.push(row('🔁', `запущен ${hm(b.t)} (v${b.version}) · восстановлено с диска: активных зон ${b.zones}, лесенок ${b.ladders}${b.positions ? `, в позиции ${b.positions}` : ''}${b.real ? `, с ордерами на бирже ${b.real}` : ''}`));
+  const l = a.learn || {};
+  if (l.running) out.push(row('<span class="zspin">🔄</span>', `<b>идёт пересчёт истории</b>: ${l.stage || '…'}${l.total ? ` — ${l.done || 0} из ${l.total}` : ''}${l.total ? `<div style="height:5px;background:var(--card);border-radius:3px;overflow:hidden;margin-top:4px;"><div style="width:${Math.round(100 * (l.done || 0) / l.total)}%;height:100%;background:var(--acc);"></div></div>` : ''}`));
+  else if (l.error) out.push(row('⚠️', `<span class="loss">пересчёт не удался</span>: ${l.error} — повторю автоматически`));
+  else if (l.finished) out.push(row('✅', `история пересчитана в ${hm(l.finished)}${l.took != null ? ` за ${l.took} с` : ''}${l.summary ? ` · ${l.summary}` : ''} · следующий пересчёт — после новой отработанной зоны или через 30 мин`));
+  else out.push(row('⏳', 'пересчёт истории ещё не запускался после старта — начнётся в течение минуты'));
+  const L = a.ladders || {};
+  if (L.pending || L.open) out.push(row('💰', `лесенок: ждут налива ${L.pending || 0}, в позиции ${L.open || 0}` +
+      (d.autotrade ? ` · на бирже ${L.limits || 0} лимиток у ${L.on_exchange || 0} постов · ${L.waiting || 0} ждут подхода цены (маржа не занята)` : ' · автоторговля выкл — только отслеживаю') +
+      (L.no_auto ? ` · ${L.no_auto} только сигнал (доп. аргументы)` : '')));
+  else out.push(row('💤', 'активных лесенок нет — жду новых постов'));
+  const o = a.orphans;
+  if (o && o.checked) out.push(row('🧹', `проверка «лишних» ордеров на бирже ${ago(o.checked)}${o.n ? ` — снято ${o.n}` : ' — всё чисто'}`));
+  return `<div class="zcard"><div class="zh">📟 Состояние</div><div style="font-size:var(--fs-sm);">${out.join('')}</div></div>`;
+}
 async function refreshZones() {
   const panel = document.getElementById('zonesPanel');
   if (!panel || Date.now() - (window._zUp || 0) < 120000) return;   // a file dialog is open: don't rebuild the panel under it
@@ -28909,7 +29023,10 @@ async function refreshZones() {
   const postRow = x => `<div style="font-size:var(--fs-sm);margin-bottom:4px;">${isSkip(x) ? '⏭' : '⚠️'} пост ${zdate(x.post_time)}${x.symbol ? ' · ' + x.symbol.replace('_USDT', '') : ''}: ${[...new Set(x.notes || [])].join('; ') || 'не распознан'} · <a href="#" onclick="zoneShot('${x.id}');return false;" style="color:var(--acc);">скрин</a> ${x.pending ? ` · <a href="#" onclick="zonesSetSym('${x.id}');return false;" style="color:var(--pos);font-weight:700;">указать монету (зон: ${x.pending.zones.length})</a>` : ''} · <a href="#" onclick="zonesReparse('${x.id}');return false;" style="color:var(--acc);">↻ распознать заново</a> · <a href="#" onclick="zonesDelPost('${x.id}');return false;" style="color:var(--neg);">удалить</a></div>`;
   const bad = (badPosts.length ? `<details style="margin-bottom:6px;"><summary style="cursor:pointer;font-size:var(--fs-sm);">⚠️ распознано не полностью — ${badPosts.length} (нужна монета или проверка)</summary>${badPosts.slice(0, 40).map(postRow).join('')}</details>` : '')
     + (skipPosts.length ? `<details style="margin-bottom:6px;"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">⏭ пропущено, не по шаблону — ${skipPosts.length}</summary>${skipPosts.slice(0, 40).map(postRow).join('')}</details>` : '');
+  clearTimeout(window._zLearnT);   // while the history is being recounted: refresh every 3 s
+  if ((d.act || {}).learn && d.act.learn.running) window._zLearnT = setTimeout(refreshZones, 3000);
   setPanelHtml(panel, `${warn}
+    ${zStatusHtml(d)}
     ${summary}
     <div class="zsec">Активные зоны (${act.length})</div>
     ${act.length ? zonePostBlocks(act) : '<div class="dim" style="margin-bottom:10px;">нет — новые посты из группы появятся здесь</div>'}
@@ -29389,7 +29506,11 @@ async function zonesTrainMode(on) {
 }
 function zonesDel(id) { if (confirm('Удалить зону?')) zonesPost('/api/zones/zone', {id, delete: true}); }
 function zonesDelPost(pid) { if (confirm('Удалить пост и его зоны?')) zonesPost('/api/zones/post_delete', {post_id: pid}); }
-function zonesRelearn() { zonesPost('/api/zones/relearn', {}); }
+function zonesRelearn() {   // v0.99.493 — an answer at once, then the progress in "Состояние"
+  zonesPost('/api/zones/relearn', {});
+  try { document.querySelectorAll('button[onclick="zonesRelearn()"]').forEach(b => { b.disabled = true; b.textContent = '⏳ пересчёт запущен…'; }); } catch (e) {}
+  setTimeout(refreshZones, 1500);
+}
 function zonesSetSym(pid) {
   const s = prompt('Тикер монеты (например ZEN)', '');
   if (s) zonesPost('/api/zones/set_symbol', {post_id: pid, symbol: s});
