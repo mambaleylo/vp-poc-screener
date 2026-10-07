@@ -18785,3 +18785,12 @@ v0.99.489 - Зоны: the tab rewritten for reading on a phone. A summary card f
          candidates and how many are positive on both), "Движение к зоне", and the
          price-behaviour reference folded away; the sources (Telegram group, our finder)
          at the bottom. zones_learn() now stores risk_tab / cands / both_pos.
+v0.99.490 - Зоны: the rule search with the early/late check is removed (user: "проверку
+         на зонах уберем, стоп будет всегда просто за зоной, тейк такой, который
+         достигается в большинстве карточек"). Entry at the 1st line, stop 0.3% beyond
+         the far line (ZONES_STOP_BUF), take = the largest 0.5% step the price reached
+         after touching the 1st line in more than half of the finished zones (the
+         user's own take % still wins). The learner then reports that rule's plain
+         result on all zones (trades, takes/stops, WR, average R, worst streak), the
+         risk table on all trades and the auto-risk (full Kelly <= 50%). The tab's
+         "Подбор правил" card is replaced by "Стоп и тейк".

@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.489"
+APP_VERSION = "0.99.490"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21214,6 +21214,8 @@ ZONES_TP_PCT = None          # the user's own take, % from the entry (None = lea
 ZONES_FILE = os.environ.get("VP_ZONES_FILE", os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_zones_state.json"))
 ZONES_IMG_DIR = os.path.join(os.path.dirname(ZONES_FILE), "zones_img")
 ZONES_DEFAULT = {"entry": 0, "buf": 1.0, "tp": 4.0}    # 1st line, stop 1% beyond the far line, take +4%
+ZONES_STOP_BUF = 0.3   # v0.99.490 — the stop: just beyond the far line of the zone (% of price)
+ZONES_TP_MAX = 20.0   # the take found from the history is capped here
 ZONES_GRID_ENTRY = (0, 1)
 ZONES_GRID_BUF = (0.3, 0.6, 1.0, 1.5, 2.5)
 ZONES_GRID_TP = (2.0, 3.0, 4.0, 5.0, 7.0, 10.0, 15.0, 20.0)   # v0.99.460 — up to +20%
@@ -21995,9 +21997,10 @@ def zones_params():
         lr = ZONES.get("learned") or {}
     p = dict(ZONES_DEFAULT)
     src = "по умолчанию"
-    if lr.get("best") and lr.get("n", 0) >= ZONES_LEARN_MIN:
-        p.update({k: lr["best"][k] for k in ("entry", "buf", "tp")})
-        src = f"обучено на {lr['n']} зонах"
+    p["buf"] = ZONES_STOP_BUF   # v0.99.490 — the stop is always just beyond the zone
+    if lr.get("tp_auto"):   # the take the price reached in most of the finished zones
+        p["tp"] = lr["tp_auto"]
+        src = f"тейк по {lr.get('n', 0)} зонам"
     if ZONES_TP_PCT:
         p["tp"] = float(ZONES_TP_PCT)
     p["source"] = src
@@ -22125,20 +22128,19 @@ def zone_path_stats(cs, z, start, end):
 
 
 def zones_learn():
-    """Grid over every finished zone: entry line x stop beyond the zone x take.
-    Best = highest average R (fees included). Also the plain reaction stats."""
+    """v0.99.490 — no rule search any more (user: "проверку на зонах уберем,
+    стоп будет всегда просто за зоной, тейк такой, который достигается в
+    большинстве карточек"): entry at the 1st line, stop just beyond the far
+    line, take = the largest move the price made after touching the 1st line
+    in more than half of the finished zones. Then the plain result of that
+    rule on every zone, the risk table and the auto-risk."""
     now = time.time()
     with _zones_lock:
         zs = [dict(z) for z in ZONES["zones"] if z.get("status") != "deleted" and not z.get("own")]
     finished = [z for z in zs if z.get("status") in ("old", "closed", "broken", "expired")
                 or now >= z["post_time"] + ZONES_MAX_DAYS * 86400]
     finished.sort(key=lambda z: z["post_time"])
-    n_fit = (len(finished) * 2) // 3   # v0.99.460 — rules chosen on the earlier 2/3, checked on the later 1/3
-    fit_ids = {id(z) for z in finished[:n_fit]}
-    cache = {}
-    grid = {}
-    grid_fit, grid_chk, after = {}, {}, {}
-    paths = []
+    cache, paths, runs = {}, [], []
     for z in finished:
         end = min(now, z["post_time"] + ZONES_MAX_DAYS * 86400)
         key = (z["symbol"], int(z["post_time"]) // 3600, int(end) // 3600)
@@ -22147,90 +22149,62 @@ def zones_learn():
         cs = cache[key]
         if not cs:
             continue
-        paths.append(zone_path_stats(cs, z, z["post_time"], end))
-        for e in ZONES_GRID_ENTRY:
-            if e >= len(z["levels"]):
-                continue
-            for b in ZONES_GRID_BUF:
-                for tp in ZONES_GRID_TP:
-                    r = zone_sim(cs, z, e, b, tp, z["post_time"], end)
-                    if r is not None:
-                        grid.setdefault((e, b, tp), []).append(r["r"])
-                        (grid_fit if id(z) in fit_ids else grid_chk).setdefault((e, b, tp), []).append(r["r"])
-                        if r.get("after") is not None:
-                            after.setdefault((e, b, tp), []).append(r["after"])
-    rows = []
-    for (e, b, tp), rs in grid.items():
-        rows.append({"entry": e, "buf": b, "tp": tp, "n": len(rs), "avg_r": round(sum(rs) / len(rs), 3),
-                     "wr": round(sum(1 for x in rs if x > 0) / len(rs) * 100, 1), "sum_r": round(sum(rs), 2)})
+        ps = zone_path_stats(cs, z, z["post_time"], end)
+        paths.append(ps)
+        if ps.get("touched"):
+            runs.append((z, cs, end))
+    touched = [p for p in paths if p.get("touched")]
+    # the take: the largest step (0.5%) the price reached in more than half of the touched zones
+    tp_auto, tp_reach = None, None
+    if len(touched) >= ZONES_LEARN_MIN:
+        for i in range(1, 2 * int(ZONES_TP_MAX) + 1):
+            x = i / 2
+            share = sum(1 for p in touched if p["run_pct"] >= x) / len(touched) * 100
+            if share <= 50:
+                break
+            tp_auto, tp_reach = x, round(share, 1)
+    rule = dict(ZONES_DEFAULT)
+    rule["buf"] = ZONES_STOP_BUF
+    if tp_auto:
+        rule["tp"] = tp_auto
     if ZONES_TP_PCT:
-        rows_sel = [r for r in rows if abs(r["tp"] - float(ZONES_TP_PCT)) < 1e-9] or rows
-    else:
-        rows_sel = rows
+        rule["tp"] = float(ZONES_TP_PCT)
+    rs, aft, wins, stops = [], [], 0, 0
+    for z, cs, end in runs:
+        r = zone_sim(cs, z, rule["entry"], rule["buf"], rule["tp"], z["post_time"], end)
+        if r is None:
+            continue
+        rs.append(r["r"])
+        wins += r["result"] == "WIN"
+        stops += r["result"] == "LOSS"
+        if r.get("after") is not None:
+            aft.append(r["after"])
     avg = lambda xs: round(sum(xs) / len(xs), 3) if xs else None
     rf = _zones_risk_frac()
+    auto = bool(AUTO_RISK_ENABLED)
 
-    auto = bool(AUTO_RISK_ENABLED)   # v0.99.467 — "Авто-риск": the risk is chosen together with the rules
-
-    def growth(xs, f_=None):
-        """v0.99.464 — account growth per trade (%) at the risk actually used:
-        the mean of log(1 + risk x R); a stop at 50% risk halves the account,
-        so rare big wins can't hide long losing streaks"""
+    def growth(xs, f_):
+        """account growth per trade (%) at risk f_: the mean of log(1 + risk x R)"""
         if not xs:
             return None
-        f_ = rf if f_ is None else f_
         lg = sum(math.log(max(1e-6, 1 + f_ * x)) for x in xs) / len(xs)
         return round((math.exp(lg) - 1) * 100, 3)
 
-    def best_risk(xs):
-        """v0.99.468 — the risk that grows the account most on these trades
-        (full Kelly, by the user's choice; capped at 50% like the other modules)"""
-        if not xs:
-            return None
-        gl = lambda f_: sum(math.log(max(1e-9, 1 + f_ * x)) for x in xs) / len(xs)
-        fb = max((i / 200 for i in range(1, 101)), key=gl)   # 0.5% .. 50%
-        return fb if gl(fb) > 1e-6 else None
-    for r in rows:
-        k = (r["entry"], r["buf"], r["tp"])
-        f, c = grid_fit.get(k, []), grid_chk.get(k, [])
-        fu = None
-        if auto:   # the risk comes from the earlier zones only — the check stays honest
-            fu = best_risk(f) or 0.0
-            r["auto_risk"] = round(fu * 100, 1)
-        r.update({"fit_n": len(f), "fit_r": avg(f), "chk_n": len(c), "chk_r": avg(c),
-                  "fit_g": growth(f, fu), "chk_g": growth(c, fu), "all_g": growth(grid.get(k, []), fu)})
-        ls, run_ = 0, 0   # the longest losing streak in time order
-        for x in grid.get(k, []):
-            run_ = run_ + 1 if x < 0 else 0
-            ls = max(ls, run_)
-        r["max_ls"] = ls
-        a = sorted(after.get(k, []))
-        if a:
-            r["after_med"] = round(a[len(a) // 2], 2)
-            r["after_2"] = round(100 * sum(1 for x in a if x >= 2) / len(a), 1)
-            r["after_5"] = round(100 * sum(1 for x in a if x >= 5) / len(a), 1)
-    d = ZONES_DEFAULT
-    dflt = next((r for r in rows if r["entry"] == d["entry"] and r["buf"] == d["buf"] and r["tp"] == d["tp"]), None)
-    ok = [r for r in rows_sel if r["fit_n"] >= ZONES_LEARN_MIN]
-    # chosen on the earlier zones only, by account growth at the risk in use
-    pick = max(ok, key=lambda r: (r["fit_g"], r["fit_r"], -r["buf"])) if ok else None
-    best, verdict = None, None
-    risk_txt = (f"при авто-риске {pick.get('auto_risk', 0):g}% на сделку" if (auto and pick) else f"при риске {rf * 100:g}% на сделку")
-    if pick:
-        dg = (dflt or {}).get("chk_g")
-        if pick["chk_n"] < 5:
-            verdict = f"подобрано на {pick['fit_n']} зонах, на проверке пока мало зон ({pick['chk_n']} из 5) — работают правила по умолчанию"
-        elif pick["chk_g"] is None or pick["chk_g"] <= 0:
-            verdict = (f"не подтвердилось на проверке: счёт {pick['chk_g']:+.2f}% за сделку {risk_txt} на {pick['chk_n']} зонах"
-                       + (f", по умолчанию {dg:+.2f}%" if dg is not None else "") + " — работают правила по умолчанию")
-        elif dg is not None and pick["chk_g"] < dg + ZONES_SWITCH_MARGIN_G:
-            verdict = (f"на проверке {pick['chk_g']:+.2f}% за сделку {risk_txt}, по умолчанию {dg:+.2f}% — разница меньше "
-                       f"{ZONES_SWITCH_MARGIN_G}%, остаются правила по умолчанию")
-        else:
-            best = pick
-            verdict = (f"подтвердилось на проверке: счёт {pick['chk_g']:+.2f}% за сделку {risk_txt} на {pick['chk_n']} "
-                       f"более поздних зонах" + (f" (по умолчанию {dg:+.2f}%)" if dg is not None else ""))
-    touched = [p for p in paths if p.get("touched")]
+    gl = lambda f_: sum(math.log(max(1e-9, 1 + f_ * x)) for x in rs) / len(rs)
+    fbest = max((i / 200 for i in range(1, 101)), key=gl) if rs else None   # 0.5% .. 50%
+    edge = bool(rs) and gl(fbest) > 1e-6
+    auto_risk = round(fbest * 100, 1) if (auto and edge and len(rs) >= ZONES_LEARN_MIN) else None
+    ls = run_ = 0   # the longest losing streak in time order
+    for x in rs:
+        run_ = run_ + 1 if x < 0 else 0
+        ls = max(ls, run_)
+    a = sorted(aft)
+    res = {"n": len(rs), "avg_r": avg(rs), "wr": round(wins / len(rs) * 100, 1) if rs else None,
+           "stops": stops, "wins": wins, "max_ls": ls,
+           "after_med": round(a[len(a) // 2], 2) if a else None,
+           "after_5": round(100 * sum(1 for x in a if x >= 5) / len(a), 1) if a else None}
+    risk_tab = {"rows": [{"risk": pc, "all": growth(rs, pc / 100)} for pc in (1, 2, 3, 5, 10, 15, 20, 30, 50)],
+                "best": round(fbest * 100, 1) if edge else None} if rs else None
     med = lambda xs: sorted(xs)[len(xs) // 2] if xs else None
     stats = {
         "finished": len(finished), "with_candles": len(paths), "touched": len(touched),
@@ -22241,42 +22215,9 @@ def zones_learn():
                   for x in (2, 3, 5, 10)},
         "beyond_far": round(sum(1 for p in touched if p["beyond_far"]) / len(touched) * 100, 1) if touched else None,
     }
-    # v0.99.465 — which risk % would have grown the account most with the rules
-    # in use (Kelly, searched on the history); half of it is the sensible one
-    use = best or dflt
-    kelly = None
-    if use:
-        rs = grid.get((use["entry"], use["buf"], use["tp"]), [])
-        if len(rs) >= ZONES_LEARN_MIN:
-            def g_at(f):
-                return sum(math.log(max(1e-9, 1 + f * x)) for x in rs) / len(rs)
-            fs = [i / 200 for i in range(1, 191)]   # 0.5% .. 95%
-            fbest = max(fs, key=g_at)
-            kelly = {"full": round(fbest * 100, 1), "half": round(fbest * 50, 1), "n": len(rs),
-                     "g_full": round((math.exp(g_at(fbest)) - 1) * 100, 3),
-                     "g_half": round((math.exp(g_at(fbest / 2)) - 1) * 100, 3),
-                     "g_now": round((math.exp(g_at(rf)) - 1) * 100, 3), "edge": g_at(fbest) > 1e-6}
-    # v0.99.489 — the risk table for the rules in use: account growth per trade
-    # at each %, on the earlier / later / all zones; and the other candidates
-    risk_tab = None
-    if use:
-        k_ = (use["entry"], use["buf"], use["tp"])
-        sets = {"fit": grid_fit.get(k_, []), "chk": grid_chk.get(k_, []), "all": grid.get(k_, [])}
-        risk_tab = {"avg": {nm: avg(xs) for nm, xs in sets.items()}, "n": {nm: len(xs) for nm, xs in sets.items()},
-                    "rows": [{"risk": pc, **{nm: growth(xs, pc / 100) for nm, xs in sets.items()}}
-                             for pc in (1, 2, 3, 5, 10, 15, 20, 30, 50)]}
-    cands = [{k2: r.get(k2) for k2 in ("entry", "buf", "tp", "fit_n", "fit_r", "chk_n", "chk_r", "wr", "fit_g", "chk_g")}
-             for r in sorted(ok, key=lambda r: -(r["fit_g"] if r["fit_g"] is not None else -99))[:6]]
-    both_pos = sum(1 for r in ok if r["chk_n"] >= 5 and (r["fit_r"] or 0) > 0 and (r["chk_r"] or 0) > 0)
-    auto_risk = None
-    if auto:
-        src_rule = best or dflt
-        auto_risk = (src_rule or {}).get("auto_risk") or None   # None/0 = no edge: the settings' % stays
-    learned = {"at": now, "n": best["n"] if best else 0, "best": best, "default": dflt, "pick": pick,
-               "risk": (auto_risk if auto and auto_risk else rf * 100), "auto": auto, "auto_risk": auto_risk,
-               "kelly": kelly, "risk_tab": risk_tab, "cands": cands, "both_pos": both_pos, "n_rules": len(ok),
-               "verdict": verdict, "fit_zones": n_fit, "chk_zones": len(finished) - n_fit,
-               "top": sorted(ok, key=lambda r: -(r["fit_r"] or -99))[:6]}
+    learned = {"at": now, "n": len(rs), "rule": rule, "tp_auto": tp_auto, "tp_reach": tp_reach,
+               "res": res, "risk_tab": risk_tab, "edge": edge,
+               "risk": auto_risk if auto_risk else rf * 100, "auto": auto, "auto_risk": auto_risk}
     with _zones_lock:
         ZONES["learned"], ZONES["stats"] = learned, stats
     zones_save()
@@ -28438,56 +28379,51 @@ async function refreshZones() {
   // v0.99.489 — the tab rewritten: a short summary first, then cards with tables
   const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
   const sgP = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${(+v).toFixed(2)}%</span>`;
-  const ruleTxt = r => r ? `линия ${(r.entry || 0) + 1} · стоп ${r.buf}% · тейк +${r.tp}%` : '—';
-  const ruleShort = r => r ? `л${(r.entry || 0) + 1} · стоп ${r.buf}% · тейк +${r.tp}%` : '—';
   const card = (title, body) => `<div class="zcard"><div class="zh">${title}</div>${body}</div>`;
   const tile = (label, value, note) => `<div class="ztile"><div class="zl">${label}</div><div class="zv">${value}</div>${note ? `<div class="zn">${note}</div>` : ''}</div>`;
-  const rt = lr.risk_tab, autoOn = !!lr.auto, riskNow = lr.risk;
+  const rt = lr.risk_tab, rs = lr.res || {}, autoOn = !!lr.auto, riskNow = lr.risk;
   const riskSrc = autoOn ? (lr.auto_risk ? 'авто-риск' : 'авто: перевеса нет → % из настроек') : 'из настроек';
   // --- 1. summary
   let banner;
-  if (!rt || !rt.n.all) banner = `<div class="zbanner warn">Пока мало отработанных зон, чтобы делать выводы — обученные правила включаются с ${d.learn_min} зон.</div>`;
-  else if ((rt.avg.all || 0) <= 0) banner = `<div class="zbanner neg"><b>Правила в минусе по истории:</b> в среднем ${sgR(rt.avg.all)} на сделку (${rt.n.all} сделок).<br>
-      При минусовом среднем <b>никакой процент риска не даёт рост</b> — риск меняет только скорость потерь (см. таблицу ниже).
+  if (!rs.n) banner = `<div class="zbanner warn">Пока мало отработанных зон, чтобы делать выводы.</div>`;
+  else if ((rs.avg_r || 0) <= 0) banner = `<div class="zbanner neg"><b>Правила в минусе по истории:</b> в среднем ${sgR(rs.avg_r)} на сделку (${rs.n} сделок).<br>
+      При минусовом среднем <b>никакой процент риска не даёт рост</b> — риск меняет только скорость потерь.
       ${d.autotrade ? '<br>⚠️ Автоторговля зон сейчас <b>включена</b> — на деньги лучше не торговать, пока статистика не станет плюсовой.' : ''}</div>`;
-  else if ((rt.avg.chk || 0) <= 0) banner = `<div class="zbanner warn"><b>Перевес не подтверждён:</b> по всей истории ${sgR(rt.avg.all)} на сделку, но на поздних зонах ${sgR(rt.avg.chk)} — похоже на везение ранних зон.</div>`;
-  else banner = `<div class="zbanner pos"><b>Перевес есть:</b> ${sgR(rt.avg.all)} на сделку по всей истории, на поздних зонах ${sgR(rt.avg.chk)}.</div>`;
+  else banner = `<div class="zbanner pos"><b>Правила в плюсе по истории:</b> ${sgR(rs.avg_r)} на сделку (${rs.n} сделок)${rt && rt.best ? `, лучший риск ~${rt.best}%` : ''}.</div>`;
   const summary = card('🎯 Зоны — итог', `<div class="ztiles">
       ${tile('Автоторговля', d.autotrade ? '<span class="win">вкл</span>' : '<span class="dim">выкл</span>', d.autotrade ? '' : 'Настройки → Автоторговля → Зоны')}
       ${tile('Риск на сделку', riskNow == null ? '—' : riskNow + '%', riskSrc)}
-      ${tile('Правила', p.source || '—', `${ruleTxt(p)}${d.tp_user ? ' (тейк свой)' : ''}`)}
-      ${tile('Результат правил', rt ? sgR(rt.avg.all) + '<span class="zn"> / сделку</span>' : '—', rt ? `${rt.n.all} сделок по истории` : '')}
+      ${tile('Правила', `стоп ${p.buf}% · тейк +${p.tp}%`, `вход от ${(p.entry || 0) + 1}-й линии${d.tp_user ? ' · тейк свой' : ''}`)}
+      ${tile('Результат правил', rs.n ? sgR(rs.avg_r) + '<span class="zn"> / сделку</span>' : '—', rs.n ? `${rs.n} сделок · WR ${rs.wr}%` : '')}
     </div>${banner}`);
-  // --- 2. risk table
+  // --- 2. how the stop / take are set
+  let ruleCard = '';
+  if (rs.n || lr.tp_auto) {
+    ruleCard = card('📐 Стоп и тейк', `<div class="zkv">
+      <div>вход</div><div>от <b>${(p.entry || 0) + 1}-й</b> линии зоны</div>
+      <div>стоп</div><div><b>${p.buf}%</b> за дальней линией зоны</div>
+      <div>тейк</div><div><b>+${p.tp}%</b> ${d.tp_user ? '(свой, из настроек)' : (lr.tp_auto ? `— цена доходила до него в <b>${lr.tp_reach}%</b> зон` : '(по умолчанию — мало зон)')}</div>
+      </div>
+      ${rs.n ? `<div class="zkv" style="margin-top:8px;">
+      <div>сделок по истории</div><div><b>${rs.n}</b>: тейков ${rs.wins}, стопов ${rs.stops}${rs.n - rs.wins - rs.stops ? `, по времени ${rs.n - rs.wins - rs.stops}` : ''}</div>
+      <div>WR</div><div><b>${rs.wr}%</b> — тейк раньше стопа</div>
+      <div>средний результат</div><div><b>${sgR(rs.avg_r)}</b> на сделку</div>
+      <div>худшая серия стопов</div><div>${rs.max_ls} подряд</div>
+      ${rs.after_med != null ? `<div>после тейка</div><div>цена шла ещё +${rs.after_med}% (медиана), +5% и больше — в ${rs.after_5}%</div>` : ''}
+      </div>` : ''}
+      <div class="zsub">«Доходила до тейка» считается без учёта стопа, поэтому WR ниже: часть зон сначала выбивает стоп, а потом цена идёт к тейку.</div>
+      <button onclick="zonesRelearn()" class="zbtn">↻ пересчитать</button>`);
+  }
+  // --- 3. risk table
   let riskCard = '';
   if (rt) {
-    const best = rt.rows.reduce((a, r) => (r.fit != null && (a == null || r.fit > a.fit)) ? r : a, null);
-    const bestOk = best && best.fit > 0;
     const cur = rt.rows.reduce((a, r) => Math.abs(r.risk - riskNow) < Math.abs(a.risk - riskNow) ? r : a, rt.rows[0]);
-    const rows = rt.rows.map(r => `<tr class="${bestOk && r === best ? 'zbest' : ''} ${r === cur ? 'zcur' : ''}"><td>${r.risk}%${bestOk && r === best ? ' 🎯' : ''}${r === cur ? ' <span class="dim">← сейчас</span>' : ''}</td><td>${sgP(r.fit)}</td><td>${sgP(r.chk)}</td><td>${sgP(r.all)}</td></tr>`).join('');
-    riskCard = card('💰 Какой риск лучше', `<div class="zsub" style="margin-top:0;">Рост счёта <b>за одну сделку</b> при разном риске, правила: ${ruleTxt(p)}</div>
-      <div class="zwrap"><table class="ztbl"><thead><tr><th>Риск</th><th>ранние<br>${rt.n.fit} сд.</th><th>поздние<br>${rt.n.chk} сд.</th><th>вся<br>история</th></tr></thead><tbody>${rows}</tbody></table></div>
-      <div class="zsub">${bestOk ? `🎯 лучший по ранним зонам — <b>${best.risk}%</b>; на поздних при нём ${sgP(best.chk)} за сделку.` : '<b>Ни один процент не растит счёт</b> на ранних зонах — у правил нет перевеса.'}
-      ${autoOn ? 'Авто-риск включён: процент выбирается по ранним зонам (не больше 50%) вместе с правилами.' : 'Включите «Авто-риск» в настройках, чтобы процент выбирался сам.'}
-      Средний результат: ранние ${sgR(rt.avg.fit)}, поздние ${sgR(rt.avg.chk)}.</div>`);
-  }
-  // --- 3. rule selection (honest check)
-  let pickCard = '';
-  if (lr.pick || lr.default) {
-    const b = lr.pick, df = lr.default;
-    const row = (nm, r) => r ? `<tr><td>${nm}<div class="dim">${ruleTxt(r)}</div></td><td>${sgR(r.fit_r)}<div class="dim">${r.fit_n} сд.</div></td><td>${sgR(r.chk_r)}<div class="dim">${r.chk_n} сд.</div></td><td>${r.wr}%</td></tr>` : '';
-    const vcls = lr.best ? 'pos' : (b && (b.chk_r || 0) <= 0 ? 'neg' : 'warn');
-    const cands = (lr.cands || []).map(r => `<tr><td>${ruleShort(r)}</td><td>${sgR(r.fit_r)}</td><td>${sgR(r.chk_r)}</td><td>${r.wr}%</td></tr>`).join('');
-    pickCard = card('🧪 Подбор правил (честная проверка)', `<div class="zsub" style="margin-top:0;">Правило ищется на <b>ранних ${lr.fit_zones}</b> зонах и проверяется на <b>поздних ${lr.chk_zones}</b>, которых подбор не видел.</div>
-      <div class="zwrap"><table class="ztbl"><thead><tr><th>Вариант</th><th>ранние</th><th>поздние</th><th>WR</th></tr></thead><tbody>
-      ${row('Лучший на ранних', b)}${row('По умолчанию', df)}</tbody></table></div>
-      ${lr.verdict ? `<div class="zbanner ${vcls}">${lr.verdict}</div>` : ''}
-      ${b && b.after_med != null ? `<div class="zsub">После тейка цена шла дальше: медиана +${b.after_med}% · ещё +2% — в ${b.after_2}% сделок, +5% — в ${b.after_5}%</div>` : ''}
-      ${cands ? `<details><summary>другие варианты</summary><div class="zsub">в плюсе и на ранних, и на поздних: <b>${lr.both_pos ?? '—'}</b> из ${lr.n_rules ?? '—'} вариантов</div>
-        <div class="zwrap"><table class="ztbl"><thead><tr><th>Правило</th><th>ранние</th><th>поздние</th><th>WR</th></tr></thead><tbody>${cands}</tbody></table></div></details>` : ''}
-      <button onclick="zonesRelearn()" class="zbtn">↻ пересчитать</button>`);
-  } else if (st.finished) {
-    pickCard = card('🧪 Подбор правил', '<div class="dim">для подбора пока мало зон со входом</div><button onclick="zonesRelearn()" class="zbtn">↻ пересчитать</button>');
+    const top = rt.rows.reduce((a, x) => x.all > a.all ? x : a);
+    const rows = rt.rows.map(r => `<tr class="${rt.best && r === top ? 'zbest' : ''} ${r === cur ? 'zcur' : ''}"><td>${r.risk}%${r === cur ? ' <span class="dim">← сейчас</span>' : ''}</td><td>${sgP(r.all)}</td></tr>`).join('');
+    riskCard = card('💰 Какой риск лучше', `<div class="zsub" style="margin-top:0;">Рост счёта <b>за одну сделку</b> при разном риске, по всем ${rs.n} сделкам истории</div>
+      <div class="zwrap"><table class="ztbl"><thead><tr><th>Риск</th><th>счёт за сделку</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="zsub">${rt.best ? `🎯 лучший — <b>~${rt.best}%</b> (выше этого риск только вредит).` : '<b>Ни один процент не растит счёт</b> — у правил нет перевеса.'}
+      ${autoOn ? 'Авто-риск включён: берётся лучший процент (не больше 50%).' : 'Включите «Авто-риск» в настройках, чтобы процент выбирался сам.'}</div>`);
   }
   // --- 4. move toward the zone
   let apCard = '';
@@ -28534,7 +28470,7 @@ async function refreshZones() {
     ${act.length ? zonePostBlocks(act) : '<div class="dim" style="margin-bottom:10px;">нет — новые посты из группы появятся здесь</div>'}
     ${zoneTradesHtml(closedTr)}
     <div class="zsec">Правила и риск</div>
-    ${riskCard}${pickCard}${apCard}${behCard}
+    ${ruleCard}${riskCard}${apCard}${behCard}
     <div class="zsec">Источники</div>
     ${zutHtml(ut)}
     <div class="dim" style="font-size:var(--fs-sm);margin:-4px 0 10px;">или ${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>
