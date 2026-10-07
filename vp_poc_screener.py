@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.512"
+APP_VERSION = "0.99.513"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -25859,7 +25859,10 @@ def api_zones_img(pid):
 _zones_recheck_lock = threading.Lock()
 
 
-def zones_recheck_results():
+ZONES_RECHECK_MARK = 510   # v0.99.513 — a post recognised again by this recogniser carries this mark
+
+
+def zones_recheck_results(force=False):
     """v0.99.502 — the stored history recognised again with the current recogniser
     (v0.99.503: every post, not only the "result" ones — old mistakes such as a
     hand-drawn red frame read as a short zone, a result label, a misread scale
@@ -25873,6 +25876,11 @@ def zones_recheck_results():
             live_posts = {z.get("post_id") for z in ZONES["zones"]
                           if z.get("status") in ("watch", "in_trade") or (z.get("trade") or {}).get("status") in ("PENDING", "OPEN")}
             posts = [p_ for p_ in ZONES["posts"] if p_["id"] not in live_posts and not p_.get("own")]
+            if force:   # the button: everything again
+                for p_ in posts:
+                    p_.pop("rechk", None)
+            # v0.99.513 — after a restart it goes on where it stopped
+            posts = [p_ for p_ in posts if p_.get("rechk") != ZONES_RECHECK_MARK]
         found = changed_n = 0
         zones_act("recheck", running=True, done=0, total=len(posts), found=0, changed=0, error=None)
         key = lambda zs: sorted((z["side"], tuple(round(v, 6) for v in z["levels"])) for z in zs)
@@ -25903,6 +25911,9 @@ def zones_recheck_results():
                 log_error(f"zones recheck {post.get('id')}: {e}")
                 continue
             found += bool(post.get("result_post"))
+            post["rechk"] = ZONES_RECHECK_MARK
+            if i % 20 == 0:
+                zones_save()   # the marks on disk as it goes
             if key(new) == key(old):
                 continue   # the same zones: the stored ones (and their results) stay
             changed_n += 1
@@ -25927,7 +25938,7 @@ def zones_recheck_results():
 
 @app.route("/api/zones/recheck_results", methods=["POST"])
 def api_zones_recheck_results():
-    threading.Thread(target=zones_recheck_results, daemon=True).start()
+    threading.Thread(target=zones_recheck_results, kwargs={"force": True}, daemon=True).start()
     zones_act("recheck", running=True, done=0, total=None, error=None)
     return jsonify({"ok": True})
 

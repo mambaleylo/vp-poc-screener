@@ -18968,3 +18968,7 @@ v0.99.512 - Peak Reversal: the daily timeframe is no longer searched (user: "т�
          the significance bar stays the one set for 216, i.e. a little stricter). Coins
          whose chosen timeframe was 1d leave the list at the start; open signals finish as
          they are.
+v0.99.513 - Зоны: the history recognition goes on where it stopped after a restart / /update
+         (user: "сейчас идёт перераспознавание истории, оно сбросится после /update?") — each
+         post recognised again is marked (saved every 20 posts), the automatic run skips the
+         marked ones; the button still recognises everything again.
