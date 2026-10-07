@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.513"
+APP_VERSION = "0.99.514"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22185,6 +22185,16 @@ def zones_group_key(z):
     return (z.get("post_id") or z["id"], z["side"])
 
 
+ZONES_DUP_SEC = 1800   # v0.99.514 — posts of one coin and side this close in time = one setup
+
+
+def zones_hist_key(z):
+    """v0.99.514 — one setup in the history: the author's album (two pictures of
+    one setup, e.g. two timeframes) comes as separate posts at the same time —
+    counted once: coin + side + the half hour of the post"""
+    return (z.get("symbol"), z["side"], int(z["post_time"] // ZONES_DUP_SEC))
+
+
 def zones_ladder_plan(group, buf=None, off=None):
     """v0.99.491 — the author's way of entering (his video for the channel):
     a limit on every line of every same-side zone of the post (a zone = both
@@ -22423,7 +22433,7 @@ def zones_learn():
     # v0.99.491 — one ladder per post and side (the author's method), not a trade per zone
     groups = {}
     for z in finished:
-        groups.setdefault(zones_group_key(z), []).append(z)
+        groups.setdefault(zones_hist_key(z), []).append(z)
     runs_g, excl, fixed_n, coarse_out = [], [], 0, 0
     with _zones_lock:
         fine_only = bool(ZONES.get("fine_only"))
@@ -23766,6 +23776,17 @@ def _zones_ladder_tick(group, now, p, pos_map):
     sym = lead["symbol"]
     s = _zones_side(lead)
     if not tr or not tr.get("legs"):
+        # v0.99.514 — the same setup posted twice (an album of two pictures): one ladder only
+        with _zones_lock:
+            twin = next((z for z in ZONES["zones"] if (z.get("trade") or {}).get("legs")
+                         and z["trade"].get("status") in ("PENDING", "OPEN") and z.get("symbol") == sym
+                         and z["side"] == lead["side"] and z.get("post_id") != lead.get("post_id")
+                         and abs(z["post_time"] - lead["post_time"]) <= ZONES_DUP_SEC), None)
+        if twin:
+            with _zones_lock:
+                for zz in group:
+                    zz["status"], zz["skip"] = "skipped", "dup"
+            return True
         px_live = (pos_map.get("_px") or {}).get(sym)
         if px_live and zones_fix_group_scale(group, px_live):   # v0.99.499 — misread decimal point
             zones_znotify(lead, f"🔧 {sym}: уровни прочитаны со сдвигом запятой — исправил под цену: "
@@ -25650,7 +25671,8 @@ def api_zones_chart(zid):
     tr, src = None, None
     t = z.get("trade")
     with _zones_lock:   # v0.99.491 — a zone of a ladder: the ladder's trade sits on its lead zone
-        group = [x for x in ZONES["zones"] if zones_group_key(x) == zones_group_key(z) and x.get("status") != "deleted"] or [z]
+        kf = zones_group_key if (z.get("lead") or (z.get("trade") or {}).get("legs")) else zones_hist_key
+        group = [x for x in ZONES["zones"] if kf(x) == kf(z) and x.get("status") != "deleted" and not x.get("own") and not x.get("oc")] or [z]
         if not t and z.get("lead"):
             t = next((x.get("trade") for x in group if x["id"] == z["lead"]), None)
     if t:
@@ -29649,7 +29671,7 @@ async function refreshSnr() {
 }
 
 // v0.99.438 — «Зоны»: posts with zones from Telegram screenshots
-const ZONE_ST = {watch: '👀 слежу', in_trade: '🤖 в сделке', closed: '✔ закрыта', broken: '💥 пробита', expired: '⌛ истекла', old: '📜 уже отработала', train: '📚 обучение: жду итога', skipped: '⚠️ уровни не совпадают с ценой — не торгую'};
+const ZONE_ST = {watch: '👀 слежу', in_trade: '🤖 в сделке', closed: '✔ закрыта', broken: '💥 пробита', expired: '⌛ истекла', old: '📜 уже отработала', train: '📚 обучение: жду итога', skipped: '⏭ не торгую'};
 const zfmt = v => v == null ? '—' : String(+(+v).toPrecision(6));
 const zdate = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
 function zoneRowHtml(z) {
@@ -29662,7 +29684,7 @@ function zoneRowHtml(z) {
   // v0.99.447 — "уже отработала" shows its outcome in R right in the status
   const stTxt = z.status === 'old'
     ? (z.result ? `📜 отработала: <b class="${z.result.r > 0 ? 'win' : 'loss'}">${z.result.r > 0 ? '+' : ''}${z.result.r}R${z.result.pct != null ? ` · ${z.result.pct > 0 ? '+' : ''}${z.result.pct}%` : ''}</b>${z.result.legs ? ` <span class="dim">· лесенка поста, налилось ${z.result.filled}/${z.result.legs}</span>` : ''}` : (z.rules === 'ladder' ? '📜 отработала: лимитки не налились' : z.rules === 'pending' ? '📜 отработала — результат появится после пересчёта истории' : z.rules === 'excl_scale' ? '⚠️ не в статистике: уровни не удалось сопоставить с ценой — скрин распознан неверно' : z.rules === 'excl_past_stop' ? '⚠️ не в статистике: в момент поста цена уже была за стопом зоны' : '📜 отработала: входа не было'))
-    : (ZONE_ST[z.status] || z.status);
+    : (ZONE_ST[z.status] || z.status) + (z.status === 'skipped' ? ({dup: ' — тот же сетап уже в работе (пост из нескольких картинок)', scale: ' — уровни не совпадают с ценой'}[z.skip] || '') : '');
   const btn = 'background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);';
   return `<div style="margin-top:8px;padding:6px 0 0 8px;border-left:3px solid ${long ? '#4caf50' : '#ef5350'};">
     <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">

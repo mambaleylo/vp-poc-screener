@@ -18972,3 +18972,8 @@ v0.99.513 - Зоны: the history recognition goes on where it stopped after a r
          (user: "сейчас идёт перераспознавание истории, оно сбросится после /update?") — each
          post recognised again is marked (saved every 20 posts), the automatic run skips the
          marked ones; the button still recognises everything again.
+v0.99.514 - Зоны: one setup posted as several pictures (an album: two BTC shorts at the same
+         minute) counted twice in the history and would have opened two ladders — double
+         risk on one idea. In the history, posts of one coin and side within the same half
+         hour are one setup; live, a second ladder for the same coin and side within 30 min
+         of an active one is not opened (status "не торгую — тот же сетап уже в работе").
