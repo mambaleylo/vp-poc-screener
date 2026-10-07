@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.507"
+APP_VERSION = "0.99.508"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22545,6 +22545,14 @@ def zones_learn():
             per_m = res["per_week"] * 30.44 / 7
             res["month_pct"] = round(((1 + g_now / 100) ** per_m - 1) * 100, 1)
             res["month_risk"] = round(r_now * 100, 1)
+            g2 = growth(rs, 0.02)   # v0.99.508 — and at a careful 2% for comparison
+            res["month_pct_2"] = round(((1 + g2 / 100) ** per_m - 1) * 100, 1) if g2 is not None else None
+            # the sampling error of the average (how sure the history is about the edge)
+            if len(rs) >= 10:
+                m_ = sum(rs) / len(rs)
+                sd_ = (sum((x - m_) ** 2 for x in rs) / (len(rs) - 1)) ** 0.5
+                res["avg_lo"] = round(m_ - 2 * sd_ / len(rs) ** 0.5, 2)
+                res["avg_hi"] = round(m_ + 2 * sd_ / len(rs) ** 0.5, 2)
     med = lambda xs: sorted(xs)[len(xs) // 2] if xs else None
     stats = {
         "finished": len(finished), "with_candles": len(paths), "touched": len(touched),
@@ -29716,7 +29724,9 @@ async function refreshZones() {
     const rows = rt.rows.map(r => `<tr class="${rt.best && r === top ? 'zbest' : ''} ${r === cur ? 'zcur' : ''}"><td>${r.risk}%${r === cur ? ' <span class="dim">← сейчас</span>' : ''}</td><td>${sgP(r.all)}</td></tr>`).join('');
     riskCard = card('💰 Какой риск лучше', `<div class="zsub" style="margin-top:0;">Рост счёта <b>за одну сделку</b> при разном риске, по всем ${rs.n} сделкам истории</div>
       <div class="zwrap"><table class="ztbl"><thead><tr><th>Риск</th><th>счёт за сделку</th></tr></thead><tbody>${rows}</tbody></table></div>
-      ${rs.month_pct != null ? `<div class="zsub">При ~${rs.per_week} сделках в неделю и риске ${rs.month_risk}% это по истории <b>${rs.month_pct > 0 ? '+' : ''}${rs.month_pct}% к счёту в месяц</b> (живая торговля обычно хуже — закладывайте около половины).</div>` : ''}
+      ${rs.month_pct != null ? `<div class="zsub">При ~${rs.per_week} сделках в неделю по истории: при риске ${rs.month_risk}% — <b>${rs.month_pct > 0 ? '+' : ''}${rs.month_pct}% в месяц</b>${rs.month_pct_2 != null ? `, при риске 2% — <b>${rs.month_pct_2 > 0 ? '+' : ''}${rs.month_pct_2}%</b>` : ''}.
+        ${rs.avg_lo != null ? `Средний результат по истории ${sgR(rs.avg_r)}, но с учётом разброса реальный может быть от ${sgR(rs.avg_lo)} до ${sgR(rs.avg_hi)} на сделку.` : ''}
+        ${rs.month_pct > 100 ? '<br>⚠️ Такие цифры нереальны: расчёт считает сделки по очереди, а на деле их открыто по 5–15 одновременно, и общий обвал рынка выбивает их разом. Большой риск оправдан, только если перевес точно такой, как в истории — если он вдвое меньше, счёт при этом риске не растёт. Ставьте 1–2%, пока живые сделки не подтвердят историю.' : 'Живая торговля обычно хуже истории — закладывайте около половины.'}</div>` : ''}
       <div class="zsub">${rt.best ? `🎯 лучший — <b>~${rt.best}%</b> (выше этого риск только вредит).` : '<b>Ни один процент не растит счёт</b> — у правил нет перевеса.'}
       ${autoOn ? 'Авто-риск включён: берётся лучший процент (не больше 50%).' : 'Включите «Авто-риск» в настройках, чтобы процент выбирался сам.'}</div>`);
   }

@@ -18935,3 +18935,8 @@ v0.99.507 - Зоны: how many trades come a week (user: "надо добави�
          the average since the first trade and over the last 8 finished weeks (the posting
          pace may change), and the risk card what a month of that pace gives at the risk in
          use by the history ("+X% к счёту в месяц", with the advice to count on about half).
+v0.99.508 - Зоны: the monthly estimate is shown at the risk in use and at a careful 2%, with
+         the range the average result may really be in (± two standard errors of the
+         history's mean), and above +100% a month a warning why such figures are not real
+         (trades open at the same time fall together; a big risk only pays if the edge is
+         exactly the history's).
