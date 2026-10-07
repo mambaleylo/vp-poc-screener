@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.493"
+APP_VERSION = "0.99.494"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22273,6 +22273,7 @@ def zones_learn():
     for z in finished:
         groups.setdefault(zones_group_key(z), []).append(z)
     rs, aft, wins, stops, fills, legs = [], [], 0, 0, 0, 0
+    res_by_zone = {}
     zones_act("learn", stage="лесенки лимиток по постам", done=0, total=len(groups))
     for i_, g in enumerate(sorted(groups.values(), key=lambda g: g[0]["post_time"])):
         if i_ % 5 == 0:
@@ -22286,6 +22287,9 @@ def zones_learn():
         if not cs:
             continue
         r = zone_ladder_sim(cs, g, rule["tp"], z0["post_time"], end)
+        for zz in g:   # v0.99.494 — the zone lists show the result by the CURRENT rules too
+            res_by_zone[zz["id"]] = ({"result": r["result"], "r": round(r["r"], 3), "pct": round(r["pct"], 2),
+                                      "filled": r["filled"], "legs": r["legs"]} if r else None)
         if r is None:
             continue
         rs.append(r["r"])
@@ -22335,6 +22339,10 @@ def zones_learn():
                "risk": auto_risk if auto_risk else rf * 100, "auto": auto, "auto_risk": auto_risk}
     with _zones_lock:
         ZONES["learned"], ZONES["stats"] = learned, stats
+        for z in ZONES["zones"]:   # history zones (no trade of the bot's own): re-scored by the current rules
+            if z["id"] in res_by_zone and not z.get("trade") and z.get("status") in ("old", "broken", "expired"):
+                z["result"] = res_by_zone[z["id"]]
+                z["rules"] = "ladder"
     zones_save()
     zones_act("learn", running=False, finished=time.time(), took=round(time.time() - now, 1),
               stage=None, summary=f"{res['n']} сделок, средний {res['avg_r'] if res['avg_r'] is not None else '—'}R")
@@ -28853,7 +28861,7 @@ function zoneRowHtml(z) {
   const hist = '';
   // v0.99.447 — "уже отработала" shows its outcome in R right in the status
   const stTxt = z.status === 'old'
-    ? (z.result ? `📜 отработала: <b class="${z.result.r > 0 ? 'win' : 'loss'}">${z.result.r > 0 ? '+' : ''}${z.result.r}R${z.result.pct != null ? ` · ${z.result.pct > 0 ? '+' : ''}${z.result.pct}%` : ''}</b>` : '📜 отработала: входа не было')
+    ? (z.result ? `📜 отработала: <b class="${z.result.r > 0 ? 'win' : 'loss'}">${z.result.r > 0 ? '+' : ''}${z.result.r}R${z.result.pct != null ? ` · ${z.result.pct > 0 ? '+' : ''}${z.result.pct}%` : ''}</b>${z.result.legs ? ` <span class="dim">· лесенка поста, налилось ${z.result.filled}/${z.result.legs}</span>` : ''}` : (z.rules === 'ladder' ? '📜 отработала: лимитки не налились' : '📜 отработала: входа не было'))
     : (ZONE_ST[z.status] || z.status);
   const btn = 'background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);';
   return `<div style="margin-top:8px;padding:6px 0 0 8px;border-left:3px solid ${long ? '#4caf50' : '#ef5350'};">

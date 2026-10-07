@@ -18828,3 +18828,9 @@ v0.99.493 - Зоны: restart safety and a "Состояние" block (user: "п
          refreshes every 3 s meanwhile; "пересчитать" answers at once), the ladders
          waiting / in a position / on the exchange / waiting for the price, the stray
          orders check.
+v0.99.494 - Зоны: the zone lists (archive, training, a zone's "отработала") showed the
+         result saved when the post came in, by the rules of that time, while the
+         learning and the chart use the current ones (user: "обучение отличается от
+         открытого графика"). Every history recount now re-scores each history zone by
+         the current rules (its post's ladder: result, R, %, limits filled), and the row
+         says "лесенка поста, налилось 2/3".
