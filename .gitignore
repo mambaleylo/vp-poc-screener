@@ -10,3 +10,5 @@ vp_zones_state.json.bak
 vp_restart_note.json
 vp_zones_oc.json
 vp_zones_oc.json.tmp
+vp_zones_state.json.*.tmp
+vp_zones_oc.json.*.tmp

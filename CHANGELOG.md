@@ -18956,3 +18956,10 @@ v0.99.510 - Зоны: a small zone (a daily chart, ZRO 1.0571–1.1861) was drop
          is a label only when it carries white text (labels ~4–6% white pixels, zones 0%);
          small zones are zones again. The history is recognised again once in the background
          after the update, so posts lost this way since v0.99.502 come back.
+v0.99.511 - Зоны: "zones_save: No such file or directory …vp_zones_state.json.tmp" (user's
+         error badge) — the history recheck, the monitor and the learner saved from
+         different threads through one shared .tmp file: one renamed it away under the
+         other, and simultaneous writes into one file could mix. Each save now writes its
+         own temp file under one lock, and an older snapshot never overwrites a newer one
+         (a sequence number); leftover temp files are removed at the start. Stress-tested:
+         8 threads x 200 saves — no errors, the newest state on disk.

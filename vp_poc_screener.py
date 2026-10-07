@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.510"
+APP_VERSION = "0.99.511"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21274,16 +21274,27 @@ ZONES = {"posts": [], "zones": [], "tg_offset": 0, "learned": None, "stats": Non
          "train_mode": False}
 
 
+_zones_save_seq = [0, 0]   # v0.99.511 — [last snapshot taken, last snapshot written]
+
+
 def zones_save():
     with _zones_lock:
+        _zones_save_seq[0] += 1
+        seq = _zones_save_seq[0]
         data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode", "own_last_scan", "monitor_ok", "fine_only", "recheck_v510") if k in ZONES}, default=str)
     try:   # v0.99.455 — written to disk for sure; the previous state kept as .bak
-        tmp = ZONES_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
+        # v0.99.511 — one writer at a time (the history recheck, the monitor and the
+        # learner save from different threads: they shared one .tmp — one renamed it
+        # away under the other, "No such file or directory", and their writes could mix)
         with _zones_save_lock:
+            if seq < _zones_save_seq[1]:
+                return   # a newer state is on disk already: an older snapshot must not overwrite it
+            _zones_save_seq[1] = seq
+            tmp = f"{ZONES_FILE}.{os.getpid()}.{threading.get_ident()}.tmp"
+            with open(tmp, "w") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
             os.replace(tmp, ZONES_FILE)
             try:   # the copy = this latest good state
                 shutil.copyfile(ZONES_FILE, ZONES_FILE + ".bak.tmp")
@@ -21300,6 +21311,12 @@ _zones_save_lock = threading.Lock()
 def zones_load():
     """The saved state; a damaged file (the phone died while writing) falls
     back to the previous copy (.bak) and is kept aside, never overwritten."""
+    try:   # v0.99.511 — temp files left by a write cut short (never the state itself)
+        import glob as _glob
+        for f_ in _glob.glob(ZONES_FILE + ".*tmp"):
+            os.remove(f_)
+    except OSError:
+        pass
     for path in (ZONES_FILE, ZONES_FILE + ".bak"):
         if not os.path.exists(path):
             continue
@@ -25278,12 +25295,13 @@ def oc_save():
     try:
         with _oc_lock:
             data = json.dumps(_OC)
-        tmp = ZONES_OC_FILE + ".tmp"
-        with open(tmp, "w") as f:
-            f.write(data)
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, ZONES_OC_FILE)
+        with _oc_lock:
+            tmp = f"{ZONES_OC_FILE}.{threading.get_ident()}.tmp"
+            with open(tmp, "w") as f:
+                f.write(data)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp, ZONES_OC_FILE)
     except Exception as e:
         log_error(f"oc save: {e}")
 
