@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.497"
+APP_VERSION = "0.99.498"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22139,6 +22139,23 @@ def zones_ladder_plan(group, buf=None, off=None):
             "sl": lv[-1] * (1 - s * buf / 100)}
 
 
+ZONES_SCALE_MAX = 30.0   # v0.99.498 — lines farther than this % from the price = a misread scale
+
+
+def zones_ladder_check(pl, px):
+    """v0.99.498 — is this ladder tradeable at price px (the price at the post /
+    now)? None = yes; else why not: the lines are nowhere near the price (the
+    screenshot was misread — e.g. 45 instead of 62 000), or the price is
+    already past the stop (the zone broke before the post / is the other side)"""
+    if not pl or not px:
+        return "нет цены"
+    if abs(px - pl["levels"][0]) / px * 100 > ZONES_SCALE_MAX and abs(px - pl["levels"][-1]) / px * 100 > ZONES_SCALE_MAX:
+        return "scale"
+    if pl["s"] * (px - pl["sl"]) <= 0:
+        return "past_stop"
+    return None
+
+
 def zones_ladder_step(st, c, s, sl, tp_pct):
     """One candle of a ladder (st: {"legs": [{"lim", "fill", "t"}], "result"}).
     Fills when the candle reaches a limit (at the limit, or at the open after a
@@ -22293,7 +22310,7 @@ def zones_learn():
     groups = {}
     for z in finished:
         groups.setdefault(zones_group_key(z), []).append(z)
-    runs_g = []
+    runs_g, excl = [], []
     for g in sorted(groups.values(), key=lambda g: g[0]["post_time"]):
         z0 = g[0]
         end = min(now, z0["post_time"] + ZONES_MAX_DAYS * 86400)
@@ -22302,6 +22319,12 @@ def zones_learn():
         if cs is None:
             cs = cache[key] = zones_candles(z0["symbol"], z0["post_time"], end)
         if cs:
+            c0 = next((c for c in cs if c["time"] >= z0["post_time"] - 1), None)
+            pl = zones_ladder_plan(g)
+            why = zones_ladder_check(pl, c0["open"] if c0 else None)
+            if why in ("scale", "past_stop"):   # v0.99.498 — not tradeable at the post: out of the stats
+                excl.append((g, why, pl, c0["open"]))
+                continue
             runs_g.append((g, cs, z0["post_time"], end))
     # v0.99.495 — the take: every variant replayed as the author's ladders over the
     # whole history, the one that grew the account most wins (user: "тейк подбирался
@@ -22378,6 +22401,21 @@ def zones_learn():
                               "r": round(r["r"], 2), "result": r["result"], "filled": r["filled"], "legs": r["legs"],
                               "d0": round(d0, 2), "width": round(abs(pl["levels"][0] - pl["levels"][-1]) / pl["levels"][0] * 100, 2),
                               "levels": [round(v, 8) for v in pl["levels"]], "px0": px0, "tf": tfk})
+    flip = 0
+    ex_rows = []
+    for g, why, pl, px0 in excl:
+        if why == "past_stop":   # would it be a normal "price before the zone" with the other side?
+            fl = dict(pl, s=-pl["s"])
+            lv = sorted(pl["levels"], reverse=(fl["s"] > 0))
+            fl.update(levels=lv, limits=[v * (1 + fl["s"] * ZONES_LIMIT_OFF / 100) for v in lv],
+                      sl=lv[-1] * (1 - fl["s"] * ZONES_STOP_BUF / 100))
+            flip += fl["s"] * (px0 - fl["limits"][0]) > 0
+        ex_rows.append({"id": g[0]["id"], "symbol": g[0]["symbol"], "side": g[0]["side"], "t": g[0]["post_time"],
+                        "why": why, "px0": px0, "levels": [round(v, 8) for v in pl["levels"]]})
+    diag["excl_scale"] = sum(1 for x in excl if x[1] == "scale")
+    diag["excl_past"] = sum(1 for x in excl if x[1] == "past_stop")
+    diag["excl_flip"] = flip
+    diag["excl_rows"] = ex_rows[-12:]
     dl = sorted(diag.pop("dist"))
     diag["dist_med"] = dl[len(dl) // 2] if dl else None
     diag["worst"] = sorted(diag["worst"], key=lambda x: x["r"])[:10]
@@ -22412,10 +22450,14 @@ def zones_learn():
                "risk": auto_risk if auto_risk else rf * 100, "auto": auto, "auto_risk": auto_risk}
     with _zones_lock:
         ZONES["learned"], ZONES["stats"] = learned, stats
+        ex_ids = {zz["id"]: why for g, why, _pl, _px in excl for zz in g}
         for z in ZONES["zones"]:   # history zones (no trade of the bot's own): re-scored by the current rules
-            if z["id"] in res_by_zone and not z.get("trade") and z.get("status") in ("old", "broken", "expired"):
-                z["result"] = res_by_zone[z["id"]]
-                z["rules"] = "ladder"
+            if not z.get("trade") and z.get("status") in ("old", "broken", "expired"):
+                if z["id"] in ex_ids:
+                    z["result"], z["rules"] = None, "excl_" + ex_ids[z["id"]]
+                elif z["id"] in res_by_zone:
+                    z["result"] = res_by_zone[z["id"]]
+                    z["rules"] = "ladder"
     zones_save()
     zones_act("learn", running=False, finished=time.time(), took=round(time.time() - now, 1),
               stage=None, summary=f"{res['n']} сделок, средний {res['avg_r'] if res['avg_r'] is not None else '—'}R")
@@ -23507,6 +23549,16 @@ def _zones_ladder_tick(group, now, p, pos_map):
         pl = zones_ladder_plan(group, p["buf"])
         if not pl:
             return False
+        why = zones_ladder_check(pl, (pos_map.get("_px") or {}).get(sym))
+        if why == "нет цены":
+            return False   # wait for a price
+        if why:   # v0.99.498 — misread lines / the zone already broken: not traded
+            with _zones_lock:
+                for zz in group:
+                    zz["status"], zz["skip"] = ("skipped" if why == "scale" else "broken"), why
+            zones_znotify(lead, f"⚠️ {sym}: " + ("уровни зоны далеко от цены (больше 30%) — похоже, скрин распознан неверно; не торгую"
+                                                if why == "scale" else "цена уже за стопом зоны — зона пробита, не торгую"))
+            return True
         with _zones_lock:
             post = next((p_ for p_ in ZONES["posts"] if p_["id"] == lead.get("post_id")), None)
         tr = {"kind": "ladder", "symbol": sym, "direction": "LONG" if s > 0 else "SHORT", "time": int(now),
@@ -23639,6 +23691,8 @@ def zones_monitor_tick(last_track=0.0):
         price = prices.get(z["symbol"])
         if legacy(z) or z["status"] != "watch" or not price:
             continue
+        if not z.get("lead") and zones_ladder_check(zones_ladder_plan([z]), price):
+            continue   # v0.99.498 — misread / already broken: the ladder step skips it, no touch messages
         s = _zones_side(z)
         for i, lvl in enumerate(z["levels"]):
             if z["touched"][i] is None and ((s > 0 and price <= lvl) or (s < 0 and price >= lvl)):
@@ -28991,7 +29045,7 @@ async function refreshSnr() {
 }
 
 // v0.99.438 — «Зоны»: posts with zones from Telegram screenshots
-const ZONE_ST = {watch: '👀 слежу', in_trade: '🤖 в сделке', closed: '✔ закрыта', broken: '💥 пробита', expired: '⌛ истекла', old: '📜 уже отработала', train: '📚 обучение: жду итога'};
+const ZONE_ST = {watch: '👀 слежу', in_trade: '🤖 в сделке', closed: '✔ закрыта', broken: '💥 пробита', expired: '⌛ истекла', old: '📜 уже отработала', train: '📚 обучение: жду итога', skipped: '⚠️ уровни не совпадают с ценой — не торгую'};
 const zfmt = v => v == null ? '—' : String(+(+v).toPrecision(6));
 const zdate = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
 function zoneRowHtml(z) {
@@ -29003,7 +29057,7 @@ function zoneRowHtml(z) {
   const hist = '';
   // v0.99.447 — "уже отработала" shows its outcome in R right in the status
   const stTxt = z.status === 'old'
-    ? (z.result ? `📜 отработала: <b class="${z.result.r > 0 ? 'win' : 'loss'}">${z.result.r > 0 ? '+' : ''}${z.result.r}R${z.result.pct != null ? ` · ${z.result.pct > 0 ? '+' : ''}${z.result.pct}%` : ''}</b>${z.result.legs ? ` <span class="dim">· лесенка поста, налилось ${z.result.filled}/${z.result.legs}</span>` : ''}` : (z.rules === 'ladder' ? '📜 отработала: лимитки не налились' : z.rules === 'pending' ? '📜 отработала — результат появится после пересчёта истории' : '📜 отработала: входа не было'))
+    ? (z.result ? `📜 отработала: <b class="${z.result.r > 0 ? 'win' : 'loss'}">${z.result.r > 0 ? '+' : ''}${z.result.r}R${z.result.pct != null ? ` · ${z.result.pct > 0 ? '+' : ''}${z.result.pct}%` : ''}</b>${z.result.legs ? ` <span class="dim">· лесенка поста, налилось ${z.result.filled}/${z.result.legs}</span>` : ''}` : (z.rules === 'ladder' ? '📜 отработала: лимитки не налились' : z.rules === 'pending' ? '📜 отработала — результат появится после пересчёта истории' : z.rules === 'excl_scale' ? '⚠️ не в статистике: уровни далеко от цены — скрин распознан неверно' : z.rules === 'excl_past_stop' ? '⚠️ не в статистике: в момент поста цена уже была за стопом зоны' : '📜 отработала: входа не было'))
     : (ZONE_ST[z.status] || z.status);
   const btn = 'background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);';
   return `<div style="margin-top:8px;padding:6px 0 0 8px;border-left:3px solid ${long ? '#4caf50' : '#ef5350'};">
@@ -29135,14 +29189,17 @@ async function refreshZones() {
     const tfTxt = Object.entries(dg.tf || {}).map(([k, v]) => `${k}: ${v}`).join(' · ');
     const worst = (dg.worst || []).map(w => `<tr onclick="zoneChart('${w.id}')" style="cursor:pointer;"><td>${(w.symbol || '').replace('_USDT', '')} ${w.side === 'long' ? 'лонг' : 'шорт'}<div class="dim">${zdate(w.t)} · ${w.tf}</div></td><td>${sgR(w.r)}<div class="dim">${w.result === 'WIN' ? 'тейк' : w.result === 'LOSS' ? 'стоп' : 'время'}</div></td><td>${w.filled}/${w.legs}</td><td>${w.d0 > 0 ? '+' : ''}${w.d0}%<div class="dim">ширина ${w.width}%</div></td></tr>`).join('');
     diagCard = `<details class="zcard"><summary class="zh" style="margin:0;">🔍 Разбор результатов</summary><div class="zkv" style="margin-top:8px;">
-      <div>постов разобрано</div><div><b>${dg.n}</b> (лонг ${dg.side_long}, шорт ${dg.n - dg.side_long})</div>
+      <div>постов в статистике</div><div><b>${dg.n}</b> (лонг ${dg.side_long}, шорт ${dg.n - dg.side_long})</div>
       <div>цена в момент поста</div><div>до первой лимитки в среднем <b>${dg.dist_med}%</b> (медиана)</div>
       <div>уже внутри зоны</div><div>${dg.inside} (${pc(dg.inside)}) — лимитки наливаются сразу</div>
-      <div>уже за стопом</div><div class="${dg.beyond_stop ? 'loss' : ''}">${dg.beyond_stop} (${pc(dg.beyond_stop)})${dg.beyond_stop ? ' — подозрительно: зона распознана не там или не та сторона' : ''}</div>
+      <div>исключено из статистики</div><div><b>${(dg.excl_scale || 0) + (dg.excl_past || 0)}</b>: уровни далеко от цены (ошибка распознавания) ${dg.excl_scale || 0}, цена уже за стопом в момент поста ${dg.excl_past || 0}${dg.excl_past ? ` — из них ${dg.excl_flip || 0} выглядели бы нормально с другой стороной (лонг↔шорт)` : ''}</div>
       <div>налилось в первые 15 мин</div><div>${dg.fill_15m} (${pc(dg.fill_15m)})</div>
       <div>налилось за сутки</div><div>${dg.fill_1d} (${pc(dg.fill_1d)})</div>
       <div>не налилось совсем</div><div>${dg.never} (${pc(dg.never)})</div>
       <div>свечи истории</div><div>${tfTxt} <span class="dim">(старые посты — только крупные свечи)</span></div></div>
+      ${(dg.excl_rows || []).length ? `<details><summary>исключённые посты (последние ${dg.excl_rows.length})</summary><div class="zwrap"><table class="ztbl"><thead><tr><th>Пост</th><th>причина</th><th>цена / уровни</th></tr></thead><tbody>
+        ${dg.excl_rows.map(x => `<tr onclick="zoneChart('${x.id}')" style="cursor:pointer;"><td>${(x.symbol || '').replace('_USDT', '')} ${x.side === 'long' ? 'лонг' : 'шорт'}<div class="dim">${zdate(x.t)}</div></td><td>${x.why === 'scale' ? 'уровни не в масштабе цены' : 'уже за стопом'}</td><td>${zfmt(x.px0)}<div class="dim">${x.levels.map(zfmt).join(' / ')}</div></td></tr>`).join('')}
+        </tbody></table></div></details>` : ''}
       ${worst ? `<div class="zsub">10 худших постов (нажмите — график):</div><div class="zwrap"><table class="ztbl"><thead><tr><th>Пост</th><th>итог</th><th>налилось</th><th>цена до зоны</th></tr></thead><tbody>${worst}</tbody></table></div>` : ''}
       <div class="zsub">«Цена до зоны» — насколько цена в момент поста была выше лонговой (ниже шортовой) первой лимитки; минус — уже внутри или за зоной.</div></details>`;
   }

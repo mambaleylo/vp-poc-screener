@@ -18863,3 +18863,13 @@ v0.99.497 - Зоны, the exchange side checked over (user: "проверь, ч�
          calling the position "unprotected". Stray limit orders are swept every 5 minutes
          (was hourly). A round that can't read the trigger orders no longer skips the
          ladders — it only leaves the stop / take re-check for the next round.
+v0.99.498 - Зоны: posts that can't be traded as drawn are out of the statistics and out
+         of the live trading (the user's breakdown: two BTC shorts at -42R / -37R with the
+         lines 99.9% away from the price, and 27% of posts with the price already past the
+         stop at the post): lines farther than 30% from the price = a misread screenshot
+         (status "уровни не совпадают с ценой"); the price already past the stop at the
+         post = the zone broke before it. Both are known at the post itself, so leaving
+         them out is not hindsight. The breakdown shows how many were left out, how many of
+         the "past the stop" ones would look normal with the other side (a colour / side
+         misread check) and the latest of them with their chart; such zones send no touch
+         messages.
