@@ -18898,3 +18898,11 @@ v0.99.502 - Зоны: the author's "result" posts are no longer taken for setups
          for such posts once in the background after the update (and by a button in the
          breakdown): their zones go (not those with a trade on), no Telegram messages,
          progress in "Состояние".
+v0.99.503 - Зоны: the stored history is recognised again by the current recogniser, not only
+         checked for "result" posts (user: an old ETH post with a hand-drawn red frame still
+         showed a short zone in the training list — the current version reads only the
+         green long zone). Once in the background after the update and by the button
+         "заново распознать всю историю": a post whose zones come out different gets the
+         new ones (old ones without a bot trade are removed), posts the bot is watching /
+         trading now are left alone, a coin that was set by hand is kept; no Telegram
+         messages; progress and counts in "Состояние"; the statistics recount after.

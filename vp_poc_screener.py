@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.502"
+APP_VERSION = "0.99.503"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21274,7 +21274,7 @@ ZONES = {"posts": [], "zones": [], "tg_offset": 0, "learned": None, "stats": Non
 
 def zones_save():
     with _zones_lock:
-        data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode", "own_last_scan", "monitor_ok", "fine_only", "recheck_v502") if k in ZONES}, default=str)
+        data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode", "own_last_scan", "monitor_ok", "fine_only", "recheck_v503") if k in ZONES}, default=str)
     try:   # v0.99.455 — written to disk for sure; the previous state kept as .bak
         tmp = ZONES_FILE + ".tmp"
         with open(tmp, "w") as f:
@@ -21306,7 +21306,7 @@ def zones_load():
                 d = json.load(f)
             with _zones_lock:
                 for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode",
-                          "own_last_scan", "monitor_ok", "fine_only", "recheck_v502"):
+                          "own_last_scan", "monitor_ok", "fine_only", "recheck_v503"):
                     if k in d:
                         ZONES[k] = d[k]
                 ZONES["train_mode"] = False   # v0.99.480 — the switch is gone: new posts are always live
@@ -25468,46 +25468,64 @@ _zones_recheck_lock = threading.Lock()
 
 
 def zones_recheck_results():
-    """v0.99.502 — the stored posts checked again for the author's "result" posts
-    (the TradingView price-range label "0,0222 (2,91%)"): their zones go (unless a
-    trade is on), the post is marked skipped. Background, no Telegram messages."""
+    """v0.99.502 — the stored history recognised again with the current recogniser
+    (v0.99.503: every post, not only the "result" ones — old mistakes such as a
+    hand-drawn red frame read as a short zone, a result label, a misread scale
+    are fixed). A post whose zones come out different gets the new ones; posts
+    with a zone the bot is watching or trading now are left as they are; a coin
+    set by hand is kept. Background, no Telegram messages."""
     if not _zones_recheck_lock.acquire(blocking=False):
         return
     try:
         with _zones_lock:
-            posts = [p_ for p_ in ZONES["posts"] if p_.get("ok") and not p_.get("result_post")]
-        try:
-            prices = _zones_symbols_and_prices()
-        except Exception:
-            prices = {}
-        found = 0
-        zones_act("recheck", running=True, done=0, total=len(posts), found=0, error=None)
+            live_posts = {z.get("post_id") for z in ZONES["zones"]
+                          if z.get("status") in ("watch", "in_trade") or (z.get("trade") or {}).get("status") in ("PENDING", "OPEN")}
+            posts = [p_ for p_ in ZONES["posts"] if p_["id"] not in live_posts and not p_.get("own")]
+        found = changed_n = 0
+        zones_act("recheck", running=True, done=0, total=len(posts), found=0, changed=0, error=None)
+        key = lambda zs: sorted((z["side"], tuple(round(v, 6) for v in z["levels"])) for z in zs)
         for i, post in enumerate(posts):
-            zones_act("recheck", done=i, found=found)
+            zones_act("recheck", done=i, found=found, changed=changed_n)
             path = os.path.join(ZONES_IMG_DIR, post["id"] + ".jpg")
             if not os.path.exists(path):
                 continue
+            old_sym = post.get("symbol")
+            with _zones_lock:
+                old = [z for z in ZONES["zones"] if z.get("post_id") == post["id"] and z.get("status") != "deleted"]
             try:
                 with open(path, "rb") as f:
-                    rec = zones_recognize(f.read(), live_price_fn=lambda s_: prices.get(s_), symbols=set(prices) or None)
+                    new = zones_recognize_post(post, f.read())
+                if not new and old_sym and (post.get("pending") or {}).get("zones"):   # the coin was set by hand before
+                    pend = post.pop("pending")
+                    post["symbol"] = old_sym
+                    px_ = None
+                    try:
+                        cs_ = zones_candles(old_sym, post["post_time"], post["post_time"] + 4 * 3600)
+                        px_ = cs_[0]["open"] if cs_ else None
+                    except Exception:
+                        pass
+                    new = [zones_make(post, zr["side"], zones_scale_fix(zr["levels"], px_)[0]) for zr in pend["zones"]]
+                    post["ok"] = bool(new)
+                    post["notes"] = [n for n in post.get("notes", []) if not n.startswith("тикер не распознан")]
             except Exception as e:
                 log_error(f"zones recheck {post.get('id')}: {e}")
                 continue
-            if not rec.get("result_post"):
-                continue
-            found += 1
+            found += bool(post.get("result_post"))
+            if key(new) == key(old):
+                continue   # the same zones: the stored ones (and their results) stay
+            changed_n += 1
             with _zones_lock:
-                post["skipped"], post["result_post"], post["ok"] = True, True, False
-                post["notes"] = [n for n in rec["notes"] if n.startswith("пост-отчёт")]
-                for z in ZONES["zones"]:
-                    if z.get("post_id") == post["id"] and not z.get("trade") and z.get("status") != "in_trade":
+                for z in old:
+                    if not z.get("trade"):
                         z["status"] = "deleted"
+                ZONES["zones"] = new + ZONES["zones"]
+            for z in new:
+                zones_replay_past(z)
         with _zones_lock:
-            ZONES["recheck_v502"] = True
+            ZONES["recheck_v503"] = True
         zones_save()
-        zones_act("recheck", running=False, done=len(posts), found=found, finished=time.time())
-        if found:
-            _zones_learn_event.set()
+        zones_act("recheck", running=False, done=len(posts), found=found, changed=changed_n, finished=time.time())
+        _zones_learn_event.set()
     except Exception as e:
         log_error(f"zones recheck: {e}")
         zones_act("recheck", running=False, error=str(e)[:200])
@@ -29307,8 +29325,8 @@ function zStatusHtml(d) {
       (L.no_auto ? ` · ${L.no_auto} только сигнал (доп. аргументы)` : '')));
   else out.push(row('💤', 'активных лесенок нет — жду новых постов'));
   const rc = a.recheck;
-  if (rc && rc.running) out.push(row('<span class="zspin">🔎</span>', `<b>проверяю историю на посты-отчёты</b> (скрины с измерителем «+2,91%» — не сетапы)${rc.total ? ` — ${rc.done || 0} из ${rc.total}, найдено ${rc.found || 0}` : ''}`));
-  else if (rc && rc.finished) out.push(row('🔎', `история проверена на посты-отчёты ${ago(rc.finished)}: найдено и убрано ${rc.found || 0}`));
+  if (rc && rc.running) out.push(row('<span class="zspin">🔎</span>', `<b>заново распознаю историю</b> текущей версией${rc.total ? ` — ${rc.done || 0} из ${rc.total} постов · зоны изменились у ${rc.changed || 0} · постов-отчётов ${rc.found || 0}` : ''}`));
+  else if (rc && rc.finished) out.push(row('🔎', `история заново распознана ${ago(rc.finished)}: зоны изменились у ${rc.changed || 0} постов, постов-отчётов ${rc.found || 0}`));
   const o = a.orphans;
   if (o && o.checked) out.push(row('🧹', `проверка «лишних» ордеров на бирже ${ago(o.checked)}${o.n ? ` — снято ${o.n}` : ' — всё чисто'}`));
   return `<div class="zcard"><div class="zh">📟 Состояние</div><div style="font-size:var(--fs-sm);">${out.join('')}</div></div>`;
@@ -29388,7 +29406,7 @@ async function refreshZones() {
         return (bt.fine || bt.coarse) ? `<div class="zsub">Результат по точности свечей (при выбранном тейке):</div><div class="zwrap"><table class="ztbl"><thead><tr><th>Свечи</th><th>сделок</th><th>WR</th><th>средний</th></tr></thead><tbody>${row('точные (15м / 1ч)', bt.fine)}${row('крупные (4ч)', bt.coarse)}</tbody></table></div>` : ''; })()}
       <div style="margin-top:8px;"><button onclick="zonesFineOnly(${dg.fine_only ? 'false' : 'true'})" class="zbtn" style="margin-top:0;">${dg.fine_only ? '✅ учу только по точным свечам — включить и 4ч' : '☐ учить только по точным свечам (без 4ч)'}</button>
       ${dg.fine_only && dg.coarse_out ? `<div class="zsub">не учтено постов на 4ч: ${dg.coarse_out}</div>` : ''}
-      <button onclick="zonesPost('/api/zones/recheck_results', {}); setTimeout(refreshZones, 1500);" class="zbtn">🔎 проверить историю на посты-отчёты</button></div>
+      <button onclick="zonesPost('/api/zones/recheck_results', {}); setTimeout(refreshZones, 1500);" class="zbtn">🔎 заново распознать всю историю</button></div>
       ${(dg.excl_rows || []).length ? `<details><summary>исключённые посты (последние ${dg.excl_rows.length})</summary><div class="zwrap"><table class="ztbl"><thead><tr><th>Пост</th><th>причина</th><th>цена / уровни</th></tr></thead><tbody>
         ${dg.excl_rows.map(x => `<tr onclick="zoneChart('${x.id}')" style="cursor:pointer;"><td>${(x.symbol || '').replace('_USDT', '')} ${x.side === 'long' ? 'лонг' : 'шорт'}<div class="dim">${zdate(x.t)}</div></td><td>${x.why === 'scale' ? 'уровни не сопоставить с ценой' : 'уже за стопом'}</td><td>${zfmt(x.px0)}<div class="dim">${x.levels.map(zfmt).join(' / ')}</div></td></tr>`).join('')}
         </tbody></table></div></details>` : ''}
@@ -32678,7 +32696,7 @@ if __name__ == "__main__":
     threading.Thread(target=zut_keepalive_loop, daemon=True).start()
     threading.Thread(target=zones_monitor_loop, daemon=True).start()
     threading.Thread(target=zones_learn_loop, daemon=True).start()
-    if not ZONES.get("recheck_v502"):   # v0.99.502 — once: the history checked for "result" posts
+    if not ZONES.get("recheck_v503"):   # v0.99.503 — once: the history recognised again by the current recogniser
         threading.Thread(target=zones_recheck_results, daemon=True).start()
     threading.Thread(target=own_scan_loop, daemon=True).start()   # v0.99.452 — our own zone finder
     threading.Thread(target=reconcile_loop, daemon=True).start()
