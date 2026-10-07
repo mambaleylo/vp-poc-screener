@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.501"
+APP_VERSION = "0.99.502"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21274,7 +21274,7 @@ ZONES = {"posts": [], "zones": [], "tg_offset": 0, "learned": None, "stats": Non
 
 def zones_save():
     with _zones_lock:
-        data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode", "own_last_scan", "monitor_ok", "fine_only") if k in ZONES}, default=str)
+        data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode", "own_last_scan", "monitor_ok", "fine_only", "recheck_v502") if k in ZONES}, default=str)
     try:   # v0.99.455 — written to disk for sure; the previous state kept as .bak
         tmp = ZONES_FILE + ".tmp"
         with open(tmp, "w") as f:
@@ -21306,7 +21306,7 @@ def zones_load():
                 d = json.load(f)
             with _zones_lock:
                 for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode",
-                          "own_last_scan", "monitor_ok", "fine_only"):
+                          "own_last_scan", "monitor_ok", "fine_only", "recheck_v502"):
                     if k in d:
                         ZONES[k] = d[k]
                 ZONES["train_mode"] = False   # v0.99.480 — the switch is gone: new posts are always live
@@ -21864,6 +21864,32 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
             if changed_m:
                 break
     merged.sort(key=lambda r: (r["kind"], r["y0"]))
+    # v0.99.502 — a "result" post (the author shows how a zone worked out): the
+    # TradingView price-range tool leaves a small filled label "0,0222 (2,91%) 222"
+    # next to an arrow. Such a post is not a new setup; and a small label is
+    # never a zone (it was read as a short zone before).
+    result_label = None
+    keep = []
+    for r in merged:
+        w_, h_ = r["x1"] - r["x0"], r["y1"] - r["y0"]
+        small = w_ < 0.22 * plot_x1 and h_ < 0.06 * H
+        if small and w_ >= 2.0 * h_ and result_label is None:
+            try:
+                from PIL import ImageOps as _IO
+                crop = im.crop((max(0, r["x0"] - 2), max(0, r["y0"] - 2), min(W, r["x1"] + 2), min(H, r["y1"] + 2)))
+                crop = _IO.invert(crop.convert("L")).resize((crop.width * 3, crop.height * 3))
+                txt = _zocr_tesseract(crop, 7)
+            except Exception:
+                txt = ""
+            if "%" in txt or re.search(r"\(\s*-?\d+[.,]?\d*\s*[%»9]?\s*\)", txt):
+                result_label = txt.strip()
+        if small or w_ < 0.06 * plot_x1:
+            continue   # a label / a marker, not a zone
+        keep.append(r)
+    merged = keep
+    if result_label:
+        notes.append(f"пост-отчёт: на скрине измеритель TradingView ({result_label[:40]}) — это результат отработки, не новый сетап")
+        merged = []
     # horizontal drawn lines: thin rows dark across most of the chart
     # v0.99.453: a drawn line is solid — the dotted current-price line is not one
     def _is_line_row(yy):
@@ -22010,6 +22036,7 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
     if not zones:
         notes.append("цветные зоны не найдены")
     return {"symbol": symbol, "zones": zones, "notes": notes, "ref": ref, "chart_px": chart_px, "tick_cands": tick_cands,
+            "result_post": bool(result_label),
             "not_listed": not_listed, "index_read": index_read, "levels_seen": [lb["v"] for lb in labels]}
 
 
@@ -22896,7 +22923,11 @@ def zones_recognize_post(post, data):
     # v0.99.478 — no colour zone at all = not a zones screenshot (another chart, a
     # meme, an index…): skipped quietly, kept apart from the real failures
     post.pop("skipped", None)
-    if rec and not rec.get("zones") and not post.get("not_listed"):
+    if rec and rec.get("result_post"):   # v0.99.502 — the author's "how it worked out" post
+        post["skipped"] = True
+        post["result_post"] = True
+        post["notes"] = [n for n in post["notes"] if n.startswith("пост-отчёт")] or ["пост-отчёт: результат отработки, не новый сетап"]
+    elif rec and not rec.get("zones") and not post.get("not_listed"):
         post["skipped"] = True
         post["notes"] = ["не похоже на скрин с зонами: цветных зон нет"]
     post["notes"] = list(dict.fromkeys(post["notes"]))   # no repeated notes
@@ -25431,6 +25462,64 @@ def api_zones_img(pid):
         return "нет картинки", 404
     with open(path, "rb") as f:
         return app.response_class(f.read(), mimetype="image/jpeg")
+
+
+_zones_recheck_lock = threading.Lock()
+
+
+def zones_recheck_results():
+    """v0.99.502 — the stored posts checked again for the author's "result" posts
+    (the TradingView price-range label "0,0222 (2,91%)"): their zones go (unless a
+    trade is on), the post is marked skipped. Background, no Telegram messages."""
+    if not _zones_recheck_lock.acquire(blocking=False):
+        return
+    try:
+        with _zones_lock:
+            posts = [p_ for p_ in ZONES["posts"] if p_.get("ok") and not p_.get("result_post")]
+        try:
+            prices = _zones_symbols_and_prices()
+        except Exception:
+            prices = {}
+        found = 0
+        zones_act("recheck", running=True, done=0, total=len(posts), found=0, error=None)
+        for i, post in enumerate(posts):
+            zones_act("recheck", done=i, found=found)
+            path = os.path.join(ZONES_IMG_DIR, post["id"] + ".jpg")
+            if not os.path.exists(path):
+                continue
+            try:
+                with open(path, "rb") as f:
+                    rec = zones_recognize(f.read(), live_price_fn=lambda s_: prices.get(s_), symbols=set(prices) or None)
+            except Exception as e:
+                log_error(f"zones recheck {post.get('id')}: {e}")
+                continue
+            if not rec.get("result_post"):
+                continue
+            found += 1
+            with _zones_lock:
+                post["skipped"], post["result_post"], post["ok"] = True, True, False
+                post["notes"] = [n for n in rec["notes"] if n.startswith("пост-отчёт")]
+                for z in ZONES["zones"]:
+                    if z.get("post_id") == post["id"] and not z.get("trade") and z.get("status") != "in_trade":
+                        z["status"] = "deleted"
+        with _zones_lock:
+            ZONES["recheck_v502"] = True
+        zones_save()
+        zones_act("recheck", running=False, done=len(posts), found=found, finished=time.time())
+        if found:
+            _zones_learn_event.set()
+    except Exception as e:
+        log_error(f"zones recheck: {e}")
+        zones_act("recheck", running=False, error=str(e)[:200])
+    finally:
+        _zones_recheck_lock.release()
+
+
+@app.route("/api/zones/recheck_results", methods=["POST"])
+def api_zones_recheck_results():
+    threading.Thread(target=zones_recheck_results, daemon=True).start()
+    zones_act("recheck", running=True, done=0, total=None, error=None)
+    return jsonify({"ok": True})
 
 
 @app.route("/api/zones/fine_only", methods=["POST"])
@@ -29217,6 +29306,9 @@ function zStatusHtml(d) {
       (d.autotrade ? ` · на бирже ${L.limits || 0} лимиток у ${L.on_exchange || 0} постов · ${L.waiting || 0} ждут подхода цены (маржа не занята)` : ' · автоторговля выкл — только отслеживаю') +
       (L.no_auto ? ` · ${L.no_auto} только сигнал (доп. аргументы)` : '')));
   else out.push(row('💤', 'активных лесенок нет — жду новых постов'));
+  const rc = a.recheck;
+  if (rc && rc.running) out.push(row('<span class="zspin">🔎</span>', `<b>проверяю историю на посты-отчёты</b> (скрины с измерителем «+2,91%» — не сетапы)${rc.total ? ` — ${rc.done || 0} из ${rc.total}, найдено ${rc.found || 0}` : ''}`));
+  else if (rc && rc.finished) out.push(row('🔎', `история проверена на посты-отчёты ${ago(rc.finished)}: найдено и убрано ${rc.found || 0}`));
   const o = a.orphans;
   if (o && o.checked) out.push(row('🧹', `проверка «лишних» ордеров на бирже ${ago(o.checked)}${o.n ? ` — снято ${o.n}` : ' — всё чисто'}`));
   return `<div class="zcard"><div class="zh">📟 Состояние</div><div style="font-size:var(--fs-sm);">${out.join('')}</div></div>`;
@@ -29295,7 +29387,8 @@ async function refreshZones() {
       ${(() => { const bt = dg.by_tf || {}, row = (nm, x) => x ? `<tr><td>${nm}<div class="dim">${zdate(x.first)} — ${zdate(x.last)}</div></td><td>${x.n}</td><td>${x.wr}%</td><td>${sgR(x.avg_r)}</td></tr>` : '';
         return (bt.fine || bt.coarse) ? `<div class="zsub">Результат по точности свечей (при выбранном тейке):</div><div class="zwrap"><table class="ztbl"><thead><tr><th>Свечи</th><th>сделок</th><th>WR</th><th>средний</th></tr></thead><tbody>${row('точные (15м / 1ч)', bt.fine)}${row('крупные (4ч)', bt.coarse)}</tbody></table></div>` : ''; })()}
       <div style="margin-top:8px;"><button onclick="zonesFineOnly(${dg.fine_only ? 'false' : 'true'})" class="zbtn" style="margin-top:0;">${dg.fine_only ? '✅ учу только по точным свечам — включить и 4ч' : '☐ учить только по точным свечам (без 4ч)'}</button>
-      ${dg.fine_only && dg.coarse_out ? `<div class="zsub">не учтено постов на 4ч: ${dg.coarse_out}</div>` : ''}</div>
+      ${dg.fine_only && dg.coarse_out ? `<div class="zsub">не учтено постов на 4ч: ${dg.coarse_out}</div>` : ''}
+      <button onclick="zonesPost('/api/zones/recheck_results', {}); setTimeout(refreshZones, 1500);" class="zbtn">🔎 проверить историю на посты-отчёты</button></div>
       ${(dg.excl_rows || []).length ? `<details><summary>исключённые посты (последние ${dg.excl_rows.length})</summary><div class="zwrap"><table class="ztbl"><thead><tr><th>Пост</th><th>причина</th><th>цена / уровни</th></tr></thead><tbody>
         ${dg.excl_rows.map(x => `<tr onclick="zoneChart('${x.id}')" style="cursor:pointer;"><td>${(x.symbol || '').replace('_USDT', '')} ${x.side === 'long' ? 'лонг' : 'шорт'}<div class="dim">${zdate(x.t)}</div></td><td>${x.why === 'scale' ? 'уровни не сопоставить с ценой' : 'уже за стопом'}</td><td>${zfmt(x.px0)}<div class="dim">${x.levels.map(zfmt).join(' / ')}</div></td></tr>`).join('')}
         </tbody></table></div></details>` : ''}
@@ -29353,7 +29446,7 @@ async function refreshZones() {
   const bad = (badPosts.length ? `<details style="margin-bottom:6px;"><summary style="cursor:pointer;font-size:var(--fs-sm);">⚠️ распознано не полностью — ${badPosts.length} (нужна монета или проверка)</summary>${badPosts.slice(0, 40).map(postRow).join('')}</details>` : '')
     + (skipPosts.length ? `<details style="margin-bottom:6px;"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">⏭ пропущено, не по шаблону — ${skipPosts.length}</summary>${skipPosts.slice(0, 40).map(postRow).join('')}</details>` : '');
   clearTimeout(window._zLearnT);   // while the history is being recounted: refresh every 3 s
-  if ((d.act || {}).learn && d.act.learn.running) window._zLearnT = setTimeout(refreshZones, 3000);
+  if (((d.act || {}).learn || {}).running || ((d.act || {}).recheck || {}).running) window._zLearnT = setTimeout(refreshZones, 3000);
   setPanelHtml(panel, `${warn}
     ${zStatusHtml(d)}
     ${summary}
@@ -32585,6 +32678,8 @@ if __name__ == "__main__":
     threading.Thread(target=zut_keepalive_loop, daemon=True).start()
     threading.Thread(target=zones_monitor_loop, daemon=True).start()
     threading.Thread(target=zones_learn_loop, daemon=True).start()
+    if not ZONES.get("recheck_v502"):   # v0.99.502 — once: the history checked for "result" posts
+        threading.Thread(target=zones_recheck_results, daemon=True).start()
     threading.Thread(target=own_scan_loop, daemon=True).start()   # v0.99.452 — our own zone finder
     threading.Thread(target=reconcile_loop, daemon=True).start()
     for _n in LOOP_MAX_GAP_SEC:  # v0.99.322 — seed so startup delays (up to 12 min) don't read as stalls

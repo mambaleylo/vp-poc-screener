@@ -18889,3 +18889,12 @@ v0.99.501 - Зоны: the breakdown compares the result on precise candles (15m 
          ranges, and a switch "учить только по точным свечам" (stored, recounts at once)
          that leaves the 4h-replayed posts out of the learning (user: "может ограничим
          историю обучения, где приходится ориентироваться на 4ч свечи").
+v0.99.502 - Зоны: the author's "result" posts are no longer taken for setups (user: "по
+         этим скринам система открывает сигналы, хотя это уже показывает результат
+         отработки... шорт нашла, видимо перепутала красный блок с результатом с зоной").
+         A small filled label read as "0,0222 (2,91%) 222" (TradingView's price-range
+         tool) marks the post as a result post: skipped, no zones ("пост-отчёт"); small
+         or narrow coloured boxes are never zones any more. The stored history is checked
+         for such posts once in the background after the update (and by a button in the
+         breakdown): their zones go (not those with a trade on), no Telegram messages,
+         progress in "Состояние".
