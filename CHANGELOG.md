@@ -18884,3 +18884,8 @@ v0.99.500 - Зоны: a misread decimal point is fixed instead of the post being
          right scale (XRP: a short 30% above) is no longer dropped — the old "30% away"
          rule is gone; only levels that can't be matched to the price are left out. The
          breakdown shows how many posts were fixed.
+v0.99.501 - Зоны: the breakdown compares the result on precise candles (15m / 1h, recent
+         posts) with the coarse 4h ones (posts older than ~400 days), with their date
+         ranges, and a switch "учить только по точным свечам" (stored, recounts at once)
+         that leaves the 4h-replayed posts out of the learning (user: "может ограничим
+         историю обучения, где приходится ориентироваться на 4ч свечи").

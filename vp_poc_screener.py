@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.500"
+APP_VERSION = "0.99.501"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21274,7 +21274,7 @@ ZONES = {"posts": [], "zones": [], "tg_offset": 0, "learned": None, "stats": Non
 
 def zones_save():
     with _zones_lock:
-        data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode", "own_last_scan", "monitor_ok") if k in ZONES}, default=str)
+        data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode", "own_last_scan", "monitor_ok", "fine_only") if k in ZONES}, default=str)
     try:   # v0.99.455 — written to disk for sure; the previous state kept as .bak
         tmp = ZONES_FILE + ".tmp"
         with open(tmp, "w") as f:
@@ -21306,7 +21306,7 @@ def zones_load():
                 d = json.load(f)
             with _zones_lock:
                 for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode",
-                          "own_last_scan", "monitor_ok"):
+                          "own_last_scan", "monitor_ok", "fine_only"):
                     if k in d:
                         ZONES[k] = d[k]
                 ZONES["train_mode"] = False   # v0.99.480 — the switch is gone: new posts are always live
@@ -22347,7 +22347,9 @@ def zones_learn():
     groups = {}
     for z in finished:
         groups.setdefault(zones_group_key(z), []).append(z)
-    runs_g, excl, fixed_n = [], [], 0
+    runs_g, excl, fixed_n, coarse_out = [], [], 0, 0
+    with _zones_lock:
+        fine_only = bool(ZONES.get("fine_only"))
     for g in sorted(groups.values(), key=lambda g: g[0]["post_time"]):
         z0 = g[0]
         end = min(now, z0["post_time"] + ZONES_MAX_DAYS * 86400)
@@ -22368,6 +22370,10 @@ def zones_learn():
             why = zones_ladder_check(pl, c0["open"] if c0 else None)
             if why in ("scale", "past_stop"):   # v0.99.498 — not tradeable at the post: out of the stats
                 excl.append((g, why, pl, c0["open"]))
+                continue
+            sec_ = (cs[1]["time"] - cs[0]["time"]) if len(cs) > 1 else 900
+            if sec_ >= 14400 and fine_only:   # v0.99.501 — "учить только по точным свечам"
+                coarse_out += 1
                 continue
             runs_g.append((g, cs, z0["post_time"], end))
     # v0.99.495 — the take: every variant replayed as the author's ladders over the
@@ -22456,6 +22462,23 @@ def zones_learn():
             flip += fl["s"] * (px0 - fl["limits"][0]) > 0
         ex_rows.append({"id": g[0]["id"], "symbol": g[0]["symbol"], "side": g[0]["side"], "t": g[0]["post_time"],
                         "why": why, "px0": px0, "levels": [round(v, 8) for v in pl["levels"]]})
+    by_tf = {}
+    for (g, cs, _s, _e), r in zip(runs_g, per):
+        if r is None:
+            continue
+        sec_ = (cs[1]["time"] - cs[0]["time"]) if len(cs) > 1 else 900
+        k_ = "coarse" if sec_ >= 14400 else "fine"
+        b = by_tf.setdefault(k_, {"n": 0, "sum": 0.0, "win": 0, "first": None, "last": None})
+        b["n"] += 1
+        b["sum"] += r["r"]
+        b["win"] += r["result"] == "WIN"
+        t0_ = g[0]["post_time"]
+        b["first"] = t0_ if b["first"] is None else min(b["first"], t0_)
+        b["last"] = t0_ if b["last"] is None else max(b["last"], t0_)
+    diag["by_tf"] = {k_: {"n": b["n"], "avg_r": round(b["sum"] / b["n"], 3), "wr": round(100 * b["win"] / b["n"], 1),
+                          "first": b["first"], "last": b["last"]} for k_, b in by_tf.items() if b["n"]}
+    diag["fine_only"] = fine_only
+    diag["coarse_out"] = coarse_out
     diag["scale_fixed"] = fixed_n
     diag["excl_scale"] = sum(1 for x in excl if x[1] == "scale")
     diag["excl_past"] = sum(1 for x in excl if x[1] == "past_stop")
@@ -25408,6 +25431,18 @@ def api_zones_img(pid):
         return "нет картинки", 404
     with open(path, "rb") as f:
         return app.response_class(f.read(), mimetype="image/jpeg")
+
+
+@app.route("/api/zones/fine_only", methods=["POST"])
+def api_zones_fine_only():
+    """v0.99.501 — learn only on posts replayed on 15m / 1h candles (not the coarse 4h of old posts)"""
+    on = bool((request.get_json(silent=True) or {}).get("on"))
+    with _zones_lock:
+        ZONES["fine_only"] = on
+    zones_save()
+    zones_act("learn", running=True, stage="запуск пересчёта", done=None, total=None, error=None)
+    _zones_learn_event.set()
+    return jsonify({"ok": True, "on": on})
 
 
 @app.route("/api/zones/relearn", methods=["POST"])
@@ -29257,6 +29292,10 @@ async function refreshZones() {
       <div>налилось за сутки</div><div>${dg.fill_1d} (${pc(dg.fill_1d)})</div>
       <div>не налилось совсем</div><div>${dg.never} (${pc(dg.never)})</div>
       <div>свечи истории</div><div>${tfTxt} <span class="dim">(старые посты — только крупные свечи)</span></div></div>
+      ${(() => { const bt = dg.by_tf || {}, row = (nm, x) => x ? `<tr><td>${nm}<div class="dim">${zdate(x.first)} — ${zdate(x.last)}</div></td><td>${x.n}</td><td>${x.wr}%</td><td>${sgR(x.avg_r)}</td></tr>` : '';
+        return (bt.fine || bt.coarse) ? `<div class="zsub">Результат по точности свечей (при выбранном тейке):</div><div class="zwrap"><table class="ztbl"><thead><tr><th>Свечи</th><th>сделок</th><th>WR</th><th>средний</th></tr></thead><tbody>${row('точные (15м / 1ч)', bt.fine)}${row('крупные (4ч)', bt.coarse)}</tbody></table></div>` : ''; })()}
+      <div style="margin-top:8px;"><button onclick="zonesFineOnly(${dg.fine_only ? 'false' : 'true'})" class="zbtn" style="margin-top:0;">${dg.fine_only ? '✅ учу только по точным свечам — включить и 4ч' : '☐ учить только по точным свечам (без 4ч)'}</button>
+      ${dg.fine_only && dg.coarse_out ? `<div class="zsub">не учтено постов на 4ч: ${dg.coarse_out}</div>` : ''}</div>
       ${(dg.excl_rows || []).length ? `<details><summary>исключённые посты (последние ${dg.excl_rows.length})</summary><div class="zwrap"><table class="ztbl"><thead><tr><th>Пост</th><th>причина</th><th>цена / уровни</th></tr></thead><tbody>
         ${dg.excl_rows.map(x => `<tr onclick="zoneChart('${x.id}')" style="cursor:pointer;"><td>${(x.symbol || '').replace('_USDT', '')} ${x.side === 'long' ? 'лонг' : 'шорт'}<div class="dim">${zdate(x.t)}</div></td><td>${x.why === 'scale' ? 'уровни не сопоставить с ценой' : 'уже за стопом'}</td><td>${zfmt(x.px0)}<div class="dim">${x.levels.map(zfmt).join(' / ')}</div></td></tr>`).join('')}
         </tbody></table></div></details>` : ''}
@@ -29796,6 +29835,10 @@ async function zonesTrainMode(on) {
 }
 function zonesDel(id) { if (confirm('Удалить зону?')) zonesPost('/api/zones/zone', {id, delete: true}); }
 function zonesDelPost(pid) { if (confirm('Удалить пост и его зоны?')) zonesPost('/api/zones/post_delete', {post_id: pid}); }
+function zonesFineOnly(on) {   // v0.99.501
+  zonesPost('/api/zones/fine_only', {on});
+  setTimeout(refreshZones, 1500);
+}
 function zonesRelearn() {   // v0.99.493 — an answer at once, then the progress in "Состояние"
   zonesPost('/api/zones/relearn', {});
   try { document.querySelectorAll('button[onclick="zonesRelearn()"]').forEach(b => { b.disabled = true; b.textContent = '⏳ пересчёт запущен…'; }); } catch (e) {}
