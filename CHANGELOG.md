@@ -18776,3 +18776,12 @@ v0.99.488 - Зоны, "Авто-риск": saving settings woke the zones learne
          settings are applied, and it relearns by itself within ~10 s whenever the
          learned rules don't match the live risk settings. The Zones tab shows the
          auto-risk line first when auto is on; the "половина" hint is removed.
+v0.99.489 - Зоны: the tab rewritten for reading on a phone. A summary card first
+         (autotrade, risk per trade and its source, rules, the rules' average result,
+         and a coloured verdict in plain words), then active zones and trades, then
+         cards with tables: "Какой риск лучше" (account growth per trade at 1–50% risk
+         on the earlier / later / all zones, the best one marked), "Подбор правил"
+         (the found rule vs the default on the earlier and later zones, plus the other
+         candidates and how many are positive on both), "Движение к зоне", and the
+         price-behaviour reference folded away; the sources (Telegram group, our finder)
+         at the bottom. zones_learn() now stores risk_tab / cands / both_pos.

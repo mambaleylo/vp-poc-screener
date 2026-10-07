@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.488"
+APP_VERSION = "0.99.489"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22256,13 +22256,25 @@ def zones_learn():
                      "g_full": round((math.exp(g_at(fbest)) - 1) * 100, 3),
                      "g_half": round((math.exp(g_at(fbest / 2)) - 1) * 100, 3),
                      "g_now": round((math.exp(g_at(rf)) - 1) * 100, 3), "edge": g_at(fbest) > 1e-6}
+    # v0.99.489 — the risk table for the rules in use: account growth per trade
+    # at each %, on the earlier / later / all zones; and the other candidates
+    risk_tab = None
+    if use:
+        k_ = (use["entry"], use["buf"], use["tp"])
+        sets = {"fit": grid_fit.get(k_, []), "chk": grid_chk.get(k_, []), "all": grid.get(k_, [])}
+        risk_tab = {"avg": {nm: avg(xs) for nm, xs in sets.items()}, "n": {nm: len(xs) for nm, xs in sets.items()},
+                    "rows": [{"risk": pc, **{nm: growth(xs, pc / 100) for nm, xs in sets.items()}}
+                             for pc in (1, 2, 3, 5, 10, 15, 20, 30, 50)]}
+    cands = [{k2: r.get(k2) for k2 in ("entry", "buf", "tp", "fit_n", "fit_r", "chk_n", "chk_r", "wr", "fit_g", "chk_g")}
+             for r in sorted(ok, key=lambda r: -(r["fit_g"] if r["fit_g"] is not None else -99))[:6]]
+    both_pos = sum(1 for r in ok if r["chk_n"] >= 5 and (r["fit_r"] or 0) > 0 and (r["chk_r"] or 0) > 0)
     auto_risk = None
     if auto:
         src_rule = best or dflt
         auto_risk = (src_rule or {}).get("auto_risk") or None   # None/0 = no edge: the settings' % stays
     learned = {"at": now, "n": best["n"] if best else 0, "best": best, "default": dflt, "pick": pick,
                "risk": (auto_risk if auto and auto_risk else rf * 100), "auto": auto, "auto_risk": auto_risk,
-               "kelly": kelly,
+               "kelly": kelly, "risk_tab": risk_tab, "cands": cands, "both_pos": both_pos, "n_rules": len(ok),
                "verdict": verdict, "fit_zones": n_fit, "chk_zones": len(finished) - n_fit,
                "top": sorted(ok, key=lambda r: -(r["fit_r"] or -99))[:6]}
     with _zones_lock:
@@ -26266,6 +26278,33 @@ INDEX_HTML = """<!doctype html>
   .pill.pos { background:var(--pos-bg); color:var(--pos); border-color:rgba(52,211,153,.3); }
   .pill.warn { background:var(--warn-bg); color:var(--warn); border-color:var(--warn-line); }
   .pill .dot { width:6px; height:6px; border-radius:50%; background:currentColor; }
+  /* v0.99.489 — Zones tab cards */
+  .zsec { font-weight:700; font-size:var(--fs-md); margin:14px 0 8px; }
+  .zcard { background:var(--inset); border:1px solid var(--line); border-radius:var(--r-sm); padding:10px 12px; margin-bottom:10px; font-size:var(--fs); line-height:1.45; }
+  .zcard .zh { font-weight:700; font-size:var(--fs-md); margin-bottom:8px; display:flex; align-items:center; gap:6px; flex-wrap:wrap; }
+  details.zcard > summary.zh { cursor:pointer; list-style:none; }
+  .zcard .zsub { color:var(--tx-2); font-size:var(--fs-sm); margin-top:8px; }
+  .zcard details > summary { cursor:pointer; color:var(--tx-2); font-size:var(--fs-sm); margin-top:8px; }
+  .ztiles { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:8px; }
+  .ztile { background:var(--card); border-radius:var(--r-sm); padding:8px 10px; min-width:0; }
+  .ztile .zl { font-size:var(--fs-xs); color:var(--tx-2); text-transform:uppercase; letter-spacing:.03em; }
+  .ztile .zv { font-size:var(--fs-lg); font-weight:700; margin-top:2px; overflow-wrap:anywhere; }
+  .zn { font-size:var(--fs-xs); color:var(--tx-2); font-weight:400; margin-top:2px; }
+  .zbanner { padding:8px 10px; border-radius:var(--r-sm); margin-top:10px; border:1px solid var(--line-2); }
+  .zbanner.pos { background:var(--pos-bg); border-color:rgba(52,211,153,.3); }
+  .zbanner.neg { background:var(--neg-bg); border-color:rgba(248,113,113,.35); }
+  .zbanner.warn { background:var(--warn-bg); border-color:var(--warn-line); }
+  .zkv { display:grid; grid-template-columns:auto 1fr; gap:4px 12px; font-size:var(--fs-sm); }
+  .zkv > div:nth-child(odd) { color:var(--tx-2); }
+  .zwrap { overflow-x:auto; }
+  .ztbl { width:100%; border-collapse:collapse; font-size:var(--fs-sm); font-variant-numeric:tabular-nums; }
+  .ztbl th { text-align:right; font-weight:600; color:var(--tx-2); padding:4px 4px; border-bottom:1px solid var(--line-2); text-transform:none; letter-spacing:0; font-size:var(--fs-xs); line-height:1.25; }
+  .ztbl td { text-align:right; padding:5px 4px; white-space:nowrap; border-bottom:1px solid var(--line); vertical-align:top; }
+  .ztbl th:first-child, .ztbl td:first-child { text-align:left; white-space:normal; }
+  .ztbl td .dim { font-size:var(--fs-xs); }
+  .ztbl tr.zbest td { background:var(--pos-bg); }
+  .ztbl tr.zcur td { font-weight:700; }
+  .zbtn { margin-top:10px; background:var(--ctl); border:none; color:var(--tx); padding:6px 12px; border-radius:var(--r-xs); }
   .loadbar { display:inline-block; width:34px; height:4px; border-radius:2px; background:var(--line-2); overflow:hidden; vertical-align:middle; }
   .loadbar > i { display:block; height:100%; background:var(--acc); }
   #overview, #autotradeBanner, #healthBanner { font-size:var(--fs-xs); }
@@ -28395,34 +28434,83 @@ async function refreshZones() {
   const p = d.params || {}, st = d.stats || {}, lr = d.learned || {};
   const deps = d.deps || {};
   const warn = deps.ok ? '' : `<div style="padding:8px;margin-bottom:8px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-sm);">⚠️ Распознавание скринов не установлено${deps.tesseract ? '' : ' (нет tesseract)'}${deps.pillow ? '' : ' (нет Pillow)'}. В Termux: <b>pkg install tesseract python-pillow</b>, потом перезапустите бота. Пока зоны можно добавлять вручную. <button onclick="zonesReparse('')" style="background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);">↻ распознать все заново</button></div>`;
-  const tg = d.tg ? `перешлите пост со скрином боту в Telegram — он распознает и пришлёт, что нашёл${d.tg_error ? ` <span class="loss">(ошибка Telegram: ${d.tg_error})</span>` : ''}` : '<span class="loss">Telegram не настроен — только загрузка здесь</span>';
-  const rules = `<div style="padding:8px 10px;margin-bottom:8px;background:var(--inset);border-radius:var(--r-sm);">
-    <b>Правила сейчас</b> (${p.source || '—'}): вход от <b>${(p.entry || 0) + 1}-й</b> линии · стоп <b>${p.buf}%</b> за дальней линией зоны · тейк <b>+${p.tp}%</b>${d.tp_user ? ' (свой, из настроек)' : ''}
-    <div class="dim" style="font-size:var(--fs-sm);">автоторговля зон: ${d.autotrade ? '<span class="win">вкл</span>' : 'выкл (Настройки → Автоторговля → Зоны)'} · зона ждёт ${d.max_days} дн. · обученные правила включаются с ${d.learn_min} отработанных зон</div>
-    ${(() => { const k = (d.learned || {}).kelly, rk = (d.learned || {}).risk; if (!k) return '';
-      if ((d.learned || {}).auto) return `<div style="margin-top:4px;">Риск: <b>авто-риск ${d.learned.auto_risk ? d.learned.auto_risk + '%' : '— нет перевеса, остаётся % из настроек'}</b> на сделку (лучший по истории, не больше 50%; подобран вместе с тейком и стопом на ранних зонах и проверен на поздних)</div>`;
-      if (!k.edge) return `<div style="margin-top:4px;">Риск: сейчас ${rk}% · по истории (${k.n} сделок) <span class="loss">ни при каком риске счёт не растёт</span> — лучше не торговать на деньги, пока статистика не изменится</div>`;
-      return `<div style="margin-top:4px;">Риск: сейчас <b>${rk}%</b> (счёт ${k.g_now > 0 ? '+' : ''}${k.g_now}% за сделку по истории) · максимум роста при ~${k.full}% (${k.g_full > 0 ? '+' : ''}${k.g_full}%) — выше этого риск только вредит</div>`; })()}</div>`;
-  let stats = '';
-  if (st.finished) {
-    const r = st.reach || {};
-    stats = `<div style="padding:8px 10px;margin-bottom:8px;background:var(--inset);border-radius:var(--r-sm);font-size:var(--fs-sm);">
-      <b>Статистика</b> по ${st.finished} отработанным зонам: цена дошла до 1-й линии в ${st.touched} · закол за 1-ю линию до разворота: медиана ${st.depth_median}%, у 80% не глубже ${st.depth_p80}% · дальнюю линию пробивала до разворота в ${st.beyond_far}% · лучший ход в сторону зоны за ${d.max_days} дн. после касания: медиана +${st.run_median}%, +2% — ${r['2']}%, +3% — ${r['3']}%, +5% — ${r['5']}%, +10% — ${r['10']}% случаев
-      ${(lr.pick || lr.best) ? (() => { const b = lr.pick || lr.best, sg = v => v == null ? '—' : (v > 0 ? '+' : '') + v + 'R';
-        const gp = v => v == null ? '—' : (v > 0 ? '+' : '') + v + '%';
-        return `<div style="margin-top:4px;">подбор под рост счёта при риске ${lr.risk}% (ранние ${lr.fit_zones} зон): линия ${b.entry + 1}, стоп ${b.buf}%, тейк +${b.tp}% → счёт <b>${gp(b.fit_g)}</b> за сделку, ${sg(b.fit_r)}, WR ${b.wr}%, худшая серия стопов ${b.max_ls} (${b.fit_n} сделок)</div>
-        <div>проверка (поздние ${lr.chk_zones} зон): счёт <b class="${(b.chk_g || 0) > 0 ? 'win' : 'loss'}">${gp(b.chk_g)}</b> за сделку, ${sg(b.chk_r)} (${b.chk_n})${lr.default ? ` · по умолчанию: ${gp(lr.default.chk_g)}, ${sg(lr.default.chk_r)}` : ''}</div>
-        <div>${lr.verdict || ''}</div>
-        ${b.after_med != null ? `<div>после тейка цена шла дальше: медиана +${b.after_med}% · ещё +2% и больше — в ${b.after_2}% сделок, +5% — в ${b.after_5}%</div>` : ''}`; })() : '<div class="dim">для подбора правил пока мало зон со входом</div>'}
-      <button onclick="zonesRelearn()" style="margin-top:6px;background:var(--ctl);border:none;color:var(--tx);padding:4px 10px;border-radius:var(--r-xs);">↻ пересчитать</button></div>`;
+  const tg = d.tg ? `перешлите пост со скрином боту в Telegram — он распознает и пришлёт, что нашёл${d.tg_error ? ` <span class="loss">(ошибка Telegram: ${d.tg_error})</span>` : ''}` : '<span class="loss">Telegram не настроен</span>';
+  // v0.99.489 — the tab rewritten: a short summary first, then cards with tables
+  const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
+  const sgP = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${(+v).toFixed(2)}%</span>`;
+  const ruleTxt = r => r ? `линия ${(r.entry || 0) + 1} · стоп ${r.buf}% · тейк +${r.tp}%` : '—';
+  const ruleShort = r => r ? `л${(r.entry || 0) + 1} · стоп ${r.buf}% · тейк +${r.tp}%` : '—';
+  const card = (title, body) => `<div class="zcard"><div class="zh">${title}</div>${body}</div>`;
+  const tile = (label, value, note) => `<div class="ztile"><div class="zl">${label}</div><div class="zv">${value}</div>${note ? `<div class="zn">${note}</div>` : ''}</div>`;
+  const rt = lr.risk_tab, autoOn = !!lr.auto, riskNow = lr.risk;
+  const riskSrc = autoOn ? (lr.auto_risk ? 'авто-риск' : 'авто: перевеса нет → % из настроек') : 'из настроек';
+  // --- 1. summary
+  let banner;
+  if (!rt || !rt.n.all) banner = `<div class="zbanner warn">Пока мало отработанных зон, чтобы делать выводы — обученные правила включаются с ${d.learn_min} зон.</div>`;
+  else if ((rt.avg.all || 0) <= 0) banner = `<div class="zbanner neg"><b>Правила в минусе по истории:</b> в среднем ${sgR(rt.avg.all)} на сделку (${rt.n.all} сделок).<br>
+      При минусовом среднем <b>никакой процент риска не даёт рост</b> — риск меняет только скорость потерь (см. таблицу ниже).
+      ${d.autotrade ? '<br>⚠️ Автоторговля зон сейчас <b>включена</b> — на деньги лучше не торговать, пока статистика не станет плюсовой.' : ''}</div>`;
+  else if ((rt.avg.chk || 0) <= 0) banner = `<div class="zbanner warn"><b>Перевес не подтверждён:</b> по всей истории ${sgR(rt.avg.all)} на сделку, но на поздних зонах ${sgR(rt.avg.chk)} — похоже на везение ранних зон.</div>`;
+  else banner = `<div class="zbanner pos"><b>Перевес есть:</b> ${sgR(rt.avg.all)} на сделку по всей истории, на поздних зонах ${sgR(rt.avg.chk)}.</div>`;
+  const summary = card('🎯 Зоны — итог', `<div class="ztiles">
+      ${tile('Автоторговля', d.autotrade ? '<span class="win">вкл</span>' : '<span class="dim">выкл</span>', d.autotrade ? '' : 'Настройки → Автоторговля → Зоны')}
+      ${tile('Риск на сделку', riskNow == null ? '—' : riskNow + '%', riskSrc)}
+      ${tile('Правила', p.source || '—', `${ruleTxt(p)}${d.tp_user ? ' (тейк свой)' : ''}`)}
+      ${tile('Результат правил', rt ? sgR(rt.avg.all) + '<span class="zn"> / сделку</span>' : '—', rt ? `${rt.n.all} сделок по истории` : '')}
+    </div>${banner}`);
+  // --- 2. risk table
+  let riskCard = '';
+  if (rt) {
+    const best = rt.rows.reduce((a, r) => (r.fit != null && (a == null || r.fit > a.fit)) ? r : a, null);
+    const bestOk = best && best.fit > 0;
+    const cur = rt.rows.reduce((a, r) => Math.abs(r.risk - riskNow) < Math.abs(a.risk - riskNow) ? r : a, rt.rows[0]);
+    const rows = rt.rows.map(r => `<tr class="${bestOk && r === best ? 'zbest' : ''} ${r === cur ? 'zcur' : ''}"><td>${r.risk}%${bestOk && r === best ? ' 🎯' : ''}${r === cur ? ' <span class="dim">← сейчас</span>' : ''}</td><td>${sgP(r.fit)}</td><td>${sgP(r.chk)}</td><td>${sgP(r.all)}</td></tr>`).join('');
+    riskCard = card('💰 Какой риск лучше', `<div class="zsub" style="margin-top:0;">Рост счёта <b>за одну сделку</b> при разном риске, правила: ${ruleTxt(p)}</div>
+      <div class="zwrap"><table class="ztbl"><thead><tr><th>Риск</th><th>ранние<br>${rt.n.fit} сд.</th><th>поздние<br>${rt.n.chk} сд.</th><th>вся<br>история</th></tr></thead><tbody>${rows}</tbody></table></div>
+      <div class="zsub">${bestOk ? `🎯 лучший по ранним зонам — <b>${best.risk}%</b>; на поздних при нём ${sgP(best.chk)} за сделку.` : '<b>Ни один процент не растит счёт</b> на ранних зонах — у правил нет перевеса.'}
+      ${autoOn ? 'Авто-риск включён: процент выбирается по ранним зонам (не больше 50%) вместе с правилами.' : 'Включите «Авто-риск» в настройках, чтобы процент выбирался сам.'}
+      Средний результат: ранние ${sgR(rt.avg.fit)}, поздние ${sgR(rt.avg.chk)}.</div>`);
   }
+  // --- 3. rule selection (honest check)
+  let pickCard = '';
+  if (lr.pick || lr.default) {
+    const b = lr.pick, df = lr.default;
+    const row = (nm, r) => r ? `<tr><td>${nm}<div class="dim">${ruleTxt(r)}</div></td><td>${sgR(r.fit_r)}<div class="dim">${r.fit_n} сд.</div></td><td>${sgR(r.chk_r)}<div class="dim">${r.chk_n} сд.</div></td><td>${r.wr}%</td></tr>` : '';
+    const vcls = lr.best ? 'pos' : (b && (b.chk_r || 0) <= 0 ? 'neg' : 'warn');
+    const cands = (lr.cands || []).map(r => `<tr><td>${ruleShort(r)}</td><td>${sgR(r.fit_r)}</td><td>${sgR(r.chk_r)}</td><td>${r.wr}%</td></tr>`).join('');
+    pickCard = card('🧪 Подбор правил (честная проверка)', `<div class="zsub" style="margin-top:0;">Правило ищется на <b>ранних ${lr.fit_zones}</b> зонах и проверяется на <b>поздних ${lr.chk_zones}</b>, которых подбор не видел.</div>
+      <div class="zwrap"><table class="ztbl"><thead><tr><th>Вариант</th><th>ранние</th><th>поздние</th><th>WR</th></tr></thead><tbody>
+      ${row('Лучший на ранних', b)}${row('По умолчанию', df)}</tbody></table></div>
+      ${lr.verdict ? `<div class="zbanner ${vcls}">${lr.verdict}</div>` : ''}
+      ${b && b.after_med != null ? `<div class="zsub">После тейка цена шла дальше: медиана +${b.after_med}% · ещё +2% — в ${b.after_2}% сделок, +5% — в ${b.after_5}%</div>` : ''}
+      ${cands ? `<details><summary>другие варианты</summary><div class="zsub">в плюсе и на ранних, и на поздних: <b>${lr.both_pos ?? '—'}</b> из ${lr.n_rules ?? '—'} вариантов</div>
+        <div class="zwrap"><table class="ztbl"><thead><tr><th>Правило</th><th>ранние</th><th>поздние</th><th>WR</th></tr></thead><tbody>${cands}</tbody></table></div></details>` : ''}
+      <button onclick="zonesRelearn()" class="zbtn">↻ пересчитать</button>`);
+  } else if (st.finished) {
+    pickCard = card('🧪 Подбор правил', '<div class="dim">для подбора пока мало зон со входом</div><button onclick="zonesRelearn()" class="zbtn">↻ пересчитать</button>');
+  }
+  // --- 4. move toward the zone
+  let apCard = '';
   const ap = d.approach || {};
   if (ap.posts || (ap.rows || []).length) {
-    const rowsTxt = (ap.rows || []).map(r => `стоп ${r.sl}%: WR ${r.wr}% · ${r.avg_r > 0 ? '+' : ''}${r.avg_r}R (${r.n})`).join(' · ');
-    stats += `<div style="padding:8px 10px;margin-bottom:8px;background:var(--inset);border-radius:var(--r-sm);font-size:var(--fs-sm);">
-      <b>Движение к зоне</b> (посты с зонами только с одной стороны от цены): цена доходит до ближайшей линии в <b>${ap.reach_pct == null ? '—' : ap.reach_pct + '%'}</b> из ${ap.posts} постов
-      <div class="dim">${rowsTxt || 'сделок пока нет'}</div>
-      <div>${ap.good && ap.best ? `<span class="win">в плюсе</span> — в сигнале будет «можно заходить», стоп ${ap.best.sl}%` : `пока ${ap.best ? 'не в плюсе' : 'мало постов (нужно ' + d.learn_min + ')'} — в сигнале только справка`} · автосделки: ${d.autotrade_approach ? '<span class="win">вкл</span>' : 'выкл'}</div></div>`;
+    const rows = (ap.rows || []).map(r => `<tr class="${ap.best && ap.best.sl === r.sl && ap.good ? 'zbest' : ''}"><td>${r.sl}%</td><td>${r.wr}%</td><td>${sgR(r.avg_r)}</td><td>${r.n}</td></tr>`).join('');
+    apCard = card(`➡️ Движение к зоне ${ap.good && ap.best ? '<span class="pill pos">в плюсе</span>' : '<span class="pill">справка</span>'}`, `<div class="zsub" style="margin-top:0;">Посты, где все зоны с одной стороны от цены: вход сразу, тейк у ближайшей линии.</div>
+      <div class="zkv" style="margin:6px 0;"><div>цена дошла до линии</div><div><b>${ap.reach_pct == null ? '—' : ap.reach_pct + '%'}</b> из ${ap.posts} постов</div>
+      <div>автосделки</div><div>${d.autotrade_approach ? '<span class="win">вкл</span>' : 'выкл'}</div></div>
+      ${rows ? `<div class="zwrap"><table class="ztbl"><thead><tr><th>Стоп</th><th>WR</th><th>средний</th><th>сделок</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="dim">сделок пока нет</div>'}
+      <div class="zsub">${ap.good && ap.best ? `в сигнале будет «можно заходить», стоп ${ap.best.sl}%` : (ap.best ? 'пока не в плюсе — в сигнале только справка' : `мало постов (нужно ${d.learn_min})`)}</div>`);
+  }
+  // --- 5. how the price behaves at the zones (reference)
+  let behCard = '';
+  if (st.finished) {
+    const r = st.reach || {};
+    behCard = `<details class="zcard"><summary class="zh" style="margin:0;">📊 Как цена ведёт себя у зон</summary><div class="zkv" style="margin-top:8px;">
+      <div>отработанных зон</div><div><b>${st.finished}</b>, дошла до 1-й линии в ${st.touched}</div>
+      <div>закол за 1-ю линию</div><div>медиана ${st.depth_median}%, у 80% ≤ ${st.depth_p80}%</div>
+      <div>пробила дальнюю линию</div><div>${st.beyond_far}% случаев</div>
+      <div>лучший ход за ${d.max_days} дн.</div><div>медиана +${st.run_median}%</div>
+      <div>дошла до +2 / +3 / +5 / +10%</div><div>${r['2']}% / ${r['3']}% / ${r['5']}% / ${r['10']}%</div>
+      <div>зона ждёт</div><div>${d.max_days} дн.</div></div></details>`;
   }
   const zs = d.zones || [];
   const ownZ = zs.filter(z => z.own);
@@ -28441,16 +28529,18 @@ async function refreshZones() {
   const bad = (badPosts.length ? `<details style="margin-bottom:6px;"><summary style="cursor:pointer;font-size:var(--fs-sm);">⚠️ распознано не полностью — ${badPosts.length} (нужна монета или проверка)</summary>${badPosts.slice(0, 40).map(postRow).join('')}</details>` : '')
     + (skipPosts.length ? `<details style="margin-bottom:6px;"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">⏭ пропущено, не по шаблону — ${skipPosts.length}</summary>${skipPosts.slice(0, 40).map(postRow).join('')}</details>` : '');
   setPanelHtml(panel, `${warn}
-    <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-bottom:8px;">
-    </div>
-    <div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>
-    ${zutHtml(ut)}
-    ${ownHtml(d, ownZ)}
-    ${rules}${stats}${bad ? `<div style="margin-bottom:8px;">${bad}</div>` : ''}
-    <div style="font-weight:700;margin:6px 0;">Активные (${act.length})</div>
-    ${act.length ? zonePostBlocks(act) : '<div class="dim">нет — перешлите пост боту или загрузите скрин</div>'}
-    ${trn.length ? `<details style="margin-top:8px;"><summary class="dim" style="cursor:pointer;">📚 обучение (${trn.length}, ждут итога: ${trn.filter(z => z.status === 'train').length})</summary>${zonePostBlocks(trn)}</details>` : ''}
+    ${summary}
+    <div class="zsec">Активные зоны (${act.length})</div>
+    ${act.length ? zonePostBlocks(act) : '<div class="dim" style="margin-bottom:10px;">нет — новые посты из группы появятся здесь</div>'}
     ${zoneTradesHtml(closedTr)}
+    <div class="zsec">Правила и риск</div>
+    ${riskCard}${pickCard}${apCard}${behCard}
+    <div class="zsec">Источники</div>
+    ${zutHtml(ut)}
+    <div class="dim" style="font-size:var(--fs-sm);margin:-4px 0 10px;">или ${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>
+    ${ownHtml(d, ownZ)}
+    ${bad ? `<div style="margin-bottom:8px;">${bad}</div>` : ''}
+    ${trn.length ? `<details style="margin-top:8px;"><summary class="dim" style="cursor:pointer;">📚 обучение (${trn.length}, ждут итога: ${trn.filter(z => z.status === 'train').length})</summary>${zonePostBlocks(trn)}</details>` : ''}
     <details style="margin-top:8px;"><summary class="dim" style="cursor:pointer;">архив (${arch.length})</summary>${zonePostBlocks(arch)}</details>`);
 }
 async function zonesPost(url, body) {
@@ -28514,8 +28604,8 @@ function ownHtml(d, ownZ) {
   const sgn = v => v == null ? '—' : (v > 0 ? '+' : '') + v + 'R';
   const last = (ex.last || []).map(e => `<div>${e.hits === e.n ? '✅' : (e.hits ? '🟡' : '❌')} ${zdate(e.t)} · ${(e.symbol || '?').replace('_USDT', '')}${e.train ? ' 📚' : ''}: ${e.hits}/${e.n}${e.items.map(it => it.hit ? ` · ${it.side === 'long' ? 'лонг' : 'шорт'} №${it.rank}, ±${it.err_pct}%${it.before_h != null ? ', раньше поста на ' + it.before_h + ' ч' : ''}${it.cmp ? `, автор ${sgn(it.cmp.author)} / мы ${sgn(it.cmp.ours)}` : ''}` : '').join('')}</div>`).join('');
   const scan = o.last_scan ? `последний скан ${zdate(o.last_scan.t)}: ${o.last_scan.coins} монет, новых зон ${o.last_scan.new}` : 'скан ещё не запускался';
-  return `<div style="${box}">
-    <b>🔎 Наш поиск зон</b> ${o.scan_on ? '' : '<span class="loss">(выключен в настройках)</span>'}
+  return `<div class="zcard" style="font-size:var(--fs-sm);">
+    <div class="zh">🔎 Наш поиск зон</div> ${o.scan_on ? '' : '<span class="loss">(выключен в настройках)</span>'}
     <div style="margin-top:4px;">Обучение: ${o.model ? `<span class="win">модель обучена</span> на ${o.model.n} примерах (совпадений с пабликом ${o.model.pos})` : `набрано совпавших зон ${o.pos || 0} из ${need} — до этого правила по умолчанию`}</div>
     ${bar(learnPct, 'var(--acc)')}
     <div>Совпадения с пабликом: <b>${o.recall == null ? '—' : o.recall + '%'}</b> (${o.hits || 0} из ${o.exams || 0} зон, наш топ-3)${o.err_median != null ? ` · разница уровней (медиана) ${o.err_median}%` : ''}${o.early ? ` · нашли раньше поста: ${o.early}` : ''}</div>
@@ -28540,9 +28630,9 @@ function zutHtml(u) {
   const box = 'padding:8px 10px;margin-bottom:8px;background:var(--inset);border-radius:var(--r-sm);font-size:var(--fs-sm);';
   const btn = 'background:var(--ctl);border:none;color:var(--tx);padding:4px 10px;border-radius:var(--r-xs);margin:4px 4px 0 0;';
   if (!u) return '';
-  if (u.ok === false) return `<div style="${box}">📡 Группа через мой аккаунт: ${u.error || 'недоступно'}</div>`;
-  if (!u.deps) return `<div style="${box}">📡 <b>Автозабор постов из группы</b> (через ваш аккаунт Telegram): в Termux выполните <b>pip install telethon</b> и перезапустите бота.</div>`;
-  if (!u.logged_in) return `<div style="${box}">📡 <b>Автозабор постов из группы</b> через ваш аккаунт Telegram — не нужно пересылать вручную.
+  if (u.ok === false) return `<div class="zcard" style="font-size:var(--fs-sm);">📡 Группа через мой аккаунт: ${u.error || 'недоступно'}</div>`;
+  if (!u.deps) return `<div class="zcard" style="font-size:var(--fs-sm);">📡 <b>Автозабор постов из группы</b> (через ваш аккаунт Telegram): в Termux выполните <b>pip install telethon</b> и перезапустите бота.</div>`;
+  if (!u.logged_in) return `<div class="zcard" style="font-size:var(--fs-sm);">📡 <b>Автозабор постов из группы</b> через ваш аккаунт Telegram — не нужно пересылать вручную.
     <div class="dim">Нужны api_id и api_hash: my.telegram.org → API development tools (один раз). Сессия хранится только на этом телефоне.</div>
     ${u.error ? `<div class="loss">${u.error}</div>` : ''}
     <button onclick="zutLogin()" style="${btn}">🔑 Войти</button>${u.login_step === 'code' ? `<button onclick="zutCode()" style="${btn}">ввести код</button>` : ''}${u.login_step === 'password' ? `<button onclick="zutPassword()" style="${btn}">ввести пароль 2FA</button>` : ''}</div>`;
@@ -28550,7 +28640,7 @@ function zutHtml(u) {
   const hTxt = h ? (h.running ? `📚 загружаю историю ${h.days >= 3650 ? 'за всё время' : 'за ' + h.days + ' дн.'}: ${h.seen}/${h.total == null ? '…' : h.total} картинок, постов с зонами ${h.posts}, зон ${h.zones}${h.eta_min != null ? ` · осталось ~${h.eta_min >= 60 ? Math.floor(h.eta_min / 60) + ' ч ' : ''}${h.eta_min % 60} мин` : ''}${h.wait ? ` · <span class="loss">${h.wait}</span>` : ''} <button onclick="zutHistoryStop()" style="background:var(--neg-bg);border:none;color:var(--neg);padding:3px 8px;border-radius:var(--r-xs);">⏹ остановить</button>`
     : `📚 история ${h.days >= 3650 ? 'за всё время' : 'за ' + h.days + ' дн.'} загружена: постов ${h.posts}, зон ${h.zones}, пропущено ${h.skipped}${h.error ? ' · <span class="loss">' + h.error + '</span>' : ''}`) : '';
   const dl = (window._zutDialogs || []).map((g, i) => `<button onclick="zutPick(${i})" style="${btn}">${String(g.title).replace(/</g, '&lt;')}</button>`).join('');
-  return `<div style="${box}">📡 <b>Группа через мой аккаунт</b>: ${u.connected ? '<span class="win">подключено</span>' : '<span class="loss">нет связи</span>'}${u.me ? ' · ' + u.me : ''}
+  return `<div class="zcard" style="font-size:var(--fs-sm);">📡 <b>Группа через мой аккаунт</b>: ${u.connected ? '<span class="win">подключено</span>' : '<span class="loss">нет связи</span>'}${u.me ? ' · ' + u.me : ''}
     · группа: <b>${u.chat_title ? String(u.chat_title).replace(/</g, '&lt;') : 'не выбрана'}</b>${u.chat_id ? ` · новых постов взято: ${u.live_n}` : ''}
     ${u.error ? `<div class="loss">${u.error}</div>` : ''}
     ${hTxt ? `<div>${hTxt}</div>` : ''}
