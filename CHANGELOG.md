@@ -18794,3 +18794,17 @@ v0.99.490 - Зоны: the rule search with the early/late check is removed (user
          result on all zones (trades, takes/stops, WR, average R, worst streak), the
          risk table on all trades and the auto-risk (full Kelly <= 50%). The tab's
          "Подбор правил" card is replaced by "Стоп и тейк".
+v0.99.491 - (the previous 0.99.491, "вход после реакции", was reverted at the user's
+         request.) Зоны follow the channel author's own instruction (his video): a post's
+         zones on one side are ONE position — a limit on every line of every zone
+         (0.2% before the line, so it is taken for sure), equal volume, ONE stop 2.5%
+         beyond the farthest line (his "2–3% from the lowest structure"), the take +tp%
+         from the average entry, re-placed after every new fill. History replay
+         (zone_ladder_sim) and learning work per post; R is measured against the loss of
+         the full ladder at the stop. Live: the bot's record follows 1m candles with the
+         same rules; with autotrade the limits are REAL GTC orders on Gate (sized for
+         the whole ladder at the risk %, fewer limits when one lot each doesn't fit), a
+         stop as soon as a position appears, the take moved to the new average, the
+         leftover limits and triggers cancelled when the position closes or the zones
+         expire. Posts marked "только при доп. аргументах" / "по факту" — signal only.
+         Open trades from before keep their old tracking.
