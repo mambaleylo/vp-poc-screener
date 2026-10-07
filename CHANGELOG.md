@@ -18951,3 +18951,8 @@ v0.99.509 - Зоны: breakeven (user: "найти лучший вариант �
          the REAL average + fees, the leftover limits cancelled (Telegram: "стоп на бирже
          перенесён в безубыток"); a lost stop is put back at the breakeven price. The tab
          lists every breakeven variant.
+v0.99.510 - Зоны: a small zone (a daily chart, ZRO 1.0571–1.1861) was dropped as "not a zones
+         screenshot" — v0.99.502 took every small coloured box for a result label. Now a box
+         is a label only when it carries white text (labels ~4–6% white pixels, zones 0%);
+         small zones are zones again. The history is recognised again once in the background
+         after the update, so posts lost this way since v0.99.502 come back.
