@@ -18769,3 +18769,10 @@ v0.99.486 - Restarts lose nothing: before /update, /restart or the 🛠 button, 
 v0.99.487 - Зоны: the Telegram entry message (and the move-to-zone trade's line)
          shows the risk the order used and where it came from: "риск 13% (авто)"
          / "(свой у Зон)" / "(общий)".
+v0.99.488 - Зоны, "Авто-риск": saving settings woke the zones learner before the
+         "Авто-риск" checkbox and the zones' own % were applied, so the rules were
+         learned with the old values (auto off, old risk) and orders took the % from
+         the field instead of the auto-picked one. The learner is now woken after all
+         settings are applied, and it relearns by itself within ~10 s whenever the
+         learned rules don't match the live risk settings. The Zones tab shows the
+         auto-risk line first when auto is on; the "половина" hint is removed.

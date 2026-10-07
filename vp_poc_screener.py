@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.487"
+APP_VERSION = "0.99.488"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1442,9 +1442,6 @@ def apply_settings(updates):
                 AUTOTRADE_RISK_PCT_OF_BALANCE = min(max(v, 0.1), 100.0)   # v0.99.435 — 0.1..100 (was up to 50)
         except (TypeError, ValueError):
             pass
-    if ("autotrade_risk_pct" in updates or "risk_pct_zones" in updates or "auto_risk_enabled" in updates) \
-            and globals().get("_zones_learn_event"):
-        globals()["_zones_learn_event"].set()   # v0.99.465 — the zones' stop / take are re-chosen for the new risk at once
     if "autotrade_zones" in updates:   # v0.99.438
         globals()["AUTOTRADE_ENABLED_ZONES"] = bool(updates["autotrade_zones"])
     if "autotrade_zones_approach" in updates:   # v0.99.441
@@ -1525,6 +1522,12 @@ def apply_settings(updates):
                 SCALP_SL_BUFFER_MULT = v
         except (TypeError, ValueError):
             pass
+    # v0.99.465 — the zones' stop / take are re-chosen for the new risk at once;
+    # v0.99.488 — only after every setting above is applied (it woke the learner
+    # before "Авто-риск" / the zones' % changed, so it learned with the old ones)
+    if ("autotrade_risk_pct" in updates or "risk_pct_zones" in updates or "auto_risk_enabled" in updates) \
+            and globals().get("_zones_learn_event"):
+        globals()["_zones_learn_event"].set()
 
 
 def save_settings():
@@ -22501,8 +22504,28 @@ def zones_learn_loop():
             zones_save()
         except Exception as e:
             log_error(f"zones_learn: {e}")
-        _zones_learn_event.wait(1800)
         _zones_learn_event.clear()
+        # v0.99.488 — relearn when the rules were learned with another risk setting
+        for _ in range(180):
+            if _zones_learn_event.wait(10) or zones_learned_stale():
+                break
+
+
+def zones_learned_stale():
+    """v0.99.488 — the learned rules don't match the live risk settings
+    ("Авто-риск" switched, or the zones' % changed since)"""
+    try:
+        with _zones_lock:
+            lr = ZONES.get("learned") or {}
+        if not lr:
+            return False
+        if bool(lr.get("auto")) != bool(AUTO_RISK_ENABLED):
+            return True
+        if not AUTO_RISK_ENABLED and abs(float(lr.get("risk") or 0) - _zones_risk_frac() * 100) > 0.05:
+            return True
+    except Exception:
+        return False
+    return False
 
 
 def zones_add_post(data, post_time=None, source="web", caption="", train=None, src_ref=None, quiet=False):
@@ -28377,9 +28400,9 @@ async function refreshZones() {
     <b>Правила сейчас</b> (${p.source || '—'}): вход от <b>${(p.entry || 0) + 1}-й</b> линии · стоп <b>${p.buf}%</b> за дальней линией зоны · тейк <b>+${p.tp}%</b>${d.tp_user ? ' (свой, из настроек)' : ''}
     <div class="dim" style="font-size:var(--fs-sm);">автоторговля зон: ${d.autotrade ? '<span class="win">вкл</span>' : 'выкл (Настройки → Автоторговля → Зоны)'} · зона ждёт ${d.max_days} дн. · обученные правила включаются с ${d.learn_min} отработанных зон</div>
     ${(() => { const k = (d.learned || {}).kelly, rk = (d.learned || {}).risk; if (!k) return '';
-      if (!k.edge) return `<div style="margin-top:4px;">Риск: сейчас ${rk}% · по истории (${k.n} сделок) <span class="loss">ни при каком риске счёт не растёт</span> — лучше не торговать на деньги, пока статистика не изменится</div>`;
       if ((d.learned || {}).auto) return `<div style="margin-top:4px;">Риск: <b>авто-риск ${d.learned.auto_risk ? d.learned.auto_risk + '%' : '— нет перевеса, остаётся % из настроек'}</b> на сделку (лучший по истории, не больше 50%; подобран вместе с тейком и стопом на ранних зонах и проверен на поздних)</div>`;
-      return `<div style="margin-top:4px;">Риск: сейчас <b>${rk}%</b> (счёт ${k.g_now > 0 ? '+' : ''}${k.g_now}% за сделку по истории) · максимум роста при ~${k.full}% (${k.g_full > 0 ? '+' : ''}${k.g_full}%) · <b>разумно ~${k.half}%</b> (${k.g_half > 0 ? '+' : ''}${k.g_half}%) — половина: будущее обычно хуже истории, а выше максимума риск только вредит</div>`; })()}</div>`;
+      if (!k.edge) return `<div style="margin-top:4px;">Риск: сейчас ${rk}% · по истории (${k.n} сделок) <span class="loss">ни при каком риске счёт не растёт</span> — лучше не торговать на деньги, пока статистика не изменится</div>`;
+      return `<div style="margin-top:4px;">Риск: сейчас <b>${rk}%</b> (счёт ${k.g_now > 0 ? '+' : ''}${k.g_now}% за сделку по истории) · максимум роста при ~${k.full}% (${k.g_full > 0 ? '+' : ''}${k.g_full}%) — выше этого риск только вредит</div>`; })()}</div>`;
   let stats = '';
   if (st.finished) {
     const r = st.reach || {};
