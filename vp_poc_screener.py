@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.491"
+APP_VERSION = "0.99.492"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23139,6 +23139,9 @@ def _zones_real_place(tr):
                     else:
                         idx = sorted({round(i * (n - 1) / max(1, k - 1)) for i in range(k)}) if k > 1 else [0]
                         per = lot
+            idx = [i for i in idx if tr["legs"][i]["fill"] is None]   # v0.99.492 — the limits not yet taken
+            if not skip and not idx:
+                skip = "все лимитки уже налились"
             if not skip:
                 wallet = get_futures_wallet_balance()
                 if wallet is not None and m_act > wallet * 0.98:
@@ -23176,6 +23179,30 @@ def _zones_real_place(tr):
     with state_lock:
         STATE["autotrade_log"].appendleft(rec)
     return rec
+
+
+_zones_arm_cache = {}
+
+
+def zones_arm_dist(sym):
+    """v0.99.492 — how close (in %) the price may come to a limit before the
+    real order must already be on the exchange: twice the coin's near-worst
+    1-minute range of the last 2 days (99.9th percentile) — the bot looks at
+    the price every ~20 s and needs a moment to place the order. 0.5–5%."""
+    now = time.time()
+    c = _zones_arm_cache.get(sym)
+    if c and now - c[0] < 3600:
+        return c[1]
+    v = 3.0
+    try:
+        cs = get_candles_range(sym, "1m", int(now - 2 * 86400), int(now)) or []
+        rg = sorted((x["high"] - x["low"]) / x["close"] * 100 for x in cs if x.get("close"))
+        if len(rg) >= 300:
+            v = min(5.0, max(0.5, 2 * rg[min(len(rg) - 1, int(len(rg) * 0.999))]))
+    except Exception as e:
+        log_error(f"zones arm dist {sym}: {e}")
+    _zones_arm_cache[sym] = (now, v)
+    return v
 
 
 def _zones_real_cancel_legs(tr):
@@ -23323,9 +23350,31 @@ def _zones_ladder_tick(group, now, p, pos_map):
         zones_znotify(lead, f"📋 {sym} {'лонг' if s > 0 else 'шорт'}: лимитки {len(tr['legs'])} шт. — {lim_txt}\n"
                             f"стоп {tr['sl']:.6g} ({p['buf']:g}% за дальней линией) · тейк +{p['tp']:g}% от средней цены входа"
                             + (f"\n⚠️ {tr['no_auto']} — без автосделки" if tr["no_auto"] else ""))
-        if (AUTOTRADE_ENABLED_ZONES and not tr["no_auto"] and (not lead.get("own") or AUTOTRADE_ENABLED_ZONES_OWN)):
-            _zones_real_place(tr)
         changed = True
+    # v0.99.492 — the real limits sit on the exchange only while the price is near
+    # (an open limit locks margin): placed when the price comes within a safe
+    # distance of the next limit, taken off again when it leaves twice as far
+    want_real = (AUTOTRADE_ENABLED_ZONES and not tr.get("no_auto") and tr.get("status") in ("PENDING", "OPEN")
+                 and (not lead.get("own") or AUTOTRADE_ENABLED_ZONES_OWN))
+    px_now = (pos_map.get("_px") or {}).get(sym)
+    nxt = next((l["lim"] for l in tr["legs"] if l["fill"] is None), None)
+    if want_real and px_now and nxt:
+        dist = s * (px_now - nxt) / px_now * 100   # how far the price still is from the next limit
+        arm = zones_arm_dist(sym)
+        r = tr.get("real")
+        if not r and dist <= arm and not tr.get("arm_skip_at", 0) > now - 600:
+            rec = _zones_real_place(tr)
+            if not tr.get("real"):
+                tr["arm_skip_at"] = now   # skipped / failed: not again for 10 minutes
+            tr["arm_dist"] = round(arm, 2)
+            changed = True
+        elif r and not r.get("seen") and not r.get("done") and dist > 2 * arm \
+                and not any(l.get("filled") for l in r["legs"]):
+            if _zones_real_cancel_legs(tr):
+                tr["real"] = None
+                tr["autotrade"] = {"status": "WAIT", "detail": f"цена ушла дальше {2 * arm:.2g}% — лимитки сняты до нового подхода",
+                                   "leverage": None}
+                changed = True
     if tr.get("status") in ("PENDING", "OPEN") and now - tr.get("chk_at", 0) >= 60:
         tr["chk_at"] = now
         t0 = tr["chk_t"]

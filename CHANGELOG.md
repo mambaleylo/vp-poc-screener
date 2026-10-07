@@ -18808,3 +18808,9 @@ v0.99.491 - (the previous 0.99.491, "вход после реакции", was re
          leftover limits and triggers cancelled when the position closes or the zones
          expire. Posts marked "только при доп. аргументах" / "по факту" — signal only.
          Open trades from before keep their old tracking.
+v0.99.492 - Зоны: an open limit locks margin on Gate (user: "лимитки же будут сразу
+         резервировать деньги"), so the ladder's real limits sit on the exchange only
+         while the price is near: placed when it comes within zones_arm_dist() of the
+         next limit — twice the coin's near-worst 1-minute range of the last 2 days
+         (99.9th pct), 0.5–5% — and taken off when it leaves twice as far with nothing
+         filled; placed again on the next approach (only the limits not yet taken).
