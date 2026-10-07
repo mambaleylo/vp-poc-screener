@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.505"
+APP_VERSION = "0.99.506"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22333,7 +22333,7 @@ def zones_learn():
     result of those rules on every post, the risk table and the auto-risk."""
     now = time.time()
     with _zones_lock:
-        zs = [dict(z) for z in ZONES["zones"] if z.get("status") != "deleted" and not z.get("own")]
+        zs = [dict(z) for z in ZONES["zones"] if z.get("status") != "deleted" and not z.get("own") and not z.get("oc")]
     finished = [z for z in zs if z.get("status") in ("old", "closed", "broken", "expired")
                 or now >= z["post_time"] + ZONES_MAX_DAYS * 86400]
     finished.sort(key=lambda z: z["post_time"])
@@ -23173,6 +23173,8 @@ def zones_znotify(z, text, important=False):
     Telegram while it is still learning (the tab shows everything); once
     trained only their trades open / close are sent (touches, breaks and
     expiries of our zones are tab-only), and the switch can mute them all."""
+    if z.get("oc"):
+        return   # v0.99.506 — "поиск по результату": tab only while it is being checked
     if z.get("own") and not (important and _own_tg_ok()):
         return
     zones_notify(text)
@@ -23637,7 +23639,7 @@ def _zones_ladder_finish(tr, group, res, px, tx):
             zz["status"] = "closed"
             zz["result"] = {"result": res, "r": round(pn["r"], 3), "pct": round(pn["pct"], 2)}
     z0 = group[0]
-    if not z0.get("own") or _own_tg_ok():
+    if not z0.get("oc") and (not z0.get("own") or _own_tg_ok()):
         notify_trade_result("zones_own" if z0.get("own") else "zones", tr["symbol"], tr["direction"], pn["avg"], px, res,
                             pn["r"], real=bool(tr.get("autotrade_fired")),
                             note=f"лимиток налилось {pn['filled']} из {pn['legs']} · чистыми {pn['pct']:+.2f}% (с комиссией)")
@@ -23676,7 +23678,7 @@ def _zones_ladder_tick(group, now, p, pos_map):
             post = next((p_ for p_ in ZONES["posts"] if p_["id"] == lead.get("post_id")), None)
         tr = {"kind": "ladder", "symbol": sym, "direction": "LONG" if s > 0 else "SHORT", "time": int(now),
               "legs": [{"level": v, "lim": x, "fill": None, "t": None} for v, x in zip(pl["levels"], pl["limits"])],
-              "sl": pl["sl"], "tp_pct": p["tp"], "tp": None, "entry": None, "status": "PENDING", "result": None,
+              "sl": pl["sl"], "tp_pct": lead.get("oc_tp") or p["tp"], "tp": None, "entry": None, "status": "PENDING", "result": None,
               "chk_t": int(max(lead["post_time"], now - 3 * 86400)), "zones": [z["id"] for z in group],
               "params": {k: p[k] for k in ("buf", "tp")}, "no_auto": zones_post_no_auto(post),
               "autotrade_fired": False, "autotrade": None, "real": None, "exit_price": None, "exit_time": None,
@@ -23687,14 +23689,14 @@ def _zones_ladder_tick(group, now, p, pos_map):
                 zz["lead"] = lead["id"]
         lim_txt = " / ".join(f"{l['lim']:.6g}" for l in tr["legs"])
         zones_znotify(lead, f"📋 {sym} {'лонг' if s > 0 else 'шорт'}: лимитки {len(tr['legs'])} шт. — {lim_txt}\n"
-                            f"стоп {tr['sl']:.6g} ({p['buf']:g}% за дальней линией) · тейк +{p['tp']:g}% от средней цены входа"
+                            f"стоп {tr['sl']:.6g} ({p['buf']:g}% за дальней линией) · тейк +{tr['tp_pct']:g}% от средней цены входа"
                             + (f"\n⚠️ {tr['no_auto']} — без автосделки" if tr["no_auto"] else ""))
         changed = True
     # v0.99.492 — the real limits sit on the exchange only while the price is near
     # (an open limit locks margin): placed when the price comes within a safe
     # distance of the next limit, taken off again when it leaves twice as far
     want_real = (AUTOTRADE_ENABLED_ZONES and not tr.get("no_auto") and tr.get("status") in ("PENDING", "OPEN")
-                 and (not lead.get("own") or AUTOTRADE_ENABLED_ZONES_OWN))
+                 and (not lead.get("own") or AUTOTRADE_ENABLED_ZONES_OWN) and not lead.get("oc"))
     px_now = (pos_map.get("_px") or {}).get(sym)
     nxt = next((l["lim"] for l in tr["legs"] if l["fill"] is None), None)
     if want_real and px_now and nxt:
@@ -24439,7 +24441,7 @@ def bot_status_text():
     up = int(time.time() - _PROC_START)
     with _zones_lock:
         zs = [z for z in ZONES["zones"] if z.get("status") in ("watch", "in_trade")]
-    pub = [z for z in zs if not z.get("own")]
+    pub = [z for z in zs if not z.get("own") and not z.get("oc")]
     tr = [z for z in zs if z.get("status") == "in_trade"]
     with _zones_outbox_lock:
         queued = len(_zones_outbox)
@@ -25151,6 +25153,272 @@ def _own_after_post(post, new):
         log_error(f"own eval {post.get('symbol')}: {e}")
 
 
+# ---- v0.99.506: "поиск по результату" — our own zones learned on what the price
+# did afterwards (the ladder's result on the candles), next to the finder that
+# learns to repeat the author. Built from the history of the liquid coins, so it
+# does not depend on how many posts the channel publishes. Observation only.
+ZONES_OC_FILE = os.path.join(os.path.dirname(ZONES_FILE), "vp_zones_oc.json")
+ZONES_OC_DAYS = 400          # history of 1h candles (Gate keeps ~400 days of 1h)
+ZONES_OC_STEP_H = 72         # a snapshot every 3 days per coin
+ZONES_OC_HOLD_H = 14 * 24    # the zone waits 14 days, like the author's
+ZONES_OC_PER_SIDE = 3        # the nearest candidates per side per snapshot
+ZONES_OC_TPS = (3.0, 5.0, 8.0, 12.0, 20.0)   # takes tried (from the average entry)
+ZONES_OC_FIT_MAX = 5000      # samples per fit (speed on a phone)
+_OC = {"samples": [], "done": {}, "model": None, "eval": None, "tp": None, "thr": None, "built": None}
+_oc_lock = threading.Lock()
+
+
+def oc_load():
+    try:
+        if os.path.exists(ZONES_OC_FILE):
+            with open(ZONES_OC_FILE) as f:
+                d = json.load(f)
+            with _oc_lock:
+                _OC.update({k: d.get(k, _OC[k]) for k in _OC})
+    except Exception as e:
+        log_error(f"oc load: {e}")
+
+
+def oc_save():
+    try:
+        with _oc_lock:
+            data = json.dumps(_OC)
+        tmp = ZONES_OC_FILE + ".tmp"
+        with open(tmp, "w") as f:
+            f.write(data)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, ZONES_OC_FILE)
+    except Exception as e:
+        log_error(f"oc save: {e}")
+
+
+def _own_top_syms(n=None):
+    vols = []
+    for t in get_tickers() or []:
+        name = t.get("contract", "")
+        if name.endswith("_USDT"):
+            try:
+                vols.append((float(t.get("volume_24h_quote") or t.get("volume_24h_settle") or 0), name))
+            except (TypeError, ValueError):
+                pass
+    return [s for _, s in sorted(vols, reverse=True)[:n or ZONES_OWN_TOP]]
+
+
+def _oc_pick(cands):
+    """the nearest candidates of each side (what a trader would look at)"""
+    out = []
+    for side in ("long", "short"):
+        out += [c for c in cands if c["side"] == side and c["f"]["rank"] < ZONES_OC_PER_SIDE]
+    return out
+
+
+def _oc_group(c):
+    return [{"id": "oc", "side": c["side"], "levels": sorted([c["lo"], c["hi"]], reverse=(c["side"] == "long"))}]
+
+
+def oc_build(now=None):
+    """The data set: snapshots of every coin's history, the candidates at each,
+    and how each one's ladder ended over the next 14 days for every take.
+    Incremental: only snapshots newer than what is stored are added."""
+    now = now or time.time()
+    syms = _own_top_syms()
+    added = 0
+    for k, sym in enumerate(syms):
+        zones_act("oc", running=True, stage=f"история монет: {sym.replace('_USDT', '')}", done=k, total=len(syms))
+        try:
+            cs = get_candles_range(sym, "1h", int(now - ZONES_OC_DAYS * 86400), int(now)) or []
+        except Exception as e:
+            log_error(f"oc candles {sym}: {e}")
+            continue
+        cs = [c for c in cs if c["time"] + 3600 <= now]
+        with _oc_lock:
+            last = _OC["done"].get(sym, 0)
+        new = []
+        for i in range(ZONES_OWN_BARS, len(cs) - ZONES_OC_HOLD_H, ZONES_OC_STEP_H):
+            t = cs[i]["time"]
+            if t <= last:
+                continue
+            win, fut = cs[i - ZONES_OWN_BARS:i], cs[i:i + ZONES_OC_HOLD_H]
+            for c in _oc_pick(own_candidates(win)):
+                rs = []
+                for tp in ZONES_OC_TPS:
+                    r = zone_ladder_sim(fut, _oc_group(c), tp, t, t + ZONES_OC_HOLD_H * 3600)
+                    rs.append(round(r["r"], 3) if r else None)
+                new.append({"t": t, "s": sym, "side": c["side"], "x": [round(v, 4) for v in _own_vec(c["f"])],
+                            "rank": c["f"]["rank"], "r": rs})
+            last = t
+        with _oc_lock:
+            _OC["samples"].extend(new)
+            _OC["done"][sym] = last
+        added += len(new)
+    with _oc_lock:
+        _OC["built"] = time.time()
+    return added
+
+
+def _oc_select(rows, model, thr, ti):
+    """per snapshot / coin / side: the best-scored candidate if it clears thr ->
+    the R of its ladder (filled ones only)"""
+    best = {}
+    for s in rows:
+        sc = own_score(model, s["x"])
+        k = (s["t"], s["s"], s["side"])
+        if sc >= thr and (k not in best or sc > best[k][0]):
+            best[k] = (sc, s)
+    return [b[1]["r"][ti] for b in best.values() if b[1]["r"][ti] is not None]
+
+
+def _oc_stat(rs):
+    return {"n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None,
+            "wr": round(100 * sum(1 for x in rs if x > 0) / len(rs), 1) if rs else None}
+
+
+def oc_train():
+    """Honest by time: the take, the model and the bar are chosen on the earlier
+    2/3 of the history, then checked on the later 1/3 it never saw (against the
+    no-model choice: the nearest zone). The live model is refit on everything."""
+    import random as _rnd
+    with _oc_lock:
+        rows = list(_OC["samples"])
+    if len(rows) < 300:
+        return None
+    rows.sort(key=lambda s: s["t"])
+    split_t = rows[len(rows) * 2 // 3]["t"]
+    tr_rows = [s for s in rows if s["t"] < split_t]
+    te_rows = [s for s in rows if s["t"] >= split_t]
+
+    def fit(rs_, ti):
+        data = [(s["x"], 1 if s["r"][ti] > 0 else 0) for s in rs_ if s["r"][ti] is not None]
+        if len(data) > ZONES_OC_FIT_MAX:
+            data = _rnd.Random(7).sample(data, ZONES_OC_FIT_MAX)
+        return own_fit(data)
+
+    best = None
+    for ti, tp in enumerate(ZONES_OC_TPS):
+        zones_act("oc", running=True, stage=f"обучение: тейк +{tp:g}%", done=ti, total=len(ZONES_OC_TPS))
+        m = fit(tr_rows, ti)
+        if not m:
+            continue
+        n_all = sum(1 for s in tr_rows if s["r"][ti] is not None)
+        for thr in (0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8):
+            st = _oc_stat(_oc_select(tr_rows, m, thr, ti))
+            if st["n"] >= max(30, 0.03 * n_all) and (best is None or st["avg"] > best["train"]["avg"]):
+                best = {"ti": ti, "tp": tp, "thr": thr, "model": m, "train": st}
+    if not best:
+        return None
+    ti = best["ti"]
+    base = lambda rs_: _oc_stat([s["r"][ti] for s in rs_ if s["rank"] == 0 and s["r"][ti] is not None])
+    ev = {"split_t": split_t, "first_t": rows[0]["t"], "last_t": rows[-1]["t"], "tp": best["tp"], "thr": best["thr"],
+          "train": best["train"], "test": _oc_stat(_oc_select(te_rows, best["model"], best["thr"], ti)),
+          "base_test": base(te_rows), "base_train": base(tr_rows),
+          "samples": len(rows), "coins": len({s["s"] for s in rows}), "t": time.time()}
+    zones_act("oc", running=True, stage="итоговая модель на всей истории", done=None, total=None)
+    final = fit(rows, ti) or best["model"]
+    with _oc_lock:
+        _OC.update({"model": final, "eval": ev, "tp": best["tp"], "thr": best["thr"]})
+    return ev
+
+
+def oc_scan_once():
+    """Live: our zones by the outcome model, every hour — tab only, no orders."""
+    with _oc_lock:
+        model, thr, tp = _OC["model"], _OC["thr"], _OC["tp"]
+    if not model:
+        return 0
+    now = time.time()
+    made = 0
+    found = []
+    for sym in _own_top_syms():
+        try:
+            cs = _own_candles(sym, now)
+        except Exception:
+            continue
+        best = {}
+        for c in _oc_pick(own_candidates(cs)):
+            sc = own_score(model, _own_vec(c["f"]))
+            if sc >= thr and (c["side"] not in best or sc > best[c["side"]][0]):
+                best[c["side"]] = (sc, c)
+        found += [(sc, sym, c) for sc, c in best.values()]
+    found.sort(key=lambda t: -t[0])
+    for sc, sym, c in found:
+        if made >= ZONES_OWN_MAX_ALERTS:
+            break
+        with _zones_lock:
+            dup = any(z.get("oc") and z.get("symbol") == sym and z.get("status") in ("watch", "in_trade")
+                      and own_matches({"lo": min(z["levels"]), "hi": max(z["levels"]), "side": z["side"]},
+                                      c["side"], [c["lo"], c["hi"]], c["atr"]) for z in ZONES["zones"])
+        if dup:
+            continue
+        lv = [c["hi"], c["lo"]] if c["side"] == "long" else [c["lo"], c["hi"]]
+        dec = max(2, 5 - math.floor(math.log10(abs(c["hi"])))) if c["hi"] > 0 else 6
+        z = zones_make({"id": f"oc_{sym}_{int(now)}", "symbol": sym, "post_time": now, "train": False},
+                       c["side"], [round(v, dec) for v in lv])
+        z.update({"oc": True, "oc_score": round(sc, 3), "oc_tp": tp})
+        with _zones_lock:
+            ZONES["zones"].insert(0, z)
+        made += 1
+    zones_act("oc_scan", t_scan=now, new=made)
+    if made:
+        zones_save()
+    return made
+
+
+def oc_stats():
+    with _oc_lock:
+        ev, n, tp, thr, built = _OC["eval"], len(_OC["samples"]), _OC["tp"], _OC["thr"], _OC["built"]
+    with _zones_lock:
+        zs = [z for z in ZONES["zones"] if z.get("oc") and z.get("status") != "deleted"]
+    done = [z["result"]["r"] for z in zs if z.get("result") and z["result"].get("r") is not None
+            and z.get("status") in ("closed", "old", "expired", "broken")]
+    return {"samples": n, "eval": ev, "tp": tp, "thr": thr, "built": built,
+            "active": sum(1 for z in zs if z.get("status") in ("watch", "in_trade")), "live": _oc_stat(done)}
+
+
+def oc_loop():
+    """build / extend the data set and retrain once a day; scan every hour"""
+    time.sleep(240)
+    oc_load()
+    last_train = 0.0
+    while True:
+        heartbeat("oc_loop")
+        try:
+            if ZONES_OWN_SCAN:
+                with _oc_lock:
+                    need = not _OC["model"] or time.time() - (_OC["eval"] or {}).get("t", 0) > 86400
+                if need and time.time() - last_train > 3600:
+                    last_train = time.time()
+                    zones_act("oc", running=True, stage="сбор истории", done=0, total=None, error=None)
+                    oc_build()
+                    oc_save()
+                    oc_train()
+                    oc_save()
+                    zones_act("oc", running=False, stage=None, finished=time.time())
+                oc_scan_once()
+        except Exception as e:
+            log_error(f"oc_loop: {e}")
+            zones_act("oc", running=False, error=str(e)[:200])
+        time.sleep(ZONES_OWN_SCAN_SEC)
+
+
+@app.route("/api/zones/oc/retrain", methods=["POST"])
+def api_oc_retrain():
+    def run():
+        try:
+            zones_act("oc", running=True, stage="сбор истории", done=0, total=None, error=None)
+            oc_build()
+            oc_save()
+            oc_train()
+            oc_save()
+            zones_act("oc", running=False, stage=None, finished=time.time())
+            oc_scan_once()
+        except Exception as e:
+            log_error(f"oc retrain: {e}")
+            zones_act("oc", running=False, error=str(e)[:200])
+    threading.Thread(target=run, daemon=True).start()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/zones/own/scan", methods=["POST"])
 def api_own_scan():
     threading.Thread(target=own_scan_once, daemon=True).start()
@@ -25237,7 +25505,8 @@ def api_zones_status():
                     "deps": zones_deps(), "tg": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID), "tg_error": tg_err,
                     "autotrade": AUTOTRADE_ENABLED_ZONES, "max_days": ZONES_MAX_DAYS, "tp_user": ZONES_TP_PCT,
                     "learn_min": ZONES_LEARN_MIN, "train_mode": bool(ZONES.get("train_mode")),
-                    "own": own_stats(), "own_exams": own_exam_list(), "autotrade_own": AUTOTRADE_ENABLED_ZONES_OWN})
+                    "own": own_stats(), "own_exams": own_exam_list(), "autotrade_own": AUTOTRADE_ENABLED_ZONES_OWN,
+                    "oc": oc_stats()})
 
 
 @app.route("/api/zones/train_mode", methods=["POST"])
@@ -29331,6 +29600,8 @@ function zStatusHtml(d) {
       (d.autotrade ? ` · на бирже ${L.limits || 0} лимиток у ${L.on_exchange || 0} постов · ${L.waiting || 0} ждут подхода цены (маржа не занята)` : ' · автоторговля выкл — только отслеживаю') +
       (L.no_auto ? ` · ${L.no_auto} только сигнал (доп. аргументы)` : '')));
   else out.push(row('💤', 'активных лесенок нет — жду новых постов'));
+  const oc = a.oc;
+  if (oc && oc.running) out.push(row('<span class="zspin">🧪</span>', `<b>поиск по результату</b>: ${oc.stage || '…'}${oc.total ? ` — ${oc.done || 0} из ${oc.total}` : ''}`));
   const rc = a.recheck;
   if (rc && rc.running) out.push(row('<span class="zspin">🔎</span>', `<b>заново распознаю историю</b> текущей версией${rc.total ? ` — ${rc.done || 0} из ${rc.total} постов · зоны изменились у ${rc.changed || 0} · постов-отчётов ${rc.found || 0}` : ''}`));
   else if (rc && rc.finished) out.push(row('🔎', `история заново распознана ${ago(rc.finished)}: зоны изменились у ${rc.changed || 0} постов, постов-отчётов ${rc.found || 0}`));
@@ -29456,7 +29727,8 @@ async function refreshZones() {
   }
   const zs = d.zones || [];
   const ownZ = zs.filter(z => z.own);
-  const pub = zs.filter(z => !z.own);
+  const ocZ = zs.filter(z => z.oc);   // v0.99.506 — "поиск по результату"
+  const pub = zs.filter(z => !z.own && !z.oc);
   const act = pub.filter(z => z.status === 'watch' || z.status === 'in_trade');
   const trn = pub.filter(z => z.train && !(z.status === 'watch' || z.status === 'in_trade'));
   const closedTr = pub.filter(z => z.trade && z.trade.result);   // v0.99.482 — finished live trades, like P/R's list
@@ -29471,7 +29743,7 @@ async function refreshZones() {
   const bad = (badPosts.length ? `<details style="margin-bottom:6px;"><summary style="cursor:pointer;font-size:var(--fs-sm);">⚠️ распознано не полностью — ${badPosts.length} (нужна монета или проверка)</summary>${badPosts.slice(0, 40).map(postRow).join('')}</details>` : '')
     + (skipPosts.length ? `<details style="margin-bottom:6px;"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">⏭ пропущено, не по шаблону — ${skipPosts.length}</summary>${skipPosts.slice(0, 40).map(postRow).join('')}</details>` : '');
   clearTimeout(window._zLearnT);   // while the history is being recounted: refresh every 3 s
-  if (((d.act || {}).learn || {}).running || ((d.act || {}).recheck || {}).running) window._zLearnT = setTimeout(refreshZones, 3000);
+  if (((d.act || {}).learn || {}).running || ((d.act || {}).recheck || {}).running || ((d.act || {}).oc || {}).running) window._zLearnT = setTimeout(refreshZones, 3000);
   setPanelHtml(panel, `${warn}
     ${zStatusHtml(d)}
     ${summary}
@@ -29484,6 +29756,7 @@ async function refreshZones() {
     ${zutHtml(ut)}
     <div class="dim" style="font-size:var(--fs-sm);margin:-4px 0 10px;">или ${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>
     ${ownHtml(d, ownZ)}
+    ${ocHtml(d, ocZ)}
     ${bad ? `<div style="margin-bottom:8px;">${bad}</div>` : ''}
     ${trn.length ? `<details style="margin-top:8px;"><summary class="dim" style="cursor:pointer;">📚 обучение (${trn.length}, ждут итога: ${trn.filter(z => z.status === 'train').length})</summary>${zonePostBlocks(trn)}</details>` : ''}
     <details style="margin-top:8px;"><summary class="dim" style="cursor:pointer;">архив (${arch.length})</summary>${zonePostBlocks(arch)}</details>`);
@@ -29570,6 +29843,30 @@ function ownHtml(d, ownZ) {
     ${last ? `<details style="margin-top:4px;"><summary class="dim" style="cursor:pointer;">последние проверки по постам</summary>${last}</details>` : ''}
     ${ownZ.length ? `<details style="margin-top:4px;"><summary class="dim" style="cursor:pointer;">наши зоны (${ownZ.length})</summary>${zonePostBlocks(ownZ)}</details>` : ''}
   </div>`;
+}
+// v0.99.506 — our zones learned on the result, next to the author-repeating finder
+function ocHtml(d, ocZ) {
+  const o = d.oc || {}, ev = o.eval, a = ((d.act || {}).oc) || {};
+  const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
+  const dd = t => t ? new Date(t * 1000).toLocaleDateString('ru-RU') : '—';
+  const row = (nm, x, note) => x ? `<tr><td>${nm}${note ? `<div class="dim">${note}</div>` : ''}</td><td>${x.n}</td><td>${x.wr == null ? '—' : x.wr + '%'}</td><td>${sgR(x.avg)}</td></tr>` : '';
+  let body = `<div class="dim">Бот сам находит зоны по свечам ${ev ? ev.coins : 40} монет и учится не повторять автора, а отбирать те, от которых цена <b>реально отыгрывала</b> по правилам лесенки (лимитки, стоп 2.5% за зоной, тейк от средней). Учится на истории за ~400 дней — не зависит от постов группы. Сейчас только наблюдение: без ордеров и без сообщений в Telegram.</div>`;
+  if (a.running) body += `<div style="margin-top:6px;"><span class="zspin">🔄</span> <b>${a.stage || 'работаю'}</b>${a.total ? ` — ${a.done || 0} из ${a.total}` : ''}<div class="dim">первый раз — до получаса на телефоне, дальше раз в сутки дополняется</div></div>`;
+  else if (a.error) body += `<div class="loss" style="margin-top:6px;">ошибка: ${a.error}</div>`;
+  if (ev) {
+    const better = ev.test && ev.base_test && ev.test.avg != null && ev.base_test.avg != null ? ev.test.avg - ev.base_test.avg : null;
+    body += `<div class="zkv" style="margin-top:8px;"><div>история</div><div>${ev.samples} зон-кандидатов, ${dd(ev.first_t)} — ${dd(ev.last_t)}</div>
+      <div>правила</div><div>тейк <b>+${ev.tp}%</b> от средней, порог оценки ${ev.thr}</div></div>
+      <div class="zsub">Честная проверка: модель училась до ${dd(ev.split_t)} и сдала экзамен на периоде после — его она не видела.</div>
+      <div class="zwrap"><table class="ztbl"><thead><tr><th></th><th>сделок</th><th>WR</th><th>средний</th></tr></thead><tbody>
+      ${row('модель, экзамен', ev.test, 'период, которого она не видела')}${row('без модели, экзамен', ev.base_test, 'просто ближайшая зона')}${row('модель, обучение', ev.train, 'на этом подбиралась — для сравнения')}</tbody></table></div>
+      ${better != null ? `<div class="zbanner ${ev.test.avg > 0 && better > 0 ? 'pos' : (ev.test.avg > 0 ? 'warn' : 'neg')}">${ev.test.avg > 0 && better > 0 ? `На экзамене модель в плюсе и лучше простого выбора на ${better.toFixed(2)}R за сделку — отбор работает.` : ev.test.avg > 0 ? 'На экзамене в плюсе, но не лучше простого выбора ближайшей зоны.' : 'На экзамене модель пока в минусе — отбор по результату на этих правилах не находит перевеса.'}</div>` : ''}`;
+  } else if (!a.running) body += `<div class="dim" style="margin-top:6px;">модель ещё не обучена — начнёт через несколько минут после запуска бота</div>`;
+  const lv = o.live || {};
+  body += `<div style="margin-top:8px;">Живые зоны: активных ${o.active || 0} · отработало ${lv.n || 0}${lv.n ? ` · средний ${sgR(lv.avg)}, WR ${lv.wr}%` : ''} · только наблюдение</div>
+    <button onclick="zonesPost('/api/zones/oc/retrain', {}); setTimeout(refreshZones, 1500);" class="zbtn">↻ дополнить историю и переобучить</button>
+    ${ocZ.length ? `<details style="margin-top:6px;"><summary class="dim" style="cursor:pointer;">зоны поиска по результату (${ocZ.length})</summary>${zonePostBlocks(ocZ)}</details>` : ''}`;
+  return `<div class="zcard" style="font-size:var(--fs-sm);"><div class="zh">🧪 Поиск по результату</div>${body}</div>`;
 }
 async function ownScanNow() {
   try { await fetch('/api/zones/own/scan', {method: 'POST'}); } catch (e) {}
@@ -32717,6 +33014,7 @@ if __name__ == "__main__":
     if not ZONES.get("recheck_v503"):   # v0.99.503 — once: the history recognised again by the current recogniser
         threading.Thread(target=zones_recheck_results, daemon=True).start()
     threading.Thread(target=own_scan_loop, daemon=True).start()   # v0.99.452 — our own zone finder
+    threading.Thread(target=oc_loop, daemon=True).start()   # v0.99.506 — our zones by the result
     threading.Thread(target=reconcile_loop, daemon=True).start()
     for _n in LOOP_MAX_GAP_SEC:  # v0.99.322 — seed so startup delays (up to 12 min) don't read as stalls
         heartbeat(_n)

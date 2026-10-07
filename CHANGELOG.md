@@ -18917,3 +18917,16 @@ v0.99.505 - Зоны, "Наш поиск зон": the card explains itself — w
          blue bar = the model's readiness, the green bar = the share of the author's zones
          found before the post (the honest exam), and the recall curve is full width with
          a 0 / 50 / 100% scale and a caption (it was a 220 px sparkline without labels).
+v0.99.506 - Зоны: "🧪 Поиск по результату" — next to the author-repeating finder (left as it
+         is), our own zones learned on what the price did afterwards. From ~400 days of 1h
+         candles of the 40 liquid coins: a snapshot every 3 days, the finder's nearest
+         candidates of each side, and each one's ladder (the author's rules: limits on the
+         zone, stop 2.5% beyond, take from the average) replayed over the next 14 days for
+         takes 3/5/8/12/20%. A logistic model learns which candidates end in profit; the
+         take and the score bar are chosen on the earlier 2/3 of the history and checked
+         on the later 1/3 it never saw, against the no-model choice (the nearest zone).
+         The data set is stored (vp_zones_oc.json) and extended daily; the live scan runs
+         hourly and its zones are followed by the ladder with their own take — observation
+         only: no orders, no Telegram, kept out of the author's statistics. Card on the
+         Zones tab with the exam table and a verdict, progress in "Состояние", a retrain
+         button.
