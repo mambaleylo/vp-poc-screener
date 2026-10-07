@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.506"
+APP_VERSION = "0.99.507"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22529,6 +22529,22 @@ def zones_learn():
            "after_5": round(100 * sum(1 for x in a if x >= 5) / len(a), 1) if a else None}
     risk_tab = {"rows": [{"risk": pc, "all": growth(rs, pc / 100)} for pc in ZONES_RISK_ROWS],
                 "best": round(fbest * 100, 1) if edge else None} if rs else None
+    # v0.99.507 — how often a trade comes: on average over the history, and over the
+    # last 8 finished weeks (the last 14 days are not finished yet); what a month of
+    # that gives at the risk in use (by the history's growth per trade)
+    t_in = sorted(r["t_in"] for r in per if r)
+    if len(t_in) >= 2:
+        span_w = max(1.0, (t_in[-1] - t_in[0]) / 604800)
+        res["per_week"] = round(len(t_in) / span_w, 1)
+        w_end = now - ZONES_MAX_DAYS * 86400
+        res["per_week_recent"] = round(sum(1 for t in t_in if w_end - 56 * 86400 <= t < w_end) / 8, 1)
+        res["since"] = t_in[0]
+        r_now = (auto_risk if auto_risk else rf * 100) / 100
+        g_now = growth(rs, r_now)
+        if g_now is not None:
+            per_m = res["per_week"] * 30.44 / 7
+            res["month_pct"] = round(((1 + g_now / 100) ** per_m - 1) * 100, 1)
+            res["month_risk"] = round(r_now * 100, 1)
     med = lambda xs: sorted(xs)[len(xs) // 2] if xs else None
     stats = {
         "finished": len(finished), "with_candles": len(paths), "touched": len(touched),
@@ -29638,7 +29654,7 @@ async function refreshZones() {
       ${tile('Автоторговля', d.autotrade ? '<span class="win">вкл</span>' : '<span class="dim">выкл</span>', d.autotrade ? '' : 'Настройки → Автоторговля → Зоны')}
       ${tile('Риск на сделку', riskNow == null ? '—' : riskNow + '%', riskSrc)}
       ${tile('Правила', 'лимитки по методичке', `стоп ${p.buf}% за зоной · тейк +${p.tp}% от средней${d.tp_user ? ' (свой)' : ''}`)}
-      ${tile('Результат правил', rs.n ? sgR(rs.avg_r) + '<span class="zn"> / сделку</span>' : '—', rs.n ? `${rs.n} сделок · WR ${rs.wr}%` : '')}
+      ${tile('Результат правил', rs.n ? sgR(rs.avg_r) + '<span class="zn"> / сделку</span>' : '—', rs.n ? `${rs.n} сделок · WR ${rs.wr}%${rs.per_week != null ? ` · ~${rs.per_week} в неделю` : ''}` : '')}
     </div>${banner}`);
   // --- 2. how the stop / take are set
   let ruleCard = '';
@@ -29650,6 +29666,7 @@ async function refreshZones() {
       </div>
       ${rs.n ? `<div class="zkv" style="margin-top:8px;">
       <div>сделок по истории</div><div><b>${rs.n}</b> (постов ${rs.groups ?? '—'}): тейков ${rs.wins}, стопов ${rs.stops}${rs.n - rs.wins - rs.stops ? `, по времени ${rs.n - rs.wins - rs.stops}` : ''}</div>
+      ${rs.per_week != null ? `<div>сделок в неделю</div><div><b>~${rs.per_week}</b> в среднем с ${new Date(rs.since * 1000).toLocaleDateString('ru-RU')} · последние 8 недель: ${rs.per_week_recent}</div>` : ''}
       <div>WR</div><div><b>${rs.wr}%</b> — тейк раньше стопа</div>
       <div>средний результат</div><div><b>${sgR(rs.avg_r)}</b> на сделку</div>
       <div>худшая серия стопов</div><div>${rs.max_ls} подряд</div>
@@ -29699,6 +29716,7 @@ async function refreshZones() {
     const rows = rt.rows.map(r => `<tr class="${rt.best && r === top ? 'zbest' : ''} ${r === cur ? 'zcur' : ''}"><td>${r.risk}%${r === cur ? ' <span class="dim">← сейчас</span>' : ''}</td><td>${sgP(r.all)}</td></tr>`).join('');
     riskCard = card('💰 Какой риск лучше', `<div class="zsub" style="margin-top:0;">Рост счёта <b>за одну сделку</b> при разном риске, по всем ${rs.n} сделкам истории</div>
       <div class="zwrap"><table class="ztbl"><thead><tr><th>Риск</th><th>счёт за сделку</th></tr></thead><tbody>${rows}</tbody></table></div>
+      ${rs.month_pct != null ? `<div class="zsub">При ~${rs.per_week} сделках в неделю и риске ${rs.month_risk}% это по истории <b>${rs.month_pct > 0 ? '+' : ''}${rs.month_pct}% к счёту в месяц</b> (живая торговля обычно хуже — закладывайте около половины).</div>` : ''}
       <div class="zsub">${rt.best ? `🎯 лучший — <b>~${rt.best}%</b> (выше этого риск только вредит).` : '<b>Ни один процент не растит счёт</b> — у правил нет перевеса.'}
       ${autoOn ? 'Авто-риск включён: берётся лучший процент (не больше 50%).' : 'Включите «Авто-риск» в настройках, чтобы процент выбирался сам.'}</div>`);
   }

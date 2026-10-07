@@ -18930,3 +18930,8 @@ v0.99.506 - Зоны: "🧪 Поиск по результату" — next to th
          only: no orders, no Telegram, kept out of the author's statistics. Card on the
          Zones tab with the exam table and a verdict, progress in "Состояние", a retrain
          button.
+v0.99.507 - Зоны: how many trades come a week (user: "надо добавить инфу сколько сделок в
+         среднем в неделю"): the summary tile shows "~N в неделю", the "Стоп и тейк" card
+         the average since the first trade and over the last 8 finished weeks (the posting
+         pace may change), and the risk card what a month of that pace gives at the risk in
+         use by the history ("+X% к счёту в месяц", with the advice to count on about half).
