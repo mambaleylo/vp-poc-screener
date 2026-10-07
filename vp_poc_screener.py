@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.486"
+APP_VERSION = "0.99.487"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22410,6 +22410,7 @@ def zones_approach_on_new_post(post):
             sim_execute_trade("zones", post["symbol"], tr["direction"], price, sl, tp, res.get("leverage") or 10, tr,
                               autotrade_result=res)
             line += f"\n   🤖 автосделка: {res.get('status')}" + (f" {res.get('leverage')}x" if res.get("leverage") else "") \
+                + f" · {zones_risk_txt(res)}" \
                 + (f" — {str(res.get('detail'))[:120]}" if res.get("status") not in ("OPENED", "OPENED_TP_SL_FAILED") and res.get("detail") else "")
         except Exception as e:
             log_error(f"zones approach autotrade {post['symbol']}: {e}")
@@ -22847,6 +22848,26 @@ def zones_znotify(z, text, important=False):
     zones_notify(text)
 
 
+def zones_risk_txt(res=None):
+    """v0.99.487 — the risk a zones order uses and where it comes from:
+    "риск 13% (авто)" / "(свой у Зон)" / "(общий)"; the order's own figure when known"""
+    try:
+        with _zones_lock:
+            ar = (ZONES.get("learned") or {}).get("auto_risk")
+        own = MODULE_RISK_PCT.get("zones")
+        if AUTO_RISK_ENABLED and ar:
+            v, src = float(ar), "авто"
+        elif own:
+            v, src = float(own), "свой у Зон"
+        else:
+            v, src = float(AUTOTRADE_RISK_PCT_OF_BALANCE), "общий"
+        if res and res.get("risk_pct") is not None:
+            v = float(res["risk_pct"])
+        return f"риск {v:g}% ({src})"
+    except Exception:
+        return ""
+
+
 def _zones_open_trade(z, price, p):
     s = _zones_side(z)
     direction = "LONG" if s > 0 else "SHORT"
@@ -22872,7 +22893,7 @@ def _zones_open_trade(z, price, p):
     plan = planned_leverage(z["symbol"], direction, price, sl)
     lev_txt = format_leverage_txt(res, AUTOTRADE_ENABLED_ZONES, plan)
     zones_znotify(z, f"{'⬆️' if s > 0 else '⬇️'} Зона {z['symbol']} ({zones_fmt(z)}): вход {direction} по {price:.6g}\n"
-                 f"SL {sl:.6g} · TP {tp:.6g} (+{p['tp']:g}%) · плечо {lev_txt}\n"
+                 f"SL {sl:.6g} · TP {tp:.6g} (+{p['tp']:g}%) · плечо {lev_txt} · {zones_risk_txt(res)}\n"
                  f"правила: линия {p['entry'] + 1}, стоп {p['buf']:g}% за зоной ({p['source']})")
     return tr
 

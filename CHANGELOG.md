@@ -18766,3 +18766,6 @@ v0.99.486 - Restarts lose nothing: before /update, /restart or the 🛠 button, 
          in-memory Telegram queue is drained (up to 10 s / 5 s on SIGTERM); the
          modules otherwise save at their own moments, so a change since the
          last save could be lost.
+v0.99.487 - Зоны: the Telegram entry message (and the move-to-zone trade's line)
+         shows the risk the order used and where it came from: "риск 13% (авто)"
+         / "(свой у Зон)" / "(общий)".
