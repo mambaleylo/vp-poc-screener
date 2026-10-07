@@ -18940,3 +18940,14 @@ v0.99.508 - Зоны: the monthly estimate is shown at the risk in use and at a 
          history's mean), and above +100% a month a warning why such figures are not real
          (trades open at the same time fall together; a big risk only pays if the edge is
          exactly the history's).
+v0.99.509 - Зоны: breakeven (user: "найти лучший вариант по безубытку и реально ставить его на
+         бирже"). Once the price has gone X% beyond the average entry, the stop moves to the
+         average entry + 0.15% (fees) and the limits not taken yet are cancelled — the
+         author's conservative way. X (none / 1 / 2 / 3 / 5 / 8%) is chosen together with
+         the take over the whole history of the posts' ladders by the best account growth;
+         the history, the statistics, the zone lists recount with it by themselves (new
+         outcome "безубыток"). Live: the bot's record follows it on the 1m candles
+         (Telegram: "стоп в безубыток"), and on the exchange the stop trigger is replaced at
+         the REAL average + fees, the leftover limits cancelled (Telegram: "стоп на бирже
+         перенесён в безубыток"); a lost stop is put back at the breakeven price. The tab
+         lists every breakeven variant.

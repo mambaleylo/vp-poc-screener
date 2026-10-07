@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.508"
+APP_VERSION = "0.99.509"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21239,6 +21239,8 @@ ZONES_STOP_BUF = 2.5   # v0.99.491 — the stop: 2.5% beyond the farthest line o
 ZONES_LIMIT_OFF = 0.2   # v0.99.491 — each limit this % before its line, so it is taken for sure (the author: 0.1–0.3%)
 ZONES_TP_MAX = 20.0   # the take found from the history is capped here
 ZONES_RISK_ROWS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30, 40, 50)   # v0.99.499 — the risk table, 1% steps up to 10%
+ZONES_BE_GRID = (None, 1.0, 2.0, 3.0, 5.0, 8.0)   # v0.99.509 — breakeven after this % move from the average entry (None = none)
+ZONES_BE_BUF = 0.15   # ... the stop goes to the average entry + this % (round-trip fees)
 ZONES_TP_GRID = (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 12.0, 15.0, 20.0)   # v0.99.495 — takes tried on the history
 ZONES_GRID_ENTRY = (0, 1)
 ZONES_GRID_BUF = (0.3, 0.6, 1.0, 1.5, 2.5)
@@ -22050,6 +22052,7 @@ def zones_params():
     src = "по умолчанию"
     p["buf"] = ZONES_STOP_BUF   # v0.99.491 — 2.5% beyond the farthest line (the author's 2–3%)
     p["off"] = ZONES_LIMIT_OFF
+    p["be"] = lr.get("be_auto")   # v0.99.509 — breakeven after this % move (None = none)
     if lr.get("tp_auto"):   # the take the price reached in most of the finished zones
         p["tp"] = lr["tp_auto"]
         src = "тейк по истории зон"
@@ -22220,27 +22223,42 @@ def zones_ladder_check(pl, px):
     return None
 
 
-def zones_ladder_step(st, c, s, sl, tp_pct):
+def zones_ladder_step(st, c, s, sl, tp_pct, be=None):
     """One candle of a ladder (st: {"legs": [{"lim", "fill", "t"}], "result"}).
     Fills when the candle reaches a limit (at the limit, or at the open after a
     gap); the stop is checked first (conservative), the take only against the
-    fills from before this candle. Returns the list of new fills."""
+    fills from before this candle. Returns the list of new fills.
+    v0.99.509 — breakeven: once the price went be % beyond the average entry
+    (checked after this candle's stop / take), the stop moves to the average
+    entry + ZONES_BE_BUF % (fees) and the limits not taken yet are cancelled
+    (the position is fixed); from the next candle on."""
     prev = [l["fill"] for l in st["legs"] if l["fill"] is not None]
     new = []
     for l in st["legs"]:
-        if l["fill"] is None and ((s > 0 and c["low"] <= l["lim"]) or (s < 0 and c["high"] >= l["lim"])):
+        if l["fill"] is None and not l.get("cx") and ((s > 0 and c["low"] <= l["lim"]) or (s < 0 and c["high"] >= l["lim"])):
             l["fill"] = min(l["lim"], c["open"]) if s > 0 else max(l["lim"], c["open"])
             l["t"] = c["time"]
             new.append(l)
     if not prev and not new:
         return new
-    if (s > 0 and c["low"] <= sl) or (s < 0 and c["high"] >= sl):
-        gap = (s > 0 and c["open"] <= sl) or (s < 0 and c["open"] >= sl)
-        st["result"], st["exit"], st["t_out"] = "LOSS", (c["open"] if gap else sl), c["time"]
+    sl_eff = st.get("sl_be") or sl
+    if (s > 0 and c["low"] <= sl_eff) or (s < 0 and c["high"] >= sl_eff):
+        gap = (s > 0 and c["open"] <= sl_eff) or (s < 0 and c["open"] >= sl_eff)
+        st["result"] = "BE" if st.get("sl_be") else "LOSS"
+        st["exit"], st["t_out"] = (c["open"] if gap else sl_eff), c["time"]
     elif prev:
-        tp = sum(prev) / len(prev) * (1 + s * tp_pct / 100)
+        avg = sum(prev) / len(prev)
+        tp = avg * (1 + s * tp_pct / 100)
         if (s > 0 and c["high"] >= tp) or (s < 0 and c["low"] <= tp):
             st["result"], st["exit"], st["t_out"] = "WIN", tp, c["time"]
+        elif be and not st.get("sl_be"):
+            trig = avg * (1 + s * be / 100)
+            if (s > 0 and c["high"] >= trig) or (s < 0 and c["low"] <= trig):
+                st["sl_be"] = avg * (1 + s * ZONES_BE_BUF / 100)
+                st["be_t"] = c["time"]
+                for l in st["legs"]:
+                    if l["fill"] is None:
+                        l["cx"] = True
     return new
 
 
@@ -22255,7 +22273,7 @@ def zones_ladder_pnl(st, s, sl, exit_px):
             "avg": sum(fills) / len(fills) if fills else None, "filled": len(fills), "legs": len(st["legs"])}
 
 
-def zone_ladder_sim(cs, group, tp_pct, start, end, buf=None):
+def zone_ladder_sim(cs, group, tp_pct, start, end, buf=None, be=None):
     """Replay a ladder over candles. None = no limit was taken."""
     pl = zones_ladder_plan(group, buf)
     if not pl:
@@ -22267,7 +22285,7 @@ def zone_ladder_sim(cs, group, tp_pct, start, end, buf=None):
         if c["time"] < start or c["time"] >= end:
             continue
         last = c
-        zones_ladder_step(st, c, s, sl, tp_pct)
+        zones_ladder_step(st, c, s, sl, tp_pct, be)
         if st["result"]:
             break
     if not any(l["fill"] is not None for l in st["legs"]):
@@ -22275,7 +22293,7 @@ def zone_ladder_sim(cs, group, tp_pct, start, end, buf=None):
     if not st["result"]:
         st["result"], st["exit"], st["t_out"] = "TIME_EXIT", last["close"], last["time"]
     out = zones_ladder_pnl(st, s, sl, st["exit"])
-    out.update({"result": st["result"], "exit": st["exit"], "sl": sl, "t_out": st["t_out"],
+    out.update({"result": st["result"], "exit": st["exit"], "sl": sl, "t_out": st["t_out"], "be": bool(st.get("sl_be")),
                 "t_in": min(l["t"] for l in st["legs"] if l["fill"] is not None)})
     return out
 
@@ -22407,34 +22425,43 @@ def zones_learn():
     # whole history, the one that grew the account most wins (user: "тейк подбирался
     # исходя из истории, опираясь на лучшую доходность"); at the auto-risk each take
     # is judged at its own best risk, otherwise at the risk in use
-    tp_rows, per_tp = [], {}
+    # v0.99.509 — the take AND the breakeven are chosen together: every pair
+    # replayed as the posts' ladders, the best account growth wins
+    all_rows, per_tp = [], {}
     grid = [float(ZONES_TP_PCT)] if ZONES_TP_PCT else list(ZONES_TP_GRID)
-    zones_act("learn", stage="подбор тейка по истории лесенок", done=0, total=len(grid))
-    for i_, tp in enumerate(grid):
-        zones_act("learn", done=i_)
-        per = [zone_ladder_sim(cs, g, tp, st_, en_) for g, cs, st_, en_ in runs_g]
-        per_tp[tp] = per
-        xs = [r["r"] for r in per if r]
+    combos = [(tp, be) for be in ZONES_BE_GRID for tp in grid]
+    zones_act("learn", stage="подбор тейка и безубытка по истории лесенок", done=0, total=len(combos))
+    for i_, (tp, be) in enumerate(combos):
+        if i_ % 3 == 0:
+            zones_act("learn", done=i_)
+        per_ = [zone_ladder_sim(cs, g, tp, st_, en_, be=be) for g, cs, st_, en_ in runs_g]
+        per_tp[(tp, be)] = per_
+        xs = [r["r"] for r in per_ if r]
         fb, gb = best_f(xs)
         g_rf = growth(xs, rf)
-        tp_rows.append({"tp": tp, "n": len(xs), "avg_r": avg(xs),
-                        "wr": round(sum(1 for r in per if r and r["result"] == "WIN") / len(xs) * 100, 1) if xs else None,
-                        "g": (gb if (auto and gb is not None) else g_rf), "g_at": ("best" if (auto and gb is not None) else round(rf * 100, 2)),
-                        "best_risk": round(fb * 100, 1) if fb else None})
-    ok_rows = [r for r in tp_rows if r["n"] >= ZONES_LEARN_MIN and r["g"] is not None]
-    best_rows = [r for r in ok_rows if r["g_at"] == "best"]   # takes that grow the account at some risk come first
-    pick = max(best_rows or ok_rows, key=lambda r: (r["g"], -r["tp"])) if ok_rows else None
+        all_rows.append({"tp": tp, "be": be, "n": len(xs), "avg_r": avg(xs),
+                         "wr": round(sum(1 for r in per_ if r and r["result"] == "WIN") / len(xs) * 100, 1) if xs else None,
+                         "be_n": sum(1 for r in per_ if r and r["result"] == "BE"),
+                         "g": (gb if (auto and gb is not None) else g_rf), "g_at": ("best" if (auto and gb is not None) else round(rf * 100, 2)),
+                         "best_risk": round(fb * 100, 1) if fb else None})
+    ok_rows = [r for r in all_rows if r["n"] >= ZONES_LEARN_MIN and r["g"] is not None]
+    best_rows = [r for r in ok_rows if r["g_at"] == "best"]   # pairs that grow the account at some risk come first
+    pick = max(best_rows or ok_rows, key=lambda r: (r["g"], -r["tp"], -(r["be"] or 99))) if ok_rows else None
     tp_auto = pick["tp"] if pick and not ZONES_TP_PCT else None
     rule = dict(ZONES_DEFAULT)
     rule["buf"] = ZONES_STOP_BUF
+    rule["be"] = pick["be"] if pick else None
     if tp_auto:
         rule["tp"] = tp_auto
     if ZONES_TP_PCT:
         rule["tp"] = float(ZONES_TP_PCT)
-    per = per_tp.get(rule["tp"])
+    # the takes table at the chosen breakeven; the breakevens table at the chosen take
+    tp_rows = [r for r in all_rows if r["be"] == rule["be"]]
+    be_rows = [r for r in all_rows if r["tp"] == rule["tp"]]
+    per = per_tp.get((rule["tp"], rule["be"]))
     if per is None:   # the default take (too few trades to choose)
-        per = [zone_ladder_sim(cs, g, rule["tp"], st_, en_) for g, cs, st_, en_ in runs_g]
-    rs, aft, wins, stops, fills, legs = [], [], 0, 0, 0, 0
+        per = [zone_ladder_sim(cs, g, rule["tp"], st_, en_, be=rule["be"]) for g, cs, st_, en_ in runs_g]
+    rs, aft, wins, stops, fills, legs, bes = [], [], 0, 0, 0, 0, 0
     res_by_zone = {}
     for (g, _cs, _s, _e), r in zip(runs_g, per):
         for zz in g:   # v0.99.494 — the zone lists show the result by the CURRENT rules too
@@ -22445,6 +22472,7 @@ def zones_learn():
         rs.append(r["r"])
         wins += r["result"] == "WIN"
         stops += r["result"] == "LOSS"
+        bes += r["result"] == "BE"
         fills += r["filled"]
         legs += r["legs"]
     # v0.99.496 — "разбор": why the result is what it is (where the price was at the post,
@@ -22523,7 +22551,7 @@ def zones_learn():
         ls = max(ls, run_)
     a = sorted(aft)
     res = {"n": len(rs), "avg_r": avg(rs), "wr": round(wins / len(rs) * 100, 1) if rs else None,
-           "stops": stops, "wins": wins, "max_ls": ls, "groups": len(groups),
+           "stops": stops, "wins": wins, "bes": bes, "max_ls": ls, "groups": len(groups),
            "fill_share": round(fills / legs * 100, 1) if legs else None,
            "after_med": round(a[len(a) // 2], 2) if a else None,
            "after_5": round(100 * sum(1 for x in a if x >= 5) / len(a), 1) if a else None}
@@ -22563,7 +22591,8 @@ def zones_learn():
                   for x in (2, 3, 5, 10)},
         "beyond_far": round(sum(1 for p in touched if p["beyond_far"]) / len(touched) * 100, 1) if touched else None,
     }
-    learned = {"at": now, "n": len(rs), "rule": rule, "tp_auto": tp_auto, "tp_rows": tp_rows,
+    learned = {"at": now, "n": len(rs), "rule": rule, "tp_auto": tp_auto, "tp_rows": tp_rows, "be_rows": be_rows,
+               "be_auto": rule.get("be"),
                "tp_by": "auto" if auto else round(rf * 100, 2),
                "res": res, "risk_tab": risk_tab, "edge": edge, "diag": diag,
                "risk": auto_risk if auto_risk else rf * 100, "auto": auto, "auto_risk": auto_risk}
@@ -23098,7 +23127,7 @@ def notify_trade_result(module, symbol, direction, entry, exit_price, result, r=
     try:
         if not TELEGRAM_ALERTS_TRADE_RESULTS or (TELEGRAM_TRADE_RESULTS_REAL_ONLY and not real):
             return
-        head = {"WIN": "✅ ТЕЙК", "LOSS": "❌ СТОП", "TIME_EXIT": "⏱ выход по времени", "TIMEOUT": "⏱ выход по времени",
+        head = {"WIN": "✅ ТЕЙК", "LOSS": "❌ СТОП", "BE": "🛡 БЕЗУБЫТОК", "TIME_EXIT": "⏱ выход по времени", "TIMEOUT": "⏱ выход по времени",
                 "LOSS_EARLY": "✂️ ранний выход"}.get(result, str(result))
         d = 1 if str(direction).upper() == "LONG" else -1
         pct = d * (exit_price - entry) / entry * 100 if entry and exit_price is not None else None
@@ -23584,6 +23613,29 @@ def _zones_real_step(tr, pos_map):
                 r["seen"], changed = True, True
                 r["t_change"] = now
                 tr["autotrade_fired"] = True
+            # v0.99.509 — breakeven: the bot's record moved the stop -> the exchange too
+            # (at the REAL average + fees), and the limits not taken yet go
+            if tr.get("sl_be") and not r.get("be_done") and avg:
+                be_px = avg * (1 + s * ZONES_BE_BUF / 100)
+                px_ = (pos_map.get("_px") or {}).get(sym)
+                if px_ and ((s > 0 and px_ <= be_px) or (s < 0 and px_ >= be_px)):
+                    r["be_done"] = True   # already back below the breakeven: the old stop stays
+                elif _zones_real_cancel_legs(tr):
+                    old_sl = r.get("sl_id")
+                    try:
+                        r["be_px"] = be_px
+                        r["sl_id"] = None   # the next lines place the stop at be_px
+                        if place("sl", be_px):
+                            if old_sl:
+                                r.setdefault("stale", []).append(str(old_sl))
+                            r["be_done"], changed = True, True
+                            zones_notify(f"🛡 {sym}: стоп на бирже перенесён в безубыток @ {be_px:.6g}, неналитые лимитки сняты")
+                        else:
+                            r["sl_id"] = old_sl
+                    except Exception as e:
+                        r["sl_id"] = r.get("sl_id") or old_sl
+                        r.pop("be_px", None)   # retried next round
+                        log_error(f"zones ladder breakeven {sym}: {e}")
             # a trigger we placed but the exchange no longer has (given 30 s for Gate's read side to catch up)
             for kind in ("sl", "tp"):
                 oid = r.get(f"{kind}_id")
@@ -23591,17 +23643,18 @@ def _zones_real_step(tr, pos_map):
                     r[f"{kind}_id"] = None
                     r[f"{kind}_lost"] = r.get(f"{kind}_lost", 0) + 1
                     changed = True
+            sl_eff = r.get("be_px") or tr["sl"]
             if not r.get("sl_id"):
                 try:
-                    if place("sl", tr["sl"]) and r.get("sl_lost"):
-                        zones_notify(f"🛡 {sym}: стоп-лосс пропал с биржи — поставил заново @ {tr['sl']:.6g}")
+                    if place("sl", sl_eff) and r.get("sl_lost"):
+                        zones_notify(f"🛡 {sym}: стоп-лосс пропал с биржи — поставил заново @ {sl_eff:.6g}")
                     changed = True
                 except Exception as e:
                     log_error(f"zones ladder SL {sym}: {e}")
                     # the price is already past the stop (e.g. a limit filled while the bot
                     # was off): the exchange won't take the stop — close at the market
                     px_ = (pos_map.get("_px") or {}).get(sym)
-                    if px_ and ((s > 0 and px_ <= tr["sl"]) or (s < 0 and px_ >= tr["sl"])):
+                    if px_ and ((s > 0 and px_ <= sl_eff) or (s < 0 and px_ >= sl_eff)):
                         if _zones_close_real(sym, direction, "price past the stop"):
                             zones_notify(f"🛑 {sym}: цена уже за стопом, стоп-ордер биржа не приняла — позиция закрыта по рынку")
                             changed = True
@@ -23703,6 +23756,7 @@ def _zones_ladder_tick(group, now, p, pos_map):
         tr = {"kind": "ladder", "symbol": sym, "direction": "LONG" if s > 0 else "SHORT", "time": int(now),
               "legs": [{"level": v, "lim": x, "fill": None, "t": None} for v, x in zip(pl["levels"], pl["limits"])],
               "sl": pl["sl"], "tp_pct": lead.get("oc_tp") or p["tp"], "tp": None, "entry": None, "status": "PENDING", "result": None,
+              "be": None if lead.get("oc") else p.get("be"),
               "chk_t": int(max(lead["post_time"], now - 3 * 86400)), "zones": [z["id"] for z in group],
               "params": {k: p[k] for k in ("buf", "tp")}, "no_auto": zones_post_no_auto(post),
               "autotrade_fired": False, "autotrade": None, "real": None, "exit_price": None, "exit_time": None,
@@ -23714,6 +23768,7 @@ def _zones_ladder_tick(group, now, p, pos_map):
         lim_txt = " / ".join(f"{l['lim']:.6g}" for l in tr["legs"])
         zones_znotify(lead, f"📋 {sym} {'лонг' if s > 0 else 'шорт'}: лимитки {len(tr['legs'])} шт. — {lim_txt}\n"
                             f"стоп {tr['sl']:.6g} ({p['buf']:g}% за дальней линией) · тейк +{tr['tp_pct']:g}% от средней цены входа"
+                            + (f" · безубыток после +{tr['be']:g}%" if tr.get("be") else "")
                             + (f"\n⚠️ {tr['no_auto']} — без автосделки" if tr["no_auto"] else ""))
         changed = True
     # v0.99.492 — the real limits sit on the exchange only while the price is near
@@ -23755,9 +23810,13 @@ def _zones_ladder_tick(group, now, p, pos_map):
         for c in cs:
             if c["time"] < t0 or c["time"] + sec > now:
                 continue
-            new = zones_ladder_step(tr, c, s, tr["sl"], tr["tp_pct"])
+            had_be = bool(tr.get("sl_be"))
+            new = zones_ladder_step(tr, c, s, tr["sl"], tr["tp_pct"], tr.get("be"))
             tr["chk_t"] = c["time"] + sec
             changed = True
+            if tr.get("sl_be") and not had_be and not tr.get("result"):
+                zones_znotify(lead, f"🛡 {sym}: цена прошла +{tr['be']:g}% от средней — стоп в безубыток "
+                                    f"({tr['sl_be']:.6g}), неналитые лимитки сняты", important=True)
             if new:
                 fills = [l["fill"] for l in tr["legs"] if l["fill"] is not None]
                 avg = sum(fills) / len(fills)
@@ -29671,9 +29730,10 @@ async function refreshZones() {
       <div>вход</div><div><b>лимитки на все линии</b> зон поста одного направления, на ${p.off ?? 0.2}% раньше линии, объём поровну</div>
       <div>стоп</div><div><b>${p.buf}%</b> за самой дальней линией — один на всю позицию</div>
       <div>тейк</div><div><b>+${p.tp}%</b> от средней цены входа ${d.tp_user ? '(свой, из настроек)' : (lr.tp_auto ? '— подобран по <b>лучшему росту счёта</b> на истории лесенок' : '(по умолчанию — мало сделок для подбора)')}</div>
+      <div>безубыток</div><div>${p.be ? `после <b>+${p.be}%</b> от средней цены — стоп на среднюю +0.15% (комиссии), неналитые лимитки снимаются` : 'не ставится — по истории без него лучше'} <span class="dim">(подобран вместе с тейком)</span></div>
       </div>
       ${rs.n ? `<div class="zkv" style="margin-top:8px;">
-      <div>сделок по истории</div><div><b>${rs.n}</b> (постов ${rs.groups ?? '—'}): тейков ${rs.wins}, стопов ${rs.stops}${rs.n - rs.wins - rs.stops ? `, по времени ${rs.n - rs.wins - rs.stops}` : ''}</div>
+      <div>сделок по истории</div><div><b>${rs.n}</b> (постов ${rs.groups ?? '—'}): тейков ${rs.wins}, стопов ${rs.stops}${rs.bes ? `, в безубыток ${rs.bes}` : ''}${rs.n - rs.wins - rs.stops - (rs.bes || 0) ? `, по времени ${rs.n - rs.wins - rs.stops - (rs.bes || 0)}` : ''}</div>
       ${rs.per_week != null ? `<div>сделок в неделю</div><div><b>~${rs.per_week}</b> в среднем с ${new Date(rs.since * 1000).toLocaleDateString('ru-RU')} · последние 8 недель: ${rs.per_week_recent}</div>` : ''}
       <div>WR</div><div><b>${rs.wr}%</b> — тейк раньше стопа</div>
       <div>средний результат</div><div><b>${sgR(rs.avg_r)}</b> на сделку</div>
@@ -29681,6 +29741,10 @@ async function refreshZones() {
       ${rs.fill_share != null ? `<div>налилось лимиток</div><div>${rs.fill_share}% от выставленных</div>` : ''}
       ${rs.after_med != null ? `<div>после тейка</div><div>цена шла ещё +${rs.after_med}% (медиана), +5% и больше — в ${rs.after_5}%</div>` : ''}
       </div>` : ''}
+      ${(lr.be_rows || []).length > 1 ? `<details><summary>все варианты безубытка</summary><div class="zsub">при тейке +${p.tp}%; каждый вариант прогнан лесенками по всей истории</div>
+        <div class="zwrap"><table class="ztbl"><thead><tr><th>Безубыток</th><th>сделок</th><th>WR</th><th>в бу</th><th>средний</th><th>счёт за сделку</th></tr></thead><tbody>
+        ${lr.be_rows.map(r => `<tr class="${r.be === p.be ? 'zbest' : ''}"><td>${r.be ? 'после +' + r.be + '%' : 'нет'}${r.be === p.be ? ' ✓' : ''}</td><td>${r.n}</td><td>${r.wr == null ? '—' : r.wr + '%'}</td><td>${r.be_n || 0}</td><td>${sgR(r.avg_r)}</td><td>${sgP(r.g)}</td></tr>`).join('')}
+        </tbody></table></div></details>` : ''}
       ${(lr.tp_rows || []).length > 1 ? `<details><summary>все варианты тейка</summary><div class="zsub">каждый тейк прогнан лесенками по всей истории; «счёт за сделку» — ${lr.tp_by === 'auto' ? 'при лучшем для этого тейка риске' : 'при риске ' + lr.tp_by + '%'}</div>
         <div class="zwrap"><table class="ztbl"><thead><tr><th>Тейк</th><th>сделок</th><th>WR</th><th>средний</th><th>счёт за сделку</th></tr></thead><tbody>
         ${lr.tp_rows.map(r => `<tr class="${r.tp === p.tp ? 'zbest' : ''}"><td>+${r.tp}%${r.tp === p.tp ? ' ✓' : ''}</td><td>${r.n}</td><td>${r.wr == null ? '—' : r.wr + '%'}</td><td>${sgR(r.avg_r)}</td><td>${sgP(r.g)}${r.g_at === 'best' ? `<div class="dim">при ${r.best_risk}%</div>` : (r.g_at != null ? `<div class="dim">при ${r.g_at}%${lr.tp_by === 'auto' ? ' — роста нет ни при каком' : ''}</div>` : '')}</td></tr>`).join('')}
@@ -29694,7 +29758,7 @@ async function refreshZones() {
   if (dg && dg.n) {
     const pc = x => Math.round(100 * x / dg.n) + '%';
     const tfTxt = Object.entries(dg.tf || {}).map(([k, v]) => `${k}: ${v}`).join(' · ');
-    const worst = (dg.worst || []).map(w => `<tr onclick="zoneChart('${w.id}')" style="cursor:pointer;"><td>${(w.symbol || '').replace('_USDT', '')} ${w.side === 'long' ? 'лонг' : 'шорт'}<div class="dim">${zdate(w.t)} · ${w.tf}</div></td><td>${sgR(w.r)}<div class="dim">${w.result === 'WIN' ? 'тейк' : w.result === 'LOSS' ? 'стоп' : 'время'}</div></td><td>${w.filled}/${w.legs}</td><td>${w.d0 > 0 ? '+' : ''}${w.d0}%<div class="dim">ширина ${w.width}%</div></td></tr>`).join('');
+    const worst = (dg.worst || []).map(w => `<tr onclick="zoneChart('${w.id}')" style="cursor:pointer;"><td>${(w.symbol || '').replace('_USDT', '')} ${w.side === 'long' ? 'лонг' : 'шорт'}<div class="dim">${zdate(w.t)} · ${w.tf}</div></td><td>${sgR(w.r)}<div class="dim">${w.result === 'WIN' ? 'тейк' : w.result === 'LOSS' ? 'стоп' : w.result === 'BE' ? 'бу' : 'время'}</div></td><td>${w.filled}/${w.legs}</td><td>${w.d0 > 0 ? '+' : ''}${w.d0}%<div class="dim">ширина ${w.width}%</div></td></tr>`).join('');
     diagCard = `<details class="zcard"><summary class="zh" style="margin:0;">🔍 Разбор результатов</summary><div class="zkv" style="margin-top:8px;">
       <div>постов в статистике</div><div><b>${dg.n}</b> (лонг ${dg.side_long}, шорт ${dg.n - dg.side_long})</div>
       <div>цена в момент поста</div><div>до первой лимитки в среднем <b>${dg.dist_med}%</b> (медиана)</div>
@@ -30176,7 +30240,7 @@ function zoneTradesHtml(list) {
   const wins = rs.filter(r => r > 0).length, sum = rs.reduce((a, b) => a + b, 0);
   const rows = list.map(z => { const t = z.trade, w = t.result === 'WIN';
     return `<div onclick="zoneChart('${z.id}')" style="cursor:pointer;padding:6px 8px;margin-top:4px;background:var(--card);border-radius:var(--r-sm);border-left:3px solid ${w ? '#4caf50' : (t.result === 'LOSS' ? '#ef5350' : '#e0a030')};font-size:var(--fs-sm);">
-      <b>${(z.symbol || '').replace('_USDT', '')}</b> ${t.direction === 'LONG' ? 'лонг' : 'шорт'} · <b class="${(t.pnl_r || 0) > 0 ? 'win' : 'loss'}">${t.result === 'WIN' ? 'тейк' : t.result === 'LOSS' ? 'стоп' : 'по времени'} ${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R${t.pnl_pct != null ? ` · ${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct}%` : ''}</b>
+      <b>${(z.symbol || '').replace('_USDT', '')}</b> ${t.direction === 'LONG' ? 'лонг' : 'шорт'} · <b class="${(t.pnl_r || 0) > 0 ? 'win' : 'loss'}">${t.result === 'WIN' ? 'тейк' : t.result === 'LOSS' ? 'стоп' : t.result === 'BE' ? 'безубыток' : 'по времени'} ${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R${t.pnl_pct != null ? ` · ${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct}%` : ''}</b>
       <span class="dim">· ${zfmt(t.entry)} → ${zfmt(t.exit_price)} · ${zdate(t.exit_time || t.time)}${t.autotrade_fired ? ' · 💰 биржа' : ''} · 📈</span></div>`; }).join('');
   return `<details style="margin-top:8px;"><summary style="cursor:pointer;">💼 Сделки по зонам: ${list.length} · WR ${Math.round(100 * wins / list.length)}% · итого ${sum > 0 ? '+' : ''}${sum.toFixed(2)}R</summary>${rows}</details>`;
 }
