@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.514"
+APP_VERSION = "0.99.515"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21284,7 +21284,7 @@ def zones_save():
     with _zones_lock:
         _zones_save_seq[0] += 1
         seq = _zones_save_seq[0]
-        data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode", "own_last_scan", "monitor_ok", "fine_only", "recheck_v510") if k in ZONES}, default=str)
+        data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode", "own_last_scan", "monitor_ok", "fine_only", "recheck_v515") if k in ZONES}, default=str)
     try:   # v0.99.455 — written to disk for sure; the previous state kept as .bak
         # v0.99.511 — one writer at a time (the history recheck, the monitor and the
         # learner save from different threads: they shared one .tmp — one renamed it
@@ -21328,7 +21328,7 @@ def zones_load():
                 d = json.load(f)
             with _zones_lock:
                 for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode",
-                          "own_last_scan", "monitor_ok", "fine_only", "recheck_v510"):
+                          "own_last_scan", "monitor_ok", "fine_only", "recheck_v515"):
                     if k in d:
                         ZONES[k] = d[k]
                 ZONES["train_mode"] = False   # v0.99.480 — the switch is gone: new posts are always live
@@ -21906,8 +21906,12 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
 
     for r in merged:
         w_, h_ = r["x1"] - r["x0"], r["y1"] - r["y0"]
-        small = w_ < 0.22 * plot_x1 and h_ < 0.06 * H and _has_text(r)   # a label, not a small zone
-        if small and w_ >= 2.0 * h_ and result_label is None:
+        small_sz = w_ < 0.22 * plot_x1 and h_ < 0.06 * H
+        small = small_sz and _has_text(r)   # a label, not a small zone
+        # v0.99.515 — the label text can come out dark in JPEG (no white pixels):
+        # every small wide rect is read, a price-range label is recognised by its text
+        if small_sz and w_ >= 2.0 * h_ and result_label is None:
+            txt = ""
             try:
                 from PIL import ImageOps as _IO
                 crop = im.crop((max(0, r["x0"] - 2), max(0, r["y0"] - 2), min(W, r["x1"] + 2), min(H, r["y1"] + 2)))
@@ -21917,6 +21921,7 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                 txt = ""
             if "%" in txt or re.search(r"\(\s*-?\d+[.,]?\d*\s*[%»9]?\s*\)", txt):
                 result_label = txt.strip()
+                small = True
         if small or w_ < 0.06 * plot_x1:
             continue   # a label / a marker, not a zone
         keep.append(r)
@@ -25881,7 +25886,7 @@ def api_zones_img(pid):
 _zones_recheck_lock = threading.Lock()
 
 
-ZONES_RECHECK_MARK = 510   # v0.99.513 — a post recognised again by this recogniser carries this mark
+ZONES_RECHECK_MARK = 515   # v0.99.515 — a post recognised again by this recogniser carries this mark
 
 
 def zones_recheck_results(force=False):
@@ -25947,7 +25952,7 @@ def zones_recheck_results(force=False):
             for z in new:
                 zones_replay_past(z)
         with _zones_lock:
-            ZONES["recheck_v510"] = True
+            ZONES["recheck_v515"] = True
         zones_save()
         zones_act("recheck", running=False, done=len(posts), found=found, changed=changed_n, finished=time.time())
         _zones_learn_event.set()
@@ -33169,7 +33174,7 @@ if __name__ == "__main__":
     threading.Thread(target=zut_keepalive_loop, daemon=True).start()
     threading.Thread(target=zones_monitor_loop, daemon=True).start()
     threading.Thread(target=zones_learn_loop, daemon=True).start()
-    if not ZONES.get("recheck_v510"):   # v0.99.503 — once: the history recognised again by the current recogniser
+    if not ZONES.get("recheck_v515"):   # v0.99.503 — once: the history recognised again by the current recogniser
         threading.Thread(target=zones_recheck_results, daemon=True).start()
     threading.Thread(target=own_scan_loop, daemon=True).start()   # v0.99.452 — our own zone finder
     threading.Thread(target=oc_loop, daemon=True).start()   # v0.99.506 — our zones by the result

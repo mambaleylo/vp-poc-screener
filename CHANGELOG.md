@@ -18977,3 +18977,9 @@ v0.99.514 - Зоны: one setup posted as several pictures (an album: two BTC sh
          risk on one idea. In the history, posts of one coin and side within the same half
          hour are one setup; live, a second ladder for the same coin and side within 30 min
          of an active one is not opened (status "не торгую — тот же сетап уже в работе").
+v0.99.515 - Зоны: a result post (SEI 1h, the price-range label "-0,01590 (-19,13%)") was
+         taken as a live setup (user: "опять пост просто с результатом отработки защитался за
+         актуальный") — in that JPEG the label text came out dark, not white, so the label
+         looked like a plain small zone and was never read. Every small wide coloured rect is
+         now read by OCR; the price-range text marks the post as a result post. The history is
+         recognised once again (new mark 515).
