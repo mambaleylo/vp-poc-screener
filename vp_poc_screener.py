@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.494"
+APP_VERSION = "0.99.495"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21217,6 +21217,7 @@ ZONES_DEFAULT = {"entry": 0, "buf": 1.0, "tp": 4.0}    # 1st line, stop 1% beyon
 ZONES_STOP_BUF = 2.5   # v0.99.491 — the stop: 2.5% beyond the farthest line of the post's zones (the author: "с запасом 2–3%")
 ZONES_LIMIT_OFF = 0.2   # v0.99.491 — each limit this % before its line, so it is taken for sure (the author: 0.1–0.3%)
 ZONES_TP_MAX = 20.0   # the take found from the history is capped here
+ZONES_TP_GRID = (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 12.0, 15.0, 20.0)   # v0.99.495 — takes tried on the history
 ZONES_GRID_ENTRY = (0, 1)
 ZONES_GRID_BUF = (0.3, 0.6, 1.0, 1.5, 2.5)
 ZONES_GRID_TP = (2.0, 3.0, 4.0, 5.0, 7.0, 10.0, 15.0, 20.0)   # v0.99.460 — up to +20%
@@ -22224,19 +22225,17 @@ def zones_act(key, **kw):
 
 
 def zones_learn():
-    """v0.99.490 — no rule search any more (user: "проверку на зонах уберем,
-    стоп будет всегда просто за зоной, тейк такой, который достигается в
-    большинстве карточек"): entry at the 1st line, stop just beyond the far
-    line, take = the largest move the price made after touching the 1st line
-    in more than half of the finished zones. Then the plain result of that
-    rule on every zone, the risk table and the auto-risk."""
+    """v0.99.495 — the history replayed by the author's method (one ladder of
+    limits per post and side, the stop beyond the farthest line); the take is
+    the one that grew the account most over that history. Then the plain
+    result of those rules on every post, the risk table and the auto-risk."""
     now = time.time()
     with _zones_lock:
         zs = [dict(z) for z in ZONES["zones"] if z.get("status") != "deleted" and not z.get("own")]
     finished = [z for z in zs if z.get("status") in ("old", "closed", "broken", "expired")
                 or now >= z["post_time"] + ZONES_MAX_DAYS * 86400]
     finished.sort(key=lambda z: z["post_time"])
-    cache, paths, runs = {}, [], []
+    cache, paths = {}, []
     zones_act("learn", running=True, started=now, stage="свечи и статистика зон", done=0, total=len(finished))
     for i_, z in enumerate(finished):
         if i_ % 5 == 0:
@@ -22248,55 +22247,8 @@ def zones_learn():
         cs = cache[key]
         if not cs:
             continue
-        ps = zone_path_stats(cs, z, z["post_time"], end)
-        paths.append(ps)
-        if ps.get("touched"):
-            runs.append((z, cs, end))
+        paths.append(zone_path_stats(cs, z, z["post_time"], end))
     touched = [p for p in paths if p.get("touched")]
-    # the take: the largest step (0.5%) the price reached in more than half of the touched zones
-    tp_auto, tp_reach = None, None
-    if len(touched) >= ZONES_LEARN_MIN:
-        for i in range(1, 2 * int(ZONES_TP_MAX) + 1):
-            x = i / 2
-            share = sum(1 for p in touched if p["run_pct"] >= x) / len(touched) * 100
-            if share <= 50:
-                break
-            tp_auto, tp_reach = x, round(share, 1)
-    rule = dict(ZONES_DEFAULT)
-    rule["buf"] = ZONES_STOP_BUF
-    if tp_auto:
-        rule["tp"] = tp_auto
-    if ZONES_TP_PCT:
-        rule["tp"] = float(ZONES_TP_PCT)
-    # v0.99.491 — one ladder per post and side (the author's method), not a trade per zone
-    groups = {}
-    for z in finished:
-        groups.setdefault(zones_group_key(z), []).append(z)
-    rs, aft, wins, stops, fills, legs = [], [], 0, 0, 0, 0
-    res_by_zone = {}
-    zones_act("learn", stage="лесенки лимиток по постам", done=0, total=len(groups))
-    for i_, g in enumerate(sorted(groups.values(), key=lambda g: g[0]["post_time"])):
-        if i_ % 5 == 0:
-            zones_act("learn", done=i_)
-        z0 = g[0]
-        end = min(now, z0["post_time"] + ZONES_MAX_DAYS * 86400)
-        key = (z0["symbol"], int(z0["post_time"]) // 3600, int(end) // 3600)
-        cs = cache.get(key)
-        if cs is None:
-            cs = cache[key] = zones_candles(z0["symbol"], z0["post_time"], end)
-        if not cs:
-            continue
-        r = zone_ladder_sim(cs, g, rule["tp"], z0["post_time"], end)
-        for zz in g:   # v0.99.494 — the zone lists show the result by the CURRENT rules too
-            res_by_zone[zz["id"]] = ({"result": r["result"], "r": round(r["r"], 3), "pct": round(r["pct"], 2),
-                                      "filled": r["filled"], "legs": r["legs"]} if r else None)
-        if r is None:
-            continue
-        rs.append(r["r"])
-        wins += r["result"] == "WIN"
-        stops += r["result"] == "LOSS"
-        fills += r["filled"]
-        legs += r["legs"]
     avg = lambda xs: round(sum(xs) / len(xs), 3) if xs else None
     rf = _zones_risk_frac()
     auto = bool(AUTO_RISK_ENABLED)
@@ -22308,9 +22260,71 @@ def zones_learn():
         lg = sum(math.log(max(1e-6, 1 + f_ * x)) for x in xs) / len(xs)
         return round((math.exp(lg) - 1) * 100, 3)
 
-    gl = lambda f_: sum(math.log(max(1e-9, 1 + f_ * x)) for x in rs) / len(rs)
-    fbest = max((i / 200 for i in range(1, 101)), key=gl) if rs else None   # 0.5% .. 50%
-    edge = bool(rs) and gl(fbest) > 1e-6
+    def best_f(xs):
+        """the risk (0.5..50%) that grows the account most on these trades, and that growth"""
+        if not xs:
+            return None, None
+        gl = lambda f_: sum(math.log(max(1e-9, 1 + f_ * x)) for x in xs) / len(xs)
+        fb = max((i / 200 for i in range(1, 101)), key=gl)
+        return (fb, growth(xs, fb)) if gl(fb) > 1e-6 else (None, None)
+
+    # v0.99.491 — one ladder per post and side (the author's method), not a trade per zone
+    groups = {}
+    for z in finished:
+        groups.setdefault(zones_group_key(z), []).append(z)
+    runs_g = []
+    for g in sorted(groups.values(), key=lambda g: g[0]["post_time"]):
+        z0 = g[0]
+        end = min(now, z0["post_time"] + ZONES_MAX_DAYS * 86400)
+        key = (z0["symbol"], int(z0["post_time"]) // 3600, int(end) // 3600)
+        cs = cache.get(key)
+        if cs is None:
+            cs = cache[key] = zones_candles(z0["symbol"], z0["post_time"], end)
+        if cs:
+            runs_g.append((g, cs, z0["post_time"], end))
+    # v0.99.495 — the take: every variant replayed as the author's ladders over the
+    # whole history, the one that grew the account most wins (user: "тейк подбирался
+    # исходя из истории, опираясь на лучшую доходность"); at the auto-risk each take
+    # is judged at its own best risk, otherwise at the risk in use
+    tp_rows, per_tp = [], {}
+    grid = [float(ZONES_TP_PCT)] if ZONES_TP_PCT else list(ZONES_TP_GRID)
+    zones_act("learn", stage="подбор тейка по истории лесенок", done=0, total=len(grid))
+    for i_, tp in enumerate(grid):
+        zones_act("learn", done=i_)
+        per = [zone_ladder_sim(cs, g, tp, st_, en_) for g, cs, st_, en_ in runs_g]
+        per_tp[tp] = per
+        xs = [r["r"] for r in per if r]
+        fb, gb = best_f(xs)
+        tp_rows.append({"tp": tp, "n": len(xs), "avg_r": avg(xs),
+                        "wr": round(sum(1 for r in per if r and r["result"] == "WIN") / len(xs) * 100, 1) if xs else None,
+                        "g": (gb if auto else growth(xs, rf)), "best_risk": round(fb * 100, 1) if fb else None})
+    ok_rows = [r for r in tp_rows if r["n"] >= ZONES_LEARN_MIN and r["g"] is not None]
+    pick = max(ok_rows, key=lambda r: (r["g"], -r["tp"])) if ok_rows else None
+    tp_auto = pick["tp"] if pick and not ZONES_TP_PCT else None
+    rule = dict(ZONES_DEFAULT)
+    rule["buf"] = ZONES_STOP_BUF
+    if tp_auto:
+        rule["tp"] = tp_auto
+    if ZONES_TP_PCT:
+        rule["tp"] = float(ZONES_TP_PCT)
+    per = per_tp.get(rule["tp"])
+    if per is None:   # the default take (too few trades to choose)
+        per = [zone_ladder_sim(cs, g, rule["tp"], st_, en_) for g, cs, st_, en_ in runs_g]
+    rs, aft, wins, stops, fills, legs = [], [], 0, 0, 0, 0
+    res_by_zone = {}
+    for (g, _cs, _s, _e), r in zip(runs_g, per):
+        for zz in g:   # v0.99.494 — the zone lists show the result by the CURRENT rules too
+            res_by_zone[zz["id"]] = ({"result": r["result"], "r": round(r["r"], 3), "pct": round(r["pct"], 2),
+                                      "filled": r["filled"], "legs": r["legs"]} if r else None)
+        if r is None:
+            continue
+        rs.append(r["r"])
+        wins += r["result"] == "WIN"
+        stops += r["result"] == "LOSS"
+        fills += r["filled"]
+        legs += r["legs"]
+    fbest, _g = best_f(rs)
+    edge = fbest is not None
     auto_risk = round(fbest * 100, 1) if (auto and edge and len(rs) >= ZONES_LEARN_MIN) else None
     ls = run_ = 0   # the longest losing streak in time order
     for x in rs:
@@ -22334,7 +22348,8 @@ def zones_learn():
                   for x in (2, 3, 5, 10)},
         "beyond_far": round(sum(1 for p in touched if p["beyond_far"]) / len(touched) * 100, 1) if touched else None,
     }
-    learned = {"at": now, "n": len(rs), "rule": rule, "tp_auto": tp_auto, "tp_reach": tp_reach,
+    learned = {"at": now, "n": len(rs), "rule": rule, "tp_auto": tp_auto, "tp_rows": tp_rows,
+               "tp_by": "auto" if auto else round(rf * 100, 2),
                "res": res, "risk_tab": risk_tab, "edge": edge,
                "risk": auto_risk if auto_risk else rf * 100, "auto": auto, "auto_risk": auto_risk}
     with _zones_lock:
@@ -22795,14 +22810,15 @@ def zones_replay_past(z):
         return
     end = min(now, z["post_time"] + ZONES_MAX_DAYS * 86400)
     cs = zones_candles(z["symbol"], z["post_time"], end)
-    p = zones_params()
-    r = zone_sim(cs, z, p["entry"], p["buf"], p["tp"], z["post_time"], end) if cs else None
     path = zone_path_stats(cs, z, z["post_time"], end) if cs else {"touched": False}
     with _zones_lock:
-        if r is not None or path.get("touched") or now >= z["post_time"] + ZONES_MAX_DAYS * 86400:
+        if path.get("touched") or now >= z["post_time"] + ZONES_MAX_DAYS * 86400:
             z["status"] = "old"
-            z["result"] = ({"result": r["result"], "r": round(r["r"], 3), "pct": round(r["pct"], 2)} if r else None)
+            # v0.99.495 — the result comes from the next history recount (the post's
+            # ladder by the current rules), not from a one-zone replay here
+            z["result"], z["rules"] = None, "pending"
             z["history"] = path
+            _zones_learn_event.set()
 
 
 ZONES_OUTBOX_FILE = os.environ.get("VP_ZONES_OUTBOX_FILE", "vp_zones_outbox.json")
@@ -28861,7 +28877,7 @@ function zoneRowHtml(z) {
   const hist = '';
   // v0.99.447 — "уже отработала" shows its outcome in R right in the status
   const stTxt = z.status === 'old'
-    ? (z.result ? `📜 отработала: <b class="${z.result.r > 0 ? 'win' : 'loss'}">${z.result.r > 0 ? '+' : ''}${z.result.r}R${z.result.pct != null ? ` · ${z.result.pct > 0 ? '+' : ''}${z.result.pct}%` : ''}</b>${z.result.legs ? ` <span class="dim">· лесенка поста, налилось ${z.result.filled}/${z.result.legs}</span>` : ''}` : (z.rules === 'ladder' ? '📜 отработала: лимитки не налились' : '📜 отработала: входа не было'))
+    ? (z.result ? `📜 отработала: <b class="${z.result.r > 0 ? 'win' : 'loss'}">${z.result.r > 0 ? '+' : ''}${z.result.r}R${z.result.pct != null ? ` · ${z.result.pct > 0 ? '+' : ''}${z.result.pct}%` : ''}</b>${z.result.legs ? ` <span class="dim">· лесенка поста, налилось ${z.result.filled}/${z.result.legs}</span>` : ''}` : (z.rules === 'ladder' ? '📜 отработала: лимитки не налились' : z.rules === 'pending' ? '📜 отработала — результат появится после пересчёта истории' : '📜 отработала: входа не было'))
     : (ZONE_ST[z.status] || z.status);
   const btn = 'background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);';
   return `<div style="margin-top:8px;padding:6px 0 0 8px;border-left:3px solid ${long ? '#4caf50' : '#ef5350'};">
@@ -28968,7 +28984,7 @@ async function refreshZones() {
     ruleCard = card('📐 Стоп и тейк', `<div class="zkv">
       <div>вход</div><div><b>лимитки на все линии</b> зон поста одного направления, на ${p.off ?? 0.2}% раньше линии, объём поровну</div>
       <div>стоп</div><div><b>${p.buf}%</b> за самой дальней линией — один на всю позицию</div>
-      <div>тейк</div><div><b>+${p.tp}%</b> от средней цены входа ${d.tp_user ? '(свой, из настроек)' : (lr.tp_auto ? `— цена доходила до него в <b>${lr.tp_reach}%</b> зон` : '(по умолчанию — мало зон)')}</div>
+      <div>тейк</div><div><b>+${p.tp}%</b> от средней цены входа ${d.tp_user ? '(свой, из настроек)' : (lr.tp_auto ? '— подобран по <b>лучшему росту счёта</b> на истории лесенок' : '(по умолчанию — мало сделок для подбора)')}</div>
       </div>
       ${rs.n ? `<div class="zkv" style="margin-top:8px;">
       <div>сделок по истории</div><div><b>${rs.n}</b> (постов ${rs.groups ?? '—'}): тейков ${rs.wins}, стопов ${rs.stops}${rs.n - rs.wins - rs.stops ? `, по времени ${rs.n - rs.wins - rs.stops}` : ''}</div>
@@ -28978,6 +28994,10 @@ async function refreshZones() {
       ${rs.fill_share != null ? `<div>налилось лимиток</div><div>${rs.fill_share}% от выставленных</div>` : ''}
       ${rs.after_med != null ? `<div>после тейка</div><div>цена шла ещё +${rs.after_med}% (медиана), +5% и больше — в ${rs.after_5}%</div>` : ''}
       </div>` : ''}
+      ${(lr.tp_rows || []).length > 1 ? `<details><summary>все варианты тейка</summary><div class="zsub">каждый тейк прогнан лесенками по всей истории; «счёт за сделку» — ${lr.tp_by === 'auto' ? 'при лучшем для этого тейка риске' : 'при риске ' + lr.tp_by + '%'}</div>
+        <div class="zwrap"><table class="ztbl"><thead><tr><th>Тейк</th><th>сделок</th><th>WR</th><th>средний</th><th>счёт за сделку</th></tr></thead><tbody>
+        ${lr.tp_rows.map(r => `<tr class="${r.tp === p.tp ? 'zbest' : ''}"><td>+${r.tp}%${r.tp === p.tp ? ' ✓' : ''}</td><td>${r.n}</td><td>${r.wr == null ? '—' : r.wr + '%'}</td><td>${sgR(r.avg_r)}</td><td>${sgP(r.g)}${lr.tp_by === 'auto' && r.best_risk ? `<div class="dim">при ${r.best_risk}%</div>` : ''}</td></tr>`).join('')}
+        </tbody></table></div></details>` : ''}
       <div class="zsub">Как в инструкции автора канала: зоны одного поста — одна позиция; R считается от убытка всей лесенки на стопе, поэтому стоп при частично налитой лесенке — меньше 1R. Посты «только при доп. аргументах» / «по факту» — без автосделки.</div>
       <button onclick="zonesRelearn()" class="zbtn">↻ пересчитать</button>`);
   }

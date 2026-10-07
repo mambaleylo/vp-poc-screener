@@ -18834,3 +18834,12 @@ v0.99.494 - Зоны: the zone lists (archive, training, a zone's "отрабо�
          открытого графика"). Every history recount now re-scores each history zone by
          the current rules (its post's ladder: result, R, %, limits filled), and the row
          says "лесенка поста, налилось 2/3".
+v0.99.495 - Зоны: the take is chosen by the best return on the history replayed by the
+         author's method (user: "тейк подбирался исходя из истории, опираясь на лучшую
+         доходность"): every take of ZONES_TP_GRID (1–20%) is replayed as the posts'
+         ladders over all finished posts and the one with the highest account growth per
+         trade wins (at the risk in use, or each at its own best risk with "Авто-риск");
+         the user's own take still overrides. The tab lists every take variant (trades,
+         WR, average R, account growth). The old "reached in most zones" rule (measured
+         from a single-line entry) is gone, and a history post coming in is no longer
+         scored by a one-zone replay — its result comes from the next recount.
