@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.490"
+APP_VERSION = "0.99.491"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21216,6 +21216,10 @@ ZONES_IMG_DIR = os.path.join(os.path.dirname(ZONES_FILE), "zones_img")
 ZONES_DEFAULT = {"entry": 0, "buf": 1.0, "tp": 4.0}    # 1st line, stop 1% beyond the far line, take +4%
 ZONES_STOP_BUF = 0.3   # v0.99.490 — the stop: just beyond the far line of the zone (% of price)
 ZONES_TP_MAX = 20.0   # the take found from the history is capped here
+ZONES_REACT_PCT = 1.0   # v0.99.491 — "после реакции": the least distance past the 1st line the closes must hold
+ZONES_REACT_ROOM = 0.5   # ... and at least this % left to the take, or the entry is skipped
+ZONES_REACT_ATR = 2.0   # ... the distance is at least this many average candle ranges of the coin
+ZONES_REACT_BARS = 2   # ... candles in a row closing beyond it
 ZONES_GRID_ENTRY = (0, 1)
 ZONES_GRID_BUF = (0.3, 0.6, 1.0, 1.5, 2.5)
 ZONES_GRID_TP = (2.0, 3.0, 4.0, 5.0, 7.0, 10.0, 15.0, 20.0)   # v0.99.460 — up to +20%
@@ -22000,10 +22004,11 @@ def zones_params():
     p["buf"] = ZONES_STOP_BUF   # v0.99.490 — the stop is always just beyond the zone
     if lr.get("tp_auto"):   # the take the price reached in most of the finished zones
         p["tp"] = lr["tp_auto"]
-        src = f"тейк по {lr.get('n', 0)} зонам"
+        src = "тейк по истории зон"
     if ZONES_TP_PCT:
         p["tp"] = float(ZONES_TP_PCT)
     p["source"] = src
+    p["mode"] = lr.get("mode") or "touch"   # v0.99.491 — the entry that did better on the history
     return p
 
 
@@ -22092,6 +22097,94 @@ def zone_sim(cs, z, entry_idx, buf, tp, start, end):
             "pct": (s * (px - fill) / fill - ZONES_FEE) * 100}
 
 
+def zone_react_tp(z, tp):
+    """v0.99.491 — the take of the "after reaction" entry: the same price as the
+    plain entry's take (tp % from the 1st line), whatever the later entry price"""
+    return z["levels"][0] * (1 + _zones_side(z) * tp / 100)
+
+
+def zone_react_confirm(cs, z, buf, tp, start, end, react=None):
+    """v0.99.491 — "вход после реакции": the price touched the 1st line and then
+    really left the zone. Noise guard (user: "закол в зону одной свечой бывает,
+    тень коснулась и цена развернулась, нужна получше защита от шума"):
+      - the distance is per coin: max(react %, 2 x the coin's average candle
+        range (ATR 14) before the touch) past the 1st line;
+      - ZONES_REACT_BARS candles in a row must CLOSE beyond it (a wick or one
+        spike candle never counts);
+      - a close back inside the zone resets the count (in-out chop);
+      - a candle CLOSING beyond the stop first = the zone broke, no trade; a
+        wick through the stop that came back into the range is allowed (user:
+        "закол стопа тоже допускается, если цена вернулась в диапазон").
+    Returns {"t", "px", "i", "thr"} or None / {"broken": t} / {"missed": t}."""
+    react = ZONES_REACT_PCT if react is None else react
+    s = _zones_side(z)
+    first = z["levels"][0]
+    sl = z["levels"][-1] * (1 - s * buf / 100)
+    tpp = zone_react_tp(z, tp)
+    sec = (cs[1]["time"] - cs[0]["time"]) if len(cs) > 1 else 900   # 15m, or 1h / 4h for old history
+    touch_i, conf, thr, run_ = None, None, None, 0
+    for i, c in enumerate(cs):
+        if c["time"] < start or c["time"] >= end:
+            continue
+        if touch_i is None:
+            if (s > 0 and c["low"] <= first) or (s < 0 and c["high"] >= first):
+                touch_i = i
+                prev = [x for x in cs[max(0, i - 14):i]] or [c]
+                atr = sum((x["high"] - x["low"]) / x["close"] * 100 for x in prev if x["close"]) / len(prev)
+                thr = max(react, ZONES_REACT_ATR * atr)
+                conf = first * (1 + s * thr / 100)
+            else:
+                continue
+        if (s > 0 and c["close"] <= sl) or (s < 0 and c["close"] >= sl):
+            return {"broken": c["time"]}   # a CLOSE beyond the stop; a wick through it that came back is allowed
+        if (s > 0 and c["close"] >= conf) or (s < 0 and c["close"] <= conf):
+            run_ += 1
+        elif (s > 0 and c["close"] <= first) or (s < 0 and c["close"] >= first):
+            run_ = 0   # closed back in the zone: the reaction starts over
+        else:
+            run_ = 0   # between the line and the threshold: not yet a reaction
+        if run_ >= ZONES_REACT_BARS:
+            if s * (tpp - c["close"]) / c["close"] * 100 < ZONES_REACT_ROOM:
+                return {"missed": c["time"]}   # already at the take: nothing left to take
+            return {"t": c["time"] + sec, "px": c["close"], "i": i, "thr": round(thr, 2)}
+    return None
+
+
+def zone_sim_react(cs, z, buf, tp, start, end, react=None):
+    """v0.99.491 — zone_sim for the "after reaction" entry: in at the close of the
+    confirming candle, the same stop beyond the zone and the same take price"""
+    cf = zone_react_confirm(cs, z, buf, tp, start, end, react)
+    if not cf or "px" not in cf:
+        return None
+    s = _zones_side(z)
+    fill = cf["px"]
+    sl = z["levels"][-1] * (1 - s * buf / 100)
+    tpp = zone_react_tp(z, tp)
+    risk = abs(fill - sl)
+    for c in cs[cf["i"] + 1:]:
+        if c["time"] >= end:
+            break
+        if (s > 0 and c["low"] <= sl) or (s < 0 and c["high"] >= sl):
+            px, res = sl, "LOSS"
+        elif (s > 0 and c["high"] >= tpp) or (s < 0 and c["low"] <= tpp):
+            px, res = tpp, "WIN"
+        else:
+            continue
+        after = None
+        if res == "WIN":
+            rest = [x for x in cs if c["time"] < x["time"] < end]
+            ext = (max(x["high"] for x in rest) if s > 0 else min(x["low"] for x in rest)) if rest else tpp
+            after = max(0.0, s * (ext - tpp) / fill * 100)
+        return {"r": s * (px - fill) / risk - ZONES_FEE * fill / risk, "fill": fill, "sl": sl, "tp": tpp,
+                "t_in": cf["t"], "t_out": c["time"], "result": res,
+                "pct": (s * (px - fill) / fill - ZONES_FEE) * 100, "after": after}
+    last = [c for c in cs[cf["i"] + 1:] if c["time"] < end]
+    px = last[-1]["close"] if last else fill
+    return {"r": s * (px - fill) / risk - ZONES_FEE * fill / risk, "fill": fill, "sl": sl, "tp": tpp,
+            "t_in": cf["t"], "t_out": last[-1]["time"] if last else cf["t"], "result": "TIME_EXIT",
+            "pct": (s * (px - fill) / fill - ZONES_FEE) * 100}
+
+
 def zone_path_stats(cs, z, start, end):
     """How the price behaved at the zone: reached the 1st line? how deep it went
     beyond it before turning, how far it ran in the zone's direction after."""
@@ -22169,16 +22262,6 @@ def zones_learn():
         rule["tp"] = tp_auto
     if ZONES_TP_PCT:
         rule["tp"] = float(ZONES_TP_PCT)
-    rs, aft, wins, stops = [], [], 0, 0
-    for z, cs, end in runs:
-        r = zone_sim(cs, z, rule["entry"], rule["buf"], rule["tp"], z["post_time"], end)
-        if r is None:
-            continue
-        rs.append(r["r"])
-        wins += r["result"] == "WIN"
-        stops += r["result"] == "LOSS"
-        if r.get("after") is not None:
-            aft.append(r["after"])
     avg = lambda xs: round(sum(xs) / len(xs), 3) if xs else None
     rf = _zones_risk_frac()
     auto = bool(AUTO_RISK_ENABLED)
@@ -22190,21 +22273,50 @@ def zones_learn():
         lg = sum(math.log(max(1e-6, 1 + f_ * x)) for x in xs) / len(xs)
         return round((math.exp(lg) - 1) * 100, 3)
 
-    gl = lambda f_: sum(math.log(max(1e-9, 1 + f_ * x)) for x in rs) / len(rs)
-    fbest = max((i / 200 for i in range(1, 101)), key=gl) if rs else None   # 0.5% .. 50%
-    edge = bool(rs) and gl(fbest) > 1e-6
-    auto_risk = round(fbest * 100, 1) if (auto and edge and len(rs) >= ZONES_LEARN_MIN) else None
-    ls = run_ = 0   # the longest losing streak in time order
-    for x in rs:
-        run_ = run_ + 1 if x < 0 else 0
-        ls = max(ls, run_)
-    a = sorted(aft)
-    res = {"n": len(rs), "avg_r": avg(rs), "wr": round(wins / len(rs) * 100, 1) if rs else None,
-           "stops": stops, "wins": wins, "max_ls": ls,
-           "after_med": round(a[len(a) // 2], 2) if a else None,
-           "after_5": round(100 * sum(1 for x in a if x >= 5) / len(a), 1) if a else None}
-    risk_tab = {"rows": [{"risk": pc, "all": growth(rs, pc / 100)} for pc in (1, 2, 3, 5, 10, 15, 20, 30, 50)],
-                "best": round(fbest * 100, 1) if edge else None} if rs else None
+    def summary(results, skipped=0):
+        rs = [r["r"] for r in results]
+        wins = sum(1 for r in results if r["result"] == "WIN")
+        stops = sum(1 for r in results if r["result"] == "LOSS")
+        ls = run_ = 0   # the longest losing streak in time order
+        for x in rs:
+            run_ = run_ + 1 if x < 0 else 0
+            ls = max(ls, run_)
+        a = sorted(r["after"] for r in results if r.get("after") is not None)
+        gl = lambda f_: sum(math.log(max(1e-9, 1 + f_ * x)) for x in rs) / len(rs)
+        fbest = max((i / 200 for i in range(1, 101)), key=gl) if rs else None   # 0.5% .. 50%
+        edge = bool(rs) and gl(fbest) > 1e-6
+        best_risk = round(fbest * 100, 1) if edge else None
+        use_f = (best_risk / 100 if best_risk else rf) if auto else rf
+        return {"n": len(rs), "avg_r": avg(rs), "wr": round(wins / len(rs) * 100, 1) if rs else None,
+                "stops": stops, "wins": wins, "max_ls": ls, "skipped": skipped,
+                "avg_pct": avg([r["pct"] for r in results]),
+                "after_med": round(a[len(a) // 2], 2) if a else None,
+                "after_5": round(100 * sum(1 for x in a if x >= 5) / len(a), 1) if a else None,
+                "edge": edge, "best_risk": best_risk, "g_use": growth(rs, use_f), "risk_used": round(use_f * 100, 1),
+                "rows": [{"risk": pc, "g": growth(rs, pc / 100)} for pc in (1, 2, 3, 5, 10, 15, 20, 30, 50)] if rs else []}
+
+    # v0.99.491 — the two entries on the same zones: at the touch of the 1st line,
+    # and after the price really reacted (a candle closed ZONES_REACT_PCT past it)
+    res_t, res_r, skip_r = [], [], 0
+    for z, cs, end in runs:
+        r = zone_sim(cs, z, rule["entry"], rule["buf"], rule["tp"], z["post_time"], end)
+        if r is not None:
+            res_t.append(r)
+        r2 = zone_sim_react(cs, z, rule["buf"], rule["tp"], z["post_time"], end)
+        if r2 is not None:
+            res_r.append(r2)
+        else:
+            skip_r += 1
+    modes = {"touch": summary(res_t), "react": summary(res_r, skip_r)}
+    key = lambda m: (modes[m]["g_use"] if modes[m]["g_use"] is not None else -1e9)
+    mode = "react" if (modes["react"]["n"] >= ZONES_LEARN_MIN and key("react") > key("touch")) else "touch"
+    res = modes[mode]
+    edge = res["edge"]
+    auto_risk = res["best_risk"] if (auto and res["n"] >= ZONES_LEARN_MIN) else None
+    risk_tab = {"rows": [{"risk": x["risk"], "touch": x["g"],
+                          "react": (modes["react"]["rows"][i]["g"] if modes["react"]["rows"] else None)}
+                         for i, x in enumerate(modes["touch"]["rows"])],
+                "best": res["best_risk"]} if modes["touch"]["rows"] else None
     med = lambda xs: sorted(xs)[len(xs) // 2] if xs else None
     stats = {
         "finished": len(finished), "with_candles": len(paths), "touched": len(touched),
@@ -22215,8 +22327,9 @@ def zones_learn():
                   for x in (2, 3, 5, 10)},
         "beyond_far": round(sum(1 for p in touched if p["beyond_far"]) / len(touched) * 100, 1) if touched else None,
     }
-    learned = {"at": now, "n": len(rs), "rule": rule, "tp_auto": tp_auto, "tp_reach": tp_reach,
-               "res": res, "risk_tab": risk_tab, "edge": edge,
+    learned = {"at": now, "n": res["n"], "rule": rule, "tp_auto": tp_auto, "tp_reach": tp_reach,
+               "res": res, "risk_tab": risk_tab, "edge": edge, "mode": mode, "modes": modes,
+               "react": {"pct": ZONES_REACT_PCT, "atr": ZONES_REACT_ATR, "bars": ZONES_REACT_BARS},
                "risk": auto_risk if auto_risk else rf * 100, "auto": auto, "auto_risk": auto_risk}
     with _zones_lock:
         ZONES["learned"], ZONES["stats"] = learned, stats
@@ -22844,14 +22957,16 @@ def zones_risk_txt(res=None):
         return ""
 
 
-def _zones_open_trade(z, price, p):
+def _zones_open_trade(z, price, p, react=None):
     s = _zones_side(z)
     direction = "LONG" if s > 0 else "SHORT"
     sl = z["levels"][-1] * (1 - s * p["buf"] / 100)
     if (s > 0 and price <= sl) or (s < 0 and price >= sl):
         return None
-    tp = price * (1 + s * p["tp"] / 100)
+    # v0.99.491 — after the reaction: the same take price as the plain entry (tp % from the 1st line)
+    tp = zone_react_tp(z, p["tp"]) if react else price * (1 + s * p["tp"] / 100)
     tr = {"symbol": z["symbol"], "direction": direction, "time": int(time.time()), "entry": price, "sl": sl, "tp": tp,
+          "mode": "react" if react else "touch",
           "params": {k: p[k] for k in ("entry", "buf", "tp")}, "status": "OPEN", "result": None,
           "exit_price": None, "exit_time": None, "pnl_r": None, "autotrade_fired": False, "autotrade": None}
     res = None
@@ -22868,9 +22983,11 @@ def _zones_open_trade(z, price, p):
             log_error(f"zones autotrade {z['symbol']}: {e}")
     plan = planned_leverage(z["symbol"], direction, price, sl)
     lev_txt = format_leverage_txt(res, AUTOTRADE_ENABLED_ZONES, plan)
+    how = (f"после реакции: {ZONES_REACT_BARS} свечи закрылись на {react['thr']:g}% от 1-й линии" if react
+           else f"от касания {p['entry'] + 1}-й линии")
     zones_znotify(z, f"{'⬆️' if s > 0 else '⬇️'} Зона {z['symbol']} ({zones_fmt(z)}): вход {direction} по {price:.6g}\n"
-                 f"SL {sl:.6g} · TP {tp:.6g} (+{p['tp']:g}%) · плечо {lev_txt} · {zones_risk_txt(res)}\n"
-                 f"правила: линия {p['entry'] + 1}, стоп {p['buf']:g}% за зоной ({p['source']})")
+                 f"SL {sl:.6g} · TP {tp:.6g} ({s * (tp - price) / price * 100:+.2f}%) · плечо {lev_txt} · {zones_risk_txt(res)}\n"
+                 f"вход {how}, стоп {p['buf']:g}% за зоной ({p['source']})")
     return tr
 
 
@@ -22945,7 +23062,7 @@ def _zones_gap_check(z, t0, t1, p):
                 changed = True
                 zones_znotify(z, f"🎯 {z['symbol']}: пока не было связи ({time.strftime('%H:%M', time.localtime(c['time']))}) "
                                  f"цена дошла до {i + 1}-й линии ({lvl:.6g}) зоны {zones_fmt(z)}")
-        if (s > 0 and lo <= far_stop) or (s < 0 and hi >= far_stop):
+        if p.get("mode") != "react" and ((s > 0 and lo <= far_stop) or (s < 0 and hi >= far_stop)):
             with _zones_lock:
                 z["status"] = "broken"
             zones_znotify(z, f"💥 Зона {z['symbol']} ({zones_fmt(z)}) пробита, пока не было связи "
@@ -22975,7 +23092,9 @@ def _zones_recheck_open(z, price, p):
         zones_znotify(z, f"✅ {z['symbol']}: после сбоя связи позиция по зоне {zones_fmt(z)} найдена на бирже — веду её",
                       important=True)
         return True
-    if time.time() - tr["time"] <= 600 and price and _zones_near_entry(z, price, p) and not tr.get("retried"):
+    near = (abs(price - tr["entry"]) / tr["entry"] * 100 <= ZONES_NEAR_ENTRY if tr.get("mode") == "react"
+            else _zones_near_entry(z, price, p)) if price else False
+    if time.time() - tr["time"] <= 600 and near and not tr.get("retried"):
         tr["retried"] = True
         res = execute_autotrade("zones", z["symbol"], tr["direction"], price, tr["sl"], tr["tp"],
                                 extra={"zone": z["id"], "retry": True},
@@ -22987,6 +23106,54 @@ def _zones_recheck_open(z, price, p):
             zones_znotify(z, f"✅ {z['symbol']}: со второй попытки открыл сделку по зоне {zones_fmt(z)}", important=True)
         return True
     tr["err_done"] = True
+    return True
+
+
+ZONES_REACT_CHASE = 1.0   # v0.99.491 — % the price may run past the confirming close and still be taken
+
+
+def _zones_react_tick(z, price, p, now):
+    """v0.99.491 — "после реакции": once per closed 15m candle, the zone's candles
+    since the post tell whether the reaction is confirmed (zone_react_confirm,
+    the same rule as on the history); then in at the market if the price is
+    still near the confirming close."""
+    bar = int(now // 900)
+    if z.get("react_bar") == bar:
+        return False
+    cs = zones_candles(z["symbol"], z["post_time"], now)
+    if not cs:
+        return False
+    with _zones_lock:
+        z["react_bar"] = bar
+    cf = zone_react_confirm(cs, z, p["buf"], p["tp"], z["post_time"], now)
+    if not cf:
+        return False
+    if "broken" in cf:
+        with _zones_lock:
+            z["status"] = "broken"
+        zones_znotify(z, f"💥 Зона {z['symbol']} ({zones_fmt(z)}) пробита до реакции — без входа")
+        return True
+    if "missed" in cf:
+        with _zones_lock:
+            z["status"] = "expired"
+        zones_znotify(z, f"⏭ Зона {z['symbol']} ({zones_fmt(z)}): цена отреагировала сразу до тейка — входа нет")
+        return True
+    s = _zones_side(z)
+    if s * (price - cf["px"]) / cf["px"] * 100 > ZONES_REACT_CHASE:
+        return False   # ran too far past the confirming close: wait for a pullback
+    if s * (zone_react_tp(z, p["tp"]) - price) / price * 100 < ZONES_REACT_ROOM:
+        return False
+    if (s > 0 and price <= z["levels"][0]) or (s < 0 and price >= z["levels"][0]):
+        return False   # back in the zone already
+    with _zones_lock:
+        post = next((p_ for p_ in ZONES["posts"] if p_["id"] == z.get("post_id")), None)
+    if post and not _zones_close_approach(post, price, "вход от зоны"):
+        return False
+    tr = _zones_open_trade(z, price, p, react=cf)
+    with _zones_lock:
+        if tr is not None:
+            z["trade"] = tr
+            z["status"] = "in_trade"
     return True
 
 
@@ -23042,11 +23209,14 @@ def zones_monitor_tick(last_track=0.0):
                              f"зоны {zones_fmt(z)}")
         e_idx = min(p["entry"], len(z["levels"]) - 1)
         far_stop = z["levels"][-1] * (1 - s * p["buf"] / 100)
-        if (s > 0 and price <= far_stop) or (s < 0 and price >= far_stop):
-            with _zones_lock:
+        if p["mode"] != "react" and ((s > 0 and price <= far_stop) or (s < 0 and price >= far_stop)):
+            with _zones_lock:   # v0.99.491 — "после реакции": only a candle close beyond the stop breaks it
                 z["status"] = "broken"
             changed = True
             zones_znotify(z, f"💥 Зона {z['symbol']} ({zones_fmt(z)}) пробита: цена {price:.6g}")
+            continue
+        if p["mode"] == "react" and z.get("trade") is None:
+            changed = _zones_react_tick(z, price, p, now) or changed
             continue
         if z["touched"][e_idx] is not None and z.get("trade") is None:
             if not _zones_near_entry(z, price, p):
@@ -28393,16 +28563,16 @@ async function refreshZones() {
   const summary = card('🎯 Зоны — итог', `<div class="ztiles">
       ${tile('Автоторговля', d.autotrade ? '<span class="win">вкл</span>' : '<span class="dim">выкл</span>', d.autotrade ? '' : 'Настройки → Автоторговля → Зоны')}
       ${tile('Риск на сделку', riskNow == null ? '—' : riskNow + '%', riskSrc)}
-      ${tile('Правила', `стоп ${p.buf}% · тейк +${p.tp}%`, `вход от ${(p.entry || 0) + 1}-й линии${d.tp_user ? ' · тейк свой' : ''}`)}
+      ${tile('Вход', p.mode === 'react' ? 'после реакции' : 'от касания', `стоп ${p.buf}% за зоной · тейк +${p.tp}%${d.tp_user ? ' (свой)' : ''}`)}
       ${tile('Результат правил', rs.n ? sgR(rs.avg_r) + '<span class="zn"> / сделку</span>' : '—', rs.n ? `${rs.n} сделок · WR ${rs.wr}%` : '')}
     </div>${banner}`);
   // --- 2. how the stop / take are set
   let ruleCard = '';
   if (rs.n || lr.tp_auto) {
     ruleCard = card('📐 Стоп и тейк', `<div class="zkv">
-      <div>вход</div><div>от <b>${(p.entry || 0) + 1}-й</b> линии зоны</div>
+      <div>вход</div><div>${p.mode === 'react' ? '<b>после реакции</b> от зоны (см. ниже)' : `от касания <b>${(p.entry || 0) + 1}-й</b> линии зоны`}</div>
       <div>стоп</div><div><b>${p.buf}%</b> за дальней линией зоны</div>
-      <div>тейк</div><div><b>+${p.tp}%</b> ${d.tp_user ? '(свой, из настроек)' : (lr.tp_auto ? `— цена доходила до него в <b>${lr.tp_reach}%</b> зон` : '(по умолчанию — мало зон)')}</div>
+      <div>тейк</div><div><b>+${p.tp}%</b> от 1-й линии ${d.tp_user ? '(свой, из настроек)' : (lr.tp_auto ? `— цена доходила до него в <b>${lr.tp_reach}%</b> зон` : '(по умолчанию — мало зон)')}</div>
       </div>
       ${rs.n ? `<div class="zkv" style="margin-top:8px;">
       <div>сделок по истории</div><div><b>${rs.n}</b>: тейков ${rs.wins}, стопов ${rs.stops}${rs.n - rs.wins - rs.stops ? `, по времени ${rs.n - rs.wins - rs.stops}` : ''}</div>
@@ -28414,14 +28584,27 @@ async function refreshZones() {
       <div class="zsub">«Доходила до тейка» считается без учёта стопа, поэтому WR ниже: часть зон сначала выбивает стоп, а потом цена идёт к тейку.</div>
       <button onclick="zonesRelearn()" class="zbtn">↻ пересчитать</button>`);
   }
+  // --- 2b. the two entries compared (v0.99.491)
+  let modeCard = '';
+  const md = lr.modes;
+  if (md && md.touch) {
+    const rc = lr.react || {};
+    const mrow = (k, nm) => { const x = md[k] || {}; return `<tr class="${p.mode === k ? 'zbest' : ''}"><td>${nm}${p.mode === k ? ' ✓' : ''}</td><td>${x.n ?? '—'}</td><td>${x.wr == null ? '—' : x.wr + '%'}</td><td>${sgR(x.avg_r)}</td><td>${sgP(x.g_use)}</td></tr>`; };
+    modeCard = card('⚖️ Режим входа', `<div class="zwrap"><table class="ztbl"><thead><tr><th>Вход</th><th>сделок</th><th>WR</th><th>средний</th><th>счёт за сделку</th></tr></thead><tbody>
+      ${mrow('touch', 'от касания')}${mrow('react', 'после реакции')}</tbody></table></div>
+      <div class="zsub"><b>После реакции</b>: цена коснулась 1-й линии, потом <b>${rc.bars || 2} свечи (15м) подряд закрылись</b> дальше от линии на max(${rc.pct || 1}%, ${rc.atr || 2}× средний размах свечи монеты). Тени и одиночные свечи не считаются; закрытие обратно в зоне — отсчёт заново. Закол за стоп тенью до входа допускается, если цена вернулась; <b>закрытие</b> свечи за стопом — зона сломана, входа нет. Стоп и цена тейка те же.
+      ${md.react && md.react.skipped ? `Без входа по этому правилу осталось ${md.react.skipped} зон.` : ''}</div>
+      <div class="zsub">В автоторговлю идёт режим с лучшим ростом счёта по истории${lr.auto ? ' (каждый при своём лучшем риске)' : ` (при риске ${md.touch.risk_used}%)`}: сейчас <b>${p.mode === 'react' ? 'после реакции' : 'от касания'}</b>.</div>`);
+  }
   // --- 3. risk table
   let riskCard = '';
   if (rt) {
     const cur = rt.rows.reduce((a, r) => Math.abs(r.risk - riskNow) < Math.abs(a.risk - riskNow) ? r : a, rt.rows[0]);
-    const top = rt.rows.reduce((a, x) => x.all > a.all ? x : a);
-    const rows = rt.rows.map(r => `<tr class="${rt.best && r === top ? 'zbest' : ''} ${r === cur ? 'zcur' : ''}"><td>${r.risk}%${r === cur ? ' <span class="dim">← сейчас</span>' : ''}</td><td>${sgP(r.all)}</td></tr>`).join('');
-    riskCard = card('💰 Какой риск лучше', `<div class="zsub" style="margin-top:0;">Рост счёта <b>за одну сделку</b> при разном риске, по всем ${rs.n} сделкам истории</div>
-      <div class="zwrap"><table class="ztbl"><thead><tr><th>Риск</th><th>счёт за сделку</th></tr></thead><tbody>${rows}</tbody></table></div>
+    const mk = p.mode === 'react' ? 'react' : 'touch';
+    const top = rt.rows.reduce((a, x) => (x[mk] ?? -1e9) > (a[mk] ?? -1e9) ? x : a);
+    const rows = rt.rows.map(r => `<tr class="${rt.best && r === top ? 'zbest' : ''} ${r === cur ? 'zcur' : ''}"><td>${r.risk}%${r === cur ? ' <span class="dim">← сейчас</span>' : ''}</td><td>${sgP(r.touch)}</td><td>${sgP(r.react)}</td></tr>`).join('');
+    riskCard = card('💰 Какой риск лучше', `<div class="zsub" style="margin-top:0;">Рост счёта <b>за одну сделку</b> при разном риске, по всей истории</div>
+      <div class="zwrap"><table class="ztbl"><thead><tr><th>Риск</th><th>от касания${mk === 'touch' ? ' ✓' : ''}</th><th>после реакции${mk === 'react' ? ' ✓' : ''}</th></tr></thead><tbody>${rows}</tbody></table></div>
       <div class="zsub">${rt.best ? `🎯 лучший — <b>~${rt.best}%</b> (выше этого риск только вредит).` : '<b>Ни один процент не растит счёт</b> — у правил нет перевеса.'}
       ${autoOn ? 'Авто-риск включён: берётся лучший процент (не больше 50%).' : 'Включите «Авто-риск» в настройках, чтобы процент выбирался сам.'}</div>`);
   }
@@ -28470,7 +28653,7 @@ async function refreshZones() {
     ${act.length ? zonePostBlocks(act) : '<div class="dim" style="margin-bottom:10px;">нет — новые посты из группы появятся здесь</div>'}
     ${zoneTradesHtml(closedTr)}
     <div class="zsec">Правила и риск</div>
-    ${ruleCard}${riskCard}${apCard}${behCard}
+    ${modeCard}${ruleCard}${riskCard}${apCard}${behCard}
     <div class="zsec">Источники</div>
     ${zutHtml(ut)}
     <div class="dim" style="font-size:var(--fs-sm);margin:-4px 0 10px;">или ${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>
