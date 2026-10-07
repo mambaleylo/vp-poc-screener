@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.496"
+APP_VERSION = "0.99.497"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -4527,6 +4527,23 @@ def cancel_price_order(order_id):
     return gate_signed_request("DELETE", f"/futures/usdt/price_orders/{order_id}")
 
 
+def _zones_ladder_on(symbol):
+    """v0.99.497 — the zones ladder holding / about to hold a real position on
+    this contract (for the shared reconcile pass): (direction, sl, last change)"""
+    try:
+        if account_id_for_mode("zones") != current_account_id():
+            return None
+        with _zones_lock:
+            for z in ZONES["zones"]:
+                tr = z.get("trade") or {}
+                r = tr.get("real") or {}
+                if tr.get("symbol") == symbol and r.get("legs") and not r.get("done"):
+                    return tr["direction"], tr["sl"], r.get("t_change") or tr.get("time")
+    except Exception:
+        return None
+    return None
+
+
 def find_open_signal_sl(symbol):
     """Searches every module's own OPEN-signal list (same set has_open_
     signal_any_module() already checks) for one on this symbol, and
@@ -4554,7 +4571,7 @@ def find_open_signal_sl(symbol):
             for s in lst:
                 if s.get("symbol") == symbol and s.get("status") == "OPEN" and s.get("sl") is not None:
                     return s.get("direction"), s.get("sl"), s.get("detected_at")
-    return None
+    return _zones_ladder_on(symbol)   # v0.99.497 — a zones ladder's stop can be restored too
 
 
 def _newest_open_signal_detected_at(symbol):
@@ -4574,6 +4591,10 @@ def _newest_open_signal_detected_at(symbol):
                     dt = s.get("detected_at")
                     if dt is not None and (newest is None or dt > newest):
                         newest = dt
+    zl = _zones_ladder_on(symbol)   # v0.99.497 — a fresh zones fill: its stop comes within a monitor round (~20 s)
+    if zl and zl[2]:
+        dt = zl[2] + 60   # covers one zones monitor round on top of the shared grace
+        newest = dt if newest is None else max(newest, dt)
     return newest
 
 
@@ -23310,16 +23331,45 @@ def _zones_real_cancel_legs(tr):
     return ok
 
 
+def _zones_pos(pos_map, sym, s):
+    """v0.99.497 — our side's position on this contract (in dual mode a long and
+    a short of one contract are two separate positions)"""
+    for x in (pos_map or {}).get(sym) or []:
+        sz = float(x.get("size") or 0)
+        if sz and (sz > 0) == (s > 0):
+            return x
+    return None
+
+
+def _zones_real_closed_pnl(sym):
+    """the exchange's own record of the last closed position on this contract"""
+    try:
+        with using_account("zones"):
+            rows = gate_signed_request("GET", "/futures/usdt/position_close", query_string=f"contract={sym}&limit=1") or []
+        if rows:
+            return float(rows[0].get("pnl") or 0)
+    except Exception as e:
+        log_error(f"zones closed pnl {sym}: {e}")
+    return None
+
+
 def _zones_real_step(tr, pos_map):
     """v0.99.491 — the exchange side of a ladder: which limits got taken, a stop
     as soon as there is a position, the take re-placed at avg entry + tp % after
-    every new fill; the position gone -> the leftover limits and triggers off."""
+    every new fill; the position gone -> the leftover limits and triggers off.
+    v0.99.497 — the stop and the take are checked against the exchange's open
+    trigger orders every round and put back if they disappeared (cancelled by
+    hand, failed); every trigger ever placed is remembered and cleaned up; the
+    position is looked up by its side; the exchange's own PnL is reported."""
     r = tr.get("real")
     if not r or r.get("done"):
         return False
     sym, direction = tr["symbol"], tr["direction"]
     s = 1 if direction == "LONG" else -1
+    now = time.time()
     changed = False
+    trig_open = pos_map.get("_trig")   # None = this round couldn't read them
+    r.setdefault("trigs", [])
     with using_account("zones"):
         for leg in r["legs"]:
             if leg.get("done") or not leg.get("id"):
@@ -23334,25 +23384,45 @@ def _zones_real_step(tr, pos_map):
             f = abs(int(float(o.get("size") or 0))) - abs(int(float(o.get("left") or 0)))
             if f != leg["filled"]:
                 leg["filled"], changed = f, True
+                r["t_change"] = now
             if o.get("status") == "finished":
                 leg["done"], changed = True, True
-        pos = pos_map.get(sym) or {}
-        size = abs(float(pos.get("size") or 0))
+        pos = _zones_pos(pos_map, sym, s)
+        size = abs(float((pos or {}).get("size") or 0))
+        tick = r.get("tick")
+
+        def place(kind, price):
+            rule = (2 if s > 0 else 1) if kind == "sl" else (1 if s > 0 else 2)
+            px = round_to_tick_directional(price, tick, round_up=((direction == "SHORT") if kind == "sl" else (direction == "LONG")))
+            o = place_close_trigger_order(sym, direction, px, rule, tick)
+            oid = (o or {}).get("id")
+            r[f"{kind}_id"], r[f"{kind}_t"] = oid, now
+            if oid:
+                r["trigs"].append(str(oid))
+            return oid
+
         if size > 0:
             avg = float(pos.get("entry_price") or 0) or None
             if not r["seen"]:
                 r["seen"], changed = True, True
+                r["t_change"] = now
                 tr["autotrade_fired"] = True
-            tick = r.get("tick")
+            # a trigger we placed but the exchange no longer has (given 30 s for Gate's read side to catch up)
+            for kind in ("sl", "tp"):
+                oid = r.get(f"{kind}_id")
+                if oid and trig_open is not None and str(oid) not in trig_open and now - (r.get(f"{kind}_t") or 0) > 30:
+                    r[f"{kind}_id"] = None
+                    r[f"{kind}_lost"] = r.get(f"{kind}_lost", 0) + 1
+                    changed = True
             if not r.get("sl_id"):
                 try:
-                    sl_r = round_to_tick_directional(tr["sl"], tick, round_up=(direction == "SHORT"))
-                    o = place_close_trigger_order(sym, direction, sl_r, 2 if s > 0 else 1, tick)
-                    r["sl_id"], changed = (o or {}).get("id"), True
+                    if place("sl", tr["sl"]) and r.get("sl_lost"):
+                        zones_notify(f"🛡 {sym}: стоп-лосс пропал с биржи — поставил заново @ {tr['sl']:.6g}")
+                    changed = True
                 except Exception as e:
                     log_error(f"zones ladder SL {sym}: {e}")
-                    # v0.99.493 — the price is already past the stop (e.g. a limit filled while
-                    # the bot was off): the exchange won't take the stop — close at the market
+                    # the price is already past the stop (e.g. a limit filled while the bot
+                    # was off): the exchange won't take the stop — close at the market
                     px_ = (pos_map.get("_px") or {}).get(sym)
                     if px_ and ((s > 0 and px_ <= tr["sl"]) or (s < 0 and px_ >= tr["sl"])):
                         if _zones_close_real(sym, direction, "price past the stop"):
@@ -23361,27 +23431,40 @@ def _zones_real_step(tr, pos_map):
             if avg:
                 tp = avg * (1 + s * tr["tp_pct"] / 100)
                 if not r.get("tp_id") or abs(tp - (r.get("tp_px") or 0)) / tp > 0.0005:
+                    old = r.get("tp_id")
                     try:
-                        tp_r = round_to_tick_directional(tp, tick, round_up=(direction == "LONG"))
-                        o = place_close_trigger_order(sym, direction, tp_r, 1 if s > 0 else 2, tick)
-                        old, r["tp_id"], r["tp_px"], changed = r.get("tp_id"), (o or {}).get("id"), tp, True
-                        if old:
-                            try:
-                                cancel_price_order(old)
-                            except Exception as e:
-                                log_error(f"zones ladder old TP cancel {sym}: {e}")
+                        if place("tp", tp):
+                            r["tp_px"], changed = tp, True
+                            if old:
+                                r.setdefault("stale", []).append(str(old))   # the previous take goes
+                            elif r.get("tp_lost"):
+                                zones_notify(f"🎯 {sym}: тейк пропал с биржи — поставил заново @ {tp:.6g}")
                     except Exception as e:
                         log_error(f"zones ladder TP {sym}: {e}")
+            for oid in list(r.get("stale") or []):   # cancelled for sure, retried until it is
+                try:
+                    cancel_price_order(oid)
+                    r["stale"].remove(oid)
+                except Exception as e:
+                    if "not found" in str(e).lower() or "finished" in str(e).lower():
+                        r["stale"].remove(oid)
+                    else:
+                        log_error(f"zones ladder old TP cancel {sym}: {e}")
         elif r["seen"] or (tr.get("status") in ("CLOSED", "EXPIRED")):
             # the position closed on the exchange (its stop / take), or the ladder ended without a fill
             if _zones_real_cancel_legs(tr):
-                for k in ("sl_id", "tp_id"):
-                    if r.get(k):
-                        try:
-                            cancel_price_order(r[k])
-                        except Exception:
-                            pass
+                for oid in set(r["trigs"]) | set(r.get("stale") or []):
+                    try:
+                        cancel_price_order(oid)
+                    except Exception:
+                        pass   # already fired / gone
                 r["done"], changed = True, True
+                if r["seen"]:
+                    pnl = _zones_real_closed_pnl(sym)
+                    tr["real_pnl"] = pnl
+                    zones_notify(f"💰 {sym}: позиция зон на бирже закрыта"
+                                 + (f", PnL {pnl:+.2f} USDT" if pnl is not None else "")
+                                 + " · лишние лимитки и ордера сняты")
     if tr.get("status") == "CLOSED" and not r.get("cancelled"):
         changed = _zones_real_cancel_legs(tr) or changed   # no new fills after our result
     return changed
@@ -23455,6 +23538,8 @@ def _zones_ladder_tick(group, now, p, pos_map):
         r = tr.get("real")
         if not r and dist <= arm and not tr.get("arm_skip_at", 0) > now - 600:
             rec = _zones_real_place(tr)
+            if tr.get("real"):
+                tr["real"]["t_change"] = now
             if not tr.get("real"):
                 tr["arm_skip_at"] = now   # skipped / failed: not again for 10 minutes
             zones_save()   # v0.99.493 — the order ids on disk at once
@@ -23512,7 +23597,7 @@ def _zones_ladder_tick(group, now, p, pos_map):
             zones_znotify(lead, f"⌛ {sym}: {ZONES_MAX_DAYS} дн. — лимитки не налились, снимаю")
         else:
             px = (pos_map.get("_px") or {}).get(sym)
-            if tr.get("real") and (pos_map.get(sym) or {}).get("size"):
+            if tr.get("real") and _zones_pos(pos_map, sym, s):
                 if not _zones_close_real(sym, tr["direction"], "time exit"):
                     return changed
             if px:
@@ -23572,9 +23657,13 @@ def zones_monitor_tick(last_track=0.0):
         try:
             with using_account("zones"):
                 for x in get_open_positions() or []:
-                    pos_map[x.get("contract")] = x
+                    pos_map.setdefault(x.get("contract"), []).append(x)
                 pos_map["_open"] = {str(o.get("id")): o for o in
                                     (gate_signed_request("GET", "/futures/usdt/orders", query_string="status=open") or [])}
+                try:   # optional: without it the stop / take are simply not re-checked this round
+                    pos_map["_trig"] = {str(t.get("id")) for t in (get_open_price_orders() or [])}
+                except Exception as e:
+                    log_error(f"zones trigger orders: {e}")
         except Exception as e:
             log_error(f"zones positions: {e}")
             pos_map = None
@@ -23662,7 +23751,7 @@ def zones_monitor_loop():
         except Exception as e:
             log_error(f"zones_monitor_loop: {e}")
             zones_act("monitor", ok=False, error=str(e)[:200])
-        if time.time() - last_sweep >= 3600 and GATE_API_KEY:
+        if time.time() - last_sweep >= 300 and GATE_API_KEY:   # v0.99.497 — every 5 min (was hourly)
             last_sweep = time.time()
             try:
                 zones_orphan_sweep()

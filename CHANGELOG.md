@@ -18850,3 +18850,16 @@ v0.99.496 - Зоны: "🔍 Разбор результатов" (user: "стр�
          candles the history was replayed on, and the 10 worst posts (tap = chart). The
          take variants table now shows the growth at the risk in use when no risk grows
          the account (instead of "—"), and such takes no longer outrank ones that do.
+v0.99.497 - Зоны, the exchange side checked over (user: "проверь, чтобы корректно
+         выставлялись ордера, стопы и тейки, вовремя проверялись осиротевшие сделки и
+         восстанавливались тейки и стопы"): every round the ladder's stop and take are
+         checked against the exchange's open trigger orders and put back if they are gone
+         (Telegram: "стоп-лосс пропал с биржи — поставил заново"); every trigger ever
+         placed is remembered — a replaced take whose cancel failed is retried until it is
+         gone, and all of them are cleaned up when the position closes; the position is
+         looked up by its side (dual mode); the exchange's own PnL is reported when the
+         position closes. The shared reconcile pass now knows the zones ladders: it can
+         restore a zones stop from the ladder, and gives a fresh fill a minute before
+         calling the position "unprotected". Stray limit orders are swept every 5 minutes
+         (was hourly). A round that can't read the trigger orders no longer skips the
+         ladders — it only leaves the stop / take re-check for the next round.
