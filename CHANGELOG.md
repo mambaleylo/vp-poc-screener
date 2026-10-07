@@ -18963,3 +18963,8 @@ v0.99.511 - Зоны: "zones_save: No such file or directory …vp_zones_state.j
          own temp file under one lock, and an older snapshot never overwrites a newer one
          (a sequence number); leftover temp files are removed at the start. Stress-tested:
          8 threads x 200 saves — no errors, the newest state on disk.
+v0.99.512 - Peak Reversal: the daily timeframe is no longer searched (user: "топ-1 монета с
+         таймфреймом 1 день, это очень долго, максимум 4ч") — 1h and 4h only (144 combos;
+         the significance bar stays the one set for 216, i.e. a little stricter). Coins
+         whose chosen timeframe was 1d leave the list at the start; open signals finish as
+         they are.

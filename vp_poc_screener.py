@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.511"
+APP_VERSION = "0.99.512"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7104,6 +7104,9 @@ def load_state():
         if _snr_stale:
             snr_results, snr_active_symbols, snr_display_symbols = {}, None, None
         prv_results = data.get("prv_results", {})
+        # v0.99.512 — coins whose chosen timeframe is no longer searched (1d) leave the list
+        prv_results = {k: v for k, v in (prv_results or {}).items()
+                       if not isinstance(v, dict) or v.get("timeframe") in (None, *PRV_TF_CANDIDATES)}
         prv_signals = data.get("prv_signals", [])
         prv_active_symbols = data.get("prv_active_symbols")
         prv_display_symbols = data.get("prv_display_symbols")
@@ -15828,7 +15831,7 @@ PRV_MA_TYPE_CANDIDATES = ["EMA", "SMA"]        # matches the Pine Script's own "
 PRV_KC_LENGTH_CANDIDATES = [14, 20, 30]        # matches the Pine Script's own "MA Length" input (default 20)
 PRV_BAND_MULT_CANDIDATES = [1.5, 2.0, 2.5]     # matches the Pine Script's own "Inner" band multiplier input (default 2) — this module always signals off the INNER band, matching the indicator's own default signalBand="Inner"
 PRV_RR_CANDIDATES     = [1.0, 1.5, 2.0, 3.0]   # v0.99.412 — back to max 3 (user); v0.99.398 had added 4 and 5   # the take-profit distance, swept like every other module's own RR — per direct user request ("процент который мы забираем по тейку нужно подбирать по типу как rr")
-PRV_TF_CANDIDATES     = ["1h", "4h", "1d"]
+PRV_TF_CANDIDATES     = ["1h", "4h"]   # v0.99.512 — 1d dropped (user: "1 день — это очень долго, максимум 4ч")
 PRV_ATR_LENGTH        = 14   # matches the Pine Script's own default "ATR Length"
 PRV_SL_ATR_MULT       = 1.0  # SL distance beyond entry, in ATR units — fixed (not swept) to keep the search space tractable, same design choice as SNR_SL_ATR_MULT
 PRV_N_COMBOS          = len(PRV_MA_TYPE_CANDIDATES) * len(PRV_KC_LENGTH_CANDIDATES) * len(PRV_BAND_MULT_CANDIDATES) * len(PRV_RR_CANDIDATES) * len(PRV_TF_CANDIDATES)  # 216
