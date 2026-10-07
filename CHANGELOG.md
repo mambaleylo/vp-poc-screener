@@ -18906,3 +18906,10 @@ v0.99.503 - Зоны: the stored history is recognised again by the current reco
          new ones (old ones without a bot trade are removed), posts the bot is watching /
          trading now are left alone, a coin that was set by hand is kept; no Telegram
          messages; progress and counts in "Состояние"; the statistics recount after.
+v0.99.504 - Зоны: whether the whole group has been studied is remembered on disk (user: "как
+         понять, что все что есть в группе изучено и запускать забрать историю больше не
+         надо"): the group card says "✅ вся история группы изучена — N картинок с … по …,
+         проверено …, нажимать больше не нужно", or that the load was stopped / covered
+         only N days, or that there is no record yet (loads made before this version) with
+         the advice to run "все" once — posts already taken are skipped without
+         downloading them again.

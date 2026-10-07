@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.503"
+APP_VERSION = "0.99.504"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24268,6 +24268,12 @@ async def _zut_history(days):
             post, new = res
             h["posts"] += 1
             h["zones"] += len(new)
+        # v0.99.504 — remembered on disk: was the whole group gone through?
+        _ZUT["cfg"]["hist_done"] = {"t": time.time(), "chat_id": chat_id, "days": days, "all": days >= 3650,
+                                    "complete": not h.get("stopped"), "total": h.get("total", 0), "seen": h["seen"],
+                                    "first": msgs[0].date.timestamp() if msgs else None,
+                                    "last": msgs[-1].date.timestamp() if msgs else None}
+        _zut_cfg_save()
         with _zones_lock:
             done = [z for z in ZONES["zones"] if z.get("train") and z.get("status") == "old" and z.get("result")]
         rs = [z["result"]["r"] for z in done]
@@ -24485,6 +24491,7 @@ def api_zut_status():
     return jsonify({"deps": zut_deps(), "has_api": bool(cfg.get("api_id") and cfg.get("api_hash")),
                     "logged_in": bool(cfg.get("session")), "me": _ZUT["me"], "chat_id": cfg.get("chat_id"),
                     "chat_title": cfg.get("chat_title"), "error": _ZUT["error"], "hist": _ZUT["hist"],
+                    "hist_done": cfg.get("hist_done") if (cfg.get("hist_done") or {}).get("chat_id") == cfg.get("chat_id") else None,
                     "live_n": _ZUT["live_n"], "connected": bool(_ZUT["client"] and _ZUT["client"].is_connected()),
                     "login_step": login.get("step")})
 
@@ -29582,6 +29589,12 @@ function zutHtml(u) {
     · группа: <b>${u.chat_title ? String(u.chat_title).replace(/</g, '&lt;') : 'не выбрана'}</b>${u.chat_id ? ` · новых постов взято: ${u.live_n}` : ''}
     ${u.error ? `<div class="loss">${u.error}</div>` : ''}
     ${hTxt ? `<div>${hTxt}</div>` : ''}
+    ${(() => { if (!u.chat_id || (h && h.running)) return '';   // v0.99.504 — is the whole group studied?
+      const hd = u.hist_done, dd = t => t ? new Date(t * 1000).toLocaleDateString('ru-RU') : '—';
+      if (hd && hd.all && hd.complete) return `<div style="margin-top:4px;"><span class="win">✅ вся история группы изучена</span> — ${hd.total} картинок с ${dd(hd.first)} по ${dd(hd.last)}, проверено ${dd(hd.t)}. «Забрать историю» больше нажимать не нужно: новые посты бот берёт сам (и догружает пропущенные после перезапуска).</div>`;
+      if (hd && !hd.complete) return `<div style="margin-top:4px;" class="loss">⚠️ загрузка истории была остановлена (${hd.seen} из ${hd.total}) — нажмите «забрать историю» → «все», уже взятые посты пропустятся быстро</div>`;
+      if (hd && !hd.all) return `<div style="margin-top:4px;" class="loss">⚠️ история загружена только за ${hd.days} дн. — для полной нажмите «забрать историю» → «все»</div>`;
+      return `<div style="margin-top:4px;" class="dim">ℹ️ отметки о полной загрузке нет (её не было до v0.99.504). Нажмите один раз «забрать историю» → «все»: уже взятые посты бот пропустит быстро, без повторного скачивания, и после этого здесь будет ✅.</div>`; })()}
     <div><button onclick="zutDialogs()" style="${btn}">${u.chat_id ? 'сменить группу' : '📋 выбрать группу'}</button>${u.chat_id ? `<button onclick="zutHistory()" style="${btn}">📚 забрать историю (обучение)</button>` : ''}<button onclick="zutLogout()" style="${btn}color:var(--neg);">выйти</button></div>
     ${u.chat_id && window._zutHistForm && !(h && h.running) ? zutHistFormHtml() : ''}
     ${dl ? `<div style="margin-top:6px;">Выберите группу с постами:<br>${dl}</div>` : ''}</div>`;
