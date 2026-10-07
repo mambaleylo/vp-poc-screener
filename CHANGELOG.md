@@ -18875,3 +18875,12 @@ v0.99.498 - Зоны: posts that can't be traded as drawn are out of the statist
          messages.
 v0.99.499 - Зоны: the risk table goes in 1% steps up to 10% (then 12, 15, 20, 25, 30, 40,
          50) — user: "шаг по риску большой, надо и 6 и 7".
+v0.99.500 - Зоны: a misread decimal point is fixed instead of the post being dropped (the
+         user's examples: BTC "59 120" read as 59.12, QNT "57.59" read as 575.9). Levels
+         more than 3x away from the price are moved by the power of ten that puts them
+         next to it — at recognition (by the price at the post), in the history recount
+         (the stored zones are corrected) and before a live ladder (Telegram: "уровни
+         прочитаны со сдвигом запятой — исправил"). A zone far from the price but in the
+         right scale (XRP: a short 30% above) is no longer dropped — the old "30% away"
+         rule is gone; only levels that can't be matched to the price are left out. The
+         breakdown shows how many posts were fixed.
