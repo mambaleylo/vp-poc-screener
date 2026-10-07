@@ -18843,3 +18843,10 @@ v0.99.495 - Зоны: the take is chosen by the best return on the history repla
          WR, average R, account growth). The old "reached in most zones" rule (measured
          from a single-line entry) is gone, and a history post coming in is no longer
          scored by a one-zone replay — its result comes from the next recount.
+v0.99.496 - Зоны: "🔍 Разбор результатов" (user: "странная картина, от винрейта ничего
+         не меняется"): for the chosen take — where the price was at the post relative
+         to the first limit (median), how many posts were already inside the zone or
+         past the stop, how fast the limits filled (15 min / a day / never), which
+         candles the history was replayed on, and the 10 worst posts (tap = chart). The
+         take variants table now shows the growth at the risk in use when no risk grows
+         the account (instead of "—"), and such takes no longer outrank ones that do.

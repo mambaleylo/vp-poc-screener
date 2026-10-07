@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.495"
+APP_VERSION = "0.99.496"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22295,11 +22295,14 @@ def zones_learn():
         per_tp[tp] = per
         xs = [r["r"] for r in per if r]
         fb, gb = best_f(xs)
+        g_rf = growth(xs, rf)
         tp_rows.append({"tp": tp, "n": len(xs), "avg_r": avg(xs),
                         "wr": round(sum(1 for r in per if r and r["result"] == "WIN") / len(xs) * 100, 1) if xs else None,
-                        "g": (gb if auto else growth(xs, rf)), "best_risk": round(fb * 100, 1) if fb else None})
+                        "g": (gb if (auto and gb is not None) else g_rf), "g_at": ("best" if (auto and gb is not None) else round(rf * 100, 2)),
+                        "best_risk": round(fb * 100, 1) if fb else None})
     ok_rows = [r for r in tp_rows if r["n"] >= ZONES_LEARN_MIN and r["g"] is not None]
-    pick = max(ok_rows, key=lambda r: (r["g"], -r["tp"])) if ok_rows else None
+    best_rows = [r for r in ok_rows if r["g_at"] == "best"]   # takes that grow the account at some risk come first
+    pick = max(best_rows or ok_rows, key=lambda r: (r["g"], -r["tp"])) if ok_rows else None
     tp_auto = pick["tp"] if pick and not ZONES_TP_PCT else None
     rule = dict(ZONES_DEFAULT)
     rule["buf"] = ZONES_STOP_BUF
@@ -22323,6 +22326,40 @@ def zones_learn():
         stops += r["result"] == "LOSS"
         fills += r["filled"]
         legs += r["legs"]
+    # v0.99.496 — "разбор": why the result is what it is (where the price was at the post,
+    # how fast the limits filled, which candles the history was replayed on, the worst posts)
+    diag = {"n": 0, "inside": 0, "beyond_stop": 0, "fill_15m": 0, "fill_1d": 0, "never": 0,
+            "tf": {}, "dist": [], "worst": [], "side_long": 0}
+    for (g, cs, st_, en_), r in zip(runs_g, per):
+        pl = zones_ladder_plan(g)
+        c0 = next((c for c in cs if c["time"] >= st_ - 1), None)
+        if not pl or not c0:
+            continue
+        diag["n"] += 1
+        diag["side_long"] += pl["s"] > 0
+        sec = (cs[1]["time"] - cs[0]["time"]) if len(cs) > 1 else 900
+        tfk = {900: "15м", 3600: "1ч", 14400: "4ч"}.get(sec, f"{sec // 60}м")
+        diag["tf"][tfk] = diag["tf"].get(tfk, 0) + 1
+        px0 = c0["open"]
+        d0 = pl["s"] * (px0 - pl["limits"][0]) / px0 * 100   # > 0: the price still before the zone, as it should be
+        diag["dist"].append(round(d0, 2))
+        if pl["s"] * (px0 - pl["sl"]) <= 0:
+            diag["beyond_stop"] += 1
+        elif d0 <= 0:
+            diag["inside"] += 1
+        if r is None:
+            diag["never"] += 1
+            continue
+        dt = r["t_in"] - st_
+        diag["fill_15m"] += dt <= 900
+        diag["fill_1d"] += dt <= 86400
+        diag["worst"].append({"id": g[0]["id"], "symbol": g[0]["symbol"], "side": g[0]["side"], "t": st_,
+                              "r": round(r["r"], 2), "result": r["result"], "filled": r["filled"], "legs": r["legs"],
+                              "d0": round(d0, 2), "width": round(abs(pl["levels"][0] - pl["levels"][-1]) / pl["levels"][0] * 100, 2),
+                              "levels": [round(v, 8) for v in pl["levels"]], "px0": px0, "tf": tfk})
+    dl = sorted(diag.pop("dist"))
+    diag["dist_med"] = dl[len(dl) // 2] if dl else None
+    diag["worst"] = sorted(diag["worst"], key=lambda x: x["r"])[:10]
     fbest, _g = best_f(rs)
     edge = fbest is not None
     auto_risk = round(fbest * 100, 1) if (auto and edge and len(rs) >= ZONES_LEARN_MIN) else None
@@ -22350,7 +22387,7 @@ def zones_learn():
     }
     learned = {"at": now, "n": len(rs), "rule": rule, "tp_auto": tp_auto, "tp_rows": tp_rows,
                "tp_by": "auto" if auto else round(rf * 100, 2),
-               "res": res, "risk_tab": risk_tab, "edge": edge,
+               "res": res, "risk_tab": risk_tab, "edge": edge, "diag": diag,
                "risk": auto_risk if auto_risk else rf * 100, "auto": auto, "auto_risk": auto_risk}
     with _zones_lock:
         ZONES["learned"], ZONES["stats"] = learned, stats
@@ -28996,10 +29033,29 @@ async function refreshZones() {
       </div>` : ''}
       ${(lr.tp_rows || []).length > 1 ? `<details><summary>все варианты тейка</summary><div class="zsub">каждый тейк прогнан лесенками по всей истории; «счёт за сделку» — ${lr.tp_by === 'auto' ? 'при лучшем для этого тейка риске' : 'при риске ' + lr.tp_by + '%'}</div>
         <div class="zwrap"><table class="ztbl"><thead><tr><th>Тейк</th><th>сделок</th><th>WR</th><th>средний</th><th>счёт за сделку</th></tr></thead><tbody>
-        ${lr.tp_rows.map(r => `<tr class="${r.tp === p.tp ? 'zbest' : ''}"><td>+${r.tp}%${r.tp === p.tp ? ' ✓' : ''}</td><td>${r.n}</td><td>${r.wr == null ? '—' : r.wr + '%'}</td><td>${sgR(r.avg_r)}</td><td>${sgP(r.g)}${lr.tp_by === 'auto' && r.best_risk ? `<div class="dim">при ${r.best_risk}%</div>` : ''}</td></tr>`).join('')}
+        ${lr.tp_rows.map(r => `<tr class="${r.tp === p.tp ? 'zbest' : ''}"><td>+${r.tp}%${r.tp === p.tp ? ' ✓' : ''}</td><td>${r.n}</td><td>${r.wr == null ? '—' : r.wr + '%'}</td><td>${sgR(r.avg_r)}</td><td>${sgP(r.g)}${r.g_at === 'best' ? `<div class="dim">при ${r.best_risk}%</div>` : (r.g_at != null ? `<div class="dim">при ${r.g_at}%${lr.tp_by === 'auto' ? ' — роста нет ни при каком' : ''}</div>` : '')}</td></tr>`).join('')}
         </tbody></table></div></details>` : ''}
       <div class="zsub">Как в инструкции автора канала: зоны одного поста — одна позиция; R считается от убытка всей лесенки на стопе, поэтому стоп при частично налитой лесенке — меньше 1R. Посты «только при доп. аргументах» / «по факту» — без автосделки.</div>
       <button onclick="zonesRelearn()" class="zbtn">↻ пересчитать</button>`);
+  }
+  // --- 2c. why the result is what it is (v0.99.496)
+  let diagCard = '';
+  const dg = lr.diag;
+  if (dg && dg.n) {
+    const pc = x => Math.round(100 * x / dg.n) + '%';
+    const tfTxt = Object.entries(dg.tf || {}).map(([k, v]) => `${k}: ${v}`).join(' · ');
+    const worst = (dg.worst || []).map(w => `<tr onclick="zoneChart('${w.id}')" style="cursor:pointer;"><td>${(w.symbol || '').replace('_USDT', '')} ${w.side === 'long' ? 'лонг' : 'шорт'}<div class="dim">${zdate(w.t)} · ${w.tf}</div></td><td>${sgR(w.r)}<div class="dim">${w.result === 'WIN' ? 'тейк' : w.result === 'LOSS' ? 'стоп' : 'время'}</div></td><td>${w.filled}/${w.legs}</td><td>${w.d0 > 0 ? '+' : ''}${w.d0}%<div class="dim">ширина ${w.width}%</div></td></tr>`).join('');
+    diagCard = `<details class="zcard"><summary class="zh" style="margin:0;">🔍 Разбор результатов</summary><div class="zkv" style="margin-top:8px;">
+      <div>постов разобрано</div><div><b>${dg.n}</b> (лонг ${dg.side_long}, шорт ${dg.n - dg.side_long})</div>
+      <div>цена в момент поста</div><div>до первой лимитки в среднем <b>${dg.dist_med}%</b> (медиана)</div>
+      <div>уже внутри зоны</div><div>${dg.inside} (${pc(dg.inside)}) — лимитки наливаются сразу</div>
+      <div>уже за стопом</div><div class="${dg.beyond_stop ? 'loss' : ''}">${dg.beyond_stop} (${pc(dg.beyond_stop)})${dg.beyond_stop ? ' — подозрительно: зона распознана не там или не та сторона' : ''}</div>
+      <div>налилось в первые 15 мин</div><div>${dg.fill_15m} (${pc(dg.fill_15m)})</div>
+      <div>налилось за сутки</div><div>${dg.fill_1d} (${pc(dg.fill_1d)})</div>
+      <div>не налилось совсем</div><div>${dg.never} (${pc(dg.never)})</div>
+      <div>свечи истории</div><div>${tfTxt} <span class="dim">(старые посты — только крупные свечи)</span></div></div>
+      ${worst ? `<div class="zsub">10 худших постов (нажмите — график):</div><div class="zwrap"><table class="ztbl"><thead><tr><th>Пост</th><th>итог</th><th>налилось</th><th>цена до зоны</th></tr></thead><tbody>${worst}</tbody></table></div>` : ''}
+      <div class="zsub">«Цена до зоны» — насколько цена в момент поста была выше лонговой (ниже шортовой) первой лимитки; минус — уже внутри или за зоной.</div></details>`;
   }
   // --- 3. risk table
   let riskCard = '';
@@ -29060,7 +29116,7 @@ async function refreshZones() {
     ${act.length ? zonePostBlocks(act) : '<div class="dim" style="margin-bottom:10px;">нет — новые посты из группы появятся здесь</div>'}
     ${zoneTradesHtml(closedTr)}
     <div class="zsec">Правила и риск</div>
-    ${ruleCard}${riskCard}${apCard}${behCard}
+    ${ruleCard}${diagCard}${riskCard}${apCard}${behCard}
     <div class="zsec">Источники</div>
     ${zutHtml(ut)}
     <div class="dim" style="font-size:var(--fs-sm);margin:-4px 0 10px;">или ${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>
