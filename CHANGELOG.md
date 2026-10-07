@@ -18873,3 +18873,5 @@ v0.99.498 - Зоны: posts that can't be traded as drawn are out of the statist
          the "past the stop" ones would look normal with the other side (a colour / side
          misread check) and the latest of them with their chart; such zones send no touch
          messages.
+v0.99.499 - Зоны: the risk table goes in 1% steps up to 10% (then 12, 15, 20, 25, 30, 40,
+         50) — user: "шаг по риску большой, надо и 6 и 7".

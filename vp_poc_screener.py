@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.498"
+APP_VERSION = "0.99.499"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21238,6 +21238,7 @@ ZONES_DEFAULT = {"entry": 0, "buf": 1.0, "tp": 4.0}    # 1st line, stop 1% beyon
 ZONES_STOP_BUF = 2.5   # v0.99.491 — the stop: 2.5% beyond the farthest line of the post's zones (the author: "с запасом 2–3%")
 ZONES_LIMIT_OFF = 0.2   # v0.99.491 — each limit this % before its line, so it is taken for sure (the author: 0.1–0.3%)
 ZONES_TP_MAX = 20.0   # the take found from the history is capped here
+ZONES_RISK_ROWS = (1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 12, 15, 20, 25, 30, 40, 50)   # v0.99.499 — the risk table, 1% steps up to 10%
 ZONES_TP_GRID = (1.0, 1.5, 2.0, 2.5, 3.0, 3.5, 4.0, 5.0, 6.0, 7.0, 8.0, 10.0, 12.0, 15.0, 20.0)   # v0.99.495 — takes tried on the history
 ZONES_GRID_ENTRY = (0, 1)
 ZONES_GRID_BUF = (0.3, 0.6, 1.0, 1.5, 2.5)
@@ -22432,7 +22433,7 @@ def zones_learn():
            "fill_share": round(fills / legs * 100, 1) if legs else None,
            "after_med": round(a[len(a) // 2], 2) if a else None,
            "after_5": round(100 * sum(1 for x in a if x >= 5) / len(a), 1) if a else None}
-    risk_tab = {"rows": [{"risk": pc, "all": growth(rs, pc / 100)} for pc in (1, 2, 3, 5, 10, 15, 20, 30, 50)],
+    risk_tab = {"rows": [{"risk": pc, "all": growth(rs, pc / 100)} for pc in ZONES_RISK_ROWS],
                 "best": round(fbest * 100, 1) if edge else None} if rs else None
     med = lambda xs: sorted(xs)[len(xs) // 2] if xs else None
     stats = {
