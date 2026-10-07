@@ -18794,16 +18794,3 @@ v0.99.490 - Зоны: the rule search with the early/late check is removed (user
          result on all zones (trades, takes/stops, WR, average R, worst streak), the
          risk table on all trades and the auto-risk (full Kelly <= 50%). The tab's
          "Подбор правил" card is replaced by "Стоп и тейк".
-v0.99.491 - Зоны: a second entry, "после реакции", next to the plain one (user: "вход
-         после выхода из зоны... исключить шум, множественные касания... лучший будет
-         идти в автоторговлю"). After the 1st line is touched, ZONES_REACT_BARS (2)
-         candles in a row must CLOSE beyond the line by max(1%, 2 x the coin's ATR
-         before the touch); a close back in the zone restarts the count; a wick through
-         the stop that came back into the range is allowed, a close beyond it breaks the
-         zone. Same stop beyond the zone and the same take price (tp % from the 1st
-         line); skipped when less than 0.5% is left to the take. The learner replays
-         both entries on the same zones and the one with the better account growth
-         (each at its own best risk with "Авто-риск") goes to the live monitor and the
-         autotrade. Live: checked once per closed 15m candle on the zone's candles, in
-         at the market if the price is within 1% of the confirming close. The tab shows
-         both entries side by side and both columns in the risk table.
