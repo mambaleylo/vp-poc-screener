@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.520"
+APP_VERSION = "0.99.521"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23524,9 +23524,13 @@ def _zones_real_place(tr):
             rec["entry"], rec["risk_pct"] = avg, risk
             margin, lev, skip = compute_risk_based_position(direction, avg, tr["sl"], cap, mmr, equity, risk_pct=risk,
                                                             symbol=sym, tiers_by_symbol=tb)
-            contracts = 0
+            contracts, idx, per, m_act = 0, [], 0, 0.0
             if not skip:
                 contracts, _n, m_act, skip = compute_contracts_from_margin(sym, avg, margin, lev)
+                if skip and skip.startswith("минимальный лот"):
+                    # v0.99.521 — one lot may still fit the risk on a deeper line: the check below decides
+                    contracts, skip = lot, None
+                    m_act = lot * float(spec.get("quanto_multiplier") or 1) * avg / lev
             if not skip:
                 n = len(lims)
                 per = int(contracts // n // lot * lot)
@@ -23552,11 +23556,25 @@ def _zones_real_place(tr):
                 done_loss = sum(abs(l["fill"] - tr["sl"]) for l in tr["legs"] if l["fill"] is not None) * per * mult
                 loss_of = lambda ii: done_loss + sum(abs(lims[i] - tr["sl"]) + (lims[i] + tr["sl"]) * 0.0006 for i in ii) * per * mult
                 first_loss = loss_of(idx)
-                while idx and loss_of(idx) > budget * 1.05:
-                    idx = idx[1:]
+                if loss_of(idx) > budget * 1.05:
+                    # v0.99.521 — the lots go to deeper lines (closer to the stop: less loss
+                    # per lot): the line nearest the price that fits, as many lots as fit
+                    free = [i for i in range(len(lims)) if tr["legs"][i]["fill"] is None]
+                    k0, best = len(idx), None
+                    for st_i in range(len(free)):
+                        rest = free[st_i:]
+                        for kk in range(min(k0, len(rest)), 0, -1):
+                            sel = sorted({rest[round(j * (len(rest) - 1) / max(1, kk - 1))] for j in range(kk)}) if kk > 1 else [rest[0]]
+                            if loss_of(sel) <= budget * 1.05:
+                                best = sel
+                                break
+                        if best:
+                            break
+                    idx = best or []
                 if not idx:
-                    skip = (f"минимальный лот {sym} ({per} контр. = ${lims[0] * per * mult:.0f}) теряет на стопе "
-                            f"${first_loss:.2f} — это {first_loss / equity * 100:.0f}% баланса при риске {risk:g}% "
+                    cheap = min((loss_of([i]) for i in range(len(lims)) if tr["legs"][i]["fill"] is None), default=first_loss)
+                    skip = (f"минимальный лот {sym} ({per} контр. = ${lims[0] * per * mult:.0f}) даже на самой глубокой линии "
+                            f"теряет на стопе ${cheap:.2f} — это {cheap / equity * 100:.0f}% баланса при риске {risk:g}% "
                             f"(${budget:.2f}); не торгую, чтобы не завышать риск")
                 else:
                     rec["loss_at_stop"] = round(loss_of(idx), 2)

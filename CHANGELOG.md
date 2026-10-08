@@ -19027,3 +19027,11 @@ v0.99.520 - Зоны: a SOL ladder opened 1 contract (1 SOL ≈ $115) that loses
          checked against the risk: over it by more than 5%, the limits nearest the price are
          dropped; if even one lot is too much, no trade ("минимальный лот … теряет на стопе
          $X — это N% баланса при риске R%"). The placed orders report their loss at the stop.
+v0.99.521 - Зоны: an expensive coin on a small balance is not just skipped (user: "что другого
+         способа нет открыть солану с позицией поменьше?"): Gate's smallest SOL order is 1
+         contract = 1 SOL, so the size cannot go lower — but a lot on a deeper line (closer to
+         the stop) loses less. When the ladder does not fit the risk, the lots go to the line
+         nearest the price that fits (SOL at a $40 balance and 19%: 1 lot on 111.6, $6.2 at the
+         stop, instead of 115 and $9.6). Also: a ladder whose size was refused by the common
+         minimum-lot rule ended with an error instead of a skip — now it goes through the same
+         line-by-line check.
