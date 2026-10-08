@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.527"
+APP_VERSION = "0.99.528"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -25987,12 +25987,12 @@ def _own_after_post(post, new):
 # does not depend on how many posts the channel publishes. Observation only.
 ZONES_OC_FILE = os.path.join(os.path.dirname(ZONES_FILE), "vp_zones_oc.json")
 ZONES_OC_DAYS = 400          # history of 1h candles (Gate keeps ~400 days of 1h)
-ZONES_OC_STEP_H = 72         # a snapshot every 3 days per coin
+ZONES_OC_STEP_H = 48         # a snapshot every 2 days per coin (v0.99.528: was 3)
 ZONES_OC_HOLD_H = 14 * 24    # the zone waits 14 days, like the author's
 ZONES_OC_PER_SIDE = 3        # the nearest candidates per side per snapshot
 ZONES_OC_TPS = (3.0, 5.0, 8.0, 12.0, 20.0)   # takes tried (from the average entry)
 ZONES_OC_FIT_MAX = 5000      # samples per fit (speed on a phone)
-_OC = {"samples": [], "done": {}, "model": None, "eval": None, "tp": None, "thr": None, "built": None}
+_OC = {"samples": [], "done": {}, "model": None, "eval": None, "tp": None, "thr": None, "built": None, "ver": None, "var": None}
 _oc_lock = threading.Lock()
 
 
@@ -26003,8 +26003,13 @@ def oc_load():
                 d = json.load(f)
             with _oc_lock:
                 _OC.update({k: d.get(k, _OC[k]) for k in _OC})
+                if _OC.get("ver") != ZONES_OC_VER:   # v0.99.528 — new features: the data set is built again
+                    _OC.update({"samples": [], "done": {}, "model": None, "eval": None, "tp": None, "thr": None,
+                                "built": None, "var": None})
     except Exception as e:
         log_error(f"oc load: {e}")
+    with _oc_lock:
+        _OC["ver"] = ZONES_OC_VER   # a new data set is of this version
 
 
 def oc_save():
@@ -26046,12 +26051,236 @@ def _oc_group(c):
     return [{"id": "oc", "side": c["side"], "levels": sorted([c["lo"], c["hi"]], reverse=(c["side"] == "long"))}]
 
 
+# v0.99.528 — "поиск по результату" v2 (user: "надо, чтобы он превзошёл по качеству
+# находки зон автора; сделай сразу всё возможное"): 11 more features of the market
+# around the zone (the coin's and BTC's trend, volatility, the last day's move, an
+# earlier break of the zone, a 4h level at it, volume, the distance and width in %),
+# a non-linear model (gradient-boosted trees on the expected R, pure Python) next to
+# the linear one, a three-way honest split by time (fit on the first 60 %, the model
+# / take / bar chosen on the next 20 %, the exam on the last 20 % nobody chose on),
+# and the author's ladders on the same exam weeks for the comparison.
+ZONES_OC_VER = 2
+_OC_CTX_FEATS = ("trend", "slope", "atrp", "mom", "rpos", "broken", "htf", "volr", "btc", "distp", "widthp")
+OC_VARIANTS = ("lin11", "lin22", "gb22")
+OC_VARIANT_NAMES = {"lin11": "прямая модель, 11 признаков (как раньше)", "lin22": "прямая модель, 22 признака",
+                    "gb22": "деревья решений, 22 признака"}
+OC_TOP_Q = (0.5, 0.35, 0.25, 0.15, 0.1, 0.05)   # the bar: this share of the best-scored candidates
+OC_GB_TREES, OC_GB_DEPTH, OC_GB_LR, OC_GB_BINS, OC_GB_LEAF = 90, 2, 0.08, 8, 40
+
+
+def _oc_ema_series(vals, n):
+    k, out, e = 2 / (n + 1), [], None
+    for v in vals:
+        e = v if e is None else e + k * (v - e)
+        out.append(e)
+    return out
+
+
+def _oc_btc_ctx(btc, t):
+    """BTC's trend at time t: (close - EMA200) in ATRs / 10, from a precomputed
+    {"t": [...], "v": [...]} series; 0 when unknown"""
+    if not btc or not btc.get("t"):
+        return 0.0
+    i = bisect.bisect_right(btc["t"], t) - 1
+    return btc["v"][i] if i >= 0 else 0.0
+
+
+def _oc_btc_series(cs):
+    if not cs or len(cs) < 220:
+        return None
+    C = [c["close"] for c in cs]
+    ema = _oc_ema_series(C, 200)
+    trs = [max(cs[i]["high"] - cs[i]["low"], abs(cs[i]["high"] - C[i - 1]), abs(cs[i]["low"] - C[i - 1])) for i in range(1, len(cs))]
+    atr = _oc_ema_series([trs[0]] + trs, 56)
+    t, v = [], []
+    for i in range(200, len(cs)):
+        if atr[i] > 0:
+            t.append(cs[i]["time"] + 3600)   # known once the bar closed
+            v.append(max(-3.0, min(3.0, (C[i] - ema[i]) / atr[i] / 10)))
+    return {"t": t, "v": v}
+
+
+def oc_ctx_feats(win, c, btc_v=0.0):
+    """the market around a candidate zone, from the same closed 1h bars"""
+    C = [x["close"] for x in win]
+    H = [x["high"] for x in win]
+    L = [x["low"] for x in win]
+    px, atr = C[-1], c["atr"] or 1e-12
+    sg = 1 if c["side"] == "long" else -1
+    ema200 = _oc_ema_series(C, 200)
+    e50 = _oc_ema_series(C, 50)
+    lo, hi = c["lo"], c["hi"]
+    hh, ll = max(H), min(L)
+    rpos = (px - ll) / (hh - ll) if hh > ll else 0.5
+    broken = sum(1 for x in C if (x < lo if sg > 0 else x > hi))
+    # 4h pivots at the zone (the 1h bars in fours)
+    h4 = [(max(H[i:i + 4]), min(L[i:i + 4])) for i in range(len(win) % 4, len(win) - 3, 4)]
+    near = 0
+    for i in range(2, len(h4) - 2):
+        for v, is_hi in ((h4[i][0], True), (h4[i][1], False)):
+            ext = all(v >= h4[j][0] for j in range(i - 2, i + 3)) if is_hi else all(v <= h4[j][1] for j in range(i - 2, i + 3))
+            if ext and lo - 0.25 * atr <= v <= hi + 0.25 * atr:
+                near += 1
+    vols = [x.get("volume") or 0 for x in win]
+    v_all = sum(vols) / len(vols) or 1e-12
+    v_24 = sum(vols[-24:]) / 24
+    dist_px = (px - hi) if sg > 0 else (lo - px)
+    return {"trend": max(-3.0, min(3.0, sg * (px - ema200[-1]) / atr / 10)),
+            "slope": max(-5.0, min(5.0, sg * (e50[-1] - e50[-25]) / atr)),
+            "atrp": math.log1p(atr / px * 100),
+            "mom": max(-10.0, min(10.0, sg * (px - C[-25]) / atr)),
+            "rpos": rpos if sg > 0 else 1 - rpos,
+            "broken": math.log1p(broken),
+            "htf": math.log1p(near),
+            "volr": max(-3.0, min(3.0, math.log((v_24 + 1e-12) / v_all))),
+            "btc": sg * btc_v,
+            "distp": math.log1p(max(0.0, dist_px) / px * 100),
+            "widthp": math.log1p((hi - lo) / px * 100)}
+
+
+def _oc_vec(c, ctx):
+    return _own_vec(c["f"]) + [float(ctx[k]) for k in _OC_CTX_FEATS]
+
+
+# ---- gradient-boosted trees (regression on the clipped R), histogram splits
+def _gb_edges(X, bins=OC_GB_BINS):
+    d = len(X[0])
+    edges = []
+    for j in range(d):
+        col = sorted(x[j] for x in X)
+        e = sorted({col[int(len(col) * q / bins)] for q in range(1, bins)})
+        edges.append(e)
+    return edges
+
+
+def _gb_bin(x, edges):
+    return [bisect.bisect_right(e, v) for v, e in zip(x, edges)]
+
+
+def gb_fit(X, y, trees=OC_GB_TREES, depth=OC_GB_DEPTH, lr=OC_GB_LR, min_leaf=OC_GB_LEAF):
+    if len(X) < 4 * min_leaf:
+        return None
+    edges = _gb_edges(X)
+    XB = [_gb_bin(x, edges) for x in X]
+    d, nb = len(X[0]), OC_GB_BINS
+    base = sum(y) / len(y)
+    pred = [base] * len(y)
+    out = []
+
+    def node(idx, res, dep):
+        n = len(idx)
+        S = sum(res[i] for i in idx)
+        if dep == 0 or n < 2 * min_leaf:
+            return {"v": lr * S / n}
+        best = None
+        for j in range(d):
+            hs, hc = [0.0] * (nb + 1), [0] * (nb + 1)
+            for i in idx:
+                b = XB[i][j]
+                hs[b] += res[i]
+                hc[b] += 1
+            sl, cl = 0.0, 0
+            for b in range(nb):
+                sl += hs[b]
+                cl += hc[b]
+                cr = n - cl
+                if cl < min_leaf or cr < min_leaf:
+                    continue
+                g = sl * sl / cl + (S - sl) ** 2 / cr - S * S / n
+                if best is None or g > best[0]:
+                    best = (g, j, b)
+        if not best or best[0] <= 1e-9:
+            return {"v": lr * S / n}
+        _, j, b = best
+        li = [i for i in idx if XB[i][j] <= b]
+        ri = [i for i in idx if XB[i][j] > b]
+        return {"j": j, "b": b, "l": node(li, res, dep - 1), "r": node(ri, res, dep - 1)}
+
+    allidx = list(range(len(y)))
+    for _ in range(trees):
+        res = [yi - pi for yi, pi in zip(y, pred)]
+        tr = node(allidx, res, depth)
+        out.append(tr)
+        for i in allidx:
+            t_ = tr
+            while "v" not in t_:
+                t_ = t_["l"] if XB[i][t_["j"]] <= t_["b"] else t_["r"]
+            pred[i] += t_["v"]
+    return {"kind": "gb", "edges": edges, "base": base, "trees": out}
+
+
+def gb_pred(m, x):
+    xb = _gb_bin(x, m["edges"])
+    s = m["base"]
+    for t_ in m["trees"]:
+        while "v" not in t_:
+            t_ = t_["l"] if xb[t_["j"]] <= t_["b"] else t_["r"]
+        s += t_["v"]
+    return s
+
+
+def oc_score(m, x):
+    """one number per candidate, higher = better: the expected R (trees) or the
+    probability of a profit (the linear model)"""
+    if not m:
+        return 0.0
+    if m.get("kind") == "gb":
+        return gb_pred(m, x)
+    return own_score(m, x[:len(m["w"])])
+
+
+def _oc_fit(rows, var, ti):
+    import random as _rnd
+    data = [s for s in rows if s["r"][ti] is not None]
+    if len(data) > ZONES_OC_FIT_MAX:
+        data = _rnd.Random(7).sample(data, ZONES_OC_FIT_MAX)
+    if not data:
+        return None
+    if var == "gb22":
+        return gb_fit([s["x"] for s in data], [max(-1.5, min(4.0, s["r"][ti])) for s in data])
+    k = 11 if var == "lin11" else len(data[0]["x"])
+    m = _oc_lin_fit([(s["x"][:k], 1 if s["r"][ti] > 0 else 0) for s in data])
+    return m
+
+
+def _oc_lin_fit(samples):
+    """own_fit for any number of features (it is written for the 11 of the finder)"""
+    pos = sum(1 for _, y in samples if y)
+    if pos < 15 or len(samples) - pos < 15:
+        return None
+    d = len(samples[0][0])
+    mu = [sum(x[j] for x, _ in samples) / len(samples) for j in range(d)]
+    sd = [max(1e-9, (sum((x[j] - mu[j]) ** 2 for x, _ in samples) / len(samples)) ** 0.5) for j in range(d)]
+    data = [([(x[j] - mu[j]) / sd[j] for j in range(d)], y) for x, y in samples]
+    wpos = (len(data) - pos) / pos
+    w, b = [0.0] * d, 0.0
+    for ep in range(150):
+        lr = 0.1 / (1 + ep / 50)
+        gw, gb = [0.0] * d, 0.0
+        for x, y in data:
+            p = 1 / (1 + math.exp(-max(-30, min(30, b + sum(wi * xi for wi, xi in zip(w, x))))))
+            g = (p - y) * (wpos if y else 1.0)
+            gb += g
+            for j in range(d):
+                gw[j] += g * x[j]
+        m = len(data)
+        b -= lr * gb / m
+        w = [wi - lr * (gwi / m + 0.01 * wi) for wi, gwi in zip(w, gw)]
+    return {"mu": mu, "sd": sd, "w": w, "b": b, "n": len(samples), "pos": pos}
+
+
 def oc_build(now=None):
     """The data set: snapshots of every coin's history, the candidates at each,
     and how each one's ladder ended over the next 14 days for every take.
     Incremental: only snapshots newer than what is stored are added."""
     now = now or time.time()
     syms = _own_top_syms()
+    try:   # v0.99.528 — BTC's trend for every snapshot
+        btc = _oc_btc_series([c for c in (get_candles_range("BTC_USDT", "1h", int(now - ZONES_OC_DAYS * 86400), int(now)) or [])
+                              if c["time"] + 3600 <= now])
+    except Exception as e:
+        btc = None
+        log_error(f"oc btc candles: {e}")
     added = 0
     for k, sym in enumerate(syms):
         zones_act("oc", running=True, stage=f"история монет: {sym.replace('_USDT', '')}", done=k, total=len(syms))
@@ -26069,12 +26298,13 @@ def oc_build(now=None):
             if t <= last:
                 continue
             win, fut = cs[i - ZONES_OWN_BARS:i], cs[i:i + ZONES_OC_HOLD_H]
+            bv = _oc_btc_ctx(btc, t)
             for c in _oc_pick(own_candidates(win)):
                 rs = []
                 for tp in ZONES_OC_TPS:
                     r = zone_ladder_sim(fut, _oc_group(c), tp, t, t + ZONES_OC_HOLD_H * 3600)
                     rs.append(round(r["r"], 3) if r else None)
-                new.append({"t": t, "s": sym, "side": c["side"], "x": [round(v, 4) for v in _own_vec(c["f"])],
+                new.append({"t": t, "s": sym, "side": c["side"], "x": [round(v, 4) for v in _oc_vec(c, oc_ctx_feats(win, c, bv))],
                             "rank": c["f"]["rank"], "r": rs})
             last = t
         with _oc_lock:
@@ -26086,66 +26316,111 @@ def oc_build(now=None):
     return added
 
 
-def _oc_select(rows, model, thr, ti):
-    """per snapshot / coin / side: the best-scored candidate if it clears thr ->
-    the R of its ladder (filled ones only)"""
+def _oc_best_per_key(rows, model):
+    """per snapshot / coin / side the best-scored candidate: (score, sample)"""
     best = {}
     for s in rows:
-        sc = own_score(model, s["x"])
+        sc = oc_score(model, s["x"])
         k = (s["t"], s["s"], s["side"])
-        if sc >= thr and (k not in best or sc > best[k][0]):
+        if k not in best or sc > best[k][0]:
             best[k] = (sc, s)
-    return [b[1]["r"][ti] for b in best.values() if b[1]["r"][ti] is not None]
+    return list(best.values())
+
+
+def _oc_select(rows, model, thr, ti):
+    return [s["r"][ti] for sc, s in _oc_best_per_key(rows, model) if sc >= thr and s["r"][ti] is not None]
 
 
 def _oc_stat(rs):
-    return {"n": len(rs), "avg": round(sum(rs) / len(rs), 3) if rs else None,
-            "wr": round(100 * sum(1 for x in rs if x > 0) / len(rs), 1) if rs else None}
+    n = len(rs)
+    mu = sum(rs) / n if n else None
+    return {"n": n, "avg": round(mu, 3) if rs else None,
+            "wr": round(100 * sum(1 for x in rs if x > 0) / n, 1) if rs else None,
+            "sd": round((sum((x - mu) ** 2 for x in rs) / (n - 1)) ** 0.5, 3) if n > 1 else None}
+
+
+def _oc_q_thr(model, rows, q):
+    """the score that keeps the best q share of the candidates (one per snapshot/coin/side)"""
+    scs = sorted((sc for sc, _ in _oc_best_per_key(rows, model)), reverse=True)
+    if not scs:
+        return None
+    return scs[max(0, min(len(scs) - 1, int(len(scs) * q) - 1))]
+
+
+def oc_author_window(t0, t1):
+    """the author's ladders (by the current rules) posted in [t0, t1): avg R, count, per week"""
+    with _zones_lock:
+        zs = [z for z in ZONES["zones"] if not z.get("own") and not z.get("oc") and z.get("rules") == "ladder"
+              and z.get("result") and z["result"].get("r") is not None and t0 <= z.get("post_time", 0) < t1]
+    seen, rs = set(), []
+    for z in zs:
+        k = zones_hist_key(z)
+        if k in seen:
+            continue
+        seen.add(k)
+        rs.append(z["result"]["r"])
+    st = _oc_stat(rs)
+    st["per_week"] = round(len(rs) / max(1e-9, (t1 - t0) / (7 * 86400)), 2) if t1 > t0 else None
+    return st
 
 
 def oc_train():
-    """Honest by time: the take, the model and the bar are chosen on the earlier
-    2/3 of the history, then checked on the later 1/3 it never saw (against the
-    no-model choice: the nearest zone). The live model is refit on everything."""
-    import random as _rnd
+    """Honest by time, three parts: the models fit on the first 60 %, the variant /
+    take / bar chosen on the next 20 %, the exam on the last 20 % (nothing was chosen
+    on it); against the no-model choice (the nearest zone) and the author's ladders
+    on the same exam weeks. The live model is refit on everything."""
     with _oc_lock:
-        rows = list(_OC["samples"])
-    if len(rows) < 300:
+        rows = [s for s in _OC["samples"] if len(s["x"]) == 22]
+    if len(rows) < 500:
         return None
     rows.sort(key=lambda s: s["t"])
-    split_t = rows[len(rows) * 2 // 3]["t"]
-    tr_rows = [s for s in rows if s["t"] < split_t]
-    te_rows = [s for s in rows if s["t"] >= split_t]
-
-    def fit(rs_, ti):
-        data = [(s["x"], 1 if s["r"][ti] > 0 else 0) for s in rs_ if s["r"][ti] is not None]
-        if len(data) > ZONES_OC_FIT_MAX:
-            data = _rnd.Random(7).sample(data, ZONES_OC_FIT_MAX)
-        return own_fit(data)
-
-    best = None
+    t_a, t_b = rows[len(rows) * 6 // 10]["t"], rows[len(rows) * 8 // 10]["t"]
+    fit_rows = [s for s in rows if s["t"] < t_a]
+    val_rows = [s for s in rows if t_a <= s["t"] < t_b]
+    te_rows = [s for s in rows if s["t"] >= t_b]
+    cands, var_best = [], {}
+    k_ = 0
     for ti, tp in enumerate(ZONES_OC_TPS):
-        zones_act("oc", running=True, stage=f"обучение: тейк +{tp:g}%", done=ti, total=len(ZONES_OC_TPS))
-        m = fit(tr_rows, ti)
-        if not m:
-            continue
-        n_all = sum(1 for s in tr_rows if s["r"][ti] is not None)
-        for thr in (0.4, 0.45, 0.5, 0.55, 0.6, 0.65, 0.7, 0.75, 0.8):
-            st = _oc_stat(_oc_select(tr_rows, m, thr, ti))
-            if st["n"] >= max(30, 0.03 * n_all) and (best is None or st["avg"] > best["train"]["avg"]):
-                best = {"ti": ti, "tp": tp, "thr": thr, "model": m, "train": st}
-    if not best:
+        for var in OC_VARIANTS:
+            k_ += 1
+            zones_act("oc", running=True, stage=f"обучение: {OC_VARIANT_NAMES[var]}, тейк +{tp:g}%",
+                      done=k_, total=len(ZONES_OC_TPS) * len(OC_VARIANTS))
+            m = _oc_fit(fit_rows, var, ti)
+            if not m:
+                continue
+            n_val = len({(s["t"], s["s"], s["side"]) for s in val_rows if s["r"][ti] is not None})
+            for q in OC_TOP_Q:
+                thr = _oc_q_thr(m, fit_rows, q)
+                if thr is None:
+                    continue
+                st = _oc_stat(_oc_select(val_rows, m, thr, ti))
+                if st["n"] >= max(30, 0.03 * n_val):
+                    row = {"var": var, "ti": ti, "tp": tp, "q": q, "thr": thr, "model": m, "val": st}
+                    cands.append(row)
+                    if var not in var_best or st["avg"] > var_best[var]["val"]["avg"]:
+                        var_best[var] = row
+    if not cands:
         return None
-    ti = best["ti"]
+    best = max(cands, key=lambda r: r["val"]["avg"])
+    ti, m = best["ti"], best["model"]
     base = lambda rs_: _oc_stat([s["r"][ti] for s in rs_ if s["rank"] == 0 and s["r"][ti] is not None])
-    ev = {"split_t": split_t, "first_t": rows[0]["t"], "last_t": rows[-1]["t"], "tp": best["tp"], "thr": best["thr"],
-          "train": best["train"], "test": _oc_stat(_oc_select(te_rows, best["model"], best["thr"], ti)),
-          "base_test": base(te_rows), "base_train": base(tr_rows),
-          "samples": len(rows), "coins": len({s["s"] for s in rows}), "t": time.time()}
+    test = _oc_stat(_oc_select(te_rows, m, best["thr"], ti))
+    weeks_te = max(1e-9, (rows[-1]["t"] - t_b) / (7 * 86400))
+    test["per_week"] = round(test["n"] / weeks_te, 2)
+    variants = []
+    for var, r in var_best.items():   # every model's own exam, for the table (not used to choose)
+        st = _oc_stat(_oc_select(te_rows, r["model"], r["thr"], r["ti"]))
+        variants.append({"var": var, "name": OC_VARIANT_NAMES[var], "tp": r["tp"], "q": r["q"], "val": r["val"], "test": st})
+    ev = {"ver": ZONES_OC_VER, "split_t": t_a, "test_t": t_b, "first_t": rows[0]["t"], "last_t": rows[-1]["t"],
+          "var": best["var"], "var_name": OC_VARIANT_NAMES[best["var"]], "tp": best["tp"], "q": best["q"],
+          "val": best["val"], "test": test, "base_test": base(te_rows), "train": _oc_stat(_oc_select(fit_rows, m, best["thr"], ti)),
+          "variants": variants, "samples": len(rows), "coins": len({s["s"] for s in rows}),
+          "author_test": oc_author_window(t_b, rows[-1]["t"] + ZONES_OC_STEP_H * 3600), "t": time.time()}
     zones_act("oc", running=True, stage="итоговая модель на всей истории", done=None, total=None)
-    final = fit(rows, ti) or best["model"]
+    final = _oc_fit(rows, best["var"], ti) or m
+    thr_final = _oc_q_thr(final, rows, best["q"])
     with _oc_lock:
-        _OC.update({"model": final, "eval": ev, "tp": best["tp"], "thr": best["thr"]})
+        _OC.update({"model": final, "eval": ev, "tp": best["tp"], "thr": thr_final, "var": best["var"]})
     return ev
 
 
@@ -26153,11 +26428,16 @@ def oc_scan_once():
     """Live: our zones by the outcome model, every hour — tab only, no orders."""
     with _oc_lock:
         model, thr, tp = _OC["model"], _OC["thr"], _OC["tp"]
-    if not model:
+    if not model or thr is None or len((model.get("edges") or model.get("w") or [])) not in (11, 22):
         return 0
     now = time.time()
     made = 0
     found = []
+    try:
+        btc = _oc_btc_series(_own_candles("BTC_USDT", now))
+        bv = btc["v"][-1] if btc and btc["v"] else 0.0
+    except Exception:
+        bv = 0.0
     for sym in _own_top_syms():
         try:
             cs = _own_candles(sym, now)
@@ -26165,7 +26445,7 @@ def oc_scan_once():
             continue
         best = {}
         for c in _oc_pick(own_candidates(cs)):
-            sc = own_score(model, _own_vec(c["f"]))
+            sc = oc_score(model, _oc_vec(c, oc_ctx_feats(cs, c, bv)))
             if sc >= thr and (c["side"] not in best or sc > best[c["side"]][0]):
                 best[c["side"]] = (sc, c)
         found += [(sc, sym, c) for sc, c in best.values()]
@@ -26200,8 +26480,12 @@ def oc_stats():
         zs = [z for z in ZONES["zones"] if z.get("oc") and z.get("status") != "deleted"]
     done = [z["result"]["r"] for z in zs if z.get("result") and z["result"].get("r") is not None
             and z.get("status") in ("closed", "old", "expired", "broken")]
+    live = _oc_stat(done)
+    t_live = min((z["post_time"] for z in zs), default=None)
     return {"samples": n, "eval": ev, "tp": tp, "thr": thr, "built": built,
-            "active": sum(1 for z in zs if z.get("status") in ("watch", "in_trade")), "live": _oc_stat(done)}
+            "active": sum(1 for z in zs if z.get("status") in ("watch", "in_trade")), "live": live,
+            # v0.99.528 — the author's ladders over the same weeks as our live zones
+            "author_live": oc_author_window(t_live, time.time()) if t_live else None}
 
 
 def oc_loop():
@@ -30788,25 +31072,35 @@ function ownHtml(d, ownZ) {
   </div>`;
 }
 // v0.99.506 — our zones learned on the result, next to the author-repeating finder
-function ocHtml(d, ocZ) {
+function ocHtml(d, ocZ) {   // v0.99.528 — v2: more features, trees, a 3-way honest exam, the author side by side
   const o = d.oc || {}, ev = o.eval, a = ((d.act || {}).oc) || {};
   const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
   const dd = t => t ? new Date(t * 1000).toLocaleDateString('ru-RU') : '—';
-  const row = (nm, x, note) => x ? `<tr><td>${nm}${note ? `<div class="dim">${note}</div>` : ''}</td><td>${x.n}</td><td>${x.wr == null ? '—' : x.wr + '%'}</td><td>${sgR(x.avg)}</td></tr>` : '';
-  let body = `<div class="dim">Бот сам находит зоны по свечам ${ev ? ev.coins : 40} монет и учится не повторять автора, а отбирать те, от которых цена <b>реально отыгрывала</b> по правилам лесенки (лимитки, стоп 2.5% за зоной, тейк от средней). Учится на истории за ~400 дней — не зависит от постов группы. Сейчас только наблюдение: без ордеров и без сообщений в Telegram.</div>`;
-  if (a.running) body += `<div style="margin-top:6px;"><span class="zspin">🔄</span> <b>${a.stage || 'работаю'}</b>${a.total ? ` — ${a.done || 0} из ${a.total}` : ''}<div class="dim">первый раз — до получаса на телефоне, дальше раз в сутки дополняется</div></div>`;
+  const row = (nm, x, note, pw) => x ? `<tr><td>${nm}${note ? `<div class="dim">${note}</div>` : ''}</td><td>${x.n}${pw && x.per_week != null ? `<div class="dim">${x.per_week}/нед</div>` : ''}</td><td>${x.wr == null ? '—' : x.wr + '%'}</td><td>${sgR(x.avg)}</td></tr>` : '';
+  let body = `<div class="dim">Бот сам ищет зоны по свечам ${ev && ev.coins ? ev.coins : 40} монет и учится отбирать те, от которых цена <b>реально отыгрывала</b> по правилам лесенки автора (лимитки, стоп 2.5% за зоной, тейк от средней). Видит 22 признака: саму зону (касания, объём, ширина, расстояние) и рынок вокруг (тренд монеты и BTC, волатильность, движение за сутки, пробивалась ли зона, уровень на 4ч). Пробует три модели — прямую на 11 и на 22 признаках и деревья решений — и берёт лучшую. Цель — <b>превзойти автора</b> по результату на сделку. Сейчас только наблюдение: без ордеров и сообщений.</div>`;
+  if (a.running) body += `<div style="margin-top:6px;"><span class="zspin">🔄</span> <b>${a.stage || 'работаю'}</b>${a.total ? ` — ${a.done || 0} из ${a.total}` : ''}<div class="dim">первый раз после обновления — история собирается заново (новые признаки), на телефоне до часа; дальше раз в сутки дополняется</div></div>`;
   else if (a.error) body += `<div class="loss" style="margin-top:6px;">ошибка: ${a.error}</div>`;
-  if (ev) {
-    const better = ev.test && ev.base_test && ev.test.avg != null && ev.base_test.avg != null ? ev.test.avg - ev.base_test.avg : null;
+  if (ev && ev.ver === 2) {
+    const at = ev.author_test || {};
+    const beatBase = ev.test && ev.base_test && ev.test.avg != null && ev.base_test.avg != null ? ev.test.avg - ev.base_test.avg : null;
+    const canCmp = ev.test && ev.test.n >= 30 && at.n >= 10 && at.avg != null;
+    const beatAuth = canCmp ? ev.test.avg - at.avg : null;
+    // the difference against its chance spread (1.65 = 95 % one-sided): "better" only when it is beyond luck
+    const zAuth = canCmp && ev.test.sd != null && at.sd != null ? beatAuth / Math.sqrt(ev.test.sd ** 2 / ev.test.n + at.sd ** 2 / at.n || 1e-9) : null;
+    const verdict = !canCmp ? null : (zAuth == null ? (beatAuth > 0 ? 'better' : 'worse') : (zAuth >= 1.65 ? 'better' : (zAuth <= -1.65 ? 'worse' : 'same')));
     body += `<div class="zkv" style="margin-top:8px;"><div>история</div><div>${ev.samples} зон-кандидатов, ${dd(ev.first_t)} — ${dd(ev.last_t)}</div>
-      <div>правила</div><div>тейк <b>+${ev.tp}%</b> от средней, порог оценки ${ev.thr}</div></div>
-      <div class="zsub">Честная проверка: модель училась до ${dd(ev.split_t)} и сдала экзамен на периоде после — его она не видела.</div>
-      <div class="zwrap"><table class="ztbl"><thead><tr><th></th><th>сделок</th><th>WR</th><th>средний</th></tr></thead><tbody>
-      ${row('модель, экзамен', ev.test, 'период, которого она не видела')}${row('без модели, экзамен', ev.base_test, 'просто ближайшая зона')}${row('модель, обучение', ev.train, 'на этом подбиралась — для сравнения')}</tbody></table></div>
-      ${better != null ? `<div class="zbanner ${ev.test.avg > 0 && better > 0 ? 'pos' : (ev.test.avg > 0 ? 'warn' : 'neg')}">${ev.test.avg > 0 && better > 0 ? `На экзамене модель в плюсе и лучше простого выбора на ${better.toFixed(2)}R за сделку — отбор работает.` : ev.test.avg > 0 ? 'На экзамене в плюсе, но не лучше простого выбора ближайшей зоны.' : 'На экзамене модель пока в минусе — отбор по результату на этих правилах не находит перевеса.'}</div>` : ''}`;
-  } else if (!a.running) body += `<div class="dim" style="margin-top:6px;">модель ещё не обучена — начнёт через несколько минут после запуска бота</div>`;
-  const lv = o.live || {};
-  body += `<div style="margin-top:8px;">Живые зоны: активных ${o.active || 0} · отработало ${lv.n || 0}${lv.n ? ` · средний ${sgR(lv.avg)}, WR ${lv.wr}%` : ''} · только наблюдение</div>
+      <div>выбрано</div><div><b>${ev.var_name}</b> · тейк <b>+${ev.tp}%</b> · беру лучшие ${Math.round(ev.q * 100)}% зон</div></div>
+      <div class="zsub">Честно, по времени: модели учились до ${dd(ev.split_t)}, лучшая выбиралась на ${dd(ev.split_t)}—${dd(ev.test_t)}, экзамен — после ${dd(ev.test_t)}: на нём ничего не подбиралось.</div>
+      <div class="zwrap"><table class="ztbl"><thead><tr><th>экзамен</th><th>сделок</th><th>WR</th><th>средний</th></tr></thead><tbody>
+      ${row('🧪 наш поиск', ev.test, 'выбранная модель', true)}${row('📌 автор канала', at.n ? at : null, 'его посты за те же недели, те же правила лесенки', true)}${row('без модели', ev.base_test, 'просто ближайшая зона')}</tbody></table></div>
+      ${canCmp ? `<div class="zbanner ${verdict === 'better' && ev.test.avg > 0 ? 'pos' : (ev.test.avg > 0 ? 'warn' : 'neg')}">${verdict === 'better' && ev.test.avg > 0 ? `🏆 На экзамене наш поиск лучше автора на ${beatAuth.toFixed(2)}R за сделку — и это больше случайного разброса.`
+          : verdict === 'same' ? `На уровне автора: разница ${beatAuth >= 0 ? '+' : ''}${beatAuth.toFixed(2)}R за сделку — в пределах случайности, превосходства пока нет.`
+          : ev.test.avg > 0 ? `В плюсе, но хуже автора на ${(-beatAuth).toFixed(2)}R за сделку.` : 'На экзамене в минусе — автора пока не превзошёл.'}${beatBase != null ? ` Против «просто ближайшей зоны»: ${beatBase >= 0 ? '+' : ''}${beatBase.toFixed(2)}R.` : ''}</div>`
+        : `<div class="zsub">Сравнить с автором пока нельзя: на неделях экзамена мало его отработанных постов (${at.n || 0}, нужно 10) или наших сделок.</div>`}
+      ${(ev.variants || []).length ? `<details><summary>все модели</summary><div class="zsub">каждая на своём лучшем тейке и пороге; «подбор» — где выбирали, «экзамен» — где не видели</div><div class="zwrap"><table class="ztbl"><thead><tr><th>модель</th><th>подбор</th><th>экзамен</th></tr></thead><tbody>${ev.variants.map(v => `<tr class="${v.var === ev.var ? 'zbest' : ''}"><td>${v.name}<div class="dim">тейк +${v.tp}% · лучшие ${Math.round(v.q * 100)}%</div></td><td>${sgR(v.val.avg)}<div class="dim">${v.val.n}</div></td><td>${sgR(v.test.avg)}<div class="dim">${v.test.n}</div></td></tr>`).join('')}</tbody></table></div></details>` : ''}`;
+  } else if (!a.running) body += `<div class="dim" style="margin-top:6px;">${ev ? 'новая версия поиска — история собирается заново, начнётся через несколько минут после запуска' : 'модель ещё не обучена — начнёт через несколько минут после запуска бота'}</div>`;
+  const lv = o.live || {}, al = o.author_live || {};
+  body += `<div style="margin-top:8px;">Живые зоны: активных ${o.active || 0} · отработало ${lv.n || 0}${lv.n ? ` · средний ${sgR(lv.avg)}, WR ${lv.wr}%` : ''}${al.n ? ` · автор за те же недели: ${al.n} сделок, ${sgR(al.avg)}` : ''} · только наблюдение</div>
     <button onclick="zonesPost('/api/zones/oc/retrain', {}); setTimeout(refreshZones, 1500);" class="zbtn">↻ дополнить историю и переобучить</button>
     ${ocZ.length ? `<details style="margin-top:6px;"><summary class="dim" style="cursor:pointer;">зоны поиска по результату (${ocZ.length})</summary>${zonePostBlocks(ocZ)}</details>` : ''}`;
   return `<div class="zcard" style="font-size:var(--fs-sm);"><div class="zh">🧪 Поиск по результату</div>${body}</div>`;

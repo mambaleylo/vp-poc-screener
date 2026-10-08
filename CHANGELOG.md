@@ -19093,3 +19093,17 @@ v0.99.527 - The outside link opened a Cloudflare error page ("Method Not Allowed
          the tunnel's own address counts; a failure before any link is shown in the settings
          and sent to Telegram once ("⚠️ Внешняя ссылка не создалась — …"), the tunnel is tried
          again after 2 minutes (20 s when it had worked and dropped).
+v0.99.528 - Зоны: "поиск по результату" v2 (user: "надо, чтобы он превзошёл по качеству находки
+         зон автора; сделай сразу всё возможное"). 11 more features of the market around
+         each zone (the coin's and BTC's trend, the 50-EMA slope, volatility, the last day's
+         move, where the price sits in its 20-day range, earlier closes through the zone, 4h
+         pivots at it, the last day's volume, distance and width in %) — 22 in all; a
+         non-linear model (gradient-boosted trees on the expected R, pure Python, histogram
+         splits) next to the linear one on 11 and on 22 features; a snapshot every 2 days
+         (was 3). Honest by time in three parts: fit on the first 60 %, the model / take /
+         share of zones chosen on the next 20 %, the exam on the last 20 % nothing was
+         chosen on. The card shows our exam next to the author's own ladders over the same
+         weeks (the same rules) and "просто ближайшая зона", with the verdict only when the
+         difference is beyond chance (1.65 standard errors); every model's exam in a table;
+         our live zones next to the author's over the same weeks. The data set is built
+         again once (new features); observation only, as before.
