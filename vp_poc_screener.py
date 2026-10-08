@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.517"
+APP_VERSION = "0.99.518"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23277,6 +23277,8 @@ def zones_znotify(z, text, important=False):
         return   # v0.99.506 — "поиск по результату": tab only while it is being checked
     if z.get("own") and not (important and _own_tg_ok()):
         return
+    if z.get("own"):   # v0.99.518 — never mistaken for the author's post
+        text = "🔎 Наш поиск" + ("" if AUTOTRADE_ENABLED_ZONES_OWN else " (наблюдение, на бирже ордеров нет)") + ": " + text
     zones_notify(text)
 
 
@@ -29806,11 +29808,12 @@ function zStatusHtml(d) {
   else if (l.finished) out.push(row('✅', `история пересчитана в ${hm(l.finished)}${l.took != null ? ` за ${l.took} с` : ''}${l.summary ? ` · ${l.summary}` : ''} · следующий пересчёт — после новой отработанной зоны или через 30 мин`));
   else out.push(row('⏳', 'пересчёт истории ещё не запускался после старта — начнётся в течение минуты'));
   const L = a.ladders || {};
-  if (L.pending || L.open) out.push(row('💰', `лесенок: ждут налива ${L.pending || 0}, в позиции ${L.open || 0}` +
+  if (L.pending || L.open) out.push(row('💰', `посты автора: ждут налива ${L.pending || 0}, в позиции ${L.open || 0}` +
       (d.autotrade ? ` · на бирже ${L.limits || 0} лимиток у ${L.on_exchange || 0} постов · ${L.waiting || 0} ждут подхода цены (маржа не занята)` + (L.virt_open ? ` · ${L.virt_open} в позиции только у бота (налились до ордеров на бирже — довожу до итога для статистики)` : '') : ' · автоторговля выкл — только отслеживаю') +
-      (L.finder ? ` · отдельно: ${L.finder} лесенок нашего поиска (только наблюдение, без ордеров)` : '') +
+
       (L.no_auto ? ` · ${L.no_auto} только сигнал (доп. аргументы)` : '')));
-  else out.push(row('💤', 'активных лесенок нет — жду новых постов'));
+  else out.push(row('💤', 'активных постов автора нет — жду новых'));
+  if (L.finder) out.push(row('🔎', `наш поиск: ${L.finder} лесенок — ${d.autotrade_own ? 'отдельно от постов автора' : 'только наблюдение, на биржу не идут'}`));   // v0.99.518
   const oc = a.oc;
   if (oc && oc.running) out.push(row('<span class="zspin">🧪</span>', `<b>поиск по результату</b>: ${oc.stage || '…'}${oc.total ? ` — ${oc.done || 0} из ${oc.total}` : ''}`));
   const rc = a.recheck;
@@ -29967,7 +29970,8 @@ async function refreshZones() {
   setPanelHtml(panel, `${warn}
     ${zStatusHtml(d)}
     ${summary}
-    <div class="zsec">Активные зоны (${act.length})</div>
+    <div class="zsec">Зоны автора — активные (${act.length})</div>
+    <div class="dim" style="font-size:var(--fs-sm);margin:-4px 0 8px;">${d.autotrade ? 'по этим постам бот ставит лимитки на бирже, когда цена подходит' : 'автоторговля выкл — только отслеживаю'}</div>
     ${act.length ? zonePostBlocks(act) : '<div class="dim" style="margin-bottom:10px;">нет — новые посты из группы появятся здесь</div>'}
     ${zoneTradesHtml(closedTr)}
     <div class="zsec">Правила и риск</div>
@@ -29975,6 +29979,7 @@ async function refreshZones() {
     <div class="zsec">Источники</div>
     ${zutHtml(ut)}
     <div class="dim" style="font-size:var(--fs-sm);margin:-4px 0 10px;">или ${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>
+    <div class="zsec">🔎 Наши зоны — ${d.autotrade_own ? 'наш поиск торгует, поиск по результату — наблюдение' : 'только наблюдение, на биржу не идут'}</div>
     ${ownHtml(d, ownZ)}
     ${ocHtml(d, ocZ)}
     ${bad ? `<div style="margin-bottom:8px;">${bad}</div>` : ''}

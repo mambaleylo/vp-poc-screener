@@ -19003,3 +19003,9 @@ v0.99.517 - Зоны: the ladders "waiting for a fill" did not go away after v0.
          "мониторинг молчит 3 мин"); a ladder without orders on the exchange is now checked
          every 5 minutes (every candle since the last check is still read). A zone added by
          hand is never replaced by the history recheck.
+v0.99.518 - Зоны: the author's zones and ours are kept apart everywhere (user: "просто
+         разделить надо, а то я думал что эти зоны реально откроются на бирже, а это наши
+         зоны"): the status shows "посты автора: …" and a separate "🔎 наш поиск: N лесенок —
+         только наблюдение, на биржу не идут"; the list heads "Зоны автора — активные" (with
+         whether the bot places orders) and "🔎 Наши зоны — только наблюдение"; a Telegram
+         message of our finder starts with "🔎 Наш поиск (наблюдение, на бирже ордеров нет)".
