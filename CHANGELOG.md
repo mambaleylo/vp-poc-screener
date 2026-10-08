@@ -19087,3 +19087,9 @@ v0.99.526 - An outside link without the router (user: "а вариант без 
          tunnel that dies is started again after 20 s; one left by the previous run (a
          restart replaces the process, the child keeps going) is stopped at start, so there
          is only one.
+v0.99.527 - The outside link opened a Cloudflare error page ("Method Not Allowed", code 10005):
+         when the quick tunnel could not be created, cloudflared printed its service address
+         (https://api.trycloudflare.com/tunnel) and the bot took that for the link. Now only
+         the tunnel's own address counts; a failure before any link is shown in the settings
+         and sent to Telegram once ("⚠️ Внешняя ссылка не создалась — …"), the tunnel is tried
+         again after 2 minutes (20 s when it had worked and dropped).

@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.526"
+APP_VERSION = "0.99.527"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -25028,8 +25028,18 @@ def _tunnel_stop():
 
 def _tunnel_reader(p_):
     for line in p_.stderr:
-        m_ = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", line)
+        # v0.99.527 — the tunnel's own address only: cloudflared also prints its service
+        # address https://api.trycloudflare.com (e.g. "failed to request quick Tunnel: Post
+        # https://api.trycloudflare.com/tunnel …") — that one was sent as the link
+        m_ = re.search(r"https://(?!api\.)[a-z0-9]+(?:-[a-z0-9]+)+\.trycloudflare\.com", line)
+        if _tunnel.get("proc") is p_ and not m_ and not _tunnel.get("url") and re.search(r"\bERR\b|failed|error", line, re.I):
+            msg_ = re.sub(r"^\S*\d{4}-\d\d-\d\dT\S+\s+", "", line.strip())   # without the timestamp
+            _tunnel["error"] = "Cloudflare не выдал ссылку: " + msg_[-160:]
+            if _tunnel.get("err_sent") != msg_[:80]:   # the same failure again: no new message
+                _tunnel["err_sent"] = msg_[:80]
+                tg_outbox_push(f"⚠️ Внешняя ссылка не создалась — {_tunnel['error']}\nпопробую ещё раз")
         if m_ and _tunnel.get("proc") is p_:
+            _tunnel["error"] = None
             _tunnel["url"] = m_.group(0)
             if _tunnel.get("sent_url") != _tunnel["url"]:
                 _tunnel["sent_url"] = _tunnel["url"]
@@ -25050,9 +25060,10 @@ def tunnel_loop():
                     _tunnel_stop()
                 _tunnel["error"] = None
             elif not alive:
-                if p_:   # it died: started again after a pause
+                if p_:   # it died: started again after a pause (longer when no link came)
+                    had_url = bool(_tunnel.get("url"))
                     _tunnel_stop()
-                    time.sleep(20)
+                    time.sleep(20 if had_url else 120)
                 exe = shutil.which("cloudflared")
                 if not exe:
                     _tunnel["error"] = "cloudflared не установлен — в Termux: pkg install cloudflared"
