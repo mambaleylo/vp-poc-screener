@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.523"
+APP_VERSION = "0.99.524"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23056,7 +23056,7 @@ def _zones_track_pb(post):
             if hit(tr["entry"], d < 0):
                 with _zones_lock:
                     tr.update({"status": "OPEN", "fill_t": c["time"]})
-                zones_pb_notify(f"🧪 Откат · {sym.replace('_USDT', '')}: лимитка {tr['entry']:.6g} налилась · стоп {tr['sl']:.6g} · тейк {tr['tp']:.6g}")
+                zones_pb_notify(f"🧪 Откат · {sym.replace('_USDT', '')}: цена дошла до лимитки {tr['entry']:.6g} (сигнал, на бирже ордера нет) · стоп {tr['sl']:.6g} · тейк {tr['tp']:.6g}")
                 if hit(tr["sl"], d < 0):
                     res = ("LOSS", tr["sl"], c["time"])
                     break
@@ -23976,6 +23976,11 @@ def _zones_real_step(tr, pos_map):
                     continue
             f = abs(int(float(o.get("size") or 0))) - abs(int(float(o.get("left") or 0)))
             if f != leg["filled"]:
+                if f > (leg["filled"] or 0):   # v0.99.524 — the exchange's own fill, reported as such
+                    tot = sum(l_.get("filled") or 0 for l_ in r["legs"] if l_ is not leg) + f
+                    zones_notify(f"💰 {sym}: на бирже исполнилась лимитка {leg['i'] + 1}/{len(tr['legs'])} по "
+                                 f"{float(o.get('fill_price') or leg['price']):.6g} ({f} контр.) · в позиции {tot} контр. · "
+                                 f"стоп {tr['sl']:.6g} ставлю на бирже")
                 leg["filled"], changed = f, True
                 r["t_change"] = now
             if o.get("status") == "finished":
@@ -24276,9 +24281,26 @@ def _zones_ladder_tick(group, now, p, pos_map):
                         post = next((p_ for p_ in ZONES["posts"] if p_["id"] == lead.get("post_id")), None)
                     if post:
                         _zones_close_approach(post, c["close"], "вход от зоны")
-                zones_znotify(lead, f"{'⬆️' if s > 0 else '⬇️'} {sym}: налилась лимитка {len(fills)}/{len(tr['legs'])} по "
-                                    f"{new[-1]['fill']:.6g} · средняя {avg:.6g} · стоп {tr['sl']:.6g} · тейк {tr['tp']:.6g}"
-                                    f" · {zones_risk_txt(None) if tr.get('real') else 'без автосделки'}", important=True)
+                # v0.99.524 — this is the bot's own record (the candles touched the line):
+                # the exchange may have no order there (not placed yet / skipped / the lot on
+                # another line) or its limit not filled; the real fill is its own "💰" message
+                rl = tr.get("real") or {}
+                leg_i = tr["legs"].index(new[-1])
+                on_ex = next((l_ for l_ in rl.get("legs") or [] if l_.get("i") == leg_i), None)
+                if on_ex:
+                    ex_txt = "на бирже лимитка по этой линии стоит — исполнение придёт отдельным 💰-сообщением"
+                elif AUTOTRADE_ENABLED_ZONES and not tr.get("no_auto"):
+                    why_ = ((tr.get("autotrade") or {}).get("detail") or "").strip()
+                    ex_txt = "на бирже ордера по этой линии нет" + (f" — {why_[:120]}" if why_ and not rl else
+                                                                     (" (лот стоит на другой линии)" if rl else " (цена была далеко, лимитки ещё не выставлялись)"))
+                else:
+                    ex_txt = "без автосделки" + (f" — {tr['no_auto']}" if tr.get("no_auto") else "")
+                if not AUTOTRADE_ENABLED_ZONES or tr.get("no_auto"):   # the bot's record is all there is
+                    zones_znotify(lead, f"📝 {sym}: по учёту бота налилась лимитка {len(fills)}/{len(tr['legs'])} по "
+                                        f"{new[-1]['fill']:.6g} · средняя {avg:.6g} · стоп {tr['sl']:.6g} · тейк {tr['tp']:.6g}\n{ex_txt}",
+                                  important=True)
+                else:   # autotrade on: the exchange's own fill is the "💰" message; the record — the tab only
+                    tr["virt_note"] = ex_txt
             if tr.get("result"):
                 _zones_ladder_finish(tr, group, tr["result"], tr["exit"], tr["t_out"])
                 break

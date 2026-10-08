@@ -19056,3 +19056,13 @@ v0.99.523 - Зоны: live pullback signals, no autotrade (user: "хочу то�
          table and keeps the live results under the table ("🔔 Сигналы откатов вживую": the
          variant in use, counts, average R, the last signals). A checkbox turns the Telegram
          messages off; the statistics go on either way.
+v0.99.524 - Зоны: "налилась лимитка" came again and again with no trade on the exchange (user:
+         "пишет постоянно что налилась лимитка, но по факту на бирже сделки не открыты"). That
+         message was the bot's own record (the candles touched a line) and even showed the
+         risk as if it were real, while the exchange often had no order there (not placed yet
+         — the price was far, skipped for the risk, the lot on another line) or its limit not
+         filled. Now with autotrade on the record's fills stay in the tab, and the exchange's
+         own fill is reported: "💰 SYM: на бирже исполнилась лимитка N/M по X (K контр.) · в
+         позиции … · стоп ставлю на бирже". With autotrade off (or a post marked no-auto) the
+         record's message says so: "📝 по учёту бота … без автосделки". The pullback signal's
+         fill says "сигнал, на бирже ордера нет".
