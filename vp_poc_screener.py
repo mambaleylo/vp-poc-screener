@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.522"
+APP_VERSION = "0.99.523"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21284,7 +21284,7 @@ def zones_save():
     with _zones_lock:
         _zones_save_seq[0] += 1
         seq = _zones_save_seq[0]
-        data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode", "own_last_scan", "monitor_ok", "fine_only", "recheck_v515") if k in ZONES}, default=str)
+        data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode", "own_last_scan", "monitor_ok", "fine_only", "pb_tg", "recheck_v515") if k in ZONES}, default=str)
     try:   # v0.99.455 — written to disk for sure; the previous state kept as .bak
         # v0.99.511 — one writer at a time (the history recheck, the monitor and the
         # learner save from different threads: they shared one .tmp — one renamed it
@@ -21328,7 +21328,7 @@ def zones_load():
                 d = json.load(f)
             with _zones_lock:
                 for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode",
-                          "own_last_scan", "monitor_ok", "fine_only", "recheck_v515"):
+                          "own_last_scan", "monitor_ok", "fine_only", "pb_tg", "recheck_v515"):
                     if k in d:
                         ZONES[k] = d[k]
                 ZONES["train_mode"] = False   # v0.99.480 — the switch is gone: new posts are always live
@@ -22933,6 +22933,174 @@ def zones_approach_on_new_post(post):
     return line
 
 
+def zones_pb_tg():
+    """v0.99.523 — the switch for the pullback signals in Telegram (on by default)"""
+    with _zones_lock:
+        return ZONES.get("pb_tg", True) is not False
+
+
+def zones_pb_notify(text):
+    if zones_pb_tg():
+        zones_notify(text)
+
+
+def zones_pb_variant():
+    """v0.99.523 — the pullback variant to signal: the best of the hypotheses table
+    with enough trades, in plus over the whole history AND on its last third"""
+    with _zones_lock:
+        hy = (ZONES.get("approach") or {}).get("hyp") or {}
+    for r in hy.get("rows") or []:
+        if r["n"] >= ZONES_LEARN_MIN and r["avg_r"] > 0 and (r.get("test_r") or 0) > 0:
+            return r
+    return None
+
+
+def _zones_pb_size(sym, direction, entry, sl):
+    """what a real order would be: leverage, margin and the loss at the stop at the
+    zones risk (nothing is placed — the pullback signals are for watching)"""
+    try:
+        with using_account("zones"):
+            spec = get_contract_spec(sym)
+            with state_lock:
+                mmr = (STATE.get("scalp_mmr_map") or {}).get(sym, SCALP_DEFAULT_MMR_PCT)
+            tiers = get_risk_limit_tiers_for_symbol(sym)
+            risk = auto_risk_for("zones", sym) or AUTOTRADE_RISK_PCT_OF_BALANCE
+            equity = get_futures_total_equity()
+            margin, lev, skip = compute_risk_based_position(direction, entry, sl, spec.get("leverage_max") or 125, mmr, equity,
+                                                            risk_pct=risk, symbol=sym, tiers_by_symbol={sym: tiers} if tiers else None)
+            if skip:
+                return {"risk": risk, "skip": skip}
+            contracts, notional, m_act, skip = compute_contracts_from_margin(sym, entry, margin, lev)
+            mult = float(spec.get("quanto_multiplier") or 1)
+            loss = contracts * mult * abs(entry - sl) * (1 + 0.0012)
+            return {"risk": risk, "lev": lev, "margin": round(m_act, 2), "contracts": contracts, "notional": round(notional, 2),
+                    "loss": round(loss, 2), "loss_pct": round(loss / equity * 100, 1) if equity else None, "skip": skip}
+    except Exception as e:
+        return {"skip": str(e)[:120]}
+
+
+def zones_pb_on_new_post(post):
+    """v0.99.523 — a live pullback signal (user: "хочу торговать откаты — уведомления
+    со лимиткой, стопом и плечом, автоторговля не нужна, статистика сделок на будущее"):
+    a fresh post with the price not yet at its zones gets the best variant of the
+    hypotheses table; the bot follows it on the candles and keeps its own results."""
+    now = time.time()
+    if not post.get("symbol") or post.get("train") or now - post["post_time"] > ZONES_APPR_FRESH_SEC or post.get("pb_trade"):
+        return None
+    v = zones_pb_variant()
+    if not v:
+        return None
+    try:
+        price = _zones_symbols_and_prices().get(post["symbol"])
+    except Exception:
+        price = None
+    ap = zones_approach_target(zones_post_levels(post), price)
+    if not ap:
+        return None
+    d, sym = ap["dir"], post["symbol"]
+    e = price * (1 - d * v["pull"] / 100)
+    line_tp = zones_approach_tp(ap["target"], d)
+    if (d > 0 and e >= line_tp) or (d < 0 and e <= line_tp):
+        return None
+    sl = e * (1 - d * v["sl"] / 100)
+    risk_px = abs(e - sl)
+    tp = {"line": line_tp, "half": e + (line_tp - e) / 2, "2r": e + d * 2 * risk_px, "3r": e + d * 3 * risk_px}[v["tp"]]
+    direction = "LONG" if d > 0 else "SHORT"
+    sz = _zones_pb_size(sym, direction, e, sl)
+    tr = {"symbol": sym, "direction": direction, "dir": d, "time": int(now), "ref": price, "entry": e, "sl": sl, "tp": tp,
+          "line_tp": line_tp, "target": ap["target"], "variant": {k: v[k] for k in ("pull", "sl", "tp", "n", "avg_r", "test_r", "wr")},
+          "size": sz, "status": "PENDING" if v["pull"] else "OPEN", "fill_t": None if v["pull"] else int(now),
+          "chk_t": int(now // 60 * 60), "result": None, "pnl_r": None, "exit_price": None, "exit_time": None}
+    post["pb_trade"] = tr
+    word = "ЛОНГ" if d > 0 else "ШОРТ"
+    tp_name = ZONES_HYP_TP_NAMES.get(v["tp"], v["tp"])
+    size_txt = (f"плечо {sz['lev']}x · маржа ${sz['margin']:g} · на стопе −${sz['loss']:g}"
+                + (f" ({sz['loss_pct']:g}% баланса)" if sz.get("loss_pct") is not None else "")
+                if sz.get("lev") and not sz.get("skip") else f"объём: {sz.get('skip') or 'не посчитан'}")
+    zones_pb_notify(f"🧪 Откат · {sym.replace('_USDT', '')} {word}\n"
+                 + (f"лимитка {e:.6g} (откат {v['pull']:g}% от {price:.6g})" if v["pull"] else f"вход по рынку {e:.6g}")
+                 + f"\nстоп {sl:.6g} ({v['sl']:g}%) · тейк {tp:.6g} ({tp_name})\n{size_txt}\n"
+                 f"по истории: {v['n']} сделок, WR {v['wr']}%, {v['avg_r']:+.2f}R, последняя треть {v['test_r']:+.2f}R\n"
+                 f"🔔 только сигнал — бот ордер не ставит, ведёт статистику")
+    return tr
+
+
+def _zones_track_pb(post):
+    """v0.99.523 — the pullback signal on the 1m candles: the fill, the stop / take
+    (the stop first on one candle; the take from the candle after the fill), the
+    move to the line before the fill = missed, 14 days = time exit."""
+    tr = post["pb_trade"]
+    now = time.time()
+    d, sym = tr["dir"], tr["symbol"]
+    try:
+        cs = get_candles_range(sym, "1m", int(tr["chk_t"]), int(now)) or []
+    except Exception as e:
+        log_error(f"zones pullback candles {sym}: {e}")
+        return False
+    changed = False
+    risk_px = abs(tr["entry"] - tr["sl"])
+    fee = ZONES_FEE * tr["entry"] / risk_px if risk_px else 0
+    res = None
+    for c in cs:
+        if c["time"] < tr["chk_t"] or c["time"] + 60 > now:
+            continue
+        tr["chk_t"] = c["time"] + 60
+        changed = True
+        hit = lambda px, up: (c["high"] >= px) if up else (c["low"] <= px)
+        if tr["status"] == "PENDING":
+            if hit(tr["line_tp"], d > 0):
+                with _zones_lock:
+                    tr.update({"status": "MISSED", "exit_time": c["time"]})
+                zones_pb_notify(f"🧪 Откат · {sym.replace('_USDT', '')}: цена ушла к зоне без отката — лимитка не налилась, сигнал снят")
+                return True
+            if hit(tr["entry"], d < 0):
+                with _zones_lock:
+                    tr.update({"status": "OPEN", "fill_t": c["time"]})
+                zones_pb_notify(f"🧪 Откат · {sym.replace('_USDT', '')}: лимитка {tr['entry']:.6g} налилась · стоп {tr['sl']:.6g} · тейк {tr['tp']:.6g}")
+                if hit(tr["sl"], d < 0):
+                    res = ("LOSS", tr["sl"], c["time"])
+                    break
+            continue
+        if hit(tr["sl"], d < 0):
+            res = ("LOSS", tr["sl"], c["time"])
+            break
+        if c["time"] > (tr.get("fill_t") or 0) and hit(tr["tp"], d > 0):
+            res = ("WIN", tr["tp"], c["time"])
+            break
+    if not res and now >= post["post_time"] + ZONES_MAX_DAYS * 86400:
+        if tr["status"] == "PENDING":
+            with _zones_lock:
+                tr.update({"status": "EXPIRED", "exit_time": int(now)})
+            return True
+        if cs:
+            res = ("TIME_EXIT", cs[-1]["close"], int(now))
+    if res:
+        kind, px, tx = res
+        r = d * (px - tr["entry"]) / risk_px - fee if risk_px else 0
+        with _zones_lock:
+            tr.update({"status": "CLOSED", "result": kind, "exit_price": px, "exit_time": tx, "pnl_r": round(r, 3)})
+        if zones_pb_tg():
+            notify_trade_result("zones_pb", sym, tr["direction"], tr["entry"], px, kind, r, real=False,
+                                note=f"откат {tr['variant']['pull']:g}% · стоп {tr['variant']['sl']:g}% · тейк "
+                                     f"{ZONES_HYP_TP_NAMES.get(tr['variant']['tp'], tr['variant']['tp'])}")
+        _zones_learn_event.set()
+        changed = True
+    return changed
+
+
+def zones_pb_stats():
+    """the live pullback signals so far: how they went (the bot's own record)"""
+    with _zones_lock:
+        ts = [dict(p_["pb_trade"], post_id=p_["id"]) for p_ in ZONES["posts"] if p_.get("pb_trade")]
+    closed = [t for t in ts if t["status"] == "CLOSED"]
+    rs = [t["pnl_r"] for t in closed if t.get("pnl_r") is not None]
+    return {"n": len(ts), "open": sum(1 for t in ts if t["status"] == "OPEN"), "pending": sum(1 for t in ts if t["status"] == "PENDING"),
+            "missed": sum(1 for t in ts if t["status"] in ("MISSED", "EXPIRED")), "closed": len(closed),
+            "wins": sum(1 for t in closed if t["result"] == "WIN"), "avg_r": round(sum(rs) / len(rs), 3) if rs else None,
+            "sum_r": round(sum(rs), 2) if rs else None,
+            "last": sorted(ts, key=lambda t: -t["time"])[:15]}
+
+
 def _zones_close_real(symbol, direction, why):
     """v0.99.455 — close the real position; True only when the exchange
     confirmed it (or there is no such position). A network failure returns
@@ -23074,6 +23242,10 @@ def zones_add_post(data, post_time=None, source="web", caption="", train=None, s
         zones_replay_past(z)
     if new:
         post["approach_txt"] = zones_approach_on_new_post(post)
+        try:
+            zones_pb_on_new_post(post)   # v0.99.523
+        except Exception as e:
+            log_error(f"zones pullback signal {post.get('symbol')}: {e}")
     _own_after_post(post, new)   # v0.99.452 — would our finder have found it?
     zones_save()
     _zones_learn_event.set()
@@ -23221,6 +23393,10 @@ def zones_set_symbol(post, sym_txt):
         zones_replay_past(z)
     if new:
         post["approach_txt"] = zones_approach_on_new_post(post)
+        try:
+            zones_pb_on_new_post(post)   # v0.99.523
+        except Exception as e:
+            log_error(f"zones pullback signal {post.get('symbol')}: {e}")
     _own_after_post(post, new)
     zones_save()
     _zones_learn_event.set()
@@ -23277,7 +23453,7 @@ def _zones_outbox_save():
 TELEGRAM_ALERTS_TRADE_RESULTS = os.environ.get("VP_TG_TRADE_RESULTS", "1") == "1"            # v0.99.457
 TELEGRAM_TRADE_RESULTS_REAL_ONLY = os.environ.get("VP_TG_TRADE_RESULTS_REAL", "0") == "1"
 _TRADE_MOD_NAMES = {"neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "zones": "Зоны",
-                    "zones_own": "Зоны · 🔎 наш поиск", "zones_appr": "Зоны · движение к зоне"}
+                    "zones_own": "Зоны · 🔎 наш поиск", "zones_appr": "Зоны · движение к зоне", "zones_pb": "Зоны · 🧪 откат"}
 
 
 def tg_outbox_push(text):
@@ -24146,7 +24322,8 @@ def zones_monitor_tick(last_track=0.0):
             _zones_learn_event.set()
     with _zones_lock:
         active = [z for z in ZONES["zones"] if z.get("status") in ("watch", "in_trade") and z.get("symbol")]
-        any_appr = any((p_.get("appr_trade") or {}).get("status") == "OPEN" for p_ in ZONES["posts"])
+        any_appr = any((p_.get("appr_trade") or {}).get("status") == "OPEN"
+                       or (p_.get("pb_trade") or {}).get("status") in ("PENDING", "OPEN") for p_ in ZONES["posts"])
         real_tails = [z for z in ZONES["zones"] if z.get("status") not in ("watch", "in_trade") and _zones_real_live(z)]
     if not active and not any_appr and not real_tails:
         return last_track
@@ -24226,6 +24403,13 @@ def zones_monitor_tick(last_track=0.0):
                 changed = _zones_track_approach(post) or changed
             except Exception as e:
                 log_error(f"zones approach track {post.get('symbol')}: {e}")
+        with _zones_lock:   # v0.99.523 — the pullback signals
+            pbs = [p_ for p_ in ZONES["posts"] if (p_.get("pb_trade") or {}).get("status") in ("PENDING", "OPEN")]
+        for post in pbs:
+            try:
+                changed = _zones_track_pb(post) or changed
+            except Exception as e:
+                log_error(f"zones pullback track {post.get('symbol')}: {e}")
         for z in active:
             if z.get("status") == "in_trade" and z.get("trade") and not z["trade"].get("legs"):
                 try:
@@ -25898,6 +26082,7 @@ def api_zones_status():
     return jsonify({"posts": posts, "zones": zones, "learned": learned, "stats": stats, "params": zones_params(),
                     "act": act,
                     "approach": approach, "autotrade_approach": AUTOTRADE_ENABLED_ZONES_APPROACH,
+                    "pb": zones_pb_stats(), "pb_variant": zones_pb_variant(), "pb_tg": zones_pb_tg(),   # v0.99.523
                     "deps": zones_deps(), "tg": bool(TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID), "tg_error": tg_err,
                     "autotrade": AUTOTRADE_ENABLED_ZONES, "max_days": ZONES_MAX_DAYS, "tp_user": ZONES_TP_PCT,
                     "learn_min": ZONES_LEARN_MIN, "train_mode": bool(ZONES.get("train_mode")),
@@ -26246,6 +26431,16 @@ def api_zones_fine_only():
     zones_save()
     zones_act("learn", running=True, stage="запуск пересчёта", done=None, total=None, error=None)
     _zones_learn_event.set()
+    return jsonify({"ok": True, "on": on})
+
+
+@app.route("/api/zones/pb_tg", methods=["POST"])
+def api_zones_pb_tg():
+    """v0.99.523 — the pullback signals in Telegram on / off (the statistics go on either way)"""
+    on = bool((request.get_json(silent=True) or {}).get("on"))
+    with _zones_lock:
+        ZONES["pb_tg"] = on
+    zones_save()
     return jsonify({"ok": True, "on": on})
 
 
@@ -30160,10 +30355,22 @@ async function refreshZones() {
     const verdict = !b ? `мало постов (нужно ${d.learn_min} сделок на вариант)`
       : (b.avg_r > 0 && b.test_r != null && b.test_r > 0 ? `<span class="win">лучший вариант в плюсе и держится на последней трети истории</span> — можно думать о торговле`
       : (b.avg_r > 0 ? '<span class="loss">лучший вариант в плюсе только в целом, на последней трети — нет</span>: скорее подгонка под историю' : 'все варианты в минусе'));
-    hypCard = card('🧪 Вход до зоны — гипотезы', `<div class="zsub" style="margin-top:0;">Посты, где цена ещё не дошла до зон (${hy.posts}). Вход в сторону зоны: сразу или лимиткой после отката против движения; стоп от входа; тейк до 1-й линии, на полпути или 2R / 3R. Свеча и стоп, и тейк — считаю стоп. Под числом сделок — в какой доле постов был вход; под средним — рост счёта за сделку. «Посл. треть» — тот же вариант только на последней трети постов по времени: проверка, что это не подгонка. Счёт — при риске ${hy.risk}%. Только справка, сделок по ним бот не открывает.</div>
+    // v0.99.523 — the live pullback signals: the variant in use and how they went
+    const pb = d.pb || {}, pv = d.pb_variant;
+    const stTxt = {PENDING: '⏳ ждёт отката', OPEN: '🟢 в позиции', MISSED: '↗ ушла без отката', EXPIRED: '⌛ не налилась', CLOSED: ''};
+    const resTxt = {WIN: 'тейк', LOSS: 'стоп', TIME_EXIT: 'по времени'};
+    const pbRow = t => `<tr><td>${(t.symbol || '').replace('_USDT', '')} ${t.direction === 'LONG' ? 'лонг' : 'шорт'}<div class="dim">${zdate(t.time)}</div></td><td>${+(+t.entry).toPrecision(5)}<div class="dim">стоп ${+(+t.sl).toPrecision(5)} · тейк ${+(+t.tp).toPrecision(5)}</div></td><td>${t.status === 'CLOSED' ? `<b class="${t.pnl_r > 0 ? 'win' : 'loss'}">${resTxt[t.result] || t.result} ${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R</b>` : (stTxt[t.status] || t.status)}${t.size && t.size.lev ? `<div class="dim">${t.size.lev}x · −$${t.size.loss}</div>` : ''}</td></tr>`;
+    const pbBlock = `<div class="zh" style="margin-top:10px;">🔔 Сигналы откатов вживую</div>
+      <div class="zsub" style="margin-top:0;">${pv ? `сейчас сигналю вариант: <b>${pv.pull ? 'откат ' + pv.pull + '%' : 'вход сразу'} · стоп ${pv.sl}% · тейк ${tpN[pv.tp] || pv.tp}</b> (лучший, что в плюсе и на последней трети)` : 'ни один вариант не в плюсе на последней трети — новых сигналов нет'}. В Telegram: лимитка, стоп, тейк, плечо и убыток на стопе при вашем риске; ордера бот не ставит.</div>
+      <label style="display:block;margin:6px 0 8px;cursor:pointer;"><input type="checkbox" ${d.pb_tg ? 'checked' : ''} onchange="zonesPbTg(this.checked)"> <b>уведомления об откатах в Telegram</b><div class="dim" style="font-size:var(--fs-sm);">статистика ведётся в любом случае</div></label>
+      ${pb.n ? `<div class="zkv"><div>сигналов</div><div><b>${pb.n}</b>: ждут ${pb.pending} · в позиции ${pb.open} · не налились ${pb.missed} · закрыто ${pb.closed}</div>
+        ${pb.closed ? `<div>итог закрытых</div><div>тейков ${pb.wins} из ${pb.closed} · средний <b>${sgR(pb.avg_r)}</b> · всего ${pb.sum_r > 0 ? '+' : ''}${pb.sum_r}R</div>` : ''}</div>
+        <div class="zwrap"><table class="ztbl"><thead><tr><th>Монета</th><th>вход</th><th>итог</th></tr></thead><tbody>${(pb.last || []).map(pbRow).join('')}</tbody></table></div>` : '<div class="dim">живых сигналов пока не было</div>'}`;
+    hypCard = card('🧪 Вход до зоны — гипотезы', `<div class="zsub" style="margin-top:0;">Посты, где цена ещё не дошла до зон (${hy.posts}). Вход в сторону зоны: сразу или лимиткой после отката против движения; стоп от входа; тейк до 1-й линии, на полпути или 2R / 3R. Свеча и стоп, и тейк — считаю стоп. Под числом сделок — в какой доле постов был вход; под средним — рост счёта за сделку. «Посл. треть» — тот же вариант только на последней трети постов по времени: проверка, что это не подгонка. Счёт — при риске ${hy.risk}%. Сделок бот не открывает — только сигналы ниже.</div>
       <div class="zsub">${verdict}</div>
       ${top.length ? `<div class="zwrap"><table class="ztbl">${head}<tbody>${top.map(hrow).join('')}</tbody></table></div>` : ''}
-      <details><summary>все ${hy.rows.length} вариантов</summary><div class="zwrap"><table class="ztbl">${head}<tbody>${hy.rows.map(hrow).join('')}</tbody></table></div></details>`);
+      <details><summary>все ${hy.rows.length} вариантов</summary><div class="zwrap"><table class="ztbl">${head}<tbody>${hy.rows.map(hrow).join('')}</tbody></table></div></details>
+      ${pbBlock}`);
   }
   // --- 5. how the price behaves at the zones (reference)
   let behCard = '';
@@ -30715,6 +30922,9 @@ async function zonesTrainMode(on) {
 }
 function zonesDel(id) { if (confirm('Удалить зону?')) zonesPost('/api/zones/zone', {id, delete: true}); }
 function zonesDelPost(pid) { if (confirm('Удалить пост и его зоны?')) zonesPost('/api/zones/post_delete', {post_id: pid}); }
+function zonesPbTg(on) {   // v0.99.523
+  zonesPost('/api/zones/pb_tg', {on});
+}
 function zonesFineOnly(on) {   // v0.99.501
   zonesPost('/api/zones/fine_only', {on});
   setTimeout(refreshZones, 1500);

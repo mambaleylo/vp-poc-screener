@@ -19045,3 +19045,14 @@ v0.99.522 - Зоны: "🧪 Вход до зоны — гипотезы", a sepa
          shows the trades (and the share of posts entered), WR, average R, account growth
          at the risk in use, and the same variant on the last third of the posts only — the
          best of 100 always looks good on the data it was picked on. Reference only.
+v0.99.523 - Зоны: live pullback signals, no autotrade (user: "хочу торговать откаты — уведомления
+         с лимиткой, стопом и плечом, автоторговля не нужна, статистика сделок на будущее";
+         "не забудь галочку на эти уведы"). A fresh post with the price not yet at its zones
+         gets the best variant of the hypotheses table that is in plus over the whole history
+         AND on its last third (none such — no signal). Telegram: "🧪 Откат" with the limit,
+         the stop, the take, the leverage, the margin and the loss at the stop a real order
+         would have at the zones risk; then the fill, "went to the zone without a pullback",
+         and the result. The bot follows each signal on 1m candles by the same rules as the
+         table and keeps the live results under the table ("🔔 Сигналы откатов вживую": the
+         variant in use, counts, average R, the last signals). A checkbox turns the Telegram
+         messages off; the statistics go on either way.
