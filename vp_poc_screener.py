@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.516"
+APP_VERSION = "0.99.517"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23856,7 +23856,12 @@ def _zones_ladder_tick(group, now, p, pos_map):
                 tr["autotrade"] = {"status": "WAIT", "detail": f"цена ушла дальше {2 * arm:.2g}% — лимитки сняты до нового подхода",
                                    "leverage": None}
                 changed = True
-    if tr.get("status") in ("PENDING", "OPEN") and now - tr.get("chk_at", 0) >= 60:
+    # v0.99.517 — a ladder with orders on the exchange: every minute; one followed
+    # only by the bot (our finders, no autotrade, far from the price): every 5 minutes
+    # (the candles since the last check are all read, nothing is missed) — hundreds
+    # of ladders asked every minute held the monitor for minutes
+    chk_every = 60 if tr.get("real") else 300
+    if tr.get("status") in ("PENDING", "OPEN") and now - tr.get("chk_at", 0) >= chk_every:
         tr["chk_at"] = now
         t0 = tr["chk_t"]
         tf, sec = ("1m", 60) if now - t0 < 2 * 86400 else ("15m", 900)
@@ -24064,6 +24069,7 @@ def zones_unrevive():
                 z["trade"] = None
             z["result"], z["rules"] = None, "pending"
             n += 1
+    zones_act("unrevive", n=n, t=time.time())
     if n:
         log_error(f"zones: {n} zones of old posts made live by the history recheck went back to the history")
         zones_save()
@@ -24079,7 +24085,8 @@ def zones_monitor_loop():
         log_error(f"zones unrevive: {e}")
     with _zones_lock:   # v0.99.493 — what came back from the disk after the start
         zs = ZONES["zones"]
-        lad = [z for z in zs if (z.get("trade") or {}).get("legs") and z["trade"].get("status") in ("PENDING", "OPEN")]
+        lad = [z for z in zs if (z.get("trade") or {}).get("legs") and z["trade"].get("status") in ("PENDING", "OPEN")
+               and not z.get("own") and not z.get("oc")]   # v0.99.517 — the author's posts only
         zones_act_boot = {"version": APP_VERSION, "zones": sum(1 for z in zs if z.get("status") in ("watch", "in_trade")),
                           "ladders": len(lad), "positions": sum(1 for z in lad if z["trade"]["status"] == "OPEN"),
                           "real": sum(1 for z in lad if (z["trade"].get("real") or {}).get("legs") and not z["trade"]["real"].get("done")),
@@ -25663,8 +25670,10 @@ def api_zones_status():
         act = json.loads(json.dumps(ZONES_ACT, default=str))
         mon_ok = ZONES.get("monitor_ok")
     # v0.99.493 — what the ladders are doing now, for the "Состояние" block
-    lad = [z["trade"] for z in zones if (z.get("trade") or {}).get("legs")]
+    lad = [z["trade"] for z in zones if (z.get("trade") or {}).get("legs") and not z.get("own") and not z.get("oc")]
     live = [t for t in lad if t.get("status") in ("PENDING", "OPEN")]
+    # v0.99.517 — our own finders' ladders (observation, no orders) are counted apart
+    finder = [z for z in zones if (z.get("own") or z.get("oc")) and (z.get("trade") or {}).get("status") in ("PENDING", "OPEN")]
     act["ladders"] = {"pending": sum(1 for t in live if t["status"] == "PENDING"),
                       "open": sum(1 for t in live if t["status"] == "OPEN"),
                       "on_exchange": sum(1 for t in live if (t.get("real") or {}).get("legs") and not t["real"].get("done")),
@@ -25672,7 +25681,8 @@ def api_zones_status():
                       "waiting": sum(1 for t in live if t["status"] == "PENDING" and not t.get("real") and not t.get("no_auto")),
                       # v0.99.516 — filled in the bot's record before any real order (e.g. before autotrade): followed to the end, no order
                       "virt_open": sum(1 for t in live if t["status"] == "OPEN" and not t.get("real")),
-                      "no_auto": sum(1 for t in live if t.get("no_auto"))}
+                      "no_auto": sum(1 for t in live if t.get("no_auto")),
+                      "finder": len(finder)}
     act["monitor_age"] = round(time.time() - mon_ok) if mon_ok else None
     act["now"] = time.time()
     return jsonify({"posts": posts, "zones": zones, "learned": learned, "stats": stats, "params": zones_params(),
@@ -25829,6 +25839,7 @@ def api_zones_zone():
                     return jsonify({"ok": False, "error": "нужны монета, сторона и уровни"}), 400
                 post["symbol"] = sym + "_USDT"
                 z = zones_make(post, b["side"], b["levels"])
+                z["manual"] = True   # v0.99.517
                 ZONES["zones"].insert(0, z)
         if not b.get("delete") and not b.get("id"):
             zones_replay_past(z)
@@ -29797,6 +29808,7 @@ function zStatusHtml(d) {
   const L = a.ladders || {};
   if (L.pending || L.open) out.push(row('💰', `лесенок: ждут налива ${L.pending || 0}, в позиции ${L.open || 0}` +
       (d.autotrade ? ` · на бирже ${L.limits || 0} лимиток у ${L.on_exchange || 0} постов · ${L.waiting || 0} ждут подхода цены (маржа не занята)` + (L.virt_open ? ` · ${L.virt_open} в позиции только у бота (налились до ордеров на бирже — довожу до итога для статистики)` : '') : ' · автоторговля выкл — только отслеживаю') +
+      (L.finder ? ` · отдельно: ${L.finder} лесенок нашего поиска (только наблюдение, без ордеров)` : '') +
       (L.no_auto ? ` · ${L.no_auto} только сигнал (доп. аргументы)` : '')));
   else out.push(row('💤', 'активных лесенок нет — жду новых постов'));
   const oc = a.oc;

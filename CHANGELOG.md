@@ -18993,3 +18993,13 @@ v0.99.516 - Зоны: after the history recheck the status showed 163 ladders "w
          A zone edited / deleted by hand is never replaced by the recheck. (2) "ждут подхода
          цены" counted the bot's own positions too (filled before any real order); now only
          ladders not filled yet, the others shown apart.
+v0.99.517 - Зоны: the ladders "waiting for a fill" did not go away after v0.99.516 (user:
+         "зоны висят ждут налива, не пропали") — the v0.99.516 explanation was wrong: the
+         history recheck had revived nothing (the start-up check found none). The extra
+         ladders are our own finders' ("🔎 наш поиск" / "поиск по результату": up to 5 new
+         zones an hour each, 14 days, observation only, no orders) — they were counted together
+         with the author's posts. The status counts the author's ladders only and shows the
+         finders' apart. The monitor asked the candles of every ladder every minute (hundreds →
+         "мониторинг молчит 3 мин"); a ladder without orders on the exchange is now checked
+         every 5 minutes (every candle since the last check is still read). A zone added by
+         hand is never replaced by the history recheck.
