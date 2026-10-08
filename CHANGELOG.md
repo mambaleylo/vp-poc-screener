@@ -19035,3 +19035,13 @@ v0.99.521 - Зоны: an expensive coin on a small balance is not just skipped (
          stop, instead of 115 and $9.6). Also: a ladder whose size was refused by the common
          minimum-lot rule ended with an error instead of a skip — now it goes through the same
          line-by-line check.
+v0.99.522 - Зоны: "🧪 Вход до зоны — гипотезы", a separate table (user: "если входить на откате
+         3%, стоп 1% и тейк на первую линию — проверять такие гипотезы отдельной таблицей").
+         The finished posts where the price had not reached the zones yet: an entry toward
+         the zone at once or by a limit after a pullback of 1 / 2 / 3 / 5% against the move;
+         the stop 0.5 / 1 / 2 / 3 / 5% from the entry; the take before the 1st line, half the
+         way, 2R or 3R — 100 variants replayed on the candles (the stop first when one candle
+         reaches both; the move reaching the line before the entry = no trade). Every row
+         shows the trades (and the share of posts entered), WR, average R, account growth
+         at the risk in use, and the same variant on the last third of the posts only — the
+         best of 100 always looks good on the data it was picked on. Reference only.

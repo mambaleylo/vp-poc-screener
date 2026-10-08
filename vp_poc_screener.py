@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.521"
+APP_VERSION = "0.99.522"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22746,6 +22746,81 @@ def zones_approach_sim(cs, d, target, sl_pct, start, end):
             "t_out": after[-1]["time"], "open": True}
 
 
+ZONES_HYP_PULL = (0.0, 1.0, 2.0, 3.0, 5.0)   # v0.99.522 — wait for a pullback this % against the move before entering
+ZONES_HYP_SL = (0.5, 1.0, 2.0, 3.0, 5.0)     # stop, % from the entry
+ZONES_HYP_TP = ("line", "half", "2r", "3r")   # take: before the first line / half the way / 2R / 3R
+ZONES_HYP_TP_NAMES = {"line": "до 1-й линии", "half": "полпути до линии", "2r": "2R", "3r": "3R"}
+
+
+def zones_hyp_sim(after, d, target, pull, sl_pct, tp_mode):
+    """v0.99.522 — one "before the zone" entry variant on the candles after the post:
+    a limit pull % against the move from the first price (0 = at once), the stop
+    sl % from the entry, the take by tp_mode. The move reaching the take before the
+    entry = no trade. Conservative: the stop is checked first, the take only from
+    the candle after the fill. {"r", "result"} or None (no entry)."""
+    if not after:
+        return None
+    p0 = after[0]["open"]
+    e = p0 * (1 - d * pull / 100)
+    line_tp = zones_approach_tp(target, d)
+    if (d > 0 and e >= line_tp) or (d < 0 and e <= line_tp):
+        return None
+    sl = e * (1 - d * sl_pct / 100)
+    risk = e - sl if d > 0 else sl - e
+    tp = {"line": line_tp, "half": e + (line_tp - e) / 2, "2r": e + d * 2 * risk, "3r": e + d * 3 * risk}[tp_mode]
+    fee = ZONES_FEE * e / risk
+    filled = pull == 0
+    for k, c in enumerate(after):
+        if not filled:
+            if (d > 0 and c["high"] >= line_tp) or (d < 0 and c["low"] <= line_tp):
+                return None   # the move went without us
+            if (d > 0 and c["low"] <= e) or (d < 0 and c["high"] >= e):
+                filled = True
+                if (d > 0 and c["low"] <= sl) or (d < 0 and c["high"] >= sl):
+                    return {"r": -1 - fee, "result": "LOSS"}
+            continue
+        if (d > 0 and c["low"] <= sl) or (d < 0 and c["high"] >= sl):
+            return {"r": -1 - fee, "result": "LOSS"}
+        if k > 0 and ((d > 0 and c["high"] >= tp) or (d < 0 and c["low"] <= tp)):
+            return {"r": d * (tp - e) / risk - fee, "result": "WIN"}
+    if not filled:
+        return None
+    return {"r": d * (after[-1]["close"] - e) / risk - fee, "result": "TIME_EXIT"}
+
+
+def zones_hyp_table(cases):
+    """cases: [(post_time, after candles, dir, target)] of finished posts. Every variant
+    over all of them; "test" = the same variant on the last third of the history only
+    (the best of 100 variants always looks good on the data it was picked on)."""
+    if not cases:
+        return None
+    cases = sorted(cases, key=lambda c: c[0])
+    cut = cases[int(len(cases) * 2 / 3)][0] if len(cases) >= 6 else None
+    rf = _zones_risk_frac()
+    rows = []
+    for pull in ZONES_HYP_PULL:
+        for sl in ZONES_HYP_SL:
+            for tpm in ZONES_HYP_TP:
+                rs, rs_t, n_ent = [], [], 0
+                for t0, after, d, target in cases:
+                    r = zones_hyp_sim(after, d, target, pull, sl, tpm)
+                    if r is None:
+                        continue
+                    rs.append(r)
+                    if cut is not None and t0 >= cut:
+                        rs_t.append(r["r"])
+                if not rs:
+                    continue
+                xs = [r["r"] for r in rs]
+                lg = sum(math.log(max(1e-6, 1 + rf * x)) for x in xs) / len(xs)
+                rows.append({"pull": pull, "sl": sl, "tp": tpm, "n": len(xs), "entry_pct": round(len(xs) / len(cases) * 100),
+                             "wr": round(sum(1 for r in rs if r["result"] == "WIN") / len(rs) * 100, 1),
+                             "avg_r": round(sum(xs) / len(xs), 3), "g": round((math.exp(lg) - 1) * 100, 3),
+                             "test_n": len(rs_t), "test_r": round(sum(rs_t) / len(rs_t), 3) if rs_t else None})
+    rows.sort(key=lambda r: (-(r["n"] >= ZONES_LEARN_MIN), -r["avg_r"]))
+    return {"posts": len(cases), "cut": cut, "rows": rows, "risk": round(rf * 100, 2)}
+
+
 def zones_post_levels(post):
     with _zones_lock:
         return [list(z["levels"]) for z in ZONES["zones"]
@@ -22762,6 +22837,9 @@ def zones_approach_learn(cache=None):
         posts = [dict(p_) for p_ in ZONES["posts"] if p_.get("ok") and p_.get("symbol")]
     rows = {sl: [] for sl in ZONES_APPR_SL}
     reach, elig = 0, 0
+    hyp_cases = []   # v0.99.522
+    with _zones_lock:
+        fine_only = bool(ZONES.get("fine_only"))
     for post in posts:
         end = min(now, post["post_time"] + ZONES_MAX_DAYS * 86400)
         window_over = now >= post["post_time"] + ZONES_MAX_DAYS * 86400
@@ -22779,6 +22857,9 @@ def zones_approach_learn(cache=None):
         if touched or window_over:
             elig += 1
             reach += 1 if touched else 0
+            sec_ = (cs[1]["time"] - cs[0]["time"]) if len(cs) > 1 else 900
+            if not (fine_only and sec_ >= 14400):
+                hyp_cases.append((post["post_time"], [c for c in cs if c["time"] < end], ap["dir"], ap["target"]))
         for sl in ZONES_APPR_SL:
             r = zones_approach_sim(cs, ap["dir"], ap["target"], sl, post["post_time"], end)
             if r is not None and (not r.get("open") or window_over):
@@ -22792,6 +22873,10 @@ def zones_approach_learn(cache=None):
     best = max(ok, key=lambda r: r["avg_r"]) if ok else None
     res = {"at": now, "posts": elig, "reach_pct": round(reach / elig * 100, 1) if elig else None,
            "rows": out_rows, "best": best, "good": bool(best and best["avg_r"] > 0)}
+    try:
+        res["hyp"] = zones_hyp_table(hyp_cases)
+    except Exception as e:
+        log_error(f"zones hypotheses: {e}")
     with _zones_lock:
         ZONES["approach"] = res
     return res
@@ -30063,6 +30148,23 @@ async function refreshZones() {
       ${rows ? `<div class="zwrap"><table class="ztbl"><thead><tr><th>Стоп</th><th>WR</th><th>средний</th><th>сделок</th></tr></thead><tbody>${rows}</tbody></table></div>` : '<div class="dim">сделок пока нет</div>'}
       <div class="zsub">${ap.good && ap.best ? `в сигнале будет «можно заходить», стоп ${ap.best.sl}%` : (ap.best ? 'пока не в плюсе — в сигнале только справка' : `мало постов (нужно ${d.learn_min})`)}</div>`);
   }
+  // v0.99.522 — "before the zone" entry hypotheses: a separate table
+  let hypCard = '';
+  const hy = ap.hyp;
+  if (hy && (hy.rows || []).length) {
+    const tpN = {line: 'до 1-й линии', half: 'полпути', '2r': '2R', '3r': '3R'};
+    const hrow = r => `<tr class="${r.n < d.learn_min ? 'dim' : ''}"><td>${r.pull ? 'откат ' + r.pull + '%' : 'сразу'}<div class="dim">стоп ${r.sl}% · тейк ${tpN[r.tp] || r.tp}</div></td><td>${r.n}<div class="dim">${r.entry_pct}%</div></td><td>${r.wr}%</td><td>${sgR(r.avg_r)}<div class="dim">${sgP(r.g)}</div></td><td>${r.test_r == null ? '—' : sgR(r.test_r)}<div class="dim">${r.test_n || ''}</div></td></tr>`;
+    const head = '<thead><tr><th>Вход</th><th>сделок</th><th>WR</th><th>средний<div class="dim">счёт</div></th><th>посл. треть</th></tr></thead>';
+    const top = hy.rows.filter(r => r.n >= d.learn_min).slice(0, 10);
+    const b = top[0];
+    const verdict = !b ? `мало постов (нужно ${d.learn_min} сделок на вариант)`
+      : (b.avg_r > 0 && b.test_r != null && b.test_r > 0 ? `<span class="win">лучший вариант в плюсе и держится на последней трети истории</span> — можно думать о торговле`
+      : (b.avg_r > 0 ? '<span class="loss">лучший вариант в плюсе только в целом, на последней трети — нет</span>: скорее подгонка под историю' : 'все варианты в минусе'));
+    hypCard = card('🧪 Вход до зоны — гипотезы', `<div class="zsub" style="margin-top:0;">Посты, где цена ещё не дошла до зон (${hy.posts}). Вход в сторону зоны: сразу или лимиткой после отката против движения; стоп от входа; тейк до 1-й линии, на полпути или 2R / 3R. Свеча и стоп, и тейк — считаю стоп. Под числом сделок — в какой доле постов был вход; под средним — рост счёта за сделку. «Посл. треть» — тот же вариант только на последней трети постов по времени: проверка, что это не подгонка. Счёт — при риске ${hy.risk}%. Только справка, сделок по ним бот не открывает.</div>
+      <div class="zsub">${verdict}</div>
+      ${top.length ? `<div class="zwrap"><table class="ztbl">${head}<tbody>${top.map(hrow).join('')}</tbody></table></div>` : ''}
+      <details><summary>все ${hy.rows.length} вариантов</summary><div class="zwrap"><table class="ztbl">${head}<tbody>${hy.rows.map(hrow).join('')}</tbody></table></div></details>`);
+  }
   // --- 5. how the price behaves at the zones (reference)
   let behCard = '';
   if (st.finished) {
@@ -30102,7 +30204,7 @@ async function refreshZones() {
     ${act.length ? zonePostBlocks(act) : '<div class="dim" style="margin-bottom:10px;">нет — новые посты из группы появятся здесь</div>'}
     ${zoneTradesHtml(closedTr)}
     <div class="zsec">Правила и риск</div>
-    ${ruleCard}${diagCard}${riskCard}${apCard}${behCard}
+    ${ruleCard}${diagCard}${riskCard}${apCard}${hypCard}${behCard}
     <div class="zsec">Источники</div>
     ${zutHtml(ut)}
     <div class="dim" style="font-size:var(--fs-sm);margin:-4px 0 10px;">или ${tg}. Зелёная зона — лонг, красная — шорт; линии внутри зоны — точки входа.</div>
