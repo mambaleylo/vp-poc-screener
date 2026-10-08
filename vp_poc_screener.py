@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.515"
+APP_VERSION = "0.99.516"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24043,8 +24043,40 @@ def zones_orphan_sweep():
     return n
 
 
+def zones_unrevive():
+    """v0.99.516 — the history recheck of v0.99.515 made new zones of old posts
+    live again (+50 ladders "waiting for the price" of setups already handled).
+    Such a zone (its post rechecked, the zone made long after the post) goes
+    back to the history; one with real orders on the exchange is left to finish."""
+    n = 0
+    with _zones_lock:
+        posts = {p_["id"]: p_ for p_ in ZONES["posts"]}
+        for z in ZONES["zones"]:
+            post = posts.get(z.get("post_id"))
+            if z.get("status") not in ("watch", "in_trade") or not post or post.get("rechk") != ZONES_RECHECK_MARK \
+                    or z.get("own") or z.get("oc") or z.get("created", 0) < z["post_time"] + 3600:
+                continue
+            lead = next((x for x in ZONES["zones"] if x["id"] == z.get("lead")), z) if z.get("lead") else z
+            if (lead.get("trade") or {}).get("real"):
+                continue
+            z["status"], z["from_rechk"] = "hist_wait", True
+            if z.get("trade"):
+                z["trade"] = None
+            z["result"], z["rules"] = None, "pending"
+            n += 1
+    if n:
+        log_error(f"zones: {n} zones of old posts made live by the history recheck went back to the history")
+        zones_save()
+        _zones_learn_event.set()
+    return n
+
+
 def zones_monitor_loop():
     last_track, last_sweep = 0.0, 0.0
+    try:
+        zones_unrevive()
+    except Exception as e:
+        log_error(f"zones unrevive: {e}")
     with _zones_lock:   # v0.99.493 — what came back from the disk after the start
         zs = ZONES["zones"]
         lad = [z for z in zs if (z.get("trade") or {}).get("legs") and z["trade"].get("status") in ("PENDING", "OPEN")]
@@ -25600,7 +25632,7 @@ def zones_post_summary(post, new):
     lines = ([post["approach_txt"]] if (post.get("approach_txt") or "").startswith("🚀") else []) \
         + [f"📥 {post['symbol']} · пост от {when} · зон: {len(new)}"]
     for z in new:
-        st = {"watch": "слежу", "old": "уже отработала (в статистику)", "train": "обучение: жду итога"}.get(z["status"], z["status"])
+        st = {"watch": "слежу", "old": "уже отработала (в статистику)", "train": "обучение: жду итога", "hist_wait": "старый пост — только в статистику"}.get(z["status"], z["status"])
         if z["status"] == "old":
             r_ = z.get("result")
             st = (f"уже отработала: {r_['r']:+g}R" + (f" · {r_['pct']:+.2f}%" if r_.get("pct") is not None else "")) \
@@ -25637,7 +25669,9 @@ def api_zones_status():
                       "open": sum(1 for t in live if t["status"] == "OPEN"),
                       "on_exchange": sum(1 for t in live if (t.get("real") or {}).get("legs") and not t["real"].get("done")),
                       "limits": sum(1 for t in live for l in ((t.get("real") or {}).get("legs") or []) if not l.get("done")),
-                      "waiting": sum(1 for t in live if not t.get("real") and not t.get("no_auto")),
+                      "waiting": sum(1 for t in live if t["status"] == "PENDING" and not t.get("real") and not t.get("no_auto")),
+                      # v0.99.516 — filled in the bot's record before any real order (e.g. before autotrade): followed to the end, no order
+                      "virt_open": sum(1 for t in live if t["status"] == "OPEN" and not t.get("real")),
                       "no_auto": sum(1 for t in live if t.get("no_auto"))}
     act["monitor_age"] = round(time.time() - mon_ok) if mon_ok else None
     act["now"] = time.time()
@@ -25761,6 +25795,7 @@ def api_zones_zone():
                 z = next((x for x in ZONES["zones"] if x["id"] == b["id"]), None)
                 if z is None:
                     return jsonify({"ok": False, "error": "нет такой зоны"}), 404
+                z["manual"] = True   # v0.99.516 — the history recheck leaves it alone
                 if b.get("delete"):
                     z["status"] = "deleted"
                 else:
@@ -25902,7 +25937,10 @@ def zones_recheck_results(force=False):
         with _zones_lock:
             live_posts = {z.get("post_id") for z in ZONES["zones"]
                           if z.get("status") in ("watch", "in_trade") or (z.get("trade") or {}).get("status") in ("PENDING", "OPEN")}
-            posts = [p_ for p_ in ZONES["posts"] if p_["id"] not in live_posts and not p_.get("own")]
+            # v0.99.516 — a post corrected by hand keeps the user's zones
+            manual_posts = {z.get("post_id") for z in ZONES["zones"] if z.get("manual")}
+            posts = [p_ for p_ in ZONES["posts"] if p_["id"] not in live_posts and not p_.get("own")
+                     and p_["id"] not in manual_posts]
             if force:   # the button: everything again
                 for p_ in posts:
                     p_.pop("rechk", None)
@@ -25951,6 +25989,13 @@ def zones_recheck_results(force=False):
                 ZONES["zones"] = new + ZONES["zones"]
             for z in new:
                 zones_replay_past(z)
+                # v0.99.516 — the history recognised again is history: an old post
+                # (already traded / skipped / broken before) never opens a new ladder;
+                # a zone not reached yet joins the learning when its 14 days are over
+                with _zones_lock:
+                    z["from_rechk"] = True
+                    if z["status"] == "watch":
+                        z["status"] = "hist_wait"
         with _zones_lock:
             ZONES["recheck_v515"] = True
         zones_save()
@@ -29676,7 +29721,7 @@ async function refreshSnr() {
 }
 
 // v0.99.438 — «Зоны»: posts with zones from Telegram screenshots
-const ZONE_ST = {watch: '👀 слежу', in_trade: '🤖 в сделке', closed: '✔ закрыта', broken: '💥 пробита', expired: '⌛ истекла', old: '📜 уже отработала', train: '📚 обучение: жду итога', skipped: '⏭ не торгую'};
+const ZONE_ST = {watch: '👀 слежу', in_trade: '🤖 в сделке', closed: '✔ закрыта', broken: '💥 пробита', expired: '⌛ истекла', old: '📜 уже отработала', train: '📚 обучение: жду итога', hist_wait: '📜 старый пост — только в статистику', skipped: '⏭ не торгую'};
 const zfmt = v => v == null ? '—' : String(+(+v).toPrecision(6));
 const zdate = t => t ? new Date(t * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '—';
 function zoneRowHtml(z) {
@@ -29751,7 +29796,7 @@ function zStatusHtml(d) {
   else out.push(row('⏳', 'пересчёт истории ещё не запускался после старта — начнётся в течение минуты'));
   const L = a.ladders || {};
   if (L.pending || L.open) out.push(row('💰', `лесенок: ждут налива ${L.pending || 0}, в позиции ${L.open || 0}` +
-      (d.autotrade ? ` · на бирже ${L.limits || 0} лимиток у ${L.on_exchange || 0} постов · ${L.waiting || 0} ждут подхода цены (маржа не занята)` : ' · автоторговля выкл — только отслеживаю') +
+      (d.autotrade ? ` · на бирже ${L.limits || 0} лимиток у ${L.on_exchange || 0} постов · ${L.waiting || 0} ждут подхода цены (маржа не занята)` + (L.virt_open ? ` · ${L.virt_open} в позиции только у бота (налились до ордеров на бирже — довожу до итога для статистики)` : '') : ' · автоторговля выкл — только отслеживаю') +
       (L.no_auto ? ` · ${L.no_auto} только сигнал (доп. аргументы)` : '')));
   else out.push(row('💤', 'активных лесенок нет — жду новых постов'));
   const oc = a.oc;

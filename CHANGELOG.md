@@ -18983,3 +18983,13 @@ v0.99.515 - Зоны: a result post (SEI 1h, the price-range label "-0,01590 (-1
          looked like a plain small zone and was never read. Every small wide coloured rect is
          now read by OCR; the price-range text marks the post as a result post. The history is
          recognised once again (new mark 515).
+v0.99.516 - Зоны: after the history recheck the status showed 163 ladders "waiting for the
+         price" (user: "почему так много ждёт подхода цены?"). Two causes: (1) the recheck gave
+         the new zones of a recent post the live status — old posts (already traded, skipped,
+         broken, or with the zones deleted by hand) opened new ladders (118 → 168). Now the
+         zones of a rechecked post are history only ("старый пост — только в статистику", in
+         the learning after its 14 days); the ones made live by v0.99.515 go back to the
+         history at the start (ones with real orders on the exchange are left to finish).
+         A zone edited / deleted by hand is never replaced by the recheck. (2) "ждут подхода
+         цены" counted the bot's own positions too (filled before any real order); now only
+         ladders not filled yet, the others shown apart.
