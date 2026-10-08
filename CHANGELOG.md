@@ -19107,3 +19107,10 @@ v0.99.528 - Зоны: "поиск по результату" v2 (user: "надо
          difference is beyond chance (1.65 standard errors); every model's exam in a table;
          our live zones next to the author's over the same weeks. The data set is built
          again once (new features); observation only, as before.
+v0.99.529 - The old ways in from outside are gone (user: "убери старые способы внешнего IP" —
+         Tailscale works for him): the page password (v0.99.525), the port-forwarding advice and
+         the Cloudflare tunnel (v0.99.526–527) with their settings, files and the background
+         process. The page opens from this phone, the home Wi-Fi and Tailscale (100.64/10);
+         straight from the internet (or through any proxy / tunnel) it is refused with a hint
+         to use Tailscale, so a forwarded port can never become a door to the account. The
+         Telegram-account and /update endpoints stay this-phone-only.

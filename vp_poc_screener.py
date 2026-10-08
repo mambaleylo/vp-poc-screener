@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.528"
+APP_VERSION = "0.99.529"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24889,46 +24889,10 @@ async def _zut_history(days):
         h["finished"] = time.time()
 
 
-# v0.99.525 — a password for the web page from outside (user: "проброс на внешний IP,
-# чтобы подключаться не из сетки"): the page can trade on the account, so from the
-# internet it opens only with a password (HTTP Basic, the browser asks once);
-# this phone itself and (unless chosen otherwise) the home Wi-Fi work as before.
-UI_AUTH_FILE = os.environ.get("VP_UI_AUTH_FILE", "vp_ui_auth.json")
-_ui_auth = {}
-_ui_auth_ok = {}     # sha256(password) -> time of the last good check (pbkdf2 is slow on a phone)
-_ui_fails = {}       # ip -> [times of wrong passwords]
-_ui_auth_lock = threading.Lock()
-UI_FAIL_MAX, UI_FAIL_WINDOW = 8, 900
-
-
-def _ui_auth_load():
-    try:
-        with open(UI_AUTH_FILE) as f:
-            _ui_auth.update(json.load(f))
-    except FileNotFoundError:
-        pass
-    except Exception as e:
-        log_error(f"ui auth load: {e}")
-
-
-def _ui_auth_save():
-    tmp = UI_AUTH_FILE + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(_ui_auth, f)
-    os.replace(tmp, UI_AUTH_FILE)
-    try:
-        os.chmod(UI_AUTH_FILE, 0o600)
-    except Exception:
-        pass
-
-
-_ui_auth_load()
-
-
-def _ui_pw_hash(pw, salt):
-    return hashlib.pbkdf2_hmac("sha256", pw.encode(), bytes.fromhex(salt), 200000).hex()
-
-
+# v0.99.529 — the web page from outside goes through Tailscale (user: "убери старые способы
+# внешнего IP": the password, the port forwarding and the Cloudflare tunnel are gone). This
+# phone, the home Wi-Fi and Tailscale (100.64/10) open it; straight from the internet it is
+# refused, so a forwarded port can never become a door to the trading account.
 def _req_kind():
     """'local' (this phone), 'lan' (home network / Tailscale) or 'public'. A request
     passed on by a proxy or a tunnel on this phone (it arrives from 127.0.0.1) counts
@@ -24952,173 +24916,11 @@ def _is_local_request():
 
 
 @app.before_request
-def _ui_auth_check():
-    kind = _req_kind()
-    if kind == "local":
-        return None
-    with _ui_auth_lock:
-        has_pw = bool(_ui_auth.get("hash"))
-        lan_too = bool(_ui_auth.get("lan_too"))
-    if kind == "lan" and not (has_pw and lan_too):
-        return None
-    if not has_pw:
-        return Response("VP-POC: доступ из интернета закрыт. Задайте пароль на телефоне с ботом: "
-                        "Настройки → «🔐 Доступ с других устройств».", 403, {"Content-Type": "text/plain; charset=utf-8"})
-    ip, now = request.remote_addr or "?", time.time()
-    with _ui_auth_lock:
-        fails = [t for t in _ui_fails.get(ip, []) if now - t < UI_FAIL_WINDOW]
-        _ui_fails[ip] = fails
-    if len(fails) >= UI_FAIL_MAX:
-        return Response("VP-POC: слишком много неверных паролей, попробуйте через 15 минут.", 429,
-                        {"Content-Type": "text/plain; charset=utf-8"})
-    a = request.authorization
-    if a and a.password:
-        key = hashlib.sha256(a.password.encode()).hexdigest()
-        with _ui_auth_lock:
-            good = now - _ui_auth_ok.get(key, 0) < 12 * 3600
-            salt, want = _ui_auth.get("salt"), _ui_auth.get("hash")
-        if not good:
-            good = hmac.compare_digest(_ui_pw_hash(a.password, salt), want)
-            with _ui_auth_lock:
-                if good:
-                    _ui_auth_ok[key] = now
-                else:
-                    _ui_fails.setdefault(ip, []).append(now)
-            if not good:
-                log_error(f"ui auth: wrong password from {ip}")
-        if good:
-            return None
-    return Response("VP-POC: нужен пароль", 401, {"WWW-Authenticate": 'Basic realm="VP-POC", charset="UTF-8"'})
-
-
-# v0.99.526 — an outside link without the router (user: "а вариант без роутера можно?"):
-# a free Cloudflare quick tunnel run from Termux (pkg install cloudflared) gives an
-# https://….trycloudflare.com address; it changes on every start, so the bot sends
-# the new one to Telegram. Only with the password set (the tunnel's visitors come
-# with a CF-Connecting-IP header = from the internet = password asked).
-_tunnel = {"proc": None, "url": None, "error": None, "started": None, "sent_url": None}
-TUNNEL_PID_FILE = UI_AUTH_FILE + ".tunnel.pid"
-
-
-def _tunnel_kill_old():
-    """a tunnel left by the previous run of the bot (a restart replaces the process,
-    its child keeps running): stopped, so there is only one"""
-    try:
-        pid = int(open(TUNNEL_PID_FILE).read().strip())
-        with open(f"/proc/{pid}/cmdline", "rb") as f:
-            if b"cloudflared" in f.read():
-                os.kill(pid, 15)
-    except Exception:
-        pass
-
-
-def _tunnel_stop():
-    p_ = _tunnel.get("proc")
-    if p_ and p_.poll() is None:
-        try:
-            p_.terminate()
-            p_.wait(timeout=10)
-        except Exception:
-            try:
-                p_.kill()
-            except Exception:
-                pass
-    _tunnel.update({"proc": None, "url": None})
-
-
-def _tunnel_reader(p_):
-    for line in p_.stderr:
-        # v0.99.527 — the tunnel's own address only: cloudflared also prints its service
-        # address https://api.trycloudflare.com (e.g. "failed to request quick Tunnel: Post
-        # https://api.trycloudflare.com/tunnel …") — that one was sent as the link
-        m_ = re.search(r"https://(?!api\.)[a-z0-9]+(?:-[a-z0-9]+)+\.trycloudflare\.com", line)
-        if _tunnel.get("proc") is p_ and not m_ and not _tunnel.get("url") and re.search(r"\bERR\b|failed|error", line, re.I):
-            msg_ = re.sub(r"^\S*\d{4}-\d\d-\d\dT\S+\s+", "", line.strip())   # without the timestamp
-            _tunnel["error"] = "Cloudflare не выдал ссылку: " + msg_[-160:]
-            if _tunnel.get("err_sent") != msg_[:80]:   # the same failure again: no new message
-                _tunnel["err_sent"] = msg_[:80]
-                tg_outbox_push(f"⚠️ Внешняя ссылка не создалась — {_tunnel['error']}\nпопробую ещё раз")
-        if m_ and _tunnel.get("proc") is p_:
-            _tunnel["error"] = None
-            _tunnel["url"] = m_.group(0)
-            if _tunnel.get("sent_url") != _tunnel["url"]:
-                _tunnel["sent_url"] = _tunnel["url"]
-                tg_outbox_push(f"🌐 Внешняя ссылка на бота: {_tunnel['url']}\n"
-                               f"вход по паролю (имя пользователя любое); ссылка меняется при каждом перезапуске — пришлю новую")
-
-
-def tunnel_loop():
-    _tunnel_kill_old()
-    while True:
-        try:
-            with _ui_auth_lock:
-                want = bool(_ui_auth.get("tunnel")) and bool(_ui_auth.get("hash"))
-            p_ = _tunnel.get("proc")
-            alive = bool(p_ and p_.poll() is None)
-            if not want:
-                if alive or p_:
-                    _tunnel_stop()
-                _tunnel["error"] = None
-            elif not alive:
-                if p_:   # it died: started again after a pause (longer when no link came)
-                    had_url = bool(_tunnel.get("url"))
-                    _tunnel_stop()
-                    time.sleep(20 if had_url else 120)
-                exe = shutil.which("cloudflared")
-                if not exe:
-                    _tunnel["error"] = "cloudflared не установлен — в Termux: pkg install cloudflared"
-                else:
-                    port = int(os.environ.get("VP_PORT", 8080))
-                    p_ = subprocess.Popen([exe, "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{port}"],
-                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, bufsize=1)
-                    _tunnel.update({"proc": p_, "url": None, "error": None, "started": time.time()})
-                    try:
-                        with open(TUNNEL_PID_FILE, "w") as f:
-                            f.write(str(p_.pid))
-                    except Exception:
-                        pass
-                    threading.Thread(target=_tunnel_reader, args=(p_,), daemon=True).start()
-        except Exception as e:
-            _tunnel["error"] = str(e)[:200]
-            log_error(f"tunnel: {e}")
-        time.sleep(5)
-
-
-@app.route("/api/ui_password", methods=["GET", "POST"])
-def api_ui_password():
-    """the password for other devices: set / removed only from this phone"""
-    if request.method == "POST":
-        if not _is_local_request():
-            return jsonify({"ok": False, "error": "пароль меняется только на телефоне с ботом (http://127.0.0.1)"}), 403
-        b = request.get_json(silent=True) or {}
-        with _ui_auth_lock:
-            if "password" in b:
-                pw = str(b.get("password") or "")
-                if pw and len(pw) < 8:
-                    return jsonify({"ok": False, "error": "пароль короче 8 символов"}), 400
-                if pw:
-                    salt = os.urandom(16).hex()
-                    _ui_auth.update({"salt": salt, "hash": _ui_pw_hash(pw, salt), "set_at": time.time()})
-                else:
-                    _ui_auth.pop("hash", None)
-                    _ui_auth.pop("salt", None)
-                _ui_auth_ok.clear()
-            if "lan_too" in b:
-                _ui_auth["lan_too"] = bool(b["lan_too"])
-            if "tunnel" in b:   # v0.99.526
-                if b["tunnel"] and not _ui_auth.get("hash"):
-                    return jsonify({"ok": False, "error": "сначала задайте пароль — без него ссылку открыть нельзя"}), 400
-                _ui_auth["tunnel"] = bool(b["tunnel"])
-            if not _ui_auth.get("hash"):
-                _ui_auth["tunnel"] = False   # no password — no outside link
-            _ui_auth_save()
-    with _ui_auth_lock:
-        out = {"ok": True, "set": bool(_ui_auth.get("hash")), "lan_too": bool(_ui_auth.get("lan_too")),
-               "local": _is_local_request(), "kind": _req_kind(), "tunnel": bool(_ui_auth.get("tunnel"))}
-    p_ = _tunnel.get("proc")
-    out.update({"tunnel_url": _tunnel.get("url"), "tunnel_error": _tunnel.get("error"),
-                "tunnel_running": bool(p_ and p_.poll() is None)})
-    return jsonify(out)
+def _no_public_access():
+    if _req_kind() == "public":
+        return Response("VP-POC: доступ напрямую из интернета закрыт — откройте через Tailscale (http://100.x.y.z:8080) "
+                        "или из домашней Wi-Fi.", 403, {"Content-Type": "text/plain; charset=utf-8"})
+    return None
 
 
 @app.before_request
@@ -28950,34 +28752,6 @@ INDEX_HTML = """<!doctype html>
     </div></details>
 
 
-    <details class="settingsGroup" style="--mod-color:var(--acc);" ontoggle="if(this.open) uiPwLoad()"><summary class="settingsGroupTitle">🔐 Доступ с других устройств</summary><div class="settingsGroupBody">
-      <div class="settingRow" style="display:block;">
-        <div class="name">Пароль для входа не с этого телефона</div>
-        <div class="sub">из интернета (проброс порта, внешний IP) страница открывается только с паролем — браузер спросит его один раз; без пароля доступ из интернета закрыт. С самого телефона с ботом пароль не нужен. Не меньше 8 символов; после 8 неверных попыток адрес блокируется на 15 минут. Задаётся только на телефоне с ботом</div>
-        <div id="uiPwState" class="sub" style="margin-top:6px;"></div>
-        <div style="display:flex;gap:8px;margin-top:6px;flex-wrap:wrap;">
-          <input type="password" id="uiPwInput" placeholder="новый пароль" autocomplete="new-password" style="flex:1;min-width:140px;">
-          <button class="zbtn" style="margin-top:0;" onclick="uiPwSave(false)">Сохранить</button>
-          <button class="zbtn" style="margin-top:0;" onclick="uiPwSave(true)">Убрать</button>
-        </div>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="name">Пароль и в домашней сети</div>
-          <div class="sub">выкл — в той же Wi-Fi (и через Tailscale) открывается без пароля, как раньше; вкл — пароль спрашивается везде, кроме самого телефона с ботом</div>
-        </div>
-        <label class="switch"><input type="checkbox" id="uiPwLan" onchange="uiPwLan(this.checked)"><span class="switchSlider"></span></label>
-      </div>
-      <div class="settingRow">
-        <div>
-          <div class="name">Внешняя ссылка без роутера (Cloudflare)</div>
-          <div class="sub">бесплатный туннель из Termux: https-ссылка вида …trycloudflare.com, открывается откуда угодно, вход по паролю выше. Роутер и «белый» IP не нужны. Ссылка меняется при каждом перезапуске — бот пришлёт новую в Telegram. Нужно один раз в Termux: <b>pkg install cloudflared</b></div>
-          <div id="uiTunnelState" class="sub" style="margin-top:4px;"></div>
-        </div>
-        <label class="switch"><input type="checkbox" id="uiTunnel" onchange="uiTunnel(this)"><span class="switchSlider"></span></label>
-      </div>
-    </div></details>
-
     <details class="settingsGroup" style="--mod-color:var(--neuro);"><summary class="settingsGroupTitle">⚙️ Производительность и фильтр Neuro</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
@@ -31498,36 +31272,6 @@ async function zonesTrainMode(on) {
 }
 function zonesDel(id) { if (confirm('Удалить зону?')) zonesPost('/api/zones/zone', {id, delete: true}); }
 function zonesDelPost(pid) { if (confirm('Удалить пост и его зоны?')) zonesPost('/api/zones/post_delete', {post_id: pid}); }
-async function uiPwLoad() {   // v0.99.525
-  try {
-    const r = await (await fetch('/api/ui_password')).json();
-    document.getElementById('uiPwState').innerHTML = (r.set ? '✅ пароль задан — из интернета вход по паролю' : '⚠️ пароль не задан — из интернета доступ закрыт')
-      + (r.local ? '' : '<br>менять можно только на телефоне с ботом');
-    document.getElementById('uiPwLan').checked = !!r.lan_too;
-    document.getElementById('uiPwLan').disabled = !r.local;
-    const tn = document.getElementById('uiTunnel');   // v0.99.526
-    tn.checked = !!r.tunnel; tn.disabled = !r.local;
-    document.getElementById('uiTunnelState').innerHTML = !r.tunnel ? '' : (r.tunnel_error ? '⚠️ ' + r.tunnel_error
-      : (r.tunnel_url ? `🌐 <a href="${r.tunnel_url}" target="_blank" style="color:var(--acc);">${r.tunnel_url}</a>` : (r.tunnel_running ? '⏳ туннель запускается…' : '⏳ запускаю…')));
-    clearTimeout(window._uiTnT);
-    if (r.tunnel && !r.tunnel_url && !r.tunnel_error) window._uiTnT = setTimeout(uiPwLoad, 3000);
-  } catch (e) {}
-}
-async function uiPwPost(body) {
-  try {
-    const r = await (await fetch('/api/ui_password', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)})).json();
-    if (!r.ok) alert(r.error || 'не получилось');
-  } catch (e) { alert('ошибка сети'); }
-  uiPwLoad();
-}
-function uiPwSave(clear) {
-  const inp = document.getElementById('uiPwInput');
-  if (clear) { if (confirm('Убрать пароль? Доступ из интернета закроется совсем.')) uiPwPost({password: ''}); return; }
-  if ((inp.value || '').length < 8) return alert('пароль — не меньше 8 символов');
-  uiPwPost({password: inp.value}); inp.value = '';
-}
-function uiPwLan(on) { uiPwPost({lan_too: on}); }
-function uiTunnel(el) { uiPwPost({tunnel: el.checked}); }
 function zonesPbTg(on) {   // v0.99.523
   zonesPost('/api/zones/pb_tg', {on});
 }
@@ -34290,7 +34034,6 @@ if __name__ == "__main__":
         heartbeat(_n)
     threading.Thread(target=system_health_watchdog, daemon=True).start()
     threading.Thread(target=risk_autotune_loop, daemon=True).start()
-    threading.Thread(target=tunnel_loop, daemon=True).start()   # v0.99.526
     port = int(os.environ.get("VP_PORT", 8080))
     tg_status = "настроен" if (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) else "не настроен"
     print(f"VP-POC Screener v{APP_VERSION} — http://127.0.0.1:{port} — Telegram: {tg_status}")
