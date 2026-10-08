@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.519"
+APP_VERSION = "0.99.520"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23541,6 +23541,25 @@ def _zones_real_place(tr):
             idx = [i for i in idx if tr["legs"][i]["fill"] is None]   # v0.99.492 — the limits not yet taken
             if not skip and not idx:
                 skip = "все лимитки уже налились"
+            # v0.99.520 — the REAL loss at the stop of what goes on the exchange: the
+            # minimum lot rounded up (allowed up to 1.5x by the common sizing) and a lone
+            # lot on the first line (the farthest from the stop) cost more than the risk —
+            # a 1-SOL lot was 24% of the balance at a 19% risk. Over the risk (+5%):
+            # the limits nearest the price go first; none fits — no trade.
+            if not skip and equity:
+                mult = float(spec.get("quanto_multiplier") or 1)
+                budget = equity * risk / 100
+                done_loss = sum(abs(l["fill"] - tr["sl"]) for l in tr["legs"] if l["fill"] is not None) * per * mult
+                loss_of = lambda ii: done_loss + sum(abs(lims[i] - tr["sl"]) + (lims[i] + tr["sl"]) * 0.0006 for i in ii) * per * mult
+                first_loss = loss_of(idx)
+                while idx and loss_of(idx) > budget * 1.05:
+                    idx = idx[1:]
+                if not idx:
+                    skip = (f"минимальный лот {sym} ({per} контр. = ${lims[0] * per * mult:.0f}) теряет на стопе "
+                            f"${first_loss:.2f} — это {first_loss / equity * 100:.0f}% баланса при риске {risk:g}% "
+                            f"(${budget:.2f}); не торгую, чтобы не завышать риск")
+                else:
+                    rec["loss_at_stop"] = round(loss_of(idx), 2)
             if not skip:
                 wallet = get_futures_wallet_balance()
                 if wallet is not None and m_act > wallet * 0.98:
@@ -23568,7 +23587,8 @@ def _zones_real_place(tr):
                     tr["real"] = {"legs": legs, "lev": lev, "tick": tick, "sl_id": None, "tp_id": None, "tp_px": None,
                                   "seen": False, "done": False, "cancelled": False}
                     rec["status"] = "LIMITS"
-                    rec["detail"] = (rec["detail"] or "") + f" лимиток {len(legs)} × {per} контр., плечо {lev}x"
+                    rec["detail"] = (rec["detail"] or "") + f" лимиток {len(legs)} × {per} контр., плечо {lev}x" \
+                        + (f", убыток на стопе ${rec['loss_at_stop']:.2f}" if rec.get("loss_at_stop") is not None else "")
                 else:
                     rec["status"] = "ERROR"
     except Exception as e:

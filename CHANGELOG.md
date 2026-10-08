@@ -19019,3 +19019,11 @@ v0.99.519 - Зоны: a new rule (user: "закрывать сделку, ког
          the first candle after the result post within the 14 days), and the rule card shows
          honestly how the history went with it and without it. A result picture posted
          within 5 minutes of the setup (one album) does not close it.
+v0.99.520 - Зоны: a SOL ladder opened 1 contract (1 SOL ≈ $115) that loses ~$9.6 at the stop —
+         24% of a ~$40 balance at a 19% risk (user: "открылась сделка далеко даже от 20%
+         риска"). The common sizing rounds up to the minimum lot when it is under 1.5x the
+         size asked for, and a lone lot went on the first line (the farthest from the stop).
+         Now the real loss at the stop of the orders about to be placed (with fees) is
+         checked against the risk: over it by more than 5%, the limits nearest the price are
+         dropped; if even one lot is too much, no trade ("минимальный лот … теряет на стопе
+         $X — это N% баланса при риске R%"). The placed orders report their loss at the stop.
