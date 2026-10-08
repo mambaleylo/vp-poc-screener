@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.525"
+APP_VERSION = "0.99.526"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24991,6 +24991,88 @@ def _ui_auth_check():
     return Response("VP-POC: нужен пароль", 401, {"WWW-Authenticate": 'Basic realm="VP-POC", charset="UTF-8"'})
 
 
+# v0.99.526 — an outside link without the router (user: "а вариант без роутера можно?"):
+# a free Cloudflare quick tunnel run from Termux (pkg install cloudflared) gives an
+# https://….trycloudflare.com address; it changes on every start, so the bot sends
+# the new one to Telegram. Only with the password set (the tunnel's visitors come
+# with a CF-Connecting-IP header = from the internet = password asked).
+_tunnel = {"proc": None, "url": None, "error": None, "started": None, "sent_url": None}
+TUNNEL_PID_FILE = UI_AUTH_FILE + ".tunnel.pid"
+
+
+def _tunnel_kill_old():
+    """a tunnel left by the previous run of the bot (a restart replaces the process,
+    its child keeps running): stopped, so there is only one"""
+    try:
+        pid = int(open(TUNNEL_PID_FILE).read().strip())
+        with open(f"/proc/{pid}/cmdline", "rb") as f:
+            if b"cloudflared" in f.read():
+                os.kill(pid, 15)
+    except Exception:
+        pass
+
+
+def _tunnel_stop():
+    p_ = _tunnel.get("proc")
+    if p_ and p_.poll() is None:
+        try:
+            p_.terminate()
+            p_.wait(timeout=10)
+        except Exception:
+            try:
+                p_.kill()
+            except Exception:
+                pass
+    _tunnel.update({"proc": None, "url": None})
+
+
+def _tunnel_reader(p_):
+    for line in p_.stderr:
+        m_ = re.search(r"https://[a-z0-9-]+\.trycloudflare\.com", line)
+        if m_ and _tunnel.get("proc") is p_:
+            _tunnel["url"] = m_.group(0)
+            if _tunnel.get("sent_url") != _tunnel["url"]:
+                _tunnel["sent_url"] = _tunnel["url"]
+                tg_outbox_push(f"🌐 Внешняя ссылка на бота: {_tunnel['url']}\n"
+                               f"вход по паролю (имя пользователя любое); ссылка меняется при каждом перезапуске — пришлю новую")
+
+
+def tunnel_loop():
+    _tunnel_kill_old()
+    while True:
+        try:
+            with _ui_auth_lock:
+                want = bool(_ui_auth.get("tunnel")) and bool(_ui_auth.get("hash"))
+            p_ = _tunnel.get("proc")
+            alive = bool(p_ and p_.poll() is None)
+            if not want:
+                if alive or p_:
+                    _tunnel_stop()
+                _tunnel["error"] = None
+            elif not alive:
+                if p_:   # it died: started again after a pause
+                    _tunnel_stop()
+                    time.sleep(20)
+                exe = shutil.which("cloudflared")
+                if not exe:
+                    _tunnel["error"] = "cloudflared не установлен — в Termux: pkg install cloudflared"
+                else:
+                    port = int(os.environ.get("VP_PORT", 8080))
+                    p_ = subprocess.Popen([exe, "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{port}"],
+                                          stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, bufsize=1)
+                    _tunnel.update({"proc": p_, "url": None, "error": None, "started": time.time()})
+                    try:
+                        with open(TUNNEL_PID_FILE, "w") as f:
+                            f.write(str(p_.pid))
+                    except Exception:
+                        pass
+                    threading.Thread(target=_tunnel_reader, args=(p_,), daemon=True).start()
+        except Exception as e:
+            _tunnel["error"] = str(e)[:200]
+            log_error(f"tunnel: {e}")
+        time.sleep(5)
+
+
 @app.route("/api/ui_password", methods=["GET", "POST"])
 def api_ui_password():
     """the password for other devices: set / removed only from this phone"""
@@ -25012,10 +25094,20 @@ def api_ui_password():
                 _ui_auth_ok.clear()
             if "lan_too" in b:
                 _ui_auth["lan_too"] = bool(b["lan_too"])
+            if "tunnel" in b:   # v0.99.526
+                if b["tunnel"] and not _ui_auth.get("hash"):
+                    return jsonify({"ok": False, "error": "сначала задайте пароль — без него ссылку открыть нельзя"}), 400
+                _ui_auth["tunnel"] = bool(b["tunnel"])
+            if not _ui_auth.get("hash"):
+                _ui_auth["tunnel"] = False   # no password — no outside link
             _ui_auth_save()
     with _ui_auth_lock:
-        return jsonify({"ok": True, "set": bool(_ui_auth.get("hash")), "lan_too": bool(_ui_auth.get("lan_too")),
-                        "local": _is_local_request(), "kind": _req_kind()})
+        out = {"ok": True, "set": bool(_ui_auth.get("hash")), "lan_too": bool(_ui_auth.get("lan_too")),
+               "local": _is_local_request(), "kind": _req_kind(), "tunnel": bool(_ui_auth.get("tunnel"))}
+    p_ = _tunnel.get("proc")
+    out.update({"tunnel_url": _tunnel.get("url"), "tunnel_error": _tunnel.get("error"),
+                "tunnel_running": bool(p_ and p_.poll() is None)})
+    return jsonify(out)
 
 
 @app.before_request
@@ -28581,6 +28673,14 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="uiPwLan" onchange="uiPwLan(this.checked)"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingRow">
+        <div>
+          <div class="name">Внешняя ссылка без роутера (Cloudflare)</div>
+          <div class="sub">бесплатный туннель из Termux: https-ссылка вида …trycloudflare.com, открывается откуда угодно, вход по паролю выше. Роутер и «белый» IP не нужны. Ссылка меняется при каждом перезапуске — бот пришлёт новую в Telegram. Нужно один раз в Termux: <b>pkg install cloudflared</b></div>
+          <div id="uiTunnelState" class="sub" style="margin-top:4px;"></div>
+        </div>
+        <label class="switch"><input type="checkbox" id="uiTunnel" onchange="uiTunnel(this)"><span class="switchSlider"></span></label>
+      </div>
     </div></details>
 
     <details class="settingsGroup" style="--mod-color:var(--neuro);"><summary class="settingsGroupTitle">⚙️ Производительность и фильтр Neuro</summary><div class="settingsGroupBody">
@@ -31100,6 +31200,12 @@ async function uiPwLoad() {   // v0.99.525
       + (r.local ? '' : '<br>менять можно только на телефоне с ботом');
     document.getElementById('uiPwLan').checked = !!r.lan_too;
     document.getElementById('uiPwLan').disabled = !r.local;
+    const tn = document.getElementById('uiTunnel');   // v0.99.526
+    tn.checked = !!r.tunnel; tn.disabled = !r.local;
+    document.getElementById('uiTunnelState').innerHTML = !r.tunnel ? '' : (r.tunnel_error ? '⚠️ ' + r.tunnel_error
+      : (r.tunnel_url ? `🌐 <a href="${r.tunnel_url}" target="_blank" style="color:var(--acc);">${r.tunnel_url}</a>` : (r.tunnel_running ? '⏳ туннель запускается…' : '⏳ запускаю…')));
+    clearTimeout(window._uiTnT);
+    if (r.tunnel && !r.tunnel_url && !r.tunnel_error) window._uiTnT = setTimeout(uiPwLoad, 3000);
   } catch (e) {}
 }
 async function uiPwPost(body) {
@@ -31116,6 +31222,7 @@ function uiPwSave(clear) {
   uiPwPost({password: inp.value}); inp.value = '';
 }
 function uiPwLan(on) { uiPwPost({lan_too: on}); }
+function uiTunnel(el) { uiPwPost({tunnel: el.checked}); }
 function zonesPbTg(on) {   // v0.99.523
   zonesPost('/api/zones/pb_tg', {on});
 }
@@ -33878,6 +33985,7 @@ if __name__ == "__main__":
         heartbeat(_n)
     threading.Thread(target=system_health_watchdog, daemon=True).start()
     threading.Thread(target=risk_autotune_loop, daemon=True).start()
+    threading.Thread(target=tunnel_loop, daemon=True).start()   # v0.99.526
     port = int(os.environ.get("VP_PORT", 8080))
     tg_status = "настроен" if (TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID) else "не настроен"
     print(f"VP-POC Screener v{APP_VERSION} — http://127.0.0.1:{port} — Telegram: {tg_status}")

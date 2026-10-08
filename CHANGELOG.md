@@ -19077,3 +19077,13 @@ v0.99.525 - A password for the web page from outside (user: "на внешний
          a tunnel running on the phone (it arrives from 127.0.0.1 with a forwarding header)
          counts as from the internet — also for the Telegram-account and /update endpoints,
          which stay this-phone-only.
+v0.99.526 - An outside link without the router (user: "а вариант без роутера можно сделать?"):
+         Settings → "🔐 Доступ с других устройств" → "Внешняя ссылка без роутера (Cloudflare)".
+         The bot runs a free Cloudflare quick tunnel from Termux (pkg install cloudflared once),
+         catches its https://….trycloudflare.com address, shows it there and sends it to
+         Telegram; the address changes on every start, so each new one is sent. Only with the
+         password set (switching it on without one is refused; removing the password turns it
+         off): the tunnel's visitors carry CF-Connecting-IP and are asked for the password. A
+         tunnel that dies is started again after 20 s; one left by the previous run (a
+         restart replaces the process, the child keeps going) is stopped at start, so there
+         is only one.

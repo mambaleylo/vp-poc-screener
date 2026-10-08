@@ -14,3 +14,4 @@ vp_zones_state.json.*.tmp
 vp_zones_oc.json.*.tmp
 vp_ui_auth.json
 vp_ui_auth.json.tmp
+vp_ui_auth.json.tunnel.pid
