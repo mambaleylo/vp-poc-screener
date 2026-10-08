@@ -19066,3 +19066,14 @@ v0.99.524 - Зоны: "налилась лимитка" came again and again wit
          позиции … · стоп ставлю на бирже". With autotrade off (or a post marked no-auto) the
          record's message says so: "📝 по учёту бота … без автосделки". The pullback signal's
          fill says "сигнал, на бирже ордера нет".
+v0.99.525 - A password for the web page from outside (user: "на внешний IP как проброс сделать,
+         чтобы подключаться не из сетки?"). The page can trade on the account, so from the
+         internet it opens only with a password: Settings → "🔐 Доступ с других устройств"
+         (set / removed only on the bot's phone; ≥ 8 characters; stored as a salted PBKDF2
+         hash in vp_ui_auth.json). The browser asks for it once (HTTP Basic); 8 wrong tries
+         block the address for 15 minutes. Without a password the internet gets "доступ
+         закрыт". The bot's phone never needs it; the home Wi-Fi and Tailscale (100.64/10) work
+         without it unless "пароль и в домашней сети" is on. A request passed on by a proxy or
+         a tunnel running on the phone (it arrives from 127.0.0.1 with a forwarding header)
+         counts as from the internet — also for the Telegram-account and /update endpoints,
+         which stay this-phone-only.
