@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.518"
+APP_VERSION = "0.99.519"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22320,8 +22320,30 @@ def zones_ladder_pnl(st, s, sl, exit_px):
             "avg": sum(fills) / len(fills) if fills else None, "filled": len(fills), "legs": len(st["legs"])}
 
 
-def zone_ladder_sim(cs, group, tp_pct, start, end, buf=None, be=None):
-    """Replay a ladder over candles. None = no limit was taken."""
+def zones_author_exits():
+    """v0.99.519 — the author's result posts by coin: {symbol: [post times, sorted]}"""
+    out = {}
+    with _zones_lock:
+        for p_ in ZONES["posts"]:
+            if p_.get("result_post") and p_.get("symbol") and p_.get("post_time"):
+                out.setdefault(p_["symbol"], []).append(float(p_["post_time"]))
+    for v in out.values():
+        v.sort()
+    return out
+
+
+def zones_author_exit_t(ax_map, symbol, after_t):
+    """the first result post of the author on this coin after the setup's post"""
+    return next((t for t in (ax_map or {}).get(symbol, ()) if t > after_t + ZONES_AX_MIN_GAP), None)
+
+
+ZONES_AX_MIN_GAP = 300   # v0.99.519 — a result picture posted with the setup itself (one album) is not its end
+
+
+def zone_ladder_sim(cs, group, tp_pct, start, end, buf=None, be=None, ax=None):
+    """Replay a ladder over candles. None = no limit was taken.
+    v0.99.519 — ax: the author posted the result on this coin at that time — the
+    trade is closed at the price then (result AUTHOR_EXIT), limits not taken are off."""
     pl = zones_ladder_plan(group, buf)
     if not pl:
         return None
@@ -22331,6 +22353,10 @@ def zone_ladder_sim(cs, group, tp_pct, start, end, buf=None, be=None):
     for c in cs:
         if c["time"] < start or c["time"] >= end:
             continue
+        if ax and c["time"] >= ax:
+            if any(l["fill"] is not None for l in st["legs"]):
+                st["result"], st["exit"], st["t_out"] = "AUTHOR_EXIT", c["open"], c["time"]
+            break
         last = c
         zones_ladder_step(st, c, s, sl, tp_pct, be)
         if st["result"]:
@@ -22440,6 +22466,7 @@ def zones_learn():
     for z in finished:
         groups.setdefault(zones_hist_key(z), []).append(z)
     runs_g, excl, fixed_n, coarse_out = [], [], 0, 0
+    ax_map, ax_of = zones_author_exits(), {}   # v0.99.519 — the author's result posts close the trade
     with _zones_lock:
         fine_only = bool(ZONES.get("fine_only"))
     for g in sorted(groups.values(), key=lambda g: g[0]["post_time"]):
@@ -22468,6 +22495,8 @@ def zones_learn():
                 coarse_out += 1
                 continue
             runs_g.append((g, cs, z0["post_time"], end))
+            ax_ = zones_author_exit_t(ax_map, z0["symbol"], z0["post_time"])
+            ax_of[id(g)] = ax_ if ax_ and ax_ < end else None   # only a result post within the trade's 14 days
     # v0.99.495 — the take: every variant replayed as the author's ladders over the
     # whole history, the one that grew the account most wins (user: "тейк подбирался
     # исходя из истории, опираясь на лучшую доходность"); at the auto-risk each take
@@ -22481,7 +22510,7 @@ def zones_learn():
     for i_, (tp, be) in enumerate(combos):
         if i_ % 3 == 0:
             zones_act("learn", done=i_)
-        per_ = [zone_ladder_sim(cs, g, tp, st_, en_, be=be) for g, cs, st_, en_ in runs_g]
+        per_ = [zone_ladder_sim(cs, g, tp, st_, en_, be=be, ax=ax_of.get(id(g))) for g, cs, st_, en_ in runs_g]
         per_tp[(tp, be)] = per_
         xs = [r["r"] for r in per_ if r]
         fb, gb = best_f(xs)
@@ -22507,7 +22536,7 @@ def zones_learn():
     be_rows = [r for r in all_rows if r["tp"] == rule["tp"]]
     per = per_tp.get((rule["tp"], rule["be"]))
     if per is None:   # the default take (too few trades to choose)
-        per = [zone_ladder_sim(cs, g, rule["tp"], st_, en_, be=rule["be"]) for g, cs, st_, en_ in runs_g]
+        per = [zone_ladder_sim(cs, g, rule["tp"], st_, en_, be=rule["be"], ax=ax_of.get(id(g))) for g, cs, st_, en_ in runs_g]
     rs, aft, wins, stops, fills, legs, bes = [], [], 0, 0, 0, 0, 0
     res_by_zone = {}
     for (g, _cs, _s, _e), r in zip(runs_g, per):
@@ -22598,7 +22627,7 @@ def zones_learn():
         ls = max(ls, run_)
     a = sorted(aft)
     res = {"n": len(rs), "avg_r": avg(rs), "wr": round(wins / len(rs) * 100, 1) if rs else None,
-           "stops": stops, "wins": wins, "bes": bes, "max_ls": ls, "groups": len(groups),
+           "stops": stops, "wins": wins, "bes": bes, "axs": sum(1 for r in per if r and r["result"] == "AUTHOR_EXIT"), "max_ls": ls, "groups": len(groups),
            "fill_share": round(fills / legs * 100, 1) if legs else None,
            "after_med": round(a[len(a) // 2], 2) if a else None,
            "after_5": round(100 * sum(1 for x in a if x >= 5) / len(a), 1) if a else None}
@@ -22638,7 +22667,17 @@ def zones_learn():
                   for x in (2, 3, 5, 10)},
         "beyond_far": round(sum(1 for p in touched if p["beyond_far"]) / len(touched) * 100, 1) if touched else None,
     }
-    learned = {"at": now, "n": len(rs), "rule": rule, "tp_auto": tp_auto, "tp_rows": tp_rows, "be_rows": be_rows,
+    # v0.99.519 — what the rule "closed on the author's result post" changed: the same
+    # take / breakeven replayed without it (honest comparison, one extra pass)
+    ax_n = sum(1 for r in per if r and r["result"] == "AUTHOR_EXIT")
+    ax_cmp = None
+    if any(ax_of.values()):
+        per_no = [zone_ladder_sim(cs, g, rule["tp"], st_, en_, be=rule["be"]) for g, cs, st_, en_ in runs_g]
+        xs_no = [r["r"] for r in per_no if r]
+        ax_cmp = {"n": ax_n, "posts": sum(1 for v in ax_of.values() if v), "avg_r": avg(rs), "n_trades": len(rs),
+                  "avg_r_without": avg(xs_no), "n_without": len(xs_no),
+                  "g": growth(rs, rf), "g_without": growth(xs_no, rf)}
+    learned = {"at": now, "n": len(rs), "rule": rule, "author_exit": ax_cmp, "tp_auto": tp_auto, "tp_rows": tp_rows, "be_rows": be_rows,
                "be_auto": rule.get("be"),
                "tp_by": "auto" if auto else round(rf * 100, 2),
                "res": res, "risk_tab": risk_tab, "edge": edge, "diag": diag,
@@ -23174,7 +23213,7 @@ def notify_trade_result(module, symbol, direction, entry, exit_price, result, r=
     try:
         if not TELEGRAM_ALERTS_TRADE_RESULTS or (TELEGRAM_TRADE_RESULTS_REAL_ONLY and not real):
             return
-        head = {"WIN": "✅ ТЕЙК", "LOSS": "❌ СТОП", "BE": "🛡 БЕЗУБЫТОК", "TIME_EXIT": "⏱ выход по времени", "TIMEOUT": "⏱ выход по времени",
+        head = {"WIN": "✅ ТЕЙК", "LOSS": "❌ СТОП", "BE": "🛡 БЕЗУБЫТОК", "TIME_EXIT": "⏱ выход по времени", "TIMEOUT": "⏱ выход по времени", "AUTHOR_EXIT": "📣 закрыта по посту автора",
                 "LOSS_EARLY": "✂️ ранний выход"}.get(result, str(result))
         d = 1 if str(direction).upper() == "LONG" else -1
         pct = d * (exit_price - entry) / entry * 100 if entry and exit_price is not None else None
@@ -23772,6 +23811,38 @@ def _zones_ladder_finish(tr, group, res, px, tx):
     _zones_learn_event.set()
 
 
+def _zones_author_exit(tr, group, lead, ax, ax_open, pos_map):
+    """v0.99.519 — the author posted the result picture of this coin (user: "закрывать
+    сделку, когда автор публикует пост с результатом"): a position is closed at
+    market, limits not taken are taken off; a ladder nothing filled of is over."""
+    sym, s = tr["symbol"], (1 if tr["direction"] == "LONG" else -1)
+    px_now = (pos_map.get("_px") or {}).get(sym)
+    if tr["status"] == "OPEN":
+        if tr.get("real") and _zones_pos(pos_map, sym, s):
+            if not _zones_close_real(sym, tr["direction"], "author result post"):
+                return False   # the exchange did not confirm: again next round
+            px = px_now or ax_open
+        else:
+            px = ax_open or px_now
+        if not px:
+            return False
+        # a ladder followed past the post before this rule (an older record): closed now
+        _zones_ladder_finish(tr, group, "AUTHOR_EXIT", px, int(ax if tr.get("chk_t", 0) <= ax + 900 else time.time()))
+        zones_znotify(lead, f"📣 {sym}: автор опубликовал результат по монете — сделку закрыл по {px:.6g}", important=True)
+        return True
+    if tr.get("real") and not tr["real"].get("done"):
+        if not _zones_real_cancel_legs(tr):
+            return False
+        tr["real"] = None
+    with _zones_lock:
+        tr.update({"status": "EXPIRED", "why": "author_result"})
+        for zz in group:
+            zz["status"] = "expired"
+    zones_znotify(lead, f"📣 {sym}: автор опубликовал результат по монете — лимитки не налились, снимаю")
+    _zones_learn_event.set()
+    return True
+
+
 def _zones_ladder_tick(group, now, p, pos_map):
     """v0.99.491 — one post's zones on one side as ONE ladder (the author's
     method). The bot's own record follows the 1m candles (the same rules as
@@ -23863,16 +23934,25 @@ def _zones_ladder_tick(group, now, p, pos_map):
     # (the candles since the last check are all read, nothing is missed) — hundreds
     # of ladders asked every minute held the monitor for minutes
     chk_every = 60 if tr.get("real") else 300
+    # v0.99.519 — the author posted the result on this coin: the trade is over
+    ax = None if (lead.get("own") or lead.get("oc")) else zones_author_exit_t(pos_map.get("_ax"), sym, lead["post_time"])
+    if ax and ax <= now:
+        chk_every = 0
+    cs_ok, ax_open = False, None
     if tr.get("status") in ("PENDING", "OPEN") and now - tr.get("chk_at", 0) >= chk_every:
         tr["chk_at"] = now
         t0 = tr["chk_t"]
         tf, sec = ("1m", 60) if now - t0 < 2 * 86400 else ("15m", 900)
         try:
             cs = get_candles_range(sym, tf, int(t0), int(now)) or []
+            cs_ok = True
         except Exception as e:
             cs = []
             log_error(f"zones ladder candles {sym}: {e}")
         for c in cs:
+            if ax and c["time"] >= ax:   # v0.99.519 — the bot's record stops at the author's result post
+                ax_open = c["open"]
+                break
             if c["time"] < t0 or c["time"] + sec > now:
                 continue
             had_be = bool(tr.get("sl_be"))
@@ -23903,6 +23983,10 @@ def _zones_ladder_tick(group, now, p, pos_map):
             if tr.get("result"):
                 _zones_ladder_finish(tr, group, tr["result"], tr["exit"], tr["t_out"])
                 break
+    if ax and ax <= now and cs_ok and tr.get("status") in ("PENDING", "OPEN"):
+        changed = _zones_author_exit(tr, group, lead, ax, ax_open, pos_map) or changed
+        if tr.get("status") not in ("PENDING", "OPEN"):
+            return changed
     if tr.get("status") in ("PENDING", "OPEN") and now >= lead["post_time"] + ZONES_MAX_DAYS * 86400:
         if tr["status"] == "PENDING":
             with _zones_lock:
@@ -23969,7 +24053,8 @@ def zones_monitor_tick(last_track=0.0):
     for z in active:
         if not legacy(z):
             groups.setdefault(zones_group_key(z), []).append(z)
-    pos_map = {"_px": prices}
+    ax_map = zones_author_exits()   # v0.99.519
+    pos_map = {"_px": prices, "_ax": ax_map}
     if real_tails or any(_zones_real_live(z) for g in groups.values() for z in g):
         try:
             with using_account("zones"):
@@ -23989,7 +24074,7 @@ def zones_monitor_tick(last_track=0.0):
         if pos_map is None and any((z.get("trade") or {}).get("real") for z in g):
             continue   # no exchange answer this round: don't decide anything about the real orders
         try:
-            changed = _zones_ladder_tick(g, now, p, pos_map if pos_map is not None else {"_px": prices}) or changed
+            changed = _zones_ladder_tick(g, now, p, pos_map if pos_map is not None else {"_px": prices, "_ax": ax_map}) or changed
         except Exception as e:
             log_error(f"zones ladder {g[0].get('symbol')}: {e}")
     for z in real_tails:   # our record is closed, the exchange side not yet (position / limits left)
@@ -25733,7 +25818,8 @@ def api_zones_chart(zid):
         src = "живая сделка"
     else:
         cs_all = zones_candles(z["symbol"], start, end)
-        r = zone_ladder_sim(cs_all, group, p["tp"], start, end) if cs_all else None
+        ax_ = None if (z.get("own") or z.get("oc")) else zones_author_exit_t(zones_author_exits(), z["symbol"], start)   # v0.99.519
+        r = zone_ladder_sim(cs_all, group, p["tp"], start, end, be=p.get("be"), ax=ax_) if cs_all else None
         if r:
             s_ = _zones_side(z)
             tr = {"t_in": r["t_in"], "fill": r["avg"], "sl": r["sl"], "tp": r["avg"] * (1 + s_ * p["tp"] / 100),
@@ -29861,10 +29947,13 @@ async function refreshZones() {
       <div>вход</div><div><b>лимитки на все линии</b> зон поста одного направления, на ${p.off ?? 0.2}% раньше линии, объём поровну</div>
       <div>стоп</div><div><b>${p.buf}%</b> за самой дальней линией — один на всю позицию</div>
       <div>тейк</div><div><b>+${p.tp}%</b> от средней цены входа ${d.tp_user ? '(свой, из настроек)' : (lr.tp_auto ? '— подобран по <b>лучшему росту счёта</b> на истории лесенок' : '(по умолчанию — мало сделок для подбора)')}</div>
+      <div>пост автора с результатом</div><div>закрывает сделку по монете по рынку, неналитые лимитки снимаются${(() => { const a = lr.author_exit; if (!a) return ' <span class="dim">(в истории таких постов после сетапов пока нет)</span>';
+        const better = (a.g ?? 0) >= (a.g_without ?? 0);
+        return `<div class="zsub">по истории: закрыто так ${a.n} из ${a.n_trades} сделок · с правилом <b>${sgR(a.avg_r)}</b>, без него было бы <b>${sgR(a.avg_r_without)}</b> (${a.n_without} сделок) — ${better ? '<span class="win">правило помогает</span>' : '<span class="loss">без правила по истории лучше</span>'}</div>`; })()}</div>
       <div>безубыток</div><div>${p.be ? `после <b>+${p.be}%</b> от средней цены — стоп на среднюю +0.15% (комиссии), неналитые лимитки снимаются` : 'не ставится — по истории без него лучше'} <span class="dim">(подобран вместе с тейком)</span></div>
       </div>
       ${rs.n ? `<div class="zkv" style="margin-top:8px;">
-      <div>сделок по истории</div><div><b>${rs.n}</b> (постов ${rs.groups ?? '—'}): тейков ${rs.wins}, стопов ${rs.stops}${rs.bes ? `, в безубыток ${rs.bes}` : ''}${rs.n - rs.wins - rs.stops - (rs.bes || 0) ? `, по времени ${rs.n - rs.wins - rs.stops - (rs.bes || 0)}` : ''}</div>
+      <div>сделок по истории</div><div><b>${rs.n}</b> (постов ${rs.groups ?? '—'}): тейков ${rs.wins}, стопов ${rs.stops}${rs.bes ? `, в безубыток ${rs.bes}` : ''}${rs.axs ? `, по посту автора ${rs.axs}` : ''}${rs.n - rs.wins - rs.stops - (rs.bes || 0) - (rs.axs || 0) ? `, по времени ${rs.n - rs.wins - rs.stops - (rs.bes || 0) - (rs.axs || 0)}` : ''}</div>
       ${rs.per_week != null ? `<div>сделок в неделю</div><div><b>~${rs.per_week}</b> в среднем с ${new Date(rs.since * 1000).toLocaleDateString('ru-RU')} · последние 8 недель: ${rs.per_week_recent}</div>` : ''}
       <div>WR</div><div><b>${rs.wr}%</b> — тейк раньше стопа</div>
       <div>средний результат</div><div><b>${sgR(rs.avg_r)}</b> на сделку</div>
@@ -29889,7 +29978,7 @@ async function refreshZones() {
   if (dg && dg.n) {
     const pc = x => Math.round(100 * x / dg.n) + '%';
     const tfTxt = Object.entries(dg.tf || {}).map(([k, v]) => `${k}: ${v}`).join(' · ');
-    const worst = (dg.worst || []).map(w => `<tr onclick="zoneChart('${w.id}')" style="cursor:pointer;"><td>${(w.symbol || '').replace('_USDT', '')} ${w.side === 'long' ? 'лонг' : 'шорт'}<div class="dim">${zdate(w.t)} · ${w.tf}</div></td><td>${sgR(w.r)}<div class="dim">${w.result === 'WIN' ? 'тейк' : w.result === 'LOSS' ? 'стоп' : w.result === 'BE' ? 'бу' : 'время'}</div></td><td>${w.filled}/${w.legs}</td><td>${w.d0 > 0 ? '+' : ''}${w.d0}%<div class="dim">ширина ${w.width}%</div></td></tr>`).join('');
+    const worst = (dg.worst || []).map(w => `<tr onclick="zoneChart('${w.id}')" style="cursor:pointer;"><td>${(w.symbol || '').replace('_USDT', '')} ${w.side === 'long' ? 'лонг' : 'шорт'}<div class="dim">${zdate(w.t)} · ${w.tf}</div></td><td>${sgR(w.r)}<div class="dim">${w.result === 'WIN' ? 'тейк' : w.result === 'LOSS' ? 'стоп' : w.result === 'BE' ? 'бу' : w.result === 'AUTHOR_EXIT' ? 'пост автора' : 'время'}</div></td><td>${w.filled}/${w.legs}</td><td>${w.d0 > 0 ? '+' : ''}${w.d0}%<div class="dim">ширина ${w.width}%</div></td></tr>`).join('');
     diagCard = `<details class="zcard"><summary class="zh" style="margin:0;">🔍 Разбор результатов</summary><div class="zkv" style="margin-top:8px;">
       <div>постов в статистике</div><div><b>${dg.n}</b> (лонг ${dg.side_long}, шорт ${dg.n - dg.side_long})</div>
       <div>цена в момент поста</div><div>до первой лимитки в среднем <b>${dg.dist_med}%</b> (медиана)</div>
@@ -30373,7 +30462,7 @@ function zoneTradesHtml(list) {
   const wins = rs.filter(r => r > 0).length, sum = rs.reduce((a, b) => a + b, 0);
   const rows = list.map(z => { const t = z.trade, w = t.result === 'WIN';
     return `<div onclick="zoneChart('${z.id}')" style="cursor:pointer;padding:6px 8px;margin-top:4px;background:var(--card);border-radius:var(--r-sm);border-left:3px solid ${w ? '#4caf50' : (t.result === 'LOSS' ? '#ef5350' : '#e0a030')};font-size:var(--fs-sm);">
-      <b>${(z.symbol || '').replace('_USDT', '')}</b> ${t.direction === 'LONG' ? 'лонг' : 'шорт'} · <b class="${(t.pnl_r || 0) > 0 ? 'win' : 'loss'}">${t.result === 'WIN' ? 'тейк' : t.result === 'LOSS' ? 'стоп' : t.result === 'BE' ? 'безубыток' : 'по времени'} ${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R${t.pnl_pct != null ? ` · ${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct}%` : ''}</b>
+      <b>${(z.symbol || '').replace('_USDT', '')}</b> ${t.direction === 'LONG' ? 'лонг' : 'шорт'} · <b class="${(t.pnl_r || 0) > 0 ? 'win' : 'loss'}">${t.result === 'WIN' ? 'тейк' : t.result === 'LOSS' ? 'стоп' : t.result === 'BE' ? 'безубыток' : t.result === 'AUTHOR_EXIT' ? 'по посту автора' : 'по времени'} ${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R${t.pnl_pct != null ? ` · ${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct}%` : ''}</b>
       <span class="dim">· ${zfmt(t.entry)} → ${zfmt(t.exit_price)} · ${zdate(t.exit_time || t.time)}${t.autotrade_fired ? ' · 💰 биржа' : ''} · 📈</span></div>`; }).join('');
   return `<details style="margin-top:8px;"><summary style="cursor:pointer;">💼 Сделки по зонам: ${list.length} · WR ${Math.round(100 * wins / list.length)}% · итого ${sum > 0 ? '+' : ''}${sum.toFixed(2)}R</summary>${rows}</details>`;
 }

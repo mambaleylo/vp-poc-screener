@@ -19009,3 +19009,13 @@ v0.99.518 - Зоны: the author's zones and ours are kept apart everywhere (use
          только наблюдение, на биржу не идут"; the list heads "Зоны автора — активные" (with
          whether the bot places orders) and "🔎 Наши зоны — только наблюдение"; a Telegram
          message of our finder starts with "🔎 Наш поиск (наблюдение, на бирже ордеров нет)".
+v0.99.519 - Зоны: a new rule (user: "закрывать сделку, когда автор публикует пост с
+         результатом"): the author's result post on a coin (the TradingView price-range
+         picture, recognised since v0.99.502) closes our ladder on that coin from an earlier
+         post — a position at market (the stop / take / limits left are taken off), a ladder
+         nothing filled of is taken off. Live: the bot's record follows the candles up to the
+         result post, then the trade closes ("📣 закрыта по посту автора" in Telegram and the
+         lists). History: every ladder is replayed with the same rule (result AUTHOR_EXIT at
+         the first candle after the result post within the 14 days), and the rule card shows
+         honestly how the history went with it and without it. A result picture posted
+         within 5 minutes of the setup (one album) does not close it.
