@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.530"
+APP_VERSION = "0.99.531"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -25866,11 +25866,14 @@ def _oc_group(c):
 # the linear one, a three-way honest split by time (fit on the first 60 %, the model
 # / take / bar chosen on the next 20 %, the exam on the last 20 % nobody chose on),
 # and the author's ladders on the same exam weeks for the comparison.
-ZONES_OC_VER = 2
-_OC_CTX_FEATS = ("trend", "slope", "atrp", "mom", "rpos", "broken", "htf", "volr", "btc", "distp", "widthp")
+ZONES_OC_VER = 3   # v0.99.531 — zones of the 4h and the daily chart too, "tf" feature
+OC_NFEAT = 23
+OC_TF_BARS = ((1, 480), (4, 480), (24, 365))   # hours per bar, bars looked at: 20 days of 1h, 80 days of 4h, a year of 1d
+OC_PER_SIDE_TF = 2   # the nearest candidates per side on each chart
+_OC_CTX_FEATS = ("trend", "slope", "atrp", "mom", "rpos", "broken", "htf", "volr", "btc", "distp", "widthp", "tf")
 OC_VARIANTS = ("lin11", "lin22", "gb22")
-OC_VARIANT_NAMES = {"lin11": "прямая модель, 11 признаков (как раньше)", "lin22": "прямая модель, 22 признака",
-                    "gb22": "деревья решений, 22 признака"}
+OC_VARIANT_NAMES = {"lin11": "прямая модель, 11 признаков (как раньше)", "lin22": "прямая модель, все 23 признака",
+                    "gb22": "деревья решений, все 23 признака"}
 OC_TOP_Q = (0.5, 0.35, 0.25, 0.15, 0.1, 0.05)   # the bar: this share of the best-scored candidates
 OC_GB_TREES, OC_GB_DEPTH, OC_GB_LR, OC_GB_BINS, OC_GB_LEAF = 90, 2, 0.08, 8, 40
 
@@ -25907,12 +25910,51 @@ def _oc_btc_series(cs):
     return {"t": t, "v": v}
 
 
+def _oc_agg(cs, hours):
+    """1h bars -> bars of `hours` (whole UTC-aligned groups only), as the exchange draws them"""
+    if hours == 1:
+        return cs
+    out, cur, key = [], None, None
+    for c in cs:
+        k = c["time"] // (hours * 3600)
+        if k != key:
+            if cur and cur["n"] == hours:
+                out.append(cur)
+            key = k
+            cur = {"time": k * hours * 3600, "open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"],
+                   "volume": c.get("volume") or 0, "n": 1}
+        else:
+            cur["high"] = max(cur["high"], c["high"])
+            cur["low"] = min(cur["low"], c["low"])
+            cur["close"] = c["close"]
+            cur["volume"] += c.get("volume") or 0
+            cur["n"] += 1
+    if cur and cur["n"] == hours:
+        out.append(cur)
+    return out
+
+
+def oc_candidates_mtf(by_tf):
+    """v0.99.531 — the author draws his zones on the 4h and the daily chart too: the
+    nearest candidates of each side on the 1h (20 days), the 4h (80 days) and the
+    daily (a year) bars; every candidate keeps the chart it came from (c["tf"])"""
+    out = []
+    for hours, bars in by_tf:
+        if len(bars) < 120:
+            continue
+        for c in own_candidates(bars):
+            if c["f"]["rank"] < OC_PER_SIDE_TF:
+                c["tf"] = hours
+                out.append(c)
+    return out
+
+
 def oc_ctx_feats(win, c, btc_v=0.0):
-    """the market around a candidate zone, from the same closed 1h bars"""
+    """the market around a candidate zone, from the closed 1h bars (win)"""
     C = [x["close"] for x in win]
     H = [x["high"] for x in win]
     L = [x["low"] for x in win]
-    px, atr = C[-1], c["atr"] or 1e-12
+    px, atr = C[-1], _own_atr(win) or c["atr"] or 1e-12   # v0.99.531 — the 1h ATR (the zone may be from a higher chart)
     sg = 1 if c["side"] == "long" else -1
     ema200 = _oc_ema_series(C, 200)
     e50 = _oc_ema_series(C, 50)
@@ -25926,7 +25968,7 @@ def oc_ctx_feats(win, c, btc_v=0.0):
     for i in range(2, len(h4) - 2):
         for v, is_hi in ((h4[i][0], True), (h4[i][1], False)):
             ext = all(v >= h4[j][0] for j in range(i - 2, i + 3)) if is_hi else all(v <= h4[j][1] for j in range(i - 2, i + 3))
-            if ext and lo - 0.25 * atr <= v <= hi + 0.25 * atr:
+            if ext and lo - 0.25 * c["atr"] <= v <= hi + 0.25 * c["atr"]:
                 near += 1
     vols = [x.get("volume") or 0 for x in win]
     v_all = sum(vols) / len(vols) or 1e-12
@@ -25942,7 +25984,8 @@ def oc_ctx_feats(win, c, btc_v=0.0):
             "volr": max(-3.0, min(3.0, math.log((v_24 + 1e-12) / v_all))),
             "btc": sg * btc_v,
             "distp": math.log1p(max(0.0, dist_px) / px * 100),
-            "widthp": math.log1p((hi - lo) / px * 100)}
+            "widthp": math.log1p((hi - lo) / px * 100),
+            "tf": {1: 0.0, 4: 1.0, 24: 2.0}.get(c.get("tf", 1), 0.0)}
 
 
 def _oc_vec(c, ctx):
@@ -26106,13 +26149,14 @@ def oc_build(now=None):
                 continue
             win, fut = cs[i - ZONES_OWN_BARS:i], cs[i:i + ZONES_OC_HOLD_H]
             bv = _oc_btc_ctx(btc, t)
-            for c in _oc_pick(own_candidates(win)):
+            by_tf = [(h, _oc_agg(cs[max(0, i - h * (n + 1)):i], h)[-n:]) for h, n in OC_TF_BARS]   # the same bars the live scan gets
+            for c in oc_candidates_mtf(by_tf):
                 rs = []
                 for tp in ZONES_OC_TPS:
                     r = zone_ladder_sim(fut, _oc_group(c), tp, t, t + ZONES_OC_HOLD_H * 3600)
                     rs.append(round(r["r"], 3) if r else None)
                 new.append({"t": t, "s": sym, "side": c["side"], "x": [round(v, 4) for v in _oc_vec(c, oc_ctx_feats(win, c, bv))],
-                            "rank": c["f"]["rank"], "r": rs})
+                            "rank": c["f"]["rank"] if c["tf"] == 1 else 9, "tf": c["tf"], "r": rs})
             last = t
         with _oc_lock:
             _OC["samples"].extend(new)
@@ -26177,7 +26221,7 @@ def oc_train():
     on it); against the no-model choice (the nearest zone) and the author's ladders
     on the same exam weeks. The live model is refit on everything."""
     with _oc_lock:
-        rows = [s for s in _OC["samples"] if len(s["x"]) == 22]
+        rows = [s for s in _OC["samples"] if len(s["x"]) == OC_NFEAT]
     if len(rows) < 500:
         return None
     rows.sort(key=lambda s: s["t"])
@@ -26235,7 +26279,7 @@ def oc_scan_once():
     """Live: our zones by the outcome model, every hour — tab only, no orders."""
     with _oc_lock:
         model, thr, tp = _OC["model"], _OC["thr"], _OC["tp"]
-    if not model or thr is None or len((model.get("edges") or model.get("w") or [])) not in (11, 22):
+    if not model or thr is None or len((model.get("edges") or model.get("w") or [])) not in (11, OC_NFEAT):
         return 0
     now = time.time()
     made = 0
@@ -26248,10 +26292,14 @@ def oc_scan_once():
     for sym in _own_top_syms():
         try:
             cs = _own_candles(sym, now)
+            by_tf = [(1, cs)]
+            for h, n, tf in ((4, 480, "4h"), (24, 365, "1d")):
+                b_ = get_candles_range(sym, tf, int(now) - (n + 2) * h * 3600, int(now)) or []
+                by_tf.append((h, [c for c in b_ if c["time"] + h * 3600 <= now][-n:]))
         except Exception:
             continue
         best = {}
-        for c in _oc_pick(own_candidates(cs)):
+        for c in oc_candidates_mtf(by_tf):
             sc = oc_score(model, _oc_vec(c, oc_ctx_feats(cs, c, bv)))
             if sc >= thr and (c["side"] not in best or sc > best[c["side"]][0]):
                 best[c["side"]] = (sc, c)
@@ -26260,17 +26308,16 @@ def oc_scan_once():
     for sc, sym, c in found:
         if made >= ZONES_OWN_MAX_ALERTS:
             break
-        with _zones_lock:
-            dup = any(z.get("oc") and z.get("symbol") == sym and z.get("status") in ("watch", "in_trade")
-                      and own_matches({"lo": min(z["levels"]), "hi": max(z["levels"]), "side": z["side"]},
-                                      c["side"], [c["lo"], c["hi"]], c["atr"]) for z in ZONES["zones"])
+        with _zones_lock:   # v0.99.531 — one active zone per coin and side: one move must not stop a whole bunch
+            dup = any(z.get("oc") and z.get("symbol") == sym and z.get("side") == c["side"]
+                      and z.get("status") in ("watch", "in_trade") for z in ZONES["zones"])
         if dup:
             continue
         lv = [c["hi"], c["lo"]] if c["side"] == "long" else [c["lo"], c["hi"]]
         dec = max(2, 5 - math.floor(math.log10(abs(c["hi"])))) if c["hi"] > 0 else 6
         z = zones_make({"id": f"oc_{sym}_{int(now)}", "symbol": sym, "post_time": now, "train": False},
                        c["side"], [round(v, dec) for v in lv])
-        z.update({"oc": True, "oc_score": round(sc, 3), "oc_tp": tp})
+        z.update({"oc": True, "oc_score": round(sc, 3), "oc_tp": tp, "oc_tf": c.get("tf", 1)})
         with _zones_lock:
             ZONES["zones"].insert(0, z)
         made += 1
@@ -26289,6 +26336,16 @@ def oc_stats():
             and z.get("status") in ("closed", "old", "expired", "broken")]
     live = _oc_stat(done)
     t_live = min((z["post_time"] for z in zs), default=None)
+    # v0.99.531 — what the live results are made of (22 losses in a row = one move?)
+    fin = sorted([z for z in zs if z.get("result") and z["result"].get("r") is not None
+                  and z.get("status") in ("closed", "old", "expired", "broken")], key=lambda z: -z["post_time"])
+    lead_tr = {z["id"]: z.get("trade") or {} for z in zs}
+    live["rows"] = [{"symbol": z["symbol"], "side": z["side"], "t": z["post_time"], "r": z["result"]["r"],
+                     "res": z["result"].get("result"), "tf": z.get("oc_tf", 1),
+                     "exit_t": (lead_tr.get(z.get("lead") or z["id"]) or {}).get("exit_time"),
+                     "filled": (lead_tr.get(z.get("lead") or z["id"]) or {}).get("filled")} for z in fin[:40]]
+    live["days"] = len({int(r_["exit_t"] // 86400) for r_ in live["rows"] if r_.get("exit_t")})
+    live["longs"] = sum(1 for r_ in live["rows"] if r_["side"] == "long")
     return {"samples": n, "eval": ev, "tp": tp, "thr": thr, "built": built,
             "active": sum(1 for z in zs if z.get("status") in ("watch", "in_trade")), "live": live,
             # v0.99.528 — the author's ladders over the same weeks as our live zones
@@ -30857,10 +30914,10 @@ function ocHtml(d, ocZ) {   // v0.99.528 — v2: more features, trees, a 3-way h
   const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
   const dd = t => t ? new Date(t * 1000).toLocaleDateString('ru-RU') : '—';
   const row = (nm, x, note, pw) => x ? `<tr><td>${nm}${note ? `<div class="dim">${note}</div>` : ''}</td><td>${x.n}${pw && x.per_week != null ? `<div class="dim">${x.per_week}/нед</div>` : ''}</td><td>${x.wr == null ? '—' : x.wr + '%'}</td><td>${sgR(x.avg)}</td></tr>` : '';
-  let body = `<div class="dim">Бот сам ищет зоны по свечам ${ev && ev.coins ? ev.coins : 40} монет и учится отбирать те, от которых цена <b>реально отыгрывала</b> по правилам лесенки автора (лимитки, стоп 2.5% за зоной, тейк от средней). Видит 22 признака: саму зону (касания, объём, ширина, расстояние) и рынок вокруг (тренд монеты и BTC, волатильность, движение за сутки, пробивалась ли зона, уровень на 4ч). Пробует три модели — прямую на 11 и на 22 признаках и деревья решений — и берёт лучшую. Цель — <b>превзойти автора</b> по результату на сделку. Сейчас только наблюдение: без ордеров и сообщений.</div>`;
+  let body = `<div class="dim">Бот сам ищет зоны по свечам ${ev && ev.coins ? ev.coins : 40} монет и учится отбирать те, от которых цена <b>реально отыгрывала</b> по правилам лесенки автора (лимитки, стоп 2.5% за зоной, тейк от средней). Ищет зоны, как автор, на трёх графиках — 1ч (20 дней), 4ч (80 дней) и дневном (год). Видит 23 признака: саму зону (касания, объём, ширина, расстояние, график) и рынок вокруг (тренд монеты и BTC, волатильность, движение за сутки, пробивалась ли зона). Пробует три модели — прямую на 11 и на всех признаках и деревья решений — и берёт лучшую. Одна активная зона на монету и сторону. Цель — <b>превзойти автора</b> по результату на сделку. Сейчас только наблюдение: без ордеров и сообщений.</div>`;
   if (a.running) body += `<div style="margin-top:6px;"><span class="zspin">🔄</span> <b>${a.stage || 'работаю'}</b>${a.total ? ` — ${a.done || 0} из ${a.total}` : ''}<div class="dim">первый раз после обновления — история собирается заново (новые признаки), на телефоне до часа; дальше раз в сутки дополняется</div></div>`;
   else if (a.error) body += `<div class="loss" style="margin-top:6px;">ошибка: ${a.error}</div>`;
-  if (ev && ev.ver === 2) {
+  if (ev && ev.ver >= 2) {
     const at = ev.author_test || {};
     const beatBase = ev.test && ev.base_test && ev.test.avg != null && ev.base_test.avg != null ? ev.test.avg - ev.base_test.avg : null;
     const canCmp = ev.test && ev.test.n >= 30 && at.n >= 10 && at.avg != null;
@@ -30880,7 +30937,14 @@ function ocHtml(d, ocZ) {   // v0.99.528 — v2: more features, trees, a 3-way h
       ${(ev.variants || []).length ? `<details><summary>все модели</summary><div class="zsub">каждая на своём лучшем тейке и пороге; «подбор» — где выбирали, «экзамен» — где не видели</div><div class="zwrap"><table class="ztbl"><thead><tr><th>модель</th><th>подбор</th><th>экзамен</th></tr></thead><tbody>${ev.variants.map(v => `<tr class="${v.var === ev.var ? 'zbest' : ''}"><td>${v.name}<div class="dim">тейк +${v.tp}% · лучшие ${Math.round(v.q * 100)}%</div></td><td>${sgR(v.val.avg)}<div class="dim">${v.val.n}</div></td><td>${sgR(v.test.avg)}<div class="dim">${v.test.n}</div></td></tr>`).join('')}</tbody></table></div></details>` : ''}`;
   } else if (!a.running) body += `<div class="dim" style="margin-top:6px;">${ev ? 'новая версия поиска — история собирается заново, начнётся через несколько минут после запуска' : 'модель ещё не обучена — начнёт через несколько минут после запуска бота'}</div>`;
   const lv = o.live || {}, al = o.author_live || {};
-  body += `<div style="margin-top:8px;">Живые зоны: активных ${o.active || 0} · отработало ${lv.n || 0}${lv.n ? ` · средний ${sgR(lv.avg)}, WR ${lv.wr}%` : ''}${al.n ? ` · автор за те же недели: ${al.n} сделок, ${sgR(al.avg)}` : ''} · только наблюдение</div>
+  body += `<div style="margin-top:8px;">Живые зоны: активных ${o.active || 0} · отработало ${lv.n || 0}${lv.n ? ` · средний ${sgR(lv.avg)}, WR ${lv.wr}%` : ''}${al.n ? ` · автор за те же недели: ${al.n} сделок, ${sgR(al.avg)}` : ''} · только наблюдение</div>`;
+  // v0.99.531 — what the live results are made of
+  if ((lv.rows || []).length) {
+    const tfN = {1: '1ч', 4: '4ч', 24: '1д'}, resN = {WIN: 'тейк', LOSS: 'стоп', BE: 'бу', TIME_EXIT: 'время'};
+    body += `<details><summary>из чего сложились живые итоги</summary><div class="zsub">последние ${lv.rows.length}: закрылись за ${lv.days || '?'} дн., лонгов ${lv.longs} из ${lv.rows.length}${lv.days && lv.days <= 3 && lv.rows.length >= 10 ? ' — почти все в одни дни: это одно движение рынка, а не много независимых сделок' : ''}</div>
+      <div class="zwrap"><table class="ztbl"><thead><tr><th>монета</th><th>итог</th><th>налилось</th></tr></thead><tbody>${lv.rows.map(r => `<tr><td>${(r.symbol || '').replace('_USDT', '')} ${r.side === 'long' ? 'лонг' : 'шорт'} <span class="dim">${tfN[r.tf] || ''}</span><div class="dim">${dd(r.t)}${r.exit_t ? ' → ' + dd(r.exit_t) : ''}</div></td><td>${resN[r.res] || r.res || ''} ${sgR(r.r)}</td><td>${r.filled == null ? '—' : r.filled}</td></tr>`).join('')}</tbody></table></div></details>`;
+  }
+  body += `
     <button onclick="zonesPost('/api/zones/oc/retrain', {}); setTimeout(refreshZones, 1500);" class="zbtn">↻ дополнить историю и переобучить</button>
     ${ocZ.length ? `<details style="margin-top:6px;"><summary class="dim" style="cursor:pointer;">зоны поиска по результату (${ocZ.length})</summary>${zonePostBlocks(ocZ)}</details>` : ''}`;
   return `<div class="zcard" style="font-size:var(--fs-sm);"><div class="zh">🧪 Поиск по результату</div>${body}</div>`;

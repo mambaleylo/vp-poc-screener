@@ -19119,3 +19119,14 @@ v0.99.530 - Зоны: the risk shown differently in different places (user: "п�
          "← сейчас" on the 15 % row and highlighted 20 % as the best). The table had only its
          round rows, the auto-risk is chosen finer. The risk in use and the best one now get
          rows of their own ("17.5% ← сейчас · лучший").
+v0.99.531 - Зоны: "поиск по результату" (user: "очень отстаём от автора — может ещё что-нибудь
+         сделать?"; the exam: ours +0.14R, the author +0.85R; live 22 finished, all stops).
+         (1) Zones of the higher charts, as the author draws them: the nearest candidates of
+         each side on the 1h (20 days), the 4h (80 days) and the daily (a year) bars, the
+         chart as a feature (23 in all); history and live take exactly the same bars
+         (checked: identical features at the same moment). (2) One active zone per coin and
+         side — up to 5 new zones an hour on neighbouring levels of one coin, nearly all one
+         side, were all stopped by one move. (3) "из чего сложились живые итоги": the last
+         40 finished live zones with the chart, dates, result and fills, how many days they
+         closed in and how many were longs — a run of stops in one or two days is one market
+         move, not many independent trades. The data set is built again once.
