@@ -19203,3 +19203,12 @@ v0.99.540 - Зоны: after the BTC post was set right, two ETC-scale zones (8.1
          header shows the post's coin, and a ladder in a trade has "✖ закрыть": the position
          at market, its limits, stop and take off the exchange, the result recorded ("✋
          закрыта вручную"); the zones of a misread coin go after it.
+v0.99.541 - Зоны: the duplicate clean-up of v0.99.538 removed the live copy (user: "распознала
+         повторно, но на сайте есть только в архиве и как дубли — там, где все слежки биткоина,
+         нету"). It kept the first copy even when all its zones were archive (finished /
+         skipped) and deleted the other copy's watched shorts. Now the copy kept is the one with
+         orders on the exchange, then the one with zones still watched or in a trade, then the
+         first; the copies removed that way are brought back at the start (their zones replayed
+         to tell watched from finished) and the archive copy becomes the duplicate. Also: after
+         a copy was dropped, the rest were still compared with it, so one of three copies could
+         stay.

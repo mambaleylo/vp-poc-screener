@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.540"
+APP_VERSION = "0.99.541"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23292,6 +23292,48 @@ def _zones_find_dup(post, new):
     return None
 
 
+def _zones_dedup_repair():
+    """v0.99.541 — the v0.99.538 clean-up kept the first copy even when it was all archive
+    and removed the other copy's watched zones (a BTC post: only in the archive and as a
+    duplicate). Such a copy comes back (its zones replayed to tell watched from finished)
+    and the archive copy becomes the duplicate."""
+    n = 0
+    with _zones_lock:
+        posts = {p_["id"]: p_ for p_ in ZONES["posts"]}
+        dropped = [p_ for p_ in ZONES["posts"] if p_.get("dup_of") and not p_.get("dup_fix541")]
+    for p_ in dropped:
+        keep = posts.get(p_["dup_of"])
+        with _zones_lock:
+            p_["dup_fix541"] = True
+            if not keep:
+                continue
+            kz = [z for z in ZONES["zones"] if z.get("post_id") == keep["id"] and z.get("status") != "deleted"]
+            dz = [z for z in ZONES["zones"] if z.get("post_id") == p_["id"] and z.get("status") == "deleted"
+                  and z.get("dup_of") == keep["id"]]
+            if not dz or any(z.get("status") in ("watch", "in_trade") for z in kz):
+                continue
+            if any(((z.get("trade") or {}).get("real") or {}).get("legs") and not z["trade"]["real"].get("done") for z in kz):
+                continue
+        for z in dz:
+            with _zones_lock:
+                z["status"] = z.pop("dup_prev", None) or ("train" if z.get("train") else "watch")
+                if z["status"] == "deleted":
+                    z["status"] = "watch"
+                z.pop("dup_of", None)
+            if z["status"] == "watch":
+                zones_replay_past(z)
+        with _zones_lock:
+            for k in ("dup_of", "skipped"):
+                p_.pop(k, None)
+            p_["notes"] = [n_ for n_ in p_.get("notes", []) if not n_.startswith("дубль поста")]
+            for z in kz:
+                z["dup_prev"], z["status"], z["dup_of"] = z.get("status"), "deleted", p_["id"]
+            keep["dup_of"], keep["skipped"], keep["dup_fix541"] = p_["id"], True, True
+            keep["notes"] = [f"дубль поста {p_['id']} (тот же пост пришёл ещё раз) — зоны убраны"]
+        n += 1
+    return n
+
+
 def zones_dedup_migrate():
     """v0.99.538 — duplicates stored before (three ZRO posts of 07.10 20:14, each with its
     own ladder): one is kept (the one with orders on the exchange, else the first), the
@@ -23299,7 +23341,7 @@ def zones_dedup_migrate():
     with _zones_lock:
         posts = [p_ for p_ in ZONES["posts"] if p_.get("symbol") and not p_.get("dup_of") and not p_.get("own")]
     posts.sort(key=lambda p_: (p_["symbol"], p_["post_time"]))
-    n = 0
+    n = _zones_dedup_repair()
     for i, a in enumerate(posts):
         if a.get("dup_of"):
             continue
@@ -23307,6 +23349,8 @@ def zones_dedup_migrate():
         if not ka:
             continue
         for b in posts[i + 1:]:
+            if a.get("dup_of"):
+                break   # this copy was just dropped: the kept one is compared with the rest
             if b["symbol"] != a["symbol"] or b["post_time"] - a["post_time"] > ZONES_DUP_SEC:
                 break
             if b.get("dup_of") or _zones_post_key(b["id"]) != ka:
@@ -23315,11 +23359,16 @@ def zones_dedup_migrate():
                 zb = [z for z in ZONES["zones"] if z.get("post_id") == b["id"] and z.get("status") != "deleted"]
                 za = [z for z in ZONES["zones"] if z.get("post_id") == a["id"] and z.get("status") != "deleted"]
             real = lambda zs: any(((z.get("trade") or {}).get("real") or {}).get("legs") and not z["trade"]["real"].get("done") for z in zs)
-            keep, drop, dz = (b, a, za) if real(zb) and not real(za) else (a, b, zb)
+            live = lambda zs: sum(1 for z in zs if z.get("status") in ("watch", "in_trade"))
+            # v0.99.541 — keep the copy that is alive: orders on the exchange first, then the
+            # one with zones still watched / in a trade (the first copy could be all archive,
+            # and the watched shorts of the other were removed), then the first
+            keep, drop, dz = (b, a, za) if (real(zb), live(zb)) > (real(za), live(za)) else (a, b, zb)
             if real(dz):
                 continue   # both have orders on the exchange: left as they are
             with _zones_lock:
                 for z in dz:
+                    z["dup_prev"] = z.get("status")   # v0.99.541 — what it was, for a repair
                     z["status"], z["dup_of"] = "deleted", keep["id"]
                 drop["dup_of"], drop["skipped"] = keep["id"], True
                 drop["notes"] = [f"дубль поста {keep['id']} (тот же пост пришёл ещё раз) — зоны убраны"]
