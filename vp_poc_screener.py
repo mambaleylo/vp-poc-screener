@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.532"
+APP_VERSION = "0.99.533"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24559,7 +24559,7 @@ def zones_tg_loop():
                 txt = (msg.get("text") or "").strip()
                 if txt.startswith("/") and not msg.get("photo"):
                     zones_save()   # the offset is past this command: a restart never repeats it
-                    if bot_command(txt):
+                    if bot_command(txt, msg.get("date")):
                         continue
                 if False and txt.lower().lstrip("/") in ("обучение вкл", "обучение выкл", "обучение", "train"):   # v0.99.480 — removed
                     with _zones_lock:
@@ -25089,16 +25089,30 @@ def bot_status_text():
             + (f"\nв очереди на отправку: {queued}" if queued > 1 else ""))
 
 
-BOT_COMMANDS_HELP = ("Команды бота:\n/update — скачать новую версию с GitHub и перезапустить\n"
+def bot_ping_text(msg_t=None):
+    """v0.99.533 — /ping: a short "I am here" (no answer = no connection)"""
+    now = time.time()
+    up = int(now - _PROC_START)
+    with _zones_lock:
+        mon = ZONES.get("monitor_ok")
+    lag = f" · ответ через {max(0, int(now - msg_t))} с" if msg_t else ""
+    mon_txt = (f"цены проверены {int(now - mon)} с назад" if mon and now - mon < 600
+               else ("⚠️ мониторинг молчит " + (f"{int((now - mon) // 60)} мин" if mon else "с запуска")))
+    return f"🏓 На связи{lag}\nv{APP_VERSION} · работает {up // 86400} д {up % 86400 // 3600} ч {up % 3600 // 60} мин · {mon_txt}"
+
+
+BOT_COMMANDS_HELP = ("Команды бота:\n/ping — на связи ли бот (нет ответа — нет связи)\n/update — скачать новую версию с GitHub и перезапустить\n"
                      "/restart — перезапустить\n/status — версия, время работы, зоны и сделки\n"
                      "/help — эта подсказка")
 
 
-def bot_command(txt):
+def bot_command(txt, msg_t=None):
     """v0.99.458 — commands from the user's own chat (TELEGRAM_CHAT_ID only).
     A fixed list — never an arbitrary shell command."""
     cmd = txt.strip().split()[0].lower().split("@")[0]
-    if cmd in ("/start", "/help"):
+    if cmd == "/ping":
+        tg_outbox_push(bot_ping_text(msg_t))
+    elif cmd in ("/start", "/help"):
         tg_outbox_push(BOT_COMMANDS_HELP)
     elif cmd == "/status":
         tg_outbox_push(bot_status_text())

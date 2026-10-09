@@ -19139,3 +19139,7 @@ v0.99.532 - Зоны: "поиск по результату" learns from the aut
          picks coincided with a fresh zone of his. Checked on a synthetic history with a
          skilled "author": the model leans on his zones and the exam rises with them; with
          no posts nothing changes. The data set is built again once (zone edges kept now).
+v0.99.533 - Telegram: /ping (user: "давай команду просто сделаем для телеги, хоть и вручную") — a
+         short "🏓 На связи · ответ через N с" with the version, the uptime and how long ago the
+         prices were checked (or "мониторинг молчит"). No answer = no connection to the bot.
+         Listed in /help.
