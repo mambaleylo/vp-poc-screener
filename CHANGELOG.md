@@ -19262,3 +19262,7 @@ v0.99.547 - Neuro: "📝 Бумажная торговля" (user: "добавь
          Telegram result line carries the paper P&L and balance. A paper-only coin sends no entry
          message (only its result). Kept in the Neuro state file — survives restarts. Also: the
          early-exit close now touches the exchange only for a position the signal itself opened.
+v0.99.548 - Авто-риск: Kelly is no longer halved (user: "Келли уберём, будем брать адекватный
+         риск, но не половинить"). The coin's risk is the whole cautious Kelly (the small-sample
+         correction — net R lowered by one standard error — stays), clamped 1..50%. The cards
+         ("с $500 как автоторговля", "лучший риск на сделку") are recomputed once on the next look.

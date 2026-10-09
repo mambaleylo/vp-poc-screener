@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.547"
+APP_VERSION = "0.99.548"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -850,7 +850,7 @@ AUTOTRADE_LEVERAGE_SNR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_SNR", 10))  #
 AUTOTRADE_INVERT_SNR = False  # v0.99.391 — feature removed, always off  # same as AUTOTRADE_INVERT_LSW/NEURO, for S/R Zones
 SNR_ALL_IN_ENABLED = False   # v0.99.424 — va-bank removed (user): with sizing by risk (v0.99.423) it was just "risk ~50%, floating per trade"
 SNR_ALL_IN_MARGIN_PCT = float(os.environ.get("VP_SNR_ALL_IN_MARGIN_PCT", 95.0))
-AUTO_RISK_ENABLED = os.environ.get("VP_AUTO_RISK", "0") == "1"   # v0.99.422 — per-coin growth-optimal risk (cautious ½ Kelly) instead of the settings' %
+AUTO_RISK_ENABLED = os.environ.get("VP_AUTO_RISK", "0") == "1"   # v0.99.422 — per-coin growth-optimal risk (cautious Kelly, v0.99.548 — not halved) instead of the settings' %
 AUTO_RISK_MAX_PCT = float(os.environ.get("VP_AUTO_RISK_MAX_PCT", 50.0))   # hard safety cap
 AUTO_RISK_MIN_PCT = float(os.environ.get("VP_AUTO_RISK_MIN_PCT", 1.0))
 NEURO_ALL_IN_ENABLED = False   # v0.99.424 — va-bank removed (user): with sizing by risk (v0.99.423) it was just "risk ~50%, floating per trade"
@@ -9020,7 +9020,8 @@ def kelly_risk(pairs):
         (25 trades at WR 64% could really be ~45%);
       - the growth-optimal share on those returns (max of the average log
         growth over a 0.5% grid);
-      - half of it ("½ Kelly");
+      - all of it (v0.99.548 — was half, "½ Kelly"; user: "брать адекватный
+        риск, но не половинить" — the small-sample correction above stays);
       - clamped to AUTO_RISK_MIN_PCT..AUTO_RISK_MAX_PCT.
     Returns {} with fewer than 8 trades."""
     pairs = [(r, k) for r, k in pairs if r is not None and k and k > 0]
@@ -9051,7 +9052,7 @@ def kelly_risk(pairs):
         return best
     full = best_m(0.0)
     cautious = best_m(se)
-    pct = max(AUTO_RISK_MIN_PCT, min(AUTO_RISK_MAX_PCT, cautious * 50.0))
+    pct = max(AUTO_RISK_MIN_PCT, min(AUTO_RISK_MAX_PCT, cautious * 100.0))   # v0.99.548 — not halved
     return {"auto_risk_pct": round(pct, 1), "auto_risk_full_pct": round(full * 100, 1),
             "auto_risk_n": n, "auto_risk_avg_r": round(mean, 3), "auto_risk_cautious_r": round(mean - se, 3)}
 
@@ -9081,7 +9082,7 @@ def compound_sig(mod):
     """Settings signature: when it changes, the $15 columns are recomputed."""
     m, v = compound_sizing(mod)
     return (f"{m}:{v:g}|auto:{int(AUTO_RISK_ENABLED)}:{AUTO_RISK_MAX_PCT:g}:{AUTO_RISK_MIN_PCT:g}"
-            f"|start:{MSNR_COMPOUND_START_BALANCE:g}|tier:436")   # v0.99.434 — a new start balance recomputes the columns; v0.99.436 — per-trade tier
+            f"|start:{MSNR_COMPOUND_START_BALANCE:g}|tier:436|kelly:548")   # v0.99.434 — a new start balance recomputes the columns; v0.99.436 — per-trade tier
 
 
 def auto_risk_for(mod, symbol):
@@ -9168,7 +9169,7 @@ def rr_compound_live_sizing(trades, symbol, mod, start_balance=None, clean_after
     out = {"compound_start": start_balance, "compound_final_balance": start_balance, "compound_return_pct": 0.0,
            "compound_leverage": None, "compound_trades": 0, "compound_blown_at": None,
            "compound_mode": (f"ва-банк {val:g}%" if mode == "all_in" else
-                             f"авто-риск {val:g}% (½ Келли)" if mode == "auto" else f"риск {val:g}%"),
+                             f"авто-риск {val:g}% (Келли)" if mode == "auto" else f"риск {val:g}%"),
            "compound_sig": compound_sig(mod), "compound_skipped": 0,
            "auto_risk_pct": None, "auto_risk_full_pct": None, "auto_risk_n": None}
     out.update(kel)
@@ -29864,7 +29865,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow subRow">
         <div>
           <div class="label">↳↳ Авто-риск (лучший % для каждой монеты Neuro / P/R; у Зон — один на все, вместе с тейком и стопом)</div>
-          <div class="sub">вместо % выше каждая монета Neuro / P/R торгуется со своим риском на сделку — тем, при котором счёт растёт быстрее всего на длинной дистанции (Келли), осторожно: по сделкам теста (их не видел выбор настроек), с пессимистичной поправкой на малую выборку и половиной от оптимума. Не больше 50%. Бэктест «с $500» считает так же</div>
+          <div class="sub">вместо % выше каждая монета Neuro / P/R торгуется со своим риском на сделку — тем, при котором счёт растёт быстрее всего на длинной дистанции (Келли), осторожно: по сделкам теста (их не видел выбор настроек), с пессимистичной поправкой на малую выборку (без деления пополам). Не больше 50%. Бэктест «с $500» считает так же</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutoRisk"><span class="switchSlider"></span></label>
       </div>
@@ -34042,7 +34043,7 @@ function compoundSummaryHtml(x) {
     ? `как автоторговля (${x.compound_mode}):</span> <span class="bal">${fmtUsdCompact(x.compound_final_balance)}</span> <span class="${cls}">(${pctTxt})</span> <span class="dim">· плечо своё под стоп каждой сделки, обычно ~${x.compound_leverage}x · ${x.compound_trades} сделок · со сложным процентом и комиссиями${x.compound_skipped ? ` · ${x.compound_skipped} пропущено (автоторговля бы не открыла)` : ''}`
     : `ва-банк:</span> <span class="bal">${fmtUsdCompact(x.compound_final_balance)}</span> <span class="${cls}">(${pctTxt})</span> <span class="dim">· плечо ${x.compound_leverage}x · ${x.compound_trades} сделок · с комиссиями`;
   const kel = x.auto_risk_pct != null   // v0.99.422
-    ? `<div style="font-size:var(--fs-sm);margin:-4px 0 8px;">🎯 <span class="dim">лучший риск на сделку для этой монеты:</span> <b>${x.auto_risk_pct}%</b> <span class="dim">(½ осторожного Келли по ${x.auto_risk_n} сделкам, которых не видел выбор настроек; без осторожности и целиком было бы ${x.auto_risk_full_pct}%) ${(x.compound_mode || '').startsWith('авто-риск') ? '· используется' : '· включите «Авто-риск» в настройках, чтобы торговать с ним'}</span></div>` : '';
+    ? `<div style="font-size:var(--fs-sm);margin:-4px 0 8px;">🎯 <span class="dim">лучший риск на сделку для этой монеты:</span> <b>${x.auto_risk_pct}%</b> <span class="dim">(осторожный Келли по ${x.auto_risk_n} сделкам, которых не видел выбор настроек; без поправки на малую выборку было бы ${x.auto_risk_full_pct}%) ${(x.compound_mode || '').startsWith('авто-риск') ? '· используется' : '· включите «Авто-риск» в настройках, чтобы торговать с ним'}</span></div>` : '';
   return `<div style="font-size:var(--fs-sm);margin:4px 0 8px;">💰 <span class="dim">с $${x.compound_start} ${how}</span>${blown}</div>` + kel;
 }
 function compoundCellTxt(t) {
