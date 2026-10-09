@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.545"
+APP_VERSION = "0.99.546"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21203,6 +21203,43 @@ def api_snr_status():
     })
 
 
+def prv_honest_live():
+    """v0.99.546 — the honest live check of P/R: EVERY closed live signal
+    (also coins that later dropped out of the list — the usual stats show
+    only coins in the list now, which hides the ones that went bad), not
+    neuro-filtered, net of round-trip fees. Split all / still in the list /
+    dropped / really traded, with the 95% interval of the mean R."""
+    with state_lock:
+        active = set(_prv_active_symbols)
+        sigs = [dict(x) for x in STATE["prv_signals"] if not x.get("neuro_filtered")]
+    def block(rows):
+        rs = []
+        for x in rows:
+            try:
+                rs.append(float(x["pnl_r"]) - trade_fee_r(x.get("entry"), x.get("sl")))
+            except (TypeError, ValueError, KeyError):
+                pass
+        n = len(rs)
+        if not n:
+            return {"n": 0}
+        avg = sum(rs) / n
+        sd = (sum((r - avg) ** 2 for r in rs) / (n - 1)) ** 0.5 if n > 1 else 0.0
+        se = sd / n ** 0.5 if n > 1 else 0.0
+        return {"n": n, "avg": round(avg, 3), "sum": round(sum(rs), 2),
+                "wr": round(sum(1 for r in rs if r > 0) / n * 100, 1),
+                "lo": round(avg - 1.96 * se, 3) if n > 1 else None, "hi": round(avg + 1.96 * se, 3) if n > 1 else None,
+                "z": round(avg / se, 2) if se > 0 else None,
+                "coins": len({x["symbol"] for x in rows})}
+    closed = [x for x in sigs if x.get("status") == "CLOSED" and x.get("result") in CLOSED_RESULTS and x.get("pnl_r") is not None]
+    times = [x.get("exit_time") or x.get("time") for x in closed if (x.get("exit_time") or x.get("time"))]
+    return {"all": block(closed),
+            "active": block([x for x in closed if x["symbol"] in active]),
+            "dropped": block([x for x in closed if x["symbol"] not in active]),
+            "real": block([x for x in closed if x.get("autotrade_fired")]),
+            "open": sum(1 for x in sigs if x.get("status") == "OPEN"),
+            "first": min(times) if times else None, "last": max(times) if times else None}
+
+
 def prv_compute_signal_stats(active_symbols=None):
     """v0.99.282 — same CRITICAL FIX as snr_compute_signal_stats()'s own
     — see that function's own comment for the full incident."""
@@ -27408,6 +27445,7 @@ def api_prv_status():
         signal_log = list(STATE["prv_signals"])
     active_set = set(active_symbols)
     signal_stats = prv_compute_signal_stats(active_symbols)
+    signal_stats["honest"] = prv_honest_live()   # v0.99.546
     coins = []
     for symbol in display_symbols:
         r = results.get(symbol)
@@ -31993,6 +32031,26 @@ function zonesAdd(postId, sym) {
   zonesPost('/api/zones/zone', {post_id: postId || null, symbol: s, side: /^ш|^s/i.test(sd.trim()) ? 'short' : 'long', levels: lv});
 }
 
+function prvHonestHtml(h) {   // v0.99.546 — the honest live check
+  if (!h || !h.all) return '';
+  const a = h.all;
+  const f = v => v == null ? '—' : (v > 0 ? '+' : '') + v;
+  const row = (name, b) => b && b.n ? `<tr><td>${name}</td><td>${b.n}</td><td>${b.wr}%</td><td><b>${f(b.avg)}R</b></td><td>${f(b.sum)}R</td><td class="dim">${b.lo != null ? f(b.lo) + '…' + f(b.hi) : '—'}</td></tr>` : `<tr><td>${name}</td><td colspan="5" class="dim">нет закрытых</td></tr>`;
+  let verdict;
+  if (!a.n || a.n < 30) verdict = `⏳ Рано судить: закрыто ${a.n || 0} из ~30 нужных. Серия плюсов на таком числе бывает и случайно — риск держи маленьким.`;
+  else if (a.lo > 0) verdict = `✅ Перевес подтверждается вживую: даже нижняя граница (${f(a.lo)}R) выше нуля после комиссий.`;
+  else if (a.avg > 0) verdict = `🟡 В плюсе, но пока в пределах случайности (нижняя граница ${f(a.lo)}R ниже нуля). Нужно больше сделок.`;
+  else verdict = `🔴 Вживую после комиссий в минусе (${f(a.avg)}R на сделку).`;
+  const d = t => t ? new Date(t * 1000).toLocaleDateString() : '—';
+  return `<details style="margin-bottom:10px;padding:10px;background:var(--inset);border-radius:var(--r-lg);border:1px solid var(--line);">
+    <summary style="cursor:pointer;"><b>🧪 Честная проверка вживую</b> <span class="dim">· ${a.n || 0} сделок · ${a.n ? f(a.avg) + 'R/сделку' : '—'}</span></summary>
+    <div style="font-size:var(--fs-sm);margin:8px 0;">${verdict}</div>
+    <table style="width:100%;font-size:var(--fs-sm);border-collapse:collapse;"><tr class="dim"><td></td><td>n</td><td>WR</td><td>ср.</td><td>сумма</td><td>95%</td></tr>
+      ${row('все сигналы', h.all)}${row('монеты в списке', h.active)}${row('выпавшие из списка', h.dropped)}${row('реально торговались', h.real)}</table>
+    <div class="dim" style="font-size:var(--fs-xs,11px);margin-top:6px;">Считаются ВСЕ закрытые живые сигналы (и монеты, выпавшие из списка), минус комиссии. Проскальзывание на тонких монетах не учтено — реальность чуть хуже. ${d(h.first)} – ${d(h.last)} · открыто ${h.open}</div>
+  </details>`;
+}
+
 async function refreshPrv() {
   const panel = document.getElementById('prvPanel');
   try {
@@ -32017,9 +32075,9 @@ async function refreshPrv() {
       </div>`;
     }
 
-    const lstatsHtml = data.live_signal_stats && data.live_signal_stats.total
+    const lstatsHtml = (data.live_signal_stats && data.live_signal_stats.total
       ? `<div class="dim" style="font-size:var(--fs-sm);margin-bottom:10px;">\u0436\u0438\u0432\u044b\u0435 \u0441\u0438\u0433\u043d\u0430\u043b\u044b \u0432\u0441\u0435\u0433\u043e: ${data.live_signal_stats.total} \u00b7 WR ${data.live_signal_stats.winrate!=null?data.live_signal_stats.winrate+'%':'\u2014'} \u00b7 \u043e\u0442\u043a\u0440\u044b\u0442\u043e: ${data.live_signal_stats.open}</div>`
-      : '';
+      : '') + prvHonestHtml((data.live_signal_stats || {}).honest);   // v0.99.546
 
     const allLiveSigs = [];
     coins.forEach(c => (c.recent_live_signals || []).forEach(s => allLiveSigs.push(s)));
