@@ -19266,3 +19266,10 @@ v0.99.548 - Авто-риск: Kelly is no longer halved (user: "Келли уб
          риск, но не половинить"). The coin's risk is the whole cautious Kelly (the small-sample
          correction — net R lowered by one standard error — stays), clamped 1..50%. The cards
          ("с $500 как автоторговля", "лучший риск на сделку") are recomputed once on the next look.
+v0.99.549 - Зоны: "в архиве нажимаю скрин, а там другая картинка". A post's number was its
+         time in ms; the pictures of one album are handled at once, so two of them could get
+         one number — the second picture was written over the first and both posts showed it
+         (and their zones were mixed under one post). Now a number is never given twice. Posts
+         stored with a shared number get their own at start (zones of another coin move with
+         their post; the lost picture is said on the post). The picture viewer no longer shows
+         the previous picture while the new one loads or when it is missing.

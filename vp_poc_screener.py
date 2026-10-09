@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.548"
+APP_VERSION = "0.99.549"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23572,6 +23572,62 @@ def zones_dedup_migrate():
     return n
 
 
+_zones_pid_lock = threading.Lock()
+_zones_pids_taken = set()
+
+
+def _zones_new_pid(now=None):
+    """v0.99.549 — a post's number was its time in ms: the pictures of one album are
+    handled at once, two of them could get one number and the second picture was
+    written over the first ("в архиве нажимаю скрин, а там другая картинка").
+    Now a number is never given twice (nor one whose picture file exists)."""
+    with _zones_pid_lock:
+        with _zones_lock:
+            taken = {p_["id"] for p_ in ZONES["posts"]}
+        ms = int((now or time.time()) * 1000)
+        while True:
+            pid = f"p{ms}"
+            if pid not in taken and pid not in _zones_pids_taken and not os.path.exists(os.path.join(ZONES_IMG_DIR, pid + ".jpg")):
+                _zones_pids_taken.add(pid)
+                return pid
+            ms += 1
+
+
+def zones_fix_dup_pids():
+    """v0.99.549 — posts stored before with one shared number: each later copy gets its own
+    number; its zones move with it when its coin differs (same coin: they can't be told apart).
+    Its picture was overwritten — that is said on the post."""
+    n = 0
+    with _zones_lock:
+        seen = {}
+        for p_ in reversed(ZONES["posts"]):   # oldest first: the first one keeps the number
+            pid = p_.get("id")
+            if pid not in seen:
+                seen[pid] = p_
+                continue
+            first = seen[pid]
+            ms = int(pid[1:]) + 1
+            taken = {x["id"] for x in ZONES["posts"]}
+            while f"p{ms}" in taken or os.path.exists(os.path.join(ZONES_IMG_DIR, f"p{ms}.jpg")):
+                ms += 1
+            new_id = f"p{ms}"
+            p_["id"] = new_id
+            p_["img_lost"] = True
+            p_.setdefault("notes", []).append("картинка этого поста была перезаписана другой (совпал номер поста) — скрин не сохранился")
+            if not first.get("img_shared"):
+                first["img_shared"] = True
+                first.setdefault("notes", []).append("номер поста совпадал с соседней картинкой альбома — скрин может быть от неё")
+            if p_.get("symbol") and p_.get("symbol") != first.get("symbol"):
+                for z in ZONES["zones"]:
+                    if z.get("post_id") == pid and z.get("symbol") == p_["symbol"]:
+                        z["post_id"] = new_id
+            n += 1
+    if n:
+        log_error(f"zones: {n} posts shared a number with another post — given their own")
+        zones_save()
+    return n
+
+
 def zones_add_post(data, post_time=None, source="web", caption="", train=None, src_ref=None, quiet=False):
     """Store a screenshot, recognise it, create its zones. Old posts are
     replayed at once: a zone already reached before now is history only
@@ -23583,8 +23639,8 @@ def zones_add_post(data, post_time=None, source="web", caption="", train=None, s
         with _zones_lock:
             train = bool(ZONES.get("train_mode"))
     post_time = float(post_time or now)
-    pid = f"p{int(now * 1000)}"
     os.makedirs(ZONES_IMG_DIR, exist_ok=True)
+    pid = _zones_new_pid(now)   # v0.99.549 — two pictures of one album no longer share a number
     img_path = os.path.join(ZONES_IMG_DIR, pid + ".jpg")
     with open(img_path, "wb") as f:
         f.write(data)
@@ -27339,10 +27395,14 @@ def api_zones_img(pid):
     if not re.fullmatch(r"p\d+", pid or ""):
         return "bad id", 400
     path = os.path.join(ZONES_IMG_DIR, pid + ".jpg")
-    if not os.path.exists(path):
+    with _zones_lock:
+        lost = any(p_.get("id") == pid and p_.get("img_lost") for p_ in ZONES["posts"])
+    if lost or not os.path.exists(path):
         return "нет картинки", 404
     with open(path, "rb") as f:
-        return app.response_class(f.read(), mimetype="image/jpeg")
+        r = app.response_class(f.read(), mimetype="image/jpeg")
+    r.headers["Cache-Control"] = "no-store"   # v0.99.549
+    return r
 
 
 _zones_recheck_lock = threading.Lock()
@@ -32014,7 +32074,21 @@ function zoneShot(pid) {
     _zsZoomInit(document.getElementById('zoneShotImg'));
   }
   _zsReset();
-  document.getElementById('zoneShotImg').src = '/api/zones/img/' + pid;
+  // v0.99.549 — the previous picture stayed on screen while the new one loaded (or when it was missing)
+  const img = document.getElementById('zoneShotImg');
+  let msg = document.getElementById('zoneShotMsg');
+  if (!msg) {
+    msg = document.createElement('div');
+    msg.id = 'zoneShotMsg';
+    msg.style.cssText = 'position:fixed;top:50%;left:0;right:0;text-align:center;color:#fff;font-size:15px;pointer-events:none;';
+    box.appendChild(msg);
+  }
+  img.removeAttribute('src');
+  img.style.visibility = 'hidden';
+  msg.textContent = 'загрузка…';
+  img.onload = () => { img.style.visibility = 'visible'; msg.textContent = ''; };
+  img.onerror = () => { msg.textContent = 'картинки этого поста нет'; };
+  img.src = '/api/zones/img/' + pid;
   box.style.display = 'flex';
   window._zUp = Date.now();   // no tab rebuild under the picture
   try { history.pushState({zoneShot: 1}, ''); } catch (e) {}
@@ -35038,6 +35112,7 @@ if __name__ == "__main__":
     threading.Thread(target=prv_backtest_loop, daemon=True).start()
     threading.Thread(target=prv_live_loop, daemon=True).start()
     zones_load()   # v0.99.438
+    zones_fix_dup_pids()   # v0.99.549
     zones_outbox_load()   # v0.99.455 — unsent zone messages from before the restart
     restart_note_on_start()   # v0.99.458 — "back in work" after /update, /restart or the button
     threading.Thread(target=zones_tg_loop, daemon=True).start()
