@@ -19178,3 +19178,11 @@ v0.99.537 - Зоны: BTC shorts "в сделке" while the exchange had a long
          ladder's) position is open on the coin, a ladder places no limits and takes its
          unfilled ones off ("жду, пока закроется") — they would merge with it or eat into it.
          The positions are read every round while zones autotrade is on.
+v0.99.538 - Зоны: duplicate posts (user: "дубли?" — three ZRO posts of 07.10 20:14 with the same
+         zones, each with its own ladder). One post can come in several ways (a forward, the
+         account reader, the history load) with different source marks, and these were stored
+         before the v0.99.514 one-ladder rule. Now a post with the same coin and the same zones
+         within 30 minutes of a stored one is kept only as a note ("дубль поста … — не
+         дублирую"), no zones; at the start the duplicates stored earlier are cleaned: one post
+         is kept (the one with orders on the exchange, else the first), the others' zones go
+         (never those with orders on the exchange).

@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.537"
+APP_VERSION = "0.99.538"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23236,6 +23236,67 @@ def zones_learned_stale():
     return False
 
 
+def _zones_post_key(pid):
+    """the post's zones as a set: {(side, levels)}"""
+    with _zones_lock:
+        return frozenset((z["side"], tuple(round(v, 6) for v in z["levels"])) for z in ZONES["zones"]
+                         if z.get("post_id") == pid and z.get("status") != "deleted" and z.get("levels"))
+
+
+def _zones_find_dup(post, new):
+    """v0.99.538 — the same post that came in another way (a forward, the account
+    reader, the history load): the same coin and the same zones within 30 minutes"""
+    if not post.get("symbol") or not new:
+        return None
+    key = frozenset((z["side"], tuple(round(v, 6) for v in z["levels"])) for z in new)
+    with _zones_lock:
+        cands = [p_ for p_ in ZONES["posts"] if p_["id"] != post["id"] and p_.get("symbol") == post["symbol"]
+                 and not p_.get("dup_of") and abs(p_.get("post_time", 0) - post["post_time"]) <= ZONES_DUP_SEC]
+    for p_ in cands:
+        if _zones_post_key(p_["id"]) == key:
+            return p_
+    return None
+
+
+def zones_dedup_migrate():
+    """v0.99.538 — duplicates stored before (three ZRO posts of 07.10 20:14, each with its
+    own ladder): one is kept (the one with orders on the exchange, else the first), the
+    others' zones go (unless they have orders on the exchange)"""
+    with _zones_lock:
+        posts = [p_ for p_ in ZONES["posts"] if p_.get("symbol") and not p_.get("dup_of") and not p_.get("own")]
+    posts.sort(key=lambda p_: (p_["symbol"], p_["post_time"]))
+    n = 0
+    for i, a in enumerate(posts):
+        if a.get("dup_of"):
+            continue
+        ka = _zones_post_key(a["id"])
+        if not ka:
+            continue
+        for b in posts[i + 1:]:
+            if b["symbol"] != a["symbol"] or b["post_time"] - a["post_time"] > ZONES_DUP_SEC:
+                break
+            if b.get("dup_of") or _zones_post_key(b["id"]) != ka:
+                continue
+            with _zones_lock:
+                zb = [z for z in ZONES["zones"] if z.get("post_id") == b["id"] and z.get("status") != "deleted"]
+                za = [z for z in ZONES["zones"] if z.get("post_id") == a["id"] and z.get("status") != "deleted"]
+            real = lambda zs: any(((z.get("trade") or {}).get("real") or {}).get("legs") and not z["trade"]["real"].get("done") for z in zs)
+            keep, drop, dz = (b, a, za) if real(zb) and not real(za) else (a, b, zb)
+            if real(dz):
+                continue   # both have orders on the exchange: left as they are
+            with _zones_lock:
+                for z in dz:
+                    z["status"], z["dup_of"] = "deleted", keep["id"]
+                drop["dup_of"], drop["skipped"] = keep["id"], True
+                drop["notes"] = [f"дубль поста {keep['id']} (тот же пост пришёл ещё раз) — зоны убраны"]
+            n += 1
+    if n:
+        zones_save()
+        _zones_learn_event.set()
+    zones_act("dedup", n=n, t=time.time())
+    return n
+
+
 def zones_add_post(data, post_time=None, source="web", caption="", train=None, src_ref=None, quiet=False):
     """Store a screenshot, recognise it, create its zones. Old posts are
     replayed at once: a zone already reached before now is history only
@@ -23259,6 +23320,11 @@ def zones_add_post(data, post_time=None, source="web", caption="", train=None, s
     if quiet:
         post["quiet"] = True        # history import: a missing coin is not asked for in Telegram
     new = zones_recognize_post(post, data)
+    dup = _zones_find_dup(post, new)   # v0.99.538 — the same post came in another way
+    if dup:
+        post.update({"dup_of": dup["id"], "skipped": True, "ok": False,
+                     "notes": [f"дубль поста {dup['id']} (тот же пост пришёл ещё раз) — не дублирую"]})
+        new = []
     with _zones_lock:
         ZONES["posts"].insert(0, post)
         ZONES["zones"] = new + ZONES["zones"]
@@ -24573,6 +24639,10 @@ def zones_monitor_loop():
         zones_unrevive()
     except Exception as e:
         log_error(f"zones unrevive: {e}")
+    try:
+        zones_dedup_migrate()   # v0.99.538
+    except Exception as e:
+        log_error(f"zones dedup: {e}")
     with _zones_lock:   # v0.99.493 — what came back from the disk after the start
         zs = ZONES["zones"]
         lad = [z for z in zs if (z.get("trade") or {}).get("legs") and z["trade"].get("status") in ("PENDING", "OPEN")
