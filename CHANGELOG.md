@@ -19196,3 +19196,10 @@ v0.99.539 - Зоны: a BTC post was read as ETC and the trade opened on ETC (us
          "1000…" coins is fine), the post is marked "монета под сомнением" and gets no
          autotrade until the coin is set by hand. Setting the coin by hand (🪙) clears the
          mark and drops the wrong coin's ladder (unless it has orders on the exchange).
+v0.99.540 - Зоны: after the BTC post was set right, two ETC-scale zones (8.17 / 8.12) stayed "в сделке
+         на бирже" under it (user: "зоны не исправились по цене") — they hold the real ETC
+         position, and a ladder with orders on the exchange is never dropped silently. Now a
+         zone of another coin than its post says so ("⚠️ ETC — не та монета"), the post's
+         header shows the post's coin, and a ladder in a trade has "✖ закрыть": the position
+         at market, its limits, stop and take off the exchange, the result recorded ("✋
+         закрыта вручную"); the zones of a misread coin go after it.

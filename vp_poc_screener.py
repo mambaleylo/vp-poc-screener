@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.539"
+APP_VERSION = "0.99.540"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23602,7 +23602,7 @@ def notify_trade_result(module, symbol, direction, entry, exit_price, result, r=
     try:
         if not TELEGRAM_ALERTS_TRADE_RESULTS or (TELEGRAM_TRADE_RESULTS_REAL_ONLY and not real):
             return
-        head = {"WIN": "✅ ТЕЙК", "LOSS": "❌ СТОП", "BE": "🛡 БЕЗУБЫТОК", "TIME_EXIT": "⏱ выход по времени", "TIMEOUT": "⏱ выход по времени", "AUTHOR_EXIT": "📣 закрыта по посту автора",
+        head = {"WIN": "✅ ТЕЙК", "LOSS": "❌ СТОП", "BE": "🛡 БЕЗУБЫТОК", "TIME_EXIT": "⏱ выход по времени", "TIMEOUT": "⏱ выход по времени", "AUTHOR_EXIT": "📣 закрыта по посту автора", "MANUAL": "✋ закрыта вручную",
                 "LOSS_EARLY": "✂️ ранний выход"}.get(result, str(result))
         d = 1 if str(direction).upper() == "LONG" else -1
         pct = d * (exit_price - entry) / entry * 100 if entry and exit_price is not None else None
@@ -26927,6 +26927,58 @@ def api_zones_reparse():
     zones_save()
     _zones_learn_event.set()
     return jsonify({"ok": True, "posts": done, "zones": found})
+
+
+@app.route("/api/zones/close_ladder", methods=["POST"])
+def api_zones_close_ladder():
+    """v0.99.540 — close a ladder by hand: the position at market, its limits, stop and
+    take off the exchange, the result recorded. Zones of a coin that is not the post's
+    (a misread ticker: ETC zones left under a BTC post) go after it."""
+    b = request.get_json(force=True, silent=True) or {}
+    with _zones_lock:
+        z = next((x for x in ZONES["zones"] if x["id"] == b.get("id")), None)
+        if not z:
+            return jsonify({"ok": False, "error": "нет такой зоны"}), 404
+        lead = z if (z.get("trade") or {}).get("legs") else next((x for x in ZONES["zones"] if x["id"] == z.get("lead")), None)
+        tr = (lead or {}).get("trade")
+        if not tr or not tr.get("legs"):
+            return jsonify({"ok": False, "error": "у зоны нет сделки"}), 400
+        group = [x for x in ZONES["zones"] if x["id"] == lead["id"] or x.get("lead") == lead["id"]]
+        post = next((p_ for p_ in ZONES["posts"] if p_["id"] == lead.get("post_id")), None)
+    sym, s_ = tr["symbol"], (1 if tr["direction"] == "LONG" else -1)
+    r = tr.get("real")
+    if r and not r.get("done"):
+        try:
+            with using_account("zones"):
+                pos_ = [x for x in (get_open_positions() or []) if x.get("contract") == sym]
+            if _zones_pos({sym: pos_}, sym, s_) and sum(l_.get("filled") or 0 for l_ in r["legs"]) > 0:
+                if not _zones_close_real(sym, tr["direction"], "closed by hand"):
+                    return jsonify({"ok": False, "error": "биржа не подтвердила закрытие — попробуйте ещё раз"}), 502
+            if not _zones_real_cancel_legs(tr):
+                return jsonify({"ok": False, "error": "не удалось снять лимитки — попробуйте ещё раз"}), 502
+            for oid in set(r.get("trigs") or []) | set(r.get("stale") or []):
+                try:
+                    cancel_price_order(oid)
+                except Exception:
+                    pass
+            r["done"] = True
+        except Exception as e:
+            return jsonify({"ok": False, "error": f"биржа: {str(e)[:150]}"}), 502
+    px = (_zones_symbols_and_prices() or {}).get(sym)
+    if tr.get("status") == "OPEN" and px:
+        _zones_ladder_finish(tr, group, "MANUAL", px, int(time.time()))
+    elif tr.get("status") in ("PENDING", "OPEN"):
+        with _zones_lock:
+            tr["status"] = "EXPIRED"
+            for zz in group:
+                zz["status"] = "expired"
+    if post and post.get("symbol") and post["symbol"] != sym:
+        with _zones_lock:
+            for zz in group:
+                zz["status"] = "deleted"   # the misread coin's zones go
+    zones_save()
+    zones_notify(f"✋ {sym}: сделку зон закрыл вручную" + (f" по {px:.6g}" if px else "") + " · лимитки, стоп и тейк сняты")
+    return jsonify({"ok": True})
 
 
 @app.route("/api/zones/set_symbol", methods=["POST"])
@@ -30867,10 +30919,15 @@ function zoneRowHtml(z) {
     : (z.status === 'in_trade' && trL && trL.legs ? (realFilled > 0 ? '💰 в сделке на бирже' : '📝 в сделке только у бота <span class="dim">(на бирже позиции нет)</span>')
        : (ZONE_ST[z.status] || z.status)) + (z.status === 'skipped' ? ({dup: ' — тот же сетап уже в работе (пост из нескольких картинок)', scale: ' — уровни не совпадают с ценой'}[z.skip] || '') : '');
   const btn = 'background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);';
+  // v0.99.540 — a zone of another coin than its post (a misread ticker), and closing a ladder by hand
+  const postSym = window._zPostSym && z.post_id ? window._zPostSym[z.post_id] : null;
+  const otherCoin = postSym && z.symbol && z.symbol !== postSym ? `<span class="loss" style="font-weight:700;">⚠️ ${z.symbol.replace('_USDT', '')} — не та монета</span> ` : '';
+  const canClose = z.status === 'in_trade' || (trL && ['PENDING', 'OPEN'].includes(trL.status) && trL.real && !trL.real.done);
   return `<div style="margin-top:8px;padding:6px 0 0 8px;border-left:3px solid ${long ? '#4caf50' : '#ef5350'};">
     <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">
-      <div>${z.status === 'watch' || z.status === 'in_trade' ? `<span class="fx-dot ${z.status === 'watch' ? 'watch' : 'trade'}" title="${z.status === 'watch' ? 'жду подхода цены' : 'позиция открыта'}"></span>` : ''}<span class="${long ? 'win' : 'loss'}" style="font-weight:700;">${long ? 'лонг' : 'шорт'}</span> <span class="dim">· ${stTxt}</span></div>
+      <div>${z.status === 'watch' || z.status === 'in_trade' ? `<span class="fx-dot ${z.status === 'watch' ? 'watch' : 'trade'}" title="${z.status === 'watch' ? 'жду подхода цены' : 'позиция открыта'}"></span>` : ''}${otherCoin}<span class="${long ? 'win' : 'loss'}" style="font-weight:700;">${long ? 'лонг' : 'шорт'}</span> <span class="dim">· ${stTxt}</span></div>
       <div style="white-space:nowrap;">
+        ${canClose ? `<button onclick="zonesCloseLadder('${z.id}')" title="закрыть сделку: позиция по рынку, лимитки, стоп и тейк снять" style="background:var(--neg-bg);border:none;color:var(--neg);padding:3px 8px;border-radius:var(--r-xs);">✖ закрыть</button>` : ''}
         <button onclick="zoneChart('${z.id}')" title="график: свечи, зона, вход и выход" style="${btn}">📈</button>
         <button onclick="zonesDel('${z.id}')" title="удалить зону" style="background:var(--neg-bg);border:none;color:var(--neg);padding:3px 8px;border-radius:var(--r-xs);">🗑</button>
       </div>
@@ -30889,7 +30946,7 @@ function zonePostBlocks(list) {
   }
   const btn = 'background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);';
   return [...groups.values()].sort((a, b) => (b[0].post_time || 0) - (a[0].post_time || 0)).map(g => {
-    const z0 = g[0], coin = (z0.symbol || '?').replace('_USDT', '');
+    const z0 = g[0], coin = ((window._zPostSym && z0.post_id && window._zPostSym[z0.post_id]) || z0.symbol || '?').replace('_USDT', '');   // v0.99.540 — the post's coin
     g.sort((a, b) => (a.side === b.side ? 0 : a.side === 'short' ? -1 : 1) || (b.levels[0] || 0) - (a.levels[0] || 0));
     const inTrade = g.some(z => z.status === 'in_trade');
     return `<div class="fx-zpost ${fxNew('zpost:' + (z0.post_id || z0.id))}${inTrade ? ' fx-intrade' : ''}" style="margin-bottom:10px;padding:10px;background:var(--card);border-radius:var(--r-lg);border:1px solid var(--line);">
@@ -31100,6 +31157,7 @@ async function refreshZones() {
   }
   const zs = d.zones || [];
   window._zTr = Object.fromEntries(zs.filter(z => z.trade).map(z => [z.id, z.trade]));   // v0.99.537
+  window._zPostSym = Object.fromEntries((d.posts || []).filter(p => p.symbol).map(p => [p.id, p.symbol]));   // v0.99.540
   const ownZ = zs.filter(z => z.own);
   const ocZ = zs.filter(z => z.oc);   // v0.99.506 — "поиск по результату"
   const pub = zs.filter(z => !z.own && !z.oc);
@@ -31542,7 +31600,7 @@ function zoneTradesHtml(list) {
   const wins = rs.filter(r => r > 0).length, sum = rs.reduce((a, b) => a + b, 0);
   const rows = list.map((z, i) => { const t = z.trade, w = t.result === 'WIN';
     return `<div class="fx-zrow" onclick="zoneChart('${z.id}')" style="--i:${Math.min(i, 20)};cursor:pointer;padding:6px 8px;margin-top:4px;background:var(--card);border-radius:var(--r-sm);border-left:3px solid ${w ? '#4caf50' : (t.result === 'LOSS' ? '#ef5350' : '#e0a030')};font-size:var(--fs-sm);">
-      <b>${(z.symbol || '').replace('_USDT', '')}</b> ${t.direction === 'LONG' ? 'лонг' : 'шорт'} · <b class="${(t.pnl_r || 0) > 0 ? 'win' : 'loss'}">${t.result === 'WIN' ? 'тейк' : t.result === 'LOSS' ? 'стоп' : t.result === 'BE' ? 'безубыток' : t.result === 'AUTHOR_EXIT' ? 'по посту автора' : 'по времени'} ${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R${t.pnl_pct != null ? ` · ${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct}%` : ''}</b>
+      <b>${(z.symbol || '').replace('_USDT', '')}</b> ${t.direction === 'LONG' ? 'лонг' : 'шорт'} · <b class="${(t.pnl_r || 0) > 0 ? 'win' : 'loss'}">${t.result === 'WIN' ? 'тейк' : t.result === 'LOSS' ? 'стоп' : t.result === 'BE' ? 'безубыток' : t.result === 'AUTHOR_EXIT' ? 'по посту автора' : t.result === 'MANUAL' ? 'вручную' : 'по времени'} ${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R${t.pnl_pct != null ? ` · ${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct}%` : ''}</b>
       <span class="dim">· ${zfmt(t.entry)} → ${zfmt(t.exit_price)} · ${zdate(t.exit_time || t.time)}${t.autotrade_fired ? ' · 💰 биржа' : ''} · 📈</span></div>`; }).join('');
   return `<details style="margin-top:8px;"><summary style="cursor:pointer;">💼 Сделки по зонам: ${list.length} · WR ${Math.round(100 * wins / list.length)}% · итого ${sum > 0 ? '+' : ''}${sum.toFixed(2)}R</summary>${zonesRSpark(list)}${rows}</details>`;
 }
@@ -31652,6 +31710,9 @@ window.addEventListener('popstate', () => zoneShotClose(true));
 async function zonesTrainMode(on) {
   if (on && !confirm('Режим обучения: новые скрины (пересланные и загруженные) пойдут только в статистику — без слежения, уведомлений и сделок. Включить?')) return;
   zonesPost('/api/zones/train_mode', {on});
+}
+function zonesCloseLadder(id) {   // v0.99.540
+  if (confirm('Закрыть сделку? Позиция на бирже закроется по рынку, лимитки, стоп и тейк снимутся.')) zonesPost('/api/zones/close_ladder', {id});
 }
 function zonesDel(id) { if (confirm('Удалить зону?')) zonesPost('/api/zones/zone', {id, delete: true}); }
 function zonesDelPost(pid) { if (confirm('Удалить пост и его зоны?')) zonesPost('/api/zones/post_delete', {post_id: pid}); }
