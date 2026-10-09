@@ -19266,6 +19266,9 @@ def neuro_compound_fields(trades, summary, symbol):
     else:
         me = sp.get("mine_end")
         days = (sp.get("valid_days") or 0) + (sp.get("holdout_days") or 0)
+    for t in trades:   # marks the mining part, so the table can say why it has no $ balance
+        if isinstance(t, dict):
+            t["compound_train"] = bool(me is not None and t.get("time") is not None and t["time"] <= me)
     comp = rr_compound_annotate([t for t in trades if me is None or t["time"] > me], symbol, mod="neuro")
     comp["compound_days"] = round(days, 1) if me else None
     comp["compound_period"] = "проверка + тест" if me else "вся история"
@@ -28600,6 +28603,36 @@ INDEX_HTML = """<!doctype html>
   .status-open { color:var(--warn); font-weight:600; }
   .status-timeout { color:var(--tx-3); }
 
+  /* ---------- motion: Neuro / Zones (plays once per new card, never on a refresh) ---------- */
+  @keyframes fxRise { from { opacity:0; transform:translateY(10px) scale(.985); } to { opacity:1; transform:none; } }
+  @keyframes fxRowIn { from { opacity:0; transform:translateX(-8px); } to { opacity:1; transform:none; } }
+  @keyframes fxDraw { from { stroke-dashoffset:1; } to { stroke-dashoffset:0; } }
+  @keyframes fxFade { from { opacity:0; } to { opacity:1; } }
+  @keyframes fxPulse { 0% { box-shadow:0 0 0 0 rgba(61,220,151,.45); } 70% { box-shadow:0 0 0 10px rgba(61,220,151,0); } 100% { box-shadow:0 0 0 0 rgba(61,220,151,0); } }
+  .fx-card { transition:transform .18s ease, box-shadow .18s ease, border-color .18s ease; }
+  .fx-card:hover, .zcard:hover { transform:translateY(-1px); box-shadow:0 6px 18px rgba(0,0,0,.28); }
+  .zcard { transition:transform .18s ease, box-shadow .18s ease; }
+  .fx-card.fx-new { animation:fxRise .45s cubic-bezier(.2,.8,.2,1) both; }
+  .fx-card.fx-new .fx-row { animation:fxRowIn .35s ease both; animation-delay:calc(var(--i, 0) * 28ms + .25s); }
+  .fx-row { transition:background .15s ease; }
+  .fx-row:hover { background:rgba(255,255,255,.06); }
+  .fx-row td:first-child { box-shadow:inset 3px 0 0 transparent; }
+  .fx-row.fx-w td:first-child { box-shadow:inset 3px 0 0 var(--pos); }
+  .fx-row.fx-l td:first-child { box-shadow:inset 3px 0 0 var(--neg); }
+  .fx-card.fx-new .bal { animation:fxFade .6s ease both; animation-delay:.3s; }
+  .fx-live { animation:fxPulse 2s ease-out infinite; }
+  .fx-spark { display:block; width:100%; height:78px; margin:6px 0 4px; overflow:visible; }
+  .fx-spark .ln { fill:none; stroke-width:2; stroke-linejoin:round; stroke-linecap:round; }
+  .fx-card.fx-new .fx-spark .ln { stroke-dasharray:1; stroke-dashoffset:0; animation:fxDraw 1.1s ease-out both; animation-delay:.3s; }
+  .fx-card.fx-new .fx-spark .ar { animation:fxFade 1.1s ease both; animation-delay:.5s; }
+  .fx-spark .dt { cursor:pointer; transition:r .12s ease; }
+  .fx-spark .dt:hover { r:5; }
+  .fx-bar { height:6px; border-radius:3px; background:var(--line); overflow:hidden; display:flex; margin-top:4px; }
+  .fx-bar > i { display:block; height:100%; transition:width .6s cubic-bezier(.2,.8,.2,1); }
+  @media (prefers-reduced-motion: reduce) {
+    .fx-card, .fx-card *, .zcard, .fx-live { animation:none !important; transition:none !important; }
+  }
+
   /* ---------- modals ---------- */
   #modal, #msnrModal, #ft5Modal, #vgiModal, #settingsModal { position:fixed; inset:0; background:var(--bg); display:none; z-index:999; }
   #modal.open, #msnrModal.open, #ft5Modal.open, #vgiModal.open, #settingsModal.open { display:flex; flex-direction:column; }
@@ -30257,11 +30290,11 @@ async function refreshNeuro() {
       const bigStats = hasStats ? `
         <div style="display:flex;gap:0;margin:10px 0;background:var(--inset);border-radius:var(--r-sm);overflow:hidden;">
           <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid var(--line);">
-            <div style="font-size:var(--fs-xl);font-weight:700;" class="${wrCls}">${s.winrate}%</div>
+            <div style="font-size:var(--fs-xl);font-weight:700;" class="${wrCls}"><span data-count="${s.winrate}" data-dec="1" data-suf="%">${s.winrate}%</span></div>
             <div class="dim" style="font-size:var(--fs-xs);">WINRATE${s.method === 'holdout' ? ' · тест' : ''}</div>
           </div>
           <div style="flex:1;text-align:center;padding:8px 4px;border-right:1px solid var(--line);">
-            <div style="font-size:var(--fs-xl);font-weight:700;" class="${pnlCls}">${s.avg_pnl_r>0?'+':''}${s.avg_pnl_r}R</div>
+            <div style="font-size:var(--fs-xl);font-weight:700;" class="${pnlCls}"><span data-count="${s.avg_pnl_r}" data-dec="2" data-suf="R" data-sign="1">${s.avg_pnl_r>0?'+':''}${s.avg_pnl_r}R</span></div>
             <div class="dim" style="font-size:var(--fs-xs);">\u0421\u0420. P&L${s.method === 'holdout' ? ' · тест' : ''}</div>
             <div class="${pnlCls}" style="font-size:var(--fs-xs);" title="суммарно за все сделки${s.method === 'holdout' ? ' тест-части' : ''} ">итого ${s.avg_pnl_r * s.n > 0 ? '+' : ''}${Math.round(s.avg_pnl_r * s.n * 10) / 10}R</div>
           </div>
@@ -30306,7 +30339,7 @@ async function refreshNeuro() {
           </div>`
         : '';
       const liveBadge = liveSig
-        ? `<div style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:10px;background:${liveSig.direction==='LONG'?'rgba(61,220,151,0.12)':'rgba(255,107,107,0.12)'};border-radius:var(--r-sm);border:1px solid ${liveSig.direction==='LONG'?'var(--pos)':'var(--neg)'};">
+        ? `<div class="fx-live" style="display:flex;align-items:center;gap:8px;padding:8px 10px;margin-bottom:10px;background:${liveSig.direction==='LONG'?'rgba(61,220,151,0.12)':'rgba(255,107,107,0.12)'};border-radius:var(--r-sm);border:1px solid ${liveSig.direction==='LONG'?'var(--pos)':'var(--neg)'};">
             <div style="font-size:var(--fs-lg);">${liveSig.direction==='LONG'?'🟢':'🔴'}</div>
             <div style="flex:1;">
               <div class="${liveSig.direction==='LONG'?'win':'loss'}" style="font-weight:700;font-size:var(--fs);">\u0416\u0418\u0412\u041e\u0419 \u0421\u0418\u0413\u041d\u0410\u041b: ${liveSig.direction}</div>
@@ -30339,7 +30372,7 @@ async function refreshNeuro() {
 
       // ---- Recent trades table with click-to-chart ----
       const trades = c.recent_trades || [];
-      const tradeRows = trades.map(t => {
+      const tradeRows = trades.map((t, ri) => {
         const rc = t.result==='WIN'?'win':(t.result==='LOSS'||t.result==='LOSS_EARLY')?'loss':'dim';
         const dirCls = t.direction === 'LONG' ? 'win' : 'loss';
         // v0.99.260 — LOSS_EARLY per direct user request ("минусовые
@@ -30358,7 +30391,7 @@ async function refreshNeuro() {
           : t.result==='TIME_EXIT'
           ? `<span class="${(t.pnl_r||0)>=0?'win':'loss'}" title="закрыта по рынку: истёк максимальный срок удержания">⏱ по времени ${(t.pnl_r>0?'+':'')+t.pnl_r}R</span>`
           : '<span class="dim">TIMEOUT</span>';
-        return `<tr onclick="openNeuroChart('${c.symbol}', ${t.time})" style="cursor:pointer;">
+        return `<tr class="fx-row ${t.result==='WIN'?'fx-w':(t.result==='LOSS'||t.result==='LOSS_EARLY')?'fx-l':''}" style="--i:${ri};cursor:pointer;" onclick="openNeuroChart('${c.symbol}', ${t.time})">
           <td class="dim">${fmtDateTime(t.entry_time)}</td>
           <td class="${dirCls}">${t.direction}</td>
           <td class="dim">${fmtNum(t.entry)}</td>
@@ -30370,9 +30403,10 @@ async function refreshNeuro() {
       const tradesSection = trades.length
         ? `<details>
             <summary style="cursor:pointer;font-size:var(--fs-sm);color:var(--tx-2);">\u043f\u043e\u0441\u043b\u0435\u0434\u043d\u0438\u0435 ${trades.length} \u0441\u0434\u0435\u043b\u043e\u043a (\u0431\u044d\u043a\u0442\u0435\u0441\u0442)</summary>
+            ${neuroEquitySpark(trades, s.compound_start)}
             <div style="overflow-x:auto;margin-top:6px;">
               <table style="font-size:var(--fs-xs);white-space:nowrap;">
-                <thead><tr><th>\u0412\u0445\u043e\u0434</th><th>Dir</th><th>Entry</th><th>\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442</th><th>P&L</th><th>$500→</th></tr></thead>
+                <thead><tr><th>\u0412\u0445\u043e\u0434</th><th>Dir</th><th>Entry</th><th>\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442</th><th>P&L</th><th title="баланс симулятора; 🎓 = период обучения, в расчёт не входит">$500→</th></tr></thead>
                 <tbody>${tradeRows}</tbody>
               </table>
             </div>
@@ -30446,7 +30480,7 @@ async function refreshNeuro() {
       const _dp = s.daily_pct;
       const dailyHead = _dp != null
         ? `<span class="${_dp >= 0 ? 'win' : 'loss'}" style="font-size:var(--fs);font-weight:700;margin-left:8px;" title="средний доход в день с $500, размер как у автоторговли, проверка + тест">${_dp > 0 ? '+' : ''}${_dp}%/день</span>` : '';
-      return `<div style="${cardStyle}">
+      return `<div class="fx-card ${fxNew('neuro:' + c.symbol)}" style="${cardStyle}">
         <div style="font-size:var(--fs-md);font-weight:700;color:var(--neuro);margin-bottom:4px;"><span class="dim" style="font-weight:400;">#${c.rank}</span> ${c.symbol.replace('_USDT','')}${dailyHead}</div>
         ${selBox}
         ${bestBadge}
@@ -30478,6 +30512,7 @@ async function refreshNeuro() {
       ${lstatsHtml}
       ${cards}
     `;
+    fxCountUp(panel);
     if (_tradingCoins.length) _neuroDrawNetwork(_tradingCoins);   // v0.99.419 — only the coins that actually trade
   } catch(e) {
     panel.innerHTML = `<div class="dim">\u041e\u0448\u0438\u0431\u043a\u0430: ${e}</div>`;
@@ -33221,8 +33256,60 @@ function compoundSummaryHtml(x) {
   return `<div style="font-size:var(--fs-sm);margin:4px 0 8px;">💰 <span class="dim">с $${x.compound_start} ${how}</span>${blown}</div>` + kel;
 }
 function compoundCellTxt(t) {
-  if (t.compound_balance_after == null) return '<span class="dim">—</span>';
+  if (t.compound_balance_after == null) {
+    return t.compound_train
+      ? '<span class="dim" title="период обучения: на этих сделках нейросеть искала закономерности, поэтому в расчёт $ они не входят">🎓 обучение</span>'
+      : '<span class="dim">—</span>';
+  }
   return `<span class="bal" title="баланс после этой сделки (старт $500, размер как у автоторговли, с комиссиями)">${fmtUsdCompact(t.compound_balance_after)}</span>`;   // v0.99.368 — own colour
+}
+// Motion helpers (Neuro / Zones): a card animates only the first time it appears in
+// this page session, so the periodic re-render doesn't replay it.
+const _fxSeen = new Set();
+function fxNew(key) {
+  if (_fxSeen.has(key)) return '';
+  _fxSeen.add(key);
+  return 'fx-new';
+}
+function fxCountUp(root) {
+  if (!root || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  root.querySelectorAll('.fx-new [data-count]').forEach(el => {
+    const to = parseFloat(el.dataset.count);
+    if (!isFinite(to)) return;
+    const dec = +el.dataset.dec || 0, suf = el.dataset.suf || '', signed = el.dataset.sign === '1';
+    const fmt = v => (signed && v > 0 ? '+' : '') + v.toFixed(dec) + suf;
+    const t0 = performance.now(), dur = 800;
+    const step = now => {
+      const k = Math.min(1, (now - t0) / dur), e = 1 - Math.pow(1 - k, 3);
+      el.textContent = fmt(to * e);
+      if (k < 1) requestAnimationFrame(step); else el.textContent = fmt(to);
+    };
+    requestAnimationFrame(step);
+  });
+}
+// Equity curve of the simulated $ balance (newest-first list in, drawn oldest->newest)
+function neuroEquitySpark(trades, start) {
+  const pts = (trades || []).filter(t => t.compound_balance_after != null).slice().reverse();
+  if (pts.length < 2) return '';
+  const s0 = start || 500, vals = [s0, ...pts.map(t => t.compound_balance_after)];
+  const W = 300, H = 70, P = 4;
+  const lo = Math.min(...vals), hi = Math.max(...vals), span = (hi - lo) || 1;
+  const X = i => P + i * (W - 2 * P) / (vals.length - 1);
+  const Y = v => H - P - (v - lo) / span * (H - 2 * P);
+  const line = vals.map((v, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
+  const up = vals[vals.length - 1] >= s0, col = up ? 'var(--pos)' : 'var(--neg)';
+  const base = Y(s0).toFixed(1);
+  const dots = pts.map((t, i) => {
+    const w = t.result === 'WIN';
+    return `<circle class="dt" cx="${X(i + 1).toFixed(1)}" cy="${Y(t.compound_balance_after).toFixed(1)}" r="2.6" style="fill:${w ? 'var(--pos)' : (t.pnl_r != null && t.pnl_r < 0 ? 'var(--neg)' : 'var(--tx-3)')};"><title>${fmtDateTime(t.entry_time)} · ${t.result}${t.pnl_r != null ? ' ' + (t.pnl_r > 0 ? '+' : '') + t.pnl_r + 'R' : ''} → $${Math.round(t.compound_balance_after)}</title></circle>`;
+  }).join('');
+  return `<svg class="fx-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="кривая баланса симуляции">
+    <line x1="${P}" x2="${W - P}" y1="${base}" y2="${base}" style="stroke:var(--line-2);stroke-dasharray:3 3;"/>
+    <path class="ar" d="${line} L${X(vals.length - 1).toFixed(1)},${H} L${X(0).toFixed(1)},${H} Z" style="fill:${col};opacity:.12;"/>
+    <path class="ln" pathLength="1" d="${line}" style="stroke:${col};"/>
+    ${dots}
+  </svg>
+  <div class="dim" style="display:flex;justify-content:space-between;font-size:var(--fs-xs);"><span>старт ${fmtUsdCompact(s0)}</span><span class="${up ? 'win' : 'loss'}">сейчас ${fmtUsdCompact(vals[vals.length - 1])}</span></div>`;
 }
 // v0.99.334 — full backtest trade lists for S/R and Peak, loaded on open
 function snrTradeRowHtml(sym, t) {
