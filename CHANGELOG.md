@@ -19219,3 +19219,9 @@ v0.99.542 - Зоны: "⏭ Пост от 09.10 11:28: не похоже на с�
          but the summary said "no colour zones" for every skipped post. Now: "🔁 уже есть — тот
          же пост пришёл ещё раз (BTC, сохранён …), не дублирую"; an author's result post gets
          its own line too.
+v0.99.543 - Зоны: the BTC post's zones were nowhere among the active ones (user: "но где по
+         биткоину зоны?"). Zones skipped as "тот же сетап уже в работе" (v0.99.514) stayed
+         skipped for good once the ladder they deferred to went away (the duplicate clean-up,
+         closed by hand, deleted). Now with no such ladder left they are watched again (replayed
+         first: a zone the price already reached is history) — at the start and every 10
+         minutes. The "🔁 уже есть" message lists that post's zones with their status.

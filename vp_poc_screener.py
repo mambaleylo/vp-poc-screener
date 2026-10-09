@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.542"
+APP_VERSION = "0.99.543"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23334,6 +23334,34 @@ def _zones_dedup_repair():
     return n
 
 
+def zones_revive_orphan_dups():
+    """v0.99.543 — zones skipped as "тот же сетап уже в работе" (v0.99.514) stayed skipped
+    for good when the ladder they deferred to went away (a duplicate clean-up, closed by
+    hand, deleted): the BTC post's zones were only in the archive. With no such ladder
+    left they are watched again (replayed: a zone the price already reached is history)."""
+    now = time.time()
+    with _zones_lock:
+        skipped = [z for z in ZONES["zones"] if z.get("status") == "skipped" and z.get("skip") == "dup"
+                   and now - z.get("post_time", 0) < ZONES_MAX_DAYS * 86400]
+        live = [z for z in ZONES["zones"] if z.get("status") in ("watch", "in_trade") and not z.get("own") and not z.get("oc")]
+    n = 0
+    for z in skipped:
+        twin = any(x.get("symbol") == z.get("symbol") and x["side"] == z["side"] and x.get("post_id") != z.get("post_id")
+                   and abs(x.get("post_time", 0) - z["post_time"]) <= ZONES_DUP_SEC for x in live)
+        if twin:
+            continue
+        with _zones_lock:
+            z["status"] = "watch"
+            z.pop("skip", None)
+        zones_replay_past(z)
+        if z["status"] == "watch":
+            live.append(z)   # the others of the same post and side go with it, not against it
+        n += 1
+    if n:
+        zones_save()
+    return n
+
+
 def zones_dedup_migrate():
     """v0.99.538 — duplicates stored before (three ZRO posts of 07.10 20:14, each with its
     own ladder): one is kept (the one with orders on the exchange, else the first), the
@@ -23376,6 +23404,7 @@ def zones_dedup_migrate():
     if n:
         zones_save()
         _zones_learn_event.set()
+    n += zones_revive_orphan_dups()   # v0.99.543
     zones_act("dedup", n=n, t=time.time())
     return n
 
@@ -24557,6 +24586,9 @@ def _zones_ladder_tick(group, now, p, pos_map):
     return changed
 
 
+_zones_revive_check = [0.0]
+
+
 def zones_monitor_tick(last_track=0.0):
     """One pass over the live zones; returns the time of the last trade check."""
     if time.time() - _zones_train_check[0] >= 900:   # training zones: outcome from the chart, no alerts
@@ -24571,6 +24603,12 @@ def zones_monitor_tick(last_track=0.0):
         if any(z.get("status") != "train" for z in tz):
             zones_save()
             _zones_learn_event.set()
+    if time.time() - _zones_revive_check[0] >= 600:   # v0.99.543
+        _zones_revive_check[0] = time.time()
+        try:
+            zones_revive_orphan_dups()
+        except Exception as e:
+            log_error(f"zones revive: {e}")
     with _zones_lock:
         active = [z for z in ZONES["zones"] if z.get("status") in ("watch", "in_trade") and z.get("symbol")]
         any_appr = any((p_.get("appr_trade") or {}).get("status") == "OPEN"
@@ -26693,9 +26731,16 @@ def zones_post_summary(post, new):
     if not new and post.get("dup_of"):   # v0.99.542 — it said "цветных зон нет" for a duplicate too
         with _zones_lock:
             first = next((p_ for p_ in ZONES["posts"] if p_["id"] == post["dup_of"]), None)
+        stn = {"watch": "слежу", "in_trade": "в сделке", "old": "уже отработала (в статистику)", "expired": "истекла",
+               "closed": "закрыта", "broken": "пробита", "skipped": "не торгую — тот же сетап уже в работе",
+               "hist_wait": "старый пост — только в статистику", "deleted": "удалена"}
+        with _zones_lock:
+            fz = [z for z in ZONES["zones"] if first and z.get("post_id") == first["id"] and z.get("status") != "deleted"]
+        zl = "\n".join(f"• {'лонг' if z['side'] == 'long' else 'шорт'} {' / '.join(f'{v:g}' for v in z['levels'])} — "
+                        f"{stn.get(z['status'], z['status'])}" for z in fz)
         return (f"🔁 Пост от {when}: уже есть — тот же пост пришёл ещё раз"
                 + (f" ({(first.get('symbol') or '').replace('_USDT', '')}, сохранён {time.strftime('%d.%m %H:%M', time.localtime(first.get('created') or first['post_time']))})" if first else "")
-                + ", не дублирую. Его зоны — во вкладке «Зоны».")
+                + ", не дублирую." + (f" Его зоны:\n{zl}" if zl else " У того поста зон сейчас нет."))
     if not new and post.get("result_post"):
         return f"📊 Пост от {when}: пост-отчёт автора (результат отработки), а не новый сетап — пропущен."
     if not new and post.get("skipped"):
