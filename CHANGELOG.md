@@ -19252,3 +19252,13 @@ v0.99.546 - P/R: "🧪 Честная проверка вживую" (user: "п�
          of the list), net of round-trip fees, split all / in the list / dropped / really traded,
          with the mean R's 95% interval and a verdict: too early (<30) / plus but within chance /
          edge confirmed (lower bound > 0) / minus. Slippage on thin coins is not modelled.
+v0.99.547 - Neuro: "📝 Бумажная торговля" (user: "добавь возможность для нейро торговать
+         бумажно — вроде стабильно хороший результат, но очень маленький доход на сделку и в
+         день"). A switch on the Neuro tab: every live signal of every coin that passes the check
+         (not only the ticked ones) is traded on a virtual balance (start $500, "↺ заново" sets
+         another) — no exchange orders, sized by the same risk as a real trade, round-trip fees and
+         0.05% slippage on stop / early / time exits. Shows the balance, P&L, % and $ per day,
+         trades per day, $ per trade, net R with its 95% interval, drawdown and the trade list; the
+         Telegram result line carries the paper P&L and balance. A paper-only coin sends no entry
+         message (only its result). Kept in the Neuro state file — survives restarts. Also: the
+         early-exit close now touches the exchange only for a position the signal itself opened.

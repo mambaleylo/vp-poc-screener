@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.546"
+APP_VERSION = "0.99.547"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -6824,6 +6824,7 @@ def save_neuro_state():
             }
         with _neuro_signal_log_lock:
             data["neuro_signal_log"] = list(_neuro_signal_log)
+            data["neuro_paper"] = json.loads(json.dumps(_neuro_paper))   # v0.99.547
         data["saved_at"] = time.time()
         tmp_path = NEURO_STATE_FILE + ".tmp"
         with _save_neuro_state_file_lock:
@@ -6873,6 +6874,8 @@ def load_neuro_state():
         with _neuro_signal_log_lock:
             _neuro_signal_log.clear()
             _neuro_signal_log.extend(data.get("neuro_signal_log", []))
+            if isinstance(data.get("neuro_paper"), dict):   # v0.99.547
+                _neuro_paper.update(data["neuro_paper"])
         print(f"Loaded persisted Neuro state: {len(_neuro_patterns)} symbols with patterns, "
               f"{len(_neuro_signal_log)} live signals, active symbols: {_neuro_active_symbols}")
     except Exception as e:
@@ -19564,6 +19567,15 @@ NEURO_RETRY_AFTER_ERROR_SEC = int(os.environ.get("VP_NEURO_RETRY_AFTER_ERROR_SEC
 NEURO_SIGNAL_HISTORY = 300
 _neuro_signal_log = deque(maxlen=NEURO_SIGNAL_HISTORY)
 _neuro_signal_log_lock = threading.Lock()
+# v0.99.547 — Neuro paper account (user: "добавь возможность для нейро торговать
+# бумажно"): every live signal of every coin that passes the check is traded on
+# a virtual balance — no exchange orders — sized by the same risk as a real
+# trade, with round-trip fees and slippage on stop / market exits. Kept in
+# the Neuro state file, so it survives restarts.
+NEURO_PAPER_START = 500.0
+NEURO_PAPER_SLIP_PCT = 0.0005   # slippage on a stop / early / time exit (a market fill on a thin coin)
+_neuro_paper = {"enabled": False, "start": NEURO_PAPER_START, "balance": NEURO_PAPER_START,
+                "started_at": None, "trades": []}
 
 
 def neuro_close_position_early(symbol, direction):
@@ -19661,7 +19673,7 @@ def neuro_track_signal_outcomes():
                             sig["pnl_r"] = round(realized, 3)
                             sig["shadow_pending"] = True
                             sig["would_have_been_result"] = None
-                        if AUTOTRADE_ENABLED_NEURO:
+                        if AUTOTRADE_ENABLED_NEURO and sig.get("autotrade_fired", True):   # v0.99.547 — never a position another signal / module opened
                             with using_account("neuro"):   # v0.99.331
                                 close_result = neuro_close_position_early(sig["symbol"], direction)
                             log_error(f"neuro early-exit {sig['symbol']}: real close attempt -> {close_result}")
@@ -19713,10 +19725,106 @@ def neuro_track_signal_outcomes():
                         sig["exit_time"] = exit_time
                         sig["pnl_r"] = pnl_r
                 if not is_shadow:
+                    _pnote = neuro_paper_sweep().get((sig["symbol"], sig["time"]), "") if sig.get("paper") else ""   # v0.99.547
                     notify_trade_result("neuro", sig["symbol"], direction, entry, exit_price, result, pnl_r,
-                                        real=bool(AUTOTRADE_ENABLED_NEURO and sig.get("autotrade_fired")))
+                                        real=bool(AUTOTRADE_ENABLED_NEURO and sig.get("autotrade_fired")), note=_pnote)
         except Exception as e:
             log_error(f"neuro_outcome {sig['symbol']}: {e}")
+
+
+def neuro_paper_symbols():
+    """v0.99.547 — the coins the paper account trades: every coin that
+    passes the check (no minimum order size on paper)."""
+    return list(_neuro_active_symbols) if _neuro_paper.get("enabled") else []
+
+
+def neuro_paper_open(symbol, sig, record):
+    """one paper position for a new live signal, risk % of the paper balance"""
+    with _neuro_signal_log_lock:
+        if not _neuro_paper.get("enabled"):
+            return None
+        bal = _neuro_paper["balance"]
+        if bal <= 0:
+            return None
+        entry, sl = float(sig["entry"]), float(sig["sl"])
+        sl_pct = abs(entry - sl) / entry if entry else 0
+        if sl_pct <= 0:
+            return None
+        try:
+            risk_pct = float(auto_risk_for("neuro", symbol) or MODULE_RISK_PCT.get("neuro") or AUTOTRADE_RISK_PCT_OF_BALANCE)
+        except Exception:
+            risk_pct = AUTOTRADE_RISK_PCT_OF_BALANCE
+        notional = bal * risk_pct / 100.0 / (sl_pct + 2 * AUTOTRADE_SIM_FEE_PCT + NEURO_PAPER_SLIP_PCT)
+        t = {"symbol": symbol, "direction": sig["direction"], "entry": entry, "sl": sl, "tp": sig["tp"],
+             "sig_time": record["time"], "opened_at": time.time(), "risk_pct": round(risk_pct, 3),
+             "notional": round(notional, 4), "lev": max(1, math.ceil(notional / bal)), "status": "OPEN"}
+        _neuro_paper["trades"].append(t)
+        del _neuro_paper["trades"][:-500]
+        record["paper"] = True
+        return t
+
+
+def neuro_paper_sweep():
+    """settles open paper positions whose signal has closed; returns
+    {(symbol, sig_time): text} for the trades settled now"""
+    out = {}
+    with _neuro_signal_log_lock:
+        by_key = {(x["symbol"], x["time"]): x for x in _neuro_signal_log}
+        for t in _neuro_paper["trades"]:
+            if t.get("status") != "OPEN":
+                continue
+            sig = by_key.get((t["symbol"], t["sig_time"]))
+            if sig is None:   # the signal fell out of the log — close at the entry, fees only
+                sig = {"status": "CLOSED", "result": "LOST", "exit_price": t["entry"]}
+            if sig.get("status") != "CLOSED" or sig.get("exit_price") is None:
+                continue
+            d = 1 if t["direction"] == "LONG" else -1
+            ex = float(sig["exit_price"])
+            move = d * (ex - t["entry"]) / t["entry"]
+            slip = 0.0 if sig.get("result") == "WIN" else NEURO_PAPER_SLIP_PCT
+            fees = t["notional"] * AUTOTRADE_SIM_FEE_PCT * (2 + move)
+            pnl = t["notional"] * (move - slip) - fees
+            risk_usd = t["notional"] * (abs(t["entry"] - t["sl"]) / t["entry"]) or 1e-9
+            _neuro_paper["balance"] = round(_neuro_paper["balance"] + pnl, 4)
+            t.update({"status": "CLOSED", "result": sig.get("result"), "exit_price": ex,
+                      "closed_at": sig.get("exit_time") or time.time(), "pnl": round(pnl, 4),
+                      "r_net": round(pnl / risk_usd, 3), "balance_after": _neuro_paper["balance"],
+                      "settled_at": time.time()})
+            out[(t["symbol"], t["sig_time"])] = (f"📝 бумажный счёт Neuro: {'+' if pnl >= 0 else '−'}${abs(pnl):.2f} "
+                                                f"→ ${_neuro_paper['balance']:.2f}")
+    return out
+
+
+def neuro_paper_status():
+    neuro_paper_sweep()
+    with _neuro_signal_log_lock:
+        p = {k: v for k, v in _neuro_paper.items() if k != "trades"}
+        trades = [dict(t) for t in _neuro_paper["trades"]]
+    closed = [t for t in trades if t.get("status") == "CLOSED"]
+    rs = [t["r_net"] for t in closed if t.get("r_net") is not None]
+    n = len(rs)
+    days = (time.time() - p["started_at"]) / 86400 if p.get("started_at") else 0
+    gain = p["balance"] - p["start"]
+    st = {"n": n, "open": sum(1 for t in trades if t.get("status") == "OPEN"),
+          "wins": sum(1 for t in closed if (t.get("pnl") or 0) > 0), "days": round(days, 2),
+          "pnl": round(gain, 2), "pnl_pct": round(gain / p["start"] * 100, 2) if p["start"] else None,
+          "per_day_usd": round(gain / days, 2) if days >= 1 else None,
+          "per_day_pct": round(((p["balance"] / p["start"]) ** (1 / days) - 1) * 100, 3) if days >= 1 and p["balance"] > 0 and p["start"] else None,
+          "per_trade_usd": round(sum(t.get("pnl") or 0 for t in closed) / len(closed), 2) if closed else None,
+          "avg_r": round(sum(rs) / n, 3) if n else None,
+          "wr": round(sum(1 for r in rs if r > 0) / n * 100, 1) if n else None,
+          "trades_per_day": round(len(trades) / days, 2) if days >= 1 else None}
+    if n > 1:
+        avg = sum(rs) / n
+        se = (sum((r - avg) ** 2 for r in rs) / (n - 1)) ** 0.5 / n ** 0.5
+        st["lo"], st["hi"] = round(avg - 1.96 * se, 3), round(avg + 1.96 * se, 3)
+    peak, dd = p["start"], 0.0
+    for t in sorted(closed, key=lambda x: x.get("settled_at") or 0):
+        b = t.get("balance_after") or 0
+        peak = max(peak, b)
+        dd = max(dd, (peak - b) / peak * 100 if peak else 0)
+    st["max_dd_pct"] = round(dd, 2)
+    return {**p, "stats": st, "trades": trades[::-1][:60], "coins": neuro_paper_symbols()}
 
 
 def neuro_compute_signal_stats(active_symbols=None):
@@ -20222,6 +20330,7 @@ def neuro_live_loop():
                 patterns_snapshot = dict(_neuro_patterns)
                 summary_snapshot = dict(_neuro_summary)
             active_symbols = neuro_trade_symbols()   # v0.99.403 — ticked (or the best) passing coins only; v0.99.430 — outside the lock
+            active_symbols += [s_ for s_ in neuro_paper_symbols() if s_ not in active_symbols]   # v0.99.547 — paper account
             # v0.99.253 — same shared BTC/ETH prefetch already applied to
             # the mining loop back in v0.99.216, found still missing here
             # during a full audit: with only ~5 active symbols this isn't
@@ -20278,13 +20387,15 @@ def neuro_live_loop():
                 pat_txt = ", ".join(f"{p['type']}={p['value']}(z={p['z']})" for p in sig["patterns"][:3])
                 # v0.99.384 — "только отмеченные монеты"
                 _sel_ok = symbol in neuro_trade_symbols()   # v0.99.403; v0.99.430 — outside the lock
-                send_telegram(
+                if _sel_ok or not neuro_paper_symbols():   # v0.99.547 — a paper-only coin: quiet, only its result
+                  send_telegram(
                     f"{arrow} NEURO {symbol} ({sig['direction']}, score {sig['score']})\n"
                     f"entry: {sig['entry']}, SL: {sig['sl']}, TP: {sig['tp']}\n"
                     f"\u0441\u043e\u0432\u043f\u0430\u0432\u0448\u0438\u0435\u0441\u044f \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0438: {pat_txt}"
-                    + ("" if _sel_ok or not AUTOTRADE_ENABLED_NEURO else "\n☑️ не торгуется — монета не отмечена для автоторговли"),
+                    + ("" if _sel_ok or not AUTOTRADE_ENABLED_NEURO else "\n☑️ не торгуется — монета не отмечена для автоторговли")
+                    + ("\n📝 + бумажный счёт" if symbol in neuro_paper_symbols() else ""),
                     category="neuro",
-                )
+                  )
                 with _neuro_signal_log_lock:
                     record = {
                         "symbol": symbol, "direction": sig["direction"],
@@ -20298,6 +20409,8 @@ def neuro_live_loop():
                     if not _sel_ok:
                         record["not_selected"] = True   # v0.99.384
                     _neuro_signal_log.appendleft(record)
+                if symbol in neuro_paper_symbols():
+                    neuro_paper_open(symbol, sig, record)   # v0.99.547
                 if AUTOTRADE_ENABLED_NEURO and _sel_ok:
                     # v0.99.245 — same live_universe-snapshot race guard as
                     # LSW's/Mirror's own (v0.99.239): active_symbols above
@@ -20334,6 +20447,7 @@ def neuro_live_loop():
                                        autotrade_result=autotrade_result, all_in_margin_pct=_neuro_all_in)
             _neuro_prev_signal_keys = {(s, t) for s, t in new_keys.items()}
             neuro_track_signal_outcomes()
+            neuro_paper_sweep()   # v0.99.547
             save_neuro_state()  # v0.99.240 — persist any new fired signal / outcome update from this pass
         except Exception as e:
             log_error(f"neuro_live_loop: {e}")
@@ -20403,6 +20517,7 @@ def api_neuro_status():
         c["rank"] = i + 1
     return jsonify({
         "autotrade_selected": sorted(_neuro_autotrade_selected),   # v0.99.384
+        "paper": neuro_paper_status(),   # v0.99.547
         "stale_results": _neuro_results_algo < NEURO_ALGO_VERSION,   # v0.99.403
         "mining_fetching": _neuro_fetching[0],   # v0.99.404
         "single_best": NEURO_SINGLE_BEST_ENABLED,
@@ -28504,6 +28619,33 @@ def api_neuro_autotrade_select():
         return jsonify({"ok": False, "error": str(e)}), 500
 
 
+@app.route("/api/neuro/paper", methods=["POST"])
+def api_neuro_paper():
+    """v0.99.547 — the Neuro paper account: {enabled} on/off, {reset, start}
+    starts it over with this balance."""
+    try:
+        body = request.get_json(force=True) or {}
+        with _neuro_signal_log_lock:
+            if body.get("reset"):
+                try:
+                    start = float(body.get("start") or _neuro_paper.get("start") or NEURO_PAPER_START)
+                except (TypeError, ValueError):
+                    start = NEURO_PAPER_START
+                start = max(1.0, min(start, 1e9))
+                _neuro_paper.update({"start": start, "balance": start, "trades": [],
+                                     "started_at": time.time() if _neuro_paper.get("enabled") else None})
+            if "enabled" in body:
+                on = bool(body["enabled"])
+                if on and not _neuro_paper.get("enabled") and not _neuro_paper.get("started_at"):
+                    _neuro_paper["started_at"] = time.time()
+                _neuro_paper["enabled"] = on
+        save_neuro_state()
+        return jsonify({"ok": True, "paper": neuro_paper_status()})
+    except Exception as e:
+        log_error(f"api_neuro_paper: {e}")
+        return jsonify({"ok": False, "error": str(e)}), 500
+
+
 @app.route("/api/neuro/restart_backtest", methods=["POST"])
 def api_neuro_restart_backtest():
     """v0.99.256 — per direct user request ("добавь кнопку перезапуска
@@ -30772,6 +30914,64 @@ function neuroSplitHtml(s) {
   </div>`;
 }
 
+async function neuroPaper(body) {   // v0.99.547 — the Neuro paper account
+  try {
+    const r = await fetch('/api/neuro/paper', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body)});
+    const j = await r.json();
+    if (!j.ok) alert('Не удалось: ' + (j.error || r.status));
+  } catch(e) { alert('Ошибка: ' + e); }
+  refreshNeuro();
+}
+
+function neuroPaperReset(start) {
+  const v = prompt('Начать бумажный счёт заново. Стартовый баланс, $:', start || 500);
+  if (v === null) return;
+  const n = parseFloat(String(v).replace(',', '.'));
+  if (!(n > 0)) { alert('Нужно число больше 0'); return; }
+  neuroPaper({reset: true, start: n});
+}
+
+function neuroPaperHtml(p) {
+  if (!p) return '';
+  const st = p.stats || {};
+  const usd = v => v == null ? '—' : (v < 0 ? '−' : '') + '$' + Math.abs(v).toFixed(2);
+  const sg = v => v == null ? '—' : (v > 0 ? '+' : '') + v;
+  const cls = v => v == null ? 'dim' : (v >= 0 ? 'win' : 'loss');
+  const toggle = `<label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;">
+      <input type="checkbox" ${p.enabled ? 'checked' : ''} onchange="neuroPaper({enabled: this.checked})"> <b>📝 Бумажная торговля</b></label>`;
+  if (!p.enabled && !(st.n || st.open)) {
+    return `<div style="padding:10px 12px;margin-bottom:12px;background:var(--inset);border-radius:var(--r);border:1px solid var(--line);font-size:var(--fs-sm);">
+      ${toggle}<div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">Торгует виртуальным балансом все монеты, прошедшие проверку, без ордеров на бирже: тот же риск на сделку, комиссии и проскальзывание учтены. Покажет реальный доход в $ и % в день.</div></div>`;
+  }
+  let verdict = '';
+  if (st.n < 30) verdict = `⏳ закрыто ${st.n || 0} из ~30 сделок — выводы рано`;
+  else if (st.lo > 0) verdict = '✅ перевес подтверждается вживую';
+  else if (st.avg_r > 0) verdict = '🟡 в плюсе, но пока в пределах случайности';
+  else verdict = '🔴 вживую в минусе';
+  const rows = (p.trades || []).slice(0, 30).map(t => `<tr>
+      <td>${String(t.symbol).replace('_USDT','')} <span class="${t.direction === 'LONG' ? 'win' : 'loss'}">${t.direction === 'LONG' ? 'L' : 'S'}</span></td>
+      <td class="dim">${fmtDateTime(t.opened_at)}</td>
+      <td class="dim">$${Math.round(t.notional)} · ${t.risk_pct}%</td>
+      <td>${t.status === 'OPEN' ? '<span class="dim">открыта</span>' : `<span class="${cls(t.pnl)}">${usd(t.pnl)}</span> <span class="dim">${sg(t.r_net)}R</span>`}</td>
+    </tr>`).join('');
+  return `<div style="padding:10px 12px;margin-bottom:12px;background:var(--inset);border-radius:var(--r);border:1px solid var(--line);">
+    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap;font-size:var(--fs-sm);">
+      ${toggle}<button style="background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);cursor:pointer;" onclick="neuroPaperReset(${p.start})">↺ заново</button></div>
+    <div style="display:flex;gap:0;margin:8px 0;background:var(--card);border-radius:var(--r-sm);overflow:hidden;border:1px solid var(--line);text-align:center;">
+      <div style="flex:1;padding:6px 2px;border-right:1px solid var(--line);"><div style="font-weight:700;font-size:var(--fs-md);">$${(p.balance || 0).toFixed(2)}</div><div class="dim" style="font-size:var(--fs-xs);">баланс (старт $${p.start})</div></div>
+      <div style="flex:1;padding:6px 2px;border-right:1px solid var(--line);"><div class="${cls(st.pnl)}" style="font-weight:700;font-size:var(--fs-md);">${st.pnl > 0 ? '+' : ''}${usd(st.pnl)}</div><div class="dim" style="font-size:var(--fs-xs);">${sg(st.pnl_pct)}% · ${st.days} дн.</div></div>
+      <div style="flex:1;padding:6px 2px;"><div class="${cls(st.per_day_pct)}" style="font-weight:700;font-size:var(--fs-md);">${st.per_day_pct != null ? sg(st.per_day_pct) + '%' : '—'}</div><div class="dim" style="font-size:var(--fs-xs);">в день ${st.per_day_usd != null ? '· ' + usd(st.per_day_usd) : '(после 1 дня)'}</div></div>
+    </div>
+    <div style="font-size:var(--fs-xs);line-height:1.6;">
+      сделок: <b>${st.n || 0}</b> закрыто · ${st.open || 0} открыто${st.trades_per_day != null ? ' · ' + st.trades_per_day + ' в день' : ''} ·
+      WR ${st.wr != null ? st.wr + '%' : '—'} · ср. <b class="${cls(st.avg_r)}">${sg(st.avg_r)}R</b>${st.lo != null ? ` <span class="dim">(95%: ${sg(st.lo)}…${sg(st.hi)})</span>` : ''} ·
+      на сделку ${usd(st.per_trade_usd)} · просадка ${st.max_dd_pct || 0}%<br>${verdict}</div>
+    <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">${p.enabled ? `торгует ${(p.coins || []).length} монет, прошедших проверку: ${(p.coins || []).map(x => x.replace('_USDT','')).join(', ') || '—'}` : '⏸ выключена — открытые сделки досчитаются'} · без ордеров на бирже · риск как у реальной сделки · комиссии и проскальзывание учтены</div>
+    ${rows ? `<details style="margin-top:6px;"><summary style="cursor:pointer;font-size:var(--fs-sm);color:var(--tx-2);">сделки (${(p.trades || []).length})</summary>
+      <div style="overflow-x:auto;"><table style="font-size:var(--fs-xs);white-space:nowrap;width:100%;">${rows}</table></div></details>` : ''}
+  </div>`;
+}
+
 async function refreshNeuro() {
   const panel = document.getElementById('neuroPanel');
   try {
@@ -31046,6 +31246,7 @@ async function refreshNeuro() {
       ${data.stale_results ? '<div style="padding:8px 10px;margin-bottom:8px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-sm);font-size:var(--fs-sm);">⚠️ карточки ниже посчитаны старой версией расчёта — не торгуются до пересчёта (идёт майнинг)</div>' : ''}
       <div style="margin-bottom:4px;">${miningTxt}</div>
       ${progressBarHtml}
+      ${neuroPaperHtml(data.paper)}
       ${_tradingCoins.length ? `<div class="dim" style="font-size:var(--fs-xs);margin-bottom:4px;">торгуются сейчас: ${_tradingCoins.length}</div>
       <div id="neuroCanvasWrap" style="width:100%;height:${Math.max(160, Math.min(420, 70 + _tradingCoins.length * 40))}px;background:var(--inset);border-radius:var(--r);overflow:hidden;margin-bottom:14px;position:relative;">
         <canvas id="neuroCanvas" style="width:100%;height:100%;display:block;"></canvas>
