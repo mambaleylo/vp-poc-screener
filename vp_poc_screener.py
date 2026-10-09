@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.541"
+APP_VERSION = "0.99.542"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -26690,6 +26690,14 @@ def api_own_scan():
 
 def zones_post_summary(post, new):
     when = time.strftime("%d.%m %H:%M", time.localtime(post["post_time"]))
+    if not new and post.get("dup_of"):   # v0.99.542 — it said "цветных зон нет" for a duplicate too
+        with _zones_lock:
+            first = next((p_ for p_ in ZONES["posts"] if p_["id"] == post["dup_of"]), None)
+        return (f"🔁 Пост от {when}: уже есть — тот же пост пришёл ещё раз"
+                + (f" ({(first.get('symbol') or '').replace('_USDT', '')}, сохранён {time.strftime('%d.%m %H:%M', time.localtime(first.get('created') or first['post_time']))})" if first else "")
+                + ", не дублирую. Его зоны — во вкладке «Зоны».")
+    if not new and post.get("result_post"):
+        return f"📊 Пост от {when}: пост-отчёт автора (результат отработки), а не новый сетап — пропущен."
     if not new and post.get("skipped"):
         return f"⏭ Пост от {when}: не похоже на скрин с зонами (цветных зон нет) — пропущен."
     if not new and post.get("index_read"):

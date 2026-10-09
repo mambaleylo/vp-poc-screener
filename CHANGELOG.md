@@ -19212,3 +19212,10 @@ v0.99.541 - Зоны: the duplicate clean-up of v0.99.538 removed the live copy 
          to tell watched from finished) and the archive copy becomes the duplicate. Also: after
          a copy was dropped, the rest were still compared with it, so one of three copies could
          stay.
+v0.99.542 - Зоны: "⏭ Пост от 09.10 11:28: не похоже на скрин с зонами (цветных зон нет)" for a BTC
+         screenshot with two green zones (user: "хотя есть же зоны"). The picture is read right
+         (checked on the very screenshot: 81764 / 81464.8 and 81201.6 / 80777.1) — it was sent
+         again, the bot took it for the duplicate it is (v0.99.538) and did not store it twice,
+         but the summary said "no colour zones" for every skipped post. Now: "🔁 уже есть — тот
+         же пост пришёл ещё раз (BTC, сохранён …), не дублирую"; an author's result post gets
+         its own line too.
