@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.535"
+APP_VERSION = "0.99.536"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -19254,21 +19254,30 @@ def neuro_daily_pct(summary):
     return round(((fb / st) ** (1.0 / days) - 1) * 100, 3)
 
 
+def _neuro_sim_start(summary):
+    """(end of the part the $ simulation skips, days the simulation covers)"""
+    sp = summary.get("split") or {}
+    if "check" in sp:   # v0.99.417 — the clean check part V + test C (no choice saw them)
+        return sp.get("valid_end"), (sp.get("check_days") or 0) + (sp.get("holdout_days") or 0)
+    return sp.get("mine_end"), (sp.get("valid_days") or 0) + (sp.get("holdout_days") or 0)
+
+
+def neuro_mark_train(trades, summary):
+    """v0.99.536 — marks the trades of the part the model learned on, so the
+    "$500→" column can say why they have no balance (cheap: run on every poll)"""
+    me, _ = _neuro_sim_start(summary)
+    for t in trades:
+        if isinstance(t, dict):
+            t["compound_train"] = bool(me is not None and t.get("time") is not None and t["time"] <= me)
+
+
 def neuro_compound_fields(trades, summary, symbol):
     """v0.99.403 — per user ("лучшую карточку по доходу в процентах ... не
     сумму, а в день среднюю", period "проверка + тест"): the $15 va-bank
     simulation over the trades AFTER the mining part (validation + test —
     none of them was used to find the dependencies), and its daily %."""
-    sp = summary.get("split") or {}
-    if "check" in sp:   # v0.99.417 — the clean check part V + test C (no choice saw them)
-        me = sp.get("valid_end")
-        days = (sp.get("check_days") or 0) + (sp.get("holdout_days") or 0)
-    else:
-        me = sp.get("mine_end")
-        days = (sp.get("valid_days") or 0) + (sp.get("holdout_days") or 0)
-    for t in trades:   # marks the mining part, so the table can say why it has no $ balance
-        if isinstance(t, dict):
-            t["compound_train"] = bool(me is not None and t.get("time") is not None and t["time"] <= me)
+    me, days = _neuro_sim_start(summary)
+    neuro_mark_train(trades, summary)
     comp = rr_compound_annotate([t for t in trades if me is None or t["time"] > me], symbol, mod="neuro")
     comp["compound_days"] = round(days, 1) if me else None
     comp["compound_period"] = "проверка + тест" if me else "вся история"
@@ -20370,6 +20379,7 @@ def api_neuro_status():
     coins = []
     for symbol in display_symbols:
         recent_trades = (trades.get(symbol) or [])[-40:][::-1]
+        neuro_mark_train(recent_trades, summary.get(symbol, {}))   # v0.99.536 — cards mined before the label existed too
         recent_live_signals = [s for s in signal_log if s["symbol"] == symbol][:40]
         coins.append({
             "symbol": symbol,
@@ -28635,8 +28645,37 @@ INDEX_HTML = """<!doctype html>
   .fx-spark .dt:hover { r:5; }
   .fx-bar { height:6px; border-radius:3px; background:var(--line); overflow:hidden; display:flex; margin-top:4px; }
   .fx-bar > i { display:block; height:100%; transition:width .6s cubic-bezier(.2,.8,.2,1); }
+  /* Zones (v0.99.536) */
+  .fx-zpanel.fx-new > .zcard, .fx-zpanel.fx-new > .fx-zpost, .fx-zpanel.fx-new > .zsec, .fx-zpanel.fx-new > details { animation:fxRise .45s cubic-bezier(.2,.8,.2,1) both; }
+  .fx-zpanel.fx-new > :nth-child(2) { animation-delay:.05s; } .fx-zpanel.fx-new > :nth-child(3) { animation-delay:.1s; }
+  .fx-zpanel.fx-new > :nth-child(4) { animation-delay:.15s; } .fx-zpanel.fx-new > :nth-child(5) { animation-delay:.2s; }
+  .fx-zpanel.fx-new > :nth-child(n+6) { animation-delay:.25s; }
+  .fx-zpost { transition:transform .18s ease, box-shadow .18s ease; }
+  .fx-zpost:hover { transform:translateY(-1px); box-shadow:0 6px 18px rgba(0,0,0,.28); }
+  .fx-zpost.fx-new { animation:fxRise .5s cubic-bezier(.2,.8,.2,1) both; }
+  .fx-zpost.fx-intrade { animation:fxPulse 2.4s ease-out infinite; border-color:var(--pos) !important; }
+  .ztile { transition:transform .18s ease, background .18s ease; }
+  .ztile:hover { transform:translateY(-1px); background:var(--ctl); }
+  .fx-new .zbanner { animation:fxFade .7s ease both; animation-delay:.25s; }
+  .ztbl tbody tr { transition:background .15s ease; }
+  .ztbl tbody tr:hover td { background:rgba(255,255,255,.05); }
+  .fx-zrow { transition:transform .15s ease, background .15s ease; }
+  .fx-zrow:hover { transform:translateX(2px); background:var(--ctl) !important; }
+  .fx-new .fx-zrow { animation:fxRowIn .35s ease both; animation-delay:calc(var(--i, 0) * 30ms + .2s); }
+  .fx-new .fx-spark .ln { stroke-dasharray:1; stroke-dashoffset:0; animation:fxDraw 1.1s ease-out both; animation-delay:.3s; }
+  .fx-new .fx-spark .ar { animation:fxFade 1.1s ease both; animation-delay:.5s; }
+  @keyframes fxGrow { from { transform:scaleX(0); } to { transform:scaleX(1); } }
+  @keyframes fxBlink { 0%, 100% { opacity:1; } 50% { opacity:.35; } }
+  .fx-ladder { display:flex; gap:3px; height:7px; margin:5px 0 2px; max-width:260px; }
+  .fx-ladder > i { flex:1; border-radius:3px; background:var(--line-2); transform-origin:left; }
+  .fx-ladder > i.on { background:var(--pos); }
+  .fx-ladder.short > i.on { background:var(--neg); }
+  .fx-new .fx-ladder > i.on, .fx-zpost.fx-new .fx-ladder > i.on { animation:fxGrow .5s ease both; animation-delay:calc(var(--i, 0) * 90ms + .3s); }
+  .fx-dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:5px; vertical-align:middle; background:var(--tx-3); }
+  .fx-dot.watch { background:var(--warn); animation:fxBlink 1.6s ease-in-out infinite; }
+  .fx-dot.trade { background:var(--pos); animation:fxBlink 1s ease-in-out infinite; }
   @media (prefers-reduced-motion: reduce) {
-    .fx-card, .fx-card *, .zcard, .fx-live { animation:none !important; transition:none !important; }
+    .fx-card, .fx-card *, .zcard, .fx-live, .fx-new, .fx-new *, .fx-zpost, .fx-zpost *, .fx-zrow, .ztile, .fx-dot { animation:none !important; transition:none !important; }
   }
 
   /* ---------- modals ---------- */
@@ -30649,6 +30688,7 @@ function zoneRowHtml(z) {
   const lad = tr && tr.legs ? `лимитки ${tr.legs.filter(l => l.fill != null).length}/${tr.legs.length}: ${tr.legs.map(l => (l.fill != null ? '✅' : '') + zfmt(l.lim)).join(' / ')} · ` : '';   // v0.99.491
   const trTxt = tr ? `<div class="dim" style="font-size:var(--fs-sm);">${lad}${tr.entry != null ? 'средняя ' + zfmt(tr.entry) + ' · ' : ''}SL ${zfmt(tr.sl)}${tr.tp != null ? ' · TP ' + zfmt(tr.tp) : ''}${tr.autotrade ? ' · биржа: ' + tr.autotrade.status + (tr.autotrade.leverage ? ' ' + tr.autotrade.leverage + 'x' : '') : ''}${tr.result ? ` · <b class="${tr.result === 'WIN' ? 'win' : 'loss'}">${tr.result} ${tr.pnl_r > 0 ? '+' : ''}${tr.pnl_r}R${tr.pnl_pct != null ? ` · ${tr.pnl_pct > 0 ? '+' : ''}${tr.pnl_pct}%` : ''}</b>` : ''}</div>` : '';
   const hist = '';
+  const ladBar = tr && tr.legs && tr.legs.length ? `<div class="fx-ladder${long ? '' : ' short'}" title="налилось лимиток: ${tr.legs.filter(l => l.fill != null).length} из ${tr.legs.length}">${tr.legs.map((l, i) => `<i class="${l.fill != null ? 'on' : ''}" style="--i:${i};"></i>`).join('')}</div>` : '';
   // v0.99.447 — "уже отработала" shows its outcome in R right in the status
   const stTxt = z.status === 'old'
     ? (z.result ? `📜 отработала: <b class="${z.result.r > 0 ? 'win' : 'loss'}">${z.result.r > 0 ? '+' : ''}${z.result.r}R${z.result.pct != null ? ` · ${z.result.pct > 0 ? '+' : ''}${z.result.pct}%` : ''}</b>${z.result.legs ? ` <span class="dim">· лесенка поста, налилось ${z.result.filled}/${z.result.legs}</span>` : ''}` : (z.rules === 'ladder' ? '📜 отработала: лимитки не налились' : z.rules === 'pending' ? '📜 отработала — результат появится после пересчёта истории' : z.rules === 'excl_scale' ? '⚠️ не в статистике: уровни не удалось сопоставить с ценой — скрин распознан неверно' : z.rules === 'excl_past_stop' ? '⚠️ не в статистике: в момент поста цена уже была за стопом зоны' : '📜 отработала: входа не было'))
@@ -30656,13 +30696,13 @@ function zoneRowHtml(z) {
   const btn = 'background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);';
   return `<div style="margin-top:8px;padding:6px 0 0 8px;border-left:3px solid ${long ? '#4caf50' : '#ef5350'};">
     <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">
-      <div><span class="${long ? 'win' : 'loss'}" style="font-weight:700;">${long ? 'лонг' : 'шорт'}</span> <span class="dim">· ${stTxt}</span></div>
+      <div>${z.status === 'watch' || z.status === 'in_trade' ? `<span class="fx-dot ${z.status === 'watch' ? 'watch' : 'trade'}" title="${z.status === 'watch' ? 'жду подхода цены' : 'позиция открыта'}"></span>` : ''}<span class="${long ? 'win' : 'loss'}" style="font-weight:700;">${long ? 'лонг' : 'шорт'}</span> <span class="dim">· ${stTxt}</span></div>
       <div style="white-space:nowrap;">
         <button onclick="zoneChart('${z.id}')" title="график: свечи, зона, вход и выход" style="${btn}">📈</button>
         <button onclick="zonesDel('${z.id}')" title="удалить зону" style="background:var(--neg-bg);border:none;color:var(--neg);padding:3px 8px;border-radius:var(--r-xs);">🗑</button>
       </div>
     </div>
-    <div style="margin-top:4px;">${lv}</div>${trTxt}${hist}
+    <div style="margin-top:4px;">${lv}</div>${ladBar}${trTxt}${hist}
   </div>`;
 }
 // v0.99.445 — all zones of one screenshot in one block: coin, post time and the
@@ -30678,7 +30718,8 @@ function zonePostBlocks(list) {
   return [...groups.values()].sort((a, b) => (b[0].post_time || 0) - (a[0].post_time || 0)).map(g => {
     const z0 = g[0], coin = (z0.symbol || '?').replace('_USDT', '');
     g.sort((a, b) => (a.side === b.side ? 0 : a.side === 'short' ? -1 : 1) || (b.levels[0] || 0) - (a.levels[0] || 0));
-    return `<div style="margin-bottom:10px;padding:10px;background:var(--card);border-radius:var(--r-lg);border:1px solid var(--line);">
+    const inTrade = g.some(z => z.status === 'in_trade');
+    return `<div class="fx-zpost ${fxNew('zpost:' + (z0.post_id || z0.id))}${inTrade ? ' fx-intrade' : ''}" style="margin-bottom:10px;padding:10px;background:var(--card);border-radius:var(--r-lg);border:1px solid var(--line);">
       <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">
         <div><b>${coin}</b> <span class="dim">· пост ${zdate(z0.post_time)} · зон: ${g.length}</span></div>
         <div style="white-space:nowrap;">
@@ -30755,9 +30796,9 @@ async function refreshZones() {
   else banner = `<div class="zbanner pos"><b>Правила в плюсе по истории:</b> ${sgR(rs.avg_r)} на сделку (${rs.n} сделок)${rt && rt.best ? `, лучший риск ~${rt.best}%` : ''}.</div>`;
   const summary = card('🎯 Зоны — итог', `<div class="ztiles">
       ${tile('Автоторговля', d.autotrade ? '<span class="win">вкл</span>' : '<span class="dim">выкл</span>', d.autotrade ? '' : 'Настройки → Автоторговля → Зоны')}
-      ${tile('Риск на сделку', riskNow == null ? '—' : riskNow + '%', riskSrc)}
+      ${tile('Риск на сделку', riskNow == null ? '—' : `<span data-count="${riskNow}" data-suf="%">${riskNow}%</span>`, riskSrc)}
       ${tile('Правила', 'лимитки по методичке', `стоп ${p.buf}% за зоной · тейк +${p.tp}% от средней${d.tp_user ? ' (свой)' : ''}`)}
-      ${tile('Результат правил', rs.n ? sgR(rs.avg_r) + '<span class="zn"> / сделку</span>' : '—', rs.n ? `${rs.n} сделок · WR ${rs.wr}%${rs.per_week != null ? ` · ~${rs.per_week} в неделю` : ''}` : '')}
+      ${tile('Результат правил', rs.n ? `<span class="${rs.avg_r > 0 ? 'win' : (rs.avg_r < 0 ? 'loss' : '')}" data-count="${rs.avg_r}" data-suf="R" data-sign="1">${fxSgR(rs.avg_r)}</span><span class="zn"> / сделку</span>` : '—', rs.n ? `${rs.n} сделок · WR ${rs.wr}%${rs.per_week != null ? ` · ~${rs.per_week} в неделю` : ''}` : '')}
     </div>${banner}`);
   // --- 2. how the stop / take are set
   let ruleCard = '';
@@ -30766,9 +30807,7 @@ async function refreshZones() {
       <div>вход</div><div><b>лимитки на все линии</b> зон поста одного направления, на ${p.off ?? 0.2}% раньше линии, объём поровну</div>
       <div>стоп</div><div><b>${p.buf}%</b> за самой дальней линией — один на всю позицию</div>
       <div>тейк</div><div><b>+${p.tp}%</b> от средней цены входа ${d.tp_user ? '(свой, из настроек)' : (lr.tp_auto ? '— подобран по <b>лучшему росту счёта</b> на истории лесенок' : '(по умолчанию — мало сделок для подбора)')}</div>
-      <div>пост автора с результатом</div><div>закрывает сделку по монете по рынку, неналитые лимитки снимаются${(() => { const a = lr.author_exit; if (!a) return ' <span class="dim">(в истории таких постов после сетапов пока нет)</span>';
-        const better = (a.g ?? 0) >= (a.g_without ?? 0);
-        return `<div class="zsub">по истории: закрыто так ${a.n} из ${a.n_trades} сделок · с правилом <b>${sgR(a.avg_r)}</b>, без него было бы <b>${sgR(a.avg_r_without)}</b> (${a.n_without} сделок) — ${better ? '<span class="win">правило помогает</span>' : '<span class="loss">без правила по истории лучше</span>'}</div>`; })()}</div>
+      <div>пост автора с результатом</div><div>не закрывает сделку <span class="dim">(выключено — сделка идёт до тейка, стопа, безубытка или срока)</span></div>
       <div>безубыток</div><div>${p.be ? `после <b>+${p.be}%</b> от средней цены — стоп на среднюю +0.15% (комиссии), неналитые лимитки снимаются` : 'не ставится — по истории без него лучше'} <span class="dim">(подобран вместе с тейком)</span></div>
       </div>
       ${rs.n ? `<div class="zkv" style="margin-top:8px;">
@@ -30905,7 +30944,7 @@ async function refreshZones() {
     + (skipPosts.length ? `<details style="margin-bottom:6px;"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">⏭ пропущено, не по шаблону — ${skipPosts.length}</summary>${skipPosts.slice(0, 40).map(postRow).join('')}</details>` : '');
   clearTimeout(window._zLearnT);   // while the history is being recounted: refresh every 3 s
   if (((d.act || {}).learn || {}).running || ((d.act || {}).recheck || {}).running || ((d.act || {}).oc || {}).running) window._zLearnT = setTimeout(refreshZones, 3000);
-  setPanelHtml(panel, `${warn}
+  setPanelHtml(panel, `<div class="fx-zpanel ${fxNew('zones:panel')}">${warn}
     ${zStatusHtml(d)}
     ${summary}
     <div class="zsec">Зоны автора — активные (${act.length})</div>
@@ -30922,7 +30961,8 @@ async function refreshZones() {
     ${ocHtml(d, ocZ)}
     ${bad ? `<div style="margin-bottom:8px;">${bad}</div>` : ''}
     ${trn.length ? `<details style="margin-top:8px;"><summary class="dim" style="cursor:pointer;">📚 обучение (${trn.length}, ждут итога: ${trn.filter(z => z.status === 'train').length})</summary>${zonePostBlocks(trn)}</details>` : ''}
-    <details style="margin-top:8px;"><summary class="dim" style="cursor:pointer;">архив (${arch.length})</summary>${zonePostBlocks(arch)}</details>`);
+    <details style="margin-top:8px;"><summary class="dim" style="cursor:pointer;">архив (${arch.length})</summary>${zonePostBlocks(arch)}</details></div>`);
+  fxCountUp(panel);
 }
 async function zonesPost(url, body) {
   try {
@@ -31326,11 +31366,11 @@ function zoneTradesHtml(list) {
   list = list.slice().sort((a, b) => (b.trade.exit_time || 0) - (a.trade.exit_time || 0));
   const rs = list.map(z => z.trade.pnl_r || 0);
   const wins = rs.filter(r => r > 0).length, sum = rs.reduce((a, b) => a + b, 0);
-  const rows = list.map(z => { const t = z.trade, w = t.result === 'WIN';
-    return `<div onclick="zoneChart('${z.id}')" style="cursor:pointer;padding:6px 8px;margin-top:4px;background:var(--card);border-radius:var(--r-sm);border-left:3px solid ${w ? '#4caf50' : (t.result === 'LOSS' ? '#ef5350' : '#e0a030')};font-size:var(--fs-sm);">
+  const rows = list.map((z, i) => { const t = z.trade, w = t.result === 'WIN';
+    return `<div class="fx-zrow" onclick="zoneChart('${z.id}')" style="--i:${Math.min(i, 20)};cursor:pointer;padding:6px 8px;margin-top:4px;background:var(--card);border-radius:var(--r-sm);border-left:3px solid ${w ? '#4caf50' : (t.result === 'LOSS' ? '#ef5350' : '#e0a030')};font-size:var(--fs-sm);">
       <b>${(z.symbol || '').replace('_USDT', '')}</b> ${t.direction === 'LONG' ? 'лонг' : 'шорт'} · <b class="${(t.pnl_r || 0) > 0 ? 'win' : 'loss'}">${t.result === 'WIN' ? 'тейк' : t.result === 'LOSS' ? 'стоп' : t.result === 'BE' ? 'безубыток' : t.result === 'AUTHOR_EXIT' ? 'по посту автора' : 'по времени'} ${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R${t.pnl_pct != null ? ` · ${t.pnl_pct > 0 ? '+' : ''}${t.pnl_pct}%` : ''}</b>
       <span class="dim">· ${zfmt(t.entry)} → ${zfmt(t.exit_price)} · ${zdate(t.exit_time || t.time)}${t.autotrade_fired ? ' · 💰 биржа' : ''} · 📈</span></div>`; }).join('');
-  return `<details style="margin-top:8px;"><summary style="cursor:pointer;">💼 Сделки по зонам: ${list.length} · WR ${Math.round(100 * wins / list.length)}% · итого ${sum > 0 ? '+' : ''}${sum.toFixed(2)}R</summary>${rows}</details>`;
+  return `<details style="margin-top:8px;"><summary style="cursor:pointer;">💼 Сделки по зонам: ${list.length} · WR ${Math.round(100 * wins / list.length)}% · итого ${sum > 0 ? '+' : ''}${sum.toFixed(2)}R</summary>${zonesRSpark(list)}${rows}</details>`;
 }
 // v0.99.482 — a zone on its candles: the zone, its lines, entry ▲/▼, exit ●,
 // stop / take, the post's moment; opens over the page, Back / ✕ close it
@@ -33282,7 +33322,7 @@ function fxCountUp(root) {
   root.querySelectorAll('.fx-new [data-count]').forEach(el => {
     const to = parseFloat(el.dataset.count);
     if (!isFinite(to)) return;
-    const dec = +el.dataset.dec || 0, suf = el.dataset.suf || '', signed = el.dataset.sign === '1';
+    const dec = el.dataset.dec != null ? +el.dataset.dec : (String(el.dataset.count).split('.')[1] || '').length, suf = el.dataset.suf || '', signed = el.dataset.sign === '1';
     const fmt = v => (signed && v > 0 ? '+' : '') + v.toFixed(dec) + suf;
     const t0 = performance.now(), dur = 800;
     const step = now => {
@@ -33293,29 +33333,44 @@ function fxCountUp(root) {
     requestAnimationFrame(step);
   });
 }
-// Equity curve of the simulated $ balance (newest-first list in, drawn oldest->newest)
-function neuroEquitySpark(trades, start) {
-  const pts = (trades || []).filter(t => t.compound_balance_after != null).slice().reverse();
-  if (pts.length < 2) return '';
-  const s0 = start || 500, vals = [s0, ...pts.map(t => t.compound_balance_after)];
-  const W = 300, H = 70, P = 4;
+// A line over time (equity / cumulative R): vals[0] is the start, dots[i] (title, colour)
+// belongs to vals[i + 1]; fmt formats the caption values
+function fxCurveSvg(vals, dots, fmt, label) {
+  if (vals.length < 3) return '';
+  const W = 300, H = 70, P = 4, s0 = vals[0], last = vals[vals.length - 1];
   const lo = Math.min(...vals), hi = Math.max(...vals), span = (hi - lo) || 1;
   const X = i => P + i * (W - 2 * P) / (vals.length - 1);
   const Y = v => H - P - (v - lo) / span * (H - 2 * P);
   const line = vals.map((v, i) => `${i ? 'L' : 'M'}${X(i).toFixed(1)},${Y(v).toFixed(1)}`).join(' ');
-  const up = vals[vals.length - 1] >= s0, col = up ? 'var(--pos)' : 'var(--neg)';
+  const up = last >= s0, col = up ? 'var(--pos)' : 'var(--neg)';
   const base = Y(s0).toFixed(1);
-  const dots = pts.map((t, i) => {
-    const w = t.result === 'WIN';
-    return `<circle class="dt" cx="${X(i + 1).toFixed(1)}" cy="${Y(t.compound_balance_after).toFixed(1)}" r="2.6" style="fill:${w ? 'var(--pos)' : (t.pnl_r != null && t.pnl_r < 0 ? 'var(--neg)' : 'var(--tx-3)')};"><title>${fmtDateTime(t.entry_time)} · ${t.result}${t.pnl_r != null ? ' ' + (t.pnl_r > 0 ? '+' : '') + t.pnl_r + 'R' : ''} → $${Math.round(t.compound_balance_after)}</title></circle>`;
-  }).join('');
-  return `<svg class="fx-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="кривая баланса симуляции">
+  const pts = dots.map((d, i) => `<circle class="dt" cx="${X(i + 1).toFixed(1)}" cy="${Y(vals[i + 1]).toFixed(1)}" r="2.6" style="fill:${d.col};"><title>${d.title}</title></circle>`).join('');
+  return `<svg class="fx-spark" viewBox="0 0 ${W} ${H}" preserveAspectRatio="none" role="img" aria-label="${label}">
     <line x1="${P}" x2="${W - P}" y1="${base}" y2="${base}" style="stroke:var(--line-2);stroke-dasharray:3 3;"/>
     <path class="ar" d="${line} L${X(vals.length - 1).toFixed(1)},${H} L${X(0).toFixed(1)},${H} Z" style="fill:${col};opacity:.12;"/>
     <path class="ln" pathLength="1" d="${line}" style="stroke:${col};"/>
-    ${dots}
+    ${pts}
   </svg>
-  <div class="dim" style="display:flex;justify-content:space-between;font-size:var(--fs-xs);"><span>старт ${fmtUsdCompact(s0)}</span><span class="${up ? 'win' : 'loss'}">сейчас ${fmtUsdCompact(vals[vals.length - 1])}</span></div>`;
+  <div class="dim" style="display:flex;justify-content:space-between;font-size:var(--fs-xs);"><span>старт ${fmt(s0)}</span><span class="${up ? 'win' : 'loss'}">сейчас ${fmt(last)}</span></div>`;
+}
+const fxDotCol = t => t.result === 'WIN' ? 'var(--pos)' : ((t.pnl_r || 0) < 0 ? 'var(--neg)' : 'var(--tx-3)');
+const fxSgR = v => (v > 0 ? '+' : '') + v + 'R';
+// Equity curve of the simulated $ balance (newest-first list in, drawn oldest->newest)
+function neuroEquitySpark(trades, start) {
+  const pts = (trades || []).filter(t => t.compound_balance_after != null).slice().reverse();
+  if (pts.length < 2) return '';
+  return fxCurveSvg([start || 500, ...pts.map(t => t.compound_balance_after)],
+    pts.map(t => ({col: fxDotCol(t), title: `${fmtDateTime(t.entry_time)} · ${t.result}${t.pnl_r != null ? ' ' + fxSgR(t.pnl_r) : ''} → $${Math.round(t.compound_balance_after)}`})),
+    fmtUsdCompact, 'кривая баланса симуляции');
+}
+// Zones: cumulative R of the finished trades (newest-first list of zones in)
+function zonesRSpark(list) {
+  const pts = list.slice().reverse();
+  let acc = 0;
+  const vals = [0, ...pts.map(z => (acc = Math.round((acc + (z.trade.pnl_r || 0)) * 100) / 100))];
+  return fxCurveSvg(vals,
+    pts.map((z, i) => ({col: fxDotCol(z.trade), title: `${(z.symbol || '').replace('_USDT', '')} · ${zdate(z.trade.exit_time || z.trade.time)} · ${fxSgR(z.trade.pnl_r || 0)} → итого ${fxSgR(vals[i + 1])}`})),
+    v => fxSgR(v), 'накопленный результат сделок по зонам');
 }
 // v0.99.334 — full backtest trade lists for S/R and Peak, loaded on open
 function snrTradeRowHtml(sym, t) {

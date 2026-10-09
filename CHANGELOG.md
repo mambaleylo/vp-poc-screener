@@ -19156,3 +19156,11 @@ v0.99.535 - Зоны: closing a trade on the author's result post is switched of
          (ZONES_AUTHOR_EXIT_ENABLED = False), so the backtest, the learning and the live ladders
          no longer end on such a post; the code stays, flip the flag to bring it back. Cards
          calculated earlier keep their old "по посту автора" rows until the next recalculation.
+v0.99.536 - Зоны: the motion asked for in v0.99.534 (user: "а для зон анимацию делал?") — the tab
+         rises in once, a new author post slides in when it arrives, the summary tiles count up,
+         a segmented bar shows how many ladder limits filled, a post in a position pulses, a
+         blinking dot marks "жду подхода" / "в сделке", the finished-trades list gets a
+         cumulative-R curve with a dot per trade, table rows and tiles light up on hover.
+         The "Стоп и тейк" card no longer says the author's result post closes the trade (it is
+         off since v0.99.535). Neuro: the "🎓 обучение" label is now set on every poll, so cards
+         mined before v0.99.534 show it too instead of a bare dash. Checked in Chromium on mock data.
