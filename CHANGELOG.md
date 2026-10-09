@@ -19246,3 +19246,9 @@ v0.99.545 - Зоны: the BTC zones still not among the active ones ("🔁 уж�
          already reached goes to history). The duplicate message names the real reason of a
          skip. /zones BTC in Telegram lists the coin's author zones of 14 days by post with their
          state.
+v0.99.546 - P/R: "🧪 Честная проверка вживую" (user: "подозрительно хорошо показывает себя
+         p/r, насколько можно доверять"). The usual live stats count only coins in the list now
+         and gross R. The new block counts EVERY closed live signal (also coins that dropped out
+         of the list), net of round-trip fees, split all / in the list / dropped / really traded,
+         with the mean R's 95% interval and a verdict: too early (<30) / plus but within chance /
+         edge confirmed (lower bound > 0) / minus. Slippage on thin coins is not modelled.
