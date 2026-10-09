@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.550"
+APP_VERSION = "0.99.551"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22244,10 +22244,38 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                 sim_ = difflib.SequenceMatcher(None, base0, _zocr_canon(sym_.replace("_USDT", ""))).ratio()
                 if sim_ >= 0.5 and (best_c is None or (sim_, -abs(lp_ - ref) / lp_) > (best_c[1], -best_c[2])):
                     best_c = (sym_, sim_, abs(lp_ - ref) / lp_, lp_)
+            # v0.99.551 — BEATUSDT.P was taken for CL (BEAT is not on Gate, CL's price is
+            # 1000x the chart's): another word read before USDT at least as often as the
+            # chosen coin, not on the exchange -> that coin is meant: skipped, not traded as CL
+            _n_sym = sum(n_ for w_, n_ in words_read.items() if _zocr_canon(w_).endswith(base0))
+            # (user: "Beat кстати на гейте есть") — a word read before USDT that IS on Gate with
+            # the chart's price as it is (no decimal shift) is the coin: BEAT over a stray CL
+            if not best_c:
+                for w_ in sorted(words_read, key=lambda w_: (-words_read[w_], -len(w_))):
+                    for cut in range(0, max(1, len(w_) - 1)):   # icons glued in front: '7BEAT'
+                        ws_ = w_[cut:]
+                        if len(ws_) < 2 or ws_ + "_USDT" not in symbols or ws_ + "_USDT" == symbol:
+                            continue
+                        try:
+                            lp_ = live_price_fn(ws_ + "_USDT")
+                        except Exception:
+                            lp_ = None
+                        if lp_ and lp_ > 0 and abs(lp_ - ref) / lp_ <= 0.25:
+                            best_c = (ws_ + "_USDT", 1.0, abs(lp_ - ref) / lp_, lp_)
+                            break
+                    if best_c:
+                        break
             if best_c:
                 notes.append(f"тикер прочитан как {symbol.replace('_USDT', '')}, но цена на скрине {ref:g} — "
                              f"это {best_c[0].replace('_USDT', '')} (его цена {best_c[3]:g})")
                 symbol = best_c[0]
+            _alt = max((w_ for w_ in words_read if len(w_) >= 3 and not _zocr_canon(w_).endswith(base0)
+                        and w_ + "_USDT" not in symbols), key=lambda w_: (words_read[w_], len(w_)), default=None)
+            if best_c:
+                pass
+            elif _alt and words_read[_alt] >= max(1, _n_sym) and abs(round(math.log10(live0 / ref))) >= 1:
+                notes.append(f"тикер на скрине — {_alt} (цена {ref:g}), а не {symbol.replace('_USDT', '')} (цена {live0:g})")
+                not_listed, symbol = _alt, None
             elif abs(round(math.log10(live0 / ref))) >= 2 and not (abs(round(math.log10(live0 / ref))) == 3 and "1000" in (header_txt or "")):
                 price_doubt = (f"цена на скрине ({ref:g}) в {live0 / ref if live0 > ref else ref / live0:.0f} раз "
                                f"отличается от цены {symbol.replace('_USDT', '')} ({live0:g}) — возможно, тикер прочитан "
@@ -23717,6 +23745,21 @@ def zones_recognize_post(post, data):
                 post["notes"].append(f"тикер прочитан неточно — по цене на момент поста ({px_post:.6g}, расхождение "
                                      f"{err * 100:.1f}%){' и названию' if sim >= 0.8 else ''} это {sym}, проверьте "
                                      f"(сменить — 🪙 во вкладке «Зоны»)")
+    # v0.99.551 — the author's caption starts with the coin's tag ("#BEAT"): it wins over the
+    # ticker OCR read (BEAT was read as CL); a tagged coin not on Gate -> the post is skipped
+    m_tag = re.search(r"#([A-Z0-9]{2,15})\b", caption.upper()) if rec and not post.get("index_read") else None
+    if m_tag and m_tag.group(1) + "_USDT" != post.get("symbol") and m_tag.group(1) not in ("USDT", "USD", "BTCD"):
+        tag, old = m_tag.group(1), post.get("symbol")
+        drop = lambda n: not any(k in n for k in ("нет на фьючерсах", "тикер", "масштаб цен", "отличается от цены"))
+        if tag + "_USDT" in prices:
+            post["symbol"], post["not_listed"] = tag + "_USDT", None
+            post.pop("price_doubt", None)
+            post["notes"] = [n for n in post["notes"] if drop(n)] + [
+                f"монета по подписи поста #{tag}" + (f" (на скрине прочитал {old.replace('_USDT', '')})" if old else "")]
+        elif old or not post.get("not_listed"):
+            post["symbol"], post["not_listed"] = None, tag
+            post.pop("price_doubt", None)
+            post["notes"] = [f"{tag} нет на фьючерсах Gate (монета по подписи поста #{tag}) — скрин пропущен"]
     if not post["symbol"] and caption and not post.get("not_listed"):
         m_ = re.search(r"\b([A-Z0-9]{2,15})(?:[/_-]?USDT)?\b", caption.upper())
         if m_ and (m_.group(1) + "_USDT") in prices:

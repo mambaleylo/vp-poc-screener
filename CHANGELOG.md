@@ -19279,3 +19279,11 @@ v0.99.550 - Зоны, сигналы откатов: "46x · −$7.16" in the "�
          and a closed signal adds "итог ±$Y" at that size. The loss at the stop counted the fees
          as 0.12% of the stop distance instead of 0.1% of the position — it was too small
          (−$5.91 for a −1.1R stop worth −$6.4); fixed (old signals are recounted on the page).
+v0.99.551 - Зоны: BEATUSDT.P read as CL (user: "на самом деле была монета BEAT, запятая не как
+         должна быть"; "BEAT на гейте есть"). CL (oil, ~90.7) is on Gate too, a stray "CL"
+         before USDT was taken first and its price put the levels x1000 (76.9 / 73.9). Now, when
+         the chosen coin's price is far from the chart's: a word read before USDT on the
+         screenshot that is on Gate with the chart's price as it is wins (BEAT, levels 0.0769 /
+         0.0739); one read at least as often but not on Gate -> the post is skipped. And the
+         author's caption tag ("#BEAT") names the coin over the OCR'd ticker (a tagged coin not
+         on Gate: skipped).
