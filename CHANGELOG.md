@@ -19143,3 +19143,11 @@ v0.99.533 - Telegram: /ping (user: "давай команду просто сд�
          short "🏓 На связи · ответ через N с" with the version, the uptime and how long ago the
          prices were checked (or "мониторинг молчит"). No answer = no connection to the bot.
          Listed in /help.
+v0.99.534 - Neuro: the "$500→" column no longer shows a bare dash for the training part
+         (user: "почему в нейро прочерки местами?"). Those trades are the mining part the model
+         learned on, so they are left out of the $ simulation on purpose; the cell now says
+         "🎓 обучение" with an explanation in the tooltip. Motion for Neuro / Zones (user: "более
+         красивая визуализация с анимациями"): cards fade in once, trade rows slide in, winrate
+         and P&L count up, a balance curve of the $ simulation above the trades table, win/loss
+         colour strip on rows, pulsing live-signal badge, hover lift on Neuro and Zones cards.
+         Respects prefers-reduced-motion.
