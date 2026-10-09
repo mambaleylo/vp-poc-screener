@@ -19151,3 +19151,8 @@ v0.99.534 - Neuro: the "$500→" column no longer shows a bare dash for the trai
          and P&L count up, a balance curve of the $ simulation above the trades table, win/loss
          colour strip on rows, pulsing live-signal badge, hover lift on Neuro and Zones cards.
          Respects prefers-reduced-motion.
+v0.99.535 - Зоны: closing a trade on the author's result post is switched off (user: "закрывать
+         сделки по постам автора — это не нужно уже"). zones_author_exits() now returns nothing
+         (ZONES_AUTHOR_EXIT_ENABLED = False), so the backtest, the learning and the live ladders
+         no longer end on such a post; the code stays, flip the flag to bring it back. Cards
+         calculated earlier keep their old "по посту автора" rows until the next recalculation.

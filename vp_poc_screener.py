@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.534"
+APP_VERSION = "0.99.535"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22323,9 +22323,15 @@ def zones_ladder_pnl(st, s, sl, exit_px):
             "avg": sum(fills) / len(fills) if fills else None, "filled": len(fills), "legs": len(st["legs"])}
 
 
+ZONES_AUTHOR_EXIT_ENABLED = False   # v0.99.535 — user: closing trades on the author's result posts is not needed any more; code kept, flip to True to bring it back
+
+
 def zones_author_exits():
-    """v0.99.519 — the author's result posts by coin: {symbol: [post times, sorted]}"""
+    """v0.99.519 — the author's result posts by coin: {symbol: [post times, sorted]}
+    (empty while ZONES_AUTHOR_EXIT_ENABLED is off — every caller then sees no such post)"""
     out = {}
+    if not ZONES_AUTHOR_EXIT_ENABLED:
+        return out
     with _zones_lock:
         for p_ in ZONES["posts"]:
             if p_.get("result_post") and p_.get("symbol") and p_.get("post_time"):
