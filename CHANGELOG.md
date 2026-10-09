@@ -19225,3 +19225,14 @@ v0.99.543 - Зоны: the BTC post's zones were nowhere among the active ones (u
          closed by hand, deleted). Now with no such ladder left they are watched again (replayed
          first: a zone the price already reached is history) — at the start and every 10
          minutes. The "🔁 уже есть" message lists that post's zones with their status.
+v0.99.544 - Зоны: a check of every coin on the screen (user: "проверь на скрине все монеты, нет ли
+         проблем"). (1) SEI: the short ladder mixed the real zone with the "-19.13%" label of the
+         author's result post (read as a zone before v0.99.515) and a real short opened; live
+         posts were left out of the history re-reading not to disturb a trade. Now every live
+         post is read once again at the start: a result post -> its zones without orders on the
+         exchange stop ("при перепроверке это пост-отчёт"), a ladder with orders gets a Telegram
+         message to close it with "✖ закрыть"; zones read differently today only get a message
+         (nothing changed — they may have been set right by hand). (2) ZRO: a copy whose post
+         record was gone escaped the duplicate clean-up — such zones take part now. (3) SOL: the
+         ladder said "лимитки 4/4" from the bot's record while fewer filled on the exchange —
+         the line now says "по учёту бота" and "на бирже: исполнено K из N выставленных".

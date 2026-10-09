@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.543"
+APP_VERSION = "0.99.544"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21297,7 +21297,7 @@ def zones_save():
     with _zones_lock:
         _zones_save_seq[0] += 1
         seq = _zones_save_seq[0]
-        data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode", "own_last_scan", "monitor_ok", "fine_only", "pb_tg", "recheck_v515") if k in ZONES}, default=str)
+        data = json.dumps({k: ZONES[k] for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode", "own_last_scan", "monitor_ok", "fine_only", "pb_tg", "recheck_v515", "live_sanity_v544") if k in ZONES}, default=str)
     try:   # v0.99.455 — written to disk for sure; the previous state kept as .bak
         # v0.99.511 — one writer at a time (the history recheck, the monitor and the
         # learner save from different threads: they shared one .tmp — one renamed it
@@ -21341,7 +21341,7 @@ def zones_load():
                 d = json.load(f)
             with _zones_lock:
                 for k in ("posts", "zones", "tg_offset", "learned", "stats", "approach", "train_mode",
-                          "own_last_scan", "monitor_ok", "fine_only", "pb_tg", "recheck_v515"):
+                          "own_last_scan", "monitor_ok", "fine_only", "pb_tg", "recheck_v515", "live_sanity_v544"):
                     if k in d:
                         ZONES[k] = d[k]
                 ZONES["train_mode"] = False   # v0.99.480 — the switch is gone: new posts are always live
@@ -23368,6 +23368,14 @@ def zones_dedup_migrate():
     others' zones go (unless they have orders on the exchange)"""
     with _zones_lock:
         posts = [p_ for p_ in ZONES["posts"] if p_.get("symbol") and not p_.get("dup_of") and not p_.get("own")]
+        # v0.99.544 — zones whose post record is gone (a ZRO copy stayed): a stand-in post
+        known = {p_["id"] for p_ in ZONES["posts"]}
+        for z in ZONES["zones"]:
+            if z.get("post_id") and z["post_id"] not in known and not z.get("own") and not z.get("oc") \
+                    and z.get("symbol") and z.get("status") != "deleted":
+                known.add(z["post_id"])
+                posts.append({"id": z["post_id"], "symbol": z["symbol"], "post_time": z.get("post_time", 0), "_orphan": True})
+    posts = [p_ for p_ in posts if p_.get("post_time") is not None]
     posts.sort(key=lambda p_: (p_["symbol"], p_["post_time"]))
     n = _zones_dedup_repair()
     for i, a in enumerate(posts):
@@ -24770,6 +24778,7 @@ def zones_monitor_loop():
         zones_dedup_migrate()   # v0.99.538
     except Exception as e:
         log_error(f"zones dedup: {e}")
+    threading.Thread(target=lambda: (time.sleep(90), zones_live_sanity()), daemon=True).start()   # v0.99.544
     with _zones_lock:   # v0.99.493 — what came back from the disk after the start
         zs = ZONES["zones"]
         lad = [z for z in zs if (z.get("trade") or {}).get("legs") and z["trade"].get("status") in ("PENDING", "OPEN")
@@ -27127,6 +27136,77 @@ _zones_recheck_lock = threading.Lock()
 
 
 ZONES_RECHECK_MARK = 515   # v0.99.515 — a post recognised again by this recogniser carries this mark
+
+
+def zones_live_sanity(force=False):
+    """v0.99.544 — the posts being watched / traded now were left out of the history
+    re-reading (not to disturb a trade), so a mistake of the old recogniser could stay in
+    work: the SEI result post — its "-19.13%" label read as a short zone — opened a real
+    short. Once (and on demand) every live post is read again: a result post or other
+    zones than the stored ones -> the zones without orders on the exchange stop, a ladder
+    with orders gets a message to close it by hand (✖ закрыть)."""
+    with _zones_lock:
+        if ZONES.get("live_sanity_v544") and not force:
+            return 0
+        live_pids = {z.get("post_id") for z in ZONES["zones"] if z.get("status") in ("watch", "in_trade")
+                     and not z.get("own") and not z.get("oc") and not z.get("manual")}
+        posts = [p_ for p_ in ZONES["posts"] if p_["id"] in live_pids]
+    try:
+        prices = _zones_symbols_and_prices()
+    except Exception:
+        return 0
+    n = 0
+    for post in posts:
+        path = os.path.join(ZONES_IMG_DIR, post["id"] + ".jpg")
+        if not os.path.exists(path):
+            continue
+        try:
+            with open(path, "rb") as f:
+                rec = zones_recognize(f.read(), live_price_fn=lambda s_: prices.get(s_), symbols=set(prices) or None)
+        except Exception as e:
+            log_error(f"zones live sanity {post.get('symbol')}: {e}")
+            continue
+        with _zones_lock:
+            zs = [z for z in ZONES["zones"] if z.get("post_id") == post["id"] and z.get("status") in ("watch", "in_trade")]
+        key_old = {(z["side"], tuple(round(v, 6) for v in z["levels"])) for z in zs}
+        px_ = prices.get(post.get("symbol") or "")
+        new_z = [(z["side"], zones_scale_fix(z["levels"], px_)[0] if px_ else z["levels"]) for z in (rec.get("zones") or [])]
+        same = lambda zo: any(zo[0] == sd and len(lv) == len(zo[1]) and all(abs(a_ - b_) <= 0.003 * abs(b_) for a_, b_ in zip(sorted(lv), sorted(zo[1])))
+                              for sd, lv in new_z)
+        sym = (post.get("symbol") or "").replace("_USDT", "")
+        when = time.strftime('%d.%m %H:%M', time.localtime(post['post_time']))
+        if not rec.get("result_post"):
+            diff = [zo for zo in key_old if not same(zo)]
+            if diff and new_z:   # only a message: the stored zones may have been set right by hand
+                n += 1
+                zones_notify(f"ℹ️ {sym}: пост от {when} сегодня распознаётся иначе — у бота "
+                             + "; ".join(f"{'лонг' if sd == 'long' else 'шорт'} {' / '.join(f'{v:g}' for v in lv)}" for sd, lv in diff)
+                             + ", на скрине сейчас " + "; ".join(f"{'лонг' if sd == 'long' else 'шорт'} {' / '.join(f'{v:g}' for v in lv)}" for sd, lv in new_z)
+                             + ". Проверьте во вкладке «Зоны» (ничего не менял).")
+            continue
+        bad = key_old
+        why = "это пост-отчёт автора (результат отработки), а не сетап"
+        real_left = []
+        with _zones_lock:
+            for z in zs:
+                if (z["side"], tuple(round(v, 6) for v in z["levels"])) not in bad:
+                    continue
+                lead = z if (z.get("trade") or {}).get("legs") else next((x for x in ZONES["zones"] if x["id"] == z.get("lead")), z)
+                rl = (lead.get("trade") or {}).get("real") or {}
+                if rl.get("legs") and not rl.get("done"):
+                    real_left.append(z)
+                    continue
+                z["status"], z["skip"] = "skipped", "recheck"
+                if z is lead:
+                    z["trade"] = None
+        n += 1
+        zones_notify(f"⚠️ {sym}: пост от {when} — {why}. "
+                     + (f"По нему на бирже есть ордера/позиция — проверьте и закройте кнопкой «✖ закрыть» во вкладке «Зоны»."
+                        if real_left else "Его зоны без ордеров сняты с работы."))
+    with _zones_lock:
+        ZONES["live_sanity_v544"] = True
+    zones_save()
+    return n
 
 
 def zones_recheck_results(force=False):
@@ -31004,11 +31084,11 @@ function zoneRowHtml(z) {
   const long = z.side === 'long';
   const lv = z.levels.map((v, i) => `<span style="${z.touched && z.touched[i] ? 'color:var(--pos);font-weight:700;' : ''}">${i + 1}) ${zfmt(v)}${z.touched && z.touched[i] ? ' ✓' : ''}</span>`).join(' · ');
   const tr = z.trade;
-  const lad = tr && tr.legs ? `лимитки ${tr.legs.filter(l => l.fill != null).length}/${tr.legs.length}: ${tr.legs.map(l => (l.fill != null ? '✅' : '') + zfmt(l.lim)).join(' / ')} · ` : '';   // v0.99.491
+  const lad = tr && tr.legs ? `${tr.real ? 'по учёту бота ' : ''}лимитки ${tr.legs.filter(l => l.fill != null).length}/${tr.legs.length}: ${tr.legs.map(l => (l.fill != null ? '✅' : '') + zfmt(l.lim)).join(' / ')} · ` : '';   // v0.99.491
   // v0.99.537 — what the exchange has, in words (it was "биржа: SKIPPED 14x")
   const trL = tr || (z.lead && window._zTr ? window._zTr[z.lead] : null);   // a zone of a ladder: the trade sits on its lead zone
   const realFilled = trL && trL.real && trL.real.legs ? trL.real.legs.reduce((a, l) => a + (l.filled || 0), 0) : 0;
-  const exTxt = !tr || !tr.autotrade ? '' : (realFilled > 0 ? ` · 💰 на бирже: позиция, плечо ${tr.real.lev || tr.autotrade.leverage}x`
+  const exTxt = !tr || !tr.autotrade ? '' : (realFilled > 0 ? ` · 💰 на бирже: позиция, исполнено ${tr.real.legs.filter(l => (l.filled || 0) > 0).length} из ${tr.real.legs.length} выставленных лимиток, плечо ${tr.real.lev || tr.autotrade.leverage}x`
     : tr.real && !tr.real.done ? ` · на бирже: лимитки стоят (${tr.real.legs.length} шт.)${tr.autotrade.leverage ? ', плечо ' + tr.autotrade.leverage + 'x' : ''}`
     : ({SKIPPED: ' · на бирже: не открыто', WAIT: ' · на бирже: ждёт', ERROR: ' · на бирже: ошибка', DRY_RUN: ' · бумажная сделка'}[tr.autotrade.status] || ' · на бирже: ' + tr.autotrade.status)
       + (tr.autotrade.detail && tr.autotrade.status !== 'LIMITS' ? ` — ${tr.autotrade.detail}` : ''));
@@ -31019,7 +31099,7 @@ function zoneRowHtml(z) {
   const stTxt = z.status === 'old'
     ? (z.result ? `📜 отработала: <b class="${z.result.r > 0 ? 'win' : 'loss'}">${z.result.r > 0 ? '+' : ''}${z.result.r}R${z.result.pct != null ? ` · ${z.result.pct > 0 ? '+' : ''}${z.result.pct}%` : ''}</b>${z.result.legs ? ` <span class="dim">· лесенка поста, налилось ${z.result.filled}/${z.result.legs}</span>` : ''}` : (z.rules === 'ladder' ? '📜 отработала: лимитки не налились' : z.rules === 'pending' ? '📜 отработала — результат появится после пересчёта истории' : z.rules === 'excl_scale' ? '⚠️ не в статистике: уровни не удалось сопоставить с ценой — скрин распознан неверно' : z.rules === 'excl_past_stop' ? '⚠️ не в статистике: в момент поста цена уже была за стопом зоны' : '📜 отработала: входа не было'))
     : (z.status === 'in_trade' && trL && trL.legs ? (realFilled > 0 ? '💰 в сделке на бирже' : '📝 в сделке только у бота <span class="dim">(на бирже позиции нет)</span>')
-       : (ZONE_ST[z.status] || z.status)) + (z.status === 'skipped' ? ({dup: ' — тот же сетап уже в работе (пост из нескольких картинок)', scale: ' — уровни не совпадают с ценой'}[z.skip] || '') : '');
+       : (ZONE_ST[z.status] || z.status)) + (z.status === 'skipped' ? ({dup: ' — тот же сетап уже в работе (пост из нескольких картинок)', scale: ' — уровни не совпадают с ценой', recheck: ' — при перепроверке это пост-отчёт автора, а не сетап'}[z.skip] || '') : '');
   const btn = 'background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);';
   // v0.99.540 — a zone of another coin than its post (a misread ticker), and closing a ladder by hand
   const postSym = window._zPostSym && z.post_id ? window._zPostSym[z.post_id] : null;
