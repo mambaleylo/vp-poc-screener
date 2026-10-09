@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.544"
+APP_VERSION = "0.99.545"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22234,7 +22234,9 @@ def zone_sim(cs, z, entry_idx, buf, tp, start, end):
 def zones_group_key(z):
     """v0.99.491 — the zones of one post on one side are ONE position (the
     author's instruction: "работаем в паре... набрать позицию в три ордера")"""
-    return (z.get("post_id") or z["id"], z["side"])
+    # v0.99.545 — the coin too: after a post's coin was set right (ETC -> BTC) its new
+    # BTC zones joined the old ETC ladder (one post, one side) and were lost in it
+    return (z.get("post_id") or z["id"], z.get("symbol"), z["side"])
 
 
 ZONES_DUP_SEC = 1800   # v0.99.514 — posts of one coin and side this close in time = one setup
@@ -25376,7 +25378,32 @@ def bot_ping_text(msg_t=None):
     return f"🏓 На связи{lag}\nv{APP_VERSION} · работает {up // 86400} д {up % 86400 // 3600} ч {up % 3600 // 60} мин · {mon_txt}"
 
 
-BOT_COMMANDS_HELP = ("Команды бота:\n/ping — на связи ли бот (нет ответа — нет связи)\n/update — скачать новую версию с GitHub и перезапустить\n"
+def bot_zones_text(coin):
+    """v0.99.545 — /zones BTC: the coin's author zones of the last 14 days, by post"""
+    sym = coin + "_USDT"
+    now = time.time()
+    with _zones_lock:
+        zs = [z for z in ZONES["zones"] if z.get("symbol") == sym and not z.get("own") and not z.get("oc")
+              and now - z.get("post_time", 0) < ZONES_MAX_DAYS * 86400]
+    if not zs:
+        return f"По {coin} зон автора за {ZONES_MAX_DAYS} дн. нет."
+    stn = {"watch": "👀 слежу", "in_trade": "🤖 в сделке", "old": "📜 отработала", "expired": "⌛ истекла", "closed": "✔ закрыта",
+           "broken": "💥 пробита", "skipped": "⏭ пропущена", "hist_wait": "📜 только в статистику", "deleted": "🗑 удалена"}
+    skn = {"dup": "тот же сетап у другой копии поста", "recheck": "пост-отчёт", "scale": "уровни не совпадают с ценой"}
+    out, by_post = [f"Зоны {coin} за {ZONES_MAX_DAYS} дн.:"], {}
+    for z in zs:
+        by_post.setdefault(z.get("post_id"), []).append(z)
+    for pid, g in sorted(by_post.items(), key=lambda kv: -kv[1][0].get("post_time", 0)):
+        out.append(f"\nпост {time.strftime('%d.%m %H:%M', time.localtime(g[0]['post_time']))}:")
+        for z in g:
+            tr = z.get("trade") or {}
+            out.append(f"• {'лонг' if z['side'] == 'long' else 'шорт'} {' / '.join(f'{v:g}' for v in z['levels'])} — "
+                       f"{stn.get(z['status'], z['status'])}" + (f" ({skn.get(z.get('skip'), z.get('skip'))})" if z.get("skip") else "")
+                       + (f" · лесенка {tr.get('status')}" if tr.get("legs") else ""))
+    return "\n".join(out)[:3800]
+
+
+BOT_COMMANDS_HELP = ("Команды бота:\n/ping — на связи ли бот (нет ответа — нет связи)\n/zones BTC — все зоны монеты и что с ними\n/update — скачать новую версию с GitHub и перезапустить\n"
                      "/restart — перезапустить\n/status — версия, время работы, зоны и сделки\n"
                      "/help — эта подсказка")
 
@@ -25387,6 +25414,9 @@ def bot_command(txt, msg_t=None):
     cmd = txt.strip().split()[0].lower().split("@")[0]
     if cmd == "/ping":
         tg_outbox_push(bot_ping_text(msg_t))
+    elif cmd == "/zones":   # v0.99.545 — every zone of a coin with its state
+        arg = (txt.strip().split() + [""])[1].upper().replace("USDT", "").strip("_/ ")
+        tg_outbox_push(bot_zones_text(arg) if arg else "Напишите монету: /zones BTC")
     elif cmd in ("/start", "/help"):
         tg_outbox_push(BOT_COMMANDS_HELP)
     elif cmd == "/status":
@@ -26745,8 +26775,13 @@ def zones_post_summary(post, new):
                "hist_wait": "старый пост — только в статистику", "deleted": "удалена"}
         with _zones_lock:
             fz = [z for z in ZONES["zones"] if first and z.get("post_id") == first["id"] and z.get("status") != "deleted"]
+        skn = {"dup": "не торгую — тот же сетап уже в работе (другая копия поста)", "recheck": "снята: при перепроверке это пост-отчёт",
+               "scale": "не торгую — уровни не совпадают с ценой"}
         zl = "\n".join(f"• {'лонг' if z['side'] == 'long' else 'шорт'} {' / '.join(f'{v:g}' for v in z['levels'])} — "
-                        f"{stn.get(z['status'], z['status'])}" for z in fz)
+                        f"{skn.get(z.get('skip'), stn.get(z['status'], z['status'])) if z['status'] == 'skipped' else stn.get(z['status'], z['status'])}"
+                        for z in fz)
+        if any(z["status"] == "skipped" for z in fz):
+            zl += "\nВернуть пропущенные в работу — кнопка «▶ в работу» у зоны во вкладке «Зоны» (архив)."
         return (f"🔁 Пост от {when}: уже есть — тот же пост пришёл ещё раз"
                 + (f" ({(first.get('symbol') or '').replace('_USDT', '')}, сохранён {time.strftime('%d.%m %H:%M', time.localtime(first.get('created') or first['post_time']))})" if first else "")
                 + ", не дублирую." + (f" Его зоны:\n{zl}" if zl else " У того поста зон сейчас нет."))
@@ -27038,6 +27073,31 @@ def api_zones_reparse():
     zones_save()
     _zones_learn_event.set()
     return jsonify({"ok": True, "posts": done, "zones": found})
+
+
+@app.route("/api/zones/revive", methods=["POST"])
+def api_zones_revive():
+    """v0.99.545 — "▶ вернуть в работу": a skipped / expired zone (and the others of its post,
+    coin and side) watched again; replayed first — a zone the price already reached is history"""
+    b = request.get_json(force=True, silent=True) or {}
+    with _zones_lock:
+        z = next((x for x in ZONES["zones"] if x["id"] == b.get("id")), None)
+        if not z:
+            return jsonify({"ok": False, "error": "нет такой зоны"}), 404
+        grp = [x for x in ZONES["zones"] if x.get("post_id") == z.get("post_id") and x.get("symbol") == z.get("symbol")
+               and x["side"] == z["side"] and x.get("status") in ("skipped", "expired", "hist_wait")]
+        for x in grp:
+            x["status"] = "watch"
+            for k in ("skip", "lead"):
+                x.pop(k, None)
+            if not ((x.get("trade") or {}).get("real") or {}).get("legs"):
+                x["trade"] = None
+    for x in grp:
+        zones_replay_past(x)
+    zones_save()
+    back = [x for x in grp if x["status"] == "watch"]
+    return jsonify({"ok": True, "watched": len(back), "history": len(grp) - len(back),
+                    "msg": (f"в работе: {len(back)}" + (f", уже отработали (цена дошла раньше): {len(grp) - len(back)}" if len(grp) > len(back) else ""))})
 
 
 @app.route("/api/zones/close_ladder", methods=["POST"])
@@ -31109,6 +31169,7 @@ function zoneRowHtml(z) {
     <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">
       <div>${z.status === 'watch' || z.status === 'in_trade' ? `<span class="fx-dot ${z.status === 'watch' ? 'watch' : 'trade'}" title="${z.status === 'watch' ? 'жду подхода цены' : 'позиция открыта'}"></span>` : ''}${otherCoin}<span class="${long ? 'win' : 'loss'}" style="font-weight:700;">${long ? 'лонг' : 'шорт'}</span> <span class="dim">· ${stTxt}</span></div>
       <div style="white-space:nowrap;">
+        ${['skipped', 'expired', 'hist_wait'].includes(z.status) && !z.own && !z.oc && (Date.now() / 1000 - (z.post_time || 0)) < 14 * 86400 ? `<button onclick="zonesRevive('${z.id}')" title="вернуть в работу (бот проверит по графику, не дошла ли уже цена)" style="${btn}">▶ в работу</button>` : ''}
         ${canClose ? `<button onclick="zonesCloseLadder('${z.id}')" title="закрыть сделку: позиция по рынку, лимитки, стоп и тейк снять" style="background:var(--neg-bg);border:none;color:var(--neg);padding:3px 8px;border-radius:var(--r-xs);">✖ закрыть</button>` : ''}
         <button onclick="zoneChart('${z.id}')" title="график: свечи, зона, вход и выход" style="${btn}">📈</button>
         <button onclick="zonesDel('${z.id}')" title="удалить зону" style="background:var(--neg-bg);border:none;color:var(--neg);padding:3px 8px;border-radius:var(--r-xs);">🗑</button>
@@ -31892,6 +31953,13 @@ window.addEventListener('popstate', () => zoneShotClose(true));
 async function zonesTrainMode(on) {
   if (on && !confirm('Режим обучения: новые скрины (пересланные и загруженные) пойдут только в статистику — без слежения, уведомлений и сделок. Включить?')) return;
   zonesPost('/api/zones/train_mode', {on});
+}
+async function zonesRevive(id) {   // v0.99.545
+  try {
+    const r = await (await fetch('/api/zones/revive', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({id})})).json();
+    alert(r.ok ? r.msg : (r.error || 'не получилось'));
+  } catch (e) { alert('ошибка сети'); }
+  refreshZones();
 }
 function zonesCloseLadder(id) {   // v0.99.540
   if (confirm('Закрыть сделку? Позиция на бирже закроется по рынку, лимитки, стоп и тейк снимутся.')) zonesPost('/api/zones/close_ladder', {id});

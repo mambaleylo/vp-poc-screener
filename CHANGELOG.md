@@ -19236,3 +19236,13 @@ v0.99.544 - Зоны: a check of every coin on the screen (user: "проверь
          record was gone escaped the duplicate clean-up — such zones take part now. (3) SOL: the
          ladder said "лимитки 4/4" from the bot's record while fewer filled on the exchange —
          the line now says "по учёту бота" and "на бирже: исполнено K из N выставленных".
+v0.99.545 - Зоны: the BTC zones still not among the active ones ("🔁 уже есть … не торгую — тот же
+         сетап уже в работе", user: "что значат эти сообщения? биткоина в зонах автора нет").
+         A ladder was one post + one side, without the coin: after the post's coin was set right
+         (ETC -> BTC) the new BTC zones joined the old ETC ladder (with a real ETC position) and
+         the other copy of the post waited for "the same setup" for good. Now a ladder is post +
+         coin + side. "▶ в работу" on a skipped / expired zone of the last 14 days watches it
+         again (with the others of its post, coin and side; replayed first — a zone the price
+         already reached goes to history). The duplicate message names the real reason of a
+         skip. /zones BTC in Telegram lists the coin's author zones of 14 days by post with their
+         state.
