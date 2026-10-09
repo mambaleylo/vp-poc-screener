@@ -19287,3 +19287,11 @@ v0.99.551 - Зоны: BEATUSDT.P read as CL (user: "на самом деле б�
          0.0739); one read at least as often but not on Gate -> the post is skipped. And the
          author's caption tag ("#BEAT") names the coin over the OCR'd ticker (a tagged coin not
          on Gate: skipped).
+v0.99.552 - Зоны: the post's text is the picture's context (user: "в тексте через решётку и
+         монета пишется … пусть тоже учитывается, для убирания лишних подозрений"). The text is
+         found also when it is not on this picture: the album's caption, or a separate message
+         with a #tag sent within 3 min before / after the picture (live: waits 6 s for it). The
+         tag equal to the coin read -> no "проверьте монету" doubt (autotrade allowed); a range
+         written in the text ("0.0769-0.0739") is the zone's two lines: a line read with a wrong
+         digit (within 3%) is set to the written number; "уровни совпадают с текстом поста"
+         otherwise. Other zones of the post are not touched.

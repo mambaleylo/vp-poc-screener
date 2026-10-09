@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.551"
+APP_VERSION = "0.99.552"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23779,6 +23779,8 @@ def zones_recognize_post(post, data):
                 post["notes"].append(f"уровни прочитаны со сдвигом запятой — исправлены под цену ({px_ref:.6g}): "
                                      + " / ".join(f"{v:.6g}" for v in lv))
             new.append(zones_make(post, zr["side"], lv))
+    if new and caption:
+        zones_caption_check(post, new, caption)   # v0.99.552
     elif rec and rec["zones"] and not post.get("not_listed"):
         post["pending"] = {"zones": rec["zones"], "ref": rec.get("ref")}   # waiting for the coin from the user
         if rec.get("tick_cands"):
@@ -23796,6 +23798,70 @@ def zones_recognize_post(post, data):
     post["notes"] = list(dict.fromkeys(post["notes"]))   # no repeated notes
     post["ok"] = bool(new)
     return new
+
+
+def zones_caption_nums(caption):
+    """the prices written in the post's text ("0.0769-0.0739", "59 120", "1,234.5"), tags left out"""
+    t = re.sub(r"#\S+", " ", caption or "")
+    out = []
+    for mo in re.finditer(r"(?<![\d.,])(\d{1,3}(?:[ \u00a0]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?)(?![\d])", t):
+        raw = mo.group(1).replace(" ", "").replace("\u00a0", "")
+        if raw.count(",") == 1 and "." not in raw:
+            raw = raw.replace(",", ".")
+        raw = raw.replace(",", "")
+        try:
+            v = float(raw)
+        except ValueError:
+            continue
+        if v > 0 and len(raw.replace(".", "").lstrip("0")) >= 2:   # one digit ("2 уровня", "1ч") is not a price
+            out.append(v)
+    return out
+
+
+def zones_caption_check(post, new, caption):
+    """v0.99.552 — the author's text is the context of the picture (user: "в тексте через решётку
+    и монета пишется … пусть тоже учитывается, для убирания лишних подозрений"):
+    - its tag is the post's coin -> no doubt about the ticker (no "проверьте монету");
+    - its prices are the levels: a level read with a wrong digit or decimal point is set to the
+      number written in the text (only when all the zone's levels find their number)."""
+    tag = re.search(r"#([A-Z0-9]{2,15})\b", caption.upper())
+    if tag and tag.group(1) + "_USDT" == post.get("symbol"):
+        if post.pop("price_doubt", None):
+            post["notes"] = [n for n in post["notes"] if "отличается от цены" not in n]
+        if not any("по подписи поста" in n for n in post["notes"]):
+            post["notes"].append(f"монета подтверждена подписью поста #{tag.group(1)}")
+    nums = zones_caption_nums(caption)
+    if not nums:
+        return
+    # ranges written as "A-B" / "A – B" / "A/B": one zone's two lines
+    ranges = []
+    t_ = re.sub(r"#\S+", " ", caption)
+    num_re = r"\d{1,3}(?:[ \u00a0]\d{3})+(?:[.,]\d+)?|\d+(?:[.,]\d+)?"
+    for mo in re.finditer(rf"({num_re})\s*[-–—/]\s*({num_re})", t_):
+        a_, b_ = zones_caption_nums(mo.group(1)), zones_caption_nums(mo.group(2))
+        if a_ and b_:
+            ranges.append(sorted((a_[0], b_[0])))
+    fixed, agreed = [], 0
+    for z in new:
+        lv = sorted(z["levels"])
+        if all(any(abs(n_ - v) <= 0.005 * v for n_ in nums) for v in lv):
+            agreed += 1   # every line is a number of the text
+            continue
+        if len(lv) != 2:
+            continue
+        best = None
+        for rg in ranges:   # the levels are already in the coin's price scale; the text is the price itself
+            err = max(abs(rg[0] - lv[0]) / lv[0], abs(rg[1] - lv[1]) / lv[1])
+            if err <= 0.03 and (best is None or err < best[0]):
+                best = (err, list(rg))
+        if best:
+            z["levels"] = sorted((round(x, 12) for x in best[1]), reverse=(z["side"] == "long"))
+            z["touched"] = [None] * len(z["levels"])
+            fixed.append(" / ".join(f"{v:g}" for v in z["levels"]))
+    if fixed:
+        post["notes"].append("уровни сверены с текстом поста: " + "; ".join(fixed))
+    elif agreed:
+        post["notes"].append("уровни совпадают с текстом поста")
 
 
 def zones_pick_by_post_price(cands, chart_px, post_time):
@@ -25223,7 +25289,7 @@ def _zut_seen(ref):
         return any(p_.get("src_ref") == ref for p_ in ZONES["posts"])
 
 
-async def _zut_handle(msg, train, quiet):
+async def _zut_handle(msg, train, quiet, live=False):
     """One group message with a picture -> a post (skipped when already taken)."""
     import asyncio
     chat_id = _ZUT["cfg"].get("chat_id")
@@ -25233,19 +25299,51 @@ async def _zut_handle(msg, train, quiet):
         return None
     busy.add(ref)   # the live handler and the catch-up may meet on one message
     try:
-        return await _zut_handle_one(msg, train, quiet, ref)
+        return await _zut_handle_one(msg, train, quiet, ref, live=live)
     finally:
         busy.discard(ref)
 
 
-async def _zut_handle_one(msg, train, quiet, ref):
+async def _zut_context_text(msg, live=False):
+    """v0.99.552 — the post's text ("#BEAT … 0.0769-0.0739") for the recognition even
+    when it is not on this picture: an album has it on one of its pictures, and the
+    author may send it as a separate message right before / after the picture."""
+    import asyncio
+    own = (getattr(msg, "message", "") or "").strip()
+    if own:
+        return own
+    client, chat_id = _ZUT["client"], _ZUT["cfg"].get("chat_id")
+    if not client or not chat_id:
+        return ""
+    try:
+        if live:
+            await asyncio.sleep(6)   # a text sent right after the picture has to arrive first
+        gid = getattr(msg, "grouped_id", None)
+        t0 = msg.date.timestamp()
+        best = ""
+        async for m in client.iter_messages(chat_id, min_id=max(0, msg.id - 6), max_id=msg.id + 7, limit=14):
+            txt = (getattr(m, "message", "") or "").strip()
+            if not txt or m.id == msg.id:
+                continue
+            if gid and getattr(m, "grouped_id", None) == gid:
+                return txt   # the album's caption
+            if abs(m.date.timestamp() - t0) <= 180 and "#" in txt and not _zut_is_image(m) and not best:
+                best = txt   # a separate text with the coin's tag next to the picture
+        return best
+    except Exception as e:
+        log_error(f"zones userbot text of {msg.id}: {e}")
+        return ""
+
+
+async def _zut_handle_one(msg, train, quiet, ref, live=False):
     import asyncio
     data = await msg.download_media(file=bytes)
     if not data:
         return None
+    caption = await _zut_context_text(msg, live=live)   # v0.99.552
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(None, lambda: zones_add_post(
-        data, post_time=msg.date.timestamp(), source="tg_user", caption=msg.message or "",
+        data, post_time=msg.date.timestamp(), source="tg_user", caption=caption,
         train=train, src_ref=ref, quiet=quiet))
 
 
@@ -25273,7 +25371,7 @@ async def _zut_start_client():
                 if not _ZUT["cfg"].get("chat_id") or event.chat_id != _ZUT["cfg"]["chat_id"]:
                     return
                 _zut_mark_seen_id(event.message.id)
-                res = await _zut_handle(event.message, train=False, quiet=False)
+                res = await _zut_handle(event.message, train=False, quiet=False, live=True)
                 if res:
                     _ZUT["live_n"] += 1
                     post, new = res
