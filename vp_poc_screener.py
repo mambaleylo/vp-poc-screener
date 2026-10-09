@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.549"
+APP_VERSION = "0.99.550"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -23185,7 +23185,7 @@ def _zones_pb_size(sym, direction, entry, sl):
                 return {"risk": risk, "skip": skip}
             contracts, notional, m_act, skip = compute_contracts_from_margin(sym, entry, margin, lev)
             mult = float(spec.get("quanto_multiplier") or 1)
-            loss = contracts * mult * abs(entry - sl) * (1 + 0.0012)
+            loss = contracts * mult * (abs(entry - sl) + 2 * AUTOTRADE_SIM_FEE_PCT * entry)   # v0.99.550 — fees are on the notional (was x1.0012 of the stop distance)
             return {"risk": risk, "lev": lev, "margin": round(m_act, 2), "contracts": contracts, "notional": round(notional, 2),
                     "loss": round(loss, 2), "loss_pct": round(loss / equity * 100, 1) if equity else None, "skip": skip}
     except Exception as e:
@@ -31673,7 +31673,19 @@ async function refreshZones() {
     const pb = d.pb || {}, pv = d.pb_variant;
     const stTxt = {PENDING: '⏳ ждёт отката', OPEN: '🟢 в позиции', MISSED: '↗ ушла без отката', EXPIRED: '⌛ не налилась', CLOSED: ''};
     const resTxt = {WIN: 'тейк', LOSS: 'стоп', TIME_EXIT: 'по времени'};
-    const pbRow = t => `<tr><td>${(t.symbol || '').replace('_USDT', '')} ${t.direction === 'LONG' ? 'лонг' : 'шорт'}<div class="dim">${zdate(t.time)}</div></td><td>${+(+t.entry).toPrecision(5)}<div class="dim">стоп ${+(+t.sl).toPrecision(5)} · тейк ${+(+t.tp).toPrecision(5)}</div></td><td>${t.status === 'CLOSED' ? `<b class="${t.pnl_r > 0 ? 'win' : 'loss'}">${resTxt[t.result] || t.result} ${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R</b>` : (stTxt[t.status] || t.status)}${t.size && t.size.lev ? `<div class="dim">${t.size.lev}x · −$${t.size.loss}</div>` : ''}</td></tr>`;
+    // v0.99.550 — "46x · −$7.16" read as a result: it is the planned order (max safe
+    // leverage for this stop, the loss at the stop at the zones risk) — said in words now,
+    // and a closed signal shows its result in $ at that size
+    const pbSizeTxt = t => {
+      const z = t.size;
+      if (!z || !z.lev) return '';
+      const riskUsd = z.notional && t.entry ? z.notional * Math.abs(t.entry - t.sl) / t.entry : null;   // 1R in $, fees aside (pnl_r has them)
+      const stopUsd = riskUsd != null ? (riskUsd + z.notional * 0.001).toFixed(2) : z.loss;   // with the round-trip fees
+      const res = t.status === 'CLOSED' && riskUsd != null && t.pnl_r != null
+        ? ` · <span class="${t.pnl_r > 0 ? 'win' : 'loss'}">итог ${t.pnl_r > 0 ? '+' : '−'}$${Math.abs(t.pnl_r * riskUsd).toFixed(2)}</span>` : '';
+      return `<div class="dim" title="каким был бы ордер: плечо — максимальное безопасное под этот стоп (маржа минимальная), убыток на стопе — ваш риск зон от баланса на момент сигнала">плечо ${z.lev}x · на стопе −$${stopUsd}${res}</div>`;
+    };
+    const pbRow = t => `<tr><td>${(t.symbol || '').replace('_USDT', '')} ${t.direction === 'LONG' ? 'лонг' : 'шорт'}<div class="dim">${zdate(t.time)}</div></td><td>${+(+t.entry).toPrecision(5)}<div class="dim">стоп ${+(+t.sl).toPrecision(5)} · тейк ${+(+t.tp).toPrecision(5)}</div></td><td>${t.status === 'CLOSED' ? `<b class="${t.pnl_r > 0 ? 'win' : 'loss'}">${resTxt[t.result] || t.result} ${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R</b>` : (stTxt[t.status] || t.status)}${pbSizeTxt(t)}</td></tr>`;
     const pbBlock = `<div class="zh" style="margin-top:10px;">🔔 Сигналы откатов вживую</div>
       <div class="zsub" style="margin-top:0;">${pv ? `сейчас сигналю вариант: <b>${pv.pull ? 'откат ' + pv.pull + '%' : 'вход сразу'} · стоп ${pv.sl}% · тейк ${tpN[pv.tp] || pv.tp}</b> (лучший, что в плюсе и на последней трети)` : 'ни один вариант не в плюсе на последней трети — новых сигналов нет'}. В Telegram: лимитка, стоп, тейк, плечо и убыток на стопе при вашем риске; ордера бот не ставит.</div>
       <label style="display:block;margin:6px 0 8px;cursor:pointer;"><input type="checkbox" ${d.pb_tg ? 'checked' : ''} onchange="zonesPbTg(this.checked)"> <b>уведомления об откатах в Telegram</b><div class="dim" style="font-size:var(--fs-sm);">статистика ведётся в любом случае</div></label>

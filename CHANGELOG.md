@@ -19273,3 +19273,9 @@ v0.99.549 - Зоны: "в архиве нажимаю скрин, а там др
          stored with a shared number get their own at start (zones of another coin move with
          their post; the lost picture is said on the post). The picture viewer no longer shows
          the previous picture while the new one loads or when it is missing.
+v0.99.550 - Зоны, сигналы откатов: "46x · −$7.16" in the "итог" column read as a result (user:
+         "откуда цифры?"). It is the planned order at the signal: the maximum safe leverage for
+         that stop and the loss at the stop at the zones risk. Now: "плечо 46x · на стопе −$X",
+         and a closed signal adds "итог ±$Y" at that size. The loss at the stop counted the fees
+         as 0.12% of the stop distance instead of 0.1% of the position — it was too small
+         (−$5.91 for a −1.1R stop worth −$6.4); fixed (old signals are recounted on the page).
