@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.529"
+APP_VERSION = "0.99.530"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22631,8 +22631,13 @@ def zones_learn():
            "fill_share": round(fills / legs * 100, 1) if legs else None,
            "after_med": round(a[len(a) // 2], 2) if a else None,
            "after_5": round(100 * sum(1 for x in a if x >= 5) / len(a), 1) if a else None}
-    risk_tab = {"rows": [{"risk": pc, "all": growth(rs, pc / 100)} for pc in ZONES_RISK_ROWS],
-                "best": round(fbest * 100, 1) if edge else None} if rs else None
+    # v0.99.530 — the risk in use and the best one get rows of their own (17.5 % was shown
+    # as "← сейчас" on the 15 % row, the best highlighted on 20 %)
+    risk_now_pc = round(auto_risk if auto_risk else rf * 100, 1)
+    best_pc = round(fbest * 100, 1) if edge else None
+    risk_tab = {"rows": [{"risk": pc, "all": growth(rs, pc / 100)}
+                         for pc in sorted(set(ZONES_RISK_ROWS) | {risk_now_pc} | ({best_pc} if best_pc else set()))],
+                "best": best_pc, "now": risk_now_pc} if rs else None
     # v0.99.507 — how often a trade comes: on average over the history, and over the
     # last 8 finished weeks (the last 14 days are not finished yet); what a month of
     # that gives at the risk in use (by the history's growth per trade)
@@ -30661,9 +30666,10 @@ async function refreshZones() {
   // --- 3. risk table
   let riskCard = '';
   if (rt) {
-    const cur = rt.rows.reduce((a, r) => Math.abs(r.risk - riskNow) < Math.abs(a.risk - riskNow) ? r : a, rt.rows[0]);
-    const top = rt.rows.reduce((a, x) => x.all > a.all ? x : a);
-    const rows = rt.rows.map(r => `<tr class="${rt.best && r === top ? 'zbest' : ''} ${r === cur ? 'zcur' : ''}"><td>${r.risk}%${r === cur ? ' <span class="dim">← сейчас</span>' : ''}</td><td>${sgP(r.all)}</td></tr>`).join('');
+    const nowPc = rt.now != null ? rt.now : riskNow;   // v0.99.530 — exact rows for the risk in use and the best one
+    const cur = rt.rows.reduce((a, r) => Math.abs(r.risk - nowPc) < Math.abs(a.risk - nowPc) ? r : a, rt.rows[0]);
+    const top = rt.best != null ? (rt.rows.find(r => Math.abs(r.risk - rt.best) < 1e-6) || rt.rows.reduce((a, x) => x.all > a.all ? x : a)) : rt.rows.reduce((a, x) => x.all > a.all ? x : a);
+    const rows = rt.rows.map(r => `<tr class="${rt.best && r === top ? 'zbest' : ''} ${r === cur ? 'zcur' : ''}"><td>${r.risk}%${r === cur ? ' <span class="dim">← сейчас</span>' : ''}${rt.best && r === top ? ' <span class="dim">· лучший</span>' : ''}</td><td>${sgP(r.all)}</td></tr>`).join('');
     riskCard = card('💰 Какой риск лучше', `<div class="zsub" style="margin-top:0;">Рост счёта <b>за одну сделку</b> при разном риске, по всем ${rs.n} сделкам истории</div>
       <div class="zwrap"><table class="ztbl"><thead><tr><th>Риск</th><th>счёт за сделку</th></tr></thead><tbody>${rows}</tbody></table></div>
       ${rs.month_pct != null ? `<div class="zsub">При ~${rs.per_week} сделках в неделю по истории: при риске ${rs.month_risk}% — <b>${rs.month_pct > 0 ? '+' : ''}${rs.month_pct}% в месяц</b>${rs.month_pct_2 != null ? `, при риске 2% — <b>${rs.month_pct_2 > 0 ? '+' : ''}${rs.month_pct_2}%</b>` : ''}.

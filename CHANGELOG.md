@@ -19114,3 +19114,8 @@ v0.99.529 - The old ways in from outside are gone (user: "убери стары�
          straight from the internet (or through any proxy / tunnel) it is refused with a hint
          to use Tailscale, so a forwarded port can never become a door to the account. The
          Telegram-account and /update endpoints stay this-phone-only.
+v0.99.530 - Зоны: the risk shown differently in different places (user: "почему разный риск в
+         разных местах показывает?" — the tile and the banner said 17.5 %, the risk table put
+         "← сейчас" on the 15 % row and highlighted 20 % as the best). The table had only its
+         round rows, the auto-risk is chosen finer. The risk in use and the best one now get
+         rows of their own ("17.5% ← сейчас · лучший").
