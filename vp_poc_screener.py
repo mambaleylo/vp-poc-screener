@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.538"
+APP_VERSION = "0.99.539"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22066,6 +22066,40 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                        key=lambda c: c["live_err"])[:10]
         tick_cands = named + by_px
 
+    # v0.99.539 — the ticker against the price on the screenshot: "BTCUSDT.P" with a candle
+    # over the B was read as ETC, its price (~17) is 10 000x away from the 82 526 on the
+    # chart, and that was taken for a decimal slip — the levels were divided by 10 000 and
+    # the trade went to ETC. A coin with a similar name whose price matches the chart's
+    # as it is (no decimal shift) is the coin; otherwise a shift beyond x10 is a doubt.
+    price_doubt = None
+    if symbol and live_price_fn and symbols and (labels or zones):
+        try:
+            live0 = live_price_fn(symbol)
+        except Exception:
+            live0 = None
+        if live0 and ref and ref > 0 and (round(math.log10(live0 / ref)) != 0 or abs(live0 - ref) / live0 > 0.25):
+            import difflib
+            base0 = _zocr_canon(symbol.replace("_USDT", ""))
+            best_c = None
+            for sym_ in symbols:
+                try:
+                    lp_ = live_price_fn(sym_)
+                except Exception:
+                    lp_ = None
+                if not lp_ or lp_ <= 0 or abs(lp_ - ref) / lp_ > 0.05:
+                    continue
+                sim_ = difflib.SequenceMatcher(None, base0, _zocr_canon(sym_.replace("_USDT", ""))).ratio()
+                if sim_ >= 0.5 and (best_c is None or (sim_, -abs(lp_ - ref) / lp_) > (best_c[1], -best_c[2])):
+                    best_c = (sym_, sim_, abs(lp_ - ref) / lp_, lp_)
+            if best_c:
+                notes.append(f"тикер прочитан как {symbol.replace('_USDT', '')}, но цена на скрине {ref:g} — "
+                             f"это {best_c[0].replace('_USDT', '')} (его цена {best_c[3]:g})")
+                symbol = best_c[0]
+            elif abs(round(math.log10(live0 / ref))) >= 2 and not (abs(round(math.log10(live0 / ref))) == 3 and "1000" in (header_txt or "")):
+                price_doubt = (f"цена на скрине ({ref:g}) в {live0 / ref if live0 > ref else ref / live0:.0f} раз "
+                               f"отличается от цены {symbol.replace('_USDT', '')} ({live0:g}) — возможно, тикер прочитан "
+                               f"неверно; без автосделки, проверьте монету")
+                notes.append(price_doubt)
     if symbol and live_price_fn and (labels or zones):
         live = None
         try:
@@ -22088,7 +22122,7 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
     if not zones:
         notes.append("цветные зоны не найдены")
     return {"symbol": symbol, "zones": zones, "notes": notes, "ref": ref, "chart_px": chart_px, "tick_cands": tick_cands,
-            "result_post": bool(result_label),
+            "result_post": bool(result_label), "price_doubt": price_doubt,
             "not_listed": not_listed, "index_read": index_read, "levels_seen": [lb["v"] for lb in labels]}
 
 
@@ -23362,8 +23396,11 @@ def zones_recognize_post(post, data):
             rec = zones_recognize(data, live_price_fn=lambda s: prices.get(s), symbols=set(prices) or None)
         except Exception as e:
             post["notes"].append(f"не распознал: {e}")
+    post.pop("price_doubt", None)
     if rec:
         post["symbol"], post["notes"] = rec["symbol"], post["notes"] + rec["notes"]
+        if rec.get("price_doubt"):
+            post["price_doubt"] = rec["price_doubt"]   # v0.99.539 — no autotrade until checked
         post["not_listed"] = rec.get("not_listed")
         post["index_read"] = rec.get("index_read")
         if post["index_read"] and not post["not_listed"]:
@@ -23473,6 +23510,7 @@ def zones_set_symbol(post, sym_txt):
         k = round(math.log10(live / ref))
         f = 10.0 ** k
     post["symbol"] = sym
+    post.pop("price_doubt", None)   # v0.99.539 — the user set the coin
     new = [zones_make(post, zr["side"], [round(v * f, 12) for v in zr["levels"]]) for zr in pend["zones"]]
     post.pop("pending", None)
     post["ok"] = bool(new)
@@ -23845,6 +23883,8 @@ def zones_post_no_auto(post):
     """v0.99.491 — the author: a setup marked "только при наличии доп.
     аргументов" is not traded by limits, only "по факту" — signal only"""
     cap = (post or {}).get("caption") or ""
+    if (post or {}).get("price_doubt"):   # v0.99.539 — the coin may be misread
+        return "монета под сомнением: цена на скрине не совпадает с ценой монеты"
     return "в посте: только при доп. аргументах" if _ZONES_NO_AUTO_RE.search(cap) else None
 
 
@@ -26815,13 +26855,18 @@ def api_zones_zone():
                     if b.get("symbol"):   # the coin is the post's: change it for all of the post's zones
                         new_sym = re.sub(r"[^A-Z0-9]", "", b["symbol"].upper().replace("USDT", "").replace(".P", "")) + "_USDT"
                         for z2 in ZONES["zones"]:
-                            if z2.get("post_id") == z.get("post_id") and z2.get("status") in ("watch", "old", "expired", "train"):
+                            if z2.get("post_id") == z.get("post_id") and z2.get("status") in ("watch", "old", "expired", "train", "in_trade"):
+                                if ((z2.get("trade") or {}).get("real") or {}).get("legs") and not z2["trade"]["real"].get("done"):
+                                    continue   # orders on the exchange: left as they are
                                 z2["symbol"] = new_sym
+                                z2.pop("lead", None)
+                                z2["trade"] = None   # v0.99.539 — the ladder of the wrong coin goes
                                 z2["status"] = "train" if z2.get("train") else "watch"
                                 z2["touched"], z2["result"] = [None] * len(z2["levels"]), None
                         for p_ in ZONES["posts"]:
                             if p_["id"] == z.get("post_id"):
                                 p_["symbol"] = new_sym
+                                p_.pop("price_doubt", None)   # v0.99.539 — the user checked the coin
                                 p_["notes"] = [n for n in p_.get("notes", []) if "тикер" not in n]
             else:
                 post = next((p for p in ZONES["posts"] if p["id"] == b.get("post_id")), None)

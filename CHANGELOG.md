@@ -19186,3 +19186,13 @@ v0.99.538 - Зоны: duplicate posts (user: "дубли?" — three ZRO posts o
          дублирую"), no zones; at the start the duplicates stored earlier are cleaned: one post
          is kept (the one with orders on the exchange, else the first), the others' zones go
          (never those with orders on the exchange).
+v0.99.539 - Зоны: a BTC post was read as ETC and the trade opened on ETC (user: "распознала как etc,
+         а это btc — справа цену видно в шапке"). A candle over the B of "BTCUSDT.P"; ETC's price
+         (~17) was 10 000x away from the chart's 82 526 and that was taken for a decimal slip —
+         the levels were divided by 10 000. Now the ticker is checked against the price on the
+         screenshot: a coin with a similar name whose price matches the chart's as it is (within
+         5 %, no decimal shift) replaces the misread one ("тикер прочитан как ETC, но цена на
+         скрине 82526 — это BTC"); if there is none and the shift is beyond x10 (x1000 for
+         "1000…" coins is fine), the post is marked "монета под сомнением" and gets no
+         autotrade until the coin is set by hand. Setting the coin by hand (🪙) clears the
+         mark and drops the wrong coin's ladder (unless it has orders on the exchange).
