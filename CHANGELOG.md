@@ -19130,3 +19130,12 @@ v0.99.531 - Зоны: "поиск по результату" (user: "очень 
          40 finished live zones with the chart, dates, result and fills, how many days they
          closed in and how many were longs — a run of stops in one or two days is one market
          move, not many independent trades. The data set is built again once.
+v0.99.532 - Зоны: "поиск по результату" learns from the author too (user: "давай сразу сделаем —
+         учится на авторе"). Three more features (26 in all): how much a zone looks like the
+         ones he draws — the "repeat the author" finder's model on his posts, for the
+         history fit only on posts before the choosing period (the exam stays honest), live
+         on all of them; whether he has drawn this level on this side within 30 days;
+         whether he posted the coin within 14 days. The card says how many of the exam's
+         picks coincided with a fresh zone of his. Checked on a synthetic history with a
+         skilled "author": the model leans on his zones and the exam rises with them; with
+         no posts nothing changes. The data set is built again once (zone edges kept now).

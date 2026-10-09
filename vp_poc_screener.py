@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.531"
+APP_VERSION = "0.99.532"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -25866,14 +25866,15 @@ def _oc_group(c):
 # the linear one, a three-way honest split by time (fit on the first 60 %, the model
 # / take / bar chosen on the next 20 %, the exam on the last 20 % nobody chose on),
 # and the author's ladders on the same exam weeks for the comparison.
-ZONES_OC_VER = 3   # v0.99.531 — zones of the 4h and the daily chart too, "tf" feature
-OC_NFEAT = 23
+ZONES_OC_VER = 4   # v0.99.531 — zones of the 4h and the daily chart too, "tf" feature; v0.99.532 — lo/hi kept
+OC_NFEAT = 23      # stored per sample; + 3 of the author's (v0.99.532), computed at fit time
+OC_AUTH_NEAR_D, OC_AUTH_COIN_D = 30, 14
 OC_TF_BARS = ((1, 480), (4, 480), (24, 365))   # hours per bar, bars looked at: 20 days of 1h, 80 days of 4h, a year of 1d
 OC_PER_SIDE_TF = 2   # the nearest candidates per side on each chart
 _OC_CTX_FEATS = ("trend", "slope", "atrp", "mom", "rpos", "broken", "htf", "volr", "btc", "distp", "widthp", "tf")
 OC_VARIANTS = ("lin11", "lin22", "gb22")
-OC_VARIANT_NAMES = {"lin11": "прямая модель, 11 признаков (как раньше)", "lin22": "прямая модель, все 23 признака",
-                    "gb22": "деревья решений, все 23 признака"}
+OC_VARIANT_NAMES = {"lin11": "прямая модель, 11 признаков (как раньше)", "lin22": "прямая модель, все 26 признаков",
+                    "gb22": "деревья решений, все 26 признаков"}
 OC_TOP_Q = (0.5, 0.35, 0.25, 0.15, 0.1, 0.05)   # the bar: this share of the best-scored candidates
 OC_GB_TREES, OC_GB_DEPTH, OC_GB_LR, OC_GB_BINS, OC_GB_LEAF = 90, 2, 0.08, 8, 40
 
@@ -25988,6 +25989,35 @@ def oc_ctx_feats(win, c, btc_v=0.0):
             "tf": {1: 0.0, 4: 1.0, 24: 2.0}.get(c.get("tf", 1), 0.0)}
 
 
+# v0.99.532 — learning from the author too (user: "давай сразу сделаем — учится на авторе"):
+# how much a zone looks like the ones he draws (the "repeat the author" finder's model,
+# fit only on his posts before the period it is judged on), whether he has drawn this
+# very level on this side within 30 days, whether he posted the coin within 14 days.
+def oc_author_index():
+    """his zones: {(symbol, side): [(post_time, lo, hi)]} and {symbol: [post_time]}"""
+    by_zone, by_coin = {}, {}
+    with _zones_lock:
+        for z in ZONES["zones"]:
+            if z.get("own") or z.get("oc") or z.get("status") == "deleted" or not z.get("symbol") or not z.get("levels"):
+                continue
+            by_zone.setdefault((z["symbol"], z["side"]), []).append((z["post_time"], min(z["levels"]), max(z["levels"])))
+            by_coin.setdefault(z["symbol"], []).append(z["post_time"])
+    return by_zone, by_coin
+
+
+def oc_author_feats(sym, side, lo, hi, x11, t, am, idx):
+    by_zone, by_coin = idx
+    pad = 0.005 * (lo + hi) / 2
+    near = any(t - OC_AUTH_NEAR_D * 86400 <= pt <= t and zl <= hi + pad and lo - pad <= zh
+               for pt, zl, zh in by_zone.get((sym, side), ()))
+    coin = any(t - OC_AUTH_COIN_D * 86400 <= pt <= t for pt in by_coin.get(sym, ()))
+    return [round(own_score(am, x11), 4), 1.0 if near else 0.0, 1.0 if coin else 0.0]
+
+
+def _oc_xa(s):
+    return s.get("xa") or s["x"]
+
+
 def _oc_vec(c, ctx):
     return _own_vec(c["f"]) + [float(ctx[k]) for k in _OC_CTX_FEATS]
 
@@ -26087,9 +26117,9 @@ def _oc_fit(rows, var, ti):
     if not data:
         return None
     if var == "gb22":
-        return gb_fit([s["x"] for s in data], [max(-1.5, min(4.0, s["r"][ti])) for s in data])
-    k = 11 if var == "lin11" else len(data[0]["x"])
-    m = _oc_lin_fit([(s["x"][:k], 1 if s["r"][ti] > 0 else 0) for s in data])
+        return gb_fit([_oc_xa(s) for s in data], [max(-1.5, min(4.0, s["r"][ti])) for s in data])
+    k = 11 if var == "lin11" else len(_oc_xa(data[0]))
+    m = _oc_lin_fit([(_oc_xa(s)[:k], 1 if s["r"][ti] > 0 else 0) for s in data])
     return m
 
 
@@ -26156,7 +26186,8 @@ def oc_build(now=None):
                     r = zone_ladder_sim(fut, _oc_group(c), tp, t, t + ZONES_OC_HOLD_H * 3600)
                     rs.append(round(r["r"], 3) if r else None)
                 new.append({"t": t, "s": sym, "side": c["side"], "x": [round(v, 4) for v in _oc_vec(c, oc_ctx_feats(win, c, bv))],
-                            "rank": c["f"]["rank"] if c["tf"] == 1 else 9, "tf": c["tf"], "r": rs})
+                            "rank": c["f"]["rank"] if c["tf"] == 1 else 9, "tf": c["tf"], "r": rs,
+                            "lo": c["lo"], "hi": c["hi"]})
             last = t
         with _oc_lock:
             _OC["samples"].extend(new)
@@ -26171,7 +26202,7 @@ def _oc_best_per_key(rows, model):
     """per snapshot / coin / side the best-scored candidate: (score, sample)"""
     best = {}
     for s in rows:
-        sc = oc_score(model, s["x"])
+        sc = oc_score(model, _oc_xa(s))
         k = (s["t"], s["s"], s["side"])
         if k not in best or sc > best[k][0]:
             best[k] = (sc, s)
@@ -26226,6 +26257,11 @@ def oc_train():
         return None
     rows.sort(key=lambda s: s["t"])
     t_a, t_b = rows[len(rows) * 6 // 10]["t"], rows[len(rows) * 8 // 10]["t"]
+    zones_act("oc", running=True, stage="признаки автора", done=None, total=None)
+    idx = oc_author_index()
+    am = own_fit(_own_samples_before(t_a))   # his style, learned only on posts before the choosing period
+    rows = [dict(s, xa=s["x"] + oc_author_feats(s["s"], s["side"], s.get("lo", 0), s.get("hi", 0), s["x"][:11], s["t"], am, idx))
+            for s in rows]
     fit_rows = [s for s in rows if s["t"] < t_a]
     val_rows = [s for s in rows if t_a <= s["t"] < t_b]
     te_rows = [s for s in rows if s["t"] >= t_b]
@@ -26267,7 +26303,13 @@ def oc_train():
           "val": best["val"], "test": test, "base_test": base(te_rows), "train": _oc_stat(_oc_select(fit_rows, m, best["thr"], ti)),
           "variants": variants, "samples": len(rows), "coins": len({s["s"] for s in rows}),
           "author_test": oc_author_window(t_b, rows[-1]["t"] + ZONES_OC_STEP_H * 3600), "t": time.time()}
+    sel_te = [sc_s[1] for sc_s in _oc_best_per_key(te_rows, m) if sc_s[0] >= best["thr"] and sc_s[1]["r"][ti] is not None]
+    ev["auth_share"] = round(100 * sum(1 for x in sel_te if x["xa"][-2] > 0) / len(sel_te), 1) if sel_te else None
+    ev["auth_posts"] = len(idx[1]) and sum(len(v) for v in idx[1].values())
     zones_act("oc", running=True, stage="итоговая модель на всей истории", done=None, total=None)
+    am_all = own_model_all()
+    rows = [dict(s, xa=s["x"] + oc_author_feats(s["s"], s["side"], s.get("lo", 0), s.get("hi", 0), s["x"][:11], s["t"], am_all, idx))
+            for s in rows]
     final = _oc_fit(rows, best["var"], ti) or m
     thr_final = _oc_q_thr(final, rows, best["q"])
     with _oc_lock:
@@ -26279,7 +26321,7 @@ def oc_scan_once():
     """Live: our zones by the outcome model, every hour — tab only, no orders."""
     with _oc_lock:
         model, thr, tp = _OC["model"], _OC["thr"], _OC["tp"]
-    if not model or thr is None or len((model.get("edges") or model.get("w") or [])) not in (11, OC_NFEAT):
+    if not model or thr is None or len((model.get("edges") or model.get("w") or [])) not in (11, OC_NFEAT + 3):
         return 0
     now = time.time()
     made = 0
@@ -26289,6 +26331,7 @@ def oc_scan_once():
         bv = btc["v"][-1] if btc and btc["v"] else 0.0
     except Exception:
         bv = 0.0
+    a_idx, am_live = oc_author_index(), own_model_all()   # v0.99.532
     for sym in _own_top_syms():
         try:
             cs = _own_candles(sym, now)
@@ -26300,7 +26343,8 @@ def oc_scan_once():
             continue
         best = {}
         for c in oc_candidates_mtf(by_tf):
-            sc = oc_score(model, _oc_vec(c, oc_ctx_feats(cs, c, bv)))
+            x_ = _oc_vec(c, oc_ctx_feats(cs, c, bv))
+            sc = oc_score(model, x_ + oc_author_feats(sym, c["side"], c["lo"], c["hi"], x_[:11], now, am_live, a_idx))
             if sc >= thr and (c["side"] not in best or sc > best[c["side"]][0]):
                 best[c["side"]] = (sc, c)
         found += [(sc, sym, c) for sc, c in best.values()]
@@ -30914,7 +30958,7 @@ function ocHtml(d, ocZ) {   // v0.99.528 — v2: more features, trees, a 3-way h
   const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
   const dd = t => t ? new Date(t * 1000).toLocaleDateString('ru-RU') : '—';
   const row = (nm, x, note, pw) => x ? `<tr><td>${nm}${note ? `<div class="dim">${note}</div>` : ''}</td><td>${x.n}${pw && x.per_week != null ? `<div class="dim">${x.per_week}/нед</div>` : ''}</td><td>${x.wr == null ? '—' : x.wr + '%'}</td><td>${sgR(x.avg)}</td></tr>` : '';
-  let body = `<div class="dim">Бот сам ищет зоны по свечам ${ev && ev.coins ? ev.coins : 40} монет и учится отбирать те, от которых цена <b>реально отыгрывала</b> по правилам лесенки автора (лимитки, стоп 2.5% за зоной, тейк от средней). Ищет зоны, как автор, на трёх графиках — 1ч (20 дней), 4ч (80 дней) и дневном (год). Видит 23 признака: саму зону (касания, объём, ширина, расстояние, график) и рынок вокруг (тренд монеты и BTC, волатильность, движение за сутки, пробивалась ли зона). Пробует три модели — прямую на 11 и на всех признаках и деревья решений — и берёт лучшую. Одна активная зона на монету и сторону. Цель — <b>превзойти автора</b> по результату на сделку. Сейчас только наблюдение: без ордеров и сообщений.</div>`;
+  let body = `<div class="dim">Бот сам ищет зоны по свечам ${ev && ev.coins ? ev.coins : 40} монет и учится отбирать те, от которых цена <b>реально отыгрывала</b> по правилам лесенки автора (лимитки, стоп 2.5% за зоной, тейк от средней). Ищет зоны, как автор, на трёх графиках — 1ч (20 дней), 4ч (80 дней) и дневном (год). Видит 23 признака: саму зону (касания, объём, ширина, расстояние, график) и рынок вокруг (тренд монеты и BTC, волатильность, движение за сутки, пробивалась ли зона). Учится и <b>на выборе автора</b>: похожа ли зона на те, что он рисует, совпадает ли с его свежей зоной, следит ли он за монетой — всего 26 признаков. Пробует три модели — прямую на 11 и на всех признаках и деревья решений — и берёт лучшую. Одна активная зона на монету и сторону. Цель — <b>превзойти автора</b> по результату на сделку. Сейчас только наблюдение: без ордеров и сообщений.</div>`;
   if (a.running) body += `<div style="margin-top:6px;"><span class="zspin">🔄</span> <b>${a.stage || 'работаю'}</b>${a.total ? ` — ${a.done || 0} из ${a.total}` : ''}<div class="dim">первый раз после обновления — история собирается заново (новые признаки), на телефоне до часа; дальше раз в сутки дополняется</div></div>`;
   else if (a.error) body += `<div class="loss" style="margin-top:6px;">ошибка: ${a.error}</div>`;
   if (ev && ev.ver >= 2) {
@@ -30927,7 +30971,7 @@ function ocHtml(d, ocZ) {   // v0.99.528 — v2: more features, trees, a 3-way h
     const verdict = !canCmp ? null : (zAuth == null ? (beatAuth > 0 ? 'better' : 'worse') : (zAuth >= 1.65 ? 'better' : (zAuth <= -1.65 ? 'worse' : 'same')));
     body += `<div class="zkv" style="margin-top:8px;"><div>история</div><div>${ev.samples} зон-кандидатов, ${dd(ev.first_t)} — ${dd(ev.last_t)}</div>
       <div>выбрано</div><div><b>${ev.var_name}</b> · тейк <b>+${ev.tp}%</b> · беру лучшие ${Math.round(ev.q * 100)}% зон</div></div>
-      <div class="zsub">Честно, по времени: модели учились до ${dd(ev.split_t)}, лучшая выбиралась на ${dd(ev.split_t)}—${dd(ev.test_t)}, экзамен — после ${dd(ev.test_t)}: на нём ничего не подбиралось.</div>
+      <div class="zsub">Честно, по времени: модели учились до ${dd(ev.split_t)}, лучшая выбиралась на ${dd(ev.split_t)}—${dd(ev.test_t)}, экзамен — после ${dd(ev.test_t)}: на нём ничего не подбиралось. Стиль автора — только по его постам до ${dd(ev.split_t)}.${ev.auth_share != null ? ` На экзамене ${ev.auth_share}% выбранных зон совпали со свежей зоной автора.` : ''}</div>
       <div class="zwrap"><table class="ztbl"><thead><tr><th>экзамен</th><th>сделок</th><th>WR</th><th>средний</th></tr></thead><tbody>
       ${row('🧪 наш поиск', ev.test, 'выбранная модель', true)}${row('📌 автор канала', at.n ? at : null, 'его посты за те же недели, те же правила лесенки', true)}${row('без модели', ev.base_test, 'просто ближайшая зона')}</tbody></table></div>
       ${canCmp ? `<div class="zbanner ${verdict === 'better' && ev.test.avg > 0 ? 'pos' : (ev.test.avg > 0 ? 'warn' : 'neg')}">${verdict === 'better' && ev.test.avg > 0 ? `🏆 На экзамене наш поиск лучше автора на ${beatAuth.toFixed(2)}R за сделку — и это больше случайного разброса.`
