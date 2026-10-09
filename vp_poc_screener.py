@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.536"
+APP_VERSION = "0.99.537"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24009,7 +24009,26 @@ def _zones_real_step(tr, pos_map):
                 r["t_change"] = now
             if o.get("status") == "finished":
                 leg["done"], changed = True, True
+        # v0.99.537 — a position is ours only when one of our limits filled: a position of
+        # another module (or opened by hand) on the coin was taken for ours, and the ladder
+        # put its own stop / take on it (BTC: a long from 82 839 while our limits were at
+        # 81 809 / 80 904). Repair: our triggers off it, the ladder back to "not filled".
+        ours_filled = sum(l_.get("filled") or 0 for l_ in r["legs"])
+        if r.get("seen") and not ours_filled:
+            for oid in set(r.get("trigs") or []) | set(r.get("stale") or []):
+                try:
+                    cancel_price_order(oid)
+                except Exception:
+                    pass   # already gone
+            r.update({"seen": False, "sl_id": None, "tp_id": None, "tp_px": None, "trigs": [], "stale": [], "be_done": False})
+            r.pop("be_px", None)
+            tr["autotrade_fired"] = False
+            changed = True
+            zones_notify(f"🔧 {sym}: позиция по монете на бирже не от зон (их лимитки не исполнялись) — "
+                         f"стоп и тейк зон с неё сняты, её ведёт тот, кто её открыл")
         pos = _zones_pos(pos_map, sym, s)
+        if pos and not ours_filled:
+            pos = None   # not ours
         size = abs(float((pos or {}).get("size") or 0))
         tick = r.get("tick")
 
@@ -24114,6 +24133,24 @@ def _zones_real_step(tr, pos_map):
     if tr.get("status") == "CLOSED" and not r.get("cancelled"):
         changed = _zones_real_cancel_legs(tr) or changed   # no new fills after our result
     return changed
+
+
+def _zones_foreign_pos(pos_map, tr):
+    """v0.99.537 — a position on this coin that is not this ladder's own (another module,
+    by hand, or another ladder of ours): one position per coin on the exchange, so our
+    limits must not merge with it (the same side) or eat into it (the other side)"""
+    r = tr.get("real") or {}
+    mine = sum(l_.get("filled") or 0 for l_ in r.get("legs") or []) > 0
+    open_ids = (pos_map or {}).get("_open") or {}
+    if any(l_.get("id") and not l_.get("done") and str(l_["id"]) not in open_ids for l_ in r.get("legs") or []):
+        return None   # one of our limits left the open list (filled?): the exchange step looks first
+    s = 1 if tr["direction"] == "LONG" else -1
+    for x in (pos_map or {}).get(tr["symbol"]) or []:
+        sz = float(x.get("size") or 0)
+        if not sz or (mine and (sz > 0) == (s > 0)):
+            continue
+        return x
+    return None
 
 
 def _zones_real_live(z):
@@ -24237,7 +24274,20 @@ def _zones_ladder_tick(group, now, p, pos_map):
                  and (not lead.get("own") or AUTOTRADE_ENABLED_ZONES_OWN) and not lead.get("oc"))
     px_now = (pos_map.get("_px") or {}).get(sym)
     nxt = next((l["lim"] for l in tr["legs"] if l["fill"] is None), None)
-    if want_real and px_now and nxt:
+    pos_known = "_open" in (pos_map or {})   # v0.99.537 — the exchange's positions were read this round
+    foreign = _zones_foreign_pos(pos_map, tr) if pos_known else None
+    if want_real and px_now and nxt and foreign:
+        r = tr.get("real")
+        fx = f"на бирже по {sym.replace('_USDT', '')} уже есть {'лонг' if float(foreign.get('size') or 0) > 0 else 'шорт'} не от этой лесенки — жду, пока закроется (одна позиция на монету)"
+        if r and not r.get("seen") and not any(l_.get("filled") for l_ in r["legs"]):
+            if _zones_real_cancel_legs(tr):
+                tr["real"] = None
+                tr["autotrade"] = {"status": "WAIT", "detail": fx + "; лимитки сняты", "leverage": None}
+                changed = True
+        elif not r and (tr.get("autotrade") or {}).get("detail") != fx:
+            tr["autotrade"] = {"status": "WAIT", "detail": fx, "leverage": None}
+            changed = True
+    elif want_real and px_now and nxt and pos_known:
         dist = s * (px_now - nxt) / px_now * 100   # how far the price still is from the next limit
         arm = zones_arm_dist(sym)
         r = tr.get("real")
@@ -24401,7 +24451,7 @@ def zones_monitor_tick(last_track=0.0):
             groups.setdefault(zones_group_key(z), []).append(z)
     ax_map = zones_author_exits()   # v0.99.519
     pos_map = {"_px": prices, "_ax": ax_map}
-    if real_tails or any(_zones_real_live(z) for g in groups.values() for z in g):
+    if real_tails or any(_zones_real_live(z) for g in groups.values() for z in g) or (AUTOTRADE_ENABLED_ZONES and groups):
         try:
             with using_account("zones"):
                 for x in get_open_positions() or []:
@@ -30686,13 +30736,21 @@ function zoneRowHtml(z) {
   const lv = z.levels.map((v, i) => `<span style="${z.touched && z.touched[i] ? 'color:var(--pos);font-weight:700;' : ''}">${i + 1}) ${zfmt(v)}${z.touched && z.touched[i] ? ' ✓' : ''}</span>`).join(' · ');
   const tr = z.trade;
   const lad = tr && tr.legs ? `лимитки ${tr.legs.filter(l => l.fill != null).length}/${tr.legs.length}: ${tr.legs.map(l => (l.fill != null ? '✅' : '') + zfmt(l.lim)).join(' / ')} · ` : '';   // v0.99.491
-  const trTxt = tr ? `<div class="dim" style="font-size:var(--fs-sm);">${lad}${tr.entry != null ? 'средняя ' + zfmt(tr.entry) + ' · ' : ''}SL ${zfmt(tr.sl)}${tr.tp != null ? ' · TP ' + zfmt(tr.tp) : ''}${tr.autotrade ? ' · биржа: ' + tr.autotrade.status + (tr.autotrade.leverage ? ' ' + tr.autotrade.leverage + 'x' : '') : ''}${tr.result ? ` · <b class="${tr.result === 'WIN' ? 'win' : 'loss'}">${tr.result} ${tr.pnl_r > 0 ? '+' : ''}${tr.pnl_r}R${tr.pnl_pct != null ? ` · ${tr.pnl_pct > 0 ? '+' : ''}${tr.pnl_pct}%` : ''}</b>` : ''}</div>` : '';
+  // v0.99.537 — what the exchange has, in words (it was "биржа: SKIPPED 14x")
+  const trL = tr || (z.lead && window._zTr ? window._zTr[z.lead] : null);   // a zone of a ladder: the trade sits on its lead zone
+  const realFilled = trL && trL.real && trL.real.legs ? trL.real.legs.reduce((a, l) => a + (l.filled || 0), 0) : 0;
+  const exTxt = !tr || !tr.autotrade ? '' : (realFilled > 0 ? ` · 💰 на бирже: позиция, плечо ${tr.real.lev || tr.autotrade.leverage}x`
+    : tr.real && !tr.real.done ? ` · на бирже: лимитки стоят (${tr.real.legs.length} шт.)${tr.autotrade.leverage ? ', плечо ' + tr.autotrade.leverage + 'x' : ''}`
+    : ({SKIPPED: ' · на бирже: не открыто', WAIT: ' · на бирже: ждёт', ERROR: ' · на бирже: ошибка', DRY_RUN: ' · бумажная сделка'}[tr.autotrade.status] || ' · на бирже: ' + tr.autotrade.status)
+      + (tr.autotrade.detail && tr.autotrade.status !== 'LIMITS' ? ` — ${tr.autotrade.detail}` : ''));
+  const trTxt = tr ? `<div class="dim" style="font-size:var(--fs-sm);">${lad}${tr.entry != null ? 'средняя ' + zfmt(tr.entry) + ' · ' : ''}SL ${zfmt(tr.sl)}${tr.tp != null ? ' · TP ' + zfmt(tr.tp) : ''}${exTxt}${tr.result ? ` · <b class="${tr.result === 'WIN' ? 'win' : 'loss'}">${tr.result} ${tr.pnl_r > 0 ? '+' : ''}${tr.pnl_r}R${tr.pnl_pct != null ? ` · ${tr.pnl_pct > 0 ? '+' : ''}${tr.pnl_pct}%` : ''}</b>` : ''}</div>` : '';
   const hist = '';
   const ladBar = tr && tr.legs && tr.legs.length ? `<div class="fx-ladder${long ? '' : ' short'}" title="налилось лимиток: ${tr.legs.filter(l => l.fill != null).length} из ${tr.legs.length}">${tr.legs.map((l, i) => `<i class="${l.fill != null ? 'on' : ''}" style="--i:${i};"></i>`).join('')}</div>` : '';
   // v0.99.447 — "уже отработала" shows its outcome in R right in the status
   const stTxt = z.status === 'old'
     ? (z.result ? `📜 отработала: <b class="${z.result.r > 0 ? 'win' : 'loss'}">${z.result.r > 0 ? '+' : ''}${z.result.r}R${z.result.pct != null ? ` · ${z.result.pct > 0 ? '+' : ''}${z.result.pct}%` : ''}</b>${z.result.legs ? ` <span class="dim">· лесенка поста, налилось ${z.result.filled}/${z.result.legs}</span>` : ''}` : (z.rules === 'ladder' ? '📜 отработала: лимитки не налились' : z.rules === 'pending' ? '📜 отработала — результат появится после пересчёта истории' : z.rules === 'excl_scale' ? '⚠️ не в статистике: уровни не удалось сопоставить с ценой — скрин распознан неверно' : z.rules === 'excl_past_stop' ? '⚠️ не в статистике: в момент поста цена уже была за стопом зоны' : '📜 отработала: входа не было'))
-    : (ZONE_ST[z.status] || z.status) + (z.status === 'skipped' ? ({dup: ' — тот же сетап уже в работе (пост из нескольких картинок)', scale: ' — уровни не совпадают с ценой'}[z.skip] || '') : '');
+    : (z.status === 'in_trade' && trL && trL.legs ? (realFilled > 0 ? '💰 в сделке на бирже' : '📝 в сделке только у бота <span class="dim">(на бирже позиции нет)</span>')
+       : (ZONE_ST[z.status] || z.status)) + (z.status === 'skipped' ? ({dup: ' — тот же сетап уже в работе (пост из нескольких картинок)', scale: ' — уровни не совпадают с ценой'}[z.skip] || '') : '');
   const btn = 'background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);';
   return `<div style="margin-top:8px;padding:6px 0 0 8px;border-left:3px solid ${long ? '#4caf50' : '#ef5350'};">
     <div style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap;align-items:center;">
@@ -30926,6 +30984,7 @@ async function refreshZones() {
       <div>зона ждёт</div><div>${d.max_days} дн.</div></div></details>`;
   }
   const zs = d.zones || [];
+  window._zTr = Object.fromEntries(zs.filter(z => z.trade).map(z => [z.id, z.trade]));   // v0.99.537
   const ownZ = zs.filter(z => z.own);
   const ocZ = zs.filter(z => z.oc);   // v0.99.506 — "поиск по результату"
   const pub = zs.filter(z => !z.own && !z.oc);

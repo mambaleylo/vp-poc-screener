@@ -19164,3 +19164,17 @@ v0.99.536 - Зоны: the motion asked for in v0.99.534 (user: "а для зон
          The "Стоп и тейк" card no longer says the author's result post closes the trade (it is
          off since v0.99.535). Neuro: the "🎓 обучение" label is now set on every poll, so cards
          mined before v0.99.534 show it too instead of a bare dash. Checked in Chromium on mock data.
+v0.99.537 - Зоны: BTC shorts "в сделке" while the exchange had a long (user: "почему какие-то
+         сделки в шорт на битке активны, хотя на бирже же лонг открыт — путаница"). (1) The
+         short ladder was in a trade only in the bot's record (its real orders were skipped);
+         the zone said "🤖 в сделке" like a real one. Now: "💰 в сделке на бирже" only when one
+         of its limits filled on the exchange, else "📝 в сделке только у бота (на бирже позиции
+         нет)" — on every zone of the ladder; "биржа: SKIPPED 14x" became words with the
+         reason. (2) A real bug: a ladder took any position of its side on the coin for its own
+         (the BTC long from 82 839 was not the zones' — their limits were at 81 809 / 80 904)
+         and put its stop / take on it. Now a position is the ladder's only once one of its
+         limits filled; such stops / takes already placed are taken off with a message. (3) One
+         position per coin on the exchange: while another module's (or a manual, or another
+         ladder's) position is open on the coin, a ladder places no limits and takes its
+         unfilled ones off ("жду, пока закроется") — they would merge with it or eat into it.
+         The positions are read every round while zones autotrade is on.
