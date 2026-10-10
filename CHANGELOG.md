@@ -19330,3 +19330,10 @@ v0.99.557 - P/R (and S/R per-coin mode): "резко появляется мон
          time is shown as "🆕 новичок" and traded only after the next recount (4 h) confirms it.
          Coins already in the list at the update are not newcomers. (S/R's pooled mode already
          ranks by train — unchanged.)
+v0.99.558 - Поиск по результату: after v0.99.556 the exam fell from -0.03R to -0.52R (user
+         screenshot) — the choices (model, take, bar, filters) won on the choosing period's
+         average, i.e. on luck in part of it. Now everything is chosen by the WORSE of the two
+         halves of the choosing period (each half needs >= 10 trades): what worked in only one
+         half isn't taken; a filter must raise the worse half by >= 0.03R and half a standard
+         error. Synthetic check: a real edge is still found; on data without an edge no filter is
+         taken (3 of 3, before 1 of 3 was).

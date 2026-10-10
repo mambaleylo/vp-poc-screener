@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.557"
+APP_VERSION = "0.99.558"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -27008,11 +27008,28 @@ def _oc_sel_f(rows, sc_of, thr, ti, flt):
     return [s["r"][ti] for sc, s in best.values() if sc >= thr and s["r"][ti] is not None]
 
 
-def _oc_tune_filters(val_rows, sc_of, thr, ti, min_n):
-    """greedy, two passes: each filter's option that raises the choosing part's average the most"""
+def _oc_rob(halves, sel):
+    """v0.99.558 — what is chosen must work in BOTH halves of the choosing period: the worse
+    half's average (None when a half has too few trades). After v0.99.556 the exam fell from
+    -0.03R to -0.52R: choices that won on the choosing period's average were luck in one part."""
+    out = []
+    for h in halves:
+        st = _oc_stat(sel(h))
+        if st["n"] < 10 or st["avg"] is None:
+            return None
+        out.append(st["avg"])
+    return min(out)
+
+
+def _oc_tune_filters(val_rows, sc_of, thr, ti, min_n, halves=None):
+    """greedy, two passes: each filter's option that raises the worse half of the choosing part most"""
     flt = {}
     cur = _oc_stat(_oc_sel_f(val_rows, sc_of, thr, ti, flt))
     if cur["avg"] is None:
+        return flt, cur
+    rob_of = lambda f_: _oc_rob(halves, lambda h: _oc_sel_f(h, sc_of, thr, ti, f_)) if halves else None
+    cur_rob = rob_of(flt) if halves else cur["avg"]
+    if cur_rob is None:
         return flt, cur
     for _ in range(2):
         changed = False
@@ -27026,13 +27043,15 @@ def _oc_tune_filters(val_rows, sc_of, thr, ti, min_n):
                     f2[key] = o
                 st = _oc_stat(_oc_sel_f(val_rows, sc_of, thr, ti, f2))
                 # adding a filter must gain clearly (>= 0.03R and half a standard error: fewer
-                # trades are noisier); dropping one needs no gain
+                # trades are noisier) — v0.99.558: in the worse half too; dropping one needs no gain
                 need = 0.0 if o is None or st["n"] < 2 else max(OC_FILTER_MIN_GAIN, 0.5 * (st["sd"] or 0) / st["n"] ** 0.5)
-                if st["n"] >= min_n and st["avg"] is not None and st["avg"] > cur["avg"] + need \
-                        and (best is None or st["avg"] > best[1]["avg"]):
-                    best = (f2, st)
+                if st["n"] < min_n or st["avg"] is None:
+                    continue
+                rb = rob_of(f2) if halves else st["avg"]
+                if rb is not None and rb > cur_rob + need and (best is None or rb > best[2]):
+                    best = (f2, st, rb)
             if best:
-                flt, cur = best
+                flt, cur, cur_rob = best
                 changed = True
         if not changed:
             break
@@ -27092,6 +27111,8 @@ def oc_train():
     val_rows = [s for s in rows if t_a <= s["t"] < t_b]
     te_rows = [s for s in rows if s["t"] >= t_b]
     cands, var_best = [], {}
+    _t_mid = sorted(s["t"] for s in val_rows)[len(val_rows) // 2] if val_rows else 0
+    val_halves = [[s for s in val_rows if s["t"] < _t_mid], [s for s in val_rows if s["t"] >= _t_mid]]   # v0.99.558
     k_ = 0
     for ti, tp in enumerate(ZONES_OC_TPS):
         for var in OC_VARIANTS:
@@ -27108,16 +27129,19 @@ def oc_train():
                     continue
                 st = _oc_stat(_oc_select(val_rows, m, thr, ti))
                 if st["n"] >= max(30, 0.03 * n_val):
-                    row = {"var": var, "ti": ti, "tp": tp, "q": q, "thr": thr, "model": m, "val": st}
+                    rob = _oc_rob(val_halves, lambda h: _oc_select(h, m, thr, ti))   # v0.99.558
+                    if rob is None:
+                        continue
+                    row = {"var": var, "ti": ti, "tp": tp, "q": q, "thr": thr, "model": m, "val": st, "rob": rob}
                     cands.append(row)
-                    if var not in var_best or st["avg"] > var_best[var]["val"]["avg"]:
+                    if var not in var_best or rob > var_best[var]["rob"]:
                         var_best[var] = row
     if not cands:
         return None
     # v0.99.556 — the adaptive filters, tuned for the 3 best model / take / bar choices
     n_val_all = len({(s["t"], s["s"], s["side"]) for s in val_rows})
     tops, seen_k = [], set()
-    for r in sorted(cands, key=lambda r: -r["val"]["avg"]):
+    for r in sorted(cands, key=lambda r: -r["rob"]):
         if (r["var"], r["ti"], r["q"]) not in seen_k:
             seen_k.add((r["var"], r["ti"], r["q"]))
             tops.append(r)
@@ -27128,10 +27152,11 @@ def oc_train():
         cache = {}
         sc_of = lambda s, m_=r["model"], c_=cache: c_[id(s)] if id(s) in c_ else c_.setdefault(id(s), oc_score(m_, _oc_xa(s)))
         r["val_nofilt"] = r["val"]
-        r["flt"], st_f = _oc_tune_filters(val_rows, sc_of, r["thr"], r["ti"], max(40, 0.04 * n_val_all))
+        r["flt"], st_f = _oc_tune_filters(val_rows, sc_of, r["thr"], r["ti"], max(40, 0.04 * n_val_all), val_halves)
         if r["flt"]:
             r["val"] = st_f
-    best = max(cands, key=lambda r: r["val"]["avg"])
+            r["rob"] = _oc_rob(val_halves, lambda h, r_=r, f_=r["flt"], sc_=sc_of: _oc_sel_f(h, sc_, r_["thr"], r_["ti"], f_)) or r["rob"]
+    best = max(cands, key=lambda r: r["rob"])
     flt = best.get("flt") or {}
     ti, m = best["ti"], best["model"]
     base = lambda rs_: _oc_stat([s["r"][ti] for s in rs_ if s["rank"] == 0 and s["r"][ti] is not None])
@@ -32185,7 +32210,7 @@ function ocHtml(d, ocZ) {   // v0.99.528 — v2: more features, trees, a 3-way h
     const zAuth = canCmp && ev.test.sd != null && at.sd != null ? beatAuth / Math.sqrt(ev.test.sd ** 2 / ev.test.n + at.sd ** 2 / at.n || 1e-9) : null;
     const verdict = !canCmp ? null : (zAuth == null ? (beatAuth > 0 ? 'better' : 'worse') : (zAuth >= 1.65 ? 'better' : (zAuth <= -1.65 ? 'worse' : 'same')));
     body += `<div class="zkv" style="margin-top:8px;"><div>история</div><div>${ev.samples} зон-кандидатов, ${dd(ev.first_t)} — ${dd(ev.last_t)}</div>
-      <div>выбрано</div><div><b>${ev.var_name}</b> · тейк <b>+${ev.tp}%</b> · беру лучшие ${Math.round(ev.q * 100)}% зон</div>
+      <div>выбрано</div><div><b>${ev.var_name}</b> · тейк <b>+${ev.tp}%</b> · беру лучшие ${Math.round(ev.q * 100)}% зон<div class="dim">выбор — по худшей из двух половин периода подбора: что сработало только в одной, не берётся</div></div>
       <div>подстроено</div><div>${(ev.filters || []).length ? ev.filters.map(f => '<b>' + f.txt + '</b>').join(' · ') : 'фильтры не помогли на подборе — беру без них'}${ev.test_nofilt && (ev.filters || []).length ? `<div class="dim">на экзамене с фильтрами ${sgR(ev.test.avg)} (${ev.test.n}), без них ${sgR(ev.test_nofilt.avg)} (${ev.test_nofilt.n}) — помогла ли подстройка там, где не подбиралась</div>` : ''}</div></div>
       <div class="zsub">Честно, по времени: модели учились до ${dd(ev.split_t)}, лучшая выбиралась на ${dd(ev.split_t)}—${dd(ev.test_t)}, экзамен — после ${dd(ev.test_t)}: на нём ничего не подбиралось. Стиль автора — только по его постам до ${dd(ev.split_t)}.${ev.auth_share != null ? ` На экзамене ${ev.auth_share}% выбранных зон совпали со свежей зоной автора.` : ''}</div>
       <div class="zwrap"><table class="ztbl"><thead><tr><th>экзамен</th><th>сделок</th><th>WR</th><th>средний</th></tr></thead><tbody>
