@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.555"
+APP_VERSION = "0.99.556"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -26492,7 +26492,8 @@ ZONES_OC_HOLD_H = 14 * 24    # the zone waits 14 days, like the author's
 ZONES_OC_PER_SIDE = 3        # the nearest candidates per side per snapshot
 ZONES_OC_TPS = (3.0, 5.0, 8.0, 12.0, 20.0)   # takes tried (from the average entry)
 ZONES_OC_FIT_MAX = 5000      # samples per fit (speed on a phone)
-_OC = {"samples": [], "done": {}, "model": None, "eval": None, "tp": None, "thr": None, "built": None, "ver": None, "var": None}
+_OC = {"samples": [], "done": {}, "model": None, "eval": None, "tp": None, "thr": None, "built": None, "ver": None, "var": None,
+       "filters": {}, "hist": []}   # v0.99.556 — the adaptive filters in use and every exam so far
 _oc_lock = threading.Lock()
 
 
@@ -26906,6 +26907,91 @@ def _oc_select(rows, model, thr, ti):
     return [s["r"][ti] for sc, s in _oc_best_per_key(rows, model) if sc >= thr and s["r"][ti] is not None]
 
 
+# v0.99.556 — adaptive filters on top of the model (user: "цель как у автора, просто больше
+# адаптивных параметров, чтобы постоянно было что проверять и подстраивать… сделки закрываются,
+# результаты экзамена не улучшаются"). The author's ladder rules stay; what is tuned is WHICH
+# zones are taken. Every retrain picks each filter on the choosing part (it must add >= 0.03R
+# there and keep enough trades), the exam judges the result on weeks nothing was chosen on.
+OC_FILTERS = (
+    ("side", "сторона", (("long", "только лонги"), ("short", "только шорты"))),
+    ("tf", "график зоны", (("1h", "только зоны 1ч"), ("htf", "только зоны 4ч и 1д"))),
+    ("btc", "BTC", (("with", "BTC идёт в сторону сделки"), ("against", "BTC идёт против сделки"))),
+    ("trend", "тренд монеты", (("with", "сделка по тренду монеты"), ("against", "сделка против тренда монеты"))),
+    ("dist", "расстояние до зоны", (("near", "зона ближе 3% от цены"), ("far", "зона дальше 3% от цены"))),
+    ("width", "ширина зоны", (("narrow", "зона уже 1.5%"), ("wide", "зона шире 1.5%"))),
+    ("auth", "автор", (("zone", "автор рисовал эту зону (30 дн.)"), ("coin", "автор разбирал монету (14 дн.)"))),
+)
+OC_FILTER_MIN_GAIN = 0.03   # R per trade a filter must add on the choosing part
+_OC_FILTER_TXT = {(k, o): t for k, _, opts in OC_FILTERS for o, t in opts}
+
+
+def _oc_filt_ok(flt, side, tf, xa):
+    """does a candidate pass the filters (x: 11 zone + 12 market features, then 3 of the author's)"""
+    for k, v in (flt or {}).items():
+        if k == "side" and side != v:
+            return False
+        if k == "tf" and (tf == 1) != (v == "1h"):
+            return False
+        if k in ("btc", "trend"):
+            x_ = xa[19] if k == "btc" else xa[11]
+            if (v == "with" and x_ <= 0) or (v == "against" and x_ >= 0):
+                return False
+        if k == "dist" and (xa[20] <= math.log1p(3.0)) != (v == "near"):
+            return False
+        if k == "width" and (xa[21] <= math.log1p(1.5)) != (v == "narrow"):
+            return False
+        if k == "auth":
+            j = 24 if v == "zone" else 25
+            if len(xa) <= j or xa[j] <= 0:
+                return False
+    return True
+
+
+def _oc_sel_f(rows, sc_of, thr, ti, flt):
+    """the R of the taken trades: per snapshot / coin / side the best-scored candidate
+    that passes the filters, if its score clears the bar"""
+    best = {}
+    for s in rows:
+        if flt and not _oc_filt_ok(flt, s["side"], s.get("tf", 1), _oc_xa(s)):
+            continue
+        sc = sc_of(s)
+        k = (s["t"], s["s"], s["side"])
+        if k not in best or sc > best[k][0]:
+            best[k] = (sc, s)
+    return [s["r"][ti] for sc, s in best.values() if sc >= thr and s["r"][ti] is not None]
+
+
+def _oc_tune_filters(val_rows, sc_of, thr, ti, min_n):
+    """greedy, two passes: each filter's option that raises the choosing part's average the most"""
+    flt = {}
+    cur = _oc_stat(_oc_sel_f(val_rows, sc_of, thr, ti, flt))
+    if cur["avg"] is None:
+        return flt, cur
+    for _ in range(2):
+        changed = False
+        for key, _nm, opts in OC_FILTERS:
+            best = None
+            for o in [None] + [o_ for o_, _t in opts]:
+                if o == flt.get(key):
+                    continue
+                f2 = {k: v for k, v in flt.items() if k != key}
+                if o:
+                    f2[key] = o
+                st = _oc_stat(_oc_sel_f(val_rows, sc_of, thr, ti, f2))
+                # adding a filter must gain clearly (>= 0.03R and half a standard error: fewer
+                # trades are noisier); dropping one needs no gain
+                need = 0.0 if o is None or st["n"] < 2 else max(OC_FILTER_MIN_GAIN, 0.5 * (st["sd"] or 0) / st["n"] ** 0.5)
+                if st["n"] >= min_n and st["avg"] is not None and st["avg"] > cur["avg"] + need \
+                        and (best is None or st["avg"] > best[1]["avg"]):
+                    best = (f2, st)
+            if best:
+                flt, cur = best
+                changed = True
+        if not changed:
+            break
+    return flt, cur
+
+
 def _oc_stat(rs):
     n = len(rs)
     mu = sum(rs) / n if n else None
@@ -26981,22 +27067,44 @@ def oc_train():
                         var_best[var] = row
     if not cands:
         return None
+    # v0.99.556 — the adaptive filters, tuned for the 3 best model / take / bar choices
+    n_val_all = len({(s["t"], s["s"], s["side"]) for s in val_rows})
+    tops, seen_k = [], set()
+    for r in sorted(cands, key=lambda r: -r["val"]["avg"]):
+        if (r["var"], r["ti"], r["q"]) not in seen_k:
+            seen_k.add((r["var"], r["ti"], r["q"]))
+            tops.append(r)
+        if len(tops) >= 3:
+            break
+    for k_, r in enumerate(tops):
+        zones_act("oc", running=True, stage="подстройка фильтров отбора", done=k_ + 1, total=len(tops))
+        cache = {}
+        sc_of = lambda s, m_=r["model"], c_=cache: c_[id(s)] if id(s) in c_ else c_.setdefault(id(s), oc_score(m_, _oc_xa(s)))
+        r["val_nofilt"] = r["val"]
+        r["flt"], st_f = _oc_tune_filters(val_rows, sc_of, r["thr"], r["ti"], max(40, 0.04 * n_val_all))
+        if r["flt"]:
+            r["val"] = st_f
     best = max(cands, key=lambda r: r["val"]["avg"])
+    flt = best.get("flt") or {}
     ti, m = best["ti"], best["model"]
     base = lambda rs_: _oc_stat([s["r"][ti] for s in rs_ if s["rank"] == 0 and s["r"][ti] is not None])
-    test = _oc_stat(_oc_select(te_rows, m, best["thr"], ti))
+    test_nofilt = _oc_stat(_oc_select(te_rows, m, best["thr"], ti))
+    test = _oc_stat(_oc_sel_f(te_rows, lambda s: oc_score(m, _oc_xa(s)), best["thr"], ti, flt)) if flt else test_nofilt
     weeks_te = max(1e-9, (rows[-1]["t"] - t_b) / (7 * 86400))
     test["per_week"] = round(test["n"] / weeks_te, 2)
     variants = []
     for var, r in var_best.items():   # every model's own exam, for the table (not used to choose)
         st = _oc_stat(_oc_select(te_rows, r["model"], r["thr"], r["ti"]))
-        variants.append({"var": var, "name": OC_VARIANT_NAMES[var], "tp": r["tp"], "q": r["q"], "val": r["val"], "test": st})
+        variants.append({"var": var, "name": OC_VARIANT_NAMES[var], "tp": r["tp"], "q": r["q"], "val": r.get("val_nofilt") or r["val"], "test": st})
     ev = {"ver": ZONES_OC_VER, "split_t": t_a, "test_t": t_b, "first_t": rows[0]["t"], "last_t": rows[-1]["t"],
           "var": best["var"], "var_name": OC_VARIANT_NAMES[best["var"]], "tp": best["tp"], "q": best["q"],
           "val": best["val"], "test": test, "base_test": base(te_rows), "train": _oc_stat(_oc_select(fit_rows, m, best["thr"], ti)),
           "variants": variants, "samples": len(rows), "coins": len({s["s"] for s in rows}),
+          "filters": [{"key": k, "opt": v, "txt": _OC_FILTER_TXT.get((k, v), f"{k}={v}")} for k, v in flt.items()],
+          "val_nofilt": best.get("val_nofilt") or best["val"], "test_nofilt": test_nofilt,
           "author_test": oc_author_window(t_b, rows[-1]["t"] + ZONES_OC_STEP_H * 3600), "t": time.time()}
-    sel_te = [sc_s[1] for sc_s in _oc_best_per_key(te_rows, m) if sc_s[0] >= best["thr"] and sc_s[1]["r"][ti] is not None]
+    sel_te = [sc_s[1] for sc_s in _oc_best_per_key([s for s in te_rows if _oc_filt_ok(flt, s["side"], s.get("tf", 1), _oc_xa(s))], m)
+              if sc_s[0] >= best["thr"] and sc_s[1]["r"][ti] is not None]
     ev["auth_share"] = round(100 * sum(1 for x in sel_te if x["xa"][-2] > 0) / len(sel_te), 1) if sel_te else None
     ev["auth_posts"] = len(idx[1]) and sum(len(v) for v in idx[1].values())
     zones_act("oc", running=True, stage="итоговая модель на всей истории", done=None, total=None)
@@ -27006,7 +27114,14 @@ def oc_train():
     final = _oc_fit(rows, best["var"], ti) or m
     thr_final = _oc_q_thr(final, rows, best["q"])
     with _oc_lock:
-        _OC.update({"model": final, "eval": ev, "tp": best["tp"], "thr": thr_final, "var": best["var"]})
+        _OC.update({"model": final, "eval": ev, "tp": best["tp"], "thr": thr_final, "var": best["var"], "filters": flt})
+        # v0.99.556 — every exam is kept: is the search getting better over time?
+        _OC.setdefault("hist", []).append({"t": ev["t"], "var": best["var"], "tp": best["tp"], "q": best["q"],
+                                           "filters": [f_["txt"] for f_ in ev["filters"]], "val": ev["val"]["avg"],
+                                           "test": test.get("avg"), "test_n": test.get("n"), "test_wr": test.get("wr"),
+                                           "test_nofilt": test_nofilt.get("avg"), "author": (ev.get("author_test") or {}).get("avg"),
+                                           "samples": len(rows)})
+        del _OC["hist"][:-60]
     return ev
 
 
@@ -27014,6 +27129,7 @@ def oc_scan_once():
     """Live: our zones by the outcome model, every hour — tab only, no orders."""
     with _oc_lock:
         model, thr, tp = _OC["model"], _OC["thr"], _OC["tp"]
+        flt = dict(_OC.get("filters") or {})   # v0.99.556
     if not model or thr is None or len((model.get("edges") or model.get("w") or [])) not in (11, OC_NFEAT + 3):
         return 0
     now = time.time()
@@ -27037,7 +27153,10 @@ def oc_scan_once():
         best = {}
         for c in oc_candidates_mtf(by_tf):
             x_ = _oc_vec(c, oc_ctx_feats(cs, c, bv))
-            sc = oc_score(model, x_ + oc_author_feats(sym, c["side"], c["lo"], c["hi"], x_[:11], now, am_live, a_idx))
+            xa_ = x_ + oc_author_feats(sym, c["side"], c["lo"], c["hi"], x_[:11], now, am_live, a_idx)
+            if flt and not _oc_filt_ok(flt, c["side"], c.get("tf", 1), xa_):
+                continue   # v0.99.556 — the adaptive filters
+            sc = oc_score(model, xa_)
             if sc >= thr and (c["side"] not in best or sc > best[c["side"]][0]):
                 best[c["side"]] = (sc, c)
         found += [(sc, sym, c) for sc, c in best.values()]
@@ -27083,7 +27202,9 @@ def oc_stats():
                      "filled": (lead_tr.get(z.get("lead") or z["id"]) or {}).get("filled")} for z in fin[:40]]
     live["days"] = len({int(r_["exit_t"] // 86400) for r_ in live["rows"] if r_.get("exit_t")})
     live["longs"] = sum(1 for r_ in live["rows"] if r_["side"] == "long")
-    return {"samples": n, "eval": ev, "tp": tp, "thr": thr, "built": built,
+    with _oc_lock:
+        hist = list(_OC.get("hist") or [])[-20:]
+    return {"samples": n, "eval": ev, "tp": tp, "thr": thr, "built": built, "hist": hist,
             "active": sum(1 for z in zs if z.get("status") in ("watch", "in_trade")), "live": live,
             # v0.99.528 — the author's ladders over the same weeks as our live zones
             "author_live": oc_author_window(t_live, time.time()) if t_live else None}
@@ -32017,7 +32138,8 @@ function ocHtml(d, ocZ) {   // v0.99.528 — v2: more features, trees, a 3-way h
     const zAuth = canCmp && ev.test.sd != null && at.sd != null ? beatAuth / Math.sqrt(ev.test.sd ** 2 / ev.test.n + at.sd ** 2 / at.n || 1e-9) : null;
     const verdict = !canCmp ? null : (zAuth == null ? (beatAuth > 0 ? 'better' : 'worse') : (zAuth >= 1.65 ? 'better' : (zAuth <= -1.65 ? 'worse' : 'same')));
     body += `<div class="zkv" style="margin-top:8px;"><div>история</div><div>${ev.samples} зон-кандидатов, ${dd(ev.first_t)} — ${dd(ev.last_t)}</div>
-      <div>выбрано</div><div><b>${ev.var_name}</b> · тейк <b>+${ev.tp}%</b> · беру лучшие ${Math.round(ev.q * 100)}% зон</div></div>
+      <div>выбрано</div><div><b>${ev.var_name}</b> · тейк <b>+${ev.tp}%</b> · беру лучшие ${Math.round(ev.q * 100)}% зон</div>
+      <div>подстроено</div><div>${(ev.filters || []).length ? ev.filters.map(f => '<b>' + f.txt + '</b>').join(' · ') : 'фильтры не помогли на подборе — беру без них'}${ev.test_nofilt && (ev.filters || []).length ? `<div class="dim">на экзамене с фильтрами ${sgR(ev.test.avg)} (${ev.test.n}), без них ${sgR(ev.test_nofilt.avg)} (${ev.test_nofilt.n}) — помогла ли подстройка там, где не подбиралась</div>` : ''}</div></div>
       <div class="zsub">Честно, по времени: модели учились до ${dd(ev.split_t)}, лучшая выбиралась на ${dd(ev.split_t)}—${dd(ev.test_t)}, экзамен — после ${dd(ev.test_t)}: на нём ничего не подбиралось. Стиль автора — только по его постам до ${dd(ev.split_t)}.${ev.auth_share != null ? ` На экзамене ${ev.auth_share}% выбранных зон совпали со свежей зоной автора.` : ''}</div>
       <div class="zwrap"><table class="ztbl"><thead><tr><th>экзамен</th><th>сделок</th><th>WR</th><th>средний</th></tr></thead><tbody>
       ${row('🧪 наш поиск', ev.test, 'выбранная модель', true)}${row('📌 автор канала', at.n ? at : null, 'его посты за те же недели, те же правила лесенки', true)}${row('без модели', ev.base_test, 'просто ближайшая зона')}</tbody></table></div>
@@ -32026,6 +32148,10 @@ function ocHtml(d, ocZ) {   // v0.99.528 — v2: more features, trees, a 3-way h
           : ev.test.avg > 0 ? `В плюсе, но хуже автора на ${(-beatAuth).toFixed(2)}R за сделку.` : 'На экзамене в минусе — автора пока не превзошёл.'}${beatBase != null ? ` Против «просто ближайшей зоны»: ${beatBase >= 0 ? '+' : ''}${beatBase.toFixed(2)}R.` : ''}</div>`
         : `<div class="zsub">Сравнить с автором пока нельзя: на неделях экзамена мало его отработанных постов (${at.n || 0}, нужно 10) или наших сделок.</div>`}
       ${(ev.variants || []).length ? `<details><summary>все модели</summary><div class="zsub">каждая на своём лучшем тейке и пороге; «подбор» — где выбирали, «экзамен» — где не видели</div><div class="zwrap"><table class="ztbl"><thead><tr><th>модель</th><th>подбор</th><th>экзамен</th></tr></thead><tbody>${ev.variants.map(v => `<tr class="${v.var === ev.var ? 'zbest' : ''}"><td>${v.name}<div class="dim">тейк +${v.tp}% · лучшие ${Math.round(v.q * 100)}%</div></td><td>${sgR(v.val.avg)}<div class="dim">${v.val.n}</div></td><td>${sgR(v.test.avg)}<div class="dim">${v.test.n}</div></td></tr>`).join('')}</tbody></table></div></details>` : ''}`;
+  if ((o.hist || []).length) {   // v0.99.556 — is it getting better?
+    const h = o.hist.slice().reverse();
+    body += `<details><summary>история экзаменов (${o.hist.length})</summary><div class="zsub">каждое переобучение (раз в сутки): что выбрано и как сдан экзамен — так видно, улучшается ли поиск</div><div class="zwrap"><table class="ztbl"><thead><tr><th>дата</th><th>экзамен</th><th>автор</th></tr></thead><tbody>${h.map(x => `<tr><td>${dd(x.t)}<div class="dim">тейк +${x.tp}% · лучшие ${Math.round(x.q * 100)}%${(x.filters || []).length ? ' · ' + x.filters.join(', ') : ''}</div></td><td>${sgR(x.test)}<div class="dim">${x.test_n || 0} · WR ${x.test_wr == null ? '—' : x.test_wr + '%'}${x.test_nofilt != null && (x.filters || []).length ? ' · без фильтров ' + (x.test_nofilt > 0 ? '+' : '') + x.test_nofilt + 'R' : ''}</div></td><td>${sgR(x.author)}</td></tr>`).join('')}</tbody></table></div></details>`;
+  }
   } else if (!a.running) body += `<div class="dim" style="margin-top:6px;">${ev ? 'новая версия поиска — история собирается заново, начнётся через несколько минут после запуска' : 'модель ещё не обучена — начнёт через несколько минут после запуска бота'}</div>`;
   const lv = o.live || {}, al = o.author_live || {};
   body += `<div style="margin-top:8px;">Живые зоны: активных ${o.active || 0} · отработало ${lv.n || 0}${lv.n ? ` · средний ${sgR(lv.avg)}, WR ${lv.wr}%` : ''}${al.n ? ` · автор за те же недели: ${al.n} сделок, ${sgR(al.avg)}` : ''} · только наблюдение</div>`;

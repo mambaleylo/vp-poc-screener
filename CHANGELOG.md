@@ -19310,3 +19310,14 @@ v0.99.555 - Зоны: "мониторинг молчит 6 мин — бот з�
          zone — minutes with hundreds of them), ran the duplicate revive check every 10 min and
          the start-up fixes before its first pass; meanwhile the live zones weren't watched. These
          chores run in their own thread now (zones_slow_loop); the monitoring only watches.
+v0.99.556 - Поиск по результату: adaptive filters on top of the model (user: "цель как у автора,
+         просто больше адаптивных параметров, чтобы постоянно было что проверять и подстраивать;
+         сделки закрываются, а результаты экзамена не улучшаются"). The author's ladder rules stay;
+         every retrain (daily) also tunes WHICH zones are taken: side, the zone's chart (1h vs
+         4h/1d), BTC with/against the trade, the coin's trend with/against, distance to the zone
+         (3%), zone width (1.5%), the author drew this zone / covers this coin. Greedy on the
+         choosing part, two passes; a filter is added only if it gains >= 0.03R and half a
+         standard error there with enough trades left. The exam judges it on unseen weeks and
+         shows the result with and without the filters. Live scan uses the same filters. Every
+         exam is kept: "история экзаменов" shows whether the search is getting better over time.
+         (Synthetic check: a real edge "long only" is found, noise mostly isn't.)
