@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.553"
+APP_VERSION = "0.99.554"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21998,6 +21998,7 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                 kind[gy][gx] = 2      # red / pink
     seen = [[False] * gw for _ in range(gh)]
     rects = []
+    label_rects = []   # v0.99.554
     for gy in range(gh):
         for gx in range(gw):
             if kind[gy][gx] and not seen[gy][gx]:
@@ -22024,6 +22025,15 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                 if wmax * step >= 50 and solid:
                     rects.append({"kind": kd, "x0": xs0 * step, "x1": xs1 * step,
                                   "y0": min(core) * step, "y1": max(core) * step + step})
+                elif wmax * step >= 50:
+                    # v0.99.554 — a price-range label ("0,0884 (6,69%) 884", XRP): its text makes
+                    # holes in the fill, so it is not "solid" and was never read; a small, wide,
+                    # filled-with-text box is kept apart — only read as a result label, never a zone
+                    lab = [ry for ry, w in per_row.items() if w >= 0.3 * wmax]
+                    lh = (max(lab) - min(lab) + 1) if lab else 0
+                    if lab and lh * step >= 10 and lh * step < 0.06 * H and len(lab) >= 0.85 * lh and wmax >= 2.5 * lh:
+                        label_rects.append({"kind": kd, "x0": xs0 * step, "x1": xs1 * step,
+                                            "y0": min(lab) * step, "y1": max(lab) * step + step, "label_only": True})
     # merge pieces of one rectangle split by a drawn line
     # (stacked pieces, and v0.99.471 side-by-side pieces cut by a hand-drawn curve)
     merged = [dict(r) for r in rects]
@@ -22070,7 +22080,7 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
                     lit += 1
         return n_ > 0 and lit / n_ >= 0.015   # labels ~4-6 %, plain zones 0 %
 
-    for r in merged:
+    for r in merged + label_rects:
         w_, h_ = r["x1"] - r["x0"], r["y1"] - r["y0"]
         small_sz = w_ < 0.22 * plot_x1 and h_ < 0.06 * H
         small = small_sz and _has_text(r)   # a label, not a small zone
@@ -22088,7 +22098,7 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
             if "%" in txt or re.search(r"\(\s*-?\d+[.,]?\d*\s*[%»9]?\s*\)", txt):
                 result_label = txt.strip()
                 small = True
-        if small or w_ < 0.06 * plot_x1:
+        if small or w_ < 0.06 * plot_x1 or r.get("label_only"):
             continue   # a label / a marker, not a zone
         keep.append(r)
     merged = keep

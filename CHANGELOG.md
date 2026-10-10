@@ -19301,3 +19301,7 @@ v0.99.553 - The backtest money column ("💰 с $…", "📈 % в день", the
          by themselves. Note: Neuro's "money" check (the card is traded only if this simulation
          ends above its start) is now at $15 — with a small balance a coin's minimum order can
          make a trade bigger than the risk or impossible, so some cards may get "💸 в минусе".
+v0.99.554 - Зоны: the XRP result post (red price-range label "0,0884 (6,69%) 884" with an arrow)
+         was taken as a live setup again. The label's dark text makes holes in its red fill, so
+         it failed the "solid rectangle" test and was never read. A small, wide box filled with
+         text is now kept apart and only read as a result label (never a zone) -> "пост-отчёт".
