@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.556"
+APP_VERSION = "0.99.557"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7020,6 +7020,7 @@ PERSIST_BT_KEYS = (
     "lsw_filter_checkpoints", "lsw_neuro_filters", "lsw_pooled", "lsw_backtest_interval",
     "snr_last_backtest_finished", "snr_filters", "snr_diag", "snr_pooled",
     "prv_last_backtest_finished", "prv_filters", "prv_keep", "prv_pooled",   # v0.99.410, v0.99.411
+    "prv_first_seen", "snr_first_seen",   # v0.99.557
     "mirror_last_backtest_finished", "mirror_last_backtest_duration", "mirror_backtest_summary",
     "mirror_tuned_tolerances",
     "ft5_last_backtest_finished", "ft5_last_backtest_duration", "ft5_universe", "ft5_live_universe",
@@ -14810,15 +14811,13 @@ def _strategy_merge_filtered(mod, added, top_n, disp_n):
             if cur is None or best["train_z"] > (cur.get("train_z") or -99):
                 n_new += cur is None
                 results[sym] = best
-        ranked = sorted(results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
-        display_top = ranked[:max(disp_n, top_n)]
-        active_top = display_top[:top_n]
+        display_top, active_syms = strategy_pick(mod, results, top_n, disp_n, prune=False)   # v0.99.557
         STATE[f"{mod}_results"] = dict(display_top)
         if mod == "snr":
-            _snr_active_symbols = [s for s, _ in active_top]
+            _snr_active_symbols = list(active_syms)
             _snr_display_symbols = [s for s, _ in display_top]
         else:
-            _prv_active_symbols = [s for s, _ in active_top]
+            _prv_active_symbols = list(active_syms)
             _prv_display_symbols = [s for s, _ in display_top]
         d = STATE.get(f"{mod}_diag")
         if isinstance(d, dict):
@@ -14828,11 +14827,54 @@ def _strategy_merge_filtered(mod, added, top_n, disp_n):
     return n_new
 
 
+# v0.99.557 — user: "по P/R резко появляется монета с отличными результатами, которой вчера не
+# было в списке — что-то тут не так". The coins were ranked by their TEST average: the part meant
+# to be the honest check picked the winners, so out of hundreds of coins the luckiest few test
+# trades came out on top, and a new lucky one every 4 h as the data moved. Now: ranked by the
+# test's sum R / sqrt(trades + 10) (a few lucky trades weigh little), traded only with
+# STRAT_ACTIVE_MIN_TEST test trades, and a coin passing for the first time is traded only once
+# the next recount (4 h later) confirms it ("🆕 новичок").
+STRAT_ACTIVE_MIN_TEST = 8
+
+
+def strategy_rank_score(r):
+    """the test's sum R / sqrt(trades + 10): the +10 is a prior — 5 lucky trades can't outrank 30 good ones"""
+    n = r.get("test_n") or 0
+    return round((r.get("test_avg_pnl_r") or 0.0) * n / math.sqrt(n + 10), 3) if n else -99.0
+
+
+def strategy_pick(mod, all_results, top_n, disp_n, prune=True):
+    """ranked by strategy_rank_score; the newcomer and few-trades rules for trading.
+    Call with state_lock held. Returns (display_top, active_symbols)."""
+    now = time.time()
+    refresh = PRV_REFRESH_SEC if mod == "prv" else SNR_REFRESH_SEC
+    key = f"{mod}_first_seen"
+    first_run = key not in STATE   # just updated: the coins already there are not newcomers
+    fs = dict(STATE.get(key) or {})
+    ranked = sorted(all_results.items(), key=lambda kv: -strategy_rank_score(kv[1]))
+    new_fs = {} if prune else dict(fs)
+    for sym, _ in ranked:
+        new_fs[sym] = fs.get(sym) or (now - refresh if first_run else now)
+    STATE[key] = new_fs
+    active = []
+    for sym, r in ranked:
+        r["rank_score"] = strategy_rank_score(r)
+        r["first_seen"] = new_fs[sym]
+        r["newcomer"] = now - new_fs[sym] < 0.75 * refresh
+        r["few_test"] = (r.get("test_n") or 0) < STRAT_ACTIVE_MIN_TEST
+        if not r["newcomer"] and not r["few_test"] and len(active) < top_n:
+            active.append(sym)
+    display = ranked[:max(disp_n, top_n)]
+    shown = {sym for sym, _ in display}
+    display += [(sym, r) for sym, r in ranked if sym in active and sym not in shown]
+    return display, active
+
+
 def provisional_top(state, key, all_results, n):
     """v0.99.369 — while an S/R / P/R cycle runs, the best coins found SO
     FAR (same ranking as the cycle end: test avg R after fees), compact.
     Display only — trading keeps using the previous finished list."""
-    ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])[:max(n, 5)]
+    ranked = sorted(all_results.items(), key=lambda kv: -strategy_rank_score(kv[1]))[:max(n, 5)]   # v0.99.557
     rows = [{"symbol": sym, "timeframe": r.get("timeframe"), "rr": r.get("rr"),
              "train_n": r.get("train_n"), "train_wr": r.get("train_wr"), "train_z": r.get("train_z"),
              "test_n": r.get("test_n"), "test_wr": r.get("test_wr"), "test_avg_pnl_r": r.get("test_avg_pnl_r"),
@@ -15511,9 +15553,14 @@ def snr_backtest_loop():
                     with state_lock:
                         _old_snr = dict(STATE.get("snr_results") or {})
                     all_results.update(strategy_carry_filters("snr", _old_snr, "snr_backtest_loop"))
-                ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
-            display_top = ranked[:max(SNR_DISPLAY_N, SNR_TOP_N)]
-            active_top = display_top[:SNR_TOP_N]
+                ranked = None   # v0.99.557 — ranked in strategy_pick() below
+            if ranked is not None:
+                display_top = ranked[:max(SNR_DISPLAY_N, SNR_TOP_N)]
+                active_top = display_top[:SNR_TOP_N]
+            else:
+                with state_lock:
+                    display_top, _act = strategy_pick("snr", all_results, SNR_TOP_N, SNR_DISPLAY_N)
+                active_top = [(sym_, all_results[sym_]) for sym_ in _act]
             # v0.99.288 — CRITICAL FIX, per direct user report ("застревание
             # бэктеста... потом зависают даже настройки и не сохраняются
             # после этой ошибки"): log_error() itself does `with state_lock:`
@@ -16347,9 +16394,9 @@ def prv_backtest_loop():
                     for s_, r_ in prv_pooled_results(_pooled["chosen"], universe).items():
                         all_results.setdefault(s_, r_)
 
-            ranked = sorted(all_results.items(), key=lambda kv: -kv[1]["test_avg_pnl_r"])
-            display_top = ranked[:max(PRV_DISPLAY_N, PRV_TOP_N)]
-            active_top = display_top[:PRV_TOP_N]
+            with state_lock:   # v0.99.557 — see strategy_pick()
+                display_top, _act = strategy_pick("prv", all_results, PRV_TOP_N, PRV_DISPLAY_N)
+            active_top = [(sym_, all_results[sym_]) for sym_ in _act]
             # v0.99.288 — same CRITICAL DEADLOCK FIX as snr_backtest_loop()'s
             # own — see that function's own comment for the full incident.
             # v0.99.393 — "no coin passed" is an honest result, not a failed
@@ -31660,7 +31707,7 @@ async function refreshSnr() {
       const bestBadge = (data.single_best && c.symbol === data.best_symbol)
         ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-xs);"><span style="font-size:var(--fs-xs);color:var(--money);">⭐ торгуется (только лучшая карточка)</span></div>`
         : (data.single_best && isActive ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:var(--line);border-radius:var(--r-xs);"><span class="dim" style="font-size:var(--fs-xs);">только сигналы — торгуется лучшая карточка</span></div>` : '');
-      const inactiveBadge = bestBadge + (isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:var(--ctl);border-radius:var(--r-xs);">
+      const inactiveBadge = bestBadge + stratNewBadge(c, isActive) + (isActive || (c.result && (c.result.newcomer || c.result.few_test)) ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:var(--ctl);border-radius:var(--r-xs);">
         <span class="dim" style="font-size:var(--fs-xs);">\u26aa \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0441\u043f\u0440\u0430\u0432\u043a\u0438 \u2014 \u043d\u0435 \u0442\u043e\u0440\u0433\u0443\u0435\u0442\u0441\u044f \u0438 \u043d\u0435 \u0441\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442\u0441\u044f \u0432\u0436\u0438\u0432\u0443\u044e</span>
       </div>`);
       if (!c.found) {
@@ -32630,6 +32677,15 @@ function prvHonestHtml(h) {   // v0.99.546 — the honest live check
   </details>`;
 }
 
+function stratNewBadge(c, isActive) {   // v0.99.557 — why a passing coin isn't traded yet
+  const r = c.result || {};
+  if (isActive || !(r.newcomer || r.few_test)) return '';
+  const dt = r.first_seen ? new Date(r.first_seen * 1000).toLocaleString('ru-RU', {day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'}) : '';
+  const txt = r.newcomer ? `🆕 новичок (в списке с ${dt}) — торговать начнёт, если подтвердится на следующем пересчёте`
+    : `мало сделок на тесте (${r.test_n}, нужно 8) — только для справки`;
+  return `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-xs);"><span style="font-size:var(--fs-xs);">${txt}</span></div>`;
+}
+
 async function refreshPrv() {
   const panel = document.getElementById('prvPanel');
   try {
@@ -32677,7 +32733,7 @@ async function refreshPrv() {
       const bestBadge = (data.single_best && c.symbol === data.best_symbol)
         ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-xs);"><span style="font-size:var(--fs-xs);color:var(--money);">⭐ торгуется (только лучшая карточка)</span></div>`
         : (data.single_best && isActive ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:var(--line);border-radius:var(--r-xs);"><span class="dim" style="font-size:var(--fs-xs);">только сигналы — торгуется лучшая карточка</span></div>` : '');
-      const inactiveBadge = bestBadge + (isActive ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:var(--ctl);border-radius:var(--r-xs);">
+      const inactiveBadge = bestBadge + stratNewBadge(c, isActive) + (isActive || (c.result && (c.result.newcomer || c.result.few_test)) ? '' : `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:var(--ctl);border-radius:var(--r-xs);">
         <span class="dim" style="font-size:var(--fs-xs);">\u26aa \u0442\u043e\u043b\u044c\u043a\u043e \u0434\u043b\u044f \u0441\u043f\u0440\u0430\u0432\u043a\u0438 \u2014 \u043d\u0435 \u0442\u043e\u0440\u0433\u0443\u0435\u0442\u0441\u044f \u0438 \u043d\u0435 \u0441\u043a\u0430\u043d\u0438\u0440\u0443\u0435\u0442\u0441\u044f \u0432\u0436\u0438\u0432\u0443\u044e</span>
       </div>`);
       if (!c.found) {

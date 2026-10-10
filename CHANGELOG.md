@@ -19321,3 +19321,12 @@ v0.99.556 - Поиск по результату: adaptive filters on top of the
          shows the result with and without the filters. Live scan uses the same filters. Every
          exam is kept: "история экзаменов" shows whether the search is getting better over time.
          (Synthetic check: a real edge "long only" is found, noise mostly isn't.)
+v0.99.557 - P/R (and S/R per-coin mode): "резко появляется монета с отличными результатами, которой
+         вчера не было в списке — что-то тут не так". The coins were ranked by their TEST average:
+         the part meant as the honest check chose the winners, so among hundreds of coins the
+         luckiest handful of test trades came out on top — a new lucky coin every 4 h as the data
+         moved. Now: ranked by the test's sum R / sqrt(trades + 10) (5 lucky trades can't outrank 30
+         good ones); a coin is traded only with >= 8 test trades; a coin passing for the first
+         time is shown as "🆕 новичок" and traded only after the next recount (4 h) confirms it.
+         Coins already in the list at the update are not newcomers. (S/R's pooled mode already
+         ranks by train — unchanged.)
