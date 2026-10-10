@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.552"
+APP_VERSION = "0.99.553"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1045,7 +1045,7 @@ AUTOTRADE_LEVERAGE_BOUNCE = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_BOUNCE", 1
 AUTOTRADE_LEVERAGE_BREAKOUT = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_BREAKOUT", 10))
 AUTOTRADE_ENABLED_MSNR = False  # v0.99.402 — MSNR removed. Original:  # off by default — same "unverified source" treatment as XAU_LG/FT5
 AUTOTRADE_LEVERAGE_MSNR = int(os.environ.get("VP_AUTOTRADE_LEVERAGE_MSNR", 10))
-MSNR_COMPOUND_START_BALANCE = float(os.environ.get("VP_MSNR_COMPOUND_START_BALANCE", 500.0))  # v0.99.434 — 15 -> 500 (user: "считать не с 15$, а с 500")  # v0.99.24 — per direct user request: $ margin the backtest's compounding simulation starts with on the first closed trade. v0.99.179 — lowered 40->15 per direct user request ("принять не за 40$ а 15$").
+MSNR_COMPOUND_START_BALANCE = float(os.environ.get("VP_MSNR_COMPOUND_START_BALANCE", 15.0))  # v0.99.553 — back to 15 (user: "хотел бы видеть там 15$"); v0.99.434 — 15 -> 500 (user: "считать не с 15$, а с 500")  # v0.99.24 — per direct user request: $ margin the backtest's compounding simulation starts with on the first closed trade. v0.99.179 — lowered 40->15 per direct user request ("принять не за 40$ а 15$").
 AUTOTRADE_ENABLED_FT5 = os.environ.get("VP_AUTOTRADE_FT5", "0") == "1"  # off by default — same reasoning as XAU_LG: unverified source, and the freqtrade backtest table this was ported from is a near-certain overfitting example (20-day 2018 window)
 AUTOTRADE_TRADE_HISTORY = 300
 
@@ -3116,7 +3116,7 @@ _ERR_MODULES = (   # first match on the leading function name wins
 _ERR_PROCESS = (
     ("filter_analysis", "отчёт фильтров"), ("filter_loop", "отчёт фильтров"),
     ("mining", "майнинг"), ("backtest", "бэктест"), ("optimize", "бэктест"), ("build_universe", "список монет"),
-    ("compound", "расчёт $500"), ("outcome", "отслеживание сделки"), ("close_position_early", "досрочное закрытие"),
+    ("compound", "расчёт $15"), ("outcome", "отслеживание сделки"), ("close_position_early", "досрочное закрытие"),
     ("live", "живой скан"), ("scan_symbol_live", "живой скан"), ("chart", "график"), ("reset", "очистка"),
     ("watchdog", "контроль бэктеста"), ("addon", "доливка"), ("index candles", "индексная цена"),
     ("funding", "фандинг"), (" OI", "открытый интерес"),
@@ -19268,7 +19268,7 @@ def _neuro_sim_start(summary):
 
 def neuro_mark_train(trades, summary):
     """v0.99.536 — marks the trades of the part the model learned on, so the
-    "$500→" column can say why they have no balance (cheap: run on every poll)"""
+    "$15→" column can say why they have no balance (cheap: run on every poll)"""
     me, _ = _neuro_sim_start(summary)
     for t in trades:
         if isinstance(t, dict):
@@ -30054,7 +30054,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow subRow" style="flex-wrap:wrap;">
         <div style="flex:1 1 100%;">
           <div class="label">↳ Риск Neuro · P/R · Зоны</div>
-          <div class="sub">свой % для каждого модуля (0.1–100); пустое поле — общий % выше. Бэктест «с $500» каждого модуля считает со своим %</div>
+          <div class="sub">свой % для каждого модуля (0.1–100); пустое поле — общий % выше. Бэктест «с $15» каждого модуля считает со своим %</div>
         </div>
         <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
           <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro" title="Neuro" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
@@ -30066,7 +30066,7 @@ INDEX_HTML = """<!doctype html>
       <div class="settingRow subRow">
         <div>
           <div class="label">↳↳ Авто-риск (лучший % для каждой монеты Neuro / P/R; у Зон — один на все, вместе с тейком и стопом)</div>
-          <div class="sub">вместо % выше каждая монета Neuro / P/R торгуется со своим риском на сделку — тем, при котором счёт растёт быстрее всего на длинной дистанции (Келли), осторожно: по сделкам теста (их не видел выбор настроек), с пессимистичной поправкой на малую выборку (без деления пополам). Не больше 50%. Бэктест «с $500» считает так же</div>
+          <div class="sub">вместо % выше каждая монета Neuro / P/R торгуется со своим риском на сделку — тем, при котором счёт растёт быстрее всего на длинной дистанции (Келли), осторожно: по сделкам теста (их не видел выбор настроек), с пессимистичной поправкой на малую выборку (без деления пополам). Не больше 50%. Бэктест «с $15» считает так же</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutoRisk"><span class="switchSlider"></span></label>
       </div>
@@ -31350,7 +31350,7 @@ async function refreshNeuro() {
             ${neuroEquitySpark(trades, s.compound_start)}
             <div style="overflow-x:auto;margin-top:6px;">
               <table style="font-size:var(--fs-xs);white-space:nowrap;">
-                <thead><tr><th>\u0412\u0445\u043e\u0434</th><th>Dir</th><th>Entry</th><th>\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442</th><th>P&L</th><th title="баланс симулятора; 🎓 = период обучения, в расчёт не входит">$500→</th></tr></thead>
+                <thead><tr><th>\u0412\u0445\u043e\u0434</th><th>Dir</th><th>Entry</th><th>\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442</th><th>P&L</th><th title="баланс симулятора; 🎓 = период обучения, в расчёт не входит">$15→</th></tr></thead>
                 <tbody>${tradeRows}</tbody>
               </table>
             </div>
@@ -31407,7 +31407,7 @@ async function refreshNeuro() {
         <span class="dim" style="font-size:var(--fs-xs);">⚪ не проходит проверку${c.fail_reason ? ': ' + c.fail_reason : ''} — не торгуется даже с галочкой</span>
       </div>`;
       const moneyBadge = (isActive && c.money_blocked)   // v0.99.429
-        ? `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:var(--ctl);border-radius:var(--r-xs);"><span class="loss" style="font-size:var(--fs-xs);">💸 при текущем риске симуляция $500 в минусе — не торгуется (уменьшите риск или включите «Авто-риск»)</span></div>` : '';
+        ? `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:var(--ctl);border-radius:var(--r-xs);"><span class="loss" style="font-size:var(--fs-xs);">💸 при текущем риске симуляция $15 в минусе — не торгуется (уменьшите риск или включите «Авто-риск»)</span></div>` : '';
       const bestBadge = (isActive && c.symbol === data.best_symbol)
         ? `<div style="display:inline-block;padding:2px 8px;margin:0 0 6px 6px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-xs);"><span style="font-size:var(--fs-xs);color:var(--money);">⭐ лучшая карточка${data.single_best ? ' · торгуется' : ''}</span></div>` : '';
       const _selSet = new Set(data.autotrade_selected || []);
@@ -31423,7 +31423,7 @@ async function refreshNeuro() {
         </label>`;
       const _dp = s.daily_pct;
       const dailyHead = _dp != null
-        ? `<span class="${_dp >= 0 ? 'win' : 'loss'}" style="font-size:var(--fs);font-weight:700;margin-left:8px;" title="средний доход в день с $500, размер как у автоторговли, проверка + тест">${_dp > 0 ? '+' : ''}${_dp}%/день</span>` : '';
+        ? `<span class="${_dp >= 0 ? 'win' : 'loss'}" style="font-size:var(--fs);font-weight:700;margin-left:8px;" title="средний доход в день с $15, размер как у автоторговли, проверка + тест">${_dp > 0 ? '+' : ''}${_dp}%/день</span>` : '';
       return `<div class="fx-card ${fxNew('neuro:' + c.symbol)}" style="${cardStyle}">
         <div style="font-size:var(--fs-md);font-weight:700;color:var(--neuro);margin-bottom:4px;"><span class="dim" style="font-weight:400;">#${c.rank}</span> ${c.symbol.replace('_USDT','')}${dailyHead}</div>
         ${selBox}
@@ -34251,16 +34251,16 @@ function fmtUsdCompact(v) {
 function neuroDailyHtml(x) {
   if (!x || x.daily_pct == null) return '';
   const d = x.daily_pct, cls = d >= 0 ? 'win' : 'loss';
-  return `<div style="font-size:var(--fs-sm);margin:4px 0 2px;">📈 <b class="${cls}">${d > 0 ? '+' : ''}${d}% в день</b> <span class="dim">· с $500 как автоторговля · ${x.compound_period || 'проверка + тест'}${x.compound_days ? ', ' + Math.round(x.compound_days) + ' дн.' : ''} · для информации</span></div>`;
+  return `<div style="font-size:var(--fs-sm);margin:4px 0 2px;">📈 <b class="${cls}">${d > 0 ? '+' : ''}${d}% в день</b> <span class="dim">· с $15 как автоторговля · ${x.compound_period || 'проверка + тест'}${x.compound_days ? ', ' + Math.round(x.compound_days) + ' дн.' : ''} · для информации</span></div>`;
 }
 function compoundSummaryHtml(x) {
   if (x && x.compound_final_balance === undefined) {
     // v0.99.327 — result computed by a version before the $15 simulation existed
-    return `<div class="dim" style="font-size:var(--fs-sm);margin:4px 0 8px;">💰 расчёт с $500 появится после следующего бэктеста этого модуля (или 🛠 → «↻ Бэктест»)</div>`;
+    return `<div class="dim" style="font-size:var(--fs-sm);margin:4px 0 8px;">💰 расчёт с $15 появится после следующего бэктеста этого модуля (или 🛠 → «↻ Бэктест»)</div>`;
   }
   if (!x || x.compound_final_balance == null) return '';
   if (!x.compound_trades) {   // v0.99.436 — say why instead of hiding the line
-    return `<div class="dim" style="font-size:var(--fs-sm);margin:4px 0 8px;">💰 с $${x.compound_start || 500}: ни одна сделка не открылась бы${x.compound_skipped ? ` — все ${x.compound_skipped} пропущены: при риске ${x.compound_mode || ''} нужной маржи больше, чем баланса (снизьте риск модуля)` : ' — у сделок нет цены входа/стопа'}</div>`;
+    return `<div class="dim" style="font-size:var(--fs-sm);margin:4px 0 8px;">💰 с $${x.compound_start || 15}: ни одна сделка не открылась бы${x.compound_skipped ? ` — все ${x.compound_skipped} пропущены: при риске ${x.compound_mode || ''} нужной маржи больше, чем баланса (снизьте риск модуля)` : ' — у сделок нет цены входа/стопа'}</div>`;
   }
   const pct = x.compound_return_pct;
   const cls = pct >= 0 ? 'win' : 'loss';
@@ -34279,7 +34279,7 @@ function compoundCellTxt(t) {
       ? '<span class="dim" title="период обучения: на этих сделках нейросеть искала закономерности, поэтому в расчёт $ они не входят">🎓 обучение</span>'
       : '<span class="dim">—</span>';
   }
-  return `<span class="bal" title="баланс после этой сделки (старт $500, размер как у автоторговли, с комиссиями)">${fmtUsdCompact(t.compound_balance_after)}</span>`;   // v0.99.368 — own colour
+  return `<span class="bal" title="баланс после этой сделки (старт $15, размер как у автоторговли, с комиссиями)">${fmtUsdCompact(t.compound_balance_after)}</span>`;   // v0.99.368 — own colour
 }
 // Motion helpers (Neuro / Zones): a card animates only the first time it appears in
 // this page session, so the periodic re-render doesn't replay it.
@@ -34372,8 +34372,8 @@ async function loadBtTrades(det, mod, sym, stamp) {
     const chron = [...d.trades].sort((a, b) => a.time - b.time);
     const split = d.test_start_time;
     let html = d.full
-      ? `<div class="dim" style="font-size:var(--fs-xs);padding:3px 0;">старт: $500, размер каждой сделки как у автоторговли (режим — в строке 💰 выше) · сначала train-часть (на ней подбирались параметры), потом тест</div>`
-      : '<div class="dim" style="font-size:var(--fs-xs);">у этого результата сохранены только последние 40 сделок (без начала истории, поэтому баланс не с $500) — полный список появится после следующего бэктеста</div>';
+      ? `<div class="dim" style="font-size:var(--fs-xs);padding:3px 0;">старт: $15, размер каждой сделки как у автоторговли (режим — в строке 💰 выше) · сначала train-часть (на ней подбирались параметры), потом тест</div>`
+      : '<div class="dim" style="font-size:var(--fs-xs);">у этого результата сохранены только последние 40 сделок (без начала истории, поэтому баланс не с $15) — полный список появится после следующего бэктеста</div>';
     let dividerDone = !split;
     for (const t of chron) {
       if (!dividerDone && t.time > split) {

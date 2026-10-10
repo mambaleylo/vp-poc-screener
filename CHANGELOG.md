@@ -19295,3 +19295,9 @@ v0.99.552 - Зоны: the post's text is the picture's context (user: "в тек
          written in the text ("0.0769-0.0739") is the zone's two lines: a line read with a wrong
          digit (within 3%) is set to the written number; "уровни совпадают с текстом поста"
          otherwise. Other zones of the post are not touched.
+v0.99.553 - The backtest money column ("💰 с $…", "📈 % в день", the "$…→" balance per trade)
+         starts from $15 again instead of $500 (user: "хотел бы видеть там 15$"; $500 came in
+         v0.99.434 at his request). The start is part of compound_sig: the saved cards recompute
+         by themselves. Note: Neuro's "money" check (the card is traded only if this simulation
+         ends above its start) is now at $15 — with a small balance a coin's minimum order can
+         make a trade bigger than the risk or impossible, so some cards may get "💸 в минусе".
