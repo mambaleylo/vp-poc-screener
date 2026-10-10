@@ -19305,3 +19305,8 @@ v0.99.554 - Зоны: the XRP result post (red price-range label "0,0884 (6,69%)
          was taken as a live setup again. The label's dark text makes holes in its red fill, so
          it failed the "solid rectangle" test and was never read. A small, wide box filled with
          text is now kept apart and only read as a result label (never a zone) -> "пост-отчёт".
+v0.99.555 - Зоны: "мониторинг молчит 6 мин — бот завис или выключен". The 20-second monitoring
+         loop also replayed every training zone on the chart every 15 min (one candle request per
+         zone — minutes with hundreds of them), ran the duplicate revive check every 10 min and
+         the start-up fixes before its first pass; meanwhile the live zones weren't watched. These
+         chores run in their own thread now (zones_slow_loop); the monitoring only watches.

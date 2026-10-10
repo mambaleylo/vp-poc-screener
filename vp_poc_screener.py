@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.554"
+APP_VERSION = "0.99.555"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -24929,24 +24929,9 @@ _zones_revive_check = [0.0]
 
 def zones_monitor_tick(last_track=0.0):
     """One pass over the live zones; returns the time of the last trade check."""
-    if time.time() - _zones_train_check[0] >= 900:   # training zones: outcome from the chart, no alerts
-        _zones_train_check[0] = time.time()
-        with _zones_lock:
-            tz = [z for z in ZONES["zones"] if z.get("status") == "train" and z.get("symbol")]
-        for z in tz:
-            try:
-                zones_replay_past(z)
-            except Exception as e:
-                log_error(f"zones train replay {z.get('symbol')}: {e}")
-        if any(z.get("status") != "train" for z in tz):
-            zones_save()
-            _zones_learn_event.set()
-    if time.time() - _zones_revive_check[0] >= 600:   # v0.99.543
-        _zones_revive_check[0] = time.time()
-        try:
-            zones_revive_orphan_dups()
-        except Exception as e:
-            log_error(f"zones revive: {e}")
+    # v0.99.555 — the training-zone replay and the revive check moved to zones_slow_loop():
+    # one candle request per zone, hundreds of zones = minutes in which the live zones
+    # weren't watched ("мониторинг молчит 6 мин — бот завис или выключен")
     with _zones_lock:
         active = [z for z in ZONES["zones"] if z.get("status") in ("watch", "in_trade") and z.get("symbol")]
         any_appr = any((p_.get("appr_trade") or {}).get("status") == "OPEN"
@@ -25098,17 +25083,46 @@ def zones_unrevive():
     return n
 
 
+def zones_slow_loop():
+    """v0.99.555 — the zones' slow chores, apart from the 20-second monitoring of the live
+    zones: the start-up fixes, the training zones' outcomes from the chart (every 15 min) and
+    the skipped-duplicate revive check (every 10 min). Each of them fetches candles zone by
+    zone and could stall the monitoring for minutes."""
+    for fn_, name_ in ((zones_unrevive, "unrevive"), (zones_dedup_migrate, "dedup")):   # v0.99.538
+        try:
+            fn_()
+        except Exception as e:
+            log_error(f"zones {name_}: {e}")
+    time.sleep(60)
+    try:
+        zones_live_sanity()   # v0.99.544
+    except Exception as e:
+        log_error(f"zones live sanity: {e}")
+    while True:
+        heartbeat("zones_slow_loop")
+        if time.time() - _zones_train_check[0] >= 900:   # training zones: outcome from the chart, no alerts
+            _zones_train_check[0] = time.time()
+            with _zones_lock:
+                tz = [z for z in ZONES["zones"] if z.get("status") == "train" and z.get("symbol")]
+            for z in tz:
+                try:
+                    zones_replay_past(z)
+                except Exception as e:
+                    log_error(f"zones train replay {z.get('symbol')}: {e}")
+            if any(z.get("status") != "train" for z in tz):
+                zones_save()
+                _zones_learn_event.set()
+        if time.time() - _zones_revive_check[0] >= 600:   # v0.99.543
+            _zones_revive_check[0] = time.time()
+            try:
+                zones_revive_orphan_dups()
+            except Exception as e:
+                log_error(f"zones revive: {e}")
+        time.sleep(60)
+
+
 def zones_monitor_loop():
     last_track, last_sweep = 0.0, 0.0
-    try:
-        zones_unrevive()
-    except Exception as e:
-        log_error(f"zones unrevive: {e}")
-    try:
-        zones_dedup_migrate()   # v0.99.538
-    except Exception as e:
-        log_error(f"zones dedup: {e}")
-    threading.Thread(target=lambda: (time.sleep(90), zones_live_sanity()), daemon=True).start()   # v0.99.544
     with _zones_lock:   # v0.99.493 — what came back from the disk after the start
         zs = ZONES["zones"]
         lad = [z for z in zs if (z.get("trade") or {}).get("legs") and z["trade"].get("status") in ("PENDING", "OPEN")
@@ -35283,6 +35297,7 @@ if __name__ == "__main__":
     threading.Thread(target=zut_start, daemon=True).start()            # v0.99.448 — group via the user's account
     threading.Thread(target=zut_keepalive_loop, daemon=True).start()
     threading.Thread(target=zones_monitor_loop, daemon=True).start()
+    threading.Thread(target=zones_slow_loop, daemon=True).start()   # v0.99.555
     threading.Thread(target=zones_learn_loop, daemon=True).start()
     if not ZONES.get("recheck_v515"):   # v0.99.503 — once: the history recognised again by the current recogniser
         threading.Thread(target=zones_recheck_results, daemon=True).start()
