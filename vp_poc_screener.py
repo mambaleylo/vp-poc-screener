@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.564"
+APP_VERSION = "0.99.565"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -1106,6 +1106,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_mirror", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_mirror", "autotrade_neuro", "auto_risk_enabled",
                   "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones",
+                  "mr4_enabled", "autotrade_mr4", "telegram_alerts_mr4", "risk_pct_mr4",   # v0.99.565
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
                   "zones_own_scan", "autotrade_zones_own", "telegram_alerts_zones_own",
                   "telegram_alerts_trade_results", "telegram_trade_results_real_only",
@@ -1160,6 +1161,8 @@ def get_settings():
         "prv_display_n": PRV_DISPLAY_N,
         "telegram_alerts_prv": TELEGRAM_ALERTS_PRV,
         "autotrade_prv": AUTOTRADE_ENABLED_PRV,
+        "mr4_enabled": MR4_ENABLED, "autotrade_mr4": AUTOTRADE_ENABLED_MR4, "telegram_alerts_mr4": TELEGRAM_ALERTS_MR4,   # v0.99.565
+        "risk_pct_mr4": MODULE_RISK_PCT.get("mr4"),
         "nq_enabled": NQ_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
@@ -1471,7 +1474,11 @@ def apply_settings(updates):
                 globals()["ZONES_MAX_DAYS"] = min(v, 90)
         except (TypeError, ValueError):
             pass
-    for _mod in ("neuro", "snr", "prv", "zones"):   # v0.99.435 — own risk % per module; empty / 0 = the common one
+    for _k in ("mr4_enabled", "autotrade_mr4", "telegram_alerts_mr4"):   # v0.99.565
+        if _k in updates:
+            globals()[{"mr4_enabled": "MR4_ENABLED", "autotrade_mr4": "AUTOTRADE_ENABLED_MR4",
+                       "telegram_alerts_mr4": "TELEGRAM_ALERTS_MR4"}[_k]] = bool(updates[_k])
+    for _mod in ("neuro", "snr", "prv", "zones", "mr4"):   # v0.99.435 — own risk % per module; empty / 0 = the common one
         _key = f"risk_pct_{_mod}"
         if _key in updates:
             try:
@@ -1807,6 +1814,8 @@ STATE = {
     "prv_waiting_for_slot": False,
     "prv_progress_done": 0, "prv_progress_total": 0, "prv_progress_in_flight": [],
     "prv_signals": deque(maxlen=500),
+    "mr4_results": {}, "mr4_last_backtest_finished": None, "mr4_backtest_running": False, "mr4_waiting_for_slot": False,   # v0.99.565
+    "mr4_progress_done": 0, "mr4_progress_total": 0, "mr4_progress_in_flight": [], "mr4_signals": deque(maxlen=500),
     "snr_signals": deque(maxlen=500),  # v0.99.271 — live signal log, same shape as lsw_signals/mirror_signals
     "scalp_risk_tiers": {},  # v0.99.237 — symbol -> sorted list of (notional_threshold, mmr, max_leverage) tiers, for notional-aware safe-leverage lookups
     "scalp_data": {},          # symbol -> {interval -> {direction -> target-summary}}
@@ -3163,7 +3172,7 @@ _ERR_CAUSES = (   # (markers, explanation, advice) — first match wins
 )
 
 
-_ERR_MODE_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "snr": "S/R Zones", "prv": "Peak Reversal", "neuro": "Neuro", "zones": "Зоны",
+_ERR_MODE_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "snr": "S/R Zones", "prv": "Peak Reversal", "mr4": "Откат 4в1", "neuro": "Neuro", "zones": "Зоны",
                     "scalp": "Скальпинг", "ft5": "FT5", "mirror": "Зеркало", "bounce": "Bounce", "breakout": "Breakout"}
 
 
@@ -5601,7 +5610,7 @@ def _sim_signal_list(mode):
     if mode == "zones":   # v0.99.438
         with _zones_lock:
             return [z["trade"] for z in ZONES["zones"] if z.get("trade")]
-    key = {"snr": "snr_signals", "prv": "prv_signals", "msnr": "msnr_signals", "mirror": "mirror_signals",
+    key = {"snr": "snr_signals", "prv": "prv_signals", "mr4": "mr4_signals", "msnr": "msnr_signals", "mirror": "mirror_signals",
            "lsw": "lsw_signals", "ft5": "ft5_signals", "scalp": "scalp_signals",
            "bounce": "signals", "breakout": "signals"}.get(mode)
     if not key:
@@ -6971,6 +6980,8 @@ def save_state():
                 "prv_signals": list(STATE["prv_signals"]),
                 "prv_active_symbols": list(_prv_active_symbols),
                 "prv_display_symbols": list(_prv_display_symbols),
+                "mr4_results": STATE["mr4_results"], "mr4_signals": list(STATE["mr4_signals"]),   # v0.99.565
+                "mr4_active_symbols": list(_mr4_active_symbols), "mr4_display_symbols": list(_mr4_display_symbols),
                 "autotrade_log": list(STATE["autotrade_log"]),
                 "sim_balance": STATE["sim_balance"],
                 "sim_alert_sent": bool(STATE.get("sim_alert_sent")),   # v0.99.355
@@ -7021,6 +7032,7 @@ PERSIST_BT_KEYS = (
     "snr_last_backtest_finished", "snr_filters", "snr_diag", "snr_pooled",
     "prv_last_backtest_finished", "prv_filters", "prv_keep", "prv_pooled",   # v0.99.410, v0.99.411
     "prv_first_seen", "snr_first_seen",   # v0.99.557
+    "mr4_last_backtest_finished", "mr4_keep", "mr4_pooled", "mr4_first_seen",   # v0.99.565
     "mirror_last_backtest_finished", "mirror_last_backtest_duration", "mirror_backtest_summary",
     "mirror_tuned_tolerances",
     "ft5_last_backtest_finished", "ft5_last_backtest_duration", "ft5_universe", "ft5_live_universe",
@@ -7082,6 +7094,7 @@ def _backfill_mfe_mae(signal_list):
 
 def load_state():
     global _snr_active_symbols, _snr_display_symbols, _prv_active_symbols, _prv_display_symbols
+    global _mr4_active_symbols, _mr4_display_symbols   # v0.99.565
     if not os.path.exists(STATE_FILE):
         return
     try:
@@ -7154,6 +7167,12 @@ def load_state():
                 _snr_display_symbols = snr_display_symbols
             STATE["prv_results"] = prv_results
             STATE["prv_signals"] = deque(prv_signals, maxlen=500)
+            STATE["mr4_results"] = data.get("mr4_results") or {}   # v0.99.565
+            STATE["mr4_signals"] = deque(data.get("mr4_signals") or [], maxlen=500)
+            if data.get("mr4_active_symbols"):
+                _mr4_active_symbols = data["mr4_active_symbols"]
+            if data.get("mr4_display_symbols"):
+                _mr4_display_symbols = data["mr4_display_symbols"]
             if prv_active_symbols:
                 _prv_active_symbols = prv_active_symbols
             if prv_display_symbols:
@@ -7427,6 +7446,7 @@ LOOP_MAX_GAP_SEC = {
     "scan_loop": 30 * 60,
     "snr_live_loop": 60 * 60,
     "prv_live_loop": 60 * 60,
+    "mr4_live_loop": 60 * 60, "mr4_backtest_loop": 60 * 60,   # v0.99.565
     "neuro_live_loop": 60 * 60,
     "reconcile_loop": 30 * 60,
     # backtest loops (v0.99.325): they now beat every minute while queued
@@ -7446,6 +7466,7 @@ LOOP_LABELS = {
     "msnr_backtest_loop": "MSNR бэктест", "lsw_backtest_loop": "Sweep бэктест",
     "snr_backtest_loop": "S/R бэктест", "prv_backtest_loop": "Peak Reversal бэктест",
     "neuro_mining_loop": "Neuro майнинг",
+    "mr4_live_loop": "Откат 4в1 живой скан", "mr4_backtest_loop": "Откат 4в1 бэктест",   # v0.99.565
 }
 BACKTEST_RETRY_AFTER_ERROR_SEC = int(os.environ.get("VP_BACKTEST_RETRY_AFTER_ERROR_SEC", 1800))  # v0.99.322 — failed backtest cycles retry in 30 min, not a full refresh interval later
 
@@ -7538,7 +7559,7 @@ def wait_beating(event, timeout, name):
 _BT_STARTUP_CHECKED = set()
 _BT_RAN = set()   # modules that already finished a cycle in THIS process (core boost)
 _BT_RESULTS_KEY = {"msnr": "msnr2_coins", "lsw": "lsw_backtest_results",
-                   "snr": "snr_results", "prv": "prv_results",
+                   "snr": "snr_results", "prv": "prv_results", "mr4": "mr4_results",
                    "mirror": "mirror_backtest_results", "ft5": "ft5_symbol_overrides"}
 
 
@@ -7549,7 +7570,7 @@ _BT_RESULTS_KEY = {"msnr": "msnr2_coins", "lsw": "lsw_backtest_results",
 # when each loop is next due — shown in the header "⏱" panel. In memory
 # only: a restart starts a fresh journal.
 BT_JOURNAL = deque(maxlen=120)
-BT_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "snr": "S/R", "prv": "Peak Reversal", "neuro": "Neuro",
+BT_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "snr": "S/R", "prv": "Peak Reversal", "neuro": "Neuro", "mr4": "Откат 4в1",
              "lsw_nf": "Sweep фильтр", "snr_nf": "S/R фильтр", "prv_nf": "P/R фильтр"}
 BT_REASON_BUTTON = "кнопка «Бэктест» / «Очистить» / настройки"
 _bt_journal_lock = threading.Lock()
@@ -7623,7 +7644,7 @@ def bt_startup_skip(mod, trigger, refresh_sec, loop_name, triggered=False):
         last = STATE.get(f"{mod}_last_backtest_finished")
         # S/R and P/R may honestly end with 0 coins — their finish time is only
         # stamped on a cycle that had data, so it alone counts as "fresh".
-        have = bool(STATE.get(_BT_RESULTS_KEY.get(mod, ""))) or mod in ("snr", "prv")
+        have = bool(STATE.get(_BT_RESULTS_KEY.get(mod, ""))) or mod in ("snr", "prv", "mr4")
     if not (have and last):
         return 0
     remaining = refresh_sec - (time.time() - last)
@@ -7696,7 +7717,8 @@ def _loop_waiting_for_slot(name):
     (something else is hogging the slots), but it's a different diagnosis
     than a hang."""
     key = {"msnr_backtest_loop": "msnr_waiting_for_slot", "lsw_backtest_loop": "lsw_waiting_for_slot",
-           "snr_backtest_loop": "snr_waiting_for_slot", "prv_backtest_loop": "prv_waiting_for_slot"}.get(name)
+           "snr_backtest_loop": "snr_waiting_for_slot", "prv_backtest_loop": "prv_waiting_for_slot",
+           "mr4_backtest_loop": "mr4_waiting_for_slot"}.get(name)
     if key:
         return bool(STATE.get(key))  # plain dict read, no lock (called from the watchdog)
     if name == "neuro_mining_loop":
@@ -7771,6 +7793,8 @@ def send_telegram(text, category=None):
     if category == "snr" and not TELEGRAM_ALERTS_SNR:
         return
     if category == "prv" and not TELEGRAM_ALERTS_PRV:
+        return
+    if category == "mr4" and not TELEGRAM_ALERTS_MR4:   # v0.99.565
         return
     if category == "zones" and not TELEGRAM_ALERTS_ZONES:
         return
@@ -9058,7 +9082,7 @@ def kelly_risk(pairs):
             "auto_risk_n": n, "auto_risk_avg_r": round(mean, 3), "auto_risk_cautious_r": round(mean - se, 3)}
 
 
-MODULE_RISK_PCT = {"neuro": None, "snr": None, "prv": None, "zones": None}   # v0.99.435 — own risk % per module (None = the common one)
+MODULE_RISK_PCT = {"neuro": None, "snr": None, "prv": None, "zones": None, "mr4": None}   # v0.99.435 — own risk % per module (None = the common one)
 RISK_PCT_MAX = 100.0   # v0.99.435 — user: "не ограничивай 50%"
 
 
@@ -9221,7 +9245,7 @@ def rr_compound_live_sizing(trades, symbol, mod, start_balance=None, clean_after
 
 
 def rr_compound_annotate(trades, symbol=None, start_balance=None, mod=None, clean_after=None):
-    if mod in ("neuro", "snr", "prv"):   # v0.99.418 — sized like the live auto-trader
+    if mod in ("neuro", "snr", "prv", "mr4"):   # v0.99.418 — sized like the live auto-trader
         return rr_compound_live_sizing(trades, symbol, mod, start_balance, clean_after=clean_after)
     """v0.99.318 — per user request ("везде где есть список сделок на
     бэктесте писать предполагаемую прибыль если бы я начинал с 15$ ...
@@ -14803,6 +14827,7 @@ def _strategy_merge_filtered(mod, added, top_n, disp_n):
     """Merge filter-phase results into S/R / P/R results and re-rank exactly
     like the cycle end. Returns how many coins are new in the results."""
     global _snr_active_symbols, _snr_display_symbols, _prv_active_symbols, _prv_display_symbols
+    global _mr4_active_symbols, _mr4_display_symbols   # v0.99.565
     with state_lock:
         results = dict(STATE.get(f"{mod}_results") or {})
         n_new = 0
@@ -14847,7 +14872,7 @@ def strategy_pick(mod, all_results, top_n, disp_n, prune=True):
     """ranked by strategy_rank_score; the newcomer and few-trades rules for trading.
     Call with state_lock held. Returns (display_top, active_symbols)."""
     now = time.time()
-    refresh = PRV_REFRESH_SEC if mod == "prv" else SNR_REFRESH_SEC
+    refresh = {"prv": PRV_REFRESH_SEC, "mr4": MR4_REFRESH_SEC}.get(mod, SNR_REFRESH_SEC)
     key = f"{mod}_first_seen"
     first_run = key not in STATE   # just updated: the coins already there are not newcomers
     fs = dict(STATE.get(key) or {})
@@ -16631,6 +16656,630 @@ def prv_live_loop():
         time.sleep(900)
 
 
+# ============================================================================
+# MR4 — "Откат 4в1" (v0.99.565, user: "отдельной вкладкой индикатор, где
+# проверяться будут предложенные из той же семьи, по аналогии всё как в P/R,
+# просто 4 в 1"). Four mean-reversion indicators of the P/R family, each
+# searched and checked exactly like P/R (per coin, train 70% / test 30%,
+# Bonferroni over every combination of all four, pooled check over all coins,
+# fees, the same entry / stop / take / max-hold rules):
+#   bb   — Bollinger: the wick touches SMA ± k·σ (σ of close)
+#   rsi  — RSI(n) at an extreme: <= th -> long, >= 100-th -> short
+#   z    — z-score of the CLOSE vs SMA: <= -thr -> long, >= thr -> short
+#   vwap — the close k ATR away from the rolling VWAP of the last L bars
+# Entry at the next bar's open, stop 1 ATR(14), take RR x stop, close at
+# market after the max holding time; one trade per coin at a time.
+# ============================================================================
+MR4_ENABLED = os.environ.get("VP_MR4_ENABLED", "1") == "1"
+AUTOTRADE_ENABLED_MR4 = os.environ.get("VP_AUTOTRADE_MR4", "0") == "1"
+TELEGRAM_ALERTS_MR4 = os.environ.get("VP_TG_ALERTS_MR4", "1") == "1"
+MR4_FAMILIES = {
+    "bb": ("Боллинджер", "длина", (14, 20, 30), "σ", (1.5, 2.0, 2.5)),
+    "rsi": ("RSI", "период", (2, 3, 5), "порог", (5, 10, 20)),
+    "z": ("Z-score", "длина", (14, 20, 30), "z", (1.5, 2.0, 2.5)),
+    "vwap": ("VWAP-полосы", "окно", (24, 48, 96), "ATR", (1.5, 2.0, 2.5)),
+}
+MR4_RR_CANDIDATES = [1.0, 1.5, 2.0, 3.0]
+MR4_TF_CANDIDATES = ["1h", "4h"]
+MR4_ATR_LENGTH = 14
+MR4_SL_ATR_MULT = 1.0
+MR4_N_COMBOS = sum(len(f[2]) * len(f[4]) for f in MR4_FAMILIES.values()) * len(MR4_RR_CANDIDATES) * len(MR4_TF_CANDIDATES)   # 288
+MR4_Z_CRITICAL = round(statistics.NormalDist().inv_cdf(1 - 0.20 / MR4_N_COMBOS), 3)   # the same alpha 0.20 Bonferroni as P/R, over all 288
+MR4_TEST_Z = 2.0
+MR4_KEEP_Z = 1.645
+MR4_POOLED_Z = round(statistics.NormalDist().inv_cdf(1 - 0.05 / MR4_N_COMBOS), 2)
+MR4_POOLED_MIN_TRAIN = 100
+MR4_POOLED_MIN_TEST = 40
+MR4_POOLED_MIN_COIN_TRAIN = 5
+MR4_MIN_TRAIN_TRADES = 15
+MR4_MIN_TEST_TRADES = 5
+MR4_HISTORY_DAYS = 500
+MR4_TRAIN_FRAC = 0.7
+MR4_MAX_WAIT_BARS = 48
+MR4_TOP_N = 3
+MR4_DISPLAY_N = 5
+MR4_REFRESH_SEC = int(os.environ.get("VP_MR4_REFRESH_SEC", 4 * 3600))
+MR4_BACKTEST_TRIGGER = threading.Event()
+_mr4_active_symbols = []
+_mr4_display_symbols = []
+_mr4_prev_signal_keys = set()
+_mr4_pool_parts = {}
+_mr4_had_data = {}
+
+
+def mr4_desc(fam, p1, p2):
+    f = MR4_FAMILIES.get(fam)
+    if not f:
+        return str(fam)
+    if fam == "rsi":
+        return f"RSI({p1}) ≤{p2:g} / ≥{100 - p2:g}"
+    return f"{f[0]} · {f[1]} {p1} · {p2:g} {f[3]}"
+
+
+def mr4_signal_series(candles, fam, p1, p2, atr=None):
+    """per closed bar: "LONG" / "SHORT" / None — the indicator's extreme on THAT bar
+    (the trade enters at the next bar's open: no lookahead)"""
+    n = len(candles)
+    out = [None] * n
+    C = [c["close"] for c in candles]
+    if fam in ("bb", "z"):
+        L, k = int(p1), float(p2)
+        s = s2 = 0.0
+        for i in range(n):
+            s += C[i]
+            s2 += C[i] * C[i]
+            if i >= L:
+                s -= C[i - L]
+                s2 -= C[i - L] * C[i - L]
+            if i < L - 1:
+                continue
+            m = s / L
+            sd = max(0.0, s2 / L - m * m) ** 0.5
+            if sd <= 0:
+                continue
+            if fam == "bb":
+                if candles[i]["high"] >= m + k * sd:
+                    out[i] = "SHORT"
+                elif candles[i]["low"] <= m - k * sd:
+                    out[i] = "LONG"
+            else:
+                z = (C[i] - m) / sd
+                out[i] = "SHORT" if z >= k else ("LONG" if z <= -k else None)
+    elif fam == "rsi":
+        p, th = int(p1), float(p2)
+        if n <= p:
+            return out
+        g = l = 0.0
+        for i in range(1, p + 1):
+            d = C[i] - C[i - 1]
+            g += max(d, 0.0)
+            l += max(-d, 0.0)
+        ag, al = g / p, l / p
+        for i in range(p, n):
+            if i > p:
+                d = C[i] - C[i - 1]
+                ag = (ag * (p - 1) + max(d, 0.0)) / p
+                al = (al * (p - 1) + max(-d, 0.0)) / p
+            rsi = 100.0 if al == 0 else 100.0 - 100.0 / (1.0 + ag / al)
+            out[i] = "LONG" if rsi <= th else ("SHORT" if rsi >= 100.0 - th else None)
+    elif fam == "vwap":
+        L, k = int(p1), float(p2)
+        atr = atr or neuro_atr_series(candles, MR4_ATR_LENGTH)
+        pv = vv = 0.0
+        for i in range(n):
+            c = candles[i]
+            v = float(c.get("volume") or 0)
+            tp = (c["high"] + c["low"] + c["close"]) / 3
+            pv += tp * v
+            vv += v
+            if i >= L:
+                o = candles[i - L]
+                vo = float(o.get("volume") or 0)
+                pv -= (o["high"] + o["low"] + o["close"]) / 3 * vo
+                vv -= vo
+            if i < L - 1 or vv <= 0 or not atr[i]:
+                continue
+            dev = (C[i] - pv / vv) / atr[i]
+            out[i] = "SHORT" if dev >= k else ("LONG" if dev <= -k else None)
+    return out
+
+
+def mr4_simulate_trades(candles, sig, rr, atr, max_wait_bars=MR4_MAX_WAIT_BARS, sl_atr_mult=MR4_SL_ATR_MULT):
+    """P/R's trade rules on a ready signal series (see prv_simulate_trades)"""
+    trades = []
+    occupied_until = -10 ** 9
+    for i in range(0, len(candles) - 1):
+        direction = sig[i]
+        if direction is None or i < occupied_until or not atr[i]:
+            continue
+        c = candles[i]
+        entry_bar = candles[i + 1]
+        entry = entry_bar["open"]
+        sl_dist = atr[i] * sl_atr_mult
+        if sl_dist <= 0:
+            continue
+        sl = entry - sl_dist if direction == "LONG" else entry + sl_dist
+        tp = entry + sl_dist * rr if direction == "LONG" else entry - sl_dist * rr
+        result, exit_time, exit_price = "TIMEOUT", None, None
+        exit_j = min(i + max_wait_bars, len(candles) - 1)
+        mae_r = 0.0
+        for j in range(i + 1, min(i + 1 + max_wait_bars, len(candles))):
+            b = candles[j]
+            if direction == "LONG":
+                mae_r = max(mae_r, (entry - b["low"]) / sl_dist)
+                if b["low"] <= sl:
+                    result, exit_price, exit_time, exit_j = "LOSS", sl, b["time"], j
+                    break
+                if b["high"] >= tp:
+                    result, exit_price, exit_time, exit_j = "WIN", tp, b["time"], j
+                    break
+            else:
+                mae_r = max(mae_r, (b["high"] - entry) / sl_dist)
+                if b["high"] >= sl:
+                    result, exit_price, exit_time, exit_j = "LOSS", sl, b["time"], j
+                    break
+                if b["low"] <= tp:
+                    result, exit_price, exit_time, exit_j = "WIN", tp, b["time"], j
+                    break
+        pnl_r = rr if result == "WIN" else (-1.0 if result == "LOSS" else None)
+        if result == "TIMEOUT" and i + max_wait_bars <= len(candles) - 1:
+            b = candles[i + max_wait_bars]
+            result, exit_price, exit_time, exit_j = "TIME_EXIT", b["close"], b["time"], i + max_wait_bars
+            pnl_r = round(time_exit_r(direction, entry, sl, b["close"]), 4)
+        fee_r = trade_fee_r(entry, sl)
+        trades.append({"time": c["time"], "entry_time": entry_bar["time"], "direction": direction, "fee_r": fee_r,
+                       "pnl_r_net": round(pnl_r - fee_r, 4) if pnl_r is not None else None,
+                       "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8),
+                       "result": result, "exit_price": round(exit_price, 8) if exit_price else None,
+                       "exit_time": exit_time, "pnl_r": pnl_r, "mae_r": round(mae_r, 3)})
+        occupied_until = exit_j
+    return trades
+
+
+def mr4_combo_key(tf, fam, p1, p2, rr):
+    return f"{tf}|{fam}|{p1}|{p2}|{rr}"
+
+
+def mr4_optimize_core(candles_by_tf, keep=None):
+    """the pure-CPU part (may run in a calculation worker process): every
+    combination of the four indicators on train, the test as one hypothesis"""
+    errors, passing, kept, pool = [], [], [], {}
+    keep_key = (keep["timeframe"], keep["family"], keep["p1"], keep["p2"], keep["rr"]) if keep else None
+    for tf in MR4_TF_CANDIDATES:
+        candles = candles_by_tf.get(tf)
+        if not candles or len(candles) < 200:
+            continue
+        try:
+            atr = neuro_atr_series(candles, MR4_ATR_LENGTH)
+            split = int(len(candles) * MR4_TRAIN_FRAC)
+            boundary_time = candles[split - 1]["time"]
+            span = (candles[0]["time"], candles[-1]["time"])
+            for fam, (_nm, _a, p1s, _b, p2s) in MR4_FAMILIES.items():
+                for p1 in p1s:
+                    for p2 in p2s:
+                        sig = mr4_signal_series(candles, fam, p1, p2, atr)
+                        for rr in MR4_RR_CANDIDATES:
+                            neuro_check_cancel()
+                            trades = mr4_simulate_trades(candles, sig, rr, atr, max_wait_bars=max_hold_bars(tf, MR4_MAX_WAIT_BARS))
+                            closed = [t for t in trades if t["result"] in CLOSED_RESULTS]
+                            train = [t for t in closed if t["time"] <= boundary_time]
+                            test = [t for t in closed if t["time"] > boundary_time]
+                            pool[mr4_combo_key(tf, fam, p1, p2, rr)] = (
+                                len(train), sum(1 for t in train if t["result"] == "WIN"),
+                                sum(_net_r(t) ** 2 for t in train), sum(_net_r(t) for t in train),
+                                len(test), sum(1 for t in test if t["result"] == "WIN"),
+                                sum(_net_r(t) ** 2 for t in test), sum(_net_r(t) for t in test))
+                            if len(train) < MR4_MIN_TRAIN_TRADES or len(test) < MR4_MIN_TEST_TRADES:
+                                continue
+                            train_z = _z_vs_breakeven_with_fees(train, rr)
+                            test_z = _z_vs_breakeven_with_fees(test, rr)
+                            if train_z is None or test_z is None:
+                                continue
+                            cand = {"tf": tf, "family": fam, "p1": p1, "p2": p2, "rr": rr, "closed": closed,
+                                    "boundary": boundary_time, "span": span, "train_z": train_z, "test_z": test_z}
+                            mine = (tf, fam, p1, p2, rr) == keep_key
+                            if train_z >= MR4_Z_CRITICAL and test_z >= MR4_TEST_Z:
+                                cand["mine"] = mine
+                                passing.append(cand)
+                            elif mine and train_z >= MR4_KEEP_Z and test_z >= MR4_KEEP_Z:
+                                kept.append(cand)   # hysteresis, as P/R
+        except NeuroCancelled:
+            raise
+        except Exception as e:
+            errors.append(f"{tf}: {e}")
+    best = None
+    own = [c for c in passing if c.get("mine")] + kept
+    pick = own or passing
+    if pick:
+        c = max(pick, key=lambda c: c["train_z"])
+        best = _strategy_best_dict(c, None, {"timeframe": c["tf"], "family": c["family"], "p1": c["p1"], "p2": c["p2"],
+                                             "rr": c["rr"], "family_name": MR4_FAMILIES[c["family"]][0],
+                                             "desc": mr4_desc(c["family"], c["p1"], c["p2"])})
+        best["kept"] = not (c["train_z"] >= MR4_Z_CRITICAL and c["test_z"] >= MR4_TEST_Z)
+    return {"best": best, "errors": errors, "pool": pool}
+
+
+def mr4_build_universe():
+    return prv_build_universe()   # the same liquidity floor ($50k a day) and stablecoin exclusion
+
+
+def mr4_fetch(symbol):
+    out = {}
+    now = int(time.time())
+    for tf in MR4_TF_CANDIDATES:
+        try:
+            out[tf] = get_candles_range(symbol, tf, now - snr_history_days_for_tf(tf, MR4_HISTORY_DAYS) * 86400, now)
+        except Exception as e:
+            log_error(f"mr4 candles {symbol} {tf}: {e}")
+    return out
+
+
+def mr4_optimize_symbol(symbol):
+    candles_by_tf = mr4_fetch(symbol)
+    _mr4_had_data[symbol] = any(len(v or []) >= 50 for v in candles_by_tf.values())
+    with state_lock:
+        keep = (STATE.get("mr4_keep") or {}).get(symbol)
+    out = calc_run("mr4_optimize_core", {"candles_by_tf": candles_by_tf, "keep": keep})
+    for msg in out["errors"]:
+        log_error(f"mr4_optimize_symbol {symbol} {msg}")
+    _mr4_pool_parts[symbol] = out.get("pool") or {}
+    best = out["best"]
+    if best is not None:
+        _all = best.pop("_all_closed", None) or []
+        best["recent_trades"] = _all[-40:][::-1]
+        try:
+            best.update(rr_compound_annotate(_all, symbol, mod="mr4", clean_after=best.get("test_start_time")))
+        except Exception as e:
+            log_error(f"mr4 compound {symbol}: {e}")
+        best["all_trades"] = _all[::-1]
+    return best
+
+
+def _mr4_pool_rows(parts):
+    """combo key -> pooled train/test over all coins"""
+    agg = {}
+    for part in parts.values():
+        for k, v in (part or {}).items():
+            a = agg.setdefault(k, [0, 0, 0.0, 0.0, 0, 0, 0.0, 0.0, 0])
+            for i in range(8):
+                a[i] += v[i]
+            if v[0] > 0:
+                a[8] += 1
+    rows = []
+    for k, a in agg.items():
+        tf, fam, p1, p2, rr = k.split("|")
+        rr = float(rr)
+        if a[0] < MR4_POOLED_MIN_TRAIN:
+            continue
+        tz = _t_from_sums(a[0], a[3], a[2], var_floor=rr)
+        sz = _t_from_sums(a[4], a[7], a[6], var_floor=rr) if a[4] else None
+        rows.append({"tf": tf, "family": fam, "p1": int(p1), "p2": float(p2), "rr": rr, "desc": mr4_desc(fam, int(p1), float(p2)),
+                     "coins": a[8], "train_n": a[0], "train_wr": round(a[1] / a[0] * 100, 1),
+                     "train_avg_pnl_r": round(a[3] / a[0], 3), "train_z": round(tz, 2) if tz is not None else None,
+                     "test_n": a[4], "test_wr": round(a[5] / a[4] * 100, 1) if a[4] else None,
+                     "test_avg_pnl_r": round(a[7] / a[4], 3) if a[4] else None,
+                     "test_z": round(sz, 2) if sz is not None else None})
+    rows.sort(key=lambda r: -(r["train_z"] if r["train_z"] is not None else -99))
+    return rows
+
+
+def mr4_pooled_select(parts):
+    """the strategy-level check (as P/R's), plus the FAMILY table: each indicator's
+    best pooled combo by train z and how it did on the pooled test — which of the
+    four works best, judged on the part no choice saw"""
+    rows = _mr4_pool_rows(parts)
+    top = rows[0] if rows else None
+    chosen = top if top and top["train_z"] is not None and top["train_z"] >= MR4_POOLED_Z else None
+    passed = bool(chosen and chosen["test_n"] >= MR4_POOLED_MIN_TEST and chosen["test_z"] is not None
+                  and chosen["test_z"] >= MR4_TEST_Z and (chosen["test_avg_pnl_r"] or 0) > 0)
+    fams = []
+    for fam, f in MR4_FAMILIES.items():
+        fr = [r for r in rows if r["family"] == fam]
+        b = fr[0] if fr else None
+        fams.append({"family": fam, "name": f[0], "best": b, "combos": len(fr),
+                     "significant": bool(b and b["train_z"] is not None and b["train_z"] >= MR4_POOLED_Z)})
+    return {"t": time.time(), "passed": passed, "chosen": chosen, "best_train": top, "top": rows[:8], "families": fams,
+            "coins": len(parts), "combos": len(rows), "combos_total": MR4_N_COMBOS, "z_needed": MR4_POOLED_Z,
+            "z_test_needed": MR4_TEST_Z, "min_train": MR4_POOLED_MIN_TRAIN, "min_test": MR4_POOLED_MIN_TEST}
+
+
+def mr4_pooled_results(chosen, symbols):
+    """per-coin cards for the confirmed pooled combo (coins with a positive own train)"""
+    key = mr4_combo_key(chosen["tf"], chosen["family"], chosen["p1"], chosen["p2"], chosen["rr"])
+    out = {}
+    for sym in symbols:
+        heartbeat("mr4_backtest_loop")
+        part = (_mr4_pool_parts.get(sym) or {}).get(key)
+        if not part or part[0] < MR4_POOLED_MIN_COIN_TRAIN or part[3] <= 0:
+            continue
+        try:
+            cs = mr4_fetch(sym).get(chosen["tf"]) or []
+            if len(cs) < 200:
+                continue
+            atr = neuro_atr_series(cs, MR4_ATR_LENGTH)
+            sig = mr4_signal_series(cs, chosen["family"], chosen["p1"], chosen["p2"], atr)
+            closed = [t for t in mr4_simulate_trades(cs, sig, chosen["rr"], atr, max_wait_bars=max_hold_bars(chosen["tf"], MR4_MAX_WAIT_BARS))
+                      if t["result"] in CLOSED_RESULTS]
+            boundary = cs[int(len(cs) * MR4_TRAIN_FRAC) - 1]["time"]
+            tr = [t for t in closed if t["time"] <= boundary]
+            te = [t for t in closed if t["time"] > boundary]
+            if not tr or not te:
+                continue
+            c = {"closed": closed, "boundary": boundary, "span": (cs[0]["time"], cs[-1]["time"]),
+                 "train_z": _z_vs_breakeven_with_fees(tr, chosen["rr"]) or 0.0, "test_z": _z_vs_breakeven_with_fees(te, chosen["rr"]) or 0.0}
+            best = _strategy_best_dict(c, None, {"timeframe": chosen["tf"], "family": chosen["family"], "p1": chosen["p1"],
+                                                 "p2": chosen["p2"], "rr": chosen["rr"], "family_name": MR4_FAMILIES[chosen["family"]][0],
+                                                 "desc": chosen["desc"]})
+            _all = best.pop("_all_closed")
+            best.update(rr_compound_annotate(_all, sym, mod="mr4", clean_after=best.get("test_start_time")))
+            best["all_trades"] = _all[::-1]
+            best["pooled"] = True
+            out[sym] = best
+        except Exception as e:
+            log_error(f"mr4_pooled_results {sym}: {e}")
+    return out
+
+
+def mr4_backtest_loop():
+    global _mr4_active_symbols, _mr4_display_symbols
+    _trig = MR4_BACKTEST_TRIGGER.wait(timeout=810)   # after P/R's 720 s
+    MR4_BACKTEST_TRIGGER.clear()
+    bt_startup_skip("mr4", MR4_BACKTEST_TRIGGER, max(300, MR4_REFRESH_SEC), "mr4_backtest_loop", _trig)
+    while True:
+        heartbeat("mr4_backtest_loop")
+        acquired = False
+        failed = False
+        try:
+            if not MR4_ENABLED:
+                wait_beating(MR4_BACKTEST_TRIGGER, max(300, MR4_REFRESH_SEC), "mr4_backtest_loop")
+                MR4_BACKTEST_TRIGGER.clear()
+                continue
+            with state_lock:
+                STATE["mr4_waiting_for_slot"] = True
+            acquire_backtest_slot("mr4_backtest_loop")
+            acquired = True
+            with state_lock:
+                STATE["mr4_waiting_for_slot"] = False
+            bt_log_start("mr4")
+            universe = mr4_build_universe()
+            with state_lock:
+                STATE["mr4_progress_done"] = 0
+                STATE["mr4_progress_total"] = len(universe)
+                STATE["mr4_backtest_running"] = True
+                STATE["mr4_progress_in_flight"] = list(universe)
+            all_results = {}
+
+            def _done(symbol, fut):
+                try:
+                    best = fut.result()
+                    if best:
+                        all_results[symbol] = best
+                        provisional_top(STATE, "mr4_provisional", all_results, MR4_DISPLAY_N)
+                except Exception as e:
+                    log_error(f"mr4_backtest_loop {symbol}: {e}")
+                with state_lock:
+                    STATE["mr4_progress_done"] += 1
+                    if symbol in STATE["mr4_progress_in_flight"]:
+                        STATE["mr4_progress_in_flight"].remove(symbol)
+
+            def _stop(symbol, reason):
+                log_error(f"mr4_backtest_loop: {symbol} {reason} — skipping")
+                with state_lock:
+                    STATE["mr4_progress_done"] += 1
+                    if symbol in STATE["mr4_progress_in_flight"]:
+                        STATE["mr4_progress_in_flight"].remove(symbol)
+
+            _mr4_pool_parts.clear()
+            with calc_boost("mr4", bt_first_run("mr4")):
+                run_pool_with_progress(mr4_optimize_symbol, universe, min(WORKERS, len(universe) or 1),
+                                       "mr4_backtest_loop", _done, _stop)
+            _BT_RAN.add("mr4")
+            per_coin = dict(all_results)
+            pooled = mr4_pooled_select({s_: _mr4_pool_parts[s_] for s_ in universe if s_ in _mr4_pool_parts})
+            with state_lock:
+                STATE["mr4_pooled"] = pooled
+            if pooled["passed"]:
+                for s_, r_ in mr4_pooled_results(pooled["chosen"], universe).items():
+                    all_results.setdefault(s_, r_)
+            data_ok = bool(universe) and sum(1 for s_ in universe if _mr4_had_data.get(s_)) >= 0.5 * len(universe)
+            found_nothing = not all_results and not data_ok
+            with state_lock:
+                display_top, _act = strategy_pick("mr4", all_results, MR4_TOP_N, MR4_DISPLAY_N)
+                if all_results or data_ok:
+                    _old = STATE.get("mr4_keep") or {}
+                    STATE["mr4_keep"] = {sym: {"timeframe": r_["timeframe"], "family": r_["family"], "p1": r_["p1"], "p2": r_["p2"],
+                                               "rr": r_["rr"], "since": (_old.get(sym) or {}).get("since") or time.time()}
+                                         for sym, r_ in per_coin.items()}
+                    STATE["mr4_results"] = dict(display_top)
+                    _mr4_active_symbols = list(_act)
+                    _mr4_display_symbols = [sym for sym, _ in display_top]
+                    STATE["mr4_last_backtest_finished"] = time.time()
+                STATE["mr4_backtest_running"] = False
+                STATE["mr4_provisional"] = None
+            if found_nothing:
+                failed = True
+                log_error("mr4_backtest_loop: zero usable results this cycle — keeping previous results")
+            bt_log_end("mr4", ok=not found_nothing, note="нет данных с биржи" if found_nothing else f"монет в результатах: {len(all_results)}")
+            if all_results or data_ok:
+                save_state()
+        except Exception as e:
+            failed = True
+            if "mr4" in _bt_started:
+                bt_log_end("mr4", ok=False, note=str(e)[:80])
+            log_error(f"mr4_backtest_loop: {e}")
+            with state_lock:
+                STATE["mr4_backtest_running"] = False
+                STATE["mr4_provisional"] = None
+                STATE["mr4_waiting_for_slot"] = False
+        finally:
+            if acquired:
+                BACKTEST_CONCURRENCY_SEMAPHORE.release()
+        bt_wait("mr4", MR4_BACKTEST_TRIGGER, BACKTEST_RETRY_AFTER_ERROR_SEC if failed else max(300, MR4_REFRESH_SEC),
+                "mr4_backtest_loop", failed=failed)
+        MR4_BACKTEST_TRIGGER.clear()
+
+
+def mr4_scan_symbol_live(symbol):
+    """the last closed bar on the coin's own combination — the backtest's rule, live"""
+    with state_lock:
+        r = STATE["mr4_results"].get(symbol)
+    if not r:
+        return None
+    tf = r["timeframe"]
+    try:
+        now = int(time.time())
+        sec = INTERVAL_SECONDS.get(tf, 3600)
+        cs = get_candles_range(symbol, tf, now - 300 * sec, now) or []
+        closed = [c for c in cs if c["time"] + sec <= now]
+        if len(closed) < 120:
+            return None
+        atr = neuro_atr_series(closed, MR4_ATR_LENGTH)
+        sig = mr4_signal_series(closed, r["family"], r["p1"], r["p2"], atr)
+        i = len(closed) - 1
+        d = sig[i]
+        if d is None or not atr[i]:
+            return None
+        entry = closed[i]["close"]
+        sl_dist = atr[i] * MR4_SL_ATR_MULT
+        sl = entry - sl_dist if d == "LONG" else entry + sl_dist
+        tp = entry + sl_dist * r["rr"] if d == "LONG" else entry - sl_dist * r["rr"]
+        return {"direction": d, "entry": round(entry, 8), "sl": round(sl, 8), "tp": round(tp, 8),
+                "time": closed[i]["time"], "timeframe": tf}
+    except Exception as e:
+        log_error(f"mr4_scan_symbol_live {symbol}: {e}")
+        return None
+
+
+def mr4_track_signal_outcomes():
+    now = time.time()
+    with state_lock:
+        open_signals = [s for s in STATE["mr4_signals"] if s["status"] == "OPEN"]
+    if not open_signals:
+        return
+    all_candles = fetch_candles_concurrent([(s["symbol"], s["timeframe"], 300) for s in open_signals])
+    for sig, candles in zip(open_signals, all_candles):
+        try:
+            if candles is None:
+                continue
+            sec = INTERVAL_SECONDS.get(sig["timeframe"], 3600)
+            future = [c for c in candles if c["time"] + sec <= now and c["time"] > sig["time"]]
+            direction, entry = sig["direction"], sig["entry"]
+            risk = abs(entry - sig["sl"]) or 1e-9
+            result = exit_price = exit_time = None
+            for n_, c in enumerate(future, 1):
+                if direction == "LONG":
+                    if c["low"] <= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["high"] >= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+                else:
+                    if c["high"] >= sig["sl"]:
+                        result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                        break
+                    if c["low"] <= sig["tp"]:
+                        result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                        break
+                if n_ >= max_hold_bars(sig["timeframe"], MR4_MAX_WAIT_BARS):
+                    result, exit_price, exit_time = "TIME_EXIT", c["close"], c["time"]
+                    break
+            if not result:
+                continue
+            raw = (exit_price - entry) / risk if direction == "LONG" else (entry - exit_price) / risk
+            pnl_r = round(raw if result != "LOSS" else -abs(raw), 3)
+            if result == "TIME_EXIT" and AUTOTRADE_ENABLED_MR4 and sig.get("autotrade_fired"):
+                log_error(f"mr4 time exit {sig['symbol']}: {close_position_for_mode('mr4', sig['symbol'], direction)}")
+            with state_lock:
+                sig.update({"status": "CLOSED", "result": result, "exit_price": exit_price, "exit_time": exit_time, "pnl_r": pnl_r})
+            notify_trade_result("mr4", sig["symbol"], direction, entry, exit_price, result, pnl_r,
+                                real=bool(AUTOTRADE_ENABLED_MR4 and sig.get("autotrade_fired")))
+        except Exception as e:
+            log_error(f"mr4_outcome {sig.get('symbol')}: {e}")
+
+
+def mr4_live_loop():
+    global _mr4_prev_signal_keys
+    time.sleep(120)
+    while True:
+        heartbeat("mr4_live_loop")
+        try:
+            if not MR4_ENABLED:
+                time.sleep(900)
+                continue
+            with state_lock:
+                active = list(_mr4_active_symbols)
+            new = {}
+            for sym in active:
+                s_ = mr4_scan_symbol_live(sym)
+                if s_:
+                    new[sym] = s_
+            keys = {s: v["time"] for s, v in new.items()}
+            fired = [s for s, t in keys.items() if (s, t) not in _mr4_prev_signal_keys and live_signal_fresh(new[s])]
+            for sym in fired:
+                sig = new[sym]
+                with state_lock:
+                    busy = any(x["symbol"] == sym and x["status"] == "OPEN" for x in STATE["mr4_signals"])
+                    dup = signal_already_logged(STATE["mr4_signals"], sym, sig["time"])
+                    res = dict(STATE["mr4_results"].get(sym) or {})
+                if busy or dup:
+                    continue
+                record = {"symbol": sym, "direction": sig["direction"], "entry": sig["entry"], "sl": sig["sl"], "tp": sig["tp"],
+                          "timeframe": sig["timeframe"], "time": sig["time"], "detected_at": time.time(), "status": "OPEN",
+                          "result": None, "exit_price": None, "exit_time": None, "pnl_r": None, "autotrade_fired": False,
+                          "family": res.get("family"), "desc": res.get("desc")}
+                with state_lock:
+                    STATE["mr4_signals"].appendleft(record)
+                autotrade_result = None
+                if AUTOTRADE_ENABLED_MR4:
+                    with state_lock:
+                        still = sym in _mr4_active_symbols
+                    if still:
+                        autotrade_result = execute_autotrade("mr4", sym, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                                                              risk_pct_override=auto_risk_for("mr4", sym))
+                        record["autotrade_fired"] = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
+                _plan = planned_leverage(sym, sig["direction"], sig["entry"], sig["sl"])
+                record["leverage"] = (autotrade_result or {}).get("leverage") or _plan
+                record["leverage_planned"] = not (autotrade_result or {}).get("leverage")
+                arrow = "⬆️" if sig["direction"] == "LONG" else "⬇️"
+                send_telegram(f"{arrow} Откат 4в1 {sym} ({sig['direction']}) · {res.get('desc', '')} · {sig['timeframe']}\n"
+                              f"entry: {sig['entry']:.6g}\nSL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n"
+                              f"плечо: {format_leverage_txt(autotrade_result, AUTOTRADE_ENABLED_MR4, _plan)}", category="mr4")
+                save_state()
+            _mr4_prev_signal_keys = set(keys.items())
+            mr4_track_signal_outcomes()
+        except Exception as e:
+            log_error(f"mr4_live_loop: {e}")
+        time.sleep(900)
+
+
+def strategy_honest_live(sigs, active):
+    """P/R's honest live check for any module's signal list (see prv_honest_live)"""
+    def block(rows):
+        rs = []
+        for x in rows:
+            try:
+                rs.append(float(x["pnl_r"]) - trade_fee_r(x.get("entry"), x.get("sl")))
+            except (TypeError, ValueError, KeyError):
+                pass
+        n = len(rs)
+        if not n:
+            return {"n": 0}
+        avg = sum(rs) / n
+        sd = (sum((r - avg) ** 2 for r in rs) / (n - 1)) ** 0.5 if n > 1 else 0.0
+        se = sd / n ** 0.5 if n > 1 else 0.0
+        return {"n": n, "avg": round(avg, 3), "sum": round(sum(rs), 2), "wr": round(sum(1 for r in rs if r > 0) / n * 100, 1),
+                "lo": round(avg - 1.96 * se, 3) if n > 1 else None, "hi": round(avg + 1.96 * se, 3) if n > 1 else None,
+                "z": round(avg / se, 2) if se > 0 else None, "coins": len({x["symbol"] for x in rows})}
+    closed = [x for x in sigs if x.get("status") == "CLOSED" and x.get("result") in CLOSED_RESULTS and x.get("pnl_r") is not None]
+    times = [x.get("exit_time") or x.get("time") for x in closed if (x.get("exit_time") or x.get("time"))]
+    return {"all": block(closed), "active": block([x for x in closed if x["symbol"] in active]),
+            "dropped": block([x for x in closed if x["symbol"] not in active]),
+            "real": block([x for x in closed if x.get("autotrade_fired")]),
+            "open": sum(1 for x in sigs if x.get("status") == "OPEN"),
+            "first": min(times) if times else None, "last": max(times) if times else None}
+
+
 # Fixed top-5 majors, maximum available history, pure-Python statistical
 # pattern discovery across many condition types (calendar, RSI zone, EMA
 # side, volume regime, candle range/body size, streaks, range position),
@@ -16824,10 +17473,10 @@ def run_pool_with_progress(fn, items, workers, loop_name, on_result, on_stop, st
 # ============================================================================
 CALC_WORKERS = int(os.environ.get("VP_CALC_WORKERS", 3))
 CALC_FUNCS = ("snr_optimize_core", "prv_optimize_core", "neuro_backtest_core", "neuro_conditions_core",
-              "lsw_backtest_core")
+              "lsw_backtest_core", "mr4_optimize_core")
 # settings that can change at runtime are sent with every task, so a worker
 # always computes with the main process's current values
-CALC_CONST_PREFIXES = ("SNR_", "PRV_", "NEURO_", "MSNR_", "LSW_", "AUTOTRADE_SIM_FEE_PCT")
+CALC_CONST_PREFIXES = ("SNR_", "PRV_", "NEURO_", "MSNR_", "LSW_", "MR4_", "AUTOTRADE_SIM_FEE_PCT")
 _calc_pool = []            # idle worker Popen objects
 _calc_busy = 0
 _calc_cond = threading.Condition()
@@ -16837,7 +17486,7 @@ _calc_stats = {"tasks": 0, "fallbacks": 0, "restarts": 0}
 CALC_WORKERS_BOOST = int(os.environ.get("VP_CALC_WORKERS_BOOST", min(8, os.cpu_count() or 4)))
 _calc_boost = set()        # modules currently in a first / post-reset run
 _calc_busy_by = {}         # v0.99.372 — module -> worker processes it is using right now
-_CALC_FN_MODULE = {"snr_optimize_core": "snr", "prv_optimize_core": "prv",
+_CALC_FN_MODULE = {"snr_optimize_core": "snr", "prv_optimize_core": "prv", "mr4_optimize_core": "mr4",
                    "neuro_backtest_core": "neuro", "neuro_conditions_core": "cond",
                    "lsw_backtest_core": "lsw"}
 
@@ -24047,7 +24696,7 @@ def _zones_outbox_save():
 
 TELEGRAM_ALERTS_TRADE_RESULTS = os.environ.get("VP_TG_TRADE_RESULTS", "1") == "1"            # v0.99.457
 TELEGRAM_TRADE_RESULTS_REAL_ONLY = os.environ.get("VP_TG_TRADE_RESULTS_REAL", "0") == "1"
-_TRADE_MOD_NAMES = {"neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "zones": "Зоны",
+_TRADE_MOD_NAMES = {"neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "mr4": "Откат 4в1", "zones": "Зоны",
                     "zones_own": "Зоны · 🔎 наш поиск", "zones_appr": "Зоны · движение к зоне", "zones_pb": "Зоны · 🧪 откат"}
 
 
@@ -28114,6 +28763,71 @@ def api_prv_status():
     })
 
 
+@app.route("/api/mr4/status")
+def api_mr4_status():
+    """v0.99.565 — the "Откат 4в1" tab"""
+    refresh_result_compound("mr4")
+    with state_lock:
+        full = dict(STATE["mr4_results"])
+        results = {k: ({kk: vv for kk, vv in v.items() if kk != "all_trades"} | {"all_trades_n": len(v.get("all_trades") or v.get("recent_trades") or [])})
+                   if isinstance(v, dict) else v for k, v in full.items()}
+        signal_log = list(STATE["mr4_signals"])
+        active, display = list(_mr4_active_symbols), list(_mr4_display_symbols)
+        st = {k: STATE.get(k) for k in ("mr4_last_backtest_finished", "mr4_backtest_running", "mr4_waiting_for_slot",
+                                        "mr4_progress_done", "mr4_progress_total", "mr4_provisional", "mr4_pooled")}
+        in_flight = list(STATE.get("mr4_progress_in_flight") or [])
+    coins = []
+    for sym in display:
+        r = results.get(sym)
+        try:
+            _rk = auto_risk_for("mr4", sym) or module_risk_pct("mr4")
+            liq = liq_for_card(sym, list((full.get(sym) or {}).get("all_trades") or []), float(_rk) if _rk else None) if r else None
+        except Exception as e:
+            liq = {"error": str(e)[:80]}
+        coins.append({"symbol": sym, "is_active": sym in active, "found": r is not None, "result": r, "liq": liq,
+                      "recent_live_signals": [x for x in signal_log if x["symbol"] == sym][:40]})
+    return jsonify({"enabled": MR4_ENABLED, "autotrade": AUTOTRADE_ENABLED_MR4, "coins": coins,
+                    "last_backtest_finished": st["mr4_last_backtest_finished"], "backtest_running": st["mr4_backtest_running"],
+                    "waiting_for_slot": st["mr4_waiting_for_slot"], "progress_done": st["mr4_progress_done"],
+                    "progress_total": st["mr4_progress_total"], "in_flight": in_flight, "provisional": st["mr4_provisional"],
+                    "pooled": st["mr4_pooled"], "calc": calc_status("mr4"), "honest": strategy_honest_live(signal_log, set(active)),
+                    "signals": signal_log[:60],
+                    "config": {"families": {k: {"name": v[0], "p1": v[1], "p1s": v[2], "p2": v[3], "p2s": v[4]} for k, v in MR4_FAMILIES.items()},
+                               "rr": MR4_RR_CANDIDATES, "tf": MR4_TF_CANDIDATES, "combos": MR4_N_COMBOS, "z_critical": MR4_Z_CRITICAL,
+                               "test_z": MR4_TEST_Z, "refresh_sec": MR4_REFRESH_SEC, "top_n": MR4_TOP_N}})
+
+
+@app.route("/api/mr4/trades/<symbol>")
+def api_mr4_trades(symbol):
+    with state_lock:
+        r = (STATE["mr4_results"] or {}).get(symbol) or {}
+        trades = list(r.get("all_trades") or r.get("recent_trades") or [])
+    return jsonify({"symbol": symbol, "full": bool(r.get("all_trades")), "trades": trades, "test_start_time": r.get("test_start_time")})
+
+
+@app.route("/api/mr4/restart_backtest", methods=["POST"])
+def api_mr4_restart_backtest():
+    bt_set_reason("mr4", BT_REASON_BUTTON)
+    MR4_BACKTEST_TRIGGER.set()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/reset/mr4", methods=["POST"])
+def api_reset_mr4():
+    global _mr4_active_symbols, _mr4_display_symbols
+    with state_lock:
+        STATE["mr4_results"] = {}
+        STATE["mr4_last_backtest_finished"] = None
+        STATE["mr4_signals"].clear()
+        STATE.pop("mr4_keep", None)
+        STATE.pop("mr4_first_seen", None)
+        _mr4_active_symbols, _mr4_display_symbols = [], []
+        _mr4_prev_signal_keys.clear()
+    save_state()
+    MR4_BACKTEST_TRIGGER.set()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/prv/restart_backtest", methods=["POST"])
 def api_prv_restart_backtest():
     try:
@@ -30013,6 +30727,7 @@ INDEX_HTML = """<!doctype html>
 </header>
 <div class="tabs">
   <div class="tab active" data-tab="prv" style="color:var(--prv);">Peak Reversal</div>
+  <div class="tab" data-tab="mr4" style="color:#ff8fa3;">🔁 Откат 4в1</div>
   <div class="tab" data-tab="zones" style="color:#4caf50;">🎯 Зоны</div>
   <div class="tab" data-tab="neuro" style="color:var(--neuro);">🧠 Neuro</div>
   <div class="tab" data-tab="signals">Volume</div>
@@ -30036,6 +30751,7 @@ INDEX_HTML = """<!doctype html>
   <div id="neuroPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="snrPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="prvPanel" style="display:block;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="mr4Panel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="zonesPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="nqPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
@@ -30202,6 +30918,13 @@ INDEX_HTML = """<!doctype html>
         </div>
         <label class="switch"><input type="checkbox" id="setPrv"><span class="switchSlider"></span></label>
       </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">🔁 Откат 4в1 (бэктест + живые сигналы)</div>
+          <div class="sub">4 индикатора из семьи P/R — Боллинджер, RSI на крайностях, z-score, VWAP-полосы — каждый подбирается и проверяется на train/test, как P/R</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setMr4"><span class="switchSlider"></span></label>
+      </div>
       <div class="settingRow subRow">
         <div>
           <div class="label">↳ Сколько монет держать в топе</div>
@@ -30296,6 +31019,13 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="label">↳ Алерты «Откат 4в1»</div>
+          <div class="sub">новые живые сигналы четырёх индикаторов отката</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramMr4"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Алерты Зон</div>
           <div class="sub">распознанный пост, цена дошла до линии, вход, пробой зоны</div>
         </div>
@@ -30386,6 +31116,7 @@ INDEX_HTML = """<!doctype html>
           <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro" title="Neuro" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctSnr" min="0.1" max="100" step="0.5" placeholder="S/R" title="S/R Zones" style="display:none;width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctPrv" min="0.1" max="100" step="0.5" placeholder="P/R" title="Peak Reversal" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctMr4" min="0.1" max="100" step="0.5" placeholder="4в1" title="Откат 4в1" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctZones" min="0.1" max="100" step="0.5" placeholder="Зоны" title="Зоны" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
         </div>
       </div>
@@ -30423,6 +31154,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча и размера позиции, что и у остальных режимов</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradePrv"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ Откат 4в1</div>
+          <div class="sub">риск — свой «4в1» или общий, тот же автоматический расчёт плеча и размера, что у P/R</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeMr4"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -30527,6 +31265,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('neuroPanel').style.display = activeTab === 'neuro' ? 'block' : 'none';
     document.getElementById('snrPanel').style.display = activeTab === 'snr' ? 'block' : 'none';
     document.getElementById('prvPanel').style.display = activeTab === 'prv' ? 'block' : 'none';
+    document.getElementById('mr4Panel').style.display = activeTab === 'mr4' ? 'block' : 'none';
     document.getElementById('zonesPanel').style.display = activeTab === 'zones' ? 'block' : 'none';
     document.getElementById('nqPanel').style.display = activeTab === 'nq' ? 'block' : 'none';
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
@@ -30540,6 +31279,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'neuro') refreshNeuro();
     if (activeTab === 'snr') refreshSnr();
     if (activeTab === 'prv') refreshPrv();
+    if (activeTab === 'mr4') refreshMr4();
     if (activeTab === 'zones') refreshZones();
     if (activeTab === 'nq') refreshNq();
     if (activeTab === 'autotrade') refreshAutotrade();
@@ -32841,6 +33581,73 @@ function stratNewBadge(c, isActive) {   // v0.99.557 — why a passing coin isn'
   return `<div style="display:inline-block;padding:2px 8px;margin-bottom:6px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-xs);"><span style="font-size:var(--fs-xs);">${txt}</span></div>`;
 }
 
+// v0.99.565 — "Откат 4в1": four mean-reversion indicators of the P/R family, side by side
+async function mr4Post(url, msg) {
+  if (msg && !confirm(msg)) return;
+  try { await fetch(url, {method: 'POST'}); } catch (e) {}
+  setTimeout(refreshMr4, 1000);
+}
+async function refreshMr4() {
+  const panel = document.getElementById('mr4Panel');
+  let d;
+  try { d = await (await fetch('/api/mr4/status')).json(); } catch (e) { panel.innerHTML = '<div class="dim">нет связи</div>'; return; }
+  const cfg = d.config || {};
+  const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
+  let h = `<div class="dim hint-block" style="margin-bottom:10px;"><b>🔁 Откат 4в1</b> — четыре индикатора из той же семьи, что P/R (ставка на возврат к среднему), каждый подбирается и проверяется так же честно:
+    <b>Боллинджер</b> (хвост за SMA ± k·σ), <b>RSI</b> на крайностях (≤ порог — лонг, ≥ 100−порог — шорт), <b>Z-score</b> закрытия от средней, <b>VWAP-полосы</b> (закрытие в k ATR от VWAP за окно).
+    Всего ${cfg.combos || 288} вариантов на монету (4 индикатора × настройки × RR × 1ч/4ч): обучение 70% (z ≥ ${cfg.z_critical} — поправка на весь перебор), тест 30% (z ≥ ${cfg.test_z}). Вход по открытию следующей свечи, стоп 1 ATR, тейк RR × стоп, комиссии учтены. Пересчёт каждые ${Math.round((cfg.refresh_sec || 14400) / 3600)} ч.</div>`;
+  if (d.enabled === false) h += '<div style="padding:10px 12px;margin-bottom:8px;background:var(--neg-bg);border:1px solid var(--neg);border-radius:var(--r-sm);font-size:var(--fs-sm);">⏸ <b>«Откат 4в1» выключен в настройках</b> — бэктест и живые сигналы не идут.</div>';
+  if (d.backtest_running) {
+    const pct = d.progress_total ? Math.round(d.progress_done / d.progress_total * 100) : 0;
+    h += `<div class="dim" style="font-size:var(--fs-sm);margin-bottom:4px;">перебор: ${d.progress_done}/${d.progress_total}${coresTxt(d.calc)}</div>
+      <div style="height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin-bottom:10px;"><div style="height:100%;width:${pct}%;background:#ff8fa3;"></div></div>`;
+  } else if (d.waiting_for_slot) h += '<div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">⏳ ждёт свободного слота бэктеста</div>';
+  else h += `<div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">последний бэктест: ${d.last_backtest_finished ? fmtDateTime(d.last_backtest_finished) : 'ещё не было — первый начнётся через ~15 мин после запуска'}</div>`;
+  h += `<div style="display:flex;gap:6px;margin-bottom:10px;"><button onclick="mr4Post('/api/mr4/restart_backtest')" class="zbtn">↻ Бэктест</button>
+    <button onclick="mr4Post('/api/reset/mr4', 'Очистить результаты и сигналы «Откат 4в1»?')" class="zbtn" style="color:var(--neg);">🗑 Очистить</button></div>`;
+  // the four indicators side by side — pooled over all coins, best combo of each by train
+  const pl = d.pooled;
+  if (pl && pl.families) {
+    h += `<div class="secTitle">Какой индикатор лучше — все монеты вместе</div>
+      <div class="dim" style="font-size:var(--fs-xs);margin-bottom:4px;">у каждого индикатора — его лучший вариант по обучению; тест — часть истории, которую выбор не видел. ${pl.coins} монет · значимо на обучении: z ≥ ${pl.z_needed}</div>
+      ${pl.families.map(f => {
+        const b = f.best;
+        if (!b) return `<div style="padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);"><b>${f.name}</b> <span class="dim">— мало сделок</span></div>`;
+        const pr = String(b.desc || '').replace(f.name + ' · ', '');
+        return `<div style="padding:6px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);">
+          <div><b>${f.name}</b>${f.significant ? ' <span class="win">✓ значимо</span>' : ''} <span class="dim" style="font-size:var(--fs-xs);">${pr} · ${b.tf} · RR ${b.rr}</span></div>
+          <div style="display:flex;gap:12px;flex-wrap:wrap;">
+            <span>обучение ${sgR(b.train_avg_pnl_r)} <span class="dim" style="font-size:var(--fs-xs);">n=${b.train_n} · WR ${b.train_wr}% · z=${b.train_z}</span></span>
+            <span>тест <b>${sgR(b.test_avg_pnl_r)}</b> <span class="dim" style="font-size:var(--fs-xs);">n=${b.test_n} · WR ${b.test_wr == null ? '—' : b.test_wr + '%'} · z=${b.test_z == null ? '—' : b.test_z}</span></span>
+          </div></div>`;
+      }).join('')}
+      <div style="font-size:var(--fs-sm);margin:6px 0 12px;">${pl.passed ? `✅ общий вариант подтверждён на тесте: <b>${pl.chosen.desc}</b> · ${pl.chosen.tf} · RR ${pl.chosen.rr} — его монеты добавлены в карточки` : '✗ ни один вариант не прошёл общую проверку по всем монетам — карточки ниже только по отдельным монетам'}</div>`;
+  }
+  h += prvHonestHtml(d.honest);
+  const sigs = d.signals || [];
+  if (sigs.length) h += sigListHtml(sigs.map(sg => sigItemHtml(sg, {extra: [sg.desc || '', sg.timeframe || '', sg.leverage ? `плечо ${sg.leverage_planned ? '~' : ''}${sg.leverage}x` : '']})));
+  const cards = (d.coins || []).map(c => {
+    const r = c.result || {};
+    const isActive = c.is_active;
+    const style = isActive ? 'margin-bottom:10px;padding:12px;background:var(--card);border-radius:var(--r-lg);border:1px solid var(--line);'
+                           : 'margin-bottom:10px;padding:12px;background:var(--inset);border-radius:var(--r-lg);border:1px dashed var(--line-2);';
+    if (!c.found) return `<div style="${style}"><b>${c.symbol.replace('_USDT', '')}</b> <span class="dim">— ничего подтверждённого</span></div>`;
+    return `<div style="${style}">
+      <div style="display:flex;justify-content:space-between;align-items:baseline;gap:8px;"><div style="font-size:var(--fs-md);font-weight:700;color:#ff8fa3;">${c.symbol.replace('_USDT', '')}</div>
+        <div class="dim" style="font-size:var(--fs-sm);">${isActive ? (d.autotrade ? '🤖 торгуется' : '📡 сигналы') : 'для справки'}</div></div>
+      ${stratNewBadge(c, isActive)}
+      <div style="font-size:var(--fs-sm);margin:4px 0;"><b>${r.desc || r.family_name || ''}</b> · ${r.timeframe} · RR ${r.rr}${r.pooled ? ' · общий вариант' : ''}${r.kept ? ' · держится (порог удержания)' : ''}</div>
+      <div style="font-size:var(--fs-sm);">обучение: ${sgR(r.train_avg_pnl_r)} <span class="dim">n=${r.train_n} · WR ${r.train_wr}% · z=${r.train_z}</span></div>
+      <div style="font-size:var(--fs-sm);margin-bottom:6px;">тест: <b>${sgR(r.test_avg_pnl_r)}</b> <span class="dim">n=${r.test_n} · WR ${r.test_wr}% · z=${r.test_z} · ${r.test_days} дн.</span></div>
+      ${compoundSummaryHtml(r)}
+      ${liqHtml(c.liq)}
+      <details ontoggle="loadBtTrades(this, 'mr4', '${c.symbol}', ${d.last_backtest_finished || 0})"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">все сделки бэктеста (${r.all_trades_n || 0})</summary><div class="btTradesBox"></div></details>
+    </div>`;
+  }).join('');
+  h += `<div class="secTitle" style="margin-top:10px;">Монеты</div>${cards || '<div class="dim">пока нет монет, прошедших проверку</div>'}`;
+  setPanelHtml(panel, h);
+}
+
 async function refreshPrv() {
   const panel = document.getElementById('prvPanel');
   try {
@@ -33741,6 +34548,7 @@ async function refreshAll() {
   if (activeTab === 'neuro') await refreshNeuro();
   if (activeTab === 'snr') await refreshSnr();
   if (activeTab === 'prv') await refreshPrv();
+  if (activeTab === 'mr4') await refreshMr4();
   if (activeTab === 'zones') await refreshZones();
   if (activeTab === 'autotrade') await refreshAutotrade();
   if (activeTab === 'simulator') await refreshSimulator();
@@ -34052,6 +34860,10 @@ const setInputs = {
   neuro_trade_filter_enabled: document.getElementById('setNeuroTradeFilter'),
   snr_enabled: document.getElementById('setSnr'),
   prv_enabled: document.getElementById('setPrv'),
+  mr4_enabled: document.getElementById('setMr4'),   // v0.99.565
+  telegram_alerts_mr4: document.getElementById('setTelegramMr4'),
+  autotrade_mr4: document.getElementById('setAutotradeMr4'),
+  risk_pct_mr4: document.getElementById('setRiskPctMr4'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
   hourly_stats_enabled: document.getElementById('setHourlyStats'),
@@ -34714,6 +35526,13 @@ function snrTradeRowHtml(sym, t) {
     <span style="white-space:nowrap;"><span class="${rc}">${t.result}${t.pnl_r!=null?' '+(t.pnl_r>0?'+':'')+t.pnl_r+'R':''}</span> ${compoundCellTxt(t)}</span>
   </div>`;
 }
+function mr4TradeRowHtml(sym, t) {   // v0.99.565 — no chart for 4в1
+  const rc = t.result === 'WIN' ? 'win' : t.result === 'LOSS' ? 'loss' : 'dim';
+  return `<div style="display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--line);font-size:var(--fs-sm);">
+    <span class="dim">${fmtDateTime(t.time)} ${t.direction} @ ${fmtNum(t.entry)} · макс. против ${t.mae_r}R</span>
+    <span style="white-space:nowrap;"><span class="${rc}">${t.result}${t.pnl_r!=null?' '+(t.pnl_r>0?'+':'')+t.pnl_r+'R':''}</span> ${compoundCellTxt(t)}</span>
+  </div>`;
+}
 function prvTradeRowHtml(sym, t) {
   const rc = t.result === 'WIN' ? 'win' : t.result === 'LOSS' ? 'loss' : 'dim';
   return `<div onclick="openPrvChart('${sym}', ${t.time})" style="cursor:pointer;display:flex;justify-content:space-between;padding:3px 0;border-bottom:1px solid var(--line);font-size:var(--fs-sm);">
@@ -34727,7 +35546,7 @@ async function loadBtTrades(det, mod, sym, stamp) {
   const box = det.querySelector('.btTradesBox');
   const key = `${mod}:${sym}:${stamp}`;
   const render = d => {
-    const rowFn = mod === 'snr' ? snrTradeRowHtml : prvTradeRowHtml;
+    const rowFn = mod === 'snr' ? snrTradeRowHtml : (mod === 'mr4' ? mr4TradeRowHtml : prvTradeRowHtml);
     // v0.99.335 — chronological ledger (oldest first) so the $15 start is at
     // the top, with a divider where the TEST part (unseen when the params
     // were chosen) begins; the train part is shown in full too.
@@ -35626,6 +36445,8 @@ if __name__ == "__main__":
     threading.Thread(target=snr_live_loop, daemon=True).start()
     threading.Thread(target=prv_backtest_loop, daemon=True).start()
     threading.Thread(target=prv_live_loop, daemon=True).start()
+    threading.Thread(target=mr4_backtest_loop, daemon=True).start()   # v0.99.565
+    threading.Thread(target=mr4_live_loop, daemon=True).start()
     zones_load()   # v0.99.438
     zones_fix_dup_pids()   # v0.99.549
     zones_outbox_load()   # v0.99.455 — unsent zone messages from before the restart

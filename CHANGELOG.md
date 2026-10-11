@@ -19363,3 +19363,18 @@ v0.99.563 - P/R cards: a liquidity reference (user: "рекомендуемая 
 v0.99.564 - Neuro paper account: the total of the open positions (user: "а это какой баланс на
          всё? надо total показывать"): "открыто 3: в позициях $1816 (3.6× баланса $500) · если
          все уйдут в стоп: −$19.60 (3.9% баланса)". The trade rows say "позиция $X · риск Y%".
+v0.99.565 - New tab "🔁 Откат 4в1" (user: "отдельной вкладкой индикатор, где будут проверяться
+         предложенные из той же семьи, по аналогии всё как в P/R, просто 4 в 1"). Four
+         mean-reversion indicators of the P/R family in one search: Bollinger (the wick at
+         SMA ± k·σ), RSI(n) at an extreme, z-score of the close vs the SMA, VWAP bands (the close
+         k ATR from the rolling VWAP). Everything as P/R: the $50k universe, 288 combinations per
+         coin (4 indicators × 9 settings × RR 1/1.5/2/3 × 1h/4h), train 70% with the Bonferroni
+         bar over all 288 (z >= 3.197, alpha 0.20 like P/R), test 30% as one hypothesis (z >= 2),
+         hysteresis, entry at the next open, stop 1 ATR, take RR × stop, max hold, fees; the
+         pooled check over all coins plus a table "какой индикатор лучше" — each indicator's best
+         pooled combo by train and its result on the unseen test; ranking / newcomer / min test
+         trades rules of v0.99.557; live scan every 15 min, outcome tracking, Telegram alerts,
+         autotrade (off by default) with its own risk "4в1" and Kelly auto-risk; the honest live
+         check, $15 compounding, liquidity line, all trades of the backtest. Settings: on/off,
+         alerts, autotrade, risk. Calculation in the worker processes like P/R. Synthetic check:
+         a mean-reverting market is found (2 of 2 coins), a random walk is not (0 of 2).
