@@ -19360,3 +19360,6 @@ v0.99.563 - P/R cards: a liquidity reference (user: "рекомендуемая 
          which the card's usual stop at the current risk reaches that size. Turnover, depth
          ±0.5% / ±1% and spread shown; fetched in the background, cached 10 min. Nothing changes
          in the orders.
+v0.99.564 - Neuro paper account: the total of the open positions (user: "а это какой баланс на
+         всё? надо total показывать"): "открыто 3: в позициях $1816 (3.6× баланса $500) · если
+         все уйдут в стоп: −$19.60 (3.9% баланса)". The trade rows say "позиция $X · риск Y%".

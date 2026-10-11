@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.563"
+APP_VERSION = "0.99.564"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -31476,10 +31476,17 @@ function neuroPaperHtml(p) {
   else if (st.lo > 0) verdict = '✅ перевес подтверждается вживую';
   else if (st.avg_r > 0) verdict = '🟡 в плюсе, но пока в пределах случайности';
   else verdict = '🔴 вживую в минусе';
+  // v0.99.564 — the total of the open positions against the balance (user: "надо total показывать")
+  const op = (p.trades || []).filter(t => t.status === 'OPEN');
+  const opN = op.reduce((a, t) => a + (t.notional || 0), 0);
+  const opRisk = op.reduce((a, t) => a + (t.notional || 0) * (Math.abs(t.entry - t.sl) / t.entry + 0.0015), 0);
+  const openTot = op.length ? `<div style="font-size:var(--fs-sm);margin-top:6px;padding:6px 8px;background:var(--card);border-radius:var(--r-sm);border:1px solid var(--line);">
+      открыто ${op.length}: в позициях <b>$${Math.round(opN)}</b> <span class="dim">(${(opN / (p.balance || 1)).toFixed(1)}× баланса $${Math.round(p.balance || 0)})</span> ·
+      если все уйдут в стоп: <b class="loss">−$${opRisk.toFixed(2)}</b> <span class="dim">(${(opRisk / (p.balance || 1) * 100).toFixed(1)}% баланса)</span></div>` : '';
   const rows = (p.trades || []).slice(0, 30).map(t => `<tr>
       <td>${String(t.symbol).replace('_USDT','')} <span class="${t.direction === 'LONG' ? 'win' : 'loss'}">${t.direction === 'LONG' ? 'L' : 'S'}</span></td>
       <td class="dim">${fmtDateTime(t.opened_at)}</td>
-      <td class="dim">$${Math.round(t.notional)} · ${t.risk_pct}%</td>
+      <td class="dim">позиция $${Math.round(t.notional)} · риск ${t.risk_pct}%</td>
       <td>${t.status === 'OPEN' ? '<span class="dim">открыта</span>' : `<span class="${cls(t.pnl)}">${usd(t.pnl)}</span> <span class="dim">${sg(t.r_net)}R</span>`}</td>
     </tr>`).join('');
   return `<div style="padding:10px 12px;margin-bottom:12px;background:var(--inset);border-radius:var(--r);border:1px solid var(--line);">
@@ -31495,6 +31502,7 @@ function neuroPaperHtml(p) {
       WR ${st.wr != null ? st.wr + '%' : '—'} · ср. <b class="${cls(st.avg_r)}">${sg(st.avg_r)}R</b>${st.lo != null ? ` <span class="dim">(95%: ${sg(st.lo)}…${sg(st.hi)})</span>` : ''} ·
       на сделку ${usd(st.per_trade_usd)} · просадка ${st.max_dd_pct || 0}%<br>${verdict}</div>
     <div class="dim" style="font-size:var(--fs-xs);margin-top:4px;">${p.enabled ? `торгует ${(p.coins || []).length} монет, прошедших проверку: ${(p.coins || []).map(x => x.replace('_USDT','')).join(', ') || '—'}` : '⏸ выключена — открытые сделки досчитаются'} · без ордеров на бирже · риск как у реальной сделки · комиссии и проскальзывание учтены</div>
+    ${openTot}
     ${rows ? `<details style="margin-top:6px;"><summary style="cursor:pointer;font-size:var(--fs-sm);color:var(--tx-2);">сделки (${(p.trades || []).length})</summary>
       <div style="overflow-x:auto;"><table style="font-size:var(--fs-xs);white-space:nowrap;width:100%;">${rows}</table></div></details>` : ''}
   </div>`;
