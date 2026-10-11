@@ -19348,3 +19348,7 @@ v0.99.560 - Зоны: the USDT.D post (a dominance index) was skipped as "I не
 v0.99.561 - /update and the "обновить" button: when GitHub gives the same version, the bot no
          longer restarts (user: "если уже последняя версия, то перезапускать не надо"); it says
          so and that a just-pushed version can reach GitHub's cache up to ~5 min later.
+v0.99.562 - Neuro: when switched off in the settings, the tab said "последний майнинг 05.10 ·
+         следующий ~06.10" for days (user: "майнинга нет, живых сигналов несколько дней нет" — it
+         had been switched off by accident). Now a red banner: "⏸ Neuro выключен в настройках —
+         майнинг не идёт, живые сигналы не ищутся, бумажная торговля стоит", no "следующий".

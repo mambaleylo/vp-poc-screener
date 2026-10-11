@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.561"
+APP_VERSION = "0.99.562"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -20571,6 +20571,7 @@ def api_neuro_status():
         "single_best": NEURO_SINGLE_BEST_ENABLED,
         "best_symbol": next((s_ for s_ in active_symbols if neuro_money_ok(s_)), None),   # v0.99.403; v0.99.429 — first card that makes money at the current risk
         "autotrade_enabled": AUTOTRADE_ENABLED_NEURO,
+        "enabled": NEURO_ENABLED,   # v0.99.562
         "calc": calc_status("neuro"), "calc_cond": calc_status("cond"),   # v0.99.372
         "coins": coins, "last_mined": last_mined, "mining_running": running,
         "waiting_slot_since": waiting_slot_since,
@@ -31417,7 +31418,7 @@ async function refreshNeuro() {
         + (data.waiting_slot_since ? ` <span style="color:var(--warn);">· ⏸ пауза с ${fmtDateTime(data.waiting_slot_since)}: уступил слот другому бэктесту, продолжит после него</span>` : '')
       : (data.waiting_slot_since
         ? `<span style="color:var(--warn);">⏳ ждёт свободного слота бэктеста с ${fmtDateTime(data.waiting_slot_since)} (одновременно идут не больше 2 бэктестов) · последний майнинг: ${lastMined}</span>`
-        : `<span class="dim">последний майнинг: ${lastMined}${data.next_mining_ts ? ' · следующий ~' + fmtDateTime(data.next_mining_ts) : ''}</span>`)
+        : `<span class="dim">последний майнинг: ${lastMined}${data.next_mining_ts && data.enabled !== false ? ' · следующий ~' + fmtDateTime(data.next_mining_ts) : ''}</span>`)
       + (data.last_error && (!data.last_mined || data.last_error_ts > data.last_mined)
         ? `<div class="loss" style="font-size:var(--fs-xs);margin-top:2px;">⚠️ последний цикл упал ${fmtDateTime(data.last_error_ts)}: ${String(data.last_error).replace(/</g,'&lt;')} · повтор через 30 мин</div>` : '');
     const progressPct = data.mining_total ? Math.round((data.mining_done||0) / data.mining_total * 100) : 0;
@@ -31672,6 +31673,7 @@ async function refreshNeuro() {
         (\u0447\u0430\u0441 \u0434\u043d\u044f, \u0434\u0435\u043d\u044c \u043d\u0435\u0434\u0435\u043b\u0438, RSI, EMA, MACD, Bollinger, \u043e\u0431\u044a\u0451\u043c, funding rate, \u043a\u043e\u0440\u0440\u0435\u043b\u044f\u0446\u0438\u044f \u0441 BTC \u0438 \u0434\u0440.) \u0438 \u043e\u0441\u0442\u0430\u0432\u043b\u044f\u0435\u0442 \u0442\u043e\u043b\u044c\u043a\u043e \u0442\u043e,
         \u0447\u0442\u043e \u043f\u043e\u0434\u0442\u0432\u0435\u0440\u0436\u0434\u0430\u0435\u0442\u0441\u044f \u043d\u0430 \u043e\u0442\u043b\u043e\u0436\u0435\u043d\u043d\u044b\u0445 \u0434\u0430\u043d\u043d\u044b\u0445 (walk-forward). \u041a\u0430\u0440\u0442\u043e\u0447\u043a\u0430 \u043a\u0430\u0436\u0434\u043e\u0439 \u043c\u043e\u043d\u0435\u0442\u044b: \u0436\u0438\u0432\u043e\u0439 \u0441\u0438\u0433\u043d\u0430\u043b \u0441\u0432\u0435\u0440\u0445\u0443, \u0437\u0430\u0442\u0435\u043c WINRATE/P&L/RR/W-L-T, \u043f\u043e\u0442\u043e\u043c \u0437\u0430\u0432\u0438\u0441\u0438\u043c\u043e\u0441\u0442\u0438 \u0438 \u0441\u0434\u0435\u043b\u043a\u0438 (\u0440\u0430\u0441\u043a\u0440\u044b\u0432\u0430\u044e\u0442\u0441\u044f). \u041a\u043b\u0438\u043a \u043f\u043e \u0441\u0434\u0435\u043b\u043a\u0435 \u2014 \u0433\u0440\u0430\u0444\u0438\u043a. \u041f\u0435\u0440\u0435\u043c\u0430\u0439\u043d\u0438\u0432\u0430\u0435\u0442 \u043a\u0430\u0436\u0434\u044b\u0435 ${Math.round((cfg.refresh_sec||14400)/3600)}\u0447.
       </div>
+      ${data.enabled === false ? '<div style="padding:10px 12px;margin-bottom:8px;background:var(--neg-bg);border:1px solid var(--neg);border-radius:var(--r-sm);font-size:var(--fs-sm);">⏸ <b>Neuro выключен в настройках</b> — майнинг не идёт, живые сигналы не ищутся, бумажная торговля стоит. Включите «Neuro» в ⚙️ Настройках.</div>' : ''}
       ${data.stale_results ? '<div style="padding:8px 10px;margin-bottom:8px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-sm);font-size:var(--fs-sm);">⚠️ карточки ниже посчитаны старой версией расчёта — не торгуются до пересчёта (идёт майнинг)</div>' : ''}
       <div style="margin-bottom:4px;">${miningTxt}</div>
       ${progressBarHtml}
