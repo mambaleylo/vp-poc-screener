@@ -19387,3 +19387,12 @@ v0.99.566 - P/R and "Откат 4в1": a second try for a trade skipped because 
          signal's timeframe (1h -> 4 h, 4h -> 12 h max); the module's autotrade must be on and the
          coin still in the list. Telegram: "✅ цена вернулась — сделка открыта со второй попытки".
          The signal list shows "⏳ жду возврата" / the outcome of the retry.
+v0.99.567 - "4в1": breakout mode (user: "давай пробой торговать" — on the real data every indicator
+         lost as a fade, strongly on the recent test part: the moves past the bands went on). Each
+         signal is now tried both ways — "откат" (against the move, back to the mean) and "пробой"
+         (with the move, continuation) — with the same stop 1 ATR / take RR × stop / max hold /
+         fees. 576 combinations per coin, the bars recomputed for them (train z >= 3.39, pooled
+         >= ~3.7). The "какой индикатор лучше" table has 8 rows: each indicator as a fade and as a
+         breakout. Cards, live signals and Telegram say which mode. Saved per-coin parameters
+         without a mode count as the fade. Tab: "🔁 4в1: откат/пробой". Synthetic check: a trending
+         market -> breakout, a mean-reverting one -> fade, a random walk -> nothing.

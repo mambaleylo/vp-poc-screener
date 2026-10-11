@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.566"
+APP_VERSION = "0.99.567"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16683,10 +16683,16 @@ MR4_FAMILIES = {
     "vwap": ("VWAP-полосы", "окно", (24, 48, 96), "ATR", (1.5, 2.0, 2.5)),
 }
 MR4_RR_CANDIDATES = [1.0, 1.5, 2.0, 3.0]
+# v0.99.567 — user: "давай пробой торговать" (every indicator lost on the fade, strongly on the
+# recent test part — the moves past the bands went on). Each signal is now tried both ways:
+# fade = against the move (back to the mean), break = with the move (continuation).
+MR4_MODES = ("fade", "break")
+MR4_MODE_NAMES = {"fade": "откат", "break": "пробой"}
+_MR4_FLIP = {"LONG": "SHORT", "SHORT": "LONG"}
 MR4_TF_CANDIDATES = ["1h", "4h"]
 MR4_ATR_LENGTH = 14
 MR4_SL_ATR_MULT = 1.0
-MR4_N_COMBOS = sum(len(f[2]) * len(f[4]) for f in MR4_FAMILIES.values()) * len(MR4_RR_CANDIDATES) * len(MR4_TF_CANDIDATES)   # 288
+MR4_N_COMBOS = sum(len(f[2]) * len(f[4]) for f in MR4_FAMILIES.values()) * len(MR4_RR_CANDIDATES) * len(MR4_TF_CANDIDATES) * len(MR4_MODES)   # 576
 MR4_Z_CRITICAL = round(statistics.NormalDist().inv_cdf(1 - 0.20 / MR4_N_COMBOS), 3)   # the same alpha 0.20 Bonferroni as P/R, over all 288
 MR4_TEST_Z = 2.0
 MR4_KEEP_Z = 1.645
@@ -16710,13 +16716,19 @@ _mr4_pool_parts = {}
 _mr4_had_data = {}
 
 
-def mr4_desc(fam, p1, p2):
+def mr4_desc(fam, p1, p2, mode="fade"):
     f = MR4_FAMILIES.get(fam)
     if not f:
         return str(fam)
+    m = MR4_MODE_NAMES.get(mode or "fade", mode)
     if fam == "rsi":
-        return f"RSI({p1}) ≤{p2:g} / ≥{100 - p2:g}"
-    return f"{f[0]} · {f[1]} {p1} · {p2:g} {f[3]}"
+        return f"{m} · RSI({p1}) ≤{p2:g} / ≥{100 - p2:g}"
+    return f"{m} · {f[0]} · {f[1]} {p1} · {p2:g} {f[3]}"
+
+
+def mr4_mode_series(sig, mode):
+    """break = the same extreme, traded with the move"""
+    return [_MR4_FLIP.get(x) for x in sig] if mode == "break" else sig
 
 
 def mr4_signal_series(candles, fam, p1, p2, atr=None):
@@ -16839,15 +16851,15 @@ def mr4_simulate_trades(candles, sig, rr, atr, max_wait_bars=MR4_MAX_WAIT_BARS, 
     return trades
 
 
-def mr4_combo_key(tf, fam, p1, p2, rr):
-    return f"{tf}|{fam}|{p1}|{p2}|{rr}"
+def mr4_combo_key(tf, fam, p1, p2, rr, mode="fade"):
+    return f"{tf}|{fam}|{p1}|{p2}|{rr}|{mode}"
 
 
 def mr4_optimize_core(candles_by_tf, keep=None):
     """the pure-CPU part (may run in a calculation worker process): every
     combination of the four indicators on train, the test as one hypothesis"""
     errors, passing, kept, pool = [], [], [], {}
-    keep_key = (keep["timeframe"], keep["family"], keep["p1"], keep["p2"], keep["rr"]) if keep else None
+    keep_key = (keep["timeframe"], keep["family"], keep["p1"], keep["p2"], keep["rr"], keep.get("mode") or "fade") if keep else None
     for tf in MR4_TF_CANDIDATES:
         candles = candles_by_tf.get(tf)
         if not candles or len(candles) < 200:
@@ -16860,14 +16872,15 @@ def mr4_optimize_core(candles_by_tf, keep=None):
             for fam, (_nm, _a, p1s, _b, p2s) in MR4_FAMILIES.items():
                 for p1 in p1s:
                     for p2 in p2s:
-                        sig = mr4_signal_series(candles, fam, p1, p2, atr)
-                        for rr in MR4_RR_CANDIDATES:
+                        sig0 = mr4_signal_series(candles, fam, p1, p2, atr)
+                        for mode, rr in [(md, r_) for md in MR4_MODES for r_ in MR4_RR_CANDIDATES]:
+                            sig = mr4_mode_series(sig0, mode)
                             neuro_check_cancel()
                             trades = mr4_simulate_trades(candles, sig, rr, atr, max_wait_bars=max_hold_bars(tf, MR4_MAX_WAIT_BARS))
                             closed = [t for t in trades if t["result"] in CLOSED_RESULTS]
                             train = [t for t in closed if t["time"] <= boundary_time]
                             test = [t for t in closed if t["time"] > boundary_time]
-                            pool[mr4_combo_key(tf, fam, p1, p2, rr)] = (
+                            pool[mr4_combo_key(tf, fam, p1, p2, rr, mode)] = (
                                 len(train), sum(1 for t in train if t["result"] == "WIN"),
                                 sum(_net_r(t) ** 2 for t in train), sum(_net_r(t) for t in train),
                                 len(test), sum(1 for t in test if t["result"] == "WIN"),
@@ -16878,9 +16891,9 @@ def mr4_optimize_core(candles_by_tf, keep=None):
                             test_z = _z_vs_breakeven_with_fees(test, rr)
                             if train_z is None or test_z is None:
                                 continue
-                            cand = {"tf": tf, "family": fam, "p1": p1, "p2": p2, "rr": rr, "closed": closed,
+                            cand = {"tf": tf, "family": fam, "p1": p1, "p2": p2, "rr": rr, "mode": mode, "closed": closed,
                                     "boundary": boundary_time, "span": span, "train_z": train_z, "test_z": test_z}
-                            mine = (tf, fam, p1, p2, rr) == keep_key
+                            mine = (tf, fam, p1, p2, rr, mode) == keep_key
                             if train_z >= MR4_Z_CRITICAL and test_z >= MR4_TEST_Z:
                                 cand["mine"] = mine
                                 passing.append(cand)
@@ -16896,8 +16909,8 @@ def mr4_optimize_core(candles_by_tf, keep=None):
     if pick:
         c = max(pick, key=lambda c: c["train_z"])
         best = _strategy_best_dict(c, None, {"timeframe": c["tf"], "family": c["family"], "p1": c["p1"], "p2": c["p2"],
-                                             "rr": c["rr"], "family_name": MR4_FAMILIES[c["family"]][0],
-                                             "desc": mr4_desc(c["family"], c["p1"], c["p2"])})
+                                             "rr": c["rr"], "mode": c["mode"], "family_name": MR4_FAMILIES[c["family"]][0],
+                                             "desc": mr4_desc(c["family"], c["p1"], c["p2"], c["mode"])})
         best["kept"] = not (c["train_z"] >= MR4_Z_CRITICAL and c["test_z"] >= MR4_TEST_Z)
     return {"best": best, "errors": errors, "pool": pool}
 
@@ -16950,13 +16963,16 @@ def _mr4_pool_rows(parts):
                 a[8] += 1
     rows = []
     for k, a in agg.items():
-        tf, fam, p1, p2, rr = k.split("|")
+        parts_ = k.split("|")
+        tf, fam, p1, p2, rr = parts_[:5]
+        mode = parts_[5] if len(parts_) > 5 else "fade"
         rr = float(rr)
         if a[0] < MR4_POOLED_MIN_TRAIN:
             continue
         tz = _t_from_sums(a[0], a[3], a[2], var_floor=rr)
         sz = _t_from_sums(a[4], a[7], a[6], var_floor=rr) if a[4] else None
-        rows.append({"tf": tf, "family": fam, "p1": int(p1), "p2": float(p2), "rr": rr, "desc": mr4_desc(fam, int(p1), float(p2)),
+        rows.append({"tf": tf, "family": fam, "p1": int(p1), "p2": float(p2), "rr": rr, "mode": mode,
+                     "desc": mr4_desc(fam, int(p1), float(p2), mode),
                      "coins": a[8], "train_n": a[0], "train_wr": round(a[1] / a[0] * 100, 1),
                      "train_avg_pnl_r": round(a[3] / a[0], 3), "train_z": round(tz, 2) if tz is not None else None,
                      "test_n": a[4], "test_wr": round(a[5] / a[4] * 100, 1) if a[4] else None,
@@ -16976,11 +16992,12 @@ def mr4_pooled_select(parts):
     passed = bool(chosen and chosen["test_n"] >= MR4_POOLED_MIN_TEST and chosen["test_z"] is not None
                   and chosen["test_z"] >= MR4_TEST_Z and (chosen["test_avg_pnl_r"] or 0) > 0)
     fams = []
-    for fam, f in MR4_FAMILIES.items():
-        fr = [r for r in rows if r["family"] == fam]
-        b = fr[0] if fr else None
-        fams.append({"family": fam, "name": f[0], "best": b, "combos": len(fr),
-                     "significant": bool(b and b["train_z"] is not None and b["train_z"] >= MR4_POOLED_Z)})
+    for mode in MR4_MODES:   # v0.99.567 — each indicator as a fade and as a breakout
+        for fam, f in MR4_FAMILIES.items():
+            fr = [r for r in rows if r["family"] == fam and r["mode"] == mode]
+            b = fr[0] if fr else None
+            fams.append({"family": fam, "mode": mode, "name": f"{f[0]} — {MR4_MODE_NAMES[mode]}", "best": b, "combos": len(fr),
+                         "significant": bool(b and b["train_z"] is not None and b["train_z"] >= MR4_POOLED_Z)})
     return {"t": time.time(), "passed": passed, "chosen": chosen, "best_train": top, "top": rows[:8], "families": fams,
             "coins": len(parts), "combos": len(rows), "combos_total": MR4_N_COMBOS, "z_needed": MR4_POOLED_Z,
             "z_test_needed": MR4_TEST_Z, "min_train": MR4_POOLED_MIN_TRAIN, "min_test": MR4_POOLED_MIN_TEST}
@@ -16988,7 +17005,7 @@ def mr4_pooled_select(parts):
 
 def mr4_pooled_results(chosen, symbols):
     """per-coin cards for the confirmed pooled combo (coins with a positive own train)"""
-    key = mr4_combo_key(chosen["tf"], chosen["family"], chosen["p1"], chosen["p2"], chosen["rr"])
+    key = mr4_combo_key(chosen["tf"], chosen["family"], chosen["p1"], chosen["p2"], chosen["rr"], chosen.get("mode") or "fade")
     out = {}
     for sym in symbols:
         heartbeat("mr4_backtest_loop")
@@ -17000,7 +17017,7 @@ def mr4_pooled_results(chosen, symbols):
             if len(cs) < 200:
                 continue
             atr = neuro_atr_series(cs, MR4_ATR_LENGTH)
-            sig = mr4_signal_series(cs, chosen["family"], chosen["p1"], chosen["p2"], atr)
+            sig = mr4_mode_series(mr4_signal_series(cs, chosen["family"], chosen["p1"], chosen["p2"], atr), chosen.get("mode") or "fade")
             closed = [t for t in mr4_simulate_trades(cs, sig, chosen["rr"], atr, max_wait_bars=max_hold_bars(chosen["tf"], MR4_MAX_WAIT_BARS))
                       if t["result"] in CLOSED_RESULTS]
             boundary = cs[int(len(cs) * MR4_TRAIN_FRAC) - 1]["time"]
@@ -17011,7 +17028,8 @@ def mr4_pooled_results(chosen, symbols):
             c = {"closed": closed, "boundary": boundary, "span": (cs[0]["time"], cs[-1]["time"]),
                  "train_z": _z_vs_breakeven_with_fees(tr, chosen["rr"]) or 0.0, "test_z": _z_vs_breakeven_with_fees(te, chosen["rr"]) or 0.0}
             best = _strategy_best_dict(c, None, {"timeframe": chosen["tf"], "family": chosen["family"], "p1": chosen["p1"],
-                                                 "p2": chosen["p2"], "rr": chosen["rr"], "family_name": MR4_FAMILIES[chosen["family"]][0],
+                                                 "p2": chosen["p2"], "rr": chosen["rr"], "mode": chosen.get("mode") or "fade",
+                                                 "family_name": MR4_FAMILIES[chosen["family"]][0],
                                                  "desc": chosen["desc"]})
             _all = best.pop("_all_closed")
             best.update(rr_compound_annotate(_all, sym, mod="mr4", clean_after=best.get("test_start_time")))
@@ -17091,7 +17109,7 @@ def mr4_backtest_loop():
                 if all_results or data_ok:
                     _old = STATE.get("mr4_keep") or {}
                     STATE["mr4_keep"] = {sym: {"timeframe": r_["timeframe"], "family": r_["family"], "p1": r_["p1"], "p2": r_["p2"],
-                                               "rr": r_["rr"], "since": (_old.get(sym) or {}).get("since") or time.time()}
+                                               "rr": r_["rr"], "mode": r_.get("mode") or "fade", "since": (_old.get(sym) or {}).get("since") or time.time()}
                                          for sym, r_ in per_coin.items()}
                     STATE["mr4_results"] = dict(display_top)
                     _mr4_active_symbols = list(_act)
@@ -17137,7 +17155,7 @@ def mr4_scan_symbol_live(symbol):
         if len(closed) < 120:
             return None
         atr = neuro_atr_series(closed, MR4_ATR_LENGTH)
-        sig = mr4_signal_series(closed, r["family"], r["p1"], r["p2"], atr)
+        sig = mr4_mode_series(mr4_signal_series(closed, r["family"], r["p1"], r["p2"], atr), r.get("mode") or "fade")
         i = len(closed) - 1
         d = sig[i]
         if d is None or not atr[i]:
@@ -17247,7 +17265,7 @@ def mr4_live_loop():
                 record["leverage"] = (autotrade_result or {}).get("leverage") or _plan
                 record["leverage_planned"] = not (autotrade_result or {}).get("leverage")
                 arrow = "⬆️" if sig["direction"] == "LONG" else "⬇️"
-                send_telegram(f"{arrow} Откат 4в1 {sym} ({sig['direction']}) · {res.get('desc', '')} · {sig['timeframe']}\n"
+                send_telegram(f"{arrow} 4в1 {sym} ({sig['direction']}) · {res.get('desc', '')} · {sig['timeframe']}\n"
                               f"entry: {sig['entry']:.6g}\nSL: {sig['sl']:.6g}  TP: {sig['tp']:.6g}\n"
                               f"плечо: {format_leverage_txt(autotrade_result, AUTOTRADE_ENABLED_MR4, _plan)}", category="mr4")
                 save_state()
@@ -30833,7 +30851,7 @@ INDEX_HTML = """<!doctype html>
 </header>
 <div class="tabs">
   <div class="tab active" data-tab="prv" style="color:var(--prv);">Peak Reversal</div>
-  <div class="tab" data-tab="mr4" style="color:#ff8fa3;">🔁 Откат 4в1</div>
+  <div class="tab" data-tab="mr4" style="color:#ff8fa3;">🔁 4в1: откат/пробой</div>
   <div class="tab" data-tab="zones" style="color:#4caf50;">🎯 Зоны</div>
   <div class="tab" data-tab="neuro" style="color:var(--neuro);">🧠 Neuro</div>
   <div class="tab" data-tab="signals">Volume</div>
@@ -31026,8 +31044,8 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
-          <div class="label">🔁 Откат 4в1 (бэктест + живые сигналы)</div>
-          <div class="sub">4 индикатора из семьи P/R — Боллинджер, RSI на крайностях, z-score, VWAP-полосы — каждый подбирается и проверяется на train/test, как P/R</div>
+          <div class="label">🔁 4в1: откат / пробой (бэктест + живые сигналы)</div>
+          <div class="sub">4 индикатора — Боллинджер, RSI на крайностях, z-score, VWAP-полосы — каждый и на откат, и на пробой; подбирается и проверяется на train/test, как P/R</div>
         </div>
         <label class="switch"><input type="checkbox" id="setMr4"><span class="switchSlider"></span></label>
       </div>
@@ -33699,9 +33717,9 @@ async function refreshMr4() {
   try { d = await (await fetch('/api/mr4/status')).json(); } catch (e) { panel.innerHTML = '<div class="dim">нет связи</div>'; return; }
   const cfg = d.config || {};
   const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
-  let h = `<div class="dim hint-block" style="margin-bottom:10px;"><b>🔁 Откат 4в1</b> — четыре индикатора из той же семьи, что P/R (ставка на возврат к среднему), каждый подбирается и проверяется так же честно:
+  let h = `<div class="dim hint-block" style="margin-bottom:10px;"><b>🔁 4в1: откат / пробой</b> — четыре индикатора из той же семьи, что P/R; каждый сигнал пробуется двумя способами: <b>откат</b> (против движения, к средней) и <b>пробой</b> (по движению, на продолжение). Подбор и проверка — так же честно, как у P/R:
     <b>Боллинджер</b> (хвост за SMA ± k·σ), <b>RSI</b> на крайностях (≤ порог — лонг, ≥ 100−порог — шорт), <b>Z-score</b> закрытия от средней, <b>VWAP-полосы</b> (закрытие в k ATR от VWAP за окно).
-    Всего ${cfg.combos || 288} вариантов на монету (4 индикатора × настройки × RR × 1ч/4ч): обучение 70% (z ≥ ${cfg.z_critical} — поправка на весь перебор), тест 30% (z ≥ ${cfg.test_z}). Вход по открытию следующей свечи, стоп 1 ATR, тейк RR × стоп, комиссии учтены. Пересчёт каждые ${Math.round((cfg.refresh_sec || 14400) / 3600)} ч.</div>`;
+    Всего ${cfg.combos || 576} вариантов на монету (4 индикатора × настройки × откат/пробой × RR × 1ч/4ч): обучение 70% (z ≥ ${cfg.z_critical} — поправка на весь перебор), тест 30% (z ≥ ${cfg.test_z}). Вход по открытию следующей свечи, стоп 1 ATR, тейк RR × стоп, комиссии учтены. Пересчёт каждые ${Math.round((cfg.refresh_sec || 14400) / 3600)} ч.</div>`;
   if (d.enabled === false) h += '<div style="padding:10px 12px;margin-bottom:8px;background:var(--neg-bg);border:1px solid var(--neg);border-radius:var(--r-sm);font-size:var(--fs-sm);">⏸ <b>«Откат 4в1» выключен в настройках</b> — бэктест и живые сигналы не идут.</div>';
   if (d.backtest_running) {
     const pct = d.progress_total ? Math.round(d.progress_done / d.progress_total * 100) : 0;
