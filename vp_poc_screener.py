@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.562"
+APP_VERSION = "0.99.563"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -27972,11 +27972,104 @@ def api_zones_relearn():
 
 
 
+# v0.99.563 — a liquidity reference for the P/R cards (user: "рекомендуемая сумма для сделки на основе
+# суммы торгов, чтобы размер был безопасным по ликвидности и проскальзыванию — просто для справки").
+# A position is "safe" when it is at most LIQ_VOL_SHARE of the coin's 24h turnover AND at most
+# LIQ_BOOK_SHARE of the order book within ±0.5% of the price on the thinner side: then the entry
+# and, more importantly, a stop hit by a market order don't move the price much.
+LIQ_VOL_SHARE = 0.005
+LIQ_BOOK_SHARE = 0.3
+LIQ_CACHE_SEC = 600
+_liq_cache = {}
+_liq_busy = set()
+_liq_lock = threading.Lock()
+
+
+def _liq_fetch(symbol):
+    spec = get_contract_spec(symbol) or {}
+    mult = float(spec.get("quanto_multiplier") or 1) or 1.0
+    with GLOBAL_HTTP_SEMAPHORE:
+        _global_rate_gate()
+        r = requests.get(f"{GATE_BASE}/futures/usdt/tickers", params={"contract": symbol}, timeout=HTTP_TIMEOUT)
+    r.raise_for_status()
+    t = (r.json() or [{}])[0]
+    vol = float(t.get("volume_24h_quote") or t.get("volume_24h_settle") or 0)
+    with GLOBAL_HTTP_SEMAPHORE:
+        _global_rate_gate()
+        r = requests.get(f"{GATE_BASE}/futures/usdt/order_book", params={"contract": symbol, "limit": 100}, timeout=HTTP_TIMEOUT)
+    r.raise_for_status()
+    ob = r.json() or {}
+    bids = [(float(x["p"]), float(x["s"]) * mult) for x in ob.get("bids") or []]
+    asks = [(float(x["p"]), float(x["s"]) * mult) for x in ob.get("asks") or []]
+    if not bids or not asks:
+        return {"symbol": symbol, "vol24": vol, "t": time.time(), "error": "пустой стакан"}
+    mid = (bids[0][0] + asks[0][0]) / 2
+    depth = lambda side, pct: sum(p * q for p, q in side if abs(p - mid) <= mid * pct / 100)
+    d05 = min(depth(bids, 0.5), depth(asks, 0.5))
+    d1 = min(depth(bids, 1.0), depth(asks, 1.0))
+    safe = min(vol * LIQ_VOL_SHARE, d05 * LIQ_BOOK_SHARE) if vol > 0 else d05 * LIQ_BOOK_SHARE
+
+    def slip(notional):   # a market order of this size through the thinner side, % from the mid
+        worst = 0.0
+        for side in (asks, bids):
+            left, cost, qty = notional, 0.0, 0.0
+            for p, q in side:
+                take = min(left, p * q)
+                cost += take
+                qty += take / p
+                left -= take
+                if left <= 1e-9:
+                    break
+            if left > 1e-9:
+                return None   # deeper than the 100 levels fetched
+            worst = max(worst, abs(cost / qty - mid) / mid * 100)
+        return round(worst, 3)
+    return {"symbol": symbol, "t": time.time(), "vol24": round(vol), "depth05": round(d05), "depth1": round(d1),
+            "spread_pct": round((asks[0][0] - bids[0][0]) / mid * 100, 3), "safe": round(safe),
+            "slip_safe": slip(safe) if safe > 0 else None, "slip_x3": slip(safe * 3) if safe > 0 else None}
+
+
+def coin_liquidity(symbol):
+    """cached; a stale / missing value is refreshed in the background (the page never waits)"""
+    with _liq_lock:
+        c = _liq_cache.get(symbol)
+        fresh = c and time.time() - c["t"] < LIQ_CACHE_SEC
+        if not fresh and symbol not in _liq_busy:
+            _liq_busy.add(symbol)
+
+            def run():
+                try:
+                    v = _liq_fetch(symbol)
+                except Exception as e:
+                    v = {"symbol": symbol, "t": time.time(), "error": str(e)[:80]}
+                with _liq_lock:
+                    _liq_cache[symbol] = v
+                    _liq_busy.discard(symbol)
+            threading.Thread(target=run, daemon=True).start()
+    return c
+
+
+def liq_for_card(symbol, trades, risk_pct):
+    """the coin's liquidity + the balance at which the card's usual stop at this risk reaches the safe size"""
+    lq = coin_liquidity(symbol)
+    if not lq or lq.get("error"):
+        return lq
+    sl = sorted(abs(t["entry"] - t["sl"]) / t["entry"] * 100 for t in (trades or [])[-60:]
+                if t.get("entry") and t.get("sl") is not None and t["entry"] > 0)
+    stop = sl[len(sl) // 2] if sl else None
+    out = dict(lq, stop_pct=round(stop, 3) if stop else None, risk_pct=risk_pct)
+    if stop and risk_pct and lq.get("safe"):
+        # notional = balance x risk / (stop + fees) -> the balance that makes the notional = safe
+        out["max_balance"] = round(lq["safe"] * (stop / 100 + 2 * AUTOTRADE_SIM_FEE_PCT) / (risk_pct / 100))
+    return out
+
+
 @app.route("/api/prv/status")
 def api_prv_status():
     refresh_result_compound("prv")   # v0.99.418
     with state_lock:
         results = dict(STATE["prv_results"])
+        _liq_trades = {k: list(v.get("all_trades") or v.get("recent_trades") or []) for k, v in results.items() if isinstance(v, dict)}   # v0.99.563
         results = {k: ({kk: vv for kk, vv in v.items() if kk != "all_trades"} | {"all_trades_n": len(v.get("all_trades") or v.get("recent_trades") or [])})
                    if isinstance(v, dict) else v for k, v in results.items()}   # v0.99.334 — full list via /api/prv/trades/<symbol>
         last_finished = STATE["prv_last_backtest_finished"]
@@ -27995,9 +28088,14 @@ def api_prv_status():
     for symbol in display_symbols:
         r = results.get(symbol)
         recent_live_signals = [s for s in signal_log if s["symbol"] == symbol][:40]
+        try:   # v0.99.563 — liquidity reference
+            _rk = auto_risk_for("prv", symbol) or module_risk_pct("prv")
+            liq = liq_for_card(symbol, _liq_trades.get(symbol), float(_rk) if _rk else None) if r else None
+        except Exception as e:
+            liq = {"error": str(e)[:80]}
         coins.append({"symbol": symbol, "is_active": symbol in active_set, "found": r is not None, "result": r,
                        "live_signal_stats": signal_stats["by_symbol"].get(symbol),
-                       "recent_live_signals": recent_live_signals})
+                       "recent_live_signals": recent_live_signals, "liq": liq})
     return jsonify({
         "single_best": PRV_SINGLE_BEST_ENABLED,   # v0.99.379
         "best_symbol": (_prv_active_symbols[0] if _prv_active_symbols else None),
@@ -32715,6 +32813,17 @@ function prvHonestHtml(h) {   // v0.99.546 — the honest live check
   </details>`;
 }
 
+function liqHtml(q) {   // v0.99.563 — liquidity reference: how big a position the coin takes safely
+  if (!q) return '<div class="dim" style="font-size:var(--fs-sm);margin:4px 0;">💧 ликвидность: считаю…</div>';
+  if (q.error) return `<div class="dim" style="font-size:var(--fs-sm);margin:4px 0;">💧 ликвидность: нет данных (${q.error})</div>`;
+  const k = v => v == null ? '—' : (v >= 1e6 ? '$' + (v / 1e6).toFixed(1) + 'M' : v >= 1e3 ? '$' + (v / 1e3).toFixed(1) + 'K' : '$' + Math.round(v));
+  const sl = v => v == null ? 'глубже стакана' : '~' + v + '%';
+  return `<div style="font-size:var(--fs-sm);margin:4px 0 8px;line-height:1.5;">💧 <b>безопасная позиция до ${k(q.safe)}</b>
+    <span class="dim">(проскальзывание ${sl(q.slip_safe)}; втрое больше — ${sl(q.slip_x3)})</span>
+    ${q.max_balance ? `<br>≈ <b>баланс до ${k(q.max_balance)}</b> <span class="dim">при риске ${q.risk_pct}% и обычном стопе ${q.stop_pct}% — с балансом больше позиция выйдет за безопасный размер</span>` : ''}
+    <div class="dim" style="font-size:var(--fs-xs);">оборот за сутки ${k(q.vol24)} · в стакане ±0.5%: ${k(q.depth05)}, ±1%: ${k(q.depth1)} · спред ${q.spread_pct}% · правило: ≤0.5% оборота и ≤30% стакана ±0.5% · только для справки</div></div>`;
+}
+
 function stratNewBadge(c, isActive) {   // v0.99.557 — why a passing coin isn't traded yet
   const r = c.result || {};
   if (isActive || !(r.newcomer || r.few_test)) return '';
@@ -32799,6 +32908,7 @@ async function refreshPrv() {
         <div class="dim hint-block" style="font-size:var(--fs-xs);margin-bottom:8px;">z — насколько стандартных отклонений результат выше безубытка с учётом комиссии: на обучении нужно ≥${data.config && data.config.z_critical} (поправка на перебор всех комбинаций), на тесте — ≥${data.config && data.config.test_z} (проверяется один уже выбранный вариант). ${r.pooled ? 'Эта монета торгуется по комбинации, подтверждённой общей проверкой по всем монетам.' : ''}</div>
         ${liveSigSection}
         ${compoundSummaryHtml(r)}
+        ${liqHtml(c.liq)}
         ${filterCoinLineHtml(data.filters, c.symbol)}
         <details ontoggle="loadBtTrades(this, 'prv', '${c.symbol}', ${data.last_backtest_finished || 0})"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">все сделки бэктеста (${r.all_trades_n || 0})</summary>${tradesRows}</details>
       </div>`;

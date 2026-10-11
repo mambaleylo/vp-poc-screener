@@ -19352,3 +19352,11 @@ v0.99.562 - Neuro: when switched off in the settings, the tab said "послед
          следующий ~06.10" for days (user: "майнинга нет, живых сигналов несколько дней нет" — it
          had been switched off by accident). Now a red banner: "⏸ Neuro выключен в настройках —
          майнинг не идёт, живые сигналы не ищутся, бумажная торговля стоит", no "следующий".
+v0.99.563 - P/R cards: a liquidity reference (user: "рекомендуемая сумма для сделки на основе
+         суммы торгов, чтобы размер был безопасным по ликвидности и проскальзыванию — для
+         справки"). "💧 безопасная позиция до $X" = min(0.5% of the coin's 24h turnover, 30% of the
+         order book within ±0.5% on the thinner side), the slippage of a market order of that
+         size and of 3x it (walked through the real book), and "≈ баланс до $B": the balance at
+         which the card's usual stop at the current risk reaches that size. Turnover, depth
+         ±0.5% / ±1% and spread shown; fetched in the background, cached 10 min. Nothing changes
+         in the orders.
