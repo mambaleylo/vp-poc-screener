@@ -19341,3 +19341,7 @@ v0.99.559 - Поиск по результату: the exam made by the old choos
          "только шорты + только 4ч/1д": -0.52R on the exam, +0.02R without those filters) was
          kept until the daily retrain. Now an exam made by older rules is redone right after the
          update (OC_SELECT_VER); the exam history marks such rows "(старый отбор)".
+v0.99.560 - Зоны: the USDT.D post (a dominance index) was skipped as "I нет на фьючерсах Gate":
+         the bar / an icon read right before "USDT" made a one-letter "coin", and the index check
+         ran only when no such coin was taken. The index check now runs whenever no listed coin was
+         found and wins over that: "USDT.D — индекс, а не монета: торговать нечего, скрин пропущен".

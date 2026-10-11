@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.559"
+APP_VERSION = "0.99.560"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -22233,13 +22233,16 @@ def zones_recognize(data, live_price_fn=None, symbols=None):
     # TOTAL2/3, USDT.D, OTHERS.D…): nothing to trade — the post is skipped instead
     # of guessing a coin by name and a x1000-scaled price (BTC.D 59 ~ BTC 59 000)
     index_read = None
-    if not symbol and not not_listed:
+    # v0.99.560 — also when a "coin" was taken as not listed: "| USDT.D" gave "I"/"7" (the bar or an
+    # icon read before USDT) and the post was skipped as "I нет на фьючерсах Gate"
+    if not symbol:
         for txt in header_all:
             t_ = " " + txt.upper().translate(_trans) + " "
             mi = re.search(r"[^A-Z0-9](BTC|ETH|USDT|USDC|USD|OTHERS|STABLE|ALT|TOTAL[23]?)[.,·]\s?D[^A-Z0-9]", t_) \
                 or re.search(r"[^A-Z0-9](TOTAL[23]?(?:ES)?|OTHERS|BTCDOM|DXY|SPX|NDX|US500|NAS100)[^A-Z0-9]", t_)
             if mi:
                 index_read = mi.group(0).strip(" ·.,:|").replace(",", ".").replace("·", ".").replace(" ", "")
+                not_listed = None
                 break
     if not symbol and symbols and not not_listed and not index_read:
         import difflib
