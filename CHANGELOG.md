@@ -19378,3 +19378,12 @@ v0.99.565 - New tab "🔁 Откат 4в1" (user: "отдельной вклад
          check, $15 compounding, liquidity line, all trades of the backtest. Settings: on/off,
          alerts, autotrade, risk. Calculation in the worker processes like P/R. Synthetic check:
          a mean-reverting market is found (2 of 2 coins), a random walk is not (0 of 2).
+v0.99.566 - P/R and "Откат 4в1": a second try for a trade skipped because the price had already
+         gone too far toward the take (user: "сделка не открылась, так как цена ушла на 0.7R —
+         пусть проверяется цена и, если вернётся, попытаться открыть ещё раз"). Such a signal is
+         watched every minute: if the price comes back within the limit (0.5R) and, since the
+         signal, neither the take nor the stop was touched (5m candles), the trade is opened with
+         the signal's own stop and take (the usual checks run again). The window: 4 bars of the
+         signal's timeframe (1h -> 4 h, 4h -> 12 h max); the module's autotrade must be on and the
+         coin still in the list. Telegram: "✅ цена вернулась — сделка открыта со второй попытки".
+         The signal list shows "⏳ жду возврата" / the outcome of the retry.

@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.565"
+APP_VERSION = "0.99.566"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -5188,6 +5188,7 @@ def _execute_autotrade_impl(mode, symbol, direction, entry, sl, tp, extra=None, 
                     drift_r = favorable_move / sl_dist_r
                     if drift_r > AUTOTRADE_MAX_FAVORABLE_DRIFT_R:
                         record["status"] = "SKIPPED"
+                        record["drift_skip"] = round(drift_r, 2)   # v0.99.566 — P/R / 4в1 retry when the price comes back
                         record["detail"] = (f"цена ({current_price}) уже прошла {drift_r:.2f}R в сторону тейка "
                                              f"к моменту открытия (лимит {AUTOTRADE_MAX_FAVORABLE_DRIFT_R}R) — "
                                              f"сделка не открыта, реальный RR был бы сильно хуже расчётного")
@@ -16630,6 +16631,8 @@ def prv_live_loop():
                                                               all_in_margin_pct=PRV_ALL_IN_MARGIN_PCT if PRV_ALL_IN_ENABLED else None,
                                                               risk_pct_override=auto_risk_for("prv", symbol))   # v0.99.422
                         record["autotrade_fired"] = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")   # v0.99.436
+                        if autotrade_result.get("drift_skip"):   # v0.99.566
+                            record["retry_entry"] = {"since": time.time(), "drift": autotrade_result["drift_skip"], "tries": 0}
                         sim_execute_trade("prv", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                            autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_PRV, record,
                                            autotrade_result=autotrade_result,
@@ -17238,6 +17241,8 @@ def mr4_live_loop():
                         autotrade_result = execute_autotrade("mr4", sym, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                                               risk_pct_override=auto_risk_for("mr4", sym))
                         record["autotrade_fired"] = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
+                        if autotrade_result.get("drift_skip"):   # v0.99.566
+                            record["retry_entry"] = {"since": time.time(), "drift": autotrade_result["drift_skip"], "tries": 0}
                 _plan = planned_leverage(sym, sig["direction"], sig["entry"], sig["sl"])
                 record["leverage"] = (autotrade_result or {}).get("leverage") or _plan
                 record["leverage_planned"] = not (autotrade_result or {}).get("leverage")
@@ -17251,6 +17256,107 @@ def mr4_live_loop():
         except Exception as e:
             log_error(f"mr4_live_loop: {e}")
         time.sleep(900)
+
+
+# v0.99.566 — user: "сделка не открылась, так как цена ушла на 0.7R — пусть периодически
+# проверяется цена и, если вернётся, попытаться открыть ещё раз" (P/R and 4в1). A signal whose
+# real order was skipped for the favorable drift (AUTOTRADE_MAX_FAVORABLE_DRIFT_R) is watched
+# every minute: while neither its take nor its stop has been touched since the signal and the
+# window lasts (ENTRY_RETRY_BARS of its timeframe, at most ENTRY_RETRY_MAX_SEC), a price back
+# within the limit opens it with the signal's own stop and take (execute_autotrade re-checks).
+ENTRY_RETRY_BARS = 4
+ENTRY_RETRY_MAX_SEC = 12 * 3600
+ENTRY_RETRY_POLL_SEC = 60
+
+
+def _entry_retry_touched(sig):
+    """did the price reach the take or the stop since the signal bar closed (5m candles)"""
+    close_t = sig["time"] + INTERVAL_SECONDS.get(sig.get("timeframe"), 3600)
+    cs = get_candles_range(sig["symbol"], "5m", int(close_t) - 300, int(time.time())) or []
+    for c in cs:
+        if c["time"] + 300 <= close_t:
+            continue
+        if sig["direction"] == "LONG" and (c["high"] >= sig["tp"] or c["low"] <= sig["sl"]):
+            return True
+        if sig["direction"] == "SHORT" and (c["low"] <= sig["tp"] or c["high"] >= sig["sl"]):
+            return True
+    return False
+
+
+def entry_retry_tick():
+    for mode, enabled, active, label in (("prv", AUTOTRADE_ENABLED_PRV, _prv_active_symbols, "Peak Reversal"),
+                                         ("mr4", AUTOTRADE_ENABLED_MR4, _mr4_active_symbols, "Откат 4в1")):
+        with state_lock:
+            todo = [x for x in STATE[f"{mode}_signals"] if x.get("retry_entry") and x.get("status") == "OPEN"
+                    and not x.get("autotrade_fired")]
+            act = set(active)
+        for sig in todo:
+            ri = sig["retry_entry"]
+            window = min(ENTRY_RETRY_MAX_SEC, ENTRY_RETRY_BARS * INTERVAL_SECONDS.get(sig.get("timeframe"), 3600))
+            stop_why = None
+            if not enabled:
+                stop_why = "автоторговля модуля выключена"
+            elif sig["symbol"] not in act:
+                stop_why = "монета выпала из списка"
+            elif time.time() - (sig["time"] + INTERVAL_SECONDS.get(sig.get("timeframe"), 3600)) > window:
+                stop_why = "цена не вернулась за отведённое время"
+            if not stop_why:
+                try:
+                    price = get_last_price(sig["symbol"])
+                except Exception:
+                    price = None
+                if not price:
+                    continue
+                risk = abs(sig["entry"] - sig["sl"]) or 1e-12
+                drift = ((price - sig["entry"]) if sig["direction"] == "LONG" else (sig["entry"] - price)) / risk
+                if drift > AUTOTRADE_MAX_FAVORABLE_DRIFT_R:
+                    continue   # still too far — look again next minute
+                try:
+                    if _entry_retry_touched(sig):
+                        stop_why = "цена уже касалась тейка или стопа после сигнала"
+                except Exception as e:
+                    log_error(f"entry retry {mode} {sig['symbol']}: candles: {e}")
+                    continue
+            if stop_why:
+                with state_lock:
+                    sig.pop("retry_entry", None)
+                    sig["retry_done"] = stop_why
+                continue
+            ri["tries"] = ri.get("tries", 0) + 1
+            kw = {"risk_pct_override": auto_risk_for(mode, sig["symbol"])}
+            if mode == "prv" and PRV_ALL_IN_ENABLED:
+                kw["all_in_margin_pct"] = PRV_ALL_IN_MARGIN_PCT
+            res = execute_autotrade(mode, sig["symbol"], sig["direction"], sig["entry"], sig["sl"], sig["tp"], **kw)
+            ok = res.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
+            with state_lock:
+                if ok:
+                    sig["autotrade_fired"] = True
+                    sig["leverage"] = res.get("leverage") or sig.get("leverage")
+                    sig["leverage_planned"] = False
+                    sig["retry_done"] = f"открыта со второй попытки (цена вернулась к {price:.6g})"
+                    sig.pop("retry_entry", None)
+                elif not res.get("drift_skip"):
+                    sig["retry_done"] = f"повтор не открыт: {res.get('detail') or res.get('status')}"[:200]
+                    sig.pop("retry_entry", None)
+            if ok:
+                if mode == "prv":
+                    sim_execute_trade("prv", sig["symbol"], sig["direction"], sig["entry"], sig["sl"], sig["tp"],
+                                      res.get("leverage") or AUTOTRADE_LEVERAGE_PRV, sig, autotrade_result=res,
+                                      all_in_margin_pct=kw.get("all_in_margin_pct"))
+                send_telegram(f"✅ {label} {sig['symbol']} {sig['direction']}: цена вернулась ({price:.6g}) — "
+                              f"сделка открыта со второй попытки · SL {sig['sl']:.6g} · TP {sig['tp']:.6g}", category=None)
+                save_state()
+
+
+def entry_retry_loop():
+    time.sleep(90)
+    while True:
+        heartbeat("entry_retry_loop")
+        try:
+            entry_retry_tick()
+        except Exception as e:
+            log_error(f"entry_retry_loop: {e}")
+        time.sleep(ENTRY_RETRY_POLL_SEC)
 
 
 def strategy_honest_live(sigs, active):
@@ -33625,7 +33731,8 @@ async function refreshMr4() {
   }
   h += prvHonestHtml(d.honest);
   const sigs = d.signals || [];
-  if (sigs.length) h += sigListHtml(sigs.map(sg => sigItemHtml(sg, {extra: [sg.desc || '', sg.timeframe || '', sg.leverage ? `плечо ${sg.leverage_planned ? '~' : ''}${sg.leverage}x` : '']})));
+  if (sigs.length) h += sigListHtml(sigs.map(sg => sigItemHtml(sg, {extra: [sg.desc || '', sg.timeframe || '', sg.leverage ? `плечо ${sg.leverage_planned ? '~' : ''}${sg.leverage}x` : '',
+    sg.retry_entry ? `⏳ цена ушла на ${sg.retry_entry.drift}R — жду возврата, чтобы открыть` : (sg.retry_done ? `↺ ${sg.retry_done}` : '')]})));
   const cards = (d.coins || []).map(c => {
     const r = c.result || {};
     const isActive = c.is_active;
@@ -33683,7 +33790,8 @@ async function refreshPrv() {
       ? sigListHtml(allLiveSigs.map(sg => sigItemHtml(sg, {
           onclick: `openPrvChart('${sg.symbol}', ${sg.time})`,
           extra: [sg.leverage ? `плечо ${sg.leverage_planned ? '~' : ''}${sg.leverage}x` : '',
-                  sg.neuro_filtered ? `<span title="отсеян фильтром Neuro «${sg.neuro_filtered}» — записан для статистики, не торговался">🧪 не торговался</span>` : ''],
+                  sg.neuro_filtered ? `<span title="отсеян фильтром Neuro «${sg.neuro_filtered}» — записан для статистики, не торговался">🧪 не торговался</span>` : '',
+                  sg.retry_entry ? `⏳ цена ушла на ${sg.retry_entry.drift}R — жду возврата, чтобы открыть` : (sg.retry_done ? `↺ ${sg.retry_done}` : '')],   // v0.99.566
         })))
       : '';
 
@@ -36447,6 +36555,7 @@ if __name__ == "__main__":
     threading.Thread(target=prv_live_loop, daemon=True).start()
     threading.Thread(target=mr4_backtest_loop, daemon=True).start()   # v0.99.565
     threading.Thread(target=mr4_live_loop, daemon=True).start()
+    threading.Thread(target=entry_retry_loop, daemon=True).start()   # v0.99.566
     zones_load()   # v0.99.438
     zones_fix_dup_pids()   # v0.99.549
     zones_outbox_load()   # v0.99.455 — unsent zone messages from before the restart
