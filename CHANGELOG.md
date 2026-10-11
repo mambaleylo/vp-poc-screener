@@ -19345,3 +19345,6 @@ v0.99.560 - Зоны: the USDT.D post (a dominance index) was skipped as "I не
          the bar / an icon read right before "USDT" made a one-letter "coin", and the index check
          ran only when no such coin was taken. The index check now runs whenever no listed coin was
          found and wins over that: "USDT.D — индекс, а не монета: торговать нечего, скрин пропущен".
+v0.99.561 - /update and the "обновить" button: when GitHub gives the same version, the bot no
+         longer restarts (user: "если уже последняя версия, то перезапускать не надо"); it says
+         so and that a just-pushed version can reach GitHub's cache up to ~5 min later.

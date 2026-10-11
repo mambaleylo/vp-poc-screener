@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.560"
+APP_VERSION = "0.99.561"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -25653,9 +25653,10 @@ def api_self_update():
         new_version = self_update_download()
     except RuntimeError as e:
         return jsonify({"ok": False, "error": str(e)}), 502
-    self_restart("update", 1.5)
-    return jsonify({"ok": True, "old_version": APP_VERSION, "new_version": new_version,
-                    "same": new_version == APP_VERSION})
+    same = new_version == APP_VERSION
+    if not same:   # v0.99.561 — the same version: nothing to restart for
+        self_restart("update", 1.5)
+    return jsonify({"ok": True, "old_version": APP_VERSION, "new_version": new_version, "same": same})
 
 
 RESTART_NOTE_FILE = os.environ.get("VP_RESTART_NOTE_FILE", "vp_restart_note.json")
@@ -25856,7 +25857,11 @@ def bot_command(txt, msg_t=None):
         except RuntimeError as e:
             tg_outbox_push(f"⚠️ Обновление не удалось: {e}")
             return True
-        tg_outbox_push(f"🔄 {'Уже последняя версия v' + nv if nv == APP_VERSION else f'Обновление v{APP_VERSION} → v{nv}'}, перезапускаю…")
+        if nv == APP_VERSION:   # v0.99.561 — nothing new: no restart (user: "если уже последняя — перезапускать не надо")
+            tg_outbox_push(f"✅ Уже последняя версия v{nv} — перезапуск не нужен. Если обновление только что вышло, "
+                           f"GitHub отдаёт его с задержкой до ~5 мин — повторите /update чуть позже.")
+            return True
+        tg_outbox_push(f"🔄 Обновление v{APP_VERSION} → v{nv}, перезапускаю…")
         zones_save()
         self_restart("update", 3)
     else:
@@ -32387,7 +32392,8 @@ async function selfUpdate() {
   let r;
   try { r = await (await fetch('/api/self_update', {method: 'POST'})).json(); } catch (e) { return alert('ошибка сети'); }
   if (!r.ok) return alert(r.error || 'не получилось');
-  alert(r.same ? `Уже последняя версия (${r.new_version}) — перезапускаю.` : `Обновление ${r.old_version} → ${r.new_version}, перезапускаю.`);
+  if (r.same) return alert(`Уже последняя версия (${r.new_version}) — перезапуск не нужен. Если обновление только что вышло, GitHub отдаёт его с задержкой до ~5 мин — попробуйте чуть позже.`);   // v0.99.561
+  alert(`Обновление ${r.old_version} → ${r.new_version}, перезапускаю.`);
   const t0 = Date.now();
   const wait = async () => {
     await new Promise(res => setTimeout(res, 3000));
