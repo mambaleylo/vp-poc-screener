@@ -19396,3 +19396,9 @@ v0.99.567 - "4в1": breakout mode (user: "давай пробой торгова
          breakout. Cards, live signals and Telegram say which mode. Saved per-coin parameters
          without a mode count as the fade. Tab: "🔁 4в1: откат/пробой". Synthetic check: a trending
          market -> breakout, a mean-reverting one -> fade, a random walk -> nothing.
+v0.99.568 - P/R / 4в1 entry retry: a trade was opened after the take had already been reached
+         (user report). The "take or stop touched since the signal" check read only CLOSED 5m
+         candles from the cache — the last minutes, where the price had just been to the take and
+         come back, weren't there yet — and missing candles counted as "not touched". Now: 5m
+         candles up to 20 min ago + live 1m candles of the last 20 min including the forming one;
+         no data or a gap in them -> no entry this minute (fail closed), looked at again later.

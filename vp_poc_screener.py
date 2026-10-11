@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.567"
+APP_VERSION = "0.99.568"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -17288,17 +17288,28 @@ ENTRY_RETRY_POLL_SEC = 60
 
 
 def _entry_retry_touched(sig):
-    """did the price reach the take or the stop since the signal bar closed (5m candles)"""
-    close_t = sig["time"] + INTERVAL_SECONDS.get(sig.get("timeframe"), 3600)
-    cs = get_candles_range(sig["symbol"], "5m", int(close_t) - 300, int(time.time())) or []
-    for c in cs:
-        if c["time"] + 300 <= close_t:
-            continue
-        if sig["direction"] == "LONG" and (c["high"] >= sig["tp"] or c["low"] <= sig["sl"]):
+    """did the price reach the take or the stop since the signal bar closed.
+    v0.99.568 — user: "вход произошёл, но уже после того, как был тейк": the check read only
+    CLOSED 5m candles from the cache — the last minutes (where the price had just been to the
+    take and come back) weren't there yet, and missing candles counted as "not touched". Now:
+    5m candles up to 20 min ago + LIVE 1m candles of the last 20 min incl. the forming one; no
+    data or a gap -> None (unknown: no entry this time)."""
+    now = int(time.time())
+    close_t = int(sig["time"] + INTERVAL_SECONDS.get(sig.get("timeframe"), 3600))
+    hit = lambda c: ((c["high"] >= sig["tp"] or c["low"] <= sig["sl"]) if sig["direction"] == "LONG"
+                     else (c["low"] <= sig["tp"] or c["high"] >= sig["sl"]))
+    recent_from = max(close_t, now - 1200)
+    if recent_from > close_t:
+        cs = [c for c in (get_candles_range(sig["symbol"], "5m", close_t - 300, recent_from) or []) if c["time"] + 300 > close_t]
+        if not cs or cs[0]["time"] > close_t + 300 or cs[-1]["time"] + 300 < recent_from - 600:
+            return None   # the history since the signal isn't complete
+        if any(hit(c) for c in cs):
             return True
-        if sig["direction"] == "SHORT" and (c["low"] <= sig["tp"] or c["high"] >= sig["sl"]):
-            return True
-    return False
+    m1 = [c for c in (_get_candles_range_live(sig["symbol"], "1m", recent_from - 60, now + 60) or [])
+          if c["time"] + 60 > recent_from]
+    if not m1 or m1[-1]["time"] < now - 180:
+        return None   # no fresh minute candles
+    return any(hit(c) for c in m1)
 
 
 def entry_retry_tick():
@@ -17330,11 +17341,14 @@ def entry_retry_tick():
                 if drift > AUTOTRADE_MAX_FAVORABLE_DRIFT_R:
                     continue   # still too far — look again next minute
                 try:
-                    if _entry_retry_touched(sig):
-                        stop_why = "цена уже касалась тейка или стопа после сигнала"
+                    touched = _entry_retry_touched(sig)
                 except Exception as e:
                     log_error(f"entry retry {mode} {sig['symbol']}: candles: {e}")
                     continue
+                if touched is None:
+                    continue   # v0.99.568 — not sure the take / stop wasn't reached: no entry, look again next minute
+                if touched:
+                    stop_why = "цена уже касалась тейка или стопа после сигнала"
             if stop_why:
                 with state_lock:
                     sig.pop("retry_entry", None)
