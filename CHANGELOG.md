@@ -19337,3 +19337,7 @@ v0.99.558 - Поиск по результату: after v0.99.556 the exam fell 
          half isn't taken; a filter must raise the worse half by >= 0.03R and half a standard
          error. Synthetic check: a real edge is still found; on data without an edge no filter is
          taken (3 of 3, before 1 of 3 was).
+v0.99.559 - Поиск по результату: the exam made by the old choosing rules (before v0.99.558 —
+         "только шорты + только 4ч/1д": -0.52R on the exam, +0.02R without those filters) was
+         kept until the daily retrain. Now an exam made by older rules is redone right after the
+         update (OC_SELECT_VER); the exam history marks such rows "(старый отбор)".

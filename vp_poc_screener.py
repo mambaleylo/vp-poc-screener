@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.558"
+APP_VERSION = "0.99.559"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -26968,7 +26968,8 @@ OC_FILTERS = (
     ("width", "ширина зоны", (("narrow", "зона уже 1.5%"), ("wide", "зона шире 1.5%"))),
     ("auth", "автор", (("zone", "автор рисовал эту зону (30 дн.)"), ("coin", "автор разбирал монету (14 дн.)"))),
 )
-OC_FILTER_MIN_GAIN = 0.03   # R per trade a filter must add on the choosing part
+OC_FILTER_MIN_GAIN = 0.03
+OC_SELECT_VER = 558   # v0.99.559 — the choosing rules; an exam made by older rules is redone at once after an update   # R per trade a filter must add on the choosing part
 _OC_FILTER_TXT = {(k, o): t for k, _, opts in OC_FILTERS for o, t in opts}
 
 
@@ -27168,7 +27169,7 @@ def oc_train():
     for var, r in var_best.items():   # every model's own exam, for the table (not used to choose)
         st = _oc_stat(_oc_select(te_rows, r["model"], r["thr"], r["ti"]))
         variants.append({"var": var, "name": OC_VARIANT_NAMES[var], "tp": r["tp"], "q": r["q"], "val": r.get("val_nofilt") or r["val"], "test": st})
-    ev = {"ver": ZONES_OC_VER, "split_t": t_a, "test_t": t_b, "first_t": rows[0]["t"], "last_t": rows[-1]["t"],
+    ev = {"ver": ZONES_OC_VER, "sel_ver": OC_SELECT_VER, "split_t": t_a, "test_t": t_b, "first_t": rows[0]["t"], "last_t": rows[-1]["t"],
           "var": best["var"], "var_name": OC_VARIANT_NAMES[best["var"]], "tp": best["tp"], "q": best["q"],
           "val": best["val"], "test": test, "base_test": base(te_rows), "train": _oc_stat(_oc_select(fit_rows, m, best["thr"], ti)),
           "variants": variants, "samples": len(rows), "coins": len({s["s"] for s in rows}),
@@ -27188,7 +27189,7 @@ def oc_train():
     with _oc_lock:
         _OC.update({"model": final, "eval": ev, "tp": best["tp"], "thr": thr_final, "var": best["var"], "filters": flt})
         # v0.99.556 — every exam is kept: is the search getting better over time?
-        _OC.setdefault("hist", []).append({"t": ev["t"], "var": best["var"], "tp": best["tp"], "q": best["q"],
+        _OC.setdefault("hist", []).append({"t": ev["t"], "sel_ver": OC_SELECT_VER, "var": best["var"], "tp": best["tp"], "q": best["q"],
                                            "filters": [f_["txt"] for f_ in ev["filters"]], "val": ev["val"]["avg"],
                                            "test": test.get("avg"), "test_n": test.get("n"), "test_wr": test.get("wr"),
                                            "test_nofilt": test_nofilt.get("avg"), "author": (ev.get("author_test") or {}).get("avg"),
@@ -27292,7 +27293,8 @@ def oc_loop():
         try:
             if ZONES_OWN_SCAN:
                 with _oc_lock:
-                    need = not _OC["model"] or time.time() - (_OC["eval"] or {}).get("t", 0) > 86400
+                    need = not _OC["model"] or time.time() - (_OC["eval"] or {}).get("t", 0) > 86400 \
+                        or (_OC["eval"] or {}).get("sel_ver") != OC_SELECT_VER   # v0.99.559
                 if need and time.time() - last_train > 3600:
                     last_train = time.time()
                     zones_act("oc", running=True, stage="сбор истории", done=0, total=None, error=None)
@@ -32222,7 +32224,7 @@ function ocHtml(d, ocZ) {   // v0.99.528 — v2: more features, trees, a 3-way h
       ${(ev.variants || []).length ? `<details><summary>все модели</summary><div class="zsub">каждая на своём лучшем тейке и пороге; «подбор» — где выбирали, «экзамен» — где не видели</div><div class="zwrap"><table class="ztbl"><thead><tr><th>модель</th><th>подбор</th><th>экзамен</th></tr></thead><tbody>${ev.variants.map(v => `<tr class="${v.var === ev.var ? 'zbest' : ''}"><td>${v.name}<div class="dim">тейк +${v.tp}% · лучшие ${Math.round(v.q * 100)}%</div></td><td>${sgR(v.val.avg)}<div class="dim">${v.val.n}</div></td><td>${sgR(v.test.avg)}<div class="dim">${v.test.n}</div></td></tr>`).join('')}</tbody></table></div></details>` : ''}`;
   if ((o.hist || []).length) {   // v0.99.556 — is it getting better?
     const h = o.hist.slice().reverse();
-    body += `<details><summary>история экзаменов (${o.hist.length})</summary><div class="zsub">каждое переобучение (раз в сутки): что выбрано и как сдан экзамен — так видно, улучшается ли поиск</div><div class="zwrap"><table class="ztbl"><thead><tr><th>дата</th><th>экзамен</th><th>автор</th></tr></thead><tbody>${h.map(x => `<tr><td>${dd(x.t)}<div class="dim">тейк +${x.tp}% · лучшие ${Math.round(x.q * 100)}%${(x.filters || []).length ? ' · ' + x.filters.join(', ') : ''}</div></td><td>${sgR(x.test)}<div class="dim">${x.test_n || 0} · WR ${x.test_wr == null ? '—' : x.test_wr + '%'}${x.test_nofilt != null && (x.filters || []).length ? ' · без фильтров ' + (x.test_nofilt > 0 ? '+' : '') + x.test_nofilt + 'R' : ''}</div></td><td>${sgR(x.author)}</td></tr>`).join('')}</tbody></table></div></details>`;
+    body += `<details><summary>история экзаменов (${o.hist.length})</summary><div class="zsub">каждое переобучение (раз в сутки): что выбрано и как сдан экзамен — так видно, улучшается ли поиск</div><div class="zwrap"><table class="ztbl"><thead><tr><th>дата</th><th>экзамен</th><th>автор</th></tr></thead><tbody>${h.map(x => `<tr><td>${dd(x.t)}${(x.sel_ver || 0) < 558 ? ' <span class="dim">(старый отбор)</span>' : ''}<div class="dim">тейк +${x.tp}% · лучшие ${Math.round(x.q * 100)}%${(x.filters || []).length ? ' · ' + x.filters.join(', ') : ''}</div></td><td>${sgR(x.test)}<div class="dim">${x.test_n || 0} · WR ${x.test_wr == null ? '—' : x.test_wr + '%'}${x.test_nofilt != null && (x.filters || []).length ? ' · без фильтров ' + (x.test_nofilt > 0 ? '+' : '') + x.test_nofilt + 'R' : ''}</div></td><td>${sgR(x.author)}</td></tr>`).join('')}</tbody></table></div></details>`;
   }
   } else if (!a.running) body += `<div class="dim" style="margin-top:6px;">${ev ? 'новая версия поиска — история собирается заново, начнётся через несколько минут после запуска' : 'модель ещё не обучена — начнёт через несколько минут после запуска бота'}</div>`;
   const lv = o.live || {}, al = o.author_live || {};
