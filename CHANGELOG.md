@@ -19505,3 +19505,6 @@ v0.99.578 - EMA W/M, from the user's ESPORTS | EMA7(W) trade ("сделки ве
          entry, for the stop and take where the trade began, and for the exit with its result
          ("тейк +1.9R"), the profit / loss areas of the position. The pill labels apply to the
          other modules' charts too.
+v0.99.579 - Charts: a price pill no longer covers a dot (the user: "перекрытие точки и плашки") — a few
+         empty candle slots on the right keep the newest candle / the entry dot clear of the pills,
+         and a pill that would still cover a dot moves to the left edge of the chart.

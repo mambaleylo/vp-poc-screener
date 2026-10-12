@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.578"
+APP_VERSION = "0.99.579"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -34233,7 +34233,8 @@ function emwPanel(ctx, box, cs, opt) {
   const pad = (b - a) * 0.07 || Math.abs(a) * 0.02 || 1;
   a -= pad; b += pad;
   const Y = v => box.y + box.h - (f(v) - a) / (b - a) * box.h;
-  const n = cs.length, step = pw / n, cw = Math.max(1, Math.min(14, step * 0.66));
+  // v0.99.579 — a few empty slots on the right: the newest candle / the entry dot stay clear of the price pills
+  const n = cs.length, step = pw / (n + (opt.padSlots == null ? 5 : opt.padSlots)), cw = Math.max(1, Math.min(14, step * 0.66));
   const X = i => box.x + step * (i + 0.5);
   const idxOf = t => { let k = -1; for (let i = 0; i < n; i++) if (cs[i].time <= t) k = i; return k; };
   ctx.font = '10px sans-serif';
@@ -34298,12 +34299,17 @@ function emwPanel(ctx, box, cs, opt) {
     const lim = i === pills.length - 1 ? box.y + box.h - PH / 2 : pills[i + 1].ty - PH - 1;
     if (pills[i].ty > lim) pills[i].ty = lim;
   }
+  // v0.99.579 — user: "перекрытие точки и плашки": a pill that would cover a dot moves to the left edge
+  const dotXY = (opt.dots || []).map(dt => { const i = idxOf(dt.t); return i < 0 || dt.p == null ? null : {x: X(i), y: Y(dt.p), r: (dt.r || 4) + 3}; }).filter(Boolean);
   pills.forEach(pl => {
-    const w = ctx.measureText(pl.text).width + 10, x = box.x + pw - w - 2;
+    const w = ctx.measureText(pl.text).width + 10;
+    let x = box.x + pw - w - 2;
+    const hits = xx => dotXY.some(dd => dd.x + dd.r > xx && dd.x - dd.r < xx + w && dd.y + dd.r > pl.ty - PH / 2 && dd.y - dd.r < pl.ty + PH / 2);
+    if (hits(x) && !hits(box.x + 4)) x = box.x + 4;
     ctx.fillStyle = pl.color; ctx.globalAlpha = 0.92;
     ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, pl.ty - PH / 2, w, PH, 5); else ctx.rect(x, pl.ty - PH / 2, w, PH); ctx.fill();
     ctx.globalAlpha = 1; ctx.fillStyle = '#0b0d12'; ctx.textAlign = 'left'; ctx.fillText(pl.text, x + 5, pl.ty + 4);
-    if (Math.abs(pl.ty - pl.y) > 2) { ctx.strokeStyle = pl.color; ctx.beginPath(); ctx.moveTo(x + w, pl.ty); ctx.lineTo(box.x + pw, pl.y); ctx.stroke(); }
+    if (Math.abs(pl.ty - pl.y) > 2 && x > box.x + 4) { ctx.strokeStyle = pl.color; ctx.beginPath(); ctx.moveTo(x + w, pl.ty); ctx.lineTo(box.x + pw, pl.y); ctx.stroke(); }
   });
   ctx.font = '10px sans-serif';
   (opt.dots || []).forEach(dt => {
