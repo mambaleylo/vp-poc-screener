@@ -19521,10 +19521,7 @@ v0.99.581 - EMA W/M: wider stops (the user, on ICP | EMA28(M) — a good entry, 
          0.25 / 0.5 / 1 ATR of the week / month and the next EMA + 0.25 / 1 daily ATR beyond the
          level (and the same buffers beyond the wick for the reaction entry). The previous model
          is ignored and retrained.
-v0.99.582 - The phone running the bot is watched (the user: "на серверном телефоне села батарея, а в
-         Telegram не пришло уведомление"): every 5 min the battery is read (Termux:API); while it
-         is NOT charging a Telegram warning at 20 / 10 / 5 %, one when the charger is unplugged,
-         one when it is plugged back in after a warning. After a restart that followed more than
-         10 min of silence: "🟢 the bot is back — it was off ~N since HH:MM" with the battery
-         (the last-alive time is stamped every 5 min and survives the restart). Without
-         Termux:API the battery can't be read — that's said once in the errors panel.
+v0.99.582 - One Telegram message when the phone running the bot is at 10 % battery or less and NOT
+         charging (the user: "иногда забываю поставить на зарядку") — once per discharge, again
+         only after it has been charged. The battery is read every 5 min through Termux:API;
+         without it that's said once in the errors panel.
