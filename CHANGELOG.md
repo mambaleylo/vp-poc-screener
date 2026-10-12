@@ -19515,3 +19515,9 @@ v0.99.580 - Charts like TradingView (the user: "плашки вынеси на �
          the legend at the top, which wraps on a narrow screen; nothing is written over the candles
          any more — the trade's result stays in the header. Applies to EMA W/M and to the other
          modules' charts.
+v0.99.581 - EMA W/M: wider stops (the user, on ICP | EMA28(M) — a good entry, a long take, stopped by a
+         wick before the fall: "стоп надо сделать больше, будем проверять сам факт отбоя"). The
+         tight 0.25 / 0.5 daily-ATR stops are gone; the model now chooses among 1 / 2 daily ATR,
+         0.25 / 0.5 / 1 ATR of the week / month and the next EMA + 0.25 / 1 daily ATR beyond the
+         level (and the same buffers beyond the wick for the reaction entry). The previous model
+         is ignored and retrained.

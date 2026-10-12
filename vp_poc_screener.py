@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.580"
+APP_VERSION = "0.99.581"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16820,9 +16820,12 @@ EMW_ENTRY_CANDIDATES = [0.25, 0.0, -0.25, "W"]  # v0.99.575 — the limit: daily
                                                 # v0.99.577 "W" — by the reaction: a 4h close back under, the stop beyond the wick
 EMW_WICK_WAIT = 12                              # 4h candles (2 days) the reaction may take after the touch
 EMW_WICK_BUF = 0.1                              # the stop's buffer beyond the wick: 0.1 x the stop candidate, in daily ATR
-EMW_STOP_CANDIDATES = [("d", 0.25), ("d", 0.5), ("d", 1.0), ("d", 2.0),   # beyond the EMA, in DAILY ATR
-                       ("tf", 0.25), ("tf", 0.5),                         # v0.99.578 — in ATR of the week / month (its wicks)
-                       ("ema", 0.25)]                                     # v0.99.578 — beyond the next EMA (+0.25 daily ATR)
+# v0.99.581 — user (ICP | EMA28(M): a good entry, a long take, still stopped by a wick before the
+# fall): "стоп надо сделать больше, будем проверять сам факт отбоя" — the tight daily stops
+# (0.25 / 0.5) go, a whole ATR of the week / month and the next EMA + 1 daily ATR come in
+EMW_STOP_CANDIDATES = [("d", 1.0), ("d", 2.0),                           # beyond the EMA, in DAILY ATR
+                       ("tf", 0.25), ("tf", 0.5), ("tf", 1.0),            # in ATR of the week / month (its wicks)
+                       ("ema", 0.25), ("ema", 1.0)]                       # beyond the next EMA (+ daily ATR)
 EMW_RR_CANDIDATES = [1.0, 2.0, 3.0]
 EMW_HOLD_CANDIDATES = [2, 7, 28]                # days, then the trade is closed at market
 EMW_TRIGGER_DATR = 0.25                         # the entry sits this many daily ATR before the EMA
@@ -16846,7 +16849,7 @@ EMW_MAX_DRIFT_R = 0.25                          # live entry at most this far pa
 EMW_WATCH_PCT = 15.0                            # the "near the EMA" list: trigger within this % of the price
 EMW_PREALERT_PCT = float(os.environ.get("VP_EMW_PREALERT_PCT", 5.0))   # v0.99.575 — "put the limit on" heads-up at this distance
 EMW_BACKTEST_TRIGGER = threading.Event()
-EMW_MODEL_VER = 578                             # a model of another layout is ignored and retrained
+EMW_MODEL_VER = 581                             # a model of another layout is ignored and retrained
 _emw_parts = {}
 _emw_had_data = {}
 _emw_levels = {}            # symbol -> the forming week's / month's levels
