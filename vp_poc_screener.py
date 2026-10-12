@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.572"
+APP_VERSION = "0.99.573"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -17096,6 +17096,19 @@ def _emw_trades(items, idx, bound):
     return tr, te, per_coin, rows
 
 
+def _emw_trade_row(sym, t, o, best, bound):
+    """one backtest trade for the list and its chart (v0.99.573 — stop / take / exit prices too)"""
+    sgn, entry, lv, da = t[2], t[6], t[7], t[10]
+    stop = lv - sgn * best["stop_atr"] * da
+    take = entry + sgn * best["rr"] * sgn * (entry - stop)
+    res = {1: "WIN", -1: "LOSS", 0: "TIME_EXIT"}[o[2]]
+    return {"symbol": sym, "tf": t[0], "ema": t[1], "direction": "LONG" if sgn > 0 else "SHORT", "time": t[3],
+            "entry": round(entry, 10), "level": round(lv, 10), "sl": round(stop, 10), "tp": round(take, 10),
+            "rise": t[5], "below": t[17], "pnl_r": o[0], "exit_time": o[1], "result": res,
+            "exit_price": round(take if res == "WIN" else stop, 10) if res != "TIME_EXIT" else None,
+            "test": bool(bound and t[3] >= bound)}
+
+
 def _emw_pct(vals, q):
     if not vals:
         return None
@@ -17156,10 +17169,7 @@ def emw_pool_select(parts, now=None):
                     row["best"] = {k_: best[k_] for k_ in ("rise", "below", "stop_atr", "rr", "hold", "hours", "train", "test")}
                     coin_hist[key] = best["_pc"]
                     keep = best["_rows"][-(400 if row["passed"] else 40):]
-                    trades_out[key] = [{"symbol": sym, "time": t[3], "entry": round(t[6], 10), "level": round(t[7], 10),
-                                        "rise": t[5], "below": t[17], "pnl_r": o[0], "exit_time": o[1],
-                                        "result": {1: "WIN", -1: "LOSS", 0: "TIME_EXIT"}[o[2]],
-                                        "test": bool(bound.get(tf) and t[3] >= bound[tf])} for sym, t, o in keep][::-1]
+                    trades_out[key] = [_emw_trade_row(sym, t, o, best, bound.get(tf)) for sym, t, o in keep][::-1]
                 setups.append(row)
     return {"setups": setups, "chosen": [s["key"] for s in setups if s["passed"]], "bound": bound,
             "coins": len(parts), "touches": sum(len(v) for v in parts.values()), "z_train": EMW_Z_TRAIN,
@@ -29108,6 +29118,44 @@ def api_emw_status():
                                "react_datr": EMW_REACT_DATR, "rise_lookback": EMW_RISE_LOOKBACK}})
 
 
+@app.route("/api/emw/chart/<symbol>")
+def api_emw_chart(symbol):
+    """v0.99.573 — user: "хочу везде открыть график и посмотреть, где цена, у какой EMA, и так же
+    на истории сделок": the week / month candles with EMA 7 / 14 / 28 around a moment (a signal,
+    a backtest trade, or now) + the 4h candles around it"""
+    try:
+        tf = request.args.get("tf", "1w")
+        tf = tf if tf in EMW_EMAS else "1w"
+        t_at = int(float(request.args.get("time") or 0))
+        exit_t = int(float(request.args.get("exit_time") or 0))
+        now = int(time.time())
+        daily = emw_fetch_daily(symbol)
+        if not daily:
+            return jsonify({"error": "нет свечей с биржи"}), 404
+        bars = emw_bars(daily, tf)
+        closes = [b["close"] for b in bars]
+        emas = {n: emw_ema(closes, n) for n in EMW_EMAS[tf]}
+        anchor = t_at or now
+        ib = max([i for i, b in enumerate(bars) if b["time"] <= anchor] or [len(bars) - 1])
+        i0, i1 = max(0, ib - 52), min(len(bars), ib + 9)
+        out_bars = []
+        for i in range(i0, i1):
+            b = bars[i]
+            out_bars.append({"time": b["time"], "open": b["open"], "high": b["high"], "low": b["low"], "close": b["close"],
+                             "forming": emw_next_period(b["time"], tf) > now,
+                             "ema": {str(n): emas[n][i] for n in emas}, "level": {str(n): (emas[n][i - 1] if i > 0 else None) for n in emas}})
+        center = t_at or now
+        h_from = min(bars[ib]["time"], center - 4 * 86400)
+        h_to = min(now, max(exit_t, center) + 3 * 86400)
+        h4 = get_candles_range(symbol, "4h", h_from, h_to) or []
+        h4 = [c for c in h4 if h_from <= c["time"] <= h_to][-150:]
+        return jsonify({"symbol": symbol, "tf": tf, "bars": out_bars, "anchor": bars[ib]["time"], "h4": h4,
+                        "price": daily[-1]["close"], "now": now, "emas": [str(n) for n in EMW_EMAS[tf]]})
+    except Exception as e:
+        log_error(f"api_emw_chart {symbol}: {e}")
+        return jsonify({"error": str(e)[:200]}), 500
+
+
 @app.route("/api/emw/trades/<path:key>")
 def api_emw_trades(key):
     with state_lock:
@@ -33858,6 +33906,160 @@ async function emwPost(url, msg) {
   try { await fetch(url, {method: 'POST'}); } catch (e) {}
   setTimeout(refreshEmw, 1000);
 }
+// v0.99.573 — EMA W/M chart: the week / month candles with EMA 7/14/28 + the 4h candles around the moment
+const EMW_EMA_COLORS = ['#5b9bd5', '#a78bfa', '#f0a742'];
+let _emwSigs = [], _emwTrades = {}, _emwWatch = [];
+function emwChartWatch(i) {
+  const r = _emwWatch[i];
+  if (r) emwChart({symbol: r.symbol, tf: r.tf, ema: r.ema, direction: r.dir, time: 0, trigger: r.trigger, level: r.level, sl: r.sl, tp: r.tp});
+}
+function emwChartSig(i) {
+  const s = _emwSigs[i];
+  if (s) emwChart({symbol: s.symbol, tf: s.timeframe, ema: s.ema, direction: s.direction, time: s.time, entry: s.entry, sl: s.sl, tp: s.tp,
+    exit_time: s.exit_time, exit_price: s.exit_price, result: s.result || 'OPEN', trigger: s.trigger, level: s.level});
+}
+function emwChartTrade(key, i) {
+  const t = (_emwTrades[key] || [])[i];
+  if (!t) return;
+  const k = key.split('|');
+  emwChart({symbol: t.symbol, tf: t.tf || k[0], ema: t.ema || +k[1], direction: t.direction || (k[2] === 'S' ? 'SHORT' : 'LONG'), time: t.time,
+    entry: t.entry, sl: t.sl, tp: t.tp, exit_time: t.exit_time, exit_price: t.exit_price, result: t.result, level: t.level, pnl_r: t.pnl_r});
+}
+async function emwChart(o) {
+  const tfTxt = o.tf === '1M' ? 'M' : 'W';
+  document.getElementById('vgiModalTitle').textContent = `${o.symbol.replace('_USDT', '')} | EMA${o.ema}(${tfTxt}) | ${o.direction || 'SHORT'}`;
+  document.getElementById('vgiModalParams').textContent = 'загрузка...';
+  vgiModal.classList.add('open');
+  window._emwRedraw = null;
+  const q = new URLSearchParams({tf: o.tf || '1w', time: o.time || 0, exit_time: o.exit_time || 0});
+  let d;
+  try { d = await (await fetch(`/api/emw/chart/${o.symbol}?${q}`)).json(); } catch (e) { document.getElementById('vgiModalParams').textContent = 'нет связи'; return; }
+  if (d.error) { document.getElementById('vgiModalParams').textContent = d.error; return; }
+  const ab = (d.bars || []).find(b => b.time === d.anchor) || {};
+  const lv = (ab.level || {});
+  const lvTxt = (d.emas || []).map(n => `EMA${n} ${lv[n] != null ? fmtNum(lv[n]) : '—'}`).join(' · ');
+  let p;
+  if (o.entry != null) {
+    const res = o.result && o.result !== 'OPEN' ? ` · ${o.result}${o.pnl_r != null ? ' ' + (o.pnl_r > 0 ? '+' : '') + o.pnl_r + 'R' : ''}${o.exit_price != null ? ' @ ' + fmtNum(o.exit_price) : ''}` : ' · открыта';
+    p = `${fmtDateTime(o.time)} · вход ${fmtNum(o.entry)} · SL ${o.sl != null ? fmtNum(o.sl) : '—'} · TP ${o.tp != null ? fmtNum(o.tp) : '—'}${res}`;
+  } else {
+    p = `сейчас ${fmtNum(d.price)} · вход ≈ ${o.trigger != null ? fmtNum(o.trigger) : '—'}${o.sl != null ? ` · SL ${fmtNum(o.sl)} · TP ${fmtNum(o.tp)}` : ''}`;
+  }
+  document.getElementById('vgiModalParams').innerHTML = `${p}<br><span style="font-size:var(--fs-xs);">уровни этой свечи (EMA закрытых): ${lvTxt}</span>`;
+  const draw = () => emwDrawChart(d, o);
+  window._emwRedraw = draw;
+  draw();
+}
+function emwPanel(ctx, box, cs, opt) {
+  const cssv = (n, f) => (getComputedStyle(document.body).getPropertyValue(n) || '').trim() || f;
+  const grid = cssv('--line', '#26304a'), mut = cssv('--tx-3', '#6c7789'), ink = cssv('--tx', '#e8ecf2');
+  const up = cssv('--pos', '#34d399'), dn = cssv('--neg', '#f87171');
+  const axisW = 62, pw = box.w - axisW;
+  if (!cs.length) { ctx.fillStyle = mut; ctx.font = '12px sans-serif'; ctx.fillText('нет свечей', box.x + 8, box.y + 20); return; }
+  let lo = Infinity, hi = -Infinity;
+  cs.forEach(c => { lo = Math.min(lo, c.low); hi = Math.max(hi, c.high); });
+  (opt.series || []).forEach(s => s.vals.forEach(v => { if (v != null) { lo = Math.min(lo, v); hi = Math.max(hi, v); } }));
+  (opt.hlines || []).forEach(l => { if (l.p != null && l.fit !== false) { lo = Math.min(lo, l.p); hi = Math.max(hi, l.p); } });
+  const f = v => opt.log ? Math.log(Math.max(v, 1e-12)) : v;
+  let a = f(lo), b = f(hi);
+  const pad = (b - a) * 0.07 || Math.abs(a) * 0.02 || 1;
+  a -= pad; b += pad;
+  const Y = v => box.y + box.h - (f(v) - a) / (b - a) * box.h;
+  const n = cs.length, step = pw / n, cw = Math.max(1, Math.min(14, step * 0.66));
+  const X = i => box.x + step * (i + 0.5);
+  const idxOf = t => { let k = -1; for (let i = 0; i < n; i++) if (cs[i].time <= t) k = i; return k; };
+  ctx.font = '10px sans-serif';
+  for (let k = 0; k <= 4; k++) {
+    const raw = a + (b - a) * k / 4, val = opt.log ? Math.exp(raw) : raw, y = Y(val);
+    ctx.strokeStyle = grid; ctx.globalAlpha = 0.5; ctx.beginPath(); ctx.moveTo(box.x, y); ctx.lineTo(box.x + pw, y); ctx.stroke(); ctx.globalAlpha = 1;
+    ctx.fillStyle = mut; ctx.textAlign = 'left'; ctx.fillText(fmtNum(val), box.x + pw + 4, y + 3);
+  }
+  const lab = Math.max(1, Math.round(n / 5));
+  ctx.fillStyle = mut; ctx.textAlign = 'center';
+  for (let i = 0; i < n; i += lab) {
+    const dt = new Date(cs[i].time * 1000);
+    ctx.fillText(opt.dayFmt ? `${dt.getDate()}.${dt.getMonth() + 1} ${String(dt.getHours()).padStart(2, '0')}ч` : `${dt.getDate()}.${dt.getMonth() + 1}.${String(dt.getFullYear()).slice(2)}`, X(i), box.y + box.h + 12);
+  }
+  if (opt.hi != null && opt.hi >= 0) {
+    ctx.fillStyle = ink; ctx.globalAlpha = 0.07; ctx.fillRect(X(opt.hi) - step / 2, box.y, step, box.h); ctx.globalAlpha = 1;
+  }
+  (opt.vlines || []).forEach(v => {
+    const i = idxOf(v.t); if (i < 0) return;
+    ctx.strokeStyle = v.color; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(X(i), box.y); ctx.lineTo(X(i), box.y + box.h); ctx.stroke(); ctx.setLineDash([]);
+    if (v.label) { ctx.fillStyle = v.color; ctx.textAlign = 'center'; ctx.fillText(v.label, X(i), box.y + 26 + (v.row || 0) * 12); }
+  });
+  cs.forEach((c, i) => {
+    const col = c.close >= c.open ? up : dn;
+    ctx.strokeStyle = col; ctx.fillStyle = col; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(X(i), Y(c.high)); ctx.lineTo(X(i), Y(c.low)); ctx.stroke();
+    const y1 = Y(Math.max(c.open, c.close)), y2 = Y(Math.min(c.open, c.close));
+    if (c.forming) { ctx.strokeRect(X(i) - cw / 2, y1, cw, Math.max(1, y2 - y1)); } else ctx.fillRect(X(i) - cw / 2, y1, cw, Math.max(1, y2 - y1));
+  });
+  (opt.series || []).forEach(s => {
+    ctx.strokeStyle = s.color; ctx.lineWidth = s.width || 1.6; ctx.beginPath();
+    let on = false;
+    s.vals.forEach((v, i) => { if (v == null) { on = false; return; } if (!on) { ctx.moveTo(X(i), Y(v)); on = true; } else ctx.lineTo(X(i), Y(v)); });
+    ctx.stroke(); ctx.lineWidth = 1;
+  });
+  (opt.hlines || []).forEach(l => {
+    if (l.p == null) return;
+    const y = Y(l.p), x0 = l.from != null ? X(l.from) - step / 2 : box.x;
+    ctx.strokeStyle = l.color; ctx.lineWidth = l.width || 1.3; if (l.dash) ctx.setLineDash(l.dash);
+    ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(box.x + pw, y); ctx.stroke(); ctx.setLineDash([]); ctx.lineWidth = 1;
+    if (l.label) {
+      ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'right'; ctx.fillStyle = l.color;
+      ctx.fillText(l.label, box.x + pw - 2, y - 3); ctx.font = '10px sans-serif';
+    }
+  });
+  (opt.dots || []).forEach(dt => {
+    const i = idxOf(dt.t); if (i < 0 || dt.p == null) return;
+    ctx.fillStyle = dt.color; ctx.beginPath(); ctx.arc(X(i), Y(dt.p), 4, 0, Math.PI * 2); ctx.fill();
+    ctx.strokeStyle = '#000'; ctx.stroke();
+  });
+  if (opt.legend) {
+    ctx.textAlign = 'left'; ctx.font = 'bold 11px sans-serif';
+    let x = box.x + 4;
+    opt.legend.forEach(g => { ctx.fillStyle = g.color; ctx.fillText(g.text, x, box.y + 12); x += ctx.measureText(g.text).width + 10; });
+    ctx.font = '10px sans-serif';
+  }
+}
+function emwDrawChart(d, o) {
+  const canvas = document.getElementById('vgiChartCanvas'), wrap = document.getElementById('vgiChartWrap');
+  const dpr = window.devicePixelRatio || 1;
+  const W = Math.max(200, wrap.clientWidth - 16), H = Math.max(260, wrap.clientHeight - 16);
+  canvas.width = W * dpr; canvas.height = H * dpr; canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
+  const ctx = canvas.getContext('2d');
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  const bars = d.bars || [];
+  const emas = d.emas || [];
+  const ai = bars.findIndex(b => b.time === d.anchor);
+  const colOf = n => EMW_EMA_COLORS[Math.max(0, emas.indexOf(String(n)))] || '#f0a742';
+  const lvl = ai >= 0 ? (bars[ai].level || {})[String(o.ema)] : (o.level || null);
+  const isShort = (o.direction || 'SHORT') === 'SHORT';
+  const topH = Math.round(H * 0.56);
+  const tLines = [{p: lvl, color: colOf(o.ema), dash: [6, 4], from: ai, label: `EMA${o.ema} ${fmtNum(lvl)}`, width: 2}];
+  if (o.entry == null) tLines.push({p: d.price, color: '#ffffff', dash: [2, 3], label: `цена ${fmtNum(d.price)}`, fit: true});
+  emwPanel(ctx, {x: 4, y: 4, w: W - 4, h: topH - 22}, bars, {
+    log: true, hi: ai, series: emas.map(n => ({vals: bars.map(b => (b.ema || {})[n]), color: colOf(n)})),
+    hlines: tLines, legend: emas.map(n => ({text: `EMA${n}(${d.tf === '1M' ? 'M' : 'W'})`, color: colOf(n)})),
+    dots: o.entry != null ? [{t: o.time, p: o.entry, color: '#ffffff'}] : []});
+  const h4 = d.h4 || [];
+  const entry = o.entry != null ? o.entry : o.trigger;
+  const bl = [{p: lvl, color: colOf(o.ema), dash: [6, 4], label: `EMA${o.ema}`, width: 2},
+              {p: entry, color: '#ffffff', label: o.entry != null ? 'вход' : 'вход ≈'},
+              {p: o.sl, color: '#f87171', label: 'стоп'}, {p: o.tp, color: '#34d399', label: 'тейк'}];
+  const vl = [];
+  if (o.time) vl.push({t: o.time, color: '#ffffff', label: 'вход'});
+  if (o.exit_time) vl.push({row: 1, t: o.exit_time, color: o.result === 'WIN' ? '#34d399' : (o.result === 'LOSS' ? '#f87171' : '#a6b0c0'), label: 'выход'});
+  const dots = o.exit_time && o.exit_price != null ? [{t: o.exit_time, p: o.exit_price, color: o.result === 'WIN' ? '#34d399' : '#f87171'}] : [];
+  emwPanel(ctx, {x: 4, y: topH + 8, w: W - 4, h: H - topH - 26}, h4, {
+    dayFmt: true, hlines: bl, vlines: vl, dots,
+    legend: [{text: '4ч свечи', color: '#a6b0c0'}, {text: isShort ? 'шорт' : 'лонг', color: isShort ? '#f87171' : '#34d399'}]});
+}
+window.addEventListener('resize', () => { if (window._emwRedraw && vgiModal.classList.contains('open')) window._emwRedraw(); });
+document.getElementById('vgiCloseBtn').addEventListener('click', () => { window._emwRedraw = null; });
+
 async function emwLoadTrades(det, key) {
   if (!det.open || det.dataset.loaded) return;
   det.dataset.loaded = '1';
@@ -33865,11 +34067,12 @@ async function emwLoadTrades(det, key) {
   box.innerHTML = '<div class="dim">загружаю…</div>';
   let d;
   try { d = await (await fetch('/api/emw/trades/' + encodeURIComponent(key))).json(); } catch (e) { box.innerHTML = '<div class="dim">нет связи</div>'; return; }
-  const rows = (d.trades || []).map(t => {
+  _emwTrades[key] = d.trades || [];
+  const rows = (d.trades || []).map((t, i) => {
     const rc = t.result === 'WIN' ? 'win' : t.result === 'LOSS' ? 'loss' : 'dim';
-    return `<div style="display:flex;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px solid var(--line);font-size:var(--fs-sm);">
+    return `<div onclick="emwChartTrade('${key}', ${i})" style="cursor:pointer;display:flex;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px solid var(--line);font-size:var(--fs-sm);">
       <span class="dim">${fmtDateTime(t.time)} <b style="color:var(--tx);">${t.symbol.replace('_USDT', '')}</b> @ ${fmtNum(t.entry)} · рост ${t.rise} ATR · под ${t.below}/3 EMA${t.test ? ' · тест' : ''}</span>
-      <span class="${rc}" style="white-space:nowrap;">${t.result} ${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R</span></div>`;
+      <span class="${rc}" style="white-space:nowrap;">${t.result} ${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R 📈</span></div>`;
   });
   box.innerHTML = rows.length ? rows.join('') : '<div class="dim">нет сделок</div>';
 }
@@ -33904,21 +34107,23 @@ async function refreshEmw() {
   }
   // live: the forming candles' levels near the price
   const w = d.watch || [];
-  h += `<div class="secTitle">Сейчас у EMA — живая свеча · ${w.length}</div>`;
-  h += w.length ? w.map(r => {
+  _emwWatch = w;
+  h += `<div class="secTitle">Сейчас у EMA — живая свеча · ${w.length}</div><div class="dim" style="font-size:var(--fs-xs);margin-bottom:4px;">нажми на строку — откроется график: свечи недели / месяца с EMA 7/14/28 и 4ч-свечи у уровня</div>`;
+  h += w.length ? w.map((r, i) => {
     const dirTxt = r.dir === 'LONG' ? '<span class="dirb long">LONG</span>' : '<span class="dirb short">SHORT</span>';
     const near = r.dist_pct <= 0 ? '<b class="win">у уровня</b>' : `до уровня <b>${r.dist_pct}%</b>`;
     const hist = r.hist ? ` · эта монета: ${r.hist[0]} сделок, ${r.hist[1]} в плюс, ${sgR(r.hist[2])}` : '';
-    return `<div style="padding:8px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);${r.confirmed ? '' : 'opacity:.75;'}">
+    return `<div onclick="emwChartWatch(${i})" style="cursor:pointer;padding:8px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);${r.confirmed ? '' : 'opacity:.75;'}">
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;"><span><b>${r.symbol.replace('_USDT', '')}</b> ${dirTxt} EMA ${r.ema} · ${tfName(r.tf)}</span>
-        <span class="dim" style="white-space:nowrap;">${r.confirmed ? '✅ по модели' : 'наблюдение'}</span></div>
+        <span class="dim" style="white-space:nowrap;">${r.confirmed ? '✅ по модели' : 'наблюдение'} · 📈</span></div>
       <div>${near} · вход ≈ ${fmtNum(r.trigger)} (EMA ${fmtNum(r.level)}) · цена ${fmtNum(r.price)}${r.touched ? ' · <span class="dim">в этой свече уже касалась</span>' : ''}</div>
       <div class="dim">рост от ${fmtNum(r.ext)} (${r.ext_pct > 0 ? '+' : ''}${r.ext_pct}% от входа) · ${r.rise} ATR${r.need_rise != null ? ` (нужно ≥ ${r.need_rise})` : ''} · под ${r.below} из 3 EMA${r.sl != null ? ` · SL ${fmtNum(r.sl)} · TP ${fmtNum(r.tp)}` : ''}${hist} · свеча до ${fmtDateTime(r.bar_end)}</div>
     </div>`;
   }).join('') : `<div class="dim" style="font-size:var(--fs-sm);">рядом с уровнями (в пределах ${cfg.watch_pct}%) сейчас никого</div>`;
   h += '<div style="height:10px;"></div>' + prvHonestHtml(d.honest);
   const sigs = d.signals || [];
-  if (sigs.length) h += sigListHtml(sigs.map(sg => sigItemHtml(sg, {extra: [sg.desc || '', sg.level ? `EMA ${fmtNum(sg.level)}` : '', sg.ext ? `рост от ${fmtNum(sg.ext)}${sg.rise != null ? ` (${sg.rise} ATR)` : ''}` : '',
+  _emwSigs = sigs;
+  if (sigs.length) h += sigListHtml(sigs.map((sg, i) => sigItemHtml(sg, {onclick: `emwChartSig(${i})`, extra: [sg.desc || '', sg.level ? `EMA ${fmtNum(sg.level)}` : '', sg.ext ? `рост от ${fmtNum(sg.ext)}${sg.rise != null ? ` (${sg.rise} ATR)` : ''}` : '',
     sg.coin_hist ? `монета: ${sg.coin_hist[0]} сд., ${sg.coin_hist[1]} в плюс` : '', sg.leverage ? `плечо ${sg.leverage_planned ? '~' : ''}${sg.leverage}x` : '']})));
   // what it learned, per EMA
   if (m && m.setups) {

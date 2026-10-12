@@ -19441,3 +19441,10 @@ v0.99.572 - EMA W/M reworked to the original picture the user sent ("HMSTR | EMA
          together with the stop / RR / hold: rise >= 0 / 1.5 / 3 ATR x under >= 2 / 3 EMAs
          (1296 variants). Live checks the rise on 1h candles up to the touch and skips a weak
          one. Telegram: "COIN | EMA28(W) | SHORT". The previous model is ignored and retrained.
+v0.99.573 - EMA W/M: a chart everywhere, at the user's request ("хочу везде открыть график и
+         посмотреть, где цена, у какой EMA, и так же на истории сделок"). A tap on a "near the
+         EMA" row, on a live signal or on a backtest trade opens it: on top the week / month
+         candles with EMA 7 / 14 / 28 (log scale), the candle of the moment highlighted, its
+         level (EMA of the closed candles) dashed, the current price for a live row; below the
+         4h candles around the touch with the EMA level, entry, stop, take and the exit. The
+         backtest trade list now keeps each trade's stop / take / exit price for that.
