@@ -19525,3 +19525,9 @@ v0.99.582 - One Telegram message when the phone running the bot is at 10 % batte
          charging (the user: "иногда забываю поставить на зарядку") — once per discharge, again
          only after it has been charged. The battery is read every 5 min through Termux:API;
          without it that's said once in the errors panel.
+v0.99.583 - EMA W/M: the short now needs a real pump candle (the user, on QNT | EMA100(W): "нет эффекта,
+         когда цена со дна резко растёт к EMA — она всё время возле EMA туда-сюда; нужна накачка
+         свечи на фоне остального графика, а тут размер свечи обычный"). The live candle's rise
+         from its low to the EMA must be at least 1.5 average candles (ATR of the week / month) —
+         learned among 1.5 / 2 / 3 (was 0.5 / 1 / 2, i.e. a normal candle passed). The previous
+         model is ignored and retrained.
