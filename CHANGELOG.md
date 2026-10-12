@@ -19491,3 +19491,17 @@ v0.99.577 - EMA W/M, from the user's MAGIC | EMA7(M) chart:
            127% above its monthly EMA 7);
          * the week / month chart says which timeframe it is.
          The previous model is ignored and retrained.
+v0.99.578 - EMA W/M, from the user's ESPORTS | EMA7(W) trade ("сделки верные, но с выбитым стопом —
+         со стопом ещё играться"): the stop the model may choose now also sits 0.25 / 0.5 ATR of
+         the week / month beyond the EMA (the size of its wicks) or beyond the next EMA on the far
+         side (+0.25 daily ATR) — next to 0.25 / 0.5 / 1 / 2 daily ATR. For the reaction entry
+         the same choices give the buffer beyond the wick (or beyond the next EMA, whichever is
+         farther). A variant whose stop doesn't exist on a touch (no next EMA) simply has no trade
+         there. Every place that shows or uses the stop says which kind it is. Previous model
+         ignored and retrained.
+         Chart ("внизу каша — детальнее, точки тейка / стопа / входа, линии тонкие"): the lower
+         panel shows just the trade and a little around it (daily candles for a long trade),
+         thicker lines with pill labels carrying the price that never overlap, dots for the
+         entry, for the stop and take where the trade began, and for the exit with its result
+         ("тейк +1.9R"), the profit / loss areas of the position. The pill labels apply to the
+         other modules' charts too.
