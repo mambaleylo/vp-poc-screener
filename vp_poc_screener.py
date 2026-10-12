@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.585"
+APP_VERSION = "0.99.586"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -34450,8 +34450,7 @@ function emwDrawChart(d, o) {
   const bl = [{p: lvl, color: colOf(o.ema), dash: [6, 4], label: `EMA${o.ema} ${fmtNum(lvl)}`, width: 2},
               {p: entry, color: '#ffffff', label: `${o.entry != null ? 'вход' : 'вход ≈'} ${fmtNum(entry)}`, width: 2.2},
               {p: o.sl, color: '#f87171', label: `стоп ${fmtNum(o.sl)}`, width: 2.4}, {p: o.tp, color: '#34d399', label: `тейк ${fmtNum(o.tp)}`, width: 2.4}];
-  const vl = [];
-  if (o.time) vl.push({t: o.time, color: 'rgba(255,255,255,.55)'});
+  const vl = [];   // v0.99.586 — no dashed signal line (the user): the entry dot marks it
   if (o.exit_time) vl.push({t: o.exit_time, color: o.result === 'WIN' ? 'rgba(52,211,153,.6)' : (o.result === 'LOSS' ? 'rgba(248,113,113,.6)' : 'rgba(166,176,192,.6)')});
   // v0.99.578 — user: "на нижнем графике каша — детальнее, точки тейка / стопа / входа, линии тонкие"
   const resCol = o.result === 'WIN' ? '#34d399' : (o.result === 'LOSS' ? '#f87171' : '#a6b0c0');
@@ -37000,10 +36999,10 @@ function drawVgiChart(data) {
   } else if (data.level_price != null && data.chart_source === 'lsw') {
     hl.push({p: data.level_price, color: '#f0a030', dash: [6, 4], label: data.level_type === 'high' ? 'равные хаи → снятие' : 'равные лоу → снятие'});
   }
-  const vl = [{t: data.time, color: '#ffffff', label: 'сигнал'}];
+  const vl = [];   // v0.99.586 — no dashed "сигнал" line (the user): the entry dot marks it
   const dots = [{t: data.time, p: data.entry, color: '#ffffff'}];
   if (data.exit_time) {
-    vl.push({row: 1, t: data.exit_time, color: resCol, label: data.result === 'WIN' ? 'тейк' : (data.result === 'LOSS' ? 'стоп' : 'выход')});
+    vl.push({t: data.exit_time, color: resCol, label: data.result === 'WIN' ? 'тейк' : (data.result === 'LOSS' ? 'стоп' : 'выход')});
     if (data.exit_price != null) dots.push({t: data.exit_time, p: data.exit_price, color: resCol});
   }
   const srcName = {prv: 'Peak Reversal', snr: 'S/R Zones', neuro: 'Neuro', mirror: 'Зеркало', lsw: 'Sweep', amd: 'AMD', scalp: 'Скальп', msnr: 'MSNR'}[data.chart_source] || '';
@@ -37101,11 +37100,17 @@ async function _ssCheckOpenPositions() {
 // charging. The browser's Battery API reports plug/unplug as an event —
 // instant, and no polling at all. Browsers without it (or a page opened from
 // another device) ask the server once a minute (termux-battery-status).
+// v0.99.586 — per user: not charging → the clock is replaced by a draining
+// battery icon (red fill = the charge left); the colour still tells about positions.
 let _ssBatTimer = null, _ssBattery = null;
-function _ssSetCharging(ch) {
+function _ssSetCharging(ch, level) {
   const clock = document.getElementById('screensaverClock');
-  if (ch === null) { clock.classList.remove('ssNoCharge'); return; }   // unknown: no outline
+  if (ch === null) { clock.classList.remove('ssNoCharge'); return; }   // unknown: the clock
   clock.classList.toggle('ssNoCharge', !ch);
+  const lv = level == null || isNaN(level) ? 0.25 : Math.max(0.04, Math.min(1, level));
+  const f = document.getElementById('ssBatFill');
+  if (f) f.setAttribute('width', (88 * lv).toFixed(1));
+  if (!ch) clock.title = `не заряжается${level != null && !isNaN(level) ? ` · ${Math.round(level * 100)}%` : ''}`;
 }
 async function _ssStartBattery() {
   clearInterval(_ssBatTimer);
@@ -37114,16 +37119,18 @@ async function _ssStartBattery() {
     try {
       if (!_ssBattery) {
         _ssBattery = await navigator.getBattery();
-        _ssBattery.addEventListener('chargingchange', () => _ssSetCharging(_ssBattery.charging));
+        const upd = () => _ssSetCharging(_ssBattery.charging, _ssBattery.level);
+        _ssBattery.addEventListener('chargingchange', upd);
+        _ssBattery.addEventListener('levelchange', upd);
       }
-      _ssSetCharging(_ssBattery.charging);
+      _ssSetCharging(_ssBattery.charging, _ssBattery.level);
       return;
     } catch (e) {}
   }
   const poll = async () => {
     try {
       const d = await (await fetch('/api/battery')).json();
-      _ssSetCharging(d.ok ? !!d.charging : null);
+      _ssSetCharging(d.ok ? !!d.charging : null, d.ok && d.level != null ? d.level / 100 : null);
     } catch (e) {}
   };
   poll();
@@ -37206,15 +37213,15 @@ document.addEventListener('fullscreenchange', () => {
     font-family:-apple-system, "SF Pro Display", BlinkMacSystemFont, "Helvetica Neue", Roboto, system-ui, sans-serif;
     font-variant-numeric:tabular-nums; -webkit-font-smoothing:antialiased; transition:color 0.5s, border-color 0.5s; }
   #screensaverTime { font-size:48px; font-weight:200; line-height:1; letter-spacing:1px; }
-  /* v0.99.481 — not charging: no frame any more; the digits keep their colour
-     and get a thin red outline */
-  #screensaverClock.ssNoCharge #screensaverTime {
-    text-shadow: 1px 0 0 #ff3b30, -1px 0 0 #ff3b30, 0 1px 0 #ff3b30, 0 -1px 0 #ff3b30,
-                 1px 1px 0 #ff3b30, -1px -1px 0 #ff3b30, 1px -1px 0 #ff3b30, -1px 1px 0 #ff3b30; }
+  /* v0.99.586 — not charging: a draining battery icon instead of the digits */
+  #screensaverBat { display:none; width:120px; height:56px; }
+  #screensaverClock.ssNoCharge #screensaverTime { display:none; }
+  #screensaverClock.ssNoCharge #screensaverBat { display:block; }
 </style>
 <div id="screensaverOverlay" style="display:none;position:fixed;inset:0;background:#000;z-index:9999;cursor:pointer;touch-action:manipulation;user-select:none;" onclick="_ssTap()" title="двойное касание — выход">
   <div id="screensaverClock" style="position:absolute;user-select:none;">
     <div id="screensaverTime"></div>
+    <svg id="screensaverBat" viewBox="0 0 120 56" aria-label="не заряжается"><rect x="2" y="2" width="104" height="52" rx="9" fill="none" stroke="currentColor" stroke-width="3"/><rect x="108" y="18" width="9" height="20" rx="3" fill="currentColor"/><rect id="ssBatFill" x="10" y="10" width="22" height="36" rx="4" fill="#ff3b30"/></svg>
   </div>
 </div>
 </body>

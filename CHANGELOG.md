@@ -19546,3 +19546,9 @@ v0.99.585 - Zones tab on another device no longer floods the Termux log with red
          local-only (the guard is unchanged), but after the first refusal the page
          stops asking and shows that the account can be connected only on the
          bot's own phone.
+v0.99.586 - Charts: the dashed vertical "signal" line is gone (EMA W/M and the
+         shared P/R, S/R, Neuro, Mirror, Sweep chart); the entry dot marks the
+         signal, the exit line stays. Screensaver: when the phone is not charging,
+         the clock is replaced by a draining battery icon (red fill = charge left,
+         outline colour still green when a position is open) instead of the red
+         outline around the digits; the clock returns when charging starts.
