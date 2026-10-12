@@ -19457,3 +19457,13 @@ v0.99.574 - EMA W/M: EMA 7 / 14 / 28 / 50 / 100 on both the week and the month, 
          without its own (an older model's trade, a "near the EMA" row) gets them from the
          model's learned variant of its EMA (daily ATR known at that moment) — the user didn't
          see the stop / take lines.
+v0.99.575 - EMA W/M from the user's RSR screenshot ("просто поставил лимитку" — a short limit right
+         at the weekly EMA 50 after the price, under EMA 28 / 50 / 100, spiked +31% into it):
+         * "under the EMAs" may now also be all but two (3 of 5) — learned with all / all but one;
+         * the entry is learned too: a limit 0.25 daily ATR before the EMA, at the EMA, or 0.25
+           beyond it into the wick (the backtest fills it only where the price reached it);
+         * a Telegram heads-up "📌 ... лимитка ..." once per level and candle when the price is
+           within 5% of a confirmed level whose rise is already big enough: where to put the
+           limit, the stop, the take and the holding time — in time to place it by hand;
+         * the rise candidates are 0 / 2 ATR (6480 variants in all). The previous model is
+           ignored and retrained.
