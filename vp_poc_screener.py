@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.569"
+APP_VERSION = "0.99.570"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -235,7 +235,7 @@ def _global_rate_gate():
 # frame with a module prefix) and how long it queued for the app-wide
 # request slot, so the header can show where the request budget goes.
 _EXCHANGE_LOAD = deque(maxlen=50000)       # (ts, module, queued_sec)
-_EXCHANGE_LOAD_PREFIXES = (("msnr", "MSNR"), ("lsw", "Sweep"), ("snr", "S/R"), ("prv", "Peak"),
+_EXCHANGE_LOAD_PREFIXES = (("msnr", "MSNR"), ("lsw", "Sweep"), ("snr", "S/R"), ("prv", "Peak"), ("emw", "EMA W/M"),
                            ("neuro", "Neuro"), ("reconcile", "автоторговля"), ("autotrade", "автоторговля"),
                            ("execute_", "автоторговля"),
                            # v0.99.340 — the main cycle's once-per-round pair-list request
@@ -1106,6 +1106,7 @@ SETTINGS_KEYS = ("volume_profile_enabled", "neuro_single_best_enabled", "prv_sin
                   "telegram_alerts_vp", "telegram_alerts_hourly", "telegram_alerts_ft5", "telegram_alerts_mirror", "telegram_alerts_ema_bull", "telegram_alerts_amd", "telegram_alerts_neuro", "telegram_alerts_neuro_summary", "telegram_alerts_nq", "telegram_alerts_network",
                   "autotrade_dry_run", "autotrade_bounce", "autotrade_breakout", "autotrade_scalp", "scalp_martingale_enabled", "autotrade_ft5", "autotrade_mirror", "autotrade_neuro", "auto_risk_enabled",
                   "autotrade_risk_pct", "risk_pct_neuro", "risk_pct_snr", "risk_pct_prv", "risk_pct_zones",
+                  "emw_enabled", "autotrade_emw", "telegram_alerts_emw", "risk_pct_emw",   # v0.99.570
                   "autotrade_zones", "telegram_alerts_zones", "zones_tp_pct", "zones_max_days", "autotrade_zones_approach",
                   "zones_own_scan", "autotrade_zones_own", "telegram_alerts_zones_own",
                   "telegram_alerts_trade_results", "telegram_trade_results_real_only",
@@ -1160,6 +1161,8 @@ def get_settings():
         "prv_display_n": PRV_DISPLAY_N,
         "telegram_alerts_prv": TELEGRAM_ALERTS_PRV,
         "autotrade_prv": AUTOTRADE_ENABLED_PRV,
+        "emw_enabled": EMW_ENABLED, "autotrade_emw": AUTOTRADE_ENABLED_EMW, "telegram_alerts_emw": TELEGRAM_ALERTS_EMW,   # v0.99.570
+        "risk_pct_emw": MODULE_RISK_PCT.get("emw"),
         "nq_enabled": NQ_ENABLED,
         "hourly_stats_enabled": HOURLY_STATS_ENABLED,
         "telegram_enabled": TELEGRAM_ENABLED,
@@ -1471,7 +1474,13 @@ def apply_settings(updates):
                 globals()["ZONES_MAX_DAYS"] = min(v, 90)
         except (TypeError, ValueError):
             pass
-    for _mod in ("neuro", "snr", "prv", "zones"):   # v0.99.435 — own risk % per module; empty / 0 = the common one
+    for _k, _g in (("emw_enabled", "EMW_ENABLED"), ("autotrade_emw", "AUTOTRADE_ENABLED_EMW"),
+                   ("telegram_alerts_emw", "TELEGRAM_ALERTS_EMW")):   # v0.99.570
+        if _k in updates:
+            globals()[_g] = bool(updates[_k])
+    if updates.get("emw_enabled"):
+        EMW_BACKTEST_TRIGGER.set()
+    for _mod in ("neuro", "snr", "prv", "zones", "emw"):   # v0.99.435 — own risk % per module; empty / 0 = the common one
         _key = f"risk_pct_{_mod}"
         if _key in updates:
             try:
@@ -1572,8 +1581,8 @@ _credentials_lock = threading.Lock()
 # account's money.
 # Stored in their own file (chmod 600), separate from the main keys file.
 # ============================================================================
-MODULE_ACCOUNT_MODES = ("neuro", "snr", "prv", "zones")  # v0.99.336 — same order as the tabs; v0.99.398 — Sweep removed
-MODULE_ACCOUNT_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "zones": "Зоны"}
+MODULE_ACCOUNT_MODES = ("neuro", "snr", "prv", "zones", "emw")  # v0.99.336 — same order as the tabs; v0.99.398 — Sweep removed
+MODULE_ACCOUNT_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "zones": "Зоны", "emw": "EMA W/M"}
 MODULE_CREDENTIALS_FILE = os.environ.get(
     "VP_MODULE_CREDENTIALS_FILE",
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "vp_poc_module_credentials.json"),
@@ -1807,6 +1816,9 @@ STATE = {
     "prv_waiting_for_slot": False,
     "prv_progress_done": 0, "prv_progress_total": 0, "prv_progress_in_flight": [],
     "prv_signals": deque(maxlen=500),
+    "emw_model": None, "emw_signals": deque(maxlen=500), "emw_fired": {}, "emw_universe": [],   # v0.99.570
+    "emw_last_backtest_finished": None, "emw_backtest_running": False, "emw_waiting_for_slot": False,
+    "emw_progress_done": 0, "emw_progress_total": 0, "emw_progress_in_flight": [],
     "snr_signals": deque(maxlen=500),  # v0.99.271 — live signal log, same shape as lsw_signals/mirror_signals
     "scalp_risk_tiers": {},  # v0.99.237 — symbol -> sorted list of (notional_threshold, mmr, max_leverage) tiers, for notional-aware safe-leverage lookups
     "scalp_data": {},          # symbol -> {interval -> {direction -> target-summary}}
@@ -3101,7 +3113,7 @@ _ERROR_TRANSLATIONS = (
 # matched on the whole text) + WHAT TO DO when there's anything to do.
 # ============================================================================
 _ERR_MODULES = (   # first match on the leading function name wins
-    ("msnr", "MSNR"), ("lsw", "Sweep"), ("snr", "S/R Zones"), ("prv", "Peak Reversal"),
+    ("msnr", "MSNR"), ("lsw", "Sweep"), ("snr", "S/R Zones"), ("prv", "Peak Reversal"), ("emw", "EMA W/M"),
     ("neuro", "Neuro"), ("reconcile", "Сверка позиций на бирже"), ("execute_autotrade", "Автоторговля"),
     ("place_close_trigger", "Ордера стоп/тейк"), ("move_stop", "Ордера стоп/тейк"),
     ("telegram", "Telegram"), ("candle cache", "Кэш свечей"), ("fetch_candles", "Загрузка свечей"),
@@ -3163,7 +3175,7 @@ _ERR_CAUSES = (   # (markers, explanation, advice) — first match wins
 )
 
 
-_ERR_MODE_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "snr": "S/R Zones", "prv": "Peak Reversal", "neuro": "Neuro", "zones": "Зоны",
+_ERR_MODE_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "snr": "S/R Zones", "prv": "Peak Reversal", "emw": "EMA W/M", "neuro": "Neuro", "zones": "Зоны",
                     "scalp": "Скальпинг", "ft5": "FT5", "mirror": "Зеркало", "bounce": "Bounce", "breakout": "Breakout"}
 
 
@@ -5602,7 +5614,7 @@ def _sim_signal_list(mode):
     if mode == "zones":   # v0.99.438
         with _zones_lock:
             return [z["trade"] for z in ZONES["zones"] if z.get("trade")]
-    key = {"snr": "snr_signals", "prv": "prv_signals", "msnr": "msnr_signals", "mirror": "mirror_signals",
+    key = {"snr": "snr_signals", "prv": "prv_signals", "emw": "emw_signals", "msnr": "msnr_signals", "mirror": "mirror_signals",
            "lsw": "lsw_signals", "ft5": "ft5_signals", "scalp": "scalp_signals",
            "bounce": "signals", "breakout": "signals"}.get(mode)
     if not key:
@@ -6972,6 +6984,7 @@ def save_state():
                 "prv_signals": list(STATE["prv_signals"]),
                 "prv_active_symbols": list(_prv_active_symbols),
                 "prv_display_symbols": list(_prv_display_symbols),
+                "emw_signals": list(STATE["emw_signals"]),   # v0.99.570
                 "autotrade_log": list(STATE["autotrade_log"]),
                 "sim_balance": STATE["sim_balance"],
                 "sim_alert_sent": bool(STATE.get("sim_alert_sent")),   # v0.99.355
@@ -7022,6 +7035,7 @@ PERSIST_BT_KEYS = (
     "snr_last_backtest_finished", "snr_filters", "snr_diag", "snr_pooled",
     "prv_last_backtest_finished", "prv_filters", "prv_keep", "prv_pooled",   # v0.99.410, v0.99.411
     "prv_first_seen", "snr_first_seen",   # v0.99.557
+    "emw_last_backtest_finished", "emw_model", "emw_universe", "emw_fired",   # v0.99.570
     "mirror_last_backtest_finished", "mirror_last_backtest_duration", "mirror_backtest_summary",
     "mirror_tuned_tolerances",
     "ft5_last_backtest_finished", "ft5_last_backtest_duration", "ft5_universe", "ft5_live_universe",
@@ -7155,6 +7169,7 @@ def load_state():
                 _snr_display_symbols = snr_display_symbols
             STATE["prv_results"] = prv_results
             STATE["prv_signals"] = deque(prv_signals, maxlen=500)
+            STATE["emw_signals"] = deque(data.get("emw_signals") or [], maxlen=500)   # v0.99.570
             if prv_active_symbols:
                 _prv_active_symbols = prv_active_symbols
             if prv_display_symbols:
@@ -7428,6 +7443,7 @@ LOOP_MAX_GAP_SEC = {
     "scan_loop": 30 * 60,
     "snr_live_loop": 60 * 60,
     "prv_live_loop": 60 * 60,
+    "emw_live_loop": 15 * 60, "emw_backtest_loop": 60 * 60,   # v0.99.570
     "neuro_live_loop": 60 * 60,
     "reconcile_loop": 30 * 60,
     # backtest loops (v0.99.325): they now beat every minute while queued
@@ -7447,6 +7463,7 @@ LOOP_LABELS = {
     "msnr_backtest_loop": "MSNR бэктест", "lsw_backtest_loop": "Sweep бэктест",
     "snr_backtest_loop": "S/R бэктест", "prv_backtest_loop": "Peak Reversal бэктест",
     "neuro_mining_loop": "Neuro майнинг",
+    "emw_live_loop": "EMA W/M живой скан", "emw_backtest_loop": "EMA W/M обучение",   # v0.99.570
 }
 BACKTEST_RETRY_AFTER_ERROR_SEC = int(os.environ.get("VP_BACKTEST_RETRY_AFTER_ERROR_SEC", 1800))  # v0.99.322 — failed backtest cycles retry in 30 min, not a full refresh interval later
 
@@ -7539,7 +7556,7 @@ def wait_beating(event, timeout, name):
 _BT_STARTUP_CHECKED = set()
 _BT_RAN = set()   # modules that already finished a cycle in THIS process (core boost)
 _BT_RESULTS_KEY = {"msnr": "msnr2_coins", "lsw": "lsw_backtest_results",
-                   "snr": "snr_results", "prv": "prv_results",
+                   "snr": "snr_results", "prv": "prv_results", "emw": "emw_model",
                    "mirror": "mirror_backtest_results", "ft5": "ft5_symbol_overrides"}
 
 
@@ -7550,7 +7567,7 @@ _BT_RESULTS_KEY = {"msnr": "msnr2_coins", "lsw": "lsw_backtest_results",
 # when each loop is next due — shown in the header "⏱" panel. In memory
 # only: a restart starts a fresh journal.
 BT_JOURNAL = deque(maxlen=120)
-BT_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "snr": "S/R", "prv": "Peak Reversal", "neuro": "Neuro",
+BT_LABELS = {"msnr": "MSNR", "lsw": "Sweep", "snr": "S/R", "prv": "Peak Reversal", "neuro": "Neuro", "emw": "EMA W/M",
              "lsw_nf": "Sweep фильтр", "snr_nf": "S/R фильтр", "prv_nf": "P/R фильтр"}
 BT_REASON_BUTTON = "кнопка «Бэктест» / «Очистить» / настройки"
 _bt_journal_lock = threading.Lock()
@@ -7697,7 +7714,8 @@ def _loop_waiting_for_slot(name):
     (something else is hogging the slots), but it's a different diagnosis
     than a hang."""
     key = {"msnr_backtest_loop": "msnr_waiting_for_slot", "lsw_backtest_loop": "lsw_waiting_for_slot",
-           "snr_backtest_loop": "snr_waiting_for_slot", "prv_backtest_loop": "prv_waiting_for_slot"}.get(name)
+           "snr_backtest_loop": "snr_waiting_for_slot", "prv_backtest_loop": "prv_waiting_for_slot",
+           "emw_backtest_loop": "emw_waiting_for_slot"}.get(name)
     if key:
         return bool(STATE.get(key))  # plain dict read, no lock (called from the watchdog)
     if name == "neuro_mining_loop":
@@ -7770,6 +7788,8 @@ def send_telegram(text, category=None):
     if category == "neuro_summary" and not TELEGRAM_ALERTS_NEURO_SUMMARY:
         return
     if category == "snr" and not TELEGRAM_ALERTS_SNR:
+        return
+    if category == "emw" and not TELEGRAM_ALERTS_EMW:   # v0.99.570
         return
     if category == "prv" and not TELEGRAM_ALERTS_PRV:
         return
@@ -9059,7 +9079,7 @@ def kelly_risk(pairs):
             "auto_risk_n": n, "auto_risk_avg_r": round(mean, 3), "auto_risk_cautious_r": round(mean - se, 3)}
 
 
-MODULE_RISK_PCT = {"neuro": None, "snr": None, "prv": None, "zones": None}   # v0.99.435 — own risk % per module (None = the common one)
+MODULE_RISK_PCT = {"neuro": None, "snr": None, "prv": None, "zones": None, "emw": None}   # v0.99.435 — own risk % per module (None = the common one)
 RISK_PCT_MAX = 100.0   # v0.99.435 — user: "не ограничивай 50%"
 
 
@@ -16748,6 +16768,744 @@ def entry_retry_loop():
         time.sleep(ENTRY_RETRY_POLL_SEC)
 
 
+# ============================================================================
+# EMW — "EMA W/M" (v0.99.570, user: "индикатор, который на недельном и месячном
+# таймфрейме ловит пампы и реакцию от EMA, которые исторически дают реакцию на
+# откат; нужна обучаемость, скан, большие свечи, откуда был откат, сколько ставить
+# безопасно стоп и какие движения чаще ставить за тейк. Работать не с уже закрытой
+# свечой, а сканировать очень часто последнюю свечу недели и месяца и уже на живой
+# свече ловить реакцию от EMA — после закрытия откат уже был").
+# The EMA of a forming candle is a*price + (1-a)*EMA_prev, so the price touches it
+# exactly when it reaches EMA_prev — the EMA of the CLOSED candles. The level of the
+# whole forming week / month is known at its open and never repaints: the backtest
+# walks the daily candles inside each W/M candle and enters at the first touch of
+# the level (a little before it, EMW_TRIGGER_ATR), live polls the price every
+# EMW_POLL_SEC seconds and enters on the same touch, inside the candle.
+# Setup: the last EMW_ABOVE_BARS closed candles closed on the far side of their EMA
+# (an uptrend for a long, a downtrend for a short), the candle opens beyond the
+# trigger, "pump" = how far the extreme of the last few candles ran from the EMA, in
+# ATR of the timeframe (the big candles the pullback comes from).
+# Learning: every EMA x side x pump size x stop x take is tried on all coins at once
+# (one coin has far too few weekly touches to learn anything by itself): the choice
+# on the older 70% of the history, the check on the newest 30%; z-scores are
+# clustered by candle (touches of the same week move together) and the train bar is
+# Bonferroni over the whole search. The safe stop and the usual bounce are measured
+# on every touch and shown next to the choice.
+# ============================================================================
+
+EMW_ENABLED = os.environ.get("VP_EMW_ENABLED", "1") == "1"
+AUTOTRADE_ENABLED_EMW = os.environ.get("VP_AUTOTRADE_EMW", "0") == "1"
+TELEGRAM_ALERTS_EMW = os.environ.get("VP_TG_ALERTS_EMW", "1") == "1"
+EMW_TF_NAMES = {"1w": "неделя", "1M": "месяц"}
+EMW_EMAS = {"1w": [9, 21, 28, 50, 100, 200], "1M": [5, 9, 12, 21, 28]}
+EMW_ATR_LEN = {"1w": 14, "1M": 6}
+EMW_PUMP_LOOKBACK = {"1w": 6, "1M": 4}          # candles the pullback's start (the pump's extreme) is looked for in
+EMW_PUMP_CANDIDATES = [0.0, 2.0, 4.0]           # extreme - EMA, in ATR: any / a move / a pump
+EMW_STOP_CANDIDATES = [0.5, 1.0, 1.5]           # stop beyond the EMA, in ATR
+EMW_RR_CANDIDATES = [1.0, 1.5, 2.0, 3.0]
+EMW_TRIGGER_ATR = 0.1                           # the entry sits this many ATR before the EMA
+EMW_ABOVE_BARS = 2
+EMW_MAX_HOLD_DAYS = {"1w": 28, "1M": 60}        # time exit (own limit — weeks, not STRATEGY_MAX_HOLD_DAYS)
+EMW_REACT_ATR = 1.0                             # a "reaction" = the price went this many ATR away from the entry
+EMW_FUNDING_PCT_DAY = float(os.environ.get("VP_EMW_FUNDING_PCT_DAY", 0.03))   # perpetual funding, paid every day held
+EMW_HISTORY_DAYS = 3000
+EMW_TRAIN_FRAC = 0.7
+EMW_COMBOS = [(s, r) for s in EMW_STOP_CANDIDATES for r in EMW_RR_CANDIDATES]
+EMW_N_COMBOS = sum(len(v) for v in EMW_EMAS.values()) * 2 * len(EMW_PUMP_CANDIDATES) * len(EMW_COMBOS)   # 792
+EMW_Z_TRAIN = round(statistics.NormalDist().inv_cdf(1 - 0.20 / EMW_N_COMBOS), 2)
+EMW_TEST_Z = 2.0
+EMW_MIN_TRAIN = 60
+EMW_MIN_TEST = 20
+EMW_REFRESH_SEC = int(os.environ.get("VP_EMW_REFRESH_SEC", 24 * 3600))
+EMW_POLL_SEC = int(os.environ.get("VP_EMW_POLL_SEC", 30))
+EMW_LEVELS_REFRESH_SEC = 6 * 3600
+EMW_MAX_DRIFT_R = 0.25                          # live entry at most this far past the trigger toward the take
+EMW_WATCH_PCT = 15.0                            # the "near the EMA" list: trigger within this % of the price
+EMW_BACKTEST_TRIGGER = threading.Event()
+_emw_parts = {}
+_emw_had_data = {}
+_emw_levels = {}            # symbol -> the forming week's / month's levels
+_emw_levels_meta = {"key": None, "at": 0, "coins": 0}
+_emw_prices = {}            # symbol -> (last, low_24h, high_24h, time)
+_emw_check_at = {}          # fire key -> last candle check
+_emw_lock = threading.Lock()
+
+
+def emw_period_start(t, tf):
+    t = int(t)
+    if tf == "1w":
+        d = t // 86400
+        return (d - (d + 3) % 7) * 86400          # Monday 00:00 UTC (1970-01-01 was a Thursday)
+    y, m = time.gmtime(t)[:2]
+    return int(datetime(y, m, 1, tzinfo=timezone.utc).timestamp())
+
+
+def emw_next_period(start, tf):
+    if tf == "1w":
+        return int(start) + 7 * 86400
+    y, m = time.gmtime(int(start))[:2]
+    y, m = (y + 1, 1) if m == 12 else (y, m + 1)
+    return int(datetime(y, m, 1, tzinfo=timezone.utc).timestamp())
+
+
+def emw_bars(daily, tf):
+    """weeks (from Monday) / calendar months from daily candles, with the daily index range"""
+    bars = []
+    for i, c in enumerate(daily):
+        ps = emw_period_start(c["time"], tf)
+        if not bars or bars[-1]["time"] != ps:
+            bars.append({"time": ps, "open": c["open"], "high": c["high"], "low": c["low"], "close": c["close"], "d0": i, "d1": i})
+        else:
+            b = bars[-1]
+            b["high"] = max(b["high"], c["high"])
+            b["low"] = min(b["low"], c["low"])
+            b["close"] = c["close"]
+            b["d1"] = i
+    return bars
+
+
+def emw_ema(closes, n):
+    out = [None] * len(closes)
+    if len(closes) < n:
+        return out
+    k = 2.0 / (n + 1)
+    e = sum(closes[:n]) / n
+    out[n - 1] = e
+    for i in range(n, len(closes)):
+        e = closes[i] * k + e * (1 - k)
+        out[i] = e
+    return out
+
+
+def emw_setup(bars, closes, ema, atr, b, sgn, tf):
+    """the level of candle b, from candles up to b-1 only (no look-ahead), or None"""
+    p = b - 1
+    if p < EMW_ABOVE_BARS - 1:
+        return None
+    lv, a = ema[p], atr[p]
+    if lv is None or not a or a <= 0:
+        return None
+    for k in range(EMW_ABOVE_BARS):
+        e = ema[p - k]
+        if e is None or sgn * (closes[p - k] - e) <= 0:
+            return None
+    trig = lv + sgn * EMW_TRIGGER_ATR * a
+    if sgn * (bars[b]["open"] - trig) <= 0:
+        return None
+    lo = max(0, b - EMW_PUMP_LOOKBACK[tf])
+    ext = max(x["high"] for x in bars[lo:b]) if sgn > 0 else min(x["low"] for x in bars[lo:b])
+    return {"L": lv, "A": a, "T": trig, "pump": sgn * (ext - lv) / a, "ext": ext}
+
+
+def _emw_outcome(daily, touch, stop, take, sgn, hold_end, now):
+    """(exit price, exit day, code 1 win / -1 loss / 0 time) or None while unfinished. The touch
+    day can stop out (the low comes after the touch: the price was above the trigger before)
+    but can't take (its high may be from before the touch)."""
+    for i in range(touch, len(daily)):
+        c = daily[i]
+        if (c["low"] <= stop) if sgn > 0 else (c["high"] >= stop):
+            return stop, c["time"], -1
+        if i > touch and ((c["high"] >= take) if sgn > 0 else (c["low"] <= take)):
+            return take, c["time"], 1
+        if c["time"] + 86400 > now:
+            return None
+        if c["time"] + 86400 >= hold_end:
+            return c["close"], c["time"], 0
+    return None
+
+
+def _emw_learn(daily, touch, entry, lv, a, sgn, hold_end, now):
+    """depth past the EMA before the bounce (ATR), the max bounce in the hold window (ATR), reacted?"""
+    react_px = entry + sgn * EMW_REACT_ATR * a
+    mae, mfe, react = 0.0, 0.0, None
+    done = False
+    for i in range(touch, len(daily)):
+        c = daily[i]
+        if c["time"] + 86400 > now:
+            break
+        adv = ((lv - c["low"]) if sgn > 0 else (c["high"] - lv)) / a
+        if react is None:
+            mae = max(mae, adv)                   # the same day's dip counts (order inside a day unknown)
+        if i > touch:
+            fav = ((c["high"] - entry) if sgn > 0 else (entry - c["low"])) / a
+            mfe = max(mfe, fav)
+            if react is None and ((c["high"] >= react_px) if sgn > 0 else (c["low"] <= react_px)):
+                react = 1
+        if c["time"] + 86400 >= hold_end:
+            done = True
+            break
+    if not done:
+        return (round(mae, 2) if react else None), None, react
+    return round(mae, 2), round(mfe, 2), (react or 0)
+
+
+def emw_touches_core(daily, now):
+    """every touch of every EMA on one coin, with its outcome for each stop x RR"""
+    errors = []
+    out = []
+    daily = [c for c in (daily or []) if c and c.get("high") is not None and c.get("low") is not None]
+    for tf, emas in EMW_EMAS.items():
+        bars = emw_bars(daily, tf)
+        if len(bars) < 6:
+            continue
+        closes = [x["close"] for x in bars]
+        atr = neuro_atr_series(bars, EMW_ATR_LEN[tf])
+        hold = EMW_MAX_HOLD_DAYS[tf] * 86400
+        for n in emas:
+            ema = emw_ema(closes, n)
+            for b in range(1, len(bars)):
+                for sgn in (1, -1):
+                    s = emw_setup(bars, closes, ema, atr, b, sgn, tf)
+                    if not s:
+                        continue
+                    trig = s["T"]
+                    touch = next((i for i in range(bars[b]["d0"], bars[b]["d1"] + 1)
+                                  if (daily[i]["low"] <= trig if sgn > 0 else daily[i]["high"] >= trig)), None)
+                    if touch is None:
+                        continue
+                    o = daily[touch]["open"]
+                    entry = min(trig, o) if sgn > 0 else max(trig, o)
+                    t0 = daily[touch]["time"]
+                    hold_end = t0 + hold
+                    outs = []
+                    for sm, rr in EMW_COMBOS:
+                        stop = s["L"] - sgn * sm * s["A"]
+                        risk = sgn * (entry - stop)
+                        if risk <= 0:
+                            outs.append(None)
+                            continue
+                        take = entry + sgn * rr * risk
+                        res = _emw_outcome(daily, touch, stop, take, sgn, hold_end, now)
+                        if res is None:
+                            outs.append(None)
+                            continue
+                        px, et, code = res
+                        r = -1.0 if code < 0 else (rr if code > 0 else sgn * (px - entry) / risk)
+                        days = max(1, (et - t0) // 86400 + 1)
+                        cost = trade_fee_r(entry, stop) + days * EMW_FUNDING_PCT_DAY / 100 * entry / risk
+                        outs.append([round(r - cost, 3), et, code])
+                    mae, mfe, react = _emw_learn(daily, touch, entry, s["L"], s["A"], sgn, hold_end, now)
+                    out.append([tf, n, sgn, t0, bars[b]["time"], round(s["pump"], 2), entry, s["L"], s["A"], s["ext"],
+                                mae, mfe, react, outs])
+    return {"touches": out, "errors": errors}
+
+
+def emw_setup_key(tf, n, sgn):
+    return f"{tf}|{n}|{'L' if sgn > 0 else 'S'}"
+
+
+def emw_desc(tf, n, sgn):
+    return f"EMA {n} · {EMW_TF_NAMES.get(tf, tf)} · {'лонг от поддержки' if sgn > 0 else 'шорт от сопротивления'}"
+
+
+def emw_stats(rows):
+    """rows: (R, cluster). SE = the larger of the plain one and the one clustered by candle"""
+    n = len(rows)
+    if not n:
+        return {"n": 0}
+    rs = [r for r, _ in rows]
+    avg = sum(rs) / n
+    cl = {}
+    for r, c in rows:
+        cl[c] = cl.get(c, 0.0) + (r - avg)
+    se = None
+    if n > 1:
+        var = sum((r - avg) ** 2 for r in rs) / (n - 1)
+        se = max(math.sqrt(sum(v * v for v in cl.values())) / n, math.sqrt(var / n))
+    return {"n": n, "avg": round(avg, 3), "sum": round(sum(rs), 2), "wr": round(sum(1 for r in rs if r > 0) / n * 100, 1),
+            "z": round(avg / se, 2) if se else None, "clusters": len(cl)}
+
+
+def _emw_trades(items, idx, bound):
+    """one position per coin at a time (like live); train / test by the touch time"""
+    last_exit = {}
+    tr, te, per_coin, rows = [], [], {}, []
+    for sym, t in items:
+        if t[3] < last_exit.get(sym, 0):
+            continue
+        o = t[13][idx]
+        if o is None:
+            last_exit[sym] = float("inf")         # still open — nothing else on this coin
+            continue
+        last_exit[sym] = o[1]
+        row = (o[0], f"{t[0]}{t[4]}")
+        (tr if bound is None or t[3] < bound else te).append(row)
+        pc = per_coin.setdefault(sym, [0, 0, 0.0])
+        pc[0] += 1
+        pc[1] += 1 if o[0] > 0 else 0
+        pc[2] = round(pc[2] + o[0], 3)
+        rows.append((sym, t, o))
+    return tr, te, per_coin, rows
+
+
+def _emw_pct(vals, q):
+    if not vals:
+        return None
+    v = sorted(vals)
+    return round(v[min(len(v) - 1, int(q * len(v)))], 2)
+
+
+def emw_pool_select(parts, now=None):
+    now = now or time.time()
+    by_setup, times = {}, {tf: [] for tf in EMW_EMAS}
+    for sym in sorted(parts):
+        for t in parts[sym]:
+            by_setup.setdefault((t[0], t[1], t[2]), []).append((sym, t))
+            times.setdefault(t[0], []).append(t[3])
+    bound = {}
+    for tf, ts in times.items():
+        ts.sort()
+        bound[tf] = ts[int(len(ts) * EMW_TRAIN_FRAC)] if len(ts) >= 20 else None
+    setups, coin_hist, trades_out = [], {}, {}
+    for tf, emas in EMW_EMAS.items():
+        for n in emas:
+            for sgn in (1, -1):
+                items = sorted(by_setup.get((tf, n, sgn)) or [], key=lambda x: (x[1][3], x[0]))
+                key = emw_setup_key(tf, n, sgn)
+                best = None
+                for k in EMW_PUMP_CANDIDATES:
+                    sub = [x for x in items if x[1][5] >= k]
+                    for idx, (sm, rr) in enumerate(EMW_COMBOS):
+                        tr, te, pc, rows = _emw_trades(sub, idx, bound.get(tf))
+                        st_tr = emw_stats(tr)
+                        if st_tr["n"] < EMW_MIN_TRAIN or st_tr.get("z") is None:
+                            continue
+                        if best is None or (st_tr["z"], st_tr["avg"]) > (best["train"]["z"], best["train"]["avg"]):
+                            best = {"pump": k, "stop_atr": sm, "rr": rr, "idx": idx, "train": st_tr, "test": emw_stats(te),
+                                    "_pc": pc, "_rows": rows}
+                sub = [x for x in items if x[1][5] >= (best["pump"] if best else 0)]
+                fin = [x[1] for x in sub if x[1][12] is not None]
+                reacted = [t[10] for t in fin if t[12] == 1 and t[10] is not None]
+                mfes = [t[11] for t in fin if t[11] is not None]
+                atr_pct = [t[8] / t[7] * 100 for _, t in sub if t[7]]
+                learn = {"touches": len(sub), "coins": len({x[0] for x in sub}), "finished": len(fin),
+                         "react_rate": round(sum(1 for t in fin if t[12] == 1) / len(fin) * 100, 1) if fin else None,
+                         "mae_p50": _emw_pct(reacted, 0.5), "mae_p75": _emw_pct(reacted, 0.75), "mae_p90": _emw_pct(reacted, 0.9),
+                         "mfe_p25": _emw_pct(mfes, 0.25), "mfe_p50": _emw_pct(mfes, 0.5), "mfe_p75": _emw_pct(mfes, 0.75),
+                         "atr_pct": round(statistics.median(atr_pct), 1) if atr_pct else None}
+                row = {"key": key, "tf": tf, "ema": n, "dir": "LONG" if sgn > 0 else "SHORT", "desc": emw_desc(tf, n, sgn),
+                       "learn": learn, "best": None, "significant": False, "passed": False}
+                if best:
+                    te_ = best["test"]
+                    row["significant"] = best["train"]["z"] >= EMW_Z_TRAIN
+                    row["passed"] = bool(row["significant"] and te_["n"] >= EMW_MIN_TEST and te_.get("z") is not None
+                                         and te_["z"] >= EMW_TEST_Z and te_["avg"] > 0)
+                    row["best"] = {k_: best[k_] for k_ in ("pump", "stop_atr", "rr", "train", "test")}
+                    coin_hist[key] = best["_pc"]
+                    keep = best["_rows"][-(400 if row["passed"] else 40):]
+                    trades_out[key] = [{"symbol": sym, "time": t[3], "entry": round(t[6], 10), "level": round(t[7], 10),
+                                        "pump": t[5], "pnl_r": o[0], "exit_time": o[1],
+                                        "result": {1: "WIN", -1: "LOSS", 0: "TIME_EXIT"}[o[2]],
+                                        "test": bool(bound.get(tf) and t[3] >= bound[tf])} for sym, t, o in keep][::-1]
+                setups.append(row)
+    return {"setups": setups, "chosen": [s["key"] for s in setups if s["passed"]], "bound": bound,
+            "coins": len(parts), "touches": sum(len(v) for v in parts.values()), "z_train": EMW_Z_TRAIN,
+            "z_test": EMW_TEST_Z, "combos": EMW_N_COMBOS, "min_train": EMW_MIN_TRAIN, "min_test": EMW_MIN_TEST,
+            "coin_hist": coin_hist, "trades": trades_out, "time": now}
+
+
+def emw_levels_for(daily, now):
+    """the levels of the forming week and month (the same emw_setup as the backtest)"""
+    out = []
+    daily = [c for c in (daily or []) if c and c.get("high") is not None]
+    for tf in EMW_EMAS:
+        bars = emw_bars(daily, tf)
+        cur = emw_period_start(now, tf)
+        if len(bars) < 3 or bars[-1]["time"] != cur:
+            continue
+        b = len(bars) - 1
+        closes = [x["close"] for x in bars]
+        atr = neuro_atr_series(bars, EMW_ATR_LEN[tf])
+        for n in EMW_EMAS[tf]:
+            ema = emw_ema(closes, n)
+            for sgn in (1, -1):
+                s = emw_setup(bars, closes, ema, atr, b, sgn, tf)
+                if not s:
+                    continue
+                touched = (bars[b]["low"] <= s["T"]) if sgn > 0 else (bars[b]["high"] >= s["T"])
+                out.append({"tf": tf, "ema": n, "sgn": sgn, "key": emw_setup_key(tf, n, sgn), "bar_time": cur,
+                            "bar_end": emw_next_period(cur, tf), "L": s["L"], "A": s["A"], "T": s["T"],
+                            "pump": round(s["pump"], 2), "ext": s["ext"], "open": bars[b]["open"], "touched": touched})
+    return out
+
+
+def emw_fetch_daily(symbol):
+    now = int(time.time())
+    try:
+        return get_candles_range(symbol, "1d", now - EMW_HISTORY_DAYS * 86400, now) or []
+    except Exception as e:
+        log_error(f"emw candles {symbol}: {e}")
+        return []
+
+
+def emw_optimize_symbol(symbol):
+    daily = emw_fetch_daily(symbol)
+    _emw_had_data[symbol] = len(daily) >= 60
+    if len(daily) < 60:
+        return None
+    out = calc_run("emw_touches_core", {"daily": daily, "now": time.time()})
+    for msg in out["errors"]:
+        log_error(f"emw_optimize_symbol {symbol} {msg}")
+    _emw_parts[symbol] = out["touches"]
+    return len(out["touches"])
+
+
+def emw_backtest_loop():
+    _trig = EMW_BACKTEST_TRIGGER.wait(timeout=900)
+    EMW_BACKTEST_TRIGGER.clear()
+    bt_startup_skip("emw", EMW_BACKTEST_TRIGGER, max(300, EMW_REFRESH_SEC), "emw_backtest_loop", _trig)
+    while True:
+        heartbeat("emw_backtest_loop")
+        acquired = False
+        failed = False
+        try:
+            if not EMW_ENABLED:
+                wait_beating(EMW_BACKTEST_TRIGGER, max(300, EMW_REFRESH_SEC), "emw_backtest_loop")
+                EMW_BACKTEST_TRIGGER.clear()
+                continue
+            with state_lock:
+                STATE["emw_waiting_for_slot"] = True
+            acquire_backtest_slot("emw_backtest_loop")
+            acquired = True
+            with state_lock:
+                STATE["emw_waiting_for_slot"] = False
+            bt_log_start("emw")
+            universe = prv_build_universe()
+            with state_lock:
+                STATE["emw_progress_done"] = 0
+                STATE["emw_progress_total"] = len(universe)
+                STATE["emw_backtest_running"] = True
+                STATE["emw_progress_in_flight"] = list(universe)
+
+            def _done(symbol, fut):
+                try:
+                    fut.result()
+                except Exception as e:
+                    log_error(f"emw_backtest_loop {symbol}: {e}")
+                with state_lock:
+                    STATE["emw_progress_done"] += 1
+                    if symbol in STATE["emw_progress_in_flight"]:
+                        STATE["emw_progress_in_flight"].remove(symbol)
+
+            def _stop(symbol, reason):
+                log_error(f"emw_backtest_loop: {symbol} {reason} — skipping")
+                with state_lock:
+                    STATE["emw_progress_done"] += 1
+                    if symbol in STATE["emw_progress_in_flight"]:
+                        STATE["emw_progress_in_flight"].remove(symbol)
+
+            _emw_parts.clear()
+            with calc_boost("emw", bt_first_run("emw")):
+                run_pool_with_progress(emw_optimize_symbol, universe, min(WORKERS, len(universe) or 1),
+                                       "emw_backtest_loop", _done, _stop)
+            _BT_RAN.add("emw")
+            data_ok = bool(universe) and sum(1 for s_ in universe if _emw_had_data.get(s_)) >= 0.5 * len(universe)
+            model = emw_pool_select({s_: _emw_parts[s_] for s_ in universe if s_ in _emw_parts}) if data_ok else None
+            _emw_parts.clear()
+            with state_lock:
+                if model:
+                    STATE["emw_model"] = model
+                    STATE["emw_universe"] = list(universe)
+                    STATE["emw_last_backtest_finished"] = time.time()
+                STATE["emw_backtest_running"] = False
+            if not model:
+                failed = True
+                log_error("emw_backtest_loop: no data for most coins this cycle — keeping the previous model")
+            bt_log_end("emw", ok=bool(model), note=("нет данных с биржи" if not model else
+                                                    f"касаний: {model['touches']}, подтверждено: {len(model['chosen'])}"))
+            if model:
+                save_state()
+        except Exception as e:
+            failed = True
+            if "emw" in _bt_started:
+                bt_log_end("emw", ok=False, note=str(e)[:80])
+            log_error(f"emw_backtest_loop: {e}")
+            with state_lock:
+                STATE["emw_backtest_running"] = False
+                STATE["emw_waiting_for_slot"] = False
+        finally:
+            if acquired:
+                BACKTEST_CONCURRENCY_SEMAPHORE.release()
+        bt_wait("emw", EMW_BACKTEST_TRIGGER, BACKTEST_RETRY_AFTER_ERROR_SEC if failed else max(300, EMW_REFRESH_SEC),
+                "emw_backtest_loop", failed=failed)
+        EMW_BACKTEST_TRIGGER.clear()
+
+
+def emw_refresh_levels(force=False):
+    """recomputed at every new week / month (and every few hours for new coins)"""
+    now = time.time()
+    key = (emw_period_start(now, "1w"), emw_period_start(now, "1M"))
+    meta = _emw_levels_meta
+    fresh_period = now - max(key) < 3600
+    due = (force or meta["key"] != key or now - meta["at"] > EMW_LEVELS_REFRESH_SEC
+           or (fresh_period and now - meta["at"] > 900))
+    if not due or now - max(key) < 120:           # Sunday's / the month's last daily candle needs a moment to close
+        return False
+    with state_lock:
+        universe = list(STATE.get("emw_universe") or [])
+    if not universe:
+        universe = prv_build_universe()
+    levels = {}
+    with ThreadPoolExecutor(max_workers=max(1, min(WORKERS, 8))) as ex:
+        for sym, lv in zip(universe, ex.map(lambda s_: emw_levels_for(emw_fetch_daily(s_), time.time()), universe)):
+            heartbeat("emw_live_loop")
+            if lv:
+                levels[sym] = lv
+    with _emw_lock:
+        _emw_levels.clear()
+        _emw_levels.update(levels)
+    meta.update({"key": key, "at": now, "coins": len(universe)})
+    return True
+
+
+def emw_chosen_cfg(model, key, pump):
+    """the confirmed config of a setup, if this candle's pump is big enough for it"""
+    if not model or key not in (model.get("chosen") or []):
+        return None
+    s = next((x for x in model["setups"] if x["key"] == key), None)
+    b = (s or {}).get("best")
+    if not b or pump < b["pump"]:
+        return None
+    return s
+
+
+def emw_trade_prices(lv, cfg):
+    sgn = lv["sgn"]
+    b = cfg["best"]
+    stop = lv["L"] - sgn * b["stop_atr"] * lv["A"]
+    take = lv["T"] + sgn * b["rr"] * abs(lv["T"] - stop)
+    return stop, take
+
+
+def emw_check_touch(sym, lv, stop, take):
+    """the forming candle's path on 1h candles: 'none' — no touch yet, 'done' — touched and the
+    stop or the take was already hit (the backtest's trade is over), 'ok' — touched, still open"""
+    cs = _get_candles_range_live(sym, "1h", lv["bar_time"], time.time() + 3600) or []
+    cs = [c for c in cs if c["time"] >= lv["bar_time"]]
+    if not cs or cs[-1]["time"] < time.time() - 2 * 3600:
+        return None
+    sgn = lv["sgn"]
+    i0 = next((i for i, c in enumerate(cs) if (c["low"] <= lv["T"] if sgn > 0 else c["high"] >= lv["T"])), None)
+    if i0 is None:
+        return "none"
+    for i in range(i0, len(cs)):
+        c = cs[i]
+        if (c["low"] <= stop) if sgn > 0 else (c["high"] >= stop):
+            return "done"
+        if i > i0 and ((c["high"] >= take) if sgn > 0 else (c["low"] <= take)):
+            return "done"
+    return "ok"
+
+
+def emw_fire(sym, lv, cfg, price, stop, take):
+    sgn = lv["sgn"]
+    direction = "LONG" if sgn > 0 else "SHORT"
+    hist = ((STATE.get("emw_model") or {}).get("coin_hist") or {}).get(lv["key"], {}).get(sym)
+    record = {"symbol": sym, "direction": direction, "entry": round(price, 10), "sl": round(stop, 10), "tp": round(take, 10),
+              "timeframe": lv["tf"], "ema": lv["ema"], "key": lv["key"], "desc": cfg["desc"], "level": round(lv["L"], 10),
+              "trigger": round(lv["T"], 10), "pump": lv["pump"], "ext": lv["ext"], "time": int(time.time()),
+              "bar_time": lv["bar_time"], "detected_at": time.time(), "status": "OPEN", "result": None, "exit_price": None,
+              "exit_time": None, "pnl_r": None, "autotrade_fired": False, "rr": cfg["best"]["rr"],
+              "hold_until": time.time() + EMW_MAX_HOLD_DAYS[lv["tf"]] * 86400, "coin_hist": hist}
+    with state_lock:
+        STATE["emw_signals"].appendleft(record)
+    autotrade_result = None
+    if AUTOTRADE_ENABLED_EMW:
+        autotrade_result = execute_autotrade("emw", sym, direction, price, stop, take, risk_pct_override=module_risk_pct("emw"))
+        record["autotrade_fired"] = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")
+        sim_execute_trade("emw", sym, direction, price, stop, take, autotrade_result.get("leverage") or 1, record,
+                          autotrade_result=autotrade_result)
+    _plan = planned_leverage(sym, direction, price, stop)
+    record["leverage"] = (autotrade_result or {}).get("leverage") or _plan
+    record["leverage_planned"] = not (autotrade_result or {}).get("leverage")
+    arrow = "⬆️" if sgn > 0 else "⬇️"
+    move = (price - lv["ext"]) / lv["ext"] * 100
+    hist_txt = f"\nэта монета на этом уровне: {hist[0]} сделок, {hist[1]} в плюс, {hist[2]:+.2f}R" if hist else ""
+    send_telegram(f"{arrow} EMA W/M {sym} ({direction}) · {cfg['desc']}\n"
+                  f"живая свеча дошла до EMA {lv['ema']} ({lv['L']:.6g}); откат от {lv['ext']:.6g} ({move:+.1f}%)\n"
+                  f"entry: {price:.6g}\nSL: {stop:.6g}  TP: {take:.6g} (RR {cfg['best']['rr']})\n"
+                  f"держим до {EMW_MAX_HOLD_DAYS[lv['tf']]} дн.{hist_txt}\n"
+                  f"плечо: {format_leverage_txt(autotrade_result, AUTOTRADE_ENABLED_EMW, _plan)}", category="emw")
+    save_state()
+
+
+def emw_scan_tick():
+    """one pass over the forming candles' levels against the live price"""
+    tickers = get_tickers() or []
+    now = time.time()
+    prices = {}
+    for t in tickers:
+        try:
+            prices[t["contract"]] = (float(t["last"]), float(t.get("low_24h") or t["last"]), float(t.get("high_24h") or t["last"]), now)
+        except (KeyError, TypeError, ValueError):
+            continue
+    with _emw_lock:
+        _emw_prices.clear()
+        _emw_prices.update(prices)
+        levels = {s: list(v) for s, v in _emw_levels.items()}
+    with state_lock:
+        model = STATE.get("emw_model")
+        fired = STATE.setdefault("emw_fired", {})
+        busy = {x["symbol"] for x in STATE["emw_signals"] if x["status"] == "OPEN"}
+    for sym, lvs in levels.items():
+        px = prices.get(sym)
+        if not px:
+            continue
+        last, lo24, hi24, _ = px
+        for lv in lvs:
+            if now >= lv["bar_end"]:
+                continue
+            cfg = emw_chosen_cfg(model, lv["key"], lv["pump"])
+            if not cfg:
+                continue
+            fkey = f"{sym}|{lv['key']}|{lv['bar_time']}"
+            if fkey in fired:
+                continue
+            sgn = lv["sgn"]
+            stop, take = emw_trade_prices(lv, cfg)
+            risk = abs(lv["T"] - stop)
+            if sgn * (last - stop) <= 0:
+                continue                              # already past the stop
+            near = sgn * (last - lv["T"]) <= EMW_MAX_DRIFT_R * risk
+            maybe = sgn * (last - lv["T"]) <= 0 or (lo24 <= lv["T"] if sgn > 0 else hi24 >= lv["T"]) or lv["touched"]
+            if not (near and maybe):
+                continue
+            if now - _emw_check_at.get(fkey, 0) < (60 if sgn * (last - lv["T"]) <= 0 else 300):
+                continue
+            _emw_check_at[fkey] = now
+            st = emw_check_touch(sym, lv, stop, take)
+            if st == "done":
+                with state_lock:
+                    fired[fkey] = {"t": now, "skip": "стоп или тейк уже был после касания"}
+                continue
+            if st != "ok":
+                continue
+            if sym in busy:
+                with state_lock:
+                    fired[fkey] = {"t": now, "skip": "по монете уже открыта сделка модуля"}
+                continue
+            with state_lock:
+                fired[fkey] = {"t": now}
+            busy.add(sym)
+            emw_fire(sym, lv, cfg, last, stop, take)
+    with state_lock:
+        for k in [k for k, v in fired.items() if now - (v.get("t") or 0) > 70 * 86400]:
+            fired.pop(k, None)
+
+
+def emw_track_outcomes():
+    now = time.time()
+    with state_lock:
+        open_signals = [s for s in STATE["emw_signals"] if s["status"] == "OPEN"]
+    for sig in open_signals:
+        try:
+            cs = _get_candles_range_live(sig["symbol"], "1h", int(sig["detected_at"]) // 3600 * 3600, now + 3600) or []
+            if not cs:
+                continue
+            sgn = 1 if sig["direction"] == "LONG" else -1
+            entry = sig["entry"]
+            risk = abs(entry - sig["sl"]) or 1e-12
+            result = exit_price = exit_time = None
+            for i, c in enumerate(cs):
+                if (c["low"] <= sig["sl"]) if sgn > 0 else (c["high"] >= sig["sl"]):
+                    result, exit_price, exit_time = "LOSS", sig["sl"], c["time"]
+                    break
+                if i > 0 and ((c["high"] >= sig["tp"]) if sgn > 0 else (c["low"] <= sig["tp"])):
+                    result, exit_price, exit_time = "WIN", sig["tp"], c["time"]
+                    break
+            if not result and now >= sig.get("hold_until", now + 1):
+                result, exit_price, exit_time = "TIME_EXIT", cs[-1]["close"], int(now)
+            if not result:
+                continue
+            raw = sgn * (exit_price - entry) / risk
+            pnl_r = round(-abs(raw) if result == "LOSS" else raw, 3)
+            if result == "TIME_EXIT" and AUTOTRADE_ENABLED_EMW and sig.get("autotrade_fired"):
+                log_error(f"emw time exit {sig['symbol']}: {close_position_for_mode('emw', sig['symbol'], sig['direction'])}")
+            with state_lock:
+                sig.update({"status": "CLOSED", "result": result, "exit_price": exit_price, "exit_time": exit_time, "pnl_r": pnl_r})
+            notify_trade_result("emw", sig["symbol"], sig["direction"], entry, exit_price, result, pnl_r,
+                                real=bool(AUTOTRADE_ENABLED_EMW and sig.get("autotrade_fired")))
+            save_state()
+        except Exception as e:
+            log_error(f"emw_outcome {sig.get('symbol')}: {e}")
+
+
+def emw_live_loop():
+    time.sleep(60)
+    last_track = 0
+    while True:
+        heartbeat("emw_live_loop")
+        try:
+            if not EMW_ENABLED:
+                time.sleep(300)
+                continue
+            emw_refresh_levels()
+            emw_scan_tick()
+            if time.time() - last_track > 300:
+                last_track = time.time()
+                emw_track_outcomes()
+        except Exception as e:
+            log_error(f"emw_live_loop: {e}")
+        time.sleep(EMW_POLL_SEC)
+
+
+def emw_honest_live(sigs):
+    """the live signals' own result, fees included (the same blocks as P/R's honest check)"""
+    def block(rows):
+        rs = []
+        for x in rows:
+            try:
+                rs.append(float(x["pnl_r"]) - trade_fee_r(x.get("entry"), x.get("sl")))
+            except (TypeError, ValueError, KeyError):
+                pass
+        n = len(rs)
+        if not n:
+            return {"n": 0}
+        avg = sum(rs) / n
+        sd = (sum((r - avg) ** 2 for r in rs) / (n - 1)) ** 0.5 if n > 1 else 0.0
+        se = sd / n ** 0.5 if n > 1 else 0.0
+        return {"n": n, "avg": round(avg, 3), "sum": round(sum(rs), 2), "wr": round(sum(1 for r in rs if r > 0) / n * 100, 1),
+                "lo": round(avg - 1.96 * se, 3) if n > 1 else None, "hi": round(avg + 1.96 * se, 3) if n > 1 else None,
+                "z": round(avg / se, 2) if se > 0 else None, "coins": len({x["symbol"] for x in rows})}
+    closed = [x for x in sigs if x.get("status") == "CLOSED" and x.get("result") in CLOSED_RESULTS and x.get("pnl_r") is not None]
+    times = [x.get("exit_time") or x.get("time") for x in closed if (x.get("exit_time") or x.get("time"))]
+    return {"all": block(closed), "active": block(closed), "dropped": {"n": 0},
+            "real": block([x for x in closed if x.get("autotrade_fired")]),
+            "open": sum(1 for x in sigs if x.get("status") == "OPEN"),
+            "first": min(times) if times else None, "last": max(times) if times else None}
+
+
+def emw_watch_list(model, limit=60):
+    """the forming candles' levels near the price, nearest first"""
+    with _emw_lock:
+        levels = {s: list(v) for s, v in _emw_levels.items()}
+        prices = dict(_emw_prices)
+    now = time.time()
+    rows = []
+    for sym, lvs in levels.items():
+        px = prices.get(sym)
+        if not px:
+            continue
+        last = px[0]
+        for lv in lvs:
+            if now >= lv["bar_end"]:
+                continue
+            sgn = lv["sgn"]
+            dist = sgn * (last - lv["T"]) / last * 100
+            if dist > EMW_WATCH_PCT:
+                continue
+            setup = next((x for x in (model or {}).get("setups") or [] if x["key"] == lv["key"]), None)
+            cfg = emw_chosen_cfg(model, lv["key"], lv["pump"])
+            stop, take = emw_trade_prices(lv, cfg or setup) if (cfg or (setup and setup.get("best"))) else (None, None)
+            rows.append({"symbol": sym, "key": lv["key"], "tf": lv["tf"], "ema": lv["ema"], "dir": "LONG" if sgn > 0 else "SHORT",
+                         "level": lv["L"], "trigger": lv["T"], "price": last, "dist_pct": round(dist, 2), "pump": lv["pump"],
+                         "ext": lv["ext"], "ext_pct": round((lv["ext"] - lv["T"]) / lv["T"] * 100, 1), "touched": lv["touched"],
+                         "confirmed": bool(cfg), "sl": stop, "tp": take, "bar_end": lv["bar_end"],
+                         "hist": ((model or {}).get("coin_hist") or {}).get(lv["key"], {}).get(sym)})
+    rows.sort(key=lambda r: (not r["confirmed"], max(r["dist_pct"], 0)))
+    return rows[:limit]
+
+
 # Fixed top-5 majors, maximum available history, pure-Python statistical
 # pattern discovery across many condition types (calendar, RSI zone, EMA
 # side, volume regime, candle range/body size, streaks, range position),
@@ -16941,10 +17699,10 @@ def run_pool_with_progress(fn, items, workers, loop_name, on_result, on_stop, st
 # ============================================================================
 CALC_WORKERS = int(os.environ.get("VP_CALC_WORKERS", 3))
 CALC_FUNCS = ("snr_optimize_core", "prv_optimize_core", "neuro_backtest_core", "neuro_conditions_core",
-              "lsw_backtest_core")
+              "lsw_backtest_core", "emw_touches_core")
 # settings that can change at runtime are sent with every task, so a worker
 # always computes with the main process's current values
-CALC_CONST_PREFIXES = ("SNR_", "PRV_", "NEURO_", "MSNR_", "LSW_", "AUTOTRADE_SIM_FEE_PCT")
+CALC_CONST_PREFIXES = ("SNR_", "PRV_", "NEURO_", "MSNR_", "LSW_", "EMW_", "AUTOTRADE_SIM_FEE_PCT")
 _calc_pool = []            # idle worker Popen objects
 _calc_busy = 0
 _calc_cond = threading.Condition()
@@ -16956,7 +17714,7 @@ _calc_boost = set()        # modules currently in a first / post-reset run
 _calc_busy_by = {}         # v0.99.372 — module -> worker processes it is using right now
 _CALC_FN_MODULE = {"snr_optimize_core": "snr", "prv_optimize_core": "prv",
                    "neuro_backtest_core": "neuro", "neuro_conditions_core": "cond",
-                   "lsw_backtest_core": "lsw"}
+                   "lsw_backtest_core": "lsw", "emw_touches_core": "emw"}
 
 
 def calc_status(mod):
@@ -24164,7 +24922,7 @@ def _zones_outbox_save():
 
 TELEGRAM_ALERTS_TRADE_RESULTS = os.environ.get("VP_TG_TRADE_RESULTS", "1") == "1"            # v0.99.457
 TELEGRAM_TRADE_RESULTS_REAL_ONLY = os.environ.get("VP_TG_TRADE_RESULTS_REAL", "0") == "1"
-_TRADE_MOD_NAMES = {"neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "zones": "Зоны",
+_TRADE_MOD_NAMES = {"neuro": "Neuro", "snr": "S/R Zones", "prv": "Peak Reversal", "emw": "EMA W/M", "zones": "Зоны",
                     "zones_own": "Зоны · 🔎 наш поиск", "zones_appr": "Зоны · движение к зоне", "zones_pb": "Зоны · 🧪 откат"}
 
 
@@ -28231,6 +28989,64 @@ def api_prv_status():
     })
 
 
+@app.route("/api/emw/status")
+def api_emw_status():
+    """v0.99.570 — the "EMA W/M" tab"""
+    with state_lock:
+        model = STATE.get("emw_model")
+        sigs = list(STATE["emw_signals"])
+        st = {k: STATE.get(k) for k in ("emw_last_backtest_finished", "emw_backtest_running", "emw_waiting_for_slot",
+                                        "emw_progress_done", "emw_progress_total")}
+        in_flight = list(STATE.get("emw_progress_in_flight") or [])
+    try:
+        watch = emw_watch_list(model)
+    except Exception as e:
+        log_error(f"emw watch: {e}")
+        watch = []
+    return jsonify({"enabled": EMW_ENABLED, "autotrade": AUTOTRADE_ENABLED_EMW,
+                    "model": {k: v for k, v in model.items() if k not in ("coin_hist", "trades")} if model else None,
+                    "watch": watch, "signals": sigs[:60], "honest": emw_honest_live(sigs), "in_flight": in_flight[:12],
+                    "last_backtest_finished": st["emw_last_backtest_finished"], "backtest_running": st["emw_backtest_running"],
+                    "waiting_for_slot": st["emw_waiting_for_slot"], "progress_done": st["emw_progress_done"],
+                    "progress_total": st["emw_progress_total"], "calc": calc_status("emw"),
+                    "levels": {"coins": len(_emw_levels), "at": _emw_levels_meta["at"] or None,
+                               "levels": sum(len(v) for v in list(_emw_levels.values()))},
+                    "prices_at": max((p[3] for p in list(_emw_prices.values())), default=None),
+                    "config": {"emas": EMW_EMAS, "pump": EMW_PUMP_CANDIDATES, "stop": EMW_STOP_CANDIDATES, "rr": EMW_RR_CANDIDATES,
+                               "trigger_atr": EMW_TRIGGER_ATR, "hold_days": EMW_MAX_HOLD_DAYS, "poll_sec": EMW_POLL_SEC,
+                               "refresh_sec": EMW_REFRESH_SEC, "combos": EMW_N_COMBOS, "z_train": EMW_Z_TRAIN,
+                               "z_test": EMW_TEST_Z, "watch_pct": EMW_WATCH_PCT, "funding_pct_day": EMW_FUNDING_PCT_DAY,
+                               "react_atr": EMW_REACT_ATR, "above_bars": EMW_ABOVE_BARS}})
+
+
+@app.route("/api/emw/trades/<path:key>")
+def api_emw_trades(key):
+    with state_lock:
+        m = STATE.get("emw_model") or {}
+        trades = list((m.get("trades") or {}).get(key) or [])
+    return jsonify({"key": key, "trades": trades})
+
+
+@app.route("/api/emw/restart_backtest", methods=["POST"])
+def api_emw_restart_backtest():
+    bt_set_reason("emw", BT_REASON_BUTTON)
+    EMW_BACKTEST_TRIGGER.set()
+    return jsonify({"ok": True})
+
+
+@app.route("/api/reset/emw", methods=["POST"])
+def api_reset_emw():
+    with state_lock:
+        STATE["emw_model"] = None
+        STATE["emw_last_backtest_finished"] = None
+        STATE["emw_signals"].clear()
+        STATE["emw_fired"] = {}
+    _emw_check_at.clear()
+    save_state()
+    EMW_BACKTEST_TRIGGER.set()
+    return jsonify({"ok": True})
+
+
 @app.route("/api/prv/restart_backtest", methods=["POST"])
 def api_prv_restart_backtest():
     try:
@@ -29857,6 +30673,7 @@ INDEX_HTML = """<!doctype html>
   .tab[data-tab="neuro"] { --tab-c:var(--neuro); }
   .tab[data-tab="snr"] { --tab-c:var(--snr); }
   .tab[data-tab="prv"] { --tab-c:var(--prv); }
+  .tab[data-tab="emw"] { --tab-c:#7fd1ff; }
   #hintsToggleBtn { flex-shrink:0; height:30px; display:inline-flex; align-items:center; padding:0 8px !important; }
 
   /* ---------- panels ---------- */
@@ -30130,6 +30947,7 @@ INDEX_HTML = """<!doctype html>
 </header>
 <div class="tabs">
   <div class="tab active" data-tab="prv" style="color:var(--prv);">Peak Reversal</div>
+  <div class="tab" data-tab="emw" style="color:#7fd1ff;">📐 EMA W/M</div>
   <div class="tab" data-tab="zones" style="color:#4caf50;">🎯 Зоны</div>
   <div class="tab" data-tab="neuro" style="color:var(--neuro);">🧠 Neuro</div>
   <div class="tab" data-tab="signals">Volume</div>
@@ -30153,6 +30971,7 @@ INDEX_HTML = """<!doctype html>
   <div id="neuroPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="snrPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="prvPanel" style="display:block;padding:8px 4px;font-size:var(--fs);"></div>
+  <div id="emwPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="zonesPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="nqPanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
   <div id="autotradePanel" style="display:none;padding:8px 4px;font-size:var(--fs);"></div>
@@ -30311,6 +31130,15 @@ INDEX_HTML = """<!doctype html>
         <label class="switch"><input type="checkbox" id="setSnrSingleBest"><span class="switchSlider"></span></label>
       </div>
     </div></details>
+    <details class="settingsGroup" style="--mod-color:#7fd1ff;"><summary class="settingsGroupTitle">📐 EMA W/M (неделя / месяц)</summary><div class="settingsGroupBody">
+      <div class="settingRow">
+        <div>
+          <div class="label">Работа (обучение + живой скан)</div>
+          <div class="sub">реакция от EMA недели и месяца после пампа — ловится на живой свече (цена проверяется каждые 30 сек), какие EMA, стоп и тейк — выучено на истории всех монет и проверено на train/test</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setEmw"><span class="switchSlider"></span></label>
+      </div>
+    </div></details>
     <details class="settingsGroup" style="--mod-color:#ffa726;"><summary class="settingsGroupTitle">Peak Reversal (Keltner Channel)</summary><div class="settingsGroupBody">
       <div class="settingRow">
         <div>
@@ -30413,6 +31241,13 @@ INDEX_HTML = """<!doctype html>
       </div>
       <div class="settingRow">
         <div>
+          <div class="label">↳ Алерты EMA W/M</div>
+          <div class="sub">цена на живой недельной / месячной свече дошла до подтверждённой EMA</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setTelegramEmw"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
           <div class="label">↳ Алерты Зон</div>
           <div class="sub">распознанный пост, цена дошла до линии, вход, пробой зоны</div>
         </div>
@@ -30503,6 +31338,7 @@ INDEX_HTML = """<!doctype html>
           <input type="number" id="setRiskPctNeuro" min="0.1" max="100" step="0.5" placeholder="Neuro" title="Neuro" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctSnr" min="0.1" max="100" step="0.5" placeholder="S/R" title="S/R Zones" style="display:none;width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctPrv" min="0.1" max="100" step="0.5" placeholder="P/R" title="Peak Reversal" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
+          <input type="number" id="setRiskPctEmw" min="0.1" max="100" step="0.5" placeholder="EMA" title="EMA W/M" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
           <input type="number" id="setRiskPctZones" min="0.1" max="100" step="0.5" placeholder="Зоны" title="Зоны" style="width:58px;background:var(--inset);border:1px solid var(--line);color:var(--tx);padding:6px 6px;border-radius:var(--r-xs);font-size:var(--fs);">
         </div>
       </div>
@@ -30540,6 +31376,13 @@ INDEX_HTML = """<!doctype html>
           <div class="sub">риск % от баланса из общих настроек, тот же автоматический расчёт плеча и размера позиции, что и у остальных режимов</div>
         </div>
         <label class="switch"><input type="checkbox" id="setAutotradePrv"><span class="switchSlider"></span></label>
+      </div>
+      <div class="settingRow">
+        <div>
+          <div class="label">↳ EMA W/M</div>
+          <div class="sub">только подтверждённые EMA; стоп широкий (за EMA недели / месяца), поэтому плечо маленькое; держит до 28 / 60 дней; риск — свой «EMA» или общий</div>
+        </div>
+        <label class="switch"><input type="checkbox" id="setAutotradeEmw"><span class="switchSlider"></span></label>
       </div>
       <div class="settingRow">
         <div>
@@ -30644,6 +31487,7 @@ document.querySelectorAll('.tab').forEach(el => {
     document.getElementById('neuroPanel').style.display = activeTab === 'neuro' ? 'block' : 'none';
     document.getElementById('snrPanel').style.display = activeTab === 'snr' ? 'block' : 'none';
     document.getElementById('prvPanel').style.display = activeTab === 'prv' ? 'block' : 'none';
+    document.getElementById('emwPanel').style.display = activeTab === 'emw' ? 'block' : 'none';
     document.getElementById('zonesPanel').style.display = activeTab === 'zones' ? 'block' : 'none';
     document.getElementById('nqPanel').style.display = activeTab === 'nq' ? 'block' : 'none';
     document.getElementById('autotradePanel').style.display = activeTab === 'autotrade' ? 'block' : 'none';
@@ -30657,6 +31501,7 @@ document.querySelectorAll('.tab').forEach(el => {
     if (activeTab === 'neuro') refreshNeuro();
     if (activeTab === 'snr') refreshSnr();
     if (activeTab === 'prv') refreshPrv();
+    if (activeTab === 'emw') refreshEmw();
     if (activeTab === 'zones') refreshZones();
     if (activeTab === 'nq') refreshNq();
     if (activeTab === 'autotrade') refreshAutotrade();
@@ -32918,6 +33763,103 @@ function zonesAdd(postId, sym) {
   zonesPost('/api/zones/zone', {post_id: postId || null, symbol: s, side: /^ш|^s/i.test(sd.trim()) ? 'short' : 'long', levels: lv});
 }
 
+// v0.99.570 — "EMA W/M": reaction off the weekly / monthly EMA, caught on the live candle
+async function emwPost(url, msg) {
+  if (msg && !confirm(msg)) return;
+  try { await fetch(url, {method: 'POST'}); } catch (e) {}
+  setTimeout(refreshEmw, 1000);
+}
+async function emwLoadTrades(det, key) {
+  if (!det.open || det.dataset.loaded) return;
+  det.dataset.loaded = '1';
+  const box = det.querySelector('.btTradesBox');
+  box.innerHTML = '<div class="dim">загружаю…</div>';
+  let d;
+  try { d = await (await fetch('/api/emw/trades/' + encodeURIComponent(key))).json(); } catch (e) { box.innerHTML = '<div class="dim">нет связи</div>'; return; }
+  const rows = (d.trades || []).map(t => {
+    const rc = t.result === 'WIN' ? 'win' : t.result === 'LOSS' ? 'loss' : 'dim';
+    return `<div style="display:flex;justify-content:space-between;gap:8px;padding:3px 0;border-bottom:1px solid var(--line);font-size:var(--fs-sm);">
+      <span class="dim">${fmtDateTime(t.time)} <b style="color:var(--tx);">${t.symbol.replace('_USDT', '')}</b> @ ${fmtNum(t.entry)} · памп ${t.pump} ATR${t.test ? ' · тест' : ''}</span>
+      <span class="${rc}" style="white-space:nowrap;">${t.result} ${t.pnl_r > 0 ? '+' : ''}${t.pnl_r}R</span></div>`;
+  });
+  box.innerHTML = rows.length ? rows.join('') : '<div class="dim">нет сделок</div>';
+}
+async function refreshEmw() {
+  const panel = document.getElementById('emwPanel');
+  let d;
+  try { d = await (await fetch('/api/emw/status')).json(); } catch (e) { panel.innerHTML = '<div class="dim">нет связи</div>'; return; }
+  const cfg = d.config || {};
+  const m = d.model;
+  const tfName = tf => tf === '1M' ? 'месяц' : 'неделя';
+  const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
+  const pctOf = (atr, ap) => atr == null || ap == null ? '' : ` <span class="dim">(~${(atr * ap).toFixed(1)}%)</span>`;
+  let h = `<details class="dim hint-block" style="margin-bottom:10px;"><summary style="cursor:pointer;"><b>📐 EMA W/M</b> — реакция от EMA недели и месяца после пампа, ловится на живой свече · как работает</summary>EMA текущей свечи совпадает с ценой ровно тогда, когда цена доходит до EMA закрытых свечей, поэтому уровень всей недели / месяца известен с её открытия и не перерисовывается. Цена проверяется каждые ${cfg.poll_sec || 30} сек, вход — при касании (чуть раньше линии, ${cfg.trigger_atr} ATR), а не после закрытия свечи.
+    <br>Условия: ${cfg.above_bars || 2} последние закрытые свечи — по ту же сторону EMA (тренд), свеча открылась выше уровня (для шорта — ниже), «памп» — насколько экстремум последних свечей ушёл от EMA в ATR (откуда начался откат).
+    <br>Обучение — на всех монетах вместе (у одной монеты слишком мало недельных касаний): EMA ${(cfg.emas || {})['1w'] ? cfg.emas['1w'].join('/') : ''} (неделя), ${(cfg.emas || {})['1M'] ? cfg.emas['1M'].join('/') : ''} (месяц) × лонг/шорт × памп ≥ ${(cfg.pump || []).join('/')} ATR × стоп ${(cfg.stop || []).join('/')} ATR за EMA × RR ${(cfg.rr || []).join('/')} — ${cfg.combos} вариантов. Выбор на старых 70% истории, проверка на новых 30%; z считается по свечам (касания одной недели идут вместе), порог обучения z ≥ ${cfg.z_train} (поправка на весь перебор), теста z ≥ ${cfg.z_test}. Держим не дольше ${(cfg.hold_days || {})['1w']} дн. (неделя) / ${(cfg.hold_days || {})['1M']} дн. (месяц); комиссии и фандинг ${cfg.funding_pct_day}%/день учтены. Пересчёт раз в ${Math.round((cfg.refresh_sec || 86400) / 3600)} ч.</details>`;
+  if (d.enabled === false) h += '<div style="padding:10px 12px;margin-bottom:8px;background:var(--neg-bg);border:1px solid var(--neg);border-radius:var(--r-sm);font-size:var(--fs-sm);">⏸ <b>«EMA W/M» выключен в настройках</b> — обучение и живой скан не идут.</div>';
+  if (d.backtest_running) {
+    const pct = d.progress_total ? Math.round(d.progress_done / d.progress_total * 100) : 0;
+    h += `<div class="dim" style="font-size:var(--fs-sm);margin-bottom:4px;">обучение: ${d.progress_done}/${d.progress_total}${coresTxt(d.calc)}</div>
+      <div style="height:6px;background:var(--line);border-radius:3px;overflow:hidden;margin-bottom:10px;"><div style="height:100%;width:${pct}%;background:#7fd1ff;"></div></div>`;
+  } else if (d.waiting_for_slot) h += '<div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">⏳ ждёт свободного слота бэктеста</div>';
+  else h += `<div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">последнее обучение: ${d.last_backtest_finished ? fmtDateTime(d.last_backtest_finished) : 'ещё не было — первое начнётся через ~15 мин после запуска'}</div>`;
+  const lv = d.levels || {};
+  h += `<div class="dim" style="font-size:var(--fs-sm);margin-bottom:8px;">живой скан: ${lv.at ? `уровни ${lv.levels} на ${lv.coins} монетах (пересчёт ${fmtDateTime(lv.at)})` : 'уровни ещё считаются'}${d.prices_at ? ` · цена ${fmtDateTime(d.prices_at)}` : ''}</div>`;
+  h += `<div style="display:flex;gap:6px;margin-bottom:10px;"><button onclick="emwPost('/api/emw/restart_backtest')" class="zbtn">↻ Обучить заново</button>
+    <button onclick="emwPost('/api/reset/emw', 'Очистить модель и сигналы «EMA W/M»?')" class="zbtn" style="color:var(--neg);">🗑 Очистить</button></div>`;
+  if (m) {
+    const n = (m.chosen || []).length;
+    h += `<div style="padding:10px 12px;margin-bottom:10px;border-radius:var(--r-sm);font-size:var(--fs-sm);border:1px solid ${n ? 'var(--pos)' : 'var(--line)'};background:${n ? 'var(--pos-bg)' : 'var(--inset)'};">${n
+      ? `✅ Подтверждено на тесте: <b>${n}</b> — ${(m.setups || []).filter(s => s.passed).map(s => s.desc).join('; ')}. По ним идут сигналы${d.autotrade ? ' и сделки' : ''}.`
+      : `✗ Пока ни одна EMA не прошла честную проверку — сигналов нет, ниже только наблюдение и статистика. ${m.coins} монет, ${m.touches} касаний.`}</div>`;
+  }
+  // live: the forming candles' levels near the price
+  const w = d.watch || [];
+  h += `<div class="secTitle">Сейчас у EMA — живая свеча · ${w.length}</div>`;
+  h += w.length ? w.map(r => {
+    const dirTxt = r.dir === 'LONG' ? '<span class="dirb long">LONG</span>' : '<span class="dirb short">SHORT</span>';
+    const near = r.dist_pct <= 0 ? '<b class="win">у уровня</b>' : `до уровня <b>${r.dist_pct}%</b>`;
+    const hist = r.hist ? ` · эта монета: ${r.hist[0]} сделок, ${r.hist[1]} в плюс, ${sgR(r.hist[2])}` : '';
+    return `<div style="padding:8px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);${r.confirmed ? '' : 'opacity:.75;'}">
+      <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;"><span><b>${r.symbol.replace('_USDT', '')}</b> ${dirTxt} EMA ${r.ema} · ${tfName(r.tf)}</span>
+        <span class="dim" style="white-space:nowrap;">${r.confirmed ? '✅ по модели' : 'наблюдение'}</span></div>
+      <div>${near} · вход ≈ ${fmtNum(r.trigger)} (EMA ${fmtNum(r.level)}) · цена ${fmtNum(r.price)}${r.touched ? ' · <span class="dim">в этой свече уже касалась</span>' : ''}</div>
+      <div class="dim">откат от ${fmtNum(r.ext)} (${r.ext_pct > 0 ? '+' : ''}${r.ext_pct}% от входа) · памп ${r.pump} ATR${r.sl != null ? ` · SL ${fmtNum(r.sl)} · TP ${fmtNum(r.tp)}` : ''}${hist} · свеча до ${fmtDateTime(r.bar_end)}</div>
+    </div>`;
+  }).join('') : `<div class="dim" style="font-size:var(--fs-sm);">рядом с уровнями (в пределах ${cfg.watch_pct}%) сейчас никого</div>`;
+  h += '<div style="height:10px;"></div>' + prvHonestHtml(d.honest);
+  const sigs = d.signals || [];
+  if (sigs.length) h += sigListHtml(sigs.map(sg => sigItemHtml(sg, {extra: [sg.desc || '', sg.level ? `EMA ${fmtNum(sg.level)}` : '', sg.ext ? `откат от ${fmtNum(sg.ext)}` : '',
+    sg.coin_hist ? `монета: ${sg.coin_hist[0]} сд., ${sg.coin_hist[1]} в плюс` : '', sg.leverage ? `плечо ${sg.leverage_planned ? '~' : ''}${sg.leverage}x` : '']})));
+  // what it learned, per EMA
+  if (m && m.setups) {
+    h += `<div class="secTitle" style="margin-top:10px;">Чему научился — все монеты вместе</div>
+      <div class="dim" style="font-size:var(--fs-xs);margin-bottom:6px;">«стоп» — насколько глубоко цена прокалывала EMA перед отскоком (у касаний, давших отскок ${cfg.react_atr} ATR); «отскок» — максимальный ход от входа за время удержания. В ATR своего таймфрейма, в скобках — примерно в % цены. Лучший вариант выбран по обучению, тест его не видел.</div>`;
+    for (const tf of ['1w', '1M']) {
+      const rows = m.setups.filter(s => s.tf === tf);
+      if (!rows.length) continue;
+      h += `<div style="font-weight:700;margin:8px 0 2px;">${tf === '1w' ? 'Неделя' : 'Месяц'}</div>`;
+      const setupHtml = s => {
+        const L = s.learn || {}, b = s.best;
+        const head = `<b>EMA ${s.ema}</b> ${s.dir === 'LONG' ? '<span class="dirb long">LONG</span>' : '<span class="dirb short">SHORT</span>'} ${s.passed ? '<span class="win">✅ подтверждено</span>' : (s.significant ? '<span class="dim">значимо на обучении, тест не прошёл</span>' : '')}`;
+        const learn = L.touches ? `касаний ${L.touches} (${L.coins} монет) · отскок ≥ ${cfg.react_atr} ATR: <b>${L.react_rate == null ? '—' : L.react_rate + '%'}</b>
+          <br>стоп: 75% отскоков прокалывали не глубже <b>${L.mae_p75 ?? '—'} ATR</b>${pctOf(L.mae_p75, L.atr_pct)}, 90% — ${L.mae_p90 ?? '—'} ATR${pctOf(L.mae_p90, L.atr_pct)}
+          <br>отскок: у половины до <b>${L.mfe_p50 ?? '—'} ATR</b>${pctOf(L.mfe_p50, L.atr_pct)}, у четверти — ${L.mfe_p75 ?? '—'} ATR${pctOf(L.mfe_p75, L.atr_pct)} · ATR ≈ ${L.atr_pct ?? '—'}% цены` : '<span class="dim">касаний нет</span>';
+        const best = b ? `<div>лучшее: памп ≥ ${b.pump} ATR · стоп ${b.stop_atr} ATR за EMA${pctOf(b.stop_atr, L.atr_pct)} · RR ${b.rr}</div>
+          <div style="display:flex;gap:12px;flex-wrap:wrap;"><span>обучение ${sgR(b.train.avg)} <span class="dim">n=${b.train.n} · WR ${b.train.wr}% · z=${b.train.z}</span></span>
+          <span>тест <b>${sgR(b.test.avg)}</b> <span class="dim">n=${b.test.n || 0}${b.test.n ? ` · WR ${b.test.wr}% · z=${b.test.z ?? '—'}` : ''}</span></span></div>
+          <details ontoggle="emwLoadTrades(this, '${s.key}')"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">сделки</summary><div class="btTradesBox"></div></details>`
+          : `<div class="dim">мало сделок для вывода (нужно ≥ ${m.min_train} на обучении)</div>`;
+        return `<div style="padding:8px 0;border-top:1px solid var(--line);font-size:var(--fs-sm);"><div>${head}</div><div class="dim" style="margin:2px 0;">${learn}</div>${best}</div>`;
+      };
+      const top = rows.filter(s => s.passed || s.significant || (s.best && s.best.test && s.best.test.avg > 0));
+      const rest = rows.filter(s => !top.includes(s));
+      h += top.map(setupHtml).join('') + (rest.length ? `<details><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);padding:6px 0;border-top:1px solid var(--line);">остальные EMA — без перевеса или мало данных (${rest.length})</summary>${rest.map(setupHtml).join('')}</details>` : '');
+    }
+  }
+  setPanelHtml(panel, h);
+}
+
 function prvHonestHtml(h) {   // v0.99.546 — the honest live check
   if (!h || !h.all) return '';
   const a = h.all;
@@ -33690,7 +34632,7 @@ async function refreshAutotrade() {
     (await fetch('/api/autotrade/log')).json(),
   ]);
   const panel = document.getElementById('autotradePanel');
-  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', ft5: 'FT5', msnr: 'MSNR', mirror: 'Зеркало', lsw: 'Sweep', neuro: 'Neuro', snr: 'S/R Zones', prv: 'Peak Reversal'};
+  const modeLabels = {bounce: 'Bounce', breakout: 'Breakout', scalp: 'Скальпинг', ft5: 'FT5', msnr: 'MSNR', mirror: 'Зеркало', lsw: 'Sweep', neuro: 'Neuro', snr: 'S/R Zones', prv: 'Peak Reversal', emw: 'EMA W/M'};
   const enabledTxt = Object.entries(status.enabled)
     .map(([k, v]) => `<span class="${v ? 'win' : 'dim'}">${modeLabels[k]}: ${v ? 'вкл' : 'выкл'}</span>`)
     .join(' &nbsp;·&nbsp; ');
@@ -33782,7 +34724,7 @@ async function refreshSimulator() {
     (await fetch('/api/simulator/trades')).json(),
   ]);
   const panel = document.getElementById('simulatorPanel');
-  const modeLabels = {neuro: 'Neuro', snr: 'S/R Zones', prv: 'Peak Reversal', msnr: 'MSNR', lsw: 'Sweep', mirror: 'Зеркало', scalp: 'Скальпинг', ft5: 'FT5', bounce: 'Bounce', breakout: 'Breakout'};
+  const modeLabels = {neuro: 'Neuro', snr: 'S/R Zones', prv: 'Peak Reversal', emw: 'EMA W/M', msnr: 'MSNR', lsw: 'Sweep', mirror: 'Зеркало', scalp: 'Скальпинг', ft5: 'FT5', bounce: 'Bounce', breakout: 'Breakout'};
   const pnlClass = status.pnl_total >= 0 ? 'win' : 'loss';
   const modesTxt = Object.entries(status.modes || {}).map(([k, v]) =>
     `<span class="${v.autotrade ? 'win' : 'dim'}">${modeLabels[k] || k}: ${v.autotrade ? (v.all_in ? 'вкл, ва-банк ' + v.all_in + '%' : 'вкл') : 'выкл'}</span>`).join(' · ');
@@ -33859,6 +34801,7 @@ async function refreshAll() {
   if (activeTab === 'neuro') await refreshNeuro();
   if (activeTab === 'snr') await refreshSnr();
   if (activeTab === 'prv') await refreshPrv();
+  if (activeTab === 'emw') await refreshEmw();
   if (activeTab === 'zones') await refreshZones();
   if (activeTab === 'autotrade') await refreshAutotrade();
   if (activeTab === 'simulator') await refreshSimulator();
@@ -34170,6 +35113,10 @@ const setInputs = {
   neuro_trade_filter_enabled: document.getElementById('setNeuroTradeFilter'),
   snr_enabled: document.getElementById('setSnr'),
   prv_enabled: document.getElementById('setPrv'),
+  emw_enabled: document.getElementById('setEmw'),   // v0.99.570
+  telegram_alerts_emw: document.getElementById('setTelegramEmw'),
+  autotrade_emw: document.getElementById('setAutotradeEmw'),
+  risk_pct_emw: document.getElementById('setRiskPctEmw'),
   telegram_enabled: document.getElementById('setTelegram'),
   telegram_alerts_hourly: document.getElementById('setTelegramHourly'),
   hourly_stats_enabled: document.getElementById('setHourlyStats'),
@@ -35745,6 +36692,8 @@ if __name__ == "__main__":
     threading.Thread(target=prv_backtest_loop, daemon=True).start()
     threading.Thread(target=prv_live_loop, daemon=True).start()
     threading.Thread(target=entry_retry_loop, daemon=True).start()   # v0.99.566
+    threading.Thread(target=emw_backtest_loop, daemon=True).start()   # v0.99.570
+    threading.Thread(target=emw_live_loop, daemon=True).start()
     zones_load()   # v0.99.438
     zones_fix_dup_pids()   # v0.99.549
     zones_outbox_load()   # v0.99.455 — unsent zone messages from before the restart

@@ -19406,3 +19406,19 @@ v0.99.569 - The "Откат 4в1" tab is removed at the user's request (both the
          modes): its backtest, live scan, auto-trade, settings, alerts and API are gone; old
          4в1 data in the state file is simply ignored. The P/R entry retry after a
          favorable-drift skip (v0.99.566) and its live 1m take/stop check (v0.99.568) stay.
+v0.99.570 - New tab "📐 EMA W/M" at the user's request: the reaction off the weekly / monthly EMA
+         after a pump, caught on the LIVE candle, not after its close. The forming candle's EMA
+         equals the price exactly when the price reaches the EMA of the closed candles, so the
+         level of the whole week / month is known at its open and never repaints; live polls
+         the price every 30 s and enters on the touch (0.1 ATR before the line), checking on 1h
+         candles that the stop / take wasn't already hit since the touch. Setup: the last 2
+         closed candles on the trend side of the EMA, the candle opens beyond the level, "pump"
+         = how far the extreme of the last candles ran from the EMA (where the pullback came
+         from). Learning on all coins at once (daily candles -> weeks from Monday / calendar
+         months): EMA 9/21/28/50/100/200 (week), 5/9/12/21/28 (month) x long/short x pump x stop
+         0.5/1/1.5 ATR beyond the EMA x RR 1/1.5/2/3 = 792 variants; choice on the older 70%,
+         check on the newest 30%, z clustered by candle, Bonferroni on train; fees and funding
+         counted; hold up to 28 / 60 days. Shown per EMA: reaction rate, how deep the price
+         pierced the EMA before the bounce (safe stop) and how far the bounce went (take).
+         Signals and auto-trade only for confirmed EMAs (auto-trade off by default; own
+         sub-account option); the "near the EMA" list shows every live level within 15%.
