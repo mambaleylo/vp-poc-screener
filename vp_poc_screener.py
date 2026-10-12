@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.584"
+APP_VERSION = "0.99.585"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -33445,8 +33445,16 @@ async function refreshZones() {
   if (!panel || Date.now() - (window._zUp || 0) < 120000) return;   // a file dialog is open: don't rebuild the panel under it
   let d;
   try { d = await (await fetch('/api/zones/status')).json(); } catch (e) { return; }
-  let ut = null;
-  try { ut = await (await fetch('/api/zones/ut/status')).json(); } catch (e) { ut = null; }
+  // v0.99.585 — the account endpoints answer only on the bot's own phone: after the first
+  // refusal another device stops asking (no red 403 lines in the Termux log every refresh)
+  let ut = window._zutRemote || null;
+  if (!ut) {
+    try {
+      const r = await fetch('/api/zones/ut/status');
+      ut = await r.json();
+      if (r.status === 403) window._zutRemote = ut = {ok: false, error: 'подключение аккаунта Telegram — только на телефоне с ботом (адрес 127.0.0.1)'};
+    } catch (e) { ut = null; }
+  }
   const p = d.params || {}, st = d.stats || {}, lr = d.learned || {};
   const deps = d.deps || {};
   const warn = deps.ok ? '' : `<div style="padding:8px;margin-bottom:8px;background:var(--warn-bg);border:1px solid var(--warn-line);border-radius:var(--r-sm);">⚠️ Распознавание скринов не установлено${deps.tesseract ? '' : ' (нет tesseract)'}${deps.pillow ? '' : ' (нет Pillow)'}. В Termux: <b>pkg install tesseract python-pillow</b>, потом перезапустите бота. Пока зоны можно добавлять вручную. <button onclick="zonesReparse('')" style="background:var(--ctl);border:none;color:var(--tx);padding:3px 8px;border-radius:var(--r-xs);">↻ распознать все заново</button></div>`;

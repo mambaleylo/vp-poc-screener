@@ -19541,3 +19541,8 @@ v0.99.584 - Zones, fix (TAO: a limit filled on the exchange, the stop and take w
          limit placed after this ladder began makes it ours (a "💰 … found in the exchange history"
          message) and the stop / take go on. The "limits stand on the exchange" count shows only
          the ones still standing.
+v0.99.585 - Zones tab on another device no longer floods the Termux log with red
+         "GET /api/zones/ut/status 403" lines: the Telegram-account endpoints stay
+         local-only (the guard is unchanged), but after the first refusal the page
+         stops asking and shows that the account can be connected only on the
+         bot's own phone.
