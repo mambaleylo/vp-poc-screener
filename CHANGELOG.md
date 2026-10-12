@@ -19467,3 +19467,13 @@ v0.99.575 - EMA W/M from the user's RSR screenshot ("просто постави
            limit, the stop, the take and the holding time — in time to place it by hand;
          * the rise candidates are 0 / 2 ATR (6480 variants in all). The previous model is
            ignored and retrained.
+v0.99.576 - Charts. The shared signal chart of P/R, S/R, Neuro, Mirror, Sweep and the rest now uses the
+         same renderer as EMA W/M (the user: "в EMA-индикаторе красивые графики, в других
+         простенько"): price grid and scale, dates, the position's profit / loss areas from the
+         signal to the exit, labelled entry / stop / take lines, the signal and exit marks, EMA
+         20 / 50 for context; redrawn on screen rotation.
+         Fix (the user: "при скролле графика иногда внизу видно, как строится список сигналов —
+         окно само приподнимается"): a swipe on an open chart went through to the page under it
+         and that page kept rebuilding its lists every 15 s. While a chart / settings window is
+         open the page under it is now frozen in place (and returns to the same spot on close),
+         nothing is rebuilt under it, and swipes on the chart stay in the chart.

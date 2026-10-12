@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.575"
+APP_VERSION = "0.99.576"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -30993,7 +30993,8 @@ INDEX_HTML = """<!doctype html>
   #settingsModalHeader { align-items:center; }
   #closeBtn, #optimizeBtn, #msnrCloseBtn, #ft5CloseBtn, #vgiCloseBtn, #settingsCloseBtn { height:34px; padding:0 14px; background:var(--ctl); border:1px solid var(--line-2); border-radius:var(--r-sm); font-size:var(--fs); font-weight:500; }
   #optimizeBtn { background:var(--pos-bg); color:var(--pos); border-color:rgba(52,211,153,.3); }
-  #chartWrap, #msnrChartWrap, #ft5ChartWrap, #vgiChartWrap { flex:1; overflow:hidden; padding:8px; }
+  #chartWrap, #msnrChartWrap, #ft5ChartWrap, #vgiChartWrap { flex:1; overflow:hidden; padding:8px; touch-action:none; overscroll-behavior:contain; }
+  #modal, #msnrModal, #ft5Modal, #vgiModal, #settingsModal { overscroll-behavior:contain; }
   canvas { width:100%; height:100%; display:block; background:var(--inset); border-radius:var(--r); }
 
   /* ---------- settings ---------- */
@@ -34000,6 +34001,7 @@ async function emwChart(o) {
   document.getElementById('vgiModalParams').textContent = 'загрузка...';
   vgiModal.classList.add('open');
   window._emwRedraw = null;
+  window._vgiLast = null;
   const q = new URLSearchParams({tf: o.tf || '1w', time: o.time || 0, exit_time: o.exit_time || 0,
     key: `${o.tf || '1w'}|${o.ema}|${(o.direction || 'SHORT') === 'SHORT' ? 'S' : 'L'}`, level: o.level || '', entry: o.entry != null ? o.entry : (o.trigger || '')});
   let d;
@@ -34060,6 +34062,13 @@ function emwPanel(ctx, box, cs, opt) {
   if (opt.hi != null && opt.hi >= 0) {
     ctx.fillStyle = ink; ctx.globalAlpha = 0.07; ctx.fillRect(X(opt.hi) - step / 2, box.y, step, box.h); ctx.globalAlpha = 1;
   }
+  (opt.zones || []).forEach(z => {   // v0.99.576 — the position's profit / loss areas
+    if (z.p1 == null || z.p2 == null || z.from == null || z.from < 0) return;
+    const x0 = X(z.from) - step / 2, x1 = X(Math.min(n - 1, z.to == null ? n - 1 : z.to)) + step / 2;
+    ctx.fillStyle = z.color; ctx.globalAlpha = z.alpha || 0.13;
+    ctx.fillRect(x0, Math.min(Y(z.p1), Y(z.p2)), Math.max(1, x1 - x0), Math.abs(Y(z.p1) - Y(z.p2)));
+    ctx.globalAlpha = 1;
+  });
   (opt.vlines || []).forEach(v => {
     const i = idxOf(v.t); if (i < 0) return;
     ctx.strokeStyle = v.color; ctx.setLineDash([3, 3]); ctx.beginPath(); ctx.moveTo(X(i), box.y); ctx.lineTo(X(i), box.y + box.h); ctx.stroke(); ctx.setLineDash([]);
@@ -34135,7 +34144,10 @@ function emwDrawChart(d, o) {
     dayFmt: true, hlines: bl, vlines: vl, dots,
     legend: [{text: '4ч свечи', color: '#a6b0c0'}, {text: isShort ? 'шорт' : 'лонг', color: isShort ? '#f87171' : '#34d399'}]});
 }
-window.addEventListener('resize', () => { if (window._emwRedraw && vgiModal.classList.contains('open')) window._emwRedraw(); });
+window.addEventListener('resize', () => {
+  if (!vgiModal.classList.contains('open')) return;
+  if (window._emwRedraw) window._emwRedraw(); else if (window._vgiLast) drawVgiChart(window._vgiLast);
+});
 document.getElementById('vgiCloseBtn').addEventListener('click', () => { window._emwRedraw = null; });
 
 async function emwLoadTrades(det, key) {
@@ -35160,7 +35172,41 @@ async function refreshGlobalErrors() {
   }
 }
 
+// v0.99.576 — user: "при скролле графика иногда внизу видно, как строится список сигналов — окно
+// само приподнимается": the page under an open chart kept scrolling (a swipe on the chart went
+// through to it, the phone's address bar moved the window) and kept rebuilding its lists every
+// 15 s. While any chart / settings window is open the page under it is frozen in place and
+// not rebuilt; on close it comes back to the same scroll position and refreshes.
+function anyOverlayOpen() {
+  for (const id of ['modal', 'msnrModal', 'ft5Modal', 'vgiModal', 'settingsModal']) {
+    const el = document.getElementById(id);
+    if (el && el.classList.contains('open')) return true;
+  }
+  for (const id of ['zoneChartBox', 'zoneShotBox']) {
+    const el = document.getElementById(id);
+    if (el && el.style.display && el.style.display !== 'none') return true;
+  }
+  return false;
+}
+let _ovLocked = false, _ovY = 0;
+function syncOverlayLock() {
+  const open = anyOverlayOpen(), b = document.body;
+  if (open && !_ovLocked) {
+    _ovY = window.scrollY || 0;
+    Object.assign(b.style, {position: 'fixed', top: (-_ovY) + 'px', left: '0', right: '0', width: '100%'});
+    _ovLocked = true;
+  } else if (!open && _ovLocked) {
+    Object.assign(b.style, {position: '', top: '', left: '', right: '', width: ''});
+    window.scrollTo(0, _ovY);
+    _ovLocked = false;
+    setTimeout(refreshAll, 50);
+  }
+}
+setInterval(syncOverlayLock, 200);
+document.addEventListener('click', () => setTimeout(syncOverlayLock, 0), true);
+
 async function refreshAll() {
+  if (anyOverlayOpen()) return;   // v0.99.576 — nothing rebuilt under an open chart
   await refreshStatus();
   await refreshOverview();
   await refreshAutotradeBanner();
@@ -36583,131 +36629,63 @@ function openPrvChart(symbol, sigTime) {
 }
 
 function drawVgiChart(data) {
-  const canvas = document.getElementById('vgiChartCanvas');
-  const wrap = document.getElementById('vgiChartWrap');
+  // v0.99.576 — user: "в EMA-индикаторе рисуются красивые графики, в других как-то простенько": the
+  // shared chart of P/R, S/R, Neuro, Mirror, Sweep… now goes through the same renderer (emwPanel):
+  // price grid and scale, dates, the position's profit / loss areas from the signal to the exit,
+  // labelled entry / stop / take lines, the signal and exit marks, EMA 20 / 50 for context
+  window._emwRedraw = null;
+  window._vgiLast = data;
+  const canvas = document.getElementById('vgiChartCanvas'), wrap = document.getElementById('vgiChartWrap');
   const dpr = window.devicePixelRatio || 1;
-  const W = wrap.clientWidth, H = wrap.clientHeight;
-  canvas.width = W * dpr; canvas.height = H * dpr;
+  const W = Math.max(200, wrap.clientWidth - 16), H = Math.max(240, wrap.clientHeight - 16);
+  canvas.width = W * dpr; canvas.height = H * dpr; canvas.style.width = W + 'px'; canvas.style.height = H + 'px';
   const ctx = canvas.getContext('2d');
-  ctx.scale(dpr, dpr);
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
   ctx.clearRect(0, 0, W, H);
-
-  const allCandles = data.candles || [];
-  if (!allCandles.length) return;
-  const entry = data.entry, sl = data.sl, tp = data.tp;
-  const exitPrice = data.exit_price;
-
-  const padRight = 54;
-  const chartW = W - padRight;
-
-  // v0.99.199 — same fix as drawChart's own v0.99.198: this function
-  // drew ALL candles the backend sent (up to 250) with no cap, giving
-  // unreadably thin slots on a narrow phone screen. Show only as many
-  // as fit at a legible minimum width, centered on the signal candle
-  // (data.time) so entry/SL/TP stay visible rather than scrolled off.
-  // v0.99.200 — FIX to v0.99.199's own adaptive-count logic: the lower
-  // bound `Math.max(15, ...)` FORCED at least 15 bars even when the
-  // actual container was narrower than 15*MIN_SLOT_PX, defeating the
-  // entire point of adapting to real screen width — exactly matching
-  // the follow-up report ("свечи все равно крайне узкие"). There should
-  // be NO artificial floor: show as many bars as genuinely fit at a
-  // legible width, even if that's fewer than 15. Also raised MIN_SLOT_PX
-  // from 9 to 14 for genuinely comfortable spacing, not just "not
-  // literally zero".
-  const MIN_SLOT_PX = 14;
-  const maxBars = Math.max(3, Math.min(allCandles.length, Math.floor(chartW / MIN_SLOT_PX)));
-  const centerSigIdx = data.time !== undefined
-    ? allCandles.findIndex(c => c.time === data.time)
-    : allCandles.length - 1;
-  const centerIdx = centerSigIdx >= 0 ? centerSigIdx : allCandles.length - 1;
-  const beforeBars = Math.round(maxBars * 0.35);
-  let start = Math.max(0, centerIdx - beforeBars);
-  let end = Math.min(allCandles.length, start + maxBars);
+  const all = data.candles || [];
+  if (!all.length) return;
+  const emaOf = (n) => { const k = 2 / (n + 1); let e = null; return all.map((c, i) => { e = e == null ? c.close : c.close * k + e * (1 - k); return i >= n - 1 ? e : null; }); };
+  const e20 = emaOf(20), e50 = emaOf(50);
+  const maxBars = Math.max(12, Math.min(all.length, Math.floor((W - 66) / 9)));
+  let ci = -1;
+  if (data.time != null) for (let i = 0; i < all.length; i++) if (all[i].time <= data.time) ci = i;
+  if (ci < 0) ci = all.length - 1;
+  const ei0 = data.exit_time ? all.findIndex(c => c.time >= data.exit_time) : -1;
+  let start = Math.max(0, ci - Math.round(maxBars * 0.35));
+  let end = Math.min(all.length, start + maxBars);
+  if (ei0 >= end && ei0 - ci < maxBars - 3) { end = Math.min(all.length, ei0 + 4); start = Math.max(0, end - maxBars); }
   if (end - start < maxBars) start = Math.max(0, end - maxBars);
-  const candles = allCandles.slice(start, end);
-
-  const n = candles.length;
-  const slot = chartW / n;
-  const bodyW = Math.max(1, slot * 0.6);
-  const xAt = (i) => i * slot + slot / 2;
-
-  const { hi, lo } = computeYRangeSimple(candles, entry, sl, tp);
-  const range = hi - lo || 1;
-  const yP = (price) => (hi - price) / range * H;
-
-  candles.forEach((c, i) => {
-    const cx = xAt(i);
-    const up = c.close >= c.open;
-    ctx.strokeStyle = ctx.fillStyle = up ? '#3ddc97' : '#ff6b6b';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    ctx.moveTo(cx, yP(c.high));
-    ctx.lineTo(cx, yP(c.low));
-    ctx.stroke();
-    const top = yP(Math.max(c.open, c.close));
-    const h = Math.max(1, Math.abs(yP(c.open) - yP(c.close)));
-    ctx.fillRect(cx - bodyW / 2, top, bodyW, h);
-  });
-
-  ctx.fillStyle = '#6b7688';
-  ctx.font = '10px sans-serif';
-  for (let i = 0; i <= 3; i++) {
-    const p = hi - (range * i / 3);
-    const yy = yP(p);
-    ctx.fillText(fmtNum(p), chartW + 4, yy + 3);
-    ctx.strokeStyle = 'rgba(255,255,255,0.05)';
-    ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(chartW, yy); ctx.stroke();
+  const cs = all.slice(start, end);
+  const si = ci - start, xi = ei0 >= 0 ? Math.min(cs.length - 1, ei0 - start) : cs.length - 1;
+  const step = cs.length > 1 ? cs[1].time - cs[0].time : 3600;
+  const isLong = data.direction !== 'SHORT';
+  const resCol = data.result === 'WIN' ? '#34d399' : (data.result === 'LOSS' ? '#f87171' : '#a6b0c0');
+  const zones = [], hl = [];
+  if (data.entry != null && si >= 0 && si < cs.length) {
+    if (data.tp != null) zones.push({from: si, to: xi, p1: data.entry, p2: data.tp, color: '#34d399'});
+    if (data.sl != null) zones.push({from: si, to: xi, p1: data.entry, p2: data.sl, color: '#f87171'});
   }
-
-  const drawLevelLine = (price, color, label) => {
-    const yy = yP(price);
-    ctx.strokeStyle = color;
-    ctx.setLineDash([5, 4]);
-    ctx.lineWidth = 1;
-    ctx.beginPath(); ctx.moveTo(0, yy); ctx.lineTo(chartW, yy); ctx.stroke();
-    ctx.setLineDash([]);
-    ctx.fillStyle = color;
-    ctx.font = 'bold 10px sans-serif';
-    ctx.fillText(label, 4, yy - 3);
-  };
-  drawLevelLine(entry, '#5a9fff', 'ENTRY');
-  drawLevelLine(sl, '#ff6b6b', 'SL');
-  drawLevelLine(tp, '#3ddc97', 'TP');
-  // v0.99.148 — chart_source-aware extra level line: each module
-  // draws its own meaningful context line instead of every chart always
-  // showing "ЗЕРКАЛО", per direct user report ("на всех графиках линия
-  // зеркала всегда видна, то есть на всех индикаторах"). Mirror: the
-  // broken support/resistance level the price is returning to (same as
-  // before, just now gated on chart_source). LSW: the equal-highs/lows
-  // level that was swept. Scalp, MSNR: no extra level (MSNR has its
-  // own separate pivot rendering path; Scalp doesn't carry one).
-  const src = data.chart_source;
-  if (data.level_price !== undefined && data.level_price !== null) {
-    if (src === 'mirror') {
-      const isLow = data.level_type === 'low';
-      drawLevelLine(data.level_price, '#c792ea', isLow ? 'ЗЕРКАЛО (быв. подд. → сопр.)' : 'ЗЕРКАЛО (быв. сопр. → подд.)');
-    } else if (src === 'lsw') {
-      const isHigh = data.level_type === 'high';
-      drawLevelLine(data.level_price, '#f0a030', isHigh ? 'УРОВЕНЬ (равные хаи → снятие)' : 'УРОВЕНЬ (равные лоу → снятие)');
-    }
-    // scalp / msnr / unknown: no extra level line — MSNR has its own
-    // pivot rendering path; scalp doesn't carry a named level at all
+  const from = si >= 0 && si < cs.length ? si : null;
+  hl.push({p: data.tp, color: '#34d399', label: `тейк ${fmtNum(data.tp)}`, from, width: 1.6},
+          {p: data.entry, color: '#ffffff', label: `вход ${fmtNum(data.entry)}`, from, width: 1.6},
+          {p: data.sl, color: '#f87171', label: `стоп ${fmtNum(data.sl)}`, from, width: 1.6});
+  if (data.level_price != null && data.chart_source === 'mirror') {
+    hl.push({p: data.level_price, color: '#c792ea', dash: [6, 4], label: data.level_type === 'low' ? 'зеркало: быв. поддержка → сопр.' : 'зеркало: быв. сопр. → поддержка'});
+  } else if (data.level_price != null && data.chart_source === 'lsw') {
+    hl.push({p: data.level_price, color: '#f0a030', dash: [6, 4], label: data.level_type === 'high' ? 'равные хаи → снятие' : 'равные лоу → снятие'});
   }
-
-  const sigIdx = candles.findIndex(c => c.time === data.time);
-  if (sigIdx >= 0) {
-    const sx = xAt(sigIdx);
-    ctx.fillStyle = '#5a9fff';
-    ctx.beginPath(); ctx.arc(sx, yP(entry), 4, 0, Math.PI * 2); ctx.fill();
+  const vl = [{t: data.time, color: '#ffffff', label: 'сигнал'}];
+  const dots = [{t: data.time, p: data.entry, color: '#ffffff'}];
+  if (data.exit_time) {
+    vl.push({row: 1, t: data.exit_time, color: resCol, label: data.result === 'WIN' ? 'тейк' : (data.result === 'LOSS' ? 'стоп' : 'выход')});
+    if (data.exit_price != null) dots.push({t: data.exit_time, p: data.exit_price, color: resCol});
   }
-  if (data.exit_time && exitPrice !== null && exitPrice !== undefined) {
-    const exitIdx = candles.findIndex(c => c.time === data.exit_time);
-    if (exitIdx >= 0) {
-      const exx = xAt(exitIdx);
-      ctx.fillStyle = data.result === 'WIN' ? '#3ddc97' : '#ff6b6b';
-      ctx.beginPath(); ctx.arc(exx, yP(exitPrice), 4, 0, Math.PI * 2); ctx.fill();
-    }
-  }
+  const srcName = {prv: 'Peak Reversal', snr: 'S/R Zones', neuro: 'Neuro', mirror: 'Зеркало', lsw: 'Sweep', amd: 'AMD', scalp: 'Скальп', msnr: 'MSNR'}[data.chart_source] || '';
+  emwPanel(ctx, {x: 4, y: 4, w: W - 4, h: H - 24}, cs, {
+    dayFmt: step < 86400, hi: from, zones, hlines: hl, vlines: vl, dots,
+    series: [{vals: e20.slice(start, end), color: 'rgba(224,160,48,.55)', width: 1.2}, {vals: e50.slice(start, end), color: 'rgba(143,127,224,.55)', width: 1.2}],
+    legend: [{text: srcName, color: '#a6b0c0'}, {text: isLong ? 'лонг' : 'шорт', color: isLong ? '#34d399' : '#f87171'},
+             {text: data.tf || '', color: '#6c7789'}, {text: 'EMA20', color: 'rgba(224,160,48,.8)'}, {text: 'EMA50', color: 'rgba(143,127,224,.85)'}]});
 }
 
 window.addEventListener('resize', () => {
