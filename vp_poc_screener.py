@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.581"
+APP_VERSION = "0.99.582"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -7036,6 +7036,7 @@ PERSIST_BT_KEYS = (
     "prv_last_backtest_finished", "prv_filters", "prv_keep", "prv_pooled",   # v0.99.410, v0.99.411
     "prv_first_seen", "snr_first_seen",   # v0.99.557
     "emw_last_backtest_finished", "emw_model", "emw_universe", "emw_fired", "emw_pre",   # v0.99.570 / 575
+    "alive_at",   # v0.99.582 — the last time the bot was alive (the "was off since …" message)
     "mirror_last_backtest_finished", "mirror_last_backtest_duration", "mirror_backtest_summary",
     "mirror_tuned_tolerances",
     "ft5_last_backtest_finished", "ft5_last_backtest_duration", "ft5_universe", "ft5_live_universe",
@@ -7444,6 +7445,7 @@ LOOP_MAX_GAP_SEC = {
     "snr_live_loop": 60 * 60,
     "prv_live_loop": 60 * 60,
     "emw_live_loop": 15 * 60, "emw_backtest_loop": 60 * 60,   # v0.99.570
+    "battery_watch_loop": 30 * 60,   # v0.99.582
     "neuro_live_loop": 60 * 60,
     "reconcile_loop": 30 * 60,
     # backtest loops (v0.99.325): they now beat every minute while queued
@@ -7464,6 +7466,7 @@ LOOP_LABELS = {
     "snr_backtest_loop": "S/R бэктест", "prv_backtest_loop": "Peak Reversal бэктест",
     "neuro_mining_loop": "Neuro майнинг",
     "emw_live_loop": "EMA W/M живой скан", "emw_backtest_loop": "EMA W/M обучение",   # v0.99.570
+    "battery_watch_loop": "батарея телефона",   # v0.99.582
 }
 BACKTEST_RETRY_AFTER_ERROR_SEC = int(os.environ.get("VP_BACKTEST_RETRY_AFTER_ERROR_SEC", 1800))  # v0.99.322 — failed backtest cycles retry in 30 min, not a full refresh interval later
 
@@ -30673,6 +30676,64 @@ def api_battery():
     return jsonify(read_battery_state())
 
 
+# v0.99.582 — user: "на серверном телефоне села батарея, а в Telegram не пришло уведомление".
+# The phone running the bot is watched: a warning while it is NOT charging at 20 / 10 / 5 % of
+# battery, one when the charger is unplugged, one when it's back on after a warning; and after
+# a restart that followed more than BATTERY_DOWNTIME_SEC of silence, "the bot is back, it was
+# off since …" (STATE["alive_at"] is stamped every few minutes and survives the restart).
+BATTERY_ALERTS_ENABLED = os.environ.get("VP_BATTERY_ALERTS", "1") == "1"
+BATTERY_ALERT_LEVELS = (20, 10, 5)
+BATTERY_DOWNTIME_SEC = 600
+
+
+def battery_watch_loop():
+    time.sleep(45)
+    prev_alive = STATE.get("alive_at")
+    now = time.time()
+    if BATTERY_ALERTS_ENABLED and prev_alive and now - prev_alive > BATTERY_DOWNTIME_SEC:
+        b = read_battery_state()
+        mins = int((now - prev_alive) // 60)
+        dur = f"{mins // 60} ч {mins % 60} мин" if mins >= 60 else f"{mins} мин"
+        bat = (f"\nбатарея: {b['level']:.0f}%{' · заряжается' if b.get('charging') else ' · НЕ заряжается'}"
+               if b.get("ok") and b.get("level") is not None else "")
+        send_telegram(f"🟢 Бот снова в работе (v{APP_VERSION}) — был недоступен ~{dur}, "
+                      f"с {time.strftime('%d.%m %H:%M', time.localtime(prev_alive))}{bat}")
+    sent, was_charging, warned_unreadable, last_save = set(), None, False, 0.0
+    while True:
+        heartbeat("battery_watch_loop")
+        try:
+            with state_lock:
+                STATE["alive_at"] = time.time()
+            if time.time() - last_save > 900:
+                last_save = time.time()
+                save_state()
+            b = read_battery_state()
+            if not b.get("ok") or b.get("level") is None:
+                if not warned_unreadable:
+                    warned_unreadable = True
+                    log_error("battery watch: заряд батареи не читается — нужен Termux:API "
+                              "(приложение Termux:API + `pkg install termux-api`), без него предупреждений о батарее не будет")
+            elif BATTERY_ALERTS_ENABLED:
+                lvl, ch = float(b["level"]), bool(b.get("charging"))
+                if ch:
+                    if sent:
+                        send_telegram(f"🔌 Телефон с ботом снова на зарядке — {lvl:.0f}%")
+                    sent.clear()
+                else:
+                    if was_charging:
+                        send_telegram(f"⚠️ Телефон с ботом отключён от зарядки — {lvl:.0f}%. "
+                                      f"Если это не специально — поставь на зарядку, иначе бот выключится, когда сядет батарея")
+                    th = next((t_ for t_ in sorted(BATTERY_ALERT_LEVELS) if lvl <= t_ and t_ not in sent), None)
+                    if th is not None:
+                        sent.update(t_ for t_ in BATTERY_ALERT_LEVELS if t_ >= th)
+                        send_telegram(f"🪫 Телефон с ботом: заряд {lvl:.0f}% и не заряжается — поставь на зарядку, "
+                                      f"иначе бот выключится" + (" совсем скоро" if th <= 5 else ""))
+                was_charging = ch
+        except Exception as e:
+            log_error(f"battery_watch_loop: {e}")
+        time.sleep(300)
+
+
 @app.route("/api/positions/summary")
 def api_positions_summary():
     """v0.99.346 — REAL open positions on the exchange, across the main
@@ -37294,6 +37355,7 @@ if __name__ == "__main__":
     threading.Thread(target=entry_retry_loop, daemon=True).start()   # v0.99.566
     threading.Thread(target=emw_backtest_loop, daemon=True).start()   # v0.99.570
     threading.Thread(target=emw_live_loop, daemon=True).start()
+    threading.Thread(target=battery_watch_loop, daemon=True).start()   # v0.99.582
     zones_load()   # v0.99.438
     zones_fix_dup_pids()   # v0.99.549
     zones_outbox_load()   # v0.99.455 — unsent zone messages from before the restart
