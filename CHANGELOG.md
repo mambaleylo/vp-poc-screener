@@ -19402,3 +19402,7 @@ v0.99.568 - P/R / 4в1 entry retry: a trade was opened after the take had alread
          come back, weren't there yet — and missing candles counted as "not touched". Now: 5m
          candles up to 20 min ago + live 1m candles of the last 20 min including the forming one;
          no data or a gap in them -> no entry this minute (fail closed), looked at again later.
+v0.99.569 - The "Откат 4в1" tab is removed at the user's request (both the fade and the breakout
+         modes): its backtest, live scan, auto-trade, settings, alerts and API are gone; old
+         4в1 data in the state file is simply ignored. The P/R entry retry after a
+         favorable-drift skip (v0.99.566) and its live 1m take/stop check (v0.99.568) stay.
