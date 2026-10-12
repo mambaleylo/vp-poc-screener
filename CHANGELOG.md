@@ -19531,3 +19531,13 @@ v0.99.583 - EMA W/M: the short now needs a real pump candle (the user, on QNT | 
          from its low to the EMA must be at least 1.5 average candles (ATR of the week / month) —
          learned among 1.5 / 2 / 3 (was 0.5 / 1 / 2, i.e. a normal candle passed). The previous
          model is ignored and retrained.
+v0.99.584 - Zones, fix (TAO: a limit filled on the exchange, the stop and take weren't put on, "the
+         position is unprotected"): a limit PARTLY filled stays in the exchange's open-order list;
+         the "a foreign position on the coin?" check ran in the same round before the exchange
+         step had recorded the fill, took our own position for a foreign one, cancelled the ladder
+         and forgot its orders — the position stayed without a stop. Now a limit of ours with any
+         fill makes the position ours. Safety net: a position on our side while none of our limits
+         shows a fill — the exchange's order history is asked which order opened it; a zones-tagged
+         limit placed after this ladder began makes it ours (a "💰 … found in the exchange history"
+         message) and the stop / take go on. The "limits stand on the exchange" count shows only
+         the ones still standing.

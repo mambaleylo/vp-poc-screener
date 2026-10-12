@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.583"
+APP_VERSION = "0.99.584"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -25776,6 +25776,33 @@ def _zones_real_step(tr, pos_map):
                 r["t_change"] = now
             if o.get("status") == "finished":
                 leg["done"], changed = True, True
+        # v0.99.584 — a safety net: a position on our side while none of our limits shows a fill —
+        # the exchange's own order history is asked which order opened it; a limit of ours (tagged
+        # "t-vpzones", placed after this ladder began) makes it ours, so the stop / take go on
+        if not sum(l_.get("filled") or 0 for l_ in r["legs"]) and _zones_pos(pos_map, sym, s) \
+                and now - r.get("adopt_chk", 0) > 60:
+            r["adopt_chk"] = now
+            try:
+                hist = gate_signed_request("GET", "/futures/usdt/orders", query_string=f"contract={sym}&status=finished&limit=50") or []
+            except Exception as e:
+                hist = []
+                log_error(f"zones fill history {sym}: {e}")
+            by_id = {str(l_.get("id")): l_ for l_ in r["legs"] if l_.get("id")}
+            for o in hist:
+                f = abs(int(float(o.get("size") or 0))) - abs(int(float(o.get("left") or 0)))
+                if (f <= 0 or not str(o.get("text") or "").startswith("t-vpzones") or (float(o.get("size") or 0) > 0) != (s > 0)
+                        or float(o.get("create_time") or 0) < (tr.get("time") or 0) - 60):
+                    continue
+                leg = by_id.get(str(o.get("id")))
+                if leg is None:
+                    leg = {"i": 0, "id": o.get("id"), "qty": abs(int(float(o.get("size") or 0))), "price": float(o.get("price") or 0),
+                           "filled": 0, "done": True, "adopted": True}
+                    r["legs"].append(leg)
+                    by_id[str(o.get("id"))] = leg
+                if f > (leg.get("filled") or 0):
+                    leg["filled"], leg["done"], changed = f, True, True
+                    zones_notify(f"💰 {sym}: на бирже исполнилась лимитка зон по {float(o.get('fill_price') or 0):.6g} ({f} контр.), "
+                                 f"бот её не учёл — нашёл по истории ордеров биржи; стоп {tr['sl']:.6g} ставлю на бирже")
         # v0.99.537 — a position is ours only when one of our limits filled: a position of
         # another module (or opened by hand) on the coin was taken for ours, and the ladder
         # put its own stop / take on it (BTC: a long from 82 839 while our limits were at
@@ -25911,6 +25938,13 @@ def _zones_foreign_pos(pos_map, tr):
     open_ids = (pos_map or {}).get("_open") or {}
     if any(l_.get("id") and not l_.get("done") and str(l_["id"]) not in open_ids for l_ in r.get("legs") or []):
         return None   # one of our limits left the open list (filled?): the exchange step looks first
+    # v0.99.584 — TAO: a limit PARTLY filled stays in the open list; this check ran before the exchange
+    # step had recorded the fill, took our own position for a foreign one, cancelled the ladder and
+    # forgot it — the position was left with no stop. A limit of ours with any fill: the position is ours.
+    for l_ in r.get("legs") or []:
+        o_ = open_ids.get(str(l_.get("id"))) if l_.get("id") and not l_.get("done") else None
+        if o_ and abs(int(float(o_.get("size") or 0))) - abs(int(float(o_.get("left") or 0))) > 0:
+            return None
     s = 1 if tr["direction"] == "LONG" else -1
     for x in (pos_map or {}).get(tr["symbol"]) or []:
         sz = float(x.get("size") or 0)
@@ -33313,7 +33347,7 @@ function zoneRowHtml(z) {
   const trL = tr || (z.lead && window._zTr ? window._zTr[z.lead] : null);   // a zone of a ladder: the trade sits on its lead zone
   const realFilled = trL && trL.real && trL.real.legs ? trL.real.legs.reduce((a, l) => a + (l.filled || 0), 0) : 0;
   const exTxt = !tr || !tr.autotrade ? '' : (realFilled > 0 ? ` · 💰 на бирже: позиция, исполнено ${tr.real.legs.filter(l => (l.filled || 0) > 0).length} из ${tr.real.legs.length} выставленных лимиток, плечо ${tr.real.lev || tr.autotrade.leverage}x`
-    : tr.real && !tr.real.done ? ` · на бирже: лимитки стоят (${tr.real.legs.length} шт.)${tr.autotrade.leverage ? ', плечо ' + tr.autotrade.leverage + 'x' : ''}`
+    : tr.real && !tr.real.done ? ` · на бирже: лимитки стоят (${tr.real.legs.filter(l => !l.done).length} шт.)${tr.autotrade.leverage ? ', плечо ' + tr.autotrade.leverage + 'x' : ''}`
     : ({SKIPPED: ' · на бирже: не открыто', WAIT: ' · на бирже: ждёт', ERROR: ' · на бирже: ошибка', DRY_RUN: ' · бумажная сделка'}[tr.autotrade.status] || ' · на бирже: ' + tr.autotrade.status)
       + (tr.autotrade.detail && tr.autotrade.status !== 'LIMITS' ? ` — ${tr.autotrade.detail}` : ''));
   const trTxt = tr ? `<div class="dim" style="font-size:var(--fs-sm);">${lad}${tr.entry != null ? 'средняя ' + zfmt(tr.entry) + ' · ' : ''}SL ${zfmt(tr.sl)}${tr.tp != null ? ' · TP ' + zfmt(tr.tp) : ''}${exTxt}${tr.result ? ` · <b class="${tr.result === 'WIN' ? 'win' : 'loss'}">${tr.result} ${tr.pnl_r > 0 ? '+' : ''}${tr.pnl_r}R${tr.pnl_pct != null ? ` · ${tr.pnl_pct > 0 ? '+' : ''}${tr.pnl_pct}%` : ''}</b>` : ''}</div>` : '';
