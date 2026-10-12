@@ -19477,3 +19477,17 @@ v0.99.576 - Charts. The shared signal chart of P/R, S/R, Neuro, Mirror, Sweep an
          and that page kept rebuilding its lists every 15 s. While a chart / settings window is
          open the page under it is now frozen in place (and returns to the same spot on close),
          nothing is rebuilt under it, and swipes on the chart stay in the chart.
+v0.99.577 - EMA W/M, from the user's MAGIC | EMA7(M) chart:
+         * the rise is now the LIVE candle's own — from its low so far up to the EMA, in ATR of
+           the week / month — and is always required (0.5 / 1 / 2 ATR, learned; no "any"): "так
+           рано маленькую EMA не надо торговать, большого роста ещё не было, свеча была очень
+           маленькой";
+         * a new entry, learned next to the limits: by the reaction — after the touch, the first
+           4h candle that CLOSES back under the zone (within 2 days and the same W/M candle);
+           entry at that close, the stop beyond the highest wick since the touch ("стоп как
+           минимум должен быть за фитилём"), the take by the learned RR. Live builds the 4h
+           candles from 1h ones; the heads-up says it waits for the reaction;
+         * "near the EMA" no longer lists a level the price already blew far through (MAGIC was
+           127% above its monthly EMA 7);
+         * the week / month chart says which timeframe it is.
+         The previous model is ignored and retrained.

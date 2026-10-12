@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.576"
+APP_VERSION = "0.99.577"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -16814,9 +16814,12 @@ EMW_EMAS = {"1w": [7, 14, 28, 50, 100], "1M": [7, 14, 28, 50, 100]}
 EMW_SIDES = (-1,)                               # shorts only (v0.99.572)
 EMW_ATR_LEN = {"1w": 14, "1M": 6}
 EMW_RISE_LOOKBACK = {"1w": 4, "1M": 3}          # closed candles the rise's low is looked for in (+ the live one up to the touch)
-EMW_RISE_CANDIDATES = [0.0, 2.0]                # EMA - that low, in ATR of the timeframe: any / sharp
+EMW_RISE_CANDIDATES = [0.5, 1.0, 2.0]           # v0.99.577 — the live candle's own rise to the EMA (from its low so far), in ATR of the timeframe; no "any"
 EMW_MISS_CANDIDATES = [0, 1, 2]                 # the last closed candle closed under all the EMAs / all but one / but two
-EMW_ENTRY_CANDIDATES = [0.25, 0.0, -0.25]       # v0.99.575 — the limit: daily ATR before the EMA / at it / beyond it (into the wick)
+EMW_ENTRY_CANDIDATES = [0.25, 0.0, -0.25, "W"]  # v0.99.575 — the limit: daily ATR before the EMA / at it / beyond it (into the wick);
+                                                # v0.99.577 "W" — by the reaction: a 4h close back under, the stop beyond the wick
+EMW_WICK_WAIT = 12                              # 4h candles (2 days) the reaction may take after the touch
+EMW_WICK_BUF = 0.1                              # the stop's buffer beyond the wick: 0.1 x the stop candidate, in daily ATR
 EMW_STOP_CANDIDATES = [0.25, 0.5, 1.0, 2.0]     # stop beyond the EMA, in DAILY ATR
 EMW_RR_CANDIDATES = [1.0, 2.0, 3.0]
 EMW_HOLD_CANDIDATES = [2, 7, 28]                # days, then the trade is closed at market
@@ -16829,7 +16832,7 @@ EMW_PATH_DAYS = 1100                            # 4h candles: the trade after th
 EMW_TRAIN_FRAC = 0.7
 EMW_COMBOS = [(s, r, h) for s in EMW_STOP_CANDIDATES for r in EMW_RR_CANDIDATES for h in EMW_HOLD_CANDIDATES]
 EMW_N_COMBOS = (sum(len(v) for v in EMW_EMAS.values()) * len(EMW_SIDES) * len(EMW_RISE_CANDIDATES)
-                * len(EMW_MISS_CANDIDATES) * len(EMW_ENTRY_CANDIDATES) * len(EMW_COMBOS))   # 6480
+                * len(EMW_MISS_CANDIDATES) * len(EMW_ENTRY_CANDIDATES) * len(EMW_COMBOS))   # 12960
 EMW_Z_TRAIN = round(statistics.NormalDist().inv_cdf(1 - 0.20 / EMW_N_COMBOS), 2)
 EMW_TEST_Z = 2.0
 EMW_MIN_TRAIN = 60
@@ -16841,7 +16844,7 @@ EMW_MAX_DRIFT_R = 0.25                          # live entry at most this far pa
 EMW_WATCH_PCT = 15.0                            # the "near the EMA" list: trigger within this % of the price
 EMW_PREALERT_PCT = float(os.environ.get("VP_EMW_PREALERT_PCT", 5.0))   # v0.99.575 — "put the limit on" heads-up at this distance
 EMW_BACKTEST_TRIGGER = threading.Event()
-EMW_MODEL_VER = 575                             # a model of another layout is ignored and retrained
+EMW_MODEL_VER = 577                             # a model of another layout is ignored and retrained
 _emw_parts = {}
 _emw_had_data = {}
 _emw_levels = {}            # symbol -> the forming week's / month's levels
@@ -16923,7 +16926,7 @@ def emw_rise(lv, a, ext, sgn):
     return sgn * (ext - lv) / a
 
 
-def _emw_outcome(path, k0, stop, take, sgn, hold_end, now):
+def _emw_outcome(path, k0, stop, take, sgn, hold_end, now, take_from=None):
     """walk 4h candles from the touch one: (exit price, exit time, code 1 win / -1 loss / 0 time)
     or None while unfinished. The touch candle can stop out (its low comes after the touch:
     the price was above the trigger before) but can't take (its high may be from before)."""
@@ -16931,7 +16934,7 @@ def _emw_outcome(path, k0, stop, take, sgn, hold_end, now):
         c = path[i]
         if (c["low"] <= stop) if sgn > 0 else (c["high"] >= stop):
             return stop, c["time"], -1
-        if i > k0 and ((c["high"] >= take) if sgn > 0 else (c["low"] <= take)):
+        if i >= (k0 + 1 if take_from is None else take_from) and ((c["high"] >= take) if sgn > 0 else (c["low"] <= take)):
             return take, c["time"], 1
         if c["time"] + 14400 > now:
             return None
@@ -17003,7 +17006,7 @@ def emw_touches_core(daily, path, now):
                             da = datr[d - 1]
                             if not da:
                                 continue
-                            trig = s["L"] + sgn * off * da
+                            trig = s["L"] + sgn * (EMW_TRIGGER_DATR if off == "W" else off) * da
                             if not ((daily[d]["low"] <= trig) if sgn > 0 else (daily[d]["high"] >= trig)):
                                 continue
                             k = bisect.bisect_left(ptimes, daily[d]["time"])
@@ -17021,19 +17024,47 @@ def emw_touches_core(daily, path, now):
                         pre = [daily[i]["low" if sgn < 0 else "high"] for i in range(d0, d)]
                         k_day = bisect.bisect_left(ptimes, daily[d]["time"])
                         pre += [path[i]["low" if sgn < 0 else "high"] for i in range(k_day, k0)]
-                        ext = min([s["ext"]] + pre) if sgn < 0 else max([s["ext"]] + pre)
-                        o = path[k0]["open"]
-                        entry = min(trig, o) if sgn > 0 else max(trig, o)
-                        t0 = path[k0]["time"]
+                        # v0.99.577 — user: "так рано маленькую EMA не надо торговать, большого роста ещё не было,
+                        # свеча была очень маленькой": the rise is the LIVE candle's own — from its low so far
+                        # (its open included) up to the EMA
+                        ext = min([bars[b]["open"]] + pre) if sgn < 0 else max([bars[b]["open"]] + pre)
+                        wick, k_take = None, None
+                        if off == "W":
+                            # v0.99.577 — user: "стоп как минимум должен быть за фитилём": after the touch,
+                            # wait for a 4h candle to CLOSE back on the short side of the zone (within
+                            # EMW_WICK_WAIT candles and this W/M candle) — enter at that close, the stop
+                            # beyond the highest wick since the touch
+                            bar_end_t = daily[d1]["time"] + 86400
+                            kE = None
+                            for j in range(k0, min(len(path), k0 + EMW_WICK_WAIT)):
+                                c = path[j]
+                                if c["time"] >= bar_end_t or c["time"] + 14400 > now:
+                                    break
+                                hv = c["high"] if sgn < 0 else c["low"]
+                                wick = hv if wick is None else (max(wick, hv) if sgn < 0 else min(wick, hv))
+                                if sgn * (c["close"] - trig) > 0:
+                                    kE = j
+                                    break
+                            if kE is None:
+                                continue
+                            entry = path[kE]["close"]
+                            t0 = path[kE]["time"]
+                            k0, k_take = kE + 1, kE + 1
+                            if k0 >= len(path):
+                                continue
+                        else:
+                            o = path[k0]["open"]
+                            entry = min(trig, o) if sgn > 0 else max(trig, o)
+                            t0 = path[k0]["time"]
                         outs = []
                         for sm, rr, hold in EMW_COMBOS:
-                            stop = s["L"] - sgn * sm * da
+                            stop = (wick - sgn * EMW_WICK_BUF * sm * da) if off == "W" else (s["L"] - sgn * sm * da)
                             risk = sgn * (entry - stop)
                             if risk <= 0:
                                 outs.append(None)
                                 continue
                             take = entry + sgn * rr * risk
-                            res = _emw_outcome(path, k0, stop, take, sgn, t0 + hold * 86400, now)
+                            res = _emw_outcome(path, k0, stop, take, sgn, t0 + hold * 86400, now, take_from=k_take)
                             if res is None:
                                 outs.append(None)
                                 continue
@@ -17044,7 +17075,7 @@ def emw_touches_core(daily, path, now):
                             outs.append([round(r - cost, 3), et, code])
                         mae, mfe2, mfe7, react, react_h = _emw_learn(path, k0, entry, s["L"], da, sgn, now)
                         out.append([tf, n, sgn, t0, bars[b]["time"], round(emw_rise(s["L"], s["A"], ext, sgn), 2), entry, s["L"],
-                                    s["A"], ext, da, mae, mfe2, mfe7, react, react_h, outs, s["miss"], s["n_def"], off])
+                                    s["A"], ext, da, mae, mfe2, mfe7, react, react_h, outs, s["miss"], s["n_def"], off, wick])
     return {"touches": out, "errors": errors}
 
 
@@ -17105,7 +17136,10 @@ def _emw_trades(items, idx, bound):
 def _emw_trade_row(sym, t, o, best, bound):
     """one backtest trade for the list and its chart (v0.99.573 — stop / take / exit prices too)"""
     sgn, entry, lv, da = t[2], t[6], t[7], t[10]
-    stop = lv - sgn * best["stop_atr"] * da
+    if len(t) > 20 and t[19] == "W" and t[20] is not None:
+        stop = t[20] - sgn * EMW_WICK_BUF * best["stop_atr"] * da
+    else:
+        stop = lv - sgn * best["stop_atr"] * da
     take = entry + sgn * best["rr"] * sgn * (entry - stop)
     res = {1: "WIN", -1: "LOSS", 0: "TIME_EXIT"}[o[2]]
     return {"symbol": sym, "tf": t[0], "ema": t[1], "direction": "LONG" if sgn > 0 else "SHORT", "time": t[3],
@@ -17209,7 +17243,7 @@ def emw_levels_for(daily, now):
                 if not s or not da:
                     continue
                 trig = s["L"] + sgn * EMW_TRIGGER_DATR * da
-                ext_now = min(s["ext"], bars[b]["low"]) if sgn < 0 else max(s["ext"], bars[b]["high"])
+                ext_now = bars[b]["low"] if sgn < 0 else bars[b]["high"]   # the live candle's own extreme so far
                 touched = (bars[b]["low"] <= trig) if sgn > 0 else (bars[b]["high"] >= trig)
                 out.append({"tf": tf, "ema": n, "sgn": sgn, "key": emw_setup_key(tf, n, sgn), "bar_time": cur,
                             "bar_end": emw_next_period(cur, tf), "L": s["L"], "A": s["A"], "T": trig, "datr": da,
@@ -17371,7 +17405,8 @@ def emw_lv_cfg(lv, cfg):
     if b.get("off") is None or not lv.get("datr"):
         return lv
     out = dict(lv)
-    out["T"] = lv["L"] + lv["sgn"] * b["off"] * lv["datr"]
+    out["wick_mode"] = b["off"] == "W"
+    out["T"] = lv["L"] + lv["sgn"] * (EMW_TRIGGER_DATR if out["wick_mode"] else b["off"]) * lv["datr"]
     if lv.get("bar_high") is not None:
         out["touched"] = (lv["bar_low"] <= out["T"]) if lv["sgn"] > 0 else (lv["bar_high"] >= out["T"])
     return out
@@ -17380,6 +17415,8 @@ def emw_lv_cfg(lv, cfg):
 def emw_trade_prices(lv, cfg):
     sgn = lv["sgn"]
     b = cfg["best"]
+    if b.get("off") == "W":   # the stop is known only once the wick is (emw_check_wick)
+        return None, None
     stop = lv["L"] - sgn * b["stop_atr"] * lv["datr"]
     take = lv["T"] + sgn * b["rr"] * abs(lv["T"] - stop)
     return stop, take
@@ -17398,7 +17435,7 @@ def emw_check_touch(sym, lv, stop, take):
     if i0 is None:
         return "none", None
     pre = [c["low" if sgn < 0 else "high"] for c in cs[:i0]]
-    ext = (min([lv["ext"]] + pre) if sgn < 0 else max([lv["ext"]] + pre))
+    ext = (min([lv["open"]] + pre) if sgn < 0 else max([lv["open"]] + pre))   # the live candle's own low before the touch
     for i in range(i0, len(cs)):
         c = cs[i]
         if (c["low"] <= stop) if sgn > 0 else (c["high"] >= stop):
@@ -17406,6 +17443,51 @@ def emw_check_touch(sym, lv, stop, take):
         if i > i0 and ((c["high"] >= take) if sgn > 0 else (c["low"] <= take)):
             return "done", ext
     return "ok", ext
+
+
+def emw_check_wick(sym, lv, cfg):
+    """v0.99.577 — the reaction entry, live: the touch of the zone, then the first CLOSED 4h candle
+    (built from 1h ones, aligned like the exchange's) back on the short side of the zone within
+    EMW_WICK_WAIT candles — the entry at its close, the stop beyond the highest wick since the touch.
+    {"st": none / wait / expired / done / ok, ...}"""
+    now = time.time()
+    cs = _get_candles_range_live(sym, "1h", lv["bar_time"], now + 3600) or []
+    cs = [c for c in cs if c["time"] >= lv["bar_time"]]
+    if not cs or cs[-1]["time"] < now - 2 * 3600:
+        return None
+    sgn, T = lv["sgn"], lv["T"]
+    i0 = next((i for i, c in enumerate(cs) if (c["low"] <= T if sgn > 0 else c["high"] >= T)), None)
+    if i0 is None:
+        return {"st": "none"}
+    pre = [c["low" if sgn < 0 else "high"] for c in cs[:i0]]
+    ext = min([lv["open"]] + pre) if sgn < 0 else max([lv["open"]] + pre)
+    groups = {}
+    for c in cs[i0:]:
+        groups.setdefault(c["time"] // 14400 * 14400, []).append(c)
+    wick, entry, k_end = None, None, None
+    for idx, k in enumerate(sorted(groups)):
+        if idx >= EMW_WICK_WAIT or k >= lv["bar_end"]:
+            return {"st": "expired", "ext": ext}
+        if k + 14400 > now:
+            return {"st": "wait", "ext": ext}
+        for c in groups[k]:
+            hv = c["high"] if sgn < 0 else c["low"]
+            wick = hv if wick is None else (max(wick, hv) if sgn < 0 else min(wick, hv))
+        close = groups[k][-1]["close"]
+        if sgn * (close - T) > 0:
+            entry, k_end = close, k + 14400
+            break
+    if entry is None:
+        return {"st": "wait", "ext": ext}
+    b = cfg["best"]
+    stop = wick - sgn * EMW_WICK_BUF * b["stop_atr"] * lv["datr"]
+    take = entry + sgn * b["rr"] * abs(entry - stop)
+    for c in cs:
+        if c["time"] < k_end:
+            continue
+        if ((c["low"] <= stop) if sgn > 0 else (c["high"] >= stop)) or ((c["high"] >= take) if sgn > 0 else (c["low"] <= take)):
+            return {"st": "done", "ext": ext}
+    return {"st": "ok", "entry": entry, "stop": stop, "take": take, "wick": wick, "ext": ext}
 
 
 def emw_fire(sym, lv, cfg, price, stop, take, ext, rise):
@@ -17432,6 +17514,8 @@ def emw_fire(sym, lv, cfg, price, stop, take, ext, rise):
     arrow = "⬆️" if sgn > 0 else "⬇️"
     move = (price - ext) / ext * 100
     hist_txt = f"\nэта монета на этом уровне: {hist[0]} сделок, {hist[1]} в плюс, {hist[2]:+.2f}R" if hist else ""
+    if lv.get("wick") is not None:
+        hist_txt = f"\nреакция: 4ч-свеча закрылась обратно под уровнем, стоп за фитилём {lv['wick']:.6g}" + hist_txt
     send_telegram(f"{arrow} {sym.replace('_USDT', '')} | {cfg['desc']} · EMA W/M\n"
                   f"живая свеча {'снизу' if sgn < 0 else 'сверху'} дошла до EMA {lv['ema']} ({lv['L']:.6g}); "
                   f"рост от {ext:.6g} ({move:+.1f}%, {rise:.1f} ATR), была под {lv['n_def'] - lv['miss']} из {lv['n_def']} EMA\n"
@@ -17443,6 +17527,13 @@ def emw_fire(sym, lv, cfg, price, stop, take, ext, rise):
 
 def emw_prealert(sym, lv, cfg, price, stop, take, dist):
     b = cfg["best"]
+    if b.get("off") == "W":
+        send_telegram(f"📌 {sym.replace('_USDT', '')} | {cfg['desc']} · EMA W/M — цена в {dist:.1f}% от уровня\n"
+                      f"EMA {lv['ema']}: {lv['L']:.6g}; сейчас {price:.6g}, рост от {lv['ext_now']:.6g} ({lv.get('rise_now', 0):.1f} ATR)\n"
+                      f"вход по реакции: после касания ждём закрытия 4ч-свечи обратно под {lv['T']:.6g}, стоп — за фитилём "
+                      f"(+{EMW_WICK_BUF * b['stop_atr']:g} дн. ATR), тейк RR {b['rr']}, держать до {b['hold']} дн."
+                      + ("\nбот войдёт сам" if AUTOTRADE_ENABLED_EMW else ""), category="emw")
+        return
     where = {0.25: "чуть до EMA", 0.0: "на EMA", -0.25: "чуть за EMA (на прострел)"}.get(b.get("off"), "")
     send_telegram(f"📌 {sym.replace('_USDT', '')} | {cfg['desc']} · EMA W/M — цена в {dist:.1f}% от уровня\n"
                   f"EMA {lv['ema']}: {lv['L']:.6g}; сейчас {price:.6g}, рост от {lv['ext_now']:.6g} ({lv.get('rise_now', 0):.1f} ATR)\n"
@@ -17485,6 +17576,44 @@ def emw_scan_tick():
             if fkey in fired:
                 continue
             sgn = lv["sgn"]
+            if lv.get("wick_mode"):   # v0.99.577 — entry by the reaction, the stop beyond the wick
+                dist = sgn * (last - lv["T"]) / last * 100
+                if (EMW_PREALERT_PCT > 0 and 0 < dist <= EMW_PREALERT_PCT and fkey not in pre
+                        and lv.get("rise_now", 0) >= cfg["best"]["rise"]):
+                    with state_lock:
+                        pre[fkey] = {"t": now}
+                    emw_prealert(sym, lv, cfg, last, None, None, dist)
+                if not (lv["touched"] or (hi24 >= lv["T"] if sgn < 0 else lo24 <= lv["T"])):
+                    continue
+                if now - _emw_check_at.get(fkey, 0) < 120:
+                    continue
+                _emw_check_at[fkey] = now
+                w = emw_check_wick(sym, lv, cfg)
+                if not w or w["st"] in ("none", "wait"):
+                    continue
+                if w["st"] in ("expired", "done"):
+                    with state_lock:
+                        fired[fkey] = {"t": now, "skip": ("реакции (закрытия 4ч обратно под уровнем) за 2 дня не было" if w["st"] == "expired"
+                                                          else "реакция была, но стоп или тейк уже задеты")}
+                    continue
+                rise = emw_rise(lv["L"], lv["A"], w["ext"], sgn)
+                risk = abs(w["entry"] - w["stop"])
+                if sgn * (last - w["stop"]) >= 0 or rise < cfg["best"]["rise"]:
+                    with state_lock:
+                        fired[fkey] = {"t": now, "skip": "цена за стопом" if sgn * (last - w["stop"]) >= 0 else f"рост к EMA {rise:.1f} ATR — мало"}
+                    continue
+                if sgn * (w["entry"] - last) > EMW_MAX_DRIFT_R * risk:
+                    continue                          # already ran toward the take — maybe it comes back
+                if sym in busy:
+                    with state_lock:
+                        fired[fkey] = {"t": now, "skip": "по монете уже открыта сделка модуля"}
+                    continue
+                with state_lock:
+                    fired[fkey] = {"t": now}
+                busy.add(sym)
+                lv = dict(lv, wick=w["wick"])
+                emw_fire(sym, lv, cfg, last, w["stop"], w["take"], w["ext"], rise)
+                continue
             stop, take = emw_trade_prices(lv, cfg)
             # v0.99.575 — user's own way ("просто поставил лимитку"): a heads-up while there is
             # time to put the limit on by hand — once per level and candle, the rise already big enough
@@ -17632,6 +17761,8 @@ def emw_watch_list(model, limit=60):
             dist = sgn * (last - lv["T"]) / last * 100
             if dist > EMW_WATCH_PCT:
                 continue
+            if lv.get("datr") and sgn * (last - lv["L"]) < -2 * lv["datr"]:
+                continue                              # v0.99.577 — already far through the EMA: not a level to wait for
             setup = next((x for x in (model or {}).get("setups") or [] if x["key"] == lv["key"]), None)
             lv = emw_lv_cfg(lv, setup)
             dist = sgn * (last - lv["T"]) / last * 100
@@ -17644,7 +17775,7 @@ def emw_watch_list(model, limit=60):
                          "rise": round(emw_rise(lv["L"], lv["A"], min(lv["ext_now"], last) if sgn < 0 else max(lv["ext_now"], last), sgn), 2),
                          "need_rise": ((setup or {}).get("best") or {}).get("rise"), "need_miss": ((setup or {}).get("best") or {}).get("miss"),
                          "ext": lv["ext_now"], "ext_pct": round((lv["ext_now"] - lv["T"]) / lv["T"] * 100, 1), "touched": lv["touched"],
-                         "confirmed": bool(cfg), "sl": stop, "tp": take, "bar_end": lv["bar_end"],
+                         "confirmed": bool(cfg), "sl": stop, "tp": take, "bar_end": lv["bar_end"], "wick_mode": bool(lv.get("wick_mode")),
                          "hist": ((model or {}).get("coin_hist") or {}).get(lv["key"], {}).get(sym)})
     rows.sort(key=lambda r: (not r["confirmed"], max(r["dist_pct"], 0)))
     return rows[:limit]
@@ -29203,7 +29334,9 @@ def api_emw_chart(symbol):
         m = STATE.get("emw_model") or {}
         setup = next((x for x in m.get("setups") or [] if x.get("key") == key), None)
         b_ = (setup or {}).get("best")
-        if b_ and b_.get("stop_atr") is not None:
+        if b_ and b_.get("off") == "W":   # the stop sits beyond the wick — known only from the trade itself
+            calc = {"mode": "wick"}
+        elif b_ and b_.get("stop_atr") is not None:
             sgn = -1 if key.endswith("|S") else 1
             day0 = (t_at or now) // 86400 * 86400
             closed = [c for c in daily if c["time"] < day0]
@@ -34023,7 +34156,7 @@ async function emwChart(o) {
   } else {
     p = `сейчас ${fmtNum(d.price)} · вход ≈ ${o.trigger != null ? fmtNum(o.trigger) : '—'}${o.sl != null ? ` · SL ${fmtNum(o.sl)} · TP ${fmtNum(o.tp)}` : ''}`;
   }
-  const calcTxt = o.calcUsed ? ` · <span title="стоп/тейк посчитаны по выученному варианту: стоп ${cc.stop_atr} дневного ATR за EMA, RR ${cc.rr}">стоп/тейк — по модели</span>` : (o.sl == null ? ' · стоп/тейк: модель ещё не выбрала вариант для этой EMA' : '');
+  const calcTxt = cc.mode === 'wick' && o.sl == null ? ' · вход по реакции: ждём закрытия 4ч обратно под уровнем, стоп — за фитилём' : o.calcUsed ? ` · <span title="стоп/тейк посчитаны по выученному варианту: стоп ${cc.stop_atr} дневного ATR за EMA, RR ${cc.rr}">стоп/тейк — по модели</span>` : (o.sl == null ? ' · стоп/тейк: модель ещё не выбрала вариант для этой EMA' : '');
   document.getElementById('vgiModalParams').innerHTML = `${p}${calcTxt}<br><span style="font-size:var(--fs-xs);">уровни этой свечи (EMA закрытых): ${lvTxt}</span>`;
   const draw = () => emwDrawChart(d, o);
   window._emwRedraw = draw;
@@ -34129,7 +34262,7 @@ function emwDrawChart(d, o) {
   if (o.entry == null) tLines.push({p: d.price, color: '#ffffff', dash: [2, 3], label: `цена ${fmtNum(d.price)}`, fit: true});
   emwPanel(ctx, {x: 4, y: 4, w: W - 4, h: topH - 22}, bars, {
     log: true, hi: ai, series: emas.map(n => ({vals: bars.map(b => (b.ema || {})[n]), color: colOf(n)})),
-    hlines: tLines, legend: emas.map(n => ({text: `EMA${n}(${d.tf === '1M' ? 'M' : 'W'})`, color: colOf(n)})),
+    hlines: tLines, legend: [{text: d.tf === '1M' ? 'Месяц' : 'Неделя', color: '#e8ecf2'}].concat(emas.map(n => ({text: `EMA${n}`, color: colOf(n)}))),
     dots: o.entry != null ? [{t: o.time, p: o.entry, color: '#ffffff'}] : []});
   const h4 = d.h4 || [];
   const entry = o.entry != null ? o.entry : o.trigger;
@@ -34176,8 +34309,8 @@ async function refreshEmw() {
   const sgR = v => v == null ? '—' : `<span class="${v > 0 ? 'win' : (v < 0 ? 'loss' : '')}">${v > 0 ? '+' : ''}${v}R</span>`;
   const pctOf = (atr, ap) => atr == null || ap == null ? '' : ` <span class="dim">(~${(atr * ap).toFixed(1)}%)</span>`;
   let h = `<details class="dim hint-block" style="margin-bottom:10px;"><summary style="cursor:pointer;"><b>📐 EMA W/M</b> — шорт: цена снизу резко дошла до EMA недели / месяца, вход на живой свече · как работает</summary>EMA текущей свечи совпадает с ценой ровно тогда, когда цена доходит до EMA закрытых свечей, поэтому уровень всей недели / месяца известен с её открытия и не перерисовывается. Цена проверяется каждые ${cfg.poll_sec || 30} сек, вход — лимиткой при касании (где именно — до EMA, на ней или за ней на прострел — выбирает обучение), а не после закрытия свечи; за ${cfg.prealert_pct}% до уровня приходит напоминание в Telegram, куда ставить лимитку. Стоп и тейк — по дневному ATR (реакция, а не недельный размах), сделка после касания проверяется по 4ч-свечам — быстрая реакция в тот же день засчитывается.
-    <br>Условия (только шорт): последняя закрытая свеча закрылась под всеми или почти всеми EMA 7/14/28/50/100 (из тех, что у монеты уже есть), новая свеча открылась под уровнем, цена резко растёт к EMA снизу — «рост» считается от минимума последних ${(cfg.rise_lookback || {})['1w'] || 4} свечей (и живой до касания) до EMA, в ATR недели / месяца.
-    <br>Обучение — на всех монетах вместе (у одной монеты слишком мало недельных касаний): EMA ${(cfg.emas || {})['1w'] ? cfg.emas['1w'].join('/') : ''} (неделя), ${(cfg.emas || {})['1M'] ? cfg.emas['1M'].join('/') : ''} (месяц) × рост ≥ ${(cfg.rise || []).join('/')} ATR × под всеми EMA / кроме одной / кроме двух × лимитка до EMA / на EMA / за EMA (${(cfg.entry || []).join('/')} дн. ATR) × стоп ${(cfg.stop || []).join('/')} дневного ATR за EMA × RR ${(cfg.rr || []).join('/')} × держать до ${(cfg.hold || []).join('/')} дн. — ${cfg.combos} вариантов. Выбор на старых 70% истории, проверка на новых 30%; z считается по свечам (касания одной недели идут вместе), порог обучения z ≥ ${cfg.z_train} (поправка на весь перебор), теста z ≥ ${cfg.z_test}. Срок удержания выбирает обучение; комиссии и фандинг ${cfg.funding_pct_day}%/день учтены. Пересчёт раз в ${Math.round((cfg.refresh_sec || 86400) / 3600)} ч.</details>`;
+    <br>Условия (только шорт): последняя закрытая свеча закрылась под всеми или почти всеми EMA 7/14/28/50/100 (из тех, что у монеты уже есть), новая свеча открылась под уровнем, и сама живая свеча резко выросла к EMA — «рост» = от её минимума до EMA, в ATR недели / месяца (маленькая свеча у ближней EMA не торгуется).
+    <br>Обучение — на всех монетах вместе (у одной монеты слишком мало недельных касаний): EMA ${(cfg.emas || {})['1w'] ? cfg.emas['1w'].join('/') : ''} (неделя), ${(cfg.emas || {})['1M'] ? cfg.emas['1M'].join('/') : ''} (месяц) × рост живой свечи ≥ ${(cfg.rise || []).join('/')} ATR × под всеми EMA / кроме одной / кроме двух × вход: лимитка до EMA / на EMA / за EMA или по реакции со стопом за фитилём × стоп ${(cfg.stop || []).join('/')} дневного ATR за EMA × RR ${(cfg.rr || []).join('/')} × держать до ${(cfg.hold || []).join('/')} дн. — ${cfg.combos} вариантов. Выбор на старых 70% истории, проверка на новых 30%; z считается по свечам (касания одной недели идут вместе), порог обучения z ≥ ${cfg.z_train} (поправка на весь перебор), теста z ≥ ${cfg.z_test}. Срок удержания выбирает обучение; комиссии и фандинг ${cfg.funding_pct_day}%/день учтены. Пересчёт раз в ${Math.round((cfg.refresh_sec || 86400) / 3600)} ч.</details>`;
   if (d.enabled === false) h += '<div style="padding:10px 12px;margin-bottom:8px;background:var(--neg-bg);border:1px solid var(--neg);border-radius:var(--r-sm);font-size:var(--fs-sm);">⏸ <b>«EMA W/M» выключен в настройках</b> — обучение и живой скан не идут.</div>';
   if (d.backtest_running) {
     const pct = d.progress_total ? Math.round(d.progress_done / d.progress_total * 100) : 0;
@@ -34207,7 +34340,7 @@ async function refreshEmw() {
       <div style="display:flex;justify-content:space-between;gap:8px;align-items:baseline;"><span><b>${r.symbol.replace('_USDT', '')}</b> ${dirTxt} EMA ${r.ema} · ${tfName(r.tf)}</span>
         <span class="dim" style="white-space:nowrap;">${r.confirmed ? '✅ по модели' : 'наблюдение'} · 📈</span></div>
       <div>${near} · вход ≈ ${fmtNum(r.trigger)} (EMA ${fmtNum(r.level)}) · цена ${fmtNum(r.price)}${r.touched ? ' · <span class="dim">в этой свече уже касалась</span>' : ''}</div>
-      <div class="dim">рост от ${fmtNum(r.ext)} (${r.ext_pct > 0 ? '+' : ''}${r.ext_pct}% от входа) · ${r.rise} ATR${r.need_rise != null ? ` (нужно ≥ ${r.need_rise})` : ''} · под ${r.n_def - r.miss} из ${r.n_def} EMA${r.sl != null ? ` · SL ${fmtNum(r.sl)} · TP ${fmtNum(r.tp)}` : ''}${hist} · свеча до ${fmtDateTime(r.bar_end)}</div>
+      <div class="dim">свеча выросла от ${fmtNum(r.ext)} (${r.ext_pct > 0 ? '+' : ''}${r.ext_pct}% от входа) · ${r.rise} ATR${r.need_rise != null ? ` (нужно ≥ ${r.need_rise})` : ''} · под ${r.n_def - r.miss} из ${r.n_def} EMA${r.sl != null ? ` · SL ${fmtNum(r.sl)} · TP ${fmtNum(r.tp)}` : (r.wick_mode ? ' · вход по реакции, стоп — за фитилём' : '')}${hist} · свеча до ${fmtDateTime(r.bar_end)}</div>
     </div>`;
   }).join('') : `<div class="dim" style="font-size:var(--fs-sm);">рядом с уровнями (в пределах ${cfg.watch_pct}%) сейчас никого</div>`;
   h += '<div style="height:10px;"></div>' + prvHonestHtml(d.honest);
@@ -34229,7 +34362,7 @@ async function refreshEmw() {
         const learn = L.touches ? `касаний ${L.touches} (${L.coins} монет) · реакция ≥ ${cfg.react_datr} ATR: <b>${L.react_rate == null ? '—' : L.react_rate + '%'}</b>${L.react_hours != null ? `, обычно за ~${L.react_hours} ч` : ''}
           <br>стоп: 75% разворотов прокалывали EMA не глубже <b>${L.mae_p75 ?? '—'} ATR</b>${pctOf(L.mae_p75, L.atr_pct)}, 90% — ${L.mae_p90 ?? '—'} ATR${pctOf(L.mae_p90, L.atr_pct)}
           <br>реакция вниз за 2 дня: у половины до <b>${L.mfe2_p50 ?? '—'} ATR</b>${pctOf(L.mfe2_p50, L.atr_pct)}, у четверти — ${L.mfe2_p75 ?? '—'} ATR${pctOf(L.mfe2_p75, L.atr_pct)}; за 7 дней — ${L.mfe7_p50 ?? '—'} / ${L.mfe7_p75 ?? '—'} ATR · дневной ATR ≈ ${L.atr_pct ?? '—'}% цены` : '<span class="dim">касаний нет</span>';
-        const best = b ? `<div>лучшее: рост ≥ ${b.rise} ATR · ${['под всеми EMA', 'под всеми EMA, кроме одной', 'под всеми EMA, кроме двух'][b.miss || 0]} · лимитка ${b.off > 0 ? 'чуть до EMA' : (b.off < 0 ? 'чуть за EMA (на прострел)' : 'на EMA')} · стоп ${b.stop_atr} ATR за EMA${pctOf(b.stop_atr, L.atr_pct)} · RR ${b.rr} · держать до ${b.hold} дн.${b.hours != null ? ` · в сделке обычно ~${b.hours < 48 ? b.hours + ' ч' : Math.round(b.hours / 24) + ' дн.'}` : ''}</div>
+        const best = b ? `<div>лучшее: свеча выросла ≥ ${b.rise} ATR · ${['под всеми EMA', 'под всеми EMA, кроме одной', 'под всеми EMA, кроме двух'][b.miss || 0]} · ${b.off === 'W' ? 'вход по реакции (4ч закрылась обратно под EMA), стоп за фитилём' : 'лимитка ' + (b.off > 0 ? 'чуть до EMA' : (b.off < 0 ? 'чуть за EMA (на прострел)' : 'на EMA'))} · стоп ${b.stop_atr} ATR за EMA${pctOf(b.stop_atr, L.atr_pct)} · RR ${b.rr} · держать до ${b.hold} дн.${b.hours != null ? ` · в сделке обычно ~${b.hours < 48 ? b.hours + ' ч' : Math.round(b.hours / 24) + ' дн.'}` : ''}</div>
           <div style="display:flex;gap:12px;flex-wrap:wrap;"><span>обучение ${sgR(b.train.avg)} <span class="dim">n=${b.train.n} · WR ${b.train.wr}% · z=${b.train.z}</span></span>
           <span>тест <b>${sgR(b.test.avg)}</b> <span class="dim">n=${b.test.n || 0}${b.test.n ? ` · WR ${b.test.wr}% · z=${b.test.z ?? '—'}` : ''}</span></span></div>
           <details ontoggle="emwLoadTrades(this, '${s.key}')"><summary class="dim" style="cursor:pointer;font-size:var(--fs-sm);">сделки</summary><div class="btTradesBox"></div></details>`
