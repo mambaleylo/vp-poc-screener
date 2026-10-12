@@ -19448,3 +19448,12 @@ v0.99.573 - EMA W/M: a chart everywhere, at the user's request ("хочу вез
          level (EMA of the closed candles) dashed, the current price for a live row; below the
          4h candles around the touch with the EMA level, entry, stop, take and the exit. The
          backtest trade list now keeps each trade's stop / take / exit price for that.
+v0.99.574 - EMA W/M: EMA 7 / 14 / 28 / 50 / 100 on both the week and the month, at the user's request
+         ("вот эти все EMA должны быть и на месяце, и на неделе") — as levels for the short and
+         on the chart, in the colours of the user's exchange app. "Under the EMAs" = under all of
+         those the coin already has history for (at least 3; EMA 100 needs 100 candles), or all
+         but one — learned (2160 variants). The previous model is ignored and retrained.
+         Charts: the stop and the take are drawn on the week / month chart too; a trade or a row
+         without its own (an older model's trade, a "near the EMA" row) gets them from the
+         model's learned variant of its EMA (daily ATR known at that moment) — the user didn't
+         see the stop / take lines.
