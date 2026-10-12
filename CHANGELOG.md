@@ -19422,3 +19422,13 @@ v0.99.570 - New tab "📐 EMA W/M" at the user's request: the reaction off the w
          pierced the EMA before the bounce (safe stop) and how far the bounce went (take).
          Signals and auto-trade only for confirmed EMAs (auto-trade off by default; own
          sub-account option); the "near the EMA" list shows every live level within 15%.
+v0.99.571 - EMA W/M: fast reactions, at the user's request ("почему сделки долгие? обычно на той
+         же свече откат очень быстро происходит и сделка закрывается за день-два"). The stop and
+         the take were sized in the weekly / monthly ATR (10-25% of the price) and held up to
+         28 / 60 days, and the trade was walked on daily candles without counting a same-day
+         take. Now: the trigger (0.25) and the stop (0.25 / 0.5 / 1 / 2) are in the DAILY ATR,
+         RR 1 / 2 / 3, the holding time 2 / 7 / 28 days is learned with them, the trade after the
+         touch is walked on 4h candles (~3 years of them), so a bounce on the same day counts.
+         The tab shows how fast the reaction usually comes, the bounce in 2 and in 7 days, and
+         the usual time in a trade of the chosen variant. A model of the old layout is ignored
+         and retrained at once.
