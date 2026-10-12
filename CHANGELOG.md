@@ -19558,3 +19558,6 @@ v0.99.587 - Neuro: a signal that stayed virtual now says why in its result messa
          the coin wasn't traded at that moment (not ticked, "only the best card",
          $15 simulation negative, didn't pass the check). The reason is kept in
          the signal log, so it survives restarts.
+v0.99.588 - Neuro: tapping a live signal in a coin card said "сделка не найдена" — the
+         chart looked only in the backtest trades. It now finds the live signal
+         first (entry / stop / take / exit as recorded), then the backtest.

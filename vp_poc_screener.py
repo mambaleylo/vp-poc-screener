@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.587"
+APP_VERSION = "0.99.588"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -21811,9 +21811,15 @@ def api_neuro_chart(symbol):
             return jsonify({"error": "нужен параметр time"}), 400
         target = float(sig_time)
         interval_sec = INTERVAL_SECONDS.get(NEURO_TF, 3600)
-        with _neuro_state_lock:
-            trades = list(_neuro_trades.get(symbol, []))
-        match = next((t for t in trades if abs(t["time"] - target) < interval_sec), None)
+        # v0.99.588 — the card's live signals first: before, only the backtest trades
+        # were searched, so a fresh live signal said "сделка не найдена"
+        with _neuro_signal_log_lock:
+            live = [dict(x) for x in _neuro_signal_log if x.get("symbol") == symbol]
+        match = min((t for t in live if abs(t["time"] - target) < interval_sec), key=lambda t: abs(t["time"] - target), default=None)
+        if not match:
+            with _neuro_state_lock:
+                trades = list(_neuro_trades.get(symbol, []))
+            match = next((t for t in trades if abs(t["time"] - target) < interval_sec), None)
         if not match:
             return jsonify({"error": "\u0441\u0434\u0435\u043b\u043a\u0430 \u043d\u0435 \u043d\u0430\u0439\u0434\u0435\u043d\u0430"}), 404
         fetch_start = match["time"] - 60 * interval_sec
