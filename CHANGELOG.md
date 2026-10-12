@@ -19508,3 +19508,10 @@ v0.99.578 - EMA W/M, from the user's ESPORTS | EMA7(W) trade ("сделки ве
 v0.99.579 - Charts: a price pill no longer covers a dot (the user: "перекрытие точки и плашки") — a few
          empty candle slots on the right keep the newest candle / the entry dot clear of the pills,
          and a pill that would still cover a dot moves to the left edge of the chart.
+v0.99.580 - Charts like TradingView (the user: "плашки вынеси на ценовую шкалу, а на графике только
+         заливка с линиями, а то всё загораживает"): every line's price is a coloured tag on the
+         price scale (pushed apart so tags never overlap, a short connector when moved; the
+         scale's own tick labels give way), the line names (вход / стоп / тейк / EMA / цена) go to
+         the legend at the top, which wraps on a narrow screen; nothing is written over the candles
+         any more — the trade's result stays in the header. Applies to EMA W/M and to the other
+         modules' charts.

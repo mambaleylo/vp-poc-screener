@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.579"
+APP_VERSION = "0.99.580"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -34233,14 +34233,28 @@ function emwPanel(ctx, box, cs, opt) {
   const pad = (b - a) * 0.07 || Math.abs(a) * 0.02 || 1;
   a -= pad; b += pad;
   const Y = v => box.y + box.h - (f(v) - a) / (b - a) * box.h;
-  // v0.99.579 — a few empty slots on the right: the newest candle / the entry dot stay clear of the price pills
-  const n = cs.length, step = pw / (n + (opt.padSlots == null ? 5 : opt.padSlots)), cw = Math.max(1, Math.min(14, step * 0.66));
+  const n = cs.length, step = pw / (n + (opt.padSlots == null ? 2 : opt.padSlots)), cw = Math.max(1, Math.min(14, step * 0.66));
   const X = i => box.x + step * (i + 0.5);
   const idxOf = t => { let k = -1; for (let i = 0; i < n; i++) if (cs[i].time <= t) k = i; return k; };
+  // v0.99.580 — user: "плашки вынеси на ценовую шкалу, а на графике только заливка с линиями": every
+  // line's price is a coloured tag on the price scale (pushed apart so tags never overlap), its
+  // name goes to the legend; the scale's own tick labels give way to the tags
+  const PH = 16;
+  const tags = (opt.hlines || []).filter(l => l.p != null).map(l => ({y: Y(l.p), p: l.p, color: l.color}))
+    .filter(t_ => t_.y >= box.y - 2 && t_.y <= box.y + box.h + 2).sort((t1, t2) => t1.y - t2.y);
+  for (let i = 0; i < tags.length; i++) {
+    tags[i].ty = Math.max(box.y + PH / 2, Math.min(box.y + box.h - PH / 2, tags[i].y));
+    if (i && tags[i].ty - tags[i - 1].ty < PH + 1) tags[i].ty = tags[i - 1].ty + PH + 1;
+  }
+  for (let i = tags.length - 1; i >= 0; i--) {
+    const lim = i === tags.length - 1 ? box.y + box.h - PH / 2 : tags[i + 1].ty - PH - 1;
+    if (tags[i].ty > lim) tags[i].ty = lim;
+  }
   ctx.font = '10px sans-serif';
   for (let k = 0; k <= 4; k++) {
     const raw = a + (b - a) * k / 4, val = opt.log ? Math.exp(raw) : raw, y = Y(val);
     ctx.strokeStyle = grid; ctx.globalAlpha = 0.5; ctx.beginPath(); ctx.moveTo(box.x, y); ctx.lineTo(box.x + pw, y); ctx.stroke(); ctx.globalAlpha = 1;
+    if (tags.some(t_ => Math.abs(t_.ty - y) < PH)) continue;
     ctx.fillStyle = mut; ctx.textAlign = 'left'; ctx.fillText(fmtNum(val), box.x + pw + 4, y + 3);
   }
   const lab = Math.max(1, Math.round(n / 5));
@@ -34279,39 +34293,12 @@ function emwPanel(ctx, box, cs, opt) {
     s.vals.forEach((v, i) => { if (v == null) { on = false; return; } if (!on) { ctx.moveTo(X(i), Y(v)); on = true; } else ctx.lineTo(X(i), Y(v)); });
     ctx.stroke(); ctx.lineWidth = 1;
   });
-  const pills = [];
   (opt.hlines || []).forEach(l => {
     if (l.p == null) return;
     const y = Y(l.p), x0 = l.from != null ? X(l.from) - step / 2 : box.x;
     ctx.strokeStyle = l.color; ctx.lineWidth = l.width || 2; if (l.dash) ctx.setLineDash(l.dash);
     ctx.beginPath(); ctx.moveTo(x0, y); ctx.lineTo(box.x + pw, y); ctx.stroke(); ctx.setLineDash([]); ctx.lineWidth = 1;
-    if (l.label) pills.push({y, text: l.label, color: l.color});
   });
-  // v0.99.578 — labels as pills at the right edge, pushed apart so they never sit on each other
-  pills.sort((p1, p2) => p1.y - p2.y);
-  ctx.font = 'bold 11px sans-serif';
-  const PH = 16;
-  for (let i = 0; i < pills.length; i++) {
-    pills[i].ty = Math.max(box.y + PH / 2, Math.min(box.y + box.h - PH / 2, pills[i].y));
-    if (i && pills[i].ty - pills[i - 1].ty < PH + 1) pills[i].ty = pills[i - 1].ty + PH + 1;
-  }
-  for (let i = pills.length - 1; i >= 0; i--) {   // pushed past the bottom: back up
-    const lim = i === pills.length - 1 ? box.y + box.h - PH / 2 : pills[i + 1].ty - PH - 1;
-    if (pills[i].ty > lim) pills[i].ty = lim;
-  }
-  // v0.99.579 — user: "перекрытие точки и плашки": a pill that would cover a dot moves to the left edge
-  const dotXY = (opt.dots || []).map(dt => { const i = idxOf(dt.t); return i < 0 || dt.p == null ? null : {x: X(i), y: Y(dt.p), r: (dt.r || 4) + 3}; }).filter(Boolean);
-  pills.forEach(pl => {
-    const w = ctx.measureText(pl.text).width + 10;
-    let x = box.x + pw - w - 2;
-    const hits = xx => dotXY.some(dd => dd.x + dd.r > xx && dd.x - dd.r < xx + w && dd.y + dd.r > pl.ty - PH / 2 && dd.y - dd.r < pl.ty + PH / 2);
-    if (hits(x) && !hits(box.x + 4)) x = box.x + 4;
-    ctx.fillStyle = pl.color; ctx.globalAlpha = 0.92;
-    ctx.beginPath(); if (ctx.roundRect) ctx.roundRect(x, pl.ty - PH / 2, w, PH, 5); else ctx.rect(x, pl.ty - PH / 2, w, PH); ctx.fill();
-    ctx.globalAlpha = 1; ctx.fillStyle = '#0b0d12'; ctx.textAlign = 'left'; ctx.fillText(pl.text, x + 5, pl.ty + 4);
-    if (Math.abs(pl.ty - pl.y) > 2 && x > box.x + 4) { ctx.strokeStyle = pl.color; ctx.beginPath(); ctx.moveTo(x + w, pl.ty); ctx.lineTo(box.x + pw, pl.y); ctx.stroke(); }
-  });
-  ctx.font = '10px sans-serif';
   (opt.dots || []).forEach(dt => {
     const i = idxOf(dt.t); if (i < 0 || dt.p == null) return;
     const r = dt.r || 4, x = X(i), y = Y(dt.p);
@@ -34326,10 +34313,34 @@ function emwPanel(ctx, box, cs, opt) {
       ctx.font = '10px sans-serif';
     }
   });
-  if (opt.legend) {
+  tags.forEach(t_ => {
+    const x = box.x + pw + 1, w = axisW - 2;
+    ctx.fillStyle = t_.color; ctx.beginPath();
+    if (ctx.roundRect) ctx.roundRect(x, t_.ty - PH / 2, w, PH, 4); else ctx.rect(x, t_.ty - PH / 2, w, PH);
+    ctx.fill();
+    if (Math.abs(t_.ty - t_.y) > 1) {   // pushed off its line: a short connector
+      ctx.strokeStyle = t_.color; ctx.beginPath(); ctx.moveTo(box.x + pw - 6, t_.y); ctx.lineTo(x, t_.ty); ctx.stroke();
+    }
+    let fs = 11;
+    const txt = fmtNum(t_.p);
+    ctx.font = `bold ${fs}px sans-serif`;
+    while (fs > 8 && ctx.measureText(txt).width > w - 6) { fs -= 1; ctx.font = `bold ${fs}px sans-serif`; }
+    ctx.fillStyle = '#0b0d12'; ctx.textAlign = 'left'; ctx.fillText(txt, x + 3, t_.ty + 4);
+  });
+  const legend = (opt.legend || []).slice();
+  (opt.hlines || []).forEach(l => {
+    if (l.p == null || l.noLegend) return;
+    const name = l.name || String(l.label || '').split(' ')[0].replace(/:$/, '');
+    if (name && !legend.some(g => g.text === name)) legend.push({text: name, color: l.color});
+  });
+  if (legend.length) {
     ctx.textAlign = 'left'; ctx.font = 'bold 11px sans-serif';
-    let x = box.x + 4;
-    opt.legend.forEach(g => { ctx.fillStyle = g.color; ctx.fillText(g.text, x, box.y + 12); x += ctx.measureText(g.text).width + 10; });
+    let x = box.x + 4, y = box.y + 12;
+    legend.forEach(g => {
+      const w = ctx.measureText(g.text).width;
+      if (x + w > box.x + pw - 4 && x > box.x + 4) { x = box.x + 4; y += 14; }
+      ctx.fillStyle = g.color; ctx.fillText(g.text, x, y); x += w + 10;
+    });
     ctx.font = '10px sans-serif';
   }
 }
@@ -34368,13 +34379,13 @@ function emwDrawChart(d, o) {
   const dots = [];
   const zones = [];
   if (o.time && entry != null) {
-    dots.push({t: o.time, p: entry, color: '#ffffff', r: 5, label: 'вход'});
+    dots.push({t: o.time, p: entry, color: '#ffffff', r: 5});
     if (o.sl != null) { dots.push({t: o.time, p: o.sl, color: '#f87171', r: 3.5}); zones.push({tFrom: o.time, tTo: o.exit_time || null, p1: entry, p2: o.sl, color: '#f87171'}); }
     if (o.tp != null) { dots.push({t: o.time, p: o.tp, color: '#34d399', r: 3.5}); zones.push({tFrom: o.time, tTo: o.exit_time || null, p1: entry, p2: o.tp, color: '#34d399'}); }
   }
   if (o.exit_time && o.exit_price != null) {
     const rTxt = o.pnl_r != null ? ` ${o.pnl_r > 0 ? '+' : ''}${o.pnl_r}R` : '';
-    dots.push({t: o.exit_time, p: o.exit_price, color: resCol, r: 6, label: (o.result === 'WIN' ? 'тейк' : (o.result === 'LOSS' ? 'стоп' : 'выход')) + rTxt, below: o.result === 'WIN' ? isShort : !isShort});
+    dots.push({t: o.exit_time, p: o.exit_price, color: resCol, r: 6});   // the result is in the header (v0.99.580: nothing written over the candles)
   }
   emwPanel(ctx, {x: 4, y: topH + 8, w: W - 4, h: H - topH - 26}, h4, {
     dayFmt: d.h_tf !== '1d', hlines: bl, vlines: vl, dots, zones,
