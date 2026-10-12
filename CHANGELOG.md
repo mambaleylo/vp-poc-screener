@@ -19552,3 +19552,9 @@ v0.99.586 - Charts: the dashed vertical "signal" line is gone (EMA W/M and the
          the clock is replaced by a draining battery icon (red fill = charge left,
          outline colour still green when a position is open) instead of the red
          outline around the digits; the clock returns when charging starts.
+v0.99.587 - Neuro: a signal that stayed virtual now says why in its result message
+         ("на биржу не открывалась: …") — the exchange side's skip reason
+         (position already open, margin, min lot, price already past…) or why
+         the coin wasn't traded at that moment (not ticked, "only the best card",
+         $15 simulation negative, didn't pass the check). The reason is kept in
+         the signal log, so it survives restarts.

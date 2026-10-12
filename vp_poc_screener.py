@@ -63,7 +63,7 @@ RETRYABLE_NETWORK_EXCEPTIONS = (requests.exceptions.ConnectionError, requests.ex
                                  requests.exceptions.ChunkedEncodingError)
 from flask import Flask, jsonify, request, Response
 
-APP_VERSION = "0.99.586"
+APP_VERSION = "0.99.587"
 
 # ----------------------------------------------------------------------------
 # Config (env-overridable, no secrets required for base functionality)
@@ -20567,6 +20567,21 @@ def neuro_trade_symbols():
     return [s for s in act if _neuro_autotrade_selected.get(s)]
 
 
+def neuro_not_traded_reason(symbol):
+    """v0.99.587 — why neuro_trade_symbols() leaves a coin out at this moment
+    (shown in the result message of a signal that stayed virtual)"""
+    act = [s for s in list(_neuro_active_symbols) if neuro_money_ok(s)]
+    if symbol not in _neuro_active_symbols:
+        return "монета не прошла проверку на момент сигнала"
+    if symbol not in act:
+        return "симуляция $15 при текущем риске уходит в минус — такая карточка не торгуется"
+    if NEURO_SINGLE_BEST_ENABLED:
+        return f"включено «только лучшая карточка» — торговалась {act[0] if act else '—'}"
+    if not _neuro_autotrade_selected.get(symbol):
+        return "монета не отмечена «🤖 торговать»"
+    return ""
+
+
 def neuro_backtest_symbol(symbol, precomputed_btc_candles=None, precomputed_eth_candles=None):
     """Fetch max available history PLUS extra data sources (4h+1d trend,
     funding rate, open interest, BTC/ETH correlation), mine + walk-forward
@@ -20968,6 +20983,8 @@ def neuro_track_signal_outcomes():
                         sig["pnl_r"] = pnl_r
                 if not is_shadow:
                     _pnote = neuro_paper_sweep().get((sig["symbol"], sig["time"]), "") if sig.get("paper") else ""   # v0.99.547
+                    if AUTOTRADE_ENABLED_NEURO and not sig.get("autotrade_fired") and sig.get("autotrade_skip"):   # v0.99.587
+                        _pnote = (_pnote + "\n" if _pnote else "") + f"ℹ️ на биржу не открывалась: {sig['autotrade_skip']}"
                     notify_trade_result("neuro", sig["symbol"], direction, entry, exit_price, result, pnl_r,
                                         real=bool(AUTOTRADE_ENABLED_NEURO and sig.get("autotrade_fired")), note=_pnote)
         except Exception as e:
@@ -21650,6 +21667,8 @@ def neuro_live_loop():
                     }
                     if not _sel_ok:
                         record["not_selected"] = True   # v0.99.384
+                        if AUTOTRADE_ENABLED_NEURO:
+                            record["autotrade_skip"] = neuro_not_traded_reason(symbol)   # v0.99.587
                     _neuro_signal_log.appendleft(record)
                 if symbol in neuro_paper_symbols():
                     neuro_paper_open(symbol, sig, record)   # v0.99.547
@@ -21664,6 +21683,7 @@ def neuro_live_loop():
                     still_active = symbol in neuro_trade_symbols()   # v0.99.403; v0.99.430 — outside the lock
                     if not still_active:
                         log_error(f"neuro_live_loop {symbol}: signal fired but symbol was dropped from _neuro_active_symbols mid-scan — signal logged, real trade skipped")
+                        record["autotrade_skip"] = neuro_not_traded_reason(symbol) or "монета выпала из списка во время скана"   # v0.99.587
                         continue
                     # v0.99.245 — per direct user request ("надо сделать как
                     # в свип, настройки такие же, процент из настроек,
@@ -21684,6 +21704,8 @@ def neuro_live_loop():
                                                           all_in_margin_pct=_neuro_all_in,
                                                           risk_pct_override=auto_risk_for("neuro", symbol))   # v0.99.422
                     record["autotrade_fired"] = autotrade_result.get("status") in ("OPENED", "OPENED_TP_SL_FAILED")   # v0.99.436
+                    if not record["autotrade_fired"]:   # v0.99.587 — the exchange side's reason, for the result message
+                        record["autotrade_skip"] = str(autotrade_result.get("detail") or autotrade_result.get("status") or "")[:300]
                     sim_execute_trade("neuro", symbol, sig["direction"], sig["entry"], sig["sl"], sig["tp"],
                                        autotrade_result.get("leverage") or AUTOTRADE_LEVERAGE_NEURO, record,
                                        autotrade_result=autotrade_result, all_in_margin_pct=_neuro_all_in)
