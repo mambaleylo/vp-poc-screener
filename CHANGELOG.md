@@ -19432,3 +19432,12 @@ v0.99.571 - EMA W/M: fast reactions, at the user's request ("почему сде
          The tab shows how fast the reaction usually comes, the bounce in 2 and in 7 days, and
          the usual time in a trade of the chosen variant. A model of the old layout is ignored
          and retrained at once.
+v0.99.572 - EMA W/M reworked to the original picture the user sent ("HMSTR | EMA28(W) | SHORT"):
+         shorts only, EMA 7 / 14 / 28 of the week and of the month. Setup: the last closed
+         candle closed under all (or 2 of 3) of these EMAs, the new candle opens under the
+         level, the price rises sharply from below into one of them — "rise" = from the low of
+         the last 4 weeks / 3 months (and of the live candle up to the touch) to the EMA, in
+         ATR of the timeframe; the short is taken on the touch of the live candle. Learned
+         together with the stop / RR / hold: rise >= 0 / 1.5 / 3 ATR x under >= 2 / 3 EMAs
+         (1296 variants). Live checks the rise on 1h candles up to the touch and skips a weak
+         one. Telegram: "COIN | EMA28(W) | SHORT". The previous model is ignored and retrained.
