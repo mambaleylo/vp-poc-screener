@@ -19569,3 +19569,14 @@ v0.99.589 - EMA W/M "Сейчас у EMA" list (user, RSR EMA28(W): "28 looks li
          showing it. Levels whose touch is already decided (signal or skip) are
          dropped too. The list now reaches 30% from the price (was 15%), so the
          next EMA up during a big weekly pump (RSR's EMA 50, 20% away) is shown.
+v0.99.590 - EMA W/M take reworked (user, XPT / SAGA: "the take can't sit below the
+         pumping candle itself — we only catch the pullback, the wick being
+         exposed"): the take is no longer a multiple of the risk (RR 1/2/3 put it
+         below the candle, SAGA's even below zero) but a share of the live
+         candle's own pump given back — 38 / 50 / 62 / 100% of the way from the
+         entry down to the low the candle rose from; the backtest picks the share
+         like the stop and the hold. Model version 590: the old model is dropped
+         and retrained. Charts: every tag on the price scale is named (SL / TP /
+         вход / EMA28 / цена), the scale's own numbers are gone, the legend keeps
+         only the candles and the EMA lines on a dark backing, and a log scale no
+         longer breaks on a price at or below zero.
