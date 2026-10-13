@@ -19580,3 +19580,14 @@ v0.99.590 - EMA W/M take reworked (user, XPT / SAGA: "the take can't sit below t
          вход / EMA28 / цена), the scale's own numbers are gone, the legend keeps
          only the candles and the EMA lines on a dark backing, and a log scale no
          longer breaks on a price at or below zero.
+v0.99.591 - EMA W/M take and stop learned from the touches themselves (user: "the point is
+         the pullback itself — came to the EMA, got a pullback, went past the EMA by
+         n; a stop that ~80% of trades don't hit"; the numbers were only an
+         example). No fixed sizes any more, both in daily ATR of the coin: the
+         take is the pullback a share (50 / 65 / 80%) of the training touches
+         really gave within the hold; the stop sits beyond the move against that a
+         share (70 / 80 / 90%) of the touches which did give that pullback made
+         first, +0.1 daily ATR (never under 0.25). The backtest picks the shares
+         on the old 70% of history, the new 30% only checks. Model version 591 —
+         retrained from scratch. The signal / pre-alert messages and the tab say
+         what the take and the stop are (in daily ATR and ≈%).
